@@ -92,6 +92,15 @@ public:
                                        const std::vector<std::string>& conditions,
                                        const std::vector<std::pair<std::string, std::string>>& items);
 
+    // JOIN query: INNER JOIN two tables on leftCol = rightCol
+    std::vector<std::string> join(const std::string& dbname,
+                                   const std::string& leftTable,
+                                   const std::string& rightTable,
+                                   const std::string& leftCol,
+                                   const std::string& rightCol,
+                                   const std::vector<std::string>& conditions,
+                                   const std::set<std::string>& selectCols);
+
 private:
     std::filesystem::path dbPath(const std::string& dbname) const;
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;

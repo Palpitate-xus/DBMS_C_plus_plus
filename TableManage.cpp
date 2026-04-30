@@ -1088,4 +1088,221 @@ std::vector<std::string> StorageEngine::aggregate(
     return result;
 }
 
+// ========================================================================
+// JOIN implementation
+// ========================================================================
+
+std::vector<std::string> StorageEngine::join(
+    const std::string& dbname,
+    const std::string& leftTable,
+    const std::string& rightTable,
+    const std::string& leftCol,
+    const std::string& rightCol,
+    const std::vector<std::string>& conditions,
+    const std::set<std::string>& selectCols) {
+    std::vector<std::string> result;
+    if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
+
+    TableSchema leftTbl = getTableSchema(dbname, leftTable);
+    TableSchema rightTbl = getTableSchema(dbname, rightTable);
+    size_t leftRowSize = leftTbl.rowSize();
+    size_t rightRowSize = rightTbl.rowSize();
+
+    // Read all rows from left table
+    std::vector<std::string> leftRows;
+    {
+        std::ifstream in(dataPath(dbname, leftTable), std::ios::binary);
+        if (in) {
+            in.seekg(0, std::ios::end);
+            auto fs = static_cast<size_t>(in.tellg());
+            in.seekg(0, std::ios::beg);
+            size_t cnt = (leftRowSize == 0) ? 0 : fs / leftRowSize;
+            for (size_t i = 0; i < cnt; ++i) {
+                std::string row(leftRowSize, '\0');
+                in.read(row.data(), static_cast<std::streamsize>(leftRowSize));
+                leftRows.push_back(std::move(row));
+            }
+        }
+    }
+
+    // Read all rows from right table
+    std::vector<std::string> rightRows;
+    {
+        std::ifstream in(dataPath(dbname, rightTable), std::ios::binary);
+        if (in) {
+            in.seekg(0, std::ios::end);
+            auto fs = static_cast<size_t>(in.tellg());
+            in.seekg(0, std::ios::beg);
+            size_t cnt = (rightRowSize == 0) ? 0 : fs / rightRowSize;
+            for (size_t i = 0; i < cnt; ++i) {
+                std::string row(rightRowSize, '\0');
+                in.read(row.data(), static_cast<std::streamsize>(rightRowSize));
+                rightRows.push_back(std::move(row));
+            }
+        }
+    }
+
+    // Build merged column layout for condition evaluation
+    // Map: colName -> {offset, colInfo}
+    // Also support "table.col" format
+    struct ColInfo { size_t offset; const Column* col; };
+    std::map<std::string, ColInfo> colMap;
+    size_t off = 0;
+    for (size_t i = 0; i < leftTbl.len; ++i) {
+        colMap[leftTbl.cols[i].dataName] = {off, &leftTbl.cols[i]};
+        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {off, &leftTbl.cols[i]};
+        off += leftTbl.cols[i].dsize;
+    }
+    off = 0;
+    for (size_t i = 0; i < rightTbl.len; ++i) {
+        std::string simple = rightTbl.cols[i].dataName;
+        if (colMap.find(simple) == colMap.end()) {
+            colMap[simple] = {leftRowSize + off, &rightTbl.cols[i]};
+        }
+        colMap[rightTable + "." + simple] = {leftRowSize + off, &rightTbl.cols[i]};
+        off += rightTbl.cols[i].dsize;
+    }
+
+    // Evaluate a condition on a merged row buffer
+    auto evalCond = [&](const Condition& c, const std::string& merged) -> bool {
+        auto it = colMap.find(c.colName);
+        if (it == colMap.end()) return false;
+        size_t offset = it->second.offset;
+        const Column& col = *it->second.col;
+        const char* buf = merged.data() + offset;
+        if (col.dataType == "char") {
+            std::string val(col.dsize, '\0');
+            std::memcpy(val.data(), buf, col.dsize);
+            auto nul = val.find('\0');
+            if (nul != std::string::npos) val.resize(nul);
+            if (c.op == "<"  && !(val <  c.value)) return false;
+            if (c.op == ">"  && !(val >  c.value)) return false;
+            if (c.op == "="  && val != c.value)    return false;
+            if (c.op == "<=" && (val >  c.value))   return false;
+            if (c.op == ">=" && (val <  c.value))   return false;
+            if (c.op == "!=" && val == c.value)    return false;
+        } else if (col.dataType == "date") {
+            Date d;
+            std::memcpy(&d, buf, DATE_SIZE);
+            Date v(c.value.c_str());
+            if (c.op == "<"  && v.year && !(d < v))  return false;
+            if (c.op == ">"  && v.year && !(d > v))  return false;
+            if (c.op == "="  && v.year && d != v)    return false;
+            if (c.op == "<=" && v.year && (d > v))   return false;
+            if (c.op == ">=" && v.year && (d < v))   return false;
+            if (c.op == "!=" && v.year && d == v)    return false;
+        } else {
+            int64_t val = 0;
+            std::memcpy(&val, buf, col.dsize);
+            int64_t cmp = parseInt(c.value);
+            if (c.op == "<"  && cmp != INF && !(val < cmp)) return false;
+            if (c.op == ">"  && cmp != INF && !(val > cmp)) return false;
+            if (c.op == "="  && cmp != INF && val != cmp)   return false;
+            if (c.op == "<=" && cmp != INF && (val > cmp))  return false;
+            if (c.op == ">=" && cmp != INF && (val < cmp))  return false;
+            if (c.op == "!=" && cmp != INF && val == cmp)   return false;
+        }
+        return true;
+    };
+
+    auto conds = parseConditions(conditions);
+
+    // Find left and right column offsets for ON condition
+    size_t leftColOff = 0;
+    for (size_t i = 0; i < leftTbl.len; ++i) {
+        if (leftTbl.cols[i].dataName == leftCol) break;
+        leftColOff += leftTbl.cols[i].dsize;
+    }
+    size_t rightColOff = 0;
+    for (size_t i = 0; i < rightTbl.len; ++i) {
+        if (rightTbl.cols[i].dataName == rightCol) break;
+        rightColOff += rightTbl.cols[i].dsize;
+    }
+
+    for (const auto& lr : leftRows) {
+        for (const auto& rr : rightRows) {
+            // ON condition
+            bool onMatch = false;
+            {
+                const Column* lc = nullptr;
+                for (size_t i = 0; i < leftTbl.len; ++i) {
+                    if (leftTbl.cols[i].dataName == leftCol) { lc = &leftTbl.cols[i]; break; }
+                }
+                const Column* rc = nullptr;
+                for (size_t i = 0; i < rightTbl.len; ++i) {
+                    if (rightTbl.cols[i].dataName == rightCol) { rc = &rightTbl.cols[i]; break; }
+                }
+                if (!lc || !rc) continue;
+
+                if (lc->dataType == "char") {
+                    std::string lv(lc->dsize, '\0'), rv(rc->dsize, '\0');
+                    std::memcpy(lv.data(), lr.data() + leftColOff, lc->dsize);
+                    std::memcpy(rv.data(), rr.data() + rightColOff, rc->dsize);
+                    auto n = lv.find('\0'); if (n != std::string::npos) lv.resize(n);
+                    n = rv.find('\0'); if (n != std::string::npos) rv.resize(n);
+                    onMatch = (lv == rv);
+                } else if (lc->dataType == "date") {
+                    Date ld, rd;
+                    std::memcpy(&ld, lr.data() + leftColOff, DATE_SIZE);
+                    std::memcpy(&rd, rr.data() + rightColOff, DATE_SIZE);
+                    onMatch = (ld == rd);
+                } else {
+                    int64_t lv = 0, rv = 0;
+                    std::memcpy(&lv, lr.data() + leftColOff, lc->dsize);
+                    std::memcpy(&rv, rr.data() + rightColOff, rc->dsize);
+                    onMatch = (lv == rv);
+                }
+            }
+            if (!onMatch) continue;
+
+            std::string merged = lr + rr;
+
+            // WHERE conditions
+            bool whereMatch = true;
+            for (const auto& c : conds) {
+                if (!evalCond(c, merged)) { whereMatch = false; break; }
+            }
+            if (!whereMatch) continue;
+
+            // Format output with SELECT columns
+            std::string rowStr;
+            auto appendCol = [&](const std::string& prefix, const Column& col, const char* buf) {
+                std::string fullName = prefix + "." + col.dataName;
+                bool include = selectCols.empty();
+                if (!include) {
+                    if (selectCols.find(col.dataName) != selectCols.end() ||
+                        selectCols.find(fullName) != selectCols.end()) {
+                        include = true;
+                    }
+                }
+                if (!include) return;
+                if (col.dataType == "char") {
+                    std::string val(col.dsize, '\0');
+                    std::memcpy(val.data(), buf, col.dsize);
+                    auto nul = val.find('\0');
+                    if (nul != std::string::npos) val.resize(nul);
+                    rowStr += val + ' ';
+                } else if (col.dataType == "date") {
+                    Date d;
+                    std::memcpy(&d, buf, DATE_SIZE);
+                    rowStr += str(d) + ' ';
+                } else {
+                    int64_t val = 0;
+                    std::memcpy(&val, buf, col.dsize);
+                    if (val == INF) rowStr += "NULL ";
+                    else rowStr += transstr(val) + ' ';
+                }
+            };
+
+            for (size_t i = 0; i < leftTbl.len; ++i)
+                appendCol(leftTable, leftTbl.cols[i], lr.data() + [&](){ size_t o=0; for(size_t j=0;j<i;++j)o+=leftTbl.cols[j].dsize; return o; }());
+            for (size_t i = 0; i < rightTbl.len; ++i)
+                appendCol(rightTable, rightTbl.cols[i], rr.data() + [&](){ size_t o=0; for(size_t j=0;j<i;++j)o+=rightTbl.cols[j].dsize; return o; }());
+
+            if (!rowStr.empty()) result.push_back(rowStr);
+        }
+    }
+    return result;
+}
+
 } // namespace dbms

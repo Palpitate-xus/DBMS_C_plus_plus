@@ -668,7 +668,6 @@ static bool execute(const string& rawSql) {
 
     if (sql.substr(0, 6) == "select") {
         if (!checkDB()) return true;
-        // Manual keyword parsing: select cols from tname [where ...] [order by col]
         size_t fromPos = sql.find("from");
         if (fromPos == string::npos) {
             cout << "SQL syntax error" << endl;
@@ -678,6 +677,104 @@ static bool execute(const string& rawSql) {
 
         size_t wherePos = sql.find("where", fromPos);
         size_t orderPos = sql.find("order by", fromPos);
+
+        // Check for JOIN
+        size_t joinPos = sql.find("join", fromPos);
+        bool isJoin = (joinPos != string::npos &&
+                       (wherePos == string::npos || joinPos < wherePos) &&
+                       (orderPos == string::npos || joinPos < orderPos));
+
+        if (isJoin) {
+            // select cols from t1 join t2 on t1.col = t2.col [where ...]
+            string leftTable = trim(sql.substr(fromPos + 4, joinPos - fromPos - 4));
+            size_t onPos = sql.find("on", joinPos);
+            if (onPos == string::npos) {
+                cout << "SQL syntax error: missing ON clause" << endl;
+                return true;
+            }
+            string rightTable = trim(sql.substr(joinPos + 4, onPos - joinPos - 4));
+            size_t onEnd = (wherePos != string::npos) ? wherePos
+                          : (orderPos != string::npos) ? orderPos : sql.size();
+            string onClause = normalizeConditionStr(trim(sql.substr(onPos + 2, onEnd - onPos - 2)));
+
+            // Parse ON clause: "t1.col=t2.col" (normalize removes spaces around =)
+            size_t eqPos = onClause.find('=');
+            if (eqPos == string::npos) {
+                cout << "SQL syntax error: invalid ON clause" << endl;
+                return true;
+            }
+            string leftOnCol = trim(onClause.substr(0, eqPos));
+            string rightOnCol = trim(onClause.substr(eqPos + 1));
+            // Strip table prefix if present for the join column args
+            size_t dot = leftOnCol.find('.');
+            if (dot != string::npos) leftOnCol = leftOnCol.substr(dot + 1);
+            dot = rightOnCol.find('.');
+            if (dot != string::npos) rightOnCol = rightOnCol.substr(dot + 1);
+
+            if (!g_engine.tableExists(g_currentDB, leftTable) ||
+                !g_engine.tableExists(g_currentDB, rightTable)) {
+                cout << "Table not exist" << endl;
+                return true;
+            }
+
+            set<string> selectCols;
+            bool selectAll = (columns == "*");
+            if (!selectAll) {
+                stringstream css(columns);
+                string item;
+                while (getline(css, item, ',')) {
+                    item = trim(item);
+                    selectCols.insert(item);
+                }
+            }
+
+            // WHERE clause
+            vector<string> condTokens;
+            if (wherePos != string::npos) {
+                size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
+                string condStr = normalizeConditionStr(trim(sql.substr(wherePos + 5, condEnd - wherePos - 5)));
+                condTokens = tokenize(condStr);
+            }
+
+            // Print header
+            TableSchema leftTbl = g_engine.getTableSchema(g_currentDB, leftTable);
+            TableSchema rightTbl = g_engine.getTableSchema(g_currentDB, rightTable);
+            if (selectAll) {
+                for (size_t i = 0; i < leftTbl.len; ++i)
+                    cout << leftTable << "." << leftTbl.cols[i].dataName << ' ';
+                for (size_t i = 0; i < rightTbl.len; ++i)
+                    cout << rightTable << "." << rightTbl.cols[i].dataName << ' ';
+            } else {
+                for (const auto& c : selectCols) cout << c << ' ';
+            }
+            cout << '\n';
+
+            vector<string> answers;
+            if (condTokens.empty()) {
+                answers = g_engine.join(g_currentDB, leftTable, rightTable,
+                                         leftOnCol, rightOnCol, {}, selectCols);
+            } else {
+                condTokens.insert(condTokens.begin(), "(");
+                condTokens.push_back(")");
+                for (auto& t : condTokens) t = modifyLogic(t);
+                auto groups = breakDownConditions(condTokens);
+                set<string> seen;
+                for (const auto& g : groups) {
+                    auto part = g_engine.join(g_currentDB, leftTable, rightTable,
+                                               leftOnCol, rightOnCol, g, selectCols);
+                    for (const auto& row : part) {
+                        if (seen.insert(row).second) answers.push_back(row);
+                    }
+                }
+            }
+            for (const auto& row : answers) {
+                cout << row << endl;
+                log(g_nowUser, row, getTime());
+            }
+            return false;
+        }
+
+        // Non-JOIN query
         size_t tnameEnd = (wherePos != string::npos) ? wherePos
                          : (orderPos != string::npos) ? orderPos : sql.size();
         string tname = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
