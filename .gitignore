@@ -1,2 +1,7 @@
 .vscode
 *.exe
+*.o
+dbms_refactored
+testdb/
+*.tmp
+build-*/
