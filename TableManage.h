@@ -94,7 +94,7 @@ private:
 
     // Parse condition strings like "<col value", "=col value", ">col value"
     struct Condition {
-        char op = 0;  // '<', '>', '='
+        std::string op;  // "<", ">", "=", "<=", ">=", "!="
         std::string colName;
         std::string value;
     };

@@ -410,11 +410,14 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     std::vector<Condition> conds;
     for (const auto& s : cstr) {
         if (s.empty()) continue;
+        size_t opEnd = 0;
+        while (opEnd < s.size() && (s[opEnd] == '<' || s[opEnd] == '>' || s[opEnd] == '=' || s[opEnd] == '!')) ++opEnd;
+        if (opEnd == 0) continue;
         Condition c;
-        c.op = s[0];
-        size_t sp = s.find(' ', 1);
+        c.op = s.substr(0, opEnd);
+        size_t sp = s.find(' ', opEnd);
         if (sp == std::string::npos) continue;
-        c.colName = s.substr(1, sp - 1);
+        c.colName = s.substr(opEnd, sp - opEnd);
         c.value = s.substr(sp + 1);
         conds.push_back(c);
     }
@@ -461,23 +464,32 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
                     auto nul = buf.find('\0');
                     if (nul != std::string::npos) buf.resize(nul);
-                    if (c.op == '<' && !(buf < c.value)) match = false;
-                    if (c.op == '>' && !(buf > c.value)) match = false;
-                    if (c.op == '=' && buf != c.value) match = false;
+                    if (c.op == "<"  && !(buf <  c.value)) match = false;
+                    if (c.op == ">"  && !(buf >  c.value)) match = false;
+                    if (c.op == "="  && buf != c.value)    match = false;
+                    if (c.op == "<=" && (buf >  c.value))   match = false;
+                    if (c.op == ">=" && (buf <  c.value))   match = false;
+                    if (c.op == "!=" && buf == c.value)    match = false;
                 } else if (col.dataType == "date") {
                     Date d;
                     in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
                     Date v(c.value.c_str());
-                    if (c.op == '<' && v.year && !(d < v)) match = false;
-                    if (c.op == '>' && v.year && !(d > v)) match = false;
-                    if (c.op == '=' && v.year && d != v) match = false;
+                    if (c.op == "<"  && v.year && !(d < v))  match = false;
+                    if (c.op == ">"  && v.year && !(d > v))  match = false;
+                    if (c.op == "="  && v.year && d != v)    match = false;
+                    if (c.op == "<=" && v.year && (d > v))   match = false;
+                    if (c.op == ">=" && v.year && (d < v))   match = false;
+                    if (c.op == "!=" && v.year && d == v)    match = false;
                 } else {
                     int64_t val = 0;
                     in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
                     int64_t cmp = parseInt(c.value);
-                    if (c.op == '<' && cmp != INF && !(val < cmp)) match = false;
-                    if (c.op == '>' && cmp != INF && !(val > cmp)) match = false;
-                    if (c.op == '=' && cmp != INF && val != cmp) match = false;
+                    if (c.op == "<"  && cmp != INF && !(val < cmp)) match = false;
+                    if (c.op == ">"  && cmp != INF && !(val > cmp)) match = false;
+                    if (c.op == "="  && cmp != INF && val != cmp)   match = false;
+                    if (c.op == "<=" && cmp != INF && (val > cmp))  match = false;
+                    if (c.op == ">=" && cmp != INF && (val < cmp))  match = false;
+                    if (c.op == "!=" && cmp != INF && val == cmp)   match = false;
                 }
                 if (!match) break;
             }

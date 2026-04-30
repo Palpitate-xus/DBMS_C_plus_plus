@@ -85,14 +85,28 @@ static string sqlProcessor(string raw) {
 // ========================================================================
 static string modifyLogic(const string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
+    size_t opStart = string::npos;
+    size_t opLen = 0;
     for (size_t i = 0; i < logic.size(); ++i) {
-        if (logic[i] == '>' || logic[i] == '<' || logic[i] == '=') {
-            string res = string(1, logic[i]) + logic;
-            res[i + 1] = ' ';
-            return res;
+        if (logic[i] == '>' || logic[i] == '<' || logic[i] == '=' || logic[i] == '!') {
+            opStart = i;
+            opLen = 1;
+            if (i + 1 < logic.size() && (logic[i + 1] == '=' || logic[i + 1] == '>')) {
+                if ((logic[i] == '<' && logic[i + 1] == '=') ||
+                    (logic[i] == '>' && logic[i + 1] == '=') ||
+                    (logic[i] == '!' && logic[i + 1] == '=') ||
+                    (logic[i] == '<' && logic[i + 1] == '>')) {
+                    opLen = 2;
+                }
+            }
+            break;
         }
     }
-    return "";
+    if (opStart == string::npos) return "";
+    string op = logic.substr(opStart, opLen);
+    string before = logic.substr(0, opStart);
+    string after = logic.substr(opStart + opLen);
+    return op + before + " " + after;
 }
 
 // ========================================================================
