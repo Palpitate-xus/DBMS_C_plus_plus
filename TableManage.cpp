@@ -1305,4 +1305,64 @@ std::vector<std::string> StorageEngine::join(
     return result;
 }
 
+// ========================================================================
+// Transaction support (database-level snapshot)
+// ========================================================================
+
+OpResult StorageEngine::beginTransaction(const std::string& dbname) {
+    if (inTransaction_) return OpResult::Success;  // already in txn
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+
+    std::filesystem::path backup = dbPath(dbname);
+    backup += ".txn_backup";
+    if (std::filesystem::exists(backup)) {
+        std::filesystem::remove_all(backup);
+    }
+    std::filesystem::create_directories(backup);
+    for (const auto& entry : std::filesystem::directory_iterator(dbPath(dbname))) {
+        std::filesystem::path dest = backup / entry.path().filename();
+        if (entry.is_directory()) {
+            std::filesystem::copy(entry.path(), dest, std::filesystem::copy_options::recursive);
+        } else {
+            std::filesystem::copy(entry.path(), dest);
+        }
+    }
+    inTransaction_ = true;
+    txnDB_ = dbname;
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::commitTransaction() {
+    if (!inTransaction_) return OpResult::Success;
+    std::filesystem::path backup = dbPath(txnDB_);
+    backup += ".txn_backup";
+    if (std::filesystem::exists(backup)) {
+        std::filesystem::remove_all(backup);
+    }
+    inTransaction_ = false;
+    txnDB_.clear();
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::rollbackTransaction() {
+    if (!inTransaction_) return OpResult::Success;
+    std::filesystem::path backup = dbPath(txnDB_);
+    backup += ".txn_backup";
+    if (!std::filesystem::exists(backup)) {
+        inTransaction_ = false;
+        txnDB_.clear();
+        return OpResult::Success;
+    }
+    std::filesystem::path db = dbPath(txnDB_);
+    std::filesystem::remove_all(db);
+    std::filesystem::rename(backup, db);
+    // Rebuild PK indexes for all tables
+    for (const auto& tname : getTableNames(txnDB_)) {
+        rebuildPKIndex(txnDB_, tname);
+    }
+    inTransaction_ = false;
+    txnDB_.clear();
+    return OpResult::Success;
+}
+
 } // namespace dbms

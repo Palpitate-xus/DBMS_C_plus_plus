@@ -101,6 +101,12 @@ public:
                                    const std::vector<std::string>& conditions,
                                    const std::set<std::string>& selectCols);
 
+    // Transaction operations
+    bool inTransaction() const { return inTransaction_; }
+    OpResult beginTransaction(const std::string& dbname);
+    OpResult commitTransaction();
+    OpResult rollbackTransaction();
+
 private:
     std::filesystem::path dbPath(const std::string& dbname) const;
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
@@ -139,6 +145,20 @@ private:
     // Helpers
     static int64_t parseInt(const std::string& s);
     static bool stringToBuffer(const std::string& src, char* dst, size_t len);
+
+    // Transaction state
+    bool inTransaction_ = false;
+    std::string txnDB_;
+    struct TxnLogEntry {
+        enum class Op { Insert, Update, Delete } op;
+        std::string tableName;
+        int64_t rowIdx;
+        std::string rowData;
+    };
+    std::vector<TxnLogEntry> txnLog_;
+    void logTxnInsert(const std::string& tableName, int64_t rowIdx);
+    void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
+    void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
 };
 
 // Column type constructors

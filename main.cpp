@@ -633,6 +633,40 @@ static bool execute(const string& rawSql) {
         return false;
     }
 
+    if (sql.substr(0, 5) == "begin") {
+        if (!checkDB()) return true;
+        auto res = g_engine.beginTransaction(g_currentDB);
+        if (res != OpResult::Success) {
+            cout << "Begin transaction failed" << endl;
+            return true;
+        }
+        cout << "Transaction started" << endl;
+        log(g_nowUser, "begin transaction", getTime());
+        return false;
+    }
+
+    if (sql.substr(0, 6) == "commit") {
+        auto res = g_engine.commitTransaction();
+        if (res != OpResult::Success) {
+            cout << "Commit failed" << endl;
+            return true;
+        }
+        cout << "Transaction committed" << endl;
+        log(g_nowUser, "commit transaction", getTime());
+        return false;
+    }
+
+    if (sql.substr(0, 8) == "rollback") {
+        auto res = g_engine.rollbackTransaction();
+        if (res != OpResult::Success) {
+            cout << "Rollback failed" << endl;
+            return true;
+        }
+        cout << "Transaction rolled back" << endl;
+        log(g_nowUser, "rollback transaction", getTime());
+        return false;
+    }
+
     if (sql.substr(0, 4) == "drop") {
         if (!checkAdmin()) return true;
         if (!checkDB()) return true;
