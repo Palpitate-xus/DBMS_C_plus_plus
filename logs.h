@@ -1,25 +1,24 @@
-#include <iostream>
-#include <fstream>
+#pragma once
+
 #include <ctime>
+#include <fstream>
+#include <iostream>
 #include <string>
-using namespace std;
 
 // 获取当前时间
-string getTime()
-{
-   time_t now = time(0);
-   string now_dt = ctime(&now);
-   cout << now_dt << endl;
-   return now_dt;
+inline std::string getTime() {
+    time_t now = time(0);
+    std::string now_dt = ctime(&now);
+    std::cout << now_dt;
+    return now_dt;
 }
 
 // 写入日志文件
-int log(string user, string operation, string time)
-{
-    fstream oFile("dbms.log", ios::binary | ios::out | ios::app);
-    if (!oFile)
-        cout << "error 1" << endl;
-    oFile << time << "    " << user << "    " << operation << endl;
-    oFile.close();
+inline int log(const std::string& user, const std::string& operation, const std::string& time) {
+    std::ofstream oFile("dbms.log", std::ios::binary | std::ios::out | std::ios::app);
+    if (!oFile) {
+        std::cout << "error 1" << std::endl;
+    }
+    oFile << time << "    " << user << "    " << operation << std::endl;
     return 0;
 }

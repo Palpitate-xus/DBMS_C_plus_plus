@@ -1,83 +1,49 @@
-#include <iostream>
-#include <fstream>
-#include <map>
-#include <string>
-using namespace std;
+#pragma once
 
-struct user{
-    string username;
-    string password;
-    string permission;
+#include <fstream>
+#include <iostream>
+#include <string>
+
+struct user {
+    std::string username;
+    std::string password;
+    std::string permission;
 };
 
-user users[99999];
-int user_count = 0;
+inline int login(const std::string& username, const std::string& password) {
+    std::ifstream infile("user.dat");
+    if (!infile) return 0;
 
-// 登录函数，返回值1表示登陆成功，0表示不存在该用户，-1表示密码错误。
-int login(string username, string password)
-{
-    // 读取users数据
-    string data;
-    ifstream infile;
-    infile.open("user.dat");
-    while (!infile.eof())
-    {
-        infile >> data;
-        users[user_count].username = data;
-        infile >> data;
-        users[user_count].password = data;
-        infile >> data;
-        users[user_count].permission = data;
-        user_count++;
-    }
-    for (int i = 0; i < user_count; i++)
-    {
-        if (username == users[i].username)
-        {
-            if (password == users[i].password)
-            {
-                infile.close();
-                cout << "successfully login" << endl;
+    user temp;
+    while (infile >> temp.username >> temp.password >> temp.permission) {
+        if (temp.username == username) {
+            if (temp.password == password) {
+                std::cout << "successfully login" << std::endl;
                 return 1;
             }
-            else
-            {
-                infile.close();
-                cout << "wrong password" << endl;
-                return -1;
-            }
+            std::cout << "wrong password" << std::endl;
+            return -1;
         }
     }
-    infile.close();
-    cout << "this user is not exist" << endl;
+    std::cout << "this user is not exist" << std::endl;
     return 0;
 }
 
-// 用户权限查询函数
-int permissionQuery(string username)
-{
-    for (int i = 0; i < user_count; i++)
-    {
-        if (username == users[i].username)
-        {
-            if (users[i].permission == "admin")
-            {
-                return 1;
-            }
-            else if (users[i].permission == "user")
-            {
-                return 0;
-            }
+inline int permissionQuery(const std::string& username) {
+    std::ifstream infile("user.dat");
+    if (!infile) return -1;
+
+    user temp;
+    while (infile >> temp.username >> temp.password >> temp.permission) {
+        if (temp.username == username) {
+            return (temp.permission == "admin") ? 1 : 0;
         }
     }
     return -1;
 }
 
-// 创建用户
-int createUser(user new_user)
-{
-    fstream fs("user.dat", ios::binary | ios::out | ios::app);
-    fs << '\n' << new_user.username << " " << new_user.password << " " << new_user.permission << endl;
-    fs.close();
+inline int createUser(const user& new_user) {
+    std::ofstream fs("user.dat", std::ios::binary | std::ios::out | std::ios::app);
+    fs << '\n' << new_user.username << " " << new_user.password << " " << new_user.permission << std::endl;
     return 0;
 }
