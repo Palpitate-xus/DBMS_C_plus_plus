@@ -87,6 +87,11 @@ public:
                                    const std::string& orderByCol = "",
                                    bool orderByAsc = true);
 
+    // Aggregate query: items = {("count","*"), ("max","score"), ...}
+    std::vector<std::string> aggregate(const std::string& dbname, const std::string& tablename,
+                                       const std::vector<std::string>& conditions,
+                                       const std::vector<std::pair<std::string, std::string>>& items);
+
 private:
     std::filesystem::path dbPath(const std::string& dbname) const;
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;

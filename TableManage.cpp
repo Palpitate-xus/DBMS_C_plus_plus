@@ -951,4 +951,141 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     return result;
 }
 
+std::vector<std::string> StorageEngine::aggregate(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    const std::vector<std::pair<std::string, std::string>>& items) {
+    std::vector<std::string> result;
+    if (!tableExists(dbname, tablename)) return result;
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t rowSize = tbl.rowSize();
+
+    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+    if (!in) return result;
+
+    in.seekg(0, std::ios::end);
+    auto fileSize = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
+
+    auto conds = parseConditions(conditions);
+    std::vector<int64_t> matchIds;
+    if (conds.empty()) {
+        for (size_t i = 0; i < rowCount; ++i) matchIds.push_back(static_cast<int64_t>(i));
+    } else {
+        auto ids = filterRows(dbname, tablename, conds);
+        matchIds.assign(ids.begin(), ids.end());
+    }
+
+    std::string rowResult;
+    for (const auto& item : items) {
+        const std::string& func = item.first;
+        const std::string& colName = item.second;
+        int64_t count = 0, sum = 0;
+        bool hasMax = false, hasMin = false;
+        std::string maxStr, minStr;
+        int64_t maxInt = 0, minInt = 0;
+        Date maxDate, minDate;
+        bool isInt = false, isDate = false, isChar = false;
+        size_t colIdx = tbl.len;
+
+        if (func != "count" || colName != "*") {
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colName) {
+                    colIdx = i;
+                    isInt = (tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
+                    isDate = (tbl.cols[i].dataType == "date");
+                    isChar = (tbl.cols[i].dataType == "char");
+                    break;
+                }
+            }
+        }
+
+        for (int64_t rowIdx : matchIds) {
+            if (func == "count") {
+                if (colName == "*") { count++; continue; }
+                if (colIdx >= tbl.len) continue;
+                size_t offset = 0;
+                for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
+                in.seekg(static_cast<std::streamoff>(rowIdx * rowSize + offset), std::ios::beg);
+                if (isInt) {
+                    int64_t val = 0;
+                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    if (val != INF) count++;
+                } else if (isDate) {
+                    Date d;
+                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    if (d.year != 0) count++;
+                } else {
+                    std::string buf(tbl.cols[colIdx].dsize, '\0');
+                    in.read(buf.data(), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    auto nul = buf.find('\0');
+                    if (nul != std::string::npos) buf.resize(nul);
+                    if (!buf.empty()) count++;
+                }
+            } else {
+                if (colIdx >= tbl.len) continue;
+                size_t offset = 0;
+                for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
+                in.seekg(static_cast<std::streamoff>(rowIdx * rowSize + offset), std::ios::beg);
+
+                if (isInt) {
+                    int64_t val = 0;
+                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    if (val == INF) continue;
+                    if (func == "sum") sum += val;
+                    if (func == "avg") { sum += val; count++; }
+                    if (func == "max") {
+                        if (!hasMax || val > maxInt) { maxInt = val; hasMax = true; }
+                    }
+                    if (func == "min") {
+                        if (!hasMin || val < minInt) { minInt = val; hasMin = true; }
+                    }
+                } else if (isDate) {
+                    Date d;
+                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    if (d.year == 0) continue;
+                    if (func == "max") {
+                        if (!hasMax || d > maxDate) { maxDate = d; hasMax = true; }
+                    }
+                    if (func == "min") {
+                        if (!hasMin || d < minDate) { minDate = d; hasMin = true; }
+                    }
+                } else {
+                    std::string buf(tbl.cols[colIdx].dsize, '\0');
+                    in.read(buf.data(), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    auto nul = buf.find('\0');
+                    if (nul != std::string::npos) buf.resize(nul);
+                    if (buf.empty()) continue;
+                    if (func == "max") {
+                        if (!hasMax || buf > maxStr) { maxStr = buf; hasMax = true; }
+                    }
+                    if (func == "min") {
+                        if (!hasMin || buf < minStr) { minStr = buf; hasMin = true; }
+                    }
+                }
+            }
+        }
+
+        if (func == "count") rowResult += transstr(count) + ' ';
+        else if (func == "sum") rowResult += transstr(sum) + ' ';
+        else if (func == "avg") rowResult += (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count)) + ' ';
+        else if (func == "max") {
+            if (!hasMax) rowResult += "NULL ";
+            else if (isInt) rowResult += transstr(maxInt) + ' ';
+            else if (isDate) rowResult += str(maxDate) + ' ';
+            else rowResult += maxStr + ' ';
+        }
+        else if (func == "min") {
+            if (!hasMin) rowResult += "NULL ";
+            else if (isInt) rowResult += transstr(minInt) + ' ';
+            else if (isDate) rowResult += str(minDate) + ' ';
+            else rowResult += minStr + ' ';
+        }
+    }
+    if (!rowResult.empty()) result.push_back(rowResult);
+    return result;
+}
+
 } // namespace dbms

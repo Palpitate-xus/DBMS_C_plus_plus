@@ -81,6 +81,31 @@ static string sqlProcessor(string raw) {
 }
 
 // ========================================================================
+// Normalize condition string: remove spaces around operators so tokenize
+// keeps each condition as a single token (e.g. "score > 80" → "score>80")
+// ========================================================================
+static string normalizeConditionStr(string s) {
+    static const char* ops[] = {">=", "<=", "!=", "<>", ">", "<", "="};
+    for (const char* op : ops) {
+        size_t len = strlen(op);
+        size_t pos = 0;
+        while ((pos = s.find(op, pos)) != string::npos) {
+            size_t before = pos;
+            while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
+            size_t after = pos + len;
+            while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
+            if (before != pos || after != pos + len) {
+                s = s.substr(0, before) + op + s.substr(after);
+                pos = before + len;
+            } else {
+                pos += len;
+            }
+        }
+    }
+    return s;
+}
+
+// ========================================================================
 // Condition conversion: "col=value" → "=col value"
 // ========================================================================
 static string modifyLogic(const string& logic) {
@@ -524,7 +549,7 @@ static bool execute(const string& rawSql) {
 
     if (sql.substr(0, 12) == "delete from ") {
         if (!checkDB()) return true;
-        vector<string> tokens = tokenize(sql.substr(12));
+        vector<string> tokens = tokenize(normalizeConditionStr(sql.substr(12)));
         if (tokens.empty()) {
             cout << "SQL syntax error" << endl;
             return true;
@@ -583,7 +608,7 @@ static bool execute(const string& rawSql) {
 
         vector<string> conds;
         if (wherePos != std::string::npos) {
-            string whereClause = trim(sql.substr(wherePos + 5));
+            string whereClause = normalizeConditionStr(trim(sql.substr(wherePos + 5)));
             vector<string> tokens = tokenize(whereClause);
             tokens.insert(tokens.begin(), "(");
             tokens.push_back(")");
@@ -643,83 +668,126 @@ static bool execute(const string& rawSql) {
 
     if (sql.substr(0, 6) == "select") {
         if (!checkDB()) return true;
-        vector<string> tokens = tokenize(sql.substr(6));
-        if (tokens.size() < 3) {
+        // Manual keyword parsing: select cols from tname [where ...] [order by col]
+        size_t fromPos = sql.find("from");
+        if (fromPos == string::npos) {
             cout << "SQL syntax error" << endl;
             return true;
         }
-        string columns = tokens[0];
-        if (tokens[1] != "from") {
-            cout << "SQL syntax error" << endl;
-            return true;
-        }
-        string tname = tokens[2];
+        string columns = trim(sql.substr(6, fromPos - 6));
+
+        size_t wherePos = sql.find("where", fromPos);
+        size_t orderPos = sql.find("order by", fromPos);
+        size_t tnameEnd = (wherePos != string::npos) ? wherePos
+                         : (orderPos != string::npos) ? orderPos : sql.size();
+        string tname = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
+
         if (!g_engine.tableExists(g_currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
 
-        // Parse ORDER BY
-        size_t orderIdx = tokens.size();
-        for (size_t i = 3; i + 1 < tokens.size(); ++i) {
-            if (tokens[i] == "order" && tokens[i + 1] == "by") {
-                orderIdx = i;
-                break;
-            }
-        }
         string orderByCol;
         bool orderByAsc = true;
-        if (orderIdx < tokens.size()) {
-            if (orderIdx + 2 < tokens.size()) orderByCol = tokens[orderIdx + 2];
-            if (orderIdx + 3 < tokens.size() && tokens[orderIdx + 3] == "desc") orderByAsc = false;
+        if (orderPos != string::npos) {
+            string orderRest = trim(sql.substr(orderPos + 8));
+            vector<string> ot = tokenize(orderRest);
+            if (!ot.empty()) orderByCol = ot[0];
+            if (ot.size() > 1 && ot[1] == "desc") orderByAsc = false;
         }
 
         TableSchema tbl = g_engine.getTableSchema(g_currentDB, tname);
         set<string> selectCols;
         bool selectAll = (columns == "*");
 
-        if (!selectAll) {
+        // Detect aggregate functions in columns
+        vector<pair<string, string>> aggItems;
+        bool hasAgg = false;
+        {
             stringstream css(columns);
             string item;
             while (getline(css, item, ',')) {
                 item = trim(item);
-                bool found = false;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == item) { found = true; break; }
+                size_t lp = item.find('(');
+                size_t rp = item.find(')');
+                if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+                    string func = item.substr(0, lp);
+                    string arg = item.substr(lp + 1, rp - lp - 1);
+                    aggItems.emplace_back(func, arg);
+                    hasAgg = true;
+                } else {
+                    aggItems.emplace_back("", item);
+                    if (!selectAll) {
+                        bool found = false;
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            if (tbl.cols[i].dataName == item) { found = true; break; }
+                        }
+                        if (!found) {
+                            cout << "Invalid column name " << item << endl;
+                            return true;
+                        }
+                        selectCols.insert(item);
+                    }
                 }
-                if (!found) {
-                    cout << "Invalid column name " << item << endl;
-                    return true;
-                }
-                selectCols.insert(item);
             }
         }
 
-        // Print headers
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
-            cout << tbl.cols[i].dataName << ' ';
-        }
-        cout << '\n';
-
-        // Extract condition tokens before "order by"
+        // WHERE clause
         vector<string> condTokens;
-        for (size_t i = 3; i < orderIdx; ++i) condTokens.push_back(tokens[i]);
+        if (wherePos != string::npos) {
+            size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
+            string condStr = normalizeConditionStr(trim(sql.substr(wherePos + 5, condEnd - wherePos - 5)));
+            condTokens = tokenize(condStr);
+        }
 
         vector<string> answers;
-        if (condTokens.empty()) {
-            answers = g_engine.query(g_currentDB, tname, {}, selectCols, orderByCol, orderByAsc);
+        if (hasAgg) {
+            for (const auto& it : aggItems) {
+                if (it.first.empty()) cout << it.second << ' ';
+                else cout << it.first << '(' << it.second << ") ";
+            }
+            cout << '\n';
+            vector<pair<string, string>> pureAgg;
+            for (const auto& it : aggItems) {
+                if (!it.first.empty()) pureAgg.push_back(it);
+            }
+            if (pureAgg.empty()) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            if (condTokens.empty()) {
+                answers = g_engine.aggregate(g_currentDB, tname, {}, pureAgg);
+            } else {
+                condTokens.insert(condTokens.begin(), "(");
+                condTokens.push_back(")");
+                for (auto& t : condTokens) t = modifyLogic(t);
+                auto groups = breakDownConditions(condTokens);
+                set<string> seen;
+                for (const auto& g : groups) {
+                    auto part = g_engine.aggregate(g_currentDB, tname, g, pureAgg);
+                    for (const auto& row : part) {
+                        if (seen.insert(row).second) answers.push_back(row);
+                    }
+                }
+            }
         } else {
-            condTokens.insert(condTokens.begin(), "(");
-            condTokens.push_back(")");
-            for (auto& t : condTokens) t = modifyLogic(t);
-            auto groups = breakDownConditions(condTokens);
-            set<string> seen;
-            for (const auto& g : groups) {
-                auto part = g_engine.query(g_currentDB, tname, g, selectCols, orderByCol, orderByAsc);
-                for (const auto& row : part) {
-                    if (seen.insert(row).second) {
-                        answers.push_back(row);
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
+                cout << tbl.cols[i].dataName << ' ';
+            }
+            cout << '\n';
+            if (condTokens.empty()) {
+                answers = g_engine.query(g_currentDB, tname, {}, selectCols, orderByCol, orderByAsc);
+            } else {
+                condTokens.insert(condTokens.begin(), "(");
+                condTokens.push_back(")");
+                for (auto& t : condTokens) t = modifyLogic(t);
+                auto groups = breakDownConditions(condTokens);
+                set<string> seen;
+                for (const auto& g : groups) {
+                    auto part = g_engine.query(g_currentDB, tname, g, selectCols, orderByCol, orderByAsc);
+                    for (const auto& row : part) {
+                        if (seen.insert(row).second) answers.push_back(row);
                     }
                 }
             }
