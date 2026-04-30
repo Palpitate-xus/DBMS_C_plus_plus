@@ -31,12 +31,22 @@ struct Column {
     void print() const;
 };
 
+struct ForeignKey {
+    std::string colName;        // local column
+    std::string refTable;       // referenced table
+    std::string refCol;         // referenced column
+    std::string onDelete = "restrict";  // restrict | cascade | setnull
+};
+
 struct TableSchema {
     std::string tablename;
     Column cols[MAX_COLUMNS];
     size_t len = 0;
+    ForeignKey fks[MAX_COLUMNS];
+    size_t fkLen = 0;
 
     void append(const Column& ncol);
+    void appendFK(const ForeignKey& fk);
     void print() const;
     size_t rowSize() const;
 };

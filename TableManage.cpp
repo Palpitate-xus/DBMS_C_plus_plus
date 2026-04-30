@@ -47,9 +47,23 @@ void TableSchema::append(const Column& ncol) {
     }
 }
 
+void TableSchema::appendFK(const ForeignKey& fk) {
+    if (fkLen < MAX_COLUMNS) {
+        fks[fkLen++] = fk;
+    }
+}
+
 void TableSchema::print() const {
     std::cout << tablename << "\n\n";
     for (size_t i = 0; i < len; ++i) cols[i].print();
+    if (fkLen > 0) {
+        std::cout << "Foreign Keys:\n";
+        for (size_t i = 0; i < fkLen; ++i) {
+            std::cout << "  " << fks[i].colName << " -> " << fks[i].refTable
+                      << "(" << fks[i].refCol << ") ON DELETE "
+                      << fks[i].onDelete << "\n";
+        }
+    }
 }
 
 size_t TableSchema::rowSize() const {
@@ -210,6 +224,15 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         int32_t dsize = static_cast<int32_t>(tbl.cols[i].dsize);
         out.write(reinterpret_cast<const char*>(&dsize), 4);
     }
+    // Write foreign keys
+    int32_t fkLen = static_cast<int32_t>(tbl.fkLen);
+    out.write(reinterpret_cast<const char*>(&fkLen), 4);
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        writeFixedString(out, tbl.fks[i].colName, MAX_COL_NAME_LEN);
+        writeFixedString(out, tbl.fks[i].refTable, MAX_TABLE_NAME_LEN);
+        writeFixedString(out, tbl.fks[i].refCol, MAX_COL_NAME_LEN);
+        writeFixedString(out, tbl.fks[i].onDelete, 10);
+    }
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -229,6 +252,18 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         int32_t dsize = 0;
         in.read(reinterpret_cast<char*>(&dsize), 4);
         tbl.cols[i].dsize = static_cast<size_t>(dsize);
+    }
+    // Read foreign keys (if present)
+    int32_t fkLen = 0;
+    in.read(reinterpret_cast<char*>(&fkLen), 4);
+    if (in && fkLen > 0 && fkLen <= static_cast<int32_t>(MAX_COLUMNS)) {
+        tbl.fkLen = static_cast<size_t>(fkLen);
+        for (size_t i = 0; i < tbl.fkLen; ++i) {
+            tbl.fks[i].colName = readFixedString(in, MAX_COL_NAME_LEN);
+            tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
+            tbl.fks[i].refCol = readFixedString(in, MAX_COL_NAME_LEN);
+            tbl.fks[i].onDelete = readFixedString(in, 10);
+        }
     }
     return tbl;
 }
@@ -486,6 +521,22 @@ OpResult StorageEngine::insert(const std::string& dbname,
         offset += col.dsize;
     }
 
+    // Check foreign key references
+    for (size_t fi = 0; fi < tbl.fkLen; ++fi) {
+        const ForeignKey& fk = tbl.fks[fi];
+        auto it = values.find(fk.colName);
+        if (it == values.end() || it->second.empty()) continue;
+        if (!tableExists(dbname, fk.refTable)) return OpResult::TableNotExist;
+        TableSchema refTbl = getTableSchema(dbname, fk.refTable);
+        BPTree* refIdx = getPKIndex(dbname, fk.refTable);
+        if (refIdx) {
+            int64_t dummy;
+            if (!refIdx->search(it->second, dummy)) {
+                return OpResult::InvalidValue;  // referenced key not found
+            }
+        }
+    }
+
     {
         std::ofstream out(dataPath(dbname, tablename), std::ios::binary | std::ios::app);
         out.write(rowBuffer.data(), static_cast<std::streamsize>(rowSize));
@@ -699,7 +750,100 @@ OpResult StorageEngine::remove(const std::string& dbname,
 
     if (toDelete.empty()) return OpResult::Success;
 
+    // Check foreign key RESTRICT: ensure no other table references rows being deleted
+    {
+        // Find PK column and offset of this table
+        size_t pkIdx = tbl.len;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+        }
+        if (pkIdx < tbl.len) {
+            // Read PK values of rows being deleted
+            std::set<std::string> deletedPKs;
+            for (int64_t rowIdx : toDelete) {
+                in.seekg(static_cast<std::streamoff>(rowIdx * rowSize), std::ios::beg);
+                size_t off = 0;
+                for (size_t c = 0; c < pkIdx; ++c) {
+                    in.seekg(static_cast<std::streamsize>(tbl.cols[c].dsize), std::ios::cur);
+                    off += tbl.cols[c].dsize;
+                }
+                const Column& col = tbl.cols[pkIdx];
+                std::string pkVal;
+                if (col.dataType == "char") {
+                    std::string buf(col.dsize, '\0');
+                    in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
+                    auto nul = buf.find('\0');
+                    if (nul != std::string::npos) buf.resize(nul);
+                    pkVal = buf;
+                } else if (col.dataType == "date") {
+                    Date d;
+                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    pkVal = str(d);
+                } else {
+                    int64_t val = 0;
+                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
+                    pkVal = transstr(val);
+                }
+                if (!pkVal.empty()) deletedPKs.insert(pkVal);
+            }
+
+            // Scan all other tables for FK references
+            auto allTables = getTableNames(dbname);
+            for (const auto& otherTable : allTables) {
+                if (otherTable == tablename) continue;
+                TableSchema otherTbl = getTableSchema(dbname, otherTable);
+                for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                    const ForeignKey& fk = otherTbl.fks[fi];
+                    if (fk.refTable != tablename) continue;
+                    // Find FK column offset in other table
+                    size_t fkColIdx = otherTbl.len;
+                    for (size_t ci = 0; ci < otherTbl.len; ++ci) {
+                        if (otherTbl.cols[ci].dataName == fk.colName) { fkColIdx = ci; break; }
+                    }
+                    if (fkColIdx >= otherTbl.len) continue;
+                    size_t otherRowSize = otherTbl.rowSize();
+                    std::ifstream oin(dataPath(dbname, otherTable), std::ios::binary);
+                    if (!oin) continue;
+                    oin.seekg(0, std::ios::end);
+                    auto ofs = static_cast<size_t>(oin.tellg());
+                    oin.seekg(0, std::ios::beg);
+                    size_t orc = (otherRowSize == 0) ? 0 : ofs / otherRowSize;
+                    for (size_t r = 0; r < orc; ++r) {
+                        size_t coff = 0;
+                        for (size_t c = 0; c < fkColIdx; ++c) {
+                            oin.seekg(static_cast<std::streamsize>(otherTbl.cols[c].dsize), std::ios::cur);
+                            coff += otherTbl.cols[c].dsize;
+                        }
+                        const Column& fcol = otherTbl.cols[fkColIdx];
+                        std::string fval;
+                        if (fcol.dataType == "char") {
+                            std::string buf(fcol.dsize, '\0');
+                            oin.read(buf.data(), static_cast<std::streamsize>(fcol.dsize));
+                            auto nul = buf.find('\0');
+                            if (nul != std::string::npos) buf.resize(nul);
+                            fval = buf;
+                        } else if (fcol.dataType == "date") {
+                            Date d;
+                            oin.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                            fval = str(d);
+                        } else {
+                            int64_t val = 0;
+                            oin.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(fcol.dsize));
+                            fval = transstr(val);
+                        }
+                        if (deletedPKs.find(fval) != deletedPKs.end()) {
+                            return OpResult::InvalidValue;  // FK reference exists, cannot delete
+                        }
+                        for (size_t c = fkColIdx + 1; c < otherTbl.len; ++c)
+                            oin.seekg(static_cast<std::streamsize>(otherTbl.cols[c].dsize), std::ios::cur);
+                    }
+                }
+            }
+        }
+    }
+
     std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
+    in.seekg(0, std::ios::beg);  // Reset stream position after FK check
     {
         std::ofstream out(tempPath, std::ios::binary);
         for (size_t i = 0; i < rowCount; ++i) {

@@ -254,10 +254,14 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             string ctype = trim(sql.substr(colon + 1, endPos - colon - 1));
             if (cname.empty() || ctype.empty()) break;
 
-            // Parse type and flags (null flag + PK)
-            size_t sp = ctype.find(' ');
-            string typeName = (sp == string::npos) ? ctype : trim(ctype.substr(0, sp));
-            string flagsStr = (sp == string::npos) ? "" : trim(ctype.substr(sp + 1));
+            // Parse type and flags (null flag + PK) and foreign key
+            size_t fkPos = ctype.find("->");
+            string typeAndFlags = (fkPos == string::npos) ? ctype : trim(ctype.substr(0, fkPos));
+            string fkStr = (fkPos == string::npos) ? "" : trim(ctype.substr(fkPos + 2));
+
+            size_t sp = typeAndFlags.find(' ');
+            string typeName = (sp == string::npos) ? typeAndFlags : trim(typeAndFlags.substr(0, sp));
+            string flagsStr = (sp == string::npos) ? "" : trim(typeAndFlags.substr(sp + 1));
             bool isNull = true;
             bool isPK = false;
             {
@@ -266,6 +270,19 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 while (fs >> f) {
                     if (f == "0") isNull = false;
                     if (f == "pk" || f == "PK") isPK = true;
+                }
+            }
+
+            // Parse foreign key: "refTable(refCol)"
+            dbms::ForeignKey fk;
+            if (!fkStr.empty()) {
+                size_t lp = fkStr.find('(');
+                size_t rp = fkStr.find(')');
+                if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+                    fk.colName = cname;
+                    fk.refTable = trim(fkStr.substr(0, lp));
+                    fk.refCol = trim(fkStr.substr(lp + 1, rp - lp - 1));
+                    fk.onDelete = "restrict";
                 }
             }
 
@@ -284,6 +301,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 if (len == 0) len = 1;
                 tbl.append(makeStringColumn(cname, isNull, len, isPK));
             }
+            if (!fk.colName.empty()) tbl.appendFK(fk);
             pos = endPos + 1;
         }
         break;
@@ -562,7 +580,11 @@ static bool execute(const string& rawSql) {
 
         tokens.erase(tokens.begin());
         if (tokens.empty()) {
-            g_engine.remove(g_currentDB, tname, {});
+            auto res = g_engine.remove(g_currentDB, tname, {});
+            if (res != OpResult::Success) {
+                cout << "Delete failed: foreign key constraint violation or other error" << endl;
+                return true;
+            }
             cout << "Delete done" << endl;
             log(g_nowUser, "delete done", getTime());
             return false;
@@ -578,7 +600,11 @@ static bool execute(const string& rawSql) {
         for (auto& t : tokens) t = modifyLogic(t);
         auto groups = breakDownConditions(tokens);
         for (const auto& g : groups) {
-            g_engine.remove(g_currentDB, tname, g);
+            auto res = g_engine.remove(g_currentDB, tname, g);
+            if (res != OpResult::Success) {
+                cout << "Delete failed: foreign key constraint violation or other error" << endl;
+                return true;
+            }
         }
         cout << "Delete done" << endl;
         log(g_nowUser, "delete done", getTime());
