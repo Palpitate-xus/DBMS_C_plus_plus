@@ -35,6 +35,7 @@ static std::string readFixedString(std::istream& in, size_t len) {
 void Column::print() const {
     std::cout << "ColumnName: " << dataName << '\n';
     std::cout << "hasNull: " << isNull << '\n';
+    std::cout << "PrimaryKey: " << isPrimaryKey << '\n';
     std::cout << "DataType: " << dataType << '\n';
     std::cout << "DataSize: " << dsize << "\n\n";
 }
@@ -59,10 +60,11 @@ size_t TableSchema::rowSize() const {
 // ========================================================================
 // Column constructors
 // ========================================================================
-Column makeIntColumn(const std::string& name, bool isNull, int scale) {
+Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK) {
     Column c;
     c.dataName = name;
     c.isNull = isNull;
+    c.isPrimaryKey = isPK;
     if (scale <= 1) {
         c.dataType = "tiny";
         c.dsize = 1;
@@ -76,19 +78,21 @@ Column makeIntColumn(const std::string& name, bool isNull, int scale) {
     return c;
 }
 
-Column makeStringColumn(const std::string& name, bool isNull, size_t length) {
+Column makeStringColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
     Column c;
     c.dataName = name;
     c.isNull = isNull;
+    c.isPrimaryKey = isPK;
     c.dataType = "char";
     c.dsize = std::max(size_t(1), std::min(length, size_t(1005)));
     return c;
 }
 
-Column makeDateColumn(const std::string& name, bool isNull) {
+Column makeDateColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;
     c.isNull = isNull;
+    c.isPrimaryKey = isPK;
     c.dataType = "date";
     c.dsize = DATE_SIZE;
     return c;
@@ -145,8 +149,8 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     int32_t len = static_cast<int32_t>(tbl.len);
     out.write(reinterpret_cast<const char*>(&len), 4);
     for (size_t i = 0; i < tbl.len; ++i) {
-        uint8_t isNull = tbl.cols[i].isNull ? 1 : 0;
-        out.write(reinterpret_cast<const char*>(&isNull), 1);
+        uint8_t flags = (tbl.cols[i].isNull ? 1 : 0) | (tbl.cols[i].isPrimaryKey ? 2 : 0);
+        out.write(reinterpret_cast<const char*>(&flags), 1);
         writeFixedString(out, tbl.cols[i].dataType, MAX_TYPE_NAME_LEN);
         writeFixedString(out, tbl.cols[i].dataName, MAX_COL_NAME_LEN);
         int32_t dsize = static_cast<int32_t>(tbl.cols[i].dsize);
@@ -162,9 +166,10 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (!in) return tbl;
     tbl.len = static_cast<size_t>(len);
     for (size_t i = 0; i < tbl.len; ++i) {
-        uint8_t isNull = 0;
-        in.read(reinterpret_cast<char*>(&isNull), 1);
-        tbl.cols[i].isNull = (isNull != 0);
+        uint8_t flags = 0;
+        in.read(reinterpret_cast<char*>(&flags), 1);
+        tbl.cols[i].isNull = (flags & 1) != 0;
+        tbl.cols[i].isPrimaryKey = (flags & 2) != 0;
         tbl.cols[i].dataType = readFixedString(in, MAX_TYPE_NAME_LEN);
         tbl.cols[i].dataName = readFixedString(in, MAX_COL_NAME_LEN);
         int32_t dsize = 0;
@@ -362,6 +367,50 @@ OpResult StorageEngine::insert(const std::string& dbname,
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
+
+    // Check primary key uniqueness
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isPrimaryKey) {
+            auto it = values.find(tbl.cols[i].dataName);
+            if (it != values.end() && !it->second.empty()) {
+                std::ifstream checkIn(dataPath(dbname, tablename), std::ios::binary);
+                if (checkIn) {
+                    checkIn.seekg(0, std::ios::end);
+                    auto fs = static_cast<size_t>(checkIn.tellg());
+                    checkIn.seekg(0, std::ios::beg);
+                    size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
+                    for (size_t r = 0; r < rc; ++r) {
+                        size_t off = 0;
+                        for (size_t j = 0; j < tbl.len; ++j) {
+                            if (j == i) {
+                                if (tbl.cols[j].dataType == "char") {
+                                    std::string buf(tbl.cols[j].dsize, '\0');
+                                    checkIn.read(buf.data(), static_cast<std::streamsize>(tbl.cols[j].dsize));
+                                    auto nul = buf.find('\0');
+                                    if (nul != std::string::npos) buf.resize(nul);
+                                    if (buf == it->second) return OpResult::DuplicateKey;
+                                } else if (tbl.cols[j].dataType == "date") {
+                                    Date d;
+                                    checkIn.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                                    Date v(it->second.c_str());
+                                    if (d == v) return OpResult::DuplicateKey;
+                                } else {
+                                    int64_t val = 0;
+                                    checkIn.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[j].dsize));
+                                    int64_t cmp = parseInt(it->second);
+                                    if (val == cmp) return OpResult::DuplicateKey;
+                                }
+                            } else {
+                                checkIn.seekg(static_cast<std::streamsize>(tbl.cols[j].dsize), std::ios::cur);
+                            }
+                            off += tbl.cols[j].dsize;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
 
     // Build row buffer and validate all values before writing
     std::string rowBuffer(rowSize, '\0');

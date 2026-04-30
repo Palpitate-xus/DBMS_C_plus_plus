@@ -22,6 +22,7 @@ constexpr int64_t INF = 0x8000000000000000LL;
 
 struct Column {
     bool isNull = false;
+    bool isPrimaryKey = false;
     std::string dataType;
     std::string dataName;
     size_t dsize = 0;
@@ -48,6 +49,7 @@ enum class OpResult {
     InvalidValue,
     NullNotAllowed,
     SyntaxError,
+    DuplicateKey,
 };
 
 class StorageEngine {
@@ -110,8 +112,8 @@ private:
 };
 
 // Column type constructors
-Column makeIntColumn(const std::string& name, bool isNull, int scale);
-Column makeStringColumn(const std::string& name, bool isNull, size_t length);
-Column makeDateColumn(const std::string& name, bool isNull);
+Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK = false);
+Column makeStringColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
+Column makeDateColumn(const std::string& name, bool isNull, bool isPK = false);
 
 } // namespace dbms

@@ -229,26 +229,35 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             string ctype = trim(sql.substr(colon + 1, endPos - colon - 1));
             if (cname.empty() || ctype.empty()) break;
 
-            // Parse type and null flag
+            // Parse type and flags (null flag + PK)
             size_t sp = ctype.find(' ');
             string typeName = (sp == string::npos) ? ctype : trim(ctype.substr(0, sp));
-            string nullFlag = (sp == string::npos) ? "" : trim(ctype.substr(sp + 1));
-            bool isNull = (nullFlag != "0");
+            string flagsStr = (sp == string::npos) ? "" : trim(ctype.substr(sp + 1));
+            bool isNull = true;
+            bool isPK = false;
+            {
+                stringstream fs(flagsStr);
+                string f;
+                while (fs >> f) {
+                    if (f == "0") isNull = false;
+                    if (f == "pk" || f == "PK") isPK = true;
+                }
+            }
 
             if (typeName.substr(0, 3) == "int") {
-                tbl.append(makeIntColumn(cname, isNull, 2));
+                tbl.append(makeIntColumn(cname, isNull, 2, isPK));
             } else if (typeName.substr(0, 4) == "tiny") {
-                tbl.append(makeIntColumn(cname, isNull, 1));
+                tbl.append(makeIntColumn(cname, isNull, 1, isPK));
             } else if (typeName.substr(0, 4) == "long") {
-                tbl.append(makeIntColumn(cname, isNull, 3));
+                tbl.append(makeIntColumn(cname, isNull, 3, isPK));
             } else if (typeName.substr(0, 4) == "date") {
-                tbl.append(makeDateColumn(cname, isNull));
+                tbl.append(makeDateColumn(cname, isNull, isPK));
             } else if (typeName.substr(0, 4) == "char") {
                 size_t len = 0;
                 for (size_t i = 4; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
                     len = len * 10 + (typeName[i] - '0');
                 if (len == 0) len = 1;
-                tbl.append(makeStringColumn(cname, isNull, len));
+                tbl.append(makeStringColumn(cname, isNull, len, isPK));
             }
             pos = endPos + 1;
         }
@@ -500,6 +509,10 @@ static bool execute(const string& rawSql) {
         for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = stripQuotes(vals[i]);
 
         auto res = g_engine.insert(g_currentDB, tname, values);
+        if (res == OpResult::DuplicateKey) {
+            cout << "Duplicate primary key" << endl;
+            return true;
+        }
         if (res != OpResult::Success) {
             cout << "Invalid data, please check" << endl;
             return true;
