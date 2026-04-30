@@ -103,6 +103,113 @@ Column makeDateColumn(const std::string& name, bool isNull, bool isPK) {
 // ========================================================================
 StorageEngine::StorageEngine() = default;
 
+// ========================================================================
+// Primary Key Index
+// ========================================================================
+void StorageEngine::updatePKIndexOnInsert(const std::string& dbname,
+                                           const std::string& tablename,
+                                           int64_t rowIdx,
+                                           const std::string& rowBuffer) {
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t pkIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+    }
+    if (pkIdx >= tbl.len) return;
+
+    size_t offset = 0;
+    for (size_t i = 0; i < pkIdx; ++i) offset += tbl.cols[i].dsize;
+
+    std::string pkVal;
+    const Column& col = tbl.cols[pkIdx];
+    if (col.dataType == "char") {
+        pkVal = rowBuffer.substr(offset, col.dsize);
+        auto nul = pkVal.find('\0');
+        if (nul != std::string::npos) pkVal.resize(nul);
+    } else if (col.dataType == "date") {
+        Date d;
+        std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
+        pkVal = str(d);
+    } else {
+        int64_t val = 0;
+        std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
+        pkVal = transstr(val);
+    }
+    pkIndexes_[pkIndexKey(dbname, tablename)][pkVal] = rowIdx;
+}
+
+void StorageEngine::rebuildPKIndex(const std::string& dbname,
+                                    const std::string& tablename) {
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t pkIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+    }
+
+    std::string key = pkIndexKey(dbname, tablename);
+    pkIndexes_[key].clear();
+    if (pkIdx >= tbl.len) return;
+
+    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+    if (!in) return;
+
+    size_t rowSize = tbl.rowSize();
+    in.seekg(0, std::ios::end);
+    auto fs = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    size_t rowCount = (rowSize == 0) ? 0 : fs / rowSize;
+
+    for (size_t r = 0; r < rowCount; ++r) {
+        for (size_t c = 0; c < pkIdx; ++c)
+            in.seekg(static_cast<std::streamsize>(tbl.cols[c].dsize), std::ios::cur);
+
+        std::string pkVal;
+        const Column& col = tbl.cols[pkIdx];
+        if (col.dataType == "char") {
+            std::string buf(col.dsize, '\0');
+            in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
+            auto nul = buf.find('\0');
+            if (nul != std::string::npos) buf.resize(nul);
+            pkVal = buf;
+        } else if (col.dataType == "date") {
+            Date d;
+            in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+            pkVal = str(d);
+        } else {
+            int64_t val = 0;
+            in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
+            pkVal = transstr(val);
+        }
+        pkIndexes_[key][pkVal] = static_cast<int64_t>(r);
+
+        for (size_t c = pkIdx + 1; c < tbl.len; ++c)
+            in.seekg(static_cast<std::streamsize>(tbl.cols[c].dsize), std::ios::cur);
+    }
+}
+
+std::set<int64_t> StorageEngine::lookupPKIndex(const std::string& dbname,
+                                                const std::string& tablename,
+                                                const TableSchema& tbl,
+                                                const std::string& colName,
+                                                const std::string& value) {
+    std::set<int64_t> result;
+    bool hasPK = false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isPrimaryKey && tbl.cols[i].dataName == colName) {
+            hasPK = true; break;
+        }
+    }
+    if (!hasPK) return result;
+
+    std::string key = pkIndexKey(dbname, tablename);
+    auto it = pkIndexes_.find(key);
+    if (it == pkIndexes_.end()) return result;
+
+    auto vit = it->second.find(value);
+    if (vit != it->second.end()) result.insert(vit->second);
+    return result;
+}
+
 std::filesystem::path StorageEngine::dbPath(const std::string& dbname) const {
     return std::filesystem::path(dbname);
 }
@@ -451,6 +558,14 @@ OpResult StorageEngine::insert(const std::string& dbname,
         std::ofstream out(dataPath(dbname, tablename), std::ios::binary | std::ios::app);
         out.write(rowBuffer.data(), static_cast<std::streamsize>(rowSize));
     }
+    // Update PK index
+    {
+        std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+        in.seekg(0, std::ios::end);
+        auto fs = static_cast<size_t>(in.tellg());
+        int64_t rowIdx = (rowSize == 0) ? 0 : static_cast<int64_t>(fs / rowSize) - 1;
+        if (rowIdx >= 0) updatePKIndexOnInsert(dbname, tablename, rowIdx, rowBuffer);
+    }
     return OpResult::Success;
 }
 
@@ -479,6 +594,69 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     std::set<int64_t> ids;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
+
+    // Try PK index for = conditions
+    for (const auto& c : conds) {
+        if (c.op == "=") {
+            ids = lookupPKIndex(dbname, tablename, tbl, c.colName, c.value);
+            if (!ids.empty()) {
+                // Verify remaining conditions by file scan on candidate rows
+                if (conds.size() > 1) {
+                    std::set<int64_t> toRemove;
+                    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+                    for (int64_t rowIdx : ids) {
+                        bool match = true;
+                        for (const auto& cond : conds) {
+                            if (cond.op == "=" && cond.colName == c.colName) continue;
+                            size_t colOffset = 0;
+                            size_t ci = 0;
+                            for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci)
+                                colOffset += tbl.cols[ci].dsize;
+                            if (ci >= tbl.len) { match = false; break; }
+                            in.seekg(static_cast<std::streamoff>(colOffset + rowIdx * rowSize), std::ios::beg);
+                            const Column& col = tbl.cols[ci];
+                            if (col.dataType == "char") {
+                                std::string buf(col.dsize, '\0');
+                                in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
+                                auto nul = buf.find('\0');
+                                if (nul != std::string::npos) buf.resize(nul);
+                                if (cond.op == "<"  && !(buf <  cond.value)) match = false;
+                                if (cond.op == ">"  && !(buf >  cond.value)) match = false;
+                                if (cond.op == "="  && buf != cond.value)    match = false;
+                                if (cond.op == "<=" && (buf >  cond.value))   match = false;
+                                if (cond.op == ">=" && (buf <  cond.value))   match = false;
+                                if (cond.op == "!=" && buf == cond.value)    match = false;
+                            } else if (col.dataType == "date") {
+                                Date d;
+                                in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                                Date v(cond.value.c_str());
+                                if (cond.op == "<"  && v.year && !(d < v))  match = false;
+                                if (cond.op == ">"  && v.year && !(d > v))  match = false;
+                                if (cond.op == "="  && v.year && d != v)    match = false;
+                                if (cond.op == "<=" && v.year && (d > v))   match = false;
+                                if (cond.op == ">=" && v.year && (d < v))   match = false;
+                                if (cond.op == "!=" && v.year && d == v)    match = false;
+                            } else {
+                                int64_t val = 0;
+                                in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
+                                int64_t cmp = parseInt(cond.value);
+                                if (cond.op == "<"  && cmp != INF && !(val < cmp)) match = false;
+                                if (cond.op == ">"  && cmp != INF && !(val > cmp)) match = false;
+                                if (cond.op == "="  && cmp != INF && val != cmp)   match = false;
+                                if (cond.op == "<=" && cmp != INF && (val > cmp))  match = false;
+                                if (cond.op == ">=" && cmp != INF && (val < cmp))  match = false;
+                                if (cond.op == "!=" && cmp != INF && val == cmp)   match = false;
+                            }
+                            if (!match) break;
+                        }
+                        if (!match) toRemove.insert(rowIdx);
+                    }
+                    for (auto r : toRemove) ids.erase(r);
+                }
+                return ids;
+            }
+        }
+    }
 
     std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
     if (!in) return ids;
@@ -585,6 +763,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
 
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    rebuildPKIndex(dbname, tablename);
     return OpResult::Success;
 }
 
@@ -670,6 +849,7 @@ OpResult StorageEngine::update(const std::string& dbname,
 
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    rebuildPKIndex(dbname, tablename);
     return OpResult::Success;
 }
 
