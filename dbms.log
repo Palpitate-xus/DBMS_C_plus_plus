@@ -134,3 +134,35 @@ Thu Apr 30 08:14:00 2026
     xus    2 bob 
 Thu Apr 30 08:14:00 2026
     xus    2 bob 
+Thu Apr 30 08:18:49 2026
+    xus    login
+Thu Apr 30 08:18:49 2026
+    xus    create database succeeded
+Thu Apr 30 08:18:49 2026
+    xus    use database success
+Thu Apr 30 08:18:49 2026
+    xus    table create succeeded
+Thu Apr 30 08:18:49 2026
+    xus    data inserted
+Thu Apr 30 08:18:49 2026
+    xus    data inserted
+Thu Apr 30 08:18:49 2026
+    xus    data inserted
+Thu Apr 30 08:18:49 2026
+    xus    2 bob 72 
+Thu Apr 30 08:18:49 2026
+    xus    1 alice 85 
+Thu Apr 30 08:18:49 2026
+    xus    3 charlie 90 
+Thu Apr 30 08:18:49 2026
+    xus    3 charlie 90 
+Thu Apr 30 08:18:49 2026
+    xus    1 alice 85 
+Thu Apr 30 08:18:49 2026
+    xus    2 bob 72 
+Thu Apr 30 08:18:49 2026
+    xus    1 alice 85 
+Thu Apr 30 08:18:49 2026
+    xus    2 bob 72 
+Thu Apr 30 08:18:49 2026
+    xus    3 charlie 90 

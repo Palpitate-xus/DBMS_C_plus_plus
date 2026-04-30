@@ -83,7 +83,9 @@ public:
                     const std::vector<std::string>& conditions);
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
                                    const std::vector<std::string>& conditions,
-                                   const std::set<std::string>& selectCols);
+                                   const std::set<std::string>& selectCols,
+                                   const std::string& orderByCol = "",
+                                   bool orderByAsc = true);
 
 private:
     std::filesystem::path dbPath(const std::string& dbname) const;

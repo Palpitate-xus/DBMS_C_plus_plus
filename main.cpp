@@ -659,6 +659,21 @@ static bool execute(const string& rawSql) {
             return true;
         }
 
+        // Parse ORDER BY
+        size_t orderIdx = tokens.size();
+        for (size_t i = 3; i + 1 < tokens.size(); ++i) {
+            if (tokens[i] == "order" && tokens[i + 1] == "by") {
+                orderIdx = i;
+                break;
+            }
+        }
+        string orderByCol;
+        bool orderByAsc = true;
+        if (orderIdx < tokens.size()) {
+            if (orderIdx + 2 < tokens.size()) orderByCol = tokens[orderIdx + 2];
+            if (orderIdx + 3 < tokens.size() && tokens[orderIdx + 3] == "desc") orderByAsc = false;
+        }
+
         TableSchema tbl = g_engine.getTableSchema(g_currentDB, tname);
         set<string> selectCols;
         bool selectAll = (columns == "*");
@@ -687,13 +702,13 @@ static bool execute(const string& rawSql) {
         }
         cout << '\n';
 
-        // Extract condition tokens after "from tname"
+        // Extract condition tokens before "order by"
         vector<string> condTokens;
-        for (size_t i = 3; i < tokens.size(); ++i) condTokens.push_back(tokens[i]);
+        for (size_t i = 3; i < orderIdx; ++i) condTokens.push_back(tokens[i]);
 
         vector<string> answers;
         if (condTokens.empty()) {
-            answers = g_engine.query(g_currentDB, tname, {}, selectCols);
+            answers = g_engine.query(g_currentDB, tname, {}, selectCols, orderByCol, orderByAsc);
         } else {
             condTokens.insert(condTokens.begin(), "(");
             condTokens.push_back(")");
@@ -701,7 +716,7 @@ static bool execute(const string& rawSql) {
             auto groups = breakDownConditions(condTokens);
             set<string> seen;
             for (const auto& g : groups) {
-                auto part = g_engine.query(g_currentDB, tname, g, selectCols);
+                auto part = g_engine.query(g_currentDB, tname, g, selectCols, orderByCol, orderByAsc);
                 for (const auto& row : part) {
                     if (seen.insert(row).second) {
                         answers.push_back(row);

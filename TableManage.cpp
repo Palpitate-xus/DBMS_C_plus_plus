@@ -856,7 +856,9 @@ OpResult StorageEngine::update(const std::string& dbname,
 std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,
-                                               const std::set<std::string>& selectCols) {
+                                               const std::set<std::string>& selectCols,
+                                               const std::string& orderByCol,
+                                               bool orderByAsc) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
 
@@ -872,11 +874,50 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
 
     auto conds = parseConditions(conditions);
-    std::set<int64_t> matchIds;
+    std::vector<int64_t> matchIds;
     if (conds.empty()) {
-        for (size_t i = 0; i < rowCount; ++i) matchIds.insert(static_cast<int64_t>(i));
+        for (size_t i = 0; i < rowCount; ++i) matchIds.push_back(static_cast<int64_t>(i));
     } else {
-        matchIds = filterRows(dbname, tablename, conds);
+        auto ids = filterRows(dbname, tablename, conds);
+        matchIds.assign(ids.begin(), ids.end());
+    }
+
+    // ORDER BY
+    if (!orderByCol.empty()) {
+        size_t sortIdx = tbl.len;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == orderByCol) { sortIdx = i; break; }
+        }
+        if (sortIdx < tbl.len) {
+            struct Item { int64_t rowIdx; std::string s; int64_t n; Date d; };
+            std::vector<Item> items;
+            const Column& scol = tbl.cols[sortIdx];
+            for (int64_t rid : matchIds) {
+                in.seekg(static_cast<std::streamoff>(rid * rowSize), std::ios::beg);
+                for (size_t c = 0; c < sortIdx; ++c)
+                    in.seekg(static_cast<std::streamsize>(tbl.cols[c].dsize), std::ios::cur);
+                Item it{rid, "", 0, {}};
+                if (scol.dataType == "char") {
+                    std::string buf(scol.dsize, '\0');
+                    in.read(buf.data(), static_cast<std::streamsize>(scol.dsize));
+                    auto nul = buf.find('\0');
+                    if (nul != std::string::npos) buf.resize(nul);
+                    it.s = buf;
+                } else if (scol.dataType == "date") {
+                    in.read(reinterpret_cast<char*>(&it.d), DATE_SIZE);
+                } else {
+                    in.read(reinterpret_cast<char*>(&it.n), static_cast<std::streamsize>(scol.dsize));
+                }
+                items.push_back(std::move(it));
+            }
+            std::sort(items.begin(), items.end(), [&](const Item& a, const Item& b) {
+                if (scol.dataType == "char") return orderByAsc ? (a.s < b.s) : (b.s < a.s);
+                if (scol.dataType == "date") return orderByAsc ? (a.d < b.d) : (b.d < a.d);
+                return orderByAsc ? (a.n < b.n) : (b.n < a.n);
+            });
+            matchIds.clear();
+            for (const auto& it : items) matchIds.push_back(it.rowIdx);
+        }
     }
 
     for (int64_t rowIdx : matchIds) {
