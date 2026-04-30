@@ -1,325 +1,485 @@
+#include "TableManage.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
-#include <map>
+#include <set>
 #include <string>
-#include <direct.h>
-#include <io.h>
-#include "DateType.h"
 #include <vector>
-#include "set.h"
-#include<bits/stdc++.h>
-using namespace std;
-typedef int ll;
-const long long INF=0x8000000000000000;
-struct column{
-    bool isNull=0;
-    string dataType="",dataName="";
-    ll dsize=0;
-    void print(){
-        cout<<"ColumnName: "<<dataName<<'\n';
-        cout<<"hasNull: "<<isNull<<'\n';
-        cout<<"DataType: "<<dataType<<'\n';
-        cout<<"DataSize: "<<dsize<<'\n'<<endl;
+
+namespace dbms {
+
+// ========================================================================
+// Helper: fixed-length string IO (for backward-compatible binary format)
+// ========================================================================
+static void writeFixedString(std::ostream& out, const std::string& s, size_t len) {
+    std::string buf = s;
+    buf.resize(len, '\0');
+    out.write(buf.data(), static_cast<std::streamsize>(len));
+}
+
+static std::string readFixedString(std::istream& in, size_t len) {
+    std::string buf(len, '\0');
+    in.read(buf.data(), static_cast<std::streamsize>(len));
+    auto pos = buf.find('\0');
+    if (pos != std::string::npos) buf.resize(pos);
+    return buf;
+}
+
+// ========================================================================
+// Column / TableSchema
+// ========================================================================
+void Column::print() const {
+    std::cout << "ColumnName: " << dataName << '\n';
+    std::cout << "hasNull: " << isNull << '\n';
+    std::cout << "DataType: " << dataType << '\n';
+    std::cout << "DataSize: " << dsize << "\n\n";
+}
+
+void TableSchema::append(const Column& ncol) {
+    if (len < MAX_COLUMNS) {
+        cols[len++] = ncol;
     }
-};
-struct table{
-    string tablename="";
-    column cols[30];
-    ll len=0;
-    void append(column ncol){cols[len++]=ncol;}
-    void print(){cout<<tablename<<'\n'<<endl;for(ll i=0;i<len;i++)cols[i].print();}
-    ll size(){ll otc=0;for(ll i=0;i<len;i++)otc+=cols[i].dsize;return otc;}
-};
-struct strlist{
-    string str[30];
-    ll len=0;
-    void print(){for(ll i=0;i<len;i++)cout<<str[i]<<endl;}
-    void append(string nstr){str[len++]=nstr;}
-};
-ll createDatabase(string DBname){
-    if(!_access(DBname.c_str(),0))return 1;//database already exist
-    _mkdir(DBname.c_str());
-    FILE*xx=fopen((DBname+"\\"+"carve.log").c_str(),"wb");
-    fclose(xx);
-    xx=fopen((DBname+"\\"+"tlist.lst").c_str(),"wb");
-    fclose(xx);
-    return 0;//success
 }
-ll dropDatabase(string DBname){
-    if(_access(DBname.c_str(),0))return 1;//database not exist
-    system(("del "+DBname+" /q").c_str());
-    _rmdir(DBname.c_str());
-    return 0;//success
+
+void TableSchema::print() const {
+    std::cout << tablename << "\n\n";
+    for (size_t i = 0; i < len; ++i) cols[i].print();
 }
-ll createTable(string DBname,string Tablename,table tbl){
-    string filepath=DBname+"\\"+Tablename;
-    if(!_access((filepath+".stc").c_str(),0)||_access(DBname.c_str(),0))return 1;//table already exist or database not exist
-    FILE*xx=fopen((filepath+".stc").c_str(),"wb");
-    fwrite(&tbl.len,4,1,xx);
-    for(ll i=0;i<tbl.len;i++){
-        fwrite(&tbl.cols[i].isNull,1,1,xx);
-        fwrite(tbl.cols[i].dataType.c_str(),4,1,xx);
-        fwrite(tbl.cols[i].dataName.c_str(),15,1,xx);
-        fwrite(&tbl.cols[i].dsize,4,1,xx);
+
+size_t TableSchema::rowSize() const {
+    size_t total = 0;
+    for (size_t i = 0; i < len; ++i) total += cols[i].dsize;
+    return total;
+}
+
+// ========================================================================
+// Column constructors
+// ========================================================================
+Column makeIntColumn(const std::string& name, bool isNull, int scale) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    if (scale <= 1) {
+        c.dataType = "tiny";
+        c.dsize = 1;
+    } else if (scale == 2) {
+        c.dataType = "int";
+        c.dsize = 4;
+    } else {
+        c.dataType = "long";
+        c.dsize = 8;
     }
-    fclose(xx);
-    xx=fopen((filepath+".dt").c_str(),"wb");
-    fclose(xx);
-    xx=fopen((DBname+"\\tlist.lst").c_str(),"ab");
-    fwrite(Tablename.c_str(),15,1,xx);
-    fclose(xx);
-    return 0;//success
+    return c;
 }
-ll dropTable(string DBname,string Tablename){
-    string filepath=DBname+"\\"+Tablename;strlist tbls;char t[15];
-    if(_access((filepath+".stc").c_str(),0))return 1;//table not exist
-    system(("del "+filepath+".stc,"+filepath+".dt /q").c_str());
-    FILE*xx=fopen((DBname+"\\tlist.lst").c_str(),"rb");
-    while(fread(t,15,1,xx)){
-        string tem=string(t);
-        if(tem!=Tablename)tbls.append(tem);
+
+Column makeStringColumn(const std::string& name, bool isNull, size_t length) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.dataType = "char";
+    c.dsize = std::max(size_t(1), std::min(length, size_t(1005)));
+    return c;
+}
+
+Column makeDateColumn(const std::string& name, bool isNull) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.dataType = "date";
+    c.dsize = DATE_SIZE;
+    return c;
+}
+
+// ========================================================================
+// StorageEngine
+// ========================================================================
+StorageEngine::StorageEngine() = default;
+
+std::filesystem::path StorageEngine::dbPath(const std::string& dbname) const {
+    return std::filesystem::path(dbname);
+}
+
+std::filesystem::path StorageEngine::schemaPath(const std::string& dbname,
+                                                 const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".stc");
+}
+
+std::filesystem::path StorageEngine::dataPath(const std::string& dbname,
+                                               const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".dt");
+}
+
+std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) const {
+    return dbPath(dbname) / "tlist.lst";
+}
+
+bool StorageEngine::databaseExists(const std::string& dbname) const {
+    return std::filesystem::exists(dbPath(dbname));
+}
+
+bool StorageEngine::tableExists(const std::string& dbname,
+                                 const std::string& tablename) const {
+    return std::filesystem::exists(schemaPath(dbname, tablename));
+}
+
+OpResult StorageEngine::createDatabase(const std::string& dbname) {
+    if (databaseExists(dbname)) return OpResult::TableAlreadyExist;
+    std::filesystem::create_directory(dbPath(dbname));
+    {
+        std::ofstream f(tableListPath(dbname), std::ios::binary);
     }
-    fclose(xx);
-    xx=fopen((DBname+"\\tlist.lst").c_str(),"wb");
-    for(ll i=0;i<tbls.len;i++)fwrite(tbls.str[i].c_str(),15,1,xx);
-    fclose(xx);
-    return 0;//success
+    return OpResult::Success;
 }
-strlist getTablenames(string DBname){
-    FILE*xx=fopen((DBname+"\\tlist.lst").c_str(),"rb");
-    char t[16];strlist tbls;
-    while(fread(t,15,1,xx))tbls.append(string(t));
-    fclose(xx);
-    return tbls;
+
+OpResult StorageEngine::dropDatabase(const std::string& dbname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    std::filesystem::remove_all(dbPath(dbname));
+    return OpResult::Success;
 }
-table getTablestruction(string DBname,string Tablename){
-    string filepath=DBname+"\\"+Tablename+".stc";table t={Tablename};
-    if(_access(filepath.c_str(),0))return t;//table not exist
-    FILE*xx=fopen(filepath.c_str(),"rb");
-    fread(&t.len,4,1,xx);
-    for(ll i=0;i<t.len;i++){
-        char type[5]="",name[16]="";
-        fread(&t.cols[i].isNull,1,1,xx);
-        fread(type,4,1,xx);
-        fread(name,15,1,xx);
-        fread(&t.cols[i].dsize,4,1,xx);
-        t.cols[i].dataType=string(type);
-        t.cols[i].dataName=string(name);
+
+void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
+    int32_t len = static_cast<int32_t>(tbl.len);
+    out.write(reinterpret_cast<const char*>(&len), 4);
+    for (size_t i = 0; i < tbl.len; ++i) {
+        uint8_t isNull = tbl.cols[i].isNull ? 1 : 0;
+        out.write(reinterpret_cast<const char*>(&isNull), 1);
+        writeFixedString(out, tbl.cols[i].dataType, MAX_TYPE_NAME_LEN);
+        writeFixedString(out, tbl.cols[i].dataName, MAX_COL_NAME_LEN);
+        int32_t dsize = static_cast<int32_t>(tbl.cols[i].dsize);
+        out.write(reinterpret_cast<const char*>(&dsize), 4);
     }
-    fclose(xx);
-    return t;
 }
-column setint(string columnName,bool isNull,ll scale){
-    string tem;
-    if(scale<=1)tem="tiny";
-    else if(scale==2)tem="int",scale=4;
-    else if(scale>=3)tem="long",scale=8;
-    return {isNull,tem,columnName,scale};
-}
-column setstring(string columnName,bool isNull,ll length){
-    return {isNull,"char",columnName,max(1,min(length,1005))};
-}
-column setdate(string columnName,bool isNull){
-    return {isNull,"date",columnName,12};
-}
-long long transint(string t){
-    if(t.length()>19||!t.length())return INF;
-    long long otc=0;
-    for(ll i=0;i<t.length();i++){
-        if(t[i]<48||t[i]>57)return INF;
-        otc=otc*10+t[i]-48;
+
+TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
+    TableSchema tbl;
+    tbl.tablename = tablename;
+    int32_t len = 0;
+    in.read(reinterpret_cast<char*>(&len), 4);
+    if (!in) return tbl;
+    tbl.len = static_cast<size_t>(len);
+    for (size_t i = 0; i < tbl.len; ++i) {
+        uint8_t isNull = 0;
+        in.read(reinterpret_cast<char*>(&isNull), 1);
+        tbl.cols[i].isNull = (isNull != 0);
+        tbl.cols[i].dataType = readFixedString(in, MAX_TYPE_NAME_LEN);
+        tbl.cols[i].dataName = readFixedString(in, MAX_COL_NAME_LEN);
+        int32_t dsize = 0;
+        in.read(reinterpret_cast<char*>(&dsize), 4);
+        tbl.cols[i].dsize = static_cast<size_t>(dsize);
     }
-    return otc;
+    return tbl;
 }
-ll insert(string DBname,string Tablename,strlist values){
-    string filepath=DBname+"\\"+Tablename;
-    if(_access((filepath+".stc").c_str(),0))return 1;//table not exist
-    table tbl=getTablestruction(DBname,Tablename);
-    map<string,string>key;
-    for(ll i=0;i<values.len;i++){
-        string tem=values.str[i];ll pos=tem.find(' ',0);
-        if(pos==-1)return 1;
-        key[tem.substr(0,pos)]=tem.substr(pos+1,tem.length()-pos);
+
+OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (tableExists(dbname, tbl.tablename)) return OpResult::TableAlreadyExist;
+
+    {
+        std::ofstream out(schemaPath(dbname, tbl.tablename), std::ios::binary);
+        writeSchema(out, tbl);
     }
-    FILE*xx=fopen((filepath+".dt").c_str(),"ab");
-    fseek(xx,0,2);ll size=ftell(xx);
-    for(ll i=0;i<tbl.len;i++){
-        column tem=tbl.cols[i];string str=key[tem.dataName];
-        if(!tem.isNull&&str=="")goto l;//unexpected NULL value
-        if(tem.dataType=="char")fwrite(str.c_str(),tem.dsize,1,xx);
-        else if(tem.dataType=="date"){
-            Date t=Date(str.c_str());
-            if(!t.year)goto l;//wrong date form
-            fwrite(&t,12,1,xx);
+    {
+        std::ofstream out(dataPath(dbname, tbl.tablename), std::ios::binary);
+    }
+    {
+        std::ofstream out(tableListPath(dbname), std::ios::binary | std::ios::app);
+        writeFixedString(out, tbl.tablename, MAX_TABLE_NAME_LEN);
+    }
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::createTable(const std::string& dbname,
+                                     const std::string& tablename,
+                                     const TableSchema& tbl) {
+    TableSchema t = tbl;
+    t.tablename = tablename;
+    return createTable(dbname, t);
+}
+
+OpResult StorageEngine::dropTable(const std::string& dbname,
+                                   const std::string& tablename) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+
+    std::filesystem::remove(schemaPath(dbname, tablename));
+    std::filesystem::remove(dataPath(dbname, tablename));
+
+    auto names = getTableNames(dbname);
+    {
+        std::ofstream out(tableListPath(dbname), std::ios::binary);
+        for (const auto& name : names) {
+            if (name != tablename) {
+                writeFixedString(out, name, MAX_TABLE_NAME_LEN);
+            }
         }
-        else{
-            ll len=str.length();long long t=transint(str);
-            if(t==INF)goto l;
-            fwrite(&t,tem.dsize,1,xx);
+    }
+    return OpResult::Success;
+}
+
+std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname) const {
+    std::vector<std::string> names;
+    std::ifstream in(tableListPath(dbname), std::ios::binary);
+    if (!in) return names;
+    while (in) {
+        std::string name = readFixedString(in, MAX_TABLE_NAME_LEN);
+        if (!name.empty()) names.push_back(name);
+    }
+    return names;
+}
+
+TableSchema StorageEngine::getTableSchema(const std::string& dbname,
+                                            const std::string& tablename) const {
+    std::ifstream in(schemaPath(dbname, tablename), std::ios::binary);
+    return readSchema(in, tablename);
+}
+
+int64_t StorageEngine::parseInt(const std::string& s) {
+    if (s.empty() || s.length() > 19) return INF;
+    int64_t val = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return INF;
+        val = val * 10 + (c - '0');
+    }
+    return val;
+}
+
+bool StorageEngine::stringToBuffer(const std::string& src, char* dst, size_t len) {
+    if (src.length() > len) return false;
+    std::memset(dst, 0, len);
+    std::memcpy(dst, src.data(), src.length());
+    return true;
+}
+
+OpResult StorageEngine::insert(const std::string& dbname,
+                                const std::string& tablename,
+                                const std::map<std::string, std::string>& values) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t rowSize = tbl.rowSize();
+
+    // Build row buffer and validate all values before writing
+    std::string rowBuffer(rowSize, '\0');
+    size_t offset = 0;
+
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        auto it = values.find(col.dataName);
+        std::string val = (it != values.end()) ? it->second : "";
+
+        if (!col.isNull && val.empty()) {
+            return OpResult::NullNotAllowed;
+        }
+
+        if (col.dataType == "char") {
+            if (!stringToBuffer(val, &rowBuffer[offset], col.dsize)) {
+                return OpResult::InvalidValue;
+            }
+        } else if (col.dataType == "date") {
+            Date d(val.c_str());
+            if (d.year == 0) return OpResult::InvalidValue;
+            std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
+        } else {
+            // integer types: tiny, int, long
+            if (val.empty()) {
+                int64_t nullVal = INF;
+                std::memcpy(&rowBuffer[offset], &nullVal, col.dsize);
+            } else {
+                int64_t num = parseInt(val);
+                if (num == INF) return OpResult::InvalidValue;
+                std::memcpy(&rowBuffer[offset], &num, col.dsize);
+            }
+        }
+        offset += col.dsize;
+    }
+
+    {
+        std::ofstream out(dataPath(dbname, tablename), std::ios::binary | std::ios::app);
+        out.write(rowBuffer.data(), static_cast<std::streamsize>(rowSize));
+    }
+    return OpResult::Success;
+}
+
+std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
+    const std::vector<std::string>& cstr) {
+    std::vector<Condition> conds;
+    for (const auto& s : cstr) {
+        if (s.empty()) continue;
+        Condition c;
+        c.op = s[0];
+        size_t sp = s.find(' ', 1);
+        if (sp == std::string::npos) continue;
+        c.colName = s.substr(1, sp - 1);
+        c.value = s.substr(sp + 1);
+        conds.push_back(c);
+    }
+    return conds;
+}
+
+std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
+                                             const std::string& tablename,
+                                             const std::vector<Condition>& conds) {
+    std::set<int64_t> ids;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t rowSize = tbl.rowSize();
+
+    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+    if (!in) return ids;
+
+    in.seekg(0, std::ios::end);
+    auto fileSize = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
+
+    for (int64_t i = 0; i < static_cast<int64_t>(rowCount); ++i) ids.insert(i);
+    if (ids.empty() || conds.empty()) return ids;
+
+    for (size_t colIdx = 0, colOffset = 0; colIdx < tbl.len;
+         colOffset += tbl.cols[colIdx++].dsize) {
+        const Column& col = tbl.cols[colIdx];
+
+        // Collect conditions for this column
+        std::vector<Condition> colConds;
+        for (const auto& c : conds) {
+            if (c.colName == col.dataName) colConds.push_back(c);
+        }
+        if (colConds.empty()) continue;
+
+        std::set<int64_t> toRemove;
+        for (int64_t rowIdx : ids) {
+            in.seekg(static_cast<std::streamoff>(colOffset + rowIdx * rowSize), std::ios::beg);
+            bool match = true;
+
+            for (const auto& c : colConds) {
+                if (col.dataType == "char") {
+                    std::string buf(col.dsize, '\0');
+                    in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
+                    auto nul = buf.find('\0');
+                    if (nul != std::string::npos) buf.resize(nul);
+                    if (c.op == '<' && !(buf < c.value)) match = false;
+                    if (c.op == '>' && !(buf > c.value)) match = false;
+                    if (c.op == '=' && buf != c.value) match = false;
+                } else if (col.dataType == "date") {
+                    Date d;
+                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    Date v(c.value.c_str());
+                    if (c.op == '<' && v.year && !(d < v)) match = false;
+                    if (c.op == '>' && v.year && !(d > v)) match = false;
+                    if (c.op == '=' && v.year && d != v) match = false;
+                } else {
+                    int64_t val = 0;
+                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
+                    int64_t cmp = parseInt(c.value);
+                    if (c.op == '<' && cmp != INF && !(val < cmp)) match = false;
+                    if (c.op == '>' && cmp != INF && !(val > cmp)) match = false;
+                    if (c.op == '=' && cmp != INF && val != cmp) match = false;
+                }
+                if (!match) break;
+            }
+            if (!match) toRemove.insert(rowIdx);
+        }
+        for (auto r : toRemove) ids.erase(r);
+        if (ids.empty()) break;
+    }
+    return ids;
+}
+
+OpResult StorageEngine::remove(const std::string& dbname,
+                                const std::string& tablename,
+                                const std::vector<std::string>& conditions) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t rowSize = tbl.rowSize();
+
+    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+    if (!in) return OpResult::Success;  // empty file
+
+    in.seekg(0, std::ios::end);
+    auto fileSize = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
+
+    auto conds = parseConditions(conditions);
+    std::set<int64_t> toDelete = filterRows(dbname, tablename, conds);
+
+    if (toDelete.empty()) return OpResult::Success;
+
+    std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
+    {
+        std::ofstream out(tempPath, std::ios::binary);
+        for (size_t i = 0; i < rowCount; ++i) {
+            std::string row(rowSize, '\0');
+            in.read(row.data(), static_cast<std::streamsize>(rowSize));
+            if (toDelete.find(static_cast<int64_t>(i)) == toDelete.end()) {
+                out.write(row.data(), static_cast<std::streamsize>(rowSize));
+            }
         }
     }
-    fclose(xx);return 0;
-    l:rewind(xx);
-    _chsize(_fileno(xx),size);//clear written data
-    fclose(xx);return 1;
+
+    std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    return OpResult::Success;
 }
-Chris*fetch(string DBname,string Tablename,strlist cstr,Chris*id){
-    string filepath=DBname+"\\"+Tablename;
-    if(_access((filepath+".stc").c_str(),0))return id;//table not exist
-    table tbl=getTablestruction(DBname,Tablename);ll size=tbl.size();
-    map<string,string>key;
-    for(ll i=0;i<cstr.len;i++){
-        string tem=cstr.str[i];ll pos=tem.find(' ',0);
-        if(pos==-1)return id;
-        key[tem.substr(0,pos)]=tem.substr(pos+1,tem.length()-pos);
+
+std::vector<std::string> StorageEngine::query(const std::string& dbname,
+                                               const std::string& tablename,
+                                               const std::vector<std::string>& conditions,
+                                               const std::set<std::string>& selectCols) {
+    std::vector<std::string> result;
+    if (!tableExists(dbname, tablename)) return result;
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t rowSize = tbl.rowSize();
+
+    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+    if (!in) return result;
+
+    in.seekg(0, std::ios::end);
+    auto fileSize = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
+
+    auto conds = parseConditions(conditions);
+    std::set<int64_t> matchIds;
+    if (conds.empty()) {
+        for (size_t i = 0; i < rowCount; ++i) matchIds.insert(static_cast<int64_t>(i));
+    } else {
+        matchIds = filterRows(dbname, tablename, conds);
     }
-    FILE*xx=fopen((filepath+".dt").c_str(),"rb");
-    for(ll i=0,pos=0;i<tbl.len;pos+=tbl.cols[i++].dsize){
-        column tem=tbl.cols[i];if(!(id->size()))goto ends;
-        if(key['<'+tem.dataName]==""&&key["="+tem.dataName]==""&&key[">"+tem.dataName]=="")continue;
-        if(tem.dataType=="char"){
-            for(ll idx=id->kth(1);idx!=0x7FFFFFFF;idx=id->next(idx)){
-                fseek(xx,pos+idx*size,0);char t[tem.dsize+1]="";
-                fread(t,tem.dsize,1,xx);
-                string m=key['<'+tem.dataName],tstr=string(t);
-                if(m!=""&&tstr>=m)goto l1;
-                m=key['>'+tem.dataName];if(m!=""&&tstr>=m)goto l1;
-                m=key['='+tem.dataName];if(m!=""&&tstr!=m)goto l1;
+
+    for (int64_t rowIdx : matchIds) {
+        in.seekg(static_cast<std::streamoff>(rowIdx * rowSize), std::ios::beg);
+        std::string rowStr;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const Column& col = tbl.cols[i];
+            if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end()) {
+                in.seekg(static_cast<std::streamsize>(col.dsize), std::ios::cur);
                 continue;
-                l1:id->delet(idx);
+            }
+            if (col.dataType == "char") {
+                std::string buf(col.dsize, '\0');
+                in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
+                auto nul = buf.find('\0');
+                if (nul != std::string::npos) buf.resize(nul);
+                rowStr += buf + ' ';
+            } else if (col.dataType == "date") {
+                Date d;
+                in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                rowStr += str(d) + ' ';
+            } else {
+                int64_t val = 0;
+                in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
+                if (val == INF) rowStr += "NULL ";
+                else rowStr += transstr(val) + ' ';
             }
         }
-        else if(tem.dataType=="date"){
-            for(ll idx=id->kth(1);idx!=0x7FFFFFFF;idx=id->next(idx)){
-                fseek(xx,pos+idx*size,0);Date tdate;
-                fread(&tdate,12,1,xx);
-                Date m=Date(key['<'+tem.dataName].c_str());
-                if(m.year&&tdate>=m)goto l2;
-                m=Date(key['>'+tem.dataName].c_str());if(m.year&&tdate<=m)goto l2;
-                m=Date(key['='+tem.dataName].c_str());if(m.year&&tdate!=m)goto l2;
-                continue;
-                l2:id->delet(idx);
-            }
-        }
-        else{
-            for(ll idx=id->kth(1);idx!=0x7FFFFFFF;idx=id->next(idx)){
-                fseek(xx,pos+idx*size,0);long long tint=0;
-                fread(&tint,tem.dsize,1,xx);
-                long long m=transint(key['<'+tem.dataName]);
-                if(m!=INF&&tint>=m)goto l3;
-                m=transint(key['>'+tem.dataName]);if(m!=INF&&tint<=m)goto l3;
-                m=transint(key['='+tem.dataName]);
-                if(m!=INF&&tint!=m)goto l3;
-                continue;
-                l3:id->delet(idx);
-            }
-        }
-        if(!id->size())break;
+        result.push_back(rowStr);
     }
-    ends:fclose(xx);
-    return id;
+    return result;
 }
-ll delet(string DBname,string Tablename,strlist cstr){
-    string filepath=DBname+"\\"+Tablename;
-    if(_access((filepath+".stc").c_str(),0))return 1;//table not exist
-    FILE*xx=fopen((filepath+".dt").c_str(),"rb");
-    FILE*yy=fopen((filepath+".temp").c_str(),"wb");
-    fseek(xx,0,2);
-    table tbl=getTablestruction(DBname,Tablename);ll size=tbl.size(),rowct=ftell(xx)/size;
-    rewind(xx);
-    Chris*id=(Chris*)calloc(1,sizeof(Chris));
-    for(ll i=0;i<rowct;i++)id->insert(i);
-    id=fetch(DBname,Tablename,cstr,id);if(!(id->size()))goto end;//nothing to delete
-    for(ll i=0;i<rowct;i++){
-        if(id->has(i)){fseek(xx,size,1);continue;}
-        for(ll i=0;i<tbl.len;i++){
-            column tem=tbl.cols[i];
-            if(tem.dataType=="char"){
-                char tstr[tem.dsize+1]="";
-                fread(tstr,tem.dsize,1,xx);
-                fwrite(tstr,tem.dsize,1,yy);
-            }
-            else if(tem.dataType=="Date"){
-                Date tdate;
-                fread(&tdate,12,1,xx);
-                fwrite(&tdate,12,1,yy);
-            }
-            else{
-                long long tint=0;
-                fread(&tint,tem.dsize,1,xx);
-                fwrite(&tint,tem.dsize,1,yy);
-            }
-        }
-    }
-    end:fclose(xx);fclose(yy);free(id);
-    remove((filepath+".dt").c_str());
-    rename((filepath+".temp").c_str(),(filepath+".dt").c_str());
-    return 0;
-}
-vector<string> lookup(string DBname,string Tablename,strlist cstr){
-    string filepath=DBname+"\\"+Tablename;vector<string>otc;
-    if(_access((filepath+".stc").c_str(),0))return otc;//table not exist
-    FILE*xx=fopen((filepath+".dt").c_str(),"rb");
-    fseek(xx,0,2);
-    table tbl=getTablestruction(DBname,Tablename);ll size=tbl.size(),rowct=ftell(xx)/size;
-    rewind(xx);
-    Chris*id=(Chris*)calloc(1,sizeof(Chris));
-    for(ll i=0;i<rowct;i++)id->insert(i);
-    id=fetch(DBname,Tablename,cstr,id);if(!(id->size()))goto end;//nothing to delete
-    for(ll idx=id->kth(1);idx!=0x7FFFFFFF;idx=id->next(idx)){
-        fseek(xx,idx*size,0);string ans="";
-        for(ll i=0;i<tbl.len;i++){
-            column tem=tbl.cols[i];
-            if(tem.dataType=="char"){
-                char tstr[tem.dsize+1]="";
-                fread(tstr,tem.dsize,1,xx);
-                ans+=string(tstr)+' ';
-            }
-            else if(tem.dataType=="date"){
-                Date tdate;
-                fread(&tdate,12,1,xx);
-                ans+=str(tdate)+' ';
-            }
-            else{
-                long long tint=0;
-                fread(&tint,tem.dsize,1,xx);
-                ans+=transstr(tint)+' ';
-            }
-        }
-        otc.push_back(ans);
-    }
-    end:fclose(xx);free(id);
-    return otc;
-}
-int main(){
-    /*createDatabase("info");
-    table newt;
-    newt.append(setint("goodsCount",0,2));
-    newt.append(setstring("goodsName",0,15));
-    newt.append(setdate("saleDate",0));
-    createTable("info","goods",newt);*/
-    /*strlist nstr1,nstr2;
-    nstr1.append("goodsCount 15");
-    nstr1.append("goodsName earphones");
-    nstr1.append("saleDate 2020-08-19");
-    nstr2.append("goodsCount 24");
-    nstr2.append("goodsName kungpow chicken");
-    nstr2.append("saleDate 2023-01-10");
-    insert("info","goods",nstr1);insert("info","goods",nstr2);*/
-    /*FILE*xx=fopen("info\\goods.dt","rb");
-    while(1){
-        ll ct=0;char gn[16]="";Date sd;
-        fread(&ct,4,1,xx);
-        fread(gn,15,1,xx);
-        fread(&sd,12,1,xx);
-        if(feof(xx))break;
-        cout<<ct<<','<<gn<<','<<sd<<endl;
-    }
-    fclose(xx);*/
-    /*strlist tem;
-    tem.append("=goodsName earphones");
-    tem.append("<goodsCount 30");
-    delet("info","goods",tem);*/
-    strlist t={{""},0};t.append("=goodsCount 24");
-    vector<string>tem=lookup("info","goods",t);
-    for(auto it=tem.cbegin();it!=tem.cend();it++)cout<<*it<<endl;
-}
+
+} // namespace dbms
