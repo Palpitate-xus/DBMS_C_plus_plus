@@ -425,6 +425,91 @@ OpResult StorageEngine::remove(const std::string& dbname,
     return OpResult::Success;
 }
 
+OpResult StorageEngine::update(const std::string& dbname,
+                                const std::string& tablename,
+                                const std::map<std::string, std::string>& updates,
+                                const std::vector<std::string>& conditions) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t rowSize = tbl.rowSize();
+
+    // Validate columns and pre-check values
+    std::map<size_t, std::string> colUpdates;  // column index -> new value
+    for (const auto& kv : updates) {
+        bool found = false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == kv.first) {
+                found = true;
+                const Column& col = tbl.cols[i];
+                if (!col.isNull && kv.second.empty()) {
+                    return OpResult::NullNotAllowed;
+                }
+                if (col.dataType == "date") {
+                    Date d(kv.second.c_str());
+                    if (d.year == 0) return OpResult::InvalidValue;
+                } else if (col.dataType != "char") {
+                    if (!kv.second.empty() && parseInt(kv.second) == INF) {
+                        return OpResult::InvalidValue;
+                    }
+                }
+                colUpdates[i] = kv.second;
+                break;
+            }
+        }
+        if (!found) return OpResult::InvalidValue;
+    }
+
+    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+    if (!in) return OpResult::Success;
+
+    in.seekg(0, std::ios::end);
+    auto fileSize = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
+
+    auto conds = parseConditions(conditions);
+    std::set<int64_t> matchIds = conds.empty()
+        ? [&](){ std::set<int64_t> s; for (size_t i = 0; i < rowCount; ++i) s.insert(static_cast<int64_t>(i)); return s; }()
+        : filterRows(dbname, tablename, conds);
+
+    if (matchIds.empty()) return OpResult::Success;
+
+    std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
+    {
+        std::ofstream out(tempPath, std::ios::binary);
+        for (size_t i = 0; i < rowCount; ++i) {
+            std::string row(rowSize, '\0');
+            in.read(row.data(), static_cast<std::streamsize>(rowSize));
+            if (matchIds.find(static_cast<int64_t>(i)) != matchIds.end()) {
+                size_t offset = 0;
+                for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    const Column& col = tbl.cols[ci];
+                    auto it = colUpdates.find(ci);
+                    if (it != colUpdates.end()) {
+                        const std::string& val = it->second;
+                        if (col.dataType == "char") {
+                            stringToBuffer(val, &row[offset], col.dsize);
+                        } else if (col.dataType == "date") {
+                            Date d(val.c_str());
+                            std::memcpy(&row[offset], &d, DATE_SIZE);
+                        } else {
+                            int64_t num = val.empty() ? INF : parseInt(val);
+                            std::memcpy(&row[offset], &num, col.dsize);
+                        }
+                    }
+                    offset += col.dsize;
+                }
+            }
+            out.write(row.data(), static_cast<std::streamsize>(rowSize));
+        }
+    }
+
+    std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    return OpResult::Success;
+}
+
 std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,

@@ -70,6 +70,9 @@ public:
     // Data operations
     OpResult insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values);
+    OpResult update(const std::string& dbname, const std::string& tablename,
+                    const std::map<std::string, std::string>& updates,
+                    const std::vector<std::string>& conditions);
     OpResult remove(const std::string& dbname, const std::string& tablename,
                     const std::vector<std::string>& conditions);
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,

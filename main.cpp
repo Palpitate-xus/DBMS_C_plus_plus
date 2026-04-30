@@ -41,6 +41,13 @@ static string trim(const string& s) {
     return s.substr(a, b - a);
 }
 
+static string stripQuotes(const string& s) {
+    if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
+        return s.substr(1, s.size() - 2);
+    }
+    return s;
+}
+
 static vector<string> tokenize(const string& sql) {
     vector<string> tokens;
     size_t i = 0;
@@ -237,6 +244,26 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
 }
 
 // ========================================================================
+// Parse UPDATE SET clause: "col1=val1, col2='val 2'"
+// ========================================================================
+static std::map<std::string, std::string> parseSetClause(const std::string& sql, size_t startPos, size_t endPos) {
+    std::map<std::string, std::string> updates;
+    std::string clause = trim(sql.substr(startPos, endPos - startPos));
+    size_t pos = 0;
+    while (pos < clause.size()) {
+        size_t eqPos = clause.find('=', pos);
+        size_t commaPos = clause.find(',', pos);
+        if (eqPos == std::string::npos) break;
+        std::string col = trim(clause.substr(pos, eqPos - pos));
+        size_t valEnd = (commaPos == std::string::npos) ? clause.size() : commaPos;
+        std::string val = trim(clause.substr(eqPos + 1, valEnd - eqPos - 1));
+        updates[col] = stripQuotes(val);
+        pos = (commaPos == std::string::npos) ? clause.size() : commaPos + 1;
+    }
+    return updates;
+}
+
+// ========================================================================
 // SQL execution
 // ========================================================================
 static bool checkAdmin() {
@@ -383,7 +410,7 @@ static bool execute(const string& rawSql) {
         }
 
         map<string, string> values;
-        for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = vals[i];
+        for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = stripQuotes(vals[i]);
 
         auto res = g_engine.insert(g_currentDB, tname, values);
         if (res != OpResult::Success) {
@@ -430,6 +457,54 @@ static bool execute(const string& rawSql) {
         }
         cout << "Delete done" << endl;
         log(g_nowUser, "delete done", getTime());
+        return false;
+    }
+
+    if (sql.substr(0, 6) == "update") {
+        if (!checkDB()) return true;
+        size_t setPos = sql.find("set");
+        if (setPos == std::string::npos) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        string tname = trim(sql.substr(6, setPos - 6));
+        if (!g_engine.tableExists(g_currentDB, tname)) {
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
+
+        size_t wherePos = sql.find("where", setPos);
+        auto updates = parseSetClause(sql, setPos + 3,
+                                       (wherePos == std::string::npos) ? sql.size() : wherePos);
+        if (updates.empty()) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+
+        vector<string> conds;
+        if (wherePos != std::string::npos) {
+            string whereClause = trim(sql.substr(wherePos + 5));
+            vector<string> tokens = tokenize(whereClause);
+            tokens.insert(tokens.begin(), "(");
+            tokens.push_back(")");
+            for (auto& t : tokens) t = modifyLogic(t);
+            auto groups = breakDownConditions(tokens);
+            for (const auto& g : groups) {
+                auto res = g_engine.update(g_currentDB, tname, updates, g);
+                if (res != OpResult::Success) {
+                    cout << "Update failed" << endl;
+                    return true;
+                }
+            }
+        } else {
+            auto res = g_engine.update(g_currentDB, tname, updates, {});
+            if (res != OpResult::Success) {
+                cout << "Update failed" << endl;
+                return true;
+            }
+        }
+        cout << "Update done" << endl;
+        log(g_nowUser, "update done", getTime());
         return false;
     }
 
