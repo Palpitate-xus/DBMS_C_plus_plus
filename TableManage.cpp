@@ -219,6 +219,108 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
     return OpResult::Success;
 }
 
+OpResult StorageEngine::alterTableAddColumn(const std::string& dbname,
+                                             const std::string& tablename,
+                                             const Column& col) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == col.dataName) return OpResult::TableAlreadyExist;
+    }
+    if (tbl.len >= MAX_COLUMNS) return OpResult::InvalidValue;
+
+    size_t oldRowSize = tbl.rowSize();
+    tbl.append(col);
+
+    // Rewrite schema
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+
+    // Migrate data: append default value for new column
+    std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
+    {
+        std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+        std::ofstream out(tempPath, std::ios::binary);
+        if (in) {
+            in.seekg(0, std::ios::end);
+            auto fileSize = static_cast<size_t>(in.tellg());
+            in.seekg(0, std::ios::beg);
+            size_t rowCount = (oldRowSize == 0) ? 0 : fileSize / oldRowSize;
+            std::string defaultVal(col.dsize, '\0');
+            if (col.dataType != "char") {
+                int64_t nullVal = INF;
+                std::memcpy(defaultVal.data(), &nullVal, col.dsize);
+            }
+            for (size_t i = 0; i < rowCount; ++i) {
+                std::string row(oldRowSize, '\0');
+                in.read(row.data(), static_cast<std::streamsize>(oldRowSize));
+                out.write(row.data(), static_cast<std::streamsize>(oldRowSize));
+                out.write(defaultVal.data(), static_cast<std::streamsize>(col.dsize));
+            }
+        }
+    }
+    std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterTableDropColumn(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& colName) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t dropIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colName) { dropIdx = i; break; }
+    }
+    if (dropIdx >= tbl.len) return OpResult::InvalidValue;
+
+    size_t oldRowSize = tbl.rowSize();
+    size_t dropSize = tbl.cols[dropIdx].dsize;
+    size_t prefixSize = 0;
+    for (size_t i = 0; i < dropIdx; ++i) prefixSize += tbl.cols[i].dsize;
+    size_t suffixSize = oldRowSize - prefixSize - dropSize;
+
+    // Shift columns left
+    for (size_t i = dropIdx; i + 1 < tbl.len; ++i) tbl.cols[i] = tbl.cols[i + 1];
+    tbl.len--;
+
+    // Rewrite schema
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+
+    // Migrate data: skip dropped column's data
+    std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
+    {
+        std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+        std::ofstream out(tempPath, std::ios::binary);
+        if (in) {
+            in.seekg(0, std::ios::end);
+            auto fileSize = static_cast<size_t>(in.tellg());
+            in.seekg(0, std::ios::beg);
+            size_t rowCount = (oldRowSize == 0) ? 0 : fileSize / oldRowSize;
+            for (size_t i = 0; i < rowCount; ++i) {
+                std::string prefix(prefixSize, '\0');
+                std::string suffix(suffixSize, '\0');
+                in.read(prefix.data(), static_cast<std::streamsize>(prefixSize));
+                in.seekg(static_cast<std::streamsize>(dropSize), std::ios::cur);
+                in.read(suffix.data(), static_cast<std::streamsize>(suffixSize));
+                out.write(prefix.data(), static_cast<std::streamsize>(prefixSize));
+                out.write(suffix.data(), static_cast<std::streamsize>(suffixSize));
+            }
+        }
+    }
+    std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    return OpResult::Success;
+}
+
 std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname) const {
     std::vector<std::string> names;
     std::ifstream in(tableListPath(dbname), std::ios::binary);

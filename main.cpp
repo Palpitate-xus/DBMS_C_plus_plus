@@ -366,6 +366,79 @@ static bool execute(const string& rawSql) {
         }
     }
 
+    if (sql.substr(0, 5) == "alter") {
+        if (!checkAdmin()) return true;
+        if (!checkDB()) return true;
+        vector<string> tokens = tokenize(sql.substr(5));
+        if (tokens.size() < 4 || tokens[0] != "table") {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        string tname = tokens[1];
+        string op = tokens[2];
+        if (op == "add" && tokens.size() >= 4 && tokens[3] == "column") {
+            // alter table tname add column colname:type [0|1]
+            if (tokens.size() < 5) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            string colDef = tokens[4];
+            size_t colon = colDef.find(':');
+            if (colon == string::npos) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            string cname = colDef.substr(0, colon);
+            string ctype = colDef.substr(colon + 1);
+            size_t sp = ctype.find(' ');
+            string typeName = (sp == string::npos) ? ctype : trim(ctype.substr(0, sp));
+            string nullFlag = (sp == string::npos) ? "" : trim(ctype.substr(sp + 1));
+            bool isNull = (nullFlag != "0");
+
+            Column col;
+            if (typeName.substr(0, 3) == "int") {
+                col = makeIntColumn(cname, isNull, 2);
+            } else if (typeName.substr(0, 4) == "tiny") {
+                col = makeIntColumn(cname, isNull, 1);
+            } else if (typeName.substr(0, 4) == "long") {
+                col = makeIntColumn(cname, isNull, 3);
+            } else if (typeName.substr(0, 4) == "date") {
+                col = makeDateColumn(cname, isNull);
+            } else if (typeName.substr(0, 4) == "char") {
+                size_t len = 0;
+                for (size_t i = 4; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
+                    len = len * 10 + (typeName[i] - '0');
+                if (len == 0) len = 1;
+                col = makeStringColumn(cname, isNull, len);
+            } else {
+                cout << "Unknown data type" << endl;
+                return true;
+            }
+            auto res = g_engine.alterTableAddColumn(g_currentDB, tname, col);
+            if (res == OpResult::TableAlreadyExist) {
+                cout << "Column already exists" << endl;
+                return true;
+            }
+            cout << "Column added" << endl;
+            return false;
+        }
+        if (op == "drop" && tokens.size() >= 4 && tokens[3] == "column") {
+            if (tokens.size() < 5) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            auto res = g_engine.alterTableDropColumn(g_currentDB, tname, tokens[4]);
+            if (res == OpResult::InvalidValue) {
+                cout << "Column not found" << endl;
+                return true;
+            }
+            cout << "Column dropped" << endl;
+            return false;
+        }
+        cout << "SQL syntax error" << endl;
+        return true;
+    }
+
     if (sql.substr(0, 12) == "insert into ") {
         if (!checkDB()) return true;
         vector<string> tokens = tokenize(sql.substr(12));

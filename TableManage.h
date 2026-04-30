@@ -63,6 +63,10 @@ public:
     OpResult createTable(const std::string& dbname, const TableSchema& tbl);
     OpResult createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl);
     OpResult dropTable(const std::string& dbname, const std::string& tablename);
+    OpResult alterTableAddColumn(const std::string& dbname, const std::string& tablename,
+                                  const Column& col);
+    OpResult alterTableDropColumn(const std::string& dbname, const std::string& tablename,
+                                   const std::string& colName);
     bool tableExists(const std::string& dbname, const std::string& tablename) const;
     std::vector<std::string> getTableNames(const std::string& dbname) const;
     TableSchema getTableSchema(const std::string& dbname, const std::string& tablename) const;
