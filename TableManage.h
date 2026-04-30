@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "DateType.h"
+#include "BPTree.h"
 
 namespace dbms {
 
@@ -116,16 +117,12 @@ private:
     void writeSchema(std::ostream& out, const TableSchema& tbl);
     TableSchema readSchema(std::istream& in, const std::string& tablename) const;
 
-    // Primary key index: "dbname/tablename" -> "pkValue" -> rowIdx
-    std::map<std::string, std::map<std::string, int64_t>> pkIndexes_;
-    std::string pkIndexKey(const std::string& dbname, const std::string& tablename) const {
-        return dbname + "/" + tablename;
-    }
-    void updatePKIndexOnInsert(const std::string& dbname, const std::string& tablename,
-                                int64_t rowIdx, const std::string& rowBuffer);
-    std::set<int64_t> lookupPKIndex(const std::string& dbname, const std::string& tablename,
-                                     const TableSchema& tbl, const std::string& colName,
-                                     const std::string& value);
+    // B+ Tree primary key index
+    std::filesystem::path indexPath(const std::string& dbname, const std::string& tablename) const;
+    mutable std::map<std::string, std::unique_ptr<BPTree>> pkIndexCache_;
+    BPTree* getPKIndex(const std::string& dbname, const std::string& tablename) const;
+    void closeAllIndexes();
+    static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);
 
     // Parse condition strings like "<col value", "=col value", ">col value"
     struct Condition {
@@ -138,9 +135,6 @@ private:
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,
                                  const std::vector<Condition>& conds);
-
-    // Indexing
-    void rebuildPKIndex(const std::string& dbname, const std::string& tablename);
 
     // Helpers
     static int64_t parseInt(const std::string& s);

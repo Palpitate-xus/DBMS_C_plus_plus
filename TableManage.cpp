@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -106,110 +107,6 @@ StorageEngine::StorageEngine() = default;
 // ========================================================================
 // Primary Key Index
 // ========================================================================
-void StorageEngine::updatePKIndexOnInsert(const std::string& dbname,
-                                           const std::string& tablename,
-                                           int64_t rowIdx,
-                                           const std::string& rowBuffer) {
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t pkIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
-    }
-    if (pkIdx >= tbl.len) return;
-
-    size_t offset = 0;
-    for (size_t i = 0; i < pkIdx; ++i) offset += tbl.cols[i].dsize;
-
-    std::string pkVal;
-    const Column& col = tbl.cols[pkIdx];
-    if (col.dataType == "char") {
-        pkVal = rowBuffer.substr(offset, col.dsize);
-        auto nul = pkVal.find('\0');
-        if (nul != std::string::npos) pkVal.resize(nul);
-    } else if (col.dataType == "date") {
-        Date d;
-        std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
-        pkVal = str(d);
-    } else {
-        int64_t val = 0;
-        std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
-        pkVal = transstr(val);
-    }
-    pkIndexes_[pkIndexKey(dbname, tablename)][pkVal] = rowIdx;
-}
-
-void StorageEngine::rebuildPKIndex(const std::string& dbname,
-                                    const std::string& tablename) {
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t pkIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
-    }
-
-    std::string key = pkIndexKey(dbname, tablename);
-    pkIndexes_[key].clear();
-    if (pkIdx >= tbl.len) return;
-
-    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) return;
-
-    size_t rowSize = tbl.rowSize();
-    in.seekg(0, std::ios::end);
-    auto fs = static_cast<size_t>(in.tellg());
-    in.seekg(0, std::ios::beg);
-    size_t rowCount = (rowSize == 0) ? 0 : fs / rowSize;
-
-    for (size_t r = 0; r < rowCount; ++r) {
-        for (size_t c = 0; c < pkIdx; ++c)
-            in.seekg(static_cast<std::streamsize>(tbl.cols[c].dsize), std::ios::cur);
-
-        std::string pkVal;
-        const Column& col = tbl.cols[pkIdx];
-        if (col.dataType == "char") {
-            std::string buf(col.dsize, '\0');
-            in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
-            auto nul = buf.find('\0');
-            if (nul != std::string::npos) buf.resize(nul);
-            pkVal = buf;
-        } else if (col.dataType == "date") {
-            Date d;
-            in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
-            pkVal = str(d);
-        } else {
-            int64_t val = 0;
-            in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
-            pkVal = transstr(val);
-        }
-        pkIndexes_[key][pkVal] = static_cast<int64_t>(r);
-
-        for (size_t c = pkIdx + 1; c < tbl.len; ++c)
-            in.seekg(static_cast<std::streamsize>(tbl.cols[c].dsize), std::ios::cur);
-    }
-}
-
-std::set<int64_t> StorageEngine::lookupPKIndex(const std::string& dbname,
-                                                const std::string& tablename,
-                                                const TableSchema& tbl,
-                                                const std::string& colName,
-                                                const std::string& value) {
-    std::set<int64_t> result;
-    bool hasPK = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isPrimaryKey && tbl.cols[i].dataName == colName) {
-            hasPK = true; break;
-        }
-    }
-    if (!hasPK) return result;
-
-    std::string key = pkIndexKey(dbname, tablename);
-    auto it = pkIndexes_.find(key);
-    if (it == pkIndexes_.end()) return result;
-
-    auto vit = it->second.find(value);
-    if (vit != it->second.end()) result.insert(vit->second);
-    return result;
-}
-
 std::filesystem::path StorageEngine::dbPath(const std::string& dbname) const {
     return std::filesystem::path(dbname);
 }
@@ -226,6 +123,56 @@ std::filesystem::path StorageEngine::dataPath(const std::string& dbname,
 
 std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) const {
     return dbPath(dbname) / "tlist.lst";
+}
+
+std::filesystem::path StorageEngine::indexPath(const std::string& dbname,
+                                                const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".idx");
+}
+
+std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const TableSchema& tbl) {
+    size_t pkIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+    }
+    if (pkIdx >= tbl.len) return "";
+
+    size_t offset = 0;
+    for (size_t i = 0; i < pkIdx; ++i) offset += tbl.cols[i].dsize;
+
+    const Column& col = tbl.cols[pkIdx];
+    if (col.dataType == "char") {
+        std::string val = rowBuffer.substr(offset, col.dsize);
+        auto nul = val.find('\0');
+        if (nul != std::string::npos) val.resize(nul);
+        return val;
+    } else if (col.dataType == "date") {
+        Date d;
+        std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
+        return str(d);
+    } else {
+        int64_t val = 0;
+        std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
+        return transstr(val);
+    }
+}
+
+BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
+    std::string key = dbname + "/" + tablename;
+    auto it = pkIndexCache_.find(key);
+    if (it != pkIndexCache_.end()) return it->second.get();
+
+    auto tree = std::make_unique<BPTree>(indexPath(dbname, tablename));
+    if (tree->open()) {
+        BPTree* ptr = tree.get();
+        pkIndexCache_[key] = std::move(tree);
+        return ptr;
+    }
+    return nullptr;
+}
+
+void StorageEngine::closeAllIndexes() {
+    pkIndexCache_.clear();
 }
 
 bool StorageEngine::databaseExists(const std::string& dbname) const {
@@ -301,6 +248,15 @@ OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema
         std::ofstream out(tableListPath(dbname), std::ios::binary | std::ios::app);
         writeFixedString(out, tbl.tablename, MAX_TABLE_NAME_LEN);
     }
+    // Create B+ tree index if table has primary key
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isPrimaryKey) {
+            BPTree idx(indexPath(dbname, tbl.tablename));
+            idx.open();
+            idx.close();
+            break;
+        }
+    }
     return OpResult::Success;
 }
 
@@ -318,6 +274,11 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
 
     std::filesystem::remove(schemaPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::remove(indexPath(dbname, tablename));
+
+    // Remove from cache
+    std::string key = dbname + "/" + tablename;
+    pkIndexCache_.erase(key);
 
     auto names = getTableNames(dbname);
     {
@@ -475,44 +436,15 @@ OpResult StorageEngine::insert(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
 
-    // Check primary key uniqueness
+    // Check primary key uniqueness using B+ tree index
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].isPrimaryKey) {
             auto it = values.find(tbl.cols[i].dataName);
             if (it != values.end() && !it->second.empty()) {
-                std::ifstream checkIn(dataPath(dbname, tablename), std::ios::binary);
-                if (checkIn) {
-                    checkIn.seekg(0, std::ios::end);
-                    auto fs = static_cast<size_t>(checkIn.tellg());
-                    checkIn.seekg(0, std::ios::beg);
-                    size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
-                    for (size_t r = 0; r < rc; ++r) {
-                        size_t off = 0;
-                        for (size_t j = 0; j < tbl.len; ++j) {
-                            if (j == i) {
-                                if (tbl.cols[j].dataType == "char") {
-                                    std::string buf(tbl.cols[j].dsize, '\0');
-                                    checkIn.read(buf.data(), static_cast<std::streamsize>(tbl.cols[j].dsize));
-                                    auto nul = buf.find('\0');
-                                    if (nul != std::string::npos) buf.resize(nul);
-                                    if (buf == it->second) return OpResult::DuplicateKey;
-                                } else if (tbl.cols[j].dataType == "date") {
-                                    Date d;
-                                    checkIn.read(reinterpret_cast<char*>(&d), DATE_SIZE);
-                                    Date v(it->second.c_str());
-                                    if (d == v) return OpResult::DuplicateKey;
-                                } else {
-                                    int64_t val = 0;
-                                    checkIn.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[j].dsize));
-                                    int64_t cmp = parseInt(it->second);
-                                    if (val == cmp) return OpResult::DuplicateKey;
-                                }
-                            } else {
-                                checkIn.seekg(static_cast<std::streamsize>(tbl.cols[j].dsize), std::ios::cur);
-                            }
-                            off += tbl.cols[j].dsize;
-                        }
-                    }
+                BPTree* idx = getPKIndex(dbname, tablename);
+                if (idx) {
+                    int64_t dummy;
+                    if (idx->search(it->second, dummy)) return OpResult::DuplicateKey;
                 }
             }
             break;
@@ -558,13 +490,19 @@ OpResult StorageEngine::insert(const std::string& dbname,
         std::ofstream out(dataPath(dbname, tablename), std::ios::binary | std::ios::app);
         out.write(rowBuffer.data(), static_cast<std::streamsize>(rowSize));
     }
-    // Update PK index
+    // Update B+ tree PK index
     {
         std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
         in.seekg(0, std::ios::end);
         auto fs = static_cast<size_t>(in.tellg());
         int64_t rowIdx = (rowSize == 0) ? 0 : static_cast<int64_t>(fs / rowSize) - 1;
-        if (rowIdx >= 0) updatePKIndexOnInsert(dbname, tablename, rowIdx, rowBuffer);
+        if (rowIdx >= 0) {
+            BPTree* idx = getPKIndex(dbname, tablename);
+            if (idx) {
+                std::string pkVal = extractPKValue(rowBuffer, tbl);
+                if (!pkVal.empty()) idx->insert(pkVal, rowIdx);
+            }
+        }
     }
     return OpResult::Success;
 }
@@ -595,10 +533,22 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
 
-    // Try PK index for = conditions
+    // Try B+ tree PK index for = conditions
     for (const auto& c : conds) {
         if (c.op == "=") {
-            ids = lookupPKIndex(dbname, tablename, tbl, c.colName, c.value);
+            bool hasPK = false;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].isPrimaryKey && tbl.cols[i].dataName == c.colName) {
+                    hasPK = true; break;
+                }
+            }
+            if (hasPK) {
+                BPTree* idx = getPKIndex(dbname, tablename);
+                if (idx) {
+                    int64_t val = -1;
+                    if (idx->search(c.value, val)) ids.insert(val);
+                }
+            }
             if (!ids.empty()) {
                 // Verify remaining conditions by file scan on candidate rows
                 if (conds.size() > 1) {
@@ -763,7 +713,30 @@ OpResult StorageEngine::remove(const std::string& dbname,
 
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::rename(tempPath, dataPath(dbname, tablename));
-    rebuildPKIndex(dbname, tablename);
+    // Rebuild B+ tree PK index
+    std::filesystem::remove(indexPath(dbname, tablename));
+    BPTree* idx = getPKIndex(dbname, tablename);
+    if (idx) {
+        size_t pkIdx = tbl.len;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+        }
+        if (pkIdx < tbl.len) {
+            std::ifstream in2(dataPath(dbname, tablename), std::ios::binary);
+            if (in2) {
+                in2.seekg(0, std::ios::end);
+                auto fs = static_cast<size_t>(in2.tellg());
+                in2.seekg(0, std::ios::beg);
+                size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
+                for (size_t r = 0; r < rc; ++r) {
+                    std::string row(rowSize, '\0');
+                    in2.read(row.data(), static_cast<std::streamsize>(rowSize));
+                    std::string pkVal = extractPKValue(row, tbl);
+                    if (!pkVal.empty()) idx->insert(pkVal, static_cast<int64_t>(r));
+                }
+            }
+        }
+    }
     return OpResult::Success;
 }
 
@@ -849,7 +822,38 @@ OpResult StorageEngine::update(const std::string& dbname,
 
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::rename(tempPath, dataPath(dbname, tablename));
-    rebuildPKIndex(dbname, tablename);
+    // Rebuild B+ tree PK index if PK column was updated
+    bool pkUpdated = false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isPrimaryKey && colUpdates.find(i) != colUpdates.end()) {
+            pkUpdated = true; break;
+        }
+    }
+    if (pkUpdated) {
+        std::filesystem::remove(indexPath(dbname, tablename));
+        BPTree* idx = getPKIndex(dbname, tablename);
+        if (idx) {
+            size_t pkIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+            }
+            if (pkIdx < tbl.len) {
+                std::ifstream in2(dataPath(dbname, tablename), std::ios::binary);
+                if (in2) {
+                    in2.seekg(0, std::ios::end);
+                    auto fs = static_cast<size_t>(in2.tellg());
+                    in2.seekg(0, std::ios::beg);
+                    size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
+                    for (size_t r = 0; r < rc; ++r) {
+                        std::string row(rowSize, '\0');
+                        in2.read(row.data(), static_cast<std::streamsize>(rowSize));
+                        std::string pkVal = extractPKValue(row, tbl);
+                        if (!pkVal.empty()) idx->insert(pkVal, static_cast<int64_t>(r));
+                    }
+                }
+            }
+        }
+    }
     return OpResult::Success;
 }
 
@@ -1356,10 +1360,8 @@ OpResult StorageEngine::rollbackTransaction() {
     std::filesystem::path db = dbPath(txnDB_);
     std::filesystem::remove_all(db);
     std::filesystem::rename(backup, db);
-    // Rebuild PK indexes for all tables
-    for (const auto& tname : getTableNames(txnDB_)) {
-        rebuildPKIndex(txnDB_, tname);
-    }
+    // Clear index cache after rollback
+    pkIndexCache_.clear();
     inTransaction_ = false;
     txnDB_.clear();
     return OpResult::Success;
