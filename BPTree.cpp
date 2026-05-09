@@ -84,26 +84,26 @@ void BPTree::deserializeNode(const char* buf, Node& node, uint16_t order) {
 // ========================================================================
 // File I/O
 // ========================================================================
-BPTree::BPTree(const std::filesystem::path& indexFile) : filePath_(indexFile) {}
+BPTree::BPTree(const std::filesystem::path& indexFile)
+    : filePath_(indexFile), bp_(std::make_unique<BufferPool>(indexFile.string(), 16)) {}
 
 BPTree::~BPTree() {
     close();
 }
 
 bool BPTree::open() {
-    if (fd_ >= 0) return true;
+    if (bp_ && bp_->isOpen()) return true;
+    if (!bp_) bp_ = std::make_unique<BufferPool>(filePath_.string(), 16);
+
+    // Check existence BEFORE opening (O_CREAT would create the file)
     bool exists = std::filesystem::exists(filePath_);
-    fd_ = ::open(filePath_.c_str(), O_RDWR | O_CREAT, 0644);
-    if (fd_ < 0) return false;
+    if (!bp_->open()) return false;
 
     if (exists) {
         readHeader();
     } else {
         header_.rootPage = 0;
         header_.nextFreePage = 1;
-        // Calculate order based on page size
-        // Leaf: 3 + order*BP_KEY_LEN + order*8 + 4 <= BP_PAGE_SIZE
-        // Internal: 3 + order*BP_KEY_LEN + (order+1)*4 <= BP_PAGE_SIZE
         size_t maxLeaf = (BP_PAGE_SIZE - 7) / (BP_KEY_LEN + 8);
         size_t maxInternal = (BP_PAGE_SIZE - 7 - 4) / (BP_KEY_LEN + 4);
         header_.order = static_cast<uint16_t>(std::min(size_t(100), std::min(maxLeaf, maxInternal)));
@@ -114,52 +114,46 @@ bool BPTree::open() {
 }
 
 void BPTree::close() {
-    if (fd_ >= 0) {
-        ::close(fd_);
-        fd_ = -1;
+    if (bp_) {
+        bp_->close();
     }
 }
 
 void BPTree::writeHeader() {
-    char buf[BP_PAGE_SIZE] = {};
+    char* buf = bp_->fetchPage(0);
     std::memcpy(buf, &header_, sizeof(FileHeader));
-    ::lseek(fd_, 0, SEEK_SET);
-    ::write(fd_, buf, BP_PAGE_SIZE);
+    bp_->markDirty(0);
+    bp_->unpinPage(0);
 }
 
 void BPTree::readHeader() {
-    char buf[BP_PAGE_SIZE] = {};
-    ::lseek(fd_, 0, SEEK_SET);
-    ssize_t n = ::read(fd_, buf, BP_PAGE_SIZE);
-    if (n >= static_cast<ssize_t>(sizeof(FileHeader))) {
-        std::memcpy(&header_, buf, sizeof(FileHeader));
-    }
+    char* buf = bp_->fetchPage(0);
+    std::memcpy(&header_, buf, sizeof(FileHeader));
+    bp_->unpinPage(0);
 }
 
 uint32_t BPTree::allocPage() {
     uint32_t page = header_.nextFreePage++;
     writeHeader();
-    char buf[BP_PAGE_SIZE] = {};
-    ::lseek(fd_, static_cast<off_t>(page) * BP_PAGE_SIZE, SEEK_SET);
-    ::write(fd_, buf, BP_PAGE_SIZE);
+    char* buf = bp_->fetchPage(page);
+    std::memset(buf, 0, BP_PAGE_SIZE);
+    bp_->markDirty(page);
+    bp_->unpinPage(page);
     return page;
 }
 
 void BPTree::writeNode(uint32_t pageNum, const Node& node) {
-    char buf[BP_PAGE_SIZE];
+    char* buf = bp_->fetchPage(pageNum);
     serializeNode(buf, node, header_.order);
-    ::lseek(fd_, static_cast<off_t>(pageNum) * BP_PAGE_SIZE, SEEK_SET);
-    ::write(fd_, buf, BP_PAGE_SIZE);
+    bp_->markDirty(pageNum);
+    bp_->unpinPage(pageNum);
 }
 
 BPTree::Node BPTree::readNode(uint32_t pageNum) const {
     Node node;
-    char buf[BP_PAGE_SIZE];
-    ::lseek(fd_, static_cast<off_t>(pageNum) * BP_PAGE_SIZE, SEEK_SET);
-    ssize_t n = ::read(fd_, buf, BP_PAGE_SIZE);
-    if (n == BP_PAGE_SIZE) {
-        deserializeNode(buf, node, header_.order);
-    }
+    char* buf = const_cast<BufferPool*>(bp_.get())->fetchPage(pageNum);
+    deserializeNode(buf, node, header_.order);
+    bp_->unpinPage(pageNum);
     return node;
 }
 
@@ -167,13 +161,12 @@ BPTree::Node BPTree::readNode(uint32_t pageNum) const {
 // Search
 // ========================================================================
 bool BPTree::search(const std::string& key, int64_t& value) const {
-    if (fd_ < 0 || header_.rootPage == 0) return false;
+    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
     return searchNode(header_.rootPage, key, value);
 }
 
 bool BPTree::searchNode(uint32_t pageNum, const std::string& key, int64_t& value) const {
     Node node = readNode(pageNum);
-    std::string k = normalizeKey(key);
     if (node.isLeaf) {
         for (size_t i = 0; i < node.numKeys; ++i) {
             if (node.keys[i] == key) {
@@ -196,7 +189,7 @@ bool BPTree::searchNode(uint32_t pageNum, const std::string& key, int64_t& value
 // Insert
 // ========================================================================
 bool BPTree::insert(const std::string& key, int64_t value) {
-    if (fd_ < 0) return false;
+    if (!bp_ || !bp_->isOpen()) return false;
     if (header_.rootPage == 0) {
         // Create root leaf
         uint32_t root = allocPage();
@@ -229,6 +222,63 @@ bool BPTree::insert(const std::string& key, int64_t value) {
         writeHeader();
         splitChild(newRoot, 0, root.numKeys > 0 ? root.children[0] : 0);
         // Re-read root after split
+    }
+    return insertNonFull(header_.rootPage, key, value);
+}
+
+// ========================================================================
+// Multi-value search (for secondary indexes with duplicate keys)
+// ========================================================================
+std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
+    std::vector<int64_t> results;
+    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return results;
+    Node node = readNode(header_.rootPage);
+    std::string k = normalizeKey(key);
+    while (!node.isLeaf) {
+        size_t i = 0;
+        while (i < node.numKeys && key >= node.keys[i]) ++i;
+        if (i >= node.children.size()) return results;
+        node = readNode(node.children[i]);
+    }
+    // Scan leaf for matching keys (including duplicates)
+    while (true) {
+        for (size_t i = 0; i < node.numKeys; ++i) {
+            if (node.keys[i] == key) {
+                results.push_back(node.values[i]);
+            }
+        }
+        if (node.nextLeaf == 0) break;
+        node = readNode(node.nextLeaf);
+    }
+    return results;
+}
+
+bool BPTree::insertMulti(const std::string& key, int64_t value) {
+    if (!bp_ || !bp_->isOpen()) return false;
+    if (header_.rootPage == 0) {
+        uint32_t root = allocPage();
+        Node node;
+        node.isLeaf = 1;
+        node.numKeys = 1;
+        node.keys.push_back(key);
+        node.values.push_back(value);
+        node.nextLeaf = 0;
+        writeNode(root, node);
+        header_.rootPage = root;
+        writeHeader();
+        return true;
+    }
+    Node root = readNode(header_.rootPage);
+    if (root.numKeys == header_.order) {
+        uint32_t newRoot = allocPage();
+        Node nr;
+        nr.isLeaf = 0;
+        nr.numKeys = 0;
+        nr.children.push_back(header_.rootPage);
+        writeNode(newRoot, nr);
+        header_.rootPage = newRoot;
+        writeHeader();
+        splitChild(newRoot, 0, root.numKeys > 0 ? root.children[0] : 0);
     }
     return insertNonFull(header_.rootPage, key, value);
 }
@@ -308,7 +358,7 @@ void BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
 // Remove (simplified: no merging, just remove key from leaf)
 // ========================================================================
 bool BPTree::remove(const std::string& key) {
-    if (fd_ < 0 || header_.rootPage == 0) return false;
+    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
     return removeFromNode(header_.rootPage, key);
 }
 
@@ -344,7 +394,7 @@ bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key) {
 // ========================================================================
 std::vector<int64_t> BPTree::rangeScan(const std::string& startKey, const std::string& endKey) const {
     std::vector<int64_t> result;
-    if (fd_ < 0 || header_.rootPage == 0) return result;
+    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return result;
     collectRange(header_.rootPage, startKey, endKey, result);
     return result;
 }

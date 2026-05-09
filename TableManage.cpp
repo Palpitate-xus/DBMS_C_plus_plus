@@ -13,6 +13,39 @@
 
 namespace dbms {
 
+static std::string trim(const std::string& s) {
+    size_t a = 0;
+    while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    size_t b = s.size();
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+// SQL LIKE pattern matching (% = any sequence, _ = single char), case-insensitive
+static bool likeMatch(const std::string& text, const std::string& pattern) {
+    std::string t = text;
+    std::string p = pattern;
+    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char& c : p) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    size_t i = 0, j = 0;
+    size_t starIdx = std::string::npos, matchIdx = 0;
+    while (i < t.size()) {
+        if (j < p.size() && (p[j] == t[i] || p[j] == '_')) {
+            ++i; ++j;
+        } else if (j < p.size() && p[j] == '%') {
+            starIdx = j++;
+            matchIdx = i;
+        } else if (starIdx != std::string::npos) {
+            j = starIdx + 1;
+            i = ++matchIdx;
+        } else {
+            return false;
+        }
+    }
+    while (j < p.size() && p[j] == '%') ++j;
+    return j == p.size();
+}
+
 // ========================================================================
 // Helper: fixed-length string IO (for backward-compatible binary format)
 // ========================================================================
@@ -116,7 +149,9 @@ Column makeDateColumn(const std::string& name, bool isNull, bool isPK) {
 // ========================================================================
 // StorageEngine
 // ========================================================================
-StorageEngine::StorageEngine() = default;
+StorageEngine::StorageEngine() {
+    recoverAllDatabases();
+}
 
 // ========================================================================
 // Primary Key Index
@@ -137,6 +172,34 @@ std::filesystem::path StorageEngine::dataPath(const std::string& dbname,
 
 std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) const {
     return dbPath(dbname) / "tlist.lst";
+}
+
+std::filesystem::path StorageEngine::walPath(const std::string& dbname) const {
+    return dbPath(dbname) / "wal.log";
+}
+
+// ========================================================================
+// WAL helpers
+// ========================================================================
+
+static void walAppend(const std::filesystem::path& walFile, const std::string& line) {
+    std::ofstream ofs(walFile, std::ios::out | std::ios::app);
+    if (ofs) ofs << line << '\n';
+}
+
+static std::vector<std::string> walReadAll(const std::filesystem::path& walFile) {
+    std::vector<std::string> lines;
+    std::ifstream ifs(walFile);
+    if (!ifs) return lines;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty()) lines.push_back(line);
+    }
+    return lines;
+}
+
+static void walClear(const std::filesystem::path& walFile) {
+    std::filesystem::remove(walFile);
 }
 
 std::filesystem::path StorageEngine::indexPath(const std::string& dbname,
@@ -174,7 +237,9 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const Ta
 BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
     std::string key = dbname + "/" + tablename;
     auto it = pkIndexCache_.find(key);
-    if (it != pkIndexCache_.end()) return it->second.get();
+    if (it != pkIndexCache_.end()) {
+        return it->second.get();
+    }
 
     auto tree = std::make_unique<BPTree>(indexPath(dbname, tablename));
     if (tree->open()) {
@@ -187,6 +252,135 @@ BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& 
 
 void StorageEngine::closeAllIndexes() {
     pkIndexCache_.clear();
+    secondaryIndexCache_.clear();
+}
+
+// ========================================================================
+// Secondary Index
+// ========================================================================
+std::filesystem::path StorageEngine::secondaryIndexPath(const std::string& dbname,
+                                                         const std::string& tablename,
+                                                         const std::string& colname) const {
+    return dbPath(dbname) / (tablename + "_" + colname + ".idx");
+}
+
+std::filesystem::path StorageEngine::secondaryIndexMetaPath(const std::string& dbname,
+                                                             const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".secidx");
+}
+
+std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbname,
+                                                           const std::string& tablename) const {
+    std::vector<std::string> cols;
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::ifstream in(meta);
+    if (!in) return cols;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty()) cols.push_back(line);
+    }
+    return cols;
+}
+
+BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
+                                          const std::string& tablename,
+                                          const std::string& colname) const {
+    std::string key = dbname + "/" + tablename + "/" + colname;
+    auto it = secondaryIndexCache_.find(key);
+    if (it != secondaryIndexCache_.end()) return it->second.get();
+
+    auto tree = std::make_unique<BPTree>(secondaryIndexPath(dbname, tablename, colname));
+    if (tree->open()) {
+        BPTree* ptr = tree.get();
+        secondaryIndexCache_[key] = std::move(tree);
+        return ptr;
+    }
+    return nullptr;
+}
+
+std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
+                                               const TableSchema& tbl, size_t colIdx) {
+    if (colIdx >= tbl.len) return "";
+    size_t offset = 0;
+    for (size_t i = 0; i < colIdx; ++i) offset += tbl.cols[i].dsize;
+    const Column& col = tbl.cols[colIdx];
+    if (col.dataType == "char") {
+        std::string val(col.dsize, '\0');
+        std::memcpy(val.data(), rowBuffer.data() + offset, col.dsize);
+        auto nul = val.find('\0');
+        if (nul != std::string::npos) val.resize(nul);
+        return val;
+    } else if (col.dataType == "date") {
+        Date d;
+        std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
+        return (d.year == 0) ? "" : str(d);
+    } else {
+        int64_t val = 0;
+        std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
+        return (val == INF) ? "" : transstr(val);
+    }
+}
+
+OpResult StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
+                                     const std::string& colname) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+
+    // Already indexed?
+    auto existing = getIndexedColumns(dbname, tablename);
+    for (const auto& c : existing) {
+        if (c == colname) return OpResult::Success;
+    }
+
+    // Build index from existing data
+    BPTree* idx = getSecondaryIndex(dbname, tablename, colname);
+    if (!idx) return OpResult::InvalidValue;
+
+    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+    if (in) {
+        in.seekg(0, std::ios::end);
+        auto fs = static_cast<size_t>(in.tellg());
+        in.seekg(0, std::ios::beg);
+        size_t rowSize = tbl.rowSize();
+        size_t rowCount = (rowSize == 0) ? 0 : fs / rowSize;
+        for (size_t r = 0; r < rowCount; ++r) {
+            std::string row(rowSize, '\0');
+            in.read(row.data(), static_cast<std::streamsize>(rowSize));
+            std::string val = extractColumnValue(row, tbl, colIdx);
+            if (!val.empty()) idx->insertMulti(val, static_cast<int64_t>(r));
+        }
+    }
+
+    // Record in metadata
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::ofstream out(meta, std::ios::out | std::ios::app);
+    out << colname << '\n';
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropIndex(const std::string& dbname, const std::string& tablename,
+                                   const std::string& colname) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
+
+    // Update metadata
+    auto cols = getIndexedColumns(dbname, tablename);
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    {
+        std::ofstream out(meta, std::ios::out);
+        for (const auto& c : cols) {
+            if (c != colname) out << c << '\n';
+        }
+    }
+    // Remove from cache
+    std::string key = dbname + "/" + tablename + "/" + colname;
+    secondaryIndexCache_.erase(key);
+    return OpResult::Success;
 }
 
 bool StorageEngine::databaseExists(const std::string& dbname) const {
@@ -467,6 +661,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
@@ -479,7 +674,10 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 BPTree* idx = getPKIndex(dbname, tablename);
                 if (idx) {
                     int64_t dummy;
-                    if (idx->search(it->second, dummy)) return OpResult::DuplicateKey;
+                    if (idx->search(it->second, dummy)) {
+                        lockManager_.unlock(tablename);
+                        return OpResult::DuplicateKey;
+                    }
                 }
             }
             break;
@@ -496,16 +694,21 @@ OpResult StorageEngine::insert(const std::string& dbname,
         std::string val = (it != values.end()) ? it->second : "";
 
         if (!col.isNull && val.empty()) {
+            lockManager_.unlock(tablename);
             return OpResult::NullNotAllowed;
         }
 
         if (col.dataType == "char") {
             if (!stringToBuffer(val, &rowBuffer[offset], col.dsize)) {
+                lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;
             }
         } else if (col.dataType == "date") {
             Date d(val.c_str());
-            if (d.year == 0) return OpResult::InvalidValue;
+            if (d.year == 0) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
             std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
         } else {
             // integer types: tiny, int, long
@@ -514,7 +717,10 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 std::memcpy(&rowBuffer[offset], &nullVal, col.dsize);
             } else {
                 int64_t num = parseInt(val);
-                if (num == INF) return OpResult::InvalidValue;
+                if (num == INF) {
+                    lockManager_.unlock(tablename);
+                    return OpResult::InvalidValue;
+                }
                 std::memcpy(&rowBuffer[offset], &num, col.dsize);
             }
         }
@@ -526,12 +732,16 @@ OpResult StorageEngine::insert(const std::string& dbname,
         const ForeignKey& fk = tbl.fks[fi];
         auto it = values.find(fk.colName);
         if (it == values.end() || it->second.empty()) continue;
-        if (!tableExists(dbname, fk.refTable)) return OpResult::TableNotExist;
+        if (!tableExists(dbname, fk.refTable)) {
+            lockManager_.unlock(tablename);
+            return OpResult::TableNotExist;
+        }
         TableSchema refTbl = getTableSchema(dbname, fk.refTable);
         BPTree* refIdx = getPKIndex(dbname, fk.refTable);
         if (refIdx) {
             int64_t dummy;
             if (!refIdx->search(it->second, dummy)) {
+                lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;  // referenced key not found
             }
         }
@@ -542,11 +752,12 @@ OpResult StorageEngine::insert(const std::string& dbname,
         out.write(rowBuffer.data(), static_cast<std::streamsize>(rowSize));
     }
     // Update B+ tree PK index
+    int64_t rowIdx = -1;
     {
         std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
         in.seekg(0, std::ios::end);
         auto fs = static_cast<size_t>(in.tellg());
-        int64_t rowIdx = (rowSize == 0) ? 0 : static_cast<int64_t>(fs / rowSize) - 1;
+        rowIdx = (rowSize == 0) ? 0 : static_cast<int64_t>(fs / rowSize) - 1;
         if (rowIdx >= 0) {
             BPTree* idx = getPKIndex(dbname, tablename);
             if (idx) {
@@ -555,6 +766,23 @@ OpResult StorageEngine::insert(const std::string& dbname,
             }
         }
     }
+    // Update secondary indexes
+    {
+        auto indexedCols = getIndexedColumns(dbname, tablename);
+        for (const auto& colname : indexedCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
+            if (secIdx) {
+                std::string val = extractColumnValue(rowBuffer, tbl, colIdx);
+                if (!val.empty()) secIdx->insert(val, rowIdx);
+            }
+        }
+    }
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
@@ -563,15 +791,29 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     std::vector<Condition> conds;
     for (const auto& s : cstr) {
         if (s.empty()) continue;
+        Condition c;
+        // Handle LIKE operator
+        if (s.size() >= 4 && s.substr(0, 4) == "like") {
+            c.op = "like";
+            size_t sp = s.find(' ', 4);
+            if (sp == std::string::npos) continue;
+            c.colName = s.substr(4, sp - 4);
+            c.value = s.substr(sp + 1);
+            if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
+                c.value = c.value.substr(1, c.value.size() - 2);
+            conds.push_back(c);
+            continue;
+        }
         size_t opEnd = 0;
         while (opEnd < s.size() && (s[opEnd] == '<' || s[opEnd] == '>' || s[opEnd] == '=' || s[opEnd] == '!')) ++opEnd;
         if (opEnd == 0) continue;
-        Condition c;
         c.op = s.substr(0, opEnd);
         size_t sp = s.find(' ', opEnd);
         if (sp == std::string::npos) continue;
         c.colName = s.substr(opEnd, sp - opEnd);
         c.value = s.substr(sp + 1);
+        if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
+            c.value = c.value.substr(1, c.value.size() - 2);
         conds.push_back(c);
     }
     return conds;
@@ -598,6 +840,13 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 if (idx) {
                     int64_t val = -1;
                     if (idx->search(c.value, val)) ids.insert(val);
+                }
+            } else {
+                // Try secondary index
+                BPTree* secIdx = getSecondaryIndex(dbname, tablename, c.colName);
+                if (secIdx) {
+                    auto vals = secIdx->searchMulti(c.value);
+                    for (int64_t v : vals) ids.insert(v);
                 }
             }
             if (!ids.empty()) {
@@ -627,6 +876,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                 if (cond.op == "<=" && (buf >  cond.value))   match = false;
                                 if (cond.op == ">=" && (buf <  cond.value))   match = false;
                                 if (cond.op == "!=" && buf == cond.value)    match = false;
+                                if (cond.op == "like" && !likeMatch(buf, cond.value)) match = false;
                             } else if (col.dataType == "date") {
                                 Date d;
                                 in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
@@ -698,6 +948,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     if (c.op == "<=" && (buf >  c.value))   match = false;
                     if (c.op == ">=" && (buf <  c.value))   match = false;
                     if (c.op == "!=" && buf == c.value)    match = false;
+                    if (c.op == "like" && !likeMatch(buf, c.value)) match = false;
                 } else if (col.dataType == "date") {
                     Date d;
                     in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
@@ -733,12 +984,16 @@ OpResult StorageEngine::remove(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::vector<std::string>& conditions) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
 
     std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) return OpResult::Success;  // empty file
+    if (!in) {
+        lockManager_.unlock(tablename);
+        return OpResult::Success;  // empty file
+    }
 
     in.seekg(0, std::ios::end);
     auto fileSize = static_cast<size_t>(in.tellg());
@@ -748,7 +1003,10 @@ OpResult StorageEngine::remove(const std::string& dbname,
     auto conds = parseConditions(conditions);
     std::set<int64_t> toDelete = filterRows(dbname, tablename, conds);
 
-    if (toDelete.empty()) return OpResult::Success;
+    if (toDelete.empty()) {
+        lockManager_.unlock(tablename);
+        return OpResult::Success;
+    }
 
     // Check foreign key RESTRICT: ensure no other table references rows being deleted
     {
@@ -832,6 +1090,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
                             fval = transstr(val);
                         }
                         if (deletedPKs.find(fval) != deletedPKs.end()) {
+                            lockManager_.unlock(tablename);
                             return OpResult::InvalidValue;  // FK reference exists, cannot delete
                         }
                         for (size_t c = fkColIdx + 1; c < otherTbl.len; ++c)
@@ -881,6 +1140,33 @@ OpResult StorageEngine::remove(const std::string& dbname,
             }
         }
     }
+    // Rebuild secondary indexes
+    {
+        auto indexedCols = getIndexedColumns(dbname, tablename);
+        for (const auto& colname : indexedCols) {
+            std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
+            if (!secIdx) continue;
+            std::ifstream in2(dataPath(dbname, tablename), std::ios::binary);
+            if (!in2) continue;
+            in2.seekg(0, std::ios::end);
+            auto fs = static_cast<size_t>(in2.tellg());
+            in2.seekg(0, std::ios::beg);
+            size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
+            for (size_t r = 0; r < rc; ++r) {
+                std::string row(rowSize, '\0');
+                in2.read(row.data(), static_cast<std::streamsize>(rowSize));
+                std::string val = extractColumnValue(row, tbl, colIdx);
+                if (!val.empty()) secIdx->insert(val, static_cast<int64_t>(r));
+            }
+        }
+    }
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
@@ -919,8 +1205,13 @@ OpResult StorageEngine::update(const std::string& dbname,
         if (!found) return OpResult::InvalidValue;
     }
 
+    lockManager_.lockExclusive(tablename);
+
     std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) return OpResult::Success;
+    if (!in) {
+        lockManager_.unlock(tablename);
+        return OpResult::Success;
+    }
 
     in.seekg(0, std::ios::end);
     auto fileSize = static_cast<size_t>(in.tellg());
@@ -932,7 +1223,10 @@ OpResult StorageEngine::update(const std::string& dbname,
         ? [&](){ std::set<int64_t> s; for (size_t i = 0; i < rowCount; ++i) s.insert(static_cast<int64_t>(i)); return s; }()
         : filterRows(dbname, tablename, conds);
 
-    if (matchIds.empty()) return OpResult::Success;
+    if (matchIds.empty()) {
+        lockManager_.unlock(tablename);
+        return OpResult::Success;
+    }
 
     std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
     {
@@ -998,6 +1292,34 @@ OpResult StorageEngine::update(const std::string& dbname,
             }
         }
     }
+    // Rebuild secondary indexes if indexed columns were updated
+    {
+        auto indexedCols = getIndexedColumns(dbname, tablename);
+        for (const auto& colname : indexedCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            if (colUpdates.find(colIdx) == colUpdates.end()) continue;
+            std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
+            BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
+            if (!secIdx) continue;
+            std::ifstream in2(dataPath(dbname, tablename), std::ios::binary);
+            if (!in2) continue;
+            in2.seekg(0, std::ios::end);
+            auto fs = static_cast<size_t>(in2.tellg());
+            in2.seekg(0, std::ios::beg);
+            size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
+            for (size_t r = 0; r < rc; ++r) {
+                std::string row(rowSize, '\0');
+                in2.read(row.data(), static_cast<std::streamsize>(rowSize));
+                std::string val = extractColumnValue(row, tbl, colIdx);
+                if (!val.empty()) secIdx->insert(val, static_cast<int64_t>(r));
+            }
+        }
+    }
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
@@ -1009,12 +1331,13 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                bool orderByAsc) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
+    lockManager_.lockShared(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
 
     std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) return result;
+    if (!in) { lockManager_.unlock(tablename); return result; }
 
     in.seekg(0, std::ios::end);
     auto fileSize = static_cast<size_t>(in.tellg());
@@ -1096,6 +1419,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         }
         result.push_back(rowStr);
     }
+    lockManager_.unlock(tablename);
     return result;
 }
 
@@ -1105,12 +1429,16 @@ std::vector<std::string> StorageEngine::aggregate(
     const std::vector<std::pair<std::string, std::string>>& items) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
+    lockManager_.lockShared(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
 
     std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) return result;
+    if (!in) {
+        lockManager_.unlock(tablename);
+        return result;
+    }
 
     in.seekg(0, std::ios::end);
     auto fileSize = static_cast<size_t>(in.tellg());
@@ -1233,6 +1561,241 @@ std::vector<std::string> StorageEngine::aggregate(
         }
     }
     if (!rowResult.empty()) result.push_back(rowResult);
+    lockManager_.unlock(tablename);
+    return result;
+}
+
+// ========================================================================
+// Group aggregate: GROUP BY with HAVING
+// ========================================================================
+
+std::vector<std::string> StorageEngine::groupAggregate(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    const std::vector<std::pair<std::string, std::string>>& items,
+    const std::string& groupByCol,
+    const std::vector<std::string>& havingConds) {
+    std::vector<std::string> result;
+    if (!tableExists(dbname, tablename)) return result;
+    lockManager_.lockShared(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t rowSize = tbl.rowSize();
+
+    // Find group-by column index
+    size_t groupIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == groupByCol) { groupIdx = i; break; }
+    }
+    if (groupIdx >= tbl.len) {
+        lockManager_.unlock(tablename);
+        return result;
+    }
+
+    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
+    if (!in) {
+        lockManager_.unlock(tablename);
+        return result;
+    }
+
+    in.seekg(0, std::ios::end);
+    auto fileSize = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
+
+    auto conds = parseConditions(conditions);
+    std::vector<int64_t> matchIds;
+    if (conds.empty()) {
+        for (size_t i = 0; i < rowCount; ++i) matchIds.push_back(static_cast<int64_t>(i));
+    } else {
+        auto ids = filterRows(dbname, tablename, conds);
+        matchIds.assign(ids.begin(), ids.end());
+    }
+
+    // Read group key for each matching row
+    auto readGroupKey = [&](int64_t rowIdx) -> std::string {
+        size_t offset = 0;
+        for (size_t c = 0; c < groupIdx; ++c) offset += tbl.cols[c].dsize;
+        in.seekg(static_cast<std::streamoff>(rowIdx * rowSize + offset), std::ios::beg);
+        const Column& col = tbl.cols[groupIdx];
+        if (col.dataType == "char") {
+            std::string buf(col.dsize, '\0');
+            in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
+            auto nul = buf.find('\0');
+            if (nul != std::string::npos) buf.resize(nul);
+            return buf;
+        } else if (col.dataType == "date") {
+            Date d;
+            in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+            return (d.year == 0) ? "" : str(d);
+        } else {
+            int64_t val = 0;
+            in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
+            return (val == INF) ? "" : transstr(val);
+        }
+    };
+
+    // Group rows by group key
+    std::map<std::string, std::vector<int64_t>> groups;
+    for (int64_t rowIdx : matchIds) {
+        groups[readGroupKey(rowIdx)].push_back(rowIdx);
+    }
+
+    // Helper: compute aggregate for a group
+    auto computeAgg = [&](const std::vector<int64_t>& gids,
+                           const std::string& func, const std::string& colName) -> std::string {
+        size_t colIdx = tbl.len;
+        bool isInt = false, isDate = false, isChar = false;
+        if (func != "count" || colName != "*") {
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colName) {
+                    colIdx = i;
+                    isInt = (tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
+                    isDate = (tbl.cols[i].dataType == "date");
+                    isChar = (tbl.cols[i].dataType == "char");
+                    break;
+                }
+            }
+        }
+        int64_t count = 0, sum = 0;
+        bool hasMax = false, hasMin = false;
+        std::string maxStr, minStr;
+        int64_t maxInt = 0, minInt = 0;
+        Date maxDate, minDate;
+
+        auto readVal = [&](int64_t rowIdx, size_t cidx) -> void {
+            size_t offset = 0;
+            for (size_t c = 0; c < cidx; ++c) offset += tbl.cols[c].dsize;
+            in.seekg(static_cast<std::streamoff>(rowIdx * rowSize + offset), std::ios::beg);
+        };
+
+        for (int64_t rowIdx : gids) {
+            if (func == "count") {
+                if (colName == "*") { count++; continue; }
+                if (colIdx >= tbl.len) continue;
+                readVal(rowIdx, colIdx);
+                if (isInt) {
+                    int64_t val = 0;
+                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    if (val != INF) count++;
+                } else if (isDate) {
+                    Date d;
+                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    if (d.year != 0) count++;
+                } else {
+                    std::string buf(tbl.cols[colIdx].dsize, '\0');
+                    in.read(buf.data(), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    auto nul = buf.find('\0');
+                    if (nul != std::string::npos) buf.resize(nul);
+                    if (!buf.empty()) count++;
+                }
+            } else {
+                if (colIdx >= tbl.len) continue;
+                readVal(rowIdx, colIdx);
+                if (isInt) {
+                    int64_t val = 0;
+                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    if (val == INF) continue;
+                    if (func == "sum") sum += val;
+                    if (func == "avg") { sum += val; count++; }
+                    if (func == "max") { if (!hasMax || val > maxInt) { maxInt = val; hasMax = true; } }
+                    if (func == "min") { if (!hasMin || val < minInt) { minInt = val; hasMin = true; } }
+                } else if (isDate) {
+                    Date d;
+                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    if (d.year == 0) continue;
+                    if (func == "max") { if (!hasMax || d > maxDate) { maxDate = d; hasMax = true; } }
+                    if (func == "min") { if (!hasMin || d < minDate) { minDate = d; hasMin = true; } }
+                } else {
+                    std::string buf(tbl.cols[colIdx].dsize, '\0');
+                    in.read(buf.data(), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    auto nul = buf.find('\0');
+                    if (nul != std::string::npos) buf.resize(nul);
+                    if (buf.empty()) continue;
+                    if (func == "max") { if (!hasMax || buf > maxStr) { maxStr = buf; hasMax = true; } }
+                    if (func == "min") { if (!hasMin || buf < minStr) { minStr = buf; hasMin = true; } }
+                }
+            }
+        }
+        if (func == "count") return transstr(count);
+        if (func == "sum") return transstr(sum);
+        if (func == "avg") return (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count));
+        if (func == "max") {
+            if (!hasMax) return "NULL";
+            if (isInt) return transstr(maxInt);
+            if (isDate) return str(maxDate);
+            return maxStr;
+        }
+        if (func == "min") {
+            if (!hasMin) return "NULL";
+            if (isInt) return transstr(minInt);
+            if (isDate) return str(minDate);
+            return minStr;
+        }
+        return "";
+    };
+
+    // Parse HAVING conditions: support "aggFunc(col) op value"
+    struct HavingCond {
+        std::string func, colName, op, value;
+    };
+    std::vector<HavingCond> havings;
+    for (const auto& hc : havingConds) {
+        if (hc.empty()) continue;
+        // Format: "func(col) op value" or "op col value" (if already modified)
+        std::string s = hc;
+        // Try parse aggFunc(col) op value
+        size_t lp = s.find('(');
+        size_t rp = s.find(')');
+        if (lp != std::string::npos && rp != std::string::npos && rp > lp + 1) {
+            HavingCond h;
+            h.func = s.substr(0, lp);
+            h.colName = s.substr(lp + 1, rp - lp - 1);
+            std::string rest = trim(s.substr(rp + 1));
+            size_t sp = rest.find(' ');
+            if (sp != std::string::npos) {
+                h.op = rest.substr(0, sp);
+                h.value = trim(rest.substr(sp + 1));
+                havings.push_back(h);
+            }
+        }
+    }
+
+    // Evaluate HAVING condition for a group
+    auto evalHaving = [&](const HavingCond& h, const std::vector<int64_t>& gids) -> bool {
+        std::string aggVal = computeAgg(gids, h.func, h.colName);
+        if (h.op == "=") return aggVal == h.value;
+        if (h.op == "!=") return aggVal != h.value;
+        // Numeric comparison
+        double a = 0, v = 0;
+        try { a = std::stod(aggVal); } catch (...) {}
+        try { v = std::stod(h.value); } catch (...) {}
+        if (h.op == ">") return a > v;
+        if (h.op == "<") return a < v;
+        if (h.op == ">=") return a >= v;
+        if (h.op == "<=") return a <= v;
+        return true;
+    };
+
+    // Build result rows
+    for (const auto& kv : groups) {
+        const std::string& gkey = kv.first;
+        const auto& gids = kv.second;
+
+        // Apply HAVING
+        bool pass = true;
+        for (const auto& h : havings) {
+            if (!evalHaving(h, gids)) { pass = false; break; }
+        }
+        if (!pass) continue;
+
+        std::string row = gkey + ' ';
+        for (const auto& item : items) {
+            row += computeAgg(gids, item.first, item.second) + ' ';
+        }
+        result.push_back(row);
+    }
+    lockManager_.unlock(tablename);
     return result;
 }
 
@@ -1250,6 +1813,15 @@ std::vector<std::string> StorageEngine::join(
     const std::set<std::string>& selectCols) {
     std::vector<std::string> result;
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
+
+    // Lock both tables in alphabetical order to avoid deadlock
+    if (leftTable < rightTable) {
+        lockManager_.lockShared(leftTable);
+        lockManager_.lockShared(rightTable);
+    } else {
+        lockManager_.lockShared(rightTable);
+        lockManager_.lockShared(leftTable);
+    }
 
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
@@ -1450,11 +2022,72 @@ std::vector<std::string> StorageEngine::join(
             if (!rowStr.empty()) result.push_back(rowStr);
         }
     }
+    lockManager_.unlock(leftTable);
+    lockManager_.unlock(rightTable);
     return result;
 }
 
 // ========================================================================
-// Transaction support (database-level snapshot)
+// WAL crash recovery
+// ========================================================================
+
+void StorageEngine::recoverAllDatabases() {
+    if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) return;
+    for (const auto& entry : std::filesystem::directory_iterator(".")) {
+        if (!entry.is_directory()) continue;
+        std::string dbname = entry.path().filename().string();
+        // Skip non-database directories (simple heuristic: must have tlist.lst)
+        if (!std::filesystem::exists(tableListPath(dbname))) continue;
+
+        std::filesystem::path walFile = walPath(dbname);
+        if (!std::filesystem::exists(walFile)) continue;
+
+        auto lines = walReadAll(walFile);
+        if (lines.empty()) {
+            walClear(walFile);
+            continue;
+        }
+
+        bool hasCommit = false;
+        bool hasRollback = false;
+        for (const auto& l : lines) {
+            if (l == "COMMIT") hasCommit = true;
+            if (l == "ROLLBACK") hasRollback = true;
+        }
+
+        std::filesystem::path backup = dbPath(dbname);
+        backup += ".txn_backup";
+
+        if (hasCommit) {
+            // Transaction was committed: WAL is just cleanup
+            if (std::filesystem::exists(backup)) {
+                std::filesystem::remove_all(backup);
+            }
+            walClear(walFile);
+        } else if (hasRollback) {
+            // Transaction was rolled back: cleanup
+            if (std::filesystem::exists(backup)) {
+                std::filesystem::remove_all(backup);
+            }
+            walClear(walFile);
+        } else {
+            // Incomplete transaction: restore from backup
+            std::cerr << "[WAL RECOVERY] Incomplete transaction in " << dbname
+                      << ". Restoring from backup..." << std::endl;
+            if (std::filesystem::exists(backup)) {
+                std::filesystem::path db = dbPath(dbname);
+                std::filesystem::remove_all(db);
+                std::filesystem::rename(backup, db);
+            }
+            walClear(walFile);
+            // Clear stale index cache entries for this db
+            pkIndexCache_.clear();
+        }
+    }
+}
+
+// ========================================================================
+// Transaction support (database-level snapshot + WAL)
 // ========================================================================
 
 OpResult StorageEngine::beginTransaction(const std::string& dbname) {
@@ -1477,16 +2110,23 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
     }
     inTransaction_ = true;
     txnDB_ = dbname;
+    // Write WAL BEGIN marker
+    walClear(walPath(dbname));
+    walAppend(walPath(dbname), "BEGIN");
     return OpResult::Success;
 }
 
 OpResult StorageEngine::commitTransaction() {
     if (!inTransaction_) return OpResult::Success;
+    // Write WAL COMMIT marker before removing backup
+    walAppend(walPath(txnDB_), "COMMIT");
     std::filesystem::path backup = dbPath(txnDB_);
     backup += ".txn_backup";
     if (std::filesystem::exists(backup)) {
         std::filesystem::remove_all(backup);
     }
+    walClear(walPath(txnDB_));
+    lockManager_.unlockAll();
     inTransaction_ = false;
     txnDB_.clear();
     return OpResult::Success;
@@ -1494,9 +2134,12 @@ OpResult StorageEngine::commitTransaction() {
 
 OpResult StorageEngine::rollbackTransaction() {
     if (!inTransaction_) return OpResult::Success;
+    walAppend(walPath(txnDB_), "ROLLBACK");
     std::filesystem::path backup = dbPath(txnDB_);
     backup += ".txn_backup";
     if (!std::filesystem::exists(backup)) {
+        walClear(walPath(txnDB_));
+        lockManager_.unlockAll();
         inTransaction_ = false;
         txnDB_.clear();
         return OpResult::Success;
@@ -1506,6 +2149,8 @@ OpResult StorageEngine::rollbackTransaction() {
     std::filesystem::rename(backup, db);
     // Clear index cache after rollback
     pkIndexCache_.clear();
+    walClear(walPath(txnDB_));
+    lockManager_.unlockAll();
     inTransaction_ = false;
     txnDB_.clear();
     return OpResult::Success;

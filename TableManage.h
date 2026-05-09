@@ -11,6 +11,7 @@
 
 #include "DateType.h"
 #include "BPTree.h"
+#include "LockManager.h"
 
 namespace dbms {
 
@@ -103,6 +104,14 @@ public:
                                        const std::vector<std::string>& conditions,
                                        const std::vector<std::pair<std::string, std::string>>& items);
 
+    // Group aggregate: GROUP BY groupCol with HAVING filter
+    std::vector<std::string> groupAggregate(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        const std::vector<std::pair<std::string, std::string>>& items,
+        const std::string& groupByCol,
+        const std::vector<std::string>& havingConds);
+
     // JOIN query: INNER JOIN two tables on leftCol = rightCol
     std::vector<std::string> join(const std::string& dbname,
                                    const std::string& leftTable,
@@ -118,11 +127,23 @@ public:
     OpResult commitTransaction();
     OpResult rollbackTransaction();
 
+    // WAL crash recovery
+    void recoverAllDatabases();
+
+    // Secondary index
+    OpResult createIndex(const std::string& dbname, const std::string& tablename,
+                         const std::string& colname);
+    OpResult dropIndex(const std::string& dbname, const std::string& tablename,
+                       const std::string& colname);
+    std::vector<std::string> getIndexedColumns(const std::string& dbname,
+                                                const std::string& tablename) const;
+
 private:
     std::filesystem::path dbPath(const std::string& dbname) const;
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path tableListPath(const std::string& dbname) const;
+    std::filesystem::path walPath(const std::string& dbname) const;
 
     void writeSchema(std::ostream& out, const TableSchema& tbl);
     TableSchema readSchema(std::istream& in, const std::string& tablename) const;
@@ -133,6 +154,18 @@ private:
     BPTree* getPKIndex(const std::string& dbname, const std::string& tablename) const;
     void closeAllIndexes();
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);
+
+    // Secondary index helpers
+    std::filesystem::path secondaryIndexPath(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& colname) const;
+    std::filesystem::path secondaryIndexMetaPath(const std::string& dbname,
+                                                  const std::string& tablename) const;
+    mutable std::map<std::string, std::unique_ptr<BPTree>> secondaryIndexCache_;
+    BPTree* getSecondaryIndex(const std::string& dbname, const std::string& tablename,
+                              const std::string& colname) const;
+    static std::string extractColumnValue(const std::string& rowBuffer,
+                                          const TableSchema& tbl, size_t colIdx);
 
     // Parse condition strings like "<col value", "=col value", ">col value"
     struct Condition {
@@ -149,6 +182,9 @@ private:
     // Helpers
     static int64_t parseInt(const std::string& s);
     static bool stringToBuffer(const std::string& src, char* dst, size_t len);
+
+    // Lock manager
+    mutable LockManager lockManager_;
 
     // Transaction state
     bool inTransaction_ = false;

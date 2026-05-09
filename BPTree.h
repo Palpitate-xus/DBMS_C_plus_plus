@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "BufferPool.h"
 
 namespace dbms {
 
@@ -30,17 +33,29 @@ public:
     // Search for key. Returns true if found, sets value.
     bool search(const std::string& key, int64_t& value) const;
 
+    // Multi-value search: returns all values for a key (allows duplicates)
+    std::vector<int64_t> searchMulti(const std::string& key) const;
+
+    // Insert allowing duplicate keys (for secondary indexes)
+    bool insertMulti(const std::string& key, int64_t value);
+
     // Range scan: [startKey, endKey] inclusive
     std::vector<int64_t> rangeScan(const std::string& startKey, const std::string& endKey) const;
 
     // Get all values in key order
     std::vector<int64_t> allValues() const;
 
-    bool isOpen() const { return fd_ >= 0; }
+    bool isOpen() const { return bp_ != nullptr && bp_->isOpen(); }
+
+    uint32_t rootPage() const { return header_.rootPage; }
+
+    // Buffer pool stats
+    size_t cacheHits() const { return bp_ ? bp_->hits() : 0; }
+    size_t cacheMisses() const { return bp_ ? bp_->misses() : 0; }
 
 private:
     std::filesystem::path filePath_;
-    int fd_ = -1;  // POSIX file descriptor for direct IO
+    std::unique_ptr<BufferPool> bp_;
 
     struct FileHeader {
         uint32_t rootPage = 0;      // page number of root node
