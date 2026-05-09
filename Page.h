@@ -91,7 +91,16 @@ public:
     uint16_t liveCount() const;
 
     // Iterate over all live records: calls fn(slotId, data, len) for each
-    void forEachLive(void (*fn)(uint16_t slotId, const char* data, size_t len, void* ctx), void* ctx) const;
+    template<typename Fn>
+    void forEachLive(Fn&& fn) const {
+        const Header* h = header();
+        for (uint16_t i = 0; i < h->numSlots; ++i) {
+            const Slot* s = slot(i);
+            if ((s->flags & SLOT_DELETED) == 0) {
+                fn(i, buf_ + s->offset, s->length);
+            }
+        }
+    }
 
 private:
     char* buf_;

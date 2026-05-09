@@ -3,14 +3,18 @@
 #include <cstdint>
 #include <fstream>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "DateType.h"
 #include "BPTree.h"
+#include "BufferPool.h"
+#include "PageAllocator.h"
 #include "LockManager.h"
 
 namespace dbms {
@@ -148,6 +152,22 @@ private:
     void writeSchema(std::ostream& out, const TableSchema& tbl);
     TableSchema readSchema(std::istream& in, const std::string& tablename) const;
 
+    // Page-based heap storage
+    mutable std::map<std::string, std::unique_ptr<PageAllocator>> pageAllocators_;
+    PageAllocator* getPageAllocator(const std::string& dbname, const std::string& tablename) const;
+    void closeAllPageAllocators();
+    void migrateAllDataFiles();
+    void migrateToPageStorage(const std::string& dbname, const std::string& tablename) const;
+    static int64_t encodeRid(uint32_t pageId, uint16_t slotId);
+    static void decodeRid(int64_t rid, uint32_t& pageId, uint16_t& slotId);
+
+    // Unified row iteration (page-based or legacy file)
+    void forEachRow(const std::string& dbname, const std::string& tablename,
+                    const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback) const;
+
+    // Read a single row by RID through page allocator
+    bool readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer, const TableSchema& tbl) const;
+
     // B+ Tree primary key index
     std::filesystem::path indexPath(const std::string& dbname, const std::string& tablename) const;
     mutable std::map<std::string, std::unique_ptr<BPTree>> pkIndexCache_;
@@ -180,6 +200,7 @@ private:
                                  const std::vector<Condition>& conds);
 
     // Helpers
+    static bool evalConditionOnRow(const Condition& cond, const char* rowData, const TableSchema& tbl);
     static int64_t parseInt(const std::string& s);
     static bool stringToBuffer(const std::string& src, char* dst, size_t len);
 

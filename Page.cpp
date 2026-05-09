@@ -196,14 +196,4 @@ uint16_t Page::liveCount() const {
     return count;
 }
 
-void Page::forEachLive(void (*fn)(uint16_t slotId, const char* data, size_t len, void* ctx), void* ctx) const {
-    const Header* h = header();
-    for (uint16_t i = 0; i < h->numSlots; ++i) {
-        const Slot* s = slot(i);
-        if ((s->flags & SLOT_DELETED) == 0) {
-            fn(i, buf_ + s->offset, s->length, ctx);
-        }
-    }
-}
-
 } // namespace dbms
