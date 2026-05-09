@@ -1103,18 +1103,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
     lockManager_.lockExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t rowSize = tbl.rowSize();
-
-    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) {
-        lockManager_.unlock(tablename);
-        return OpResult::Success;  // empty file
-    }
-
-    in.seekg(0, std::ios::end);
-    auto fileSize = static_cast<size_t>(in.tellg());
-    in.seekg(0, std::ios::beg);
-    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     auto conds = parseConditions(conditions);
     std::set<int64_t> toDelete = filterRows(dbname, tablename, conds);
@@ -1126,36 +1115,33 @@ OpResult StorageEngine::remove(const std::string& dbname,
 
     // Check foreign key RESTRICT: ensure no other table references rows being deleted
     {
-        // Find PK column and offset of this table
         size_t pkIdx = tbl.len;
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
         }
         if (pkIdx < tbl.len) {
-            // Read PK values of rows being deleted
             std::set<std::string> deletedPKs;
-            for (int64_t rowIdx : toDelete) {
-                in.seekg(static_cast<std::streamoff>(rowIdx * rowSize), std::ios::beg);
+            for (int64_t rid : toDelete) {
+                std::string row;
+                if (!readRowByRid(pa, rid, row, tbl)) continue;
                 size_t off = 0;
-                for (size_t c = 0; c < pkIdx; ++c) {
-                    in.seekg(static_cast<std::streamsize>(tbl.cols[c].dsize), std::ios::cur);
-                    off += tbl.cols[c].dsize;
-                }
+                for (size_t c = 0; c < pkIdx; ++c) off += tbl.cols[c].dsize;
                 const Column& col = tbl.cols[pkIdx];
                 std::string pkVal;
+                const char* rowData = row.data();
                 if (col.dataType == "char") {
                     std::string buf(col.dsize, '\0');
-                    in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
+                    std::memcpy(buf.data(), rowData + off, col.dsize);
                     auto nul = buf.find('\0');
                     if (nul != std::string::npos) buf.resize(nul);
                     pkVal = buf;
                 } else if (col.dataType == "date") {
                     Date d;
-                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    std::memcpy(&d, rowData + off, DATE_SIZE);
                     pkVal = str(d);
                 } else {
                     int64_t val = 0;
-                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
+                    std::memcpy(&val, rowData + off, col.dsize);
                     pkVal = transstr(val);
                 }
                 if (!pkVal.empty()) deletedPKs.insert(pkVal);
@@ -1169,98 +1155,74 @@ OpResult StorageEngine::remove(const std::string& dbname,
                 for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
                     const ForeignKey& fk = otherTbl.fks[fi];
                     if (fk.refTable != tablename) continue;
-                    // Find FK column offset in other table
                     size_t fkColIdx = otherTbl.len;
                     for (size_t ci = 0; ci < otherTbl.len; ++ci) {
                         if (otherTbl.cols[ci].dataName == fk.colName) { fkColIdx = ci; break; }
                     }
                     if (fkColIdx >= otherTbl.len) continue;
-                    size_t otherRowSize = otherTbl.rowSize();
-                    std::ifstream oin(dataPath(dbname, otherTable), std::ios::binary);
-                    if (!oin) continue;
-                    oin.seekg(0, std::ios::end);
-                    auto ofs = static_cast<size_t>(oin.tellg());
-                    oin.seekg(0, std::ios::beg);
-                    size_t orc = (otherRowSize == 0) ? 0 : ofs / otherRowSize;
-                    for (size_t r = 0; r < orc; ++r) {
+                    bool foundRef = false;
+                    forEachRow(dbname, otherTable, [&](uint32_t, uint16_t, const char* data, size_t) {
+                        if (foundRef) return;
                         size_t coff = 0;
-                        for (size_t c = 0; c < fkColIdx; ++c) {
-                            oin.seekg(static_cast<std::streamsize>(otherTbl.cols[c].dsize), std::ios::cur);
-                            coff += otherTbl.cols[c].dsize;
-                        }
+                        for (size_t c = 0; c < fkColIdx; ++c) coff += otherTbl.cols[c].dsize;
                         const Column& fcol = otherTbl.cols[fkColIdx];
                         std::string fval;
                         if (fcol.dataType == "char") {
                             std::string buf(fcol.dsize, '\0');
-                            oin.read(buf.data(), static_cast<std::streamsize>(fcol.dsize));
+                            std::memcpy(buf.data(), data + coff, fcol.dsize);
                             auto nul = buf.find('\0');
                             if (nul != std::string::npos) buf.resize(nul);
                             fval = buf;
                         } else if (fcol.dataType == "date") {
                             Date d;
-                            oin.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                            std::memcpy(&d, data + coff, DATE_SIZE);
                             fval = str(d);
                         } else {
                             int64_t val = 0;
-                            oin.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(fcol.dsize));
+                            std::memcpy(&val, data + coff, fcol.dsize);
                             fval = transstr(val);
                         }
                         if (deletedPKs.find(fval) != deletedPKs.end()) {
-                            lockManager_.unlock(tablename);
-                            return OpResult::InvalidValue;  // FK reference exists, cannot delete
+                            foundRef = true;
                         }
-                        for (size_t c = fkColIdx + 1; c < otherTbl.len; ++c)
-                            oin.seekg(static_cast<std::streamsize>(otherTbl.cols[c].dsize), std::ios::cur);
+                    });
+                    if (foundRef) {
+                        lockManager_.unlock(tablename);
+                        return OpResult::InvalidValue;
                     }
                 }
             }
         }
     }
 
-    std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
-    in.seekg(0, std::ios::beg);  // Reset stream position after FK check
-    {
-        std::ofstream out(tempPath, std::ios::binary);
-        for (size_t i = 0; i < rowCount; ++i) {
-            std::string row(rowSize, '\0');
-            in.read(row.data(), static_cast<std::streamsize>(rowSize));
-            if (toDelete.find(static_cast<int64_t>(i)) == toDelete.end()) {
-                out.write(row.data(), static_cast<std::streamsize>(rowSize));
-            }
+    // Delete rows via PageAllocator tombstones + update indexes
+    for (int64_t rid : toDelete) {
+        uint32_t pageId; uint16_t slotId;
+        decodeRid(rid, pageId, slotId);
+        char* pageBuf = pa->fetchPage(pageId);
+        if (pageBuf) {
+            Page page(pageBuf);
+            page.remove(slotId);
+            pa->markDirty(pageId);
+            pa->unpinPage(pageId);
         }
     }
 
-    std::filesystem::remove(dataPath(dbname, tablename));
-    std::filesystem::rename(tempPath, dataPath(dbname, tablename));
-    // Rebuild B+ tree PK index
-    std::filesystem::remove(indexPath(dbname, tablename));
-    BPTree* idx = getPKIndex(dbname, tablename);
-    if (idx) {
-        size_t pkIdx = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
-        }
-        if (pkIdx < tbl.len) {
-            std::ifstream in2(dataPath(dbname, tablename), std::ios::binary);
-            if (in2) {
-                in2.seekg(0, std::ios::end);
-                auto fs = static_cast<size_t>(in2.tellg());
-                in2.seekg(0, std::ios::beg);
-                size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
-                for (size_t r = 0; r < rc; ++r) {
-                    std::string row(rowSize, '\0');
-                    in2.read(row.data(), static_cast<std::streamsize>(rowSize));
-                    std::string pkVal = extractPKValue(row, tbl);
-                    if (!pkVal.empty()) idx->insert(pkVal, static_cast<int64_t>(r));
-                }
-            }
+    // Remove from PK index
+    BPTree* pkIdx = getPKIndex(dbname, tablename);
+    if (pkIdx) {
+        for (int64_t rid : toDelete) {
+            std::string row;
+            if (!readRowByRid(pa, rid, row, tbl)) continue;
+            std::string pkVal = extractPKValue(row, tbl);
+            if (!pkVal.empty()) pkIdx->remove(pkVal);
         }
     }
-    // Rebuild secondary indexes
+
+    // Remove from secondary indexes
     {
         auto indexedCols = getIndexedColumns(dbname, tablename);
         for (const auto& colname : indexedCols) {
-            std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
             size_t colIdx = tbl.len;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
@@ -1268,17 +1230,11 @@ OpResult StorageEngine::remove(const std::string& dbname,
             if (colIdx >= tbl.len) continue;
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
             if (!secIdx) continue;
-            std::ifstream in2(dataPath(dbname, tablename), std::ios::binary);
-            if (!in2) continue;
-            in2.seekg(0, std::ios::end);
-            auto fs = static_cast<size_t>(in2.tellg());
-            in2.seekg(0, std::ios::beg);
-            size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
-            for (size_t r = 0; r < rc; ++r) {
-                std::string row(rowSize, '\0');
-                in2.read(row.data(), static_cast<std::streamsize>(rowSize));
+            for (int64_t rid : toDelete) {
+                std::string row;
+                if (!readRowByRid(pa, rid, row, tbl)) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
-                if (!val.empty()) secIdx->insert(val, static_cast<int64_t>(r));
+                if (!val.empty()) secIdx->remove(val);
             }
         }
     }
@@ -1323,20 +1279,11 @@ OpResult StorageEngine::update(const std::string& dbname,
 
     lockManager_.lockExclusive(tablename);
 
-    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) {
-        lockManager_.unlock(tablename);
-        return OpResult::Success;
-    }
-
-    in.seekg(0, std::ios::end);
-    auto fileSize = static_cast<size_t>(in.tellg());
-    in.seekg(0, std::ios::beg);
-    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     auto conds = parseConditions(conditions);
     std::set<int64_t> matchIds = conds.empty()
-        ? [&](){ std::set<int64_t> s; for (size_t i = 0; i < rowCount; ++i) s.insert(static_cast<int64_t>(i)); return s; }()
+        ? [&](){ std::set<int64_t> s; forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) { s.insert(encodeRid(pid, sid)); }); return s; }()
         : filterRows(dbname, tablename, conds);
 
     if (matchIds.empty()) {
@@ -1344,97 +1291,88 @@ OpResult StorageEngine::update(const std::string& dbname,
         return OpResult::Success;
     }
 
-    std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
-    {
-        std::ofstream out(tempPath, std::ios::binary);
-        for (size_t i = 0; i < rowCount; ++i) {
-            std::string row(rowSize, '\0');
-            in.read(row.data(), static_cast<std::streamsize>(rowSize));
-            if (matchIds.find(static_cast<int64_t>(i)) != matchIds.end()) {
-                size_t offset = 0;
-                for (size_t ci = 0; ci < tbl.len; ++ci) {
-                    const Column& col = tbl.cols[ci];
-                    auto it = colUpdates.find(ci);
-                    if (it != colUpdates.end()) {
-                        const std::string& val = it->second;
-                        if (col.dataType == "char") {
-                            stringToBuffer(val, &row[offset], col.dsize);
-                        } else if (col.dataType == "date") {
-                            Date d(val.c_str());
-                            std::memcpy(&row[offset], &d, DATE_SIZE);
-                        } else {
-                            int64_t num = val.empty() ? INF : parseInt(val);
-                            std::memcpy(&row[offset], &num, col.dsize);
-                        }
-                    }
-                    offset += col.dsize;
-                }
-            }
-            out.write(row.data(), static_cast<std::streamsize>(rowSize));
-        }
-    }
+    // Pre-fetch indexed column list
+    auto indexedCols = getIndexedColumns(dbname, tablename);
 
-    std::filesystem::remove(dataPath(dbname, tablename));
-    std::filesystem::rename(tempPath, dataPath(dbname, tablename));
-    // Rebuild B+ tree PK index if PK column was updated
-    bool pkUpdated = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isPrimaryKey && colUpdates.find(i) != colUpdates.end()) {
-            pkUpdated = true; break;
-        }
-    }
-    if (pkUpdated) {
-        std::filesystem::remove(indexPath(dbname, tablename));
-        BPTree* idx = getPKIndex(dbname, tablename);
-        if (idx) {
-            size_t pkIdx = tbl.len;
+    // For each matching row, read old data, update, write back, update indexes
+    for (int64_t rid : matchIds) {
+        std::string row;
+        if (!readRowByRid(pa, rid, row, tbl)) continue;
+
+        // Save old PK and indexed column values before modification
+        std::string oldPK = extractPKValue(row, tbl);
+        std::map<std::string, std::string> oldIdxVals;
+        for (const auto& colname : indexedCols) {
+            size_t colIdx = tbl.len;
             for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (pkIdx < tbl.len) {
-                std::ifstream in2(dataPath(dbname, tablename), std::ios::binary);
-                if (in2) {
-                    in2.seekg(0, std::ios::end);
-                    auto fs = static_cast<size_t>(in2.tellg());
-                    in2.seekg(0, std::ios::beg);
-                    size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
-                    for (size_t r = 0; r < rc; ++r) {
-                        std::string row(rowSize, '\0');
-                        in2.read(row.data(), static_cast<std::streamsize>(rowSize));
-                        std::string pkVal = extractPKValue(row, tbl);
-                        if (!pkVal.empty()) idx->insert(pkVal, static_cast<int64_t>(r));
-                    }
+            if (colIdx < tbl.len) {
+                oldIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
+            }
+        }
+
+        // Modify row buffer
+        size_t offset = 0;
+        for (size_t ci = 0; ci < tbl.len; ++ci) {
+            const Column& col = tbl.cols[ci];
+            auto it = colUpdates.find(ci);
+            if (it != colUpdates.end()) {
+                const std::string& val = it->second;
+                if (col.dataType == "char") {
+                    stringToBuffer(val, &row[offset], col.dsize);
+                } else if (col.dataType == "date") {
+                    Date d(val.c_str());
+                    std::memcpy(&row[offset], &d, DATE_SIZE);
+                } else {
+                    int64_t num = val.empty() ? INF : parseInt(val);
+                    std::memcpy(&row[offset], &num, col.dsize);
                 }
             }
+            offset += col.dsize;
         }
-    }
-    // Rebuild secondary indexes if indexed columns were updated
-    {
-        auto indexedCols = getIndexedColumns(dbname, tablename);
-        for (const auto& colname : indexedCols) {
+
+        // Write back via PageAllocator
+        uint32_t pageId; uint16_t slotId;
+        decodeRid(rid, pageId, slotId);
+        char* pageBuf = pa->fetchPage(pageId);
+        if (pageBuf) {
+            Page page(pageBuf);
+            page.update(slotId, row.data(), rowSize);
+            pa->markDirty(pageId);
+            pa->unpinPage(pageId);
+        }
+
+        // Update PK index if PK was updated
+        BPTree* pkIdx = getPKIndex(dbname, tablename);
+        if (pkIdx) {
+            std::string newPK = extractPKValue(row, tbl);
+            if (oldPK != newPK) {
+                if (!oldPK.empty()) pkIdx->remove(oldPK);
+                if (!newPK.empty()) pkIdx->insert(newPK, rid);
+            }
+        }
+
+        // Update secondary indexes if indexed columns were updated
+        for (const auto& kv : oldIdxVals) {
+            const std::string& colname = kv.first;
+            const std::string& oldVal = kv.second;
             size_t colIdx = tbl.len;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
             if (colIdx >= tbl.len) continue;
             if (colUpdates.find(colIdx) == colUpdates.end()) continue;
-            std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
             if (!secIdx) continue;
-            std::ifstream in2(dataPath(dbname, tablename), std::ios::binary);
-            if (!in2) continue;
-            in2.seekg(0, std::ios::end);
-            auto fs = static_cast<size_t>(in2.tellg());
-            in2.seekg(0, std::ios::beg);
-            size_t rc = (rowSize == 0) ? 0 : fs / rowSize;
-            for (size_t r = 0; r < rc; ++r) {
-                std::string row(rowSize, '\0');
-                in2.read(row.data(), static_cast<std::streamsize>(rowSize));
-                std::string val = extractColumnValue(row, tbl, colIdx);
-                if (!val.empty()) secIdx->insert(val, static_cast<int64_t>(r));
+            std::string newVal = extractColumnValue(row, tbl, colIdx);
+            if (oldVal != newVal) {
+                if (!oldVal.empty()) secIdx->remove(oldVal);
+                if (!newVal.empty()) secIdx->insert(newVal, rid);
             }
         }
     }
+
     lockManager_.unlock(tablename);
     return OpResult::Success;
 }
@@ -1557,25 +1495,10 @@ std::vector<std::string> StorageEngine::aggregate(
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
 
-    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) {
-        lockManager_.unlock(tablename);
-        return result;
-    }
-
-    in.seekg(0, std::ios::end);
-    auto fileSize = static_cast<size_t>(in.tellg());
-    in.seekg(0, std::ios::beg);
-    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
-
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
     auto conds = parseConditions(conditions);
-    std::vector<int64_t> matchIds;
-    if (conds.empty()) {
-        for (size_t i = 0; i < rowCount; ++i) matchIds.push_back(static_cast<int64_t>(i));
-    } else {
-        auto ids = filterRows(dbname, tablename, conds);
-        matchIds.assign(ids.begin(), ids.end());
-    }
+    auto ids = filterRows(dbname, tablename, conds);
+    std::vector<int64_t> matchIds(ids.begin(), ids.end());
 
     std::string rowResult;
     for (const auto& item : items) {
@@ -1601,24 +1524,27 @@ std::vector<std::string> StorageEngine::aggregate(
             }
         }
 
-        for (int64_t rowIdx : matchIds) {
+        for (int64_t rid : matchIds) {
+            std::string row;
+            if (!readRowByRid(pa, rid, row, tbl)) continue;
+            const char* rowData = row.data();
             if (func == "count") {
                 if (colName == "*") { count++; continue; }
                 if (colIdx >= tbl.len) continue;
                 size_t offset = 0;
                 for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
-                in.seekg(static_cast<std::streamoff>(rowIdx * rowSize + offset), std::ios::beg);
+                const char* colData = rowData + offset;
                 if (isInt) {
                     int64_t val = 0;
-                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    std::memcpy(&val, colData, tbl.cols[colIdx].dsize);
                     if (val != INF) count++;
                 } else if (isDate) {
                     Date d;
-                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    std::memcpy(&d, colData, DATE_SIZE);
                     if (d.year != 0) count++;
                 } else {
                     std::string buf(tbl.cols[colIdx].dsize, '\0');
-                    in.read(buf.data(), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    std::memcpy(buf.data(), colData, tbl.cols[colIdx].dsize);
                     auto nul = buf.find('\0');
                     if (nul != std::string::npos) buf.resize(nul);
                     if (!buf.empty()) count++;
@@ -1627,11 +1553,11 @@ std::vector<std::string> StorageEngine::aggregate(
                 if (colIdx >= tbl.len) continue;
                 size_t offset = 0;
                 for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
-                in.seekg(static_cast<std::streamoff>(rowIdx * rowSize + offset), std::ios::beg);
+                const char* colData = rowData + offset;
 
                 if (isInt) {
                     int64_t val = 0;
-                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    std::memcpy(&val, colData, tbl.cols[colIdx].dsize);
                     if (val == INF) continue;
                     if (func == "sum") sum += val;
                     if (func == "avg") { sum += val; count++; }
@@ -1643,7 +1569,7 @@ std::vector<std::string> StorageEngine::aggregate(
                     }
                 } else if (isDate) {
                     Date d;
-                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    std::memcpy(&d, colData, DATE_SIZE);
                     if (d.year == 0) continue;
                     if (func == "max") {
                         if (!hasMax || d > maxDate) { maxDate = d; hasMax = true; }
@@ -1653,7 +1579,7 @@ std::vector<std::string> StorageEngine::aggregate(
                     }
                 } else {
                     std::string buf(tbl.cols[colIdx].dsize, '\0');
-                    in.read(buf.data(), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    std::memcpy(buf.data(), colData, tbl.cols[colIdx].dsize);
                     auto nul = buf.find('\0');
                     if (nul != std::string::npos) buf.resize(nul);
                     if (buf.empty()) continue;
@@ -1715,45 +1641,40 @@ std::vector<std::string> StorageEngine::groupAggregate(
         return result;
     }
 
-    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (!in) {
-        lockManager_.unlock(tablename);
-        return result;
-    }
-
-    in.seekg(0, std::ios::end);
-    auto fileSize = static_cast<size_t>(in.tellg());
-    in.seekg(0, std::ios::beg);
-    size_t rowCount = (rowSize == 0) ? 0 : fileSize / rowSize;
-
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
     if (conds.empty()) {
-        for (size_t i = 0; i < rowCount; ++i) matchIds.push_back(static_cast<int64_t>(i));
+        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            matchIds.push_back(encodeRid(pageId, slotId));
+        });
     } else {
         auto ids = filterRows(dbname, tablename, conds);
         matchIds.assign(ids.begin(), ids.end());
     }
 
     // Read group key for each matching row
-    auto readGroupKey = [&](int64_t rowIdx) -> std::string {
+    auto readGroupKey = [&](int64_t rid) -> std::string {
+        std::string row;
+        if (!readRowByRid(pa, rid, row, tbl)) return "";
+        const char* rowData = row.data();
         size_t offset = 0;
         for (size_t c = 0; c < groupIdx; ++c) offset += tbl.cols[c].dsize;
-        in.seekg(static_cast<std::streamoff>(rowIdx * rowSize + offset), std::ios::beg);
+        const char* colData = rowData + offset;
         const Column& col = tbl.cols[groupIdx];
         if (col.dataType == "char") {
             std::string buf(col.dsize, '\0');
-            in.read(buf.data(), static_cast<std::streamsize>(col.dsize));
+            std::memcpy(buf.data(), colData, col.dsize);
             auto nul = buf.find('\0');
             if (nul != std::string::npos) buf.resize(nul);
             return buf;
         } else if (col.dataType == "date") {
             Date d;
-            in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+            std::memcpy(&d, colData, DATE_SIZE);
             return (d.year == 0) ? "" : str(d);
         } else {
             int64_t val = 0;
-            in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(col.dsize));
+            std::memcpy(&val, colData, col.dsize);
             return (val == INF) ? "" : transstr(val);
         }
     };
@@ -1786,38 +1707,40 @@ std::vector<std::string> StorageEngine::groupAggregate(
         int64_t maxInt = 0, minInt = 0;
         Date maxDate, minDate;
 
-        auto readVal = [&](int64_t rowIdx, size_t cidx) -> void {
-            size_t offset = 0;
-            for (size_t c = 0; c < cidx; ++c) offset += tbl.cols[c].dsize;
-            in.seekg(static_cast<std::streamoff>(rowIdx * rowSize + offset), std::ios::beg);
-        };
+        for (int64_t rid : gids) {
+            std::string row;
+            if (!readRowByRid(pa, rid, row, tbl)) continue;
+            const char* rowData = row.data();
 
-        for (int64_t rowIdx : gids) {
             if (func == "count") {
                 if (colName == "*") { count++; continue; }
                 if (colIdx >= tbl.len) continue;
-                readVal(rowIdx, colIdx);
+                size_t offset = 0;
+                for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
+                const char* colData = rowData + offset;
                 if (isInt) {
                     int64_t val = 0;
-                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    std::memcpy(&val, colData, tbl.cols[colIdx].dsize);
                     if (val != INF) count++;
                 } else if (isDate) {
                     Date d;
-                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    std::memcpy(&d, colData, DATE_SIZE);
                     if (d.year != 0) count++;
                 } else {
                     std::string buf(tbl.cols[colIdx].dsize, '\0');
-                    in.read(buf.data(), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    std::memcpy(buf.data(), colData, tbl.cols[colIdx].dsize);
                     auto nul = buf.find('\0');
                     if (nul != std::string::npos) buf.resize(nul);
                     if (!buf.empty()) count++;
                 }
             } else {
                 if (colIdx >= tbl.len) continue;
-                readVal(rowIdx, colIdx);
+                size_t offset = 0;
+                for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
+                const char* colData = rowData + offset;
                 if (isInt) {
                     int64_t val = 0;
-                    in.read(reinterpret_cast<char*>(&val), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    std::memcpy(&val, colData, tbl.cols[colIdx].dsize);
                     if (val == INF) continue;
                     if (func == "sum") sum += val;
                     if (func == "avg") { sum += val; count++; }
@@ -1825,13 +1748,13 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     if (func == "min") { if (!hasMin || val < minInt) { minInt = val; hasMin = true; } }
                 } else if (isDate) {
                     Date d;
-                    in.read(reinterpret_cast<char*>(&d), DATE_SIZE);
+                    std::memcpy(&d, colData, DATE_SIZE);
                     if (d.year == 0) continue;
                     if (func == "max") { if (!hasMax || d > maxDate) { maxDate = d; hasMax = true; } }
                     if (func == "min") { if (!hasMin || d < minDate) { minDate = d; hasMin = true; } }
                 } else {
                     std::string buf(tbl.cols[colIdx].dsize, '\0');
-                    in.read(buf.data(), static_cast<std::streamsize>(tbl.cols[colIdx].dsize));
+                    std::memcpy(buf.data(), colData, tbl.cols[colIdx].dsize);
                     auto nul = buf.find('\0');
                     if (nul != std::string::npos) buf.resize(nul);
                     if (buf.empty()) continue;
@@ -1953,37 +1876,15 @@ std::vector<std::string> StorageEngine::join(
 
     // Read all rows from left table
     std::vector<std::string> leftRows;
-    {
-        std::ifstream in(dataPath(dbname, leftTable), std::ios::binary);
-        if (in) {
-            in.seekg(0, std::ios::end);
-            auto fs = static_cast<size_t>(in.tellg());
-            in.seekg(0, std::ios::beg);
-            size_t cnt = (leftRowSize == 0) ? 0 : fs / leftRowSize;
-            for (size_t i = 0; i < cnt; ++i) {
-                std::string row(leftRowSize, '\0');
-                in.read(row.data(), static_cast<std::streamsize>(leftRowSize));
-                leftRows.push_back(std::move(row));
-            }
-        }
-    }
+    forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
+        leftRows.emplace_back(data, len);
+    });
 
     // Read all rows from right table
     std::vector<std::string> rightRows;
-    {
-        std::ifstream in(dataPath(dbname, rightTable), std::ios::binary);
-        if (in) {
-            in.seekg(0, std::ios::end);
-            auto fs = static_cast<size_t>(in.tellg());
-            in.seekg(0, std::ios::beg);
-            size_t cnt = (rightRowSize == 0) ? 0 : fs / rightRowSize;
-            for (size_t i = 0; i < cnt; ++i) {
-                std::string row(rightRowSize, '\0');
-                in.read(row.data(), static_cast<std::streamsize>(rightRowSize));
-                rightRows.push_back(std::move(row));
-            }
-        }
-    }
+    forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
+        rightRows.emplace_back(data, len);
+    });
 
     // Build merged column layout for condition evaluation
     // Map: colName -> {offset, colInfo}
