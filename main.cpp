@@ -28,6 +28,7 @@ int g_nowPermission = 0;
 string g_nowUser;
 string g_currentDB = "info";
 StorageEngine g_engine;
+map<string, string> g_preparedStmts;
 
 // ========================================================================
 // Utility
@@ -1148,6 +1149,82 @@ bool execute(const string& rawSql) {
             if (isUnionAll || seen.insert(rightLines[i]).second) {
                 cout << rightLines[i] << endl;
             }
+        }
+        return false;
+    }
+
+    // PREPARE stmt_name FROM 'sql_template'
+    if (sql.substr(0, 8) == "prepare ") {
+        string rest = trim(sql.substr(8));
+        size_t fromPos = rest.find(" from ");
+        if (fromPos == string::npos) {
+            cout << "SQL syntax error: expected FROM" << endl;
+            return true;
+        }
+        string stmtName = trim(rest.substr(0, fromPos));
+        string templateSql = trim(rest.substr(fromPos + 6));
+        templateSql = stripQuotes(templateSql);
+        if (templateSql.empty()) {
+            cout << "SQL syntax error: empty statement" << endl;
+            return true;
+        }
+        g_preparedStmts[stmtName] = templateSql;
+        cout << "Statement " << stmtName << " prepared" << endl;
+        return false;
+    }
+
+    // EXECUTE stmt_name USING (val1, val2, ...)
+    if (sql.substr(0, 8) == "execute ") {
+        string rest = trim(sql.substr(8));
+        size_t usingPos = rest.find(" using ");
+        string stmtName, usingClause;
+        if (usingPos == string::npos) {
+            stmtName = rest;
+        } else {
+            stmtName = trim(rest.substr(0, usingPos));
+            usingClause = trim(rest.substr(usingPos + 7));
+        }
+        auto it = g_preparedStmts.find(stmtName);
+        if (it == g_preparedStmts.end()) {
+            cout << "Prepared statement " << stmtName << " not found" << endl;
+            return true;
+        }
+        string expanded = it->second;
+        if (!usingClause.empty()) {
+            // Parse values: remove surrounding () if present
+            if (usingClause.size() >= 2 && usingClause.front() == '(' && usingClause.back() == ')') {
+                usingClause = trim(usingClause.substr(1, usingClause.size() - 2));
+            }
+            stringstream vss(usingClause);
+            string val;
+            vector<string> values;
+            while (getline(vss, val, ',')) values.push_back(trim(val));
+            size_t vidx = 0;
+            size_t pos = 0;
+            while ((pos = expanded.find('?', pos)) != string::npos) {
+                if (vidx >= values.size()) {
+                    cout << "Not enough parameters for prepared statement" << endl;
+                    return true;
+                }
+                expanded = expanded.substr(0, pos) + values[vidx] + expanded.substr(pos + 1);
+                pos += values[vidx].size();
+                ++vidx;
+            }
+            if (vidx < values.size()) {
+                cout << "Too many parameters for prepared statement" << endl;
+                return true;
+            }
+        }
+        return execute(expanded);
+    }
+
+    // DEALLOCATE PREPARE stmt_name
+    if (sql.substr(0, 19) == "deallocate prepare ") {
+        string stmtName = trim(sql.substr(19));
+        if (g_preparedStmts.erase(stmtName)) {
+            cout << "Statement " << stmtName << " deallocated" << endl;
+        } else {
+            cout << "Prepared statement " << stmtName << " not found" << endl;
         }
         return false;
     }
