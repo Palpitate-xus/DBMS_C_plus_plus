@@ -14,6 +14,7 @@
 #include "NetworkServer.h"
 #include "logs.h"
 #include "permissions.h"
+#include "Session.h"
 
 using namespace std;
 using dbms::Column;
@@ -24,11 +25,7 @@ using dbms::OpResult;
 using dbms::StorageEngine;
 using dbms::TableSchema;
 
-int g_nowPermission = 0;
-string g_nowUser;
-string g_currentDB = "info";
 StorageEngine g_engine;
-map<string, string> g_preparedStmts;
 
 // ========================================================================
 // Utility
@@ -490,7 +487,7 @@ static std::map<std::string, std::string> parseSetClause(const std::string& sql,
 // ========================================================================
 // Subquery helpers
 // ========================================================================
-static std::vector<std::string> runSubQuery(const std::string& rawSql) {
+static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& s) {
     std::string sql = sqlProcessor(rawSql);
     size_t fromPos = sql.find("from");
     if (fromPos == std::string::npos) return {};
@@ -500,7 +497,7 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql) {
     size_t tnameEnd = (wherePos != std::string::npos) ? wherePos : sql.size();
     std::string tname = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
 
-    if (!g_engine.tableExists(g_currentDB, tname)) return {};
+    if (!g_engine.tableExists(s.currentDB, tname)) return {};
 
     std::set<std::string> selectCols;
     if (columns != "*") {
@@ -519,13 +516,13 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql) {
         auto groups = breakDownConditions(tokens);
         std::set<std::string> seen;
         for (const auto& g : groups) {
-            auto part = g_engine.query(g_currentDB, tname, g, selectCols, "", true);
+            auto part = g_engine.query(s.currentDB, tname, g, selectCols, "", true);
             for (const auto& row : part) {
                 if (seen.insert(row).second) answers.push_back(row);
             }
         }
     } else {
-        answers = g_engine.query(g_currentDB, tname, {}, selectCols, "", true);
+        answers = g_engine.query(s.currentDB, tname, {}, selectCols, "", true);
     }
 
     for (auto& s : answers) {
@@ -535,7 +532,7 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql) {
 }
 
 // Expand IN (...) subqueries / value lists into OR conditions
-static std::string expandSubqueries(std::string sql) {
+static std::string expandSubqueries(std::string sql, Session& s) {
     while (true) {
         size_t pos = sql.find(" in ");
         if (pos == std::string::npos) break;
@@ -571,7 +568,7 @@ static std::string expandSubqueries(std::string sql) {
         std::string inner = trim(sql.substr(parenStart + 1, parenEnd - parenStart - 1));
         std::vector<std::string> values;
         if (inner.size() >= 6 && inner.substr(0, 6) == "select") {
-            values = runSubQuery(inner);
+            values = runSubQuery(inner, s);
         } else {
             size_t vpos = 0;
             while (vpos < inner.size()) {
@@ -600,28 +597,29 @@ static std::string expandSubqueries(std::string sql) {
 // ========================================================================
 // SQL execution
 // ========================================================================
-static bool checkAdmin() {
-    if (g_nowPermission == 0) {
+static bool checkAdmin(const Session& s) {
+    if (s.permission == 0) {
         cout << "permission denied" << endl;
-        log(g_nowUser, "permission denied", getTime());
+        log(s.username, "permission denied", getTime());
         return false;
     }
     return true;
 }
 
-static bool checkTablePermission(const string& tname, dbms::StorageEngine::TablePrivilege priv) {
-    if (g_nowPermission == 1) return true; // admin bypass
-    if (!g_engine.hasPermission(g_currentDB, tname, g_nowUser, priv)) {
+static bool checkTablePermission(Session& s, const string& tname,
+                                  dbms::StorageEngine::TablePrivilege priv) {
+    if (s.permission == 1) return true; // admin bypass
+    if (!g_engine.hasPermission(s.currentDB, tname, s.username, priv)) {
         cout << "permission denied on table " << tname << endl;
         return false;
     }
     return true;
 }
 
-static bool checkDB() {
-    if (!g_engine.databaseExists(g_currentDB)) {
-        cout << "Invalid Database name:" << g_currentDB << endl;
-        log(g_nowUser, "invalid database name", getTime());
+static bool checkDB(const Session& s) {
+    if (!g_engine.databaseExists(s.currentDB)) {
+        cout << "Invalid Database name:" << s.currentDB << endl;
+        log(s.username, "invalid database name", getTime());
         return false;
     }
     return true;
@@ -638,7 +636,7 @@ void logSlowQuery(const string& sql, double ms) {
     }
 }
 
-bool execute(const string& rawSql) {
+bool execute(const string& rawSql, Session& s) {
     auto start = std::chrono::steady_clock::now();
     string sql = sqlProcessor(rawSql);
     if (sql.substr(0, 3) == "use") {
@@ -646,20 +644,20 @@ bool execute(const string& rawSql) {
             string dbname = trim(sql.substr(13));
             if (!g_engine.databaseExists(dbname)) {
                 cout << "Database not found" << endl;
-                g_currentDB = "";
-                log(g_nowUser, "use database error", getTime());
+                s.currentDB = "";
+                log(s.username, "use database error", getTime());
                 return true;
             }
-            g_currentDB = dbname;
+            s.currentDB = dbname;
             cout << "set Database to " << dbname << endl;
-            log(g_nowUser, "use database success", getTime());
+            log(s.username, "use database success", getTime());
             return false;
         }
     }
 
     if (sql.substr(0, 6) == "create") {
         if (sql.substr(7, 4) == "user") {
-            if (!checkAdmin()) return true;
+            if (!checkAdmin(s)) return true;
             string rest = trim(sql.substr(12));
             vector<string> parts;
             stringstream ss(rest);
@@ -675,7 +673,7 @@ bool execute(const string& rawSql) {
             temp.permission = parts[2];
             if (permissionQuery(temp.username) != -1) {
                 cout << "error: user already exist" << endl;
-                log(g_nowUser, "error: user already exist", getTime());
+                log(s.username, "error: user already exist", getTime());
                 return true;
             }
             createUser(temp);
@@ -684,22 +682,22 @@ bool execute(const string& rawSql) {
         }
 
         if (sql.substr(7, 8) == "database") {
-            if (!checkAdmin()) return true;
+            if (!checkAdmin(s)) return true;
             string dbname = trim(sql.substr(16));
             auto res = g_engine.createDatabase(dbname);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "Failed:Database " << dbname << " already exists" << endl;
-                log(g_nowUser, "create database error", getTime());
+                log(s.username, "create database error", getTime());
             } else {
                 cout << "Create Database succeeded" << endl;
-                log(g_nowUser, "create database succeeded", getTime());
+                log(s.username, "create database succeeded", getTime());
             }
             return res != OpResult::Success;
         }
 
         if (sql.substr(7, 5) == "table") {
-            if (!checkAdmin()) return true;
-            if (!checkDB()) return true;
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
             string rest = trim(sql.substr(13));
             size_t sp = rest.find(' ');
             if (sp == string::npos) {
@@ -709,20 +707,20 @@ bool execute(const string& rawSql) {
             string tname = rest.substr(0, sp);
             TableSchema tbl = parseTableColumns(sql, 13 + sp + 1);
             tbl.tablename = tname;
-            auto res = g_engine.createTable(g_currentDB, tbl);
+            auto res = g_engine.createTable(s.currentDB, tbl);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "Table " << tname << " already exists" << endl;
-                log(g_nowUser, "table already exists", getTime());
+                log(s.username, "table already exists", getTime());
                 return true;
             }
             cout << "Table create succeeded" << endl;
-            log(g_nowUser, "table create succeeded", getTime());
+            log(s.username, "table create succeeded", getTime());
             return false;
         }
 
         if (sql.substr(7, 5) == "index") {
-            if (!checkAdmin()) return true;
-            if (!checkDB()) return true;
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
             // create index idxname on tname(colname)
             string rest = trim(sql.substr(13));
             size_t onPos = rest.find(" on ");
@@ -740,7 +738,7 @@ bool execute(const string& rawSql) {
             }
             string tname = trim(afterOn.substr(0, lp));
             string colname = trim(afterOn.substr(lp + 1, rp - lp - 1));
-            auto res = g_engine.createIndex(g_currentDB, tname, colname);
+            auto res = g_engine.createIndex(s.currentDB, tname, colname);
             if (res != OpResult::Success) {
                 cout << "Create index failed" << endl;
                 return true;
@@ -750,8 +748,8 @@ bool execute(const string& rawSql) {
         }
 
         if (sql.substr(7, 4) == "view") {
-            if (!checkAdmin()) return true;
-            if (!checkDB()) return true;
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
             // create view viewname as select ...
             string rest = trim(sql.substr(12));
             size_t asPos = rest.find(" as ");
@@ -761,7 +759,7 @@ bool execute(const string& rawSql) {
             }
             string viewname = trim(rest.substr(0, asPos));
             string viewSql = trim(rest.substr(asPos + 4));
-            auto res = g_engine.createView(g_currentDB, viewname, viewSql);
+            auto res = g_engine.createView(s.currentDB, viewname, viewSql);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "View " << viewname << " already exists" << endl;
                 return true;
@@ -772,8 +770,8 @@ bool execute(const string& rawSql) {
     }
 
     if (sql.substr(0, 5) == "alter") {
-        if (!checkAdmin()) return true;
-        if (!checkDB()) return true;
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
         vector<string> tokens = tokenize(sql.substr(5));
         if (tokens.size() < 4 || tokens[0] != "table") {
             cout << "SQL syntax error" << endl;
@@ -819,7 +817,7 @@ bool execute(const string& rawSql) {
                 cout << "Unknown data type" << endl;
                 return true;
             }
-            auto res = g_engine.alterTableAddColumn(g_currentDB, tname, col);
+            auto res = g_engine.alterTableAddColumn(s.currentDB, tname, col);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "Column already exists" << endl;
                 return true;
@@ -832,7 +830,7 @@ bool execute(const string& rawSql) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            auto res = g_engine.alterTableDropColumn(g_currentDB, tname, tokens[4]);
+            auto res = g_engine.alterTableDropColumn(s.currentDB, tname, tokens[4]);
             if (res == OpResult::InvalidValue) {
                 cout << "Column not found" << endl;
                 return true;
@@ -845,18 +843,18 @@ bool execute(const string& rawSql) {
     }
 
     if (sql.substr(0, 12) == "insert into ") {
-        if (!checkDB()) return true;
+        if (!checkDB(s)) return true;
         vector<string> tokens = tokenize(sql.substr(12));
         if (tokens.empty()) {
             cout << "SQL syntax error" << endl;
             return true;
         }
         string tname = tokens[0];
-        if (!g_engine.tableExists(g_currentDB, tname)) {
+        if (!g_engine.tableExists(s.currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        if (!checkTablePermission(tname, dbms::StorageEngine::TablePrivilege::Insert)) return true;
+        if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Insert)) return true;
 
         // Find column list and value list
         size_t colStart = sql.find('(', 12);
@@ -891,7 +889,7 @@ bool execute(const string& rawSql) {
         map<string, string> values;
         for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = stripQuotes(vals[i]);
 
-        auto res = g_engine.insert(g_currentDB, tname, values);
+        auto res = g_engine.insert(s.currentDB, tname, values);
         if (res == OpResult::DuplicateKey) {
             cout << "Duplicate primary key" << endl;
             return true;
@@ -901,34 +899,34 @@ bool execute(const string& rawSql) {
             return true;
         }
         cout << "Data inserted" << endl;
-        log(g_nowUser, "data inserted", getTime());
+        log(s.username, "data inserted", getTime());
         return false;
     }
 
     if (sql.substr(0, 12) == "delete from ") {
-        if (!checkDB()) return true;
-        string delRest = expandSubqueries(sql.substr(12));
+        if (!checkDB(s)) return true;
+        string delRest = expandSubqueries(sql.substr(12), s);
         vector<string> tokens = tokenize(normalizeConditionStr(delRest));
         if (tokens.empty()) {
             cout << "SQL syntax error" << endl;
             return true;
         }
         string tname = tokens[0];
-        if (!g_engine.tableExists(g_currentDB, tname)) {
+        if (!g_engine.tableExists(s.currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        if (!checkTablePermission(tname, dbms::StorageEngine::TablePrivilege::Delete)) return true;
+        if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Delete)) return true;
 
         tokens.erase(tokens.begin());
         if (tokens.empty()) {
-            auto res = g_engine.remove(g_currentDB, tname, {});
+            auto res = g_engine.remove(s.currentDB, tname, {});
             if (res != OpResult::Success) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
             }
             cout << "Delete done" << endl;
-            log(g_nowUser, "delete done", getTime());
+            log(s.username, "delete done", getTime());
             return false;
         }
         if (tokens.size() == 1) {
@@ -942,30 +940,30 @@ bool execute(const string& rawSql) {
         for (auto& t : tokens) t = modifyLogic(t);
         auto groups = breakDownConditions(tokens);
         for (const auto& g : groups) {
-            auto res = g_engine.remove(g_currentDB, tname, g);
+            auto res = g_engine.remove(s.currentDB, tname, g);
             if (res != OpResult::Success) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
             }
         }
         cout << "Delete done" << endl;
-        log(g_nowUser, "delete done", getTime());
+        log(s.username, "delete done", getTime());
         return false;
     }
 
     if (sql.substr(0, 6) == "update") {
-        if (!checkDB()) return true;
+        if (!checkDB(s)) return true;
         size_t setPos = sql.find("set");
         if (setPos == std::string::npos) {
             cout << "SQL syntax error" << endl;
             return true;
         }
         string tname = trim(sql.substr(6, setPos - 6));
-        if (!g_engine.tableExists(g_currentDB, tname)) {
+        if (!g_engine.tableExists(s.currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        if (!checkTablePermission(tname, dbms::StorageEngine::TablePrivilege::Update)) return true;
+        if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Update)) return true;
 
         size_t wherePos = sql.find("where", setPos);
         auto updates = parseSetClause(sql, setPos + 3,
@@ -978,7 +976,7 @@ bool execute(const string& rawSql) {
         vector<string> conds;
         if (wherePos != std::string::npos) {
             string whereClause = trim(sql.substr(wherePos + 5));
-            whereClause = expandSubqueries(whereClause);
+            whereClause = expandSubqueries(whereClause, s);
             whereClause = normalizeConditionStr(whereClause);
             vector<string> tokens = tokenize(whereClause);
             tokens.insert(tokens.begin(), "(");
@@ -986,47 +984,47 @@ bool execute(const string& rawSql) {
             for (auto& t : tokens) t = modifyLogic(t);
             auto groups = breakDownConditions(tokens);
             for (const auto& g : groups) {
-                auto res = g_engine.update(g_currentDB, tname, updates, g);
+                auto res = g_engine.update(s.currentDB, tname, updates, g);
                 if (res != OpResult::Success) {
                     cout << "Update failed" << endl;
                     return true;
                 }
             }
         } else {
-            auto res = g_engine.update(g_currentDB, tname, updates, {});
+            auto res = g_engine.update(s.currentDB, tname, updates, {});
             if (res != OpResult::Success) {
                 cout << "Update failed" << endl;
                 return true;
             }
         }
         cout << "Update done" << endl;
-        log(g_nowUser, "update done", getTime());
+        log(s.username, "update done", getTime());
         return false;
     }
 
     if (sql.substr(0, 7) == "analyze") {
-        if (!checkAdmin()) return true;
-        if (!checkDB()) return true;
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
         string rest = trim(sql.substr(7));
         if (rest.substr(0, 5) != "table") {
             cout << "SQL syntax error" << endl;
             return true;
         }
         string tname = trim(rest.substr(5));
-        g_engine.analyzeTable(g_currentDB, tname);
+        g_engine.analyzeTable(s.currentDB, tname);
         cout << "Table " << tname << " analyzed" << endl;
         return false;
     }
 
     if (sql.substr(0, 5) == "begin") {
-        if (!checkDB()) return true;
-        auto res = g_engine.beginTransaction(g_currentDB);
+        if (!checkDB(s)) return true;
+        auto res = g_engine.beginTransaction(s.currentDB);
         if (res != OpResult::Success) {
             cout << "Begin transaction failed" << endl;
             return true;
         }
         cout << "Transaction started" << endl;
-        log(g_nowUser, "begin transaction", getTime());
+        log(s.username, "begin transaction", getTime());
         return false;
     }
 
@@ -1037,7 +1035,7 @@ bool execute(const string& rawSql) {
             return true;
         }
         cout << "Transaction committed" << endl;
-        log(g_nowUser, "commit transaction", getTime());
+        log(s.username, "commit transaction", getTime());
         return false;
     }
 
@@ -1048,13 +1046,13 @@ bool execute(const string& rawSql) {
             return true;
         }
         cout << "Transaction rolled back" << endl;
-        log(g_nowUser, "rollback transaction", getTime());
+        log(s.username, "rollback transaction", getTime());
         return false;
     }
 
     if (sql.substr(0, 4) == "drop") {
-        if (!checkAdmin()) return true;
-        if (!checkDB()) return true;
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
         vector<string> tokens = tokenize(sql.substr(4));
         if (tokens.size() < 2) {
             cout << "SQL syntax error" << endl;
@@ -1063,7 +1061,7 @@ bool execute(const string& rawSql) {
         string op = tokens[0];
         string name = tokens[1];
         if (op == "table") {
-            auto res = g_engine.dropTable(g_currentDB, name);
+            auto res = g_engine.dropTable(s.currentDB, name);
             if (res == OpResult::TableNotExist) {
                 cout << "Table " << name << " not exist" << endl;
                 return true;
@@ -1078,7 +1076,7 @@ bool execute(const string& rawSql) {
                 return true;
             }
             cout << "Database dropped" << endl;
-            log(g_nowUser, "database dropped", getTime());
+            log(s.username, "database dropped", getTime());
             return false;
         }
         if (op == "index") {
@@ -1088,7 +1086,7 @@ bool execute(const string& rawSql) {
                 return true;
             }
             string tname = tokens[3];
-            auto res = g_engine.dropIndex(g_currentDB, tname, name);
+            auto res = g_engine.dropIndex(s.currentDB, tname, name);
             if (res != OpResult::Success) {
                 cout << "Drop index failed" << endl;
                 return true;
@@ -1097,7 +1095,7 @@ bool execute(const string& rawSql) {
             return false;
         }
         if (op == "view") {
-            auto res = g_engine.dropView(g_currentDB, name);
+            auto res = g_engine.dropView(s.currentDB, name);
             if (res == OpResult::TableNotExist) {
                 cout << "View " << name << " not exist" << endl;
                 return true;
@@ -1121,7 +1119,7 @@ bool execute(const string& rawSql) {
         actualUnionPos = unionPos;
     }
     if (actualUnionPos != string::npos) {
-        if (!checkDB()) return true;
+        if (!checkDB(s)) return true;
         string leftSql = trim(sql.substr(0, actualUnionPos));
         string rightSql = trim(sql.substr(actualUnionPos + (isUnionAll ? 9 : 5)));
         if (leftSql.empty() || rightSql.empty()) {
@@ -1132,12 +1130,12 @@ bool execute(const string& rawSql) {
         auto* oldBuf = cout.rdbuf();
         stringstream leftSs;
         cout.rdbuf(leftSs.rdbuf());
-        execute(leftSql);
+        execute(leftSql, s);
         cout.rdbuf(oldBuf);
         // Execute right query, capture output
         stringstream rightSs;
         cout.rdbuf(rightSs.rdbuf());
-        execute(rightSql);
+        execute(rightSql, s);
         cout.rdbuf(oldBuf);
         // Parse outputs: first line is header, rest are data rows
         vector<string> leftLines, rightLines;
@@ -1190,8 +1188,8 @@ bool execute(const string& rawSql) {
 
     // GRANT privilege ON table TO user
     if (sql.substr(0, 6) == "grant ") {
-        if (!checkAdmin()) return true;
-        if (!checkDB()) return true;
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
         string rest = trim(sql.substr(6));
         size_t onPos = rest.find(" on ");
         size_t toPos = rest.find(" to ");
@@ -1212,15 +1210,15 @@ bool execute(const string& rawSql) {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
-        g_engine.grant(g_currentDB, tname, uname, priv);
+        g_engine.grant(s.currentDB, tname, uname, priv);
         cout << "Granted " << privStr << " on " << tname << " to " << uname << endl;
         return false;
     }
 
     // REVOKE privilege ON table FROM user
     if (sql.substr(0, 7) == "revoke ") {
-        if (!checkAdmin()) return true;
-        if (!checkDB()) return true;
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
         string rest = trim(sql.substr(7));
         size_t onPos = rest.find(" on ");
         size_t fromPos = rest.find(" from ");
@@ -1241,7 +1239,7 @@ bool execute(const string& rawSql) {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
-        g_engine.revoke(g_currentDB, tname, uname, priv);
+        g_engine.revoke(s.currentDB, tname, uname, priv);
         cout << "Revoked " << privStr << " on " << tname << " from " << uname << endl;
         return false;
     }
@@ -1261,7 +1259,7 @@ bool execute(const string& rawSql) {
             cout << "SQL syntax error: empty statement" << endl;
             return true;
         }
-        g_preparedStmts[stmtName] = templateSql;
+        s.preparedStmts[stmtName] = templateSql;
         cout << "Statement " << stmtName << " prepared" << endl;
         return false;
     }
@@ -1277,8 +1275,8 @@ bool execute(const string& rawSql) {
             stmtName = trim(rest.substr(0, usingPos));
             usingClause = trim(rest.substr(usingPos + 7));
         }
-        auto it = g_preparedStmts.find(stmtName);
-        if (it == g_preparedStmts.end()) {
+        auto it = s.preparedStmts.find(stmtName);
+        if (it == s.preparedStmts.end()) {
             cout << "Prepared statement " << stmtName << " not found" << endl;
             return true;
         }
@@ -1308,13 +1306,13 @@ bool execute(const string& rawSql) {
                 return true;
             }
         }
-        return execute(expanded);
+        return execute(expanded, s);
     }
 
     // DEALLOCATE PREPARE stmt_name
     if (sql.substr(0, 19) == "deallocate prepare ") {
         string stmtName = trim(sql.substr(19));
-        if (g_preparedStmts.erase(stmtName)) {
+        if (s.preparedStmts.erase(stmtName)) {
             cout << "Statement " << stmtName << " deallocated" << endl;
         } else {
             cout << "Prepared statement " << stmtName << " not found" << endl;
@@ -1324,8 +1322,8 @@ bool execute(const string& rawSql) {
 
     // LOAD DATA INFILE: import CSV
     if (sql.substr(0, 17) == "load data infile ") {
-        if (!checkAdmin()) return true;
-        if (!checkDB()) return true;
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
         string rest = trim(sql.substr(17));
         // Parse: 'file.csv' into table tname
         size_t q1 = rest.find('\'');
@@ -1345,11 +1343,11 @@ bool execute(const string& rawSql) {
             return true;
         }
         string tname = trim(afterFile.substr(11));
-        if (!g_engine.tableExists(g_currentDB, tname)) {
+        if (!g_engine.tableExists(s.currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        TableSchema tbl = g_engine.getTableSchema(g_currentDB, tname);
+        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
         ifstream csvIn(filename);
         if (!csvIn) {
             cout << "Cannot open file: " << filename << endl;
@@ -1372,7 +1370,7 @@ bool execute(const string& rawSql) {
             for (size_t i = 0; i < tbl.len; ++i) {
                 values[tbl.cols[i].dataName] = trim(fields[i]);
             }
-            auto res = g_engine.insert(g_currentDB, tname, values);
+            auto res = g_engine.insert(s.currentDB, tname, values);
             if (res == OpResult::Success) imported++;
             else skipped++;
         }
@@ -1382,7 +1380,7 @@ bool execute(const string& rawSql) {
 
     // EXPLAIN: show query plan without executing
     if (sql.substr(0, 7) == "explain") {
-        if (!checkDB()) return true;
+        if (!checkDB(s)) return true;
         string inner = trim(sql.substr(7));
         if (inner.size() < 6 || inner.substr(0, 6) != "select") {
             cout << "EXPLAIN only supports SELECT" << endl;
@@ -1449,7 +1447,7 @@ bool execute(const string& rawSql) {
             while (getline(css, item, ',')) selectCols.insert(trim(item));
         }
         dbms::PlanContext ctx;
-        ctx.dbname = g_currentDB;
+        ctx.dbname = s.currentDB;
         ctx.tablename = tname;
         ctx.conds = dbms::StorageEngine::parseConditions(conds);
         ctx.selectCols = selectCols;
@@ -1458,12 +1456,12 @@ bool execute(const string& rawSql) {
         ctx.limit = limitVal;
         ctx.distinct = isDistinct;
         auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-        cout << dbms::QueryPlanner::explain(plan, &g_engine, g_currentDB);
+        cout << dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB);
         return false;
     }
 
     if (sql.substr(0, 6) == "select") {
-        if (!checkDB()) return true;
+        if (!checkDB(s)) return true;
 
         // Check for INTO OUTFILE clause
         string outfile;
@@ -1577,13 +1575,13 @@ bool execute(const string& rawSql) {
             dot = rightOnCol.find('.');
             if (dot != string::npos) rightOnCol = rightOnCol.substr(dot + 1);
 
-            if (!g_engine.tableExists(g_currentDB, leftTable) ||
-                !g_engine.tableExists(g_currentDB, rightTable)) {
+            if (!g_engine.tableExists(s.currentDB, leftTable) ||
+                !g_engine.tableExists(s.currentDB, rightTable)) {
                 cout << "Table not exist" << endl;
                 return true;
             }
-            if (!checkTablePermission(leftTable, dbms::StorageEngine::TablePrivilege::Select)) return true;
-            if (!checkTablePermission(rightTable, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            if (!checkTablePermission(s, leftTable, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            if (!checkTablePermission(s, rightTable, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
             set<string> selectCols;
             bool selectAll = (columns == "*");
@@ -1600,13 +1598,13 @@ bool execute(const string& rawSql) {
             if (wherePos != string::npos) {
                 size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
                 string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
-                whereClause = expandSubqueries(whereClause);
+                whereClause = expandSubqueries(whereClause, s);
                 string condStr = normalizeConditionStr(whereClause);
                 condTokens = tokenize(condStr);
             }
 
-            TableSchema leftTbl = g_engine.getTableSchema(g_currentDB, leftTable);
-            TableSchema rightTbl = g_engine.getTableSchema(g_currentDB, rightTable);
+            TableSchema leftTbl = g_engine.getTableSchema(s.currentDB, leftTable);
+            TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
             if (selectAll) {
                 for (size_t i = 0; i < leftTbl.len; ++i)
                     cout << leftTable << "." << leftTbl.cols[i].dataName << ' ';
@@ -1620,13 +1618,13 @@ bool execute(const string& rawSql) {
             vector<string> answers;
             auto runJoin = [&](const vector<string>& conds) -> vector<string> {
                 if (jt == JoinType::Left) {
-                    return g_engine.leftJoin(g_currentDB, leftTable, rightTable,
+                    return g_engine.leftJoin(s.currentDB, leftTable, rightTable,
                                               leftOnCol, rightOnCol, conds, selectCols);
                 } else if (jt == JoinType::Right) {
-                    return g_engine.rightJoin(g_currentDB, leftTable, rightTable,
+                    return g_engine.rightJoin(s.currentDB, leftTable, rightTable,
                                                leftOnCol, rightOnCol, conds, selectCols);
                 } else {
-                    return g_engine.join(g_currentDB, leftTable, rightTable,
+                    return g_engine.join(s.currentDB, leftTable, rightTable,
                                           leftOnCol, rightOnCol, conds, selectCols);
                 }
             };
@@ -1664,7 +1662,7 @@ bool execute(const string& rawSql) {
             }
             for (const auto& row : answers) {
                 cout << row << endl;
-                log(g_nowUser, row, getTime());
+                log(s.username, row, getTime());
             }
             return false;
         }
@@ -1678,18 +1676,18 @@ bool execute(const string& rawSql) {
                          : (offsetPos != string::npos) ? offsetPos : sql.size();
         string tname = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
 
-        if (!g_engine.tableExists(g_currentDB, tname)) {
-            if (g_engine.viewExists(g_currentDB, tname)) {
-                string viewSql = g_engine.getViewSQL(g_currentDB, tname);
+        if (!g_engine.tableExists(s.currentDB, tname)) {
+            if (g_engine.viewExists(s.currentDB, tname)) {
+                string viewSql = g_engine.getViewSQL(s.currentDB, tname);
                 if (!viewSql.empty()) {
-                    execute(viewSql);
+                    execute(viewSql, s);
                     return false;
                 }
             }
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        if (!checkTablePermission(tname, dbms::StorageEngine::TablePrivilege::Select)) return true;
+        if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
         string orderByCol;
         bool orderByAsc = true;
@@ -1734,7 +1732,7 @@ bool execute(const string& rawSql) {
             }
         }
 
-        TableSchema tbl = g_engine.getTableSchema(g_currentDB, tname);
+        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
         set<string> selectCols;
         bool selectAll = (columns == "*");
 
@@ -1779,7 +1777,7 @@ bool execute(const string& rawSql) {
                            : (limitPos != string::npos) ? limitPos
                            : (offsetPos != string::npos) ? offsetPos : sql.size();
             string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
-            whereClause = expandSubqueries(whereClause);
+            whereClause = expandSubqueries(whereClause, s);
             string condStr = normalizeConditionStr(whereClause);
             condTokens = tokenize(condStr);
         }
@@ -1796,7 +1794,7 @@ bool execute(const string& rawSql) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.groupAggregate(g_currentDB, tname, {}, pureAgg, groupByCol, havingConds);
+                answers = g_engine.groupAggregate(s.currentDB, tname, {}, pureAgg, groupByCol, havingConds);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -1804,7 +1802,7 @@ bool execute(const string& rawSql) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.groupAggregate(g_currentDB, tname, g, pureAgg, groupByCol, havingConds);
+                    auto part = g_engine.groupAggregate(s.currentDB, tname, g, pureAgg, groupByCol, havingConds);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
@@ -1825,7 +1823,7 @@ bool execute(const string& rawSql) {
                 return true;
             }
             if (condTokens.empty()) {
-                answers = g_engine.aggregate(g_currentDB, tname, {}, pureAgg);
+                answers = g_engine.aggregate(s.currentDB, tname, {}, pureAgg);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -1833,7 +1831,7 @@ bool execute(const string& rawSql) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.aggregate(g_currentDB, tname, g, pureAgg);
+                    auto part = g_engine.aggregate(s.currentDB, tname, g, pureAgg);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
@@ -1846,7 +1844,7 @@ bool execute(const string& rawSql) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.query(g_currentDB, tname, {}, selectCols, orderByCol, orderByAsc);
+                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderByCol, orderByAsc);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -1854,7 +1852,7 @@ bool execute(const string& rawSql) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(g_currentDB, tname, g, selectCols, orderByCol, orderByAsc);
+                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderByCol, orderByAsc);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
@@ -1928,7 +1926,7 @@ bool execute(const string& rawSql) {
         } else {
             for (const auto& row : answers) {
                 cout << row << endl;
-                log(g_nowUser, row, getTime());
+                log(s.username, row, getTime());
             }
         }
         return false;
@@ -1947,7 +1945,7 @@ bool execute(const string& rawSql) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            TableSchema tbl = g_engine.getTableSchema(g_currentDB, tokens[1]);
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tokens[1]);
             if (tbl.len == 0) {
                 cout << "Table " << tokens[1] << " not exist" << endl;
                 return true;
@@ -1956,9 +1954,9 @@ bool execute(const string& rawSql) {
             return false;
         }
         if (op == "database") {
-            auto names = g_engine.getTableNames(g_currentDB);
+            auto names = g_engine.getTableNames(s.currentDB);
             for (const auto& n : names) cout << n << endl;
-            log(g_nowUser, "view database", getTime());
+            log(s.username, "view database", getTime());
             return false;
         }
         cout << "SQL syntax error" << endl;
@@ -1980,20 +1978,21 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    Session s;
     string username, password;
     cout << "login" << endl;
     cin >> username >> password;
     if (login(username, password)) {
-        g_nowUser = username;
-        log(g_nowUser, "login", getTime());
-        g_nowPermission = permissionQuery(username);
+        s.username = username;
+        log(s.username, "login", getTime());
+        s.permission = permissionQuery(username);
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
         while (true) {
             string sql;
             getline(cin, sql);
             if (trim(sql) == "exit") break;
             auto start = std::chrono::steady_clock::now();
-            execute(sql);
+            execute(sql, s);
             auto end = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
             if (ms > 100.0) {

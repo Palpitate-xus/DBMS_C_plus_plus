@@ -1,6 +1,7 @@
 #include "NetworkServer.h"
 #include "TableManage.h"
 #include "permissions.h"
+#include "Session.h"
 
 #include <arpa/inet.h>
 #include <chrono>
@@ -12,13 +13,10 @@
 #include <unistd.h>
 
 // External globals from main.cpp
-extern int g_nowPermission;
-extern std::string g_nowUser;
-extern std::string g_currentDB;
 extern dbms::StorageEngine g_engine;
 
 // Forward declare execute() and logSlowQuery() from main.cpp
-extern bool execute(const std::string& rawSql);
+extern bool execute(const std::string& rawSql, Session& s);
 extern void logSlowQuery(const std::string& sql, double ms);
 
 namespace dbms {
@@ -55,6 +53,8 @@ static void handleClient(int clientFd) {
     g_stats.activeConnections++;
     g_stats.totalConnections++;
 
+    Session s;
+
     // Login phase
     sendLine(clientFd, "login");
     std::string creds = recvLine(clientFd);
@@ -69,9 +69,9 @@ static void handleClient(int clientFd) {
         return;
     }
 
-    g_nowUser = username;
-    g_nowPermission = permissionQuery(username);
-    g_currentDB = "info";
+    s.username = username;
+    s.permission = permissionQuery(username);
+    s.currentDB = "info";
     sendLine(clientFd, "successfully login");
 
     // SQL execution loop
@@ -94,7 +94,7 @@ static void handleClient(int clientFd) {
         auto* oldBuf = std::cout.rdbuf();
         std::stringstream output;
         std::cout.rdbuf(output.rdbuf());
-        execute(sql);
+        execute(sql, s);
         std::cout.rdbuf(oldBuf);
 
         auto end = std::chrono::steady_clock::now();
