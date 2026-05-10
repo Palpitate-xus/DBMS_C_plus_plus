@@ -5,6 +5,35 @@
 namespace dbms {
 
 // ========================================================================
+// Checksum
+// ========================================================================
+
+uint16_t Page::computeChecksum(const char* data, size_t len) {
+    uint8_t sum1 = 0, sum2 = 0;
+    for (size_t i = 0; i < len; ++i) {
+        sum1 = (sum1 + static_cast<uint8_t>(data[i])) % 255;
+        sum2 = (sum2 + sum1) % 255;
+    }
+    return (static_cast<uint16_t>(sum2) << 8) | sum1;
+}
+
+void Page::writeChecksum() {
+    Header* h = header();
+    h->checksum = 0;
+    h->checksum = computeChecksum(buf_, PAGE_SIZE);
+}
+
+bool Page::verifyChecksum() const {
+    const Header* h = header();
+    uint16_t saved = h->checksum;
+    if (saved == 0) return true; // unchecked / legacy page
+    const_cast<Header*>(h)->checksum = 0;
+    uint16_t computed = computeChecksum(buf_, PAGE_SIZE);
+    const_cast<Header*>(h)->checksum = saved;
+    return saved == computed;
+}
+
+// ========================================================================
 // Page initialization
 // ========================================================================
 
@@ -15,8 +44,9 @@ void Page::init(uint32_t pageId) {
     h->numSlots = 0;
     h->freeOffset = static_cast<uint16_t>(sizeof(Header));
     h->dataOffset = static_cast<uint16_t>(PAGE_SIZE);
-    h->reserved = 0;
+    h->checksum = 0;
     h->nextPage = 0;
+    writeChecksum();
 }
 
 // ========================================================================
@@ -37,6 +67,7 @@ bool Page::insert(const char* data, size_t len, uint16_t& slotId) {
             s->length = static_cast<uint16_t>(len);
             s->flags = 0;
             slotId = i;
+            writeChecksum();
             return true;
         }
     }
@@ -57,6 +88,7 @@ bool Page::insert(const char* data, size_t len, uint16_t& slotId) {
     slotId = h->numSlots;
     h->numSlots++;
     h->freeOffset = static_cast<uint16_t>(sizeof(Header) + h->numSlots * sizeof(Slot));
+    writeChecksum();
     return true;
 }
 
@@ -70,6 +102,7 @@ bool Page::remove(uint16_t slotId) {
     Slot* s = slot(slotId);
     if ((s->flags & SLOT_DELETED) != 0) return false;
     s->flags |= SLOT_DELETED;
+    writeChecksum();
     return true;
 }
 
@@ -79,6 +112,7 @@ bool Page::restore(uint16_t slotId) {
     Slot* s = slot(slotId);
     if ((s->flags & SLOT_DELETED) == 0) return false;
     s->flags &= ~SLOT_DELETED;
+    writeChecksum();
     return true;
 }
 
@@ -113,6 +147,7 @@ bool Page::update(uint16_t slotId, const char* data, size_t len) {
             // Zero pad remainder to avoid stale data
             std::memset(buf_ + s->offset + len, 0, s->length - len);
         }
+        writeChecksum();
         return true;
     }
 
@@ -122,6 +157,7 @@ bool Page::update(uint16_t slotId, const char* data, size_t len) {
     if (!insert(data, len, newSlotId)) {
         // Failed to insert: restore old slot (best effort)
         s->flags &= ~SLOT_DELETED;
+        writeChecksum();
         return false;
     }
     return true;
@@ -174,6 +210,7 @@ void Page::compact() {
     h->numSlots = liveCount;
     h->freeOffset = static_cast<uint16_t>(sizeof(Header) + liveCount * sizeof(Slot));
     h->dataOffset = newDataOffset;
+    writeChecksum();
 }
 
 // ========================================================================

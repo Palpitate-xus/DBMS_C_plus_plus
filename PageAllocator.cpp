@@ -108,7 +108,14 @@ uint32_t PageAllocator::numPages() const {
 
 char* PageAllocator::fetchPage(uint32_t pageId) {
     if (!isOpen()) return nullptr;
-    return bp_->fetchPage(pageId);
+    char* buf = bp_->fetchPage(pageId);
+    if (buf && pageId >= 1) {
+        Page page(buf);
+        if (!page.verifyChecksum()) {
+            std::cerr << "[CHECKSUM ERROR] Page " << pageId << " checksum mismatch" << std::endl;
+        }
+    }
+    return buf;
 }
 
 void PageAllocator::unpinPage(uint32_t pageId) {

@@ -52,7 +52,7 @@ public:
         uint16_t numSlots;     // number of slots currently on page
         uint16_t freeOffset;   // offset where slot array ends (= start of free space)
         uint16_t dataOffset;   // offset where data region starts (= end of free space)
-        uint16_t reserved;
+        uint16_t checksum;     // Fletcher-16 page integrity checksum (0 = unchecked/legacy)
         uint32_t nextPage;     // next page in chain (for overflow / free list)
     };
 #pragma pack(pop)
@@ -89,6 +89,11 @@ public:
     uint32_t id() const { return header()->pageId; }
     uint32_t nextPage() const { return header()->nextPage; }
     void setNextPage(uint32_t next);
+
+    // Checksum
+    static uint16_t computeChecksum(const char* data, size_t len);
+    void writeChecksum();
+    bool verifyChecksum() const;
 
     // Number of live (non-deleted) records
     uint16_t liveCount() const;
