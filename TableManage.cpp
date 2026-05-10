@@ -1,4 +1,5 @@
 #include "TableManage.h"
+#include "TxnIdGenerator.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -12,6 +13,18 @@
 #include <vector>
 
 namespace dbms {
+
+// Global active transaction tracking
+std::mutex StorageEngine::globalTxnMutex_;
+std::set<uint64_t> StorageEngine::activeTransactions_;
+
+bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
+    if (rowTxnId == creatorTxnId) return true;
+    if (rowTxnId < upLimitId) return true;
+    if (rowTxnId >= lowLimitId) return false;
+    if (activeTxnIds.count(rowTxnId)) return false;
+    return true;
+}
 
 static std::string trim(const std::string& s) {
     size_t a = 0;
@@ -102,7 +115,7 @@ void TableSchema::print() const {
 size_t TableSchema::rowSize() const {
     size_t total = 0;
     for (size_t i = 0; i < len; ++i) total += cols[i].dsize;
-    return total;
+    return total + MVCC_HEADER_SIZE;
 }
 
 // ========================================================================
@@ -517,15 +530,25 @@ void StorageEngine::decodeRid(int64_t rid, uint32_t& pageId, uint16_t& slotId) {
 }
 
 void StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
-                                const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback) const {
+                                const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
+                                const ReadView* readView) const {
+    const ReadView* rv = readView;
+    if (!rv && inTransaction_) rv = &readView_;
+
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     if (!pa) return;
     uint32_t np = pa->numPages();
     for (uint32_t pid = 1; pid < np; ++pid) {
         char* buf = pa->fetchPage(pid);
         Page page(buf);
-        page.forEachLive([&callback, pid](uint16_t sid, const char* data, size_t len) {
-            callback(pid, sid, data, len);
+        page.forEachLive([&callback, pid, rv](uint16_t sid, const char* data, size_t len) {
+            if (len <= MVCC_HEADER_SIZE) return;
+            if (rv) {
+                uint64_t rowTxnId = 0;
+                std::memcpy(&rowTxnId, data, sizeof(uint64_t));
+                if (!rv->isVisible(rowTxnId)) return;
+            }
+            callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
         });
         pa->unpinPage(pid);
     }
@@ -544,7 +567,11 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
     bool ok = page.get(slotId, data, len);
     pa->unpinPage(pageId);
     if (!ok) return false;
-    rowBuffer.assign(data, len);
+    if (len > MVCC_HEADER_SIZE) {
+        rowBuffer.assign(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+    } else {
+        rowBuffer.clear();
+    }
     return true;
 }
 
@@ -555,7 +582,7 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const Ta
     }
     if (pkIdx >= tbl.len) return "";
 
-    size_t offset = 0;
+    size_t offset = MVCC_HEADER_SIZE;
     for (size_t i = 0; i < pkIdx; ++i) offset += tbl.cols[i].dsize;
 
     const Column& col = tbl.cols[pkIdx];
@@ -642,7 +669,7 @@ BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
 std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
                                                const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
-    size_t offset = 0;
+    size_t offset = MVCC_HEADER_SIZE;
     for (size_t i = 0; i < colIdx; ++i) offset += tbl.cols[i].dsize;
     const Column& col = tbl.cols[colIdx];
     if (col.dataType == "char") {
@@ -1000,7 +1027,7 @@ bool StorageEngine::stringToBuffer(const std::string& src, char* dst, size_t len
 // ========================================================================
 bool StorageEngine::evalConditionOnRow(const Condition& cond,
                                         const char* rowData, const TableSchema& tbl) {
-    size_t offset = 0;
+    size_t offset = MVCC_HEADER_SIZE;
     size_t ci = 0;
     for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci)
         offset += tbl.cols[ci].dsize;
@@ -1072,7 +1099,14 @@ OpResult StorageEngine::insert(const std::string& dbname,
 
     // Build row buffer and validate all values before writing
     std::string rowBuffer(rowSize, '\0');
-    size_t offset = 0;
+
+    // Write MVCC header: creatorTxnId + rollbackPtr
+    uint64_t creatorTxnId = inTransaction_ ? currentTxnId_ : 0;
+    uint64_t rollbackPtr = 0;
+    std::memcpy(rowBuffer.data(), &creatorTxnId, sizeof(uint64_t));
+    std::memcpy(rowBuffer.data() + sizeof(uint64_t), &rollbackPtr, sizeof(uint64_t));
+
+    size_t offset = MVCC_HEADER_SIZE;
 
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
@@ -2920,22 +2954,42 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
         }
     }
 
+    // Assign transaction ID and create ReadView
+    currentTxnId_ = TxnIdGenerator::instance().nextTxId();
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        activeTransactions_.insert(currentTxnId_);
+        readView_.creatorTxnId = currentTxnId_;
+        readView_.upLimitId = activeTransactions_.empty() ? currentTxnId_ : *activeTransactions_.begin();
+        readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        readView_.activeTxnIds = activeTransactions_;
+        readView_.activeTxnIds.erase(currentTxnId_);
+    }
+
     txnLog_.clear();
     inTransaction_ = true;
     txnDB_ = dbname;
     // Write WAL BEGIN marker
     walClear(walPath(dbname));
-    walAppend(walPath(dbname), "BEGIN");
+    walAppend(walPath(dbname), "BEGIN " + std::to_string(currentTxnId_));
     return OpResult::Success;
 }
 
 OpResult StorageEngine::commitTransaction() {
     if (!inTransaction_) return OpResult::Success;
+    // Update max committed txId
+    TxnIdGenerator::instance().notifyCommit(currentTxnId_);
+    // Remove from active set
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        activeTransactions_.erase(currentTxnId_);
+    }
     // Write WAL COMMIT marker
-    walAppend(walPath(txnDB_), "COMMIT");
+    walAppend(walPath(txnDB_), "COMMIT " + std::to_string(currentTxnId_));
     txnLog_.clear();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
+    currentTxnId_ = 0;
     inTransaction_ = false;
     txnDB_.clear();
     return OpResult::Success;
@@ -2943,7 +2997,12 @@ OpResult StorageEngine::commitTransaction() {
 
 OpResult StorageEngine::rollbackTransaction() {
     if (!inTransaction_) return OpResult::Success;
-    walAppend(walPath(txnDB_), "ROLLBACK");
+    // Remove from active set (aborted, not committed)
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        activeTransactions_.erase(currentTxnId_);
+    }
+    walAppend(walPath(txnDB_), "ROLLBACK " + std::to_string(currentTxnId_));
 
     // Replay txnLog in reverse order to undo changes
     for (auto it = txnLog_.rbegin(); it != txnLog_.rend(); ++it) {
@@ -3058,6 +3117,7 @@ OpResult StorageEngine::rollbackTransaction() {
     txnLog_.clear();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
+    currentTxnId_ = 0;
     inTransaction_ = false;
     txnDB_.clear();
     return OpResult::Success;

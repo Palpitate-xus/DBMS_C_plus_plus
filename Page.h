@@ -32,6 +32,7 @@ public:
         uint32_t numPages;      // total number of pages in file
         uint32_t freeListHead;  // head of free page list (0 = none)
         uint32_t rowSize;       // fixed row size for this table
+        uint32_t formatVersion; // 0 = legacy, 1 = with MVCC header
     };
 #pragma pack(pop)
 

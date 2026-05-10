@@ -26,6 +26,11 @@ constexpr size_t MAX_COL_NAME_LEN = 15;
 constexpr size_t DATE_SIZE = 12;
 constexpr int64_t INF = 0x8000000000000000LL;
 
+// MVCC header size per row
+constexpr size_t MVCC_TXID_SIZE = 8;      // uint64_t creatorTxnId
+constexpr size_t MVCC_ROLLBACK_SIZE = 8;  // uint64_t rollbackPtr (0 = no older version)
+constexpr size_t MVCC_HEADER_SIZE = MVCC_TXID_SIZE + MVCC_ROLLBACK_SIZE;
+
 struct Column {
     bool isNull = false;
     bool isPrimaryKey = false;
@@ -197,9 +202,19 @@ public:
     static int64_t encodeRid(uint32_t pageId, uint16_t slotId);
     static void decodeRid(int64_t rid, uint32_t& pageId, uint16_t& slotId);
 
+    // MVCC ReadView
+    struct ReadView {
+        uint64_t creatorTxnId = 0;
+        uint64_t upLimitId = 0;
+        uint64_t lowLimitId = 0;
+        std::set<uint64_t> activeTxnIds;
+        bool isVisible(uint64_t rowTxnId) const;
+    };
+
     // Row iteration (public for execution plan use)
     void forEachRow(const std::string& dbname, const std::string& tablename,
-                    const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback) const;
+                    const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback,
+                    const ReadView* readView = nullptr) const;
     bool readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer, const TableSchema& tbl) const;
 
     // Schema helpers (public for execution plan use)
@@ -223,6 +238,12 @@ public:
     std::vector<std::string> getUserPermissions(const std::string& dbname,
                                                  const std::string& tablename,
                                                  const std::string& username) const;
+
+    // Current transaction ID (0 = not in a transaction)
+    uint64_t currentTxnId() const { return currentTxnId_; }
+    const ReadView* getCurrentReadView() const {
+        return inTransaction_ ? &readView_ : nullptr;
+    }
 
 private:
     std::filesystem::path dbPath(const std::string& dbname) const;
@@ -267,6 +288,8 @@ private:
     // Transaction state
     bool inTransaction_ = false;
     std::string txnDB_;
+    uint64_t currentTxnId_ = 0;
+    ReadView readView_;
     struct TxnLogEntry {
         enum class Op { Insert, Update, Delete } op;
         std::string tableName;
@@ -277,6 +300,10 @@ private:
     void logTxnInsert(const std::string& tableName, int64_t rowIdx);
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
+
+    // Global active transaction tracking (for ReadView)
+    static std::mutex globalTxnMutex_;
+    static std::set<uint64_t> activeTransactions_;
 };
 
 // Column type constructors

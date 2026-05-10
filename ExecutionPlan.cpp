@@ -12,7 +12,7 @@ namespace dbms {
 static std::string formatRow(const char* rowData, const TableSchema& tbl,
                               const std::set<std::string>& selectCols) {
     std::string rowStr;
-    size_t offset = 0;
+    size_t offset = MVCC_HEADER_SIZE;
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end()) {
@@ -68,7 +68,7 @@ static bool likeMatch(const std::string& text, const std::string& pattern) {
 // ========================================================================
 static bool evalCondRaw(const StorageEngine::Condition& cond,
                          const char* rowData, const TableSchema& tbl) {
-    size_t offset = 0;
+    size_t offset = MVCC_HEADER_SIZE;
     size_t ci = 0;
     for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci)
         offset += tbl.cols[ci].dsize;
