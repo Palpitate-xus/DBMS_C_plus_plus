@@ -96,6 +96,21 @@ public:
     std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;
     std::vector<std::string> getViewNames(const std::string& dbname) const;
 
+    // Statistics
+    struct ColumnStats {
+        size_t cardinality = 0;
+        std::string minVal;
+        std::string maxVal;
+    };
+    struct TableStats {
+        size_t rowCount = 0;
+        std::map<std::string, ColumnStats> colStats;
+    };
+    void analyzeTable(const std::string& dbname, const std::string& tablename);
+    size_t getTableRowCount(const std::string& dbname, const std::string& tablename) const;
+    ColumnStats getColumnStats(const std::string& dbname, const std::string& tablename,
+                                const std::string& colname) const;
+
     // Data operations
     OpResult insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values);
@@ -205,6 +220,7 @@ private:
     std::filesystem::path walPath(const std::string& dbname) const;
     std::filesystem::path viewPath(const std::string& dbname, const std::string& viewname) const;
     std::filesystem::path viewsDir(const std::string& dbname) const;
+    std::filesystem::path statsPath(const std::string& dbname) const;
 
     void writeSchema(std::ostream& out, const TableSchema& tbl);
     TableSchema readSchema(std::istream& in, const std::string& tablename) const;

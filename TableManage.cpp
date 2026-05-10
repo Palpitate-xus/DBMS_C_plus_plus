@@ -243,6 +243,139 @@ std::vector<std::string> StorageEngine::getViewNames(const std::string& dbname) 
 }
 
 // ========================================================================
+// Statistics
+// ========================================================================
+
+std::filesystem::path StorageEngine::statsPath(const std::string& dbname) const {
+    return dbPath(dbname) / ".stats";
+}
+
+void StorageEngine::analyzeTable(const std::string& dbname,
+                                  const std::string& tablename) {
+    if (!tableExists(dbname, tablename)) return;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    TableStats stats;
+    stats.rowCount = 0;
+    std::map<std::string, std::set<std::string>> distinctVals;
+    std::map<std::string, std::string> minVals, maxVals;
+
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t) {
+        stats.rowCount++;
+        size_t offset = 0;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const Column& col = tbl.cols[i];
+            std::string val;
+            if (col.dataType == "char") {
+                std::string buf(col.dsize, '\0');
+                std::memcpy(buf.data(), data + offset, col.dsize);
+                auto nul = buf.find('\0');
+                if (nul != std::string::npos) buf.resize(nul);
+                val = buf;
+            } else if (col.dataType == "date") {
+                Date d;
+                std::memcpy(&d, data + offset, DATE_SIZE);
+                val = (d.year == 0) ? "" : str(d);
+            } else {
+                int64_t v = 0;
+                std::memcpy(&v, data + offset, col.dsize);
+                val = (v == INF) ? "" : transstr(v);
+            }
+            distinctVals[col.dataName].insert(val);
+            if (minVals.find(col.dataName) == minVals.end() || val < minVals[col.dataName]) {
+                minVals[col.dataName] = val;
+            }
+            if (maxVals.find(col.dataName) == maxVals.end() || val > maxVals[col.dataName]) {
+                maxVals[col.dataName] = val;
+            }
+            offset += col.dsize;
+        }
+    });
+
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const std::string& cname = tbl.cols[i].dataName;
+        ColumnStats cs;
+        cs.cardinality = distinctVals[cname].size();
+        cs.minVal = minVals[cname];
+        cs.maxVal = maxVals[cname];
+        stats.colStats[cname] = cs;
+    }
+
+    // Load existing stats, update this table's entry
+    std::map<std::string, TableStats> allStats;
+    auto spath = statsPath(dbname);
+    if (std::filesystem::exists(spath)) {
+        std::ifstream ifs(spath);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string tname, cname;
+            size_t card;
+            std::string minv, maxv;
+            ss >> tname >> cname >> card;
+            std::getline(ss, minv, '|');
+            std::getline(ss, maxv, '|');
+            allStats[tname].colStats[cname] = {card, minv, maxv};
+        }
+    }
+    allStats[tablename] = stats;
+
+    // Write back: include rowCount as a special entry
+    std::ofstream ofs(spath);
+    for (const auto& kv : allStats) {
+        // Write row count as first line for this table
+        ofs << kv.first << " __rows__ " << kv.second.rowCount << "||\n";
+        for (const auto& cv : kv.second.colStats) {
+            ofs << kv.first << " " << cv.first << " " << cv.second.cardinality
+               << "|" << cv.second.minVal << "|" << cv.second.maxVal << "\n";
+        }
+    }
+}
+
+size_t StorageEngine::getTableRowCount(const std::string& dbname,
+                                        const std::string& tablename) const {
+    auto spath = statsPath(dbname);
+    if (!std::filesystem::exists(spath)) return 0;
+    std::ifstream ifs(spath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string tname, cname;
+        size_t val;
+        ss >> tname >> cname >> val;
+        if (tname == tablename && cname == "__rows__") {
+            return val;
+        }
+    }
+    return 0;
+}
+
+StorageEngine::ColumnStats StorageEngine::getColumnStats(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& colname) const {
+    auto spath = statsPath(dbname);
+    if (!std::filesystem::exists(spath)) return {};
+    std::ifstream ifs(spath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string tname, cname;
+        size_t card;
+        std::string minv, maxv;
+        ss >> tname >> cname >> card;
+        std::getline(ss, minv, '|');
+        std::getline(ss, maxv, '|');
+        if (tname == tablename && cname == colname) {
+            return {card, minv, maxv};
+        }
+    }
+    return {};
+}
+
+// ========================================================================
 // WAL helpers
 // ========================================================================
 
@@ -545,24 +678,18 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
         if (c == colname) return OpResult::Success;
     }
 
-    // Build index from existing data
+    // Build index from existing data using page-based iteration
     BPTree* idx = getSecondaryIndex(dbname, tablename, colname);
     if (!idx) return OpResult::InvalidValue;
 
-    std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-    if (in) {
-        in.seekg(0, std::ios::end);
-        auto fs = static_cast<size_t>(in.tellg());
-        in.seekg(0, std::ios::beg);
-        size_t rowSize = tbl.rowSize();
-        size_t rowCount = (rowSize == 0) ? 0 : fs / rowSize;
-        for (size_t r = 0; r < rowCount; ++r) {
-            std::string row(rowSize, '\0');
-            in.read(row.data(), static_cast<std::streamsize>(rowSize));
-            std::string val = extractColumnValue(row, tbl, colIdx);
-            if (!val.empty()) idx->insertMulti(val, static_cast<int64_t>(r));
+    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                       const char* data, size_t len) {
+        std::string row(data, len);
+        std::string val = extractColumnValue(row, tbl, colIdx);
+        if (!val.empty()) {
+            idx->insertMulti(val, encodeRid(pageId, slotId));
         }
-    }
+    });
 
     // Record in metadata
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);

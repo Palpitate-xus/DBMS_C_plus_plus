@@ -40,6 +40,7 @@ public:
     bool open() override;
     bool next(std::string& outRow) override;
     void close() override;
+    const std::string& tableName() const { return tablename_; }
 
 private:
     StorageEngine* engine_;
@@ -62,6 +63,9 @@ public:
     bool open() override;
     bool next(std::string& outRow) override;
     void close() override;
+    const std::string& tableName() const { return tablename_; }
+    const std::string& colName() const { return colname_; }
+    const std::string& value() const { return value_; }
 
 private:
     StorageEngine* engine_;
@@ -87,6 +91,7 @@ public:
     bool next(std::string& outRow) override;
     void close() override;
     Operator* child() const { return child_.get(); }
+    const std::vector<StorageEngine::Condition>& conditions() const { return conds_; }
 
 private:
     OpPtr child_;
@@ -146,6 +151,7 @@ public:
     bool next(std::string& outRow) override;
     void close() override;
     Operator* child() const { return child_.get(); }
+    size_t limit() const { return limit_; }
 
 private:
     OpPtr child_;
@@ -185,6 +191,8 @@ public:
     void close() override;
     Operator* leftChild() const { return left_.get(); }
     Operator* rightChild() const { return right_.get(); }
+    const std::string& leftTable() const { return leftTable_; }
+    const std::string& rightTable() const { return rightTable_; }
 
 private:
     StorageEngine* engine_;
@@ -252,8 +260,9 @@ public:
                                 const std::vector<StorageEngine::Condition>& conds,
                                 const std::set<std::string>& selectCols);
 
-    // Get a human-readable description of the plan tree
-    static std::string explain(OpPtr& plan);
+    // Get a human-readable description of the plan tree with cost estimates
+    static std::string explain(OpPtr& plan, StorageEngine* engine,
+                               const std::string& dbname);
 };
 
 } // namespace dbms

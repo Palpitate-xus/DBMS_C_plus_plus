@@ -1,6 +1,7 @@
 #include "ExecutionPlan.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace dbms {
@@ -478,33 +479,39 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
     OpPtr root;
 
     // Choose between IndexScan and TableScan
-    bool hasIndexScan = false;
-    if (!ctx.conds.empty()) {
-        for (const auto& c : ctx.conds) {
+    std::vector<StorageEngine::Condition> remainingConds = ctx.conds;
+    if (!remainingConds.empty()) {
+        for (const auto& c : remainingConds) {
             if (c.op == "=") {
                 // Check if column has primary key index
                 TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+                bool isPK = false;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].dataName == c.colName && tbl.cols[i].isPrimaryKey) {
-                        root = std::make_unique<IndexScanOp>(engine, ctx.dbname, ctx.tablename,
-                                                                 c.colName, c.value);
-                        hasIndexScan = true;
-                        break;
+                        isPK = true; break;
                     }
                 }
-                if (!hasIndexScan) {
-                    // Check secondary index
+                bool hasSecIdx = false;
+                if (!isPK) {
                     auto indexedCols = engine->getIndexedColumns(ctx.dbname, ctx.tablename);
                     for (const auto& ic : indexedCols) {
-                        if (ic == c.colName) {
-                            root = std::make_unique<IndexScanOp>(engine, ctx.dbname, ctx.tablename,
-                                                                     c.colName, c.value);
-                            hasIndexScan = true;
-                            break;
-                        }
+                        if (ic == c.colName) { hasSecIdx = true; break; }
                     }
                 }
-                if (hasIndexScan) break;
+                if (isPK || hasSecIdx) {
+                    root = std::make_unique<IndexScanOp>(engine, ctx.dbname, ctx.tablename,
+                                                          c.colName, c.value);
+                    // Remove this condition from Filter since IndexScan handles it
+                    auto it = remainingConds.begin();
+                    while (it != remainingConds.end()) {
+                        if (it->colName == c.colName && it->op == c.op && it->value == c.value) {
+                            it = remainingConds.erase(it);
+                            break;
+                        }
+                        ++it;
+                    }
+                    break;
+                }
             }
         }
     }
@@ -514,9 +521,9 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
     }
 
     // Add Filter if there are remaining conditions
-    if (!ctx.conds.empty()) {
+    if (!remainingConds.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
-        root = std::make_unique<FilterOp>(std::move(root), tbl, ctx.conds);
+        root = std::make_unique<FilterOp>(std::move(root), tbl, remainingConds);
     }
 
     // Add Sort if ORDER BY
@@ -567,44 +574,148 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
 }
 
 // ========================================================================
-// EXPLAIN
+// EXPLAIN with cost estimation
 // ========================================================================
 
-static void explainOp(Operator* op, int indent, std::string& out) {
+struct CostEstimate {
+    double rows = 0;
+    double cost = 0;
+};
+
+static double estimateSelectivity(const StorageEngine::Condition& cond,
+                                  StorageEngine* engine,
+                                  const std::string& dbname,
+                                  const std::string& tablename) {
+    if (cond.op == "=") {
+        auto stats = engine->getColumnStats(dbname, tablename, cond.colName);
+        if (stats.cardinality > 0) {
+            return 1.0 / static_cast<double>(stats.cardinality);
+        }
+        return 0.1;
+    }
+    if (cond.op == "!=") return 0.9;
+    if (cond.op == "like") return 0.2;
+    // Range operators: <, >, <=, >=
+    return 0.3;
+}
+
+static CostEstimate explainOp(Operator* op, int indent,
+                              StorageEngine* engine,
+                              const std::string& dbname,
+                              std::string& out) {
     std::string prefix(indent * 2, ' ');
-    if (dynamic_cast<TableScanOp*>(op)) {
-        out += prefix + "TableScan\n";
-    } else if (dynamic_cast<IndexScanOp*>(op)) {
-        out += prefix + "IndexScan\n";
-    } else if (dynamic_cast<FilterOp*>(op)) {
-        out += prefix + "Filter\n";
-        if (auto* c = dynamic_cast<FilterOp*>(op)->child()) explainOp(c, indent + 1, out);
-    } else if (dynamic_cast<ProjectOp*>(op)) {
-        out += prefix + "Project\n";
-        if (auto* c = dynamic_cast<ProjectOp*>(op)->child()) explainOp(c, indent + 1, out);
-    } else if (dynamic_cast<SortOp*>(op)) {
-        out += prefix + "Sort\n";
-        if (auto* c = dynamic_cast<SortOp*>(op)->child()) explainOp(c, indent + 1, out);
-    } else if (dynamic_cast<LimitOp*>(op)) {
-        out += prefix + "Limit\n";
-        if (auto* c = dynamic_cast<LimitOp*>(op)->child()) explainOp(c, indent + 1, out);
-    } else if (dynamic_cast<DistinctOp*>(op)) {
-        out += prefix + "Distinct\n";
-        if (auto* c = dynamic_cast<DistinctOp*>(op)->child()) explainOp(c, indent + 1, out);
+    CostEstimate est;
+
+    if (auto* scan = dynamic_cast<TableScanOp*>(op)) {
+        double rows = static_cast<double>(engine->getTableRowCount(dbname, scan->tableName()));
+        est.rows = rows;
+        est.cost = rows * 1.0;
+        out += prefix + "TableScan(table=" + scan->tableName() +
+               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
+    } else if (auto* idx = dynamic_cast<IndexScanOp*>(op)) {
+        double rows = idx->colName().empty() ? 1.0 : 5.0;
+        // PK scan usually returns 1 row
+        TableSchema tbl = engine->getTableSchema(dbname, idx->tableName());
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == idx->colName() && tbl.cols[i].isPrimaryKey) {
+                rows = 1.0;
+                break;
+            }
+        }
+        auto stats = engine->getColumnStats(dbname, idx->tableName(), idx->colName());
+        if (stats.cardinality > 0) {
+            rows = static_cast<double>(engine->getTableRowCount(dbname, idx->tableName()))
+                   / static_cast<double>(stats.cardinality);
+            if (rows < 1.0) rows = 1.0;
+        }
+        est.rows = rows;
+        est.cost = rows * 2.0;  // index lookup + row fetch
+        out += prefix + "IndexScan(table=" + idx->tableName() +
+               ", col=" + idx->colName() + ", val=" + idx->value() +
+               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
+    } else if (auto* filt = dynamic_cast<FilterOp*>(op)) {
+        CostEstimate child = explainOp(filt->child(), indent + 1, engine, dbname, out);
+        double sel = 1.0;
+        for (const auto& c : filt->conditions()) {
+            // Try to find the table name for this condition
+            // We look at the child operator to determine the table
+            std::string tblName;
+            if (auto* ts = dynamic_cast<TableScanOp*>(filt->child())) {
+                tblName = ts->tableName();
+            } else if (auto* is = dynamic_cast<IndexScanOp*>(filt->child())) {
+                tblName = is->tableName();
+            }
+            sel *= estimateSelectivity(c, engine, dbname, tblName);
+        }
+        est.rows = child.rows * sel;
+        est.cost = child.cost + est.rows * 0.5;
+        out += prefix + "Filter  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
+    } else if (auto* proj = dynamic_cast<ProjectOp*>(op)) {
+        CostEstimate child = explainOp(proj->child(), indent + 1, engine, dbname, out);
+        est.rows = child.rows;
+        est.cost = child.cost + child.rows * 0.1;
+        out += prefix + "Project  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
+    } else if (auto* sort = dynamic_cast<SortOp*>(op)) {
+        CostEstimate child = explainOp(sort->child(), indent + 1, engine, dbname, out);
+        est.rows = child.rows;
+        double logFactor = child.rows > 1.0 ? std::log2(child.rows) : 1.0;
+        est.cost = child.cost + child.rows * logFactor * 0.1;
+        out += prefix + "Sort  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
+    } else if (auto* lim = dynamic_cast<LimitOp*>(op)) {
+        CostEstimate child = explainOp(lim->child(), indent + 1, engine, dbname, out);
+        est.rows = std::min(child.rows, static_cast<double>(lim->limit()));
+        est.cost = child.cost + est.rows * 0.01;
+        out += prefix + "Limit(limit=" + std::to_string(lim->limit()) +
+               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
+    } else if (auto* dist = dynamic_cast<DistinctOp*>(op)) {
+        CostEstimate child = explainOp(dist->child(), indent + 1, engine, dbname, out);
+        est.rows = child.rows * 0.5;
+        if (est.rows < 1.0) est.rows = 1.0;
+        est.cost = child.cost + child.rows * 0.5;
+        out += prefix + "Distinct  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
     } else if (auto* join = dynamic_cast<NestedLoopJoinOp*>(op)) {
-        out += prefix + "NestedLoopJoin\n";
-        if (auto* lc = join->leftChild()) explainOp(lc, indent + 1, out);
-        if (auto* rc = join->rightChild()) explainOp(rc, indent + 1, out);
+        CostEstimate left = explainOp(join->leftChild(), indent + 1, engine, dbname, out);
+        CostEstimate right = explainOp(join->rightChild(), indent + 1, engine, dbname, out);
+        est.rows = left.rows * right.rows * 0.1;
+        if (est.rows < 1.0) est.rows = 1.0;
+        est.cost = left.cost + left.rows * right.cost;
+        out += prefix + "NestedLoopJoin(" + join->leftTable() + ", " + join->rightTable() +
+               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
     } else if (dynamic_cast<AggregateOp*>(op)) {
-        out += prefix + "Aggregate\n";
+        est.rows = 1;
+        est.cost = 10;  // base aggregate cost
+        out += prefix + "Aggregate  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
     } else {
         out += prefix + "Unknown\n";
     }
+
+    return est;
 }
 
-std::string QueryPlanner::explain(OpPtr& plan) {
+std::string QueryPlanner::explain(OpPtr& plan, StorageEngine* engine,
+                                  const std::string& dbname) {
     std::string result;
-    explainOp(plan.get(), 0, result);
+    CostEstimate total = explainOp(plan.get(), 0, engine, dbname, result);
+    result += "\nTotal estimated cost: " + std::to_string(static_cast<int>(total.cost));
+    result += ", estimated rows: " + std::to_string(static_cast<int>(total.rows)) + "\n";
     return result;
 }
 

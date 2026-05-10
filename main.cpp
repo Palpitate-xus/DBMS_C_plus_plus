@@ -943,6 +943,20 @@ bool execute(const string& rawSql) {
         return false;
     }
 
+    if (sql.substr(0, 7) == "analyze") {
+        if (!checkAdmin()) return true;
+        if (!checkDB()) return true;
+        string rest = trim(sql.substr(7));
+        if (rest.substr(0, 5) != "table") {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        string tname = trim(rest.substr(5));
+        g_engine.analyzeTable(g_currentDB, tname);
+        cout << "Table " << tname << " analyzed" << endl;
+        return false;
+    }
+
     if (sql.substr(0, 5) == "begin") {
         if (!checkDB()) return true;
         auto res = g_engine.beginTransaction(g_currentDB);
@@ -1168,7 +1182,7 @@ bool execute(const string& rawSql) {
         ctx.limit = limitVal;
         ctx.distinct = isDistinct;
         auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-        cout << dbms::QueryPlanner::explain(plan);
+        cout << dbms::QueryPlanner::explain(plan, &g_engine, g_currentDB);
         return false;
     }
 
