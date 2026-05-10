@@ -1165,6 +1165,29 @@ bool execute(const string& rawSql) {
         return false;
     }
 
+    // SHOW CONNECTIONS / SHOW STATUS
+    if (sql.substr(0, 5) == "show ") {
+        string rest = trim(sql.substr(5));
+        if (rest == "connections") {
+            auto& s = dbms::getServerStats();
+            cout << "active_connections: " << s.activeConnections.load() << endl;
+            cout << "total_connections: " << s.totalConnections.load() << endl;
+            cout << "max_connections: " << s.maxConnections.load() << endl;
+            cout << "rejected_connections: " << s.rejectedConnections.load() << endl;
+            return false;
+        }
+        if (rest == "status") {
+            auto& s = dbms::getServerStats();
+            cout << "active_connections " << s.activeConnections.load() << endl;
+            cout << "total_connections " << s.totalConnections.load() << endl;
+            cout << "max_connections " << s.maxConnections.load() << endl;
+            cout << "rejected_connections " << s.rejectedConnections.load() << endl;
+            return false;
+        }
+        cout << "Unknown SHOW command" << endl;
+        return true;
+    }
+
     // GRANT privilege ON table TO user
     if (sql.substr(0, 6) == "grant ") {
         if (!checkAdmin()) return true;

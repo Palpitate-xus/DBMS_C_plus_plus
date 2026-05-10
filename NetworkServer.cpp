@@ -23,6 +23,12 @@ extern void logSlowQuery(const std::string& sql, double ms);
 
 namespace dbms {
 
+static ServerStats g_stats;
+
+ServerStats& getServerStats() {
+    return g_stats;
+}
+
 static void sendLine(int fd, const std::string& msg) {
     std::string line = msg + "\n";
     ssize_t sent = 0;
@@ -46,6 +52,9 @@ static std::string recvLine(int fd) {
 }
 
 static void handleClient(int clientFd) {
+    g_stats.activeConnections++;
+    g_stats.totalConnections++;
+
     // Login phase
     sendLine(clientFd, "login");
     std::string creds = recvLine(clientFd);
@@ -56,6 +65,7 @@ static void handleClient(int clientFd) {
     if (!login(username, password)) {
         sendLine(clientFd, "wrong username or password");
         ::close(clientFd);
+        g_stats.activeConnections--;
         return;
     }
 
@@ -106,6 +116,7 @@ static void handleClient(int clientFd) {
     }
 
     ::close(clientFd);
+    g_stats.activeConnections--;
 }
 
 void startServer(int port) {
@@ -142,6 +153,13 @@ void startServer(int port) {
         socklen_t clientLen = sizeof(clientAddr);
         int clientFd = ::accept(serverFd, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
         if (clientFd < 0) continue;
+
+        if (g_stats.activeConnections >= g_stats.maxConnections.load()) {
+            sendLine(clientFd, "too many connections");
+            ::close(clientFd);
+            g_stats.rejectedConnections++;
+            continue;
+        }
 
         std::thread([clientFd]() {
             handleClient(clientFd);
