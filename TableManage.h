@@ -89,6 +89,13 @@ public:
     std::vector<std::string> getTableNames(const std::string& dbname) const;
     TableSchema getTableSchema(const std::string& dbname, const std::string& tablename) const;
 
+    // View support
+    OpResult createView(const std::string& dbname, const std::string& viewname, const std::string& sql);
+    OpResult dropView(const std::string& dbname, const std::string& viewname);
+    bool viewExists(const std::string& dbname, const std::string& viewname) const;
+    std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;
+    std::vector<std::string> getViewNames(const std::string& dbname) const;
+
     // Data operations
     OpResult insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values);
@@ -196,6 +203,8 @@ private:
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path tableListPath(const std::string& dbname) const;
     std::filesystem::path walPath(const std::string& dbname) const;
+    std::filesystem::path viewPath(const std::string& dbname, const std::string& viewname) const;
+    std::filesystem::path viewsDir(const std::string& dbname) const;
 
     void writeSchema(std::ostream& out, const TableSchema& tbl);
     TableSchema readSchema(std::istream& in, const std::string& tablename) const;

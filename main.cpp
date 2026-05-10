@@ -664,6 +664,27 @@ static bool execute(const string& rawSql) {
             cout << "Index created" << endl;
             return false;
         }
+
+        if (sql.substr(7, 4) == "view") {
+            if (!checkAdmin()) return true;
+            if (!checkDB()) return true;
+            // create view viewname as select ...
+            string rest = trim(sql.substr(12));
+            size_t asPos = rest.find(" as ");
+            if (asPos == string::npos) {
+                cout << "SQL syntax error: VIEW requires AS clause" << endl;
+                return true;
+            }
+            string viewname = trim(rest.substr(0, asPos));
+            string viewSql = trim(rest.substr(asPos + 4));
+            auto res = g_engine.createView(g_currentDB, viewname, viewSql);
+            if (res == OpResult::TableAlreadyExist) {
+                cout << "View " << viewname << " already exists" << endl;
+                return true;
+            }
+            cout << "View " << viewname << " created" << endl;
+            return false;
+        }
     }
 
     if (sql.substr(0, 5) == "alter") {
@@ -974,8 +995,73 @@ static bool execute(const string& rawSql) {
             cout << "Index dropped" << endl;
             return false;
         }
+        if (op == "view") {
+            auto res = g_engine.dropView(g_currentDB, name);
+            if (res == OpResult::TableNotExist) {
+                cout << "View " << name << " not exist" << endl;
+                return true;
+            }
+            cout << "View dropped" << endl;
+            return false;
+        }
         cout << "SQL syntax error" << endl;
         return true;
+    }
+
+    // UNION / UNION ALL
+    size_t unionAllPos = sql.find("union all");
+    size_t unionPos = sql.find("union");
+    bool isUnionAll = false;
+    size_t actualUnionPos = string::npos;
+    if (unionAllPos != string::npos) {
+        isUnionAll = true;
+        actualUnionPos = unionAllPos;
+    } else if (unionPos != string::npos) {
+        actualUnionPos = unionPos;
+    }
+    if (actualUnionPos != string::npos) {
+        if (!checkDB()) return true;
+        string leftSql = trim(sql.substr(0, actualUnionPos));
+        string rightSql = trim(sql.substr(actualUnionPos + (isUnionAll ? 9 : 5)));
+        if (leftSql.empty() || rightSql.empty()) {
+            cout << "SQL syntax error: invalid UNION" << endl;
+            return true;
+        }
+        // Execute left query, capture output
+        auto* oldBuf = cout.rdbuf();
+        stringstream leftSs;
+        cout.rdbuf(leftSs.rdbuf());
+        execute(leftSql);
+        cout.rdbuf(oldBuf);
+        // Execute right query, capture output
+        stringstream rightSs;
+        cout.rdbuf(rightSs.rdbuf());
+        execute(rightSql);
+        cout.rdbuf(oldBuf);
+        // Parse outputs: first line is header, rest are data rows
+        vector<string> leftLines, rightLines;
+        string line;
+        while (getline(leftSs, line)) leftLines.push_back(line);
+        while (getline(rightSs, line)) rightLines.push_back(line);
+        // Print header from left query
+        if (!leftLines.empty()) {
+            cout << leftLines[0] << endl;
+        } else if (!rightLines.empty()) {
+            cout << rightLines[0] << endl;
+        }
+        // Merge data rows (skip headers)
+        set<string> seen;
+        for (size_t i = 1; i < leftLines.size(); ++i) {
+            if (isUnionAll || seen.insert(leftLines[i]).second) {
+                cout << leftLines[i] << endl;
+            }
+        }
+        for (size_t i = 1; i < rightLines.size(); ++i) {
+            if (isUnionAll || seen.insert(rightLines[i]).second) {
+                cout << rightLines[i] << endl;
+            }
+        }
+        return false;
     }
 
     // EXPLAIN: show query plan without executing
@@ -1260,6 +1346,13 @@ static bool execute(const string& rawSql) {
         string tname = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
 
         if (!g_engine.tableExists(g_currentDB, tname)) {
+            if (g_engine.viewExists(g_currentDB, tname)) {
+                string viewSql = g_engine.getViewSQL(g_currentDB, tname);
+                if (!viewSql.empty()) {
+                    execute(viewSql);
+                    return false;
+                }
+            }
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }

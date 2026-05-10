@@ -179,6 +179,69 @@ std::filesystem::path StorageEngine::walPath(const std::string& dbname) const {
     return dbPath(dbname) / "wal.log";
 }
 
+std::filesystem::path StorageEngine::viewPath(const std::string& dbname,
+                                               const std::string& viewname) const {
+    return dbPath(dbname) / (viewname + ".view");
+}
+
+std::filesystem::path StorageEngine::viewsDir(const std::string& dbname) const {
+    return dbPath(dbname) / ".views";
+}
+
+OpResult StorageEngine::createView(const std::string& dbname,
+                                    const std::string& viewname,
+                                    const std::string& sql) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto vdir = viewsDir(dbname);
+    if (!std::filesystem::exists(vdir)) {
+        std::filesystem::create_directories(vdir);
+    }
+    std::ofstream ofs(viewPath(dbname, viewname));
+    if (!ofs) return OpResult::InvalidValue;
+    ofs << sql;
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropView(const std::string& dbname,
+                                  const std::string& viewname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = viewPath(dbname, viewname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+bool StorageEngine::viewExists(const std::string& dbname,
+                                const std::string& viewname) const {
+    return std::filesystem::exists(viewPath(dbname, viewname));
+}
+
+std::string StorageEngine::getViewSQL(const std::string& dbname,
+                                       const std::string& viewname) const {
+    auto path = viewPath(dbname, viewname);
+    if (!std::filesystem::exists(path)) return "";
+    std::ifstream ifs(path);
+    if (!ifs) return "";
+    std::string sql((std::istreambuf_iterator<char>(ifs)),
+                     std::istreambuf_iterator<char>());
+    return sql;
+}
+
+std::vector<std::string> StorageEngine::getViewNames(const std::string& dbname) const {
+    std::vector<std::string> result;
+    auto vdir = viewsDir(dbname);
+    if (!std::filesystem::exists(vdir)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(vdir)) {
+        if (entry.is_regular_file()) {
+            std::string name = entry.path().filename().string();
+            if (name.size() > 5 && name.substr(name.size() - 5) == ".view") {
+                result.push_back(name.substr(0, name.size() - 5));
+            }
+        }
+    }
+    return result;
+}
+
 // ========================================================================
 // WAL helpers
 // ========================================================================
@@ -1816,10 +1879,12 @@ std::vector<std::string> StorageEngine::groupAggregate(
             h.func = s.substr(0, lp);
             h.colName = s.substr(lp + 1, rp - lp - 1);
             std::string rest = trim(s.substr(rp + 1));
-            size_t sp = rest.find(' ');
-            if (sp != std::string::npos) {
-                h.op = rest.substr(0, sp);
-                h.value = trim(rest.substr(sp + 1));
+            // Parse operator and value: may be "> 1" or ">1" (no space)
+            size_t opEnd = 0;
+            while (opEnd < rest.size() && (rest[opEnd] == '<' || rest[opEnd] == '>' || rest[opEnd] == '=' || rest[opEnd] == '!')) ++opEnd;
+            if (opEnd > 0) {
+                h.op = rest.substr(0, opEnd);
+                h.value = trim(rest.substr(opEnd));
                 havings.push_back(h);
             }
         }
