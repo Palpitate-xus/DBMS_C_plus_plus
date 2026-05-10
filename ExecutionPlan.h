@@ -3,6 +3,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "TableManage.h"
@@ -207,6 +208,79 @@ private:
     TableSchema rightTbl_;
     std::string curLeftRow_;
     bool hasLeft_ = false;
+};
+
+// ========================================================================
+// HashJoin: INNER JOIN using hash table on right table
+// ========================================================================
+class HashJoinOp : public Operator {
+public:
+    HashJoinOp(StorageEngine* engine, const std::string& dbname,
+               OpPtr left, OpPtr right,
+               const std::string& leftTable, const std::string& rightTable,
+               const std::string& leftCol, const std::string& rightCol);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* leftChild() const { return left_.get(); }
+    Operator* rightChild() const { return right_.get(); }
+    const std::string& leftTable() const { return leftTable_; }
+    const std::string& rightTable() const { return rightTable_; }
+
+private:
+    StorageEngine* engine_;
+    std::string dbname_;
+    OpPtr left_;
+    OpPtr right_;
+    std::string leftTable_;
+    std::string rightTable_;
+    std::string leftCol_;
+    std::string rightCol_;
+    TableSchema leftTbl_;
+    TableSchema rightTbl_;
+
+    std::unordered_map<std::string, std::vector<std::string>> rightHash_;
+    std::string curLeftRow_;
+    std::vector<std::string> curRightMatches_;
+    size_t matchPos_ = 0;
+    bool hasLeft_ = false;
+};
+
+// ========================================================================
+// MergeJoin: INNER JOIN on sorted inputs
+// ========================================================================
+class MergeJoinOp : public Operator {
+public:
+    MergeJoinOp(StorageEngine* engine, const std::string& dbname,
+                OpPtr left, OpPtr right,
+                const std::string& leftTable, const std::string& rightTable,
+                const std::string& leftCol, const std::string& rightCol);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* leftChild() const { return left_.get(); }
+    Operator* rightChild() const { return right_.get(); }
+    const std::string& leftTable() const { return leftTable_; }
+    const std::string& rightTable() const { return rightTable_; }
+
+private:
+    StorageEngine* engine_;
+    std::string dbname_;
+    OpPtr left_;
+    OpPtr right_;
+    std::string leftTable_;
+    std::string rightTable_;
+    std::string leftCol_;
+    std::string rightCol_;
+    TableSchema leftTbl_;
+    TableSchema rightTbl_;
+
+    std::vector<std::string> leftRows_;
+    std::vector<std::string> rightRows_;
+    size_t leftPos_ = 0;
+    size_t rightPos_ = 0;
 };
 
 // ========================================================================

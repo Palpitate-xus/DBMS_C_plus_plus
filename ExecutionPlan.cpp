@@ -446,6 +446,168 @@ void NestedLoopJoinOp::close() {
 }
 
 // ========================================================================
+// Helper: extract join key value from raw row data as string
+// ========================================================================
+static std::string extractJoinKey(const std::string& row, const TableSchema& tbl, const std::string& colName) {
+    size_t offset = 0;
+    const Column* col = nullptr;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colName) {
+            col = &tbl.cols[i];
+            break;
+        }
+        offset += tbl.cols[i].dsize;
+    }
+    if (!col) return "";
+    if (col->dataType == "char") {
+        std::string val(col->dsize, '\0');
+        std::memcpy(val.data(), row.data() + offset, col->dsize);
+        auto n = val.find('\0');
+        if (n != std::string::npos) val.resize(n);
+        return val;
+    } else if (col->dataType == "date") {
+        Date d;
+        std::memcpy(&d, row.data() + offset, DATE_SIZE);
+        return str(d);
+    } else {
+        int64_t val = 0;
+        std::memcpy(&val, row.data() + offset, col->dsize);
+        return transstr(val);
+    }
+}
+
+// ========================================================================
+// HashJoinOp
+// ========================================================================
+
+HashJoinOp::HashJoinOp(StorageEngine* engine, const std::string& dbname,
+                       OpPtr left, OpPtr right,
+                       const std::string& leftTable, const std::string& rightTable,
+                       const std::string& leftCol, const std::string& rightCol)
+    : engine_(engine), dbname_(dbname),
+      left_(std::move(left)), right_(std::move(right)),
+      leftTable_(leftTable), rightTable_(rightTable),
+      leftCol_(leftCol), rightCol_(rightCol) {}
+
+bool HashJoinOp::open() {
+    leftTbl_ = engine_->getTableSchema(dbname_, leftTable_);
+    rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
+
+    // Build hash table from right table
+    if (!right_->open()) return false;
+    std::string rightRow;
+    while (right_->next(rightRow)) {
+        std::string key = extractJoinKey(rightRow, rightTbl_, rightCol_);
+        rightHash_[key].push_back(std::move(rightRow));
+    }
+    right_->close();
+
+    // Start left table iteration
+    if (!left_->open()) return false;
+    hasLeft_ = left_->next(curLeftRow_);
+    matchPos_ = 0;
+    curRightMatches_.clear();
+    return true;
+}
+
+bool HashJoinOp::next(std::string& outRow) {
+    while (hasLeft_) {
+        // If we have pending matches for current left row, output them
+        while (matchPos_ < curRightMatches_.size()) {
+            outRow = curLeftRow_ + curRightMatches_[matchPos_];
+            ++matchPos_;
+            return true;
+        }
+
+        // Move to next left row
+        hasLeft_ = left_->next(curLeftRow_);
+        if (!hasLeft_) break;
+
+        std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
+        auto it = rightHash_.find(key);
+        if (it != rightHash_.end()) {
+            curRightMatches_ = it->second;
+            matchPos_ = 0;
+        } else {
+            curRightMatches_.clear();
+            matchPos_ = 0;
+        }
+    }
+    return false;
+}
+
+void HashJoinOp::close() {
+    left_->close();
+    rightHash_.clear();
+    curRightMatches_.clear();
+}
+
+// ========================================================================
+// MergeJoinOp
+// ========================================================================
+
+MergeJoinOp::MergeJoinOp(StorageEngine* engine, const std::string& dbname,
+                         OpPtr left, OpPtr right,
+                         const std::string& leftTable, const std::string& rightTable,
+                         const std::string& leftCol, const std::string& rightCol)
+    : engine_(engine), dbname_(dbname),
+      left_(std::move(left)), right_(std::move(right)),
+      leftTable_(leftTable), rightTable_(rightTable),
+      leftCol_(leftCol), rightCol_(rightCol) {}
+
+bool MergeJoinOp::open() {
+    leftTbl_ = engine_->getTableSchema(dbname_, leftTable_);
+    rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
+
+    // Read all left rows
+    if (!left_->open()) return false;
+    std::string row;
+    while (left_->next(row)) leftRows_.push_back(std::move(row));
+    left_->close();
+
+    // Read all right rows
+    if (!right_->open()) return false;
+    while (right_->next(row)) rightRows_.push_back(std::move(row));
+    right_->close();
+
+    // Sort both by join key
+    auto leftCmp = [&](const std::string& a, const std::string& b) {
+        return extractJoinKey(a, leftTbl_, leftCol_) < extractJoinKey(b, leftTbl_, leftCol_);
+    };
+    auto rightCmp = [&](const std::string& a, const std::string& b) {
+        return extractJoinKey(a, rightTbl_, rightCol_) < extractJoinKey(b, rightTbl_, rightCol_);
+    };
+    std::sort(leftRows_.begin(), leftRows_.end(), leftCmp);
+    std::sort(rightRows_.begin(), rightRows_.end(), rightCmp);
+
+    leftPos_ = 0;
+    rightPos_ = 0;
+    return true;
+}
+
+bool MergeJoinOp::next(std::string& outRow) {
+    while (leftPos_ < leftRows_.size() && rightPos_ < rightRows_.size()) {
+        std::string lk = extractJoinKey(leftRows_[leftPos_], leftTbl_, leftCol_);
+        std::string rk = extractJoinKey(rightRows_[rightPos_], rightTbl_, rightCol_);
+        if (lk == rk) {
+            outRow = leftRows_[leftPos_] + rightRows_[rightPos_];
+            ++rightPos_;
+            return true;
+        } else if (lk < rk) {
+            ++leftPos_;
+        } else {
+            ++rightPos_;
+        }
+    }
+    return false;
+}
+
+void MergeJoinOp::close() {
+    leftRows_.clear();
+    rightRows_.clear();
+}
+
+// ========================================================================
 // AggregateOp
 // ========================================================================
 
@@ -565,10 +727,28 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     (void)conds;
     auto left = std::make_unique<TableScanOp>(engine, dbname, leftTable);
     auto right = std::make_unique<TableScanOp>(engine, dbname, rightTable);
-    auto join = std::make_unique<NestedLoopJoinOp>(
-        engine, dbname, std::move(left), std::move(right),
-        leftTable, rightTable, leftCol, rightCol);
-    // TODO: add filter for WHERE conditions, project for selectCols
+
+    // Choose JOIN algorithm based on table sizes
+    size_t leftRows = engine->getTableRowCount(dbname, leftTable);
+    size_t rightRows = engine->getTableRowCount(dbname, rightTable);
+
+    OpPtr join;
+    if (leftRows < 100 || rightRows < 100) {
+        // Small table: NestedLoopJoin is fine
+        join = std::make_unique<NestedLoopJoinOp>(
+            engine, dbname, std::move(left), std::move(right),
+            leftTable, rightTable, leftCol, rightCol);
+    } else if (leftRows > rightRows * 3) {
+        // Left much larger: build hash on smaller right table
+        join = std::make_unique<HashJoinOp>(
+            engine, dbname, std::move(left), std::move(right),
+            leftTable, rightTable, leftCol, rightCol);
+    } else {
+        // Similar size: HashJoin is generally best for unordered data
+        join = std::make_unique<HashJoinOp>(
+            engine, dbname, std::move(left), std::move(right),
+            leftTable, rightTable, leftCol, rightCol);
+    }
     (void)selectCols;
     return join;
 }
@@ -694,6 +874,27 @@ static CostEstimate explainOp(Operator* op, int indent,
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + left.rows * right.cost;
         out += prefix + "NestedLoopJoin(" + join->leftTable() + ", " + join->rightTable() +
+               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
+    } else if (auto* hjoin = dynamic_cast<HashJoinOp*>(op)) {
+        CostEstimate left = explainOp(hjoin->leftChild(), indent + 1, engine, dbname, out);
+        CostEstimate right = explainOp(hjoin->rightChild(), indent + 1, engine, dbname, out);
+        est.rows = left.rows * right.rows * 0.1;
+        if (est.rows < 1.0) est.rows = 1.0;
+        est.cost = left.cost + right.cost + right.rows * 2.0;  // hash build cost
+        out += prefix + "HashJoin(" + hjoin->leftTable() + ", " + hjoin->rightTable() +
+               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
+               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+
+    } else if (auto* mjoin = dynamic_cast<MergeJoinOp*>(op)) {
+        CostEstimate left = explainOp(mjoin->leftChild(), indent + 1, engine, dbname, out);
+        CostEstimate right = explainOp(mjoin->rightChild(), indent + 1, engine, dbname, out);
+        est.rows = left.rows * right.rows * 0.1;
+        if (est.rows < 1.0) est.rows = 1.0;
+        est.cost = left.cost + right.cost + left.rows * std::log2(left.rows + 1) * 0.1
+                   + right.rows * std::log2(right.rows + 1) * 0.1;
+        out += prefix + "MergeJoin(" + mjoin->leftTable() + ", " + mjoin->rightTable() +
                ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
                "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
 
