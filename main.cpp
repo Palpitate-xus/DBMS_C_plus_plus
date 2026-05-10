@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <chrono>
 #include <cctype>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <set>
@@ -9,6 +11,7 @@
 
 #include "TableManage.h"
 #include "ExecutionPlan.h"
+#include "NetworkServer.h"
 #include "logs.h"
 #include "permissions.h"
 
@@ -21,10 +24,10 @@ using dbms::OpResult;
 using dbms::StorageEngine;
 using dbms::TableSchema;
 
-static int g_nowPermission = 0;
-static string g_nowUser;
-static string g_currentDB = "info";
-static StorageEngine g_engine;
+int g_nowPermission = 0;
+string g_nowUser;
+string g_currentDB = "info";
+StorageEngine g_engine;
 
 // ========================================================================
 // Utility
@@ -555,7 +558,19 @@ static bool checkDB() {
     return true;
 }
 
-static bool execute(const string& rawSql) {
+void logSlowQuery(const string& sql, double ms) {
+    std::ofstream ofs("slow_query.log", std::ios::app);
+    if (ofs) {
+        auto now = std::chrono::system_clock::now();
+        auto t = std::chrono::system_clock::to_time_t(now);
+        char buf[64];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+        ofs << buf << " [" << std::fixed << std::setprecision(2) << ms << "ms] " << sql << "\n";
+    }
+}
+
+bool execute(const string& rawSql) {
+    auto start = std::chrono::steady_clock::now();
     string sql = sqlProcessor(rawSql);
     if (sql.substr(0, 3) == "use") {
         if (sql.substr(4, 8) == "database") {
@@ -1588,7 +1603,14 @@ static bool execute(const string& rawSql) {
 // ========================================================================
 // Main
 // ========================================================================
-int main() {
+int main(int argc, char* argv[]) {
+    // Server mode: ./dbms_main --server PORT
+    if (argc >= 3 && std::string(argv[1]) == "--server") {
+        int port = std::stoi(argv[2]);
+        dbms::startServer(port);
+        return 0;
+    }
+
     string username, password;
     cout << "login" << endl;
     cin >> username >> password;
@@ -1601,7 +1623,13 @@ int main() {
             string sql;
             getline(cin, sql);
             if (trim(sql) == "exit") break;
+            auto start = std::chrono::steady_clock::now();
             execute(sql);
+            auto end = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(end - start).count();
+            if (ms > 100.0) {
+                logSlowQuery(sql, ms);
+            }
         }
     } else {
         cout << "wrong username or password" << endl;
