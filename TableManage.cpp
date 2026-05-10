@@ -974,6 +974,11 @@ OpResult StorageEngine::insert(const std::string& dbname,
 
     int64_t rid = encodeRid(pageId, slotId);
 
+    // Log for transaction rollback
+    if (inTransaction_ && dbname == txnDB_) {
+        logTxnInsert(tablename, rid);
+    }
+
     // Update B+ tree PK index
     {
         BPTree* idx = getPKIndex(dbname, tablename);
@@ -1197,6 +1202,14 @@ OpResult StorageEngine::remove(const std::string& dbname,
 
     // Delete rows via PageAllocator tombstones + update indexes
     for (int64_t rid : toDelete) {
+        // Log for transaction rollback (before deletion)
+        if (inTransaction_ && dbname == txnDB_) {
+            std::string row;
+            if (readRowByRid(pa, rid, row, tbl)) {
+                logTxnDelete(tablename, rid, row);
+            }
+        }
+
         uint32_t pageId; uint16_t slotId;
         decodeRid(rid, pageId, slotId);
         char* pageBuf = pa->fetchPage(pageId);
@@ -1298,6 +1311,11 @@ OpResult StorageEngine::update(const std::string& dbname,
     for (int64_t rid : matchIds) {
         std::string row;
         if (!readRowByRid(pa, rid, row, tbl)) continue;
+
+        // Log for transaction rollback (before modification)
+        if (inTransaction_ && dbname == txnDB_) {
+            logTxnUpdate(tablename, rid, row);
+        }
 
         // Save old PK and indexed column values before modification
         std::string oldPK = extractPKValue(row, tbl);
@@ -2111,13 +2129,32 @@ void StorageEngine::recoverAllDatabases() {
 }
 
 // ========================================================================
-// Transaction support (database-level snapshot + WAL)
+// Transaction logging helpers
+// ========================================================================
+
+void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx) {
+    txnLog_.push_back({TxnLogEntry::Op::Insert, tableName, rowIdx, ""});
+}
+
+void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
+                                  const std::string& oldRowData) {
+    txnLog_.push_back({TxnLogEntry::Op::Update, tableName, rowIdx, oldRowData});
+}
+
+void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
+                                  const std::string& oldRowData) {
+    txnLog_.push_back({TxnLogEntry::Op::Delete, tableName, rowIdx, oldRowData});
+}
+
+// ========================================================================
+// Transaction support (Undo Log based rollback, no full-db snapshot)
 // ========================================================================
 
 OpResult StorageEngine::beginTransaction(const std::string& dbname) {
     if (inTransaction_) return OpResult::Success;  // already in txn
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
 
+    // Keep a backup for crash recovery (recoverAllDatabases)
     std::filesystem::path backup = dbPath(dbname);
     backup += ".txn_backup";
     if (std::filesystem::exists(backup)) {
@@ -2132,6 +2169,8 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
             std::filesystem::copy(entry.path(), dest);
         }
     }
+
+    txnLog_.clear();
     inTransaction_ = true;
     txnDB_ = dbname;
     // Write WAL BEGIN marker
@@ -2142,13 +2181,9 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
 
 OpResult StorageEngine::commitTransaction() {
     if (!inTransaction_) return OpResult::Success;
-    // Write WAL COMMIT marker before removing backup
+    // Write WAL COMMIT marker
     walAppend(walPath(txnDB_), "COMMIT");
-    std::filesystem::path backup = dbPath(txnDB_);
-    backup += ".txn_backup";
-    if (std::filesystem::exists(backup)) {
-        std::filesystem::remove_all(backup);
-    }
+    txnLog_.clear();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     inTransaction_ = false;
@@ -2159,20 +2194,118 @@ OpResult StorageEngine::commitTransaction() {
 OpResult StorageEngine::rollbackTransaction() {
     if (!inTransaction_) return OpResult::Success;
     walAppend(walPath(txnDB_), "ROLLBACK");
-    std::filesystem::path backup = dbPath(txnDB_);
-    backup += ".txn_backup";
-    if (!std::filesystem::exists(backup)) {
-        walClear(walPath(txnDB_));
-        lockManager_.unlockAll();
-        inTransaction_ = false;
-        txnDB_.clear();
-        return OpResult::Success;
+
+    // Replay txnLog in reverse order to undo changes
+    for (auto it = txnLog_.rbegin(); it != txnLog_.rend(); ++it) {
+        PageAllocator* pa = getPageAllocator(txnDB_, it->tableName);
+        TableSchema tbl = getTableSchema(txnDB_, it->tableName);
+
+        if (it->op == TxnLogEntry::Op::Insert) {
+            // Undo INSERT: remove the row
+            uint32_t pageId; uint16_t slotId;
+            decodeRid(it->rowIdx, pageId, slotId);
+            char* pageBuf = pa->fetchPage(pageId);
+            if (pageBuf) {
+                Page page(pageBuf);
+                page.remove(slotId);
+                pa->markDirty(pageId);
+                pa->unpinPage(pageId);
+            }
+            // Remove from PK index
+            BPTree* pkIdx = getPKIndex(txnDB_, it->tableName);
+            if (pkIdx) {
+                std::string row;
+                if (readRowByRid(pa, it->rowIdx, row, tbl)) {
+                    std::string pkVal = extractPKValue(row, tbl);
+                    if (!pkVal.empty()) pkIdx->remove(pkVal);
+                }
+            }
+            // Remove from secondary indexes
+            auto indexedCols = getIndexedColumns(txnDB_, it->tableName);
+            for (const auto& colname : indexedCols) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                BPTree* secIdx = getSecondaryIndex(txnDB_, it->tableName, colname);
+                if (!secIdx) continue;
+                std::string row;
+                if (readRowByRid(pa, it->rowIdx, row, tbl)) {
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (!val.empty()) secIdx->remove(val);
+                }
+            }
+        } else if (it->op == TxnLogEntry::Op::Update) {
+            // Undo UPDATE: restore old row data
+            uint32_t pageId; uint16_t slotId;
+            decodeRid(it->rowIdx, pageId, slotId);
+            char* pageBuf = pa->fetchPage(pageId);
+            if (pageBuf) {
+                Page page(pageBuf);
+                page.restore(slotId);  // clear tombstone if present
+                page.update(slotId, it->rowData.data(), it->rowData.size());
+                pa->markDirty(pageId);
+                pa->unpinPage(pageId);
+            }
+            // Rebuild indexes: oldPK -> newPK change needs index fix
+            // Since we restored old data, we need to ensure PK index points to correct rid
+            BPTree* pkIdx = getPKIndex(txnDB_, it->tableName);
+            if (pkIdx) {
+                std::string pkVal = extractPKValue(it->rowData, tbl);
+                if (!pkVal.empty()) {
+                    pkIdx->remove(pkVal);
+                    pkIdx->insert(pkVal, it->rowIdx);
+                }
+            }
+            auto indexedCols = getIndexedColumns(txnDB_, it->tableName);
+            for (const auto& colname : indexedCols) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                BPTree* secIdx = getSecondaryIndex(txnDB_, it->tableName, colname);
+                if (!secIdx) continue;
+                std::string val = extractColumnValue(it->rowData, tbl, colIdx);
+                if (!val.empty()) {
+                    secIdx->remove(val);
+                    secIdx->insertMulti(val, it->rowIdx);
+                }
+            }
+        } else if (it->op == TxnLogEntry::Op::Delete) {
+            // Undo DELETE: restore the row by clearing tombstone
+            uint32_t pageId; uint16_t slotId;
+            decodeRid(it->rowIdx, pageId, slotId);
+            char* pageBuf = pa->fetchPage(pageId);
+            if (pageBuf) {
+                Page page(pageBuf);
+                page.restore(slotId);
+                pa->markDirty(pageId);
+                pa->unpinPage(pageId);
+            }
+            // Re-add to indexes
+            BPTree* pkIdx = getPKIndex(txnDB_, it->tableName);
+            if (pkIdx) {
+                std::string pkVal = extractPKValue(it->rowData, tbl);
+                if (!pkVal.empty()) pkIdx->insert(pkVal, it->rowIdx);
+            }
+            auto indexedCols = getIndexedColumns(txnDB_, it->tableName);
+            for (const auto& colname : indexedCols) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                BPTree* secIdx = getSecondaryIndex(txnDB_, it->tableName, colname);
+                if (!secIdx) continue;
+                std::string val = extractColumnValue(it->rowData, tbl, colIdx);
+                if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
+            }
+        }
     }
-    std::filesystem::path db = dbPath(txnDB_);
-    std::filesystem::remove_all(db);
-    std::filesystem::rename(backup, db);
-    // Clear index cache after rollback
-    pkIndexCache_.clear();
+
+    txnLog_.clear();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     inTransaction_ = false;

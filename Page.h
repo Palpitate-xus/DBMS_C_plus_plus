@@ -69,6 +69,9 @@ public:
     // Mark a slot as deleted (tombstone). Returns false if slot invalid.
     bool remove(uint16_t slotId);
 
+    // Restore a deleted slot (clear tombstone). Returns false if slot invalid or not deleted.
+    bool restore(uint16_t slotId);
+
     // Read a record. data points into buf_, no copy.
     bool get(uint16_t slotId, const char*& data, size_t& len) const;
 

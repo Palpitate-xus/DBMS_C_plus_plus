@@ -73,6 +73,15 @@ bool Page::remove(uint16_t slotId) {
     return true;
 }
 
+bool Page::restore(uint16_t slotId) {
+    Header* h = header();
+    if (slotId >= h->numSlots) return false;
+    Slot* s = slot(slotId);
+    if ((s->flags & SLOT_DELETED) == 0) return false;
+    s->flags &= ~SLOT_DELETED;
+    return true;
+}
+
 // ========================================================================
 // Get
 // ========================================================================
