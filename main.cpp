@@ -107,6 +107,54 @@ static vector<string> splitConds(const string& s) {
     return result;
 }
 
+// ========================================================================
+// CSV parsing helpers
+// ========================================================================
+static vector<string> parseCSVLine(const string& line) {
+    vector<string> fields;
+    size_t i = 0;
+    while (i < line.size()) {
+        string field;
+        if (line[i] == '"') {
+            ++i; // skip opening quote
+            while (i < line.size()) {
+                if (line[i] == '"') {
+                    if (i + 1 < line.size() && line[i + 1] == '"') {
+                        field += '"';
+                        i += 2;
+                    } else {
+                        ++i; // skip closing quote
+                        break;
+                    }
+                } else {
+                    field += line[i++];
+                }
+            }
+        } else {
+            while (i < line.size() && line[i] != ',') {
+                field += line[i++];
+            }
+        }
+        fields.push_back(field);
+        if (i < line.size() && line[i] == ',') ++i;
+    }
+    return fields;
+}
+
+static string escapeCSVField(const string& val) {
+    bool needsQuote = val.find(',') != string::npos ||
+                      val.find('"') != string::npos ||
+                      val.find('\n') != string::npos;
+    if (!needsQuote) return val;
+    string result = "\"";
+    for (char c : val) {
+        if (c == '"') result += "\"\"";
+        else result += c;
+    }
+    result += '"';
+    return result;
+}
+
 static string normalizeConditionStr(string s) {
     static const char* ops[] = {">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
@@ -1104,6 +1152,64 @@ bool execute(const string& rawSql) {
         return false;
     }
 
+    // LOAD DATA INFILE: import CSV
+    if (sql.substr(0, 17) == "load data infile ") {
+        if (!checkAdmin()) return true;
+        if (!checkDB()) return true;
+        string rest = trim(sql.substr(17));
+        // Parse: 'file.csv' into table tname
+        size_t q1 = rest.find('\'');
+        if (q1 == string::npos) {
+            cout << "SQL syntax error: missing filename" << endl;
+            return true;
+        }
+        size_t q2 = rest.find('\'', q1 + 1);
+        if (q2 == string::npos) {
+            cout << "SQL syntax error: unclosed filename" << endl;
+            return true;
+        }
+        string filename = rest.substr(q1 + 1, q2 - q1 - 1);
+        string afterFile = trim(rest.substr(q2 + 1));
+        if (afterFile.substr(0, 11) != "into table ") {
+            cout << "SQL syntax error: expected INTO TABLE" << endl;
+            return true;
+        }
+        string tname = trim(afterFile.substr(11));
+        if (!g_engine.tableExists(g_currentDB, tname)) {
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
+        TableSchema tbl = g_engine.getTableSchema(g_currentDB, tname);
+        ifstream csvIn(filename);
+        if (!csvIn) {
+            cout << "Cannot open file: " << filename << endl;
+            return true;
+        }
+        size_t imported = 0, skipped = 0;
+        string line;
+        bool firstLine = true;
+        while (getline(csvIn, line)) {
+            if (trim(line).empty()) continue;
+            auto fields = parseCSVLine(line);
+            if (fields.size() != tbl.len) {
+                // Try treating first line as header
+                if (firstLine) { firstLine = false; continue; }
+                skipped++;
+                continue;
+            }
+            firstLine = false;
+            map<string, string> values;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                values[tbl.cols[i].dataName] = trim(fields[i]);
+            }
+            auto res = g_engine.insert(g_currentDB, tname, values);
+            if (res == OpResult::Success) imported++;
+            else skipped++;
+        }
+        cout << "Imported " << imported << " rows, skipped " << skipped << endl;
+        return false;
+    }
+
     // EXPLAIN: show query plan without executing
     if (sql.substr(0, 7) == "explain") {
         if (!checkDB()) return true;
@@ -1188,6 +1294,21 @@ bool execute(const string& rawSql) {
 
     if (sql.substr(0, 6) == "select") {
         if (!checkDB()) return true;
+
+        // Check for INTO OUTFILE clause
+        string outfile;
+        size_t intoPos = sql.find("into outfile");
+        if (intoPos != string::npos) {
+            size_t q1 = sql.find('\'', intoPos);
+            if (q1 != string::npos) {
+                size_t q2 = sql.find('\'', q1 + 1);
+                if (q2 != string::npos) {
+                    outfile = sql.substr(q1 + 1, q2 - q1 - 1);
+                    sql = trim(sql.substr(0, intoPos));
+                }
+            }
+        }
+
         size_t fromPos = sql.find("from");
         if (fromPos == string::npos) {
             cout << "SQL syntax error" << endl;
@@ -1583,9 +1704,59 @@ bool execute(const string& rawSql) {
             if (noff > 0)
                 answers.erase(answers.begin(), answers.begin() + noff);
         }
-        for (const auto& row : answers) {
-            cout << row << endl;
-            log(g_nowUser, row, getTime());
+        if (!outfile.empty()) {
+            ofstream ofs(outfile);
+            if (!ofs) {
+                cout << "Cannot open file for writing: " << outfile << endl;
+                return true;
+            }
+            // Write header based on column selection
+            if (!groupByCol.empty()) {
+                ofs << escapeCSVField(groupByCol);
+                for (const auto& it : aggItems) {
+                    if (!it.first.empty()) {
+                        ofs << "," << escapeCSVField(it.first + "(" + it.second + ")");
+                    }
+                }
+                ofs << "\n";
+            } else if (hasAgg) {
+                bool first = true;
+                for (const auto& it : aggItems) {
+                    if (!first) ofs << ",";
+                    first = false;
+                    if (it.first.empty()) ofs << escapeCSVField(it.second);
+                    else ofs << escapeCSVField(it.first + "(" + it.second + ")");
+                }
+                ofs << "\n";
+            } else {
+                bool first = true;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
+                    if (!first) ofs << ",";
+                    first = false;
+                    ofs << escapeCSVField(tbl.cols[i].dataName);
+                }
+                ofs << "\n";
+            }
+            for (const auto& row : answers) {
+                // Row values are space-separated; split and re-join as CSV
+                stringstream rss(row);
+                string val;
+                bool first = true;
+                while (rss >> val) {
+                    if (!first) ofs << ",";
+                    first = false;
+                    ofs << escapeCSVField(val);
+                }
+                ofs << "\n";
+            }
+            ofs.close();
+            cout << "Query result saved to " << outfile << " (" << answers.size() << " rows)" << endl;
+        } else {
+            for (const auto& row : answers) {
+                cout << row << endl;
+                log(g_nowUser, row, getTime());
+            }
         }
         return false;
     }
