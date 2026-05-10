@@ -376,6 +376,17 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         fk.refTable = trim(fkStr.substr(0, lp));
                         fk.refCol = trim(fkStr.substr(lp + 1, rp - lp - 1));
                         fk.onDelete = "restrict";
+                        // Parse ON DELETE action
+                        string afterRp = trim(fkStr.substr(rp + 1));
+                        size_t odPos = afterRp.find("on delete");
+                        if (odPos != string::npos) {
+                            string action = trim(afterRp.substr(odPos + 9));
+                            if (action.size() >= 7 && action.substr(0, 7) == "cascade")
+                                fk.onDelete = "cascade";
+                            else if ((action.size() >= 7 && action.substr(0, 7) == "setnull") ||
+                                     (action.size() >= 8 && action.substr(0, 8) == "set null"))
+                                fk.onDelete = "setnull";
+                        }
                     }
                 }
                 ctype = typeName;

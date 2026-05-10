@@ -1181,7 +1181,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
         return OpResult::Success;
     }
 
-    // Check foreign key RESTRICT: ensure no other table references rows being deleted
+    // Check foreign key references and apply ON DELETE actions
     {
         size_t pkIdx = tbl.len;
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -1215,49 +1215,195 @@ OpResult StorageEngine::remove(const std::string& dbname,
                 if (!pkVal.empty()) deletedPKs.insert(pkVal);
             }
 
-            // Scan all other tables for FK references
-            auto allTables = getTableNames(dbname);
-            for (const auto& otherTable : allTables) {
-                if (otherTable == tablename) continue;
-                TableSchema otherTbl = getTableSchema(dbname, otherTable);
-                for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
-                    const ForeignKey& fk = otherTbl.fks[fi];
-                    if (fk.refTable != tablename) continue;
-                    size_t fkColIdx = otherTbl.len;
-                    for (size_t ci = 0; ci < otherTbl.len; ++ci) {
-                        if (otherTbl.cols[ci].dataName == fk.colName) { fkColIdx = ci; break; }
-                    }
-                    if (fkColIdx >= otherTbl.len) continue;
-                    bool foundRef = false;
-                    forEachRow(dbname, otherTable, [&](uint32_t, uint16_t, const char* data, size_t) {
-                        if (foundRef) return;
-                        size_t coff = 0;
-                        for (size_t c = 0; c < fkColIdx; ++c) coff += otherTbl.cols[c].dsize;
-                        const Column& fcol = otherTbl.cols[fkColIdx];
-                        std::string fval;
-                        if (fcol.dataType == "char") {
-                            std::string buf(fcol.dsize, '\0');
-                            std::memcpy(buf.data(), data + coff, fcol.dsize);
-                            auto nul = buf.find('\0');
-                            if (nul != std::string::npos) buf.resize(nul);
-                            fval = buf;
-                        } else if (fcol.dataType == "date") {
-                            Date d;
-                            std::memcpy(&d, data + coff, DATE_SIZE);
-                            fval = str(d);
-                        } else {
-                            int64_t val = 0;
-                            std::memcpy(&val, data + coff, fcol.dsize);
-                            fval = transstr(val);
+            if (!deletedPKs.empty()) {
+                // Scan all other tables for FK references and collect actions
+                struct CascadeAction { std::string table; int64_t rid; };
+                struct SetNullAction { std::string table; int64_t rid; size_t colIdx; };
+                std::vector<CascadeAction> cascadeActions;
+                std::vector<SetNullAction> setNullActions;
+                std::set<std::string> restrictTables;
+
+                auto allTables = getTableNames(dbname);
+                for (const auto& otherTable : allTables) {
+                    if (otherTable == tablename) continue;
+                    TableSchema otherTbl = getTableSchema(dbname, otherTable);
+                    for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                        const ForeignKey& fk = otherTbl.fks[fi];
+                        if (fk.refTable != tablename) continue;
+                        size_t fkColIdx = otherTbl.len;
+                        for (size_t ci = 0; ci < otherTbl.len; ++ci) {
+                            if (otherTbl.cols[ci].dataName == fk.colName) { fkColIdx = ci; break; }
                         }
-                        if (deletedPKs.find(fval) != deletedPKs.end()) {
-                            foundRef = true;
-                        }
-                    });
-                    if (foundRef) {
-                        lockManager_.unlock(tablename);
-                        return OpResult::InvalidValue;
+                        if (fkColIdx >= otherTbl.len) continue;
+
+                        forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t) {
+                            size_t coff = 0;
+                            for (size_t c = 0; c < fkColIdx; ++c) coff += otherTbl.cols[c].dsize;
+                            const Column& fcol = otherTbl.cols[fkColIdx];
+                            std::string fval;
+                            if (fcol.dataType == "char") {
+                                std::string buf(fcol.dsize, '\0');
+                                std::memcpy(buf.data(), data + coff, fcol.dsize);
+                                auto nul = buf.find('\0');
+                                if (nul != std::string::npos) buf.resize(nul);
+                                fval = buf;
+                            } else if (fcol.dataType == "date") {
+                                Date d;
+                                std::memcpy(&d, data + coff, DATE_SIZE);
+                                fval = (d.year == 0) ? "" : str(d);
+                            } else {
+                                int64_t val = 0;
+                                std::memcpy(&val, data + coff, fcol.dsize);
+                                fval = (val == INF) ? "" : transstr(val);
+                            }
+                            if (deletedPKs.find(fval) != deletedPKs.end()) {
+                                int64_t orid = encodeRid(opid, osid);
+                                if (fk.onDelete == "cascade") {
+                                    cascadeActions.push_back({otherTable, orid});
+                                } else if (fk.onDelete == "setnull") {
+                                    setNullActions.push_back({otherTable, orid, fkColIdx});
+                                } else {
+                                    restrictTables.insert(otherTable);
+                                }
+                            }
+                        });
                     }
+                }
+
+                if (!restrictTables.empty()) {
+                    lockManager_.unlock(tablename);
+                    return OpResult::InvalidValue;
+                }
+
+                // Collect tables that need locks for cascade/setnull
+                std::set<std::string> cascadeTables;
+                for (const auto& ca : cascadeActions) cascadeTables.insert(ca.table);
+                for (const auto& sa : setNullActions) cascadeTables.insert(sa.table);
+
+                // Acquire locks on referenced tables in alphabetical order
+                std::vector<std::string> sortedTables(cascadeTables.begin(), cascadeTables.end());
+                std::sort(sortedTables.begin(), sortedTables.end());
+                for (const auto& t : sortedTables) {
+                    lockManager_.lockExclusive(t);
+                }
+
+                // Apply SET NULL: set FK column to NULL
+                for (const auto& sa : setNullActions) {
+                    TableSchema otbl = getTableSchema(dbname, sa.table);
+                    PageAllocator* opa = getPageAllocator(dbname, sa.table);
+                    std::string row;
+                    if (!readRowByRid(opa, sa.rid, row, otbl)) continue;
+
+                    // Save old values for index update
+                    std::string oldPK = extractPKValue(row, otbl);
+                    std::map<std::string, std::string> oldIdxVals;
+                    auto indexedCols = getIndexedColumns(dbname, sa.table);
+                    for (const auto& ic : indexedCols) {
+                        size_t ici = otbl.len;
+                        for (size_t i = 0; i < otbl.len; ++i) {
+                            if (otbl.cols[i].dataName == ic) { ici = i; break; }
+                        }
+                        if (ici < otbl.len) oldIdxVals[ic] = extractColumnValue(row, otbl, ici);
+                    }
+
+                    // Set FK column to NULL
+                    size_t offset = 0;
+                    for (size_t c = 0; c < sa.colIdx; ++c) offset += otbl.cols[c].dsize;
+                    const Column& fcol = otbl.cols[sa.colIdx];
+                    if (fcol.dataType == "char") {
+                        std::memset(&row[offset], 0, fcol.dsize);
+                    } else if (fcol.dataType == "date") {
+                        Date d{};
+                        std::memcpy(&row[offset], &d, DATE_SIZE);
+                    } else {
+                        int64_t nullVal = INF;
+                        std::memcpy(&row[offset], &nullVal, fcol.dsize);
+                    }
+
+                    // Write back
+                    uint32_t pid; uint16_t sid;
+                    decodeRid(sa.rid, pid, sid);
+                    char* pbuf = opa->fetchPage(pid);
+                    if (pbuf) {
+                        Page page(pbuf);
+                        page.update(sid, row.data(), otbl.rowSize());
+                        pa->markDirty(pid);
+                        opa->unpinPage(pid);
+                    }
+
+                    // Update PK index if PK changed (it didn't)
+                    // Update secondary indexes if indexed column was changed
+                    for (const auto& kv : oldIdxVals) {
+                        const std::string& ic = kv.first;
+                        size_t ici = otbl.len;
+                        for (size_t i = 0; i < otbl.len; ++i) {
+                            if (otbl.cols[i].dataName == ic) { ici = i; break; }
+                        }
+                        if (ici >= otbl.len || ici != sa.colIdx) continue;
+                        BPTree* sidx = getSecondaryIndex(dbname, sa.table, ic);
+                        if (!sidx) continue;
+                        std::string newVal = extractColumnValue(row, otbl, ici);
+                        if (kv.second != newVal) {
+                            if (!kv.second.empty()) sidx->remove(kv.second);
+                            if (!newVal.empty()) sidx->insertMulti(newVal, sa.rid);
+                        }
+                    }
+                }
+
+                // Apply CASCADE: delete referencing rows
+                for (const auto& ca : cascadeActions) {
+                    TableSchema otbl = getTableSchema(dbname, ca.table);
+                    PageAllocator* opa = getPageAllocator(dbname, ca.table);
+
+                    // Log for transaction rollback
+                    if (inTransaction_ && dbname == txnDB_) {
+                        std::string row;
+                        if (readRowByRid(opa, ca.rid, row, otbl)) {
+                            logTxnDelete(ca.table, ca.rid, row);
+                        }
+                    }
+
+                    // Delete via tombstone
+                    uint32_t pid; uint16_t sid;
+                    decodeRid(ca.rid, pid, sid);
+                    char* pbuf = opa->fetchPage(pid);
+                    if (pbuf) {
+                        Page page(pbuf);
+                        page.remove(sid);
+                        pa->markDirty(pid);
+                        opa->unpinPage(pid);
+                    }
+
+                    // Remove from PK index
+                    BPTree* pidx = getPKIndex(dbname, ca.table);
+                    if (pidx) {
+                        std::string row;
+                        if (readRowByRid(opa, ca.rid, row, otbl)) {
+                            std::string pkVal = extractPKValue(row, otbl);
+                            if (!pkVal.empty()) pidx->remove(pkVal);
+                        }
+                    }
+
+                    // Remove from secondary indexes
+                    auto indexedCols = getIndexedColumns(dbname, ca.table);
+                    for (const auto& ic : indexedCols) {
+                        size_t ici = otbl.len;
+                        for (size_t i = 0; i < otbl.len; ++i) {
+                            if (otbl.cols[i].dataName == ic) { ici = i; break; }
+                        }
+                        if (ici >= otbl.len) continue;
+                        BPTree* sidx = getSecondaryIndex(dbname, ca.table, ic);
+                        if (!sidx) continue;
+                        std::string row;
+                        if (!readRowByRid(opa, ca.rid, row, otbl)) continue;
+                        std::string val = extractColumnValue(row, otbl, ici);
+                        if (!val.empty()) sidx->remove(val);
+                    }
+                }
+
+                // Release locks on referenced tables
+                for (const auto& t : sortedTables) {
+                    lockManager_.unlock(t);
                 }
             }
         }
