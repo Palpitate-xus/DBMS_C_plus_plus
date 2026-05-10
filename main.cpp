@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "TableManage.h"
+#include "ExecutionPlan.h"
 #include "logs.h"
 #include "permissions.h"
 
@@ -85,6 +86,24 @@ static string sqlProcessor(string raw) {
 // Normalize condition string: remove spaces around operators so tokenize
 // keeps each condition as a single token (e.g. "score > 80" → "score>80")
 // ========================================================================
+// ========================================================================
+// Split condition string by " and " into individual conditions
+// ========================================================================
+static vector<string> splitConds(const string& s) {
+    vector<string> result;
+    size_t start = 0;
+    while (start < s.size()) {
+        size_t andPos = s.find(" and ", start);
+        if (andPos == string::npos) {
+            result.push_back(trim(s.substr(start)));
+            break;
+        }
+        result.push_back(trim(s.substr(start, andPos - start)));
+        start = andPos + 5;
+    }
+    return result;
+}
+
 static string normalizeConditionStr(string s) {
     static const char* ops[] = {">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
@@ -957,6 +976,88 @@ static bool execute(const string& rawSql) {
         }
         cout << "SQL syntax error" << endl;
         return true;
+    }
+
+    // EXPLAIN: show query plan without executing
+    if (sql.substr(0, 7) == "explain") {
+        if (!checkDB()) return true;
+        string inner = trim(sql.substr(7));
+        if (inner.size() < 6 || inner.substr(0, 6) != "select") {
+            cout << "EXPLAIN only supports SELECT" << endl;
+            return true;
+        }
+        // Parse the SELECT to extract table name and conditions
+        size_t fromPos = inner.find("from");
+        if (fromPos == string::npos) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        string columns = trim(inner.substr(6, fromPos - 6));
+        bool isDistinct = false;
+        if (columns.size() >= 9 && columns.substr(0, 9) == "distinct ") {
+            isDistinct = true;
+            columns = trim(columns.substr(9));
+        }
+        size_t wherePos = inner.find("where", fromPos);
+        size_t orderPos = inner.find("order by", fromPos);
+        size_t limitPos = inner.find("limit", fromPos);
+        string tname = trim(inner.substr(fromPos + 4,
+            (wherePos != string::npos) ? (wherePos - fromPos - 4)
+            : (orderPos != string::npos) ? (orderPos - fromPos - 4)
+            : (limitPos != string::npos) ? (limitPos - fromPos - 4)
+            : (inner.size() - fromPos - 4)));
+        vector<string> conds;
+        if (wherePos != string::npos) {
+            size_t condEnd = (orderPos != string::npos) ? orderPos
+                           : (limitPos != string::npos) ? limitPos
+                           : inner.size();
+            string condStr = normalizeConditionStr(trim(inner.substr(wherePos + 5, condEnd - wherePos - 5)));
+            if (!condStr.empty()) {
+                vector<string> rawConds = splitConds(condStr);
+                for (auto& c : rawConds) {
+                    string mc = modifyLogic(c);
+                    if (!mc.empty()) conds.push_back(mc);
+                }
+            }
+        }
+        string orderByCol = "";
+        bool orderByAsc = true;
+        if (orderPos != string::npos) {
+            size_t sortEnd = (limitPos != string::npos) ? limitPos : inner.size();
+            string sortStr = trim(inner.substr(orderPos + 8, sortEnd - orderPos - 8));
+            if (!sortStr.empty()) {
+                if (sortStr.size() >= 5 && sortStr.substr(sortStr.size() - 4) == "desc") {
+                    orderByCol = trim(sortStr.substr(0, sortStr.size() - 4));
+                    orderByAsc = false;
+                } else {
+                    orderByCol = trim(sortStr);
+                }
+            }
+        }
+        size_t limitVal = 0;
+        if (limitPos != string::npos) {
+            string lstr = trim(inner.substr(limitPos + 5));
+            try { limitVal = static_cast<size_t>(std::stoull(lstr)); } catch (...) {}
+        }
+        set<string> selectCols;
+        bool selectAll = (columns == "*");
+        if (!selectAll) {
+            stringstream css(columns);
+            string item;
+            while (getline(css, item, ',')) selectCols.insert(trim(item));
+        }
+        dbms::PlanContext ctx;
+        ctx.dbname = g_currentDB;
+        ctx.tablename = tname;
+        ctx.conds = dbms::StorageEngine::parseConditions(conds);
+        ctx.selectCols = selectCols;
+        ctx.orderByCol = orderByCol;
+        ctx.orderByAsc = orderByAsc;
+        ctx.limit = limitVal;
+        ctx.distinct = isDistinct;
+        auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+        cout << dbms::QueryPlanner::explain(plan);
+        return false;
     }
 
     if (sql.substr(0, 6) == "select") {
