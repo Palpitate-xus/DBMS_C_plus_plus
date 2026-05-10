@@ -125,6 +125,24 @@ public:
                                    const std::vector<std::string>& conditions,
                                    const std::set<std::string>& selectCols);
 
+    // LEFT JOIN: preserve all left rows, fill NULL for non-matching right
+    std::vector<std::string> leftJoin(const std::string& dbname,
+                                       const std::string& leftTable,
+                                       const std::string& rightTable,
+                                       const std::string& leftCol,
+                                       const std::string& rightCol,
+                                       const std::vector<std::string>& conditions,
+                                       const std::set<std::string>& selectCols);
+
+    // RIGHT JOIN: preserve all right rows, fill NULL for non-matching left
+    std::vector<std::string> rightJoin(const std::string& dbname,
+                                        const std::string& leftTable,
+                                        const std::string& rightTable,
+                                        const std::string& leftCol,
+                                        const std::string& rightCol,
+                                        const std::vector<std::string>& conditions,
+                                        const std::set<std::string>& selectCols);
+
     // Transaction operations
     bool inTransaction() const { return inTransaction_; }
     OpResult beginTransaction(const std::string& dbname);

@@ -1096,27 +1096,58 @@ static bool execute(const string& rawSql) {
         };
 
         // Check for JOIN
+        size_t leftJoinPos = sql.find("left join", fromPos);
+        size_t rightJoinPos = sql.find("right join", fromPos);
+        size_t innerJoinPos = sql.find("inner join", fromPos);
         size_t joinPos = sql.find("join", fromPos);
-        bool isJoin = (joinPos != string::npos &&
-                       (wherePos == string::npos || joinPos < wherePos) &&
-                       (orderPos == string::npos || joinPos < orderPos));
+
+        enum class JoinType { Inner, Left, Right };
+        JoinType jt = JoinType::Inner;
+        size_t actualJoinPos = joinPos;
+
+        if (leftJoinPos != string::npos &&
+            (wherePos == string::npos || leftJoinPos < wherePos) &&
+            (orderPos == string::npos || leftJoinPos < orderPos)) {
+            jt = JoinType::Left;
+            actualJoinPos = leftJoinPos;
+        } else if (rightJoinPos != string::npos &&
+                   (wherePos == string::npos || rightJoinPos < wherePos) &&
+                   (orderPos == string::npos || rightJoinPos < orderPos)) {
+            jt = JoinType::Right;
+            actualJoinPos = rightJoinPos;
+        } else if (innerJoinPos != string::npos &&
+                   (wherePos == string::npos || innerJoinPos < wherePos) &&
+                   (orderPos == string::npos || innerJoinPos < orderPos)) {
+            jt = JoinType::Inner;
+            actualJoinPos = innerJoinPos;
+        } else if (joinPos != string::npos &&
+                   (wherePos == string::npos || joinPos < wherePos) &&
+                   (orderPos == string::npos || joinPos < orderPos)) {
+            jt = JoinType::Inner;
+            actualJoinPos = joinPos;
+        } else {
+            actualJoinPos = string::npos;
+        }
+
+        bool isJoin = (actualJoinPos != string::npos);
 
         if (isJoin) {
-            // select cols from t1 [inner] join t2 on t1.col = t2.col [where ...]
-            string leftTable = trim(sql.substr(fromPos + 4, joinPos - fromPos - 4));
-            if (leftTable.size() >= 5 && leftTable.substr(leftTable.size() - 5) == "inner")
-                leftTable = trim(leftTable.substr(0, leftTable.size() - 5));
-            size_t onPos = sql.find("on", joinPos);
+            string leftTable = trim(sql.substr(fromPos + 4, actualJoinPos - fromPos - 4));
+            size_t onPos = sql.find("on", actualJoinPos);
             if (onPos == string::npos) {
                 cout << "SQL syntax error: missing ON clause" << endl;
                 return true;
             }
-            string rightTable = trim(sql.substr(joinPos + 4, onPos - joinPos - 4));
+            size_t tableNameStart = actualJoinPos;
+            if (jt == JoinType::Left) tableNameStart += 9;
+            else if (jt == JoinType::Right) tableNameStart += 10;
+            else if (jt == JoinType::Inner) tableNameStart += 10;
+            else tableNameStart += 4;
+            string rightTable = trim(sql.substr(tableNameStart, onPos - tableNameStart));
             size_t onEnd = (wherePos != string::npos) ? wherePos
                           : (orderPos != string::npos) ? orderPos : sql.size();
             string onClause = normalizeConditionStr(trim(sql.substr(onPos + 2, onEnd - onPos - 2)));
 
-            // Parse ON clause: "t1.col=t2.col" (normalize removes spaces around =)
             size_t eqPos = onClause.find('=');
             if (eqPos == string::npos) {
                 cout << "SQL syntax error: invalid ON clause" << endl;
@@ -1124,7 +1155,6 @@ static bool execute(const string& rawSql) {
             }
             string leftOnCol = trim(onClause.substr(0, eqPos));
             string rightOnCol = trim(onClause.substr(eqPos + 1));
-            // Strip table prefix if present for the join column args
             size_t dot = leftOnCol.find('.');
             if (dot != string::npos) leftOnCol = leftOnCol.substr(dot + 1);
             dot = rightOnCol.find('.');
@@ -1147,7 +1177,6 @@ static bool execute(const string& rawSql) {
                 }
             }
 
-            // WHERE clause
             vector<string> condTokens;
             if (wherePos != string::npos) {
                 size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
@@ -1157,7 +1186,6 @@ static bool execute(const string& rawSql) {
                 condTokens = tokenize(condStr);
             }
 
-            // Print header
             TableSchema leftTbl = g_engine.getTableSchema(g_currentDB, leftTable);
             TableSchema rightTbl = g_engine.getTableSchema(g_currentDB, rightTable);
             if (selectAll) {
@@ -1171,9 +1199,21 @@ static bool execute(const string& rawSql) {
             cout << '\n';
 
             vector<string> answers;
+            auto runJoin = [&](const vector<string>& conds) -> vector<string> {
+                if (jt == JoinType::Left) {
+                    return g_engine.leftJoin(g_currentDB, leftTable, rightTable,
+                                              leftOnCol, rightOnCol, conds, selectCols);
+                } else if (jt == JoinType::Right) {
+                    return g_engine.rightJoin(g_currentDB, leftTable, rightTable,
+                                               leftOnCol, rightOnCol, conds, selectCols);
+                } else {
+                    return g_engine.join(g_currentDB, leftTable, rightTable,
+                                          leftOnCol, rightOnCol, conds, selectCols);
+                }
+            };
+
             if (condTokens.empty()) {
-                answers = g_engine.join(g_currentDB, leftTable, rightTable,
-                                         leftOnCol, rightOnCol, {}, selectCols);
+                answers = runJoin({});
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -1181,8 +1221,7 @@ static bool execute(const string& rawSql) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.join(g_currentDB, leftTable, rightTable,
-                                               leftOnCol, rightOnCol, g, selectCols);
+                    auto part = runJoin(g);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
