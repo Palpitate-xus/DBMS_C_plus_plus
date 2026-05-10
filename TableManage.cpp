@@ -3063,4 +3063,123 @@ OpResult StorageEngine::rollbackTransaction() {
     return OpResult::Success;
 }
 
+// ========================================================================
+// Table-level permissions
+// ========================================================================
+
+std::filesystem::path StorageEngine::permPath(const std::string& dbname) const {
+    return dbPath(dbname) / ".permissions";
+}
+
+static std::string privToStr(StorageEngine::TablePrivilege p) {
+    switch (p) {
+        case StorageEngine::TablePrivilege::Select: return "select";
+        case StorageEngine::TablePrivilege::Insert: return "insert";
+        case StorageEngine::TablePrivilege::Update: return "update";
+        case StorageEngine::TablePrivilege::Delete: return "delete";
+        case StorageEngine::TablePrivilege::All: return "all";
+    }
+    return "";
+}
+
+void StorageEngine::grant(const std::string& dbname, const std::string& tablename,
+                          const std::string& username, TablePrivilege priv) {
+    auto ppath = permPath(dbname);
+    // Read existing permissions
+    std::map<std::string, std::set<std::string>> perms; // user+table -> privileges
+    if (std::filesystem::exists(ppath)) {
+        std::ifstream ifs(ppath);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string u, t, p;
+            ss >> u >> t >> p;
+            perms[u + "|" + t].insert(p);
+        }
+    }
+    std::string key = username + "|" + tablename;
+    perms[key].insert(privToStr(priv));
+    // Write back
+    std::ofstream ofs(ppath);
+    for (const auto& kv : perms) {
+        size_t pipe = kv.first.find('|');
+        std::string u = kv.first.substr(0, pipe);
+        std::string t = kv.first.substr(pipe + 1);
+        for (const auto& p : kv.second) {
+            ofs << u << " " << t << " " << p << "\n";
+        }
+    }
+}
+
+void StorageEngine::revoke(const std::string& dbname, const std::string& tablename,
+                           const std::string& username, TablePrivilege priv) {
+    auto ppath = permPath(dbname);
+    if (!std::filesystem::exists(ppath)) return;
+    std::map<std::string, std::set<std::string>> perms;
+    {
+        std::ifstream ifs(ppath);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string u, t, p;
+            ss >> u >> t >> p;
+            perms[u + "|" + t].insert(p);
+        }
+    }
+    std::string key = username + "|" + tablename;
+    auto it = perms.find(key);
+    if (it != perms.end()) {
+        it->second.erase(privToStr(priv));
+        if (it->second.empty()) perms.erase(it);
+    }
+    std::ofstream ofs(ppath);
+    for (const auto& kv : perms) {
+        size_t pipe = kv.first.find('|');
+        std::string u = kv.first.substr(0, pipe);
+        std::string t = kv.first.substr(pipe + 1);
+        for (const auto& p : kv.second) {
+            ofs << u << " " << t << " " << p << "\n";
+        }
+    }
+}
+
+bool StorageEngine::hasPermission(const std::string& dbname, const std::string& tablename,
+                                  const std::string& username, TablePrivilege priv) const {
+    auto ppath = permPath(dbname);
+    if (!std::filesystem::exists(ppath)) return false;
+    std::string target = privToStr(priv);
+    std::ifstream ifs(ppath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string u, t, p;
+        ss >> u >> t >> p;
+        if (u == username && t == tablename) {
+            if (p == "all" || p == target) return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> StorageEngine::getUserPermissions(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& username) const {
+    std::vector<std::string> result;
+    auto ppath = permPath(dbname);
+    if (!std::filesystem::exists(ppath)) return result;
+    std::ifstream ifs(ppath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string u, t, p;
+        ss >> u >> t >> p;
+        if (u == username && t == tablename) result.push_back(p);
+    }
+    return result;
+}
+
 } // namespace dbms

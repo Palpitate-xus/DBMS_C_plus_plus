@@ -609,6 +609,15 @@ static bool checkAdmin() {
     return true;
 }
 
+static bool checkTablePermission(const string& tname, dbms::StorageEngine::TablePrivilege priv) {
+    if (g_nowPermission == 1) return true; // admin bypass
+    if (!g_engine.hasPermission(g_currentDB, tname, g_nowUser, priv)) {
+        cout << "permission denied on table " << tname << endl;
+        return false;
+    }
+    return true;
+}
+
 static bool checkDB() {
     if (!g_engine.databaseExists(g_currentDB)) {
         cout << "Invalid Database name:" << g_currentDB << endl;
@@ -847,6 +856,7 @@ bool execute(const string& rawSql) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
+        if (!checkTablePermission(tname, dbms::StorageEngine::TablePrivilege::Insert)) return true;
 
         // Find column list and value list
         size_t colStart = sql.find('(', 12);
@@ -908,6 +918,7 @@ bool execute(const string& rawSql) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
+        if (!checkTablePermission(tname, dbms::StorageEngine::TablePrivilege::Delete)) return true;
 
         tokens.erase(tokens.begin());
         if (tokens.empty()) {
@@ -954,6 +965,7 @@ bool execute(const string& rawSql) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
+        if (!checkTablePermission(tname, dbms::StorageEngine::TablePrivilege::Update)) return true;
 
         size_t wherePos = sql.find("where", setPos);
         auto updates = parseSetClause(sql, setPos + 3,
@@ -1150,6 +1162,64 @@ bool execute(const string& rawSql) {
                 cout << rightLines[i] << endl;
             }
         }
+        return false;
+    }
+
+    // GRANT privilege ON table TO user
+    if (sql.substr(0, 6) == "grant ") {
+        if (!checkAdmin()) return true;
+        if (!checkDB()) return true;
+        string rest = trim(sql.substr(6));
+        size_t onPos = rest.find(" on ");
+        size_t toPos = rest.find(" to ");
+        if (onPos == string::npos || toPos == string::npos) {
+            cout << "SQL syntax error: GRANT privilege ON table TO user" << endl;
+            return true;
+        }
+        string privStr = trim(rest.substr(0, onPos));
+        string tname = trim(rest.substr(onPos + 4, toPos - onPos - 4));
+        string uname = trim(rest.substr(toPos + 4));
+        dbms::StorageEngine::TablePrivilege priv;
+        if (privStr == "select") priv = dbms::StorageEngine::TablePrivilege::Select;
+        else if (privStr == "insert") priv = dbms::StorageEngine::TablePrivilege::Insert;
+        else if (privStr == "update") priv = dbms::StorageEngine::TablePrivilege::Update;
+        else if (privStr == "delete") priv = dbms::StorageEngine::TablePrivilege::Delete;
+        else if (privStr == "all") priv = dbms::StorageEngine::TablePrivilege::All;
+        else {
+            cout << "Unknown privilege: " << privStr << endl;
+            return true;
+        }
+        g_engine.grant(g_currentDB, tname, uname, priv);
+        cout << "Granted " << privStr << " on " << tname << " to " << uname << endl;
+        return false;
+    }
+
+    // REVOKE privilege ON table FROM user
+    if (sql.substr(0, 7) == "revoke ") {
+        if (!checkAdmin()) return true;
+        if (!checkDB()) return true;
+        string rest = trim(sql.substr(7));
+        size_t onPos = rest.find(" on ");
+        size_t fromPos = rest.find(" from ");
+        if (onPos == string::npos || fromPos == string::npos) {
+            cout << "SQL syntax error: REVOKE privilege ON table FROM user" << endl;
+            return true;
+        }
+        string privStr = trim(rest.substr(0, onPos));
+        string tname = trim(rest.substr(onPos + 4, fromPos - onPos - 4));
+        string uname = trim(rest.substr(fromPos + 6));
+        dbms::StorageEngine::TablePrivilege priv;
+        if (privStr == "select") priv = dbms::StorageEngine::TablePrivilege::Select;
+        else if (privStr == "insert") priv = dbms::StorageEngine::TablePrivilege::Insert;
+        else if (privStr == "update") priv = dbms::StorageEngine::TablePrivilege::Update;
+        else if (privStr == "delete") priv = dbms::StorageEngine::TablePrivilege::Delete;
+        else if (privStr == "all") priv = dbms::StorageEngine::TablePrivilege::All;
+        else {
+            cout << "Unknown privilege: " << privStr << endl;
+            return true;
+        }
+        g_engine.revoke(g_currentDB, tname, uname, priv);
+        cout << "Revoked " << privStr << " on " << tname << " from " << uname << endl;
         return false;
     }
 
@@ -1489,6 +1559,8 @@ bool execute(const string& rawSql) {
                 cout << "Table not exist" << endl;
                 return true;
             }
+            if (!checkTablePermission(leftTable, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            if (!checkTablePermission(rightTable, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
             set<string> selectCols;
             bool selectAll = (columns == "*");
@@ -1594,6 +1666,7 @@ bool execute(const string& rawSql) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
+        if (!checkTablePermission(tname, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
         string orderByCol;
         bool orderByAsc = true;

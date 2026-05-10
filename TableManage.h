@@ -212,6 +212,18 @@ public:
                               const std::string& colname) const;
     PageAllocator* getPageAllocator(const std::string& dbname, const std::string& tablename) const;
 
+    // Table-level permissions
+    enum class TablePrivilege { Select, Insert, Update, Delete, All };
+    void grant(const std::string& dbname, const std::string& tablename,
+               const std::string& username, TablePrivilege priv);
+    void revoke(const std::string& dbname, const std::string& tablename,
+                const std::string& username, TablePrivilege priv);
+    bool hasPermission(const std::string& dbname, const std::string& tablename,
+                       const std::string& username, TablePrivilege priv) const;
+    std::vector<std::string> getUserPermissions(const std::string& dbname,
+                                                 const std::string& tablename,
+                                                 const std::string& username) const;
+
 private:
     std::filesystem::path dbPath(const std::string& dbname) const;
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
@@ -221,6 +233,7 @@ private:
     std::filesystem::path viewPath(const std::string& dbname, const std::string& viewname) const;
     std::filesystem::path viewsDir(const std::string& dbname) const;
     std::filesystem::path statsPath(const std::string& dbname) const;
+    std::filesystem::path permPath(const std::string& dbname) const;
 
     void writeSchema(std::ostream& out, const TableSchema& tbl);
     TableSchema readSchema(std::istream& in, const std::string& tablename) const;
