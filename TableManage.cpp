@@ -3,13 +3,16 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <set>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace dbms {
@@ -118,6 +121,45 @@ size_t TableSchema::rowSize() const {
     return total + MVCC_HEADER_SIZE;
 }
 
+bool TableSchema::hasVariableLength() const {
+    for (size_t i = 0; i < len; ++i) {
+        if (cols[i].isVariableLength) return true;
+    }
+    return false;
+}
+
+size_t TableSchema::fixedDataSize() const {
+    size_t total = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (!cols[i].isVariableLength) total += cols[i].dsize;
+    }
+    return total;
+}
+
+size_t TableSchema::varColCount() const {
+    size_t count = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (cols[i].isVariableLength) ++count;
+    }
+    return count;
+}
+
+size_t TableSchema::getVarColIndex(size_t colIdx) const {
+    size_t idx = 0;
+    for (size_t i = 0; i < colIdx; ++i) {
+        if (cols[i].isVariableLength) ++idx;
+    }
+    return idx;
+}
+
+size_t TableSchema::getFixedColOffset(size_t colIdx) const {
+    size_t off = 0;
+    for (size_t i = 0; i < colIdx; ++i) {
+        if (!cols[i].isVariableLength) off += cols[i].dsize;
+    }
+    return off;
+}
+
 // ========================================================================
 // Column constructors
 // ========================================================================
@@ -159,6 +201,17 @@ Column makeDateColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "varchar";
+    c.dsize = std::max(size_t(1), std::min(maxLen, size_t(65535)));
+    return c;
+}
+
 // ========================================================================
 // StorageEngine
 // ========================================================================
@@ -190,6 +243,10 @@ std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) co
 
 std::filesystem::path StorageEngine::walPath(const std::string& dbname) const {
     return dbPath(dbname) / "wal.log";
+}
+
+std::filesystem::path StorageEngine::checkpointPath(const std::string& dbname) const {
+    return dbPath(dbname) / "checkpoint";
 }
 
 std::filesystem::path StorageEngine::viewPath(const std::string& dbname,
@@ -273,35 +330,18 @@ void StorageEngine::analyzeTable(const std::string& dbname,
     std::map<std::string, std::set<std::string>> distinctVals;
     std::map<std::string, std::string> minVals, maxVals;
 
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t) {
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         stats.rowCount++;
-        size_t offset = 0;
+        std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
-            const Column& col = tbl.cols[i];
-            std::string val;
-            if (col.dataType == "char") {
-                std::string buf(col.dsize, '\0');
-                std::memcpy(buf.data(), data + offset, col.dsize);
-                auto nul = buf.find('\0');
-                if (nul != std::string::npos) buf.resize(nul);
-                val = buf;
-            } else if (col.dataType == "date") {
-                Date d;
-                std::memcpy(&d, data + offset, DATE_SIZE);
-                val = (d.year == 0) ? "" : str(d);
-            } else {
-                int64_t v = 0;
-                std::memcpy(&v, data + offset, col.dsize);
-                val = (v == INF) ? "" : transstr(v);
+            std::string val = extractColumnValue(row, tbl, i);
+            distinctVals[tbl.cols[i].dataName].insert(val);
+            if (minVals.find(tbl.cols[i].dataName) == minVals.end() || val < minVals[tbl.cols[i].dataName]) {
+                minVals[tbl.cols[i].dataName] = val;
             }
-            distinctVals[col.dataName].insert(val);
-            if (minVals.find(col.dataName) == minVals.end() || val < minVals[col.dataName]) {
-                minVals[col.dataName] = val;
+            if (maxVals.find(tbl.cols[i].dataName) == maxVals.end() || val > maxVals[tbl.cols[i].dataName]) {
+                maxVals[tbl.cols[i].dataName] = val;
             }
-            if (maxVals.find(col.dataName) == maxVals.end() || val > maxVals[col.dataName]) {
-                maxVals[col.dataName] = val;
-            }
-            offset += col.dsize;
         }
     });
 
@@ -392,9 +432,22 @@ StorageEngine::ColumnStats StorageEngine::getColumnStats(
 // WAL helpers
 // ========================================================================
 
+static void syncFile(const std::filesystem::path& path) {
+    int fd = ::open(path.c_str(), O_RDWR);
+    if (fd >= 0) {
+        ::fsync(fd);
+        ::close(fd);
+    }
+}
+
 static void walAppend(const std::filesystem::path& walFile, const std::string& line) {
     std::ofstream ofs(walFile, std::ios::out | std::ios::app);
-    if (ofs) ofs << line << '\n';
+    if (ofs) {
+        ofs << line << '\n';
+        ofs.flush();
+        ofs.close();
+        syncFile(walFile);
+    }
 }
 
 static std::vector<std::string> walReadAll(const std::filesystem::path& walFile) {
@@ -498,10 +551,11 @@ void StorageEngine::migrateToPageStorage(const std::string& dbname,
 }
 
 void StorageEngine::migrateAllDataFiles() {
-    for (const auto& entry : std::filesystem::directory_iterator(".")) {
-        if (!entry.is_directory()) continue;
-        std::string dbname = entry.path().filename().string();
-        if (!std::filesystem::exists(tableListPath(dbname))) continue;
+    for (const auto& entry : std::filesystem::directory_iterator(".", std::filesystem::directory_options::skip_permission_denied)) {
+        try { if (!entry.is_directory()) continue; } catch (...) { continue; }
+        std::string dbname;
+        try { dbname = entry.path().filename().string(); } catch (...) { continue; }
+        try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
         auto tables = getTableNames(dbname);
         for (const auto& tname : tables) {
             std::filesystem::path dt = dataPath(dbname, tname);
@@ -582,10 +636,16 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const Ta
     }
     if (pkIdx >= tbl.len) return "";
 
-    size_t offset = MVCC_HEADER_SIZE;
-    for (size_t i = 0; i < pkIdx; ++i) offset += tbl.cols[i].dsize;
-
     const Column& col = tbl.cols[pkIdx];
+    if (col.isVariableLength) {
+        return extractColumnValue(rowBuffer, tbl, pkIdx);
+    }
+
+    size_t offset = 0;
+    for (size_t i = 0; i < pkIdx; ++i) {
+        if (!tbl.cols[i].isVariableLength) offset += tbl.cols[i].dsize;
+    }
+    if (offset + col.dsize > rowBuffer.size()) return "";
     if (col.dataType == "char") {
         std::string val = rowBuffer.substr(offset, col.dsize);
         auto nul = val.find('\0');
@@ -669,9 +729,27 @@ BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
 std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
                                                const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
-    size_t offset = MVCC_HEADER_SIZE;
-    for (size_t i = 0; i < colIdx; ++i) offset += tbl.cols[i].dsize;
     const Column& col = tbl.cols[colIdx];
+
+    if (col.isVariableLength) {
+        // Variable-length column: look up in var offset array
+        size_t varIdx = tbl.getVarColIndex(colIdx);
+        size_t fixedSize = tbl.fixedDataSize();
+        size_t arrPos = fixedSize + varIdx * 4;
+        if (arrPos + 4 > rowBuffer.size()) return "";
+        uint16_t dataOffset = 0, dataLen = 0;
+        std::memcpy(&dataOffset, rowBuffer.data() + arrPos, sizeof(uint16_t));
+        std::memcpy(&dataLen, rowBuffer.data() + arrPos + 2, sizeof(uint16_t));
+        if (dataOffset + dataLen > rowBuffer.size()) return "";
+        return rowBuffer.substr(dataOffset, dataLen);
+    }
+
+    // Fixed-length column
+    size_t offset = 0;
+    for (size_t i = 0; i < colIdx; ++i) {
+        if (!tbl.cols[i].isVariableLength) offset += tbl.cols[i].dsize;
+    }
+    if (offset + col.dsize > rowBuffer.size()) return "";
     if (col.dataType == "char") {
         std::string val(col.dsize, '\0');
         std::memcpy(val.data(), rowBuffer.data() + offset, col.dsize);
@@ -773,12 +851,20 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     int32_t len = static_cast<int32_t>(tbl.len);
     out.write(reinterpret_cast<const char*>(&len), 4);
     for (size_t i = 0; i < tbl.len; ++i) {
-        uint8_t flags = (tbl.cols[i].isNull ? 1 : 0) | (tbl.cols[i].isPrimaryKey ? 2 : 0);
+        uint8_t flags = (tbl.cols[i].isNull ? 1 : 0) | (tbl.cols[i].isPrimaryKey ? 2 : 0) | (tbl.cols[i].isVariableLength ? 4 : 0) | (tbl.cols[i].isUnique ? 8 : 0) | (!tbl.cols[i].defaultValue.empty() ? 16 : 0) | (tbl.cols[i].isAutoIncrement ? 32 : 0) | (!tbl.cols[i].checkExpr.empty() ? 64 : 0);
         out.write(reinterpret_cast<const char*>(&flags), 1);
         writeFixedString(out, tbl.cols[i].dataType, MAX_TYPE_NAME_LEN);
         writeFixedString(out, tbl.cols[i].dataName, MAX_COL_NAME_LEN);
         int32_t dsize = static_cast<int32_t>(tbl.cols[i].dsize);
         out.write(reinterpret_cast<const char*>(&dsize), 4);
+        if (!tbl.cols[i].defaultValue.empty()) {
+            writeFixedString(out, tbl.cols[i].defaultValue, MAX_COL_NAME_LEN);
+        }
+        if (!tbl.cols[i].checkExpr.empty()) {
+            uint16_t checkLen = static_cast<uint16_t>(tbl.cols[i].checkExpr.size());
+            out.write(reinterpret_cast<const char*>(&checkLen), 2);
+            out.write(tbl.cols[i].checkExpr.data(), checkLen);
+        }
     }
     // Write foreign keys
     int32_t fkLen = static_cast<int32_t>(tbl.fkLen);
@@ -803,11 +889,28 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         in.read(reinterpret_cast<char*>(&flags), 1);
         tbl.cols[i].isNull = (flags & 1) != 0;
         tbl.cols[i].isPrimaryKey = (flags & 2) != 0;
+        tbl.cols[i].isVariableLength = (flags & 4) != 0;
+        tbl.cols[i].isUnique = (flags & 8) != 0;
+        bool hasDefault = (flags & 16) != 0;
+        tbl.cols[i].isAutoIncrement = (flags & 32) != 0;
+        bool hasCheck = (flags & 64) != 0;
         tbl.cols[i].dataType = readFixedString(in, MAX_TYPE_NAME_LEN);
         tbl.cols[i].dataName = readFixedString(in, MAX_COL_NAME_LEN);
         int32_t dsize = 0;
         in.read(reinterpret_cast<char*>(&dsize), 4);
         tbl.cols[i].dsize = static_cast<size_t>(dsize);
+        if (hasDefault) {
+            tbl.cols[i].defaultValue = readFixedString(in, MAX_COL_NAME_LEN);
+        }
+        if (hasCheck) {
+            uint16_t checkLen = 0;
+            in.read(reinterpret_cast<char*>(&checkLen), 2);
+            if (in && checkLen > 0) {
+                std::string checkExpr(checkLen, '\0');
+                in.read(checkExpr.data(), checkLen);
+                tbl.cols[i].checkExpr = checkExpr;
+            }
+        }
     }
     // Read foreign keys (if present)
     int32_t fkLen = 0;
@@ -851,6 +954,12 @@ OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema
             break;
         }
     }
+    // Initialize auto-increment sequences
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isAutoIncrement) {
+            writeNextSeq(dbname, tbl.tablename, tbl.cols[i].dataName, 1);
+        }
+    }
     return OpResult::Success;
 }
 
@@ -869,6 +978,7 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(schemaPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
+    removeSeq(dbname, tablename);
 
     // Remove from cache
     std::string key = dbname + "/" + tablename;
@@ -1026,29 +1136,25 @@ bool StorageEngine::stringToBuffer(const std::string& src, char* dst, size_t len
 // Helper: evaluate a single condition against a row buffer (page-based)
 // ========================================================================
 bool StorageEngine::evalConditionOnRow(const Condition& cond,
-                                        const char* rowData, const TableSchema& tbl) {
-    size_t offset = MVCC_HEADER_SIZE;
+                                        const std::string& rowBuffer, const TableSchema& tbl) {
+    if (cond.colName == "__true__") return true;
+    if (cond.colName == "__false__") return false;
     size_t ci = 0;
-    for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci)
-        offset += tbl.cols[ci].dsize;
+    for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci) {}
     if (ci >= tbl.len) return false;
 
+    std::string val = extractColumnValue(rowBuffer, tbl, ci);
     const Column& col = tbl.cols[ci];
-    if (col.dataType == "char") {
-        std::string buf(col.dsize, '\0');
-        std::memcpy(buf.data(), rowData + offset, col.dsize);
-        auto nul = buf.find('\0');
-        if (nul != std::string::npos) buf.resize(nul);
-        if (cond.op == "<"  && !(buf <  cond.value)) return false;
-        if (cond.op == ">"  && !(buf >  cond.value)) return false;
-        if (cond.op == "="  && buf != cond.value)    return false;
-        if (cond.op == "<=" && (buf >  cond.value))   return false;
-        if (cond.op == ">=" && (buf <  cond.value))   return false;
-        if (cond.op == "!=" && buf == cond.value)    return false;
-        if (cond.op == "like" && !likeMatch(buf, cond.value)) return false;
+    if (col.dataType == "char" || col.isVariableLength) {
+        if (cond.op == "<"  && !(val <  cond.value)) return false;
+        if (cond.op == ">"  && !(val >  cond.value)) return false;
+        if (cond.op == "="  && val != cond.value)    return false;
+        if (cond.op == "<=" && (val >  cond.value))   return false;
+        if (cond.op == ">=" && (val <  cond.value))   return false;
+        if (cond.op == "!=" && val == cond.value)    return false;
+        if (cond.op == "like" && !likeMatch(val, cond.value)) return false;
     } else if (col.dataType == "date") {
-        Date d;
-        std::memcpy(&d, rowData + offset, DATE_SIZE);
+        Date d = (val.empty() ? Date{} : Date(val.c_str()));
         Date v(cond.value.c_str());
         if (cond.op == "<"  && v.year && !(d < v))  return false;
         if (cond.op == ">"  && v.year && !(d > v))  return false;
@@ -1057,17 +1163,143 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == ">=" && v.year && (d < v))   return false;
         if (cond.op == "!=" && v.year && d == v)    return false;
     } else {
-        int64_t val = 0;
-        std::memcpy(&val, rowData + offset, col.dsize);
+        int64_t num = val.empty() ? INF : parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
-        if (cond.op == "<"  && cmp != INF && !(val < cmp)) return false;
-        if (cond.op == ">"  && cmp != INF && !(val > cmp)) return false;
-        if (cond.op == "="  && cmp != INF && val != cmp)   return false;
-        if (cond.op == "<=" && cmp != INF && (val > cmp))  return false;
-        if (cond.op == ">=" && cmp != INF && (val < cmp))  return false;
-        if (cond.op == "!=" && cmp != INF && val == cmp)   return false;
+        if (cond.op == "<"  && cmp != INF && !(num < cmp)) return false;
+        if (cond.op == ">"  && cmp != INF && !(num > cmp)) return false;
+        if (cond.op == "="  && cmp != INF && num != cmp)   return false;
+        if (cond.op == "<=" && cmp != INF && (num > cmp))  return false;
+        if (cond.op == ">=" && cmp != INF && (num < cmp))  return false;
+        if (cond.op == "!=" && cmp != INF && num == cmp)   return false;
     }
     return true;
+}
+
+// ========================================================================
+// Parse CHECK expression into Condition list
+// e.g., "score>=0andscore<=100" -> [{"score",">=","0"}, {"score","<=","100"}]
+// ========================================================================
+static std::vector<StorageEngine::Condition> parseCheckConditions(const std::string& expr) {
+    std::vector<StorageEngine::Condition> result;
+    size_t pos = 0;
+    while (pos < expr.size()) {
+        size_t andPos = expr.find("and", pos);
+        std::string condStr = (andPos == std::string::npos) ? expr.substr(pos) : expr.substr(pos, andPos - pos);
+        if (!condStr.empty()) {
+            size_t opStart = 0;
+            while (opStart < condStr.size() && !strchr("<>=!", condStr[opStart])) ++opStart;
+            if (opStart > 0 && opStart < condStr.size()) {
+                StorageEngine::Condition c;
+                c.colName = condStr.substr(0, opStart);
+                size_t opEnd = opStart;
+                while (opEnd < condStr.size() && strchr("<>=!", condStr[opEnd])) ++opEnd;
+                c.op = condStr.substr(opStart, opEnd - opStart);
+                c.value = condStr.substr(opEnd);
+                if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
+                    c.value = c.value.substr(1, c.value.size() - 2);
+                result.push_back(c);
+            }
+        }
+        if (andPos == std::string::npos) break;
+        pos = andPos + 3;
+    }
+    return result;
+}
+
+// ========================================================================
+// Helper: build full row buffer (with MVCC header) from column values
+// ========================================================================
+static std::string buildRowBuffer(const TableSchema& tbl,
+                                   const std::map<std::string, std::string>& values,
+                                   uint64_t creatorTxnId) {
+    std::string rowBuffer;
+    uint64_t rollbackPtr = 0;
+    rowBuffer.append(reinterpret_cast<const char*>(&creatorTxnId), sizeof(uint64_t));
+    rowBuffer.append(reinterpret_cast<const char*>(&rollbackPtr), sizeof(uint64_t));
+
+    if (!tbl.hasVariableLength()) {
+        size_t dataSize = tbl.rowSize() - MVCC_HEADER_SIZE;
+        rowBuffer.resize(tbl.rowSize(), '\0');
+        size_t offset = MVCC_HEADER_SIZE;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const Column& col = tbl.cols[i];
+            auto it = values.find(col.dataName);
+            std::string val = (it != values.end()) ? it->second : "";
+            if (col.dataType == "char") {
+                std::memset(&rowBuffer[offset], 0, col.dsize);
+                if (!val.empty()) {
+                    size_t copyLen = std::min(val.size(), col.dsize);
+                    std::memcpy(&rowBuffer[offset], val.data(), copyLen);
+                }
+            } else if (col.dataType == "date") {
+                if (val.empty()) {
+                    Date d{};
+                    std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
+                } else {
+                    Date d(val.c_str());
+                    std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
+                }
+            } else {
+                int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
+                std::memcpy(&rowBuffer[offset], &num, col.dsize);
+            }
+            offset += col.dsize;
+        }
+    } else {
+        size_t fixedSize = tbl.fixedDataSize();
+        size_t nVar = tbl.varColCount();
+        size_t varArraySize = nVar * 4;
+
+        std::string fixedData(fixedSize, '\0');
+        std::vector<std::string> varDataList;
+        size_t fixedOff = 0;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const Column& col = tbl.cols[i];
+            auto it = values.find(col.dataName);
+            std::string val = (it != values.end()) ? it->second : "";
+            if (col.isVariableLength) {
+                if (val.size() > col.dsize) val.resize(col.dsize);
+                varDataList.push_back(val);
+            } else {
+                if (col.dataType == "char") {
+                    std::memset(&fixedData[fixedOff], 0, col.dsize);
+                    if (!val.empty()) {
+                        size_t copyLen = std::min(val.size(), col.dsize);
+                        std::memcpy(&fixedData[fixedOff], val.data(), copyLen);
+                    }
+                } else if (col.dataType == "date") {
+                    if (val.empty()) {
+                        Date d{};
+                        std::memcpy(&fixedData[fixedOff], &d, DATE_SIZE);
+                    } else {
+                        Date d(val.c_str());
+                        std::memcpy(&fixedData[fixedOff], &d, DATE_SIZE);
+                    }
+                } else {
+                    int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
+                    std::memcpy(&fixedData[fixedOff], &num, col.dsize);
+                }
+                fixedOff += col.dsize;
+            }
+        }
+
+        std::string varOffsetArray(varArraySize, '\0');
+        std::string varDataSection;
+        uint16_t varDataOffset = static_cast<uint16_t>(fixedSize + varArraySize);
+        for (size_t vi = 0; vi < varDataList.size(); ++vi) {
+            uint16_t vlen = static_cast<uint16_t>(varDataList[vi].size());
+            size_t arrPos = vi * 4;
+            std::memcpy(&varOffsetArray[arrPos], &varDataOffset, sizeof(uint16_t));
+            std::memcpy(&varOffsetArray[arrPos + 2], &vlen, sizeof(uint16_t));
+            varDataSection += varDataList[vi];
+            varDataOffset += vlen;
+        }
+
+        rowBuffer += fixedData;
+        rowBuffer += varOffsetArray;
+        rowBuffer += varDataSection;
+    }
+    return rowBuffer;
 }
 
 OpResult StorageEngine::insert(const std::string& dbname,
@@ -1079,11 +1311,32 @@ OpResult StorageEngine::insert(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
 
+    // Apply DEFAULT values
+    std::map<std::string, std::string> actualValues = values;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        auto it = actualValues.find(col.dataName);
+        if ((it == actualValues.end() || it->second.empty()) && !col.defaultValue.empty()) {
+            actualValues[col.dataName] = col.defaultValue;
+        }
+    }
+
+    // Apply AUTO_INCREMENT values
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        if (!col.isAutoIncrement) continue;
+        auto it = actualValues.find(col.dataName);
+        if (it != actualValues.end() && !it->second.empty()) continue;
+        int64_t nextVal = readNextSeq(dbname, tablename, col.dataName);
+        actualValues[col.dataName] = std::to_string(nextVal);
+        writeNextSeq(dbname, tablename, col.dataName, nextVal + 1);
+    }
+
     // Check primary key uniqueness using B+ tree index
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].isPrimaryKey) {
-            auto it = values.find(tbl.cols[i].dataName);
-            if (it != values.end() && !it->second.empty()) {
+            auto it = actualValues.find(tbl.cols[i].dataName);
+            if (it != actualValues.end() && !it->second.empty()) {
                 BPTree* idx = getPKIndex(dbname, tablename);
                 if (idx) {
                     int64_t dummy;
@@ -1097,61 +1350,75 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
     }
 
-    // Build row buffer and validate all values before writing
-    std::string rowBuffer(rowSize, '\0');
-
-    // Write MVCC header: creatorTxnId + rollbackPtr
-    uint64_t creatorTxnId = inTransaction_ ? currentTxnId_ : 0;
-    uint64_t rollbackPtr = 0;
-    std::memcpy(rowBuffer.data(), &creatorTxnId, sizeof(uint64_t));
-    std::memcpy(rowBuffer.data() + sizeof(uint64_t), &rollbackPtr, sizeof(uint64_t));
-
-    size_t offset = MVCC_HEADER_SIZE;
-
+    // Check UNIQUE constraints
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
-        auto it = values.find(col.dataName);
-        std::string val = (it != values.end()) ? it->second : "";
+        if (!col.isUnique) continue;
+        auto it = actualValues.find(col.dataName);
+        if (it == actualValues.end() || it->second.empty()) continue;
+        // Check if value already exists
+        bool duplicate = false;
+        forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            if (duplicate) return;
+            std::string row(data, len);
+            std::string existingVal = extractColumnValue(row, tbl, i);
+            if (existingVal == it->second) duplicate = true;
+        });
+        if (duplicate) {
+            lockManager_.unlock(tablename);
+            return OpResult::DuplicateKey;
+        }
+    }
 
+    // Validate all values before building row buffer
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        auto it = actualValues.find(col.dataName);
+        std::string val = (it != actualValues.end()) ? it->second : "";
         if (!col.isNull && val.empty()) {
             lockManager_.unlock(tablename);
             return OpResult::NullNotAllowed;
         }
-
-        if (col.dataType == "char") {
-            if (!stringToBuffer(val, &rowBuffer[offset], col.dsize)) {
-                lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
-            }
-        } else if (col.dataType == "date") {
+        if (!col.isVariableLength && col.dataType == "date" && !val.empty()) {
             Date d(val.c_str());
             if (d.year == 0) {
                 lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;
             }
-            std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
-        } else {
-            // integer types: tiny, int, long
-            if (val.empty()) {
-                int64_t nullVal = INF;
-                std::memcpy(&rowBuffer[offset], &nullVal, col.dsize);
-            } else {
-                int64_t num = parseInt(val);
-                if (num == INF) {
-                    lockManager_.unlock(tablename);
-                    return OpResult::InvalidValue;
-                }
-                std::memcpy(&rowBuffer[offset], &num, col.dsize);
+        }
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && !val.empty()) {
+            int64_t num = parseInt(val);
+            if (num == INF) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
             }
         }
-        offset += col.dsize;
+    }
+
+    // Build row buffer
+    uint64_t creatorTxnId = inTransaction_ ? currentTxnId_ : 0;
+    std::string rowBuffer = buildRowBuffer(tbl, actualValues, creatorTxnId);
+
+    // Check CHECK constraints before writing
+    std::string strippedRow(rowBuffer.data() + MVCC_HEADER_SIZE,
+                            rowBuffer.size() - MVCC_HEADER_SIZE);
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        if (col.checkExpr.empty()) continue;
+        auto checkConds = parseCheckConditions(col.checkExpr);
+        for (const auto& cond : checkConds) {
+            if (!evalConditionOnRow(cond, strippedRow, tbl)) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+        }
     }
 
     // Check foreign key references
     for (size_t fi = 0; fi < tbl.fkLen; ++fi) {
         const ForeignKey& fk = tbl.fks[fi];
-        auto it = values.find(fk.colName);
-        if (it == values.end() || it->second.empty()) continue;
+        auto it = actualValues.find(fk.colName);
+        if (it == actualValues.end() || it->second.empty()) continue;
         if (!tableExists(dbname, fk.refTable)) {
             lockManager_.unlock(tablename);
             return OpResult::TableNotExist;
@@ -1167,6 +1434,13 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
     }
 
+    // Check if row fits in a page (page capacity = PAGE_SIZE - header - slot)
+    constexpr size_t MAX_ROW_SIZE = Page::PAGE_SIZE - sizeof(Page::Header) - sizeof(Page::Slot);
+    if (rowBuffer.size() > MAX_ROW_SIZE) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+
     // Write row into page-based storage
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     uint32_t pageId = 0;
@@ -1174,11 +1448,12 @@ OpResult StorageEngine::insert(const std::string& dbname,
     {
         uint32_t numPages = pa->numPages();
         bool inserted = false;
+        size_t actualRowSize = rowBuffer.size();
         for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
             char* buf = pa->fetchPage(pid);
             Page page(buf);
-            if (page.canFit(rowSize)) {
-                if (page.insert(rowBuffer.data(), rowSize, slotId)) {
+            if (page.canFit(actualRowSize)) {
+                if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                     pageId = pid;
                     inserted = true;
                 }
@@ -1190,7 +1465,11 @@ OpResult StorageEngine::insert(const std::string& dbname,
             pageId = pa->allocPage();
             char* buf = pa->fetchPage(pageId);
             Page page(buf);
-            page.insert(rowBuffer.data(), rowSize, slotId);
+            if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
+                pa->unpinPage(pageId);
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
             pa->markDirty(pageId);
             pa->unpinPage(pageId);
         }
@@ -1207,7 +1486,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
     {
         BPTree* idx = getPKIndex(dbname, tablename);
         if (idx) {
-            std::string pkVal = extractPKValue(rowBuffer, tbl);
+            std::string pkVal = extractPKValue(strippedRow, tbl);
             if (!pkVal.empty()) idx->insert(pkVal, rid);
         }
     }
@@ -1222,7 +1501,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
             if (colIdx >= tbl.len) continue;
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
             if (secIdx) {
-                std::string val = extractColumnValue(rowBuffer, tbl, colIdx);
+                std::string val = extractColumnValue(strippedRow, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, rid);
             }
         }
@@ -1302,7 +1581,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                         bool match = true;
                         for (const auto& cond : conds) {
                             if (cond.op == "=" && cond.colName == c.colName) continue;
-                            if (!evalConditionOnRow(cond, row.data(), tbl)) { match = false; break; }
+                            if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
                         }
                         if (!match) toRemove.insert(rid);
                     }
@@ -1317,8 +1596,9 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
         int64_t rid = encodeRid(pageId, slotId);
         bool match = true;
+        std::string row(data, len);
         for (const auto& c : conds) {
-            if (!evalConditionOnRow(c, data, tbl)) { match = false; break; }
+            if (!evalConditionOnRow(c, row, tbl)) { match = false; break; }
         }
         if (match) ids.insert(rid);
     });
@@ -1353,26 +1633,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
             for (int64_t rid : toDelete) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
-                size_t off = 0;
-                for (size_t c = 0; c < pkIdx; ++c) off += tbl.cols[c].dsize;
-                const Column& col = tbl.cols[pkIdx];
-                std::string pkVal;
-                const char* rowData = row.data();
-                if (col.dataType == "char") {
-                    std::string buf(col.dsize, '\0');
-                    std::memcpy(buf.data(), rowData + off, col.dsize);
-                    auto nul = buf.find('\0');
-                    if (nul != std::string::npos) buf.resize(nul);
-                    pkVal = buf;
-                } else if (col.dataType == "date") {
-                    Date d;
-                    std::memcpy(&d, rowData + off, DATE_SIZE);
-                    pkVal = str(d);
-                } else {
-                    int64_t val = 0;
-                    std::memcpy(&val, rowData + off, col.dsize);
-                    pkVal = transstr(val);
-                }
+                std::string pkVal = extractPKValue(row, tbl);
                 if (!pkVal.empty()) deletedPKs.insert(pkVal);
             }
 
@@ -1397,26 +1658,9 @@ OpResult StorageEngine::remove(const std::string& dbname,
                         }
                         if (fkColIdx >= otherTbl.len) continue;
 
-                        forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t) {
-                            size_t coff = 0;
-                            for (size_t c = 0; c < fkColIdx; ++c) coff += otherTbl.cols[c].dsize;
-                            const Column& fcol = otherTbl.cols[fkColIdx];
-                            std::string fval;
-                            if (fcol.dataType == "char") {
-                                std::string buf(fcol.dsize, '\0');
-                                std::memcpy(buf.data(), data + coff, fcol.dsize);
-                                auto nul = buf.find('\0');
-                                if (nul != std::string::npos) buf.resize(nul);
-                                fval = buf;
-                            } else if (fcol.dataType == "date") {
-                                Date d;
-                                std::memcpy(&d, data + coff, DATE_SIZE);
-                                fval = (d.year == 0) ? "" : str(d);
-                            } else {
-                                int64_t val = 0;
-                                std::memcpy(&val, data + coff, fcol.dsize);
-                                fval = (val == INF) ? "" : transstr(val);
-                            }
+                        forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
+                            std::string row(data, len);
+                            std::string fval = extractColumnValue(row, otherTbl, fkColIdx);
                             if (deletedPKs.find(fval) != deletedPKs.end()) {
                                 int64_t orid = encodeRid(opid, osid);
                                 if (fk.onDelete == "cascade") {
@@ -1467,29 +1711,23 @@ OpResult StorageEngine::remove(const std::string& dbname,
                         if (ici < otbl.len) oldIdxVals[ic] = extractColumnValue(row, otbl, ici);
                     }
 
-                    // Set FK column to NULL
-                    size_t offset = 0;
-                    for (size_t c = 0; c < sa.colIdx; ++c) offset += otbl.cols[c].dsize;
-                    const Column& fcol = otbl.cols[sa.colIdx];
-                    if (fcol.dataType == "char") {
-                        std::memset(&row[offset], 0, fcol.dsize);
-                    } else if (fcol.dataType == "date") {
-                        Date d{};
-                        std::memcpy(&row[offset], &d, DATE_SIZE);
-                    } else {
-                        int64_t nullVal = INF;
-                        std::memcpy(&row[offset], &nullVal, fcol.dsize);
-                    }
-
-                    // Write back
-                    uint32_t pid; uint16_t sid;
-                    decodeRid(sa.rid, pid, sid);
-                    char* pbuf = opa->fetchPage(pid);
-                    if (pbuf) {
-                        Page page(pbuf);
-                        page.update(sid, row.data(), otbl.rowSize());
-                        pa->markDirty(pid);
-                        opa->unpinPage(pid);
+                    // Set FK column to NULL: rebuild row buffer
+                    {
+                        std::map<std::string, std::string> rowValues;
+                        for (size_t i = 0; i < otbl.len; ++i) {
+                            rowValues[otbl.cols[i].dataName] = extractColumnValue(row, otbl, i);
+                        }
+                        rowValues[otbl.cols[sa.colIdx].dataName] = "";
+                        std::string newRow = buildRowBuffer(otbl, rowValues, 0);
+                        uint32_t pid; uint16_t sid;
+                        decodeRid(sa.rid, pid, sid);
+                        char* pbuf = opa->fetchPage(pid);
+                        if (pbuf) {
+                            Page page(pbuf);
+                            page.update(sid, newRow.data(), newRow.size());
+                            pa->markDirty(pid);
+                            opa->unpinPage(pid);
+                        }
                     }
 
                     // Update PK index if PK changed (it didn't)
@@ -1648,7 +1886,7 @@ OpResult StorageEngine::update(const std::string& dbname,
                 if (col.dataType == "date") {
                     Date d(kv.second.c_str());
                     if (d.year == 0) return OpResult::InvalidValue;
-                } else if (col.dataType != "char") {
+                } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty() && parseInt(kv.second) == INF) {
                         return OpResult::InvalidValue;
                     }
@@ -1700,48 +1938,67 @@ OpResult StorageEngine::update(const std::string& dbname,
             }
         }
 
-        // Modify row buffer
-        size_t offset = 0;
-        for (size_t ci = 0; ci < tbl.len; ++ci) {
-            const Column& col = tbl.cols[ci];
-            auto it = colUpdates.find(ci);
-            if (it != colUpdates.end()) {
-                const std::string& val = it->second;
-                if (col.dataType == "char") {
-                    stringToBuffer(val, &row[offset], col.dsize);
-                } else if (col.dataType == "date") {
-                    Date d(val.c_str());
-                    std::memcpy(&row[offset], &d, DATE_SIZE);
-                } else {
-                    int64_t num = val.empty() ? INF : parseInt(val);
-                    std::memcpy(&row[offset], &num, col.dsize);
-                }
-            }
-            offset += col.dsize;
+        // Rebuild row buffer with updates
+        std::map<std::string, std::string> rowValues;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            rowValues[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
         }
+        for (const auto& kv : colUpdates) {
+            rowValues[tbl.cols[kv.first].dataName] = kv.second;
+        }
+        std::string newRow = buildRowBuffer(tbl, rowValues, 0);
 
         // Write back via PageAllocator
         uint32_t pageId; uint16_t slotId;
         decodeRid(rid, pageId, slotId);
-        char* pageBuf = pa->fetchPage(pageId);
-        if (pageBuf) {
-            Page page(pageBuf);
-            page.update(slotId, row.data(), rowSize);
-            pa->markDirty(pageId);
-            pa->unpinPage(pageId);
-        }
 
-        // Update PK index if PK was updated
-        BPTree* pkIdx = getPKIndex(dbname, tablename);
-        if (pkIdx) {
-            std::string newPK = extractPKValue(row, tbl);
-            if (oldPK != newPK) {
-                if (!oldPK.empty()) pkIdx->remove(oldPK);
-                if (!newPK.empty()) pkIdx->insert(newPK, rid);
+        // Check CHECK constraints before writing
+        std::string strippedNewRow(newRow.data() + MVCC_HEADER_SIZE,
+                                   newRow.size() - MVCC_HEADER_SIZE);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const Column& col = tbl.cols[i];
+            if (col.checkExpr.empty()) continue;
+            auto checkConds = parseCheckConditions(col.checkExpr);
+            for (const auto& cond : checkConds) {
+                if (!evalConditionOnRow(cond, strippedNewRow, tbl)) {
+                    lockManager_.unlock(tablename);
+                    return OpResult::InvalidValue;
+                }
             }
         }
 
-        // Update secondary indexes if indexed columns were updated
+        char* pageBuf = pa->fetchPage(pageId);
+        int64_t actualRid = rid;
+        if (pageBuf) {
+            Page page(pageBuf);
+            uint16_t newSlotId = slotId;
+            if (!page.update(slotId, newRow.data(), newRow.size(), &newSlotId)) {
+                pa->unpinPage(pageId);
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+            pa->markDirty(pageId);
+            pa->unpinPage(pageId);
+            if (newSlotId != slotId) {
+                actualRid = encodeRid(pageId, newSlotId);
+            }
+        }
+
+        // Update PK index if PK was updated or RID changed
+        BPTree* pkIdx = getPKIndex(dbname, tablename);
+        if (pkIdx) {
+            std::string newPK = extractPKValue(strippedNewRow, tbl);
+            if (oldPK != newPK) {
+                if (!oldPK.empty()) pkIdx->remove(oldPK);
+                if (!newPK.empty()) pkIdx->insert(newPK, actualRid);
+            } else if (actualRid != rid && !newPK.empty()) {
+                // RID changed but PK same: re-insert with new RID
+                pkIdx->remove(newPK);
+                pkIdx->insert(newPK, actualRid);
+            }
+        }
+
+        // Update secondary indexes if indexed columns were updated or RID changed
         for (const auto& kv : oldIdxVals) {
             const std::string& colname = kv.first;
             const std::string& oldVal = kv.second;
@@ -1750,13 +2007,17 @@ OpResult StorageEngine::update(const std::string& dbname,
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
             if (colIdx >= tbl.len) continue;
-            if (colUpdates.find(colIdx) == colUpdates.end()) continue;
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
             if (!secIdx) continue;
-            std::string newVal = extractColumnValue(row, tbl, colIdx);
-            if (oldVal != newVal) {
+            std::string newVal = extractColumnValue(strippedNewRow, tbl, colIdx);
+            bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
+            if (colChanged && oldVal != newVal) {
                 if (!oldVal.empty()) secIdx->remove(oldVal);
-                if (!newVal.empty()) secIdx->insert(newVal, rid);
+                if (!newVal.empty()) secIdx->insert(newVal, actualRid);
+            } else if (actualRid != rid && !newVal.empty()) {
+                // RID changed: update index entry with new RID
+                secIdx->remove(newVal);
+                secIdx->insertMulti(newVal, actualRid);
             }
         }
     }
@@ -1774,6 +2035,11 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
     lockManager_.lockShared(tablename);
+
+    // READ COMMITTED: refresh snapshot before each query
+    if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::ReadCommitted) {
+        refreshReadView();
+    }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
@@ -1806,25 +2072,19 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             std::vector<Item> items;
             const Column& scol = tbl.cols[sortIdx];
             for (auto& mr : matchRows) {
-                size_t offset = 0;
-                for (size_t c = 0; c < sortIdx; ++c) offset += tbl.cols[c].dsize;
+                std::string val = extractColumnValue(mr.second, tbl, sortIdx);
                 Item it{mr.first, "", 0, {}};
-                const char* rowData = mr.second.data();
-                if (scol.dataType == "char") {
-                    std::string buf(scol.dsize, '\0');
-                    std::memcpy(buf.data(), rowData + offset, scol.dsize);
-                    auto nul = buf.find('\0');
-                    if (nul != std::string::npos) buf.resize(nul);
-                    it.s = buf;
+                if (scol.dataType == "char" || scol.isVariableLength) {
+                    it.s = val;
                 } else if (scol.dataType == "date") {
-                    std::memcpy(&it.d, rowData + offset, DATE_SIZE);
+                    it.d = val.empty() ? Date{} : Date(val.c_str());
                 } else {
-                    std::memcpy(&it.n, rowData + offset, scol.dsize);
+                    it.n = val.empty() ? 0 : parseInt(val);
                 }
                 items.push_back(std::move(it));
             }
             std::sort(items.begin(), items.end(), [&](const Item& a, const Item& b) {
-                if (scol.dataType == "char") return orderByAsc ? (a.s < b.s) : (b.s < a.s);
+                if (scol.dataType == "char" || scol.isVariableLength) return orderByAsc ? (a.s < b.s) : (b.s < a.s);
                 if (scol.dataType == "date") return orderByAsc ? (a.d < b.d) : (b.d < a.d);
                 return orderByAsc ? (a.n < b.n) : (b.n < a.n);
             });
@@ -1839,32 +2099,14 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     for (auto& mr : matchRows) {
-        const char* rowData = mr.second.data();
         std::string rowStr;
-        size_t offset = 0;
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
-            if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end()) {
-                offset += col.dsize;
+            if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
                 continue;
-            }
-            if (col.dataType == "char") {
-                std::string buf(col.dsize, '\0');
-                std::memcpy(buf.data(), rowData + offset, col.dsize);
-                auto nul = buf.find('\0');
-                if (nul != std::string::npos) buf.resize(nul);
-                rowStr += buf + ' ';
-            } else if (col.dataType == "date") {
-                Date d;
-                std::memcpy(&d, rowData + offset, DATE_SIZE);
-                rowStr += str(d) + ' ';
-            } else {
-                int64_t val = 0;
-                std::memcpy(&val, rowData + offset, col.dsize);
-                if (val == INF) rowStr += "NULL ";
-                else rowStr += transstr(val) + ' ';
-            }
-            offset += col.dsize;
+            std::string val = extractColumnValue(mr.second, tbl, i);
+            if (val.empty() && !col.isNull) rowStr += "NULL ";
+            else rowStr += val + ' ';
         }
         result.push_back(rowStr);
     }
@@ -1904,9 +2146,9 @@ std::vector<std::string> StorageEngine::aggregate(
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colName) {
                     colIdx = i;
-                    isInt = (tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
+                    isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
-                    isChar = (tbl.cols[i].dataType == "char");
+                    isChar = (tbl.cols[i].dataType == "char" || tbl.cols[i].isVariableLength);
                     break;
                 }
             }
@@ -1915,49 +2157,27 @@ std::vector<std::string> StorageEngine::aggregate(
         for (int64_t rid : matchIds) {
             std::string row;
             if (!readRowByRid(pa, rid, row, tbl)) continue;
-            const char* rowData = row.data();
             if (func == "count") {
                 if (colName == "*") { count++; continue; }
                 if (colIdx >= tbl.len) continue;
-                size_t offset = 0;
-                for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
-                const char* colData = rowData + offset;
-                if (isInt) {
-                    int64_t val = 0;
-                    std::memcpy(&val, colData, tbl.cols[colIdx].dsize);
-                    if (val != INF) count++;
-                } else if (isDate) {
-                    Date d;
-                    std::memcpy(&d, colData, DATE_SIZE);
-                    if (d.year != 0) count++;
-                } else {
-                    std::string buf(tbl.cols[colIdx].dsize, '\0');
-                    std::memcpy(buf.data(), colData, tbl.cols[colIdx].dsize);
-                    auto nul = buf.find('\0');
-                    if (nul != std::string::npos) buf.resize(nul);
-                    if (!buf.empty()) count++;
-                }
+                std::string val = extractColumnValue(row, tbl, colIdx);
+                if (!val.empty()) count++;
             } else {
                 if (colIdx >= tbl.len) continue;
-                size_t offset = 0;
-                for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
-                const char* colData = rowData + offset;
-
+                std::string val = extractColumnValue(row, tbl, colIdx);
                 if (isInt) {
-                    int64_t val = 0;
-                    std::memcpy(&val, colData, tbl.cols[colIdx].dsize);
-                    if (val == INF) continue;
-                    if (func == "sum") sum += val;
-                    if (func == "avg") { sum += val; count++; }
+                    int64_t num = val.empty() ? INF : parseInt(val);
+                    if (num == INF) continue;
+                    if (func == "sum") sum += num;
+                    if (func == "avg") { sum += num; count++; }
                     if (func == "max") {
-                        if (!hasMax || val > maxInt) { maxInt = val; hasMax = true; }
+                        if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; }
                     }
                     if (func == "min") {
-                        if (!hasMin || val < minInt) { minInt = val; hasMin = true; }
+                        if (!hasMin || num < minInt) { minInt = num; hasMin = true; }
                     }
                 } else if (isDate) {
-                    Date d;
-                    std::memcpy(&d, colData, DATE_SIZE);
+                    Date d = val.empty() ? Date{} : Date(val.c_str());
                     if (d.year == 0) continue;
                     if (func == "max") {
                         if (!hasMax || d > maxDate) { maxDate = d; hasMax = true; }
@@ -1966,16 +2186,12 @@ std::vector<std::string> StorageEngine::aggregate(
                         if (!hasMin || d < minDate) { minDate = d; hasMin = true; }
                     }
                 } else {
-                    std::string buf(tbl.cols[colIdx].dsize, '\0');
-                    std::memcpy(buf.data(), colData, tbl.cols[colIdx].dsize);
-                    auto nul = buf.find('\0');
-                    if (nul != std::string::npos) buf.resize(nul);
-                    if (buf.empty()) continue;
+                    if (val.empty()) continue;
                     if (func == "max") {
-                        if (!hasMax || buf > maxStr) { maxStr = buf; hasMax = true; }
+                        if (!hasMax || val > maxStr) { maxStr = val; hasMax = true; }
                     }
                     if (func == "min") {
-                        if (!hasMin || buf < minStr) { minStr = buf; hasMin = true; }
+                        if (!hasMin || val < minStr) { minStr = val; hasMin = true; }
                     }
                 }
             }
@@ -2045,26 +2261,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
     auto readGroupKey = [&](int64_t rid) -> std::string {
         std::string row;
         if (!readRowByRid(pa, rid, row, tbl)) return "";
-        const char* rowData = row.data();
-        size_t offset = 0;
-        for (size_t c = 0; c < groupIdx; ++c) offset += tbl.cols[c].dsize;
-        const char* colData = rowData + offset;
-        const Column& col = tbl.cols[groupIdx];
-        if (col.dataType == "char") {
-            std::string buf(col.dsize, '\0');
-            std::memcpy(buf.data(), colData, col.dsize);
-            auto nul = buf.find('\0');
-            if (nul != std::string::npos) buf.resize(nul);
-            return buf;
-        } else if (col.dataType == "date") {
-            Date d;
-            std::memcpy(&d, colData, DATE_SIZE);
-            return (d.year == 0) ? "" : str(d);
-        } else {
-            int64_t val = 0;
-            std::memcpy(&val, colData, col.dsize);
-            return (val == INF) ? "" : transstr(val);
-        }
+        return extractColumnValue(row, tbl, groupIdx);
     };
 
     // Group rows by group key
@@ -2082,9 +2279,9 @@ std::vector<std::string> StorageEngine::groupAggregate(
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colName) {
                     colIdx = i;
-                    isInt = (tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
+                    isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
-                    isChar = (tbl.cols[i].dataType == "char");
+                    isChar = (tbl.cols[i].dataType == "char" || tbl.cols[i].isVariableLength);
                     break;
                 }
             }
@@ -2098,56 +2295,31 @@ std::vector<std::string> StorageEngine::groupAggregate(
         for (int64_t rid : gids) {
             std::string row;
             if (!readRowByRid(pa, rid, row, tbl)) continue;
-            const char* rowData = row.data();
 
             if (func == "count") {
                 if (colName == "*") { count++; continue; }
                 if (colIdx >= tbl.len) continue;
-                size_t offset = 0;
-                for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
-                const char* colData = rowData + offset;
-                if (isInt) {
-                    int64_t val = 0;
-                    std::memcpy(&val, colData, tbl.cols[colIdx].dsize);
-                    if (val != INF) count++;
-                } else if (isDate) {
-                    Date d;
-                    std::memcpy(&d, colData, DATE_SIZE);
-                    if (d.year != 0) count++;
-                } else {
-                    std::string buf(tbl.cols[colIdx].dsize, '\0');
-                    std::memcpy(buf.data(), colData, tbl.cols[colIdx].dsize);
-                    auto nul = buf.find('\0');
-                    if (nul != std::string::npos) buf.resize(nul);
-                    if (!buf.empty()) count++;
-                }
+                std::string val = extractColumnValue(row, tbl, colIdx);
+                if (!val.empty()) count++;
             } else {
                 if (colIdx >= tbl.len) continue;
-                size_t offset = 0;
-                for (size_t c = 0; c < colIdx; ++c) offset += tbl.cols[c].dsize;
-                const char* colData = rowData + offset;
+                std::string val = extractColumnValue(row, tbl, colIdx);
                 if (isInt) {
-                    int64_t val = 0;
-                    std::memcpy(&val, colData, tbl.cols[colIdx].dsize);
-                    if (val == INF) continue;
-                    if (func == "sum") sum += val;
-                    if (func == "avg") { sum += val; count++; }
-                    if (func == "max") { if (!hasMax || val > maxInt) { maxInt = val; hasMax = true; } }
-                    if (func == "min") { if (!hasMin || val < minInt) { minInt = val; hasMin = true; } }
+                    int64_t num = val.empty() ? INF : parseInt(val);
+                    if (num == INF) continue;
+                    if (func == "sum") sum += num;
+                    if (func == "avg") { sum += num; count++; }
+                    if (func == "max") { if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; } }
+                    if (func == "min") { if (!hasMin || num < minInt) { minInt = num; hasMin = true; } }
                 } else if (isDate) {
-                    Date d;
-                    std::memcpy(&d, colData, DATE_SIZE);
+                    Date d = val.empty() ? Date{} : Date(val.c_str());
                     if (d.year == 0) continue;
                     if (func == "max") { if (!hasMax || d > maxDate) { maxDate = d; hasMax = true; } }
                     if (func == "min") { if (!hasMin || d < minDate) { minDate = d; hasMin = true; } }
                 } else {
-                    std::string buf(tbl.cols[colIdx].dsize, '\0');
-                    std::memcpy(buf.data(), colData, tbl.cols[colIdx].dsize);
-                    auto nul = buf.find('\0');
-                    if (nul != std::string::npos) buf.resize(nul);
-                    if (buf.empty()) continue;
-                    if (func == "max") { if (!hasMax || buf > maxStr) { maxStr = buf; hasMax = true; } }
-                    if (func == "min") { if (!hasMin || buf < minStr) { minStr = buf; hasMin = true; } }
+                    if (val.empty()) continue;
+                    if (func == "max") { if (!hasMax || val > maxStr) { maxStr = val; hasMax = true; } }
+                    if (func == "min") { if (!hasMin || val < minStr) { minStr = val; hasMin = true; } }
                 }
             }
         }
@@ -2276,39 +2448,30 @@ std::vector<std::string> StorageEngine::join(
         rightRows.emplace_back(data, len);
     });
 
-    // Build merged column layout for condition evaluation
-    // Map: colName -> {offset, colInfo}
-    // Also support "table.col" format
-    struct ColInfo { size_t offset; const Column* col; };
+    // Build column map for condition evaluation: colName -> {isLeft, colIdx}
+    struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
-    size_t off = 0;
     for (size_t i = 0; i < leftTbl.len; ++i) {
-        colMap[leftTbl.cols[i].dataName] = {off, &leftTbl.cols[i]};
-        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {off, &leftTbl.cols[i]};
-        off += leftTbl.cols[i].dsize;
+        colMap[leftTbl.cols[i].dataName] = {true, i};
+        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {true, i};
     }
-    off = 0;
     for (size_t i = 0; i < rightTbl.len; ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) {
-            colMap[simple] = {leftRowSize + off, &rightTbl.cols[i]};
+            colMap[simple] = {false, i};
         }
-        colMap[rightTable + "." + simple] = {leftRowSize + off, &rightTbl.cols[i]};
-        off += rightTbl.cols[i].dsize;
+        colMap[rightTable + "." + simple] = {false, i};
     }
 
-    // Evaluate a condition on a merged row buffer
-    auto evalCond = [&](const Condition& c, const std::string& merged) -> bool {
+    // Evaluate a condition on left/right row pair
+    auto evalCond = [&](const Condition& c, const std::string& leftRow, const std::string& rightRow) -> bool {
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
-        size_t offset = it->second.offset;
-        const Column& col = *it->second.col;
-        const char* buf = merged.data() + offset;
-        if (col.dataType == "char") {
-            std::string val(col.dsize, '\0');
-            std::memcpy(val.data(), buf, col.dsize);
-            auto nul = val.find('\0');
-            if (nul != std::string::npos) val.resize(nul);
+        const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
+        const std::string& row = it->second.isLeft ? leftRow : rightRow;
+        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        const Column& col = tbl.cols[it->second.colIdx];
+        if (col.dataType == "char" || col.isVariableLength) {
             if (c.op == "<"  && !(val <  c.value)) return false;
             if (c.op == ">"  && !(val >  c.value)) return false;
             if (c.op == "="  && val != c.value)    return false;
@@ -2316,8 +2479,7 @@ std::vector<std::string> StorageEngine::join(
             if (c.op == ">=" && (val <  c.value))   return false;
             if (c.op == "!=" && val == c.value)    return false;
         } else if (col.dataType == "date") {
-            Date d;
-            std::memcpy(&d, buf, DATE_SIZE);
+            Date d = val.empty() ? Date{} : Date(val.c_str());
             Date v(c.value.c_str());
             if (c.op == "<"  && v.year && !(d < v))  return false;
             if (c.op == ">"  && v.year && !(d > v))  return false;
@@ -2326,113 +2488,71 @@ std::vector<std::string> StorageEngine::join(
             if (c.op == ">=" && v.year && (d < v))   return false;
             if (c.op == "!=" && v.year && d == v)    return false;
         } else {
-            int64_t val = 0;
-            std::memcpy(&val, buf, col.dsize);
+            int64_t num = val.empty() ? INF : parseInt(val);
             int64_t cmp = parseInt(c.value);
-            if (c.op == "<"  && cmp != INF && !(val < cmp)) return false;
-            if (c.op == ">"  && cmp != INF && !(val > cmp)) return false;
-            if (c.op == "="  && cmp != INF && val != cmp)   return false;
-            if (c.op == "<=" && cmp != INF && (val > cmp))  return false;
-            if (c.op == ">=" && cmp != INF && (val < cmp))  return false;
-            if (c.op == "!=" && cmp != INF && val == cmp)   return false;
+            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
+            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
+            if (c.op == "="  && cmp != INF && num != cmp)   return false;
+            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
+            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
+            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
         }
         return true;
     };
 
     auto conds = parseConditions(conditions);
 
-    // Find left and right column offsets for ON condition
-    size_t leftColOff = 0;
+    // Find left and right column indices for ON condition
+    size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
-        if (leftTbl.cols[i].dataName == leftCol) break;
-        leftColOff += leftTbl.cols[i].dsize;
+        if (leftTbl.cols[i].dataName == leftCol) { leftColIdx = i; break; }
     }
-    size_t rightColOff = 0;
+    size_t rightColIdx = rightTbl.len;
     for (size_t i = 0; i < rightTbl.len; ++i) {
-        if (rightTbl.cols[i].dataName == rightCol) break;
-        rightColOff += rightTbl.cols[i].dsize;
+        if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
     for (const auto& lr : leftRows) {
         for (const auto& rr : rightRows) {
             // ON condition
-            bool onMatch = false;
-            {
-                const Column* lc = nullptr;
-                for (size_t i = 0; i < leftTbl.len; ++i) {
-                    if (leftTbl.cols[i].dataName == leftCol) { lc = &leftTbl.cols[i]; break; }
-                }
-                const Column* rc = nullptr;
-                for (size_t i = 0; i < rightTbl.len; ++i) {
-                    if (rightTbl.cols[i].dataName == rightCol) { rc = &rightTbl.cols[i]; break; }
-                }
-                if (!lc || !rc) continue;
-
-                if (lc->dataType == "char") {
-                    std::string lv(lc->dsize, '\0'), rv(rc->dsize, '\0');
-                    std::memcpy(lv.data(), lr.data() + leftColOff, lc->dsize);
-                    std::memcpy(rv.data(), rr.data() + rightColOff, rc->dsize);
-                    auto n = lv.find('\0'); if (n != std::string::npos) lv.resize(n);
-                    n = rv.find('\0'); if (n != std::string::npos) rv.resize(n);
-                    onMatch = (lv == rv);
-                } else if (lc->dataType == "date") {
-                    Date ld, rd;
-                    std::memcpy(&ld, lr.data() + leftColOff, DATE_SIZE);
-                    std::memcpy(&rd, rr.data() + rightColOff, DATE_SIZE);
-                    onMatch = (ld == rd);
-                } else {
-                    int64_t lv = 0, rv = 0;
-                    std::memcpy(&lv, lr.data() + leftColOff, lc->dsize);
-                    std::memcpy(&rv, rr.data() + rightColOff, rc->dsize);
-                    onMatch = (lv == rv);
-                }
-            }
-            if (!onMatch) continue;
-
-            std::string merged = lr + rr;
+            if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+            std::string lv = extractColumnValue(lr, leftTbl, leftColIdx);
+            std::string rv = extractColumnValue(rr, rightTbl, rightColIdx);
+            if (lv != rv) continue;
 
             // WHERE conditions
             bool whereMatch = true;
             for (const auto& c : conds) {
-                if (!evalCond(c, merged)) { whereMatch = false; break; }
+                if (!evalCond(c, lr, rr)) { whereMatch = false; break; }
             }
             if (!whereMatch) continue;
 
             // Format output with SELECT columns
             std::string rowStr;
-            auto appendCol = [&](const std::string& prefix, const Column& col, const char* buf) {
-                std::string fullName = prefix + "." + col.dataName;
+            for (size_t i = 0; i < leftTbl.len; ++i) {
+                std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
                 bool include = selectCols.empty();
                 if (!include) {
-                    if (selectCols.find(col.dataName) != selectCols.end() ||
-                        selectCols.find(fullName) != selectCols.end()) {
-                        include = true;
-                    }
+                    if (selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() ||
+                        selectCols.find(fullName) != selectCols.end()) include = true;
                 }
-                if (!include) return;
-                if (col.dataType == "char") {
-                    std::string val(col.dsize, '\0');
-                    std::memcpy(val.data(), buf, col.dsize);
-                    auto nul = val.find('\0');
-                    if (nul != std::string::npos) val.resize(nul);
-                    rowStr += val + ' ';
-                } else if (col.dataType == "date") {
-                    Date d;
-                    std::memcpy(&d, buf, DATE_SIZE);
-                    rowStr += str(d) + ' ';
-                } else {
-                    int64_t val = 0;
-                    std::memcpy(&val, buf, col.dsize);
-                    if (val == INF) rowStr += "NULL ";
-                    else rowStr += transstr(val) + ' ';
+                if (!include) continue;
+                std::string val = extractColumnValue(lr, leftTbl, i);
+                if (val.empty() && !leftTbl.cols[i].isNull) rowStr += "NULL ";
+                else rowStr += val + ' ';
+            }
+            for (size_t i = 0; i < rightTbl.len; ++i) {
+                std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
+                bool include = selectCols.empty();
+                if (!include) {
+                    if (selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() ||
+                        selectCols.find(fullName) != selectCols.end()) include = true;
                 }
-            };
-
-            for (size_t i = 0; i < leftTbl.len; ++i)
-                appendCol(leftTable, leftTbl.cols[i], lr.data() + [&](){ size_t o=0; for(size_t j=0;j<i;++j)o+=leftTbl.cols[j].dsize; return o; }());
-            for (size_t i = 0; i < rightTbl.len; ++i)
-                appendCol(rightTable, rightTbl.cols[i], rr.data() + [&](){ size_t o=0; for(size_t j=0;j<i;++j)o+=rightTbl.cols[j].dsize; return o; }());
-
+                if (!include) continue;
+                std::string val = extractColumnValue(rr, rightTbl, i);
+                if (val.empty() && !rightTbl.cols[i].isNull) rowStr += "NULL ";
+                else rowStr += val + ' ';
+            }
             if (!rowStr.empty()) result.push_back(rowStr);
         }
     }
@@ -2478,35 +2598,26 @@ std::vector<std::string> StorageEngine::leftJoin(
         rightRows.emplace_back(data, len);
     });
 
-    struct ColInfo { size_t offset; const Column* col; };
+    struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
-    size_t off = 0;
     for (size_t i = 0; i < leftTbl.len; ++i) {
-        colMap[leftTbl.cols[i].dataName] = {off, &leftTbl.cols[i]};
-        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {off, &leftTbl.cols[i]};
-        off += leftTbl.cols[i].dsize;
+        colMap[leftTbl.cols[i].dataName] = {true, i};
+        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {true, i};
     }
-    off = 0;
     for (size_t i = 0; i < rightTbl.len; ++i) {
         std::string simple = rightTbl.cols[i].dataName;
-        if (colMap.find(simple) == colMap.end()) {
-            colMap[simple] = {leftRowSize + off, &rightTbl.cols[i]};
-        }
-        colMap[rightTable + "." + simple] = {leftRowSize + off, &rightTbl.cols[i]};
-        off += rightTbl.cols[i].dsize;
+        if (colMap.find(simple) == colMap.end()) colMap[simple] = {false, i};
+        colMap[rightTable + "." + simple] = {false, i};
     }
 
-    auto evalCond = [&](const Condition& c, const std::string& merged) -> bool {
+    auto evalCond = [&](const Condition& c, const std::string& leftRow, const std::string& rightRow) -> bool {
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
-        size_t offset = it->second.offset;
-        const Column& col = *it->second.col;
-        const char* buf = merged.data() + offset;
-        if (col.dataType == "char") {
-            std::string val(col.dsize, '\0');
-            std::memcpy(val.data(), buf, col.dsize);
-            auto nul = val.find('\0');
-            if (nul != std::string::npos) val.resize(nul);
+        const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
+        const std::string& row = it->second.isLeft ? leftRow : rightRow;
+        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        const Column& col = tbl.cols[it->second.colIdx];
+        if (col.dataType == "char" || col.isVariableLength) {
             if (c.op == "<"  && !(val <  c.value)) return false;
             if (c.op == ">"  && !(val >  c.value)) return false;
             if (c.op == "="  && val != c.value)    return false;
@@ -2514,8 +2625,7 @@ std::vector<std::string> StorageEngine::leftJoin(
             if (c.op == ">=" && (val <  c.value))   return false;
             if (c.op == "!=" && val == c.value)    return false;
         } else if (col.dataType == "date") {
-            Date d;
-            std::memcpy(&d, buf, DATE_SIZE);
+            Date d = val.empty() ? Date{} : Date(val.c_str());
             Date v(c.value.c_str());
             if (c.op == "<"  && v.year && !(d < v))  return false;
             if (c.op == ">"  && v.year && !(d > v))  return false;
@@ -2524,120 +2634,69 @@ std::vector<std::string> StorageEngine::leftJoin(
             if (c.op == ">=" && v.year && (d < v))   return false;
             if (c.op == "!=" && v.year && d == v)    return false;
         } else {
-            int64_t val = 0;
-            std::memcpy(&val, buf, col.dsize);
+            int64_t num = val.empty() ? INF : parseInt(val);
             int64_t cmp = parseInt(c.value);
-            if (c.op == "<"  && cmp != INF && !(val < cmp)) return false;
-            if (c.op == ">"  && cmp != INF && !(val > cmp)) return false;
-            if (c.op == "="  && cmp != INF && val != cmp)   return false;
-            if (c.op == "<=" && cmp != INF && (val > cmp))  return false;
-            if (c.op == ">=" && cmp != INF && (val < cmp))  return false;
-            if (c.op == "!=" && cmp != INF && val == cmp)   return false;
+            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
+            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
+            if (c.op == "="  && cmp != INF && num != cmp)   return false;
+            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
+            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
+            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
         }
         return true;
     };
 
     auto conds = parseConditions(conditions);
 
-    size_t leftColOff = 0;
+    size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
-        if (leftTbl.cols[i].dataName == leftCol) break;
-        leftColOff += leftTbl.cols[i].dsize;
+        if (leftTbl.cols[i].dataName == leftCol) { leftColIdx = i; break; }
     }
-    size_t rightColOff = 0;
+    size_t rightColIdx = rightTbl.len;
     for (size_t i = 0; i < rightTbl.len; ++i) {
-        if (rightTbl.cols[i].dataName == rightCol) break;
-        rightColOff += rightTbl.cols[i].dsize;
+        if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
-    auto onMatch = [&](const std::string& lr, const std::string& rr) -> bool {
-        const Column* lc = nullptr;
+    auto formatRow = [&](const std::string& lr, const std::string& rr, bool rightNull) -> std::string {
+        std::string rowStr;
         for (size_t i = 0; i < leftTbl.len; ++i) {
-            if (leftTbl.cols[i].dataName == leftCol) { lc = &leftTbl.cols[i]; break; }
+            std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
+            bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
+            if (!include) continue;
+            std::string val = extractColumnValue(lr, leftTbl, i);
+            if (val.empty() && !leftTbl.cols[i].isNull) rowStr += "NULL ";
+            else rowStr += val + ' ';
         }
-        const Column* rc = nullptr;
         for (size_t i = 0; i < rightTbl.len; ++i) {
-            if (rightTbl.cols[i].dataName == rightCol) { rc = &rightTbl.cols[i]; break; }
+            std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
+            bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
+            if (!include) continue;
+            if (rightNull) { rowStr += "NULL "; continue; }
+            std::string val = extractColumnValue(rr, rightTbl, i);
+            if (val.empty() && !rightTbl.cols[i].isNull) rowStr += "NULL ";
+            else rowStr += val + ' ';
         }
-        if (!lc || !rc) return false;
-        if (lc->dataType == "char") {
-            std::string lv(lc->dsize, '\0'), rv(rc->dsize, '\0');
-            std::memcpy(lv.data(), lr.data() + leftColOff, lc->dsize);
-            std::memcpy(rv.data(), rr.data() + rightColOff, rc->dsize);
-            auto n = lv.find('\0'); if (n != std::string::npos) lv.resize(n);
-            n = rv.find('\0'); if (n != std::string::npos) rv.resize(n);
-            return lv == rv;
-        } else if (lc->dataType == "date") {
-            Date ld, rd;
-            std::memcpy(&ld, lr.data() + leftColOff, DATE_SIZE);
-            std::memcpy(&rd, rr.data() + rightColOff, DATE_SIZE);
-            return ld == rd;
-        } else {
-            int64_t lv = 0, rv = 0;
-            std::memcpy(&lv, lr.data() + leftColOff, lc->dsize);
-            std::memcpy(&rv, rr.data() + rightColOff, rc->dsize);
-            return lv == rv;
-        }
-    };
-
-    auto appendCol = [&](const std::string& prefix, const Column& col, const char* buf) -> std::string {
-        std::string fullName = prefix + "." + col.dataName;
-        bool include = selectCols.empty();
-        if (!include) {
-            if (selectCols.find(col.dataName) != selectCols.end() ||
-                selectCols.find(fullName) != selectCols.end()) {
-                include = true;
-            }
-        }
-        if (!include) return "";
-        if (!buf) return "NULL ";
-        if (col.dataType == "char") {
-            std::string val(col.dsize, '\0');
-            std::memcpy(val.data(), buf, col.dsize);
-            auto nul = val.find('\0');
-            if (nul != std::string::npos) val.resize(nul);
-            return val + ' ';
-        } else if (col.dataType == "date") {
-            Date d;
-            std::memcpy(&d, buf, DATE_SIZE);
-            return (d.year == 0) ? "NULL " : str(d) + ' ';
-        } else {
-            int64_t val = 0;
-            std::memcpy(&val, buf, col.dsize);
-            if (val == INF) return "NULL ";
-            return transstr(val) + ' ';
-        }
+        return rowStr;
     };
 
     for (const auto& lr : leftRows) {
         bool hasMatch = false;
         for (const auto& rr : rightRows) {
-            if (!onMatch(lr, rr)) continue;
-            std::string merged = lr + rr;
+            if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+            std::string lv = extractColumnValue(lr, leftTbl, leftColIdx);
+            std::string rv = extractColumnValue(rr, rightTbl, rightColIdx);
+            if (lv != rv) continue;
             bool whereMatch = true;
             for (const auto& c : conds) {
-                if (!evalCond(c, merged)) { whereMatch = false; break; }
+                if (!evalCond(c, lr, rr)) { whereMatch = false; break; }
             }
             if (!whereMatch) continue;
             hasMatch = true;
-            std::string rowStr;
-            for (size_t i = 0; i < leftTbl.len; ++i) {
-                rowStr += appendCol(leftTable, leftTbl.cols[i], lr.data() + [&]() { size_t o = 0; for (size_t j = 0; j < i; ++j) o += leftTbl.cols[j].dsize; return o; }());
-            }
-            for (size_t i = 0; i < rightTbl.len; ++i) {
-                rowStr += appendCol(rightTable, rightTbl.cols[i], rr.data() + [&]() { size_t o = 0; for (size_t j = 0; j < i; ++j) o += rightTbl.cols[j].dsize; return o; }());
-            }
+            std::string rowStr = formatRow(lr, rr, false);
             if (!rowStr.empty()) result.push_back(rowStr);
         }
         if (!hasMatch) {
-            // Output left row + right NULLs
-            std::string rowStr;
-            for (size_t i = 0; i < leftTbl.len; ++i) {
-                rowStr += appendCol(leftTable, leftTbl.cols[i], lr.data() + [&]() { size_t o = 0; for (size_t j = 0; j < i; ++j) o += leftTbl.cols[j].dsize; return o; }());
-            }
-            for (size_t i = 0; i < rightTbl.len; ++i) {
-                rowStr += appendCol(rightTable, rightTbl.cols[i], nullptr);  // NULL
-            }
+            std::string rowStr = formatRow(lr, "", true);
             if (!rowStr.empty()) result.push_back(rowStr);
         }
     }
@@ -2683,35 +2742,26 @@ std::vector<std::string> StorageEngine::rightJoin(
         rightRows.emplace_back(data, len);
     });
 
-    struct ColInfo { size_t offset; const Column* col; };
+    struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
-    size_t off = 0;
     for (size_t i = 0; i < leftTbl.len; ++i) {
-        colMap[leftTbl.cols[i].dataName] = {off, &leftTbl.cols[i]};
-        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {off, &leftTbl.cols[i]};
-        off += leftTbl.cols[i].dsize;
+        colMap[leftTbl.cols[i].dataName] = {true, i};
+        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {true, i};
     }
-    off = 0;
     for (size_t i = 0; i < rightTbl.len; ++i) {
         std::string simple = rightTbl.cols[i].dataName;
-        if (colMap.find(simple) == colMap.end()) {
-            colMap[simple] = {leftRowSize + off, &rightTbl.cols[i]};
-        }
-        colMap[rightTable + "." + simple] = {leftRowSize + off, &rightTbl.cols[i]};
-        off += rightTbl.cols[i].dsize;
+        if (colMap.find(simple) == colMap.end()) colMap[simple] = {false, i};
+        colMap[rightTable + "." + simple] = {false, i};
     }
 
-    auto evalCond = [&](const Condition& c, const std::string& merged) -> bool {
+    auto evalCond = [&](const Condition& c, const std::string& leftRow, const std::string& rightRow) -> bool {
         auto it = colMap.find(c.colName);
         if (it == colMap.end()) return false;
-        size_t offset = it->second.offset;
-        const Column& col = *it->second.col;
-        const char* buf = merged.data() + offset;
-        if (col.dataType == "char") {
-            std::string val(col.dsize, '\0');
-            std::memcpy(val.data(), buf, col.dsize);
-            auto nul = val.find('\0');
-            if (nul != std::string::npos) val.resize(nul);
+        const TableSchema& tbl = it->second.isLeft ? leftTbl : rightTbl;
+        const std::string& row = it->second.isLeft ? leftRow : rightRow;
+        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        const Column& col = tbl.cols[it->second.colIdx];
+        if (col.dataType == "char" || col.isVariableLength) {
             if (c.op == "<"  && !(val <  c.value)) return false;
             if (c.op == ">"  && !(val >  c.value)) return false;
             if (c.op == "="  && val != c.value)    return false;
@@ -2719,8 +2769,7 @@ std::vector<std::string> StorageEngine::rightJoin(
             if (c.op == ">=" && (val <  c.value))   return false;
             if (c.op == "!=" && val == c.value)    return false;
         } else if (col.dataType == "date") {
-            Date d;
-            std::memcpy(&d, buf, DATE_SIZE);
+            Date d = val.empty() ? Date{} : Date(val.c_str());
             Date v(c.value.c_str());
             if (c.op == "<"  && v.year && !(d < v))  return false;
             if (c.op == ">"  && v.year && !(d > v))  return false;
@@ -2729,122 +2778,69 @@ std::vector<std::string> StorageEngine::rightJoin(
             if (c.op == ">=" && v.year && (d < v))   return false;
             if (c.op == "!=" && v.year && d == v)    return false;
         } else {
-            int64_t val = 0;
-            std::memcpy(&val, buf, col.dsize);
+            int64_t num = val.empty() ? INF : parseInt(val);
             int64_t cmp = parseInt(c.value);
-            if (c.op == "<"  && cmp != INF && !(val < cmp)) return false;
-            if (c.op == ">"  && cmp != INF && !(val > cmp)) return false;
-            if (c.op == "="  && cmp != INF && val != cmp)   return false;
-            if (c.op == "<=" && cmp != INF && (val > cmp))  return false;
-            if (c.op == ">=" && cmp != INF && (val < cmp))  return false;
-            if (c.op == "!=" && cmp != INF && val == cmp)   return false;
+            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
+            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
+            if (c.op == "="  && cmp != INF && num != cmp)   return false;
+            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
+            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
+            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
         }
         return true;
     };
 
     auto conds = parseConditions(conditions);
 
-    size_t leftColOff = 0;
+    size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
-        if (leftTbl.cols[i].dataName == leftCol) break;
-        leftColOff += leftTbl.cols[i].dsize;
+        if (leftTbl.cols[i].dataName == leftCol) { leftColIdx = i; break; }
     }
-    size_t rightColOff = 0;
+    size_t rightColIdx = rightTbl.len;
     for (size_t i = 0; i < rightTbl.len; ++i) {
-        if (rightTbl.cols[i].dataName == rightCol) break;
-        rightColOff += rightTbl.cols[i].dsize;
+        if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
-    auto onMatch = [&](const std::string& lr, const std::string& rr) -> bool {
-        const Column* lc = nullptr;
+    auto formatRow = [&](const std::string& lr, const std::string& rr, bool leftNull) -> std::string {
+        std::string rowStr;
         for (size_t i = 0; i < leftTbl.len; ++i) {
-            if (leftTbl.cols[i].dataName == leftCol) { lc = &leftTbl.cols[i]; break; }
+            std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
+            bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
+            if (!include) continue;
+            if (leftNull) { rowStr += "NULL "; continue; }
+            std::string val = extractColumnValue(lr, leftTbl, i);
+            if (val.empty() && !leftTbl.cols[i].isNull) rowStr += "NULL ";
+            else rowStr += val + ' ';
         }
-        const Column* rc = nullptr;
         for (size_t i = 0; i < rightTbl.len; ++i) {
-            if (rightTbl.cols[i].dataName == rightCol) { rc = &rightTbl.cols[i]; break; }
+            std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
+            bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
+            if (!include) continue;
+            std::string val = extractColumnValue(rr, rightTbl, i);
+            if (val.empty() && !rightTbl.cols[i].isNull) rowStr += "NULL ";
+            else rowStr += val + ' ';
         }
-        if (!lc || !rc) return false;
-        if (lc->dataType == "char") {
-            std::string lv(lc->dsize, '\0'), rv(rc->dsize, '\0');
-            std::memcpy(lv.data(), lr.data() + leftColOff, lc->dsize);
-            std::memcpy(rv.data(), rr.data() + rightColOff, rc->dsize);
-            auto n = lv.find('\0'); if (n != std::string::npos) lv.resize(n);
-            n = rv.find('\0'); if (n != std::string::npos) rv.resize(n);
-            return lv == rv;
-        } else if (lc->dataType == "date") {
-            Date ld, rd;
-            std::memcpy(&ld, lr.data() + leftColOff, DATE_SIZE);
-            std::memcpy(&rd, rr.data() + rightColOff, DATE_SIZE);
-            return ld == rd;
-        } else {
-            int64_t lv = 0, rv = 0;
-            std::memcpy(&lv, lr.data() + leftColOff, lc->dsize);
-            std::memcpy(&rv, rr.data() + rightColOff, rc->dsize);
-            return lv == rv;
-        }
-    };
-
-    auto appendCol = [&](const std::string& prefix, const Column& col, const char* buf) -> std::string {
-        std::string fullName = prefix + "." + col.dataName;
-        bool include = selectCols.empty();
-        if (!include) {
-            if (selectCols.find(col.dataName) != selectCols.end() ||
-                selectCols.find(fullName) != selectCols.end()) {
-                include = true;
-            }
-        }
-        if (!include) return "";
-        if (col.dataType == "char") {
-            std::string val(col.dsize, '\0');
-            if (buf) std::memcpy(val.data(), buf, col.dsize);
-            else val.assign(col.dsize, '\0');
-            auto nul = val.find('\0');
-            if (nul != std::string::npos) val.resize(nul);
-            return val.empty() ? "NULL " : val + ' ';
-        } else if (col.dataType == "date") {
-            if (!buf) return "NULL ";
-            Date d;
-            std::memcpy(&d, buf, DATE_SIZE);
-            return (d.year == 0) ? "NULL " : str(d) + ' ';
-        } else {
-            if (!buf) return "NULL ";
-            int64_t val = 0;
-            std::memcpy(&val, buf, col.dsize);
-            if (val == INF) return "NULL ";
-            return transstr(val) + ' ';
-        }
+        return rowStr;
     };
 
     for (const auto& rr : rightRows) {
         bool hasMatch = false;
         for (const auto& lr : leftRows) {
-            if (!onMatch(lr, rr)) continue;
-            std::string merged = lr + rr;
+            if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+            std::string lv = extractColumnValue(lr, leftTbl, leftColIdx);
+            std::string rv = extractColumnValue(rr, rightTbl, rightColIdx);
+            if (lv != rv) continue;
             bool whereMatch = true;
             for (const auto& c : conds) {
-                if (!evalCond(c, merged)) { whereMatch = false; break; }
+                if (!evalCond(c, lr, rr)) { whereMatch = false; break; }
             }
             if (!whereMatch) continue;
             hasMatch = true;
-            std::string rowStr;
-            for (size_t i = 0; i < leftTbl.len; ++i) {
-                rowStr += appendCol(leftTable, leftTbl.cols[i], lr.data() + [&]() { size_t o = 0; for (size_t j = 0; j < i; ++j) o += leftTbl.cols[j].dsize; return o; }());
-            }
-            for (size_t i = 0; i < rightTbl.len; ++i) {
-                rowStr += appendCol(rightTable, rightTbl.cols[i], rr.data() + [&]() { size_t o = 0; for (size_t j = 0; j < i; ++j) o += rightTbl.cols[j].dsize; return o; }());
-            }
+            std::string rowStr = formatRow(lr, rr, false);
             if (!rowStr.empty()) result.push_back(rowStr);
         }
         if (!hasMatch) {
-            // Output left NULLs + right row
-            std::string rowStr;
-            for (size_t i = 0; i < leftTbl.len; ++i) {
-                rowStr += appendCol(leftTable, leftTbl.cols[i], nullptr);
-            }
-            for (size_t i = 0; i < rightTbl.len; ++i) {
-                rowStr += appendCol(rightTable, rightTbl.cols[i], rr.data() + [&]() { size_t o = 0; for (size_t j = 0; j < i; ++j) o += rightTbl.cols[j].dsize; return o; }());
-            }
+            std::string rowStr = formatRow("", rr, true);
             if (!rowStr.empty()) result.push_back(rowStr);
         }
     }
@@ -2859,11 +2855,14 @@ std::vector<std::string> StorageEngine::rightJoin(
 
 void StorageEngine::recoverAllDatabases() {
     if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) return;
-    for (const auto& entry : std::filesystem::directory_iterator(".")) {
-        if (!entry.is_directory()) continue;
-        std::string dbname = entry.path().filename().string();
+    for (const auto& entry : std::filesystem::directory_iterator(".", std::filesystem::directory_options::skip_permission_denied)) {
+        try {
+            if (!entry.is_directory()) continue;
+        } catch (...) { continue; }
+        std::string dbname;
+        try { dbname = entry.path().filename().string(); } catch (...) { continue; }
         // Skip non-database directories (simple heuristic: must have tlist.lst)
-        if (!std::filesystem::exists(tableListPath(dbname))) continue;
+        try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
 
         std::filesystem::path walFile = walPath(dbname);
         if (!std::filesystem::exists(walFile)) continue;
@@ -2913,6 +2912,93 @@ void StorageEngine::recoverAllDatabases() {
 }
 
 // ========================================================================
+// ReadView refresh (for READ COMMITTED)
+// ========================================================================
+void StorageEngine::refreshReadView() {
+    if (!inTransaction_ || txnIsolationLevel_ != IsolationLevel::ReadCommitted) return;
+    std::lock_guard<std::mutex> lock(globalTxnMutex_);
+    readView_.creatorTxnId = currentTxnId_;
+    readView_.upLimitId = activeTransactions_.empty() ? currentTxnId_ : *activeTransactions_.begin();
+    readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+    readView_.activeTxnIds = activeTransactions_;
+    readView_.activeTxnIds.erase(currentTxnId_);
+}
+
+// ========================================================================
+// Checkpoint: flush all dirty pages and truncate WAL
+// ========================================================================
+void StorageEngine::checkpoint(const std::string& dbname) {
+    if (!databaseExists(dbname)) return;
+
+    // Flush all page allocators for this database
+    auto tables = getTableNames(dbname);
+    for (const auto& tname : tables) {
+        PageAllocator* pa = getPageAllocator(dbname, tname);
+        if (pa) pa->flush();
+    }
+
+    // Write checkpoint record
+    auto cpPath = checkpointPath(dbname);
+    {
+        std::ofstream cp(cpPath, std::ios::binary);
+        uint64_t timestamp = static_cast<uint64_t>(std::time(nullptr));
+        uint64_t maxTxId = TxnIdGenerator::instance().maxCommittedTxId();
+        cp.write(reinterpret_cast<const char*>(&timestamp), sizeof(uint64_t));
+        cp.write(reinterpret_cast<const char*>(&maxTxId), sizeof(uint64_t));
+        cp.close();
+    }
+    syncFile(cpPath);
+
+    // Truncate WAL after checkpoint
+    walClear(walPath(dbname));
+}
+
+// ========================================================================
+// VACUUM: reclaim space from deleted rows
+// ========================================================================
+size_t StorageEngine::vacuum(const std::string& dbname,
+                             const std::string& tablename) {
+    if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
+    lockManager_.lockExclusive(tablename);
+
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    if (!pa) { lockManager_.unlock(tablename); return 0; }
+
+    uint32_t np = pa->numPages();
+    size_t freedPages = 0;
+
+    for (uint32_t pid = 1; pid < np; ++pid) {
+        char* buf = pa->fetchPage(pid);
+        if (!buf) continue;
+        Page page(buf);
+
+        // Skip pages that are already empty or fully live
+        uint16_t beforeLive = page.liveCount();
+        uint16_t beforeSlots = page.slotCount();
+        if (beforeSlots == 0 || beforeLive == beforeSlots) {
+            pa->unpinPage(pid);
+            continue;
+        }
+
+        // Compact: move live records together, keep slotIds stable
+        page.compact();
+        pa->markDirty(pid);
+
+        // If page is now empty, return it to the free list
+        if (page.liveCount() == 0) {
+            pa->unpinPage(pid);
+            pa->freePage(pid);
+            freedPages++;
+        } else {
+            pa->unpinPage(pid);
+        }
+    }
+
+    lockManager_.unlock(tablename);
+    return freedPages;
+}
+
+// ========================================================================
 // Transaction logging helpers
 // ========================================================================
 
@@ -2954,11 +3040,14 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
         }
     }
 
-    // Assign transaction ID and create ReadView
+    // Assign transaction ID and create ReadView (if needed)
     currentTxnId_ = TxnIdGenerator::instance().nextTxId();
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.insert(currentTxnId_);
+    }
+    if (txnIsolationLevel_ != IsolationLevel::ReadUncommitted) {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
         readView_.creatorTxnId = currentTxnId_;
         readView_.upLimitId = activeTransactions_.empty() ? currentTxnId_ : *activeTransactions_.begin();
         readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
@@ -3129,6 +3218,63 @@ OpResult StorageEngine::rollbackTransaction() {
 
 std::filesystem::path StorageEngine::permPath(const std::string& dbname) const {
     return dbPath(dbname) / ".permissions";
+}
+
+std::filesystem::path StorageEngine::seqPath(const std::string& dbname, const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".seq");
+}
+
+int64_t StorageEngine::readNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname) {
+    auto path = seqPath(dbname, tablename);
+    int64_t val = 1;
+    if (std::filesystem::exists(path)) {
+        std::ifstream ifs(path);
+        if (ifs) {
+            std::string line;
+            while (std::getline(ifs, line)) {
+                size_t sp = line.find(' ');
+                if (sp == std::string::npos) continue;
+                if (line.substr(0, sp) == colname) {
+                    try {
+                        val = std::stoll(line.substr(sp + 1));
+                    } catch (...) { val = 1; }
+                    break;
+                }
+            }
+        }
+    }
+    return val;
+}
+
+void StorageEngine::writeNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname, int64_t val) {
+    auto path = seqPath(dbname, tablename);
+    // Read existing entries
+    std::map<std::string, int64_t> seqs;
+    if (std::filesystem::exists(path)) {
+        std::ifstream ifs(path);
+        if (ifs) {
+            std::string line;
+            while (std::getline(ifs, line)) {
+                size_t sp = line.find(' ');
+                if (sp == std::string::npos) continue;
+                try {
+                    seqs[line.substr(0, sp)] = std::stoll(line.substr(sp + 1));
+                } catch (...) {}
+            }
+        }
+    }
+    seqs[colname] = val;
+    std::ofstream ofs(path);
+    for (const auto& p : seqs) {
+        ofs << p.first << ' ' << p.second << '\n';
+    }
+}
+
+void StorageEngine::removeSeq(const std::string& dbname, const std::string& tablename) {
+    auto path = seqPath(dbname, tablename);
+    if (std::filesystem::exists(path)) {
+        std::filesystem::remove(path);
+    }
 }
 
 static std::string privToStr(StorageEngine::TablePrivilege p) {

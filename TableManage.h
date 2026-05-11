@@ -34,9 +34,14 @@ constexpr size_t MVCC_HEADER_SIZE = MVCC_TXID_SIZE + MVCC_ROLLBACK_SIZE;
 struct Column {
     bool isNull = false;
     bool isPrimaryKey = false;
+    bool isVariableLength = false;  // true for VARCHAR, false for fixed-length types
+    bool isUnique = false;          // UNIQUE constraint
+    bool isAutoIncrement = false;   // AUTO_INCREMENT / SERIAL
     std::string dataType;
     std::string dataName;
-    size_t dsize = 0;
+    size_t dsize = 0;  // For VARCHAR: max length; for fixed: actual bytes
+    std::string defaultValue;       // DEFAULT value
+    std::string checkExpr;          // CHECK constraint expression
 
     void print() const;
 };
@@ -59,6 +64,13 @@ struct TableSchema {
     void appendFK(const ForeignKey& fk);
     void print() const;
     size_t rowSize() const;
+
+    // Variable-length helpers
+    bool hasVariableLength() const;
+    size_t fixedDataSize() const;       // sum of dsize of all fixed-length columns
+    size_t varColCount() const;         // number of variable-length columns
+    size_t getVarColIndex(size_t colIdx) const;  // index among var columns
+    size_t getFixedColOffset(size_t colIdx) const; // offset within fixed data region
 };
 
 // Result code for data operations
@@ -179,6 +191,12 @@ public:
     // WAL crash recovery
     void recoverAllDatabases();
 
+    // Checkpoint: flush all dirty pages and write checkpoint record
+    void checkpoint(const std::string& dbname);
+
+    // VACUUM: reclaim space from deleted rows
+    size_t vacuum(const std::string& dbname, const std::string& tablename);
+
     // Secondary index
     OpResult createIndex(const std::string& dbname, const std::string& tablename,
                          const std::string& colname);
@@ -194,7 +212,7 @@ public:
         std::string value;
     };
     static std::vector<Condition> parseConditions(const std::vector<std::string>& cstr);
-    static bool evalConditionOnRow(const Condition& cond, const char* rowData, const TableSchema& tbl);
+    static bool evalConditionOnRow(const Condition& cond, const std::string& rowBuffer, const TableSchema& tbl);
     static int64_t parseInt(const std::string& s);
     static bool stringToBuffer(const std::string& src, char* dst, size_t len);
 
@@ -245,16 +263,29 @@ public:
         return inTransaction_ ? &readView_ : nullptr;
     }
 
+    // Transaction isolation levels
+    enum class IsolationLevel { ReadUncommitted = 0, ReadCommitted = 1, RepeatableRead = 2, Serializable = 3 };
+    void setIsolationLevel(IsolationLevel level) { txnIsolationLevel_ = level; }
+    IsolationLevel getIsolationLevel() const { return txnIsolationLevel_; }
+    void refreshReadView();  // For READ COMMITTED: re-snapshot before each query
+
 private:
     std::filesystem::path dbPath(const std::string& dbname) const;
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path tableListPath(const std::string& dbname) const;
     std::filesystem::path walPath(const std::string& dbname) const;
+    std::filesystem::path checkpointPath(const std::string& dbname) const;
     std::filesystem::path viewPath(const std::string& dbname, const std::string& viewname) const;
     std::filesystem::path viewsDir(const std::string& dbname) const;
     std::filesystem::path statsPath(const std::string& dbname) const;
     std::filesystem::path permPath(const std::string& dbname) const;
+    std::filesystem::path seqPath(const std::string& dbname, const std::string& tablename) const;
+
+    // Auto-increment sequence helpers
+    int64_t readNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname);
+    void writeNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname, int64_t val);
+    void removeSeq(const std::string& dbname, const std::string& tablename);
 
     void writeSchema(std::ostream& out, const TableSchema& tbl);
     TableSchema readSchema(std::istream& in, const std::string& tablename) const;
@@ -290,6 +321,7 @@ private:
     std::string txnDB_;
     uint64_t currentTxnId_ = 0;
     ReadView readView_;
+    IsolationLevel txnIsolationLevel_ = IsolationLevel::RepeatableRead;
     struct TxnLogEntry {
         enum class Op { Insert, Update, Delete } op;
         std::string tableName;
@@ -310,5 +342,6 @@ private:
 Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK = false);
 Column makeStringColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
 Column makeDateColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK = false);
 
 } // namespace dbms
