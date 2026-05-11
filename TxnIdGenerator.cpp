@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace dbms {
 
@@ -29,6 +31,12 @@ void TxnIdGenerator::save() {
     if (!ofs) return;
     ofs.write(reinterpret_cast<const char*>(&nextTxId_), sizeof(nextTxId_));
     ofs.write(reinterpret_cast<const char*>(&maxCommitted_), sizeof(maxCommitted_));
+    ofs.close();
+    int fd = ::open(persistPath_.c_str(), O_RDWR);
+    if (fd >= 0) {
+        ::fsync(fd);
+        ::close(fd);
+    }
 }
 
 uint64_t TxnIdGenerator::nextTxId() {

@@ -9,33 +9,16 @@ namespace dbms {
 // ========================================================================
 // Helper: format a raw row buffer into display string
 // ========================================================================
-static std::string formatRow(const char* rowData, const TableSchema& tbl,
+static std::string formatRow(const std::string& rowBuffer, const TableSchema& tbl,
                               const std::set<std::string>& selectCols) {
     std::string rowStr;
-    size_t offset = MVCC_HEADER_SIZE;
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
-        if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end()) {
-            offset += col.dsize;
+        if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
             continue;
-        }
-        if (col.dataType == "char") {
-            std::string buf(col.dsize, '\0');
-            std::memcpy(buf.data(), rowData + offset, col.dsize);
-            auto nul = buf.find('\0');
-            if (nul != std::string::npos) buf.resize(nul);
-            rowStr += buf + ' ';
-        } else if (col.dataType == "date") {
-            Date d;
-            std::memcpy(&d, rowData + offset, DATE_SIZE);
-            rowStr += str(d) + ' ';
-        } else {
-            int64_t val = 0;
-            std::memcpy(&val, rowData + offset, col.dsize);
-            if (val == INF) rowStr += "NULL ";
-            else rowStr += transstr(val) + ' ';
-        }
-        offset += col.dsize;
+        std::string val = StorageEngine::extractColumnValue(rowBuffer, tbl, i);
+        if (val.empty() && !col.isNull) rowStr += "NULL ";
+        else rowStr += val + ' ';
     }
     return rowStr;
 }
@@ -67,29 +50,23 @@ static bool likeMatch(const std::string& text, const std::string& pattern) {
 // Helper: evaluate a single condition on raw row data
 // ========================================================================
 static bool evalCondRaw(const StorageEngine::Condition& cond,
-                         const char* rowData, const TableSchema& tbl) {
-    size_t offset = MVCC_HEADER_SIZE;
+                         const std::string& rowBuffer, const TableSchema& tbl) {
     size_t ci = 0;
-    for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci)
-        offset += tbl.cols[ci].dsize;
+    for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci) {}
     if (ci >= tbl.len) return false;
 
+    std::string val = StorageEngine::extractColumnValue(rowBuffer, tbl, ci);
     const Column& col = tbl.cols[ci];
-    if (col.dataType == "char") {
-        std::string buf(col.dsize, '\0');
-        std::memcpy(buf.data(), rowData + offset, col.dsize);
-        auto nul = buf.find('\0');
-        if (nul != std::string::npos) buf.resize(nul);
-        if (cond.op == "<"  && !(buf <  cond.value)) return false;
-        if (cond.op == ">"  && !(buf >  cond.value)) return false;
-        if (cond.op == "="  && buf != cond.value)    return false;
-        if (cond.op == "<=" && (buf >  cond.value))   return false;
-        if (cond.op == ">=" && (buf <  cond.value))   return false;
-        if (cond.op == "!=" && buf == cond.value)    return false;
-        if (cond.op == "like" && !likeMatch(buf, cond.value)) return false;
+    if (col.dataType == "char" || col.isVariableLength) {
+        if (cond.op == "<"  && !(val <  cond.value)) return false;
+        if (cond.op == ">"  && !(val >  cond.value)) return false;
+        if (cond.op == "="  && val != cond.value)    return false;
+        if (cond.op == "<=" && (val >  cond.value))   return false;
+        if (cond.op == ">=" && (val <  cond.value))   return false;
+        if (cond.op == "!=" && val == cond.value)    return false;
+        if (cond.op == "like" && !likeMatch(val, cond.value)) return false;
     } else if (col.dataType == "date") {
-        Date d;
-        std::memcpy(&d, rowData + offset, DATE_SIZE);
+        Date d = (val.empty() ? Date{} : Date(val.c_str()));
         Date v(cond.value.c_str());
         if (cond.op == "<"  && v.year && !(d < v))  return false;
         if (cond.op == ">"  && v.year && !(d > v))  return false;
@@ -98,15 +75,14 @@ static bool evalCondRaw(const StorageEngine::Condition& cond,
         if (cond.op == ">=" && v.year && (d < v))   return false;
         if (cond.op == "!=" && v.year && d == v)    return false;
     } else {
-        int64_t val = 0;
-        std::memcpy(&val, rowData + offset, col.dsize);
+        int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
-        if (cond.op == "<"  && cmp != INF && !(val < cmp)) return false;
-        if (cond.op == ">"  && cmp != INF && !(val > cmp)) return false;
-        if (cond.op == "="  && cmp != INF && val != cmp)   return false;
-        if (cond.op == "<=" && cmp != INF && (val > cmp))  return false;
-        if (cond.op == ">=" && cmp != INF && (val < cmp))  return false;
-        if (cond.op == "!=" && cmp != INF && val == cmp)   return false;
+        if (cond.op == "<"  && cmp != INF && !(num < cmp)) return false;
+        if (cond.op == ">"  && cmp != INF && !(num > cmp)) return false;
+        if (cond.op == "="  && cmp != INF && num != cmp)   return false;
+        if (cond.op == "<=" && cmp != INF && (num > cmp))  return false;
+        if (cond.op == ">=" && cmp != INF && (num < cmp))  return false;
+        if (cond.op == "!=" && cmp != INF && num == cmp)   return false;
     }
     return true;
 }
@@ -218,7 +194,7 @@ bool FilterOp::next(std::string& outRow) {
     while (child_->next(outRow)) {
         bool match = true;
         for (const auto& c : conds_) {
-            if (!evalCondRaw(c, outRow.data(), tbl_)) { match = false; break; }
+            if (!evalCondRaw(c, outRow, tbl_)) { match = false; break; }
         }
         if (match) return true;
     }
@@ -244,7 +220,7 @@ bool ProjectOp::open() {
 bool ProjectOp::next(std::string& outRow) {
     std::string raw;
     if (!child_->next(raw)) return false;
-    outRow = formatRow(raw.data(), tbl_, selectCols_);
+    outRow = formatRow(raw, tbl_, selectCols_);
     return true;
 }
 
@@ -275,24 +251,19 @@ bool SortOp::open() {
         std::vector<std::pair<std::string, Item>> items;
         const Column& scol = tbl_.cols[sortIdx];
         for (auto& r : buffer_) {
-            size_t offset = 0;
-            for (size_t c = 0; c < sortIdx; ++c) offset += tbl_.cols[c].dsize;
+            std::string val = StorageEngine::extractColumnValue(r, tbl_, sortIdx);
             Item it{"", 0, {}};
-            if (scol.dataType == "char") {
-                std::string buf(scol.dsize, '\0');
-                std::memcpy(buf.data(), r.data() + offset, scol.dsize);
-                auto nul = buf.find('\0');
-                if (nul != std::string::npos) buf.resize(nul);
-                it.s = buf;
+            if (scol.dataType == "char" || scol.isVariableLength) {
+                it.s = val;
             } else if (scol.dataType == "date") {
-                std::memcpy(&it.d, r.data() + offset, DATE_SIZE);
+                it.d = val.empty() ? Date{} : Date(val.c_str());
             } else {
-                std::memcpy(&it.n, r.data() + offset, scol.dsize);
+                it.n = val.empty() ? 0 : StorageEngine::parseInt(val);
             }
             items.emplace_back(std::move(r), it);
         }
         std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
-            if (scol.dataType == "char") return asc_ ? (a.second.s < b.second.s) : (b.second.s < a.second.s);
+            if (scol.dataType == "char" || scol.isVariableLength) return asc_ ? (a.second.s < b.second.s) : (b.second.s < a.second.s);
             if (scol.dataType == "date") return asc_ ? (a.second.d < b.second.d) : (b.second.d < a.second.d);
             return asc_ ? (a.second.n < b.second.n) : (b.second.n < a.second.n);
         });
@@ -449,31 +420,12 @@ void NestedLoopJoinOp::close() {
 // Helper: extract join key value from raw row data as string
 // ========================================================================
 static std::string extractJoinKey(const std::string& row, const TableSchema& tbl, const std::string& colName) {
-    size_t offset = 0;
-    const Column* col = nullptr;
+    size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].dataName == colName) {
-            col = &tbl.cols[i];
-            break;
-        }
-        offset += tbl.cols[i].dsize;
+        if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
     }
-    if (!col) return "";
-    if (col->dataType == "char") {
-        std::string val(col->dsize, '\0');
-        std::memcpy(val.data(), row.data() + offset, col->dsize);
-        auto n = val.find('\0');
-        if (n != std::string::npos) val.resize(n);
-        return val;
-    } else if (col->dataType == "date") {
-        Date d;
-        std::memcpy(&d, row.data() + offset, DATE_SIZE);
-        return str(d);
-    } else {
-        int64_t val = 0;
-        std::memcpy(&val, row.data() + offset, col->dsize);
-        return transstr(val);
-    }
+    if (colIdx >= tbl.len) return "";
+    return StorageEngine::extractColumnValue(row, tbl, colIdx);
 }
 
 // ========================================================================

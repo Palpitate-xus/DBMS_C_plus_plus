@@ -77,7 +77,8 @@ public:
     bool get(uint16_t slotId, const char*& data, size_t& len) const;
 
     // Update a record in-place if len fits, otherwise remove + insert.
-    bool update(uint16_t slotId, const char* data, size_t len);
+    // If re-inserted, newSlotId receives the new slot id.
+    bool update(uint16_t slotId, const char* data, size_t len, uint16_t* newSlotId = nullptr);
 
     // Compact the page: move all live records together and rebuild slot array.
     // This removes fragmentation caused by deleted records.

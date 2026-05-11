@@ -2,6 +2,13 @@
 *.exe
 *.o
 dbms_refactored
+dbms_main
+dbms.log
+slow_queries.txt
+user.dat
+.txnid
+*.txn_backup
 testdb/
+testdb*
 *.tmp
 build-*/

@@ -134,7 +134,7 @@ bool Page::get(uint16_t slotId, const char*& data, size_t& len) const {
 // Update
 // ========================================================================
 
-bool Page::update(uint16_t slotId, const char* data, size_t len) {
+bool Page::update(uint16_t slotId, const char* data, size_t len, uint16_t* newSlotId) {
     Header* h = header();
     if (slotId >= h->numSlots) return false;
     Slot* s = slot(slotId);
@@ -148,18 +148,21 @@ bool Page::update(uint16_t slotId, const char* data, size_t len) {
             std::memset(buf_ + s->offset + len, 0, s->length - len);
         }
         writeChecksum();
+        if (newSlotId) *newSlotId = slotId;
         return true;
     }
 
     // Does not fit: remove old + insert new
     if (!remove(slotId)) return false;
-    uint16_t newSlotId = 0;
-    if (!insert(data, len, newSlotId)) {
+    uint16_t insertedSlotId = 0;
+    if (!insert(data, len, insertedSlotId)) {
         // Failed to insert: restore old slot (best effort)
         s->flags &= ~SLOT_DELETED;
         writeChecksum();
+        if (newSlotId) *newSlotId = slotId;
         return false;
     }
+    if (newSlotId) *newSlotId = insertedSlotId;
     return true;
 }
 
@@ -171,9 +174,9 @@ void Page::compact() {
     Header* h = header();
     if (h->numSlots == 0) return;
 
-    // Build array of live slots
+    // Build array of live slots (preserve original slotId)
     struct LiveItem { uint16_t slotId; Slot slot; };
-    LiveItem items[256]; // MAX_SLOTS roughly PAGE_SIZE / (min row ~ 10)
+    LiveItem items[256];
     uint16_t liveCount = 0;
     for (uint16_t i = 0; i < h->numSlots; ++i) {
         Slot* s = slot(i);
@@ -193,22 +196,36 @@ void Page::compact() {
                   return a.slot.offset > b.slot.offset;
               });
 
-    // Move records to new compact positions
+    // Move records to new compact positions, updating offsets in-place
     uint16_t newDataOffset = static_cast<uint16_t>(PAGE_SIZE);
     for (uint16_t i = 0; i < liveCount; ++i) {
         newDataOffset -= items[i].slot.length;
         std::memmove(buf_ + newDataOffset, buf_ + items[i].slot.offset, items[i].slot.length);
-        items[i].slot.offset = newDataOffset;
+        // Update the original slot's offset (slotId unchanged)
+        Slot* origSlot = slot(items[i].slotId);
+        origSlot->offset = newDataOffset;
     }
 
-    // Rebuild slot array: assign slots 0..liveCount-1
-    for (uint16_t i = 0; i < liveCount; ++i) {
+    // Clear deleted slot entries
+    for (uint16_t i = 0; i < h->numSlots; ++i) {
         Slot* s = slot(i);
-        *s = items[i].slot;
+        if (s->flags & SLOT_DELETED) {
+            s->offset = 0;
+            s->length = 0;
+        }
     }
 
-    h->numSlots = liveCount;
-    h->freeOffset = static_cast<uint16_t>(sizeof(Header) + liveCount * sizeof(Slot));
+    // Trim trailing deleted slots to shrink slot array
+    while (h->numSlots > 0) {
+        Slot* s = slot(h->numSlots - 1);
+        if ((s->flags & SLOT_DELETED) == 0) break;
+        s->offset = 0;
+        s->length = 0;
+        s->flags = 0;
+        h->numSlots--;
+    }
+
+    h->freeOffset = static_cast<uint16_t>(sizeof(Header) + h->numSlots * sizeof(Slot));
     h->dataOffset = newDataOffset;
     writeChecksum();
 }

@@ -148,6 +148,10 @@ void BufferPool::flush() {
             frame.dirty = false;
         }
     }
+    // fsync to ensure durability
+    if (fd_ >= 0) {
+        ::fsync(fd_);
+    }
 }
 
 } // namespace dbms
