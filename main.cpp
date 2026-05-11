@@ -21,6 +21,7 @@ using dbms::Column;
 using dbms::makeDateColumn;
 using dbms::makeIntColumn;
 using dbms::makeStringColumn;
+using dbms::makeVarCharColumn;
 using dbms::OpResult;
 using dbms::StorageEngine;
 using dbms::TableSchema;
@@ -81,6 +82,63 @@ static string sqlProcessor(string raw) {
     raw.erase(remove(raw.begin(), raw.end(), '\r'), raw.end());
     if (!raw.empty() && raw.back() == ';') raw.pop_back();
     return raw;
+}
+
+// ========================================================================
+// Window function support
+// ========================================================================
+struct WindowFunc {
+    string name;
+    string arg;
+    string orderByCol;
+    bool orderByAsc;
+};
+
+static bool parseWindowFunc(const string& item, WindowFunc& wf) {
+    string low = toLower(item);
+    size_t overPos = low.find("over");
+    if (overPos == string::npos) return false;
+
+    string funcPart = trim(item.substr(0, overPos));
+    string overPart = trim(item.substr(overPos + 4));
+
+    size_t lp = funcPart.find('(');
+    size_t rp = funcPart.rfind(')');
+    if (lp == string::npos || rp == string::npos) return false;
+    wf.name = toLower(trim(funcPart.substr(0, lp)));
+    wf.arg = trim(funcPart.substr(lp + 1, rp - lp - 1));
+
+    size_t overLp = overPart.find('(');
+    size_t overRp = overPart.rfind(')');
+    if (overLp == string::npos || overRp == string::npos) return false;
+    string overContent = trim(overPart.substr(overLp + 1, overRp - overLp - 1));
+
+    string lowContent = toLower(overContent);
+    size_t orderPos = lowContent.find("order by");
+    if (orderPos == string::npos) return false;
+
+    string orderRest = trim(overContent.substr(orderPos + 8));
+    vector<string> ot = tokenize(orderRest);
+    if (ot.empty()) return false;
+    wf.orderByCol = ot[0];
+    wf.orderByAsc = true;
+    if (ot.size() > 1 && toLower(ot[1]) == "desc") wf.orderByAsc = false;
+
+    return true;
+}
+
+// ========================================================================
+// Temporary table helpers
+// ========================================================================
+static string tempTablePrefix(const string& name) { return "__tmp_" + name; }
+
+static string resolveTableName(Session& s, const string& name) {
+    if (s.tempTables.count(name)) return tempTablePrefix(name);
+    return name;
+}
+
+static bool isTempTable(Session& s, const string& name) {
+    return s.tempTables.count(name) != 0;
 }
 
 // ========================================================================
@@ -360,8 +418,12 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             string cname, ctype;
             bool isNull = true;
             bool isPK = false;
+            bool isUnique = false;
+            std::string defaultVal;
+            std::string checkExpr;
             dbms::ForeignKey fk;
 
+            vector<string> parts;
             if (isBrace) {
                 // {col:type flags} format
                 size_t colon = segment.find(':');
@@ -370,10 +432,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 ctype = trim(segment.substr(colon + 1));
             } else {
                 // (col type flags) format
-                vector<string> parts;
-                stringstream ss(segment);
-                string part;
-                while (ss >> part) parts.push_back(part);
+                parts = tokenize(segment);
                 if (parts.empty()) break;
                 cname = parts[0];
                 if (parts.size() >= 2) {
@@ -389,6 +448,33 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                             isNull = false; ++i;
                         } else if (parts[i] == "0") {
                             isNull = false;
+                        } else if (parts[i] == "unique") {
+                            isUnique = true;
+                        } else if (parts[i] == "default" && i + 1 < parts.size()) {
+                            defaultVal = parts[i + 1];
+                            if (defaultVal.size() >= 2 && defaultVal.front() == '\'' && defaultVal.back() == '\'') {
+                                defaultVal = defaultVal.substr(1, defaultVal.size() - 2);
+                            }
+                            ++i;
+                        } else if (parts[i] == "check" && i + 1 < parts.size()) {
+                            // Collect CHECK expression
+                            ++i;
+                            int parenDepth = 0;
+                            std::string expr;
+                            for (; i < parts.size(); ++i) {
+                                if (parts[i] == "(") {
+                                    if (parenDepth > 0) expr += "(";
+                                    ++parenDepth;
+                                } else if (parts[i] == ")") {
+                                    --parenDepth;
+                                    if (parenDepth > 0) expr += ")";
+                                } else {
+                                    expr += parts[i];
+                                }
+                                if (parenDepth == 0 && !expr.empty()) break;
+                            }
+                            // Store normalized expression
+                            checkExpr = normalizeConditionStr(expr);
                         }
                     }
                 }
@@ -438,7 +524,11 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 ctype = typeName;
             }
 
-            if (ctype.substr(0, 3) == "int") {
+            if (ctype.substr(0, 6) == "serial") {
+                Column col = makeIntColumn(cname, false, 2, isPK);
+                col.isAutoIncrement = true;
+                tbl.append(col);
+            } else if (ctype.substr(0, 3) == "int") {
                 tbl.append(makeIntColumn(cname, isNull, 2, isPK));
             } else if (ctype.substr(0, 4) == "tiny") {
                 tbl.append(makeIntColumn(cname, isNull, 1, isPK));
@@ -448,13 +538,41 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeDateColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "char") {
                 size_t len = 0;
-                size_t start = 4;
-                // Skip optional '(' for standard SQL syntax: char(20)
-                if (start < ctype.size() && ctype[start] == '(') ++start;
-                for (size_t i = start; i < ctype.size() && isdigit(static_cast<unsigned char>(ctype[i])); ++i)
-                    len = len * 10 + (ctype[i] - '0');
+                // Parentheses format: type and length may be in separate parts
+                if (!isBrace && parts.size() >= 3) {
+                    string lenStr = parts[2];
+                    for (char c : lenStr)
+                        if (isdigit(static_cast<unsigned char>(c))) len = len * 10 + (c - '0');
+                }
+                if (len == 0) {
+                    size_t start = 4;
+                    if (start < ctype.size() && ctype[start] == '(') ++start;
+                    for (size_t i = start; i < ctype.size() && isdigit(static_cast<unsigned char>(ctype[i])); ++i)
+                        len = len * 10 + (ctype[i] - '0');
+                }
                 if (len == 0) len = 1;
                 tbl.append(makeStringColumn(cname, isNull, len, isPK));
+            } else if (ctype.substr(0, 7) == "varchar") {
+                size_t len = 0;
+                if (!isBrace && parts.size() >= 3) {
+                    string lenStr = parts[2];
+                    for (char c : lenStr)
+                        if (isdigit(static_cast<unsigned char>(c))) len = len * 10 + (c - '0');
+                }
+                if (len == 0) {
+                    size_t start = 7;
+                    if (start < ctype.size() && ctype[start] == '(') ++start;
+                    for (size_t i = start; i < ctype.size() && isdigit(static_cast<unsigned char>(ctype[i])); ++i)
+                        len = len * 10 + (ctype[i] - '0');
+                }
+                if (len == 0) len = 1;
+                tbl.append(makeVarCharColumn(cname, isNull, len, isPK));
+            }
+            // Apply unique/default/check to last appended column
+            if (tbl.len > 0) {
+                tbl.cols[tbl.len - 1].isUnique = isUnique;
+                tbl.cols[tbl.len - 1].defaultValue = defaultVal;
+                tbl.cols[tbl.len - 1].checkExpr = checkExpr;
             }
             if (!fk.colName.empty()) tbl.appendFK(fk);
             pos = endPos + 1;
@@ -531,8 +649,101 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
     return answers;
 }
 
-// Expand IN (...) subqueries / value lists into OR conditions
+// Helper: find matching closing paren from start position
+static size_t findMatchingParen(const std::string& s, size_t start) {
+    int depth = 1;
+    for (size_t i = start + 1; i < s.size(); ++i) {
+        if (s[i] == '(') ++depth;
+        else if (s[i] == ')') { --depth; if (depth == 0) return i; }
+    }
+    return std::string::npos;
+}
+
+// Expand IN (...) / EXISTS (...) / ANY / ALL subqueries into plain conditions
 static std::string expandSubqueries(std::string sql, Session& s) {
+    // ---------- EXISTS ----------
+    while (true) {
+        size_t pos = sql.find("exists");
+        if (pos == std::string::npos) break;
+        size_t parenStart = sql.find('(', pos);
+        if (parenStart == std::string::npos) break;
+        size_t parenEnd = findMatchingParen(sql, parenStart);
+        if (parenEnd == std::string::npos) break;
+
+        std::string inner = trim(sql.substr(parenStart + 1, parenEnd - parenStart - 1));
+        bool hasResult = false;
+        if (inner.size() >= 6 && inner.substr(0, 6) == "select") {
+            auto rows = runSubQuery(inner, s);
+            hasResult = !rows.empty();
+        }
+        // Replace with special markers recognized by evalConditionOnRow
+        std::string replacement = hasResult ? "__true__=1" : "__false__=1";
+        sql = sql.substr(0, pos) + replacement + sql.substr(parenEnd + 1);
+    }
+
+    // ---------- ANY / ALL ----------
+    while (true) {
+        auto findAnyAll = [&](const std::string& key) -> size_t {
+            size_t p = sql.find(" " + key + " ");
+            if (p != std::string::npos) return p + 1; // point to key itself
+            p = sql.find(" " + key + "(");
+            if (p != std::string::npos) return p + 1;
+            return std::string::npos;
+        };
+        size_t anyPos = findAnyAll("any");
+        size_t allPos = findAnyAll("all");
+        size_t pos = std::string::npos;
+        bool isAny = false;
+        if (anyPos != std::string::npos && allPos != std::string::npos) {
+            pos = std::min(anyPos, allPos);
+            isAny = (pos == anyPos);
+        } else if (anyPos != std::string::npos) {
+            pos = anyPos; isAny = true;
+        } else if (allPos != std::string::npos) {
+            pos = allPos; isAny = false;
+        } else {
+            break;
+        }
+
+        // Find operator before colName (e.g. "> any", "= any")
+        size_t opStart = pos;
+        while (opStart > 0 && std::isspace(static_cast<unsigned char>(sql[opStart - 1]))) --opStart;
+        size_t opEnd = opStart;
+        while (opEnd > 0 && (sql[opEnd - 1] == '<' || sql[opEnd - 1] == '>' || sql[opEnd - 1] == '=' || sql[opEnd - 1] == '!')) --opEnd;
+        if (opEnd == opStart) break; // no operator found
+        std::string op = sql.substr(opEnd, opStart - opEnd);
+
+        size_t colNameEnd = opEnd;
+        while (colNameEnd > 0 && std::isspace(static_cast<unsigned char>(sql[colNameEnd - 1]))) --colNameEnd;
+        size_t colNameStart = colNameEnd;
+        while (colNameStart > 0 && !std::isspace(static_cast<unsigned char>(sql[colNameStart - 1]))) --colNameStart;
+        std::string colName = trim(sql.substr(colNameStart, colNameEnd - colNameStart));
+
+        size_t parenStart = sql.find('(', pos);
+        if (parenStart == std::string::npos) break;
+        size_t parenEnd = findMatchingParen(sql, parenStart);
+        if (parenEnd == std::string::npos) break;
+
+        std::string inner = trim(sql.substr(parenStart + 1, parenEnd - parenStart - 1));
+        std::vector<std::string> values;
+        if (inner.size() >= 6 && inner.substr(0, 6) == "select") {
+            values = runSubQuery(inner, s);
+        }
+
+        std::string replacement;
+        if (values.empty()) {
+            // SQL standard: ANY(empty) = false, ALL(empty) = true
+            replacement = isAny ? "1=0" : "1=1";
+        } else {
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (i > 0) replacement += isAny ? " or " : " and ";
+                replacement += colName + op + values[i];
+            }
+        }
+        sql = sql.substr(0, colNameStart) + replacement + sql.substr(parenEnd + 1);
+    }
+
+    // ---------- IN ----------
     while (true) {
         size_t pos = sql.find(" in ");
         if (pos == std::string::npos) break;
@@ -551,12 +762,7 @@ static std::string expandSubqueries(std::string sql, Session& s) {
             continue;
         }
 
-        int depth = 1;
-        size_t parenEnd = std::string::npos;
-        for (size_t i = parenStart + 1; i < sql.size(); ++i) {
-            if (sql[i] == '(') ++depth;
-            else if (sql[i] == ')') { --depth; if (depth == 0) { parenEnd = i; break; } }
-        }
+        size_t parenEnd = findMatchingParen(sql, parenStart);
         if (parenEnd == std::string::npos) break;
 
         size_t colStart = pos;
@@ -695,6 +901,36 @@ bool execute(const string& rawSql, Session& s) {
             return res != OpResult::Success;
         }
 
+        if (sql.substr(7, 9) == "temporary") {
+            // create temporary table tname (...)
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            string rest = trim(sql.substr(17)); // skip "create temporary "
+            if (rest.substr(0, 5) != "table") {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            rest = trim(rest.substr(5));
+            size_t sp = rest.find(' ');
+            if (sp == string::npos) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            string origName = rest.substr(0, sp);
+            string tmpName = tempTablePrefix(origName);
+            TableSchema tbl = parseTableColumns(sql, 17 + 5 + 1 + sp + 1);
+            tbl.tablename = tmpName;
+            auto res = g_engine.createTable(s.currentDB, tbl);
+            if (res == OpResult::TableAlreadyExist) {
+                cout << "Temporary table " << origName << " already exists" << endl;
+                return true;
+            }
+            s.tempTables.insert(origName);
+            cout << "Temporary table " << origName << " created" << endl;
+            log(s.username, "temporary table create succeeded", getTime());
+            return false;
+        }
+
         if (sql.substr(7, 5) == "table") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
@@ -736,7 +972,8 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            string tname = trim(afterOn.substr(0, lp));
+            string tnameOrig = trim(afterOn.substr(0, lp));
+            string tname = resolveTableName(s, tnameOrig);
             string colname = trim(afterOn.substr(lp + 1, rp - lp - 1));
             auto res = g_engine.createIndex(s.currentDB, tname, colname);
             if (res != OpResult::Success) {
@@ -777,7 +1014,8 @@ bool execute(const string& rawSql, Session& s) {
             cout << "SQL syntax error" << endl;
             return true;
         }
-        string tname = tokens[1];
+        string tnameOrig = tokens[1];
+        string tname = resolveTableName(s, tnameOrig);
         string op = tokens[2];
         if (op == "add" && tokens.size() >= 4 && tokens[3] == "column") {
             // alter table tname add column colname:type [0|1]
@@ -813,6 +1051,14 @@ bool execute(const string& rawSql, Session& s) {
                     len = len * 10 + (typeName[i] - '0');
                 if (len == 0) len = 1;
                 col = makeStringColumn(cname, isNull, len);
+            } else if (typeName.substr(0, 7) == "varchar") {
+                size_t len = 0;
+                size_t start = 7;
+                if (start < typeName.size() && typeName[start] == '(') ++start;
+                for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
+                    len = len * 10 + (typeName[i] - '0');
+                if (len == 0) len = 1;
+                col = makeVarCharColumn(cname, isNull, len);
             } else {
                 cout << "Unknown data type" << endl;
                 return true;
@@ -850,11 +1096,12 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         string tname = tokens[0];
-        if (!g_engine.tableExists(s.currentDB, tname)) {
+        string resolvedName = resolveTableName(s, tname);
+        if (!g_engine.tableExists(s.currentDB, resolvedName)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Insert)) return true;
+        if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Insert)) return true;
 
         // Find column list and value list
         size_t colStart = sql.find('(', 12);
@@ -889,9 +1136,9 @@ bool execute(const string& rawSql, Session& s) {
         map<string, string> values;
         for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = stripQuotes(vals[i]);
 
-        auto res = g_engine.insert(s.currentDB, tname, values);
+        auto res = g_engine.insert(s.currentDB, resolvedName, values);
         if (res == OpResult::DuplicateKey) {
-            cout << "Duplicate primary key" << endl;
+            cout << "Duplicate key" << endl;
             return true;
         }
         if (res != OpResult::Success) {
@@ -912,15 +1159,16 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         string tname = tokens[0];
-        if (!g_engine.tableExists(s.currentDB, tname)) {
+        string resolvedName = resolveTableName(s, tname);
+        if (!g_engine.tableExists(s.currentDB, resolvedName)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Delete)) return true;
+        if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Delete)) return true;
 
         tokens.erase(tokens.begin());
         if (tokens.empty()) {
-            auto res = g_engine.remove(s.currentDB, tname, {});
+            auto res = g_engine.remove(s.currentDB, resolvedName, {});
             if (res != OpResult::Success) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
@@ -940,7 +1188,7 @@ bool execute(const string& rawSql, Session& s) {
         for (auto& t : tokens) t = modifyLogic(t);
         auto groups = breakDownConditions(tokens);
         for (const auto& g : groups) {
-            auto res = g_engine.remove(s.currentDB, tname, g);
+            auto res = g_engine.remove(s.currentDB, resolvedName, g);
             if (res != OpResult::Success) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
@@ -959,11 +1207,12 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         string tname = trim(sql.substr(6, setPos - 6));
-        if (!g_engine.tableExists(s.currentDB, tname)) {
+        string resolvedName = resolveTableName(s, tname);
+        if (!g_engine.tableExists(s.currentDB, resolvedName)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Update)) return true;
+        if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Update)) return true;
 
         size_t wherePos = sql.find("where", setPos);
         auto updates = parseSetClause(sql, setPos + 3,
@@ -984,14 +1233,14 @@ bool execute(const string& rawSql, Session& s) {
             for (auto& t : tokens) t = modifyLogic(t);
             auto groups = breakDownConditions(tokens);
             for (const auto& g : groups) {
-                auto res = g_engine.update(s.currentDB, tname, updates, g);
+                auto res = g_engine.update(s.currentDB, resolvedName, updates, g);
                 if (res != OpResult::Success) {
                     cout << "Update failed" << endl;
                     return true;
                 }
             }
         } else {
-            auto res = g_engine.update(s.currentDB, tname, updates, {});
+            auto res = g_engine.update(s.currentDB, resolvedName, updates, {});
             if (res != OpResult::Success) {
                 cout << "Update failed" << endl;
                 return true;
@@ -1018,6 +1267,19 @@ bool execute(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 5) == "begin") {
         if (!checkDB(s)) return true;
+        // Parse optional isolation level: "begin read committed"
+        string rest = trim(sql.substr(5));
+        if (!rest.empty()) {
+            if (rest == "read uncommitted") {
+                g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
+            } else if (rest == "read committed") {
+                g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
+            } else if (rest == "repeatable read") {
+                g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+            } else if (rest == "serializable") {
+                g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            }
+        }
         auto res = g_engine.beginTransaction(s.currentDB);
         if (res != OpResult::Success) {
             cout << "Begin transaction failed" << endl;
@@ -1025,6 +1287,34 @@ bool execute(const string& rawSql, Session& s) {
         }
         cout << "Transaction started" << endl;
         log(s.username, "begin transaction", getTime());
+        return false;
+    }
+
+    if (sql.substr(0, 25) == "set transaction isolation" ||
+        sql.substr(0, 31) == "set transaction isolation level") {
+        string rawRest;
+        if (sql.substr(0, 31) == "set transaction isolation level") {
+            rawRest = sql.substr(31);
+        } else {
+            rawRest = sql.substr(25);
+        }
+        string rest = trim(rawRest);
+        if (rest.find("read uncommitted") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
+            cout << "Isolation level set to READ UNCOMMITTED" << endl;
+        } else if (rest.find("read committed") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
+            cout << "Isolation level set to READ COMMITTED" << endl;
+        } else if (rest.find("repeatable read") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+            cout << "Isolation level set to REPEATABLE READ" << endl;
+        } else if (rest.find("serializable") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            cout << "Isolation level set to SERIALIZABLE" << endl;
+        } else {
+            cout << "Unknown isolation level" << endl;
+            return true;
+        }
         return false;
     }
 
@@ -1050,6 +1340,34 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (sql.substr(0, 10) == "checkpoint") {
+        if (!checkDB(s)) return true;
+        g_engine.checkpoint(s.currentDB);
+        cout << "Checkpoint completed" << endl;
+        log(s.username, "checkpoint", getTime());
+        return false;
+    }
+
+    if (sql.substr(0, 6) == "vacuum") {
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
+        string tname = trim(sql.substr(6));
+        if (tname.empty()) {
+            // Vacuum all tables in current database (excluding temp tables)
+            auto tables = g_engine.getTableNames(s.currentDB);
+            size_t totalFreed = 0;
+            for (const auto& tbl : tables) {
+                totalFreed += g_engine.vacuum(s.currentDB, tbl);
+            }
+            cout << "VACUUM completed, " << totalFreed << " pages freed" << endl;
+        } else {
+            string resolvedName = resolveTableName(s, tname);
+            size_t freed = g_engine.vacuum(s.currentDB, resolvedName);
+            cout << "VACUUM completed, " << freed << " pages freed" << endl;
+        }
+        return false;
+    }
+
     if (sql.substr(0, 4) == "drop") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
@@ -1060,7 +1378,39 @@ bool execute(const string& rawSql, Session& s) {
         }
         string op = tokens[0];
         string name = tokens[1];
+        if (op == "temporary") {
+            if (tokens.size() < 3 || tokens[1] != "table") {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            string origName = tokens[2];
+            if (!s.tempTables.count(origName)) {
+                cout << "Temporary table " << origName << " not exist" << endl;
+                return true;
+            }
+            string tmpName = tempTablePrefix(origName);
+            auto res = g_engine.dropTable(s.currentDB, tmpName);
+            if (res == OpResult::TableNotExist) {
+                cout << "Temporary table " << origName << " not exist" << endl;
+                return true;
+            }
+            s.tempTables.erase(origName);
+            cout << "Temporary table dropped" << endl;
+            return false;
+        }
         if (op == "table") {
+            // Check if it's a temp table first
+            if (s.tempTables.count(name)) {
+                string tmpName = tempTablePrefix(name);
+                auto res = g_engine.dropTable(s.currentDB, tmpName);
+                if (res != OpResult::Success) {
+                    cout << "Table " << name << " not exist" << endl;
+                    return true;
+                }
+                s.tempTables.erase(name);
+                cout << "Table dropped" << endl;
+                return false;
+            }
             auto res = g_engine.dropTable(s.currentDB, name);
             if (res == OpResult::TableNotExist) {
                 cout << "Table " << name << " not exist" << endl;
@@ -1085,7 +1435,8 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            string tname = tokens[3];
+            string tnameOrig = tokens[3];
+            string tname = resolveTableName(s, tnameOrig);
             auto res = g_engine.dropIndex(s.currentDB, tname, name);
             if (res != OpResult::Success) {
                 cout << "Drop index failed" << endl;
@@ -1547,7 +1898,7 @@ bool execute(const string& rawSql, Session& s) {
         bool isJoin = (actualJoinPos != string::npos);
 
         if (isJoin) {
-            string leftTable = trim(sql.substr(fromPos + 4, actualJoinPos - fromPos - 4));
+            string leftTableOrig = trim(sql.substr(fromPos + 4, actualJoinPos - fromPos - 4));
             size_t onPos = sql.find("on", actualJoinPos);
             if (onPos == string::npos) {
                 cout << "SQL syntax error: missing ON clause" << endl;
@@ -1558,7 +1909,7 @@ bool execute(const string& rawSql, Session& s) {
             else if (jt == JoinType::Right) tableNameStart += 10;
             else if (jt == JoinType::Inner) tableNameStart += 10;
             else tableNameStart += 4;
-            string rightTable = trim(sql.substr(tableNameStart, onPos - tableNameStart));
+            string rightTableOrig = trim(sql.substr(tableNameStart, onPos - tableNameStart));
             size_t onEnd = (wherePos != string::npos) ? wherePos
                           : (orderPos != string::npos) ? orderPos : sql.size();
             string onClause = normalizeConditionStr(trim(sql.substr(onPos + 2, onEnd - onPos - 2)));
@@ -1575,13 +1926,15 @@ bool execute(const string& rawSql, Session& s) {
             dot = rightOnCol.find('.');
             if (dot != string::npos) rightOnCol = rightOnCol.substr(dot + 1);
 
+            string leftTable = resolveTableName(s, leftTableOrig);
+            string rightTable = resolveTableName(s, rightTableOrig);
             if (!g_engine.tableExists(s.currentDB, leftTable) ||
                 !g_engine.tableExists(s.currentDB, rightTable)) {
                 cout << "Table not exist" << endl;
                 return true;
             }
-            if (!checkTablePermission(s, leftTable, dbms::StorageEngine::TablePrivilege::Select)) return true;
-            if (!checkTablePermission(s, rightTable, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            if (!isTempTable(s, leftTableOrig) && !checkTablePermission(s, leftTableOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            if (!isTempTable(s, rightTableOrig) && !checkTablePermission(s, rightTableOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
             set<string> selectCols;
             bool selectAll = (columns == "*");
@@ -1607,9 +1960,9 @@ bool execute(const string& rawSql, Session& s) {
             TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
             if (selectAll) {
                 for (size_t i = 0; i < leftTbl.len; ++i)
-                    cout << leftTable << "." << leftTbl.cols[i].dataName << ' ';
+                    cout << leftTableOrig << "." << leftTbl.cols[i].dataName << ' ';
                 for (size_t i = 0; i < rightTbl.len; ++i)
-                    cout << rightTable << "." << rightTbl.cols[i].dataName << ' ';
+                    cout << rightTableOrig << "." << rightTbl.cols[i].dataName << ' ';
             } else {
                 for (const auto& c : selectCols) cout << c << ' ';
             }
@@ -1674,20 +2027,21 @@ bool execute(const string& rawSql, Session& s) {
                          : (orderPos != string::npos) ? orderPos
                          : (limitPos != string::npos) ? limitPos
                          : (offsetPos != string::npos) ? offsetPos : sql.size();
-        string tname = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
+        string tnameOrig = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
+        string tname = resolveTableName(s, tnameOrig);
 
         if (!g_engine.tableExists(s.currentDB, tname)) {
-            if (g_engine.viewExists(s.currentDB, tname)) {
-                string viewSql = g_engine.getViewSQL(s.currentDB, tname);
+            if (g_engine.viewExists(s.currentDB, tnameOrig)) {
+                string viewSql = g_engine.getViewSQL(s.currentDB, tnameOrig);
                 if (!viewSql.empty()) {
                     execute(viewSql, s);
                     return false;
                 }
             }
-            cout << "Table " << tname << " not exist" << endl;
+            cout << "Table " << tnameOrig << " not exist" << endl;
             return true;
         }
-        if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Select)) return true;
+        if (!isTempTable(s, tnameOrig) && !checkTablePermission(s, tnameOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
         string orderByCol;
         bool orderByAsc = true;
@@ -1736,33 +2090,46 @@ bool execute(const string& rawSql, Session& s) {
         set<string> selectCols;
         bool selectAll = (columns == "*");
 
-        // Detect aggregate functions in columns
+        // Detect aggregate functions and window functions in columns
         vector<pair<string, string>> aggItems;
+        vector<WindowFunc> windowFuncs;
+        vector<int> exprTypes; // 0=normal, 1=agg, 2=window
         bool hasAgg = false;
+        bool hasWindow = false;
         {
             stringstream css(columns);
             string item;
             while (getline(css, item, ',')) {
                 item = trim(item);
-                size_t lp = item.find('(');
-                size_t rp = item.find(')');
-                if (lp != string::npos && rp != string::npos && rp > lp + 1) {
-                    string func = item.substr(0, lp);
-                    string arg = item.substr(lp + 1, rp - lp - 1);
-                    aggItems.emplace_back(func, arg);
-                    hasAgg = true;
+                WindowFunc wf;
+                if (parseWindowFunc(item, wf)) {
+                    windowFuncs.push_back(wf);
+                    hasWindow = true;
+                    exprTypes.push_back(2);
+                    aggItems.emplace_back(wf.name, wf.arg);
                 } else {
-                    aggItems.emplace_back("", item);
-                    if (!selectAll) {
-                        bool found = false;
-                        for (size_t i = 0; i < tbl.len; ++i) {
-                            if (tbl.cols[i].dataName == item) { found = true; break; }
+                    size_t lp = item.find('(');
+                    size_t rp = item.find(')');
+                    if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+                        string func = item.substr(0, lp);
+                        string arg = item.substr(lp + 1, rp - lp - 1);
+                        aggItems.emplace_back(func, arg);
+                        hasAgg = true;
+                        exprTypes.push_back(1);
+                    } else {
+                        aggItems.emplace_back("", item);
+                        exprTypes.push_back(0);
+                        if (!selectAll) {
+                            bool found = false;
+                            for (size_t i = 0; i < tbl.len; ++i) {
+                                if (tbl.cols[i].dataName == item) { found = true; break; }
+                            }
+                            if (!found) {
+                                cout << "Invalid column name " << item << endl;
+                                return true;
+                            }
+                            selectCols.insert(item);
                         }
-                        if (!found) {
-                            cout << "Invalid column name " << item << endl;
-                            return true;
-                        }
-                        selectCols.insert(item);
                     }
                 }
             }
@@ -1837,6 +2204,150 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
             }
+        } else if (hasWindow) {
+            // Output header
+            for (size_t i = 0; i < aggItems.size(); ++i) {
+                if (exprTypes[i] == 2) {
+                    cout << aggItems[i].first << "(" << aggItems[i].second << ") over (order by "
+                         << windowFuncs[0].orderByCol << ") ";
+                } else if (exprTypes[i] == 1) {
+                    cout << aggItems[i].first << "(" << aggItems[i].second << ") ";
+                } else {
+                    cout << aggItems[i].second << " ";
+                }
+            }
+            cout << '\n';
+
+            // Fetch all data (need all columns for window function computation)
+            set<string> allCols;
+            vector<string> rawAnswers;
+            if (condTokens.empty()) {
+                rawAnswers = g_engine.query(s.currentDB, tname, {}, allCols, "", true);
+            } else {
+                condTokens.insert(condTokens.begin(), "(");
+                condTokens.push_back(")");
+                for (auto& t : condTokens) t = modifyLogic(t);
+                auto groups = breakDownConditions(condTokens);
+                set<string> seen;
+                for (const auto& g : groups) {
+                    auto part = g_engine.query(s.currentDB, tname, g, allCols, "", true);
+                    for (const auto& row : part) {
+                        if (seen.insert(row).second) rawAnswers.push_back(row);
+                    }
+                }
+            }
+
+            // Parse rows into column name -> value maps
+            vector<map<string, string>> rows;
+            for (const auto& rowStr : rawAnswers) {
+                map<string, string> rowData;
+                stringstream ss(rowStr);
+                string val;
+                for (size_t i = 0; i < tbl.len && ss >> val; ++i) {
+                    rowData[tbl.cols[i].dataName] = val;
+                }
+                rows.push_back(rowData);
+            }
+
+            // Sort by window function ORDER BY column
+            const WindowFunc& wf0 = windowFuncs[0];
+            std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
+                auto itA = a.find(wf0.orderByCol);
+                auto itB = b.find(wf0.orderByCol);
+                if (itA == a.end() || itB == b.end()) return false;
+                try {
+                    int64_t va = stoll(itA->second);
+                    int64_t vb = stoll(itB->second);
+                    return wf0.orderByAsc ? (va < vb) : (va > vb);
+                } catch (...) {
+                    return wf0.orderByAsc ? (itA->second < itB->second) : (itA->second > itB->second);
+                }
+            });
+
+            // Compute window function values
+            for (size_t i = 0; i < rows.size(); ++i) {
+                for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
+                    const auto& wf = windowFuncs[wi];
+                    string val;
+                    if (wf.name == "row_number") {
+                        val = to_string(i + 1);
+                    } else if (wf.name == "rank") {
+                        if (i == 0) {
+                            val = "1";
+                        } else {
+                            auto itCur = rows[i].find(wf.orderByCol);
+                            auto itPrev = rows[i - 1].find(wf.orderByCol);
+                            if (itCur != rows[i].end() && itPrev != rows[i - 1].end()
+                                && itCur->second == itPrev->second) {
+                                val = rows[i - 1]["_win_" + to_string(wi)];
+                            } else {
+                                val = to_string(i + 1);
+                            }
+                        }
+                    } else if (wf.name == "lag") {
+                        if (i == 0) val = "NULL";
+                        else {
+                            auto it = rows[i - 1].find(wf.arg);
+                            val = (it != rows[i - 1].end()) ? it->second : "NULL";
+                        }
+                    } else if (wf.name == "lead") {
+                        if (i == rows.size() - 1) val = "NULL";
+                        else {
+                            auto it = rows[i + 1].find(wf.arg);
+                            val = (it != rows[i + 1].end()) ? it->second : "NULL";
+                        }
+                    }
+                    rows[i]["_win_" + to_string(wi)] = val;
+                }
+            }
+
+            // Format results as strings
+            vector<string> winAnswers;
+            for (const auto& row : rows) {
+                string line;
+                for (size_t i = 0; i < aggItems.size(); ++i) {
+                    if (exprTypes[i] == 2) {
+                        size_t wi = 0;
+                        for (size_t j = 0; j < i; ++j) {
+                            if (exprTypes[j] == 2) wi++;
+                        }
+                        auto it = row.find("_win_" + to_string(wi));
+                        if (it != row.end()) line += it->second + " ";
+                    } else if (exprTypes[i] == 0) {
+                        auto it = row.find(aggItems[i].second);
+                        if (it != row.end()) line += it->second + " ";
+                    }
+                }
+                if (!line.empty() && line.back() == ' ') line.pop_back();
+                winAnswers.push_back(line);
+            }
+
+            // DISTINCT
+            if (isDistinct) {
+                vector<string> deduped;
+                set<string> seen;
+                for (const auto& row : winAnswers) {
+                    if (seen.insert(row).second) deduped.push_back(row);
+                }
+                winAnswers = std::move(deduped);
+            }
+
+            // LIMIT / OFFSET
+            size_t wlim = 0, woff = 0;
+            parseLimitOffset(wlim, woff);
+            if (woff < winAnswers.size()) {
+                if (wlim > 0 && woff + wlim < winAnswers.size())
+                    winAnswers.erase(winAnswers.begin() + woff + wlim, winAnswers.end());
+                if (woff > 0)
+                    winAnswers.erase(winAnswers.begin(), winAnswers.begin() + woff);
+            }
+
+            // Output
+            for (const auto& row : winAnswers) {
+                cout << row << endl;
+                log(s.username, row, getTime());
+            }
+            return false;
         } else {
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
@@ -1945,7 +2456,8 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tokens[1]);
+            string tname = resolveTableName(s, tokens[1]);
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
             if (tbl.len == 0) {
                 cout << "Table " << tokens[1] << " not exist" << endl;
                 return true;
@@ -1987,16 +2499,24 @@ int main(int argc, char* argv[]) {
         log(s.username, "login", getTime());
         s.permission = permissionQuery(username);
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
+        int sqlCount = 0;
+        const int CHECKPOINT_INTERVAL = 30;  // auto checkpoint every N SQLs
         while (true) {
             string sql;
             getline(cin, sql);
             if (trim(sql) == "exit") break;
             auto start = std::chrono::steady_clock::now();
-            execute(sql, s);
+            bool ok = execute(sql, s);
             auto end = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
             if (ms > 100.0) {
                 logSlowQuery(sql, ms);
+            }
+            if (ok && !s.currentDB.empty()) {
+                if (++sqlCount >= CHECKPOINT_INTERVAL) {
+                    g_engine.checkpoint(s.currentDB);
+                    sqlCount = 0;
+                }
             }
         }
     } else {
