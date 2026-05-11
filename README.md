@@ -11,7 +11,7 @@
 - **索引**：`CREATE INDEX`, `DROP INDEX`（二级索引）
 - **查看结构**：`VIEW TABLE`, `VIEW DATABASE`
 - **数据类型**：`INT`, `TINYINT`, `LONG`, `CHAR(n)`, `VARCHAR(n)`, `DATE`
-- **约束支持**：主键 (Primary Key)、非空 (NOT NULL)、外键 (Foreign Key)
+- **约束支持**：主键 (Primary Key)、非空 (NOT NULL)、唯一 (UNIQUE)、外键 (Foreign Key)、CHECK 约束、DEFAULT 默认值、SERIAL 自增
 
 ### 数据操纵 (DML)
 - **插入**：`INSERT INTO ... VALUES (...)`
@@ -26,15 +26,17 @@
 - **分组**：`GROUP BY ... HAVING ...`
 - **表连接**：`INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`
 - **JOIN 算法选择**：NestedLoopJoin / HashJoin / MergeJoin，查询优化器根据统计信息自动选择
-- **子查询**：支持 `IN` 子查询
+- **子查询**：支持 `IN`, `EXISTS`, `ANY`, `ALL` 子查询
 - **联合**：`UNION`, `UNION ALL`
 - **执行计划**：`EXPLAIN SELECT ...` 带成本估计
+- **窗口函数**：`ROW_NUMBER()`, `RANK()`, `LAG()`, `LEAD()` 支持 `OVER (ORDER BY ...)`
 
 ### 事务控制 (TCL) / MVCC
 - `BEGIN` — 开启事务，分配全局唯一事务 ID，创建 ReadView
 - `COMMIT` — 提交事务，持久化到 WAL
 - `ROLLBACK` — 基于 Undo Log 的增量回滚
 - **MVCC 快照隔离**：每行带 16 字节 MVCC 头部（creatorTxnId + rollbackPtr），事务内读取基于 ReadView 的可见性规则，实现读写不阻塞
+- **隔离级别**：支持 READ UNCOMMITTED / READ COMMITTED / REPEATABLE READ / SERIALIZABLE
 - **全局事务 ID 生成器**：单调递增 64 位 txId，持久化到 `.txnid` 文件
 
 ### 索引
@@ -59,6 +61,7 @@
 - **VARCHAR 变长行**：`[定长数据 | 变长偏移数组 | 变长数据]` 格式，减少存储浪费
 - **MVCC 行格式**：每行开头 16 字节头部（8B creatorTxnId + 8B rollbackPtr）
 - **统计信息**：`ANALYZE TABLE` 收集行数、列基数、最小/最大值
+- **VACUUM**：`VACUUM [tablename]` 回收已删除行占用的空间，页压缩并归还空页
 
 ### 权限管理
 - 用户登录系统（用户名/密码存储于 `user.dat`）
@@ -66,10 +69,15 @@
 - `CREATE USER` 创建新用户
 - **表级权限**：`GRANT` / `REVOKE` SELECT/INSERT/UPDATE/DELETE/ALL
 
+### 临时表
+- **CREATE TEMPORARY TABLE**：会话级临时表，自动覆盖同名永久表
+- **DROP TEMPORARY TABLE**：删除会话临时表，恢复访问永久表
+- 临时表存储在会话中，断开连接后自动清理
+
 ### 网络服务
 - **TCP 服务器**：`./dbms_main --server PORT` 启动服务端
 - **多客户端**：每个连接独立线程，支持并发访问
-- **会话隔离**：每个客户端连接拥有独立的 Session（用户名、权限、当前数据库、预编译语句），多客户端互不干扰
+- **会话隔离**：每个客户端连接拥有独立的 Session（用户名、权限、当前数据库、预编译语句、临时表），多客户端互不干扰
 - **连接管理**：最大连接数限制（默认 64）
 - **连接监控**：`SHOW CONNECTIONS`, `SHOW STATUS`
 
@@ -80,6 +88,41 @@
 ### 测试脚本
 - **SQL 集成测试**：`./test_sql.sh` — 12 项 SQL 语句级测试（CREATE/INSERT/SELECT/UPDATE/DELETE/JOIN/事务/Checkpoint/索引等）
 - **API 功能测试**：`./test_all.sh` — 6 项 C++ API 级测试（VARCHAR/JOIN/MVCC/Checkpoint/聚合/索引）
+
+### 窗口函数
+```sql
+select name, row_number() over (order by score) from users
+select name, rank() over (order by score desc) from users
+select name, lag(score) over (order by id) from users
+select name, lead(score) over (order by id) from users
+```
+
+### 临时表
+```sql
+create temporary table temp_users (id int not null primary key, name varchar 50)
+insert into temp_users (id, name) values (1, 'Temp')
+select * from temp_users
+drop temporary table temp_users
+```
+
+### SERIAL 自增
+```sql
+create table users (id serial primary key, name varchar 50)
+insert into users (name) values ('Alice')   -- id 自动分配为 1
+insert into users (name) values ('Bob')     -- id 自动分配为 2
+```
+
+### CHECK 约束
+```sql
+create table users (id int primary key, score int check (score >= 0 and score <= 100))
+insert into users (id, score) values (1, 120)  -- 拒绝：违反 CHECK 约束
+```
+
+### VACUUM
+```sql
+vacuum users    -- 回收 users 表的已删除行空间
+vacuum          -- 回收当前数据库所有表的空间
+```
 
 ### 预编译语句
 - `PREPARE stmt_name FROM 'SQL template'`

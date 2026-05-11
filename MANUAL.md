@@ -62,12 +62,12 @@ admin admin admin
 
 | 类别 | 命令 |
 |------|------|
-| DDL | `CREATE DATABASE`, `DROP DATABASE`, `USE DATABASE`, `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE VIEW`, `DROP VIEW`, `CREATE INDEX`, `DROP INDEX` |
+| DDL | `CREATE DATABASE`, `DROP DATABASE`, `USE DATABASE`, `CREATE TABLE`, `CREATE TEMPORARY TABLE`, `DROP TABLE`, `ALTER TABLE`, `CREATE VIEW`, `DROP VIEW`, `CREATE INDEX`, `DROP INDEX` |
 | DML | `INSERT INTO`, `SELECT`, `UPDATE`, `DELETE FROM` |
-| DQL | `JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `UNION`, `UNION ALL`, `GROUP BY`, `HAVING`, `LIMIT`, `OFFSET`, `DISTINCT`, `EXPLAIN` |
+| DQL | `JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `UNION`, `UNION ALL`, `GROUP BY`, `HAVING`, `LIMIT`, `OFFSET`, `DISTINCT`, `EXPLAIN`, **窗口函数** |
 | TCL | `BEGIN`, `COMMIT`, `ROLLBACK`, `CHECKPOINT`, `VACUUM` |
 | DCL | `CREATE USER`, `GRANT`, `REVOKE` |
-| 系统 | `ANALYZE TABLE`, `SHOW CONNECTIONS`, `SHOW STATUS`, `PREPARE`, `EXECUTE`, `DEALLOCATE PREPARE`, `LOAD DATA INFILE`, `SELECT ... INTO OUTFILE` |
+| 系统 | `ANALYZE TABLE`, `SHOW CONNECTIONS`, `SHOW STATUS`, `PREPARE`, `EXECUTE`, `DEALLOCATE PREPARE`, `LOAD DATA INFILE`, `SELECT ... INTO OUTFILE`, `SET TRANSACTION ISOLATION LEVEL` |
 
 ---
 
@@ -80,6 +80,7 @@ admin admin admin
 | `LONG` | 64位有符号整数 | 8 字节 | `9999999999` |
 | `CHAR(n)` | 定长字符串，空格填充 | n 字节 | `'hello'` |
 | `VARCHAR(n)` | 变长字符串，最大 n 字节 | 实际长度 + 4 字节偏移 | `'hello'` |
+| `SERIAL` | 自增整数（INT + AUTO_INCREMENT） | 4 字节 | `1`, `2`, `3`（自动分配） |
 | `DATE` | 日期（YYYY-MM-DD） | 12 字节 | `'2024-01-15'` |
 
 ---
@@ -143,8 +144,8 @@ create table tablename ( colname type [constraints], ... )
 
 **参数：**
 - `colname` — 列名
-- `type` — `int`, `tinyint`, `long`, `char n`, `varchar n`, `date`
-- `constraints` — 可选：`not null`, `primary key`, `unique`, `default 'value'`
+- `type` — `int`, `tinyint`, `long`, `serial`, `char n`, `varchar n`, `date`
+- `constraints` — 可选：`not null`, `primary key`, `unique`, `default 'value'`, `check (expr)`
 
 **示例：**
 ```sql
@@ -153,7 +154,13 @@ create table users (
     name varchar 50 not null,
     email varchar 100 unique,
     age int default 18,
-    score int
+    score int check (score >= 0 and score <= 100)
+)
+
+create table orders (
+    id serial primary key,
+    user_id int not null,
+    amount int
 )
 ```
 
@@ -263,6 +270,39 @@ drop index indexname on tablename
 **示例：**
 ```sql
 drop index idx_name on users
+```
+
+---
+
+### 4.11 CREATE TEMPORARY TABLE
+
+```sql
+create temporary table tablename ( colname type [constraints], ... )
+```
+
+创建会话级临时表。临时表仅对当前连接可见，同名临时表优先于永久表。断开连接后自动删除。
+
+**示例：**
+```sql
+create temporary table temp_users (id int not null primary key, name varchar 50)
+insert into temp_users (id, name) values (100, 'TempUser')
+select * from temp_users   -- 返回临时表数据
+drop temporary table temp_users   -- 删除临时表，恢复访问永久表
+```
+
+---
+
+### 4.12 DROP TEMPORARY TABLE
+
+```sql
+drop temporary table tablename
+```
+
+删除会话中的临时表。之后对同名的访问将指向永久表。
+
+**示例：**
+```sql
+drop temporary table temp_users
 ```
 
 ---
@@ -426,7 +466,29 @@ select count(*), max(score), min(score), sum(score), avg(score) from users
 
 ---
 
-### 6.4 EXPLAIN
+### 6.4 窗口函数
+
+支持 `OVER (ORDER BY ...)` 语法的窗口函数。
+
+**函数列表：**
+| 函数 | 说明 |
+|------|------|
+| `row_number() over (...)` | 行号递增（1, 2, 3, ...） |
+| `rank() over (...)` | 排名（相同值同排名，跳号） |
+| `lag(col) over (...)` | 前一行的值（首行返回 NULL） |
+| `lead(col) over (...)` | 后一行的值（末行返回 NULL） |
+
+**示例：**
+```sql
+select name, row_number() over (order by score) from users
+select name, rank() over (order by score desc) from users
+select name, lag(score) over (order by id) from users
+select name, lead(score) over (order by id) from users
+```
+
+---
+
+### 6.5 EXPLAIN
 
 ```sql
 explain select ...
@@ -448,9 +510,24 @@ explain select * from users join orders on users.id = orders.uid
 
 ```sql
 begin
+begin read committed
+begin repeatable read
 ```
 
 开启事务，分配事务 ID，创建 ReadView。
+
+**隔离级别：**
+| 级别 | 说明 |
+|------|------|
+| `read uncommitted` | 不创建 ReadView，可读取未提交数据 |
+| `read committed` | 每次查询前刷新 ReadView |
+| `repeatable read` | BEGIN 时创建 ReadView，事务期间不变（默认） |
+| `serializable` | 同 repeatable read |
+
+也可通过 `set transaction isolation level` 设置默认隔离级别：
+```sql
+set transaction isolation level read committed
+```
 
 ---
 
@@ -490,7 +567,7 @@ checkpoint
 vacuum [tablename]
 ```
 
-回收已删除行占用的空间。不带表名则清理当前数据库所有表。
+回收已删除行占用的空间。对每个数据页执行 `compact()` 压缩，移除已删除记录，将空页归还到空闲页链表。不带表名则清理当前数据库所有表。
 
 **示例：**
 ```sql

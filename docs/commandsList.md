@@ -5,6 +5,7 @@
 - drop database
 - use database
 - create table
+- create temporary table
 - drop table
 - alter table add column
 - alter table drop column
@@ -28,15 +29,18 @@
 - select distinct ...
 - select count(*)/max/min/sum/avg
 - select ... into outfile
+- select ... window function over (order by ...)
 - load data infile ... into table
 - explain select ...
 - analyze table
 
 ## TCL - 事务控制
-- begin
+- begin [isolation level]
 - commit
 - rollback
 - checkpoint
+- vacuum [tablename]
+- set transaction isolation level ...
 
 ## DCL - 权限控制
 - create user
