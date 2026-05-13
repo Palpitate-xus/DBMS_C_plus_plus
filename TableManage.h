@@ -221,6 +221,11 @@ public:
     OpResult commitTransaction();
     OpResult rollbackTransaction();
 
+    // Savepoint support
+    OpResult savepoint(const std::string& name);
+    OpResult rollbackToSavepoint(const std::string& name);
+    OpResult releaseSavepoint(const std::string& name);
+
     // WAL crash recovery
     void recoverAllDatabases();
 
@@ -365,6 +370,9 @@ private:
     void logTxnInsert(const std::string& tableName, int64_t rowIdx);
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
+
+    // Savepoint support
+    std::map<std::string, size_t> savepoints_; // name -> txnLog_ index
 
     // Global active transaction tracking (for ReadView)
     static std::mutex globalTxnMutex_;

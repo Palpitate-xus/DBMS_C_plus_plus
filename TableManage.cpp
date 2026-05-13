@@ -3545,6 +3545,7 @@ OpResult StorageEngine::commitTransaction() {
     // Write WAL COMMIT marker
     walAppend(walPath(txnDB_), "COMMIT " + std::to_string(currentTxnId_));
     txnLog_.clear();
+    savepoints_.clear();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     currentTxnId_ = 0;
@@ -3673,11 +3674,143 @@ OpResult StorageEngine::rollbackTransaction() {
     }
 
     txnLog_.clear();
+    savepoints_.clear();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     currentTxnId_ = 0;
     inTransaction_ = false;
     txnDB_.clear();
+    return OpResult::Success;
+}
+
+// ========================================================================
+// Savepoint support
+// ========================================================================
+
+OpResult StorageEngine::savepoint(const std::string& name) {
+    if (!inTransaction_) return OpResult::InvalidValue;
+    savepoints_[name] = txnLog_.size();
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
+    if (!inTransaction_) return OpResult::InvalidValue;
+    auto it = savepoints_.find(name);
+    if (it == savepoints_.end()) return OpResult::InvalidValue;
+    size_t spIdx = it->second;
+    if (spIdx > txnLog_.size()) return OpResult::InvalidValue;
+
+    // Undo entries from end back to savepoint
+    for (size_t i = txnLog_.size(); i > spIdx; --i) {
+        auto& entry = txnLog_[i - 1];
+        PageAllocator* pa = getPageAllocator(txnDB_, entry.tableName);
+        TableSchema tbl = getTableSchema(txnDB_, entry.tableName);
+        if (entry.op == TxnLogEntry::Op::Insert) {
+            // Remove from indexes first (row still exists)
+            BPTree* pkIdx = getPKIndex(txnDB_, entry.tableName);
+            if (pkIdx) {
+                std::string row;
+                if (readRowByRid(pa, entry.rowIdx, row, tbl)) {
+                    std::string pkVal = extractPKValue(row, tbl);
+                    if (!pkVal.empty()) pkIdx->remove(pkVal);
+                }
+            }
+            auto indexedCols = getIndexedColumns(txnDB_, entry.tableName);
+            for (const auto& colname : indexedCols) {
+                size_t colIdx = tbl.len;
+                for (size_t j = 0; j < tbl.len; ++j) {
+                    if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                BPTree* secIdx = getSecondaryIndex(txnDB_, entry.tableName, colname);
+                if (!secIdx) continue;
+                std::string row;
+                if (readRowByRid(pa, entry.rowIdx, row, tbl)) {
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (!val.empty()) secIdx->remove(val);
+                }
+            }
+            // Then remove the row from page
+            uint32_t pageId; uint16_t slotId;
+            decodeRid(entry.rowIdx, pageId, slotId);
+            char* pageBuf = pa->fetchPage(pageId);
+            if (pageBuf) {
+                Page page(pageBuf);
+                page.remove(slotId);
+                pa->markDirty(pageId);
+                pa->unpinPage(pageId);
+            }
+        } else if (entry.op == TxnLogEntry::Op::Update) {
+            uint32_t pageId; uint16_t slotId;
+            decodeRid(entry.rowIdx, pageId, slotId);
+            char* pageBuf = pa->fetchPage(pageId);
+            if (pageBuf) {
+                Page page(pageBuf);
+                page.update(slotId, entry.rowData.data(), entry.rowData.size());
+                pa->markDirty(pageId);
+                pa->unpinPage(pageId);
+            }
+            BPTree* pkIdx = getPKIndex(txnDB_, entry.tableName);
+            if (pkIdx) {
+                std::string newPk = extractPKValue(entry.rowData, tbl);
+                if (!newPk.empty()) pkIdx->insert(newPk, entry.rowIdx);
+            }
+            auto indexedCols = getIndexedColumns(txnDB_, entry.tableName);
+            for (const auto& colname : indexedCols) {
+                size_t colIdx = tbl.len;
+                for (size_t j = 0; j < tbl.len; ++j) {
+                    if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                BPTree* secIdx = getSecondaryIndex(txnDB_, entry.tableName, colname);
+                if (!secIdx) continue;
+                std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
+                if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
+            }
+        } else if (entry.op == TxnLogEntry::Op::Delete) {
+            uint32_t pageId; uint16_t slotId;
+            decodeRid(entry.rowIdx, pageId, slotId);
+            char* pageBuf = pa->fetchPage(pageId);
+            if (pageBuf) {
+                Page page(pageBuf);
+                page.restore(slotId);
+                pa->markDirty(pageId);
+                pa->unpinPage(pageId);
+            }
+            BPTree* pkIdx = getPKIndex(txnDB_, entry.tableName);
+            if (pkIdx) {
+                std::string pkVal = extractPKValue(entry.rowData, tbl);
+                if (!pkVal.empty()) pkIdx->insert(pkVal, entry.rowIdx);
+            }
+            auto indexedCols = getIndexedColumns(txnDB_, entry.tableName);
+            for (const auto& colname : indexedCols) {
+                size_t colIdx = tbl.len;
+                for (size_t j = 0; j < tbl.len; ++j) {
+                    if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                BPTree* secIdx = getSecondaryIndex(txnDB_, entry.tableName, colname);
+                if (!secIdx) continue;
+                std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
+                if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
+            }
+        }
+    }
+    txnLog_.resize(spIdx);
+
+    // Remove all savepoints created after this one
+    for (auto sit = savepoints_.begin(); sit != savepoints_.end(); ) {
+        if (sit->second > spIdx) sit = savepoints_.erase(sit);
+        else ++sit;
+    }
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::releaseSavepoint(const std::string& name) {
+    if (!inTransaction_) return OpResult::InvalidValue;
+    auto it = savepoints_.find(name);
+    if (it == savepoints_.end()) return OpResult::InvalidValue;
+    savepoints_.erase(it);
     return OpResult::Success;
 }
 

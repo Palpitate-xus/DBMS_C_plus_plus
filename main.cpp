@@ -1531,6 +1531,74 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // SAVEPOINT name
+    if (sql.substr(0, 10) == "savepoint ") {
+        if (!g_engine.inTransaction()) {
+            cout << "Not in transaction" << endl;
+            return true;
+        }
+        string name = sql.substr(10);
+        // trim trailing whitespace
+        while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
+        if (name.empty()) {
+            cout << "Savepoint name required" << endl;
+            return true;
+        }
+        auto res = g_engine.savepoint(name);
+        if (res != OpResult::Success) {
+            cout << "Savepoint failed" << endl;
+            return true;
+        }
+        cout << "Savepoint " << name << " created" << endl;
+        log(s.username, "savepoint " + name, getTime());
+        return false;
+    }
+
+    // RELEASE SAVEPOINT name
+    if (sql.substr(0, 18) == "release savepoint ") {
+        if (!g_engine.inTransaction()) {
+            cout << "Not in transaction" << endl;
+            return true;
+        }
+        string name = sql.substr(18);
+        while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
+        if (name.empty()) {
+            cout << "Savepoint name required" << endl;
+            return true;
+        }
+        auto res = g_engine.releaseSavepoint(name);
+        if (res != OpResult::Success) {
+            cout << "Savepoint not found" << endl;
+            return true;
+        }
+        cout << "Savepoint " << name << " released" << endl;
+        log(s.username, "release savepoint " + name, getTime());
+        return false;
+    }
+
+    // ROLLBACK TO SAVEPOINT name (must check before "rollback")
+    if (sql.substr(0, 21) == "rollback to savepoint") {
+        if (!g_engine.inTransaction()) {
+            cout << "Not in transaction" << endl;
+            return true;
+        }
+        string name = sql.substr(21);
+        while (!name.empty() && isspace((unsigned char)name.front())) name.erase(name.begin());
+        while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
+        if (name.empty()) {
+            cout << "Savepoint name required" << endl;
+            return true;
+        }
+        auto res = g_engine.rollbackToSavepoint(name);
+        if (res != OpResult::Success) {
+            cout << "Savepoint not found" << endl;
+            return true;
+        }
+        cout << "Rolled back to savepoint " << name << endl;
+        log(s.username, "rollback to savepoint " + name, getTime());
+        return false;
+    }
+
     if (sql.substr(0, 8) == "rollback") {
         auto res = g_engine.rollbackTransaction();
         if (res != OpResult::Success) {
