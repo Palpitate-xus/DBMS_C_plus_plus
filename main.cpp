@@ -1735,6 +1735,40 @@ bool execute(const string& rawSql, Session& s) {
             cout << "rejected_connections " << s.rejectedConnections.load() << endl;
             return false;
         }
+        if (rest == "tables") {
+            if (!checkDB(s)) return true;
+            auto names = g_engine.getTableNames(s.currentDB);
+            for (const auto& n : names) cout << n << endl;
+            return false;
+        }
+        if (rest.substr(0, 7) == "columns") {
+            if (!checkDB(s)) return true;
+            string colsRest = trim(rest.substr(7));
+            size_t fromPos = colsRest.find("from ");
+            size_t inPos = colsRest.find("in ");
+            string tname;
+            if (fromPos != string::npos) tname = trim(colsRest.substr(fromPos + 5));
+            else if (inPos != string::npos) tname = trim(colsRest.substr(inPos + 3));
+            else tname = colsRest;
+            tname = resolveTableName(s, tname);
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+            if (tbl.len == 0) {
+                cout << "Table not exist" << endl;
+                return true;
+            }
+            cout << "field type null key default extra" << endl;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                const auto& c = tbl.cols[i];
+                cout << c.dataName << ' '
+                     << c.dataType << ' '
+                     << (c.isNull ? "yes" : "no") << ' '
+                     << (c.isPrimaryKey ? "pri" : "") << ' '
+                     << c.defaultValue << ' '
+                     << (c.isAutoIncrement ? "auto_increment" : "")
+                     << endl;
+            }
+            return false;
+        }
         cout << "Unknown SHOW command" << endl;
         return true;
     }
@@ -2767,6 +2801,29 @@ bool execute(const string& rawSql, Session& s) {
                 cout << row << endl;
                 log(s.username, row, getTime());
             }
+        }
+        return false;
+    }
+
+    if (sql.substr(0, 5) == "desc " || sql.substr(0, 9) == "describe ") {
+        if (!checkDB(s)) return true;
+        string tname = (sql.substr(0, 5) == "desc ") ? trim(sql.substr(5)) : trim(sql.substr(9));
+        tname = resolveTableName(s, tname);
+        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+        if (tbl.len == 0) {
+            cout << "Table not exist" << endl;
+            return true;
+        }
+        cout << "field type null key default extra" << endl;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const auto& c = tbl.cols[i];
+            cout << c.dataName << ' '
+                 << c.dataType << ' '
+                 << (c.isNull ? "yes" : "no") << ' '
+                 << (c.isPrimaryKey ? "pri" : "") << ' '
+                 << c.defaultValue << ' '
+                 << (c.isAutoIncrement ? "auto_increment" : "")
+                 << endl;
         }
         return false;
     }
