@@ -2242,6 +2242,24 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (!expr.funcArgs.empty()) return getVal(expr.funcArgs.back());
         return "";
     }
+    if (expr.funcName == "cast" && expr.funcArgs.size() >= 2) {
+        std::string val = getVal(expr.funcArgs[0]);
+        std::string targetType = expr.funcArgs[1];
+        if (targetType == "char" || targetType == "varchar") {
+            return val;
+        }
+        if (targetType == "int" || targetType == "integer" || targetType == "tinyint" || targetType == "long") {
+            try {
+                int64_t num = std::stoll(val);
+                return std::to_string(num);
+            } catch (...) { return "0"; }
+        }
+        if (targetType == "date") {
+            Date d(val.c_str());
+            return (d.year == 0) ? "" : str(d);
+        }
+        return val;
+    }
     return "";
 }
 

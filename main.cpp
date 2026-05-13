@@ -183,7 +183,7 @@ static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "upper", "lower", "trim", "substring", "concat",
                                          "abs", "round", "ceil", "floor",
                                          "now", "current_timestamp", "extract",
-                                         "case_when"};
+                                         "case_when", "cast"};
     return scalars.find(name) != scalars.end();
 }
 
@@ -2297,6 +2297,15 @@ bool execute(const string& rawSql, Session& s) {
                     if (lp != string::npos && rp != string::npos && rp > lp) {
                         string func = item.substr(0, lp);
                         string arg = item.substr(lp + 1, rp - lp - 1);
+                        // Preprocess cast: "expr as type" → "expr,type"
+                        if (func == "cast") {
+                            size_t asPos = arg.find(" as ");
+                            if (asPos != string::npos) {
+                                string expr = trim(arg.substr(0, asPos));
+                                string type = trim(arg.substr(asPos + 4));
+                                arg = expr + "," + type;
+                            }
+                        }
                         if (isScalarFunc(func)) {
                             dbms::StorageEngine::SelectExpr expr;
                             expr.displayName = item;
