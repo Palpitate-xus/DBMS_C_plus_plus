@@ -2306,6 +2306,13 @@ bool execute(const string& rawSql, Session& s) {
                                 arg = expr + "," + type;
                             }
                         }
+                        // Normalize count(distinct col) → "distinct col"
+                        if (func == "count") {
+                            arg = trim(arg);
+                            if (arg.size() > 9 && arg.substr(0, 9) == "distinct ") {
+                                arg = "distinct " + trim(arg.substr(9));
+                            }
+                        }
                         if (isScalarFunc(func)) {
                             dbms::StorageEngine::SelectExpr expr;
                             expr.displayName = item;

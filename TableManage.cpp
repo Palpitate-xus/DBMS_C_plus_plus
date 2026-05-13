@@ -2384,9 +2384,12 @@ std::vector<std::string> StorageEngine::aggregate(
         bool isInt = false, isDate = false, isChar = false;
         size_t colIdx = tbl.len;
 
-        if (func != "count" || colName != "*") {
+        bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
+        std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
+
+        if (func != "count" || actualColName != "*") {
             for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == colName) {
+                if (tbl.cols[i].dataName == actualColName) {
                     colIdx = i;
                     isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
@@ -2396,15 +2399,26 @@ std::vector<std::string> StorageEngine::aggregate(
             }
         }
 
-        for (int64_t rid : matchIds) {
-            std::string row;
-            if (!readRowByRid(pa, rid, row, tbl)) continue;
-            if (func == "count") {
-                if (colName == "*") { count++; continue; }
+        if (isDistinctCount) {
+            std::set<std::string> distinctVals;
+            for (int64_t rid : matchIds) {
+                std::string row;
+                if (!readRowByRid(pa, rid, row, tbl)) continue;
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
-                if (!val.empty()) count++;
-            } else {
+                if (!val.empty()) distinctVals.insert(val);
+            }
+            count = static_cast<int64_t>(distinctVals.size());
+        } else {
+            for (int64_t rid : matchIds) {
+                std::string row;
+                if (!readRowByRid(pa, rid, row, tbl)) continue;
+                if (func == "count") {
+                    if (colName == "*") { count++; continue; }
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (!val.empty()) count++;
+                } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
                 if (isInt) {
@@ -2437,6 +2451,7 @@ std::vector<std::string> StorageEngine::aggregate(
                     }
                 }
             }
+        }
         }
 
         if (func == "count") rowResult += transstr(count) + ' ';
@@ -2515,11 +2530,13 @@ std::vector<std::string> StorageEngine::groupAggregate(
     // Helper: compute aggregate for a group
     auto computeAgg = [&](const std::vector<int64_t>& gids,
                            const std::string& func, const std::string& colName) -> std::string {
+        bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
+        std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false, isChar = false;
-        if (func != "count" || colName != "*") {
+        if (func != "count" || actualColName != "*") {
             for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == colName) {
+                if (tbl.cols[i].dataName == actualColName) {
                     colIdx = i;
                     isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
@@ -2534,16 +2551,27 @@ std::vector<std::string> StorageEngine::groupAggregate(
         int64_t maxInt = 0, minInt = 0;
         Date maxDate, minDate;
 
-        for (int64_t rid : gids) {
-            std::string row;
-            if (!readRowByRid(pa, rid, row, tbl)) continue;
-
-            if (func == "count") {
-                if (colName == "*") { count++; continue; }
+        if (isDistinctCount) {
+            std::set<std::string> distinctVals;
+            for (int64_t rid : gids) {
+                std::string row;
+                if (!readRowByRid(pa, rid, row, tbl)) continue;
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
-                if (!val.empty()) count++;
-            } else {
+                if (!val.empty()) distinctVals.insert(val);
+            }
+            count = static_cast<int64_t>(distinctVals.size());
+        } else {
+            for (int64_t rid : gids) {
+                std::string row;
+                if (!readRowByRid(pa, rid, row, tbl)) continue;
+
+                if (func == "count") {
+                    if (colName == "*") { count++; continue; }
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (!val.empty()) count++;
+                } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
                 if (isInt) {
@@ -2564,6 +2592,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     if (func == "min") { if (!hasMin || val < minStr) { minStr = val; hasMin = true; } }
                 }
             }
+        }
         }
         if (func == "count") return transstr(count);
         if (func == "sum") return transstr(sum);
