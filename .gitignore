@@ -12,3 +12,5 @@ testdb/
 testdb*
 *.tmp
 build-*/
+slow_query.log
+dbms.log

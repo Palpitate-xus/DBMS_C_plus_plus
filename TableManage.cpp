@@ -2130,6 +2130,152 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     return result;
 }
 
+// ========================================================================
+// Scalar function helper
+// ========================================================================
+static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
+                                    const std::string& rowBuffer,
+                                    const TableSchema& tbl) {
+    auto getVal = [&](const std::string& arg) -> std::string {
+        if (arg.size() >= 2 && arg.front() == '\'' && arg.back() == '\'')
+            return arg.substr(1, arg.size() - 2);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == arg)
+                return StorageEngine::extractColumnValue(rowBuffer, tbl, i);
+        }
+        return arg;
+    };
+
+    if (expr.funcName == "length" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        return std::to_string(val.size());
+    }
+    if (expr.funcName == "upper" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        for (char& c : val) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return val;
+    }
+    if (expr.funcName == "lower" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        for (char& c : val) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return val;
+    }
+    if (expr.funcName == "trim" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        size_t a = 0, b = val.size();
+        while (a < b && val[a] == ' ') ++a;
+        while (b > a && val[b - 1] == ' ') --b;
+        return val.substr(a, b - a);
+    }
+    if (expr.funcName == "substring" && expr.funcArgs.size() >= 3) {
+        std::string val = getVal(expr.funcArgs[0]);
+        int start = std::stoi(expr.funcArgs[1]) - 1; // 1-based to 0-based
+        int len = std::stoi(expr.funcArgs[2]);
+        if (start < 0) start = 0;
+        if (start >= static_cast<int>(val.size())) return "";
+        return val.substr(start, len);
+    }
+    if (expr.funcName == "concat") {
+        std::string result;
+        for (const auto& arg : expr.funcArgs) result += getVal(arg);
+        return result;
+    }
+    return "";
+}
+
+std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
+                                                   const std::string& tablename,
+                                                   const std::vector<std::string>& conditions,
+                                                   const std::vector<SelectExpr>& exprs,
+                                                   const std::string& orderByCol,
+                                                   bool orderByAsc) {
+    std::vector<std::string> result;
+    if (!tableExists(dbname, tablename)) return result;
+    lockManager_.lockShared(tablename);
+
+    if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::ReadCommitted) {
+        refreshReadView();
+    }
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t rowSize = tbl.rowSize();
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+
+    auto conds = parseConditions(conditions);
+    std::vector<std::pair<int64_t, std::string>> matchRows;
+    if (conds.empty()) {
+        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t) {
+            matchRows.emplace_back(encodeRid(pid, sid), std::string(data, rowSize));
+        });
+    } else {
+        auto ids = filterRows(dbname, tablename, conds);
+        for (int64_t rid : ids) {
+            std::string row;
+            if (readRowByRid(pa, rid, row, tbl)) {
+                matchRows.emplace_back(rid, std::move(row));
+            }
+        }
+    }
+
+    // ORDER BY (only supports plain columns for now)
+    if (!orderByCol.empty()) {
+        size_t sortIdx = tbl.len;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == orderByCol) { sortIdx = i; break; }
+        }
+        if (sortIdx < tbl.len) {
+            struct Item { int64_t rid; std::string s; int64_t n; Date d; };
+            std::vector<Item> items;
+            const Column& scol = tbl.cols[sortIdx];
+            for (auto& mr : matchRows) {
+                std::string val = extractColumnValue(mr.second, tbl, sortIdx);
+                Item it{mr.first, "", 0, {}};
+                if (scol.dataType == "char" || scol.isVariableLength) {
+                    it.s = val;
+                } else if (scol.dataType == "date") {
+                    it.d = val.empty() ? Date{} : Date(val.c_str());
+                } else {
+                    it.n = val.empty() ? 0 : parseInt(val);
+                }
+                items.push_back(std::move(it));
+            }
+            std::sort(items.begin(), items.end(), [&](const Item& a, const Item& b) {
+                if (scol.dataType == "char" || scol.isVariableLength) return orderByAsc ? (a.s < b.s) : (b.s < a.s);
+                if (scol.dataType == "date") return orderByAsc ? (a.d < b.d) : (b.d < a.d);
+                return orderByAsc ? (a.n < b.n) : (b.n < a.n);
+            });
+            std::vector<std::pair<int64_t, std::string>> sorted;
+            for (const auto& it : items) {
+                for (auto& mr : matchRows) {
+                    if (mr.first == it.rid) { sorted.push_back(std::move(mr)); break; }
+                }
+            }
+            matchRows = std::move(sorted);
+        }
+    }
+
+    for (auto& mr : matchRows) {
+        std::string rowStr;
+        for (const auto& expr : exprs) {
+            std::string val;
+            if (expr.isScalar) {
+                val = applyScalarFunc(expr, mr.second, tbl);
+            } else {
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == expr.colName) {
+                        val = extractColumnValue(mr.second, tbl, i);
+                        break;
+                    }
+                }
+            }
+            rowStr += val + ' ';
+        }
+        result.push_back(rowStr);
+    }
+    lockManager_.unlock(tablename);
+    return result;
+}
+
 std::vector<std::string> StorageEngine::aggregate(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,

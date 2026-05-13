@@ -142,6 +142,21 @@ public:
                                    const std::string& orderByCol = "",
                                    bool orderByAsc = true);
 
+    // Scalar function expression for queryExpr
+    struct SelectExpr {
+        std::string displayName;
+        bool isScalar = false;
+        std::string funcName;
+        std::vector<std::string> funcArgs;
+        std::string colName;
+    };
+    std::vector<std::string> queryExpr(const std::string& dbname,
+                                        const std::string& tablename,
+                                        const std::vector<std::string>& conditions,
+                                        const std::vector<SelectExpr>& exprs,
+                                        const std::string& orderByCol = "",
+                                        bool orderByAsc = true);
+
     // Aggregate query: items = {("count","*"), ("max","score"), ...}
     std::vector<std::string> aggregate(const std::string& dbname, const std::string& tablename,
                                        const std::vector<std::string>& conditions,

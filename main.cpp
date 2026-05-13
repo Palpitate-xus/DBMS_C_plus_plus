@@ -85,6 +85,55 @@ static string sqlProcessor(string raw) {
 }
 
 // ========================================================================
+// Scalar function helpers
+// ========================================================================
+static bool isScalarFunc(const string& name) {
+    static const set<string> scalars = {"length", "upper", "lower", "trim", "substring", "concat"};
+    return scalars.find(name) != scalars.end();
+}
+
+static vector<string> splitSelectColumns(const string& s) {
+    vector<string> cols;
+    size_t i = 0;
+    int parenDepth = 0;
+    string current;
+    while (i < s.size()) {
+        if (s[i] == '(') parenDepth++;
+        else if (s[i] == ')') parenDepth--;
+        else if (s[i] == ',' && parenDepth == 0) {
+            cols.push_back(trim(current));
+            current.clear();
+            ++i;
+            continue;
+        }
+        current += s[i];
+        ++i;
+    }
+    if (!current.empty()) cols.push_back(trim(current));
+    return cols;
+}
+
+static vector<string> splitFuncArgs(const string& s) {
+    vector<string> args;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && isspace(static_cast<unsigned char>(s[i]))) ++i;
+        if (i >= s.size()) break;
+        string arg;
+        if (s[i] == '\'') {
+            arg += s[i++];
+            while (i < s.size() && s[i] != '\'') arg += s[i++];
+            if (i < s.size()) arg += s[i++];
+        } else {
+            while (i < s.size() && s[i] != ',') arg += s[i++];
+        }
+        args.push_back(trim(arg));
+        if (i < s.size() && s[i] == ',') ++i;
+    }
+    return args;
+}
+
+// ========================================================================
 // Window function support
 // ========================================================================
 struct WindowFunc {
@@ -1831,9 +1880,9 @@ bool execute(const string& rawSql, Session& s) {
         set<string> selectCols;
         bool selectAll = (columns == "*");
         if (!selectAll) {
-            stringstream css(columns);
-            string item;
-            while (getline(css, item, ',')) selectCols.insert(trim(item));
+            for (const auto& item : splitSelectColumns(columns)) {
+                selectCols.insert(trim(item));
+            }
         }
         dbms::PlanContext ctx;
         ctx.dbname = s.currentDB;
@@ -1977,11 +2026,8 @@ bool execute(const string& rawSql, Session& s) {
             set<string> selectCols;
             bool selectAll = (columns == "*");
             if (!selectAll) {
-                stringstream css(columns);
-                string item;
-                while (getline(css, item, ',')) {
-                    item = trim(item);
-                    selectCols.insert(item);
+                for (const auto& item : splitSelectColumns(columns)) {
+                    selectCols.insert(trim(item));
                 }
             }
 
@@ -2128,35 +2174,72 @@ bool execute(const string& rawSql, Session& s) {
         set<string> selectCols;
         bool selectAll = (columns == "*");
 
-        // Detect aggregate functions and window functions in columns
+        // Detect aggregate functions, window functions, and scalar functions in columns
         vector<pair<string, string>> aggItems;
         vector<WindowFunc> windowFuncs;
-        vector<int> exprTypes; // 0=normal, 1=agg, 2=window
+        vector<dbms::StorageEngine::SelectExpr> selectExprs;
+        vector<int> exprTypes; // 0=normal, 1=agg, 2=window, 3=scalar
         bool hasAgg = false;
         bool hasWindow = false;
+        bool hasScalar = false;
         {
-            stringstream css(columns);
-            string item;
-            while (getline(css, item, ',')) {
-                item = trim(item);
+            for (const auto& itemRaw : splitSelectColumns(columns)) {
+                string item = trim(itemRaw);
                 WindowFunc wf;
                 if (parseWindowFunc(item, wf)) {
                     windowFuncs.push_back(wf);
                     hasWindow = true;
                     exprTypes.push_back(2);
                     aggItems.emplace_back(wf.name, wf.arg);
+                    dbms::StorageEngine::SelectExpr expr;
+                    expr.displayName = item;
+                    expr.isScalar = false;
+                    expr.colName = item;
+                    selectExprs.push_back(expr);
                 } else {
                     size_t lp = item.find('(');
                     size_t rp = item.find(')');
                     if (lp != string::npos && rp != string::npos && rp > lp + 1) {
                         string func = item.substr(0, lp);
                         string arg = item.substr(lp + 1, rp - lp - 1);
-                        aggItems.emplace_back(func, arg);
-                        hasAgg = true;
-                        exprTypes.push_back(1);
+                        if (isScalarFunc(func)) {
+                            dbms::StorageEngine::SelectExpr expr;
+                            expr.displayName = item;
+                            expr.isScalar = true;
+                            expr.funcName = func;
+                            expr.funcArgs = splitFuncArgs(arg);
+                            selectExprs.push_back(expr);
+                            hasScalar = true;
+                            exprTypes.push_back(3);
+                            // Add referenced columns to selectCols for fetching
+                            for (const auto& a : expr.funcArgs) {
+                                string ta = trim(a);
+                                if (ta.size() >= 2 && ta.front() == '\'' && ta.back() == '\'') continue;
+                                for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                    if (tbl.cols[ci].dataName == ta) {
+                                        selectCols.insert(ta);
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            aggItems.emplace_back(func, arg);
+                            hasAgg = true;
+                            exprTypes.push_back(1);
+                            dbms::StorageEngine::SelectExpr expr;
+                            expr.displayName = item;
+                            expr.isScalar = false;
+                            expr.colName = item;
+                            selectExprs.push_back(expr);
+                        }
                     } else {
                         aggItems.emplace_back("", item);
                         exprTypes.push_back(0);
+                        dbms::StorageEngine::SelectExpr expr;
+                        expr.displayName = item;
+                        expr.isScalar = false;
+                        expr.colName = item;
+                        selectExprs.push_back(expr);
                         if (!selectAll) {
                             bool found = false;
                             for (size_t i = 0; i < tbl.len; ++i) {
@@ -2386,6 +2469,26 @@ bool execute(const string& rawSql, Session& s) {
                 log(s.username, row, getTime());
             }
             return false;
+        } else if (hasScalar) {
+            for (const auto& expr : selectExprs) {
+                cout << expr.displayName << ' ';
+            }
+            cout << '\n';
+            if (condTokens.empty()) {
+                answers = g_engine.queryExpr(s.currentDB, tname, {}, selectExprs, orderByCol, orderByAsc);
+            } else {
+                condTokens.insert(condTokens.begin(), "(");
+                condTokens.push_back(")");
+                for (auto& t : condTokens) t = modifyLogic(t);
+                auto groups = breakDownConditions(condTokens);
+                set<string> seen;
+                for (const auto& g : groups) {
+                    auto part = g_engine.queryExpr(s.currentDB, tname, g, selectExprs, orderByCol, orderByAsc);
+                    for (const auto& row : part) {
+                        if (seen.insert(row).second) answers.push_back(row);
+                    }
+                }
+            }
         } else {
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
@@ -2446,6 +2549,14 @@ bool execute(const string& rawSql, Session& s) {
                     first = false;
                     if (it.first.empty()) ofs << escapeCSVField(it.second);
                     else ofs << escapeCSVField(it.first + "(" + it.second + ")");
+                }
+                ofs << "\n";
+            } else if (hasScalar) {
+                bool first = true;
+                for (const auto& expr : selectExprs) {
+                    if (!first) ofs << ",";
+                    first = false;
+                    ofs << escapeCSVField(expr.displayName);
                 }
                 ofs << "\n";
             } else {
