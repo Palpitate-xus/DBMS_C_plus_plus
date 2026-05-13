@@ -3,12 +3,21 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include "sha256.h"
 
 struct user {
     std::string username;
     std::string password;
     std::string permission;
 };
+
+inline bool isHashedPassword(const std::string& pw) {
+    if (pw.size() != 64) return false;
+    for (char c : pw) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
 
 inline int login(const std::string& username, const std::string& password) {
     std::ifstream infile("user.dat");
@@ -17,7 +26,11 @@ inline int login(const std::string& username, const std::string& password) {
     user temp;
     while (infile >> temp.username >> temp.password >> temp.permission) {
         if (temp.username == username) {
-            if (temp.password == password) {
+            std::string checkPw = password;
+            if (isHashedPassword(temp.password)) {
+                checkPw = sha256(password);
+            }
+            if (temp.password == checkPw) {
                 std::cout << "successfully login" << std::endl;
                 return 1;
             }
@@ -44,6 +57,7 @@ inline int permissionQuery(const std::string& username) {
 
 inline int createUser(const user& new_user) {
     std::ofstream fs("user.dat", std::ios::binary | std::ios::out | std::ios::app);
-    fs << '\n' << new_user.username << " " << new_user.password << " " << new_user.permission << std::endl;
+    std::string hashedPw = isHashedPassword(new_user.password) ? new_user.password : sha256(new_user.password);
+    fs << '\n' << new_user.username << " " << hashedPw << " " << new_user.permission << std::endl;
     return 0;
 }
