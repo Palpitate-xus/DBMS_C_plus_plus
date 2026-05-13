@@ -1145,6 +1145,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
 
     std::string val = extractColumnValue(rowBuffer, tbl, ci);
     const Column& col = tbl.cols[ci];
+    if (cond.op == "isnull") return val.empty();
+    if (cond.op == "isnotnull") return !val.empty();
     if (col.dataType == "char" || col.isVariableLength) {
         if (cond.op == "<"  && !(val <  cond.value)) return false;
         if (cond.op == ">"  && !(val >  cond.value)) return false;
@@ -1525,6 +1527,20 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             c.value = s.substr(sp + 1);
             if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
                 c.value = c.value.substr(1, c.value.size() - 2);
+            conds.push_back(c);
+            continue;
+        }
+        // Handle IS NOT NULL operator
+        if (s.size() >= 9 && s.substr(0, 9) == "isnotnull") {
+            c.op = "isnotnull";
+            c.colName = trim(s.substr(9));
+            conds.push_back(c);
+            continue;
+        }
+        // Handle IS NULL operator
+        if (s.size() >= 6 && s.substr(0, 6) == "isnull") {
+            c.op = "isnull";
+            c.colName = trim(s.substr(6));
             conds.push_back(c);
             continue;
         }
