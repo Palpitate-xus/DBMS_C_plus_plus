@@ -2,6 +2,7 @@
 #include "TxnIdGenerator.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -2179,6 +2180,39 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::string result;
         for (const auto& arg : expr.funcArgs) result += getVal(arg);
         return result;
+    }
+    if (expr.funcName == "abs" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        try {
+            double d = std::stod(val);
+            d = std::abs(d);
+            if (d == std::floor(d)) return std::to_string(static_cast<int64_t>(d));
+            return std::to_string(d);
+        } catch (...) { return val; }
+    }
+    if (expr.funcName == "round" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        try {
+            double d = std::stod(val);
+            d = std::round(d);
+            return std::to_string(static_cast<int64_t>(d));
+        } catch (...) { return val; }
+    }
+    if (expr.funcName == "ceil" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        try {
+            double d = std::stod(val);
+            d = std::ceil(d);
+            return std::to_string(static_cast<int64_t>(d));
+        } catch (...) { return val; }
+    }
+    if (expr.funcName == "floor" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        try {
+            double d = std::stod(val);
+            d = std::floor(d);
+            return std::to_string(static_cast<int64_t>(d));
+        } catch (...) { return val; }
     }
     return "";
 }

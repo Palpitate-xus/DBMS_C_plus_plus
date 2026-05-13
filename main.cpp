@@ -88,7 +88,8 @@ static string sqlProcessor(string raw) {
 // Scalar function helpers
 // ========================================================================
 static bool isScalarFunc(const string& name) {
-    static const set<string> scalars = {"length", "upper", "lower", "trim", "substring", "concat"};
+    static const set<string> scalars = {"length", "upper", "lower", "trim", "substring", "concat",
+                                         "abs", "round", "ceil", "floor"};
     return scalars.find(name) != scalars.end();
 }
 
