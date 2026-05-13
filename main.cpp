@@ -89,7 +89,8 @@ static string sqlProcessor(string raw) {
 // ========================================================================
 static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "upper", "lower", "trim", "substring", "concat",
-                                         "abs", "round", "ceil", "floor"};
+                                         "abs", "round", "ceil", "floor",
+                                         "now", "current_timestamp", "extract"};
     return scalars.find(name) != scalars.end();
 }
 
@@ -591,7 +592,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 if (!fkStr.empty()) {
                     size_t lp = fkStr.find('(');
                     size_t rp = fkStr.find(')');
-                    if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+                    if (lp != string::npos && rp != string::npos && rp > lp) {
                         fk.colName = cname;
                         fk.refTable = trim(fkStr.substr(0, lp));
                         fk.refCol = trim(fkStr.substr(lp + 1, rp - lp - 1));
@@ -2200,7 +2201,7 @@ bool execute(const string& rawSql, Session& s) {
                 } else {
                     size_t lp = item.find('(');
                     size_t rp = item.find(')');
-                    if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+                    if (lp != string::npos && rp != string::npos && rp > lp) {
                         string func = item.substr(0, lp);
                         string arg = item.substr(lp + 1, rp - lp - 1);
                         if (isScalarFunc(func)) {

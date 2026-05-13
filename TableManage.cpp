@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -2213,6 +2214,22 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             d = std::floor(d);
             return std::to_string(static_cast<int64_t>(d));
         } catch (...) { return val; }
+    }
+    if (expr.funcName == "now" || expr.funcName == "current_timestamp") {
+        std::time_t t = std::time(nullptr);
+        std::tm* tm = std::localtime(&t);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
+        return std::string(buf);
+    }
+    if (expr.funcName == "extract" && expr.funcArgs.size() >= 2) {
+        std::string val = getVal(expr.funcArgs[1]);
+        Date d(val.c_str());
+        std::string field = expr.funcArgs[0];
+        if (field == "year") return std::to_string(d.year);
+        if (field == "month") return std::to_string(d.month);
+        if (field == "day") return std::to_string(d.day);
+        return "";
     }
     return "";
 }
