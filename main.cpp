@@ -1296,39 +1296,59 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         string colsStr = trim(sql.substr(colStart + 1, colEnd - colStart - 1));
-        string valsStr = trim(sql.substr(valStart + 1, valEnd - valStart - 1));
+
+        // Parse all value rows (multi-row INSERT)
+        vector<string> allValStrs;
+        allValStrs.push_back(trim(sql.substr(valStart + 1, valEnd - valStart - 1)));
+        size_t nextPos = valEnd + 1;
+        while (nextPos < sql.size()) {
+            while (nextPos < sql.size() && isspace(static_cast<unsigned char>(sql[nextPos]))) ++nextPos;
+            if (nextPos >= sql.size() || sql[nextPos] != ',') break;
+            ++nextPos;
+            while (nextPos < sql.size() && isspace(static_cast<unsigned char>(sql[nextPos]))) ++nextPos;
+            if (nextPos >= sql.size() || sql[nextPos] != '(') break;
+            size_t nextValEnd = sql.find(')', nextPos);
+            if (nextValEnd == string::npos) break;
+            allValStrs.push_back(trim(sql.substr(nextPos + 1, nextValEnd - nextPos - 1)));
+            nextPos = nextValEnd + 1;
+        }
 
         vector<string> cols;
-        vector<string> vals;
         {
             stringstream css(colsStr);
             string item;
             while (getline(css, item, ',')) cols.push_back(trim(item));
         }
-        {
-            stringstream vss(valsStr);
-            string item;
-            while (getline(vss, item, ',')) vals.push_back(trim(item));
-        }
-        if (cols.size() != vals.size()) {
-            cout << "SQL syntax error: column count mismatch" << endl;
-            return true;
-        }
 
-        map<string, string> values;
-        for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = stripQuotes(vals[i]);
+        int inserted = 0;
+        for (const string& valsStr : allValStrs) {
+            vector<string> vals;
+            {
+                stringstream vss(valsStr);
+                string item;
+                while (getline(vss, item, ',')) vals.push_back(trim(item));
+            }
+            if (cols.size() != vals.size()) {
+                cout << "SQL syntax error: column count mismatch" << endl;
+                return true;
+            }
 
-        auto res = g_engine.insert(s.currentDB, resolvedName, values);
-        if (res == OpResult::DuplicateKey) {
-            cout << "Duplicate key" << endl;
-            return true;
+            map<string, string> values;
+            for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = stripQuotes(vals[i]);
+
+            auto res = g_engine.insert(s.currentDB, resolvedName, values);
+            if (res == OpResult::DuplicateKey) {
+                cout << "Duplicate key" << endl;
+                return true;
+            }
+            if (res != OpResult::Success) {
+                cout << "Invalid data, please check" << endl;
+                return true;
+            }
+            ++inserted;
         }
-        if (res != OpResult::Success) {
-            cout << "Invalid data, please check" << endl;
-            return true;
-        }
-        cout << "Data inserted" << endl;
-        log(s.username, "data inserted", getTime());
+        cout << inserted << " row(s) inserted" << endl;
+        log(s.username, to_string(inserted) + " row(s) inserted", getTime());
         return false;
     }
 
