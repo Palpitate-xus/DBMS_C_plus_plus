@@ -816,13 +816,13 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
         auto groups = breakDownConditions(tokens);
         std::set<std::string> seen;
         for (const auto& g : groups) {
-            auto part = g_engine.query(s.currentDB, tname, g, selectCols, "", true);
+            auto part = g_engine.query(s.currentDB, tname, g, selectCols, {});
             for (const auto& row : part) {
                 if (seen.insert(row).second) answers.push_back(row);
             }
         }
     } else {
-        answers = g_engine.query(s.currentDB, tname, {}, selectCols, "", true);
+        answers = g_engine.query(s.currentDB, tname, {}, selectCols, {});
     }
 
     for (auto& s : answers) {
@@ -2242,24 +2242,40 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (!isTempTable(s, tnameOrig) && !checkTablePermission(s, tnameOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
-        string orderByCol;
-        bool orderByAsc = true;
+        vector<dbms::StorageEngine::OrderBySpec> orderBySpecs;
         if (orderPos != string::npos) {
             size_t orderEnd = (limitPos != string::npos) ? limitPos
                             : (offsetPos != string::npos) ? offsetPos : sql.size();
             string orderRest = trim(sql.substr(orderPos + 8, orderEnd - orderPos - 8));
-            vector<string> ot = tokenize(orderRest);
-            if (!ot.empty()) orderByCol = ot[0];
-            if (ot.size() > 1 && ot[1] == "desc") orderByAsc = false;
+            vector<string> orderParts;
+            {
+                stringstream oss(orderRest);
+                string part;
+                while (getline(oss, part, ',')) orderParts.push_back(trim(part));
+            }
+            for (const string& part : orderParts) {
+                vector<string> ot = tokenize(part);
+                if (!ot.empty()) {
+                    dbms::StorageEngine::OrderBySpec spec;
+                    spec.colName = ot[0];
+                    spec.ascending = !(ot.size() > 1 && ot[1] == "desc");
+                    orderBySpecs.push_back(spec);
+                }
+            }
         }
 
-        string groupByCol;
+        vector<string> groupByCols;
         if (groupPos != string::npos) {
             size_t groupEnd = (havingPos != string::npos) ? havingPos
                             : (orderPos != string::npos) ? orderPos
                             : (limitPos != string::npos) ? limitPos
                             : (offsetPos != string::npos) ? offsetPos : sql.size();
-            groupByCol = trim(sql.substr(groupPos + 8, groupEnd - groupPos - 8));
+            string groupRest = trim(sql.substr(groupPos + 8, groupEnd - groupPos - 8));
+            {
+                stringstream gss(groupRest);
+                string part;
+                while (getline(gss, part, ',')) groupByCols.push_back(trim(part));
+            }
         }
 
         if (havingPos != string::npos && groupPos == string::npos) {
@@ -2402,8 +2418,8 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         vector<string> answers;
-        if (!groupByCol.empty()) {
-            cout << groupByCol << ' ';
+        if (!groupByCols.empty()) {
+            for (const auto& gc : groupByCols) cout << gc << ' ';
             vector<pair<string, string>> pureAgg;
             for (const auto& it : aggItems) {
                 if (!it.first.empty()) {
@@ -2413,7 +2429,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.groupAggregate(s.currentDB, tname, {}, pureAgg, groupByCol, havingConds);
+                answers = g_engine.groupAggregate(s.currentDB, tname, {}, pureAgg, groupByCols, havingConds);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -2421,7 +2437,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.groupAggregate(s.currentDB, tname, g, pureAgg, groupByCol, havingConds);
+                    auto part = g_engine.groupAggregate(s.currentDB, tname, g, pureAgg, groupByCols, havingConds);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
@@ -2474,7 +2490,7 @@ bool execute(const string& rawSql, Session& s) {
             set<string> allCols;
             vector<string> rawAnswers;
             if (condTokens.empty()) {
-                rawAnswers = g_engine.query(s.currentDB, tname, {}, allCols, "", true);
+                rawAnswers = g_engine.query(s.currentDB, tname, {}, allCols, {});
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -2482,7 +2498,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(s.currentDB, tname, g, allCols, "", true);
+                    auto part = g_engine.query(s.currentDB, tname, g, allCols, {});
                     for (const auto& row : part) {
                         if (seen.insert(row).second) rawAnswers.push_back(row);
                     }
@@ -2606,7 +2622,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.queryExpr(s.currentDB, tname, {}, selectExprs, orderByCol, orderByAsc);
+                answers = g_engine.queryExpr(s.currentDB, tname, {}, selectExprs, orderBySpecs);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -2614,7 +2630,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.queryExpr(s.currentDB, tname, g, selectExprs, orderByCol, orderByAsc);
+                    auto part = g_engine.queryExpr(s.currentDB, tname, g, selectExprs, orderBySpecs);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
@@ -2627,7 +2643,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderByCol, orderByAsc);
+                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -2635,7 +2651,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderByCol, orderByAsc);
+                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
@@ -2665,8 +2681,13 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             // Write header based on column selection
-            if (!groupByCol.empty()) {
-                ofs << escapeCSVField(groupByCol);
+            if (!groupByCols.empty()) {
+                bool first = true;
+                for (const auto& gc : groupByCols) {
+                    if (!first) ofs << ",";
+                    first = false;
+                    ofs << escapeCSVField(gc);
+                }
                 for (const auto& it : aggItems) {
                     if (!it.first.empty()) {
                         ofs << "," << escapeCSVField(it.first + "(" + it.second + ")");

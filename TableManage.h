@@ -136,11 +136,14 @@ public:
                     const std::vector<std::string>& conditions);
     OpResult remove(const std::string& dbname, const std::string& tablename,
                     const std::vector<std::string>& conditions);
+    struct OrderBySpec {
+        std::string colName;
+        bool ascending = true;
+    };
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
                                    const std::vector<std::string>& conditions,
                                    const std::set<std::string>& selectCols,
-                                   const std::string& orderByCol = "",
-                                   bool orderByAsc = true);
+                                   const std::vector<OrderBySpec>& orderBy = {});
 
     // Scalar function expression for queryExpr
     struct SelectExpr {
@@ -154,20 +157,19 @@ public:
                                         const std::string& tablename,
                                         const std::vector<std::string>& conditions,
                                         const std::vector<SelectExpr>& exprs,
-                                        const std::string& orderByCol = "",
-                                        bool orderByAsc = true);
+                                        const std::vector<OrderBySpec>& orderBy = {});
 
     // Aggregate query: items = {("count","*"), ("max","score"), ...}
     std::vector<std::string> aggregate(const std::string& dbname, const std::string& tablename,
                                        const std::vector<std::string>& conditions,
                                        const std::vector<std::pair<std::string, std::string>>& items);
 
-    // Group aggregate: GROUP BY groupCol with HAVING filter
+    // Group aggregate: GROUP BY groupCol(s) with HAVING filter
     std::vector<std::string> groupAggregate(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
         const std::vector<std::pair<std::string, std::string>>& items,
-        const std::string& groupByCol,
+        const std::vector<std::string>& groupByCols,
         const std::vector<std::string>& havingConds);
 
     // JOIN query: INNER JOIN two tables on leftCol = rightCol

@@ -2048,8 +2048,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,
                                                const std::set<std::string>& selectCols,
-                                               const std::string& orderByCol,
-                                               bool orderByAsc) {
+                                               const std::vector<OrderBySpec>& orderBy) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
     lockManager_.lockShared(tablename);
@@ -2079,41 +2078,68 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         }
     }
 
-    // ORDER BY
-    if (!orderByCol.empty()) {
-        size_t sortIdx = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == orderByCol) { sortIdx = i; break; }
-        }
-        if (sortIdx < tbl.len) {
-            struct Item { int64_t rid; std::string s; int64_t n; Date d; };
-            std::vector<Item> items;
-            const Column& scol = tbl.cols[sortIdx];
-            for (auto& mr : matchRows) {
-                std::string val = extractColumnValue(mr.second, tbl, sortIdx);
-                Item it{mr.first, "", 0, {}};
-                if (scol.dataType == "char" || scol.isVariableLength) {
-                    it.s = val;
-                } else if (scol.dataType == "date") {
-                    it.d = val.empty() ? Date{} : Date(val.c_str());
+    // ORDER BY (multi-column)
+    if (!orderBy.empty()) {
+        struct SortKey {
+            int64_t rid;
+            std::vector<std::tuple<std::string, int64_t, Date>> vals; // (str, num, date) per column
+        };
+        std::vector<SortKey> keys;
+        for (auto& mr : matchRows) {
+            SortKey k{mr.first, {}};
+            for (const auto& spec : orderBy) {
+                size_t sortIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == spec.colName) { sortIdx = i; break; }
+                }
+                if (sortIdx < tbl.len) {
+                    std::string val = extractColumnValue(mr.second, tbl, sortIdx);
+                    const Column& scol = tbl.cols[sortIdx];
+                    if (scol.dataType == "char" || scol.isVariableLength) {
+                        k.vals.emplace_back(val, 0, Date{});
+                    } else if (scol.dataType == "date") {
+                        k.vals.emplace_back("", 0, val.empty() ? Date{} : Date(val.c_str()));
+                    } else {
+                        k.vals.emplace_back("", val.empty() ? 0 : parseInt(val), Date{});
+                    }
                 } else {
-                    it.n = val.empty() ? 0 : parseInt(val);
-                }
-                items.push_back(std::move(it));
-            }
-            std::sort(items.begin(), items.end(), [&](const Item& a, const Item& b) {
-                if (scol.dataType == "char" || scol.isVariableLength) return orderByAsc ? (a.s < b.s) : (b.s < a.s);
-                if (scol.dataType == "date") return orderByAsc ? (a.d < b.d) : (b.d < a.d);
-                return orderByAsc ? (a.n < b.n) : (b.n < a.n);
-            });
-            std::vector<std::pair<int64_t, std::string>> sorted;
-            for (const auto& it : items) {
-                for (auto& mr : matchRows) {
-                    if (mr.first == it.rid) { sorted.push_back(std::move(mr)); break; }
+                    k.vals.emplace_back("", 0, Date{});
                 }
             }
-            matchRows = std::move(sorted);
+            keys.push_back(std::move(k));
         }
+        std::sort(keys.begin(), keys.end(), [&](const SortKey& a, const SortKey& b) {
+            for (size_t i = 0; i < orderBy.size(); ++i) {
+                const auto& spec = orderBy[i];
+                size_t sortIdx = tbl.len;
+                for (size_t j = 0; j < tbl.len; ++j) {
+                    if (tbl.cols[j].dataName == spec.colName) { sortIdx = j; break; }
+                }
+                if (sortIdx >= tbl.len) continue;
+                const Column& scol = tbl.cols[sortIdx];
+                bool less = false, greater = false;
+                if (scol.dataType == "char" || scol.isVariableLength) {
+                    less = std::get<0>(a.vals[i]) < std::get<0>(b.vals[i]);
+                    greater = std::get<0>(b.vals[i]) < std::get<0>(a.vals[i]);
+                } else if (scol.dataType == "date") {
+                    less = std::get<2>(a.vals[i]) < std::get<2>(b.vals[i]);
+                    greater = std::get<2>(b.vals[i]) < std::get<2>(a.vals[i]);
+                } else {
+                    less = std::get<1>(a.vals[i]) < std::get<1>(b.vals[i]);
+                    greater = std::get<1>(b.vals[i]) < std::get<1>(a.vals[i]);
+                }
+                if (less) return spec.ascending;
+                if (greater) return !spec.ascending;
+            }
+            return false;
+        });
+        std::vector<std::pair<int64_t, std::string>> sorted;
+        for (const auto& k : keys) {
+            for (auto& mr : matchRows) {
+                if (mr.first == k.rid) { sorted.push_back(std::move(mr)); break; }
+            }
+        }
+        matchRows = std::move(sorted);
     }
 
     for (auto& mr : matchRows) {
@@ -2267,8 +2293,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                                                    const std::string& tablename,
                                                    const std::vector<std::string>& conditions,
                                                    const std::vector<SelectExpr>& exprs,
-                                                   const std::string& orderByCol,
-                                                   bool orderByAsc) {
+                                                   const std::vector<OrderBySpec>& orderBy) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
     lockManager_.lockShared(tablename);
@@ -2297,41 +2322,68 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
         }
     }
 
-    // ORDER BY (only supports plain columns for now)
-    if (!orderByCol.empty()) {
-        size_t sortIdx = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == orderByCol) { sortIdx = i; break; }
-        }
-        if (sortIdx < tbl.len) {
-            struct Item { int64_t rid; std::string s; int64_t n; Date d; };
-            std::vector<Item> items;
-            const Column& scol = tbl.cols[sortIdx];
-            for (auto& mr : matchRows) {
-                std::string val = extractColumnValue(mr.second, tbl, sortIdx);
-                Item it{mr.first, "", 0, {}};
-                if (scol.dataType == "char" || scol.isVariableLength) {
-                    it.s = val;
-                } else if (scol.dataType == "date") {
-                    it.d = val.empty() ? Date{} : Date(val.c_str());
+    // ORDER BY (multi-column)
+    if (!orderBy.empty()) {
+        struct SortKey {
+            int64_t rid;
+            std::vector<std::tuple<std::string, int64_t, Date>> vals;
+        };
+        std::vector<SortKey> keys;
+        for (auto& mr : matchRows) {
+            SortKey k{mr.first, {}};
+            for (const auto& spec : orderBy) {
+                size_t sortIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == spec.colName) { sortIdx = i; break; }
+                }
+                if (sortIdx < tbl.len) {
+                    std::string val = extractColumnValue(mr.second, tbl, sortIdx);
+                    const Column& scol = tbl.cols[sortIdx];
+                    if (scol.dataType == "char" || scol.isVariableLength) {
+                        k.vals.push_back({val, 0, {}});
+                    } else if (scol.dataType == "date") {
+                        k.vals.push_back({"", 0, val.empty() ? Date{} : Date(val.c_str())});
+                    } else {
+                        k.vals.push_back({"", val.empty() ? 0 : parseInt(val), {}});
+                    }
                 } else {
-                    it.n = val.empty() ? 0 : parseInt(val);
-                }
-                items.push_back(std::move(it));
-            }
-            std::sort(items.begin(), items.end(), [&](const Item& a, const Item& b) {
-                if (scol.dataType == "char" || scol.isVariableLength) return orderByAsc ? (a.s < b.s) : (b.s < a.s);
-                if (scol.dataType == "date") return orderByAsc ? (a.d < b.d) : (b.d < a.d);
-                return orderByAsc ? (a.n < b.n) : (b.n < a.n);
-            });
-            std::vector<std::pair<int64_t, std::string>> sorted;
-            for (const auto& it : items) {
-                for (auto& mr : matchRows) {
-                    if (mr.first == it.rid) { sorted.push_back(std::move(mr)); break; }
+                    k.vals.push_back({"", 0, {}});
                 }
             }
-            matchRows = std::move(sorted);
+            keys.push_back(std::move(k));
         }
+        std::sort(keys.begin(), keys.end(), [&](const SortKey& a, const SortKey& b) {
+            for (size_t i = 0; i < orderBy.size(); ++i) {
+                const auto& spec = orderBy[i];
+                size_t sortIdx = tbl.len;
+                for (size_t j = 0; j < tbl.len; ++j) {
+                    if (tbl.cols[j].dataName == spec.colName) { sortIdx = j; break; }
+                }
+                if (sortIdx >= tbl.len) continue;
+                const Column& scol = tbl.cols[sortIdx];
+                bool less = false, greater = false;
+                if (scol.dataType == "char" || scol.isVariableLength) {
+                    less = std::get<0>(a.vals[i]) < std::get<0>(b.vals[i]);
+                    greater = std::get<0>(b.vals[i]) < std::get<0>(a.vals[i]);
+                } else if (scol.dataType == "date") {
+                    less = std::get<2>(a.vals[i]) < std::get<2>(b.vals[i]);
+                    greater = std::get<2>(b.vals[i]) < std::get<2>(a.vals[i]);
+                } else {
+                    less = std::get<1>(a.vals[i]) < std::get<1>(b.vals[i]);
+                    greater = std::get<1>(b.vals[i]) < std::get<1>(a.vals[i]);
+                }
+                if (less) return spec.ascending;
+                if (greater) return !spec.ascending;
+            }
+            return false;
+        });
+        std::vector<std::pair<int64_t, std::string>> sorted;
+        for (const auto& k : keys) {
+            for (auto& mr : matchRows) {
+                if (mr.first == k.rid) { sorted.push_back(std::move(mr)); break; }
+            }
+        }
+        matchRows = std::move(sorted);
     }
 
     for (auto& mr : matchRows) {
@@ -2483,7 +2535,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,
     const std::vector<std::pair<std::string, std::string>>& items,
-    const std::string& groupByCol,
+    const std::vector<std::string>& groupByCols,
     const std::vector<std::string>& havingConds) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
@@ -2492,12 +2544,14 @@ std::vector<std::string> StorageEngine::groupAggregate(
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t rowSize = tbl.rowSize();
 
-    // Find group-by column index
-    size_t groupIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].dataName == groupByCol) { groupIdx = i; break; }
+    // Find group-by column indices
+    std::vector<size_t> groupIdxs;
+    for (const auto& gcol : groupByCols) {
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == gcol) { groupIdxs.push_back(i); break; }
+        }
     }
-    if (groupIdx >= tbl.len) {
+    if (groupIdxs.size() != groupByCols.size()) {
         lockManager_.unlock(tablename);
         return result;
     }
@@ -2514,11 +2568,16 @@ std::vector<std::string> StorageEngine::groupAggregate(
         matchIds.assign(ids.begin(), ids.end());
     }
 
-    // Read group key for each matching row
+    // Read composite group key for each matching row
     auto readGroupKey = [&](int64_t rid) -> std::string {
         std::string row;
         if (!readRowByRid(pa, rid, row, tbl)) return "";
-        return extractColumnValue(row, tbl, groupIdx);
+        std::string key;
+        for (size_t idx : groupIdxs) {
+            if (!key.empty()) key += "\x01";
+            key += extractColumnValue(row, tbl, idx);
+        }
+        return key;
     };
 
     // Group rows by group key
@@ -2668,7 +2727,17 @@ std::vector<std::string> StorageEngine::groupAggregate(
         }
         if (!pass) continue;
 
-        std::string row = gkey + ' ';
+        std::string row;
+        size_t kp = 0;
+        while (kp < gkey.size()) {
+            size_t sep = gkey.find('\x01', kp);
+            std::string part = (sep == std::string::npos) ? gkey.substr(kp) : gkey.substr(kp, sep - kp);
+            if (!row.empty()) row += ' ';
+            row += part;
+            if (sep == std::string::npos) break;
+            kp = sep + 1;
+        }
+        row += ' ';
         for (const auto& item : items) {
             row += computeAgg(gids, item.first, item.second) + ' ';
         }
