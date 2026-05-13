@@ -2066,10 +2066,12 @@ bool execute(const string& rawSql, Session& s) {
         // Check for JOIN
         size_t leftJoinPos = sql.find("left join", fromPos);
         size_t rightJoinPos = sql.find("right join", fromPos);
+        size_t fullOuterJoinPos = sql.find("full outer join", fromPos);
+        size_t crossJoinPos = sql.find("cross join", fromPos);
         size_t innerJoinPos = sql.find("inner join", fromPos);
         size_t joinPos = sql.find("join", fromPos);
 
-        enum class JoinType { Inner, Left, Right };
+        enum class JoinType { Inner, Left, Right, FullOuter, Cross };
         JoinType jt = JoinType::Inner;
         size_t actualJoinPos = joinPos;
 
@@ -2083,6 +2085,16 @@ bool execute(const string& rawSql, Session& s) {
                    (orderPos == string::npos || rightJoinPos < orderPos)) {
             jt = JoinType::Right;
             actualJoinPos = rightJoinPos;
+        } else if (fullOuterJoinPos != string::npos &&
+                   (wherePos == string::npos || fullOuterJoinPos < wherePos) &&
+                   (orderPos == string::npos || fullOuterJoinPos < orderPos)) {
+            jt = JoinType::FullOuter;
+            actualJoinPos = fullOuterJoinPos;
+        } else if (crossJoinPos != string::npos &&
+                   (wherePos == string::npos || crossJoinPos < wherePos) &&
+                   (orderPos == string::npos || crossJoinPos < orderPos)) {
+            jt = JoinType::Cross;
+            actualJoinPos = crossJoinPos;
         } else if (innerJoinPos != string::npos &&
                    (wherePos == string::npos || innerJoinPos < wherePos) &&
                    (orderPos == string::npos || innerJoinPos < orderPos)) {
@@ -2101,32 +2113,42 @@ bool execute(const string& rawSql, Session& s) {
 
         if (isJoin) {
             string leftTableOrig = trim(sql.substr(fromPos + 4, actualJoinPos - fromPos - 4));
+            bool isCrossJoin = (jt == JoinType::Cross);
             size_t onPos = sql.find("on", actualJoinPos);
-            if (onPos == string::npos) {
-                cout << "SQL syntax error: missing ON clause" << endl;
-                return true;
-            }
             size_t tableNameStart = actualJoinPos;
             if (jt == JoinType::Left) tableNameStart += 9;
             else if (jt == JoinType::Right) tableNameStart += 10;
+            else if (jt == JoinType::FullOuter) tableNameStart += 15;
+            else if (jt == JoinType::Cross) tableNameStart += 10;
             else if (jt == JoinType::Inner) tableNameStart += 10;
             else tableNameStart += 4;
-            string rightTableOrig = trim(sql.substr(tableNameStart, onPos - tableNameStart));
-            size_t onEnd = (wherePos != string::npos) ? wherePos
-                          : (orderPos != string::npos) ? orderPos : sql.size();
-            string onClause = normalizeConditionStr(trim(sql.substr(onPos + 2, onEnd - onPos - 2)));
 
-            size_t eqPos = onClause.find('=');
-            if (eqPos == string::npos) {
-                cout << "SQL syntax error: invalid ON clause" << endl;
-                return true;
+            size_t clauseEnd = (wherePos != string::npos) ? wherePos
+                             : (orderPos != string::npos) ? orderPos : sql.size();
+            string rightTableOrig;
+            string leftOnCol, rightOnCol;
+
+            if (isCrossJoin) {
+                rightTableOrig = trim(sql.substr(tableNameStart, clauseEnd - tableNameStart));
+            } else {
+                if (onPos == string::npos) {
+                    cout << "SQL syntax error: missing ON clause" << endl;
+                    return true;
+                }
+                rightTableOrig = trim(sql.substr(tableNameStart, onPos - tableNameStart));
+                string onClause = normalizeConditionStr(trim(sql.substr(onPos + 2, clauseEnd - onPos - 2)));
+                size_t eqPos = onClause.find('=');
+                if (eqPos == string::npos) {
+                    cout << "SQL syntax error: invalid ON clause" << endl;
+                    return true;
+                }
+                leftOnCol = trim(onClause.substr(0, eqPos));
+                rightOnCol = trim(onClause.substr(eqPos + 1));
+                size_t dot = leftOnCol.find('.');
+                if (dot != string::npos) leftOnCol = leftOnCol.substr(dot + 1);
+                dot = rightOnCol.find('.');
+                if (dot != string::npos) rightOnCol = rightOnCol.substr(dot + 1);
             }
-            string leftOnCol = trim(onClause.substr(0, eqPos));
-            string rightOnCol = trim(onClause.substr(eqPos + 1));
-            size_t dot = leftOnCol.find('.');
-            if (dot != string::npos) leftOnCol = leftOnCol.substr(dot + 1);
-            dot = rightOnCol.find('.');
-            if (dot != string::npos) rightOnCol = rightOnCol.substr(dot + 1);
 
             string leftTable = resolveTableName(s, leftTableOrig);
             string rightTable = resolveTableName(s, rightTableOrig);
@@ -2175,6 +2197,11 @@ bool execute(const string& rawSql, Session& s) {
                 } else if (jt == JoinType::Right) {
                     return g_engine.rightJoin(s.currentDB, leftTable, rightTable,
                                                leftOnCol, rightOnCol, conds, selectCols);
+                } else if (jt == JoinType::FullOuter) {
+                    return g_engine.fullOuterJoin(s.currentDB, leftTable, rightTable,
+                                                   leftOnCol, rightOnCol, conds, selectCols);
+                } else if (jt == JoinType::Cross) {
+                    return g_engine.crossJoin(s.currentDB, leftTable, rightTable, conds, selectCols);
                 } else {
                     return g_engine.join(s.currentDB, leftTable, rightTable,
                                           leftOnCol, rightOnCol, conds, selectCols);

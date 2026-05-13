@@ -199,6 +199,22 @@ public:
                                         const std::vector<std::string>& conditions,
                                         const std::set<std::string>& selectCols);
 
+    // FULL OUTER JOIN: union of LEFT and RIGHT JOIN
+    std::vector<std::string> fullOuterJoin(const std::string& dbname,
+                                            const std::string& leftTable,
+                                            const std::string& rightTable,
+                                            const std::string& leftCol,
+                                            const std::string& rightCol,
+                                            const std::vector<std::string>& conditions,
+                                            const std::set<std::string>& selectCols);
+
+    // CROSS JOIN: cartesian product
+    std::vector<std::string> crossJoin(const std::string& dbname,
+                                        const std::string& leftTable,
+                                        const std::string& rightTable,
+                                        const std::vector<std::string>& conditions,
+                                        const std::set<std::string>& selectCols);
+
     // Transaction operations
     bool inTransaction() const { return inTransaction_; }
     OpResult beginTransaction(const std::string& dbname);
