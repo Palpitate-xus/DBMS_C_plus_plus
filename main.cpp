@@ -73,6 +73,11 @@ static vector<string> tokenize(const string& sql) {
 }
 
 // ========================================================================
+// CASE WHEN preprocessing forward declaration
+// ========================================================================
+static string preprocessCaseWhen(string s);
+
+// ========================================================================
 // SQL preprocessing
 // ========================================================================
 static string sqlProcessor(string raw) {
@@ -81,7 +86,94 @@ static string sqlProcessor(string raw) {
     raw.erase(remove(raw.begin(), raw.end(), '\t'), raw.end());
     raw.erase(remove(raw.begin(), raw.end(), '\r'), raw.end());
     if (!raw.empty() && raw.back() == ';') raw.pop_back();
+    raw = preprocessCaseWhen(raw);
     return raw;
+}
+
+// ========================================================================
+// CASE WHEN preprocessing: "case when a then b when c then d else e end"
+//                         → "case_when(a,b,c,d,e)"
+// ========================================================================
+static string normalizeCaseCondition(string s) {
+    s = trim(s);
+    static const char* ops[] = {">=", "<=", "!=", "<>", ">", "<", "="};
+    for (const char* op : ops) {
+        size_t len = strlen(op);
+        size_t pos = s.find(op);
+        if (pos != string::npos) {
+            string before = trim(s.substr(0, pos));
+            string after = trim(s.substr(pos + len));
+            return string(op) + before + " " + after;
+        }
+    }
+    size_t isnotPos = s.find("is not null");
+    if (isnotPos != string::npos) {
+        return "isnotnull " + trim(s.substr(0, isnotPos));
+    }
+    size_t isPos = s.find("is null");
+    if (isPos != string::npos) {
+        return "isnull " + trim(s.substr(0, isPos));
+    }
+    size_t likePos = s.find("like");
+    if (likePos != string::npos) {
+        string before = trim(s.substr(0, likePos));
+        string after = trim(s.substr(likePos + 4));
+        return "like" + before + " " + after;
+    }
+    return s;
+}
+
+static string preprocessCaseWhen(string s) {
+    size_t pos = 0;
+    while (true) {
+        size_t casePos = s.find("case when", pos);
+        if (casePos == string::npos) break;
+        size_t endPos = s.find("end", casePos);
+        if (endPos == string::npos) break;
+        string content = trim(s.substr(casePos + 9, endPos - casePos - 9));
+
+        vector<pair<string, string>> whenThen;
+        string elseVal;
+        size_t curr = 0;
+        while (curr < content.size()) {
+            size_t thenPos = content.find("then", curr);
+            if (thenPos == string::npos) break;
+            string cond = normalizeCaseCondition(content.substr(curr, thenPos - curr));
+
+            size_t nextWhen = content.find("when", thenPos + 4);
+            size_t elsePos = content.find("else", thenPos + 4);
+
+            if (elsePos != string::npos && (nextWhen == string::npos || elsePos < nextWhen)) {
+                string thenVal = trim(content.substr(thenPos + 4, elsePos - thenPos - 4));
+                whenThen.emplace_back(cond, thenVal);
+                elseVal = trim(content.substr(elsePos + 4));
+                break;
+            } else if (nextWhen != string::npos) {
+                string thenVal = trim(content.substr(thenPos + 4, nextWhen - thenPos - 4));
+                whenThen.emplace_back(cond, thenVal);
+                curr = nextWhen + 4;
+            } else {
+                string thenVal = trim(content.substr(thenPos + 4));
+                whenThen.emplace_back(cond, thenVal);
+                break;
+            }
+        }
+
+        string replacement = "case_when(";
+        for (size_t i = 0; i < whenThen.size(); ++i) {
+            if (i > 0) replacement += ",";
+            replacement += whenThen[i].first + "," + whenThen[i].second;
+        }
+        if (!elseVal.empty()) {
+            if (!whenThen.empty()) replacement += ",";
+            replacement += elseVal;
+        }
+        replacement += ")";
+
+        s = s.substr(0, casePos) + replacement + s.substr(endPos + 3);
+        pos = casePos + replacement.size();
+    }
+    return s;
 }
 
 // ========================================================================
@@ -90,7 +182,8 @@ static string sqlProcessor(string raw) {
 static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "upper", "lower", "trim", "substring", "concat",
                                          "abs", "round", "ceil", "floor",
-                                         "now", "current_timestamp", "extract"};
+                                         "now", "current_timestamp", "extract",
+                                         "case_when"};
     return scalars.find(name) != scalars.end();
 }
 

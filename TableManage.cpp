@@ -2231,6 +2231,17 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (field == "day") return std::to_string(d.day);
         return "";
     }
+    if (expr.funcName == "case_when") {
+        // Args: cond1, val1, cond2, val2, ..., default
+        for (size_t i = 0; i + 1 < expr.funcArgs.size(); i += 2) {
+            auto conds = StorageEngine::parseConditions({expr.funcArgs[i]});
+            if (!conds.empty() && StorageEngine::evalConditionOnRow(conds[0], rowBuffer, tbl)) {
+                return getVal(expr.funcArgs[i + 1]);
+            }
+        }
+        if (!expr.funcArgs.empty()) return getVal(expr.funcArgs.back());
+        return "";
+    }
     return "";
 }
 
