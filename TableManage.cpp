@@ -985,6 +985,8 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
     // Remove from cache
     std::string key = dbname + "/" + tablename;
     pkIndexCache_.erase(key);
+    pageAllocators_.erase(key);
+    secondaryIndexCache_.erase(key);
 
     auto names = getTableNames(dbname);
     {

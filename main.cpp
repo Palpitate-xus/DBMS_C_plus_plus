@@ -720,9 +720,9 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeDateColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "char") {
                 size_t len = 0;
-                // Parentheses format: type and length may be in separate parts
                 if (!isBrace && parts.size() >= 3) {
                     string lenStr = parts[2];
+                    if (lenStr == "(" && parts.size() >= 4) lenStr = parts[3];
                     for (char c : lenStr)
                         if (isdigit(static_cast<unsigned char>(c))) len = len * 10 + (c - '0');
                 }
@@ -738,6 +738,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 size_t len = 0;
                 if (!isBrace && parts.size() >= 3) {
                     string lenStr = parts[2];
+                    if (lenStr == "(" && parts.size() >= 4) lenStr = parts[3];
                     for (char c : lenStr)
                         if (isdigit(static_cast<unsigned char>(c))) len = len * 10 + (c - '0');
                 }
@@ -839,6 +840,188 @@ static size_t findMatchingParen(const std::string& s, size_t start) {
         else if (s[i] == ')') { --depth; if (depth == 0) return i; }
     }
     return std::string::npos;
+}
+
+// Execute a SELECT subquery for derived table use; returns rows and fills outColNames.
+// Supports basic SELECT with WHERE, ORDER BY, LIMIT, OFFSET.
+static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Session& s,
+                                                    std::vector<std::string>& outColNames) {
+    std::string sql = sqlProcessor(rawSql);
+    size_t fromPos = sql.find("from");
+    if (fromPos == std::string::npos) return {};
+
+    std::string columns = trim(sql.substr(6, fromPos - 6));
+
+    size_t wherePos = sql.find("where", fromPos);
+    size_t orderPos = sql.find("order by", fromPos);
+    size_t limitPos = sql.find("limit", fromPos);
+    size_t offsetPos = sql.find("offset", fromPos);
+
+    size_t tnameEnd = (wherePos != std::string::npos) ? wherePos
+                     : (orderPos != std::string::npos) ? orderPos
+                     : (limitPos != std::string::npos) ? limitPos
+                     : (offsetPos != std::string::npos) ? offsetPos
+                     : sql.size();
+    std::string tname = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
+
+    if (!g_engine.tableExists(s.currentDB, tname)) return {};
+
+    // Parse column names
+    outColNames.clear();
+    if (columns == "*") {
+        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+        for (size_t i = 0; i < tbl.len; ++i) outColNames.push_back(tbl.cols[i].dataName);
+    } else {
+        for (const auto& itemRaw : splitSelectColumns(columns)) {
+            std::string item = trim(itemRaw);
+            size_t asPos = item.find(" as ");
+            if (asPos != std::string::npos) {
+                outColNames.push_back(trim(item.substr(asPos + 4)));
+            } else {
+                outColNames.push_back(item);
+            }
+        }
+    }
+
+    std::set<std::string> selectCols;
+    for (const auto& c : outColNames) selectCols.insert(c);
+
+    std::vector<std::string> conds;
+    if (wherePos != std::string::npos) {
+        size_t condEnd = (orderPos != std::string::npos) ? orderPos
+                        : (limitPos != std::string::npos) ? limitPos
+                        : (offsetPos != std::string::npos) ? offsetPos
+                        : sql.size();
+        std::string condStr = normalizeConditionStr(trim(sql.substr(wherePos + 5, condEnd - wherePos - 5)));
+        std::vector<std::string> tokens = tokenize(condStr);
+        tokens.insert(tokens.begin(), "(");
+        tokens.push_back(")");
+        for (auto& t : tokens) t = modifyLogic(t);
+        auto groups = breakDownConditions(tokens);
+        if (!groups.empty()) conds = groups[0];
+    }
+
+    std::vector<StorageEngine::OrderBySpec> orderBy;
+    if (orderPos != std::string::npos) {
+        size_t orderEnd = (limitPos != std::string::npos) ? limitPos
+                         : (offsetPos != std::string::npos) ? offsetPos
+                         : sql.size();
+        std::string orderRest = trim(sql.substr(orderPos + 8, orderEnd - orderPos - 8));
+        std::stringstream oss(orderRest);
+        std::string part;
+        while (std::getline(oss, part, ',')) {
+            part = trim(part);
+            std::vector<std::string> ot = tokenize(part);
+            if (!ot.empty()) {
+                StorageEngine::OrderBySpec spec;
+                spec.colName = ot[0];
+                spec.ascending = !(ot.size() > 1 && ot[1] == "desc");
+                orderBy.push_back(spec);
+            }
+        }
+    }
+
+    std::vector<std::string> answers;
+    if (conds.empty()) {
+        answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBy);
+    } else {
+        answers = g_engine.query(s.currentDB, tname, conds, selectCols, orderBy);
+    }
+
+    size_t limitVal = 0, offsetVal = 0;
+    if (limitPos != std::string::npos) {
+        size_t limEnd = (offsetPos != std::string::npos) ? offsetPos : sql.size();
+        std::string lstr = trim(sql.substr(limitPos + 5, limEnd - limitPos - 5));
+        try { limitVal = static_cast<size_t>(std::stoull(lstr)); } catch (...) {}
+    }
+    if (offsetPos != std::string::npos) {
+        std::string ostr = trim(sql.substr(offsetPos + 6));
+        try { offsetVal = static_cast<size_t>(std::stoull(ostr)); } catch (...) {}
+    }
+    if (offsetVal < answers.size()) {
+        if (limitVal > 0 && offsetVal + limitVal < answers.size())
+            answers.erase(answers.begin() + offsetVal + limitVal, answers.end());
+        if (offsetVal > 0)
+            answers.erase(answers.begin(), answers.begin() + offsetVal);
+    }
+
+    for (auto& row : answers) row = trim(row);
+    return answers;
+}
+
+// Detect and process derived tables (subqueries in FROM clause).
+// Replaces (SELECT ...) AS alias with a temporary table name.
+// Returns modified SQL.
+static std::string processDerivedTables(const std::string& sql, Session& s) {
+    std::string result = sql;
+    int derivedCount = 0;
+
+    while (true) {
+        size_t parenStart = result.find("(select");
+        if (parenStart == std::string::npos) break;
+        size_t parenEnd = findMatchingParen(result, parenStart);
+        if (parenEnd == std::string::npos) break;
+
+        std::string afterParen = trim(result.substr(parenEnd + 1));
+        if (afterParen.size() < 3 || afterParen.substr(0, 3) != "as ") break;
+        std::string alias = trim(afterParen.substr(3));
+        size_t sp = alias.find(' ');
+        if (sp != std::string::npos) alias = alias.substr(0, sp);
+        if (alias.empty()) break;
+
+        std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
+        std::vector<std::string> colNames;
+        auto rows = runDerivedSubQuery(innerSelect, s, colNames);
+        if (colNames.empty()) break;
+
+        std::string tmpName = "__derived_" + std::to_string(derivedCount++);
+        std::string actualName = tempTablePrefix(tmpName);
+        TableSchema tmpTbl;
+        tmpTbl.tablename = actualName;
+        for (const auto& cname : colNames) {
+            Column col;
+            col.dataName = cname;
+            col.dataType = "varchar";
+            col.isVariableLength = true;
+            col.dsize = 255;
+            col.isNull = true;
+            tmpTbl.append(col);
+        }
+        auto res = g_engine.createTable(s.currentDB, tmpTbl);
+        if (res != OpResult::Success) break;
+        s.tempTables.insert(tmpName);
+
+        for (const auto& row : rows) {
+            std::map<std::string, std::string> values;
+            std::stringstream rss(row);
+            std::string val;
+            size_t colIdx = 0;
+            while (colIdx < colNames.size() && rss >> val) {
+                values[colNames[colIdx++]] = val;
+            }
+            if (!values.empty()) g_engine.insert(s.currentDB, actualName, values);
+        }
+
+        // Replace alias references with bare column names
+        std::string aliasDot = alias + ".";
+        size_t pos = 0;
+        while ((pos = result.find(aliasDot, pos)) != std::string::npos) {
+            result = result.substr(0, pos) + result.substr(pos + aliasDot.size());
+            // pos stays same since we removed characters
+        }
+
+        // Replace the derived table definition with temp table name
+        size_t aliasEnd = parenEnd + 1;
+        while (aliasEnd < result.size() && isspace((unsigned char)result[aliasEnd])) ++aliasEnd;
+        if (aliasEnd + 2 < result.size() && result.substr(aliasEnd, 3) == "as ") {
+            aliasEnd += 3;
+            while (aliasEnd < result.size() && isspace((unsigned char)result[aliasEnd])) ++aliasEnd;
+            aliasEnd += alias.size();
+        }
+        result = result.substr(0, parenStart) + tmpName + result.substr(aliasEnd);
+    }
+
+    return result;
 }
 
 // Expand IN (...) / EXISTS (...) / ANY / ALL subqueries into plain conditions
@@ -2117,6 +2300,21 @@ bool execute(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select") {
         if (!checkDB(s)) return true;
+
+        // Process derived tables: (SELECT ...) AS alias
+        sql = processDerivedTables(sql, s);
+
+        // RAII guard to drop temp tables created for derived tables
+        struct TempTableGuard {
+            Session* ps;
+            TempTableGuard(Session* s) : ps(s) {}
+            ~TempTableGuard() {
+                for (const auto& t : ps->tempTables) {
+                    g_engine.dropTable(ps->currentDB, tempTablePrefix(t));
+                }
+                ps->tempTables.clear();
+            }
+        } guard(&s);
 
         // Check for INTO OUTFILE clause
         string outfile;
