@@ -949,6 +949,107 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
     return answers;
 }
 
+// Helper: create a temp table from query rows and column names.
+// Returns the user-visible temp name (without __tmp_ prefix).
+static std::string createTempTableFromRows(Session& s,
+                                           const std::vector<std::string>& rows,
+                                           const std::vector<std::string>& colNames,
+                                           int& counter) {
+    std::string tmpName = "__cte_" + std::to_string(counter++);
+    std::string actualName = tempTablePrefix(tmpName);
+    TableSchema tmpTbl;
+    tmpTbl.tablename = actualName;
+    for (const auto& cname : colNames) {
+        Column col;
+        col.dataName = cname;
+        col.dataType = "varchar";
+        col.isVariableLength = true;
+        col.dsize = 255;
+        col.isNull = true;
+        tmpTbl.append(col);
+    }
+    auto res = g_engine.createTable(s.currentDB, tmpTbl);
+    if (res != OpResult::Success) return "";
+    s.tempTables.insert(tmpName);
+
+    for (const auto& row : rows) {
+        std::map<std::string, std::string> values;
+        std::stringstream rss(row);
+        std::string val;
+        size_t colIdx = 0;
+        while (colIdx < colNames.size() && rss >> val) {
+            values[colNames[colIdx++]] = val;
+        }
+        if (!values.empty()) g_engine.insert(s.currentDB, actualName, values);
+    }
+    return tmpName;
+}
+
+// Process CTEs (WITH clause): WITH cte AS (SELECT ...) [, ...] SELECT ...
+// Returns modified SQL with CTE references replaced by temp table names.
+static std::string processCTEs(const std::string& sql, Session& s) {
+    std::string result = sql;
+    size_t withPos = result.find("with ");
+    if (withPos == std::string::npos) return result;
+
+    size_t pos = withPos + 5; // skip "with "
+    int cteCount = 0;
+
+    while (pos < result.size()) {
+        // Skip leading whitespace
+        while (pos < result.size() && isspace((unsigned char)result[pos])) ++pos;
+        if (pos >= result.size()) break;
+
+        // Find " as (" to split name and subquery
+        size_t asPos = result.find(" as ", pos);
+        if (asPos == std::string::npos) break;
+        std::string cteName = trim(result.substr(pos, asPos - pos));
+        if (cteName.empty()) break;
+
+        // Find opening paren of subquery
+        size_t parenStart = result.find('(', asPos + 4);
+        if (parenStart == std::string::npos) break;
+        size_t parenEnd = findMatchingParen(result, parenStart);
+        if (parenEnd == std::string::npos) break;
+
+        std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
+        std::vector<std::string> colNames;
+        auto rows = runDerivedSubQuery(innerSelect, s, colNames);
+        if (colNames.empty()) break;
+
+        std::string tmpName = createTempTableFromRows(s, rows, colNames, cteCount);
+        if (tmpName.empty()) break;
+
+        // Replace CTE name references in the rest of the SQL
+        size_t replacePos = parenEnd + 1;
+        while ((replacePos = result.find(cteName + ".", replacePos)) != std::string::npos) {
+            result = result.substr(0, replacePos) + result.substr(replacePos + cteName.size() + 1);
+        }
+        replacePos = parenEnd + 1;
+        while ((replacePos = result.find(cteName, replacePos)) != std::string::npos) {
+            result = result.substr(0, replacePos) + tmpName + result.substr(replacePos + cteName.size());
+            replacePos += tmpName.size();
+        }
+
+        // Move past this CTE definition
+        pos = parenEnd + 1;
+        while (pos < result.size() && isspace((unsigned char)result[pos])) ++pos;
+        if (pos < result.size() && result[pos] == ',') {
+            ++pos;
+            continue;
+        }
+        break;
+    }
+
+    // Remove the WITH clause from the SQL
+    size_t mainQueryStart = pos;
+    while (mainQueryStart < result.size() && isspace((unsigned char)result[mainQueryStart])) ++mainQueryStart;
+    if (mainQueryStart < result.size()) {
+        result = result.substr(0, withPos) + result.substr(mainQueryStart);
+    }
+    return result;
+}
+
 // Detect and process derived tables (subqueries in FROM clause).
 // Replaces (SELECT ...) AS alias with a temporary table name.
 // Returns modified SQL.
@@ -974,33 +1075,10 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         auto rows = runDerivedSubQuery(innerSelect, s, colNames);
         if (colNames.empty()) break;
 
-        std::string tmpName = "__derived_" + std::to_string(derivedCount++);
-        std::string actualName = tempTablePrefix(tmpName);
-        TableSchema tmpTbl;
-        tmpTbl.tablename = actualName;
-        for (const auto& cname : colNames) {
-            Column col;
-            col.dataName = cname;
-            col.dataType = "varchar";
-            col.isVariableLength = true;
-            col.dsize = 255;
-            col.isNull = true;
-            tmpTbl.append(col);
-        }
-        auto res = g_engine.createTable(s.currentDB, tmpTbl);
-        if (res != OpResult::Success) break;
-        s.tempTables.insert(tmpName);
-
-        for (const auto& row : rows) {
-            std::map<std::string, std::string> values;
-            std::stringstream rss(row);
-            std::string val;
-            size_t colIdx = 0;
-            while (colIdx < colNames.size() && rss >> val) {
-                values[colNames[colIdx++]] = val;
-            }
-            if (!values.empty()) g_engine.insert(s.currentDB, actualName, values);
-        }
+        int counter = derivedCount;
+        std::string tmpName = createTempTableFromRows(s, rows, colNames, counter);
+        if (tmpName.empty()) break;
+        derivedCount = counter;
 
         // Replace alias references with bare column names
         std::string aliasDot = alias + ".";
@@ -2298,13 +2376,16 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    if (sql.substr(0, 6) == "select") {
+    if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
+
+        // Process CTEs: WITH cte AS (SELECT ...)
+        sql = processCTEs(sql, s);
 
         // Process derived tables: (SELECT ...) AS alias
         sql = processDerivedTables(sql, s);
 
-        // RAII guard to drop temp tables created for derived tables
+        // RAII guard to drop temp tables created for CTEs and derived tables
         struct TempTableGuard {
             Session* ps;
             TempTableGuard(Session* s) : ps(s) {}
