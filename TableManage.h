@@ -60,10 +60,20 @@ struct TableSchema {
     ForeignKey fks[MAX_COLUMNS];
     size_t fkLen = 0;
 
+    // Composite primary key column indices (empty = use single-column isPrimaryKey)
+    std::vector<size_t> pkColIndices;
+    // Composite UNIQUE constraints: each inner vector is column indices
+    std::vector<std::vector<size_t>> uniqueConstraints;
+
     void append(const Column& ncol);
     void appendFK(const ForeignKey& fk);
     void print() const;
     size_t rowSize() const;
+
+    // PK helpers
+    bool hasPrimaryKey() const;
+    std::string buildPKValue(const std::string& rowBuffer) const;
+    std::string buildPKValue(const std::map<std::string, std::string>& values) const;
 
     // Variable-length helpers
     bool hasVariableLength() const;

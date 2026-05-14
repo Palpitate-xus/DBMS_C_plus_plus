@@ -582,6 +582,8 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
 // ========================================================================
 static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
     TableSchema tbl;
+    std::vector<std::string> pkColNames;  // raw names from PRIMARY KEY (a,b)
+    std::vector<std::vector<std::string>> uniqueColNames; // raw names from UNIQUE (a,b)
     size_t pos = nameEnd;
     while (pos < sql.size()) {
         if (sql[pos] != '{' && sql[pos] != '(') { ++pos; continue; }
@@ -597,6 +599,29 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             string segment = trim(sql.substr(pos, endPos - pos));
             if (segment.empty()) { pos = endPos + 1; continue; }
 
+            // Detect table-level constraints before treating as column def
+            vector<string> parts = tokenize(segment);
+            if (!parts.empty() && parts[0] == "primary" && parts.size() > 2 && parts[1] == "key") {
+                // PRIMARY KEY (col1, col2, ...)
+                for (size_t i = 2; i < parts.size(); ++i) {
+                    if (parts[i] == "(" || parts[i] == ")" || parts[i] == ",") continue;
+                    pkColNames.push_back(parts[i]);
+                }
+                pos = endPos + 1;
+                continue;
+            }
+            if (!parts.empty() && parts[0] == "unique") {
+                // UNIQUE (col1, col2, ...)
+                std::vector<std::string> cols;
+                for (size_t i = 1; i < parts.size(); ++i) {
+                    if (parts[i] == "(" || parts[i] == ")" || parts[i] == ",") continue;
+                    cols.push_back(parts[i]);
+                }
+                if (!cols.empty()) uniqueColNames.push_back(std::move(cols));
+                pos = endPos + 1;
+                continue;
+            }
+
             string cname, ctype;
             bool isNull = true;
             bool isPK = false;
@@ -605,7 +630,6 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             std::string checkExpr;
             dbms::ForeignKey fk;
 
-            vector<string> parts;
             if (isBrace) {
                 // {col:type flags} format
                 size_t colon = segment.find(':');
@@ -761,6 +785,28 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             pos = endPos + 1;
         }
         break;
+    }
+    // Resolve composite PRIMARY KEY column names to indices
+    for (const auto& cname : pkColNames) {
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == cname) {
+                tbl.pkColIndices.push_back(i);
+                break;
+            }
+        }
+    }
+    // Resolve composite UNIQUE constraint column names to indices
+    for (const auto& ucols : uniqueColNames) {
+        std::vector<size_t> indices;
+        for (const auto& cname : ucols) {
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == cname) {
+                    indices.push_back(i);
+                    break;
+                }
+            }
+        }
+        if (!indices.empty()) tbl.uniqueConstraints.push_back(std::move(indices));
     }
     return tbl;
 }

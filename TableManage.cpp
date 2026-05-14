@@ -632,36 +632,7 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
 }
 
 std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const TableSchema& tbl) {
-    size_t pkIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
-    }
-    if (pkIdx >= tbl.len) return "";
-
-    const Column& col = tbl.cols[pkIdx];
-    if (col.isVariableLength) {
-        return extractColumnValue(rowBuffer, tbl, pkIdx);
-    }
-
-    size_t offset = 0;
-    for (size_t i = 0; i < pkIdx; ++i) {
-        if (!tbl.cols[i].isVariableLength) offset += tbl.cols[i].dsize;
-    }
-    if (offset + col.dsize > rowBuffer.size()) return "";
-    if (col.dataType == "char") {
-        std::string val = rowBuffer.substr(offset, col.dsize);
-        auto nul = val.find('\0');
-        if (nul != std::string::npos) val.resize(nul);
-        return val;
-    } else if (col.dataType == "date") {
-        Date d;
-        std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
-        return str(d);
-    } else {
-        int64_t val = 0;
-        std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
-        return transstr(val);
-    }
+    return tbl.buildPKValue(rowBuffer);
 }
 
 BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
@@ -767,6 +738,51 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
         return (val == INF) ? "" : transstr(val);
     }
+}
+
+// TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
+bool TableSchema::hasPrimaryKey() const {
+    if (!pkColIndices.empty()) return true;
+    for (size_t i = 0; i < len; ++i) if (cols[i].isPrimaryKey) return true;
+    return false;
+}
+
+std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
+    std::string key;
+    if (!pkColIndices.empty()) {
+        for (size_t idx : pkColIndices) {
+            if (idx < len) key += StorageEngine::extractColumnValue(rowBuffer, *this, idx) + "\x01";
+        }
+    } else {
+        for (size_t i = 0; i < len; ++i) {
+            if (cols[i].isPrimaryKey) {
+                key = StorageEngine::extractColumnValue(rowBuffer, *this, i);
+                break;
+            }
+        }
+    }
+    return key;
+}
+
+std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& values) const {
+    std::string key;
+    if (!pkColIndices.empty()) {
+        for (size_t idx : pkColIndices) {
+            if (idx < len) {
+                auto it = values.find(cols[idx].dataName);
+                key += (it != values.end() ? it->second : "") + "\x01";
+            }
+        }
+    } else {
+        for (size_t i = 0; i < len; ++i) {
+            if (cols[i].isPrimaryKey) {
+                auto it = values.find(cols[i].dataName);
+                key = (it != values.end() ? it->second : "");
+                break;
+            }
+        }
+    }
+    return key;
 }
 
 OpResult StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
@@ -877,6 +893,24 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         writeFixedString(out, tbl.fks[i].refCol, MAX_COL_NAME_LEN);
         writeFixedString(out, tbl.fks[i].onDelete, 10);
     }
+    // Write composite primary key column indices (0 = use legacy isPrimaryKey)
+    int32_t pkCount = static_cast<int32_t>(tbl.pkColIndices.size());
+    out.write(reinterpret_cast<const char*>(&pkCount), 4);
+    for (size_t idx : tbl.pkColIndices) {
+        int32_t cidx = static_cast<int32_t>(idx);
+        out.write(reinterpret_cast<const char*>(&cidx), 4);
+    }
+    // Write composite UNIQUE constraints
+    int32_t ucCount = static_cast<int32_t>(tbl.uniqueConstraints.size());
+    out.write(reinterpret_cast<const char*>(&ucCount), 4);
+    for (const auto& uc : tbl.uniqueConstraints) {
+        int32_t cc = static_cast<int32_t>(uc.size());
+        out.write(reinterpret_cast<const char*>(&cc), 4);
+        for (size_t idx : uc) {
+            int32_t cidx = static_cast<int32_t>(idx);
+            out.write(reinterpret_cast<const char*>(&cidx), 4);
+        }
+    }
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -926,6 +960,40 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             tbl.fks[i].onDelete = readFixedString(in, 10);
         }
     }
+    // Read composite primary key column indices (new format, ignore if EOF)
+    int32_t pkCount = 0;
+    in.read(reinterpret_cast<char*>(&pkCount), 4);
+    if (in && pkCount > 0 && pkCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+        tbl.pkColIndices.reserve(pkCount);
+        for (int32_t i = 0; i < pkCount; ++i) {
+            int32_t cidx = 0;
+            in.read(reinterpret_cast<char*>(&cidx), 4);
+            if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len)) {
+                tbl.pkColIndices.push_back(static_cast<size_t>(cidx));
+            }
+        }
+    }
+    // Read composite UNIQUE constraints (new format, ignore if EOF)
+    int32_t ucCount = 0;
+    in.read(reinterpret_cast<char*>(&ucCount), 4);
+    if (in && ucCount > 0 && ucCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+        tbl.uniqueConstraints.reserve(ucCount);
+        for (int32_t i = 0; i < ucCount; ++i) {
+            int32_t cc = 0;
+            in.read(reinterpret_cast<char*>(&cc), 4);
+            if (!in || cc <= 0 || cc > static_cast<int32_t>(MAX_COLUMNS)) break;
+            std::vector<size_t> constraint;
+            constraint.reserve(cc);
+            for (int32_t j = 0; j < cc; ++j) {
+                int32_t cidx = 0;
+                in.read(reinterpret_cast<char*>(&cidx), 4);
+                if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len)) {
+                    constraint.push_back(static_cast<size_t>(cidx));
+                }
+            }
+            if (!constraint.empty()) tbl.uniqueConstraints.push_back(std::move(constraint));
+        }
+    }
     return tbl;
 }
 
@@ -948,13 +1016,10 @@ OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema
         writeFixedString(out, tbl.tablename, MAX_TABLE_NAME_LEN);
     }
     // Create B+ tree index if table has primary key
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isPrimaryKey) {
-            BPTree idx(indexPath(dbname, tbl.tablename));
-            idx.open();
-            idx.close();
-            break;
-        }
+    if (tbl.hasPrimaryKey()) {
+        BPTree idx(indexPath(dbname, tbl.tablename));
+        idx.open();
+        idx.close();
     }
     // Initialize auto-increment sequences
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -1339,36 +1404,58 @@ OpResult StorageEngine::insert(const std::string& dbname,
     }
 
     // Check primary key uniqueness using B+ tree index
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isPrimaryKey) {
-            auto it = actualValues.find(tbl.cols[i].dataName);
-            if (it != actualValues.end() && !it->second.empty()) {
-                BPTree* idx = getPKIndex(dbname, tablename);
-                if (idx) {
-                    int64_t dummy;
-                    if (idx->search(it->second, dummy)) {
-                        lockManager_.unlock(tablename);
-                        return OpResult::DuplicateKey;
-                    }
+    if (tbl.hasPrimaryKey()) {
+        std::string pkVal = tbl.buildPKValue(actualValues);
+        if (!pkVal.empty()) {
+            BPTree* idx = getPKIndex(dbname, tablename);
+            if (idx) {
+                int64_t dummy;
+                if (idx->search(pkVal, dummy)) {
+                    lockManager_.unlock(tablename);
+                    return OpResult::DuplicateKey;
                 }
             }
-            break;
         }
     }
 
-    // Check UNIQUE constraints
+    // Check single-column UNIQUE constraints
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (!col.isUnique) continue;
         auto it = actualValues.find(col.dataName);
         if (it == actualValues.end() || it->second.empty()) continue;
-        // Check if value already exists
         bool duplicate = false;
         forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
             if (duplicate) return;
             std::string row(data, len);
             std::string existingVal = extractColumnValue(row, tbl, i);
             if (existingVal == it->second) duplicate = true;
+        });
+        if (duplicate) {
+            lockManager_.unlock(tablename);
+            return OpResult::DuplicateKey;
+        }
+    }
+
+    // Check composite UNIQUE constraints
+    for (const auto& uc : tbl.uniqueConstraints) {
+        if (uc.empty()) continue;
+        std::string compositeKey;
+        for (size_t idx : uc) {
+            if (idx < tbl.len) {
+                auto it = actualValues.find(tbl.cols[idx].dataName);
+                compositeKey += (it != actualValues.end() ? it->second : "") + "\x01";
+            }
+        }
+        bool duplicate = false;
+        forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            if (duplicate) return;
+            std::string row(data, len);
+            std::string existingKey;
+            for (size_t idx : uc) {
+                if (idx < tbl.len) existingKey += extractColumnValue(row, tbl, idx) + "\x01";
+            }
+            if (existingKey == compositeKey) duplicate = true;
         });
         if (duplicate) {
             lockManager_.unlock(tablename);
