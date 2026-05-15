@@ -29,6 +29,15 @@ public:
     // Get list of currently locked tables
     std::vector<std::string> lockedTables() const;
 
+    // ========================================================================
+    // Row-level locking
+    // ========================================================================
+    bool rowLockShared(const std::string& table, int64_t rid);
+    bool rowLockExclusive(const std::string& table, int64_t rid);
+    void rowUnlock(const std::string& table, int64_t rid);
+    void rowUnlockAll(const std::string& table);
+    std::vector<int64_t> lockedRows(const std::string& table) const;
+
 private:
     struct LockState {
         std::shared_mutex mtx;
@@ -38,6 +47,10 @@ private:
     };
     std::map<std::string, LockState> locks_;
     std::mutex globalMutex_;
+
+    // Row locks: key = "table:rid"
+    std::map<std::string, LockState> rowLocks_;
+    std::mutex rowMutex_;
 
     // Wait-for graph: thread A waits for thread B to release a lock
     std::map<std::thread::id, std::set<std::thread::id>> waitFor_;

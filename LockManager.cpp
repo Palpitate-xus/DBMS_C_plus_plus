@@ -144,20 +144,44 @@ void LockManager::unlock(const std::string& table) {
 
 void LockManager::unlockAll() {
     std::thread::id self = std::this_thread::get_id();
-    std::lock_guard<std::mutex> guard(globalMutex_);
-    removeWaitEdges(self);
-    for (auto& kv : locks_) {
-        auto& state = kv.second;
-        // Remove self from holders
-        auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-        if (hit != state.holders.end()) state.holders.erase(hit);
-        if (state.exclusive) {
-            state.mtx.unlock();
-            state.exclusive = false;
+    {
+        std::lock_guard<std::mutex> guard(globalMutex_);
+        removeWaitEdges(self);
+        for (auto& kv : locks_) {
+            auto& state = kv.second;
+            // Remove self from holders
+            auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+            if (hit != state.holders.end()) state.holders.erase(hit);
+            if (state.exclusive) {
+                state.mtx.unlock();
+                state.exclusive = false;
+            }
+            while (state.sharedCount > 0) {
+                state.mtx.unlock_shared();
+                state.sharedCount--;
+            }
         }
-        while (state.sharedCount > 0) {
-            state.mtx.unlock_shared();
-            state.sharedCount--;
+    }
+    // Also release all row locks held by this thread
+    {
+        std::lock_guard<std::mutex> guard(rowMutex_);
+        for (auto it = rowLocks_.begin(); it != rowLocks_.end(); ) {
+            auto& state = it->second;
+            auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+            if (hit != state.holders.end()) state.holders.erase(hit);
+            if (state.exclusive) {
+                state.mtx.unlock();
+                state.exclusive = false;
+            }
+            while (state.sharedCount > 0) {
+                state.mtx.unlock_shared();
+                state.sharedCount--;
+            }
+            if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+                it = rowLocks_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 }
@@ -171,6 +195,151 @@ std::vector<std::string> LockManager::lockedTables() const {
     for (const auto& kv : locks_) {
         if (kv.second.exclusive || kv.second.sharedCount > 0) {
             result.push_back(kv.first);
+        }
+    }
+    return result;
+}
+
+// ========================================================================
+// Row-level locking
+// ========================================================================
+
+static std::string makeRowKey(const std::string& table, int64_t rid) {
+    return table + ":" + std::to_string(rid);
+}
+
+bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
+    std::thread::id self = std::this_thread::get_id();
+    std::string key = makeRowKey(table, rid);
+    {
+        std::lock_guard<std::mutex> guard(rowMutex_);
+        auto& state = rowLocks_[key];
+        // Already holding shared or exclusive lock on this row
+        if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
+            state.sharedCount++;
+            return true;
+        }
+        if (!state.exclusive && state.holders.empty()) {
+            state.mtx.lock_shared();
+            state.sharedCount++;
+            state.holders.push_back(self);
+            return true;
+        }
+        if (state.exclusive && !state.holders.empty()) {
+            addWaitEdge(self, state.holders[0]);
+            if (hasCycle(self)) {
+                removeWaitEdges(self);
+                return false;
+            }
+        }
+    }
+    auto& state = rowLocks_[key];
+    state.mtx.lock_shared();
+    {
+        std::lock_guard<std::mutex> guard(rowMutex_);
+        state.sharedCount++;
+        state.holders.push_back(self);
+        removeWaitEdges(self);
+    }
+    return true;
+}
+
+bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
+    std::thread::id self = std::this_thread::get_id();
+    std::string key = makeRowKey(table, rid);
+    {
+        std::lock_guard<std::mutex> guard(rowMutex_);
+        auto& state = rowLocks_[key];
+        // Already holding exclusive lock on this row
+        if (state.exclusive && state.holders.size() == 1 && state.holders[0] == self) {
+            return true;
+        }
+        if (state.sharedCount == 0 && !state.exclusive) {
+            state.mtx.lock();
+            state.exclusive = true;
+            state.holders.push_back(self);
+            return true;
+        }
+        for (const auto& holder : state.holders) {
+            if (holder != self) addWaitEdge(self, holder);
+        }
+        if (hasCycle(self)) {
+            removeWaitEdges(self);
+            return false;
+        }
+    }
+    auto& state = rowLocks_[key];
+    state.mtx.lock();
+    {
+        std::lock_guard<std::mutex> guard(rowMutex_);
+        state.exclusive = true;
+        state.holders.push_back(self);
+        removeWaitEdges(self);
+    }
+    return true;
+}
+
+void LockManager::rowUnlock(const std::string& table, int64_t rid) {
+    std::thread::id self = std::this_thread::get_id();
+    std::string key = makeRowKey(table, rid);
+    std::lock_guard<std::mutex> guard(rowMutex_);
+    removeWaitEdges(self);
+    auto it = rowLocks_.find(key);
+    if (it == rowLocks_.end()) return;
+    auto& state = it->second;
+    auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+    if (hit != state.holders.end()) state.holders.erase(hit);
+    if (state.exclusive) {
+        state.mtx.unlock();
+        state.exclusive = false;
+    } else if (state.sharedCount > 0) {
+        state.mtx.unlock_shared();
+        state.sharedCount--;
+    }
+    // Clean up empty lock state
+    if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+        rowLocks_.erase(it);
+    }
+}
+
+void LockManager::rowUnlockAll(const std::string& table) {
+    std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> guard(rowMutex_);
+    removeWaitEdges(self);
+    std::string prefix = table + ":";
+    for (auto it = rowLocks_.begin(); it != rowLocks_.end(); ) {
+        if (it->first.find(prefix) != 0) { ++it; continue; }
+        auto& state = it->second;
+        auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+        if (hit != state.holders.end()) state.holders.erase(hit);
+        if (state.exclusive) {
+            state.mtx.unlock();
+            state.exclusive = false;
+        }
+        while (state.sharedCount > 0) {
+            state.mtx.unlock_shared();
+            state.sharedCount--;
+        }
+        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+            it = rowLocks_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::vector<int64_t> LockManager::lockedRows(const std::string& table) const {
+    std::vector<int64_t> result;
+    std::string prefix = table + ":";
+    std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(rowMutex_));
+    for (const auto& kv : rowLocks_) {
+        if (kv.first.find(prefix) != 0) continue;
+        if (kv.second.exclusive || kv.second.sharedCount > 0) {
+            // Extract rid from key
+            size_t pos = kv.first.find(':');
+            if (pos != std::string::npos) {
+                try { result.push_back(std::stoll(kv.first.substr(pos + 1))); } catch (...) {}
+            }
         }
     }
     return result;

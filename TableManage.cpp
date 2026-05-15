@@ -2059,6 +2059,11 @@ OpResult StorageEngine::remove(const std::string& dbname,
         return OpResult::Success;
     }
 
+    // Acquire row-level exclusive locks on rows to be deleted
+    for (int64_t rid : toDelete) {
+        lockManager_.rowLockExclusive(tablename, rid);
+    }
+
     // Check foreign key references and apply ON DELETE actions
     {
         size_t pkIdx = tbl.len;
@@ -2371,6 +2376,11 @@ OpResult StorageEngine::update(const std::string& dbname,
         return OpResult::Success;
     }
 
+    // Acquire row-level exclusive locks on rows to be updated
+    for (int64_t rid : matchIds) {
+        lockManager_.rowLockExclusive(tablename, rid);
+    }
+
     // Pre-fetch indexed column list
     auto indexedCols = getIndexedColumns(dbname, tablename);
 
@@ -2632,6 +2642,13 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             if (readRowByRid(pa, rid, row, tbl)) {
                 matchRows.emplace_back(rid, std::move(row));
             }
+        }
+    }
+
+    // Row-level shared locks within transaction
+    if (inTransaction_) {
+        for (auto& mr : matchRows) {
+            lockManager_.rowLockShared(tablename, mr.first);
         }
     }
 
