@@ -83,6 +83,24 @@ static bool evalCondRaw(const StorageEngine::Condition& cond,
         if (cond.op == "<=" && cmp != 0 && (num > cmp))  return false;
         if (cond.op == ">=" && cmp != 0 && (num < cmp))  return false;
         if (cond.op == "!=" && cmp != 0 && num == cmp)   return false;
+    } else if (col.dataType == "float") {
+        float num = val.empty() ? 0.0f : std::stof(val);
+        float cmp = std::stof(cond.value);
+        if (cond.op == "<"  && !(num < cmp)) return false;
+        if (cond.op == ">"  && !(num > cmp)) return false;
+        if (cond.op == "="  && num != cmp)   return false;
+        if (cond.op == "<=" && (num > cmp))  return false;
+        if (cond.op == ">=" && (num < cmp))  return false;
+        if (cond.op == "!=" && num == cmp)   return false;
+    } else if (col.dataType == "double" || col.dataType == "decimal") {
+        double num = val.empty() ? 0.0 : std::stod(val);
+        double cmp = std::stod(cond.value);
+        if (cond.op == "<"  && !(num < cmp)) return false;
+        if (cond.op == ">"  && !(num > cmp)) return false;
+        if (cond.op == "="  && num != cmp)   return false;
+        if (cond.op == "<=" && (num > cmp))  return false;
+        if (cond.op == ">=" && (num < cmp))  return false;
+        if (cond.op == "!=" && num == cmp)   return false;
     } else {
         int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
@@ -366,18 +384,20 @@ bool SortOp::open() {
         if (tbl_.cols[i].dataName == orderByCol_) { sortIdx = i; break; }
     }
     if (sortIdx < tbl_.len) {
-        struct Item { std::string s; int64_t n; Date d; };
+        struct Item { std::string s; int64_t n; Date d; double f; };
         std::vector<std::pair<std::string, Item>> items;
         const Column& scol = tbl_.cols[sortIdx];
         for (auto& r : buffer_) {
             std::string val = StorageEngine::extractColumnValue(r, tbl_, sortIdx);
-            Item it{"", 0, {}};
+            Item it{"", 0, {}, 0.0};
             if (scol.dataType == "char" || scol.isVariableLength) {
                 it.s = val;
             } else if (scol.dataType == "date") {
                 it.d = val.empty() ? Date{} : Date(val.c_str());
             } else if (scol.dataType == "timestamp") {
                 it.n = val.empty() ? 0 : parseTimestampToSeconds(val);
+            } else if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") {
+                try { it.f = std::stod(val); } catch (...) { it.f = 0.0; }
             } else {
                 it.n = val.empty() ? 0 : StorageEngine::parseInt(val);
             }
@@ -386,6 +406,7 @@ bool SortOp::open() {
         std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
             if (scol.dataType == "char" || scol.isVariableLength) return asc_ ? (a.second.s < b.second.s) : (b.second.s < a.second.s);
             if (scol.dataType == "date") return asc_ ? (a.second.d < b.second.d) : (b.second.d < a.second.d);
+            if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") return asc_ ? (a.second.f < b.second.f) : (b.second.f < a.second.f);
             return asc_ ? (a.second.n < b.second.n) : (b.second.n < a.second.n);
         });
         buffer_.clear();

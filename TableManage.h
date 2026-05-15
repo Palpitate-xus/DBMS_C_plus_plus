@@ -415,5 +415,8 @@ Column makeDateColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK = false);
 Column makeTimestampColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTextColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeFloatColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeDoubleColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeDecimalColumn(const std::string& name, bool isNull, int precision, int scale, bool isPK = false);
 
 } // namespace dbms

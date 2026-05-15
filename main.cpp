@@ -24,6 +24,9 @@ using dbms::makeStringColumn;
 using dbms::makeVarCharColumn;
 using dbms::makeTimestampColumn;
 using dbms::makeTextColumn;
+using dbms::makeFloatColumn;
+using dbms::makeDoubleColumn;
+using dbms::makeDecimalColumn;
 using dbms::OpResult;
 using dbms::StorageEngine;
 using dbms::TableSchema;
@@ -780,6 +783,25 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeVarCharColumn(cname, isNull, len, isPK));
             } else if (ctype.substr(0, 4) == "text") {
                 tbl.append(makeTextColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 5) == "float") {
+                tbl.append(makeFloatColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 6) == "double") {
+                tbl.append(makeDoubleColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 7) == "decimal") {
+                int prec = 10, sc = 0;
+                size_t lp = ctype.find('(');
+                size_t rp = ctype.find(')');
+                if (lp != string::npos && rp != string::npos && rp > lp) {
+                    string inside = ctype.substr(lp + 1, rp - lp - 1);
+                    size_t comma = inside.find(',');
+                    if (comma != string::npos) {
+                        try { prec = stoi(trim(inside.substr(0, comma))); } catch (...) {}
+                        try { sc = stoi(trim(inside.substr(comma + 1))); } catch (...) {}
+                    } else {
+                        try { prec = stoi(trim(inside)); } catch (...) {}
+                    }
+                }
+                tbl.append(makeDecimalColumn(cname, isNull, prec, sc, isPK));
             }
             // Apply unique/default/check to last appended column
             if (tbl.len > 0) {
@@ -1577,6 +1599,12 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeVarCharColumn(cname, isNull, len);
             } else if (typeName.substr(0, 4) == "text") {
                 col = makeTextColumn(cname, isNull);
+            } else if (typeName.substr(0, 5) == "float") {
+                col = makeFloatColumn(cname, isNull);
+            } else if (typeName.substr(0, 6) == "double") {
+                col = makeDoubleColumn(cname, isNull);
+            } else if (typeName.substr(0, 7) == "decimal") {
+                col = makeDecimalColumn(cname, isNull, 10, 0);
             } else {
                 cout << "Unknown data type" << endl;
                 return true;

@@ -13,6 +13,7 @@
 #include <iostream>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -232,6 +233,36 @@ Column makeTextColumn(const std::string& name, bool isNull, bool isPK) {
     c.isVariableLength = true;
     c.dataType = "text";
     c.dsize = 65535;
+    return c;
+}
+
+Column makeFloatColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "float";
+    c.dsize = 4;
+    return c;
+}
+
+Column makeDoubleColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "double";
+    c.dsize = 8;
+    return c;
+}
+
+Column makeDecimalColumn(const std::string& name, bool isNull, int precision, int scale, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "decimal";
+    c.dsize = 8;  // stored as double internally
     return c;
 }
 
@@ -818,6 +849,20 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         int64_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, TIMESTAMP_SIZE);
         return (val == INF || val == 0) ? "" : formatTimestampSeconds(val);
+    } else if (col.dataType == "float") {
+        float val = 0.0f;
+        std::memcpy(&val, rowBuffer.data() + offset, sizeof(float));
+        if (val == 0.0f) return "";
+        std::ostringstream oss;
+        oss << val;
+        return oss.str();
+    } else if (col.dataType == "double" || col.dataType == "decimal") {
+        double val = 0.0;
+        std::memcpy(&val, rowBuffer.data() + offset, sizeof(double));
+        if (val == 0.0) return "";
+        std::ostringstream oss;
+        oss << val;
+        return oss.str();
     } else {
         int64_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
@@ -1437,6 +1482,24 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && cmp != 0 && (num > cmp))  return false;
         if (cond.op == ">=" && cmp != 0 && (num < cmp))  return false;
         if (cond.op == "!=" && cmp != 0 && num == cmp)   return false;
+    } else if (col.dataType == "float") {
+        float num = val.empty() ? 0.0f : std::stof(val);
+        float cmp = std::stof(cond.value);
+        if (cond.op == "<"  && !(num < cmp)) return false;
+        if (cond.op == ">"  && !(num > cmp)) return false;
+        if (cond.op == "="  && num != cmp)   return false;
+        if (cond.op == "<=" && (num > cmp))  return false;
+        if (cond.op == ">=" && (num < cmp))  return false;
+        if (cond.op == "!=" && num == cmp)   return false;
+    } else if (col.dataType == "double" || col.dataType == "decimal") {
+        double num = val.empty() ? 0.0 : std::stod(val);
+        double cmp = std::stod(cond.value);
+        if (cond.op == "<"  && !(num < cmp)) return false;
+        if (cond.op == ">"  && !(num > cmp)) return false;
+        if (cond.op == "="  && num != cmp)   return false;
+        if (cond.op == "<=" && (num > cmp))  return false;
+        if (cond.op == ">=" && (num < cmp))  return false;
+        if (cond.op == "!=" && num == cmp)   return false;
     } else {
         int64_t num = val.empty() ? INF : parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
@@ -1517,6 +1580,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             } else if (col.dataType == "timestamp") {
                 int64_t num = val.empty() ? INF : parseTimestampToSeconds(val);
                 std::memcpy(&rowBuffer[offset], &num, TIMESTAMP_SIZE);
+            } else if (col.dataType == "float") {
+                float num = val.empty() ? 0.0f : std::stof(val);
+                std::memcpy(&rowBuffer[offset], &num, sizeof(float));
+            } else if (col.dataType == "double" || col.dataType == "decimal") {
+                double num = val.empty() ? 0.0 : std::stod(val);
+                std::memcpy(&rowBuffer[offset], &num, sizeof(double));
             } else {
                 int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
                 std::memcpy(&rowBuffer[offset], &num, col.dsize);
@@ -1556,6 +1625,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 } else if (col.dataType == "timestamp") {
                     int64_t num = val.empty() ? INF : parseTimestampToSeconds(val);
                     std::memcpy(&fixedData[fixedOff], &num, TIMESTAMP_SIZE);
+                } else if (col.dataType == "float") {
+                    float num = val.empty() ? 0.0f : std::stof(val);
+                    std::memcpy(&fixedData[fixedOff], &num, sizeof(float));
+                } else if (col.dataType == "double" || col.dataType == "decimal") {
+                    double num = val.empty() ? 0.0 : std::stod(val);
+                    std::memcpy(&fixedData[fixedOff], &num, sizeof(double));
                 } else {
                     int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
                     std::memcpy(&fixedData[fixedOff], &num, col.dsize);
@@ -1696,7 +1771,19 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType == "float" && !val.empty()) {
+            try { std::stof(val); } catch (...) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+        }
+        if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal") && !val.empty()) {
+            try { std::stod(val); } catch (...) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+        }
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
@@ -2651,6 +2738,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (targetType == "timestamp") {
             int64_t ts = parseTimestampToSeconds(val);
             return (ts == 0) ? "" : formatTimestampSeconds(ts);
+        }
+        if (targetType == "float") {
+            try { return std::to_string(std::stof(val)); } catch (...) { return "0"; }
+        }
+        if (targetType == "double" || targetType == "decimal") {
+            try { return std::to_string(std::stod(val)); } catch (...) { return "0"; }
         }
         return val;
     }
