@@ -1085,6 +1085,21 @@ bool StorageEngine::databaseExists(const std::string& dbname) const {
     return std::filesystem::exists(dbPath(dbname));
 }
 
+std::vector<std::string> StorageEngine::getDatabaseNames() const {
+    std::vector<std::string> result;
+    if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(".", std::filesystem::directory_options::skip_permission_denied)) {
+        try {
+            if (!entry.is_directory()) continue;
+        } catch (...) { continue; }
+        std::string dbname;
+        try { dbname = entry.path().filename().string(); } catch (...) { continue; }
+        try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
+        result.push_back(dbname);
+    }
+    return result;
+}
+
 bool StorageEngine::tableExists(const std::string& dbname,
                                  const std::string& tablename) const {
     return std::filesystem::exists(schemaPath(dbname, tablename));
@@ -2495,12 +2510,103 @@ OpResult StorageEngine::update(const std::string& dbname,
     return OpResult::Success;
 }
 
+// ========================================================================
+// information_schema virtual tables
+// ========================================================================
+std::vector<std::string> StorageEngine::queryInformationSchema(
+    const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    const std::set<std::string>& selectCols,
+    const std::vector<OrderBySpec>& orderBy) const {
+
+    std::vector<std::string> result;
+    auto conds = parseConditions(conditions);
+
+    if (tablename == "tables" || tablename == "TABLES") {
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& tname : getTableNames(dbname)) {
+                std::string row = dbname + " " + tname + " BASE_TABLE ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                    if (c.colName == "table_name" && c.op == "=" && tname != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+            for (const auto& vname : getViewNames(dbname)) {
+                std::string row = dbname + " " + vname + " VIEW ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                    if (c.colName == "table_name" && c.op == "=" && vname != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+        }
+    } else if (tablename == "columns" || tablename == "COLUMNS") {
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& tname : getTableNames(dbname)) {
+                TableSchema tbl = getTableSchema(dbname, tname);
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    const Column& col = tbl.cols[i];
+                    std::string nullable = col.isNull ? "YES" : "NO";
+                    std::string row = dbname + " " + tname + " " + col.dataName + " " + col.dataType + " " + nullable + " ";
+                    bool match = true;
+                    for (const auto& c : conds) {
+                        if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                        if (c.colName == "table_name" && c.op == "=" && tname != c.value) { match = false; break; }
+                        if (c.colName == "column_name" && c.op == "=" && col.dataName != c.value) { match = false; break; }
+                    }
+                    if (match) result.push_back(row);
+                }
+            }
+        }
+    } else if (tablename == "statistics" || tablename == "STATISTICS") {
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& tname : getTableNames(dbname)) {
+                TableSchema tbl = getTableSchema(dbname, tname);
+                // Single-column indexes
+                auto idxCols = getIndexedColumns(dbname, tname);
+                for (const auto& cname : idxCols) {
+                    std::string row = dbname + " " + tname + " " + cname + "_idx " + cname + " ";
+                    bool match = true;
+                    for (const auto& c : conds) {
+                        if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                        if (c.colName == "table_name" && c.op == "=" && tname != c.value) { match = false; break; }
+                    }
+                    if (match) result.push_back(row);
+                }
+                // Composite indexes
+                auto compIdxs = getCompositeIndexes(dbname, tname);
+                for (const auto& ci : compIdxs) {
+                    for (size_t seq = 0; seq < ci.columns.size(); ++seq) {
+                        std::string row = dbname + " " + tname + " " + ci.name + " " + ci.columns[seq] + " " + std::to_string(seq + 1) + " ";
+                        bool match = true;
+                        for (const auto& c : conds) {
+                            if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                            if (c.colName == "table_name" && c.op == "=" && tname != c.value) { match = false; break; }
+                        }
+                        if (match) result.push_back(row);
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
 std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,
                                                const std::set<std::string>& selectCols,
                                                const std::vector<OrderBySpec>& orderBy) {
     std::vector<std::string> result;
+
+    // information_schema virtual tables
+    if (dbname == "information_schema") {
+        return queryInformationSchema(tablename, conditions, selectCols, orderBy);
+    }
+
     if (!tableExists(dbname, tablename)) return result;
     lockManager_.lockShared(tablename);
 

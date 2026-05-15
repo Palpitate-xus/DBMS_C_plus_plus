@@ -104,6 +104,7 @@ public:
     OpResult createDatabase(const std::string& dbname);
     OpResult dropDatabase(const std::string& dbname);
     bool databaseExists(const std::string& dbname) const;
+    std::vector<std::string> getDatabaseNames() const;
 
     // Table operations
     OpResult createTable(const std::string& dbname, const TableSchema& tbl);
@@ -169,6 +170,13 @@ public:
                                         const std::vector<std::string>& conditions,
                                         const std::vector<SelectExpr>& exprs,
                                         const std::vector<OrderBySpec>& orderBy = {});
+
+    // information_schema virtual tables
+    std::vector<std::string> queryInformationSchema(
+        const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        const std::set<std::string>& selectCols,
+        const std::vector<OrderBySpec>& orderBy) const;
 
     // Aggregate query: items = {("count","*"), ("max","score"), ...}
     std::vector<std::string> aggregate(const std::string& dbname, const std::string& tablename,
