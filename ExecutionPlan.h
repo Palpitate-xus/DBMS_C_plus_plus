@@ -81,6 +81,39 @@ private:
 };
 
 // ========================================================================
+// IndexOnlyScan: covering index — return data directly from index keys,
+// avoiding row lookup. Used when SELECT columns are all in the index and
+// WHERE matches the index columns.
+// ========================================================================
+class IndexOnlyScanOp : public Operator {
+public:
+    // For single-column index: indexCols = {colname}, filterValue = the value
+    // For composite index: indexCols = list of cols, filterValue = composite key
+    IndexOnlyScanOp(StorageEngine* engine, const std::string& dbname,
+                    const std::string& tablename,
+                    const std::vector<std::string>& indexCols,
+                    const std::string& filterValue,
+                    const std::string& compositeIndexName = "");
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    const std::string& tableName() const { return tablename_; }
+    const std::vector<std::string>& indexCols() const { return indexCols_; }
+
+private:
+    StorageEngine* engine_;
+    std::string dbname_;
+    std::string tablename_;
+    std::vector<std::string> indexCols_;
+    std::string filterValue_;
+    std::string compositeIndexName_;
+    TableSchema tbl_;
+    std::vector<int64_t> rids_;
+    size_t pos_ = 0;
+};
+
+// ========================================================================
 // Filter: apply WHERE conditions
 // ========================================================================
 class FilterOp : public Operator {
