@@ -2,6 +2,7 @@
 #include "TableManage.h"
 #include "permissions.h"
 #include "Session.h"
+#include "TLSWrapper.h"
 
 #include <arpa/inet.h>
 #include <chrono>
@@ -27,21 +28,21 @@ ServerStats& getServerStats() {
     return g_stats;
 }
 
-static void sendLine(int fd, const std::string& msg) {
+static void sendLine(SecureSocket& sock, const std::string& msg) {
     std::string line = msg + "\n";
-    ssize_t sent = 0;
-    while (sent < static_cast<ssize_t>(line.size())) {
-        ssize_t n = ::write(fd, line.data() + sent, line.size() - sent);
+    size_t sent = 0;
+    while (sent < line.size()) {
+        ssize_t n = sock.send(line.data() + sent, line.size() - sent);
         if (n <= 0) break;
-        sent += n;
+        sent += static_cast<size_t>(n);
     }
 }
 
-static std::string recvLine(int fd) {
+static std::string recvLine(SecureSocket& sock) {
     std::string line;
     char ch;
     while (true) {
-        ssize_t n = ::read(fd, &ch, 1);
+        ssize_t n = sock.recv(&ch, 1);
         if (n <= 0) return line;
         if (ch == '\n') break;
         if (ch != '\r') line.push_back(ch);
@@ -49,22 +50,22 @@ static std::string recvLine(int fd) {
     return line;
 }
 
-static void handleClient(int clientFd) {
+static void handleClient(SecureSocket sock) {
     g_stats.activeConnections++;
     g_stats.totalConnections++;
 
     Session s;
 
     // Login phase
-    sendLine(clientFd, "login");
-    std::string creds = recvLine(clientFd);
+    sendLine(sock, "login");
+    std::string creds = recvLine(sock);
     std::stringstream ss(creds);
     std::string username, password;
     ss >> username >> password;
 
     if (!login(username, password)) {
-        sendLine(clientFd, "wrong username or password");
-        ::close(clientFd);
+        sendLine(sock, "wrong username or password");
+        sock.close();
         g_stats.activeConnections--;
         return;
     }
@@ -72,11 +73,11 @@ static void handleClient(int clientFd) {
     s.username = username;
     s.permission = permissionQuery(username);
     s.currentDB = "info";
-    sendLine(clientFd, "successfully login");
+    sendLine(sock, "successfully login");
 
     // SQL execution loop
     while (true) {
-        std::string sql = recvLine(clientFd);
+        std::string sql = recvLine(sock);
         if (sql.empty()) break;
         std::string trimmed;
         {
@@ -107,19 +108,37 @@ static void handleClient(int clientFd) {
         while (pos < result.size()) {
             size_t nl = result.find('\n', pos);
             if (nl == std::string::npos) {
-                sendLine(clientFd, result.substr(pos));
+                sendLine(sock, result.substr(pos));
                 break;
             }
-            sendLine(clientFd, result.substr(pos, nl - pos));
+            sendLine(sock, result.substr(pos, nl - pos));
             pos = nl + 1;
         }
     }
 
-    ::close(clientFd);
+    sock.close();
     g_stats.activeConnections--;
 }
 
 void startServer(int port) {
+    // Initialize TLS context
+    TLSServerContext tlsCtx;
+    std::string certFile = "server.crt";
+    std::string keyFile = "server.key";
+    if (!std::filesystem::exists(certFile) || !std::filesystem::exists(keyFile)) {
+        std::cout << "Generating self-signed TLS certificate..." << std::endl;
+        if (!TLSServerContext::generateSelfSignedCert(certFile, keyFile)) {
+            std::cerr << "Warning: failed to generate TLS certificate, running without encryption" << std::endl;
+        }
+    }
+    if (std::filesystem::exists(certFile) && std::filesystem::exists(keyFile)) {
+        if (tlsCtx.init(certFile, keyFile)) {
+            std::cout << "TLS encryption enabled (certificate: " << certFile << ")" << std::endl;
+        } else {
+            std::cerr << "Warning: TLS initialization failed, running without encryption" << std::endl;
+        }
+    }
+
     int serverFd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (serverFd < 0) {
         std::cerr << "Failed to create socket" << std::endl;
@@ -146,7 +165,13 @@ void startServer(int port) {
         return;
     }
 
-    std::cout << "DBMS server listening on port " << port << std::endl;
+    std::cout << "DBMS server listening on port " << port;
+    if (tlsCtx.enabled()) {
+        std::cout << " (TLS enabled)";
+    } else {
+        std::cout << " (plaintext - no TLS)";
+    }
+    std::cout << std::endl;
 
     while (true) {
         sockaddr_in clientAddr{};
@@ -155,14 +180,24 @@ void startServer(int port) {
         if (clientFd < 0) continue;
 
         if (g_stats.activeConnections >= g_stats.maxConnections.load()) {
-            sendLine(clientFd, "too many connections");
-            ::close(clientFd);
+            SecureSocket tmp(clientFd);
+            sendLine(tmp, "too many connections");
+            tmp.close();
             g_stats.rejectedConnections++;
             continue;
         }
 
-        std::thread([clientFd]() {
-            handleClient(clientFd);
+        std::thread([clientFd, &tlsCtx]() {
+            SecureSocket sock(clientFd, tlsCtx.ctx());
+            if (tlsCtx.enabled()) {
+                if (!sock.handshake()) {
+                    std::cerr << "TLS handshake failed" << std::endl;
+                    sock.close();
+                    g_stats.activeConnections--;
+                    return;
+                }
+            }
+            handleClient(std::move(sock));
         }).detach();
     }
 
