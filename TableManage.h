@@ -245,13 +245,31 @@ public:
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename);
 
-    // Secondary index
+    // Secondary index (single-column)
     OpResult createIndex(const std::string& dbname, const std::string& tablename,
                          const std::string& colname);
     OpResult dropIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname);
     std::vector<std::string> getIndexedColumns(const std::string& dbname,
                                                 const std::string& tablename) const;
+
+    // Composite index (multi-column)
+    struct CompositeIndexInfo {
+        std::string name;
+        std::vector<std::string> columns;
+    };
+    OpResult createCompositeIndex(const std::string& dbname, const std::string& tablename,
+                                  const std::vector<std::string>& colnames,
+                                  const std::string& indexName);
+    OpResult dropCompositeIndex(const std::string& dbname, const std::string& tablename,
+                                const std::string& indexName);
+    std::vector<CompositeIndexInfo> getCompositeIndexes(const std::string& dbname,
+                                                         const std::string& tablename) const;
+    BPTree* getCompositeIndexTree(const std::string& dbname, const std::string& tablename,
+                                  const std::string& indexName) const;
+    // Build composite key from row buffer
+    static std::string buildCompositeKey(const std::string& rowBuffer, const TableSchema& tbl,
+                                          const std::vector<std::string>& colNames);
 
     // Condition parsing (public for execution plan use)
     struct Condition {

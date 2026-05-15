@@ -678,9 +678,52 @@ std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbn
     if (!in) return cols;
     std::string line;
     while (std::getline(in, line)) {
-        if (!line.empty()) cols.push_back(line);
+        if (line.empty()) continue;
+        if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
+            // Composite index: C:name:col1:col2:...
+            size_t pos = 2;
+            size_t next = line.find(':', pos);
+            if (next != std::string::npos) pos = next + 1;
+            while (pos < line.size()) {
+                next = line.find(':', pos);
+                std::string cname = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
+                if (!cname.empty()) cols.push_back(cname);
+                if (next == std::string::npos) break;
+                pos = next + 1;
+            }
+        } else {
+            cols.push_back(line);
+        }
     }
     return cols;
+}
+
+std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexes(
+    const std::string& dbname, const std::string& tablename) const {
+    std::vector<CompositeIndexInfo> result;
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::ifstream in(meta);
+    if (!in) return result;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
+            size_t pos = 2;
+            size_t next = line.find(':', pos);
+            if (next == std::string::npos) continue;
+            CompositeIndexInfo info;
+            info.name = line.substr(pos, next - pos);
+            pos = next + 1;
+            while (pos < line.size()) {
+                next = line.find(':', pos);
+                std::string cname = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
+                if (!cname.empty()) info.columns.push_back(cname);
+                if (next == std::string::npos) break;
+                pos = next + 1;
+            }
+            if (!info.columns.empty()) result.push_back(std::move(info));
+        }
+    }
+    return result;
 }
 
 BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
@@ -691,6 +734,23 @@ BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
     if (it != secondaryIndexCache_.end()) return it->second.get();
 
     auto tree = std::make_unique<BPTree>(secondaryIndexPath(dbname, tablename, colname));
+    if (tree->open()) {
+        BPTree* ptr = tree.get();
+        secondaryIndexCache_[key] = std::move(tree);
+        return ptr;
+    }
+    return nullptr;
+}
+
+BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& indexName) const {
+    std::string key = dbname + "/" + tablename + "/C/" + indexName;
+    auto it = secondaryIndexCache_.find(key);
+    if (it != secondaryIndexCache_.end()) return it->second.get();
+
+    std::filesystem::path p = dbPath(dbname) / (tablename + ".idx_" + indexName);
+    auto tree = std::make_unique<BPTree>(p);
     if (tree->open()) {
         BPTree* ptr = tree.get();
         secondaryIndexCache_[key] = std::move(tree);
@@ -738,6 +798,23 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
         return (val == INF) ? "" : transstr(val);
     }
+}
+
+std::string StorageEngine::buildCompositeKey(const std::string& rowBuffer,
+                                               const TableSchema& tbl,
+                                               const std::vector<std::string>& colNames) {
+    std::string key;
+    for (const auto& cname : colNames) {
+        size_t colIdx = tbl.len;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == cname) { colIdx = i; break; }
+        }
+        if (colIdx < tbl.len) {
+            if (!key.empty()) key += '\x01';
+            key += extractColumnValue(rowBuffer, tbl, colIdx);
+        }
+    }
+    return key;
 }
 
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
@@ -837,6 +914,99 @@ OpResult StorageEngine::dropIndex(const std::string& dbname, const std::string& 
     }
     // Remove from cache
     std::string key = dbname + "/" + tablename + "/" + colname;
+    secondaryIndexCache_.erase(key);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::vector<std::string>& colnames,
+                                              const std::string& indexName) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    // Validate all columns exist
+    for (const auto& cname : colnames) {
+        bool found = false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == cname) { found = true; break; }
+        }
+        if (!found) return OpResult::InvalidValue;
+    }
+
+    // Check name collision with existing composite indexes
+    auto existingComp = getCompositeIndexes(dbname, tablename);
+    for (const auto& ci : existingComp) {
+        if (ci.name == indexName) return OpResult::Success;
+    }
+
+    // Build index from existing data
+    BPTree* idx = getCompositeIndexTree(dbname, tablename, indexName);
+    if (!idx) return OpResult::InvalidValue;
+
+    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                       const char* data, size_t len) {
+        std::string row(data, len);
+        std::string key = buildCompositeKey(row, tbl, colnames);
+        if (!key.empty()) {
+            idx->insertMulti(key, encodeRid(pageId, slotId));
+        }
+    });
+
+    // Record in metadata: C:indexName:col1:col2:...
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::ofstream out(meta, std::ios::out | std::ios::app);
+    out << "C:" << indexName;
+    for (const auto& c : colnames) out << ":" << c;
+    out << '\n';
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropCompositeIndex(const std::string& dbname,
+                                            const std::string& tablename,
+                                            const std::string& indexName) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    std::filesystem::path p = dbPath(dbname) / (tablename + ".idx_" + indexName);
+    std::filesystem::remove(p);
+
+    // Rewrite metadata without this composite index
+    auto singleCols = getIndexedColumns(dbname, tablename);
+    auto compIdxs = getCompositeIndexes(dbname, tablename);
+
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    {
+        std::ofstream out(meta, std::ios::out);
+        // Rewrite single-column entries (filter out those only in composite)
+        for (const auto& c : singleCols) {
+            // Check if this column is in any remaining composite index
+            bool inComposite = false;
+            for (const auto& ci : compIdxs) {
+                if (ci.name == indexName) continue;
+                for (const auto& cc : ci.columns) {
+                    if (cc == c) { inComposite = true; break; }
+                }
+                if (inComposite) break;
+            }
+            // Also check if it was in the dropped composite
+            bool inDropped = false;
+            for (const auto& ci : compIdxs) {
+                if (ci.name != indexName) continue;
+                for (const auto& cc : ci.columns) {
+                    if (cc == c) { inDropped = true; break; }
+                }
+            }
+            if (!inDropped || inComposite) out << c << '\n';
+        }
+        // Rewrite composite entries
+        for (const auto& ci : compIdxs) {
+            if (ci.name == indexName) continue;
+            out << "C:" << ci.name;
+            for (const auto& c : ci.columns) out << ":" << c;
+            out << '\n';
+        }
+    }
+    // Remove from cache
+    std::string key = dbname + "/" + tablename + "/C/" + indexName;
     secondaryIndexCache_.erase(key);
     return OpResult::Success;
 }
@@ -1599,6 +1769,17 @@ OpResult StorageEngine::insert(const std::string& dbname,
             }
         }
     }
+    // Update composite indexes
+    {
+        auto compIdxs = getCompositeIndexes(dbname, tablename);
+        for (const auto& ci : compIdxs) {
+            BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
+            if (cidx) {
+                std::string key = buildCompositeKey(strippedRow, tbl, ci.columns);
+                if (!key.empty()) cidx->insertMulti(key, rid);
+            }
+        }
+    }
     lockManager_.unlock(tablename);
     return OpResult::Success;
 }
@@ -1915,14 +2096,24 @@ OpResult StorageEngine::remove(const std::string& dbname,
         }
     }
 
-    // Delete rows via PageAllocator tombstones + update indexes
+    // Pre-read row data for index removal (before tombstone)
+    std::vector<std::string> rowsToDelete;
+    rowsToDelete.reserve(toDelete.size());
+    for (int64_t rid : toDelete) {
+        std::string row;
+        if (readRowByRid(pa, rid, row, tbl)) {
+            rowsToDelete.push_back(row);
+        } else {
+            rowsToDelete.push_back("");
+        }
+    }
+
+    // Delete rows via PageAllocator tombstones
+    size_t delIdx = 0;
     for (int64_t rid : toDelete) {
         // Log for transaction rollback (before deletion)
-        if (inTransaction_ && dbname == txnDB_) {
-            std::string row;
-            if (readRowByRid(pa, rid, row, tbl)) {
-                logTxnDelete(tablename, rid, row);
-            }
+        if (inTransaction_ && dbname == txnDB_ && !rowsToDelete[delIdx].empty()) {
+            logTxnDelete(tablename, rid, rowsToDelete[delIdx]);
         }
 
         uint32_t pageId; uint16_t slotId;
@@ -1934,14 +2125,14 @@ OpResult StorageEngine::remove(const std::string& dbname,
             pa->markDirty(pageId);
             pa->unpinPage(pageId);
         }
+        ++delIdx;
     }
 
     // Remove from PK index
     BPTree* pkIdx = getPKIndex(dbname, tablename);
     if (pkIdx) {
-        for (int64_t rid : toDelete) {
-            std::string row;
-            if (!readRowByRid(pa, rid, row, tbl)) continue;
+        for (const auto& row : rowsToDelete) {
+            if (row.empty()) continue;
             std::string pkVal = extractPKValue(row, tbl);
             if (!pkVal.empty()) pkIdx->remove(pkVal);
         }
@@ -1958,11 +2149,23 @@ OpResult StorageEngine::remove(const std::string& dbname,
             if (colIdx >= tbl.len) continue;
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
             if (!secIdx) continue;
-            for (int64_t rid : toDelete) {
-                std::string row;
-                if (!readRowByRid(pa, rid, row, tbl)) continue;
+            for (const auto& row : rowsToDelete) {
+                if (row.empty()) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
                 if (!val.empty()) secIdx->remove(val);
+            }
+        }
+    }
+    // Remove from composite indexes
+    {
+        auto compIdxs = getCompositeIndexes(dbname, tablename);
+        for (const auto& ci : compIdxs) {
+            BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
+            if (!cidx) continue;
+            for (const auto& row : rowsToDelete) {
+                if (row.empty()) continue;
+                std::string key = buildCompositeKey(row, tbl, ci.columns);
+                if (!key.empty()) cidx->remove(key);
             }
         }
     }
@@ -2125,6 +2328,31 @@ OpResult StorageEngine::update(const std::string& dbname,
                 // RID changed: update index entry with new RID
                 secIdx->remove(newVal);
                 secIdx->insertMulti(newVal, actualRid);
+            }
+        }
+
+        // Update composite indexes
+        auto compIdxs = getCompositeIndexes(dbname, tablename);
+        for (const auto& ci : compIdxs) {
+            bool anyColChanged = false;
+            for (const auto& cname : ci.columns) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == cname) { colIdx = i; break; }
+                }
+                if (colUpdates.find(colIdx) != colUpdates.end()) { anyColChanged = true; break; }
+            }
+            if (!anyColChanged && actualRid == rid) continue;
+            BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
+            if (!cidx) continue;
+            std::string newKey = buildCompositeKey(strippedNewRow, tbl, ci.columns);
+            std::string oldKey = buildCompositeKey(row, tbl, ci.columns);
+            if (oldKey != newKey) {
+                if (!oldKey.empty()) cidx->remove(oldKey);
+                if (!newKey.empty()) cidx->insertMulti(newKey, actualRid);
+            } else if (actualRid != rid && !newKey.empty()) {
+                cidx->remove(newKey);
+                cidx->insertMulti(newKey, actualRid);
             }
         }
     }

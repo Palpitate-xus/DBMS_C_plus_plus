@@ -1446,7 +1446,7 @@ bool execute(const string& rawSql, Session& s) {
         if (sql.substr(7, 5) == "index") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
-            // create index idxname on tname(colname)
+            // create index idxname on tname(colname) or tname(col1, col2, ...)
             string rest = trim(sql.substr(13));
             size_t onPos = rest.find(" on ");
             if (onPos == string::npos) {
@@ -1463,8 +1463,27 @@ bool execute(const string& rawSql, Session& s) {
             }
             string tnameOrig = trim(afterOn.substr(0, lp));
             string tname = resolveTableName(s, tnameOrig);
-            string colname = trim(afterOn.substr(lp + 1, rp - lp - 1));
-            auto res = g_engine.createIndex(s.currentDB, tname, colname);
+            string colsStr = trim(afterOn.substr(lp + 1, rp - lp - 1));
+            // Parse comma-separated column list
+            vector<string> colnames;
+            size_t cpos = 0;
+            while (cpos < colsStr.size()) {
+                size_t comma = colsStr.find(',', cpos);
+                string c = trim(colsStr.substr(cpos, comma - cpos));
+                if (!c.empty()) colnames.push_back(c);
+                if (comma == string::npos) break;
+                cpos = comma + 1;
+            }
+            if (colnames.empty()) {
+                cout << "SQL syntax error: no columns specified" << endl;
+                return true;
+            }
+            OpResult res;
+            if (colnames.size() == 1) {
+                res = g_engine.createIndex(s.currentDB, tname, colnames[0]);
+            } else {
+                res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName);
+            }
             if (res != OpResult::Success) {
                 cout << "Create index failed" << endl;
                 return true;
@@ -2014,7 +2033,11 @@ bool execute(const string& rawSql, Session& s) {
             }
             string tnameOrig = tokens[3];
             string tname = resolveTableName(s, tnameOrig);
-            auto res = g_engine.dropIndex(s.currentDB, tname, name);
+            // Try composite index first, then single-column index
+            auto res = g_engine.dropCompositeIndex(s.currentDB, tname, name);
+            if (res != OpResult::Success) {
+                res = g_engine.dropIndex(s.currentDB, tname, name);
+            }
             if (res != OpResult::Success) {
                 cout << "Drop index failed" << endl;
                 return true;

@@ -77,7 +77,7 @@ int main() {
     if (rows.size() != 1) { std::cerr << "Update failed" << std::endl; return 1; }
 
     // ORDER BY
-    rows = engine.query("test_varchar_db", "users", {}, {}, "name", true);
+    rows = engine.query("test_varchar_db", "users", {}, {}, {{"name", true}});
     if (rows.size() != 3) { std::cerr << "Order by failed" << std::endl; return 1; }
 
     // DELETE
@@ -281,7 +281,7 @@ int main() {
     if (agg.size() != 1) { std::cerr << "Aggregate failed" << std::endl; return 1; }
 
     // GROUP BY
-    auto grp = engine.groupAggregate("test_agg_db", "scores", {}, {{"count", "*"}}, "dept", {});
+    auto grp = engine.groupAggregate("test_agg_db", "scores", {}, {{"count", "*"}}, {"dept"}, {});
     if (grp.size() != 2) { std::cerr << "GROUP BY expected 2 groups, got " << grp.size() << std::endl; return 1; }
 
     std::filesystem::remove_all("test_agg_db");
