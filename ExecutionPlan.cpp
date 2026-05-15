@@ -74,6 +74,15 @@ static bool evalCondRaw(const StorageEngine::Condition& cond,
         if (cond.op == "<=" && v.year && (d > v))   return false;
         if (cond.op == ">=" && v.year && (d < v))   return false;
         if (cond.op == "!=" && v.year && d == v)    return false;
+    } else if (col.dataType == "timestamp") {
+        int64_t num = val.empty() ? 0 : parseTimestampToSeconds(val);
+        int64_t cmp = parseTimestampToSeconds(cond.value);
+        if (cond.op == "<"  && cmp != 0 && !(num < cmp)) return false;
+        if (cond.op == ">"  && cmp != 0 && !(num > cmp)) return false;
+        if (cond.op == "="  && cmp != 0 && num != cmp)   return false;
+        if (cond.op == "<=" && cmp != 0 && (num > cmp))  return false;
+        if (cond.op == ">=" && cmp != 0 && (num < cmp))  return false;
+        if (cond.op == "!=" && cmp != 0 && num == cmp)   return false;
     } else {
         int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
@@ -367,6 +376,8 @@ bool SortOp::open() {
                 it.s = val;
             } else if (scol.dataType == "date") {
                 it.d = val.empty() ? Date{} : Date(val.c_str());
+            } else if (scol.dataType == "timestamp") {
+                it.n = val.empty() ? 0 : parseTimestampToSeconds(val);
             } else {
                 it.n = val.empty() ? 0 : StorageEngine::parseInt(val);
             }
@@ -503,6 +514,11 @@ bool NestedLoopJoinOp::next(std::string& outRow) {
                 std::memcpy(&ld, curLeftRow_.data() + leftOff, DATE_SIZE);
                 std::memcpy(&rd, rightRow.data() + rightOff, DATE_SIZE);
                 match = (ld == rd);
+            } else if (lc->dataType == "timestamp") {
+                int64_t lv = 0, rv = 0;
+                std::memcpy(&lv, curLeftRow_.data() + leftOff, TIMESTAMP_SIZE);
+                std::memcpy(&rv, rightRow.data() + rightOff, TIMESTAMP_SIZE);
+                match = (lv == rv);
             } else {
                 int64_t lv = 0, rv = 0;
                 std::memcpy(&lv, curLeftRow_.data() + leftOff, lc->dsize);

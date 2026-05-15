@@ -742,6 +742,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeIntColumn(cname, isNull, 3, isPK));
             } else if (ctype.substr(0, 4) == "date") {
                 tbl.append(makeDateColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 9) == "timestamp") {
+                tbl.append(makeTimestampColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "char") {
                 size_t len = 0;
                 if (!isBrace && parts.size() >= 3) {

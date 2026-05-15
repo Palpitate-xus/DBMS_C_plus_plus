@@ -124,3 +124,57 @@ inline std::ostream& operator<<(std::ostream& ost, Date a) {
     ost << a.year << '-' << a.month << '-' << a.day;
     return ost;
 }
+
+// ========================================================================
+// Timestamp helpers: store as int64_t seconds since Date epoch
+// ========================================================================
+inline int64_t parseTimestampToSeconds(const std::string& s) {
+    int y = 0, m = 0, d = 0, h = 0, mn = 0, sec = 0;
+    auto sp = s.find(' ');
+    std::string datePart = (sp == std::string::npos) ? s : s.substr(0, sp);
+    std::string timePart = (sp == std::string::npos) ? "00:00:00" : s.substr(sp + 1);
+    // Parse date YYYY-MM-DD
+    int pos[2] = {0, 0};
+    int k = 0;
+    for (size_t i = 0; i < datePart.size() && k < 2; i++) {
+        if (datePart[i] == '-') pos[k++] = static_cast<int>(i);
+    }
+    if (pos[0] && pos[1]) {
+        for (int i = 0; i < pos[0]; i++) y = y * 10 + datePart[i] - '0';
+        for (int i = pos[0] + 1; i < pos[1]; i++) m = m * 10 + datePart[i] - '0';
+        for (size_t i = pos[1] + 1; i < datePart.size(); i++) d = d * 10 + datePart[i] - '0';
+    }
+    // Parse time HH:MM:SS
+    int tpos[2] = {0, 0};
+    k = 0;
+    for (size_t i = 0; i < timePart.size() && k < 2; i++) {
+        if (timePart[i] == ':') tpos[k++] = static_cast<int>(i);
+    }
+    if (tpos[0] && tpos[1]) {
+        for (int i = 0; i < tpos[0]; i++) h = h * 10 + timePart[i] - '0';
+        for (int i = tpos[0] + 1; i < tpos[1]; i++) mn = mn * 10 + timePart[i] - '0';
+        for (size_t i = tpos[1] + 1; i < timePart.size(); i++) sec = sec * 10 + timePart[i] - '0';
+    }
+    Date dt(y, m, d);
+    if (dt.year == 0) return 0;
+    return dt.convert() * 86400LL + h * 3600LL + mn * 60LL + sec;
+}
+
+inline std::string formatTimestampSeconds(int64_t ts) {
+    if (ts < 0) return "";
+    int64_t dayNum = ts / 86400;
+    int64_t sod = ts % 86400;
+    Date d = DISCONV(dayNum);
+    if (d.year == 0) return "";
+    int h = static_cast<int>(sod / 3600);
+    int mn = static_cast<int>((sod % 3600) / 60);
+    int s = static_cast<int>(sod % 60);
+    std::string res = str(d) + " ";
+    if (h < 10) res += "0";
+    res += transstr(h) + ":";
+    if (mn < 10) res += "0";
+    res += transstr(mn) + ":";
+    if (s < 10) res += "0";
+    res += transstr(s);
+    return res;
+}

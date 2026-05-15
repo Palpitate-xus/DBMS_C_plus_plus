@@ -21,9 +21,10 @@ namespace dbms {
 
 constexpr size_t MAX_COLUMNS = 30;
 constexpr size_t MAX_TABLE_NAME_LEN = 15;
-constexpr size_t MAX_TYPE_NAME_LEN = 4;
+constexpr size_t MAX_TYPE_NAME_LEN = 12;
 constexpr size_t MAX_COL_NAME_LEN = 15;
 constexpr size_t DATE_SIZE = 12;
+constexpr size_t TIMESTAMP_SIZE = 8;
 constexpr int64_t INF = 0x8000000000000000LL;
 
 // MVCC header size per row
@@ -412,5 +413,6 @@ Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK 
 Column makeStringColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
 Column makeDateColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK = false);
+Column makeTimestampColumn(const std::string& name, bool isNull, bool isPK = false);
 
 } // namespace dbms

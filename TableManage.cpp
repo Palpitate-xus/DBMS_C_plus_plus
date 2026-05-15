@@ -214,6 +214,16 @@ Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bo
     return c;
 }
 
+Column makeTimestampColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "timestamp";
+    c.dsize = TIMESTAMP_SIZE;
+    return c;
+}
+
 // ========================================================================
 // StorageEngine
 // ========================================================================
@@ -793,6 +803,10 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         Date d;
         std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
         return (d.year == 0) ? "" : str(d);
+    } else if (col.dataType == "timestamp") {
+        int64_t val = 0;
+        std::memcpy(&val, rowBuffer.data() + offset, TIMESTAMP_SIZE);
+        return (val == INF || val == 0) ? "" : formatTimestampSeconds(val);
     } else {
         int64_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
@@ -1403,6 +1417,15 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && v.year && (d > v))   return false;
         if (cond.op == ">=" && v.year && (d < v))   return false;
         if (cond.op == "!=" && v.year && d == v)    return false;
+    } else if (col.dataType == "timestamp") {
+        int64_t num = val.empty() ? 0 : parseTimestampToSeconds(val);
+        int64_t cmp = parseTimestampToSeconds(cond.value);
+        if (cond.op == "<"  && cmp != 0 && !(num < cmp)) return false;
+        if (cond.op == ">"  && cmp != 0 && !(num > cmp)) return false;
+        if (cond.op == "="  && cmp != 0 && num != cmp)   return false;
+        if (cond.op == "<=" && cmp != 0 && (num > cmp))  return false;
+        if (cond.op == ">=" && cmp != 0 && (num < cmp))  return false;
+        if (cond.op == "!=" && cmp != 0 && num == cmp)   return false;
     } else {
         int64_t num = val.empty() ? INF : parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
@@ -1480,6 +1503,9 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     Date d(val.c_str());
                     std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
                 }
+            } else if (col.dataType == "timestamp") {
+                int64_t num = val.empty() ? INF : parseTimestampToSeconds(val);
+                std::memcpy(&rowBuffer[offset], &num, TIMESTAMP_SIZE);
             } else {
                 int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
                 std::memcpy(&rowBuffer[offset], &num, col.dsize);
@@ -1516,6 +1542,9 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                         Date d(val.c_str());
                         std::memcpy(&fixedData[fixedOff], &d, DATE_SIZE);
                     }
+                } else if (col.dataType == "timestamp") {
+                    int64_t num = val.empty() ? INF : parseTimestampToSeconds(val);
+                    std::memcpy(&fixedData[fixedOff], &num, TIMESTAMP_SIZE);
                 } else {
                     int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
                     std::memcpy(&fixedData[fixedOff], &num, col.dsize);
@@ -1649,7 +1678,14 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType == "timestamp" && !val.empty()) {
+            int64_t ts = parseTimestampToSeconds(val);
+            if (ts == 0) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+        }
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
