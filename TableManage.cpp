@@ -224,6 +224,17 @@ Column makeTimestampColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeTextColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "text";
+    c.dsize = 65535;
+    return c;
+}
+
 // ========================================================================
 // StorageEngine
 // ========================================================================
@@ -2418,8 +2429,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     auto conds = parseConditions(conditions);
     std::vector<std::pair<int64_t, std::string>> matchRows;
     if (conds.empty()) {
-        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t) {
-            matchRows.emplace_back(encodeRid(pid, sid), std::string(data, rowSize));
+        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+            matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
         });
     } else {
         auto ids = filterRows(dbname, tablename, conds);
@@ -2624,7 +2635,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "cast" && expr.funcArgs.size() >= 2) {
         std::string val = getVal(expr.funcArgs[0]);
         std::string targetType = expr.funcArgs[1];
-        if (targetType == "char" || targetType == "varchar") {
+        if (targetType == "char" || targetType == "varchar" || targetType == "text") {
             return val;
         }
         if (targetType == "int" || targetType == "integer" || targetType == "tinyint" || targetType == "long") {
@@ -2636,6 +2647,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (targetType == "date") {
             Date d(val.c_str());
             return (d.year == 0) ? "" : str(d);
+        }
+        if (targetType == "timestamp") {
+            int64_t ts = parseTimestampToSeconds(val);
+            return (ts == 0) ? "" : formatTimestampSeconds(ts);
         }
         return val;
     }
@@ -2662,8 +2677,8 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
     auto conds = parseConditions(conditions);
     std::vector<std::pair<int64_t, std::string>> matchRows;
     if (conds.empty()) {
-        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t) {
-            matchRows.emplace_back(encodeRid(pid, sid), std::string(data, rowSize));
+        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+            matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
         });
     } else {
         auto ids = filterRows(dbname, tablename, conds);

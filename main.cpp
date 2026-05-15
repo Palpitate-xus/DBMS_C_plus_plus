@@ -22,6 +22,8 @@ using dbms::makeDateColumn;
 using dbms::makeIntColumn;
 using dbms::makeStringColumn;
 using dbms::makeVarCharColumn;
+using dbms::makeTimestampColumn;
+using dbms::makeTextColumn;
 using dbms::OpResult;
 using dbms::StorageEngine;
 using dbms::TableSchema;
@@ -776,6 +778,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 }
                 if (len == 0) len = 1;
                 tbl.append(makeVarCharColumn(cname, isNull, len, isPK));
+            } else if (ctype.substr(0, 4) == "text") {
+                tbl.append(makeTextColumn(cname, isNull, isPK));
             }
             // Apply unique/default/check to last appended column
             if (tbl.len > 0) {
@@ -1555,6 +1559,8 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeIntColumn(cname, isNull, 3);
             } else if (typeName.substr(0, 4) == "date") {
                 col = makeDateColumn(cname, isNull);
+            } else if (typeName.substr(0, 9) == "timestamp") {
+                col = makeTimestampColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "char") {
                 size_t len = 0;
                 for (size_t i = 4; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
@@ -1569,6 +1575,8 @@ bool execute(const string& rawSql, Session& s) {
                     len = len * 10 + (typeName[i] - '0');
                 if (len == 0) len = 1;
                 col = makeVarCharColumn(cname, isNull, len);
+            } else if (typeName.substr(0, 4) == "text") {
+                col = makeTextColumn(cname, isNull);
             } else {
                 cout << "Unknown data type" << endl;
                 return true;
