@@ -155,7 +155,8 @@ public:
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
                                    const std::vector<std::string>& conditions,
                                    const std::set<std::string>& selectCols,
-                                   const std::vector<OrderBySpec>& orderBy = {});
+                                   const std::vector<OrderBySpec>& orderBy = {},
+                                   bool forUpdate = false);
 
     // Scalar function expression for queryExpr
     struct SelectExpr {

@@ -2492,6 +2492,20 @@ bool execute(const string& rawSql, Session& s) {
         // Process derived tables: (SELECT ...) AS alias
         sql = processDerivedTables(sql, s);
 
+        // Parse FOR UPDATE / FOR SHARE
+        bool forUpdate = false;
+        {
+            size_t fuPos = sql.find("for update");
+            if (fuPos != string::npos) {
+                forUpdate = true;
+                sql = trim(sql.substr(0, fuPos));
+            }
+            size_t fsPos = sql.find("for share");
+            if (fsPos != string::npos) {
+                sql = trim(sql.substr(0, fsPos));
+            }
+        }
+
         // RAII guard to drop temp tables created for CTEs and derived tables
         struct TempTableGuard {
             Session* ps;
@@ -2664,6 +2678,8 @@ bool execute(const string& rawSql, Session& s) {
                 string condStr = normalizeConditionStr(whereClause);
                 condTokens = tokenize(condStr);
             }
+
+            if (forUpdate) { cout << "FOR UPDATE not supported with JOIN" << endl; return true; }
 
             TableSchema leftTbl = g_engine.getTableSchema(s.currentDB, leftTable);
             TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
@@ -2934,6 +2950,7 @@ bool execute(const string& rawSql, Session& s) {
 
         vector<string> answers;
         if (!groupByCols.empty()) {
+            if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
             for (const auto& gc : groupByCols) cout << gc << ' ';
             vector<pair<string, string>> pureAgg;
             for (const auto& it : aggItems) {
@@ -2972,6 +2989,7 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
+            if (forUpdate) { cout << "FOR UPDATE not supported with aggregate" << endl; return true; }
             if (condTokens.empty()) {
                 answers = g_engine.aggregate(s.currentDB, tname, {}, pureAgg);
             } else {
@@ -2988,6 +3006,7 @@ bool execute(const string& rawSql, Session& s) {
                 }
             }
         } else if (hasWindow) {
+            if (forUpdate) { cout << "FOR UPDATE not supported with window functions" << endl; return true; }
             // Output header
             for (size_t i = 0; i < aggItems.size(); ++i) {
                 if (exprTypes[i] == 2) {
@@ -3132,6 +3151,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         } else if (hasScalar) {
+            if (forUpdate) { cout << "FOR UPDATE not supported with scalar functions" << endl; return true; }
             for (const auto& expr : selectExprs) {
                 cout << expr.displayName << ' ';
             }
@@ -3158,7 +3178,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs);
+                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs, forUpdate);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -3166,7 +3186,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs);
+                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs, forUpdate);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }

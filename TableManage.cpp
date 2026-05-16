@@ -2609,7 +2609,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,
                                                const std::set<std::string>& selectCols,
-                                               const std::vector<OrderBySpec>& orderBy) {
+                                               const std::vector<OrderBySpec>& orderBy,
+                                               bool forUpdate) {
     std::vector<std::string> result;
 
     // information_schema virtual tables
@@ -2645,10 +2646,14 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         }
     }
 
-    // Row-level shared locks within transaction
+    // Row-level locks within transaction
     if (inTransaction_) {
         for (auto& mr : matchRows) {
-            lockManager_.rowLockShared(tablename, mr.first);
+            if (forUpdate) {
+                lockManager_.rowLockExclusive(tablename, mr.first);
+            } else {
+                lockManager_.rowLockShared(tablename, mr.first);
+            }
         }
     }
 
