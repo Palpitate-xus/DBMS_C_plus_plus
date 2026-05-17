@@ -2912,6 +2912,18 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return val;
     }
+    if (expr.funcName == "coalesce") {
+        for (const auto& arg : expr.funcArgs) {
+            std::string v = getVal(arg);
+            if (!v.empty()) return v;
+        }
+        return "";
+    }
+    if (expr.funcName == "nullif" && expr.funcArgs.size() >= 2) {
+        std::string v1 = getVal(expr.funcArgs[0]);
+        std::string v2 = getVal(expr.funcArgs[1]);
+        return (v1 == v2) ? "" : v1;
+    }
     return "";
 }
 

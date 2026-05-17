@@ -201,7 +201,8 @@ static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "upper", "lower", "trim", "substring", "concat",
                                          "abs", "round", "ceil", "floor",
                                          "now", "current_timestamp", "extract",
-                                         "case_when", "cast"};
+                                         "case_when", "cast",
+                                         "coalesce", "nullif"};
     return scalars.find(name) != scalars.end();
 }
 
