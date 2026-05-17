@@ -2798,10 +2798,16 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // EXPLAIN: show query plan without executing
+    // EXPLAIN / EXPLAIN ANALYZE
     if (sql.substr(0, 7) == "explain") {
         if (!checkDB(s)) return true;
-        string inner = trim(sql.substr(7));
+        bool isAnalyze = false;
+        string rest = trim(sql.substr(7));
+        if (rest.size() >= 8 && rest.substr(0, 8) == "analyze ") {
+            isAnalyze = true;
+            rest = trim(rest.substr(8));
+        }
+        string inner = rest;
         if (inner.size() < 6 || inner.substr(0, 6) != "select") {
             cout << "EXPLAIN only supports SELECT" << endl;
             return true;
@@ -2877,6 +2883,26 @@ bool execute(const string& rawSql, Session& s) {
         ctx.distinct = isDistinct;
         auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
         cout << dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB);
+
+        if (isAnalyze) {
+            // Execute the query and collect actual statistics
+            auto execStart = std::chrono::steady_clock::now();
+            size_t actualRows = 0;
+
+            // Use the query engine to execute the parsed SELECT
+            // We need to re-run through the normal SELECT path
+            // For simplicity, execute via engine.query() with parsed params
+            auto answers = g_engine.query(s.currentDB, tname, conds, selectCols,
+                {dbms::StorageEngine::OrderBySpec{orderByCol, orderByAsc}}, false);
+            actualRows = answers.size();
+
+            auto execEnd = std::chrono::steady_clock::now();
+            double execMs = std::chrono::duration<double, std::milli>(execEnd - execStart).count();
+
+            cout << "\n--- ANALYZE ---\n";
+            cout << "Actual time: " << std::fixed << std::setprecision(3) << execMs << " ms\n";
+            cout << "Actual rows: " << actualRows << "\n";
+        }
         return false;
     }
 
