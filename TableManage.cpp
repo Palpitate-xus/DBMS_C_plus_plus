@@ -1038,6 +1038,107 @@ std::string StorageEngine::buildCompositeKey(const std::string& rowBuffer,
     return key;
 }
 
+// ========================================================================
+// Trigger support
+// ========================================================================
+std::filesystem::path StorageEngine::triggerPath(const std::string& dbname) const {
+    return dbPath(dbname) / ".triggers";
+}
+
+void StorageEngine::writeTrigger(std::ostream& out, const Trigger& trg) const {
+    size_t n = trg.name.size();
+    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
+    out.write(trg.name.data(), static_cast<std::streamsize>(n));
+    n = trg.timing.size();
+    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
+    out.write(trg.timing.data(), static_cast<std::streamsize>(n));
+    n = trg.event.size();
+    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
+    out.write(trg.event.data(), static_cast<std::streamsize>(n));
+    n = trg.tableName.size();
+    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
+    out.write(trg.tableName.data(), static_cast<std::streamsize>(n));
+    n = trg.action.size();
+    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
+    out.write(trg.action.data(), static_cast<std::streamsize>(n));
+}
+
+StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
+    Trigger trg;
+    auto readStr = [&](std::string& s) {
+        size_t n = 0;
+        in.read(reinterpret_cast<char*>(&n), sizeof(size_t));
+        if (!in || n > 100000) return;
+        s.resize(n);
+        in.read(s.data(), static_cast<std::streamsize>(n));
+    };
+    readStr(trg.name);
+    readStr(trg.timing);
+    readStr(trg.event);
+    readStr(trg.tableName);
+    readStr(trg.action);
+    return trg;
+}
+
+OpResult StorageEngine::createTrigger(const std::string& dbname, const Trigger& trg) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto existing = getAllTriggers(dbname);
+    for (const auto& t : existing) {
+        if (t.name == trg.name) return OpResult::Success; // already exists
+    }
+    existing.push_back(trg);
+    std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
+    size_t count = existing.size();
+    out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+    for (const auto& t : existing) writeTrigger(out, t);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropTrigger(const std::string& dbname, const std::string& trgName) {
+    auto existing = getAllTriggers(dbname);
+    bool found = false;
+    {
+        std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
+        size_t count = 0;
+        for (const auto& t : existing) {
+            if (t.name != trgName) ++count;
+        }
+        out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+        for (const auto& t : existing) {
+            if (t.name != trgName) writeTrigger(out, t);
+            else found = true;
+        }
+    }
+    return found ? OpResult::Success : OpResult::TableNotExist;
+}
+
+std::vector<StorageEngine::Trigger> StorageEngine::getTriggers(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& timing, const std::string& event) const {
+    std::vector<Trigger> result;
+    auto all = getAllTriggers(dbname);
+    for (const auto& t : all) {
+        if (t.tableName == tablename && t.timing == timing && t.event == event) {
+            result.push_back(t);
+        }
+    }
+    return result;
+}
+
+std::vector<StorageEngine::Trigger> StorageEngine::getAllTriggers(const std::string& dbname) const {
+    std::vector<Trigger> result;
+    std::ifstream in(triggerPath(dbname), std::ios::binary);
+    if (!in) return result;
+    size_t count = 0;
+    in.read(reinterpret_cast<char*>(&count), sizeof(size_t));
+    if (!in || count > 10000) return result;
+    for (size_t i = 0; i < count && in; ++i) {
+        Trigger t = readTrigger(in);
+        if (!t.name.empty()) result.push_back(std::move(t));
+    }
+    return result;
+}
+
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
 bool TableSchema::hasPrimaryKey() const {
     if (!pkColIndices.empty()) return true;
@@ -2151,6 +2252,24 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
     }
     lockManager_.unlock(tablename);
+
+    // Fire AFTER INSERT triggers
+    if (triggerExecutor_) {
+        auto triggers = getTriggers(dbname, tablename, "after", "insert");
+        for (const auto& trg : triggers) {
+            std::string action = trg.action;
+            for (const auto& [col, val] : actualValues) {
+                std::string placeholder = "NEW." + col;
+                size_t pos = 0;
+                while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                    action.replace(pos, placeholder.size(), val);
+                    pos += val.size();
+                }
+            }
+            triggerExecutor_(action);
+        }
+    }
+
     return OpResult::Success;
 }
 
@@ -2575,6 +2694,28 @@ OpResult StorageEngine::remove(const std::string& dbname,
         }
     }
     lockManager_.unlock(tablename);
+
+    // Fire AFTER DELETE triggers
+    if (triggerExecutor_) {
+        auto triggers = getTriggers(dbname, tablename, "after", "delete");
+        for (const auto& trg : triggers) {
+            for (const auto& row : rowsToDelete) {
+                if (row.empty()) continue;
+                std::string action = trg.action;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    std::string val = extractColumnValue(row, tbl, i);
+                    std::string placeholder = "OLD." + tbl.cols[i].dataName;
+                    size_t pos = 0;
+                    while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                        action.replace(pos, placeholder.size(), val);
+                        pos += val.size();
+                    }
+                }
+                triggerExecutor_(action);
+            }
+        }
+    }
+
     return OpResult::Success;
 }
 
@@ -2802,6 +2943,29 @@ OpResult StorageEngine::update(const std::string& dbname,
     }
 
     lockManager_.unlock(tablename);
+
+    // Fire AFTER UPDATE triggers
+    if (triggerExecutor_) {
+        auto triggers = getTriggers(dbname, tablename, "after", "update");
+        for (const auto& trg : triggers) {
+            for (int64_t rid : matchIds) {
+                std::string oldRow, newRow;
+                if (!readRowByRid(pa, rid, newRow, tbl)) continue;
+                std::string action = trg.action;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    std::string val = extractColumnValue(newRow, tbl, i);
+                    std::string placeholder = "NEW." + tbl.cols[i].dataName;
+                    size_t pos = 0;
+                    while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                        action.replace(pos, placeholder.size(), val);
+                        pos += val.size();
+                    }
+                }
+                triggerExecutor_(action);
+            }
+        }
+    }
+
     return OpResult::Success;
 }
 

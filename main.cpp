@@ -1569,6 +1569,55 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
+        if (sql.substr(7, 7) == "trigger") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            // create trigger name before/after insert/update/delete on table action
+            string rest = trim(sql.substr(15));
+            // Parse: name timing event on tablename action
+            vector<string> tparts;
+            {
+                string cur;
+                for (char c : rest) {
+                    if (isspace(static_cast<unsigned char>(c))) {
+                        if (!cur.empty()) { tparts.push_back(cur); cur.clear(); }
+                    } else { cur += c; }
+                }
+                if (!cur.empty()) tparts.push_back(cur);
+            }
+            if (tparts.size() < 6) {
+                cout << "SQL syntax error: CREATE TRIGGER name timing event ON table action" << endl;
+                return true;
+            }
+            string trgName = tparts[0];
+            string timing = tparts[1];
+            string event = tparts[2];
+            if (tparts[3] != "on") {
+                cout << "SQL syntax error: expected ON" << endl;
+                return true;
+            }
+            string tname = resolveTableName(s, tparts[4]);
+            // Remaining parts are the action SQL
+            string action;
+            for (size_t i = 5; i < tparts.size(); ++i) {
+                if (!action.empty()) action += " ";
+                action += tparts[i];
+            }
+            dbms::StorageEngine::Trigger trg;
+            trg.name = trgName;
+            trg.timing = timing;
+            trg.event = event;
+            trg.tableName = tname;
+            trg.action = action;
+            auto res = g_engine.createTrigger(s.currentDB, trg);
+            if (res != OpResult::Success) {
+                cout << "Create trigger failed" << endl;
+                return true;
+            }
+            cout << "Trigger created" << endl;
+            return false;
+        }
+
         if (sql.substr(7, 4) == "view") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
@@ -2260,6 +2309,15 @@ bool execute(const string& rawSql, Session& s) {
             cout << "View dropped" << endl;
             return false;
         }
+        if (op == "trigger") {
+            auto res = g_engine.dropTrigger(s.currentDB, name);
+            if (res != OpResult::Success) {
+                cout << "Trigger " << name << " not exist" << endl;
+                return true;
+            }
+            cout << "Trigger dropped" << endl;
+            return false;
+        }
         cout << "SQL syntax error" << endl;
         return true;
     }
@@ -2444,6 +2502,23 @@ bool execute(const string& rawSql, Session& s) {
                      << c.defaultValue << ' '
                      << (c.isAutoIncrement ? "auto_increment" : "")
                      << endl;
+            }
+            return false;
+        }
+        if (rest == "triggers") {
+            if (!checkDB(s)) return true;
+            auto triggers = g_engine.getAllTriggers(s.currentDB);
+            if (triggers.empty()) {
+                cout << "No triggers" << endl;
+                return false;
+            }
+            cout << "name timing event table action" << endl;
+            for (const auto& trg : triggers) {
+                cout << trg.name << ' '
+                     << trg.timing << ' '
+                     << trg.event << ' '
+                     << trg.tableName << ' '
+                     << trg.action << endl;
             }
             return false;
         }
@@ -3592,6 +3667,12 @@ int main(int argc, char* argv[]) {
     }
 
     Session s;
+    // Register trigger executor callback
+    g_engine.setTriggerExecutor([&](const std::string& actionSql) -> bool {
+        Session triggerSession = s;
+        triggerSession.preparedStmts.clear();
+        return execute(actionSql, triggerSession);
+    });
     string username, password;
     cout << "login" << endl;
     cin >> username >> password;

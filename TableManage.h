@@ -344,6 +344,24 @@ public:
                                                  const std::string& tablename,
                                                  const std::string& username) const;
 
+    // Trigger support
+    struct Trigger {
+        std::string name;
+        std::string timing;   // "before" or "after"
+        std::string event;    // "insert", "update", "delete"
+        std::string tableName;
+        std::string action;   // SQL action (e.g., "insert into audit_log values (...)")
+    };
+    OpResult createTrigger(const std::string& dbname, const Trigger& trg);
+    OpResult dropTrigger(const std::string& dbname, const std::string& trgName);
+    std::vector<Trigger> getTriggers(const std::string& dbname, const std::string& tablename,
+                                      const std::string& timing, const std::string& event) const;
+    std::vector<Trigger> getAllTriggers(const std::string& dbname) const;
+
+    // Trigger executor callback: action SQL -> success/failure
+    using TriggerExecutor = std::function<bool(const std::string& actionSql)>;
+    void setTriggerExecutor(TriggerExecutor executor) { triggerExecutor_ = executor; }
+
     // Current transaction ID (0 = not in a transaction)
     uint64_t currentTxnId() const { return currentTxnId_; }
     const ReadView* getCurrentReadView() const {
@@ -403,6 +421,12 @@ private:
     std::filesystem::path hashIndexMetaPath(const std::string& dbname,
                                              const std::string& tablename) const;
     mutable std::map<std::string, std::unique_ptr<HashIndex>> hashIndexCache_;
+
+    // Trigger helpers
+    std::filesystem::path triggerPath(const std::string& dbname) const;
+    void writeTrigger(std::ostream& out, const Trigger& trg) const;
+    Trigger readTrigger(std::istream& in) const;
+    TriggerExecutor triggerExecutor_;
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,
