@@ -171,14 +171,17 @@ Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK)
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
-    if (scale <= 1) {
+    if (scale == 0) {
+        c.dataType = "smallint";
+        c.dsize = 2;
+    } else if (scale == 1) {
         c.dataType = "tiny";
         c.dsize = 1;
     } else if (scale == 2) {
         c.dataType = "int";
         c.dsize = 4;
     } else {
-        c.dataType = "long";
+        c.dataType = "bigint";
         c.dsize = 8;
     }
     return c;

@@ -755,6 +755,10 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeIntColumn(cname, isNull, 2, isPK));
             } else if (ctype.substr(0, 4) == "tiny") {
                 tbl.append(makeIntColumn(cname, isNull, 1, isPK));
+            } else if (ctype.substr(0, 8) == "smallint") {
+                tbl.append(makeIntColumn(cname, isNull, 0, isPK));
+            } else if (ctype.substr(0, 6) == "bigint") {
+                tbl.append(makeIntColumn(cname, isNull, 3, isPK));
             } else if (ctype.substr(0, 4) == "long") {
                 tbl.append(makeIntColumn(cname, isNull, 3, isPK));
             } else if (ctype.substr(0, 4) == "date") {
@@ -1589,6 +1593,10 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeIntColumn(cname, isNull, 2);
             } else if (typeName.substr(0, 4) == "tiny") {
                 col = makeIntColumn(cname, isNull, 1);
+            } else if (typeName.substr(0, 8) == "smallint") {
+                col = makeIntColumn(cname, isNull, 0);
+            } else if (typeName.substr(0, 6) == "bigint") {
+                col = makeIntColumn(cname, isNull, 3);
             } else if (typeName.substr(0, 4) == "long") {
                 col = makeIntColumn(cname, isNull, 3);
             } else if (typeName.substr(0, 4) == "date") {
