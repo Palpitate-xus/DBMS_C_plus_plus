@@ -1682,8 +1682,45 @@ bool execute(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 5) == "alter") {
         if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
         vector<string> tokens = tokenize(sql.substr(5));
+        if (tokens.size() < 2) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        if (tokens[0] == "user") {
+            if (tokens.size() < 3) {
+                cout << "SQL syntax error: ALTER USER username password newpassword" << endl;
+                return true;
+            }
+            string uname = tokens[1];
+            string newPw = tokens[2];
+            ifstream infile("user.dat");
+            vector<user> users;
+            bool found = false;
+            if (infile) {
+                user temp;
+                while (infile >> temp.username >> temp.password >> temp.permission) {
+                    if (temp.username == uname) {
+                        found = true;
+                        temp.password = sha256(newPw);
+                    }
+                    users.push_back(temp);
+                }
+            }
+            if (!found) {
+                cout << "User " << uname << " not exist" << endl;
+                return true;
+            }
+            ofstream outfile("user.dat");
+            for (size_t i = 0; i < users.size(); ++i) {
+                if (i > 0) outfile << '\n';
+                outfile << users[i].username << " " << users[i].password << " " << users[i].permission;
+            }
+            outfile << endl;
+            cout << "User password updated" << endl;
+            return false;
+        }
+        if (!checkDB(s)) return true;
         if (tokens.size() < 4 || tokens[0] != "table") {
             cout << "SQL syntax error" << endl;
             return true;
@@ -2392,6 +2429,30 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Table dropped" << endl;
+            return false;
+        }
+        if (op == "user") {
+            ifstream infile("user.dat");
+            vector<user> users;
+            bool found = false;
+            if (infile) {
+                user temp;
+                while (infile >> temp.username >> temp.password >> temp.permission) {
+                    if (temp.username == name) found = true;
+                    else users.push_back(temp);
+                }
+            }
+            ofstream outfile("user.dat");
+            for (size_t i = 0; i < users.size(); ++i) {
+                if (i > 0) outfile << '\n';
+                outfile << users[i].username << " " << users[i].password << " " << users[i].permission;
+            }
+            outfile << endl;
+            if (!found) {
+                cout << "User " << name << " not exist" << endl;
+                return true;
+            }
+            cout << "User dropped" << endl;
             return false;
         }
         if (op == "database") {
