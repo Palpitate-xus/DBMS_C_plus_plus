@@ -1797,17 +1797,104 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Insert)) return true;
 
-        // Find column list and value list
+        // Find column list
         size_t colStart = sql.find('(', 12);
         size_t colEnd = sql.find(')', colStart);
-        size_t valStart = sql.find('(', colEnd);
-        size_t valEnd = sql.find(')', valStart);
-        if (colStart == string::npos || valStart == string::npos) {
+        if (colStart == string::npos) {
             cout << "SQL syntax error" << endl;
             return true;
         }
 
         string colsStr = trim(sql.substr(colStart + 1, colEnd - colStart - 1));
+
+        // Check for INSERT INTO ... SELECT
+        size_t selectPos = sql.find("select", colEnd);
+        if (selectPos != string::npos) {
+            // Parse INSERT INTO ... SELECT
+            vector<string> cols;
+            {
+                stringstream css(colsStr);
+                string item;
+                while (getline(css, item, ',')) cols.push_back(trim(item));
+            }
+
+            string selectSql = trim(sql.substr(selectPos));
+            // Parse the SELECT: extract FROM table, columns, WHERE
+            size_t fromPos = selectSql.find("from");
+            if (fromPos == string::npos) {
+                cout << "SQL syntax error: SELECT requires FROM" << endl;
+                return true;
+            }
+            string selectColsStr = trim(selectSql.substr(6, fromPos - 6));
+            size_t wherePos = selectSql.find("where", fromPos);
+            size_t orderPos = selectSql.find("order by", fromPos);
+            string srcTname = trim(selectSql.substr(fromPos + 4,
+                (wherePos != string::npos) ? (wherePos - fromPos - 4)
+                : (orderPos != string::npos) ? (orderPos - fromPos - 4)
+                : (selectSql.size() - fromPos - 4)));
+
+            vector<string> selectCols;
+            {
+                stringstream scs(selectColsStr);
+                string item;
+                while (getline(scs, item, ',')) selectCols.push_back(trim(item));
+            }
+            if (cols.size() != selectCols.size()) {
+                cout << "SQL syntax error: column count mismatch" << endl;
+                return true;
+            }
+
+            vector<string> conds;
+            if (wherePos != string::npos) {
+                size_t condEnd = (orderPos != string::npos) ? orderPos : selectSql.size();
+                string condStr = normalizeConditionStr(trim(selectSql.substr(wherePos + 5, condEnd - wherePos - 5)));
+                if (!condStr.empty()) {
+                    vector<string> rawConds = splitConds(condStr);
+                    for (auto& c : rawConds) {
+                        string mc = modifyLogic(c);
+                        if (!mc.empty()) conds.push_back(mc);
+                    }
+                }
+            }
+
+            TableSchema srcTbl = g_engine.getTableSchema(s.currentDB, srcTname);
+            auto parsedConds = dbms::StorageEngine::parseConditions(conds);
+
+            int inserted = 0;
+            g_engine.forEachRow(s.currentDB, srcTname, [&](uint32_t, uint16_t, const char* data, size_t len) {
+                std::string row(data, len);
+                bool match = true;
+                for (const auto& c : parsedConds) {
+                    if (!dbms::StorageEngine::evalConditionOnRow(c, row, srcTbl)) {
+                        match = false; break;
+                    }
+                }
+                if (!match) return;
+
+                std::map<string, string> values;
+                for (size_t i = 0; i < cols.size(); ++i) {
+                    size_t colIdx = srcTbl.len;
+                    for (size_t j = 0; j < srcTbl.len; ++j) {
+                        if (srcTbl.cols[j].dataName == selectCols[i]) { colIdx = j; break; }
+                    }
+                    if (colIdx < srcTbl.len) {
+                        values[cols[i]] = dbms::StorageEngine::extractColumnValue(row, srcTbl, colIdx);
+                    }
+                }
+                auto res = g_engine.insert(s.currentDB, resolvedName, values);
+                if (res == dbms::OpResult::Success) ++inserted;
+            });
+            cout << inserted << " rows inserted" << endl;
+            return false;
+        }
+
+        // Regular INSERT INTO ... VALUES
+        size_t valStart = sql.find('(', colEnd);
+        size_t valEnd = sql.find(')', valStart);
+        if (valStart == string::npos) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
 
         // Parse all value rows (multi-row INSERT)
         vector<string> allValStrs;
