@@ -104,6 +104,19 @@ inline int64_t operator-(Date a, Date b) {
     return a.convert() - b.convert();
 }
 
+inline Date dateAddMonths(Date d, int months) {
+    int m = d.month + months;
+    int y = d.year;
+    while (m > 12) { m -= 12; y++; }
+    while (m < 1) { m += 12; y--; }
+    int maxDay = DAYS[m] - DAYS[m + 1] + (m == 2) * ((!(y % 4) && y % 100) || !(y % 400));
+    if (d.day > maxDay) d.day = maxDay;
+    return Date(y, m, d.day);
+}
+inline Date dateAddYears(Date d, int years) {
+    return dateAddMonths(d, years * 12);
+}
+
 inline std::string transstr(int64_t t) {
     if (t == 0) return "0";
     std::string tem;

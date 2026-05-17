@@ -2974,6 +2974,38 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return std::to_string(a % b);
         } catch (...) { return "0"; }
     }
+    if (expr.funcName == "date_add" && expr.funcArgs.size() >= 3) {
+        std::string dstr = getVal(expr.funcArgs[0]);
+        Date d(dstr.c_str());
+        if (d.year == 0) return "";
+        try {
+            int n = std::stoi(getVal(expr.funcArgs[1]));
+            std::string unit = getVal(expr.funcArgs[2]);
+            for (char& c : unit) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            Date result;
+            if (unit == "day" || unit == "days") result = d + n;
+            else if (unit == "month" || unit == "months") result = dateAddMonths(d, n);
+            else if (unit == "year" || unit == "years") result = dateAddYears(d, n);
+            else return "";
+            return str(result);
+        } catch (...) { return ""; }
+    }
+    if (expr.funcName == "date_sub" && expr.funcArgs.size() >= 3) {
+        std::string dstr = getVal(expr.funcArgs[0]);
+        Date d(dstr.c_str());
+        if (d.year == 0) return "";
+        try {
+            int n = std::stoi(getVal(expr.funcArgs[1]));
+            std::string unit = getVal(expr.funcArgs[2]);
+            for (char& c : unit) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            Date result;
+            if (unit == "day" || unit == "days") result = d - n;
+            else if (unit == "month" || unit == "months") result = dateAddMonths(d, -n);
+            else if (unit == "year" || unit == "years") result = dateAddYears(d, -n);
+            else return "";
+            return str(result);
+        } catch (...) { return ""; }
+    }
     return "";
 }
 

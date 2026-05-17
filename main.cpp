@@ -204,7 +204,8 @@ static bool isScalarFunc(const string& name) {
                                          "case_when", "cast",
                                          "coalesce", "nullif",
                                          "replace", "position", "instr",
-                                         "power", "sqrt", "mod"};
+                                         "power", "sqrt", "mod",
+                                         "date_add", "date_sub"};
     return scalars.find(name) != scalars.end();
 }
 
