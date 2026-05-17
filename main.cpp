@@ -2270,6 +2270,80 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // INTERSECT
+    size_t intersectPos = sql.find("intersect");
+    if (intersectPos != string::npos) {
+        if (!checkDB(s)) return true;
+        string leftSql = trim(sql.substr(0, intersectPos));
+        string rightSql = trim(sql.substr(intersectPos + 9));
+        if (leftSql.empty() || rightSql.empty()) {
+            cout << "SQL syntax error: invalid INTERSECT" << endl;
+            return true;
+        }
+        auto* oldBuf = cout.rdbuf();
+        stringstream leftSs;
+        cout.rdbuf(leftSs.rdbuf());
+        execute(leftSql, s);
+        cout.rdbuf(oldBuf);
+        stringstream rightSs;
+        cout.rdbuf(rightSs.rdbuf());
+        execute(rightSql, s);
+        cout.rdbuf(oldBuf);
+        vector<string> leftLines, rightLines;
+        string line;
+        while (getline(leftSs, line)) leftLines.push_back(line);
+        while (getline(rightSs, line)) rightLines.push_back(line);
+        if (!leftLines.empty()) cout << leftLines[0] << endl;
+        else if (!rightLines.empty()) cout << rightLines[0] << endl;
+        set<string> rightSet;
+        for (size_t i = 1; i < rightLines.size(); ++i) rightSet.insert(rightLines[i]);
+        for (size_t i = 1; i < leftLines.size(); ++i) {
+            if (rightSet.find(leftLines[i]) != rightSet.end()) {
+                cout << leftLines[i] << endl;
+            }
+        }
+        return false;
+    }
+
+    // EXCEPT / MINUS
+    size_t exceptPos = sql.find("except");
+    size_t minusPos = sql.find("minus");
+    size_t actualExceptPos = string::npos;
+    if (exceptPos != string::npos) actualExceptPos = exceptPos;
+    else if (minusPos != string::npos) actualExceptPos = minusPos;
+    if (actualExceptPos != string::npos) {
+        if (!checkDB(s)) return true;
+        string leftSql = trim(sql.substr(0, actualExceptPos));
+        string rightSql = trim(sql.substr(actualExceptPos + (exceptPos != string::npos ? 6 : 5)));
+        if (leftSql.empty() || rightSql.empty()) {
+            cout << "SQL syntax error: invalid EXCEPT" << endl;
+            return true;
+        }
+        auto* oldBuf = cout.rdbuf();
+        stringstream leftSs;
+        cout.rdbuf(leftSs.rdbuf());
+        execute(leftSql, s);
+        cout.rdbuf(oldBuf);
+        stringstream rightSs;
+        cout.rdbuf(rightSs.rdbuf());
+        execute(rightSql, s);
+        cout.rdbuf(oldBuf);
+        vector<string> leftLines, rightLines;
+        string line;
+        while (getline(leftSs, line)) leftLines.push_back(line);
+        while (getline(rightSs, line)) rightLines.push_back(line);
+        if (!leftLines.empty()) cout << leftLines[0] << endl;
+        else if (!rightLines.empty()) cout << rightLines[0] << endl;
+        set<string> rightSet;
+        for (size_t i = 1; i < rightLines.size(); ++i) rightSet.insert(rightLines[i]);
+        for (size_t i = 1; i < leftLines.size(); ++i) {
+            if (rightSet.find(leftLines[i]) == rightSet.end()) {
+                cout << leftLines[i] << endl;
+            }
+        }
+        return false;
+    }
+
     // SHOW CONNECTIONS / SHOW STATUS
     if (sql.substr(0, 5) == "show ") {
         string rest = trim(sql.substr(5));
