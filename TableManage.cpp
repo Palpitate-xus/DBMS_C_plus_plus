@@ -755,6 +755,115 @@ std::filesystem::path StorageEngine::secondaryIndexMetaPath(const std::string& d
     return dbPath(dbname) / (tablename + ".secidx");
 }
 
+// ========================================================================
+// Hash Index
+// ========================================================================
+std::filesystem::path StorageEngine::hashIndexPath(const std::string& dbname,
+                                                    const std::string& tablename,
+                                                    const std::string& colname) const {
+    return dbPath(dbname) / (tablename + "_" + colname + ".hidx");
+}
+
+std::filesystem::path StorageEngine::hashIndexMetaPath(const std::string& dbname,
+                                                        const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".hashidx");
+}
+
+std::vector<std::string> StorageEngine::getHashIndexedColumns(const std::string& dbname,
+                                                               const std::string& tablename) const {
+    std::vector<std::string> cols;
+    std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
+    std::ifstream in(meta);
+    if (!in) return cols;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty()) cols.push_back(line);
+    }
+    return cols;
+}
+
+HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
+                                        const std::string& tablename,
+                                        const std::string& colname) const {
+    std::string key = dbname + "." + tablename + "." + colname;
+    auto it = hashIndexCache_.find(key);
+    if (it != hashIndexCache_.end()) return it->second.get();
+    auto idx = std::make_unique<HashIndex>(hashIndexPath(dbname, tablename, colname));
+    if (idx->open()) {
+        HashIndex* ptr = idx.get();
+        hashIndexCache_[key] = std::move(idx);
+        return ptr;
+    }
+    return nullptr;
+}
+
+OpResult StorageEngine::createHashIndex(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    bool found = false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colname) { found = true; break; }
+    }
+    if (!found) return OpResult::InvalidValue;
+
+    std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
+    std::set<std::string> existing;
+    {
+        std::ifstream in(meta);
+        std::string line;
+        while (std::getline(in, line)) if (!line.empty()) existing.insert(line);
+    }
+    if (existing.count(colname)) return OpResult::Success; // already exists
+    existing.insert(colname);
+    {
+        std::ofstream out(meta, std::ios::trunc);
+        for (const auto& c : existing) out << c << '\n';
+    }
+
+    // Build hash index from existing data
+    HashIndex* hidx = getHashIndex(dbname, tablename, colname);
+    if (!hidx) return OpResult::Success;
+    hidx->clear();
+    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                       const char* data, size_t len) {
+        std::string row(data, len);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == colname) {
+                std::string val = extractColumnValue(row, tbl, i);
+                if (!val.empty()) {
+                    hidx->insert(val, encodeRid(pageId, slotId));
+                }
+                break;
+            }
+        }
+    });
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropHashIndex(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& colname) {
+    std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
+    std::set<std::string> existing;
+    {
+        std::ifstream in(meta);
+        std::string line;
+        while (std::getline(in, line)) if (!line.empty()) existing.insert(line);
+    }
+    existing.erase(colname);
+    {
+        std::ofstream out(meta, std::ios::trunc);
+        for (const auto& c : existing) out << c << '\n';
+    }
+    std::string key = dbname + "." + tablename + "." + colname;
+    hashIndexCache_.erase(key);
+    std::filesystem::remove(hashIndexPath(dbname, tablename, colname));
+    return OpResult::Success;
+}
+
 std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbname,
                                                            const std::string& tablename) const {
     std::vector<std::string> cols;
@@ -2012,6 +2121,22 @@ OpResult StorageEngine::insert(const std::string& dbname,
             }
         }
     }
+    // Update hash indexes
+    {
+        auto hashCols = getHashIndexedColumns(dbname, tablename);
+        for (const auto& colname : hashCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            HashIndex* hidx = getHashIndex(dbname, tablename, colname);
+            if (hidx) {
+                std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+                if (!val.empty()) hidx->insert(val, rid);
+            }
+        }
+    }
     lockManager_.unlock(tablename);
     return OpResult::Success;
 }
@@ -2085,10 +2210,19 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     if (idx->search(c.value, val)) ids.insert(val);
                 }
             } else {
-                BPTree* secIdx = getSecondaryIndex(dbname, tablename, c.colName);
-                if (secIdx) {
-                    auto vals = secIdx->searchMulti(c.value);
+                // Try hash index first (O(1) equality lookup)
+                HashIndex* hidx = getHashIndex(dbname, tablename, c.colName);
+                if (hidx) {
+                    auto vals = hidx->search(c.value);
                     for (int64_t v : vals) ids.insert(v);
+                }
+                // Fallback to B+ tree secondary index
+                if (ids.empty()) {
+                    BPTree* secIdx = getSecondaryIndex(dbname, tablename, c.colName);
+                    if (secIdx) {
+                        auto vals = secIdx->searchMulti(c.value);
+                        for (int64_t v : vals) ids.insert(v);
+                    }
                 }
             }
             if (!ids.empty()) {
@@ -2406,6 +2540,27 @@ OpResult StorageEngine::remove(const std::string& dbname,
             }
         }
     }
+    // Remove from hash indexes
+    {
+        auto hashCols = getHashIndexedColumns(dbname, tablename);
+        for (const auto& colname : hashCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            HashIndex* hidx = getHashIndex(dbname, tablename, colname);
+            if (!hidx) continue;
+            size_t hidx_i = 0;
+            for (int64_t rid : toDelete) {
+                if (hidx_i < rowsToDelete.size() && !rowsToDelete[hidx_i].empty()) {
+                    std::string val = extractColumnValue(rowsToDelete[hidx_i], tbl, colIdx);
+                    if (!val.empty()) hidx->remove(val, rid);
+                }
+                ++hidx_i;
+            }
+        }
+    }
     lockManager_.unlock(tablename);
     return OpResult::Success;
 }
@@ -2481,6 +2636,17 @@ OpResult StorageEngine::update(const std::string& dbname,
         std::string oldPK = extractPKValue(row, tbl);
         std::map<std::string, std::string> oldIdxVals;
         for (const auto& colname : indexedCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx < tbl.len) {
+                oldIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
+            }
+        }
+        // Also save hash-indexed column values
+        auto hashCols = getHashIndexedColumns(dbname, tablename);
+        for (const auto& colname : hashCols) {
             size_t colIdx = tbl.len;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
@@ -2595,6 +2761,29 @@ OpResult StorageEngine::update(const std::string& dbname,
             } else if (actualRid != rid && !newKey.empty()) {
                 cidx->remove(newKey);
                 cidx->insertMulti(newKey, actualRid);
+            }
+        }
+
+        // Update hash indexes
+        auto hashIdxCols = getHashIndexedColumns(dbname, tablename);
+        for (const auto& colname : hashIdxCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            HashIndex* hidx = getHashIndex(dbname, tablename, colname);
+            if (!hidx) continue;
+            auto itOld = oldIdxVals.find(colname);
+            std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
+            std::string newVal = extractColumnValue(strippedNewRow, tbl, colIdx);
+            bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
+            if (colChanged && oldVal != newVal) {
+                if (!oldVal.empty()) hidx->remove(oldVal, rid);
+                if (!newVal.empty()) hidx->insert(newVal, actualRid);
+            } else if (actualRid != rid && !newVal.empty()) {
+                hidx->remove(newVal, rid);
+                hidx->insert(newVal, actualRid);
             }
         }
     }

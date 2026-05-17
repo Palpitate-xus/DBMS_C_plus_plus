@@ -16,6 +16,7 @@
 #include "BufferPool.h"
 #include "PageAllocator.h"
 #include "LockManager.h"
+#include "HashIndex.h"
 
 namespace dbms {
 
@@ -255,13 +256,23 @@ public:
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename);
 
-    // Secondary index (single-column)
+    // Secondary index (single-column B+ tree)
     OpResult createIndex(const std::string& dbname, const std::string& tablename,
                          const std::string& colname);
     OpResult dropIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname);
     std::vector<std::string> getIndexedColumns(const std::string& dbname,
                                                 const std::string& tablename) const;
+
+    // Hash index (single-column, O(1) equality lookup)
+    OpResult createHashIndex(const std::string& dbname, const std::string& tablename,
+                              const std::string& colname);
+    OpResult dropHashIndex(const std::string& dbname, const std::string& tablename,
+                            const std::string& colname);
+    std::vector<std::string> getHashIndexedColumns(const std::string& dbname,
+                                                    const std::string& tablename) const;
+    class HashIndex* getHashIndex(const std::string& dbname, const std::string& tablename,
+                                   const std::string& colname) const;
 
     // Composite index (multi-column)
     struct CompositeIndexInfo {
@@ -384,6 +395,14 @@ private:
     std::filesystem::path secondaryIndexMetaPath(const std::string& dbname,
                                                   const std::string& tablename) const;
     mutable std::map<std::string, std::unique_ptr<BPTree>> secondaryIndexCache_;
+
+    // Hash index helpers
+    std::filesystem::path hashIndexPath(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname) const;
+    std::filesystem::path hashIndexMetaPath(const std::string& dbname,
+                                             const std::string& tablename) const;
+    mutable std::map<std::string, std::unique_ptr<HashIndex>> hashIndexCache_;
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,

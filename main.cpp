@@ -1500,11 +1500,17 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 5) == "index") {
+        if (sql.substr(7, 5) == "index" || sql.substr(7, 9) == "hash ind") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
-            // create index idxname on tname(colname) or tname(col1, col2, ...)
-            string rest = trim(sql.substr(13));
+            bool isHash = false;
+            size_t restStart = 13;
+            // Check for "create hash index"
+            if (sql.substr(7, 4) == "hash") {
+                isHash = true;
+                restStart = 18; // after "create hash index "
+            }
+            string rest = trim(sql.substr(restStart));
             size_t onPos = rest.find(" on ");
             if (onPos == string::npos) {
                 cout << "SQL syntax error" << endl;
@@ -1537,8 +1543,16 @@ bool execute(const string& rawSql, Session& s) {
             }
             OpResult res;
             if (colnames.size() == 1) {
-                res = g_engine.createIndex(s.currentDB, tname, colnames[0]);
+                if (isHash) {
+                    res = g_engine.createHashIndex(s.currentDB, tname, colnames[0]);
+                } else {
+                    res = g_engine.createIndex(s.currentDB, tname, colnames[0]);
+                }
             } else {
+                if (isHash) {
+                    cout << "Hash index only supports single-column" << endl;
+                    return true;
+                }
                 res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName);
             }
             if (res != OpResult::Success) {
@@ -2220,6 +2234,9 @@ bool execute(const string& rawSql, Session& s) {
             auto res = g_engine.dropCompositeIndex(s.currentDB, tname, name);
             if (res != OpResult::Success) {
                 res = g_engine.dropIndex(s.currentDB, tname, name);
+            }
+            if (res != OpResult::Success) {
+                res = g_engine.dropHashIndex(s.currentDB, tname, name);
             }
             if (res != OpResult::Success) {
                 cout << "Drop index failed" << endl;
