@@ -2209,6 +2209,119 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // DUMP DATABASE dbname TO 'file.sql'
+    if (sql.substr(0, 4) == "dump") {
+        if (!checkAdmin(s)) return true;
+        string rest = trim(sql.substr(4));
+        size_t toPos = rest.find("to ");
+        if (toPos == string::npos) {
+            cout << "SQL syntax error: DUMP database_name TO 'file.sql'" << endl;
+            return true;
+        }
+        string dbname = trim(rest.substr(0, toPos));
+        string filePath = stripQuotes(trim(rest.substr(toPos + 3)));
+        if (filePath.empty()) {
+            cout << "SQL syntax error: missing file path" << endl;
+            return true;
+        }
+        ofstream out(filePath);
+        if (!out) {
+            cout << "Cannot open file: " << filePath << endl;
+            return true;
+        }
+        auto tables = g_engine.getTableNames(dbname);
+        for (const string& tname : tables) {
+            TableSchema tbl = g_engine.getTableSchema(dbname, tname);
+            out << "CREATE TABLE " << tname << " (";
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (i > 0) out << ", ";
+                out << tbl.cols[i].dataName << " " << tbl.cols[i].dataType;
+                if (tbl.cols[i].dsize > 0 && tbl.cols[i].dataType == "char") {
+                    out << "(" << tbl.cols[i].dsize << ")";
+                } else if (tbl.cols[i].dsize > 0 && tbl.cols[i].dataType == "varchar") {
+                    out << "(" << tbl.cols[i].dsize << ")";
+                }
+                if (tbl.cols[i].isPrimaryKey) out << " PRIMARY KEY";
+                if (!tbl.cols[i].isNull) out << " NOT NULL";
+                if (tbl.cols[i].isUnique) out << " UNIQUE";
+                if (tbl.cols[i].isAutoIncrement) out << " AUTO_INCREMENT";
+            }
+            out << ");\n";
+            vector<string> colNames;
+            for (size_t i = 0; i < tbl.len; ++i) colNames.push_back(tbl.cols[i].dataName);
+            g_engine.forEachRow(dbname, tname, [&](uint32_t, uint16_t, const char* data, size_t len) {
+                std::string row(data, len);
+                out << "INSERT INTO " << tname << " (";
+                for (size_t i = 0; i < colNames.size(); ++i) {
+                    if (i > 0) out << ", ";
+                    out << colNames[i];
+                }
+                out << ") VALUES (";
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (i > 0) out << ", ";
+                    string val = dbms::StorageEngine::extractColumnValue(row, tbl, i);
+                    if (val.empty()) {
+                        out << "NULL";
+                    } else {
+                        string escaped;
+                        for (char c : val) {
+                            if (c == '\'') escaped += "''";
+                            else escaped += c;
+                        }
+                        out << "'" << escaped << "'";
+                    }
+                }
+                out << ");\n";
+            });
+        }
+        cout << "Dumped " << tables.size() << " tables to " << filePath << endl;
+        return false;
+    }
+
+    // RESTORE DATABASE dbname FROM 'file.sql'
+    if (sql.substr(0, 7) == "restore") {
+        if (!checkAdmin(s)) return true;
+        string rest = trim(sql.substr(7));
+        size_t fromPos = rest.find("from ");
+        if (fromPos == string::npos) {
+            cout << "SQL syntax error: RESTORE database_name FROM 'file.sql'" << endl;
+            return true;
+        }
+        string dbname = trim(rest.substr(0, fromPos));
+        string filePath = stripQuotes(trim(rest.substr(fromPos + 5)));
+        if (filePath.empty()) {
+            cout << "SQL syntax error: missing file path" << endl;
+            return true;
+        }
+        ifstream in(filePath);
+        if (!in) {
+            cout << "Cannot open file: " << filePath << endl;
+            return true;
+        }
+        if (!g_engine.databaseExists(dbname)) {
+            g_engine.createDatabase(dbname);
+        }
+        string line, stmt;
+        int count = 0;
+        while (getline(in, line)) {
+            stmt += line;
+            size_t semi = stmt.find(';');
+            if (semi != string::npos) {
+                string cmd = trim(stmt.substr(0, semi));
+                stmt = stmt.substr(semi + 1);
+                if (!cmd.empty()) {
+                    Session tmpS = s;
+                    tmpS.currentDB = dbname;
+                    execute(cmd, tmpS);
+                    ++count;
+                }
+            }
+            stmt += " ";
+        }
+        cout << "Restored " << count << " statements to " << dbname << endl;
+        return false;
+    }
+
     if (sql.substr(0, 5) == "begin") {
         if (!checkDB(s)) return true;
         // Parse optional isolation level: "begin read committed"
