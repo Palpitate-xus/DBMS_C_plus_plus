@@ -2947,6 +2947,33 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         size_t pos = str.find(substr);
         return (pos == std::string::npos) ? "0" : std::to_string(pos + 1);
     }
+    if (expr.funcName == "power" && expr.funcArgs.size() >= 2) {
+        try {
+            double base = std::stod(getVal(expr.funcArgs[0]));
+            double exp = std::stod(getVal(expr.funcArgs[1]));
+            double r = std::pow(base, exp);
+            std::ostringstream oss;
+            oss << r;
+            return oss.str();
+        } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "sqrt" && expr.funcArgs.size() >= 1) {
+        try {
+            double v = std::stod(getVal(expr.funcArgs[0]));
+            double r = std::sqrt(v);
+            std::ostringstream oss;
+            oss << r;
+            return oss.str();
+        } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "mod" && expr.funcArgs.size() >= 2) {
+        try {
+            int64_t a = std::stoll(getVal(expr.funcArgs[0]));
+            int64_t b = std::stoll(getVal(expr.funcArgs[1]));
+            if (b == 0) return "0";
+            return std::to_string(a % b);
+        } catch (...) { return "0"; }
+    }
     return "";
 }
 

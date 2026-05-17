@@ -203,7 +203,8 @@ static bool isScalarFunc(const string& name) {
                                          "now", "current_timestamp", "extract",
                                          "case_when", "cast",
                                          "coalesce", "nullif",
-                                         "replace", "position", "instr"};
+                                         "replace", "position", "instr",
+                                         "power", "sqrt", "mod"};
     return scalars.find(name) != scalars.end();
 }
 
