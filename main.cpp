@@ -56,6 +56,18 @@ static string stripQuotes(const string& s) {
     return s;
 }
 
+static pair<set<string>, bool> parseReturningClause(const string& sql, size_t searchStart) {
+    size_t retPos = sql.find("returning", searchStart);
+    if (retPos == string::npos) return {{}, false};
+    string retStr = trim(sql.substr(retPos + 9));
+    if (retStr == "*") return {{}, true};
+    set<string> cols;
+    stringstream rss(retStr);
+    string item;
+    while (getline(rss, item, ',')) cols.insert(trim(item));
+    return {cols, false};
+}
+
 static vector<string> tokenize(const string& sql) {
     vector<string> tokens;
     size_t i = 0;
@@ -1712,7 +1724,11 @@ bool execute(const string& rawSql, Session& s) {
             }
         }
 
+        // Parse RETURNING clause
+        auto [returningCols, returningAll] = parseReturningClause(sql, valEnd);
+
         int inserted = 0;
+        vector<string> returnedRows;
         for (const string& valsStr : allValStrs) {
             vector<string> vals;
             {
@@ -1740,7 +1756,6 @@ bool execute(const string& rawSql, Session& s) {
                     cout << "Conflict column not in INSERT values" << endl;
                     return true;
                 }
-                // Build WHERE condition for the conflict column
                 string condVal = it->second;
                 vector<string> whereConds;
                 if (!condVal.empty()) whereConds.push_back("=" + conflictCol + " " + condVal);
@@ -1749,7 +1764,13 @@ bool execute(const string& rawSql, Session& s) {
                     cout << "UPSERT update failed" << endl;
                     return true;
                 }
-                ++inserted; // count as inserted (or upserted)
+                ++inserted;
+                // RETURNING for UPSERT: query updated row
+                if (!returningCols.empty() || returningAll) {
+                    auto rr = g_engine.query(s.currentDB, resolvedName, whereConds,
+                                             returningAll ? set<string>() : returningCols, {});
+                    for (auto& r : rr) returnedRows.push_back(r);
+                }
                 continue;
             }
             if (res != OpResult::Success) {
@@ -1757,8 +1778,19 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             ++inserted;
+            // RETURNING: query inserted row
+            if (!returningCols.empty() || returningAll) {
+                vector<string> whereConds;
+                for (auto& kv : values) {
+                    if (!kv.second.empty()) whereConds.push_back("=" + kv.first + " " + kv.second);
+                }
+                auto rr = g_engine.query(s.currentDB, resolvedName, whereConds,
+                                         returningAll ? set<string>() : returningCols, {});
+                for (auto& r : rr) returnedRows.push_back(r);
+            }
         }
         cout << inserted << " row(s) inserted" << endl;
+        for (auto& row : returnedRows) cout << row << endl;
         log(s.username, to_string(inserted) + " row(s) inserted", getTime());
         return false;
     }
@@ -1779,14 +1811,25 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Delete)) return true;
 
+        // Parse RETURNING clause from original SQL (before normalization)
+        auto [returningCols, returningAll] = parseReturningClause(sql, 12);
+
         tokens.erase(tokens.begin());
         if (tokens.empty()) {
+            // RETURNING: query all rows before delete
+            vector<string> returnedRows;
+            if (!returningCols.empty() || returningAll) {
+                auto rr = g_engine.query(s.currentDB, resolvedName, {},
+                                         returningAll ? set<string>() : returningCols, {});
+                returnedRows = rr;
+            }
             auto res = g_engine.remove(s.currentDB, resolvedName, {});
             if (res != OpResult::Success) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
             }
             cout << "Delete done" << endl;
+            for (auto& row : returnedRows) cout << row << endl;
             log(s.username, "delete done", getTime());
             return false;
         }
@@ -1800,6 +1843,15 @@ bool execute(const string& rawSql, Session& s) {
         tokens.push_back(")");
         for (auto& t : tokens) t = modifyLogic(t);
         auto groups = breakDownConditions(tokens);
+        // RETURNING: query rows before delete
+        vector<string> returnedRows;
+        if (!returningCols.empty() || returningAll) {
+            for (const auto& g : groups) {
+                auto rr = g_engine.query(s.currentDB, resolvedName, g,
+                                         returningAll ? set<string>() : returningCols, {});
+                for (auto& r : rr) returnedRows.push_back(r);
+            }
+        }
         for (const auto& g : groups) {
             auto res = g_engine.remove(s.currentDB, resolvedName, g);
             if (res != OpResult::Success) {
@@ -1808,6 +1860,7 @@ bool execute(const string& rawSql, Session& s) {
             }
         }
         cout << "Delete done" << endl;
+        for (auto& row : returnedRows) cout << row << endl;
         log(s.username, "delete done", getTime());
         return false;
     }
@@ -1835,7 +1888,11 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
 
+        // Parse RETURNING clause
+        auto [returningCols, returningAll] = parseReturningClause(sql, setPos);
+
         vector<string> conds;
+        vector<string> returnedRows;
         if (wherePos != std::string::npos) {
             string whereClause = trim(sql.substr(wherePos + 5));
             whereClause = expandSubqueries(whereClause, s);
@@ -1852,14 +1909,28 @@ bool execute(const string& rawSql, Session& s) {
                     return true;
                 }
             }
+            // RETURNING: query updated rows
+            if (!returningCols.empty() || returningAll) {
+                for (const auto& g : groups) {
+                    auto rr = g_engine.query(s.currentDB, resolvedName, g,
+                                             returningAll ? set<string>() : returningCols, {});
+                    for (auto& r : rr) returnedRows.push_back(r);
+                }
+            }
         } else {
             auto res = g_engine.update(s.currentDB, resolvedName, updates, {});
             if (res != OpResult::Success) {
                 cout << "Update failed" << endl;
                 return true;
             }
+            if (!returningCols.empty() || returningAll) {
+                auto rr = g_engine.query(s.currentDB, resolvedName, {},
+                                         returningAll ? set<string>() : returningCols, {});
+                for (auto& r : rr) returnedRows.push_back(r);
+            }
         }
         cout << "Update done" << endl;
+        for (auto& row : returnedRows) cout << row << endl;
         log(s.username, "update done", getTime());
         return false;
     }
