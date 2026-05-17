@@ -27,6 +27,7 @@ using dbms::makeTextColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makeDecimalColumn;
+using dbms::makeBooleanColumn;
 using dbms::OpResult;
 using dbms::StorageEngine;
 using dbms::TableSchema;
@@ -761,6 +762,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeIntColumn(cname, isNull, 3, isPK));
             } else if (ctype.substr(0, 4) == "long") {
                 tbl.append(makeIntColumn(cname, isNull, 3, isPK));
+            } else if (ctype.substr(0, 4) == "bool" || ctype.substr(0, 1) == "bit") {
+                tbl.append(makeBooleanColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "date") {
                 tbl.append(makeDateColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 9) == "timestamp") {
@@ -1599,6 +1602,8 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeIntColumn(cname, isNull, 3);
             } else if (typeName.substr(0, 4) == "long") {
                 col = makeIntColumn(cname, isNull, 3);
+            } else if (typeName.substr(0, 4) == "bool" || typeName.substr(0, 3) == "bit") {
+                col = makeBooleanColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "date") {
                 col = makeDateColumn(cname, isNull);
             } else if (typeName.substr(0, 9) == "timestamp") {

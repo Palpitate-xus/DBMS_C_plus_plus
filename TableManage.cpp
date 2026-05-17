@@ -269,6 +269,16 @@ Column makeDecimalColumn(const std::string& name, bool isNull, int precision, in
     return c;
 }
 
+Column makeBooleanColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "boolean";
+    c.dsize = 1;
+    return c;
+}
+
 // ========================================================================
 // StorageEngine
 // ========================================================================
@@ -866,6 +876,11 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         std::ostringstream oss;
         oss << val;
         return oss.str();
+    } else if (col.dataType == "boolean") {
+        int8_t val = 0;
+        std::memcpy(&val, rowBuffer.data() + offset, sizeof(int8_t));
+        if (val == INT8_MIN) return "";
+        return val ? "true" : "false";
     } else {
         int64_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
@@ -1518,6 +1533,9 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && (num > cmp))  return false;
         if (cond.op == ">=" && (num < cmp))  return false;
         if (cond.op == "!=" && num == cmp)   return false;
+    } else if (col.dataType == "boolean") {
+        if (cond.op == "="  && val != cond.value) return false;
+        if (cond.op == "!=" && val == cond.value) return false;
     } else {
         int64_t num = val.empty() ? INF : parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
@@ -1604,6 +1622,11 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             } else if (col.dataType == "double" || col.dataType == "decimal") {
                 double num = val.empty() ? 0.0 : std::stod(val);
                 std::memcpy(&rowBuffer[offset], &num, sizeof(double));
+            } else if (col.dataType == "boolean") {
+                int8_t bval = val.empty() ? INT8_MIN :
+                    (val == "1" || val == "true" || val == "TRUE") ? 1 :
+                    (val == "0" || val == "false" || val == "FALSE") ? 0 : INT8_MIN;
+                std::memcpy(&rowBuffer[offset], &bval, sizeof(int8_t));
             } else {
                 int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
                 std::memcpy(&rowBuffer[offset], &num, col.dsize);
@@ -1649,6 +1672,11 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 } else if (col.dataType == "double" || col.dataType == "decimal") {
                     double num = val.empty() ? 0.0 : std::stod(val);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(double));
+                } else if (col.dataType == "boolean") {
+                    int8_t bval = val.empty() ? INT8_MIN :
+                        (val == "1" || val == "true" || val == "TRUE") ? 1 :
+                        (val == "0" || val == "false" || val == "FALSE") ? 0 : INT8_MIN;
+                    std::memcpy(&fixedData[fixedOff], &bval, sizeof(int8_t));
                 } else {
                     int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
                     std::memcpy(&fixedData[fixedOff], &num, col.dsize);
@@ -1801,7 +1829,13 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType == "boolean" && !val.empty()) {
+            if (val != "1" && val != "0" && val != "true" && val != "false" && val != "TRUE" && val != "FALSE") {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+        }
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);

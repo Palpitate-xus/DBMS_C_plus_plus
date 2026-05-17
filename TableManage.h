@@ -427,5 +427,6 @@ Column makeTextColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeDoubleColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeDecimalColumn(const std::string& name, bool isNull, int precision, int scale, bool isPK = false);
+Column makeBooleanColumn(const std::string& name, bool isNull, bool isPK = false);
 
 } // namespace dbms
