@@ -1500,15 +1500,21 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 5) == "index" || sql.substr(7, 9) == "hash ind") {
+        if (sql.substr(7, 5) == "index" || sql.substr(7, 9) == "hash ind" || sql.substr(7, 12) == "unique index") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
             bool isHash = false;
+            bool isUnique = false;
             size_t restStart = 13;
             // Check for "create hash index"
             if (sql.substr(7, 4) == "hash") {
                 isHash = true;
                 restStart = 18; // after "create hash index "
+            }
+            // Check for "create unique index"
+            if (sql.substr(7, 6) == "unique") {
+                isUnique = true;
+                restStart = 20; // after "create unique index "
             }
             string rest = trim(sql.substr(restStart));
             size_t onPos = rest.find(" on ");

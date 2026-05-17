@@ -1433,6 +1433,12 @@ OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema
             writeNextSeq(dbname, tbl.tablename, tbl.cols[i].dataName, 1);
         }
     }
+    // Auto-create secondary index for UNIQUE columns
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isUnique) {
+            createIndex(dbname, tbl.tablename, tbl.cols[i].dataName);
+        }
+    }
     return OpResult::Success;
 }
 
@@ -1897,19 +1903,26 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
     }
 
-    // Check single-column UNIQUE constraints
+    // Check single-column UNIQUE constraints (use B+ tree index if available)
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (!col.isUnique) continue;
         auto it = actualValues.find(col.dataName);
         if (it == actualValues.end() || it->second.empty()) continue;
         bool duplicate = false;
-        forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
-            if (duplicate) return;
-            std::string row(data, len);
-            std::string existingVal = extractColumnValue(row, tbl, i);
-            if (existingVal == it->second) duplicate = true;
-        });
+        // Try B+ tree secondary index first
+        BPTree* secIdx = getSecondaryIndex(dbname, tablename, col.dataName);
+        if (secIdx) {
+            int64_t dummy;
+            if (secIdx->search(it->second, dummy)) duplicate = true;
+        } else {
+            forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+                if (duplicate) return;
+                std::string row(data, len);
+                std::string existingVal = extractColumnValue(row, tbl, i);
+                if (existingVal == it->second) duplicate = true;
+            });
+        }
         if (duplicate) {
             lockManager_.unlock(tablename);
             return OpResult::DuplicateKey;
