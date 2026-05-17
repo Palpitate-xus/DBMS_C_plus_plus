@@ -2924,6 +2924,29 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::string v2 = getVal(expr.funcArgs[1]);
         return (v1 == v2) ? "" : v1;
     }
+    if (expr.funcName == "replace" && expr.funcArgs.size() >= 3) {
+        std::string str = getVal(expr.funcArgs[0]);
+        std::string from = getVal(expr.funcArgs[1]);
+        std::string to = getVal(expr.funcArgs[2]);
+        size_t pos = 0;
+        while ((pos = str.find(from, pos)) != std::string::npos) {
+            str.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+        return str;
+    }
+    if (expr.funcName == "position" && expr.funcArgs.size() >= 2) {
+        std::string substr = getVal(expr.funcArgs[0]);
+        std::string str = getVal(expr.funcArgs[1]);
+        size_t pos = str.find(substr);
+        return (pos == std::string::npos) ? "0" : std::to_string(pos + 1);
+    }
+    if (expr.funcName == "instr" && expr.funcArgs.size() >= 2) {
+        std::string str = getVal(expr.funcArgs[0]);
+        std::string substr = getVal(expr.funcArgs[1]);
+        size_t pos = str.find(substr);
+        return (pos == std::string::npos) ? "0" : std::to_string(pos + 1);
+    }
     return "";
 }
 
