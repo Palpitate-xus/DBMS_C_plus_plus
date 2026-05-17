@@ -28,6 +28,8 @@ using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makeDecimalColumn;
 using dbms::makeBooleanColumn;
+using dbms::makeTimeColumn;
+using dbms::makeDateTimeColumn;
 using dbms::OpResult;
 using dbms::StorageEngine;
 using dbms::TableSchema;
@@ -772,6 +774,10 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeDateColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 9) == "timestamp") {
                 tbl.append(makeTimestampColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 4) == "time") {
+                tbl.append(makeTimeColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 8) == "datetime") {
+                tbl.append(makeDateTimeColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "char") {
                 size_t len = 0;
                 if (!isBrace && parts.size() >= 3) {
@@ -1612,6 +1618,10 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeDateColumn(cname, isNull);
             } else if (typeName.substr(0, 9) == "timestamp") {
                 col = makeTimestampColumn(cname, isNull);
+            } else if (typeName.substr(0, 4) == "time") {
+                col = makeTimeColumn(cname, isNull);
+            } else if (typeName.substr(0, 8) == "datetime") {
+                col = makeDateTimeColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "char") {
                 size_t len = 0;
                 for (size_t i = 4; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)

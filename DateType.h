@@ -139,6 +139,39 @@ inline std::ostream& operator<<(std::ostream& ost, Date a) {
 }
 
 // ========================================================================
+// Time helpers: store as int32_t seconds since 00:00:00
+// ========================================================================
+inline int32_t parseTimeToSeconds(const std::string& s) {
+    int h = 0, m = 0, sec = 0;
+    int pos[2] = {0, 0};
+    int k = 0;
+    for (size_t i = 0; i < s.size() && k < 2; i++) {
+        if (s[i] == ':') pos[k++] = static_cast<int>(i);
+    }
+    if (!pos[0] || !pos[1]) return -1;
+    for (int i = 0; i < pos[0]; i++) h = h * 10 + s[i] - '0';
+    for (int i = pos[0] + 1; i < pos[1]; i++) m = m * 10 + s[i] - '0';
+    for (size_t i = pos[1] + 1; i < s.size(); i++) sec = sec * 10 + s[i] - '0';
+    if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) return -1;
+    return h * 3600 + m * 60 + sec;
+}
+
+inline std::string formatTimeSeconds(int32_t secs) {
+    if (secs < 0 || secs > 86399) return "";
+    int h = secs / 3600;
+    int m = (secs % 3600) / 60;
+    int s = secs % 60;
+    std::string res;
+    if (h < 10) res += "0";
+    res += transstr(h) + ":";
+    if (m < 10) res += "0";
+    res += transstr(m) + ":";
+    if (s < 10) res += "0";
+    res += transstr(s);
+    return res;
+}
+
+// ========================================================================
 // Timestamp helpers: store as int64_t seconds since Date epoch
 // ========================================================================
 inline int64_t parseTimestampToSeconds(const std::string& s) {

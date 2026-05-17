@@ -279,6 +279,26 @@ Column makeBooleanColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeTimeColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "time";
+    c.dsize = 4;  // int32_t seconds since 00:00:00
+    return c;
+}
+
+Column makeDateTimeColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "datetime";
+    c.dsize = TIMESTAMP_SIZE;  // same as timestamp: int64_t seconds
+    return c;
+}
+
 // ========================================================================
 // StorageEngine
 // ========================================================================
@@ -858,10 +878,14 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         Date d;
         std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
         return (d.year == 0) ? "" : str(d);
-    } else if (col.dataType == "timestamp") {
+    } else if (col.dataType == "timestamp" || col.dataType == "datetime") {
         int64_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, TIMESTAMP_SIZE);
         return (val == INF || val == 0) ? "" : formatTimestampSeconds(val);
+    } else if (col.dataType == "time") {
+        int32_t val = 0;
+        std::memcpy(&val, rowBuffer.data() + offset, sizeof(int32_t));
+        return (val < 0) ? "" : formatTimeSeconds(val);
     } else if (col.dataType == "float") {
         float val = 0.0f;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(float));
@@ -1506,7 +1530,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && v.year && (d > v))   return false;
         if (cond.op == ">=" && v.year && (d < v))   return false;
         if (cond.op == "!=" && v.year && d == v)    return false;
-    } else if (col.dataType == "timestamp") {
+    } else if (col.dataType == "timestamp" || col.dataType == "datetime") {
         int64_t num = val.empty() ? 0 : parseTimestampToSeconds(val);
         int64_t cmp = parseTimestampToSeconds(cond.value);
         if (cond.op == "<"  && cmp != 0 && !(num < cmp)) return false;
@@ -1515,6 +1539,15 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && cmp != 0 && (num > cmp))  return false;
         if (cond.op == ">=" && cmp != 0 && (num < cmp))  return false;
         if (cond.op == "!=" && cmp != 0 && num == cmp)   return false;
+    } else if (col.dataType == "time") {
+        int32_t num = val.empty() ? -1 : parseTimeToSeconds(val);
+        int32_t cmp = parseTimeToSeconds(cond.value);
+        if (cond.op == "<"  && cmp >= 0 && !(num < cmp)) return false;
+        if (cond.op == ">"  && cmp >= 0 && !(num > cmp)) return false;
+        if (cond.op == "="  && cmp >= 0 && num != cmp)   return false;
+        if (cond.op == "<=" && cmp >= 0 && (num > cmp))  return false;
+        if (cond.op == ">=" && cmp >= 0 && (num < cmp))  return false;
+        if (cond.op == "!=" && cmp >= 0 && num == cmp)   return false;
     } else if (col.dataType == "float") {
         float num = val.empty() ? 0.0f : std::stof(val);
         float cmp = std::stof(cond.value);
@@ -1613,9 +1646,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     Date d(val.c_str());
                     std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
                 }
-            } else if (col.dataType == "timestamp") {
+            } else if (col.dataType == "timestamp" || col.dataType == "datetime") {
                 int64_t num = val.empty() ? INF : parseTimestampToSeconds(val);
                 std::memcpy(&rowBuffer[offset], &num, TIMESTAMP_SIZE);
+            } else if (col.dataType == "time") {
+                int32_t num = val.empty() ? -1 : parseTimeToSeconds(val);
+                std::memcpy(&rowBuffer[offset], &num, sizeof(int32_t));
             } else if (col.dataType == "float") {
                 float num = val.empty() ? 0.0f : std::stof(val);
                 std::memcpy(&rowBuffer[offset], &num, sizeof(float));
@@ -1663,9 +1699,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                         Date d(val.c_str());
                         std::memcpy(&fixedData[fixedOff], &d, DATE_SIZE);
                     }
-                } else if (col.dataType == "timestamp") {
+                } else if (col.dataType == "timestamp" || col.dataType == "datetime") {
                     int64_t num = val.empty() ? INF : parseTimestampToSeconds(val);
                     std::memcpy(&fixedData[fixedOff], &num, TIMESTAMP_SIZE);
+                } else if (col.dataType == "time") {
+                    int32_t num = val.empty() ? -1 : parseTimeToSeconds(val);
+                    std::memcpy(&fixedData[fixedOff], &num, sizeof(int32_t));
                 } else if (col.dataType == "float") {
                     float num = val.empty() ? 0.0f : std::stof(val);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(float));
@@ -1810,9 +1849,16 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType == "timestamp" && !val.empty()) {
+        if (!col.isVariableLength && (col.dataType == "timestamp" || col.dataType == "datetime") && !val.empty()) {
             int64_t ts = parseTimestampToSeconds(val);
             if (ts == 0) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+        }
+        if (!col.isVariableLength && col.dataType == "time" && !val.empty()) {
+            int32_t ts = parseTimeToSeconds(val);
+            if (ts < 0) {
                 lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;
             }
@@ -1835,7 +1881,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
