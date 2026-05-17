@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -35,6 +36,26 @@ using dbms::StorageEngine;
 using dbms::TableSchema;
 
 StorageEngine g_engine;
+
+// ========================================================================
+// Slow query log enhancements
+// ========================================================================
+double g_slowQueryThresholdMs = 100.0;
+static constexpr size_t MAX_SLOW_LOG_ENTRIES = 100;
+
+struct SlowQueryEntry {
+    std::string timestamp;
+    std::string username;
+    std::string dbname;
+    double ms = 0.0;
+    std::string sql;
+};
+static std::vector<SlowQueryEntry> g_slowQueryBuffer;
+static std::mutex g_slowQueryMutex;
+
+void logSlowQuery(const std::string& sql, double ms,
+                  const std::string& username = "",
+                  const std::string& dbname = "");
 
 // ========================================================================
 // Utility
@@ -1377,14 +1398,32 @@ static bool checkDB(const Session& s) {
     return true;
 }
 
-void logSlowQuery(const string& sql, double ms) {
+void logSlowQuery(const std::string& sql, double ms,
+                  const std::string& username,
+                  const std::string& dbname) {
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+
+    // Write to file with enhanced format
     std::ofstream ofs("slow_query.log", std::ios::app);
     if (ofs) {
-        auto now = std::chrono::system_clock::now();
-        auto t = std::chrono::system_clock::to_time_t(now);
-        char buf[64];
-        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
-        ofs << buf << " [" << std::fixed << std::setprecision(2) << ms << "ms] " << sql << "\n";
+        ofs << buf << " [" << username << "] [" << dbname << "] ["
+            << std::fixed << std::setprecision(2) << ms << "ms] " << sql << "\n";
+    }
+
+    // Buffer in memory for SHOW SLOW LOG
+    std::lock_guard<std::mutex> lock(g_slowQueryMutex);
+    SlowQueryEntry entry;
+    entry.timestamp = buf;
+    entry.username = username;
+    entry.dbname = dbname;
+    entry.ms = ms;
+    entry.sql = sql;
+    g_slowQueryBuffer.push_back(std::move(entry));
+    if (g_slowQueryBuffer.size() > MAX_SLOW_LOG_ENTRIES) {
+        g_slowQueryBuffer.erase(g_slowQueryBuffer.begin());
     }
 }
 
@@ -2522,6 +2561,22 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
+        if (rest == "slow log") {
+            std::lock_guard<std::mutex> lock(g_slowQueryMutex);
+            if (g_slowQueryBuffer.empty()) {
+                cout << "No slow queries recorded" << endl;
+                return false;
+            }
+            cout << "timestamp user db ms sql" << endl;
+            for (const auto& e : g_slowQueryBuffer) {
+                cout << e.timestamp << ' '
+                     << e.username << ' '
+                     << e.dbname << ' '
+                     << std::fixed << std::setprecision(2) << e.ms << ' '
+                     << e.sql << endl;
+            }
+            return false;
+        }
         cout << "Unknown SHOW command" << endl;
         return true;
     }
@@ -2581,6 +2636,31 @@ bool execute(const string& rawSql, Session& s) {
         }
         g_engine.revoke(s.currentDB, tname, uname, priv);
         cout << "Revoked " << privStr << " on " << tname << " from " << uname << endl;
+        return false;
+    }
+
+    // SET variable = value
+    if (sql.substr(0, 4) == "set ") {
+        string rest = trim(sql.substr(4));
+        size_t eqPos = rest.find('=');
+        if (eqPos == string::npos) {
+            cout << "SQL syntax error: SET var=value" << endl;
+            return true;
+        }
+        string var = trim(rest.substr(0, eqPos));
+        string val = trim(rest.substr(eqPos + 1));
+        if (var == "slow_query_threshold") {
+            try {
+                g_slowQueryThresholdMs = std::stod(val);
+                cout << "slow_query_threshold set to " << g_slowQueryThresholdMs << "ms" << endl;
+            } catch (...) {
+                cout << "Invalid value for slow_query_threshold" << endl;
+                return true;
+            }
+        } else {
+            cout << "Unknown variable: " << var << endl;
+            return true;
+        }
         return false;
     }
 
@@ -3691,8 +3771,8 @@ int main(int argc, char* argv[]) {
             bool ok = execute(sql, s);
             auto end = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
-            if (ms > 100.0) {
-                logSlowQuery(sql, ms);
+            if (ms > g_slowQueryThresholdMs) {
+                logSlowQuery(sql, ms, s.username, s.currentDB);
             }
             if (ok && !s.currentDB.empty()) {
                 if (++sqlCount >= CHECKPOINT_INTERVAL) {

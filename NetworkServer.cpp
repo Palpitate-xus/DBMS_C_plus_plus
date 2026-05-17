@@ -18,7 +18,10 @@ extern dbms::StorageEngine g_engine;
 
 // Forward declare execute() and logSlowQuery() from main.cpp
 extern bool execute(const std::string& rawSql, Session& s);
-extern void logSlowQuery(const std::string& sql, double ms);
+extern double g_slowQueryThresholdMs;
+extern void logSlowQuery(const std::string& sql, double ms,
+                         const std::string& username,
+                         const std::string& dbname);
 
 namespace dbms {
 
@@ -100,7 +103,7 @@ static void handleClient(SecureSocket sock) {
 
         auto end = std::chrono::steady_clock::now();
         double ms = std::chrono::duration<double, std::milli>(end - start).count();
-        if (ms > 100.0) logSlowQuery(sql, ms);
+        if (ms > g_slowQueryThresholdMs) logSlowQuery(sql, ms, s.username, s.currentDB);
 
         std::string result = output.str();
         // Send result back to client
