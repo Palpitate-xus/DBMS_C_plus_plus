@@ -19,6 +19,7 @@ extern dbms::StorageEngine g_engine;
 // Forward declare execute() and logSlowQuery() from main.cpp
 extern bool execute(const std::string& rawSql, Session& s);
 extern double g_slowQueryThresholdMs;
+extern int g_checkpointInterval;
 extern void logSlowQuery(const std::string& sql, double ms,
                          const std::string& username,
                          const std::string& dbname);
@@ -79,6 +80,7 @@ static void handleClient(SecureSocket sock) {
     sendLine(sock, "successfully login");
 
     // SQL execution loop
+    int sqlCount = 0;
     while (true) {
         std::string sql = recvLine(sock);
         if (sql.empty()) break;
@@ -104,6 +106,15 @@ static void handleClient(SecureSocket sock) {
         auto end = std::chrono::steady_clock::now();
         double ms = std::chrono::duration<double, std::milli>(end - start).count();
         if (ms > g_slowQueryThresholdMs) logSlowQuery(sql, ms, s.username, s.currentDB);
+
+        // Auto checkpoint
+        if (g_checkpointInterval > 0 && !s.currentDB.empty()) {
+            if (++sqlCount >= g_checkpointInterval) {
+                dbms::StorageEngine engine;
+                engine.checkpoint(s.currentDB);
+                sqlCount = 0;
+            }
+        }
 
         std::string result = output.str();
         // Send result back to client

@@ -42,6 +42,7 @@ StorageEngine g_engine;
 // ========================================================================
 double g_slowQueryThresholdMs = 100.0;
 static constexpr size_t MAX_SLOW_LOG_ENTRIES = 100;
+int g_checkpointInterval = 30;  // auto checkpoint every N SQLs
 
 struct SlowQueryEntry {
     std::string timestamp;
@@ -2657,6 +2658,14 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Invalid value for slow_query_threshold" << endl;
                 return true;
             }
+        } else if (var == "checkpoint_interval") {
+            try {
+                g_checkpointInterval = std::stoi(val);
+                cout << "checkpoint_interval set to " << g_checkpointInterval << endl;
+            } catch (...) {
+                cout << "Invalid value for checkpoint_interval" << endl;
+                return true;
+            }
         } else {
             cout << "Unknown variable: " << var << endl;
             return true;
@@ -3788,7 +3797,6 @@ int main(int argc, char* argv[]) {
         s.permission = permissionQuery(username);
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
         int sqlCount = 0;
-        const int CHECKPOINT_INTERVAL = 30;  // auto checkpoint every N SQLs
         while (true) {
             string sql;
             getline(cin, sql);
@@ -3800,8 +3808,8 @@ int main(int argc, char* argv[]) {
             if (ms > g_slowQueryThresholdMs) {
                 logSlowQuery(sql, ms, s.username, s.currentDB);
             }
-            if (ok && !s.currentDB.empty()) {
-                if (++sqlCount >= CHECKPOINT_INTERVAL) {
+            if (ok && !s.currentDB.empty() && g_checkpointInterval > 0) {
+                if (++sqlCount >= g_checkpointInterval) {
                     g_engine.checkpoint(s.currentDB);
                     sqlCount = 0;
                 }
