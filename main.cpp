@@ -1684,6 +1684,34 @@ bool execute(const string& rawSql, Session& s) {
             while (getline(css, item, ',')) cols.push_back(trim(item));
         }
 
+        // Parse ON CONFLICT clause for UPSERT
+        size_t onConflictPos = sql.find("on conflict", valEnd);
+        string conflictCol;
+        map<string, string> upsertUpdates;
+        if (onConflictPos != string::npos) {
+            size_t conflictColStart = sql.find('(', onConflictPos);
+            size_t conflictColEnd = sql.find(')', conflictColStart);
+            if (conflictColStart != string::npos && conflictColEnd != string::npos) {
+                conflictCol = trim(sql.substr(conflictColStart + 1, conflictColEnd - conflictColStart - 1));
+            }
+            size_t doUpdatePos = sql.find("do update set", conflictColEnd);
+            if (doUpdatePos != string::npos) {
+                string setClause = trim(sql.substr(doUpdatePos + 13));
+                vector<string> setParts;
+                {
+                    stringstream sss(setClause);
+                    string item;
+                    while (getline(sss, item, ',')) setParts.push_back(trim(item));
+                }
+                for (const string& part : setParts) {
+                    size_t eq = part.find('=');
+                    if (eq != string::npos) {
+                        upsertUpdates[trim(part.substr(0, eq))] = stripQuotes(trim(part.substr(eq + 1)));
+                    }
+                }
+            }
+        }
+
         int inserted = 0;
         for (const string& valsStr : allValStrs) {
             vector<string> vals;
@@ -1702,8 +1730,27 @@ bool execute(const string& rawSql, Session& s) {
 
             auto res = g_engine.insert(s.currentDB, resolvedName, values);
             if (res == OpResult::DuplicateKey) {
-                cout << "Duplicate key" << endl;
-                return true;
+                if (conflictCol.empty()) {
+                    cout << "Duplicate key" << endl;
+                    return true;
+                }
+                // UPSERT: perform UPDATE on conflict
+                auto it = values.find(conflictCol);
+                if (it == values.end()) {
+                    cout << "Conflict column not in INSERT values" << endl;
+                    return true;
+                }
+                // Build WHERE condition for the conflict column
+                string condVal = it->second;
+                vector<string> whereConds;
+                if (!condVal.empty()) whereConds.push_back("=" + conflictCol + " " + condVal);
+                auto ures = g_engine.update(s.currentDB, resolvedName, upsertUpdates, whereConds);
+                if (ures != OpResult::Success) {
+                    cout << "UPSERT update failed" << endl;
+                    return true;
+                }
+                ++inserted; // count as inserted (or upserted)
+                continue;
             }
             if (res != OpResult::Success) {
                 cout << "Invalid data, please check" << endl;
