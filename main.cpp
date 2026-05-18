@@ -2201,9 +2201,112 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // DELETE ... USING ... (multi-table delete via JOIN)
     if (sql.substr(0, 12) == "delete from ") {
         if (!checkDB(s)) return true;
         string delRest = expandSubqueries(sql.substr(12), s);
+        size_t usingPos = findTopLevelKeyword(delRest, "using");
+        if (usingPos != string::npos) {
+            string targetPart = trim(delRest.substr(0, usingPos));
+            size_t wherePos = findTopLevelKeyword(delRest, "where", usingPos);
+            string sourceName = trim(delRest.substr(usingPos + 5,
+                (wherePos != string::npos) ? (wherePos - usingPos - 5)
+                : (delRest.size() - usingPos - 5)));
+            string tname = targetPart;
+            string resolvedSource = resolveTableName(s, sourceName);
+            string resolvedTarget = resolveTableName(s, tname);
+            if (!g_engine.tableExists(s.currentDB, resolvedSource)) {
+                cout << "Table " << sourceName << " not exist" << endl;
+                return true;
+            }
+            if (!g_engine.tableExists(s.currentDB, resolvedTarget)) {
+                cout << "Table " << tname << " not exist" << endl;
+                return true;
+            }
+            if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Delete)) return true;
+            // Build JOIN query: separate join conditions (ON) from filter conditions (WHERE)
+            string joinSql = "select * from " + tname + " inner join " + sourceName;
+            if (wherePos != string::npos) {
+                string whereClause = trim(delRest.substr(wherePos + 5));
+                vector<string> conds;
+                {
+                    size_t p = 0;
+                    while (p < whereClause.size()) {
+                        size_t ap = whereClause.find(" and ", p);
+                        if (ap == string::npos) {
+                            conds.push_back(trim(whereClause.substr(p)));
+                            break;
+                        }
+                        conds.push_back(trim(whereClause.substr(p, ap - p)));
+                        p = ap + 5;
+                    }
+                }
+                string onClause, whereFilter;
+                string targetPrefix = tname + ".";
+                string sourcePrefix = sourceName + ".";
+                for (const auto& c : conds) {
+                    bool hasTarget = (c.find(targetPrefix) != string::npos);
+                    bool hasSource = (c.find(sourcePrefix) != string::npos);
+                    if (hasTarget && hasSource) {
+                        if (!onClause.empty()) onClause += " and ";
+                        onClause += c;
+                    } else {
+                        if (!whereFilter.empty()) whereFilter += " and ";
+                        whereFilter += c;
+                    }
+                }
+                if (!onClause.empty()) {
+                    joinSql += " on " + onClause;
+                }
+                if (!whereFilter.empty()) {
+                    joinSql += " where " + whereFilter;
+                }
+            }
+            Session tmpS = s;
+            tmpS.preparedStmts.clear();
+            auto* oldBuf = std::cout.rdbuf();
+            std::stringstream joinOutput;
+            std::cout.rdbuf(joinOutput.rdbuf());
+            execute(joinSql, tmpS);
+            std::cout.rdbuf(oldBuf);
+            vector<string> joinLines;
+            string line;
+            while (getline(joinOutput, line)) {
+                string tl = trim(line);
+                if (tl.size() >= 3 && (tl.substr(0, 3) == "Mon" || tl.substr(0, 3) == "Tue" ||
+                    tl.substr(0, 3) == "Wed" || tl.substr(0, 3) == "Thu" || tl.substr(0, 3) == "Fri" ||
+                    tl.substr(0, 3) == "Sat" || tl.substr(0, 3) == "Sun")) continue;
+                joinLines.push_back(tl);
+            }
+            if (joinLines.size() <= 1) {
+                cout << "Delete done (0 rows)" << endl;
+                return false;
+            }
+            TableSchema targetTbl = g_engine.getTableSchema(s.currentDB, resolvedTarget);
+            size_t pkIdx = targetTbl.len;
+            for (size_t i = 0; i < targetTbl.len; ++i) {
+                if (targetTbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+            }
+            if (pkIdx >= targetTbl.len) {
+                cout << "DELETE USING requires target table to have a primary key" << endl;
+                return true;
+            }
+            string pkCol = targetTbl.cols[pkIdx].dataName;
+            size_t deletedCount = 0;
+            for (size_t li = 1; li < joinLines.size(); ++li) {
+                stringstream ss(joinLines[li]);
+                string val;
+                vector<string> cols;
+                while (ss >> val) cols.push_back(val);
+                if (cols.size() <= pkIdx) continue;
+                string pkVal = cols[pkIdx];
+                vector<string> pkCond = {"=" + pkCol + " " + pkVal};
+                auto res = g_engine.remove(s.currentDB, resolvedTarget, pkCond);
+                if (res == OpResult::Success) deletedCount++;
+            }
+            cout << "Delete done (" << deletedCount << " row(s))" << endl;
+            return false;
+        }
         vector<string> tokens = tokenize(normalizeConditionStr(delRest));
         if (tokens.empty()) {
             cout << "SQL syntax error" << endl;
@@ -2271,6 +2374,7 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // UPDATE ... FROM ... (multi-table update via JOIN)
     if (sql.substr(0, 6) == "update") {
         if (!checkDB(s)) return true;
         size_t setPos = sql.find("set");
@@ -2279,6 +2383,140 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         string tname = trim(sql.substr(6, setPos - 6));
+        size_t fromPos = findTopLevelKeyword(sql, "from", setPos);
+        if (fromPos != std::string::npos) {
+            // Multi-table update: UPDATE target SET ... FROM source WHERE ...
+            size_t wherePos = findTopLevelKeyword(sql, "where", fromPos);
+            string sourceName = trim(sql.substr(fromPos + 4,
+                (wherePos != std::string::npos) ? (wherePos - fromPos - 4)
+                : (sql.size() - fromPos - 4)));
+            string resolvedSource = resolveTableName(s, sourceName);
+            if (!g_engine.tableExists(s.currentDB, resolvedSource)) {
+                cout << "Table " << sourceName << " not exist" << endl;
+                return true;
+            }
+            string resolvedTarget = resolveTableName(s, tname);
+            if (!g_engine.tableExists(s.currentDB, resolvedTarget)) {
+                cout << "Table " << tname << " not exist" << endl;
+                return true;
+            }
+            // Parse SET clause
+            auto updates = parseSetClause(sql, setPos + 3, fromPos);
+            if (updates.empty()) {
+                cout << "SQL syntax error: invalid SET clause" << endl;
+                return true;
+            }
+            // Build JOIN query: separate join conditions (ON) from filter conditions (WHERE)
+            string joinSql = "select * from " + tname + " inner join " + sourceName;
+            if (wherePos != std::string::npos) {
+                string whereClause = trim(sql.substr(wherePos + 5));
+                vector<string> conds;
+                {
+                    int depth = 0;
+                    string cur;
+                    for (char c : whereClause) {
+                        if (c == '(') depth++;
+                        else if (c == ')') depth--;
+                        if (c == ' ' && depth == 0) {
+                            if (cur == "and" || cur == "or") {
+                                if (!cur.empty()) {
+                                    conds.push_back(trim(cur));
+                                    cur.clear();
+                                }
+                            } else {
+                                cur += c;
+                            }
+                        } else {
+                            cur += c;
+                        }
+                    }
+                    if (!trim(cur).empty()) conds.push_back(trim(cur));
+                }
+                // Simpler split by " and "
+                conds.clear();
+                {
+                    size_t p = 0;
+                    while (p < whereClause.size()) {
+                        size_t ap = whereClause.find(" and ", p);
+                        if (ap == string::npos) {
+                            conds.push_back(trim(whereClause.substr(p)));
+                            break;
+                        }
+                        conds.push_back(trim(whereClause.substr(p, ap - p)));
+                        p = ap + 5;
+                    }
+                }
+                string onClause, whereFilter;
+                string targetPrefix = tname + ".";
+                string sourcePrefix = sourceName + ".";
+                for (const auto& c : conds) {
+                    bool hasTarget = (c.find(targetPrefix) != string::npos);
+                    bool hasSource = (c.find(sourcePrefix) != string::npos);
+                    if (hasTarget && hasSource) {
+                        if (!onClause.empty()) onClause += " and ";
+                        onClause += c;
+                    } else {
+                        if (!whereFilter.empty()) whereFilter += " and ";
+                        whereFilter += c;
+                    }
+                }
+                if (!onClause.empty()) {
+                    joinSql += " on " + onClause;
+                }
+                if (!whereFilter.empty()) {
+                    joinSql += " where " + whereFilter;
+                }
+            }
+            // Execute JOIN query to get matching target rows
+            Session tmpS = s;
+            tmpS.preparedStmts.clear();
+            auto* oldBuf = std::cout.rdbuf();
+            std::stringstream joinOutput;
+            std::cout.rdbuf(joinOutput.rdbuf());
+            execute(joinSql, tmpS);
+            std::cout.rdbuf(oldBuf);
+            // Parse output: first line is header, rest are data rows (skip timestamp lines)
+            vector<string> joinLines;
+            string line;
+            while (getline(joinOutput, line)) {
+                string tl = trim(line);
+                // Skip timestamp lines that start with day-of-week
+                if (tl.size() >= 3 && (tl.substr(0, 3) == "Mon" || tl.substr(0, 3) == "Tue" ||
+                    tl.substr(0, 3) == "Wed" || tl.substr(0, 3) == "Thu" || tl.substr(0, 3) == "Fri" ||
+                    tl.substr(0, 3) == "Sat" || tl.substr(0, 3) == "Sun")) continue;
+                joinLines.push_back(tl);
+            }
+            if (joinLines.size() <= 1) {
+                cout << "Update done (0 rows)" << endl;
+                return false;
+            }
+            // Get PK column of target table
+            TableSchema targetTbl = g_engine.getTableSchema(s.currentDB, resolvedTarget);
+            size_t pkIdx = targetTbl.len;
+            for (size_t i = 0; i < targetTbl.len; ++i) {
+                if (targetTbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+            }
+            if (pkIdx >= targetTbl.len) {
+                cout << "UPDATE FROM requires target table to have a primary key" << endl;
+                return true;
+            }
+            string pkCol = targetTbl.cols[pkIdx].dataName;
+            // For each joined row, extract target PK and update
+            size_t updatedCount = 0;
+            for (size_t li = 1; li < joinLines.size(); ++li) {
+                stringstream ss(joinLines[li]);
+                string val;
+                vector<string> cols;
+                while (ss >> val) cols.push_back(val);
+                if (cols.size() <= pkIdx) continue;
+                string pkVal = cols[pkIdx];
+                vector<string> pkCond = {"=" + pkCol + " " + pkVal};
+                auto res = g_engine.update(s.currentDB, resolvedTarget, updates, pkCond);
+                if (res == OpResult::Success) updatedCount++;
+            }
+            cout << "Update done (" << updatedCount << " row(s))" << endl;
+            return false;
+        }
         string resolvedName = resolveTableName(s, tname);
         if (!g_engine.tableExists(s.currentDB, resolvedName)) {
             cout << "Table " << tname << " not exist" << endl;
