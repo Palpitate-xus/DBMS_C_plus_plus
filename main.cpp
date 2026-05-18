@@ -3269,6 +3269,11 @@ bool execute(const string& rawSql, Session& s) {
             cout << "rejected_connections " << s.rejectedConnections.load() << endl;
             return false;
         }
+        if (rest == "databases") {
+            auto names = g_engine.getDatabaseNames();
+            for (const auto& n : names) cout << n << endl;
+            return false;
+        }
         if (rest == "tables") {
             if (!checkDB(s)) return true;
             auto names = g_engine.getTableNames(s.currentDB);
