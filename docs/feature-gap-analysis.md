@@ -366,7 +366,7 @@
 | **INCLUDE 列** | ❌ | ✅ | P2 |
 | **聚集索引 (Clustered Index)** | 部分 | ✅ MSSQL | P2 |
 | **并发索引创建 (CONCURRENTLY)** | ❌ | ✅ | P3 |
-| **索引重建 (REINDEX)** | ❌ | ✅ | P2 |
+| **索引重建 (REINDEX)** | ✅ | ✅ | - |
 
 ---
 

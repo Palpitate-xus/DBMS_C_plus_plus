@@ -305,6 +305,9 @@ public:
                                 const std::string& indexName);
     std::vector<CompositeIndexInfo> getCompositeIndexes(const std::string& dbname,
                                                          const std::string& tablename) const;
+
+    // Reindex: rebuild all indexes for a table
+    OpResult reindex(const std::string& dbname, const std::string& tablename);
     BPTree* getCompositeIndexTree(const std::string& dbname, const std::string& tablename,
                                   const std::string& indexName) const;
     // Build composite key from row buffer

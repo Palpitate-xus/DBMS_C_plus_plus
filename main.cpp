@@ -3352,6 +3352,31 @@ bool execute(const string& rawSql, Session& s) {
         return true;
     }
 
+    // REINDEX TABLE tablename
+    if (sql.substr(0, 7) == "reindex") {
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
+        string rest = trim(sql.substr(7));
+        if (rest.substr(0, 5) == "table") {
+            string tname = trim(rest.substr(5));
+            tname = resolveTableName(s, tname);
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table " << tname << " not exist" << endl;
+                return true;
+            }
+            auto res = g_engine.reindex(s.currentDB, tname);
+            if (res != OpResult::Success) {
+                cout << "Reindex failed" << endl;
+                return true;
+            }
+            cout << "Reindex succeeded" << endl;
+            log(s.username, "reindex table " + tname, getTime());
+            return false;
+        }
+        cout << "SQL syntax error: REINDEX TABLE tablename" << endl;
+        return true;
+    }
+
     // UNION / UNION ALL — skip matches inside parentheses (e.g., WITH clauses)
     auto findSetOp = [&](const string& kw) -> size_t {
         size_t p = sql.find(kw);
