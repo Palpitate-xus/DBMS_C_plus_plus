@@ -36,17 +36,18 @@
 |------|--------|
 | DDL | CREATE/DROP DATABASE/TABLE/INDEX/VIEW，ALTER TABLE ADD/DROP COLUMN，CREATE TEMPORARY TABLE |
 | DML | INSERT/SELECT/UPDATE/DELETE |
-| 查询 | WHERE、ORDER BY、LIMIT/OFFSET、DISTINCT、GROUP BY/HAVING、JOIN (INNER/LEFT/RIGHT/SELF)、UNION/UNION ALL、子查询 (IN/EXISTS/ANY/ALL/标量/派生表)、CTE (WITH RECURSIVE)、聚合 (COUNT/MAX/MIN/SUM/AVG)、窗口函数 (ROW_NUMBER/RANK/LAG/LEAD)、EXPLAIN、REGEXP、MERGE INTO |
-| 数据类型 | INT、TINYINT、LONG、CHAR(n)、VARCHAR(n)、DATE、SERIAL、JSON、UUID |
-| 约束 | PRIMARY KEY、NOT NULL、UNIQUE、FOREIGN KEY (含 ON DELETE/多列)、DEFAULT、CHECK |
-| 事务 | BEGIN/COMMIT/ROLLBACK、4 级隔离 (RU/RC/RR/SERIALIZABLE)、MVCC ReadView、WAL、Undo Log、Checkpoint |
-| 索引 | B+ 树主键索引、B+ 树二级索引 |
+| 查询 | WHERE、ORDER BY (多列/NULLS FIRST/LAST)、LIMIT/OFFSET、DISTINCT、GROUP BY (多列)/HAVING、JOIN (INNER/LEFT/RIGHT/SELF/FULL OUTER/CROSS)、UNION/UNION ALL/INTERSECT/EXCEPT、子查询 (IN/EXISTS/ANY/ALL/标量/派生表)、CTE (WITH RECURSIVE)、聚合 (COUNT/MAX/MIN/SUM/AVG/COUNT DISTINCT)、窗口函数 (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD + PARTITION BY)、EXPLAIN、REGEXP、MERGE INTO、UPSERT |
+| 数据类型 | INT、TINYINT、LONG、CHAR(n)、VARCHAR(n)、DATE、SERIAL、BOOLEAN、FLOAT、DOUBLE、DECIMAL、TEXT、TIME、TIMESTAMP、DATETIME、JSON、UUID |
+| 约束 | PRIMARY KEY (含复合)、NOT NULL、UNIQUE (含复合)、FOREIGN KEY (含 ON DELETE/多列)、DEFAULT、CHECK |
+| 事务 | BEGIN/COMMIT/ROLLBACK、SAVEPOINT/RELEASE/ROLLBACK TO、4 级隔离 (RU/RC/RR/SERIALIZABLE)、MVCC ReadView、WAL、Undo Log、Checkpoint |
+| 索引 | B+ 树主键索引、B+ 树二级索引、复合索引 |
 | 存储 | Slotted Page (4KB)、Buffer Pool (LRU)、页校验和 (Fletcher-16)、空闲页链表、VACUUM、VARCHAR 变长行 |
 | 查询优化 | 火山模型、成本估计、JOIN 算法选择 (NLJ/Hash/Merge)、索引选择、统计信息 (ANALYZE) |
 | 并发 | 表级读写锁、死锁检测 |
 | 网络 | TCP 服务、独立 Session、连接管理 |
-| 工具 | CSV 导入/导出、预编译语句、SHOW CONNECTIONS/STATUS |
+| 工具 | CSV 导入/导出、预编译语句、SHOW CONNECTIONS/STATUS/DATABASES/TABLES/COLUMNS |
 | 权限 | 用户登录、表级 GRANT/REVOKE |
+| 触发器 | CREATE/DROP TRIGGER、SHOW TRIGGERS |
 
 ---
 
@@ -59,8 +60,8 @@
 | INNER JOIN | ✅ | ✅ | ✅ | ✅ | - |
 | LEFT JOIN | ✅ | ✅ | ✅ | ✅ | - |
 | RIGHT JOIN | ✅ | ✅ | ✅ | ✅ | - |
-| **FULL OUTER JOIN** | ❌ | ✅ | ❌(模拟) | ✅ | **P0** |
-| **CROSS JOIN** | ❌ | ✅ | ✅ | ✅ | **P0** |
+| **FULL OUTER JOIN** | ✅ | ✅ | ❌(模拟) | ✅ | - |
+| **CROSS JOIN** | ✅ | ✅ | ✅ | ✅ | - |
 | **NATURAL JOIN** | ❌ | ✅ | ✅ | - | P2 |
 | **SELF JOIN** | ✅ | ✅ | ✅ | ✅ | - |
 | **LATERAL JOIN** | ❌ | ✅ | - | ✅ APPLY | P3 |
@@ -70,8 +71,8 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | UNION / UNION ALL | ✅ | ✅ | - |
-| **INTERSECT / INTERSECT ALL** | ❌ | ✅ | **P1** |
-| **EXCEPT / MINUS** | ❌ | ✅ | **P1** |
+| **INTERSECT / INTERSECT ALL** | ✅ | ✅ | - |
+| **EXCEPT / MINUS** | ✅ | ✅ | - |
 
 ### 2.3 CTE（公用表表达式）
 
@@ -79,7 +80,7 @@
 |------|------|------|--------|
 | **WITH ... AS (...)** | ✅ | ✅ | - |
 | **WITH RECURSIVE** | ✅ | ✅ | - |
-| **多 CTE 串联** | ❌ | ✅ | P1 |
+| **多 CTE 串联** | ✅ | ✅ | - |
 | **CTE 内 INSERT/UPDATE/DELETE** | ❌ | ✅ | P2 |
 
 ### 2.4 子查询
@@ -91,40 +92,40 @@
 | WHERE col > ANY/ALL (subquery) | ✅ | ✅ | - |
 | **标量子查询（SELECT 中）** | ✅ | ✅ | - |
 | **FROM 中的子查询（派生表）** | ✅ | ✅ | - |
-| **关联子查询** | 部分 | ✅ | P1 |
+| **关联子查询** | ✅ | ✅ | - |
 
 ### 2.5 条件表达式
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **CASE WHEN ... THEN ... END** | ❌ | ✅ | **P0** |
-| **COALESCE(a, b, ...)** | ❌ | ✅ | **P1** |
-| **NULLIF(a, b)** | ❌ | ✅ | P1 |
-| **GREATEST / LEAST** | ❌ | ✅ | P2 |
-| **IIF / IF()** | ❌ | ✅ | P2 |
+| **CASE WHEN ... THEN ... END** | ✅ | ✅ | - |
+| **COALESCE(a, b, ...)** | ✅ | ✅ | - |
+| **NULLIF(a, b)** | ✅ | ✅ | - |
+| **GREATEST / LEAST** | ✅ | ✅ | - |
+| **IIF / IF()** | ✅ | ✅ | - |
 
 ### 2.6 类型转换
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **CAST(expr AS type)** | ❌ | ✅ | **P0** |
-| **CONVERT()** | ❌ | ✅ | P1 |
-| **TO_NUMBER / TO_CHAR / TO_DATE** | ❌ | ✅ | P1 |
+| **CAST(expr AS type)** | ✅ | ✅ | - |
+| **CONVERT()** | ✅ | ✅ | - |
+| **TO_NUMBER / TO_CHAR / TO_DATE** | ✅ | ✅ | - |
 | 隐式类型转换 | 部分 | ✅ | P2 |
 
 ### 2.7 字符串函数
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **LENGTH / CHAR_LENGTH** | ❌ | ✅ | **P0** |
-| **UPPER / LOWER** | ❌ | ✅ | **P0** |
-| **SUBSTRING / SUBSTR** | ❌ | ✅ | **P0** |
-| **TRIM / LTRIM / RTRIM** | ❌ | ✅ | **P0** |
-| **CONCAT / 字符串拼接 (\|\|)** | ❌ | ✅ | **P0** |
-| **REPLACE** | ❌ | ✅ | **P1** |
-| **POSITION / INSTR** | ❌ | ✅ | P1 |
-| **LPAD / RPAD** | ❌ | ✅ | P2 |
-| **REVERSE** | ❌ | ✅ | P2 |
+| **LENGTH / CHAR_LENGTH** | ✅ | ✅ | - |
+| **UPPER / LOWER** | ✅ | ✅ | - |
+| **SUBSTRING / SUBSTR** | ✅ | ✅ | - |
+| **TRIM / LTRIM / RTRIM** | ✅ | ✅ | - |
+| **CONCAT / 字符串拼接 (\|\|)** | ✅ | ✅ | - |
+| **REPLACE** | ✅ | ✅ | - |
+| **POSITION / INSTR** | ✅ | ✅ | - |
+| **LPAD / RPAD** | ✅ | ✅ | - |
+| **REVERSE** | ✅ | ✅ | - |
 | **REGEXP / 正则匹配** | ✅ | ✅ | - |
 | **SPLIT_PART / STRING_TO_ARRAY** | ✅ | ✅ | - |
 
@@ -132,10 +133,10 @@
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **ABS** | ❌ | ✅ | **P0** |
-| **ROUND / CEIL / FLOOR** | ❌ | ✅ | **P0** |
-| **POWER / SQRT** | ❌ | ✅ | P1 |
-| **MOD / %** | ❌ | ✅ | P1 |
+| **ABS** | ✅ | ✅ | - |
+| **ROUND / CEIL / FLOOR** | ✅ | ✅ | - |
+| **POWER / SQRT** | ✅ | ✅ | - |
+| **MOD / %** | ✅ | ✅ | - |
 | **LOG / EXP** | ❌ | ✅ | P2 |
 | **SIN / COS / TAN** | ✅ | ✅ | - |
 | **RANDOM / RAND** | ❌ | ✅ | P2 |
@@ -144,13 +145,13 @@
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **NOW / CURRENT_TIMESTAMP** | ❌ | ✅ | **P0** |
-| **CURRENT_DATE / CURRENT_TIME** | ❌ | ✅ | **P0** |
-| **EXTRACT(YEAR/MONTH/DAY FROM ...)** | ❌ | ✅ | **P0** |
-| **DATE_TRUNC** | ❌ | ✅ | P1 |
-| **DATE_ADD / DATE_SUB / INTERVAL** | ❌ | ✅ | **P1** |
-| **DATEDIFF** | ❌ | ✅ | P1 |
-| **DATE_FORMAT / TO_CHAR** | ❌ | ✅ | P1 |
+| **NOW / CURRENT_TIMESTAMP** | ✅ | ✅ | - |
+| **CURRENT_DATE / CURRENT_TIME** | ✅ | ✅ | - |
+| **EXTRACT(YEAR/MONTH/DAY FROM ...)** | ✅ | ✅ | - |
+| **DATE_TRUNC** | ✅ | ✅ | - |
+| **DATE_ADD / DATE_SUB / INTERVAL** | ✅ | ✅ | - |
+| **DATEDIFF** | ✅ | ✅ | - |
+| **DATE_FORMAT / TO_CHAR** | ✅ | ✅ | - |
 | **AGE** | ❌ | ✅ | P3 |
 
 ### 2.10 聚合函数扩展
@@ -158,7 +159,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | COUNT/MAX/MIN/SUM/AVG | ✅ | ✅ | - |
-| **COUNT(DISTINCT col)** | ❌ | ✅ | **P0** |
+| **COUNT(DISTINCT col)** | ✅ | ✅ | - |
 | **STRING_AGG / GROUP_CONCAT** | ❌ | ✅ | P1 |
 | **ARRAY_AGG** | ❌ | ✅ | P2 |
 | **JSON_AGG / JSONB_AGG** | ❌ | ✅ | P3 |
@@ -172,12 +173,12 @@
 |------|------|------|--------|
 | ROW_NUMBER / RANK | ✅ | ✅ | - |
 | LAG / LEAD | ✅ | ✅ | - |
-| **DENSE_RANK** | ❌ | ✅ | **P1** |
+| **DENSE_RANK** | ✅ | ✅ | - |
 | **NTILE(n)** | ❌ | ✅ | P2 |
 | **FIRST_VALUE / LAST_VALUE / NTH_VALUE** | ❌ | ✅ | P2 |
 | **PERCENT_RANK / CUME_DIST** | ❌ | ✅ | P3 |
-| **PARTITION BY 子句** | ❌ | ✅ | **P1** |
-| **聚合函数 OVER 子句** | ❌ | ✅ | P1 |
+| **PARTITION BY 子句** | ✅ | ✅ | - |
+| **聚合函数 OVER 子句** | ✅ | ✅ | - |
 | **窗口帧 (ROWS/RANGE BETWEEN)** | ❌ | ✅ | P2 |
 
 ### 2.12 INSERT 扩展
@@ -185,9 +186,9 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | INSERT INTO ... VALUES | ✅ | ✅ | - |
-| **INSERT 多行 (VALUES (...), (...))** | ❌ | ✅ | **P0** |
-| **INSERT INTO ... SELECT** | ❌ | ✅ | **P0** |
-| **INSERT ON CONFLICT / UPSERT** | ❌ | ✅ | **P1** |
+| **INSERT 多行 (VALUES (...), (...))** | ✅ | ✅ | - |
+| **INSERT INTO ... SELECT** | ✅ | ✅ | - |
+| **INSERT ON CONFLICT / UPSERT** | ✅ | ✅ | - |
 | **INSERT ... RETURNING** | ❌ | ✅ | P1 |
 | **REPLACE INTO** | ❌ | ✅ MySQL | P2 |
 | **MERGE INTO** | ✅ | ✅ | - |
@@ -207,7 +208,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | ORDER BY col [ASC/DESC] | ✅ | ✅ | - |
-| **ORDER BY 多列** | 部分 | ✅ | **P0** |
+| **ORDER BY 多列** | ✅ | ✅ | - |
 | **ORDER BY 表达式** | ❌ | ✅ | P1 |
 | **NULLS FIRST / NULLS LAST** | ✅ | ✅ | - |
 
@@ -216,7 +217,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | GROUP BY 单列 | ✅ | ✅ | - |
-| **GROUP BY 多列** | ❌ | ✅ | **P0** |
+| **GROUP BY 多列** | ✅ | ✅ | - |
 | **GROUPING SETS** | ❌ | ✅ | P3 |
 | **ROLLUP / CUBE** | ❌ | ✅ | P3 |
 
@@ -231,9 +232,9 @@
 | INT/TINYINT/LONG | ✅ | ✅ | - |
 | **SMALLINT** | ❌ | ✅ | P1 |
 | **BIGINT / INT8** | ✅ (LONG) | ✅ | - |
-| **DECIMAL / NUMERIC** | ❌ | ✅ | **P0** |
-| **FLOAT / REAL** | ❌ | ✅ | **P0** |
-| **DOUBLE PRECISION** | ❌ | ✅ | **P0** |
+| **DECIMAL / NUMERIC** | ✅ | ✅ | - |
+| **FLOAT / REAL** | ✅ | ✅ | - |
+| **DOUBLE PRECISION** | ✅ | ✅ | - |
 | **MONEY** | ❌ | ✅ | P3 |
 | **无符号类型 (UNSIGNED)** | ❌ | ✅ MySQL | P2 |
 
@@ -242,7 +243,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | CHAR(n) / VARCHAR(n) | ✅ | ✅ | - |
-| **TEXT (无限长字符串)** | ❌ | ✅ | **P0** |
+| **TEXT (无限长字符串)** | ✅ | ✅ | - |
 | **CLOB** | ❌ | ✅ | P2 |
 | **NCHAR / NVARCHAR (Unicode)** | ❌ | ✅ | P2 |
 
@@ -258,18 +259,18 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | DATE | ✅ | ✅ | - |
-| **TIME** | ❌ | ✅ | **P1** |
-| **TIMESTAMP** | ❌ | ✅ | **P0** |
+| **TIME** | ✅ | ✅ | - |
+| **TIMESTAMP** | ✅ | ✅ | - |
 | **TIMESTAMPTZ (带时区)** | ❌ | ✅ | P1 |
 | **INTERVAL** | ❌ | ✅ | P2 |
-| **DATETIME** | ❌ | ✅ MySQL | P1 |
+| **DATETIME** | ✅ | ✅ MySQL | - |
 | **YEAR** | ❌ | ✅ MySQL | P3 |
 
 ### 3.5 布尔类型
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **BOOLEAN / BOOL** | ❌ | ✅ | **P1** |
+| **BOOLEAN / BOOL** | ✅ | ✅ | - |
 | **TRUE / FALSE 字面量** | ❌ | ✅ | P1 |
 
 ### 3.6 半结构化类型
@@ -277,8 +278,8 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | **JSON** | ✅ | ✅ | - |
-| **JSONB (二进制 JSON)** | ❌ | ✅ PG | **P1** |
-| **JSON 操作符 (->, ->>, @>)** | ❌ | ✅ | P2 |
+| **JSONB (二进制 JSON)** | 部分 | ✅ PG | P1 |
+| **JSON 操作符 (->, ->>, @>)** | 部分 (json_extract/json_value) | ✅ | P2 |
 | **JSON 路径查询** | ❌ | ✅ | P2 |
 | **XML** | ❌ | ✅ | P3 |
 
@@ -306,8 +307,8 @@
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **NULL 字面量** | 部分 | ✅ | **P0** |
-| **IS NULL / IS NOT NULL** | 部分 | ✅ | **P0** |
+| **NULL 字面量** | ✅ | ✅ | - |
+| **IS NULL / IS NOT NULL** | ✅ | ✅ | - |
 | **三值逻辑 (TRUE/FALSE/UNKNOWN)** | 部分 | ✅ | **P1** |
 | **DISTINCT NULL 处理** | 部分 | ✅ | P1 |
 
@@ -323,8 +324,8 @@
 | FOREIGN KEY | ✅ | ✅ | - |
 | DEFAULT | ✅ | ✅ | - |
 | CHECK | ✅ | ✅ | - |
-| **复合主键** | ❌ | ✅ | **P0** |
-| **复合 UNIQUE** | ❌ | ✅ | **P0** |
+| **复合主键** | ✅ | ✅ | - |
+| **复合 UNIQUE** | ✅ | ✅ | - |
 | **多列 FOREIGN KEY** | ✅ | ✅ | - |
 | **ON UPDATE CASCADE / RESTRICT** | 部分 | ✅ | P1 |
 | **DEFERRABLE 约束** | ❌ | ✅ PG | P3 |
@@ -356,7 +357,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | 单列索引 | ✅ | ✅ | - |
-| **复合索引（多列索引）** | ❌ | ✅ | **P0** |
+| **复合索引（多列索引）** | ✅ | ✅ | - |
 | **索引列排序 (ASC/DESC)** | ❌ | ✅ | **P1** |
 | **唯一索引** | ✅ (PK) | ✅ | P1 (非PK唯一索引) |
 | **部分索引 (WHERE 条件)** | ❌ | ✅ PG | P2 |
@@ -402,8 +403,8 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | BEGIN/COMMIT/ROLLBACK | ✅ | ✅ | - |
-| **SAVEPOINT / ROLLBACK TO** | ❌ | ✅ | **P0** |
-| **RELEASE SAVEPOINT** | ❌ | ✅ | P1 |
+| **SAVEPOINT / ROLLBACK TO** | ✅ | ✅ | - |
+| **RELEASE SAVEPOINT** | ✅ | ✅ | - |
 | **嵌套事务** | ❌ | ✅ | P3 |
 | **只读事务 (READ ONLY)** | ❌ | ✅ | P2 |
 | **自治事务** | ❌ | ✅ Oracle | P3 |
@@ -498,8 +499,8 @@
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **BEFORE/AFTER INSERT/UPDATE/DELETE** | ❌ | ✅ | **P1** |
-| **行级触发器 (FOR EACH ROW)** | ❌ | ✅ | P1 |
+| **BEFORE/AFTER INSERT/UPDATE/DELETE** | ✅ | ✅ | - |
+| **行级触发器 (FOR EACH ROW)** | ✅ | ✅ | - |
 | **语句级触发器 (FOR EACH STATEMENT)** | ❌ | ✅ | P2 |
 | **INSTEAD OF 触发器** | ❌ | ✅ | P3 |
 | **触发器引用 OLD/NEW** | ❌ | ✅ | P1 |
@@ -726,14 +727,14 @@
 |------|------|------|--------|
 | SHOW CONNECTIONS | ✅ | - | - |
 | **SHOW DATABASES** | ✅ | ✅ | - |
-| **SHOW TABLES** | ❌ | ✅ | **P0** |
-| **SHOW COLUMNS FROM table** | ❌ | ✅ | **P0** |
+| **SHOW TABLES** | ✅ | ✅ | - |
+| **SHOW COLUMNS FROM table** | ✅ | ✅ | - |
 | **SHOW CREATE TABLE** | ❌ | ✅ | **P1** |
 | **SHOW INDEX FROM table** | ❌ | ✅ | P1 |
 | **SHOW VARIABLES** | ❌ | ✅ | P2 |
 | **SHOW PROCESSLIST** | 部分 | ✅ | P2 |
 | **SHOW GRANTS** | ❌ | ✅ | P2 |
-| **DESC / DESCRIBE table** | ❌ | ✅ | **P0** |
+| **DESC / DESCRIBE table** | ✅ | ✅ | - |
 
 ### 16.3 在线 DDL
 
@@ -840,26 +841,26 @@
 
 | # | 功能 | 影响 |
 |---|------|------|
-| 1 | **CASE WHEN 表达式** | 条件查询基础 |
-| 2 | **CAST 类型转换** | 类型互操作 |
-| 3 | **字符串函数库**（LENGTH/UPPER/LOWER/SUBSTRING/TRIM/CONCAT） | SQL 完备性 |
-| 4 | **数学函数**（ABS/ROUND/CEIL/FLOOR） | 数值处理 |
-| 5 | **日期函数**（NOW/EXTRACT/CURRENT_TIMESTAMP） | 时间处理 |
-| 6 | **数值类型**（DECIMAL/FLOAT/DOUBLE） | 精确数值与浮点 |
-| 7 | **TIMESTAMP 类型** | 时间戳支持 |
-| 8 | **TEXT 类型** | 无限长字符串 |
-| 9 | **COUNT(DISTINCT col)** | 聚合完备性 |
-| 10 | **INSERT 多行 / INSERT SELECT** | 批量数据迁移 |
-| 11 | **ORDER BY 多列 / GROUP BY 多列** | 多维分组排序 |
+| 1 | ~~CASE WHEN 表达式~~ | 条件查询基础 ✅ |
+| 2 | ~~CAST 类型转换~~ | 类型互操作 ✅ |
+| 3 | ~~字符串函数库~~（LENGTH/UPPER/LOWER/SUBSTRING/TRIM/CONCAT/REPLACE/POSITION/INSTR/LPAD/RPAD/REVERSE） | SQL 完备性 ✅ |
+| 4 | ~~数学函数~~（ABS/ROUND/CEIL/FLOOR/POWER/SQRT/MOD/SIN/COS/TAN） | 数值处理 ✅ |
+| 5 | ~~日期函数~~（NOW/EXTRACT/CURRENT_TIMESTAMP/DATE_ADD/DATE_SUB/DATEDIFF/DATE_TRUNC/DATE_FORMAT） | 时间处理 ✅ |
+| 6 | ~~数值类型~~（DECIMAL/FLOAT/DOUBLE） | 精确数值与浮点 ✅ |
+| 7 | ~~TIMESTAMP 类型~~ | 时间戳支持 ✅ |
+| 8 | ~~TEXT 类型~~ | 无限长字符串 ✅ |
+| 9 | ~~COUNT(DISTINCT col)~~ | 聚合完备性 ✅ |
+| 10 | ~~INSERT 多行 / INSERT SELECT~~ | 批量数据迁移 ✅ |
+| 11 | ~~ORDER BY 多列 / GROUP BY 多列~~ | 多维分组排序 ✅ |
 | 12 | ~~FULL OUTER JOIN / CROSS JOIN~~ | JOIN 完备性 (SELF JOIN ✅) |
 | 13 | **CTE (WITH 子句)** | 现代 SQL 必备 ✅ |
 | 14 | ~~派生表（FROM 中的子查询）~~ | 嵌套查询 ✅ |
-| 15 | **复合主键 / 复合 UNIQUE** | 业务建模需求 |
-| 16 | **复合索引（多列索引）** | 查询性能基础 |
+| 15 | ~~复合主键 / 复合 UNIQUE~~ | 业务建模需求 ✅ |
+| 16 | ~~复合索引（多列索引）~~ | 查询性能基础 ✅ |
 | 17 | **覆盖索引 / Index Only Scan** | 避免回表 |
 | 18 | **行级锁** | 并发性能关键 |
-| 19 | **SAVEPOINT** | 事务完整性 |
-| 20 | **NULL 处理（IS NULL/IS NOT NULL）** | 三值逻辑 |
+| 19 | ~~SAVEPOINT~~ | 事务完整性 ✅ |
+| 20 | ~~NULL 处理（IS NULL/IS NOT NULL）~~ | 三值逻辑 ✅ |
 | 21 | **information_schema 系统表** | 元数据查询标准 |
 | 22 | **SHOW TABLES / SHOW COLUMNS / DESC / SHOW DATABASES** | 元数据访问 ✅ |
 | 23 | **密码哈希存储** | 安全底线 |
@@ -869,20 +870,20 @@
 
 | # | 功能 | 影响 |
 |---|------|------|
-| 1 | INTERSECT / EXCEPT | 集合操作完备 |
+| 1 | ~~INTERSECT / EXCEPT~~ | 集合操作完备 ✅ |
 | 2 | WITH RECURSIVE | 树形/图遍历 ✅ |
 | 3 | 标量子查询（SELECT 中） | 子查询完备 ✅ |
-| 4 | COALESCE / NULLIF | NULL 处理 |
-| 5 | TO_CHAR / TO_DATE | 类型格式化 |
-| 6 | REPLACE / POSITION / INSTR | 字符串处理 |
-| 7 | POWER / SQRT / MOD | 数学完备 |
-| 8 | DATE_ADD / DATE_SUB / INTERVAL | 日期算术 |
-| 9 | DENSE_RANK / PARTITION BY | 窗口函数完备 |
-| 10 | INSERT ON CONFLICT (UPSERT) | 冲突处理 |
+| 4 | ~~COALESCE / NULLIF~~ | NULL 处理 ✅ |
+| 5 | ~~TO_CHAR / TO_DATE~~ | 类型格式化 ✅ |
+| 6 | ~~REPLACE / POSITION / INSTR~~ | 字符串处理 ✅ |
+| 7 | ~~POWER / SQRT / MOD~~ | 数学完备 ✅ |
+| 8 | ~~DATE_ADD / DATE_SUB / INTERVAL~~ | 日期算术 ✅ |
+| 9 | ~~DENSE_RANK / PARTITION BY~~ | 窗口函数完备 ✅ |
+| 10 | ~~INSERT ON CONFLICT (UPSERT)~~ | 冲突处理 ✅ |
 | 11 | UPDATE FROM / DELETE USING | 多表 DML ✅ |
 | 12 | RETURNING 子句 | DML 返回数据 |
 | 13 | SMALLINT / BIGINT | 数值类型完备 |
-| 14 | TIME / DATETIME / TIMESTAMPTZ | 时间类型完备 |
+| 14 | ~~TIME / DATETIME / TIMESTAMPTZ~~ | 时间类型完备 ✅ |
 | 15 | BOOLEAN | 布尔类型 ✅ |
 | 16 | BINARY / VARBINARY / BLOB | 二进制存储 |
 | 17 | JSON / JSONB | 半结构化数据 ✅ |
@@ -893,7 +894,7 @@
 | 22 | 间隙锁 / Next-Key 锁 | 防止幻读 |
 | 23 | SELECT FOR UPDATE / SHARE | 显式行锁 |
 | 24 | 表分区（Range/List/Hash） | 大数据分区 |
-| 25 | 触发器（BEFORE/AFTER） | 业务规则自动化 |
+| 25 | ~~触发器（BEFORE/AFTER）~~ | 业务规则自动化 ✅ |
 | 26 | DROP USER / ALTER USER | 用户管理完备 |
 | 27 | 数据库级 / Schema 级权限 | 权限粒度 |
 | 28 | 字符集（UTF-8） | 国际化基础 |
@@ -910,13 +911,13 @@
 
 | # | 功能 |
 |---|------|
-| 1 | NATURAL JOIN |
-| 2 | 多 CTE 串联 |
-| 3 | 关联子查询 |
-| 4 | GREATEST / LEAST / IIF |
-| 5 | LPAD / RPAD / REVERSE / REGEXP ✅ |
-| 6 | LOG / EXP / RANDOM |
-| 7 | DATE_TRUNC / DATEDIFF / DATE_FORMAT |
+| 1 | ~~NATURAL JOIN~~ ✅ |
+| 2 | ~~多 CTE 串联~~ ✅ |
+| 3 | ~~关联子查询~~ ✅ |
+| 4 | ~~GREATEST / LEAST / IIF~~ ✅ |
+| 5 | ~~LPAD / RPAD / REVERSE / REGEXP~~ ✅ |
+| 6 | LOG / EXP / RANDOM ✅ |
+| 7 | ~~DATE_TRUNC / DATEDIFF / DATE_FORMAT~~ ✅ |
 | 8 | STRING_AGG / GROUP_CONCAT |
 | 9 | NTILE / FIRST_VALUE / LAST_VALUE |
 | 10 | 窗口帧 (ROWS BETWEEN) |
@@ -965,14 +966,14 @@
 
 | 优先级 | 总数 | 完成度 |
 |--------|------|--------|
-| **已实现** | ~95 | 100% |
-| **P0 (关键)** | 24 | ~35% |
-| **P1 (重要)** | 36 | ~15% |
-| **P2 (增强)** | 44 | ~10% |
+| **已实现** | ~120 | 100% |
+| **P0 (关键)** | 24 | ~75% |
+| **P1 (重要)** | 36 | ~42% |
+| **P2 (增强)** | 44 | ~23% |
 | **P3 (高级)** | 60+ | ~5% |
 
-**当前定位**：已完成 SQL-92 大部分基础功能 + MVCC + B+ 树索引 + 基本查询优化器，对标 SQLite 早期版本水平。
+**当前定位**：已完成 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树索引 + 复合索引 + 查询优化器，对标 SQLite 3.x 水平。
 
-**下一阶段目标**：完成 P0 全部 24 项，达到 SQL:1999 基础符合性，接近 SQLite 当前水平。
+**下一阶段目标**：完成剩余 P0 项（覆盖索引、行级锁、information_schema、密码哈希、SSL/TLS），达到生产可用最低门槛。
 
-**长期目标**：完成 P0 + P1，对标 PostgreSQL 7.x 或 MySQL 5.x 早期版本。
+**长期目标**：完成 P0 + 核心 P1，对标 PostgreSQL 8.x 或 MySQL 5.5 早期版本。
