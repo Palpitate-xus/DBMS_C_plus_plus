@@ -229,6 +229,9 @@ static bool isScalarFunc(const string& name) {
                                          "coalesce", "nullif",
                                          "replace", "position", "instr",
                                          "power", "sqrt", "mod",
+                                         "ln", "log", "exp", "random", "rand",
+                                         "lpad", "rpad", "reverse",
+                                         "greatest", "least", "if", "iif",
                                          "date_add", "date_sub",
                                          "datediff", "date_trunc", "date_format",
                                          "subquery"};

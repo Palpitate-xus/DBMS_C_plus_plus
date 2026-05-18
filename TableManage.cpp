@@ -3361,6 +3361,98 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         size_t pos = str.find(substr);
         return (pos == std::string::npos) ? "0" : std::to_string(pos + 1);
     }
+    if (expr.funcName == "lpad" && expr.funcArgs.size() >= 2) {
+        std::string str = getVal(expr.funcArgs[0]);
+        try {
+            size_t target = static_cast<size_t>(std::stoul(getVal(expr.funcArgs[1])));
+            std::string pad = (expr.funcArgs.size() >= 3) ? getVal(expr.funcArgs[2]) : " ";
+            if (pad.empty()) return str;
+            if (str.size() >= target) return str.substr(0, target);
+            std::string out;
+            while (out.size() + str.size() < target) {
+                out += pad;
+            }
+            out = out.substr(0, target - str.size());
+            return out + str;
+        } catch (...) { return str; }
+    }
+    if (expr.funcName == "rpad" && expr.funcArgs.size() >= 2) {
+        std::string str = getVal(expr.funcArgs[0]);
+        try {
+            size_t target = static_cast<size_t>(std::stoul(getVal(expr.funcArgs[1])));
+            std::string pad = (expr.funcArgs.size() >= 3) ? getVal(expr.funcArgs[2]) : " ";
+            if (pad.empty()) return str;
+            if (str.size() >= target) return str.substr(0, target);
+            std::string out = str;
+            while (out.size() < target) {
+                out += pad;
+            }
+            return out.substr(0, target);
+        } catch (...) { return str; }
+    }
+    if (expr.funcName == "reverse" && !expr.funcArgs.empty()) {
+        std::string str = getVal(expr.funcArgs[0]);
+        std::reverse(str.begin(), str.end());
+        return str;
+    }
+    if (expr.funcName == "greatest" && !expr.funcArgs.empty()) {
+        std::string best;
+        bool isFirst = true;
+        bool allNum = true;
+        for (const auto& a : expr.funcArgs) {
+            std::string v = getVal(a);
+            if (v.empty()) continue;
+            try { std::stod(v); } catch (...) { allNum = false; }
+        }
+        for (const auto& a : expr.funcArgs) {
+            std::string v = getVal(a);
+            if (v.empty()) continue;
+            if (isFirst) { best = v; isFirst = false; continue; }
+            if (allNum) {
+                try {
+                    if (std::stod(v) > std::stod(best)) best = v;
+                } catch (...) {}
+            } else {
+                if (v > best) best = v;
+            }
+        }
+        return best;
+    }
+    if (expr.funcName == "least" && !expr.funcArgs.empty()) {
+        std::string best;
+        bool isFirst = true;
+        bool allNum = true;
+        for (const auto& a : expr.funcArgs) {
+            std::string v = getVal(a);
+            if (v.empty()) continue;
+            try { std::stod(v); } catch (...) { allNum = false; }
+        }
+        for (const auto& a : expr.funcArgs) {
+            std::string v = getVal(a);
+            if (v.empty()) continue;
+            if (isFirst) { best = v; isFirst = false; continue; }
+            if (allNum) {
+                try {
+                    if (std::stod(v) < std::stod(best)) best = v;
+                } catch (...) {}
+            } else {
+                if (v < best) best = v;
+            }
+        }
+        return best;
+    }
+    if ((expr.funcName == "if" || expr.funcName == "iif") && expr.funcArgs.size() >= 3) {
+        std::string cond = getVal(expr.funcArgs[0]);
+        std::string trueVal = getVal(expr.funcArgs[1]);
+        std::string falseVal = getVal(expr.funcArgs[2]);
+        bool isTrue = false;
+        if (cond == "true" || cond == "1") isTrue = true;
+        else if (cond == "false" || cond == "0" || cond.empty()) isTrue = false;
+        else {
+            try { isTrue = (std::stod(cond) != 0); } catch (...) { isTrue = !cond.empty(); }
+        }
+        return isTrue ? trueVal : falseVal;
+    }
     if (expr.funcName == "power" && expr.funcArgs.size() >= 2) {
         try {
             double base = std::stod(getVal(expr.funcArgs[0]));
@@ -3387,6 +3479,25 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (b == 0) return "0";
             return std::to_string(a % b);
         } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "ln" && !expr.funcArgs.empty()) {
+        try { return std::to_string(std::log(std::stod(getVal(expr.funcArgs[0])))); } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "log" && !expr.funcArgs.empty()) {
+        try {
+            if (expr.funcArgs.size() >= 2) {
+                double base = std::stod(getVal(expr.funcArgs[0]));
+                double x = std::stod(getVal(expr.funcArgs[1]));
+                return std::to_string(std::log(x) / std::log(base));
+            }
+            return std::to_string(std::log10(std::stod(getVal(expr.funcArgs[0]))));
+        } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "exp" && !expr.funcArgs.empty()) {
+        try { return std::to_string(std::exp(std::stod(getVal(expr.funcArgs[0])))); } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "random" || expr.funcName == "rand") {
+        return std::to_string(static_cast<double>(std::rand()) / RAND_MAX);
     }
     if (expr.funcName == "date_add" && expr.funcArgs.size() >= 3) {
         std::string dstr = getVal(expr.funcArgs[0]);
