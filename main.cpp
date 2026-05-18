@@ -2047,6 +2047,163 @@ bool execute(const string& rawSql, Session& s) {
         return true;
     }
 
+    // MERGE INTO: simplified syntax
+    // merge into target using source on target.id = source.id
+    //   update set name = source.name, age = source.age
+    //   insert (id, name, age) values (source.id, source.name, source.age)
+    if (sql.substr(0, 10) == "merge into") {
+        if (!checkDB(s)) return true;
+        // Parse: merge into target using source on target.col = source.col
+        size_t usingPos = sql.find("using");
+        size_t onPos = sql.find(" on ");
+        size_t updatePos = sql.find("update set");
+        size_t insertPos = sql.find("insert");
+        if (usingPos == string::npos || onPos == string::npos ||
+            updatePos == string::npos || insertPos == string::npos) {
+            cout << "SQL syntax error: MERGE INTO target USING source ON condition UPDATE SET ... INSERT ..." << endl;
+            return true;
+        }
+        string targetName = trim(sql.substr(10, usingPos - 10));
+        string sourceName = trim(sql.substr(usingPos + 5, onPos - usingPos - 5));
+        string onClause = trim(sql.substr(onPos + 4, updatePos - onPos - 4));
+        string updateClause = trim(sql.substr(updatePos + 10, insertPos - updatePos - 10));
+        string insertClause = trim(sql.substr(insertPos + 6));
+
+        targetName = resolveTableName(s, targetName);
+        sourceName = resolveTableName(s, sourceName);
+        if (!g_engine.tableExists(s.currentDB, targetName)) {
+            cout << "Table " << targetName << " not exist" << endl;
+            return true;
+        }
+        if (!g_engine.tableExists(s.currentDB, sourceName)) {
+            cout << "Table " << sourceName << " not exist" << endl;
+            return true;
+        }
+
+        // Parse ON clause: target.col = source.col
+        size_t eqPos = onClause.find('=');
+        if (eqPos == string::npos) {
+            cout << "SQL syntax error: ON clause requires =" << endl;
+            return true;
+        }
+        string leftOn = trim(onClause.substr(0, eqPos));
+        string rightOn = trim(onClause.substr(eqPos + 1));
+        size_t leftDot = leftOn.find('.');
+        size_t rightDot = rightOn.find('.');
+        string targetOnCol = (leftDot != string::npos) ? trim(leftOn.substr(leftDot + 1)) : leftOn;
+        string sourceOnCol = (rightDot != string::npos) ? trim(rightOn.substr(rightDot + 1)) : rightOn;
+
+        // Parse UPDATE SET: col = source.col, ...
+        map<string, string> updateMap; // targetCol -> sourceCol
+        {
+            vector<string> parts;
+            size_t i = 0;
+            int depth = 0;
+            string cur;
+            for (char c : updateClause) {
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+                if (c == ',' && depth == 0) {
+                    parts.push_back(trim(cur));
+                    cur.clear();
+                } else cur += c;
+            }
+            if (!trim(cur).empty()) parts.push_back(trim(cur));
+            for (const string& part : parts) {
+                size_t eq = part.find('=');
+                if (eq == string::npos) continue;
+                string tcol = trim(part.substr(0, eq));
+                string scol = trim(part.substr(eq + 1));
+                size_t sd = scol.find('.');
+                if (sd != string::npos) scol = trim(scol.substr(sd + 1));
+                updateMap[tcol] = scol;
+            }
+        }
+
+        // Parse INSERT: (cols) VALUES (source.cols)
+        vector<string> insertCols;
+        vector<string> insertSourceCols;
+        {
+            size_t lp = insertClause.find('(');
+            size_t rp = insertClause.find(')');
+            if (lp != string::npos && rp != string::npos && rp > lp) {
+                string colsPart = trim(insertClause.substr(lp + 1, rp - lp - 1));
+                string valsPart;
+                size_t valsPos = insertClause.find("values", rp);
+                if (valsPos != string::npos) {
+                    size_t vlp = insertClause.find('(', valsPos);
+                    size_t vrp = insertClause.find(')', vlp);
+                    if (vlp != string::npos && vrp != string::npos) {
+                        valsPart = trim(insertClause.substr(vlp + 1, vrp - vlp - 1));
+                    }
+                }
+                // Split cols and vals
+                stringstream css(colsPart);
+                string item;
+                while (getline(css, item, ',')) insertCols.push_back(trim(item));
+                stringstream vss(valsPart);
+                while (getline(vss, item, ',')) {
+                    string sc = trim(item);
+                    size_t sd = sc.find('.');
+                    if (sd != string::npos) sc = trim(sc.substr(sd + 1));
+                    insertSourceCols.push_back(sc);
+                }
+            }
+        }
+
+        // Read source table schema and data
+        TableSchema sourceTbl = g_engine.getTableSchema(s.currentDB, sourceName);
+        TableSchema targetTbl = g_engine.getTableSchema(s.currentDB, targetName);
+        vector<map<string, string>> sourceRows;
+        g_engine.forEachRow(s.currentDB, sourceName, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            map<string, string> row;
+            string rowStr(data, len);
+            for (size_t i = 0; i < sourceTbl.len; ++i) {
+                row[sourceTbl.cols[i].dataName] = dbms::StorageEngine::extractColumnValue(rowStr, sourceTbl, i);
+            }
+            sourceRows.push_back(std::move(row));
+        });
+
+        int updated = 0, inserted = 0;
+        for (const auto& srow : sourceRows) {
+            auto it = srow.find(sourceOnCol);
+            if (it == srow.end()) continue;
+            string matchVal = it->second;
+            if (matchVal.empty()) continue;
+
+            // Check if target has matching row
+            vector<string> conds = {"=" + targetOnCol + " " + matchVal};
+            set<string> qcols;
+            auto matchRows = g_engine.query(s.currentDB, targetName, conds, qcols);
+
+            if (!matchRows.empty()) {
+                // UPDATE matched row
+                map<string, string> updates;
+                for (const auto& kv : updateMap) {
+                    auto sit = srow.find(kv.second);
+                    if (sit != srow.end()) updates[kv.first] = sit->second;
+                }
+                if (!updates.empty()) {
+                    g_engine.update(s.currentDB, targetName, updates, conds);
+                    updated++;
+                }
+            } else {
+                // INSERT new row
+                map<string, string> values;
+                for (size_t i = 0; i < insertCols.size() && i < insertSourceCols.size(); ++i) {
+                    auto sit = srow.find(insertSourceCols[i]);
+                    if (sit != srow.end()) values[insertCols[i]] = sit->second;
+                }
+                if (!values.empty()) {
+                    auto res = g_engine.insert(s.currentDB, targetName, values);
+                    if (res == dbms::OpResult::Success) inserted++;
+                }
+            }
+        }
+        cout << "MERGE completed: " << updated << " updated, " << inserted << " inserted" << endl;
+        return false;
+    }
+
     if (sql.substr(0, 12) == "insert into ") {
         if (!checkDB(s)) return true;
         vector<string> tokens = tokenize(sql.substr(12));
