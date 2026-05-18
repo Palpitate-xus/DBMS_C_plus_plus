@@ -4012,6 +4012,15 @@ bool execute(const string& rawSql, Session& s) {
             for (const string& part : orderParts) {
                 string sortItem = part;
                 bool asc = true;
+                bool nullsFirst = false;
+                // Detect NULLS FIRST / NULLS LAST
+                size_t nullsPos = sortItem.find("nulls");
+                if (nullsPos != string::npos) {
+                    string afterNulls = trim(sortItem.substr(nullsPos + 5));
+                    if (afterNulls == "first") nullsFirst = true;
+                    // else "last" is default
+                    sortItem = trim(sortItem.substr(0, nullsPos));
+                }
                 if (sortItem.size() >= 5 && sortItem.substr(sortItem.size() - 4) == "desc") {
                     asc = false;
                     sortItem = trim(sortItem.substr(0, sortItem.size() - 4));
@@ -4028,6 +4037,7 @@ bool execute(const string& rawSql, Session& s) {
                         spec.exprFunc = func;
                         spec.exprArg = arg;
                         spec.ascending = asc;
+                        spec.nullsFirst = nullsFirst;
                         exprOrderBySpecs.push_back(spec);
                         continue;
                     }
@@ -4036,6 +4046,7 @@ bool execute(const string& rawSql, Session& s) {
                 dbms::StorageEngine::OrderBySpec spec;
                 spec.colName = sortItem;
                 spec.ascending = asc;
+                spec.nullsFirst = nullsFirst;
                 orderBySpecs.push_back(spec);
             }
         }

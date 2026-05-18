@@ -161,6 +161,7 @@ public:
         std::string exprFunc;   // e.g., "length"
         std::string exprArg;    // e.g., "name"
         bool isExpression = false;
+        bool nullsFirst = false;  // NULLS FIRST / NULLS LAST
     };
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
                                    const std::vector<std::string>& conditions,

@@ -3250,10 +3250,11 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         struct SortKey {
             int64_t rid;
             std::vector<std::tuple<std::string, int64_t, Date>> vals; // (str, num, date) per column
+            std::vector<bool> isNulls; // true if value is NULL
         };
         std::vector<SortKey> keys;
         for (auto& mr : matchRows) {
-            SortKey k{mr.first, {}};
+            SortKey k{mr.first, {}, {}};
             for (const auto& spec : orderBy) {
                 size_t sortIdx = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
@@ -3262,6 +3263,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                 if (sortIdx < tbl.len) {
                     std::string val = extractColumnValue(mr.second, tbl, sortIdx);
                     const Column& scol = tbl.cols[sortIdx];
+                    k.isNulls.push_back(val.empty());
                     if (scol.dataType == "char" || scol.isVariableLength) {
                         k.vals.emplace_back(val, 0, Date{});
                     } else if (scol.dataType == "date") {
@@ -3270,6 +3272,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                         k.vals.emplace_back("", val.empty() ? 0 : parseInt(val), Date{});
                     }
                 } else {
+                    k.isNulls.push_back(true);
                     k.vals.emplace_back("", 0, Date{});
                 }
             }
@@ -3283,6 +3286,12 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                     if (tbl.cols[j].dataName == spec.colName) { sortIdx = j; break; }
                 }
                 if (sortIdx >= tbl.len) continue;
+                // NULL handling: NULLS FIRST or NULLS LAST (default)
+                bool aNull = a.isNulls[i];
+                bool bNull = b.isNulls[i];
+                if (aNull && bNull) continue;
+                if (aNull) return spec.nullsFirst;
+                if (bNull) return !spec.nullsFirst;
                 const Column& scol = tbl.cols[sortIdx];
                 bool less = false, greater = false;
                 if (scol.dataType == "char" || scol.isVariableLength) {
@@ -4003,10 +4012,11 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
         struct SortKey {
             int64_t rid;
             std::vector<std::tuple<std::string, int64_t, Date>> vals;
+            std::vector<bool> isNulls;
         };
         std::vector<SortKey> keys;
         for (auto& mr : matchRows) {
-            SortKey k{mr.first, {}};
+            SortKey k{mr.first, {}, {}};
             for (const auto& spec : orderBy) {
                 size_t sortIdx = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
@@ -4015,6 +4025,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                 if (sortIdx < tbl.len) {
                     std::string val = extractColumnValue(mr.second, tbl, sortIdx);
                     const Column& scol = tbl.cols[sortIdx];
+                    k.isNulls.push_back(val.empty());
                     if (scol.dataType == "char" || scol.isVariableLength) {
                         k.vals.push_back({val, 0, {}});
                     } else if (scol.dataType == "date") {
@@ -4023,6 +4034,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                         k.vals.push_back({"", val.empty() ? 0 : parseInt(val), {}});
                     }
                 } else {
+                    k.isNulls.push_back(true);
                     k.vals.push_back({"", 0, {}});
                 }
             }
@@ -4036,6 +4048,11 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                     if (tbl.cols[j].dataName == spec.colName) { sortIdx = j; break; }
                 }
                 if (sortIdx >= tbl.len) continue;
+                bool aNull = a.isNulls[i];
+                bool bNull = b.isNulls[i];
+                if (aNull && bNull) continue;
+                if (aNull) return spec.nullsFirst;
+                if (bNull) return !spec.nullsFirst;
                 const Column& scol = tbl.cols[sortIdx];
                 bool less = false, greater = false;
                 if (scol.dataType == "char" || scol.isVariableLength) {
@@ -4523,6 +4540,11 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 const auto& spec = exprSpecs[i];
                 const std::string& av = a.exprVals[i];
                 const std::string& bv = b.exprVals[i];
+                bool aNull = av.empty();
+                bool bNull = bv.empty();
+                if (aNull && bNull) continue;
+                if (aNull) return spec.nullsFirst;
+                if (bNull) return !spec.nullsFirst;
                 bool less = false, greater = false;
                 // Try numeric comparison first
                 try {
