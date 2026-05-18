@@ -202,7 +202,7 @@
 | **UPDATE FROM (多表 UPDATE)** | ✅ | ✅ | - |
 | **DELETE ... USING (多表 DELETE)** | ✅ | ✅ | - |
 | **UPDATE/DELETE ... RETURNING** | ✅ | ✅ | - |
-| **UPDATE/DELETE ... LIMIT** | ❌ | ✅ | P2 |
+| **UPDATE/DELETE ... LIMIT** | ✅ | ✅ | - |
 
 ### 2.14 ORDER BY 扩展
 

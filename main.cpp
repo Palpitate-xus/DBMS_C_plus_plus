@@ -2699,6 +2699,19 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Delete done (" << deletedCount << " row(s))" << endl;
             return false;
         }
+        // Parse LIMIT clause from original SQL before tokenizing
+        size_t delLimitPos = sql.find("limit", 12);
+        int delLimitVal = -1;
+        if (delLimitPos != string::npos) {
+            string limitStr = trim(sql.substr(delLimitPos + 5));
+            try { delLimitVal = stoi(limitStr); } catch (...) { delLimitVal = -1; }
+            // Remove limit from delRest for tokenization
+            size_t limitInDelRest = delRest.find("limit");
+            if (limitInDelRest != string::npos) {
+                delRest = trim(delRest.substr(0, limitInDelRest));
+            }
+        }
+
         vector<string> tokens = tokenize(normalizeConditionStr(delRest));
         if (tokens.empty()) {
             cout << "SQL syntax error" << endl;
@@ -2717,6 +2730,43 @@ bool execute(const string& rawSql, Session& s) {
 
         tokens.erase(tokens.begin());
         if (tokens.empty()) {
+            // No WHERE clause
+            if (delLimitVal > 0) {
+                TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
+                size_t pkIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+                }
+                if (pkIdx >= tbl.len) {
+                    cout << "DELETE ... LIMIT requires table to have a primary key" << endl;
+                    return true;
+                }
+                string pkCol = tbl.cols[pkIdx].dataName;
+                size_t deletedCount = 0;
+                vector<string> returnedRows;
+                auto matchRows = g_engine.query(s.currentDB, resolvedName, {}, {}, {});
+                for (size_t ri = 0; ri < matchRows.size() && deletedCount < static_cast<size_t>(delLimitVal); ++ri) {
+                    stringstream ss(matchRows[ri]);
+                    string val;
+                    vector<string> cols;
+                    while (ss >> val) cols.push_back(val);
+                    if (cols.size() <= pkIdx) continue;
+                    string pkVal = cols[pkIdx];
+                    vector<string> pkCond = {"=" + pkCol + " " + pkVal};
+                    if (!returningCols.empty() || returningAll) {
+                        auto rr = g_engine.query(s.currentDB, resolvedName, pkCond,
+                                                 returningAll ? set<string>() : returningCols, {});
+                        for (auto& r : rr) returnedRows.push_back(r);
+                    }
+                    auto res = g_engine.remove(s.currentDB, resolvedName, pkCond);
+                    if (res == OpResult::Success) ++deletedCount;
+                }
+                cout << "Delete done (" << deletedCount << " row(s))" << endl;
+                for (auto& row : returnedRows) cout << row << endl;
+                log(s.username, "delete done", getTime());
+                g_engine.analyzeTable(s.currentDB, resolvedName);
+                return false;
+            }
             // RETURNING: query all rows before delete
             vector<string> returnedRows;
             if (!returningCols.empty() || returningAll) {
@@ -2744,6 +2794,47 @@ bool execute(const string& rawSql, Session& s) {
         tokens.push_back(")");
         for (auto& t : tokens) t = modifyLogic(t);
         auto groups = breakDownConditions(tokens);
+
+        // If LIMIT is specified, query matching rows and delete by PK
+        if (delLimitVal > 0) {
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
+            size_t pkIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+            }
+            if (pkIdx >= tbl.len) {
+                cout << "DELETE ... LIMIT requires table to have a primary key" << endl;
+                return true;
+            }
+            string pkCol = tbl.cols[pkIdx].dataName;
+            size_t deletedCount = 0;
+            vector<string> returnedRows;
+            for (const auto& g : groups) {
+                auto matchRows = g_engine.query(s.currentDB, resolvedName, g, {}, {});
+                for (size_t ri = 0; ri < matchRows.size() && deletedCount < static_cast<size_t>(delLimitVal); ++ri) {
+                    stringstream ss(matchRows[ri]);
+                    string val;
+                    vector<string> cols;
+                    while (ss >> val) cols.push_back(val);
+                    if (cols.size() <= pkIdx) continue;
+                    string pkVal = cols[pkIdx];
+                    vector<string> pkCond = {"=" + pkCol + " " + pkVal};
+                    if (!returningCols.empty() || returningAll) {
+                        auto rr = g_engine.query(s.currentDB, resolvedName, pkCond,
+                                                 returningAll ? set<string>() : returningCols, {});
+                        for (auto& r : rr) returnedRows.push_back(r);
+                    }
+                    auto res = g_engine.remove(s.currentDB, resolvedName, pkCond);
+                    if (res == OpResult::Success) ++deletedCount;
+                }
+            }
+            cout << "Delete done (" << deletedCount << " row(s))" << endl;
+            for (auto& row : returnedRows) cout << row << endl;
+            log(s.username, "delete done", getTime());
+            g_engine.analyzeTable(s.currentDB, resolvedName);
+            return false;
+        }
+
         // RETURNING: query rows before delete
         vector<string> returnedRows;
         if (!returningCols.empty() || returningAll) {
@@ -2918,8 +3009,15 @@ bool execute(const string& rawSql, Session& s) {
         if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Update)) return true;
 
         size_t wherePos = sql.find("where", setPos);
-        auto updates = parseSetClause(sql, setPos + 3,
-                                       (wherePos == std::string::npos) ? sql.size() : wherePos);
+        size_t setEndPos = (wherePos == std::string::npos) ? sql.size() : wherePos;
+        // Strip LIMIT from set clause range before parsing
+        {
+            size_t tmpLimitPos = sql.find("limit", setPos);
+            if (tmpLimitPos != string::npos && tmpLimitPos < setEndPos) {
+                setEndPos = tmpLimitPos;
+            }
+        }
+        auto updates = parseSetClause(sql, setPos + 3, setEndPos);
         if (updates.empty()) {
             cout << "SQL syntax error" << endl;
             return true;
@@ -2928,10 +3026,26 @@ bool execute(const string& rawSql, Session& s) {
         // Parse RETURNING clause
         auto [returningCols, returningAll] = parseReturningClause(sql, setPos);
 
+        // Parse LIMIT clause
+        size_t limitPos = string::npos;
+        int limitVal = -1;
+        {
+            size_t searchStart = (wherePos != string::npos) ? wherePos : setPos;
+            limitPos = sql.find("limit", searchStart);
+            if (limitPos != string::npos) {
+                string limitStr = trim(sql.substr(limitPos + 5));
+                try { limitVal = stoi(limitStr); } catch (...) { limitVal = -1; }
+            }
+        }
+
         vector<string> conds;
         vector<string> returnedRows;
         if (wherePos != std::string::npos) {
             string whereClause = trim(sql.substr(wherePos + 5));
+            // Strip LIMIT from whereClause if present
+            if (limitPos != string::npos && limitPos > wherePos) {
+                whereClause = trim(sql.substr(wherePos + 5, limitPos - wherePos - 5));
+            }
             whereClause = expandSubqueries(whereClause, s);
             whereClause = normalizeConditionStr(whereClause);
             vector<string> tokens = tokenize(whereClause);
@@ -2939,6 +3053,50 @@ bool execute(const string& rawSql, Session& s) {
             tokens.push_back(")");
             for (auto& t : tokens) t = modifyLogic(t);
             auto groups = breakDownConditions(tokens);
+
+            // If LIMIT is specified, query matching rows and update by PK
+            if (limitVal > 0) {
+                TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
+                size_t pkIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+                }
+                if (pkIdx >= tbl.len) {
+                    cout << "UPDATE ... LIMIT requires table to have a primary key" << endl;
+                    return true;
+                }
+                string pkCol = tbl.cols[pkIdx].dataName;
+                size_t updatedCount = 0;
+                for (const auto& g : groups) {
+                    auto matchRows = g_engine.query(s.currentDB, resolvedName, g, {}, {});
+                    for (size_t ri = 0; ri < matchRows.size() && updatedCount < static_cast<size_t>(limitVal); ++ri) {
+                        stringstream ss(matchRows[ri]);
+                        string val;
+                        vector<string> cols;
+                        while (ss >> val) cols.push_back(val);
+                        if (cols.size() <= pkIdx) continue;
+                        string pkVal = cols[pkIdx];
+                        vector<string> pkCond = {"=" + pkCol + " " + pkVal};
+                        cerr << "DEBUG pkCond='" << pkCond[0] << "'" << endl;
+                        auto res = g_engine.update(s.currentDB, resolvedName, updates, pkCond);
+                        cerr << "DEBUG update res=" << static_cast<int>(res) << endl;
+                        if (res == OpResult::Success) {
+                            ++updatedCount;
+                            if (!returningCols.empty() || returningAll) {
+                                auto rr = g_engine.query(s.currentDB, resolvedName, pkCond,
+                                                         returningAll ? set<string>() : returningCols, {});
+                                for (auto& r : rr) returnedRows.push_back(r);
+                            }
+                        }
+                    }
+                }
+                cout << "Update done (" << updatedCount << " row(s))" << endl;
+                for (auto& row : returnedRows) cout << row << endl;
+                log(s.username, "update done", getTime());
+                g_engine.analyzeTable(s.currentDB, resolvedName);
+                return false;
+            }
+
             for (const auto& g : groups) {
                 auto res = g_engine.update(s.currentDB, resolvedName, updates, g);
                 if (res != OpResult::Success) {
@@ -2955,6 +3113,44 @@ bool execute(const string& rawSql, Session& s) {
                 }
             }
         } else {
+            // No WHERE clause
+            if (limitVal > 0) {
+                TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
+                size_t pkIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
+                }
+                if (pkIdx >= tbl.len) {
+                    cout << "UPDATE ... LIMIT requires table to have a primary key" << endl;
+                    return true;
+                }
+                string pkCol = tbl.cols[pkIdx].dataName;
+                size_t updatedCount = 0;
+                auto matchRows = g_engine.query(s.currentDB, resolvedName, {}, {}, {});
+                for (size_t ri = 0; ri < matchRows.size() && updatedCount < static_cast<size_t>(limitVal); ++ri) {
+                    stringstream ss(matchRows[ri]);
+                    string val;
+                    vector<string> cols;
+                    while (ss >> val) cols.push_back(val);
+                    if (cols.size() <= pkIdx) continue;
+                    string pkVal = cols[pkIdx];
+                    vector<string> pkCond = {"=" + pkCol + " " + pkVal};
+                    auto res = g_engine.update(s.currentDB, resolvedName, updates, pkCond);
+                    if (res == OpResult::Success) {
+                        ++updatedCount;
+                        if (!returningCols.empty() || returningAll) {
+                            auto rr = g_engine.query(s.currentDB, resolvedName, pkCond,
+                                                     returningAll ? set<string>() : returningCols, {});
+                            for (auto& r : rr) returnedRows.push_back(r);
+                        }
+                    }
+                }
+                cout << "Update done (" << updatedCount << " row(s))" << endl;
+                for (auto& row : returnedRows) cout << row << endl;
+                log(s.username, "update done", getTime());
+                g_engine.analyzeTable(s.currentDB, resolvedName);
+                return false;
+            }
             auto res = g_engine.update(s.currentDB, resolvedName, updates, {});
             if (res != OpResult::Success) {
                 cout << "Update failed" << endl;
