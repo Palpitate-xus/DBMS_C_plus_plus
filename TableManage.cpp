@@ -42,6 +42,51 @@ static std::string trim(const std::string& s) {
 }
 
 // SQL LIKE pattern matching (% = any sequence, _ = single char), case-insensitive
+// Evaluate a simple generated-column expression: supports binary ops + - * /
+// e.g. "age * 2", "salary + bonus", "price - discount"
+static std::string evaluateGeneratedExpr(
+    const std::string& expr,
+    const std::map<std::string, std::string>& colValues) {
+    // Find the operator
+    char op = 0;
+    size_t opPos = std::string::npos;
+    for (size_t i = 0; i < expr.size(); ++i) {
+        if (expr[i] == '+' || expr[i] == '-' || expr[i] == '*' || expr[i] == '/') {
+            op = expr[i];
+            opPos = i;
+            break;
+        }
+    }
+    if (opPos == std::string::npos || op == 0) return "";
+    std::string left = trim(expr.substr(0, opPos));
+    std::string right = trim(expr.substr(opPos + 1));
+    if (left.empty() || right.empty()) return "";
+    // Resolve operand values
+    auto resolve = [&](const std::string& token) -> double {
+        auto it = colValues.find(token);
+        if (it != colValues.end() && !it->second.empty()) {
+            try { return std::stod(it->second); } catch (...) {}
+        }
+        try { return std::stod(token); } catch (...) { return 0.0; }
+    };
+    double lv = resolve(left);
+    double rv = resolve(right);
+    double result = 0.0;
+    switch (op) {
+        case '+': result = lv + rv; break;
+        case '-': result = lv - rv; break;
+        case '*': result = lv * rv; break;
+        case '/': result = (rv != 0.0) ? lv / rv : 0.0; break;
+    }
+    // Return as integer string if whole number, else decimal
+    if (result == std::floor(result)) {
+        return std::to_string(static_cast<int64_t>(result));
+    }
+    std::ostringstream oss;
+    oss << result;
+    return oss.str();
+}
+
 static bool likeMatch(const std::string& text, const std::string& pattern) {
     std::string t = text;
     std::string p = pattern;
@@ -1431,7 +1476,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     int32_t len = static_cast<int32_t>(tbl.len);
     out.write(reinterpret_cast<const char*>(&len), 4);
     for (size_t i = 0; i < tbl.len; ++i) {
-        uint8_t flags = (tbl.cols[i].isNull ? 1 : 0) | (tbl.cols[i].isPrimaryKey ? 2 : 0) | (tbl.cols[i].isVariableLength ? 4 : 0) | (tbl.cols[i].isUnique ? 8 : 0) | (!tbl.cols[i].defaultValue.empty() ? 16 : 0) | (tbl.cols[i].isAutoIncrement ? 32 : 0) | (!tbl.cols[i].checkExpr.empty() ? 64 : 0);
+        uint8_t flags = (tbl.cols[i].isNull ? 1 : 0) | (tbl.cols[i].isPrimaryKey ? 2 : 0) | (tbl.cols[i].isVariableLength ? 4 : 0) | (tbl.cols[i].isUnique ? 8 : 0) | (!tbl.cols[i].defaultValue.empty() ? 16 : 0) | (tbl.cols[i].isAutoIncrement ? 32 : 0) | (!tbl.cols[i].checkExpr.empty() ? 64 : 0) | (!tbl.cols[i].generatedExpr.empty() ? 128 : 0);
         out.write(reinterpret_cast<const char*>(&flags), 1);
         writeFixedString(out, tbl.cols[i].dataType, MAX_TYPE_NAME_LEN);
         writeFixedString(out, tbl.cols[i].dataName, MAX_COL_NAME_LEN);
@@ -1444,6 +1489,11 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             uint16_t checkLen = static_cast<uint16_t>(tbl.cols[i].checkExpr.size());
             out.write(reinterpret_cast<const char*>(&checkLen), 2);
             out.write(tbl.cols[i].checkExpr.data(), checkLen);
+        }
+        if (!tbl.cols[i].generatedExpr.empty()) {
+            uint16_t genLen = static_cast<uint16_t>(tbl.cols[i].generatedExpr.size());
+            out.write(reinterpret_cast<const char*>(&genLen), 2);
+            out.write(tbl.cols[i].generatedExpr.data(), genLen);
         }
     }
     // Write foreign keys (multi-column support: version 1 format)
@@ -1506,6 +1556,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         bool hasDefault = (flags & 16) != 0;
         tbl.cols[i].isAutoIncrement = (flags & 32) != 0;
         bool hasCheck = (flags & 64) != 0;
+        bool hasGenerated = (flags & 128) != 0;
         tbl.cols[i].dataType = readFixedString(in, MAX_TYPE_NAME_LEN);
         tbl.cols[i].dataName = readFixedString(in, MAX_COL_NAME_LEN);
         int32_t dsize = 0;
@@ -1521,6 +1572,15 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 std::string checkExpr(checkLen, '\0');
                 in.read(checkExpr.data(), checkLen);
                 tbl.cols[i].checkExpr = checkExpr;
+            }
+        }
+        if (hasGenerated) {
+            uint16_t genLen = 0;
+            in.read(reinterpret_cast<char*>(&genLen), 2);
+            if (in && genLen > 0) {
+                std::string genExpr(genLen, '\0');
+                in.read(genExpr.data(), genLen);
+                tbl.cols[i].generatedExpr = genExpr;
             }
         }
     }
@@ -2198,6 +2258,18 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;
             }
+        }
+    }
+
+    // Compute generated columns
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        if (col.generatedExpr.empty()) continue;
+        auto it = actualValues.find(col.dataName);
+        if (it != actualValues.end() && !it->second.empty()) continue; // user provided value
+        std::string computed = evaluateGeneratedExpr(col.generatedExpr, actualValues);
+        if (!computed.empty()) {
+            actualValues[col.dataName] = computed;
         }
     }
 
@@ -3410,7 +3482,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     StorageEngine* engine = nullptr,
                                     const std::string& dbname = "") {
     auto getVal = [&](const std::string& arg) -> std::string {
-        if (arg.size() >= 2 && arg.front() == '\'' && arg.back() == '\'')
+        if (arg.size() >= 2 && ((arg.front() == '\'' && arg.back() == '\'') || (arg.front() == '"' && arg.back() == '"')))
             return arg.substr(1, arg.size() - 2);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == arg)
@@ -3870,6 +3942,17 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         Date d1(a.c_str()), d2(b.c_str());
         if (d1.year == 0 || d2.year == 0) return "";
         return std::to_string(d1 - d2);
+    }
+    if (expr.funcName == "age" && expr.funcArgs.size() >= 2) {
+        std::string a = getVal(expr.funcArgs[0]);
+        std::string b = getVal(expr.funcArgs[1]);
+        Date d1(a.c_str()), d2(b.c_str());
+        if (d1.year == 0 || d2.year == 0) return "";
+        int years = d1.year - d2.year;
+        if (d1.month < d2.month || (d1.month == d2.month && d1.day < d2.day)) {
+            years--;
+        }
+        return std::to_string(years);
     }
     if (expr.funcName == "date_trunc" && expr.funcArgs.size() >= 2) {
         std::string unit = getVal(expr.funcArgs[0]);

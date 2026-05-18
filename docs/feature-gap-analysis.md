@@ -152,7 +152,7 @@
 | **DATE_ADD / DATE_SUB / INTERVAL** | ✅ | ✅ | - |
 | **DATEDIFF** | ✅ | ✅ | - |
 | **DATE_FORMAT / TO_CHAR** | ✅ | ✅ | - |
-| **AGE** | ❌ | ✅ | P3 |
+| **AGE** | ✅ | ✅ | - |
 
 ### 2.10 聚合函数扩展
 
@@ -235,7 +235,7 @@
 | **DECIMAL / NUMERIC** | ✅ | ✅ | - |
 | **FLOAT / REAL** | ✅ | ✅ | - |
 | **DOUBLE PRECISION** | ✅ | ✅ | - |
-| **MONEY** | ❌ | ✅ | P3 |
+| **MONEY** | ✅ | ✅ | - |
 | **无符号类型 (UNSIGNED)** | ❌ | ✅ MySQL | P2 |
 
 ### 3.2 字符串类型
@@ -332,7 +332,7 @@
 | **EXCLUSION 约束** | ❌ | ✅ PG | P3 |
 | **域 (CREATE DOMAIN)** | ❌ | ✅ PG | P3 |
 | **断言 (CREATE ASSERTION)** | ❌ | 标准 | P3 |
-| **生成列 (GENERATED COLUMN)** | ❌ | ✅ | P2 |
+| **生成列 (GENERATED COLUMN)** | ✅ | ✅ | - |
 | **标识列 (IDENTITY)** | ✅ SERIAL | ✅ | - |
 
 ---
@@ -969,7 +969,7 @@
 | **已实现** | ~120 | 100% |
 | **P0 (关键)** | 24 | **100%** |
 | **P1 (重要)** | 36 | ~58% |
-| **P2 (增强)** | 44 | ~34% |
+| **P2 (增强)** | 44 | ~36% |
 | **P3 (高级)** | 60+ | ~5% |
 
 **当前定位**：P0 全部完成！已实现 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树/Hash 索引 + 复合索引 + 覆盖索引 + 行级锁 + 查询优化器 + SSL/TLS + 密码哈希，对标 SQLite 3.x 水平。

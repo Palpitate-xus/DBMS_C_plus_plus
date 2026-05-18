@@ -77,7 +77,7 @@ static string trim(const string& s) {
 }
 
 static string stripQuotes(const string& s) {
-    if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
+    if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') || (s.front() == '"' && s.back() == '"'))) {
         return s.substr(1, s.size() - 2);
     }
     return s;
@@ -260,6 +260,7 @@ static bool isScalarFunc(const string& name) {
                                          "greatest", "least", "if", "iif",
                                          "date_add", "date_sub",
                                          "datediff", "date_trunc", "date_format",
+                                         "age",
                                          "json_extract", "json_value",
                                          "sin", "cos", "tan",
                                          "split_part",
@@ -834,6 +835,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             bool isUnique = false;
             std::string defaultVal;
             std::string checkExpr;
+            std::string generatedExpr;
             dbms::ForeignKey fk;
 
             if (isBrace) {
@@ -887,6 +889,25 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                             }
                             // Store normalized expression
                             checkExpr = normalizeConditionStr(expr);
+                        } else if (parts[i] == "generated" && i + 2 < parts.size() && parts[i + 1] == "always" && parts[i + 2] == "as") {
+                            // GENERATED ALWAYS AS (expr)
+                            i += 3;
+                            int parenDepth = 0;
+                            std::string expr;
+                            for (; i < parts.size(); ++i) {
+                                if (parts[i] == "(") {
+                                    if (parenDepth > 0) expr += "(";
+                                    ++parenDepth;
+                                } else if (parts[i] == ")") {
+                                    --parenDepth;
+                                    if (parenDepth > 0) expr += ")";
+                                } else {
+                                    expr += parts[i];
+                                }
+                                if (parenDepth == 0 && !expr.empty()) break;
+                            }
+                            // Store generated expression (normalize as condition)
+                            generatedExpr = normalizeConditionStr(expr);
                         }
                     }
                 }
@@ -1000,7 +1021,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeJsonColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 5) == "float") {
                 tbl.append(makeFloatColumn(cname, isNull, isPK));
-            } else if (ctype.substr(0, 6) == "double") {
+            } else if (ctype.substr(0, 6) == "double" || ctype.substr(0, 5) == "money") {
                 tbl.append(makeDoubleColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 7) == "decimal") {
                 int prec = 10, sc = 0;
@@ -1023,6 +1044,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.cols[tbl.len - 1].isUnique = isUnique;
                 tbl.cols[tbl.len - 1].defaultValue = defaultVal;
                 tbl.cols[tbl.len - 1].checkExpr = checkExpr;
+                tbl.cols[tbl.len - 1].generatedExpr = generatedExpr;
             }
             if (!fk.colNames.empty()) tbl.appendFK(fk);
             pos = endPos + 1;
@@ -2063,7 +2085,7 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeJsonColumn(cname, isNull);
             } else if (typeName.substr(0, 5) == "float") {
                 col = makeFloatColumn(cname, isNull);
-            } else if (typeName.substr(0, 6) == "double") {
+            } else if (typeName.substr(0, 6) == "double" || typeName.substr(0, 5) == "money") {
                 col = makeDoubleColumn(cname, isNull);
             } else if (typeName.substr(0, 7) == "decimal") {
                 col = makeDecimalColumn(cname, isNull, 10, 0);

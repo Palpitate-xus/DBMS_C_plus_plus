@@ -44,6 +44,7 @@ struct Column {
     size_t dsize = 0;  // For VARCHAR: max length; for fixed: actual bytes
     std::string defaultValue;       // DEFAULT value
     std::string checkExpr;          // CHECK constraint expression
+    std::string generatedExpr;      // GENERATED ALWAYS AS (expr)
 
     void print() const;
 };
