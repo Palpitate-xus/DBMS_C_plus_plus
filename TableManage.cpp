@@ -3705,6 +3705,8 @@ std::vector<std::string> StorageEngine::aggregate(
         Date maxDate, minDate;
         bool isInt = false, isDate = false, isChar = false;
         size_t colIdx = tbl.len;
+        std::string groupConcat;
+        bool groupConcatFirst = true;
 
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
@@ -3740,6 +3742,13 @@ std::vector<std::string> StorageEngine::aggregate(
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     if (!val.empty()) count++;
+                } else if (func == "group_concat" || func == "string_agg") {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (val.empty()) continue;
+                    if (!groupConcatFirst) groupConcat += ",";
+                    groupConcat += val;
+                    groupConcatFirst = false;
                 } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
@@ -3779,6 +3788,9 @@ std::vector<std::string> StorageEngine::aggregate(
         if (func == "count") rowResult += transstr(count) + ' ';
         else if (func == "sum") rowResult += transstr(sum) + ' ';
         else if (func == "avg") rowResult += (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count)) + ' ';
+        else if (func == "group_concat" || func == "string_agg") {
+            rowResult += (groupConcat.empty() ? "NULL" : groupConcat) + ' ';
+        }
         else if (func == "max") {
             if (!hasMax) rowResult += "NULL ";
             else if (isInt) rowResult += transstr(maxInt) + ' ';
@@ -3879,6 +3891,8 @@ std::vector<std::string> StorageEngine::groupAggregate(
         std::string maxStr, minStr;
         int64_t maxInt = 0, minInt = 0;
         Date maxDate, minDate;
+        std::string groupConcat;
+        bool groupConcatFirst = true;
 
         if (isDistinctCount) {
             std::set<std::string> distinctVals;
@@ -3900,6 +3914,13 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     if (!val.empty()) count++;
+                } else if (func == "group_concat" || func == "string_agg") {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (val.empty()) continue;
+                    if (!groupConcatFirst) groupConcat += ",";
+                    groupConcat += val;
+                    groupConcatFirst = false;
                 } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
@@ -3926,6 +3947,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         if (func == "count") return transstr(count);
         if (func == "sum") return transstr(sum);
         if (func == "avg") return (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count));
+        if (func == "group_concat" || func == "string_agg") return groupConcat.empty() ? "NULL" : groupConcat;
         if (func == "max") {
             if (!hasMax) return "NULL";
             if (isInt) return transstr(maxInt);
