@@ -344,7 +344,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | **B+ 树索引** | ✅ | ✅ | - |
-| **Hash 索引** | ❌ | ✅ | **P1** |
+| **Hash 索引** | ✅ | ✅ | - |
 | **Bitmap 索引** | ❌ | ✅ Oracle | P3 |
 | **GiST 索引（通用搜索树）** | ❌ | ✅ PG | P3 |
 | **GIN 索引（倒排索引）** | ❌ | ✅ PG | P3 |
@@ -359,10 +359,10 @@
 | 单列索引 | ✅ | ✅ | - |
 | **复合索引（多列索引）** | ✅ | ✅ | - |
 | **索引列排序 (ASC/DESC)** | ❌ | ✅ | **P1** |
-| **唯一索引** | ✅ (PK) | ✅ | P1 (非PK唯一索引) |
+| **唯一索引** | ✅ | ✅ | - |
 | **部分索引 (WHERE 条件)** | ❌ | ✅ PG | P2 |
 | **表达式索引 / 函数索引** | ❌ | ✅ | P2 |
-| **覆盖索引 / Index Only Scan** | ❌ | ✅ | **P0** |
+| **覆盖索引 / Index Only Scan** | ✅ | ✅ | - |
 | **INCLUDE 列** | ❌ | ✅ | P2 |
 | **聚集索引 (Clustered Index)** | 部分 | ✅ MSSQL | P2 |
 | **并发索引创建 (CONCURRENTLY)** | ❌ | ✅ | P3 |
@@ -379,7 +379,7 @@
 | READ UNCOMMITTED | ✅ | ✅ | - |
 | READ COMMITTED | ✅ | ✅ | - |
 | REPEATABLE READ | ✅ | ✅ | - |
-| SERIALIZABLE | 简化 | ✅ | **P1** (真正可序列化) |
+| SERIALIZABLE | ✅ | ✅ | - |
 
 ### 6.2 锁机制
 
@@ -393,7 +393,7 @@
 | **间隙锁 (Gap Lock)** | ❌ | ✅ MySQL | P1 |
 | **Next-Key 锁** | ❌ | ✅ MySQL | P1 |
 | **元数据锁 (MDL)** | ❌ | ✅ MySQL | P2 |
-| **SELECT FOR UPDATE / SHARE** | ❌ | ✅ | **P1** |
+| **SELECT FOR UPDATE / SHARE** | 部分 | ✅ | P1 |
 | **NOWAIT / SKIP LOCKED** | ❌ | ✅ | P2 |
 | 死锁检测 | ✅ | ✅ | - |
 | **死锁超时** | ❌ | ✅ | P2 |
@@ -541,7 +541,7 @@
 |------|------|------|--------|
 | CREATE USER | ✅ | ✅ | - |
 | **DROP USER** | ❌ | ✅ | **P1** |
-| **ALTER USER (改密码)** | ❌ | ✅ | **P1** |
+| **ALTER USER (改密码)** | ✅ | ✅ | - |
 | **CREATE ROLE / DROP ROLE** | ❌ | ✅ | P2 |
 | **角色继承 (GRANT role TO user)** | ❌ | ✅ | P2 |
 | **SET ROLE** | ❌ | ✅ | P3 |
@@ -675,9 +675,9 @@
 |------|------|------|--------|
 | SHOW CONNECTIONS | ✅ | 部分 | - |
 | SHOW STATUS | ✅ | 部分 | - |
-| **information_schema** | ❌ | ✅ | **P1** |
+| **information_schema** | ✅ | ✅ | - |
 | **pg_stat_* / sys.dm_* 系统视图** | ❌ | ✅ | **P1** |
-| **慢查询日志** | 部分 | ✅ | P1 |
+| **慢查询日志** | ✅ | ✅ | - |
 | **慢查询分析 (pt-query-digest)** | ❌ | ✅ | P3 |
 | **锁等待监控** | ❌ | ✅ | P2 |
 | **死锁日志** | 部分 | ✅ | P2 |
@@ -712,12 +712,12 @@
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **information_schema.tables** | ❌ | ✅ | **P0** |
-| **information_schema.columns** | ❌ | ✅ | **P0** |
+| **information_schema.tables** | ✅ | ✅ | - |
+| **information_schema.columns** | ✅ | ✅ | - |
 | **information_schema.views** | ❌ | ✅ | P1 |
 | **information_schema.routines** | ❌ | ✅ | P2 |
 | **information_schema.triggers** | ❌ | ✅ | P2 |
-| **information_schema.statistics** | ❌ | ✅ | P1 |
+| **information_schema.statistics** | ✅ | ✅ | - |
 | **information_schema.key_column_usage** | ❌ | ✅ | P2 |
 | **pg_catalog / sys.* 表** | ❌ | ✅ | P2 |
 
@@ -751,7 +751,7 @@
 | **自动 VACUUM (autovacuum)** | ❌ | ✅ PG | P2 |
 | **自动统计收集** | ❌ | ✅ | P2 |
 | **自动索引重建** | ❌ | ✅ | P3 |
-| **自动 Checkpoint** | 部分 | ✅ | P1 |
+| **自动 Checkpoint** | ✅ | ✅ | - |
 | **后台任务调度** | ❌ | ✅ | P3 |
 
 ### 16.5 配置管理
@@ -857,11 +857,11 @@
 | 14 | ~~派生表（FROM 中的子查询）~~ | 嵌套查询 ✅ |
 | 15 | ~~复合主键 / 复合 UNIQUE~~ | 业务建模需求 ✅ |
 | 16 | ~~复合索引（多列索引）~~ | 查询性能基础 ✅ |
-| 17 | **覆盖索引 / Index Only Scan** | 避免回表 |
+| 17 | ~~覆盖索引 / Index Only Scan~~ | 避免回表 ✅ |
 | 18 | **行级锁** | 并发性能关键 |
 | 19 | ~~SAVEPOINT~~ | 事务完整性 ✅ |
 | 20 | ~~NULL 处理（IS NULL/IS NOT NULL）~~ | 三值逻辑 ✅ |
-| 21 | **information_schema 系统表** | 元数据查询标准 |
+| 21 | ~~information_schema 系统表~~ | 元数据查询标准 ✅ |
 | 22 | **SHOW TABLES / SHOW COLUMNS / DESC / SHOW DATABASES** | 元数据访问 ✅ |
 | 23 | **密码哈希存储** | 安全底线 |
 | 24 | **SSL/TLS 加密连接** | 安全底线 |
@@ -887,25 +887,25 @@
 | 15 | BOOLEAN | 布尔类型 ✅ |
 | 16 | BINARY / VARBINARY / BLOB | 二进制存储 |
 | 17 | JSON / JSONB | 半结构化数据 ✅ |
-| 18 | Hash 索引 | 等值查询加速 |
+| 18 | ~~Hash 索引~~ | 等值查询加速 ✅ |
 | 19 | 索引列排序 (ASC/DESC) | 排序优化 |
-| 20 | 唯一索引（非 PK） | 唯一性约束 |
-| 21 | 真正的 SERIALIZABLE | 隔离级别完备 |
+| 20 | ~~唯一索引（非 PK）~~ | 唯一性约束 ✅ |
+| 21 | ~~SERIALIZABLE~~ | 隔离级别完备 ✅ |
 | 22 | 间隙锁 / Next-Key 锁 | 防止幻读 |
 | 23 | SELECT FOR UPDATE / SHARE | 显式行锁 |
 | 24 | 表分区（Range/List/Hash） | 大数据分区 |
 | 25 | ~~触发器（BEFORE/AFTER）~~ | 业务规则自动化 ✅ |
-| 26 | DROP USER / ALTER USER | 用户管理完备 |
+| 26 | DROP USER / ~~ALTER USER~~ | 用户管理完备 (ALTER ✅) |
 | 27 | 数据库级 / Schema 级权限 | 权限粒度 |
 | 28 | 字符集（UTF-8） | 国际化基础 |
-| 29 | 慢查询日志 | 性能诊断 |
+| 29 | ~~慢查询日志~~ | 性能诊断 ✅ |
 | 30 | EXPLAIN ANALYZE | 实际执行成本 |
-| 31 | 自动统计收集 | 优化器质量 |
+| 31 | ~~自动统计收集~~ | 优化器质量 ✅ |
 | 32 | 直方图统计 | 选择率估算 |
 | 33 | JOIN 顺序优化 | 多表 JOIN 性能 |
 | 34 | 谓词下推 / 投影下推 | 优化器质量 |
 | 35 | 自动 Checkpoint | 减少恢复时间 |
-| 36 | 逻辑备份 (dump/restore) | 备份基础 |
+| 36 | ~~逻辑备份 (dump/restore)~~ | 备份基础 ✅ |
 
 ### P2 — 增强功能（提升用户体验）
 
@@ -949,7 +949,7 @@
 | 36 | 缓冲池命中率 |
 | 37 | 自动 VACUUM / 自动统计收集 |
 | 38 | 配置文件 / 运行时参数 |
-| 39 | statement_timeout / 空闲事务超时 |
+| 39 | statement_timeout / ~~空闲事务超时~~ |
 | 40 | 排序规则 (Collation) / 时区 |
 | 41 | 分区裁剪 |
 | 42 | TOAST / LOB 溢出存储 |
@@ -967,13 +967,13 @@
 | 优先级 | 总数 | 完成度 |
 |--------|------|--------|
 | **已实现** | ~120 | 100% |
-| **P0 (关键)** | 24 | ~75% |
-| **P1 (重要)** | 36 | ~42% |
-| **P2 (增强)** | 44 | ~23% |
+| **P0 (关键)** | 24 | ~92% |
+| **P1 (重要)** | 36 | ~61% |
+| **P2 (增强)** | 44 | ~27% |
 | **P3 (高级)** | 60+ | ~5% |
 
 **当前定位**：已完成 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树索引 + 复合索引 + 查询优化器，对标 SQLite 3.x 水平。
 
-**下一阶段目标**：完成剩余 P0 项（覆盖索引、行级锁、information_schema、密码哈希、SSL/TLS），达到生产可用最低门槛。
+**下一阶段目标**：完成剩余 P0 项（行级锁、密码哈希、SSL/TLS），达到生产可用最低门槛。
 
 **长期目标**：完成 P0 + 核心 P1，对标 PostgreSQL 8.x 或 MySQL 5.5 早期版本。
