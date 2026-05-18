@@ -160,7 +160,7 @@
 |------|------|------|--------|
 | COUNT/MAX/MIN/SUM/AVG | ✅ | ✅ | - |
 | **COUNT(DISTINCT col)** | ✅ | ✅ | - |
-| **STRING_AGG / GROUP_CONCAT** | ❌ | ✅ | P1 |
+| **STRING_AGG / GROUP_CONCAT** | ✅ | ✅ | - |
 | **ARRAY_AGG** | ❌ | ✅ | P2 |
 | **JSON_AGG / JSONB_AGG** | ❌ | ✅ | P3 |
 | **VAR / STDDEV** | ❌ | ✅ | P3 |
@@ -271,7 +271,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | **BOOLEAN / BOOL** | ✅ | ✅ | - |
-| **TRUE / FALSE 字面量** | ❌ | ✅ | P1 |
+| **TRUE / FALSE 字面量** | ✅ | ✅ | - |
 
 ### 3.6 半结构化类型
 
@@ -540,7 +540,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | CREATE USER | ✅ | ✅ | - |
-| **DROP USER** | ❌ | ✅ | **P1** |
+| **DROP USER** | ✅ | ✅ | - |
 | **ALTER USER (改密码)** | ✅ | ✅ | - |
 | **CREATE ROLE / DROP ROLE** | ❌ | ✅ | P2 |
 | **角色继承 (GRANT role TO user)** | ❌ | ✅ | P2 |
@@ -636,7 +636,7 @@
 | **多列统计** | ❌ | ✅ | P2 |
 | **相关性统计** | ❌ | ✅ | P3 |
 | **MCV (Most Common Values)** | ❌ | ✅ PG | P2 |
-| **自动统计收集** | ❌ | ✅ | **P1** |
+| **自动统计收集** | ✅ | ✅ | - |
 
 ### 13.2 优化器特性
 
@@ -714,7 +714,7 @@
 |------|------|------|--------|
 | **information_schema.tables** | ✅ | ✅ | - |
 | **information_schema.columns** | ✅ | ✅ | - |
-| **information_schema.views** | ❌ | ✅ | P1 |
+| **information_schema.views** | ✅ | ✅ | - |
 | **information_schema.routines** | ❌ | ✅ | P2 |
 | **information_schema.triggers** | ❌ | ✅ | P2 |
 | **information_schema.statistics** | ✅ | ✅ | - |
@@ -729,8 +729,8 @@
 | **SHOW DATABASES** | ✅ | ✅ | - |
 | **SHOW TABLES** | ✅ | ✅ | - |
 | **SHOW COLUMNS FROM table** | ✅ | ✅ | - |
-| **SHOW CREATE TABLE** | ❌ | ✅ | **P1** |
-| **SHOW INDEX FROM table** | ❌ | ✅ | P1 |
+| **SHOW CREATE TABLE** | ✅ | ✅ | - |
+| **SHOW INDEX FROM table** | ✅ | ✅ | - |
 | **SHOW VARIABLES** | ❌ | ✅ | P2 |
 | **SHOW PROCESSLIST** | 部分 | ✅ | P2 |
 | **SHOW GRANTS** | ❌ | ✅ | P2 |
@@ -968,12 +968,12 @@
 |--------|------|--------|
 | **已实现** | ~120 | 100% |
 | **P0 (关键)** | 24 | **100%** |
-| **P1 (重要)** | 36 | ~75% |
+| **P1 (重要)** | 36 | ~58% |
 | **P2 (增强)** | 44 | ~27% |
 | **P3 (高级)** | 60+ | ~5% |
 
 **当前定位**：P0 全部完成！已实现 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树/Hash 索引 + 复合索引 + 覆盖索引 + 行级锁 + 查询优化器 + SSL/TLS + 密码哈希，对标 SQLite 3.x 水平。
 
-**下一阶段目标**：完成核心 P1 项（DROP USER、STRING_AGG/GROUP_CONCAT、表分区、间隙锁/Next-Key 锁、数据库级权限、直方图统计、自动统计收集、字符集支持等）。
+**下一阶段目标**：P0 已完成，P1 完成约 58%。剩余核心 P1：ORDER BY 表达式、BINARY/BLOB 类型、索引列排序 ASC/DESC、表分区（Range/List/Hash）、间隙锁/Next-Key 锁、数据库级权限、直方图统计、投影下推、字符集支持。接下来推进 P2 增强功能。
 
 **长期目标**：完成 P0 + 核心 P1，对标 PostgreSQL 8.x 或 MySQL 5.5 早期版本。
