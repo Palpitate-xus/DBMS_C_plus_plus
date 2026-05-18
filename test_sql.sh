@@ -61,7 +61,7 @@ echo ""
 
 # 编译
 echo "编译 dbms_main..."
-if ! g++ -std=c++17 -O2 -pthread main.cpp TableManage.cpp ExecutionPlan.cpp BufferPool.cpp PageAllocator.cpp Page.cpp BPTree.cpp LockManager.cpp NetworkServer.cpp TxnIdGenerator.cpp -o dbms_main 2>&1; then
+if ! g++ -std=c++17 -O2 -pthread main.cpp TableManage.cpp ExecutionPlan.cpp BufferPool.cpp PageAllocator.cpp Page.cpp BPTree.cpp LockManager.cpp NetworkServer.cpp TLSWrapper.cpp TxnIdGenerator.cpp HashIndex.cpp /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3 -o dbms_main 2>&1; then
     echo "编译失败!"
     exit 1
 fi
@@ -82,7 +82,7 @@ use database testdb
 create table users ( id int not null primary key , name varchar 20 not null , age int )
 insert into users (id,name,age) values (1,'Alice',25)
 insert into users (id,name,age) values (2,'Bob',30)" \
-"Data inserted"
+"1 row(s) inserted"
 
 # ========== 测试 3: SELECT 查询 ==========
 run_test "SELECT 查询" \
