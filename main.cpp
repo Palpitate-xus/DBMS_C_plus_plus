@@ -307,6 +307,7 @@ struct WindowFunc {
     string arg;
     string orderByCol;
     bool orderByAsc;
+    vector<string> partitionByCols;
 };
 
 static bool parseWindowFunc(const string& item, WindowFunc& wf) {
@@ -329,15 +330,34 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
     string overContent = trim(overPart.substr(overLp + 1, overRp - overLp - 1));
 
     string lowContent = toLower(overContent);
+    size_t partPos = lowContent.find("partition by");
     size_t orderPos = lowContent.find("order by");
-    if (orderPos == string::npos) return false;
 
-    string orderRest = trim(overContent.substr(orderPos + 8));
-    vector<string> ot = tokenize(orderRest);
-    if (ot.empty()) return false;
-    wf.orderByCol = ot[0];
-    wf.orderByAsc = true;
-    if (ot.size() > 1 && toLower(ot[1]) == "desc") wf.orderByAsc = false;
+    // Parse PARTITION BY (optional)
+    if (partPos != string::npos) {
+        size_t partEnd = (orderPos != string::npos) ? orderPos : overContent.size();
+        string partRest = trim(overContent.substr(partPos + 12, partEnd - partPos - 12));
+        stringstream pss(partRest);
+        string col;
+        while (getline(pss, col, ',')) {
+            string c = trim(col);
+            if (!c.empty()) wf.partitionByCols.push_back(c);
+        }
+    }
+
+    // ORDER BY is optional for window functions like row_number with partition only
+    if (orderPos != string::npos) {
+        string orderRest = trim(overContent.substr(orderPos + 8));
+        vector<string> ot = tokenize(orderRest);
+        if (!ot.empty()) {
+            wf.orderByCol = ot[0];
+            wf.orderByAsc = true;
+            if (ot.size() > 1 && toLower(ot[1]) == "desc") wf.orderByAsc = false;
+        }
+    } else if (wf.partitionByCols.empty()) {
+        // Neither PARTITION BY nor ORDER BY - invalid
+        return false;
+    }
 
     return true;
 }
@@ -3739,8 +3759,20 @@ bool execute(const string& rawSql, Session& s) {
             // Output header
             for (size_t i = 0; i < aggItems.size(); ++i) {
                 if (exprTypes[i] == 2) {
-                    cout << aggItems[i].first << "(" << aggItems[i].second << ") over (order by "
-                         << windowFuncs[0].orderByCol << ") ";
+                    cout << aggItems[i].first << "(" << aggItems[i].second << ") over (";
+                    bool hasPart = !windowFuncs[0].partitionByCols.empty();
+                    if (hasPart) {
+                        cout << "partition by ";
+                        for (size_t pi = 0; pi < windowFuncs[0].partitionByCols.size(); ++pi) {
+                            if (pi > 0) cout << ",";
+                            cout << windowFuncs[0].partitionByCols[pi];
+                        }
+                    }
+                    if (!windowFuncs[0].orderByCol.empty()) {
+                        if (hasPart) cout << " ";
+                        cout << "order by " << windowFuncs[0].orderByCol;
+                    }
+                    cout << ") ";
                 } else if (exprTypes[i] == 1) {
                     cout << aggItems[i].first << "(" << aggItems[i].second << ") ";
                 } else {
@@ -3780,9 +3812,26 @@ bool execute(const string& rawSql, Session& s) {
                 rows.push_back(rowData);
             }
 
-            // Sort by window function ORDER BY column
+            // Sort by partition columns first, then by ORDER BY column
             const WindowFunc& wf0 = windowFuncs[0];
             std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
+                // Compare partition columns first
+                for (const auto& pcol : wf0.partitionByCols) {
+                    auto itA = a.find(pcol);
+                    auto itB = b.find(pcol);
+                    if (itA == a.end() || itB == b.end()) continue;
+                    if (itA->second != itB->second) {
+                        try {
+                            int64_t va = stoll(itA->second);
+                            int64_t vb = stoll(itB->second);
+                            return va < vb;
+                        } catch (...) {
+                            return itA->second < itB->second;
+                        }
+                    }
+                }
+                // Then compare ORDER BY column
+                if (wf0.orderByCol.empty()) return false;
                 auto itA = a.find(wf0.orderByCol);
                 auto itB = b.find(wf0.orderByCol);
                 if (itA == a.end() || itB == b.end()) return false;
@@ -3795,15 +3844,32 @@ bool execute(const string& rawSql, Session& s) {
                 }
             });
 
+            // Helper: check if two rows are in the same partition
+            auto samePartition = [&](size_t i, size_t j, const WindowFunc& wf) -> bool {
+                if (wf.partitionByCols.empty()) return true;
+                for (const auto& pcol : wf.partitionByCols) {
+                    auto itA = rows[i].find(pcol);
+                    auto itB = rows[j].find(pcol);
+                    if (itA == rows[i].end() || itB == rows[j].end()) continue;
+                    if (itA->second != itB->second) return false;
+                }
+                return true;
+            };
+
             // Compute window function values
             for (size_t i = 0; i < rows.size(); ++i) {
                 for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
                     const auto& wf = windowFuncs[wi];
                     string val;
+                    // Determine partition start index for current row
+                    size_t partStart = i;
+                    while (partStart > 0 && samePartition(partStart - 1, i, wf)) partStart--;
+                    size_t partIdx = i - partStart; // 0-based index within partition
+
                     if (wf.name == "row_number") {
-                        val = to_string(i + 1);
+                        val = to_string(partIdx + 1);
                     } else if (wf.name == "rank") {
-                        if (i == 0) {
+                        if (partIdx == 0) {
                             val = "1";
                         } else {
                             auto itCur = rows[i].find(wf.orderByCol);
@@ -3812,20 +3878,38 @@ bool execute(const string& rawSql, Session& s) {
                                 && itCur->second == itPrev->second) {
                                 val = rows[i - 1]["_win_" + to_string(wi)];
                             } else {
-                                val = to_string(i + 1);
+                                val = to_string(partIdx + 1);
+                            }
+                        }
+                    } else if (wf.name == "dense_rank") {
+                        if (partIdx == 0) {
+                            val = "1";
+                        } else {
+                            auto itCur = rows[i].find(wf.orderByCol);
+                            auto itPrev = rows[i - 1].find(wf.orderByCol);
+                            if (itCur != rows[i].end() && itPrev != rows[i - 1].end()
+                                && itCur->second == itPrev->second) {
+                                val = rows[i - 1]["_win_" + to_string(wi)];
+                            } else {
+                                int64_t prevRank = 0;
+                                try { prevRank = stoll(rows[i - 1]["_win_" + to_string(wi)]); }
+                                catch (...) { prevRank = 0; }
+                                val = to_string(prevRank + 1);
                             }
                         }
                     } else if (wf.name == "lag") {
-                        if (i == 0) val = "NULL";
+                        if (partIdx == 0) val = "NULL";
                         else {
                             auto it = rows[i - 1].find(wf.arg);
                             val = (it != rows[i - 1].end()) ? it->second : "NULL";
                         }
                     } else if (wf.name == "lead") {
-                        if (i == rows.size() - 1) val = "NULL";
-                        else {
+                        // Check if next row is in same partition
+                        if (i + 1 < rows.size() && samePartition(i + 1, i, wf)) {
                             auto it = rows[i + 1].find(wf.arg);
                             val = (it != rows[i + 1].end()) ? it->second : "NULL";
+                        } else {
+                            val = "NULL";
                         }
                     }
                     rows[i]["_win_" + to_string(wi)] = val;

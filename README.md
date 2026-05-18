@@ -29,7 +29,7 @@
 - **子查询**：支持 `IN`, `EXISTS`, `ANY`, `ALL` 子查询
 - **联合**：`UNION`, `UNION ALL`
 - **执行计划**：`EXPLAIN SELECT ...` 带成本估计
-- **窗口函数**：`ROW_NUMBER()`, `RANK()`, `LAG()`, `LEAD()` 支持 `OVER (ORDER BY ...)`
+- **窗口函数**：`ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()` 支持 `OVER (PARTITION BY ... ORDER BY ...)`
 
 ### 事务控制 (TCL) / MVCC
 - `BEGIN` — 开启事务，分配全局唯一事务 ID，创建 ReadView
