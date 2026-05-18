@@ -309,6 +309,16 @@ Column makeBooleanColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeUuidColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "uuid";
+    c.dsize = 36;  // UUID string: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    return c;
+}
+
 Column makeTimeColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;
@@ -1007,7 +1017,7 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         if (!tbl.cols[i].isVariableLength) offset += tbl.cols[i].dsize;
     }
     if (offset + col.dsize > rowBuffer.size()) return "";
-    if (col.dataType == "char") {
+    if (col.dataType == "char" || col.dataType == "uuid") {
         std::string val(col.dsize, '\0');
         std::memcpy(val.data(), rowBuffer.data() + offset, col.dsize);
         auto nul = val.find('\0');
@@ -1799,7 +1809,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     const Column& col = tbl.cols[ci];
     if (cond.op == "isnull") return val.empty();
     if (cond.op == "isnotnull") return !val.empty();
-    if (col.dataType == "char" || col.isVariableLength) {
+    if (col.dataType == "char" || col.dataType == "uuid" || col.isVariableLength) {
         if (cond.op == "<"  && !(val <  cond.value)) return false;
         if (cond.op == ">"  && !(val >  cond.value)) return false;
         if (cond.op == "="  && val != cond.value)    return false;
@@ -1919,7 +1929,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
-            if (col.dataType == "char") {
+            if (col.dataType == "char" || col.dataType == "uuid") {
                 std::memset(&rowBuffer[offset], 0, col.dsize);
                 if (!val.empty()) {
                     size_t copyLen = std::min(val.size(), col.dsize);
@@ -2175,7 +2185,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
@@ -3727,6 +3737,67 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "random" || expr.funcName == "rand") {
         return std::to_string(static_cast<double>(std::rand()) / RAND_MAX);
+    }
+    if (expr.funcName == "sin" && !expr.funcArgs.empty()) {
+        try {
+            double d = std::stod(getVal(expr.funcArgs[0]));
+            std::ostringstream oss;
+            oss << std::sin(d);
+            return oss.str();
+        } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "cos" && !expr.funcArgs.empty()) {
+        try {
+            double d = std::stod(getVal(expr.funcArgs[0]));
+            std::ostringstream oss;
+            oss << std::cos(d);
+            return oss.str();
+        } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "tan" && !expr.funcArgs.empty()) {
+        try {
+            double d = std::stod(getVal(expr.funcArgs[0]));
+            std::ostringstream oss;
+            oss << std::tan(d);
+            return oss.str();
+        } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "split_part" && expr.funcArgs.size() >= 3) {
+        std::string str = getVal(expr.funcArgs[0]);
+        std::string delimiter = getVal(expr.funcArgs[1]);
+        try {
+            int part = std::stoi(getVal(expr.funcArgs[2]));
+            if (part <= 0) return "";
+            size_t pos = 0;
+            int current = 1;
+            while (current < part) {
+                pos = str.find(delimiter, pos);
+                if (pos == std::string::npos) return "";
+                pos += delimiter.size();
+                current++;
+            }
+            size_t end = str.find(delimiter, pos);
+            if (end == std::string::npos) return str.substr(pos);
+            return str.substr(pos, end - pos);
+        } catch (...) { return ""; }
+    }
+    if (expr.funcName == "uuid_generate") {
+        // Generate UUID v4: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+        // where y is one of {8, 9, a, b}
+        const char hex[] = "0123456789abcdef";
+        std::string uuid(36, '\0');
+        for (size_t i = 0; i < 36; ++i) {
+            if (i == 8 || i == 13 || i == 18 || i == 23) {
+                uuid[i] = '-';
+            } else if (i == 14) {
+                uuid[i] = '4';
+            } else if (i == 19) {
+                uuid[i] = hex[8 + (std::rand() & 3)];
+            } else {
+                uuid[i] = hex[std::rand() & 15];
+            }
+        }
+        return uuid;
     }
     if (expr.funcName == "date_add" && expr.funcArgs.size() >= 3) {
         std::string dstr = getVal(expr.funcArgs[0]);

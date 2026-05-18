@@ -30,6 +30,7 @@ using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makeDecimalColumn;
 using dbms::makeBooleanColumn;
+using dbms::makeUuidColumn;
 using dbms::makeTimeColumn;
 using dbms::makeDateTimeColumn;
 using dbms::OpResult;
@@ -237,6 +238,9 @@ static bool isScalarFunc(const string& name) {
                                          "date_add", "date_sub",
                                          "datediff", "date_trunc", "date_format",
                                          "json_extract", "json_value",
+                                         "sin", "cos", "tan",
+                                         "split_part",
+                                         "uuid_generate",
                                          "subquery"};
     return scalars.find(name) != scalars.end();
 }
@@ -925,6 +929,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeIntColumn(cname, isNull, 3, isPK));
             } else if (ctype.substr(0, 4) == "bool" || ctype.substr(0, 1) == "bit") {
                 tbl.append(makeBooleanColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 4) == "uuid") {
+                tbl.append(makeUuidColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "date") {
                 tbl.append(makeDateColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 9) == "timestamp") {
@@ -1986,6 +1992,8 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeIntColumn(cname, isNull, 3);
             } else if (typeName.substr(0, 4) == "bool" || typeName.substr(0, 3) == "bit") {
                 col = makeBooleanColumn(cname, isNull);
+            } else if (typeName.substr(0, 4) == "uuid") {
+                col = makeUuidColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "date") {
                 col = makeDateColumn(cname, isNull);
             } else if (typeName.substr(0, 9) == "timestamp") {
