@@ -487,6 +487,7 @@ Column makeStringColumn(const std::string& name, bool isNull, size_t length, boo
 Column makeDateColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK = false);
 Column makeTimestampColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeTimestamptzColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTextColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeJsonColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK = false);

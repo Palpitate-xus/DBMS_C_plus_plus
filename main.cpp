@@ -24,6 +24,7 @@ using dbms::makeIntColumn;
 using dbms::makeStringColumn;
 using dbms::makeVarCharColumn;
 using dbms::makeTimestampColumn;
+using dbms::makeTimestamptzColumn;
 using dbms::makeTextColumn;
 using dbms::makeJsonColumn;
 using dbms::makeFloatColumn;
@@ -977,6 +978,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeUuidColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "date") {
                 tbl.append(makeDateColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 12) == "timestamptz") {
+                tbl.append(makeTimestamptzColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 9) == "timestamp") {
                 tbl.append(makeTimestampColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "time") {
@@ -2059,6 +2062,8 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeUuidColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "date") {
                 col = makeDateColumn(cname, isNull);
+            } else if (typeName.substr(0, 12) == "timestamptz") {
+                col = makeTimestamptzColumn(cname, isNull);
             } else if (typeName.substr(0, 9) == "timestamp") {
                 col = makeTimestampColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "time") {

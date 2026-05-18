@@ -176,9 +176,33 @@ inline std::string formatTimeSeconds(int32_t secs) {
 // ========================================================================
 inline int64_t parseTimestampToSeconds(const std::string& s) {
     int y = 0, m = 0, d = 0, h = 0, mn = 0, sec = 0;
+    int tzOffsetMinutes = 0;  // +08:00 => +480, -05:00 => -300
     auto sp = s.find(' ');
     std::string datePart = (sp == std::string::npos) ? s : s.substr(0, sp);
     std::string timePart = (sp == std::string::npos) ? "00:00:00" : s.substr(sp + 1);
+    // Parse timezone offset from timePart if present: [+-]HH or [+-]HH:MM
+    size_t tzPos = std::string::npos;
+    for (size_t i = 0; i < timePart.size(); ++i) {
+        if ((timePart[i] == '+' || timePart[i] == '-') && i > 0) {
+            tzPos = i;
+            break;
+        }
+    }
+    std::string tzStr;
+    if (tzPos != std::string::npos) {
+        tzStr = timePart.substr(tzPos);
+        timePart = timePart.substr(0, tzPos);
+        bool tzNegative = (tzStr[0] == '-');
+        int tzh = 0, tzm = 0;
+        size_t tzColon = tzStr.find(':');
+        if (tzColon != std::string::npos) {
+            for (size_t i = 1; i < tzColon; ++i) if (tzStr[i] >= '0' && tzStr[i] <= '9') tzh = tzh * 10 + tzStr[i] - '0';
+            for (size_t i = tzColon + 1; i < tzStr.size(); ++i) if (tzStr[i] >= '0' && tzStr[i] <= '9') tzm = tzm * 10 + tzStr[i] - '0';
+        } else {
+            for (size_t i = 1; i < tzStr.size(); ++i) if (tzStr[i] >= '0' && tzStr[i] <= '9') tzh = tzh * 10 + tzStr[i] - '0';
+        }
+        tzOffsetMinutes = (tzNegative ? -1 : 1) * (tzh * 60 + tzm);
+    }
     // Parse date YYYY-MM-DD
     int pos[2] = {0, 0};
     int k = 0;
@@ -199,11 +223,14 @@ inline int64_t parseTimestampToSeconds(const std::string& s) {
     if (tpos[0] && tpos[1]) {
         for (int i = 0; i < tpos[0]; i++) h = h * 10 + timePart[i] - '0';
         for (int i = tpos[0] + 1; i < tpos[1]; i++) mn = mn * 10 + timePart[i] - '0';
-        for (size_t i = tpos[1] + 1; i < timePart.size(); i++) sec = sec * 10 + timePart[i] - '0';
+        for (size_t i = tpos[1] + 1; i < timePart.size(); i++) {
+            if (timePart[i] >= '0' && timePart[i] <= '9') sec = sec * 10 + timePart[i] - '0';
+        }
     }
     Date dt(y, m, d);
     if (dt.year == 0) return 0;
-    return dt.convert() * 86400LL + h * 3600LL + mn * 60LL + sec;
+    // For TIMESTAMPTZ: store as UTC (subtract timezone offset)
+    return dt.convert() * 86400LL + h * 3600LL + mn * 60LL + sec - tzOffsetMinutes * 60LL;
 }
 
 inline std::string formatTimestampSeconds(int64_t ts) {
