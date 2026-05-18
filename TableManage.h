@@ -152,6 +152,10 @@ public:
     struct OrderBySpec {
         std::string colName;
         bool ascending = true;
+        // For ORDER BY expression support (e.g., ORDER BY length(name))
+        std::string exprFunc;   // e.g., "length"
+        std::string exprArg;    // e.g., "name"
+        bool isExpression = false;
     };
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
                                    const std::vector<std::string>& conditions,
@@ -192,6 +196,12 @@ public:
         const std::vector<std::pair<std::string, std::string>>& items,
         const std::vector<std::string>& groupByCols,
         const std::vector<std::string>& havingConds);
+
+    // Sort result rows by expression (post-query ORDER BY expression)
+    std::vector<std::string> sortByExpression(
+        const std::string& dbname, const std::string& tablename,
+        std::vector<std::string> rows,
+        const std::vector<OrderBySpec>& exprSpecs) const;
 
     // JOIN query: INNER JOIN two tables on leftCol = rightCol
     std::vector<std::string> join(const std::string& dbname,

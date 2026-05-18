@@ -4150,6 +4150,106 @@ std::vector<std::string> StorageEngine::groupAggregate(
     return result;
 }
 
+// Simple comma-split for function arguments (used by ORDER BY expression)
+static std::vector<std::string> splitExprArgs(const std::string& s) {
+    std::vector<std::string> args;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && isspace(static_cast<unsigned char>(s[i]))) ++i;
+        if (i >= s.size()) break;
+        std::string arg;
+        if (s[i] == '\'') {
+            arg += s[i++];
+            while (i < s.size() && s[i] != '\'') arg += s[i++];
+            if (i < s.size()) arg += s[i++];
+        } else {
+            while (i < s.size() && s[i] != ',') arg += s[i++];
+        }
+        args.push_back(trim(arg));
+        if (i < s.size() && s[i] == ',') ++i;
+    }
+    return args;
+}
+
+// ========================================================================
+// Post-query ORDER BY expression sorting
+// ========================================================================
+
+std::vector<std::string> StorageEngine::sortByExpression(
+    const std::string& dbname, const std::string& tablename,
+    std::vector<std::string> rows,
+    const std::vector<OrderBySpec>& exprSpecs) const {
+    if (rows.empty() || exprSpecs.empty()) return rows;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    struct SortRow {
+        std::string rowStr;
+        std::vector<std::string> exprVals;
+    };
+    std::vector<SortRow> sortRows;
+    for (const auto& rowStr : rows) {
+        SortRow sr;
+        sr.rowStr = rowStr;
+        // Parse row into column values
+        std::map<std::string, std::string> rowData;
+        std::stringstream ss(rowStr);
+        std::string val;
+        for (size_t i = 0; i < tbl.len && ss >> val; ++i) {
+            rowData[tbl.cols[i].dataName] = val;
+        }
+        for (const auto& spec : exprSpecs) {
+            std::string ev;
+            auto getCol = [&](const std::string& name) -> std::string {
+                auto it = rowData.find(name);
+                return (it != rowData.end()) ? it->second : "";
+            };
+            std::string argVal = getCol(spec.exprArg);
+            if (spec.exprFunc == "length") {
+                ev = std::to_string(argVal.size());
+            } else if (spec.exprFunc == "upper") {
+                ev = argVal;
+                for (char& c : ev) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            } else if (spec.exprFunc == "lower") {
+                ev = argVal;
+                for (char& c : ev) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            } else if (spec.exprFunc == "abs") {
+                try { ev = std::to_string(std::llabs(std::stoll(argVal))); } catch (...) { ev = "0"; }
+            } else {
+                ev = argVal;
+            }
+            sr.exprVals.push_back(ev);
+        }
+        sortRows.push_back(std::move(sr));
+    }
+
+    std::stable_sort(sortRows.begin(), sortRows.end(),
+        [&](const SortRow& a, const SortRow& b) {
+            for (size_t i = 0; i < exprSpecs.size(); ++i) {
+                const auto& spec = exprSpecs[i];
+                const std::string& av = a.exprVals[i];
+                const std::string& bv = b.exprVals[i];
+                bool less = false, greater = false;
+                // Try numeric comparison first
+                try {
+                    int64_t na = std::stoll(av);
+                    int64_t nb = std::stoll(bv);
+                    less = na < nb;
+                    greater = na > nb;
+                } catch (...) {
+                    less = av < bv;
+                    greater = av > bv;
+                }
+                if (less) return spec.ascending;
+                if (greater) return !spec.ascending;
+            }
+            return false;
+        });
+
+    std::vector<std::string> result;
+    for (auto& sr : sortRows) result.push_back(std::move(sr.rowStr));
+    return result;
+}
+
 // ========================================================================
 // JOIN implementation
 // ========================================================================

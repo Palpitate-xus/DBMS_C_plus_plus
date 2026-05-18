@@ -3626,24 +3626,56 @@ bool execute(const string& rawSql, Session& s) {
         if (!isTempTable(s, tnameOrig) && !checkTablePermission(s, tnameOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
         vector<dbms::StorageEngine::OrderBySpec> orderBySpecs;
+        vector<dbms::StorageEngine::OrderBySpec> exprOrderBySpecs; // expressions sorted post-query
         if (orderPos != string::npos) {
             size_t orderEnd = (limitPos != string::npos) ? limitPos
                             : (offsetPos != string::npos) ? offsetPos : sql.size();
             string orderRest = trim(sql.substr(orderPos + 8, orderEnd - orderPos - 8));
             vector<string> orderParts;
             {
-                stringstream oss(orderRest);
-                string part;
-                while (getline(oss, part, ',')) orderParts.push_back(trim(part));
+                // Split by comma at paren depth 0
+                int depth = 0;
+                string cur;
+                for (char c : orderRest) {
+                    if (c == '(') depth++;
+                    else if (c == ')') depth--;
+                    if (c == ',' && depth == 0) {
+                        orderParts.push_back(trim(cur));
+                        cur.clear();
+                    } else {
+                        cur += c;
+                    }
+                }
+                if (!trim(cur).empty()) orderParts.push_back(trim(cur));
             }
             for (const string& part : orderParts) {
-                vector<string> ot = tokenize(part);
-                if (!ot.empty()) {
-                    dbms::StorageEngine::OrderBySpec spec;
-                    spec.colName = ot[0];
-                    spec.ascending = !(ot.size() > 1 && ot[1] == "desc");
-                    orderBySpecs.push_back(spec);
+                string sortItem = part;
+                bool asc = true;
+                if (sortItem.size() >= 5 && sortItem.substr(sortItem.size() - 4) == "desc") {
+                    asc = false;
+                    sortItem = trim(sortItem.substr(0, sortItem.size() - 4));
                 }
+                size_t lp = sortItem.find('(');
+                size_t rp = sortItem.rfind(')');
+                if (lp != string::npos && rp != string::npos && rp > lp) {
+                    // Expression: func(arg)
+                    string func = toLower(trim(sortItem.substr(0, lp)));
+                    string arg = trim(sortItem.substr(lp + 1, rp - lp - 1));
+                    if (isScalarFunc(func)) {
+                        dbms::StorageEngine::OrderBySpec spec;
+                        spec.isExpression = true;
+                        spec.exprFunc = func;
+                        spec.exprArg = arg;
+                        spec.ascending = asc;
+                        exprOrderBySpecs.push_back(spec);
+                        continue;
+                    }
+                }
+                // Simple column
+                dbms::StorageEngine::OrderBySpec spec;
+                spec.colName = sortItem;
+                spec.ascending = asc;
+                orderBySpecs.push_back(spec);
             }
         }
 
@@ -4188,6 +4220,10 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
             }
+        }
+        // Post-query expression sorting
+        if (!exprOrderBySpecs.empty()) {
+            answers = g_engine.sortByExpression(s.currentDB, tname, std::move(answers), exprOrderBySpecs);
         }
         if (isDistinct) {
             vector<string> deduped;
