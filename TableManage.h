@@ -49,10 +49,15 @@ struct Column {
 };
 
 struct ForeignKey {
-    std::string colName;        // local column
-    std::string refTable;       // referenced table
-    std::string refCol;         // referenced column
-    std::string onDelete = "restrict";  // restrict | cascade | setnull
+    std::vector<std::string> colNames;     // local columns (composite FK)
+    std::vector<std::string> refCols;      // referenced columns
+    std::string refTable;                  // referenced table
+    std::string onDelete = "restrict";     // restrict | cascade | setnull
+
+    // Back-compat helpers
+    bool isSingleColumn() const { return colNames.size() <= 1; }
+    std::string singleColName() const { return colNames.empty() ? "" : colNames[0]; }
+    std::string singleRefCol() const { return refCols.empty() ? "" : refCols[0]; }
 };
 
 struct TableSchema {

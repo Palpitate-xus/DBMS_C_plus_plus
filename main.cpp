@@ -694,9 +694,19 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
         char closeChar = isBrace ? '}' : ')';
         ++pos;
         while (pos < sql.size()) {
-            size_t comma = sql.find(',', pos);
-            size_t brace = sql.find(closeChar, pos);
-            size_t endPos = min({comma, brace});
+            // Find next comma or closeChar, respecting parenthesis depth
+            size_t endPos = string::npos;
+            int parenDepth = 0;
+            for (size_t i = pos; i < sql.size(); ++i) {
+                if (sql[i] == '(') { ++parenDepth; continue; }
+                if (sql[i] == ')') {
+                    if (parenDepth > 0) { --parenDepth; continue; }
+                    // Top-level close paren - end of table definition
+                    if (closeChar == ')') { endPos = i; break; }
+                }
+                if (sql[i] == ',' && parenDepth == 0) { endPos = i; break; }
+                if (sql[i] == closeChar && parenDepth == 0) { endPos = i; break; }
+            }
             if (endPos == string::npos) break;
 
             string segment = trim(sql.substr(pos, endPos - pos));
@@ -708,7 +718,9 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 // PRIMARY KEY (col1, col2, ...)
                 for (size_t i = 2; i < parts.size(); ++i) {
                     if (parts[i] == "(" || parts[i] == ")" || parts[i] == ",") continue;
-                    pkColNames.push_back(parts[i]);
+                    std::string c = parts[i];
+                    if (!c.empty() && c.back() == ',') c.pop_back();
+                    pkColNames.push_back(c);
                 }
                 pos = endPos + 1;
                 continue;
@@ -718,9 +730,52 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 std::vector<std::string> cols;
                 for (size_t i = 1; i < parts.size(); ++i) {
                     if (parts[i] == "(" || parts[i] == ")" || parts[i] == ",") continue;
-                    cols.push_back(parts[i]);
+                    std::string c = parts[i];
+                    if (!c.empty() && c.back() == ',') c.pop_back();
+                    cols.push_back(c);
                 }
                 if (!cols.empty()) uniqueColNames.push_back(std::move(cols));
+                pos = endPos + 1;
+                continue;
+            }
+            if (!parts.empty() && parts[0] == "foreign" && parts.size() > 1 && parts[1] == "key") {
+                // FOREIGN KEY (col1, col2, ...) REFERENCES refTable(refCol1, refCol2, ...)
+                dbms::ForeignKey fk;
+                size_t i = 2;
+                // Collect local columns
+                while (i < parts.size() && (parts[i] == "(" || parts[i] == ",")) ++i;
+                while (i < parts.size() && parts[i] != ")" && parts[i] != "references") {
+                    if (parts[i] != ",") {
+                        std::string c = parts[i];
+                        if (!c.empty() && c.back() == ',') c.pop_back();
+                        if (!c.empty()) fk.colNames.push_back(c);
+                    }
+                    ++i;
+                }
+                while (i < parts.size() && parts[i] != "references") ++i;
+                if (i < parts.size() && parts[i] == "references") {
+                    ++i; // skip "references"
+                    if (i < parts.size()) {
+                        std::string rt = parts[i];
+                        if (!rt.empty() && rt.back() == ',') rt.pop_back();
+                        fk.refTable = rt;
+                        ++i;
+                        // Collect referenced columns from (refCol1, refCol2, ...)
+                        while (i < parts.size() && (parts[i] == "(" || parts[i] == ",")) ++i;
+                        while (i < parts.size() && parts[i] != ")") {
+                            if (parts[i] != ",") {
+                                std::string c = parts[i];
+                                if (!c.empty() && c.back() == ',') c.pop_back();
+                                if (!c.empty()) fk.refCols.push_back(c);
+                            }
+                            ++i;
+                        }
+                    }
+                }
+                fk.onDelete = "restrict";
+                if (!fk.colNames.empty() && !fk.refTable.empty() && !fk.refCols.empty()) {
+                    tbl.appendFK(fk);
+                }
                 pos = endPos + 1;
                 continue;
             }
@@ -813,9 +868,9 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                     size_t lp = fkStr.find('(');
                     size_t rp = fkStr.find(')');
                     if (lp != string::npos && rp != string::npos && rp > lp) {
-                        fk.colName = cname;
+                        fk.colNames.push_back(cname);
                         fk.refTable = trim(fkStr.substr(0, lp));
-                        fk.refCol = trim(fkStr.substr(lp + 1, rp - lp - 1));
+                        fk.refCols.push_back(trim(fkStr.substr(lp + 1, rp - lp - 1)));
                         fk.onDelete = "restrict";
                         // Parse ON DELETE action
                         string afterRp = trim(fkStr.substr(rp + 1));
@@ -919,7 +974,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.cols[tbl.len - 1].defaultValue = defaultVal;
                 tbl.cols[tbl.len - 1].checkExpr = checkExpr;
             }
-            if (!fk.colName.empty()) tbl.appendFK(fk);
+            if (!fk.colNames.empty()) tbl.appendFK(fk);
             pos = endPos + 1;
         }
         break;

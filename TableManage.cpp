@@ -111,9 +111,17 @@ void TableSchema::print() const {
     if (fkLen > 0) {
         std::cout << "Foreign Keys:\n";
         for (size_t i = 0; i < fkLen; ++i) {
-            std::cout << "  " << fks[i].colName << " -> " << fks[i].refTable
-                      << "(" << fks[i].refCol << ") ON DELETE "
-                      << fks[i].onDelete << "\n";
+            std::cout << "  ";
+            for (size_t ci = 0; ci < fks[i].colNames.size(); ++ci) {
+                if (ci > 0) std::cout << ",";
+                std::cout << fks[i].colNames[ci];
+            }
+            std::cout << " -> " << fks[i].refTable << "(";
+            for (size_t ci = 0; ci < fks[i].refCols.size(); ++ci) {
+                if (ci > 0) std::cout << ",";
+                std::cout << fks[i].refCols[ci];
+            }
+            std::cout << ") ON DELETE " << fks[i].onDelete << "\n";
         }
     }
 }
@@ -1164,10 +1172,13 @@ std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
             if (idx < len) key += StorageEngine::extractColumnValue(rowBuffer, *this, idx) + "\x01";
         }
     } else {
+        // Collect all columns marked as primary key (composite PK support)
+        bool first = true;
         for (size_t i = 0; i < len; ++i) {
             if (cols[i].isPrimaryKey) {
-                key = StorageEngine::extractColumnValue(rowBuffer, *this, i);
-                break;
+                if (!first) key += "\x01";
+                key += StorageEngine::extractColumnValue(rowBuffer, *this, i);
+                first = false;
             }
         }
     }
@@ -1184,11 +1195,13 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
             }
         }
     } else {
+        bool first = true;
         for (size_t i = 0; i < len; ++i) {
             if (cols[i].isPrimaryKey) {
+                if (!first) key += "\x01";
                 auto it = values.find(cols[i].dataName);
-                key = (it != values.end() ? it->second : "");
-                break;
+                key += (it != values.end() ? it->second : "");
+                first = false;
             }
         }
     }
@@ -1383,7 +1396,11 @@ OpResult StorageEngine::dropDatabase(const std::string& dbname) {
     return OpResult::Success;
 }
 
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420001;  // "DB" + version 1
+
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
+    // Write format version marker
+    out.write(reinterpret_cast<const char*>(&SCHEMA_FORMAT_VERSION), 4);
     int32_t len = static_cast<int32_t>(tbl.len);
     out.write(reinterpret_cast<const char*>(&len), 4);
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -1402,13 +1419,17 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(tbl.cols[i].checkExpr.data(), checkLen);
         }
     }
-    // Write foreign keys
+    // Write foreign keys (multi-column support: version 1 format)
     int32_t fkLen = static_cast<int32_t>(tbl.fkLen);
     out.write(reinterpret_cast<const char*>(&fkLen), 4);
     for (size_t i = 0; i < tbl.fkLen; ++i) {
-        writeFixedString(out, tbl.fks[i].colName, MAX_COL_NAME_LEN);
+        int32_t numCols = static_cast<int32_t>(tbl.fks[i].colNames.size());
+        out.write(reinterpret_cast<const char*>(&numCols), 4);
+        for (int32_t ci = 0; ci < numCols; ++ci) {
+            writeFixedString(out, tbl.fks[i].colNames[ci], MAX_COL_NAME_LEN);
+            writeFixedString(out, tbl.fks[i].refCols[ci], MAX_COL_NAME_LEN);
+        }
         writeFixedString(out, tbl.fks[i].refTable, MAX_TABLE_NAME_LEN);
-        writeFixedString(out, tbl.fks[i].refCol, MAX_COL_NAME_LEN);
         writeFixedString(out, tbl.fks[i].onDelete, 10);
     }
     // Write composite primary key column indices (0 = use legacy isPrimaryKey)
@@ -1434,9 +1455,19 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
     TableSchema tbl;
     tbl.tablename = tablename;
-    int32_t len = 0;
-    in.read(reinterpret_cast<char*>(&len), 4);
+    int32_t firstInt = 0;
+    in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return tbl;
+
+    bool isNewFormat = (firstInt == SCHEMA_FORMAT_VERSION);
+    int32_t len = 0;
+    if (isNewFormat) {
+        in.read(reinterpret_cast<char*>(&len), 4);
+    } else {
+        // Legacy format: first 4 bytes are column count
+        len = firstInt;
+    }
+    if (len < 0 || len > static_cast<int32_t>(MAX_COLUMNS)) return tbl;
     tbl.len = static_cast<size_t>(len);
     for (size_t i = 0; i < tbl.len; ++i) {
         uint8_t flags = 0;
@@ -1466,16 +1497,33 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
-    // Read foreign keys (if present)
+    // Read foreign keys
     int32_t fkLen = 0;
     in.read(reinterpret_cast<char*>(&fkLen), 4);
     if (in && fkLen > 0 && fkLen <= static_cast<int32_t>(MAX_COLUMNS)) {
         tbl.fkLen = static_cast<size_t>(fkLen);
         for (size_t i = 0; i < tbl.fkLen; ++i) {
-            tbl.fks[i].colName = readFixedString(in, MAX_COL_NAME_LEN);
-            tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
-            tbl.fks[i].refCol = readFixedString(in, MAX_COL_NAME_LEN);
-            tbl.fks[i].onDelete = readFixedString(in, 10);
+            if (isNewFormat) {
+                int32_t numCols = 0;
+                in.read(reinterpret_cast<char*>(&numCols), 4);
+                if (!in || numCols <= 0 || numCols > static_cast<int32_t>(MAX_COLUMNS)) break;
+                tbl.fks[i].colNames.reserve(numCols);
+                tbl.fks[i].refCols.reserve(numCols);
+                for (int32_t ci = 0; ci < numCols; ++ci) {
+                    tbl.fks[i].colNames.push_back(readFixedString(in, MAX_COL_NAME_LEN));
+                    tbl.fks[i].refCols.push_back(readFixedString(in, MAX_COL_NAME_LEN));
+                }
+                tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
+                tbl.fks[i].onDelete = readFixedString(in, 10);
+            } else {
+                // Legacy single-column format
+                std::string colName = readFixedString(in, MAX_COL_NAME_LEN);
+                tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
+                std::string refCol = readFixedString(in, MAX_COL_NAME_LEN);
+                tbl.fks[i].onDelete = readFixedString(in, 10);
+                tbl.fks[i].colNames.push_back(colName);
+                tbl.fks[i].refCols.push_back(refCol);
+            }
         }
     }
     // Read composite primary key column indices (new format, ignore if EOF)
@@ -2146,17 +2194,58 @@ OpResult StorageEngine::insert(const std::string& dbname,
     // Check foreign key references
     for (size_t fi = 0; fi < tbl.fkLen; ++fi) {
         const ForeignKey& fk = tbl.fks[fi];
-        auto it = actualValues.find(fk.colName);
-        if (it == actualValues.end() || it->second.empty()) continue;
+        // Check if any FK column value is NULL (NULL is allowed in FKs)
+        bool hasNull = false;
+        for (const auto& colName : fk.colNames) {
+            auto it = actualValues.find(colName);
+            if (it == actualValues.end() || it->second.empty()) {
+                hasNull = true;
+                break;
+            }
+        }
+        if (hasNull) continue;
         if (!tableExists(dbname, fk.refTable)) {
             lockManager_.unlock(tablename);
             return OpResult::TableNotExist;
         }
         TableSchema refTbl = getTableSchema(dbname, fk.refTable);
-        BPTree* refIdx = getPKIndex(dbname, fk.refTable);
-        if (refIdx) {
-            int64_t dummy;
-            if (!refIdx->search(it->second, dummy)) {
+        if (fk.colNames.size() == 1) {
+            // Single-column FK: use BPTree index for fast lookup
+            BPTree* refIdx = getPKIndex(dbname, fk.refTable);
+            if (refIdx) {
+                auto it = actualValues.find(fk.colNames[0]);
+                int64_t dummy;
+                if (!refIdx->search(it->second, dummy)) {
+                    lockManager_.unlock(tablename);
+                    return OpResult::InvalidValue;  // referenced key not found
+                }
+            }
+        } else {
+            // Multi-column FK: scan reference table rows
+            bool found = false;
+            forEachRow(dbname, fk.refTable, [&](uint32_t, uint16_t, const char* data, size_t len) {
+                if (found) return;
+                std::string row(data, len);
+                bool match = true;
+                for (size_t ci = 0; ci < fk.refCols.size() && ci < fk.colNames.size(); ++ci) {
+                    int refColIdx = -1;
+                    for (size_t ri = 0; ri < refTbl.len; ++ri) {
+                        if (refTbl.cols[ri].dataName == fk.refCols[ci]) {
+                            refColIdx = static_cast<int>(ri);
+                            break;
+                        }
+                    }
+                    if (refColIdx < 0) { match = false; break; }
+                    std::string refVal = extractColumnValue(row, refTbl, refColIdx);
+                    auto it = actualValues.find(fk.colNames[ci]);
+                    if (it == actualValues.end() || it->second != refVal) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) found = true;
+            });
+            if (!found) {
                 lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;  // referenced key not found
             }
@@ -2431,18 +2520,26 @@ OpResult StorageEngine::remove(const std::string& dbname,
             if (tbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
         }
         if (pkIdx < tbl.len) {
-            std::set<std::string> deletedPKs;
+            // Collect deleted rows' primary key values (multi-column PK aware)
+            std::vector<std::map<std::string, std::string>> deletedPKRows;
             for (int64_t rid : toDelete) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
-                std::string pkVal = extractPKValue(row, tbl);
-                if (!pkVal.empty()) deletedPKs.insert(pkVal);
+                std::map<std::string, std::string> pkVals;
+                if (!tbl.pkColIndices.empty()) {
+                    for (size_t pki : tbl.pkColIndices) {
+                        pkVals[tbl.cols[pki].dataName] = extractColumnValue(row, tbl, pki);
+                    }
+                } else {
+                    pkVals[tbl.cols[pkIdx].dataName] = extractPKValue(row, tbl);
+                }
+                if (!pkVals.empty()) deletedPKRows.push_back(std::move(pkVals));
             }
 
-            if (!deletedPKs.empty()) {
+            if (!deletedPKRows.empty()) {
                 // Scan all other tables for FK references and collect actions
                 struct CascadeAction { std::string table; int64_t rid; };
-                struct SetNullAction { std::string table; int64_t rid; size_t colIdx; };
+                struct SetNullAction { std::string table; int64_t rid; std::vector<size_t> colIndices; };
                 std::vector<CascadeAction> cascadeActions;
                 std::vector<SetNullAction> setNullActions;
                 std::set<std::string> restrictTables;
@@ -2454,21 +2551,45 @@ OpResult StorageEngine::remove(const std::string& dbname,
                     for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
                         const ForeignKey& fk = otherTbl.fks[fi];
                         if (fk.refTable != tablename) continue;
-                        size_t fkColIdx = otherTbl.len;
-                        for (size_t ci = 0; ci < otherTbl.len; ++ci) {
-                            if (otherTbl.cols[ci].dataName == fk.colName) { fkColIdx = ci; break; }
+
+                        // Build mapping from refCols to local col indices in otherTbl
+                        std::vector<size_t> fkColIndices;
+                        bool allFound = true;
+                        for (const auto& colName : fk.colNames) {
+                            size_t colIdx = otherTbl.len;
+                            for (size_t ci = 0; ci < otherTbl.len; ++ci) {
+                                if (otherTbl.cols[ci].dataName == colName) { colIdx = ci; break; }
+                            }
+                            if (colIdx >= otherTbl.len) { allFound = false; break; }
+                            fkColIndices.push_back(colIdx);
                         }
-                        if (fkColIdx >= otherTbl.len) continue;
+                        if (!allFound || fkColIndices.empty()) continue;
 
                         forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
                             std::string row(data, len);
-                            std::string fval = extractColumnValue(row, otherTbl, fkColIdx);
-                            if (deletedPKs.find(fval) != deletedPKs.end()) {
+                            // Build FK value map for this row
+                            std::map<std::string, std::string> fkVals;
+                            for (size_t ci = 0; ci < fk.colNames.size() && ci < fk.refCols.size(); ++ci) {
+                                fkVals[fk.refCols[ci]] = extractColumnValue(row, otherTbl, fkColIndices[ci]);
+                            }
+                            // Check if any deleted PK row matches this FK
+                            bool matched = false;
+                            for (const auto& pkVals : deletedPKRows) {
+                                bool allMatch = true;
+                                for (const auto& [refCol, refVal] : pkVals) {
+                                    auto it = fkVals.find(refCol);
+                                    if (it == fkVals.end() || it->second != refVal) {
+                                        allMatch = false; break;
+                                    }
+                                }
+                                if (allMatch) { matched = true; break; }
+                            }
+                            if (matched) {
                                 int64_t orid = encodeRid(opid, osid);
                                 if (fk.onDelete == "cascade") {
                                     cascadeActions.push_back({otherTable, orid});
                                 } else if (fk.onDelete == "setnull") {
-                                    setNullActions.push_back({otherTable, orid, fkColIdx});
+                                    setNullActions.push_back({otherTable, orid, fkColIndices});
                                 } else {
                                     restrictTables.insert(otherTable);
                                 }
@@ -2513,13 +2634,15 @@ OpResult StorageEngine::remove(const std::string& dbname,
                         if (ici < otbl.len) oldIdxVals[ic] = extractColumnValue(row, otbl, ici);
                     }
 
-                    // Set FK column to NULL: rebuild row buffer
+                    // Set FK columns to NULL: rebuild row buffer
                     {
                         std::map<std::string, std::string> rowValues;
                         for (size_t i = 0; i < otbl.len; ++i) {
                             rowValues[otbl.cols[i].dataName] = extractColumnValue(row, otbl, i);
                         }
-                        rowValues[otbl.cols[sa.colIdx].dataName] = "";
+                        for (size_t ci : sa.colIndices) {
+                            rowValues[otbl.cols[ci].dataName] = "";
+                        }
                         std::string newRow = buildRowBuffer(otbl, rowValues, 0);
                         uint32_t pid; uint16_t sid;
                         decodeRid(sa.rid, pid, sid);
@@ -2540,7 +2663,12 @@ OpResult StorageEngine::remove(const std::string& dbname,
                         for (size_t i = 0; i < otbl.len; ++i) {
                             if (otbl.cols[i].dataName == ic) { ici = i; break; }
                         }
-                        if (ici >= otbl.len || ici != sa.colIdx) continue;
+                        if (ici >= otbl.len) continue;
+                        bool isFkCol = false;
+                        for (size_t ci : sa.colIndices) {
+                            if (ci == ici) { isFkCol = true; break; }
+                        }
+                        if (!isFkCol) continue;
                         BPTree* sidx = getSecondaryIndex(dbname, sa.table, ic);
                         if (!sidx) continue;
                         std::string newVal = extractColumnValue(row, otbl, ici);
