@@ -4438,9 +4438,11 @@ std::vector<std::string> StorageEngine::aggregate(
         size_t colIdx = tbl.len;
         std::string groupConcat;
         bool groupConcatFirst = true;
+        std::vector<std::string> jsonAggVals;
 
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
+        bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
 
         if (func != "count" || actualColName != "*") {
             for (size_t i = 0; i < tbl.len; ++i) {
@@ -4480,6 +4482,10 @@ std::vector<std::string> StorageEngine::aggregate(
                     if (!groupConcatFirst) groupConcat += ",";
                     groupConcat += val;
                     groupConcatFirst = false;
+                } else if (isJsonAgg) {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    jsonAggVals.push_back(val);
                 } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
@@ -4521,6 +4527,29 @@ std::vector<std::string> StorageEngine::aggregate(
         else if (func == "avg") rowResult += (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count)) + ' ';
         else if (func == "group_concat" || func == "string_agg") {
             rowResult += (groupConcat.empty() ? "NULL" : groupConcat) + ' ';
+        }
+        else if (isJsonAgg) {
+            std::string json = "[";
+            bool first = true;
+            for (const auto& v : jsonAggVals) {
+                if (!first) json += ",";
+                if (v.empty()) {
+                    json += "null";
+                } else if (isInt || v == "true" || v == "false" || v == "null") {
+                    json += v;
+                } else {
+                    // String: escape quotes and wrap
+                    std::string esc;
+                    for (char c : v) {
+                        if (c == '"' || c == '\\') esc += '\\';
+                        esc += c;
+                    }
+                    json += '"' + esc + '"';
+                }
+                first = false;
+            }
+            json += "]";
+            rowResult += json + ' ';
         }
         else if (func == "max") {
             if (!hasMax) rowResult += "NULL ";
@@ -4604,6 +4633,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
                            const std::string& func, const std::string& colName) -> std::string {
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
+        bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false, isChar = false;
         if (func != "count" || actualColName != "*") {
@@ -4624,6 +4654,8 @@ std::vector<std::string> StorageEngine::groupAggregate(
         Date maxDate, minDate;
         std::string groupConcat;
         bool groupConcatFirst = true;
+        std::vector<std::string> jsonAggVals;
+        bool jsonAggFirst = true;
 
         if (isDistinctCount) {
             std::set<std::string> distinctVals;
@@ -4652,6 +4684,10 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     if (!groupConcatFirst) groupConcat += ",";
                     groupConcat += val;
                     groupConcatFirst = false;
+                } else if (isJsonAgg) {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    jsonAggVals.push_back(val);
                 } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
@@ -4679,6 +4715,28 @@ std::vector<std::string> StorageEngine::groupAggregate(
         if (func == "sum") return transstr(sum);
         if (func == "avg") return (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count));
         if (func == "group_concat" || func == "string_agg") return groupConcat.empty() ? "NULL" : groupConcat;
+        if (isJsonAgg) {
+            std::string json = "[";
+            bool first = true;
+            for (const auto& v : jsonAggVals) {
+                if (!first) json += ",";
+                if (v.empty()) {
+                    json += "null";
+                } else if (isInt || v == "true" || v == "false" || v == "null") {
+                    json += v;
+                } else {
+                    std::string esc;
+                    for (char c : v) {
+                        if (c == '"' || c == '\\') esc += '\\';
+                        esc += c;
+                    }
+                    json += '"' + esc + '"';
+                }
+                first = false;
+            }
+            json += "]";
+            return json;
+        }
         if (func == "max") {
             if (!hasMax) return "NULL";
             if (isInt) return transstr(maxInt);

@@ -162,7 +162,7 @@
 | **COUNT(DISTINCT col)** | ✅ | ✅ | - |
 | **STRING_AGG / GROUP_CONCAT** | ✅ | ✅ | - |
 | **ARRAY_AGG** | ❌ | ✅ | P2 |
-| **JSON_AGG / JSONB_AGG** | ❌ | ✅ | P3 |
+| **JSON_AGG / JSONB_AGG** | ✅ | ✅ | - |
 | **VAR / STDDEV** | ❌ | ✅ | P3 |
 | **PERCENTILE_CONT/DISC** | ❌ | ✅ | P3 |
 | **FILTER 子句** | ❌ | ✅ | P3 |
