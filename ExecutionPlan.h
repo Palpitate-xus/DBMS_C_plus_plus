@@ -370,6 +370,10 @@ public:
     // Get a human-readable description of the plan tree with cost estimates
     static std::string explain(OpPtr& plan, StorageEngine* engine,
                                const std::string& dbname);
+
+    // Get JSON-formatted description of the plan tree with cost estimates
+    static std::string explainJson(OpPtr& plan, StorageEngine* engine,
+                                   const std::string& dbname);
 };
 
 } // namespace dbms

@@ -1101,6 +1101,8 @@ void StorageEngine::writeTrigger(std::ostream& out, const Trigger& trg) const {
     n = trg.action.size();
     out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
     out.write(trg.action.data(), static_cast<std::streamsize>(n));
+    char forEachRow = trg.forEachRow ? 1 : 0;
+    out.write(&forEachRow, sizeof(char));
 }
 
 StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
@@ -1117,6 +1119,10 @@ StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
     readStr(trg.event);
     readStr(trg.tableName);
     readStr(trg.action);
+    // Backward compatibility: forEachRow flag may not exist in old files
+    char forEachRow = 1;
+    in.read(&forEachRow, sizeof(char));
+    if (in) trg.forEachRow = (forEachRow != 0);
     return trg;
 }
 
@@ -2043,6 +2049,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
 OpResult StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values) {
+    if (readOnly_) return OpResult::InvalidValue;
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
     lockManager_.lockExclusive(tablename);
 
@@ -2380,12 +2387,14 @@ OpResult StorageEngine::insert(const std::string& dbname,
         auto triggers = getTriggers(dbname, tablename, "after", "insert");
         for (const auto& trg : triggers) {
             std::string action = trg.action;
-            for (const auto& [col, val] : actualValues) {
-                std::string placeholder = "NEW." + col;
-                size_t pos = 0;
-                while ((pos = action.find(placeholder, pos)) != std::string::npos) {
-                    action.replace(pos, placeholder.size(), val);
-                    pos += val.size();
+            if (trg.forEachRow) {
+                for (const auto& [col, val] : actualValues) {
+                    std::string placeholder = "NEW." + col;
+                    size_t pos = 0;
+                    while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                        action.replace(pos, placeholder.size(), val);
+                        pos += val.size();
+                    }
                 }
             }
             triggerExecutor_(action);
@@ -2528,6 +2537,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
 OpResult StorageEngine::remove(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::vector<std::string>& conditions) {
+    if (readOnly_) return OpResult::InvalidValue;
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
     lockManager_.lockExclusive(tablename);
 
@@ -2872,19 +2882,24 @@ OpResult StorageEngine::remove(const std::string& dbname,
     if (triggerExecutor_) {
         auto triggers = getTriggers(dbname, tablename, "after", "delete");
         for (const auto& trg : triggers) {
-            for (const auto& row : rowsToDelete) {
-                if (row.empty()) continue;
-                std::string action = trg.action;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    std::string val = extractColumnValue(row, tbl, i);
-                    std::string placeholder = "OLD." + tbl.cols[i].dataName;
-                    size_t pos = 0;
-                    while ((pos = action.find(placeholder, pos)) != std::string::npos) {
-                        action.replace(pos, placeholder.size(), val);
-                        pos += val.size();
+            if (trg.forEachRow) {
+                for (const auto& row : rowsToDelete) {
+                    if (row.empty()) continue;
+                    std::string action = trg.action;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        std::string val = extractColumnValue(row, tbl, i);
+                        std::string placeholder = "OLD." + tbl.cols[i].dataName;
+                        size_t pos = 0;
+                        while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                            action.replace(pos, placeholder.size(), val);
+                            pos += val.size();
+                        }
                     }
+                    triggerExecutor_(action);
                 }
-                triggerExecutor_(action);
+            } else {
+                // Statement-level trigger: execute once
+                triggerExecutor_(trg.action);
             }
         }
     }
@@ -2896,6 +2911,7 @@ OpResult StorageEngine::update(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& updates,
                                 const std::vector<std::string>& conditions) {
+    if (readOnly_) return OpResult::InvalidValue;
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -3121,20 +3137,25 @@ OpResult StorageEngine::update(const std::string& dbname,
     if (triggerExecutor_) {
         auto triggers = getTriggers(dbname, tablename, "after", "update");
         for (const auto& trg : triggers) {
-            for (int64_t rid : matchIds) {
-                std::string oldRow, newRow;
-                if (!readRowByRid(pa, rid, newRow, tbl)) continue;
-                std::string action = trg.action;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    std::string val = extractColumnValue(newRow, tbl, i);
-                    std::string placeholder = "NEW." + tbl.cols[i].dataName;
-                    size_t pos = 0;
-                    while ((pos = action.find(placeholder, pos)) != std::string::npos) {
-                        action.replace(pos, placeholder.size(), val);
-                        pos += val.size();
+            if (trg.forEachRow) {
+                for (int64_t rid : matchIds) {
+                    std::string oldRow, newRow;
+                    if (!readRowByRid(pa, rid, newRow, tbl)) continue;
+                    std::string action = trg.action;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        std::string val = extractColumnValue(newRow, tbl, i);
+                        std::string placeholder = "NEW." + tbl.cols[i].dataName;
+                        size_t pos = 0;
+                        while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                            action.replace(pos, placeholder.size(), val);
+                            pos += val.size();
+                        }
                     }
+                    triggerExecutor_(action);
                 }
-                triggerExecutor_(action);
+            } else {
+                // Statement-level trigger: execute once
+                triggerExecutor_(trg.action);
             }
         }
     }
@@ -5477,6 +5498,7 @@ OpResult StorageEngine::commitTransaction() {
     lockManager_.unlockAll();
     currentTxnId_ = 0;
     inTransaction_ = false;
+    readOnly_ = false;
     txnDB_.clear();
     return OpResult::Success;
 }
@@ -5606,6 +5628,7 @@ OpResult StorageEngine::rollbackTransaction() {
     lockManager_.unlockAll();
     currentTxnId_ = 0;
     inTransaction_ = false;
+    readOnly_ = false;
     txnDB_.clear();
     return OpResult::Success;
 }

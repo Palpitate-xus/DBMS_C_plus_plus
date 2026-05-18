@@ -406,7 +406,7 @@
 | **SAVEPOINT / ROLLBACK TO** | ✅ | ✅ | - |
 | **RELEASE SAVEPOINT** | ✅ | ✅ | - |
 | **嵌套事务** | ❌ | ✅ | P3 |
-| **只读事务 (READ ONLY)** | ❌ | ✅ | P2 |
+| **只读事务 (READ ONLY)** | ✅ | ✅ | - |
 | **自治事务** | ❌ | ✅ Oracle | P3 |
 
 ### 6.4 分布式事务
@@ -501,7 +501,7 @@
 |------|------|------|--------|
 | **BEFORE/AFTER INSERT/UPDATE/DELETE** | ✅ | ✅ | - |
 | **行级触发器 (FOR EACH ROW)** | ✅ | ✅ | - |
-| **语句级触发器 (FOR EACH STATEMENT)** | ❌ | ✅ | P2 |
+| **语句级触发器 (FOR EACH STATEMENT)** | ✅ | ✅ | - |
 | **INSTEAD OF 触发器** | ❌ | ✅ | P3 |
 | **触发器引用 OLD/NEW** | ✅ | ✅ | - |
 | **多触发器执行顺序** | ❌ | ✅ | P3 |
@@ -664,7 +664,7 @@
 | EXPLAIN (估算成本) | ✅ | ✅ | - |
 | **EXPLAIN ANALYZE (实际执行)** | ✅ | ✅ | - |
 | **EXPLAIN BUFFERS** | ❌ | ✅ | P2 |
-| **EXPLAIN FORMAT JSON/XML** | ❌ | ✅ | P2 |
+| **EXPLAIN FORMAT JSON/XML** | ✅ | ✅ | - |
 | **EXPLAIN VERBOSE** | ❌ | ✅ | P2 |
 
 ---
@@ -969,7 +969,7 @@
 | **已实现** | ~120 | 100% |
 | **P0 (关键)** | 24 | **100%** |
 | **P1 (重要)** | 36 | ~58% |
-| **P2 (增强)** | 44 | ~27% |
+| **P2 (增强)** | 44 | ~34% |
 | **P3 (高级)** | 60+ | ~5% |
 
 **当前定位**：P0 全部完成！已实现 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树/Hash 索引 + 复合索引 + 覆盖索引 + 行级锁 + 查询优化器 + SSL/TLS + 密码哈希，对标 SQLite 3.x 水平。

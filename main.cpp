@@ -1893,9 +1893,25 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             string tname = resolveTableName(s, tparts[4]);
+            // Detect FOR EACH ROW / FOR EACH STATEMENT
+            bool forEachRow = true;
+            size_t actionStart = 5;
+            for (size_t i = 5; i + 2 < tparts.size(); ++i) {
+                if (tparts[i] == "for" && tparts[i+1] == "each") {
+                    if (tparts[i+2] == "statement") {
+                        forEachRow = false;
+                        actionStart = i + 3;
+                        break;
+                    } else if (tparts[i+2] == "row") {
+                        forEachRow = true;
+                        actionStart = i + 3;
+                        break;
+                    }
+                }
+            }
             // Remaining parts are the action SQL
             string action;
-            for (size_t i = 5; i < tparts.size(); ++i) {
+            for (size_t i = actionStart; i < tparts.size(); ++i) {
                 if (!action.empty()) action += " ";
                 action += tparts[i];
             }
@@ -1905,6 +1921,7 @@ bool execute(const string& rawSql, Session& s) {
             trg.event = event;
             trg.tableName = tname;
             trg.action = action;
+            trg.forEachRow = forEachRow;
             auto res = g_engine.createTrigger(s.currentDB, trg);
             if (res != OpResult::Success) {
                 cout << "Create trigger failed" << endl;
@@ -3000,7 +3017,9 @@ bool execute(const string& rawSql, Session& s) {
     if (sql.substr(0, 5) == "begin") {
         if (!checkDB(s)) return true;
         // Parse optional isolation level: "begin read committed"
+        // Parse optional read only: "begin read only"
         string rest = trim(sql.substr(5));
+        bool readOnly = false;
         if (!rest.empty()) {
             if (rest == "read uncommitted") {
                 g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
@@ -3010,6 +3029,8 @@ bool execute(const string& rawSql, Session& s) {
                 g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
             } else if (rest == "serializable") {
                 g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            } else if (rest == "read only") {
+                readOnly = true;
             }
         }
         auto res = g_engine.beginTransaction(s.currentDB);
@@ -3017,8 +3038,14 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Begin transaction failed" << endl;
             return true;
         }
-        cout << "Transaction started" << endl;
-        log(s.username, "begin transaction", getTime());
+        g_engine.setReadOnly(readOnly);
+        if (readOnly) {
+            cout << "Read-only transaction started" << endl;
+            log(s.username, "begin read-only transaction", getTime());
+        } else {
+            cout << "Transaction started" << endl;
+            log(s.username, "begin transaction", getTime());
+        }
         return false;
     }
 
@@ -3844,14 +3871,19 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // EXPLAIN / EXPLAIN ANALYZE
+    // EXPLAIN / EXPLAIN ANALYZE / EXPLAIN FORMAT JSON
     if (sql.substr(0, 7) == "explain") {
         if (!checkDB(s)) return true;
         bool isAnalyze = false;
+        bool isJson = false;
         string rest = trim(sql.substr(7));
         if (rest.size() >= 8 && rest.substr(0, 8) == "analyze ") {
             isAnalyze = true;
             rest = trim(rest.substr(8));
+        }
+        if (rest.size() >= 11 && rest.substr(0, 11) == "format json") {
+            isJson = true;
+            rest = trim(rest.substr(11));
         }
         string inner = rest;
         if (inner.size() < 6 || inner.substr(0, 6) != "select") {
@@ -3928,7 +3960,11 @@ bool execute(const string& rawSql, Session& s) {
         ctx.limit = limitVal;
         ctx.distinct = isDistinct;
         auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-        cout << dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB);
+        if (isJson) {
+            cout << dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB);
+        } else {
+            cout << dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB);
+        }
 
         if (isAnalyze) {
             // Execute the query and collect actual statistics

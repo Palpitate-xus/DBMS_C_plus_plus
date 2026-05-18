@@ -254,6 +254,8 @@ public:
 
     // Transaction operations
     bool inTransaction() const { return inTransaction_; }
+    bool isReadOnly() const { return readOnly_; }
+    void setReadOnly(bool ro) { readOnly_ = ro; }
     OpResult beginTransaction(const std::string& dbname);
     OpResult commitTransaction();
     OpResult rollbackTransaction();
@@ -367,6 +369,7 @@ public:
         std::string event;    // "insert", "update", "delete"
         std::string tableName;
         std::string action;   // SQL action (e.g., "insert into audit_log values (...)")
+        bool forEachRow = true;  // true = FOR EACH ROW, false = FOR EACH STATEMENT
     };
     OpResult createTrigger(const std::string& dbname, const Trigger& trg);
     OpResult dropTrigger(const std::string& dbname, const std::string& trgName);
@@ -453,6 +456,7 @@ private:
 
     // Transaction state
     bool inTransaction_ = false;
+    bool readOnly_ = false;
     std::string txnDB_;
     uint64_t currentTxnId_ = 0;
     ReadView readView_;
