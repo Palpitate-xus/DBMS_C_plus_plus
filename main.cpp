@@ -3791,7 +3791,7 @@ bool execute(const string& rawSql, Session& s) {
             else if (jt == JoinType::Right) tableNameStart += 10;
             else if (jt == JoinType::FullOuter) tableNameStart += 15;
             else if (jt == JoinType::Cross) tableNameStart += 10;
-            else if (jt == JoinType::Inner) tableNameStart += 10;
+            else if (actualJoinPos + 10 <= sql.size() && sql.substr(actualJoinPos, 10) == "inner join") tableNameStart += 10;
             else tableNameStart += 4;
 
             size_t clauseEnd = (wherePos != string::npos) ? wherePos
@@ -3821,21 +3821,39 @@ bool execute(const string& rawSql, Session& s) {
                 if (dot != string::npos) rightOnCol = rightOnCol.substr(dot + 1);
             }
 
-            string leftTable = resolveTableName(s, leftTableOrig);
-            string rightTable = resolveTableName(s, rightTableOrig);
+            // Extract table name and alias from "table alias" format
+            auto extractTableAndAlias = [](const string& s) -> pair<string, string> {
+                size_t sp = s.find(' ');
+                if (sp == string::npos) return {s, ""};
+                return {trim(s.substr(0, sp)), trim(s.substr(sp + 1))};
+            };
+            auto [leftTableName, leftAlias] = extractTableAndAlias(leftTableOrig);
+            auto [rightTableName, rightAlias] = extractTableAndAlias(rightTableOrig);
+
+            string leftTable = resolveTableName(s, leftTableName);
+            string rightTable = resolveTableName(s, rightTableName);
             if (!g_engine.tableExists(s.currentDB, leftTable) ||
                 !g_engine.tableExists(s.currentDB, rightTable)) {
                 cout << "Table not exist" << endl;
                 return true;
             }
-            if (!isTempTable(s, leftTableOrig) && !checkTablePermission(s, leftTableOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
-            if (!isTempTable(s, rightTableOrig) && !checkTablePermission(s, rightTableOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            if (!isTempTable(s, leftTableName) && !checkTablePermission(s, leftTableName, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            if (!isTempTable(s, rightTableName) && !checkTablePermission(s, rightTableName, dbms::StorageEngine::TablePrivilege::Select)) return true;
 
             set<string> selectCols;
             bool selectAll = (columns == "*");
             if (!selectAll) {
                 for (const auto& item : splitSelectColumns(columns)) {
-                    selectCols.insert(trim(item));
+                    string col = trim(item);
+                    // Strip table aliases from SELECT columns
+                    for (const auto& alias : {leftAlias, rightAlias}) {
+                        if (alias.empty()) continue;
+                        string prefix = alias + ".";
+                        if (col.size() > prefix.size() && col.substr(0, prefix.size()) == prefix) {
+                            col = col.substr(prefix.size());
+                        }
+                    }
+                    selectCols.insert(col);
                 }
             }
 
@@ -3844,6 +3862,17 @@ bool execute(const string& rawSql, Session& s) {
                 size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
                 string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
                 whereClause = expandSubqueries(whereClause, s);
+                // Strip table aliases from WHERE clause before normalization
+                if (!leftAlias.empty() || !rightAlias.empty()) {
+                    for (const auto& alias : {leftAlias, rightAlias}) {
+                        if (alias.empty()) continue;
+                        string prefix = alias + ".";
+                        size_t pos = 0;
+                        while ((pos = whereClause.find(prefix, pos)) != string::npos) {
+                            whereClause = whereClause.substr(0, pos) + whereClause.substr(pos + prefix.size());
+                        }
+                    }
+                }
                 string condStr = normalizeConditionStr(whereClause);
                 condTokens = tokenize(condStr);
             }
@@ -3852,15 +3881,30 @@ bool execute(const string& rawSql, Session& s) {
 
             TableSchema leftTbl = g_engine.getTableSchema(s.currentDB, leftTable);
             TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
+            string leftPrefix = leftAlias.empty() ? leftTableName : leftAlias;
+            string rightPrefix = rightAlias.empty() ? rightTableName : rightAlias;
             if (selectAll) {
                 for (size_t i = 0; i < leftTbl.len; ++i)
-                    cout << leftTableOrig << "." << leftTbl.cols[i].dataName << ' ';
+                    cout << leftPrefix << "." << leftTbl.cols[i].dataName << ' ';
                 for (size_t i = 0; i < rightTbl.len; ++i)
-                    cout << rightTableOrig << "." << rightTbl.cols[i].dataName << ' ';
+                    cout << rightPrefix << "." << rightTbl.cols[i].dataName << ' ';
             } else {
                 for (const auto& c : selectCols) cout << c << ' ';
             }
             cout << '\n';
+
+            // Strip table aliases from WHERE condition tokens
+            if (!condTokens.empty() && (!leftAlias.empty() || !rightAlias.empty())) {
+                for (auto& tok : condTokens) {
+                    for (const auto& alias : {leftAlias, rightAlias}) {
+                        if (alias.empty()) continue;
+                        string prefix = alias + ".";
+                        if (tok.size() > prefix.size() && tok.substr(0, prefix.size()) == prefix) {
+                            tok = tok.substr(prefix.size());
+                        }
+                    }
+                }
+            }
 
             vector<string> answers;
             auto runJoin = [&](const vector<string>& conds) -> vector<string> {
