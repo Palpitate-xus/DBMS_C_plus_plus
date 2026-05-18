@@ -239,6 +239,17 @@ Column makeTextColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeJsonColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "json";
+    c.dsize = 65535;
+    return c;
+}
+
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;
@@ -3628,6 +3639,105 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
         }
         return out;
+    }
+    if (expr.funcName == "json_extract" && expr.funcArgs.size() >= 2) {
+        std::string jsonStr = getVal(expr.funcArgs[0]);
+        std::string path = getVal(expr.funcArgs[1]);
+        // Simple JSON path extractor: supports $.key or $['key'] or $.key1.key2
+        // Trim whitespace and surrounding quotes from path
+        path = trim(path);
+        if (path.size() >= 2 && path.front() == '\'' && path.back() == '\'') {
+            path = path.substr(1, path.size() - 2);
+        }
+        if (path.empty() || path[0] != '$') return jsonStr;
+        // Remove leading $.
+        std::string keyPath = (path.size() > 1 && path[1] == '.') ? path.substr(2) : path.substr(1);
+        if (keyPath.empty()) return jsonStr;
+        // Split keyPath by '.' or ['']
+        std::vector<std::string> keys;
+        {
+            std::string cur;
+            size_t i = 0;
+            while (i < keyPath.size()) {
+                if (keyPath[i] == '.') {
+                    if (!cur.empty()) { keys.push_back(cur); cur.clear(); }
+                    ++i;
+                } else if (keyPath[i] == '[') {
+                    if (!cur.empty()) { keys.push_back(cur); cur.clear(); }
+                    ++i;
+                    if (i < keyPath.size() && keyPath[i] == '\'') {
+                        ++i;
+                        while (i < keyPath.size() && keyPath[i] != '\'') { cur.push_back(keyPath[i]); ++i; }
+                        if (i < keyPath.size()) ++i; // skip closing '
+                    } else {
+                        while (i < keyPath.size() && keyPath[i] != ']') { cur.push_back(keyPath[i]); ++i; }
+                    }
+                    if (i < keyPath.size() && keyPath[i] == ']') ++i;
+                    if (!cur.empty()) { keys.push_back(cur); cur.clear(); }
+                } else {
+                    cur.push_back(keyPath[i]);
+                    ++i;
+                }
+            }
+            if (!cur.empty()) keys.push_back(cur);
+        }
+        // Navigate through JSON string levels
+        std::string current = jsonStr;
+        for (const std::string& key : keys) {
+            if (key.empty()) continue;
+            // Find the key in current JSON object
+            std::string searchKey = "\"" + key + "\"";
+            size_t keyPos = current.find(searchKey);
+            if (keyPos == std::string::npos) return "";
+            size_t colonPos = current.find(':', keyPos + searchKey.size());
+            if (colonPos == std::string::npos) return "";
+            size_t valStart = colonPos + 1;
+            while (valStart < current.size() && std::isspace(static_cast<unsigned char>(current[valStart]))) ++valStart;
+            if (valStart >= current.size()) return "";
+            if (current[valStart] == '{') {
+                // Object value - extract matching braces
+                int depth = 1;
+                size_t end = valStart + 1;
+                while (end < current.size() && depth > 0) {
+                    if (current[end] == '{') ++depth;
+                    else if (current[end] == '}') --depth;
+                    ++end;
+                }
+                current = current.substr(valStart, end - valStart);
+            } else if (current[valStart] == '[') {
+                // Array value - extract matching brackets
+                int depth = 1;
+                size_t end = valStart + 1;
+                while (end < current.size() && depth > 0) {
+                    if (current[end] == '[') ++depth;
+                    else if (current[end] == ']') --depth;
+                    ++end;
+                }
+                current = current.substr(valStart, end - valStart);
+            } else if (current[valStart] == '\"') {
+                // String value
+                size_t end = valStart + 1;
+                while (end < current.size() && current[end] != '\"') {
+                    if (current[end] == '\\' && end + 1 < current.size()) end += 2;
+                    else ++end;
+                }
+                current = current.substr(valStart + 1, end - valStart - 1);
+            } else {
+                // Number, boolean, null
+                size_t end = valStart;
+                while (end < current.size() && current[end] != ',' && current[end] != '}' && current[end] != ']') ++end;
+                current = trim(current.substr(valStart, end - valStart));
+            }
+        }
+        return current;
+    }
+    if (expr.funcName == "json_value" && expr.funcArgs.size() >= 2) {
+        // json_value is alias for json_extract but returns unquoted string
+        StorageEngine::SelectExpr subExpr;
+        subExpr.isScalar = true;
+        subExpr.funcName = "json_extract";
+        subExpr.funcArgs = expr.funcArgs;
+        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname);
     }
     if (expr.funcName == "subquery" && !expr.funcArgs.empty() && engine) {
         // Simplified scalar subquery: funcArgs[0] = "select col from table [where ...]"

@@ -25,6 +25,7 @@ using dbms::makeStringColumn;
 using dbms::makeVarCharColumn;
 using dbms::makeTimestampColumn;
 using dbms::makeTextColumn;
+using dbms::makeJsonColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makeDecimalColumn;
@@ -235,6 +236,7 @@ static bool isScalarFunc(const string& name) {
                                          "greatest", "least", "if", "iif",
                                          "date_add", "date_sub",
                                          "datediff", "date_trunc", "date_format",
+                                         "json_extract", "json_value",
                                          "subquery"};
     return scalars.find(name) != scalars.end();
 }
@@ -889,6 +891,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 tbl.append(makeVarCharColumn(cname, isNull, len, isPK));
             } else if (ctype.substr(0, 4) == "text") {
                 tbl.append(makeTextColumn(cname, isNull, isPK));
+            } else if (ctype.substr(0, 4) == "json") {
+                tbl.append(makeJsonColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 5) == "float") {
                 tbl.append(makeFloatColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 6) == "double") {
@@ -1930,6 +1934,8 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeVarCharColumn(cname, isNull, len);
             } else if (typeName.substr(0, 4) == "text") {
                 col = makeTextColumn(cname, isNull);
+            } else if (typeName.substr(0, 4) == "json") {
+                col = makeJsonColumn(cname, isNull);
             } else if (typeName.substr(0, 5) == "float") {
                 col = makeFloatColumn(cname, isNull);
             } else if (typeName.substr(0, 6) == "double") {
@@ -2138,9 +2144,26 @@ bool execute(const string& rawSql, Session& s) {
         for (const string& valsStr : allValStrs) {
             vector<string> vals;
             {
-                stringstream vss(valsStr);
                 string item;
-                while (getline(vss, item, ',')) vals.push_back(trim(item));
+                size_t i = 0;
+                while (i < valsStr.size()) {
+                    while (i < valsStr.size() && isspace(static_cast<unsigned char>(valsStr[i]))) ++i;
+                    if (i >= valsStr.size()) break;
+                    string val;
+                    if (valsStr[i] == '\'') {
+                        val += valsStr[i++];
+                        while (i < valsStr.size() && valsStr[i] != '\'') val += valsStr[i++];
+                        if (i < valsStr.size()) val += valsStr[i++];
+                    } else if (valsStr[i] == '\"') {
+                        val += valsStr[i++];
+                        while (i < valsStr.size() && valsStr[i] != '\"') val += valsStr[i++];
+                        if (i < valsStr.size()) val += valsStr[i++];
+                    } else {
+                        while (i < valsStr.size() && valsStr[i] != ',') val += valsStr[i++];
+                    }
+                    vals.push_back(trim(val));
+                    if (i < valsStr.size() && valsStr[i] == ',') ++i;
+                }
             }
             if (cols.size() != vals.size()) {
                 cout << "SQL syntax error: column count mismatch" << endl;
