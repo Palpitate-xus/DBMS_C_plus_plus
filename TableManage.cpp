@@ -3420,6 +3420,47 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return str(result);
         } catch (...) { return ""; }
     }
+    if (expr.funcName == "datediff" && expr.funcArgs.size() >= 2) {
+        std::string a = getVal(expr.funcArgs[0]);
+        std::string b = getVal(expr.funcArgs[1]);
+        Date d1(a.c_str()), d2(b.c_str());
+        if (d1.year == 0 || d2.year == 0) return "";
+        return std::to_string(d1 - d2);
+    }
+    if (expr.funcName == "date_trunc" && expr.funcArgs.size() >= 2) {
+        std::string unit = getVal(expr.funcArgs[0]);
+        for (char& c : unit) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        std::string dstr = getVal(expr.funcArgs[1]);
+        Date d(dstr.c_str());
+        if (d.year == 0) return "";
+        Date result = d;
+        if (unit == "year") { result.month = 1; result.day = 1; }
+        else if (unit == "month") { result.day = 1; }
+        else if (unit == "day") { /* unchanged */ }
+        else return "";
+        return str(result);
+    }
+    if (expr.funcName == "date_format" && expr.funcArgs.size() >= 2) {
+        std::string dstr = getVal(expr.funcArgs[0]);
+        std::string fmt = getVal(expr.funcArgs[1]);
+        Date d(dstr.c_str());
+        if (d.year == 0) return "";
+        std::string out;
+        for (size_t i = 0; i < fmt.size(); ++i) {
+            if (fmt[i] == '%' && i + 1 < fmt.size()) {
+                char c = static_cast<char>(std::tolower(static_cast<unsigned char>(fmt[i + 1])));
+                char buf[16];
+                if (c == 'y') { std::snprintf(buf, sizeof(buf), "%04d", d.year); out += buf; }
+                else if (c == 'm') { std::snprintf(buf, sizeof(buf), "%02d", d.month); out += buf; }
+                else if (c == 'd') { std::snprintf(buf, sizeof(buf), "%02d", d.day); out += buf; }
+                else { out += fmt[i]; out += fmt[i + 1]; }
+                ++i;
+            } else {
+                out += fmt[i];
+            }
+        }
+        return out;
+    }
     if (expr.funcName == "subquery" && !expr.funcArgs.empty() && engine) {
         // Simplified scalar subquery: funcArgs[0] = "select col from table [where ...]"
         std::string subSql = expr.funcArgs[0];
