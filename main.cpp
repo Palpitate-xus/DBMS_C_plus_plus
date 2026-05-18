@@ -131,6 +131,29 @@ static string sqlProcessor(string raw) {
     raw.erase(remove(raw.begin(), raw.end(), '\r'), raw.end());
     if (!raw.empty() && raw.back() == ';') raw.pop_back();
     raw = preprocessCaseWhen(raw);
+    // Normalize boolean literals: true/false → 1/0
+    {
+        string out;
+        size_t i = 0;
+        while (i < raw.size()) {
+            // Check for "true" as a standalone token
+            if ((i == 0 || !isalnum(static_cast<unsigned char>(raw[i-1]))) &&
+                raw.substr(i, 4) == "true" &&
+                (i + 4 >= raw.size() || !isalnum(static_cast<unsigned char>(raw[i+4])))) {
+                out += "1";
+                i += 4;
+            } else if ((i == 0 || !isalnum(static_cast<unsigned char>(raw[i-1]))) &&
+                       raw.substr(i, 5) == "false" &&
+                       (i + 5 >= raw.size() || !isalnum(static_cast<unsigned char>(raw[i+5])))) {
+                out += "0";
+                i += 5;
+            } else {
+                out += raw[i];
+                ++i;
+            }
+        }
+        raw = out;
+    }
     return raw;
 }
 
@@ -2463,6 +2486,7 @@ bool execute(const string& rawSql, Session& s) {
         cout << inserted << " row(s) inserted" << endl;
         for (auto& row : returnedRows) cout << row << endl;
         log(s.username, to_string(inserted) + " row(s) inserted", getTime());
+        if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedName);
         return false;
     }
 
@@ -2636,6 +2660,7 @@ bool execute(const string& rawSql, Session& s) {
         cout << "Delete done" << endl;
         for (auto& row : returnedRows) cout << row << endl;
         log(s.username, "delete done", getTime());
+        g_engine.analyzeTable(s.currentDB, resolvedName);
         return false;
     }
 
@@ -2841,6 +2866,7 @@ bool execute(const string& rawSql, Session& s) {
         cout << "Update done" << endl;
         for (auto& row : returnedRows) cout << row << endl;
         log(s.username, "update done", getTime());
+        g_engine.analyzeTable(s.currentDB, resolvedName);
         return false;
     }
 
