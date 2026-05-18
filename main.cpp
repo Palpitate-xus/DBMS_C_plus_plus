@@ -490,6 +490,20 @@ static string normalizeConditionStr(string s) {
             pos += 4;
         }
     }
+    // Normalize REGEXP keyword: "name regexp '^a'" → "nameregexp'^a'"
+    pos = 0;
+    while ((pos = s.find("regexp", pos)) != string::npos) {
+        size_t before = pos;
+        while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
+        size_t after = pos + 6;
+        while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
+        if (before != pos || after != pos + 6) {
+            s = s.substr(0, before) + "regexp" + s.substr(after);
+            pos = before + 6;
+        } else {
+            pos += 6;
+        }
+    }
     // Normalize IS NOT NULL (before IS NULL to avoid partial match)
     pos = 0;
     while ((pos = s.find("is not null", pos)) != string::npos) {
@@ -532,6 +546,13 @@ static string modifyLogic(const string& logic) {
         string before = logic.substr(0, likePos);
         string after = logic.substr(likePos + 4);
         return "like" + before + " " + after;
+    }
+    // Handle REGEXP
+    size_t regexpPos = logic.find("regexp");
+    if (regexpPos != string::npos) {
+        string before = logic.substr(0, regexpPos);
+        string after = logic.substr(regexpPos + 6);
+        return "regexp" + before + " " + after;
     }
     // Handle IS NOT NULL
     size_t isnotPos = logic.find("isnotnull");

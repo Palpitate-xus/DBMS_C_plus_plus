@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -63,6 +64,16 @@ static bool likeMatch(const std::string& text, const std::string& pattern) {
     }
     while (j < p.size() && p[j] == '%') ++j;
     return j == p.size();
+}
+
+// REGEXP pattern matching (ECMAScript syntax), case-insensitive
+static bool regexMatch(const std::string& text, const std::string& pattern) {
+    try {
+        std::regex re(pattern, std::regex::icase | std::regex::ECMAScript);
+        return std::regex_search(text, re);
+    } catch (...) {
+        return false;
+    }
 }
 
 // ========================================================================
@@ -1796,6 +1807,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == ">=" && (val <  cond.value))   return false;
         if (cond.op == "!=" && val == cond.value)    return false;
         if (cond.op == "like" && !likeMatch(val, cond.value)) return false;
+        if (cond.op == "regexp" && !regexMatch(val, cond.value)) return false;
     } else if (col.dataType == "date") {
         Date d = (val.empty() ? Date{} : Date(val.c_str()));
         Date v(cond.value.c_str());
@@ -2385,6 +2397,18 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', 4);
             if (sp == std::string::npos) continue;
             c.colName = s.substr(4, sp - 4);
+            c.value = s.substr(sp + 1);
+            if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
+                c.value = c.value.substr(1, c.value.size() - 2);
+            conds.push_back(c);
+            continue;
+        }
+        // Handle REGEXP operator
+        if (s.size() >= 6 && s.substr(0, 6) == "regexp") {
+            c.op = "regexp";
+            size_t sp = s.find(' ', 6);
+            if (sp == std::string::npos) continue;
+            c.colName = s.substr(6, sp - 6);
             c.value = s.substr(sp + 1);
             if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
                 c.value = c.value.substr(1, c.value.size() - 2);
