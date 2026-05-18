@@ -189,7 +189,7 @@
 | **INSERT 多行 (VALUES (...), (...))** | ✅ | ✅ | - |
 | **INSERT INTO ... SELECT** | ✅ | ✅ | - |
 | **INSERT ON CONFLICT / UPSERT** | ✅ | ✅ | - |
-| **INSERT ... RETURNING** | ❌ | ✅ | P1 |
+| **INSERT ... RETURNING** | ✅ | ✅ | - |
 | **REPLACE INTO** | ❌ | ✅ MySQL | P2 |
 | **MERGE INTO** | ✅ | ✅ | - |
 
@@ -200,7 +200,7 @@
 | UPDATE/DELETE 基础 | ✅ | ✅ | - |
 | **UPDATE FROM (多表 UPDATE)** | ✅ | ✅ | - |
 | **DELETE ... USING (多表 DELETE)** | ✅ | ✅ | - |
-| **UPDATE/DELETE ... RETURNING** | ❌ | ✅ | P1 |
+| **UPDATE/DELETE ... RETURNING** | ✅ | ✅ | - |
 | **UPDATE/DELETE ... LIMIT** | ❌ | ✅ | P2 |
 
 ### 2.14 ORDER BY 扩展
@@ -230,7 +230,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | INT/TINYINT/LONG | ✅ | ✅ | - |
-| **SMALLINT** | ❌ | ✅ | P1 |
+| **SMALLINT** | ✅ | ✅ | - |
 | **BIGINT / INT8** | ✅ (LONG) | ✅ | - |
 | **DECIMAL / NUMERIC** | ✅ | ✅ | - |
 | **FLOAT / REAL** | ✅ | ✅ | - |
@@ -503,7 +503,7 @@
 | **行级触发器 (FOR EACH ROW)** | ✅ | ✅ | - |
 | **语句级触发器 (FOR EACH STATEMENT)** | ❌ | ✅ | P2 |
 | **INSTEAD OF 触发器** | ❌ | ✅ | P3 |
-| **触发器引用 OLD/NEW** | ❌ | ✅ | P1 |
+| **触发器引用 OLD/NEW** | ✅ | ✅ | - |
 | **多触发器执行顺序** | ❌ | ✅ | P3 |
 | **DDL 触发器** | ❌ | ✅ | P3 |
 | **事件触发器** | ❌ | ✅ PG | P3 |
@@ -662,7 +662,7 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | EXPLAIN (估算成本) | ✅ | ✅ | - |
-| **EXPLAIN ANALYZE (实际执行)** | ❌ | ✅ | **P1** |
+| **EXPLAIN ANALYZE (实际执行)** | ✅ | ✅ | - |
 | **EXPLAIN BUFFERS** | ❌ | ✅ | P2 |
 | **EXPLAIN FORMAT JSON/XML** | ❌ | ✅ | P2 |
 | **EXPLAIN VERBOSE** | ❌ | ✅ | P2 |
@@ -881,8 +881,8 @@
 | 9 | ~~DENSE_RANK / PARTITION BY~~ | 窗口函数完备 ✅ |
 | 10 | ~~INSERT ON CONFLICT (UPSERT)~~ | 冲突处理 ✅ |
 | 11 | UPDATE FROM / DELETE USING | 多表 DML ✅ |
-| 12 | RETURNING 子句 | DML 返回数据 |
-| 13 | SMALLINT / BIGINT | 数值类型完备 |
+| 12 | ~~RETURNING 子句~~ | DML 返回数据 ✅ |
+| 13 | ~~SMALLINT / BIGINT~~ | 数值类型完备 ✅ |
 | 14 | ~~TIME / DATETIME / TIMESTAMPTZ~~ | 时间类型完备 ✅ |
 | 15 | BOOLEAN | 布尔类型 ✅ |
 | 16 | BINARY / VARBINARY / BLOB | 二进制存储 |
@@ -899,7 +899,7 @@
 | 27 | 数据库级 / Schema 级权限 | 权限粒度 |
 | 28 | 字符集（UTF-8） | 国际化基础 |
 | 29 | ~~慢查询日志~~ | 性能诊断 ✅ |
-| 30 | EXPLAIN ANALYZE | 实际执行成本 |
+| 30 | ~~EXPLAIN ANALYZE~~ | 实际执行成本 ✅ |
 | 31 | ~~自动统计收集~~ | 优化器质量 ✅ |
 | 32 | 直方图统计 | 选择率估算 |
 | 33 | JOIN 顺序优化 | 多表 JOIN 性能 |
@@ -968,12 +968,12 @@
 |--------|------|--------|
 | **已实现** | ~120 | 100% |
 | **P0 (关键)** | 24 | **100%** |
-| **P1 (重要)** | 36 | ~61% |
+| **P1 (重要)** | 36 | ~75% |
 | **P2 (增强)** | 44 | ~27% |
 | **P3 (高级)** | 60+ | ~5% |
 
 **当前定位**：P0 全部完成！已实现 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树/Hash 索引 + 复合索引 + 覆盖索引 + 行级锁 + 查询优化器 + SSL/TLS + 密码哈希，对标 SQLite 3.x 水平。
 
-**下一阶段目标**：完成核心 P1 项（DROP USER、SMALLINT/BIGINT、真正的 SERIALIZABLE 间隙锁、SELECT FOR UPDATE 完整支持、表分区、触发器 OLD/NEW 引用等）。
+**下一阶段目标**：完成核心 P1 项（DROP USER、STRING_AGG/GROUP_CONCAT、表分区、间隙锁/Next-Key 锁、数据库级权限、直方图统计、自动统计收集、字符集支持等）。
 
 **长期目标**：完成 P0 + 核心 P1，对标 PostgreSQL 8.x 或 MySQL 5.5 早期版本。
