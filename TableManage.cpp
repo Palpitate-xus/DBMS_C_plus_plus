@@ -378,7 +378,7 @@ std::filesystem::path StorageEngine::checkpointPath(const std::string& dbname) c
 
 std::filesystem::path StorageEngine::viewPath(const std::string& dbname,
                                                const std::string& viewname) const {
-    return dbPath(dbname) / (viewname + ".view");
+    return viewsDir(dbname) / (viewname + ".view");
 }
 
 std::filesystem::path StorageEngine::viewsDir(const std::string& dbname) const {
@@ -3221,6 +3221,18 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
                         if (match) result.push_back(row);
                     }
                 }
+            }
+        }
+    } else if (tablename == "views" || tablename == "VIEWS") {
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& vname : getViewNames(dbname)) {
+                std::string row = dbname + " " + vname + " ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                    if (c.colName == "table_name" && c.op == "=" && vname != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
             }
         }
     }

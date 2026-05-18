@@ -1622,6 +1622,7 @@ static bool checkTablePermission(Session& s, const string& tname,
 }
 
 static bool checkDB(const Session& s) {
+    if (s.currentDB == "information_schema") return true;
     if (!g_engine.databaseExists(s.currentDB)) {
         cout << "Invalid Database name:" << s.currentDB << endl;
         log(s.username, "invalid database name", getTime());
@@ -1666,7 +1667,7 @@ bool execute(const string& rawSql, Session& s) {
     if (sql.substr(0, 3) == "use") {
         if (sql.substr(4, 8) == "database") {
             string dbname = trim(sql.substr(13));
-            if (!g_engine.databaseExists(dbname)) {
+            if (dbname != "information_schema" && !g_engine.databaseExists(dbname)) {
                 cout << "Database not found" << endl;
                 s.currentDB = "";
                 log(s.username, "use database error", getTime());
@@ -3506,6 +3507,88 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
+        if (rest.substr(0, 12) == "create table") {
+            if (!checkDB(s)) return true;
+            string tname = trim(rest.substr(12));
+            tname = resolveTableName(s, tname);
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+            if (tbl.len == 0) {
+                cout << "Table not exist" << endl;
+                return true;
+            }
+            string ddl = "CREATE TABLE " + tname + " (";
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (i > 0) ddl += ", ";
+                const auto& c = tbl.cols[i];
+                ddl += c.dataName + " " + c.dataType;
+                if (!c.isNull) ddl += " NOT NULL";
+                if (c.isPrimaryKey) ddl += " PRIMARY KEY";
+                if (c.isUnique) ddl += " UNIQUE";
+                if (c.isAutoIncrement) ddl += " AUTO_INCREMENT";
+                if (!c.defaultValue.empty()) ddl += " DEFAULT '" + c.defaultValue + "'";
+            }
+            // Primary key
+            vector<string> pkCols;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].isPrimaryKey) pkCols.push_back(tbl.cols[i].dataName);
+            }
+            if (!pkCols.empty()) {
+                ddl += ", PRIMARY KEY (";
+                for (size_t i = 0; i < pkCols.size(); ++i) {
+                    if (i > 0) ddl += ", ";
+                    ddl += pkCols[i];
+                }
+                ddl += ")";
+            }
+            // Foreign keys
+            for (size_t fi = 0; fi < tbl.fkLen; ++fi) {
+                const auto& fk = tbl.fks[fi];
+                ddl += ", FOREIGN KEY (";
+                for (size_t i = 0; i < fk.colNames.size(); ++i) {
+                    if (i > 0) ddl += ", ";
+                    ddl += fk.colNames[i];
+                }
+                ddl += ") REFERENCES " + fk.refTable + " (";
+                for (size_t i = 0; i < fk.refCols.size(); ++i) {
+                    if (i > 0) ddl += ", ";
+                    ddl += fk.refCols[i];
+                }
+                ddl += ")";
+                if (!fk.onDelete.empty()) ddl += " ON DELETE " + fk.onDelete;
+            }
+            ddl += ")";
+            cout << ddl << endl;
+            return false;
+        }
+        if (rest.substr(0, 5) == "index") {
+            if (!checkDB(s)) return true;
+            string idxRest = trim(rest.substr(5));
+            size_t fromPos = idxRest.find("from ");
+            size_t inPos = idxRest.find("in ");
+            string tname;
+            if (fromPos != string::npos) tname = trim(idxRest.substr(fromPos + 5));
+            else if (inPos != string::npos) tname = trim(idxRest.substr(inPos + 3));
+            else tname = idxRest;
+            tname = resolveTableName(s, tname);
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not exist" << endl;
+                return true;
+            }
+            cout << "table index_name column_name seq" << endl;
+            // Single-column indexes
+            auto idxCols = g_engine.getIndexedColumns(s.currentDB, tname);
+            for (const auto& cname : idxCols) {
+                cout << tname << " " << cname << "_idx " << cname << " 1" << endl;
+            }
+            // Composite indexes
+            auto compIdxs = g_engine.getCompositeIndexes(s.currentDB, tname);
+            for (const auto& ci : compIdxs) {
+                for (size_t seq = 0; seq < ci.columns.size(); ++seq) {
+                    cout << tname << " " << ci.name << " " << ci.columns[seq] << " " << (seq + 1) << endl;
+                }
+            }
+            return false;
+        }
         cout << "Unknown SHOW command" << endl;
         return true;
     }
@@ -4164,7 +4247,7 @@ bool execute(const string& rawSql, Session& s) {
         string tnameOrig = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
         string tname = resolveTableName(s, tnameOrig);
 
-        if (!g_engine.tableExists(s.currentDB, tname)) {
+        if (s.currentDB != "information_schema" && !g_engine.tableExists(s.currentDB, tname)) {
             if (g_engine.viewExists(s.currentDB, tnameOrig)) {
                 string viewSql = g_engine.getViewSQL(s.currentDB, tnameOrig);
                 if (!viewSql.empty()) {

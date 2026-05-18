@@ -61,3 +61,26 @@ inline int createUser(const user& new_user) {
     fs << '\n' << new_user.username << " " << hashedPw << " " << new_user.permission << std::endl;
     return 0;
 }
+
+inline bool deleteUser(const std::string& username) {
+    std::ifstream infile("user.dat");
+    if (!infile) return false;
+    std::vector<user> users;
+    user temp;
+    bool found = false;
+    while (infile >> temp.username >> temp.password >> temp.permission) {
+        if (temp.username == username) {
+            found = true;
+            continue;
+        }
+        users.push_back(temp);
+    }
+    if (!found) return false;
+    std::ofstream outfile("user.dat", std::ios::trunc);
+    for (size_t i = 0; i < users.size(); ++i) {
+        if (i > 0) outfile << '\n';
+        outfile << users[i].username << " " << users[i].password << " " << users[i].permission;
+    }
+    if (!users.empty()) outfile << std::endl;
+    return true;
+}
