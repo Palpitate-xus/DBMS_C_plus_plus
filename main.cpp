@@ -229,7 +229,8 @@ static bool isScalarFunc(const string& name) {
                                          "coalesce", "nullif",
                                          "replace", "position", "instr",
                                          "power", "sqrt", "mod",
-                                         "date_add", "date_sub"};
+                                         "date_add", "date_sub",
+                                         "subquery"};
     return scalars.find(name) != scalars.end();
 }
 
@@ -252,6 +253,30 @@ static vector<string> splitSelectColumns(const string& s) {
     }
     if (!current.empty()) cols.push_back(trim(current));
     return cols;
+}
+
+// Find a keyword at top-level (parenthesis depth 0), skipping content inside parens and single-quoted strings.
+// Returns string::npos if not found. The match boundary is checked at word level.
+static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos = 0) {
+    int depth = 0;
+    bool inStr = false;
+    size_t klen = kw.size();
+    for (size_t i = startPos; i < sql.size(); ++i) {
+        char c = sql[i];
+        if (inStr) {
+            if (c == '\'') inStr = false;
+            continue;
+        }
+        if (c == '\'') { inStr = true; continue; }
+        if (c == '(') { depth++; continue; }
+        if (c == ')') { depth--; continue; }
+        if (depth == 0 && i + klen <= sql.size() && sql.compare(i, klen, kw) == 0) {
+            bool leftOk = (i == 0) || !isalnum(static_cast<unsigned char>(sql[i-1]));
+            bool rightOk = (i + klen == sql.size()) || !isalnum(static_cast<unsigned char>(sql[i+klen]));
+            if (leftOk && rightOk) return i;
+        }
+    }
+    return string::npos;
 }
 
 static vector<string> splitFuncArgs(const string& s) {
@@ -3225,7 +3250,7 @@ bool execute(const string& rawSql, Session& s) {
             }
         }
 
-        size_t fromPos = sql.find("from");
+        size_t fromPos = findTopLevelKeyword(sql, "from");
         if (fromPos == string::npos) {
             cout << "SQL syntax error" << endl;
             return true;
@@ -3237,12 +3262,12 @@ bool execute(const string& rawSql, Session& s) {
             columns = trim(columns.substr(9));
         }
 
-        size_t wherePos = sql.find("where", fromPos);
-        size_t groupPos = sql.find("group by", fromPos);
-        size_t havingPos = sql.find("having", fromPos);
-        size_t orderPos = sql.find("order by", fromPos);
-        size_t limitPos = sql.find("limit", fromPos);
-        size_t offsetPos = sql.find("offset", fromPos);
+        size_t wherePos = findTopLevelKeyword(sql, "where", fromPos);
+        size_t groupPos = findTopLevelKeyword(sql, "group by", fromPos);
+        size_t havingPos = findTopLevelKeyword(sql, "having", fromPos);
+        size_t orderPos = findTopLevelKeyword(sql, "order by", fromPos);
+        size_t limitPos = findTopLevelKeyword(sql, "limit", fromPos);
+        size_t offsetPos = findTopLevelKeyword(sql, "offset", fromPos);
 
         auto parseLimitOffset = [&](size_t& limitVal, size_t& offsetVal) {
             limitVal = 0; offsetVal = 0;
@@ -3551,6 +3576,17 @@ bool execute(const string& rawSql, Session& s) {
                     expr.isScalar = false;
                     expr.colName = item;
                     selectExprs.push_back(expr);
+                } else if (item.size() >= 9 && item.front() == '(' && item.back() == ')' &&
+                           item.substr(1, 7) == "select ") {
+                    // Scalar subquery in SELECT: (SELECT col FROM t [WHERE ...])
+                    dbms::StorageEngine::SelectExpr expr;
+                    expr.displayName = item;
+                    expr.isScalar = true;
+                    expr.funcName = "subquery";
+                    expr.funcArgs.push_back(item.substr(1, item.size() - 2));
+                    selectExprs.push_back(expr);
+                    hasScalar = true;
+                    exprTypes.push_back(3);
                 } else {
                     size_t lp = item.find('(');
                     size_t rp = item.find(')');

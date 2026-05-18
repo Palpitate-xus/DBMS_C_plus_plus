@@ -3191,7 +3191,9 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
 // ========================================================================
 static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const std::string& rowBuffer,
-                                    const TableSchema& tbl) {
+                                    const TableSchema& tbl,
+                                    StorageEngine* engine = nullptr,
+                                    const std::string& dbname = "") {
     auto getVal = [&](const std::string& arg) -> std::string {
         if (arg.size() >= 2 && arg.front() == '\'' && arg.back() == '\'')
             return arg.substr(1, arg.size() - 2);
@@ -3418,6 +3420,101 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return str(result);
         } catch (...) { return ""; }
     }
+    if (expr.funcName == "subquery" && !expr.funcArgs.empty() && engine) {
+        // Simplified scalar subquery: funcArgs[0] = "select col from table [where ...]"
+        std::string subSql = expr.funcArgs[0];
+        size_t fromPos = subSql.find("from");
+        if (fromPos == std::string::npos) return "";
+        std::string colsStr = trim(subSql.substr(6, fromPos - 6));
+        size_t wherePos = subSql.find("where", fromPos);
+        std::string subTname = trim(subSql.substr(fromPos + 4,
+            (wherePos != std::string::npos) ? (wherePos - fromPos - 4)
+            : (subSql.size() - fromPos - 4)));
+        std::vector<std::string> subConds;
+        if (wherePos != std::string::npos) {
+            std::string condStr = trim(subSql.substr(wherePos + 5));
+            // Correlated subquery: replace outer column refs with their literal values
+            for (size_t i = 0; i < tbl.len; ++i) {
+                const std::string& colName = tbl.cols[i].dataName;
+                std::string colVal = StorageEngine::extractColumnValue(rowBuffer, tbl, i);
+                // Quote string-type values
+                bool needQuote = (tbl.cols[i].dataType == "char" ||
+                                  tbl.cols[i].dataType == "varchar" ||
+                                  tbl.cols[i].dataType == "text" ||
+                                  tbl.cols[i].dataType == "date" ||
+                                  tbl.cols[i].dataType == "timestamp" ||
+                                  tbl.cols[i].dataType == "datetime" ||
+                                  tbl.cols[i].dataType == "time");
+                std::string replacement = needQuote ? ("'" + colVal + "'") : colVal;
+                // Replace whole-word occurrences of colName in condStr
+                std::string newCond;
+                size_t p = 0;
+                while (p < condStr.size()) {
+                    size_t found = condStr.find(colName, p);
+                    if (found == std::string::npos) {
+                        newCond += condStr.substr(p);
+                        break;
+                    }
+                    bool leftOk = (found == 0) || !isalnum(static_cast<unsigned char>(condStr[found-1]));
+                    bool rightOk = (found + colName.size() == condStr.size()) ||
+                                   !isalnum(static_cast<unsigned char>(condStr[found+colName.size()]));
+                    newCond += condStr.substr(p, found - p);
+                    if (leftOk && rightOk) {
+                        newCond += replacement;
+                    } else {
+                        newCond += condStr.substr(found, colName.size());
+                    }
+                    p = found + colName.size();
+                }
+                condStr = newCond;
+            }
+            // Transform col<op>value into <op>col value format expected by parseConditions
+            if (!condStr.empty()) {
+                size_t opStart = std::string::npos;
+                size_t opLen = 0;
+                for (size_t k = 0; k < condStr.size(); ++k) {
+                    char c = condStr[k];
+                    if (c == '>' || c == '<' || c == '=' || c == '!') {
+                        opStart = k;
+                        opLen = 1;
+                        if (k + 1 < condStr.size() && (condStr[k+1] == '=' || condStr[k+1] == '>')) {
+                            opLen = 2;
+                        }
+                        break;
+                    }
+                }
+                if (opStart != std::string::npos) {
+                    std::string opStr = condStr.substr(opStart, opLen);
+                    std::string before = condStr.substr(0, opStart);
+                    std::string after = condStr.substr(opStart + opLen);
+                    condStr = opStr + before + " " + after;
+                }
+                subConds.push_back(condStr);
+            }
+        }
+        std::set<std::string> subSelectCols;
+        // Inline split colsStr by comma (avoid dependency on main.cpp's splitSelectColumns)
+        {
+            std::string cur;
+            int depth = 0;
+            for (char ch : colsStr) {
+                if (ch == '(') depth++;
+                else if (ch == ')') depth--;
+                if (ch == ',' && depth == 0) {
+                    subSelectCols.insert(trim(cur));
+                    cur.clear();
+                } else {
+                    cur.push_back(ch);
+                }
+            }
+            if (!trim(cur).empty()) subSelectCols.insert(trim(cur));
+        }
+        auto rows = engine->query(dbname, subTname, subConds, subSelectCols);
+        if (rows.empty()) return "";
+        std::string firstRow = trim(rows[0]);
+        size_t sp = firstRow.find(' ');
+        return (sp == std::string::npos) ? firstRow : trim(firstRow.substr(0, sp));
+    }
     return "";
 }
 
@@ -3523,7 +3620,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
         for (const auto& expr : exprs) {
             std::string val;
             if (expr.isScalar) {
-                val = applyScalarFunc(expr, mr.second, tbl);
+                val = applyScalarFunc(expr, mr.second, tbl, this, dbname);
             } else {
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].dataName == expr.colName) {
