@@ -3326,6 +3326,63 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return val;
     }
+    if (expr.funcName == "convert" && expr.funcArgs.size() >= 2) {
+        // CONVERT(val, type) - alias for CAST
+        std::string val = getVal(expr.funcArgs[0]);
+        std::string targetType = getVal(expr.funcArgs[1]);
+        for (char& c : targetType) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (targetType == "int" || targetType == "integer") {
+            try { return std::to_string(static_cast<int64_t>(std::stoll(val))); } catch (...) { return "0"; }
+        }
+        if (targetType == "float") {
+            try { return std::to_string(std::stof(val)); } catch (...) { return "0"; }
+        }
+        if (targetType == "double") {
+            try { return std::to_string(std::stod(val)); } catch (...) { return "0"; }
+        }
+        if (targetType == "char" || targetType == "varchar" || targetType == "text") {
+            return val;
+        }
+        if (targetType == "date") {
+            Date d(val.c_str());
+            return (d.year == 0) ? "" : str(d);
+        }
+        return val;
+    }
+    if (expr.funcName == "to_number" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        try { return std::to_string(std::stod(val)); } catch (...) { return "0"; }
+    }
+    if (expr.funcName == "to_char" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        if (expr.funcArgs.size() >= 2) {
+            // TO_CHAR(date, fmt) - reuse date_format logic
+            std::string fmt = getVal(expr.funcArgs[1]);
+            Date d(val.c_str());
+            if (d.year == 0) return val;
+            std::string out;
+            for (size_t i = 0; i < fmt.size(); ++i) {
+                if (fmt[i] == '%' && i + 1 < fmt.size()) {
+                    char c = static_cast<char>(std::tolower(static_cast<unsigned char>(fmt[i + 1])));
+                    char buf[16];
+                    if (c == 'y') { std::snprintf(buf, sizeof(buf), "%04d", d.year); out += buf; }
+                    else if (c == 'm') { std::snprintf(buf, sizeof(buf), "%02d", d.month); out += buf; }
+                    else if (c == 'd') { std::snprintf(buf, sizeof(buf), "%02d", d.day); out += buf; }
+                    else { out += fmt[i]; out += fmt[i + 1]; }
+                    ++i;
+                } else {
+                    out += fmt[i];
+                }
+            }
+            return out;
+        }
+        return val;
+    }
+    if (expr.funcName == "to_date" && expr.funcArgs.size() >= 1) {
+        std::string val = getVal(expr.funcArgs[0]);
+        Date d(val.c_str());
+        return (d.year == 0) ? "" : str(d);
+    }
     if (expr.funcName == "coalesce") {
         for (const auto& arg : expr.funcArgs) {
             std::string v = getVal(arg);
