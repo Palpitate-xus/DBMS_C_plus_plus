@@ -191,7 +191,7 @@
 | **INSERT INTO ... SELECT** | ✅ | ✅ | - |
 | **INSERT ON CONFLICT / UPSERT** | ✅ | ✅ | - |
 | **INSERT ... RETURNING** | ✅ | ✅ | - |
-| **REPLACE INTO** | ❌ | ✅ MySQL | P2 |
+| **REPLACE INTO** | ✅ | ✅ MySQL | - |
 | **MERGE INTO** | ✅ | ✅ | - |
 
 ### 2.13 UPDATE / DELETE 扩展

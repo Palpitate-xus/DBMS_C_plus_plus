@@ -2280,6 +2280,12 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    bool isReplace = false;
+    if (sql.substr(0, 13) == "replace into ") {
+        isReplace = true;
+        sql = "insert into " + sql.substr(13);
+    }
+
     if (sql.substr(0, 12) == "insert into ") {
         if (!checkDB(s)) return true;
         vector<string> tokens = tokenize(sql.substr(12));
@@ -2484,6 +2490,54 @@ bool execute(const string& rawSql, Session& s) {
 
             auto res = g_engine.insert(s.currentDB, resolvedName, values);
             if (res == OpResult::DuplicateKey) {
+                if (isReplace) {
+                    // REPLACE INTO: delete conflicting row(s), then re-insert
+                    TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
+                    if (tbl.hasPrimaryKey()) {
+                        string pkVal = tbl.buildPKValue(values);
+                        if (!pkVal.empty()) {
+                            vector<string> whereConds;
+                            string pkColName;
+                            if (!tbl.pkColIndices.empty()) {
+                                for (size_t idx : tbl.pkColIndices) {
+                                    if (idx < tbl.len) { pkColName = tbl.cols[idx].dataName; break; }
+                                }
+                            } else {
+                                for (size_t i = 0; i < tbl.len; ++i) {
+                                    if (tbl.cols[i].isPrimaryKey) { pkColName = tbl.cols[i].dataName; break; }
+                                }
+                            }
+                            if (!pkColName.empty()) {
+                                whereConds.push_back("=" + pkColName + " " + pkVal);
+                                g_engine.remove(s.currentDB, resolvedName, whereConds);
+                            }
+                        }
+                    }
+                    // Also check unique constraints
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (!tbl.cols[ci].isUnique) continue;
+                        auto it = values.find(tbl.cols[ci].dataName);
+                        if (it == values.end() || it->second.empty()) continue;
+                        vector<string> whereConds;
+                        whereConds.push_back("=" + tbl.cols[ci].dataName + " " + it->second);
+                        g_engine.remove(s.currentDB, resolvedName, whereConds);
+                    }
+                    // Re-insert after deletion
+                    res = g_engine.insert(s.currentDB, resolvedName, values);
+                    if (res == OpResult::Success) {
+                        ++inserted;
+                        if (!returningCols.empty() || returningAll) {
+                            vector<string> whereConds;
+                            for (auto& kv : values) {
+                                if (!kv.second.empty()) whereConds.push_back("=" + kv.first + " " + kv.second);
+                            }
+                            auto rr = g_engine.query(s.currentDB, resolvedName, whereConds,
+                                                     returningAll ? set<string>() : returningCols, {});
+                            for (auto& r : rr) returnedRows.push_back(r);
+                        }
+                        continue;
+                    }
+                }
                 if (conflictCol.empty()) {
                     cout << "Duplicate key" << endl;
                     return true;
@@ -2527,9 +2581,14 @@ bool execute(const string& rawSql, Session& s) {
                 for (auto& r : rr) returnedRows.push_back(r);
             }
         }
-        cout << inserted << " row(s) inserted" << endl;
+        if (isReplace) {
+            cout << inserted << " row(s) replaced" << endl;
+            log(s.username, to_string(inserted) + " row(s) replaced", getTime());
+        } else {
+            cout << inserted << " row(s) inserted" << endl;
+            log(s.username, to_string(inserted) + " row(s) inserted", getTime());
+        }
         for (auto& row : returnedRows) cout << row << endl;
-        log(s.username, to_string(inserted) + " row(s) inserted", getTime());
         if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedName);
         return false;
     }
