@@ -3915,6 +3915,24 @@ bool execute(const string& rawSql, Session& s) {
                         } else {
                             val = "NULL";
                         }
+                    } else if (wf.name == "first_value") {
+                        auto it = rows[partStart].find(wf.arg);
+                        val = (it != rows[partStart].end()) ? it->second : "NULL";
+                    } else if (wf.name == "last_value") {
+                        // Find last row in same partition
+                        size_t partEnd = i;
+                        while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
+                        auto it = rows[partEnd].find(wf.arg);
+                        val = (it != rows[partEnd].end()) ? it->second : "NULL";
+                    } else if (wf.name == "ntile") {
+                        size_t partEnd = i;
+                        while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
+                        size_t partitionSize = partEnd - partStart + 1;
+                        int n = 1;
+                        try { n = std::stoi(wf.arg); } catch (...) { n = 1; }
+                        if (n <= 0) n = 1;
+                        size_t bucket = (partIdx * static_cast<size_t>(n)) / partitionSize + 1;
+                        val = to_string(bucket);
                     }
                     rows[i]["_win_" + to_string(wi)] = val;
                 }
