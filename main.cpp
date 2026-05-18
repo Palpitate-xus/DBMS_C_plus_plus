@@ -312,6 +312,7 @@ struct WindowFunc {
     string orderByCol;
     bool orderByAsc;
     vector<string> partitionByCols;
+    bool isAggregate = false;
 };
 
 static bool parseWindowFunc(const string& item, WindowFunc& wf) {
@@ -327,6 +328,10 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
     if (lp == string::npos || rp == string::npos) return false;
     wf.name = toLower(trim(funcPart.substr(0, lp)));
     wf.arg = trim(funcPart.substr(lp + 1, rp - lp - 1));
+
+    // Detect aggregate window functions: sum, count, avg, max, min
+    static const set<string> aggNames = {"sum", "count", "avg", "max", "min"};
+    wf.isAggregate = aggNames.count(wf.name) != 0;
 
     size_t overLp = overPart.find('(');
     size_t overRp = overPart.rfind(')');
@@ -358,8 +363,8 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
             wf.orderByAsc = true;
             if (ot.size() > 1 && toLower(ot[1]) == "desc") wf.orderByAsc = false;
         }
-    } else if (wf.partitionByCols.empty()) {
-        // Neither PARTITION BY nor ORDER BY - invalid
+    } else if (wf.partitionByCols.empty() && !wf.isAggregate) {
+        // Neither PARTITION BY nor ORDER BY - invalid for non-aggregate window functions
         return false;
     }
 
@@ -3965,6 +3970,53 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             };
 
+            // Pre-compute partition boundaries for aggregate window functions
+            vector<map<size_t, string>> aggCache(windowFuncs.size());
+            for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
+                const auto& wf = windowFuncs[wi];
+                if (!wf.isAggregate) continue;
+                // Group row indices by partition key
+                map<string, vector<size_t>> partRows;
+                for (size_t ri = 0; ri < rows.size(); ++ri) {
+                    string key;
+                    for (const auto& pcol : wf.partitionByCols) {
+                        auto it = rows[ri].find(pcol);
+                        key += (it != rows[ri].end() ? it->second : "") + "\x01";
+                    }
+                    partRows[key].push_back(ri);
+                }
+                // Compute aggregate per partition
+                for (const auto& pr : partRows) {
+                    int64_t sum = 0, count = 0;
+                    bool hasMax = false, hasMin = false;
+                    int64_t maxVal = 0, minVal = 0;
+                    for (size_t ri : pr.second) {
+                        if (wf.name == "count") {
+                            count++;
+                            continue;
+                        }
+                        auto it = rows[ri].find(wf.arg);
+                        if (it == rows[ri].end()) continue;
+                        if (it->second.empty()) continue;
+                        try {
+                            int64_t v = stoll(it->second);
+                            if (wf.name == "sum" || wf.name == "avg") { sum += v; count++; }
+                            if (wf.name == "max") { if (!hasMax || v > maxVal) { maxVal = v; hasMax = true; } }
+                            if (wf.name == "min") { if (!hasMin || v < minVal) { minVal = v; hasMin = true; } }
+                        } catch (...) {}
+                    }
+                    string aggVal;
+                    if (wf.name == "sum") aggVal = to_string(sum);
+                    else if (wf.name == "count") aggVal = to_string(count);
+                    else if (wf.name == "avg") aggVal = (count == 0 ? "0" : to_string(static_cast<double>(sum) / count));
+                    else if (wf.name == "max") aggVal = hasMax ? to_string(maxVal) : "NULL";
+                    else if (wf.name == "min") aggVal = hasMin ? to_string(minVal) : "NULL";
+                    for (size_t ri : pr.second) {
+                        aggCache[wi][ri] = aggVal;
+                    }
+                }
+            }
+
             // Compute window function values
             for (size_t i = 0; i < rows.size(); ++i) {
                 for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
@@ -3975,7 +4027,10 @@ bool execute(const string& rawSql, Session& s) {
                     while (partStart > 0 && samePartition(partStart - 1, i, wf)) partStart--;
                     size_t partIdx = i - partStart; // 0-based index within partition
 
-                    if (wf.name == "row_number") {
+                    if (wf.isAggregate) {
+                        auto it = aggCache[wi].find(i);
+                        val = (it != aggCache[wi].end()) ? it->second : "NULL";
+                    } else if (wf.name == "row_number") {
                         val = to_string(partIdx + 1);
                     } else if (wf.name == "rank") {
                         if (partIdx == 0) {
@@ -4063,6 +4118,7 @@ bool execute(const string& rawSql, Session& s) {
                 if (!line.empty() && line.back() == ' ') line.pop_back();
                 winAnswers.push_back(line);
             }
+            // (debug removed)
 
             // DISTINCT
             if (isDistinct) {
