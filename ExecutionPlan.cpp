@@ -866,32 +866,42 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
                                    const std::vector<StorageEngine::Condition>& conds,
                                    const std::set<std::string>& selectCols) {
     (void)conds;
-    auto left = std::make_unique<TableScanOp>(engine, dbname, leftTable);
-    auto right = std::make_unique<TableScanOp>(engine, dbname, rightTable);
+    (void)selectCols;
 
-    // Choose JOIN algorithm based on table sizes
+    // Get table sizes for join ordering optimization
     size_t leftRows = engine->getTableRowCount(dbname, leftTable);
     size_t rightRows = engine->getTableRowCount(dbname, rightTable);
 
-    OpPtr join;
-    if (leftRows < 100 || rightRows < 100) {
-        // Small table: NestedLoopJoin is fine
-        join = std::make_unique<NestedLoopJoinOp>(
-            engine, dbname, std::move(left), std::move(right),
-            leftTable, rightTable, leftCol, rightCol);
-    } else if (leftRows > rightRows * 3) {
-        // Left much larger: build hash on smaller right table
-        join = std::make_unique<HashJoinOp>(
-            engine, dbname, std::move(left), std::move(right),
-            leftTable, rightTable, leftCol, rightCol);
-    } else {
-        // Similar size: HashJoin is generally best for unordered data
-        join = std::make_unique<HashJoinOp>(
-            engine, dbname, std::move(left), std::move(right),
-            leftTable, rightTable, leftCol, rightCol);
+    // Decide join algorithm
+    bool useNLJ = (leftRows < 100 || rightRows < 100);
+    bool useHash = !useNLJ;
+
+    // JOIN order optimization:
+    // - NLJ: smaller table as LEFT (outer loop) to minimize full scans
+    // - HashJoin: smaller table as RIGHT (build hash table) to reduce memory
+    bool shouldSwap = false;
+    if (useNLJ && rightRows < leftRows) {
+        shouldSwap = true; // Put smaller table on the left for NLJ
+    } else if (useHash && rightRows > leftRows * 3) {
+        shouldSwap = true; // Put smaller table on the right for HashJoin
     }
-    (void)selectCols;
-    return join;
+
+    std::string lTbl = shouldSwap ? rightTable : leftTable;
+    std::string rTbl = shouldSwap ? leftTable : rightTable;
+    std::string lCol = shouldSwap ? rightCol : leftCol;
+    std::string rCol = shouldSwap ? leftCol : rightCol;
+
+    auto leftScan = std::make_unique<TableScanOp>(engine, dbname, lTbl);
+    auto rightScan = std::make_unique<TableScanOp>(engine, dbname, rTbl);
+
+    if (useNLJ) {
+        return std::make_unique<NestedLoopJoinOp>(
+            engine, dbname, std::move(leftScan), std::move(rightScan),
+            lTbl, rTbl, lCol, rCol);
+    }
+    return std::make_unique<HashJoinOp>(
+        engine, dbname, std::move(leftScan), std::move(rightScan),
+        lTbl, rTbl, lCol, rCol);
 }
 
 // ========================================================================

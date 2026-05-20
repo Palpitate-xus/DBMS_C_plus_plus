@@ -5145,14 +5145,24 @@ std::vector<std::string> StorageEngine::join(
         if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
-    for (const auto& lr : leftRows) {
+    // JOIN optimization: build hash table on right table's join column
+    // This turns O(N*M) nested loop into O(N+M) hash probe
+    std::unordered_map<std::string, std::vector<std::string>> rightHash;
+    if (rightColIdx < rightTbl.len) {
         for (const auto& rr : rightRows) {
-            // ON condition
-            if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
-            std::string lv = extractColumnValue(lr, leftTbl, leftColIdx);
             std::string rv = extractColumnValue(rr, rightTbl, rightColIdx);
-            if (lv != rv) continue;
+            rightHash[rv].push_back(rr);
+        }
+    }
 
+    for (const auto& lr : leftRows) {
+        // ON condition via hash probe
+        if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+        std::string lv = extractColumnValue(lr, leftTbl, leftColIdx);
+        auto it = rightHash.find(lv);
+        if (it == rightHash.end()) continue;
+
+        for (const auto& rr : it->second) {
             // WHERE conditions
             bool whereMatch = true;
             for (const auto& c : conds) {
