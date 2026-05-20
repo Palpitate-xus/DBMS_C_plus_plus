@@ -248,7 +248,7 @@ static string preprocessCaseWhen(string s) {
 // Scalar function helpers
 // ========================================================================
 static bool isScalarFunc(const string& name) {
-    static const set<string> scalars = {"length", "upper", "lower", "trim", "substring", "concat",
+    static const set<string> scalars = {"length", "char_length", "character_length", "upper", "lower", "trim", "substring", "concat",
                                          "abs", "round", "ceil", "floor",
                                          "now", "current_timestamp", "extract",
                                          "case_when", "cast", "convert",
@@ -1756,13 +1756,21 @@ bool execute(const string& rawSql, Session& s) {
 
         if (sql.substr(7, 8) == "database") {
             if (!checkAdmin(s)) return true;
-            string dbname = trim(sql.substr(16));
-            auto res = g_engine.createDatabase(dbname);
+            string rest = trim(sql.substr(16));
+            string dbname = rest;
+            string charset = "utf8";
+            size_t csPos = rest.find(" character set ");
+            if (csPos == string::npos) csPos = rest.find(" charset ");
+            if (csPos != string::npos) {
+                dbname = trim(rest.substr(0, csPos));
+                charset = trim(rest.substr(csPos + ((rest[csPos+1] == 'c') ? 15 : 9)));
+            }
+            auto res = g_engine.createDatabase(dbname, charset);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "Failed:Database " << dbname << " already exists" << endl;
                 log(s.username, "create database error", getTime());
             } else {
-                cout << "Create Database succeeded" << endl;
+                cout << "Create Database succeeded (charset=" << charset << ")" << endl;
                 log(s.username, "create database succeeded", getTime());
             }
             return res != OpResult::Success;

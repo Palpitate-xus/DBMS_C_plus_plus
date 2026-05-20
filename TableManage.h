@@ -108,7 +108,8 @@ public:
     StorageEngine();
 
     // Database operations
-    OpResult createDatabase(const std::string& dbname);
+    OpResult createDatabase(const std::string& dbname, const std::string& charset = "utf8");
+    std::string getDatabaseCharset(const std::string& dbname) const;
     OpResult dropDatabase(const std::string& dbname);
     bool databaseExists(const std::string& dbname) const;
     std::vector<std::string> getDatabaseNames() const;

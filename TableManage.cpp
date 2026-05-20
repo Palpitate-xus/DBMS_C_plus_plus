@@ -1550,13 +1550,26 @@ bool StorageEngine::tableExists(const std::string& dbname,
     return std::filesystem::exists(schemaPath(dbname, tablename));
 }
 
-OpResult StorageEngine::createDatabase(const std::string& dbname) {
+OpResult StorageEngine::createDatabase(const std::string& dbname, const std::string& charset) {
     if (databaseExists(dbname)) return OpResult::TableAlreadyExist;
     std::filesystem::create_directory(dbPath(dbname));
     {
         std::ofstream f(tableListPath(dbname), std::ios::binary);
     }
+    {
+        std::ofstream f(dbPath(dbname) / ".charset");
+        f << charset;
+    }
     return OpResult::Success;
+}
+
+std::string StorageEngine::getDatabaseCharset(const std::string& dbname) const {
+    auto cpath = dbPath(dbname) / ".charset";
+    if (!std::filesystem::exists(cpath)) return "utf8";
+    std::ifstream f(cpath);
+    std::string cs;
+    if (f >> cs) return cs;
+    return "utf8";
 }
 
 OpResult StorageEngine::dropDatabase(const std::string& dbname) {
@@ -3601,6 +3614,21 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "length" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
         return std::to_string(val.size());
+    }
+    if ((expr.funcName == "char_length" || expr.funcName == "character_length") && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        // Count UTF-8 code points (not bytes)
+        size_t count = 0;
+        for (size_t i = 0; i < val.size(); ) {
+            unsigned char c = static_cast<unsigned char>(val[i]);
+            if (c < 0x80) { i += 1; }
+            else if ((c & 0xE0) == 0xC0) { i += 2; }
+            else if ((c & 0xF0) == 0xE0) { i += 3; }
+            else if ((c & 0xF8) == 0xF0) { i += 4; }
+            else { i += 1; } // invalid byte, skip
+            count++;
+        }
+        return std::to_string(count);
     }
     if (expr.funcName == "upper" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
