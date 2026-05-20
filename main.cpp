@@ -1844,8 +1844,105 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             string tname = rest.substr(0, sp);
-            TableSchema tbl = parseTableColumns(sql, 13 + sp + 1);
+            // Check for PARTITION BY clause
+            size_t partPos = sql.find("partition by");
+            string colsSql = sql;
+            if (partPos != string::npos) colsSql = sql.substr(0, partPos);
+            TableSchema tbl = parseTableColumns(colsSql, 13 + sp + 1);
             tbl.tablename = tname;
+            // Parse partitioning
+            if (partPos != string::npos) {
+                string partRest = trim(sql.substr(partPos + 12)); // after "partition by"
+                size_t lp = partRest.find('(');
+                size_t rp = partRest.find(')', lp);
+                if (lp != string::npos) {
+                    string ptype = trim(partRest.substr(0, lp));
+                    string pkey = trim(partRest.substr(lp + 1, rp - lp - 1));
+                    tbl.partitionKey = pkey;
+                    transform(ptype.begin(), ptype.end(), ptype.begin(), ::tolower);
+                    if (ptype == "range") {
+                        tbl.partitionType = dbms::TableSchema::PartitionType::Range;
+                        size_t defsStart = partRest.find('(', rp);
+                        if (defsStart != string::npos) {
+                            size_t defsEnd = partRest.rfind(')');
+                            string defs = partRest.substr(defsStart + 1, defsEnd - defsStart - 1);
+                            size_t dp = 0;
+                            while (dp < defs.size()) {
+                                size_t nextPart = defs.find("partition ", dp + 1);
+                                string def = trim(defs.substr(dp, nextPart - dp));
+                                if (!def.empty()) {
+                                    string defLower = def;
+                                    transform(defLower.begin(), defLower.end(), defLower.begin(), ::tolower);
+                                    size_t vp = defLower.find("values less than");
+                                    if (vp != string::npos) {
+                                        string pname = trim(def.substr(0, vp));
+                                        if (pname.size() > 10 && pname.substr(0, 10) == "partition ") pname = trim(pname.substr(10));
+                                        size_t blp = def.find('(', vp);
+                                        size_t brp = def.find(')', blp);
+                                        if (blp != string::npos && brp != string::npos) {
+                                            string bound = trim(def.substr(blp + 1, brp - blp - 1));
+                                            tbl.rangePartitions.push_back({pname, bound});
+                                        }
+                                    }
+                                }
+                                if (nextPart == string::npos) break;
+                                dp = nextPart;
+                            }
+                        }
+                    } else if (ptype == "list") {
+                        tbl.partitionType = dbms::TableSchema::PartitionType::List;
+                        size_t defsStart = partRest.find('(', rp);
+                        if (defsStart != string::npos) {
+                            size_t defsEnd = partRest.rfind(')');
+                            string defs = partRest.substr(defsStart + 1, defsEnd - defsStart - 1);
+                            // Split by "partition " keyword (not comma, which may appear inside values)
+                            size_t dp = 0;
+                            while (dp < defs.size()) {
+                                size_t nextPart = defs.find("partition ", dp + 1);
+                                string def = trim(defs.substr(dp, nextPart - dp));
+                                if (!def.empty()) {
+                                    string defLower = def;
+                                    transform(defLower.begin(), defLower.end(), defLower.begin(), ::tolower);
+                                    size_t vp = defLower.find("values in");
+                                    if (vp != string::npos) {
+                                        string pname = trim(def.substr(0, vp));
+                                        if (pname.size() > 10 && pname.substr(0, 10) == "partition ") pname = trim(pname.substr(10));
+                                        size_t blp = def.find('(', vp);
+                                        size_t brp = def.find(')', blp);
+                                        if (blp != string::npos && brp != string::npos) {
+                                            string vals = def.substr(blp + 1, brp - blp - 1);
+                                            vector<string> vlist;
+                                            size_t cp = 0;
+                                            while (cp < vals.size()) {
+                                                size_t c = vals.find(',', cp);
+                                                string v = trim(vals.substr(cp, c - cp));
+                                                // Strip quotes from partition values
+                                                if (v.size() >= 2 && ((v.front() == '\'' && v.back() == '\'') || (v.front() == '"' && v.back() == '"'))) {
+                                                    v = v.substr(1, v.size() - 2);
+                                                }
+                                                vlist.push_back(v);
+                                                if (c == string::npos) break;
+                                                cp = c + 1;
+                                            }
+                                            tbl.listPartitions.push_back({pname, vlist});
+                                        }
+                                    }
+                                }
+                                if (nextPart == string::npos) break;
+                                dp = nextPart;
+                            }
+                        }
+                    } else if (ptype == "hash") {
+                        tbl.partitionType = dbms::TableSchema::PartitionType::Hash;
+                        size_t np = partRest.find("partitions");
+                        if (np != string::npos) {
+                            string nstr = trim(partRest.substr(np + 10));
+                            try { tbl.hashPartitions = stoul(nstr); } catch (...) {}
+                        }
+                        if (tbl.hashPartitions == 0) tbl.hashPartitions = 4;
+                    }
+                }
+            }
             auto res = g_engine.createTable(s.currentDB, tbl);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "Table " << tname << " already exists" << endl;

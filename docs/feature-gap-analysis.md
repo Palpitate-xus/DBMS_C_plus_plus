@@ -437,9 +437,9 @@
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **Range 分区** | ❌ | ✅ | **P1** |
-| **List 分区** | ❌ | ✅ | **P1** |
-| **Hash 分区** | ❌ | ✅ | **P1** |
+| **Range 分区** | ✅ | ✅ | - |
+| **List 分区** | ✅ | ✅ | - |
+| **Hash 分区** | ✅ | ✅ | - |
 | **Composite 复合分区** | ❌ | ✅ | P3 |
 | **分区裁剪 (Partition Pruning)** | ❌ | ✅ | P2 |
 | **分区交换 (EXCHANGE PARTITION)** | ❌ | ✅ | P3 |
@@ -895,7 +895,7 @@
 | 21 | ~~SERIALIZABLE~~ | 隔离级别完备 ✅ |
 | 22 | 间隙锁 / Next-Key 锁 | 防止幻读 |
 | 23 | ~~SELECT FOR UPDATE / SHARE~~ | 显式行锁 ✅ |
-| 24 | 表分区（Range/List/Hash） | 大数据分区 |
+| 24 | ~~表分区（Range/List/Hash）~~ | 大数据分区 ✅ |
 | 25 | ~~触发器（BEFORE/AFTER）~~ | 业务规则自动化 ✅ |
 | 26 | ~~DROP USER~~ / ~~ALTER USER~~ | 用户管理完备 ✅ |
 | 27 | ~~数据库级~~ / Schema 级权限 | 权限粒度 ✅ |

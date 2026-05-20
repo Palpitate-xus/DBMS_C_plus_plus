@@ -73,6 +73,14 @@ struct TableSchema {
     // Composite UNIQUE constraints: each inner vector is column indices
     std::vector<std::vector<size_t>> uniqueConstraints;
 
+    // Partitioning
+    enum class PartitionType { None, Range, List, Hash };
+    PartitionType partitionType = PartitionType::None;
+    std::string partitionKey;  // column name for partitioning
+    std::vector<std::pair<std::string, std::string>> rangePartitions;  // name -> upper bound
+    std::vector<std::pair<std::string, std::vector<std::string>>> listPartitions;  // name -> values
+    size_t hashPartitions = 0;  // number of hash partitions
+
     void append(const Column& ncol);
     void appendFK(const ForeignKey& fk);
     void print() const;
@@ -407,6 +415,9 @@ private:
     std::filesystem::path dbPath(const std::string& dbname) const;
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path partitionDataPath(const std::string& dbname, const std::string& tablename,
+                                            const std::string& partitionName) const;
+    std::string getPartitionName(const TableSchema& tbl, const std::string& keyVal) const;
     std::filesystem::path tableListPath(const std::string& dbname) const;
     std::filesystem::path walPath(const std::string& dbname) const;
     std::filesystem::path checkpointPath(const std::string& dbname) const;
