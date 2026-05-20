@@ -5135,6 +5135,73 @@ std::vector<std::string> StorageEngine::join(
 
     auto conds = parseConditions(conditions);
 
+    // Predicate pushdown: classify conditions by which table they reference
+    std::vector<Condition> leftConds, rightConds, joinConds;
+    for (const auto& c : conds) {
+        bool onLeft = (colMap.find(c.colName) != colMap.end() && colMap.at(c.colName).isLeft);
+        bool onRight = false;
+        auto it = colMap.find(c.colName);
+        if (it != colMap.end()) onRight = !it->second.isLeft;
+        // Check if value references a column from the other table
+        bool valIsCol = false;
+        auto vit = colMap.find(c.value);
+        if (vit != colMap.end()) valIsCol = true;
+        if (onLeft && !valIsCol) leftConds.push_back(c);
+        else if (onRight && !valIsCol) rightConds.push_back(c);
+        else joinConds.push_back(c);
+    }
+
+    // Apply predicate pushdown: filter rows before JOIN
+    auto evalSingleCond = [&](const Condition& c, const std::string& row,
+                               const TableSchema& tbl) -> bool {
+        auto it = colMap.find(c.colName);
+        if (it == colMap.end()) return false;
+        std::string val = extractColumnValue(row, tbl, it->second.colIdx);
+        const Column& col = tbl.cols[it->second.colIdx];
+        if (col.dataType == "char" || col.isVariableLength) {
+            if (c.op == "<"  && !(val <  c.value)) return false;
+            if (c.op == ">"  && !(val >  c.value)) return false;
+            if (c.op == "="  && val != c.value)    return false;
+            if (c.op == "<=" && (val >  c.value))   return false;
+            if (c.op == ">=" && (val <  c.value))   return false;
+            if (c.op == "!=" && val == c.value)    return false;
+        } else if (col.dataType == "date") {
+            Date d = val.empty() ? Date{} : Date(val.c_str());
+            Date v(c.value.c_str());
+            if (c.op == "<"  && v.year && !(d < v))  return false;
+            if (c.op == ">"  && v.year && !(d > v))  return false;
+            if (c.op == "="  && v.year && d != v)    return false;
+            if (c.op == "<=" && v.year && (d > v))   return false;
+            if (c.op == ">=" && v.year && (d < v))   return false;
+            if (c.op == "!=" && v.year && d == v)    return false;
+        } else {
+            int64_t num = val.empty() ? INF : parseInt(val);
+            int64_t cmp = parseInt(c.value);
+            if (c.op == "<"  && cmp != INF && !(num < cmp)) return false;
+            if (c.op == ">"  && cmp != INF && !(num > cmp)) return false;
+            if (c.op == "="  && cmp != INF && num != cmp)   return false;
+            if (c.op == "<=" && cmp != INF && (num > cmp))  return false;
+            if (c.op == ">=" && cmp != INF && (num < cmp))  return false;
+            if (c.op == "!=" && cmp != INF && num == cmp)   return false;
+        }
+        return true;
+    };
+
+    if (!leftConds.empty()) {
+        leftRows.erase(std::remove_if(leftRows.begin(), leftRows.end(),
+            [&](const std::string& row) {
+                for (const auto& c : leftConds) if (!evalSingleCond(c, row, leftTbl)) return true;
+                return false;
+            }), leftRows.end());
+    }
+    if (!rightConds.empty()) {
+        rightRows.erase(std::remove_if(rightRows.begin(), rightRows.end(),
+            [&](const std::string& row) {
+                for (const auto& c : rightConds) if (!evalSingleCond(c, row, rightTbl)) return true;
+                return false;
+            }), rightRows.end());
+    }
+
     // Find left and right column indices for ON condition
     size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -5146,7 +5213,6 @@ std::vector<std::string> StorageEngine::join(
     }
 
     // JOIN optimization: build hash table on right table's join column
-    // This turns O(N*M) nested loop into O(N+M) hash probe
     std::unordered_map<std::string, std::vector<std::string>> rightHash;
     if (rightColIdx < rightTbl.len) {
         for (const auto& rr : rightRows) {
@@ -5163,9 +5229,9 @@ std::vector<std::string> StorageEngine::join(
         if (it == rightHash.end()) continue;
 
         for (const auto& rr : it->second) {
-            // WHERE conditions
+            // WHERE conditions (only cross-table conditions remain after pushdown)
             bool whereMatch = true;
-            for (const auto& c : conds) {
+            for (const auto& c : joinConds) {
                 if (!evalCond(c, lr, rr)) { whereMatch = false; break; }
             }
             if (!whereMatch) continue;
