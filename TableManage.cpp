@@ -313,6 +313,39 @@ Column makeTextColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeBlobColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "blob";
+    c.dsize = 65535;
+    return c;
+}
+
+Column makeBinaryColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = false;
+    c.dataType = "binary";
+    c.dsize = std::max(size_t(1), std::min(length, size_t(1005)));
+    return c;
+}
+
+Column makeVarBinaryColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "varbinary";
+    c.dsize = std::max(size_t(1), std::min(length, size_t(65535)));
+    return c;
+}
+
 Column makeJsonColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;
@@ -2431,7 +2464,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
@@ -3792,7 +3825,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "cast" && expr.funcArgs.size() >= 2) {
         std::string val = getVal(expr.funcArgs[0]);
         std::string targetType = expr.funcArgs[1];
-        if (targetType == "char" || targetType == "varchar" || targetType == "text") {
+        if (targetType == "char" || targetType == "varchar" || targetType == "text" ||
+            targetType == "binary" || targetType == "varbinary" || targetType == "blob") {
             return val;
         }
         if (targetType == "int" || targetType == "integer" || targetType == "tinyint" || targetType == "long") {
@@ -4312,6 +4346,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 bool needQuote = (tbl.cols[i].dataType == "char" ||
                                   tbl.cols[i].dataType == "varchar" ||
                                   tbl.cols[i].dataType == "text" ||
+                                  tbl.cols[i].dataType == "binary" ||
+                                  tbl.cols[i].dataType == "varbinary" ||
+                                  tbl.cols[i].dataType == "blob" ||
                                   tbl.cols[i].dataType == "date" ||
                                   tbl.cols[i].dataType == "timestamp" ||
                                   tbl.cols[i].dataType == "datetime" ||

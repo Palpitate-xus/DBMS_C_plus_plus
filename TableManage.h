@@ -496,6 +496,9 @@ Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bo
 Column makeTimestampColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTimestamptzColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTextColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeBlobColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeBinaryColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
+Column makeVarBinaryColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
 Column makeJsonColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeDoubleColumn(const std::string& name, bool isNull, bool isPK = false);

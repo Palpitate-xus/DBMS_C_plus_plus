@@ -26,6 +26,9 @@ using dbms::makeVarCharColumn;
 using dbms::makeTimestampColumn;
 using dbms::makeTimestamptzColumn;
 using dbms::makeTextColumn;
+using dbms::makeBlobColumn;
+using dbms::makeBinaryColumn;
+using dbms::makeVarBinaryColumn;
 using dbms::makeJsonColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
@@ -845,6 +848,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 if (colon == string::npos) break;
                 cname = trim(segment.substr(0, colon));
                 ctype = trim(segment.substr(colon + 1));
+                std::transform(ctype.begin(), ctype.end(), ctype.begin(), ::tolower);
             } else {
                 // (col type flags) format
                 parts = tokenize(segment);
@@ -852,6 +856,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 cname = parts[0];
                 if (parts.size() >= 2) {
                     ctype = parts[1];
+                    std::transform(ctype.begin(), ctype.end(), ctype.begin(), ::tolower);
                     for (size_t i = 2; i < parts.size(); ++i) {
                         if (parts[i] == "primary") {
                             if (i + 1 < parts.size() && parts[i + 1] == "key") {
@@ -956,6 +961,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                     }
                 }
                 ctype = typeName;
+                std::transform(ctype.begin(), ctype.end(), ctype.begin(), ::tolower);
             }
 
             if (ctype.substr(0, 6) == "serial") {
@@ -1018,6 +1024,28 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 }
                 if (len == 0) len = 1;
                 tbl.append(makeVarCharColumn(cname, isNull, len, isPK));
+            } else if (ctype == "binary") {
+                size_t blen = 0;
+                if (!isBrace && parts.size() >= 3) {
+                    string lenStr = parts[2];
+                    if (lenStr == "(" && parts.size() >= 4) lenStr = parts[3];
+                    for (char c : lenStr)
+                        if (isdigit(static_cast<unsigned char>(c))) blen = blen * 10 + (c - '0');
+                }
+                if (blen == 0) blen = 1;
+                tbl.append(makeBinaryColumn(cname, isNull, blen, isPK));
+            } else if (ctype == "varbinary") {
+                size_t vlen = 0;
+                if (!isBrace && parts.size() >= 3) {
+                    string lenStr = parts[2];
+                    if (lenStr == "(" && parts.size() >= 4) lenStr = parts[3];
+                    for (char c : lenStr)
+                        if (isdigit(static_cast<unsigned char>(c))) vlen = vlen * 10 + (c - '0');
+                }
+                if (vlen == 0) vlen = 1;
+                tbl.append(makeVarBinaryColumn(cname, isNull, vlen, isPK));
+            } else if (ctype.substr(0, 4) == "blob") {
+                tbl.append(makeBlobColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "text") {
                 tbl.append(makeTextColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "json") {
@@ -2092,6 +2120,26 @@ bool execute(const string& rawSql, Session& s) {
                     len = len * 10 + (typeName[i] - '0');
                 if (len == 0) len = 1;
                 col = makeVarCharColumn(cname, isNull, len);
+            } else if (typeName.substr(0, 7) == "binary(") {
+                size_t lp = typeName.find('(');
+                size_t rp = typeName.find(')');
+                size_t len = 0;
+                if (lp != string::npos && rp != string::npos && rp > lp) {
+                    try { len = stoul(typeName.substr(lp + 1, rp - lp - 1)); } catch (...) {}
+                }
+                if (len == 0) len = 1;
+                col = makeBinaryColumn(cname, isNull, len);
+            } else if (typeName.substr(0, 9) == "varbinary") {
+                size_t lp = typeName.find('(');
+                size_t rp = typeName.find(')');
+                size_t len = 0;
+                if (lp != string::npos && rp != string::npos && rp > lp) {
+                    try { len = stoul(typeName.substr(lp + 1, rp - lp - 1)); } catch (...) {}
+                }
+                if (len == 0) len = 1;
+                col = makeVarBinaryColumn(cname, isNull, len);
+            } else if (typeName.substr(0, 4) == "blob") {
+                col = makeBlobColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "text") {
                 col = makeTextColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "json") {

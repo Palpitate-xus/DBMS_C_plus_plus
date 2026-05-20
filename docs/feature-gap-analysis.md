@@ -252,8 +252,8 @@
 
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
-| **BINARY / VARBINARY** | ❌ | ✅ | **P1** |
-| **BLOB / BYTEA** | ❌ | ✅ | **P1** |
+| **BINARY / VARBINARY** | ✅ | ✅ | - |
+| **BLOB / BYTEA** | ✅ | ✅ | - |
 
 ### 3.4 日期时间类型
 
@@ -887,7 +887,7 @@
 | 13 | ~~SMALLINT / BIGINT~~ | 数值类型完备 ✅ |
 | 14 | ~~TIME / DATETIME / TIMESTAMPTZ~~ | 时间类型完备 ✅ |
 | 15 | BOOLEAN | 布尔类型 ✅ |
-| 16 | BINARY / VARBINARY / BLOB | 二进制存储 |
+| 16 | ~~BINARY / VARBINARY / BLOB~~ | 二进制存储 ✅ |
 | 17 | JSON / JSONB | 半结构化数据 ✅ |
 | 18 | ~~Hash 索引~~ | 等值查询加速 ✅ |
 | 19 | 索引列排序 (ASC/DESC) | 排序优化 |
