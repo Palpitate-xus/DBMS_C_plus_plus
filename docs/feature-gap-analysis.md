@@ -39,7 +39,7 @@
 | 查询 | WHERE、ORDER BY (多列/NULLS FIRST/LAST)、LIMIT/OFFSET、DISTINCT、GROUP BY (多列)/HAVING、JOIN (INNER/LEFT/RIGHT/SELF/FULL OUTER/CROSS)、UNION/UNION ALL/INTERSECT/EXCEPT、子查询 (IN/EXISTS/ANY/ALL/标量/派生表)、CTE (WITH RECURSIVE)、聚合 (COUNT/MAX/MIN/SUM/AVG/COUNT DISTINCT)、窗口函数 (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD/NTILE/FIRST_VALUE/LAST_VALUE + PARTITION BY)、EXPLAIN、REGEXP、MERGE INTO、UPSERT |
 | 数据类型 | INT、TINYINT、LONG、CHAR(n)、VARCHAR(n)、DATE、SERIAL、BOOLEAN、FLOAT、DOUBLE、DECIMAL、TEXT、TIME、TIMESTAMP、TIMESTAMPTZ、DATETIME、JSON、UUID |
 | 约束 | PRIMARY KEY (含复合)、NOT NULL、UNIQUE (含复合)、FOREIGN KEY (含 ON DELETE/多列)、DEFAULT、CHECK |
-| 事务 | BEGIN/COMMIT/ROLLBACK、SAVEPOINT/RELEASE/ROLLBACK TO、4 级隔离 (RU/RC/RR/SERIALIZABLE)、MVCC ReadView、WAL、Undo Log、Checkpoint |
+| 事务 | BEGIN/COMMIT/ROLLBACK、SAVEPOINT/RELEASE/ROLLBACK TO、只读事务 (READ ONLY)、4 级隔离 (RU/RC/RR/SERIALIZABLE)、MVCC ReadView、WAL、Undo Log、Checkpoint |
 | 索引 | B+ 树主键索引、B+ 树二级索引、复合索引 |
 | 存储 | Slotted Page (4KB)、Buffer Pool (LRU)、页校验和 (Fletcher-16)、空闲页链表、VACUUM、VARCHAR 变长行 |
 | 查询优化 | 火山模型、成本估计、JOIN 算法选择 (NLJ/Hash/Merge)、索引选择、统计信息 (ANALYZE) |
@@ -47,7 +47,7 @@
 | 网络 | TCP 服务、独立 Session、连接管理 |
 | 工具 | CSV 导入/导出、预编译语句、SHOW CONNECTIONS/STATUS/DATABASES/TABLES/COLUMNS |
 | 权限 | 用户登录、表级 GRANT/REVOKE |
-| 触发器 | CREATE/DROP TRIGGER、SHOW TRIGGERS |
+| 触发器 | CREATE/DROP TRIGGER、行级/语句级触发器 (FOR EACH ROW/STATEMENT)、SHOW TRIGGERS |
 
 ---
 
@@ -896,7 +896,7 @@
 | 23 | SELECT FOR UPDATE / SHARE | 显式行锁 |
 | 24 | 表分区（Range/List/Hash） | 大数据分区 |
 | 25 | ~~触发器（BEFORE/AFTER）~~ | 业务规则自动化 ✅ |
-| 26 | DROP USER / ~~ALTER USER~~ | 用户管理完备 (ALTER ✅) |
+| 26 | ~~DROP USER~~ / ~~ALTER USER~~ | 用户管理完备 ✅ |
 | 27 | 数据库级 / Schema 级权限 | 权限粒度 |
 | 28 | 字符集（UTF-8） | 国际化基础 |
 | 29 | ~~慢查询日志~~ | 性能诊断 ✅ |
@@ -905,7 +905,7 @@
 | 32 | 直方图统计 | 选择率估算 |
 | 33 | JOIN 顺序优化 | 多表 JOIN 性能 |
 | 34 | 谓词下推 / 投影下推 | 优化器质量 |
-| 35 | 自动 Checkpoint | 减少恢复时间 |
+| 35 | ~~自动 Checkpoint~~ | 减少恢复时间 ✅ |
 | 36 | ~~逻辑备份 (dump/restore)~~ | 备份基础 ✅ |
 
 ### P2 — 增强功能（提升用户体验）
@@ -919,7 +919,7 @@
 | 5 | ~~LPAD / RPAD / REVERSE / REGEXP~~ ✅ |
 | 6 | LOG / EXP / RANDOM ✅ |
 | 7 | ~~DATE_TRUNC / DATEDIFF / DATE_FORMAT~~ ✅ |
-| 8 | STRING_AGG / GROUP_CONCAT |
+| 8 | ~~STRING_AGG / GROUP_CONCAT~~ ✅ |
 | 9 | ~~NTILE / FIRST_VALUE / LAST_VALUE~~ ✅ |
 | 10 | 窗口帧 (ROWS BETWEEN) |
 | 11 | MERGE INTO ✅ |
@@ -932,9 +932,9 @@
 | 18 | INCLUDE 列 / 聚集索引 |
 | 19 | 意向锁 / 元数据锁 |
 | 20 | NOWAIT / SKIP LOCKED |
-| 21 | 只读事务 |
+| 21 | ~~只读事务~~ ✅ |
 | 22 | 物化视图 |
-| 23 | 行级 / 语句级触发器 |
+| 23 | ~~行级 / 语句级触发器~~ ✅ |
 | 24 | 存储过程 / UDF / CALL |
 | 25 | 表值函数 |
 | 26 | 列级权限 |
@@ -945,7 +945,7 @@
 | 31 | 多列统计 / MCV |
 | 32 | 查询计划缓存 |
 | 33 | 子查询展开 / 查询重写 |
-| 34 | EXPLAIN FORMAT JSON |
+| 34 | ~~EXPLAIN FORMAT JSON~~ ✅ |
 | 35 | 锁等待 / 死锁日志 / 活动会话 |
 | 36 | 缓冲池命中率 |
 | 37 | 自动 VACUUM / ~~自动统计收集~~ ✅ |
@@ -969,12 +969,12 @@
 |--------|------|--------|
 | **已实现** | ~120 | 100% |
 | **P0 (关键)** | 24 | **100%** |
-| **P1 (重要)** | 36 | ~58% |
-| **P2 (增强)** | 44 | ~36% |
+| **P1 (重要)** | 36 | ~69% |
+| **P2 (增强)** | 44 | ~43% |
 | **P3 (高级)** | 60+ | ~5% |
 
 **当前定位**：P0 全部完成！已实现 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树/Hash 索引 + 复合索引 + 覆盖索引 + 行级锁 + 查询优化器 + SSL/TLS + 密码哈希，对标 SQLite 3.x 水平。
 
-**下一阶段目标**：P0 已完成，P1 完成约 58%。剩余核心 P1：ORDER BY 表达式、BINARY/BLOB 类型、索引列排序 ASC/DESC、表分区（Range/List/Hash）、间隙锁/Next-Key 锁、数据库级权限、直方图统计、投影下推、字符集支持。接下来推进 P2 增强功能。
+**下一阶段目标**：P0 已完成，P1 完成约 69%。剩余核心 P1：BINARY/BLOB 类型、索引列排序 ASC/DESC、表分区（Range/List/Hash）、间隙锁/Next-Key 锁、数据库级权限、直方图统计、投影下推、字符集支持。接下来推进 P2 增强功能。
 
 **长期目标**：完成 P0 + 核心 P1，对标 PostgreSQL 8.x 或 MySQL 5.5 早期版本。
