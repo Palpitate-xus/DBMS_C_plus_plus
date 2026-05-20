@@ -1890,13 +1890,25 @@ bool execute(const string& rawSql, Session& s) {
             string tnameOrig = trim(afterOn.substr(0, lp));
             string tname = resolveTableName(s, tnameOrig);
             string colsStr = trim(afterOn.substr(lp + 1, rp - lp - 1));
-            // Parse comma-separated column list
+            // Parse comma-separated column list, supporting ASC/DESC
             vector<string> colnames;
+            vector<bool> colAsc;
             size_t cpos = 0;
             while (cpos < colsStr.size()) {
                 size_t comma = colsStr.find(',', cpos);
                 string c = trim(colsStr.substr(cpos, comma - cpos));
-                if (!c.empty()) colnames.push_back(c);
+                if (!c.empty()) {
+                    bool asc = true;
+                    size_t sp = c.find(' ');
+                    if (sp != string::npos) {
+                        string dir = trim(c.substr(sp + 1));
+                        transform(dir.begin(), dir.end(), dir.begin(), ::tolower);
+                        if (dir == "desc") asc = false;
+                        c = trim(c.substr(0, sp));
+                    }
+                    colnames.push_back(c);
+                    colAsc.push_back(asc);
+                }
                 if (comma == string::npos) break;
                 cpos = comma + 1;
             }
@@ -1909,7 +1921,7 @@ bool execute(const string& rawSql, Session& s) {
                 if (isHash) {
                     res = g_engine.createHashIndex(s.currentDB, tname, colnames[0]);
                 } else {
-                    res = g_engine.createIndex(s.currentDB, tname, colnames[0]);
+                    res = g_engine.createIndex(s.currentDB, tname, colnames[0], colAsc[0]);
                 }
             } else {
                 if (isHash) {

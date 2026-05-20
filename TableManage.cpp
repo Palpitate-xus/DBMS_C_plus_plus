@@ -1083,10 +1083,29 @@ std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbn
                 pos = next + 1;
             }
         } else {
-            cols.push_back(line);
+            // Strip :DESC suffix if present
+            size_t descPos = line.find(":DESC");
+            if (descPos != std::string::npos) {
+                cols.push_back(line.substr(0, descPos));
+            } else {
+                cols.push_back(line);
+            }
         }
     }
     return cols;
+}
+
+bool StorageEngine::isDescendingIndex(const std::string& dbname, const std::string& tablename,
+                                      const std::string& colname) const {
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::ifstream in(meta);
+    if (!in) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        if (line == colname + ":DESC") return true;
+    }
+    return false;
 }
 
 std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexes(
@@ -1393,7 +1412,7 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
 }
 
 OpResult StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
-                                     const std::string& colname) {
+                                     const std::string& colname, bool ascending) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -1402,10 +1421,19 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
     }
     if (colIdx >= tbl.len) return OpResult::InvalidValue;
 
-    // Already indexed?
+    // Already indexed? If direction differs, drop and recreate
     auto existing = getIndexedColumns(dbname, tablename);
+    bool alreadyIndexed = false;
     for (const auto& c : existing) {
-        if (c == colname) return OpResult::Success;
+        if (c == colname) { alreadyIndexed = true; break; }
+    }
+    if (alreadyIndexed) {
+        bool currentDesc = isDescendingIndex(dbname, tablename, colname);
+        if (currentDesc == !ascending) {
+            return OpResult::Success; // same direction, nothing to do
+        }
+        // Direction changed: drop old index and recreate
+        dropIndex(dbname, tablename, colname);
     }
 
     // Build index from existing data using page-based iteration
@@ -1421,10 +1449,10 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
         }
     });
 
-    // Record in metadata
+    // Record in metadata (append :DESC for descending indexes)
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
     std::ofstream out(meta, std::ios::out | std::ios::app);
-    out << colname << '\n';
+    out << colname << (ascending ? "" : ":DESC") << '\n';
     return OpResult::Success;
 }
 
