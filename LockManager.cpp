@@ -279,6 +279,41 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
     return true;
 }
 
+bool LockManager::rowLockSharedNoWait(const std::string& table, int64_t rid) {
+    std::thread::id self = std::this_thread::get_id();
+    std::string key = makeRowKey(table, rid);
+    std::lock_guard<std::mutex> guard(rowMutex_);
+    auto& state = rowLocks_[key];
+    if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
+        state.sharedCount++;
+        return true;
+    }
+    if (!state.exclusive && state.holders.empty()) {
+        state.mtx.lock_shared();
+        state.sharedCount++;
+        state.holders.push_back(self);
+        return true;
+    }
+    return false;
+}
+
+bool LockManager::rowLockExclusiveNoWait(const std::string& table, int64_t rid) {
+    std::thread::id self = std::this_thread::get_id();
+    std::string key = makeRowKey(table, rid);
+    std::lock_guard<std::mutex> guard(rowMutex_);
+    auto& state = rowLocks_[key];
+    if (state.exclusive && state.holders.size() == 1 && state.holders[0] == self) {
+        return true;
+    }
+    if (state.sharedCount == 0 && !state.exclusive) {
+        state.mtx.lock();
+        state.exclusive = true;
+        state.holders.push_back(self);
+        return true;
+    }
+    return false;
+}
+
 void LockManager::rowUnlock(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
     std::string key = makeRowKey(table, rid);

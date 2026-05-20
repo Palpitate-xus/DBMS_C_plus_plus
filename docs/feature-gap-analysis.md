@@ -394,8 +394,9 @@
 | **间隙锁 (Gap Lock)** | ❌ | ✅ MySQL | P1 |
 | **Next-Key 锁** | ❌ | ✅ MySQL | P1 |
 | **元数据锁 (MDL)** | ❌ | ✅ MySQL | P2 |
-| **SELECT FOR UPDATE / SHARE** | 部分 | ✅ | P1 |
-| **NOWAIT / SKIP LOCKED** | ❌ | ✅ | P2 |
+| **SELECT FOR UPDATE / SHARE** | ✅ | ✅ | - |
+| **NOWAIT** | ✅ | ✅ | - |
+| **SKIP LOCKED** | ❌ | ✅ | P2 |
 | 死锁检测 | ✅ | ✅ | - |
 | **死锁超时** | ❌ | ✅ | P2 |
 
@@ -893,7 +894,7 @@
 | 20 | ~~唯一索引（非 PK）~~ | 唯一性约束 ✅ |
 | 21 | ~~SERIALIZABLE~~ | 隔离级别完备 ✅ |
 | 22 | 间隙锁 / Next-Key 锁 | 防止幻读 |
-| 23 | SELECT FOR UPDATE / SHARE | 显式行锁 |
+| 23 | ~~SELECT FOR UPDATE / SHARE~~ | 显式行锁 ✅ |
 | 24 | 表分区（Range/List/Hash） | 大数据分区 |
 | 25 | ~~触发器（BEFORE/AFTER）~~ | 业务规则自动化 ✅ |
 | 26 | ~~DROP USER~~ / ~~ALTER USER~~ | 用户管理完备 ✅ |
@@ -931,7 +932,7 @@
 | 17 | 部分索引 / 表达式索引 |
 | 18 | INCLUDE 列 / 聚集索引 |
 | 19 | 意向锁 / 元数据锁 |
-| 20 | NOWAIT / SKIP LOCKED |
+| 20 | ~~NOWAIT~~ / SKIP LOCKED |
 | 21 | ~~只读事务~~ ✅ |
 | 22 | 物化视图 |
 | 23 | ~~行级 / 语句级触发器~~ ✅ |

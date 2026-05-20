@@ -34,6 +34,9 @@ public:
     // ========================================================================
     bool rowLockShared(const std::string& table, int64_t rid);
     bool rowLockExclusive(const std::string& table, int64_t rid);
+    // Non-blocking variants: return false immediately if lock cannot be acquired
+    bool rowLockSharedNoWait(const std::string& table, int64_t rid);
+    bool rowLockExclusiveNoWait(const std::string& table, int64_t rid);
     void rowUnlock(const std::string& table, int64_t rid);
     void rowUnlockAll(const std::string& table);
     std::vector<int64_t> lockedRows(const std::string& table) const;

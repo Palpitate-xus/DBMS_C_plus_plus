@@ -3434,7 +3434,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::vector<std::string>& conditions,
                                                const std::set<std::string>& selectCols,
                                                const std::vector<OrderBySpec>& orderBy,
-                                               bool forUpdate) {
+                                               bool forUpdate,
+                                               bool noWait) {
     std::vector<std::string> result;
 
     // information_schema virtual tables
@@ -3473,10 +3474,19 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     // Row-level locks within transaction
     if (inTransaction_) {
         for (auto& mr : matchRows) {
-            if (forUpdate) {
-                lockManager_.rowLockExclusive(tablename, mr.first);
+            bool locked;
+            if (noWait) {
+                locked = forUpdate
+                    ? lockManager_.rowLockExclusiveNoWait(tablename, mr.first)
+                    : lockManager_.rowLockSharedNoWait(tablename, mr.first);
             } else {
-                lockManager_.rowLockShared(tablename, mr.first);
+                locked = forUpdate
+                    ? lockManager_.rowLockExclusive(tablename, mr.first)
+                    : lockManager_.rowLockShared(tablename, mr.first);
+            }
+            if (!locked) {
+                lockManager_.unlock(tablename);
+                return result;
             }
         }
     }

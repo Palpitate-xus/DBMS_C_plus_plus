@@ -4304,9 +4304,15 @@ bool execute(const string& rawSql, Session& s) {
         // Process derived tables: (SELECT ...) AS alias
         sql = processDerivedTables(sql, s);
 
-        // Parse FOR UPDATE / FOR SHARE
+        // Parse FOR UPDATE / FOR SHARE / NOWAIT
         bool forUpdate = false;
+        bool noWait = false;
         {
+            size_t nwPos = sql.find("nowait");
+            if (nwPos != string::npos) {
+                noWait = true;
+                sql = trim(sql.substr(0, nwPos));
+            }
             size_t fuPos = sql.find("for update");
             if (fuPos != string::npos) {
                 forUpdate = true;
@@ -5221,7 +5227,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs, forUpdate);
+                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs, forUpdate, noWait);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -5229,7 +5235,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs, forUpdate);
+                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs, forUpdate, noWait);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }

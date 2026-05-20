@@ -168,7 +168,8 @@ public:
                                    const std::vector<std::string>& conditions,
                                    const std::set<std::string>& selectCols,
                                    const std::vector<OrderBySpec>& orderBy = {},
-                                   bool forUpdate = false);
+                                   bool forUpdate = false,
+                                   bool noWait = false);
 
     // Scalar function expression for queryExpr
     struct SelectExpr {
