@@ -3978,7 +3978,8 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         g_engine.grant(s.currentDB, tname, uname, priv);
-        cout << "Granted " << privStr << " on " << tname << " to " << uname << endl;
+        string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
+        cout << "Granted " << privStr << " on " << scope << " to " << uname << endl;
         return false;
     }
 
@@ -4007,7 +4008,8 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         g_engine.revoke(s.currentDB, tname, uname, priv);
-        cout << "Revoked " << privStr << " on " << tname << " from " << uname << endl;
+        string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
+        cout << "Revoked " << privStr << " on " << scope << " from " << uname << endl;
         return false;
     }
 

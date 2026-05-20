@@ -6158,16 +6158,19 @@ bool StorageEngine::hasPermission(const std::string& dbname, const std::string& 
     std::string target = privToStr(priv);
     std::ifstream ifs(ppath);
     std::string line;
+    bool hasDbLevel = false;
     while (std::getline(ifs, line)) {
         if (line.empty()) continue;
         std::stringstream ss(line);
         std::string u, t, p;
         ss >> u >> t >> p;
-        if (u == username && t == tablename) {
-            if (p == "all" || p == target) return true;
-        }
+        if (u != username) continue;
+        // Table-level permission
+        if (t == tablename && (p == "all" || p == target)) return true;
+        // Database-level permission (wildcard table "*")
+        if (t == "*" && (p == "all" || p == target)) hasDbLevel = true;
     }
-    return false;
+    return hasDbLevel;
 }
 
 std::vector<std::string> StorageEngine::getUserPermissions(
