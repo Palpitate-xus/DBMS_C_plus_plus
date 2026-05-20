@@ -138,6 +138,8 @@ public:
         size_t cardinality = 0;
         std::string minVal;
         std::string maxVal;
+        // Equi-depth histogram: each bucket is (low, high) boundary
+        std::vector<std::pair<std::string, std::string>> histogram;
     };
     struct TableStats {
         size_t rowCount = 0;

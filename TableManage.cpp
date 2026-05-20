@@ -510,6 +510,7 @@ void StorageEngine::analyzeTable(const std::string& dbname,
     TableStats stats;
     stats.rowCount = 0;
     std::map<std::string, std::set<std::string>> distinctVals;
+    std::map<std::string, std::vector<std::string>> allVals;
     std::map<std::string, std::string> minVals, maxVals;
 
     forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
@@ -518,6 +519,7 @@ void StorageEngine::analyzeTable(const std::string& dbname,
         for (size_t i = 0; i < tbl.len; ++i) {
             std::string val = extractColumnValue(row, tbl, i);
             distinctVals[tbl.cols[i].dataName].insert(val);
+            allVals[tbl.cols[i].dataName].push_back(val);
             if (minVals.find(tbl.cols[i].dataName) == minVals.end() || val < minVals[tbl.cols[i].dataName]) {
                 minVals[tbl.cols[i].dataName] = val;
             }
@@ -527,12 +529,44 @@ void StorageEngine::analyzeTable(const std::string& dbname,
         }
     });
 
+    const size_t HIST_BUCKETS = 10;
     for (size_t i = 0; i < tbl.len; ++i) {
         const std::string& cname = tbl.cols[i].dataName;
         ColumnStats cs;
         cs.cardinality = distinctVals[cname].size();
         cs.minVal = minVals[cname];
         cs.maxVal = maxVals[cname];
+        // Build equi-depth histogram
+        auto& vals = allVals[cname];
+        if (vals.size() >= HIST_BUCKETS * 2) {
+            // Use numeric sort for integer/float columns, string sort otherwise
+            bool isNumeric = (!tbl.cols[i].isVariableLength &&
+                              (tbl.cols[i].dataType == "int" || tbl.cols[i].dataType == "long" ||
+                               tbl.cols[i].dataType == "tinyint" || tbl.cols[i].dataType == "float" ||
+                               tbl.cols[i].dataType == "double" || tbl.cols[i].dataType == "decimal"));
+            if (isNumeric) {
+                std::vector<long long> nums;
+                nums.reserve(vals.size());
+                for (const auto& v : vals) {
+                    try { nums.push_back(std::stoll(v)); } catch (...) { nums.push_back(0); }
+                }
+                std::sort(nums.begin(), nums.end());
+                size_t perBucket = nums.size() / HIST_BUCKETS;
+                for (size_t b = 0; b < HIST_BUCKETS; ++b) {
+                    size_t start = b * perBucket;
+                    size_t end = (b == HIST_BUCKETS - 1) ? nums.size() - 1 : (b + 1) * perBucket;
+                    cs.histogram.push_back({std::to_string(nums[start]), std::to_string(nums[end])});
+                }
+            } else {
+                std::sort(vals.begin(), vals.end());
+                size_t perBucket = vals.size() / HIST_BUCKETS;
+                for (size_t b = 0; b < HIST_BUCKETS; ++b) {
+                    size_t start = b * perBucket;
+                    size_t end = (b == HIST_BUCKETS - 1) ? vals.size() - 1 : (b + 1) * perBucket;
+                    cs.histogram.push_back({vals[start], vals[end]});
+                }
+            }
+        }
         stats.colStats[cname] = cs;
     }
 
@@ -547,11 +581,26 @@ void StorageEngine::analyzeTable(const std::string& dbname,
             std::stringstream ss(line);
             std::string tname, cname;
             size_t card;
-            std::string minv, maxv;
+            std::string minv, maxv, histStr;
             ss >> tname >> cname >> card;
             std::getline(ss, minv, '|');
             std::getline(ss, maxv, '|');
-            allStats[tname].colStats[cname] = {card, minv, maxv};
+            std::getline(ss, histStr, '|');
+            ColumnStats cs{card, minv, maxv};
+            if (!histStr.empty()) {
+                size_t pos = 0;
+                while (pos < histStr.size()) {
+                    size_t semi = histStr.find(';', pos);
+                    std::string bucket = (semi == std::string::npos) ? histStr.substr(pos) : histStr.substr(pos, semi - pos);
+                    size_t comma = bucket.find(',');
+                    if (comma != std::string::npos) {
+                        cs.histogram.push_back({bucket.substr(0, comma), bucket.substr(comma + 1)});
+                    }
+                    if (semi == std::string::npos) break;
+                    pos = semi + 1;
+                }
+            }
+            allStats[tname].colStats[cname] = cs;
         }
     }
     allStats[tablename] = stats;
@@ -563,7 +612,12 @@ void StorageEngine::analyzeTable(const std::string& dbname,
         ofs << kv.first << " __rows__ " << kv.second.rowCount << "||\n";
         for (const auto& cv : kv.second.colStats) {
             ofs << kv.first << " " << cv.first << " " << cv.second.cardinality
-               << "|" << cv.second.minVal << "|" << cv.second.maxVal << "\n";
+               << "|" << cv.second.minVal << "|" << cv.second.maxVal << "|";
+            for (size_t i = 0; i < cv.second.histogram.size(); ++i) {
+                if (i > 0) ofs << ";";
+                ofs << cv.second.histogram[i].first << "," << cv.second.histogram[i].second;
+            }
+            ofs << "\n";
         }
     }
 }
@@ -599,12 +653,27 @@ StorageEngine::ColumnStats StorageEngine::getColumnStats(
         std::stringstream ss(line);
         std::string tname, cname;
         size_t card;
-        std::string minv, maxv;
+        std::string minv, maxv, histStr;
         ss >> tname >> cname >> card;
         std::getline(ss, minv, '|');
         std::getline(ss, maxv, '|');
+        std::getline(ss, histStr, '|');
         if (tname == tablename && cname == colname) {
-            return {card, minv, maxv};
+            ColumnStats cs{card, minv, maxv};
+            if (!histStr.empty()) {
+                size_t pos = 0;
+                while (pos < histStr.size()) {
+                    size_t semi = histStr.find(';', pos);
+                    std::string bucket = (semi == std::string::npos) ? histStr.substr(pos) : histStr.substr(pos, semi - pos);
+                    size_t comma = bucket.find(',');
+                    if (comma != std::string::npos) {
+                        cs.histogram.push_back({bucket.substr(0, comma), bucket.substr(comma + 1)});
+                    }
+                    if (semi == std::string::npos) break;
+                    pos = semi + 1;
+                }
+            }
+            return cs;
         }
     }
     return {};
