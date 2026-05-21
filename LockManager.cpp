@@ -380,4 +380,54 @@ std::vector<int64_t> LockManager::lockedRows(const std::string& table) const {
     return result;
 }
 
+// ========================================================================
+// Gap locking
+// ========================================================================
+
+bool LockManager::lockGap(const std::string& table, const std::string& leftKey, const std::string& rightKey) {
+    std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> guard(gapMutex_);
+    // Simplified: always succeed (no deadlock detection for gap locks)
+    gapLocks_[table].push_back({leftKey, rightKey, self});
+    return true;
+}
+
+bool LockManager::isGapLocked(const std::string& table, const std::string& key) const {
+    std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(gapMutex_));
+    auto it = gapLocks_.find(table);
+    if (it == gapLocks_.end()) return false;
+    std::thread::id self = std::this_thread::get_id();
+    for (const auto& gl : it->second) {
+        if (gl.holder == self) continue; // skip own gap locks
+        if (key > gl.leftKey && key < gl.rightKey) return true;
+    }
+    return false;
+}
+
+void LockManager::unlockGaps(const std::string& table) {
+    std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> guard(gapMutex_);
+    auto it = gapLocks_.find(table);
+    if (it == gapLocks_.end()) return;
+    auto& vec = it->second;
+    vec.erase(std::remove_if(vec.begin(), vec.end(),
+        [&self](const GapLock& gl) { return gl.holder == self; }), vec.end());
+    if (vec.empty()) gapLocks_.erase(it);
+}
+
+void LockManager::unlockAllGaps() {
+    std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> guard(gapMutex_);
+    for (auto it = gapLocks_.begin(); it != gapLocks_.end(); ) {
+        auto& vec = it->second;
+        vec.erase(std::remove_if(vec.begin(), vec.end(),
+            [&self](const GapLock& gl) { return gl.holder == self; }), vec.end());
+        if (vec.empty()) {
+            it = gapLocks_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 } // namespace dbms

@@ -391,8 +391,8 @@
 | **页级锁** | ❌ | ✅ MSSQL | P2 |
 | **共享锁 / 排他锁** | ✅ | ✅ | - |
 | **意向锁 (IS/IX)** | ❌ | ✅ | P2 |
-| **间隙锁 (Gap Lock)** | ❌ | ✅ MySQL | P1 |
-| **Next-Key 锁** | ❌ | ✅ MySQL | P1 |
+| **间隙锁 (Gap Lock)** | ✅ | ✅ MySQL | - |
+| **Next-Key 锁** | ✅ | ✅ MySQL | - |
 | **元数据锁 (MDL)** | ❌ | ✅ MySQL | P2 |
 | **SELECT FOR UPDATE / SHARE** | ✅ | ✅ | - |
 | **NOWAIT** | ✅ | ✅ | - |
@@ -893,7 +893,7 @@
 | 19 | ~~索引列排序 (ASC/DESC)~~ | 排序优化 ✅ |
 | 20 | ~~唯一索引（非 PK）~~ | 唯一性约束 ✅ |
 | 21 | ~~SERIALIZABLE~~ | 隔离级别完备 ✅ |
-| 22 | 间隙锁 / Next-Key 锁 | 防止幻读 |
+| 22 | ~~间隙锁 / Next-Key 锁~~ | 防止幻读 ✅ |
 | 23 | ~~SELECT FOR UPDATE / SHARE~~ | 显式行锁 ✅ |
 | 24 | ~~表分区（Range/List/Hash）~~ | 大数据分区 ✅ |
 | 25 | ~~触发器（BEFORE/AFTER）~~ | 业务规则自动化 ✅ |

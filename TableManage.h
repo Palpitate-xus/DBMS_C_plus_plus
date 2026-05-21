@@ -109,6 +109,7 @@ enum class OpResult {
     NullNotAllowed,
     SyntaxError,
     DuplicateKey,
+    LockConflict,
 };
 
 class StorageEngine {

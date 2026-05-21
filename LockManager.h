@@ -41,6 +41,18 @@ public:
     void rowUnlockAll(const std::string& table);
     std::vector<int64_t> lockedRows(const std::string& table) const;
 
+    // ========================================================================
+    // Gap locking (simplified: prevents INSERT in a key range)
+    // ========================================================================
+    // Lock a gap (range) on a table. Returns true if acquired, false if blocked.
+    bool lockGap(const std::string& table, const std::string& leftKey, const std::string& rightKey);
+    // Check if a key falls within any held gap lock
+    bool isGapLocked(const std::string& table, const std::string& key) const;
+    // Release all gap locks for a table held by current thread
+    void unlockGaps(const std::string& table);
+    // Release all gap locks held by current thread
+    void unlockAllGaps();
+
 private:
     struct LockState {
         std::shared_mutex mtx;
@@ -54,6 +66,15 @@ private:
     // Row locks: key = "table:rid"
     std::map<std::string, LockState> rowLocks_;
     std::mutex rowMutex_;
+
+    // Gap locks: table -> list of (leftKey, rightKey, holder)
+    struct GapLock {
+        std::string leftKey;
+        std::string rightKey;
+        std::thread::id holder;
+    };
+    std::map<std::string, std::vector<GapLock>> gapLocks_;
+    mutable std::mutex gapMutex_;
 
     // Wait-for graph: thread A waits for thread B to release a lock
     std::map<std::thread::id, std::set<std::thread::id>> waitFor_;

@@ -2676,6 +2676,15 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
     }
 
+    // Check gap lock conflict (if any transaction holds a gap lock covering PK)
+    if (tbl.hasPrimaryKey()) {
+        std::string pkVal = tbl.buildPKValue(actualValues);
+        if (!pkVal.empty() && lockManager_.isGapLocked(tablename, pkVal)) {
+            lockManager_.unlock(tablename);
+            return OpResult::LockConflict;
+        }
+    }
+
     // Check foreign key references
     for (size_t fi = 0; fi < tbl.fkLen; ++fi) {
         const ForeignKey& fk = tbl.fks[fi];
@@ -3798,6 +3807,23 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             if (!locked) {
                 lockManager_.unlock(tablename);
                 return result;
+            }
+        }
+        // Gap locking for FOR UPDATE (simplified: lock gaps between matching rows)
+        if (forUpdate && !matchRows.empty()) {
+            std::vector<std::string> pkVals;
+            for (auto& mr : matchRows) {
+                std::string pk = extractPKValue(mr.second, tbl);
+                if (!pk.empty()) pkVals.push_back(pk);
+            }
+            std::sort(pkVals.begin(), pkVals.end());
+            for (size_t i = 1; i < pkVals.size(); ++i) {
+                lockManager_.lockGap(tablename, pkVals[i-1], pkVals[i]);
+            }
+            if (!pkVals.empty()) {
+                // Lock gap before first and after last
+                lockManager_.lockGap(tablename, "", pkVals.front());
+                lockManager_.lockGap(tablename, pkVals.back(), "~");
             }
         }
     }
@@ -6150,6 +6176,7 @@ OpResult StorageEngine::commitTransaction() {
     savepoints_.clear();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
+    lockManager_.unlockAllGaps();
     currentTxnId_ = 0;
     inTransaction_ = false;
     readOnly_ = false;
@@ -6280,6 +6307,7 @@ OpResult StorageEngine::rollbackTransaction() {
     savepoints_.clear();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
+    lockManager_.unlockAllGaps();
     currentTxnId_ = 0;
     inTransaction_ = false;
     readOnly_ = false;
