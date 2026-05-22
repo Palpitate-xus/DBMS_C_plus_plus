@@ -21,6 +21,7 @@ struct Config {
     bool enableQueryPlanCache = true;
     size_t queryPlanCacheSize = 100;
     int passwordPolicyLevel = 0; // 0=none, 1=warn, 2=medium required, 3=strong required
+    std::string passwordHashAlgorithm = "sha256"; // "sha256" or "md5"
 
     // Load from file; returns true on success.
     bool load(const std::string& filename);

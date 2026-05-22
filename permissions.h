@@ -36,12 +36,24 @@ inline std::string passwordStrengthMessage(int score) {
     return "weak";
 }
 
-inline bool isHashedPassword(const std::string& pw) {
+inline bool isSha256Hash(const std::string& pw) {
     if (pw.size() != 64) return false;
     for (char c : pw) {
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
     }
     return true;
+}
+
+inline bool isMd5Hash(const std::string& pw) {
+    if (pw.size() != 32) return false;
+    for (char c : pw) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+inline bool isHashedPassword(const std::string& pw) {
+    return isSha256Hash(pw) || isMd5Hash(pw);
 }
 
 inline int login(const std::string& username, const std::string& password) {
@@ -52,8 +64,10 @@ inline int login(const std::string& username, const std::string& password) {
     while (infile >> temp.username >> temp.password >> temp.permission) {
         if (temp.username == username) {
             std::string checkPw = password;
-            if (isHashedPassword(temp.password)) {
+            if (isSha256Hash(temp.password)) {
                 checkPw = sha256(password);
+            } else if (isMd5Hash(temp.password)) {
+                checkPw = md5(password);
             }
             if (temp.password == checkPw) {
                 std::cout << "successfully login" << std::endl;
@@ -80,9 +94,16 @@ inline int permissionQuery(const std::string& username) {
     return -1;
 }
 
-inline int createUser(const user& new_user) {
+inline int createUser(const user& new_user, const std::string& hashAlgo = "sha256") {
     std::ofstream fs("user.dat", std::ios::binary | std::ios::out | std::ios::app);
-    std::string hashedPw = isHashedPassword(new_user.password) ? new_user.password : sha256(new_user.password);
+    std::string hashedPw;
+    if (isHashedPassword(new_user.password)) {
+        hashedPw = new_user.password;
+    } else if (hashAlgo == "md5") {
+        hashedPw = md5(new_user.password);
+    } else {
+        hashedPw = sha256(new_user.password);
+    }
     fs << '\n' << new_user.username << " " << hashedPw << " " << new_user.permission << std::endl;
     return 0;
 }

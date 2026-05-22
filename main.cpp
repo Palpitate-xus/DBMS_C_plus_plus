@@ -1871,8 +1871,24 @@ bool execute(const string& rawSql, Session& s) {
             }
             user temp;
             temp.username = parts[0];
-            temp.password = parts[1];
             temp.permission = parts[2];
+            // Preserve password case from raw SQL (sqlProcessor lowercases everything)
+            {
+                string rawRest = rawSql;
+                size_t p = 0;
+                while (p < rawRest.size() && isspace(static_cast<unsigned char>(rawRest[p]))) ++p;
+                rawRest = rawRest.substr(p);
+                string lraw = toLower(rawRest);
+                size_t cuPos = lraw.find("create user");
+                if (cuPos != string::npos) rawRest = rawRest.substr(cuPos + 11);
+                rawRest = trim(rawRest);
+                vector<string> rawParts;
+                stringstream rss(rawRest);
+                string rp;
+                while (rss >> rp) rawParts.push_back(rp);
+                if (rawParts.size() >= 2) temp.password = rawParts[1];
+                else temp.password = parts[1];
+            }
             if (permissionQuery(temp.username) != -1) {
                 cout << "error: user already exist" << endl;
                 log(s.username, "error: user already exist", getTime());
@@ -1896,7 +1912,7 @@ bool execute(const string& rawSql, Session& s) {
                     cout << "Password strength: " << strength << " (score=" << score << ")" << endl;
                 }
             }
-            createUser(temp);
+            createUser(temp, g_config.passwordHashAlgorithm);
             cout << "create user  " << temp.username << "  succeeded" << endl;
             return false;
         }
@@ -2256,6 +2272,21 @@ bool execute(const string& rawSql, Session& s) {
             }
             string uname = tokens[1];
             string newPw = tokens[2];
+            {
+                string rawRest = rawSql;
+                size_t p = 0;
+                while (p < rawRest.size() && isspace(static_cast<unsigned char>(rawRest[p]))) ++p;
+                rawRest = rawRest.substr(p);
+                string lraw = toLower(rawRest);
+                size_t auPos = lraw.find("alter user");
+                if (auPos != string::npos) rawRest = rawRest.substr(auPos + 10);
+                rawRest = trim(rawRest);
+                vector<string> rawParts;
+                stringstream rss(rawRest);
+                string rp;
+                while (rss >> rp) rawParts.push_back(rp);
+                if (rawParts.size() >= 2) newPw = rawParts[1];
+            }
             ifstream infile("user.dat");
             vector<user> users;
             bool found = false;
@@ -2264,7 +2295,10 @@ bool execute(const string& rawSql, Session& s) {
                 while (infile >> temp.username >> temp.password >> temp.permission) {
                     if (temp.username == uname) {
                         found = true;
-                        temp.password = sha256(newPw);
+                        if (isMd5Hash(temp.password))
+                            temp.password = md5(newPw);
+                        else
+                            temp.password = sha256(newPw);
                     }
                     users.push_back(temp);
                 }
@@ -4424,6 +4458,9 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Invalid value for password_policy_level" << endl;
                 return true;
             }
+        } else if (var == "password_hash_algorithm") {
+            g_config.passwordHashAlgorithm = val;
+            cout << "password_hash_algorithm set to " << g_config.passwordHashAlgorithm << endl;
         } else {
             cout << "Unknown variable: " << var << endl;
             return true;
