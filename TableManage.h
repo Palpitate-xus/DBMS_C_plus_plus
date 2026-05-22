@@ -158,15 +158,23 @@ public:
         std::string maxVal;
         // Equi-depth histogram: each bucket is (low, high) boundary
         std::vector<std::pair<std::string, std::string>> histogram;
+        // Most Common Values: (value, frequency), top-N
+        std::vector<std::pair<std::string, size_t>> mcv;
     };
     struct TableStats {
         size_t rowCount = 0;
         std::map<std::string, ColumnStats> colStats;
+        // Multi-column stats: key = "col1,col2", value = joint stats
+        std::map<std::string, ColumnStats> multiColStats;
     };
     void analyzeTable(const std::string& dbname, const std::string& tablename);
+    void analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
+                            const std::vector<std::string>& colnames);
     size_t getTableRowCount(const std::string& dbname, const std::string& tablename) const;
     ColumnStats getColumnStats(const std::string& dbname, const std::string& tablename,
                                 const std::string& colname) const;
+    ColumnStats getMultiColumnStats(const std::string& dbname, const std::string& tablename,
+                                     const std::string& colKey) const;
 
     // Data operations
     OpResult insert(const std::string& dbname, const std::string& tablename,
@@ -448,11 +456,15 @@ private:
     std::filesystem::path tableListPath(const std::string& dbname) const;
     std::filesystem::path walPath(const std::string& dbname) const;
     std::filesystem::path checkpointPath(const std::string& dbname) const;
+
+public:
     std::filesystem::path viewPath(const std::string& dbname, const std::string& viewname) const;
     std::filesystem::path viewsDir(const std::string& dbname) const;
     std::filesystem::path statsPath(const std::string& dbname) const;
     std::filesystem::path permPath(const std::string& dbname) const;
     std::filesystem::path seqPath(const std::string& dbname, const std::string& tablename) const;
+
+private:
 
     // Auto-increment sequence helpers
     int64_t readNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname);

@@ -3679,7 +3679,36 @@ bool execute(const string& rawSql, Session& s) {
             cout << "SQL syntax error" << endl;
             return true;
         }
-        string tname = trim(rest.substr(5));
+        string afterTable = trim(rest.substr(5));
+        // Check for ANALYZE TABLE t COLUMNS (col1, col2)
+        size_t colsPos = afterTable.find(" columns ");
+        if (colsPos != string::npos) {
+            string tname = trim(afterTable.substr(0, colsPos));
+            string colsPart = trim(afterTable.substr(colsPos + 9));
+            // Strip parentheses
+            if (!colsPart.empty() && colsPart.front() == '(') colsPart = colsPart.substr(1);
+            if (!colsPart.empty() && colsPart.back() == ')') colsPart.pop_back();
+            vector<string> colnames;
+            stringstream css(colsPart);
+            string c;
+            while (getline(css, c, ',')) {
+                string tc = trim(c);
+                if (!tc.empty()) colnames.push_back(tc);
+            }
+            if (colnames.size() < 2) {
+                cout << "Multi-column analyze requires at least 2 columns" << endl;
+                return true;
+            }
+            g_engine.analyzeMultiColumn(s.currentDB, tname, colnames);
+            string key;
+            for (size_t i = 0; i < colnames.size(); ++i) {
+                if (i > 0) key += ",";
+                key += colnames[i];
+            }
+            cout << "Multi-column stats (" << key << ") for table " << tname << " analyzed" << endl;
+            return false;
+        }
+        string tname = afterTable;
         g_engine.analyzeTable(s.currentDB, tname);
         cout << "Table " << tname << " analyzed" << endl;
         return false;
@@ -4435,6 +4464,59 @@ bool execute(const string& rawSql, Session& s) {
                      << e.dbname << ' '
                      << std::fixed << std::setprecision(2) << e.ms << ' '
                      << e.sql << endl;
+            }
+            return false;
+        }
+        if (rest.substr(0, 5) == "stats") {
+            if (!checkDB(s)) return true;
+            string statsRest = trim(rest.substr(5));
+            size_t forPos = statsRest.find("for ");
+            string tname = (forPos != string::npos) ? trim(statsRest.substr(forPos + 4)) : statsRest;
+            tname = resolveTableName(s, tname);
+            size_t rowCount = g_engine.getTableRowCount(s.currentDB, tname);
+            cout << "table: " << tname << "  rows: " << rowCount << endl;
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+            for (size_t i = 0; i < tbl.len; ++i) {
+                auto cs = g_engine.getColumnStats(s.currentDB, tname, tbl.cols[i].dataName);
+                cout << "  column: " << tbl.cols[i].dataName
+                     << "  cardinality: " << cs.cardinality
+                     << "  min: " << cs.minVal
+                     << "  max: " << cs.maxVal;
+                if (!cs.mcv.empty()) {
+                    cout << "  mcv: ";
+                    for (size_t j = 0; j < cs.mcv.size() && j < 5; ++j) {
+                        if (j > 0) cout << ", ";
+                        cout << cs.mcv[j].first << "(" << cs.mcv[j].second << ")";
+                    }
+                }
+                cout << endl;
+            }
+            // Show multi-column stats
+            auto schema = g_engine.getTableSchema(s.currentDB, tname);
+            auto spath = g_engine.statsPath(s.currentDB);
+            if (std::filesystem::exists(spath)) {
+                std::ifstream ifs(spath);
+                std::string line;
+                bool hasMulti = false;
+                while (std::getline(ifs, line)) {
+                    if (line.empty()) continue;
+                    std::stringstream ss(line);
+                    std::string t, tag, key;
+                    ss >> t >> tag >> key;
+                    if (t == tname && tag == "__multi__") {
+                        if (!hasMulti) { cout << "  multi-column stats:" << endl; hasMulti = true; }
+                        auto mcs = g_engine.getMultiColumnStats(s.currentDB, tname, key);
+                        cout << "    " << key << "  cardinality: " << mcs.cardinality;
+                        if (!mcs.mcv.empty()) {
+                            cout << "  mcv: ";
+                            for (size_t j = 0; j < mcs.mcv.size() && j < 5; ++j) {
+                                if (j > 0) cout << ", ";
+                                cout << mcs.mcv[j].first << "(" << mcs.mcv[j].second << ")";
+                            }
+                        }
+                        cout << endl;
+                    }
+                }
             }
             return false;
         }

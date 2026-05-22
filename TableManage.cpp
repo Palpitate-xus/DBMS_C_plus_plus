@@ -634,6 +634,117 @@ std::filesystem::path StorageEngine::statsPath(const std::string& dbname) const 
     return dbPath(dbname) / ".stats";
 }
 
+// Helper: compute MCV (Most Common Values) from a list of values
+static std::vector<std::pair<std::string, size_t>> computeMCV(
+    const std::vector<std::string>& vals, size_t topN = 10) {
+    std::map<std::string, size_t> freq;
+    for (const auto& v : vals) freq[v]++;
+    std::vector<std::pair<std::string, size_t>> result(freq.begin(), freq.end());
+    std::sort(result.begin(), result.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    if (result.size() > topN) result.resize(topN);
+    return result;
+}
+
+static std::string mcvToString(const std::vector<std::pair<std::string, size_t>>& mcv) {
+    std::string s;
+    for (size_t i = 0; i < mcv.size(); ++i) {
+        if (i > 0) s += ";";
+        s += std::to_string(mcv[i].second) + ":" + mcv[i].first;
+    }
+    return s;
+}
+
+static std::vector<std::pair<std::string, size_t>> mcvFromString(const std::string& s) {
+    std::vector<std::pair<std::string, size_t>> result;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t semi = s.find(';', pos);
+        std::string item = (semi == std::string::npos) ? s.substr(pos) : s.substr(pos, semi - pos);
+        size_t colon = item.find(':');
+        if (colon != std::string::npos) {
+            try {
+                size_t freq = std::stoull(item.substr(0, colon));
+                result.push_back({item.substr(colon + 1), freq});
+            } catch (...) {}
+        }
+        if (semi == std::string::npos) break;
+        pos = semi + 1;
+    }
+    return result;
+}
+
+// Parse a stats line into ColumnStats. Format:
+// tname cname card|min|max|hist|mcv
+static StorageEngine::ColumnStats parseStatsLine(const std::string& line) {
+    std::stringstream ss(line);
+    std::string tname, cname;
+    ss >> tname >> cname;
+    // Read remainder after cname; cardinality is at start, followed by |min|max|hist|mcv
+    std::string rest;
+    std::getline(ss, rest);
+    rest = trim(rest);
+    // Extract cardinality (number at start of rest)
+    size_t card = 0;
+    size_t numEnd = 0;
+    while (numEnd < rest.size() && std::isdigit(static_cast<unsigned char>(rest[numEnd]))) ++numEnd;
+    try { card = std::stoull(rest.substr(0, numEnd)); } catch (...) {}
+    // The pipe-separated fields start at numEnd
+    std::string pipePart = (numEnd < rest.size()) ? rest.substr(numEnd) : "";
+    // Split pipePart by '|', skipping leading empty segments
+    std::vector<std::string> parts;
+    size_t p = 0;
+    while (p < pipePart.size()) {
+        size_t pipe = pipePart.find('|', p);
+        std::string part = (pipe == std::string::npos) ? pipePart.substr(p) : pipePart.substr(p, pipe - p);
+        parts.push_back(part);
+        if (pipe == std::string::npos) break;
+        p = pipe + 1;
+    }
+    // Skip leading empty parts (from the | immediately after cardinality)
+    size_t startIdx = 0;
+    while (startIdx < parts.size() && parts[startIdx].empty()) ++startIdx;
+    std::vector<std::string> realParts;
+    for (size_t i = startIdx; i < parts.size(); ++i) realParts.push_back(parts[i]);
+
+    StorageEngine::ColumnStats cs;
+    cs.cardinality = card;
+    if (realParts.size() > 0) cs.minVal = realParts[0];
+    if (realParts.size() > 1) cs.maxVal = realParts[1];
+    // Histogram
+    if (realParts.size() > 2 && !realParts[2].empty()) {
+        const std::string& histStr = realParts[2];
+        size_t pos = 0;
+        while (pos < histStr.size()) {
+            size_t semi = histStr.find(';', pos);
+            std::string bucket = (semi == std::string::npos) ? histStr.substr(pos) : histStr.substr(pos, semi - pos);
+            size_t comma = bucket.find(',');
+            if (comma != std::string::npos) {
+                cs.histogram.push_back({bucket.substr(0, comma), bucket.substr(comma + 1)});
+            }
+            if (semi == std::string::npos) break;
+            pos = semi + 1;
+        }
+    }
+    // MCV
+    if (realParts.size() > 3 && !realParts[3].empty()) {
+        cs.mcv = mcvFromString(realParts[3]);
+    }
+    return cs;
+}
+
+// Write a single ColumnStats entry
+static void writeStatsEntry(std::ofstream& ofs, const std::string& tname,
+                            const std::string& cname, const StorageEngine::ColumnStats& cs) {
+    ofs << tname << " " << cname << " " << cs.cardinality
+        << "|" << cs.minVal << "|" << cs.maxVal << "|";
+    for (size_t i = 0; i < cs.histogram.size(); ++i) {
+        if (i > 0) ofs << ";";
+        ofs << cs.histogram[i].first << "," << cs.histogram[i].second;
+    }
+    ofs << "|" << mcvToString(cs.mcv) << "\n";
+}
+
 void StorageEngine::analyzeTable(const std::string& dbname,
                                   const std::string& tablename) {
     if (!tableExists(dbname, tablename)) return;
@@ -662,16 +773,16 @@ void StorageEngine::analyzeTable(const std::string& dbname,
     });
 
     const size_t HIST_BUCKETS = 10;
+    const size_t MCV_TOP_N = 10;
     for (size_t i = 0; i < tbl.len; ++i) {
         const std::string& cname = tbl.cols[i].dataName;
-        ColumnStats cs;
+        StorageEngine::ColumnStats cs;
         cs.cardinality = distinctVals[cname].size();
         cs.minVal = minVals[cname];
         cs.maxVal = maxVals[cname];
-        // Build equi-depth histogram
         auto& vals = allVals[cname];
+        // Build equi-depth histogram
         if (vals.size() >= HIST_BUCKETS * 2) {
-            // Use numeric sort for integer/float columns, string sort otherwise
             bool isNumeric = (!tbl.cols[i].isVariableLength &&
                               (tbl.cols[i].dataType == "int" || tbl.cols[i].dataType == "long" ||
                                tbl.cols[i].dataType == "tinyint" || tbl.cols[i].dataType == "float" ||
@@ -699,10 +810,12 @@ void StorageEngine::analyzeTable(const std::string& dbname,
                 }
             }
         }
+        // Compute MCV
+        cs.mcv = computeMCV(vals, MCV_TOP_N);
         stats.colStats[cname] = cs;
     }
 
-    // Load existing stats, update this table's entry
+    // Load existing stats, update this table's entry (preserve multi-col stats)
     std::map<std::string, TableStats> allStats;
     auto spath = statsPath(dbname);
     if (std::filesystem::exists(spath)) {
@@ -712,44 +825,143 @@ void StorageEngine::analyzeTable(const std::string& dbname,
             if (line.empty()) continue;
             std::stringstream ss(line);
             std::string tname, cname;
-            size_t card;
-            std::string minv, maxv, histStr;
-            ss >> tname >> cname >> card;
-            std::getline(ss, minv, '|');
-            std::getline(ss, maxv, '|');
-            std::getline(ss, histStr, '|');
-            ColumnStats cs{card, minv, maxv};
-            if (!histStr.empty()) {
-                size_t pos = 0;
-                while (pos < histStr.size()) {
-                    size_t semi = histStr.find(';', pos);
-                    std::string bucket = (semi == std::string::npos) ? histStr.substr(pos) : histStr.substr(pos, semi - pos);
-                    size_t comma = bucket.find(',');
-                    if (comma != std::string::npos) {
-                        cs.histogram.push_back({bucket.substr(0, comma), bucket.substr(comma + 1)});
-                    }
-                    if (semi == std::string::npos) break;
-                    pos = semi + 1;
-                }
+            ss >> tname >> cname;
+            if (cname == "__rows__") {
+                std::string rc;
+                std::getline(ss, rc);
+                try { allStats[tname].rowCount = std::stoull(rc); } catch (...) {}
+                continue;
             }
-            allStats[tname].colStats[cname] = cs;
+            if (cname == "__multi__") {
+                std::string colKey;
+                ss >> colKey;
+                std::string rest;
+                std::getline(ss, rest);
+                // Reconstruct line for parseStatsLine
+                allStats[tname].multiColStats[colKey] = parseStatsLine(tname + " " + colKey + " " + rest);
+                continue;
+            }
+            allStats[tname].colStats[cname] = parseStatsLine(line);
         }
+    }
+    // Preserve multi-col stats from existing entry
+    auto it = allStats.find(tablename);
+    if (it != allStats.end()) {
+        stats.multiColStats = it->second.multiColStats;
     }
     allStats[tablename] = stats;
 
-    // Write back: include rowCount as a special entry
+    // Write back
     std::ofstream ofs(spath);
     for (const auto& kv : allStats) {
-        // Write row count as first line for this table
         ofs << kv.first << " __rows__ " << kv.second.rowCount << "||\n";
         for (const auto& cv : kv.second.colStats) {
-            ofs << kv.first << " " << cv.first << " " << cv.second.cardinality
-               << "|" << cv.second.minVal << "|" << cv.second.maxVal << "|";
-            for (size_t i = 0; i < cv.second.histogram.size(); ++i) {
+            writeStatsEntry(ofs, kv.first, cv.first, cv.second);
+        }
+        for (const auto& mv : kv.second.multiColStats) {
+            ofs << kv.first << " __multi__ " << mv.first << " " << mv.second.cardinality
+                << "|" << mv.second.minVal << "|" << mv.second.maxVal << "|";
+            for (size_t i = 0; i < mv.second.histogram.size(); ++i) {
                 if (i > 0) ofs << ";";
-                ofs << cv.second.histogram[i].first << "," << cv.second.histogram[i].second;
+                ofs << mv.second.histogram[i].first << "," << mv.second.histogram[i].second;
             }
-            ofs << "\n";
+            ofs << "|" << mcvToString(mv.second.mcv) << "\n";
+        }
+    }
+}
+
+void StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
+                                        const std::vector<std::string>& colnames) {
+    if (!tableExists(dbname, tablename)) return;
+    if (colnames.size() < 2) return;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    // Build column index map
+    std::map<std::string, size_t> colIdx;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        colIdx[tbl.cols[i].dataName] = i;
+    }
+    for (const auto& c : colnames) {
+        if (colIdx.find(c) == colIdx.end()) return;
+    }
+
+    std::string colKey;
+    for (size_t i = 0; i < colnames.size(); ++i) {
+        if (i > 0) colKey += ",";
+        colKey += colnames[i];
+    }
+
+    std::map<std::string, size_t> distinctVals;
+    std::map<std::string, std::string> minVals, maxVals;
+    size_t rowCount = 0;
+
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        rowCount++;
+        std::string row(data, len);
+        std::string combined;
+        for (size_t i = 0; i < colnames.size(); ++i) {
+            if (i > 0) combined += "#";
+            combined += extractColumnValue(row, tbl, colIdx[colnames[i]]);
+        }
+        distinctVals[combined]++;
+        if (minVals.empty() || combined < minVals.begin()->first) minVals[combined] = combined;
+        if (maxVals.empty() || combined > maxVals.rbegin()->first) maxVals[combined] = combined;
+    });
+
+    StorageEngine::ColumnStats cs;
+    cs.cardinality = distinctVals.size();
+    if (!minVals.empty()) cs.minVal = minVals.begin()->first;
+    if (!maxVals.empty()) cs.maxVal = maxVals.rbegin()->first;
+
+    // MCV for combined values
+    std::vector<std::pair<std::string, size_t>> freqVec(distinctVals.begin(), distinctVals.end());
+    std::sort(freqVec.begin(), freqVec.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    if (freqVec.size() > 10) freqVec.resize(10);
+    cs.mcv = freqVec;
+
+    // Load existing stats
+    std::map<std::string, TableStats> allStats;
+    auto spath = statsPath(dbname);
+    if (std::filesystem::exists(spath)) {
+        std::ifstream ifs(spath);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string tname, cname;
+            ss >> tname >> cname;
+            if (cname == "__rows__") {
+                std::string rc; std::getline(ss, rc);
+                try { allStats[tname].rowCount = std::stoull(rc); } catch (...) {}
+                continue;
+            }
+            if (cname == "__multi__") {
+                std::string colKey; ss >> colKey;
+                std::string rest; std::getline(ss, rest);
+                allStats[tname].multiColStats[colKey] = parseStatsLine(tname + " " + colKey + " " + rest);
+                continue;
+            }
+            allStats[tname].colStats[cname] = parseStatsLine(line);
+        }
+    }
+    allStats[tablename].multiColStats[colKey] = cs;
+
+    // Write back
+    std::ofstream ofs(spath);
+    for (const auto& kv : allStats) {
+        ofs << kv.first << " __rows__ " << kv.second.rowCount << "||\n";
+        for (const auto& cv : kv.second.colStats) {
+            writeStatsEntry(ofs, kv.first, cv.first, cv.second);
+        }
+        for (const auto& mv : kv.second.multiColStats) {
+            ofs << kv.first << " __multi__ " << mv.first << " " << mv.second.cardinality
+                << "|" << mv.second.minVal << "|" << mv.second.maxVal << "|";
+            for (size_t i = 0; i < mv.second.histogram.size(); ++i) {
+                if (i > 0) ofs << ";";
+                ofs << mv.second.histogram[i].first << "," << mv.second.histogram[i].second;
+            }
+            ofs << "|" << mcvToString(mv.second.mcv) << "\n";
         }
     }
 }
@@ -793,10 +1005,11 @@ size_t StorageEngine::getTableRowCount(const std::string& dbname,
         if (line.empty()) continue;
         std::stringstream ss(line);
         std::string tname, cname;
-        size_t val;
-        ss >> tname >> cname >> val;
+        ss >> tname >> cname;
         if (tname == tablename && cname == "__rows__") {
-            return val;
+            std::string rest;
+            std::getline(ss, rest);
+            try { return std::stoull(rest); } catch (...) { return 0; }
         }
     }
     return 0;
@@ -813,28 +1026,32 @@ StorageEngine::ColumnStats StorageEngine::getColumnStats(
         if (line.empty()) continue;
         std::stringstream ss(line);
         std::string tname, cname;
-        size_t card;
-        std::string minv, maxv, histStr;
-        ss >> tname >> cname >> card;
-        std::getline(ss, minv, '|');
-        std::getline(ss, maxv, '|');
-        std::getline(ss, histStr, '|');
+        ss >> tname >> cname;
         if (tname == tablename && cname == colname) {
-            ColumnStats cs{card, minv, maxv};
-            if (!histStr.empty()) {
-                size_t pos = 0;
-                while (pos < histStr.size()) {
-                    size_t semi = histStr.find(';', pos);
-                    std::string bucket = (semi == std::string::npos) ? histStr.substr(pos) : histStr.substr(pos, semi - pos);
-                    size_t comma = bucket.find(',');
-                    if (comma != std::string::npos) {
-                        cs.histogram.push_back({bucket.substr(0, comma), bucket.substr(comma + 1)});
-                    }
-                    if (semi == std::string::npos) break;
-                    pos = semi + 1;
-                }
-            }
-            return cs;
+            std::string rest;
+            std::getline(ss, rest);
+            return parseStatsLine(tname + " " + cname + " " + rest);
+        }
+    }
+    return {};
+}
+
+StorageEngine::ColumnStats StorageEngine::getMultiColumnStats(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& colKey) const {
+    auto spath = statsPath(dbname);
+    if (!std::filesystem::exists(spath)) return {};
+    std::ifstream ifs(spath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string tname, tag, key;
+        ss >> tname >> tag >> key;
+        if (tname == tablename && tag == "__multi__" && key == colKey) {
+            std::string rest;
+            std::getline(ss, rest);
+            return parseStatsLine(tname + " " + key + " " + rest);
         }
     }
     return {};
