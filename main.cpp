@@ -1878,6 +1878,24 @@ bool execute(const string& rawSql, Session& s) {
                 log(s.username, "error: user already exist", getTime());
                 return true;
             }
+            // Password strength check
+            if (g_config.passwordPolicyLevel > 0) {
+                int score = checkPasswordStrength(temp.password);
+                std::string strength = passwordStrengthMessage(score);
+                if (g_config.passwordPolicyLevel >= 3 && score < 80) {
+                    cout << "ERROR: password too weak (" << strength << ", score=" << score
+                         << "). Require strong password (score>=80)." << endl;
+                    return true;
+                }
+                if (g_config.passwordPolicyLevel >= 2 && score < 50) {
+                    cout << "ERROR: password too weak (" << strength << ", score=" << score
+                         << "). Require medium password (score>=50)." << endl;
+                    return true;
+                }
+                if (g_config.passwordPolicyLevel >= 1) {
+                    cout << "Password strength: " << strength << " (score=" << score << ")" << endl;
+                }
+            }
             createUser(temp);
             cout << "create user  " << temp.username << "  succeeded" << endl;
             return false;
@@ -4396,6 +4414,14 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "statement_timeout set to " << s.statementTimeoutMs << "ms" << endl;
             } catch (...) {
                 cout << "Invalid value for statement_timeout" << endl;
+                return true;
+            }
+        } else if (var == "password_policy_level") {
+            try {
+                g_config.passwordPolicyLevel = std::stoi(val);
+                cout << "password_policy_level set to " << g_config.passwordPolicyLevel << endl;
+            } catch (...) {
+                cout << "Invalid value for password_policy_level" << endl;
                 return true;
             }
         } else {

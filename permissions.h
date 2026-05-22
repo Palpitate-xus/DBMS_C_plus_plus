@@ -11,6 +11,31 @@ struct user {
     std::string permission;
 };
 
+inline int checkPasswordStrength(const std::string& pw) {
+    // Returns 0-100 score based on complexity
+    int score = 0;
+    if (pw.length() >= 6) score += 20;
+    if (pw.length() >= 8) score += 20;
+    bool hasLower = false, hasUpper = false, hasDigit = false, hasSpecial = false;
+    for (char c : pw) {
+        if (c >= 'a' && c <= 'z') hasLower = true;
+        else if (c >= 'A' && c <= 'Z') hasUpper = true;
+        else if (c >= '0' && c <= '9') hasDigit = true;
+        else hasSpecial = true;
+    }
+    if (hasLower) score += 15;
+    if (hasUpper) score += 15;
+    if (hasDigit) score += 15;
+    if (hasSpecial) score += 15;
+    return score;
+}
+
+inline std::string passwordStrengthMessage(int score) {
+    if (score >= 80) return "strong";
+    if (score >= 50) return "medium";
+    return "weak";
+}
+
 inline bool isHashedPassword(const std::string& pw) {
     if (pw.size() != 64) return false;
     for (char c : pw) {

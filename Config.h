@@ -20,6 +20,7 @@ struct Config {
     size_t bufferPoolFrames = 16;
     bool enableQueryPlanCache = true;
     size_t queryPlanCacheSize = 100;
+    int passwordPolicyLevel = 0; // 0=none, 1=warn, 2=medium required, 3=strong required
 
     // Load from file; returns true on success.
     bool load(const std::string& filename);

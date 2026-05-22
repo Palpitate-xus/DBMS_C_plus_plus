@@ -35,6 +35,8 @@ bool Config::load(const std::string& filename) {
             enableQueryPlanCache = (val == "1" || val == "true" || val == "on");
         } else if (key == "query_plan_cache_size") {
             try { queryPlanCacheSize = static_cast<size_t>(std::stoull(val)); } catch (...) {}
+        } else if (key == "password_policy_level") {
+            try { passwordPolicyLevel = std::stoi(val); } catch (...) {}
         }
     }
     return true;
@@ -47,7 +49,8 @@ void Config::printAll() const {
               << "statement_timeout_ms " << statementTimeoutMs << "\n"
               << "buffer_pool_frames " << bufferPoolFrames << "\n"
               << "enable_query_plan_cache " << (enableQueryPlanCache ? "on" : "off") << "\n"
-              << "query_plan_cache_size " << queryPlanCacheSize << "\n";
+              << "query_plan_cache_size " << queryPlanCacheSize << "\n"
+              << "password_policy_level " << passwordPolicyLevel << "\n";
 }
 
 } // namespace dbms
