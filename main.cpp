@@ -148,6 +148,7 @@ static string preprocessCaseWhen(string s);
 // ========================================================================
 // SQL preprocessing
 // ========================================================================
+static string foldConstants(const string& s);
 static string sqlProcessor(string raw) {
     raw = toLower(raw);
     raw.erase(remove(raw.begin(), raw.end(), '\n'), raw.end());
@@ -629,7 +630,88 @@ static string normalizeConditionStr(string s) {
             pos += 7;
         }
     }
+    // Constant folding: "1 + 2" → "3", "5 * 3" → "15", "10 / 2" → "5"
+    s = foldConstants(s);
     return s;
+}
+
+// ========================================================================
+// Constant folding: evaluate arithmetic expressions of literal numbers
+// ========================================================================
+static string foldConstants(const string& s) {
+    string result;
+    size_t i = 0;
+    while (i < s.size()) {
+        // Look for: number [spaces] op [spaces] number
+        // where both numbers are standalone literals (not part of identifiers)
+        size_t num1Start = i;
+        while (num1Start < s.size() && isspace(static_cast<unsigned char>(s[num1Start]))) num1Start++;
+        if (num1Start >= s.size()) { result += s[i++]; continue; }
+
+        size_t num1End = num1Start;
+        bool num1Float = false;
+        while (num1End < s.size() && (isdigit(static_cast<unsigned char>(s[num1End])) || s[num1End] == '.')) {
+            if (s[num1End] == '.') num1Float = true;
+            num1End++;
+        }
+        if (num1End == num1Start) { result += s[i++]; continue; }
+
+        size_t opPos = num1End;
+        while (opPos < s.size() && isspace(static_cast<unsigned char>(s[opPos]))) opPos++;
+        if (opPos >= s.size()) { result += s[i++]; continue; }
+        char op = s[opPos];
+        if (op != '+' && op != '-' && op != '*' && op != '/') { result += s[i++]; continue; }
+
+        size_t num2Start = opPos + 1;
+        while (num2Start < s.size() && isspace(static_cast<unsigned char>(s[num2Start]))) num2Start++;
+        size_t num2End = num2Start;
+        bool num2Float = false;
+        while (num2End < s.size() && (isdigit(static_cast<unsigned char>(s[num2End])) || s[num2End] == '.')) {
+            if (s[num2End] == '.') num2Float = true;
+            num2End++;
+        }
+        if (num2End == num2Start) { result += s[i++]; continue; }
+
+        // Ensure standalone: not part of an identifier or larger expression
+        if (num1Start > 0 && (isalnum(static_cast<unsigned char>(s[num1Start - 1])) || s[num1Start - 1] == '_')) {
+            result += s[i++]; continue;
+        }
+        if (num2End < s.size() && (isalnum(static_cast<unsigned char>(s[num2End])) || s[num2End] == '_')) {
+            result += s[i++]; continue;
+        }
+
+        string n1 = s.substr(num1Start, num1End - num1Start);
+        string n2 = s.substr(num2Start, num2End - num2Start);
+        string folded;
+        if (num1Float || num2Float) {
+            double v1 = 0, v2 = 0, r = 0;
+            try { v1 = std::stod(n1); v2 = std::stod(n2); } catch (...) { result += s[i++]; continue; }
+            switch (op) {
+                case '+': r = v1 + v2; break;
+                case '-': r = v1 - v2; break;
+                case '*': r = v1 * v2; break;
+                case '/': if (v2 != 0) r = v1 / v2; else { result += s[i++]; continue; }
+            }
+            folded = std::to_string(r);
+            // Trim trailing zeros
+            while (folded.size() > 1 && folded.back() == '0') folded.pop_back();
+            if (!folded.empty() && folded.back() == '.') folded += '0';
+        } else {
+            long long v1 = 0, v2 = 0, r = 0;
+            try { v1 = std::stoll(n1); v2 = std::stoll(n2); } catch (...) { result += s[i++]; continue; }
+            switch (op) {
+                case '+': r = v1 + v2; break;
+                case '-': r = v1 - v2; break;
+                case '*': r = v1 * v2; break;
+                case '/': if (v2 != 0) r = v1 / v2; else { result += s[i++]; continue; }
+            }
+            folded = std::to_string(r);
+        }
+        result += s.substr(i, num1Start - i);
+        result += folded;
+        i = num2End;
+    }
+    return result;
 }
 
 // ========================================================================
@@ -5397,6 +5479,17 @@ bool execute(const string& rawSql, Session& s) {
             if (g_engine.viewExists(s.currentDB, tnameOrig)) {
                 string viewSql = g_engine.getViewSQL(s.currentDB, tnameOrig);
                 if (!viewSql.empty()) {
+                    // View expansion: replace view reference with derived table
+                    // Replace FROM viewname with FROM (view_sql) AS __view_name
+                    string expanded = rawSql;
+                    string pattern = "from " + tnameOrig;
+                    size_t fp = expanded.find(pattern);
+                    if (fp != string::npos) {
+                        string subq = "from (" + viewSql + ") as __view_" + tnameOrig;
+                        expanded = expanded.substr(0, fp) + subq + expanded.substr(fp + pattern.size());
+                        return execute(expanded, s);
+                    }
+                    // Fallback: execute view standalone
                     execute(viewSql, s);
                     return false;
                 }
