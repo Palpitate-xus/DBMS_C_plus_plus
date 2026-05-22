@@ -25,6 +25,8 @@ using dbms::makeDateColumn;
 using dbms::makeIntColumn;
 using dbms::makeStringColumn;
 using dbms::makeVarCharColumn;
+using dbms::makeNCharColumn;
+using dbms::makeNVarCharColumn;
 using dbms::makeTimestampColumn;
 using dbms::makeTimestamptzColumn;
 using dbms::makeTextColumn;
@@ -1091,6 +1093,38 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 }
                 if (len == 0) len = 1;
                 tbl.append(makeVarCharColumn(cname, isNull, len, isPK));
+            } else if (ctype.substr(0, 7) == "nvarchar") {
+                size_t len = 0;
+                if (!isBrace && parts.size() >= 3) {
+                    string lenStr = parts[2];
+                    if (lenStr == "(" && parts.size() >= 4) lenStr = parts[3];
+                    for (char c : lenStr)
+                        if (isdigit(static_cast<unsigned char>(c))) len = len * 10 + (c - '0');
+                }
+                if (len == 0) {
+                    size_t start = 7;
+                    if (start < ctype.size() && ctype[start] == '(') ++start;
+                    for (size_t i = start; i < ctype.size() && isdigit(static_cast<unsigned char>(ctype[i])); ++i)
+                        len = len * 10 + (ctype[i] - '0');
+                }
+                if (len == 0) len = 1;
+                tbl.append(makeNVarCharColumn(cname, isNull, len, isPK));
+            } else if (ctype.substr(0, 5) == "nchar") {
+                size_t len = 0;
+                if (!isBrace && parts.size() >= 3) {
+                    string lenStr = parts[2];
+                    if (lenStr == "(" && parts.size() >= 4) lenStr = parts[3];
+                    for (char c : lenStr)
+                        if (isdigit(static_cast<unsigned char>(c))) len = len * 10 + (c - '0');
+                }
+                if (len == 0) {
+                    size_t start = 5;
+                    if (start < ctype.size() && ctype[start] == '(') ++start;
+                    for (size_t i = start; i < ctype.size() && isdigit(static_cast<unsigned char>(ctype[i])); ++i)
+                        len = len * 10 + (ctype[i] - '0');
+                }
+                if (len == 0) len = 1;
+                tbl.append(makeNCharColumn(cname, isNull, len, isPK));
             } else if (ctype == "binary") {
                 size_t blen = 0;
                 if (!isBrace && parts.size() >= 3) {
@@ -2296,6 +2330,22 @@ bool execute(const string& rawSql, Session& s) {
                     len = len * 10 + (typeName[i] - '0');
                 if (len == 0) len = 1;
                 col = makeVarCharColumn(cname, isNull, len);
+            } else if (typeName.substr(0, 7) == "nvarchar") {
+                size_t len = 0;
+                size_t start = 7;
+                if (start < typeName.size() && typeName[start] == '(') ++start;
+                for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
+                    len = len * 10 + (typeName[i] - '0');
+                if (len == 0) len = 1;
+                col = makeNVarCharColumn(cname, isNull, len);
+            } else if (typeName.substr(0, 5) == "nchar") {
+                size_t len = 0;
+                size_t start = 5;
+                if (start < typeName.size() && typeName[start] == '(') ++start;
+                for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
+                    len = len * 10 + (typeName[i] - '0');
+                if (len == 0) len = 1;
+                col = makeNCharColumn(cname, isNull, len);
             } else if (typeName.substr(0, 7) == "binary(") {
                 size_t lp = typeName.find('(');
                 size_t rp = typeName.find(')');

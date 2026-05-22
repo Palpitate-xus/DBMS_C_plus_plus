@@ -283,6 +283,27 @@ Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bo
     return c;
 }
 
+Column makeNCharColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "nchar";
+    c.dsize = std::max(size_t(1), std::min(length, size_t(4000)));
+    return c;
+}
+
+Column makeNVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "nvarchar";
+    c.dsize = std::max(size_t(1), std::min(maxLen, size_t(4000)));
+    return c;
+}
+
 Column makeTimestampColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;

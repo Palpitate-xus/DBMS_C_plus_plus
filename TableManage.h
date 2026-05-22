@@ -527,6 +527,8 @@ Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK 
 Column makeStringColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
 Column makeDateColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK = false);
+Column makeNCharColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
+Column makeNVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK = false);
 Column makeTimestampColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTimestamptzColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTextColumn(const std::string& name, bool isNull, bool isPK = false);
