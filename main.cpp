@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -4208,6 +4209,14 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Invalid value for checkpoint_interval" << endl;
                 return true;
             }
+        } else if (var == "statement_timeout") {
+            try {
+                s.statementTimeoutMs = std::stoi(val);
+                cout << "statement_timeout set to " << s.statementTimeoutMs << "ms" << endl;
+            } catch (...) {
+                cout << "Invalid value for statement_timeout" << endl;
+                return true;
+            }
         } else {
             cout << "Unknown variable: " << var << endl;
             return true;
@@ -5594,10 +5603,25 @@ int main(int argc, char* argv[]) {
             getline(cin, sql);
             if (trim(sql) == "exit") break;
             auto start = std::chrono::steady_clock::now();
-            bool ok = execute(sql, s);
+            bool ok = false;
+            bool timedOut = false;
+            if (s.statementTimeoutMs > 0) {
+                auto future = std::async(std::launch::async, [&]() { return execute(sql, s); });
+                if (future.wait_for(std::chrono::milliseconds(s.statementTimeoutMs))
+                    == std::future_status::timeout) {
+                    timedOut = true;
+                    cout << "ERROR: statement timeout" << endl;
+                } else {
+                    ok = future.get();
+                }
+            } else {
+                ok = execute(sql, s);
+            }
             auto end = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
-            if (ms > g_slowQueryThresholdMs) {
+            if (timedOut) {
+                logSlowQuery(sql, ms, s.username, s.currentDB);
+            } else if (ms > g_slowQueryThresholdMs) {
                 logSlowQuery(sql, ms, s.username, s.currentDB);
             }
             if (ok && !s.currentDB.empty() && g_checkpointInterval > 0) {
