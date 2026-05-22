@@ -363,9 +363,11 @@ public:
     };
 
     // Row iteration (public for execution plan use)
+    // targetPartitions: empty = all partitions; only effective for partitioned tables
     void forEachRow(const std::string& dbname, const std::string& tablename,
                     const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback,
-                    const ReadView* readView = nullptr) const;
+                    const ReadView* readView = nullptr,
+                    const std::vector<std::string>& targetPartitions = {}) const;
     bool readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer, const TableSchema& tbl) const;
 
     // Schema helpers (public for execution plan use)
@@ -389,6 +391,11 @@ public:
     std::vector<std::string> getUserPermissions(const std::string& dbname,
                                                  const std::string& tablename,
                                                  const std::string& username) const;
+
+    // Partition pruning: given conditions, return partition names to scan
+    // (empty = all partitions, only applicable for partitioned tables)
+    std::vector<std::string> getTargetPartitions(const TableSchema& tbl,
+                                                  const std::vector<Condition>& conds) const;
 
     // Lock manager access
     LockManager& getLockManager() { return lockManager_; }

@@ -487,6 +487,53 @@ std::string StorageEngine::getPartitionName(const TableSchema& tbl, const std::s
     return "";
 }
 
+std::vector<std::string> StorageEngine::getTargetPartitions(
+    const TableSchema& tbl, const std::vector<Condition>& conds) const {
+    std::vector<std::string> result;
+    if (tbl.partitionType == TableSchema::PartitionType::None) return result;
+    if (tbl.partitionKey.empty()) return result;
+
+    // Collect partition-key related conditions
+    for (const auto& c : conds) {
+        if (c.colName != tbl.partitionKey) continue;
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            if (c.op == "=") {
+                result.push_back(getPartitionName(tbl, c.value));
+            } else if (c.op == "<") {
+                for (const auto& rp : tbl.rangePartitions) {
+                    if (rp.second > c.value) result.push_back(rp.first);
+                }
+            } else if (c.op == "<=") {
+                for (const auto& rp : tbl.rangePartitions) {
+                    if (rp.second >= c.value) result.push_back(rp.first);
+                }
+            } else if (c.op == ">") {
+                for (const auto& rp : tbl.rangePartitions) {
+                    if (rp.second <= c.value) result.push_back(rp.first);
+                }
+                if (!tbl.rangePartitions.empty()) result.push_back(tbl.rangePartitions.back().first);
+            } else if (c.op == ">=") {
+                for (const auto& rp : tbl.rangePartitions) {
+                    if (rp.second < c.value) result.push_back(rp.first);
+                }
+                if (!tbl.rangePartitions.empty()) result.push_back(tbl.rangePartitions.back().first);
+            }
+        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+            if (c.op == "=") {
+                result.push_back(getPartitionName(tbl, c.value));
+            }
+        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+            if (c.op == "=") {
+                result.push_back(getPartitionName(tbl, c.value));
+            }
+        }
+    }
+    // Deduplicate
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
 std::filesystem::path StorageEngine::walPath(const std::string& dbname) const {
     return dbPath(dbname) / "wal.log";
 }
@@ -929,20 +976,23 @@ void StorageEngine::decodeRid(int64_t rid, uint32_t& pageId, uint16_t& slotId) {
 
 void StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
                                 const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
-                                const ReadView* readView) const {
+                                const ReadView* readView,
+                                const std::vector<std::string>& targetPartitions) const {
     const ReadView* rv = readView;
     if (!rv && inTransaction_) rv = &readView_;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType != TableSchema::PartitionType::None) {
-        // Partitioned table: iterate over all partition files
-        std::vector<std::string> partNames;
-        if (tbl.partitionType == TableSchema::PartitionType::Range) {
-            for (const auto& rp : tbl.rangePartitions) partNames.push_back(rp.first);
-        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
-            for (const auto& lp : tbl.listPartitions) partNames.push_back(lp.first);
-        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
-            for (size_t i = 0; i < tbl.hashPartitions; ++i) partNames.push_back("p" + std::to_string(i));
+        // Partitioned table: iterate over target partition files (or all if empty)
+        std::vector<std::string> partNames = targetPartitions;
+        if (partNames.empty()) {
+            if (tbl.partitionType == TableSchema::PartitionType::Range) {
+                for (const auto& rp : tbl.rangePartitions) partNames.push_back(rp.first);
+            } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+                for (const auto& lp : tbl.listPartitions) partNames.push_back(lp.first);
+            } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < tbl.hashPartitions; ++i) partNames.push_back("p" + std::to_string(i));
+            }
         }
         for (const auto& pname : partNames) {
             auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize());
@@ -3045,6 +3095,34 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     }
 
     // Full table scan via page iterator
+    // Partition pruning: if conditions involve partition key, scan only matching partitions
+    if (tbl.partitionType != TableSchema::PartitionType::None) {
+        auto targetParts = getTargetPartitions(tbl, conds);
+        if (!targetParts.empty()) {
+            for (const auto& pname : targetParts) {
+                auto ppa = std::make_unique<PageAllocator>(
+                    partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize());
+                if (!ppa->open()) continue;
+                uint32_t np = ppa->numPages();
+                for (uint32_t pid = 1; pid < np; ++pid) {
+                    char* buf = ppa->fetchPage(pid);
+                    Page page(buf);
+                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                        int64_t rid = encodeRid(pid, sid);
+                        bool match = true;
+                        std::string row(data, len);
+                        for (const auto& c : conds) {
+                            if (!evalConditionOnRow(c, row, tbl)) { match = false; break; }
+                        }
+                        if (match) ids.insert(rid);
+                    });
+                    ppa->unpinPage(pid);
+                }
+                ppa->close();
+            }
+            return ids;
+        }
+    }
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
         int64_t rid = encodeRid(pageId, slotId);
         bool match = true;
@@ -3817,6 +3895,18 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
         });
+    } else if (tbl.partitionType != TableSchema::PartitionType::None) {
+        // Partitioned table: use forEachRow with partition pruning + in-callback filtering
+        auto targetParts = getTargetPartitions(tbl, conds);
+        const ReadView* rv = inTransaction_ ? &readView_ : nullptr;
+        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+            std::string row(data, len);
+            bool match = true;
+            for (const auto& c : conds) {
+                if (!evalConditionOnRow(c, row, tbl)) { match = false; break; }
+            }
+            if (match) matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
+        }, rv, targetParts);
     } else {
         auto ids = filterRows(dbname, tablename, conds);
         for (int64_t rid : ids) {
