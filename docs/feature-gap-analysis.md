@@ -37,16 +37,16 @@
 | DDL | CREATE/DROP DATABASE/TABLE/INDEX/VIEW，ALTER TABLE ADD/DROP COLUMN，CREATE TEMPORARY TABLE |
 | DML | INSERT/SELECT/UPDATE/DELETE |
 | 查询 | WHERE、ORDER BY (多列/NULLS FIRST/LAST)、LIMIT/OFFSET、DISTINCT、GROUP BY (多列)/HAVING、JOIN (INNER/LEFT/RIGHT/SELF/FULL OUTER/CROSS)、UNION/UNION ALL/INTERSECT/EXCEPT、子查询 (IN/EXISTS/ANY/ALL/标量/派生表)、CTE (WITH RECURSIVE)、聚合 (COUNT/MAX/MIN/SUM/AVG/COUNT DISTINCT)、窗口函数 (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD/NTILE/FIRST_VALUE/LAST_VALUE + PARTITION BY)、EXPLAIN、REGEXP、MERGE INTO、UPSERT |
-| 数据类型 | INT、TINYINT、LONG、CHAR(n)、VARCHAR(n)、DATE、SERIAL、BOOLEAN、FLOAT、DOUBLE、DECIMAL、TEXT、TIME、TIMESTAMP、TIMESTAMPTZ、DATETIME、JSON、UUID |
+| 数据类型 | INT、TINYINT、LONG、CHAR(n)、VARCHAR(n)、BINARY(n)、VARBINARY(n)、BLOB、DATE、SERIAL、BOOLEAN、FLOAT、DOUBLE、DECIMAL、TEXT、TIME、TIMESTAMP、TIMESTAMPTZ、DATETIME、JSON、UUID |
 | 约束 | PRIMARY KEY (含复合)、NOT NULL、UNIQUE (含复合)、FOREIGN KEY (含 ON DELETE/多列)、DEFAULT、CHECK |
 | 事务 | BEGIN/COMMIT/ROLLBACK、SAVEPOINT/RELEASE/ROLLBACK TO、只读事务 (READ ONLY)、4 级隔离 (RU/RC/RR/SERIALIZABLE)、MVCC ReadView、WAL、Undo Log、Checkpoint |
-| 索引 | B+ 树主键索引、B+ 树二级索引、复合索引 |
-| 存储 | Slotted Page (4KB)、Buffer Pool (LRU)、页校验和 (Fletcher-16)、空闲页链表、VACUUM、VARCHAR 变长行 |
-| 查询优化 | 火山模型、成本估计、JOIN 算法选择 (NLJ/Hash/Merge)、索引选择、统计信息 (ANALYZE) |
-| 并发 | 表级读写锁、死锁检测 |
+| 索引 | B+ 树主键索引、B+ 树二级索引、复合索引、索引列排序 (ASC/DESC)、Hash 索引 |
+| 存储 | Slotted Page (4KB)、Buffer Pool (LRU)、页校验和 (Fletcher-16)、空闲页链表、VACUUM、VARCHAR 变长行、表分区 (Range/List/Hash) |
+| 查询优化 | 火山模型、成本估计、JOIN 算法选择 (NLJ/Hash/Merge)、JOIN 顺序优化、索引选择、谓词下推、统计信息 (ANALYZE)、直方图 |
+| 并发 | 表级读写锁、行级锁、间隙锁/Next-Key 锁、死锁检测 |
 | 网络 | TCP 服务、独立 Session、连接管理 |
 | 工具 | CSV 导入/导出、预编译语句、SHOW CONNECTIONS/STATUS/DATABASES/TABLES/COLUMNS |
-| 权限 | 用户登录、表级 GRANT/REVOKE |
+| 权限 | 用户登录、表级 GRANT/REVOKE、数据库级权限 |
 | 触发器 | CREATE/DROP TRIGGER、行级/语句级触发器 (FOR EACH ROW/STATEMENT)、SHOW TRIGGERS |
 
 ---
@@ -971,7 +971,7 @@
 | **已实现** | ~120 | 100% |
 | **P0 (关键)** | 24 | **100%** |
 | **P1 (重要)** | 36 | **100%** |
-| **P2 (增强)** | 44 | ~43% |
+| **P2 (增强)** | 44 | ~41% |
 | **P3 (高级)** | 60+ | ~5% |
 
 **当前定位**：P0 全部完成！已实现 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树/Hash 索引 + 复合索引 + 覆盖索引 + 行级锁 + 查询优化器 + SSL/TLS + 密码哈希，对标 SQLite 3.x 水平。
