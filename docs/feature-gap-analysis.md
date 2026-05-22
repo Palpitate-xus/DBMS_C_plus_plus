@@ -180,7 +180,7 @@
 | **PERCENT_RANK / CUME_DIST** | ❌ | ✅ | P3 |
 | **PARTITION BY 子句** | ✅ | ✅ | - |
 | **聚合函数 OVER 子句** | ✅ | ✅ | - |
-| **窗口帧 (ROWS/RANGE BETWEEN)** | ❌ | ✅ | P2 |
+| **窗口帧 (ROWS/RANGE BETWEEN)** | ✅ | ✅ | - |
 
 ### 2.12 INSERT 扩展
 
@@ -922,7 +922,7 @@
 | 7 | ~~DATE_TRUNC / DATEDIFF / DATE_FORMAT~~ ✅ |
 | 8 | ~~STRING_AGG / GROUP_CONCAT~~ ✅ |
 | 9 | ~~NTILE / FIRST_VALUE / LAST_VALUE~~ ✅ |
-| 10 | 窗口帧 (ROWS BETWEEN) |
+| 10 | ~~窗口帧 (ROWS BETWEEN)~~ ✅ |
 | 11 | MERGE INTO ✅ |
 | 12 | NULLS FIRST/LAST ✅ |
 | 13 | ~~无符号数值类型~~ ✅ |
@@ -971,7 +971,7 @@
 | **已实现** | ~120 | 100% |
 | **P0 (关键)** | 24 | **100%** |
 | **P1 (重要)** | 36 | **100%** |
-| **P2 (增强)** | 44 | ~57% |
+| **P2 (增强)** | 44 | ~59% |
 | **P3 (高级)** | 60+ | ~5% |
 
 **当前定位**：P0 全部完成！已实现 SQL-92 几乎全部基础功能 + SQL:1999 核心扩展（CTE、窗口函数、派生表、标量子查询）+ MVCC + B+ 树/Hash 索引 + 复合索引 + 覆盖索引 + 行级锁 + 查询优化器 + SSL/TLS + 密码哈希，对标 SQLite 3.x 水平。

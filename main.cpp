@@ -366,6 +366,12 @@ struct WindowFunc {
     bool orderByAsc;
     vector<string> partitionByCols;
     bool isAggregate = false;
+    // Frame: rows between <start> and <end>
+    // frameStartOffset / frameEndOffset are relative to current row index within partition
+    // -1 means unbounded (partition start/end), 0 means current row
+    int frameStartOffset = -1; // -1 = unbounded preceding, N = N preceding
+    int frameEndOffset = 0;    // 0 = current row, N = N following, -1 = unbounded following
+    bool hasFrame = false;
 };
 
 static bool parseWindowFunc(const string& item, WindowFunc& wf) {
@@ -410,6 +416,45 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
     // ORDER BY is optional for window functions like row_number with partition only
     if (orderPos != string::npos) {
         string orderRest = trim(overContent.substr(orderPos + 8));
+        // Strip ROWS BETWEEN clause from orderRest
+        size_t rowsPos = toLower(orderRest).find("rows");
+        if (rowsPos != string::npos) {
+            string frameStr = trim(orderRest.substr(rowsPos));
+            orderRest = trim(orderRest.substr(0, rowsPos));
+            // Parse "rows between N preceding and current row"
+            string lfs = toLower(frameStr);
+            if (lfs.find("between") != string::npos) {
+                wf.hasFrame = true;
+                // start bound
+                if (lfs.find("unbounded preceding") != string::npos) {
+                    wf.frameStartOffset = -1;
+                } else {
+                    size_t precPos = lfs.find("preceding");
+                    if (precPos != string::npos) {
+                        string numStr;
+                        for (size_t i = lfs.find("between") + 7; i < precPos; ++i) {
+                            if (isdigit(static_cast<unsigned char>(lfs[i]))) numStr += lfs[i];
+                        }
+                        if (!numStr.empty()) wf.frameStartOffset = std::stoi(numStr);
+                    }
+                }
+                // end bound
+                if (lfs.find("unbounded following") != string::npos) {
+                    wf.frameEndOffset = -1;
+                } else if (lfs.find("current row") != string::npos) {
+                    wf.frameEndOffset = 0;
+                } else {
+                    size_t follPos = lfs.find("following");
+                    if (follPos != string::npos) {
+                        string numStr;
+                        for (size_t i = lfs.rfind(" and ", follPos) + 5; i < follPos; ++i) {
+                            if (isdigit(static_cast<unsigned char>(lfs[i]))) numStr += lfs[i];
+                        }
+                        if (!numStr.empty()) wf.frameEndOffset = std::stoi(numStr);
+                    }
+                }
+            }
+        }
         vector<string> ot = tokenize(orderRest);
         if (!ot.empty()) {
             wf.orderByCol = ot[0];
@@ -5341,31 +5386,45 @@ bool execute(const string& rawSql, Session& s) {
                 }
                 // Compute aggregate per partition
                 for (const auto& pr : partRows) {
-                    int64_t sum = 0, count = 0;
-                    bool hasMax = false, hasMin = false;
-                    int64_t maxVal = 0, minVal = 0;
-                    for (size_t ri : pr.second) {
-                        if (wf.name == "count") {
-                            count++;
-                            continue;
+                    const auto& idxs = pr.second;
+                    for (size_t ii = 0; ii < idxs.size(); ++ii) {
+                        size_t ri = idxs[ii];
+                        // Determine frame boundaries within this partition
+                        size_t fStart = 0, fEnd = idxs.size();
+                        if (wf.hasFrame) {
+                            if (wf.frameStartOffset >= 0) {
+                                fStart = (ii >= static_cast<size_t>(wf.frameStartOffset)) ? (ii - wf.frameStartOffset) : 0;
+                            }
+                            if (wf.frameEndOffset >= 0) {
+                                fEnd = ii + wf.frameEndOffset + 1;
+                                if (fEnd > idxs.size()) fEnd = idxs.size();
+                            }
                         }
-                        auto it = rows[ri].find(wf.arg);
-                        if (it == rows[ri].end()) continue;
-                        if (it->second.empty()) continue;
-                        try {
-                            int64_t v = stoll(it->second);
-                            if (wf.name == "sum" || wf.name == "avg") { sum += v; count++; }
-                            if (wf.name == "max") { if (!hasMax || v > maxVal) { maxVal = v; hasMax = true; } }
-                            if (wf.name == "min") { if (!hasMin || v < minVal) { minVal = v; hasMin = true; } }
-                        } catch (...) {}
-                    }
-                    string aggVal;
-                    if (wf.name == "sum") aggVal = to_string(sum);
-                    else if (wf.name == "count") aggVal = to_string(count);
-                    else if (wf.name == "avg") aggVal = (count == 0 ? "0" : to_string(static_cast<double>(sum) / count));
-                    else if (wf.name == "max") aggVal = hasMax ? to_string(maxVal) : "NULL";
-                    else if (wf.name == "min") aggVal = hasMin ? to_string(minVal) : "NULL";
-                    for (size_t ri : pr.second) {
+                        int64_t sum = 0, count = 0;
+                        bool hasMax = false, hasMin = false;
+                        int64_t maxVal = 0, minVal = 0;
+                        for (size_t fj = fStart; fj < fEnd; ++fj) {
+                            size_t rj = idxs[fj];
+                            if (wf.name == "count") {
+                                count++;
+                                continue;
+                            }
+                            auto it = rows[rj].find(wf.arg);
+                            if (it == rows[rj].end()) continue;
+                            if (it->second.empty()) continue;
+                            try {
+                                int64_t v = stoll(it->second);
+                                if (wf.name == "sum" || wf.name == "avg") { sum += v; count++; }
+                                if (wf.name == "max") { if (!hasMax || v > maxVal) { maxVal = v; hasMax = true; } }
+                                if (wf.name == "min") { if (!hasMin || v < minVal) { minVal = v; hasMin = true; } }
+                            } catch (...) {}
+                        }
+                        string aggVal;
+                        if (wf.name == "sum") aggVal = to_string(sum);
+                        else if (wf.name == "count") aggVal = to_string(count);
+                        else if (wf.name == "avg") aggVal = (count == 0 ? "0" : to_string(static_cast<double>(sum) / count));
+                        else if (wf.name == "max") aggVal = hasMax ? to_string(maxVal) : "NULL";
+                        else if (wf.name == "min") aggVal = hasMin ? to_string(minVal) : "NULL";
                         aggCache[wi][ri] = aggVal;
                     }
                 }
