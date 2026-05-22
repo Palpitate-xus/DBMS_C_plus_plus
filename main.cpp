@@ -17,6 +17,7 @@
 #include "logs.h"
 #include "permissions.h"
 #include "Session.h"
+#include "Config.h"
 
 using namespace std;
 using dbms::Column;
@@ -77,6 +78,9 @@ static std::mutex g_slowQueryMutex;
 void logSlowQuery(const std::string& sql, double ms,
                   const std::string& username = "",
                   const std::string& dbname = "");
+
+// Forward declaration for SHOW VARIABLES
+extern dbms::Config g_config;
 
 // ========================================================================
 // Utility
@@ -4013,6 +4017,10 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
+        if (rest == "variables") {
+            g_config.printAll();
+            return false;
+        }
         if (rest == "deadlocks") {
             auto entries = g_engine.getLockManager().getDeadlockLog();
             if (entries.empty()) {
@@ -5687,7 +5695,15 @@ bool execute(const string& rawSql, Session& s) {
 // ========================================================================
 // Main
 // ========================================================================
+dbms::Config g_config;
+
 int main(int argc, char* argv[]) {
+    // Load runtime configuration
+    if (g_config.load("dbms.conf")) {
+        g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
+        g_checkpointInterval = g_config.checkpointInterval;
+    }
+
     // Server mode: ./dbms_main --server PORT
     if (argc >= 3 && std::string(argv[1]) == "--server") {
         int port = std::stoi(argv[2]);
@@ -5696,6 +5712,7 @@ int main(int argc, char* argv[]) {
     }
 
     Session s;
+    s.statementTimeoutMs = g_config.statementTimeoutMs;
     // Register trigger executor callback
     g_engine.setTriggerExecutor([&](const std::string& actionSql) -> bool {
         Session triggerSession = s;
