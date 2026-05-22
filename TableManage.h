@@ -383,11 +383,17 @@ public:
     // Table-level permissions
     enum class TablePrivilege { Select, Insert, Update, Delete, All };
     void grant(const std::string& dbname, const std::string& tablename,
-               const std::string& username, TablePrivilege priv);
+               const std::string& username, TablePrivilege priv,
+               const std::vector<std::string>& columns = {});
     void revoke(const std::string& dbname, const std::string& tablename,
-                const std::string& username, TablePrivilege priv);
+                const std::string& username, TablePrivilege priv,
+                const std::vector<std::string>& columns = {});
     bool hasPermission(const std::string& dbname, const std::string& tablename,
                        const std::string& username, TablePrivilege priv) const;
+    // Column-level permission check: returns true if user has privilege on ALL given columns
+    bool hasColumnPermission(const std::string& dbname, const std::string& tablename,
+                             const std::string& username, TablePrivilege priv,
+                             const std::vector<std::string>& columns) const;
     std::vector<std::string> getUserPermissions(const std::string& dbname,
                                                  const std::string& tablename,
                                                  const std::string& username) const;

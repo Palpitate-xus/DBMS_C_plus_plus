@@ -1792,7 +1792,133 @@ static bool checkTablePermission(Session& s, const string& tname,
                                   dbms::StorageEngine::TablePrivilege priv) {
     if (s.permission == 1) return true; // admin bypass
     if (!g_engine.hasPermission(s.currentDB, tname, s.username, priv)) {
+        // If there are column-level permissions for this privilege type,
+        // don't reject here; let the column-level check handle it.
+        if (priv == dbms::StorageEngine::TablePrivilege::Select ||
+            priv == dbms::StorageEngine::TablePrivilege::Insert ||
+            priv == dbms::StorageEngine::TablePrivilege::Update) {
+            auto perms = g_engine.getUserPermissions(s.currentDB, tname, s.username);
+            string target = (priv == dbms::StorageEngine::TablePrivilege::Select) ? "select" :
+                           (priv == dbms::StorageEngine::TablePrivilege::Insert) ? "insert" : "update";
+            for (const auto& p : perms) {
+                if (p == target || p == "all") return true;
+            }
+        }
         cout << "permission denied on table " << tname << endl;
+        return false;
+    }
+    return true;
+}
+
+// Check column-level SELECT permission. columnsStr is comma-separated column list (or "*").
+static bool checkSelectColumnPermission(Session& s, const string& tname,
+                                        const string& columnsStr) {
+    if (s.permission == 1) return true;
+    if (columnsStr == "*") {
+        // SELECT * requires table-level SELECT or ALL columns allowed individually
+        // For simplicity: if any column-level restrictions exist, deny SELECT *
+        auto perms = g_engine.getUserPermissions(s.currentDB, tname, s.username);
+        for (const auto& p : perms) {
+            if (p == "select" || p == "all") {
+                // Need to check if this is table-level or column-level
+                // If table-level, hasPermission would have returned true already
+                // So if we reach here, it's column-level - deny *
+            }
+        }
+        // Actually: if hasPermission is true, we already passed table-level check
+        // If hasPermission is false but hasColumnPermission might be true for some columns
+        // For SELECT *, we need all columns or table-level permission
+        if (!g_engine.hasPermission(s.currentDB, tname, s.username,
+                                     dbms::StorageEngine::TablePrivilege::Select)) {
+            // Check if ALL columns of the table are individually allowed
+            auto schema = g_engine.getTableSchema(s.currentDB, tname);
+            if (schema.len == 0) return true; // no columns = no restriction
+            vector<string> allCols;
+            for (size_t i = 0; i < schema.len; ++i) allCols.push_back(schema.cols[i].dataName);
+            if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+                                               dbms::StorageEngine::TablePrivilege::Select, allCols)) {
+                cout << "permission denied: SELECT * requires access to all columns on table " << tname << endl;
+                return false;
+            }
+        }
+        return true;
+    }
+    // Parse explicit column list
+    vector<string> cols;
+    stringstream ss(columnsStr);
+    string item;
+    while (getline(ss, item, ',')) {
+        string col = trim(item);
+        // Strip alias prefix like "t.col" or aggregate expressions
+        size_t dot = col.find('.');
+        if (dot != string::npos) col = trim(col.substr(dot + 1));
+        size_t lp = col.find('(');
+        if (lp != string::npos) {
+            // aggregate(col) - extract inner column name
+            size_t rp = col.find(')', lp);
+            if (rp != string::npos) {
+                string inner = trim(col.substr(lp + 1, rp - lp - 1));
+                if (inner != "*" && inner != "distinct") col = inner;
+                else continue; // count(*) doesn't need column permission
+            }
+        }
+        if (!col.empty() && col != "*") cols.push_back(col);
+    }
+    if (cols.empty()) return true;
+    if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+                                       dbms::StorageEngine::TablePrivilege::Select, cols)) {
+        cout << "permission denied: SELECT on restricted columns of table " << tname << endl;
+        return false;
+    }
+    return true;
+}
+
+// Check column-level UPDATE permission on SET columns.
+static bool checkUpdateColumnPermission(Session& s, const string& tname,
+                                        const string& setClause) {
+    if (s.permission == 1) return true;
+    vector<string> cols;
+    stringstream ss(setClause);
+    string item;
+    while (getline(ss, item, ',')) {
+        string part = trim(item);
+        size_t eq = part.find('=');
+        if (eq != string::npos) {
+            string col = trim(part.substr(0, eq));
+            size_t dot = col.find('.');
+            if (dot != string::npos) col = trim(col.substr(dot + 1));
+            if (!col.empty()) cols.push_back(col);
+        }
+    }
+    if (cols.empty()) return true;
+    if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+                                       dbms::StorageEngine::TablePrivilege::Update, cols)) {
+        cout << "permission denied: UPDATE on restricted columns of table " << tname << endl;
+        return false;
+    }
+    return true;
+}
+
+// Check column-level INSERT permission on given columns (empty = all columns).
+static bool checkInsertColumnPermission(Session& s, const string& tname,
+                                        const vector<string>& cols) {
+    if (s.permission == 1) return true;
+    if (cols.empty()) {
+        // INSERT INTO t VALUES (...) - check all columns
+        auto schema = g_engine.getTableSchema(s.currentDB, tname);
+        if (schema.len == 0) return true;
+        vector<string> allCols;
+        for (size_t i = 0; i < schema.len; ++i) allCols.push_back(schema.cols[i].dataName);
+        if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+                                           dbms::StorageEngine::TablePrivilege::Insert, allCols)) {
+            cout << "permission denied: INSERT requires access to all columns on table " << tname << endl;
+            return false;
+        }
+        return true;
+    }
+    if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+                                       dbms::StorageEngine::TablePrivilege::Insert, cols)) {
+        cout << "permission denied: INSERT on restricted columns of table " << tname << endl;
         return false;
     }
     return true;
@@ -2644,6 +2770,17 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         string colsStr = trim(sql.substr(colStart + 1, colEnd - colStart - 1));
+        // Column-level permission check
+        {
+            vector<string> insertCols;
+            stringstream css(colsStr);
+            string item;
+            while (getline(css, item, ',')) {
+                string c = trim(item);
+                if (!c.empty()) insertCols.push_back(c);
+            }
+            if (!isTempTable(s, tname) && !checkInsertColumnPermission(s, tname, insertCols)) return true;
+        }
 
         // Check for INSERT INTO ... SELECT
         size_t selectPos = sql.find("select", colEnd);
@@ -3341,6 +3478,15 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Update)) return true;
+        {
+            size_t wPos = sql.find("where", setPos);
+            size_t lPos = sql.find("limit", setPos);
+            size_t setEnd = sql.size();
+            if (wPos != string::npos) setEnd = wPos;
+            if (lPos != string::npos && lPos < setEnd) setEnd = lPos;
+            string setClause = trim(sql.substr(setPos + 3, setEnd - setPos - 3));
+            if (!isTempTable(s, tname) && !checkUpdateColumnPermission(s, tname, setClause)) return true;
+        }
 
         size_t wherePos = sql.find("where", setPos);
         size_t setEndPos = (wherePos == std::string::npos) ? sql.size() : wherePos;
@@ -4356,7 +4502,7 @@ bool execute(const string& rawSql, Session& s) {
         return true;
     }
 
-    // GRANT privilege ON table TO user
+    // GRANT privilege[(col1,col2)] ON table TO user
     if (sql.substr(0, 6) == "grant ") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
@@ -4364,12 +4510,29 @@ bool execute(const string& rawSql, Session& s) {
         size_t onPos = rest.find(" on ");
         size_t toPos = rest.find(" to ");
         if (onPos == string::npos || toPos == string::npos) {
-            cout << "SQL syntax error: GRANT privilege ON table TO user" << endl;
+            cout << "SQL syntax error: GRANT privilege[(cols)] ON table TO user" << endl;
             return true;
         }
-        string privStr = trim(rest.substr(0, onPos));
+        string privPart = trim(rest.substr(0, onPos));
         string tname = trim(rest.substr(onPos + 4, toPos - onPos - 4));
         string uname = trim(rest.substr(toPos + 4));
+        // Parse privilege and optional column list: select(col1,col2)
+        string privStr;
+        vector<string> colList;
+        size_t lp = privPart.find('(');
+        size_t rp = privPart.find(')');
+        if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+            privStr = trim(privPart.substr(0, lp));
+            string cols = privPart.substr(lp + 1, rp - lp - 1);
+            stringstream css(cols);
+            string c;
+            while (getline(css, c, ',')) {
+                string tc = trim(c);
+                if (!tc.empty()) colList.push_back(tc);
+            }
+        } else {
+            privStr = privPart;
+        }
         dbms::StorageEngine::TablePrivilege priv;
         if (privStr == "select") priv = dbms::StorageEngine::TablePrivilege::Select;
         else if (privStr == "insert") priv = dbms::StorageEngine::TablePrivilege::Insert;
@@ -4380,13 +4543,22 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
-        g_engine.grant(s.currentDB, tname, uname, priv);
+        g_engine.grant(s.currentDB, tname, uname, priv, colList);
         string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
-        cout << "Granted " << privStr << " on " << scope << " to " << uname << endl;
+        if (!colList.empty()) {
+            string cols;
+            for (size_t i = 0; i < colList.size(); ++i) {
+                if (i > 0) cols += ",";
+                cols += colList[i];
+            }
+            cout << "Granted " << privStr << "(" << cols << ") on " << scope << " to " << uname << endl;
+        } else {
+            cout << "Granted " << privStr << " on " << scope << " to " << uname << endl;
+        }
         return false;
     }
 
-    // REVOKE privilege ON table FROM user
+    // REVOKE privilege[(col1,col2)] ON table FROM user
     if (sql.substr(0, 7) == "revoke ") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
@@ -4394,12 +4566,28 @@ bool execute(const string& rawSql, Session& s) {
         size_t onPos = rest.find(" on ");
         size_t fromPos = rest.find(" from ");
         if (onPos == string::npos || fromPos == string::npos) {
-            cout << "SQL syntax error: REVOKE privilege ON table FROM user" << endl;
+            cout << "SQL syntax error: REVOKE privilege[(cols)] ON table FROM user" << endl;
             return true;
         }
-        string privStr = trim(rest.substr(0, onPos));
+        string privPart = trim(rest.substr(0, onPos));
         string tname = trim(rest.substr(onPos + 4, fromPos - onPos - 4));
         string uname = trim(rest.substr(fromPos + 6));
+        string privStr;
+        vector<string> colList;
+        size_t lp = privPart.find('(');
+        size_t rp = privPart.find(')');
+        if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+            privStr = trim(privPart.substr(0, lp));
+            string cols = privPart.substr(lp + 1, rp - lp - 1);
+            stringstream css(cols);
+            string c;
+            while (getline(css, c, ',')) {
+                string tc = trim(c);
+                if (!tc.empty()) colList.push_back(tc);
+            }
+        } else {
+            privStr = privPart;
+        }
         dbms::StorageEngine::TablePrivilege priv;
         if (privStr == "select") priv = dbms::StorageEngine::TablePrivilege::Select;
         else if (privStr == "insert") priv = dbms::StorageEngine::TablePrivilege::Insert;
@@ -4410,9 +4598,18 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
-        g_engine.revoke(s.currentDB, tname, uname, priv);
+        g_engine.revoke(s.currentDB, tname, uname, priv, colList);
         string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
-        cout << "Revoked " << privStr << " on " << scope << " from " << uname << endl;
+        if (!colList.empty()) {
+            string cols;
+            for (size_t i = 0; i < colList.size(); ++i) {
+                if (i > 0) cols += ",";
+                cols += colList[i];
+            }
+            cout << "Revoked " << privStr << "(" << cols << ") on " << scope << " from " << uname << endl;
+        } else {
+            cout << "Revoked " << privStr << " on " << scope << " from " << uname << endl;
+        }
         return false;
     }
 
@@ -4947,6 +5144,9 @@ bool execute(const string& rawSql, Session& s) {
             }
             if (!isTempTable(s, leftTableName) && !checkTablePermission(s, leftTableName, dbms::StorageEngine::TablePrivilege::Select)) return true;
             if (!isTempTable(s, rightTableName) && !checkTablePermission(s, rightTableName, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            // Column-level permission check for JOIN: verify all selected columns
+            if (!isTempTable(s, leftTableName) && !checkSelectColumnPermission(s, leftTableName, columns)) return true;
+            if (!isTempTable(s, rightTableName) && !checkSelectColumnPermission(s, rightTableName, columns)) return true;
 
             set<string> selectCols;
             bool selectAll = (columns == "*");
@@ -5093,6 +5293,7 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         if (!isTempTable(s, tnameOrig) && !checkTablePermission(s, tnameOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
+        if (!isTempTable(s, tnameOrig) && !checkSelectColumnPermission(s, tnameOrig, columns)) return true;
 
         vector<dbms::StorageEngine::OrderBySpec> orderBySpecs;
         vector<dbms::StorageEngine::OrderBySpec> exprOrderBySpecs; // expressions sorted post-query

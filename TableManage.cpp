@@ -6669,38 +6669,84 @@ static std::string privToStr(StorageEngine::TablePrivilege p) {
     return "";
 }
 
+// Permission entry: user|table|priv -> set of columns (empty = table-level)
+static std::string permKey(const std::string& u, const std::string& t, const std::string& p) {
+    return u + "|" + t + "|" + p;
+}
+
+static std::vector<std::string> parseColumns(const std::string& colsStr) {
+    std::vector<std::string> cols;
+    std::stringstream ss(colsStr);
+    std::string col;
+    while (std::getline(ss, col, ',')) {
+        if (!col.empty()) cols.push_back(col);
+    }
+    return cols;
+}
+
+static std::string joinColumns(const std::vector<std::string>& cols) {
+    std::string s;
+    for (size_t i = 0; i < cols.size(); ++i) {
+        if (i > 0) s += ",";
+        s += cols[i];
+    }
+    return s;
+}
+
 void StorageEngine::grant(const std::string& dbname, const std::string& tablename,
-                          const std::string& username, TablePrivilege priv) {
+                          const std::string& username, TablePrivilege priv,
+                          const std::vector<std::string>& columns) {
     auto ppath = permPath(dbname);
-    // Read existing permissions
-    std::map<std::string, std::set<std::string>> perms; // user+table -> privileges
+    // Read: key -> set of columns (empty set = table-level)
+    std::map<std::string, std::set<std::string>> perms;
     if (std::filesystem::exists(ppath)) {
         std::ifstream ifs(ppath);
         std::string line;
         while (std::getline(ifs, line)) {
             if (line.empty()) continue;
             std::stringstream ss(line);
-            std::string u, t, p;
+            std::string u, t, p, cols;
             ss >> u >> t >> p;
-            perms[u + "|" + t].insert(p);
+            std::getline(ss, cols); // rest may be columns
+            if (!cols.empty() && cols[0] == ' ') cols = cols.substr(1);
+            auto key = permKey(u, t, p);
+            if (!cols.empty()) {
+                for (const auto& c : parseColumns(cols)) perms[key].insert(c);
+            } else {
+                perms[key] = {}; // table-level marker
+            }
         }
     }
-    std::string key = username + "|" + tablename;
-    perms[key].insert(privToStr(priv));
+    auto key = permKey(username, tablename, privToStr(priv));
+    if (columns.empty()) {
+        perms[key] = {}; // table-level
+    } else {
+        if (perms[key].empty()) {
+            // If transitioning from table-level to column-level, start fresh
+            auto it = perms.find(key);
+            if (it != perms.end() && it->second.empty()) {
+                it->second.clear(); // was table-level
+            }
+        }
+        for (const auto& c : columns) perms[key].insert(c);
+    }
     // Write back
     std::ofstream ofs(ppath);
     for (const auto& kv : perms) {
-        size_t pipe = kv.first.find('|');
-        std::string u = kv.first.substr(0, pipe);
-        std::string t = kv.first.substr(pipe + 1);
-        for (const auto& p : kv.second) {
-            ofs << u << " " << t << " " << p << "\n";
-        }
+        size_t p1 = kv.first.find('|');
+        size_t p2 = kv.first.find('|', p1 + 1);
+        std::string u = kv.first.substr(0, p1);
+        std::string t = kv.first.substr(p1 + 1, p2 - p1 - 1);
+        std::string p = kv.first.substr(p2 + 1);
+        ofs << u << " " << t << " " << p;
+        if (!kv.second.empty()) ofs << " " << joinColumns(std::vector<std::string>(kv.second.begin(), kv.second.end()));
+        ofs << "\n";
     }
 }
 
 void StorageEngine::revoke(const std::string& dbname, const std::string& tablename,
-                           const std::string& username, TablePrivilege priv) {
+                           const std::string& username, TablePrivilege priv,
+                           const std::vector<std::string>& columns) {
     auto ppath = permPath(dbname);
     if (!std::filesystem::exists(ppath)) return;
     std::map<std::string, std::set<std::string>> perms;
@@ -6710,25 +6756,38 @@ void StorageEngine::revoke(const std::string& dbname, const std::string& tablena
         while (std::getline(ifs, line)) {
             if (line.empty()) continue;
             std::stringstream ss(line);
-            std::string u, t, p;
+            std::string u, t, p, cols;
             ss >> u >> t >> p;
-            perms[u + "|" + t].insert(p);
+            std::getline(ss, cols);
+            if (!cols.empty() && cols[0] == ' ') cols = cols.substr(1);
+            auto key = permKey(u, t, p);
+            if (!cols.empty()) {
+                for (const auto& c : parseColumns(cols)) perms[key].insert(c);
+            } else {
+                perms[key] = {};
+            }
         }
     }
-    std::string key = username + "|" + tablename;
+    auto key = permKey(username, tablename, privToStr(priv));
     auto it = perms.find(key);
     if (it != perms.end()) {
-        it->second.erase(privToStr(priv));
-        if (it->second.empty()) perms.erase(it);
+        if (columns.empty()) {
+            perms.erase(it); // revoke entire privilege
+        } else {
+            for (const auto& c : columns) it->second.erase(c);
+            if (it->second.empty()) perms.erase(it);
+        }
     }
     std::ofstream ofs(ppath);
     for (const auto& kv : perms) {
-        size_t pipe = kv.first.find('|');
-        std::string u = kv.first.substr(0, pipe);
-        std::string t = kv.first.substr(pipe + 1);
-        for (const auto& p : kv.second) {
-            ofs << u << " " << t << " " << p << "\n";
-        }
+        size_t p1 = kv.first.find('|');
+        size_t p2 = kv.first.find('|', p1 + 1);
+        std::string u = kv.first.substr(0, p1);
+        std::string t = kv.first.substr(p1 + 1, p2 - p1 - 1);
+        std::string p = kv.first.substr(p2 + 1);
+        ofs << u << " " << t << " " << p;
+        if (!kv.second.empty()) ofs << " " << joinColumns(std::vector<std::string>(kv.second.begin(), kv.second.end()));
+        ofs << "\n";
     }
 }
 
@@ -6743,15 +6802,58 @@ bool StorageEngine::hasPermission(const std::string& dbname, const std::string& 
     while (std::getline(ifs, line)) {
         if (line.empty()) continue;
         std::stringstream ss(line);
-        std::string u, t, p;
+        std::string u, t, p, cols;
         ss >> u >> t >> p;
+        std::getline(ss, cols);
         if (u != username) continue;
-        // Table-level permission
-        if (t == tablename && (p == "all" || p == target)) return true;
+        // Table-level permission (no column restriction)
+        if (t == tablename && (p == "all" || p == target)) {
+            if (cols.empty() || (cols.size() == 1 && cols[0] == ' ')) return true;
+        }
         // Database-level permission (wildcard table "*")
         if (t == "*" && (p == "all" || p == target)) hasDbLevel = true;
     }
     return hasDbLevel;
+}
+
+bool StorageEngine::hasColumnPermission(const std::string& dbname, const std::string& tablename,
+                                        const std::string& username, TablePrivilege priv,
+                                        const std::vector<std::string>& columns) const {
+    if (columns.empty()) return hasPermission(dbname, tablename, username, priv);
+    auto ppath = permPath(dbname);
+    if (!std::filesystem::exists(ppath)) return false;
+    std::string target = privToStr(priv);
+    // Gather allowed columns for this user/table/priv
+    std::set<std::string> allowedCols;
+    bool hasTableLevel = false;
+    bool hasDbLevel = false;
+    {
+        std::ifstream ifs(ppath);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string u, t, p, cols;
+            ss >> u >> t >> p;
+            std::getline(ss, cols);
+            if (!cols.empty() && cols[0] == ' ') cols = cols.substr(1);
+            if (u != username) continue;
+            if (t == "*" && (p == "all" || p == target)) hasDbLevel = true;
+            if (t != tablename) continue;
+            if (p == "all") hasTableLevel = true;
+            if (p == target) {
+                if (cols.empty()) hasTableLevel = true;
+                else {
+                    for (const auto& c : parseColumns(cols)) allowedCols.insert(c);
+                }
+            }
+        }
+    }
+    if (hasTableLevel || hasDbLevel) return true;
+    for (const auto& col : columns) {
+        if (allowedCols.find(col) == allowedCols.end()) return false;
+    }
+    return true;
 }
 
 std::vector<std::string> StorageEngine::getUserPermissions(
