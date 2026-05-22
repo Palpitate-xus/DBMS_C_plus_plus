@@ -3958,6 +3958,10 @@ bool execute(const string& rawSql, Session& s) {
             cout << "total_connections " << s.totalConnections.load() << endl;
             cout << "max_connections " << s.maxConnections.load() << endl;
             cout << "rejected_connections " << s.rejectedConnections.load() << endl;
+            auto bpStats = g_engine.getBufferPoolStats();
+            cout << "buffer_pool_hits " << bpStats.totalHits << endl;
+            cout << "buffer_pool_misses " << bpStats.totalMisses << endl;
+            cout << "buffer_pool_hit_rate " << std::fixed << std::setprecision(2) << bpStats.hitRate << "%" << endl;
             return false;
         }
         if (rest == "databases") {

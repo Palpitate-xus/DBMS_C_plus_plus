@@ -685,6 +685,35 @@ void StorageEngine::analyzeTable(const std::string& dbname,
     }
 }
 
+StorageEngine::BufferPoolStats StorageEngine::getBufferPoolStats() const {
+    BufferPoolStats stats;
+    // Page allocators (table data files)
+    for (const auto& kv : pageAllocators_) {
+        if (kv.second && kv.second->bufferPool()) {
+            auto* bp = kv.second->bufferPool();
+            stats.totalHits += bp->hits();
+            stats.totalMisses += bp->misses();
+        }
+    }
+    // Primary key indexes
+    for (const auto& kv : pkIndexCache_) {
+        if (kv.second) {
+            stats.totalHits += kv.second->cacheHits();
+            stats.totalMisses += kv.second->cacheMisses();
+        }
+    }
+    // Secondary indexes
+    for (const auto& kv : secondaryIndexCache_) {
+        if (kv.second) {
+            stats.totalHits += kv.second->cacheHits();
+            stats.totalMisses += kv.second->cacheMisses();
+        }
+    }
+    size_t total = stats.totalHits + stats.totalMisses;
+    stats.hitRate = total == 0 ? 0.0 : 100.0 * static_cast<double>(stats.totalHits) / static_cast<double>(total);
+    return stats;
+}
+
 size_t StorageEngine::getTableRowCount(const std::string& dbname,
                                         const std::string& tablename) const {
     auto spath = statsPath(dbname);

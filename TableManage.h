@@ -142,6 +142,14 @@ public:
     std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;
     std::vector<std::string> getViewNames(const std::string& dbname) const;
 
+    // Buffer pool stats (aggregated across all open tables and indexes)
+    struct BufferPoolStats {
+        size_t totalHits = 0;
+        size_t totalMisses = 0;
+        double hitRate = 0.0;
+    };
+    BufferPoolStats getBufferPoolStats() const;
+
     // Statistics
     struct ColumnStats {
         size_t cardinality = 0;

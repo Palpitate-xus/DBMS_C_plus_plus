@@ -38,6 +38,11 @@ public:
     // Stats
     size_t hits() const { return hits_; }
     size_t misses() const { return misses_; }
+    double hitRate() const {
+        size_t total = hits_ + misses_;
+        return total == 0 ? 0.0 : 100.0 * static_cast<double>(hits_) / static_cast<double>(total);
+    }
+    void resetStats() { hits_ = 0; misses_ = 0; }
 
 private:
     struct Frame {
