@@ -1453,24 +1453,29 @@ std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbn
     while (std::getline(in, line)) {
         if (line.empty()) continue;
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
-            // Composite index: C:name:col1:col2:...
+            // Composite index: C:name:col1:col2:...[:INCLUDE:...]
             size_t pos = 2;
             size_t next = line.find(':', pos);
             if (next != std::string::npos) pos = next + 1;
             while (pos < line.size()) {
                 next = line.find(':', pos);
                 std::string cname = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
-                if (!cname.empty()) cols.push_back(cname);
+                if (!cname.empty()) {
+                    if (cname == "INCLUDE") break; // stop at INCLUDE marker
+                    cols.push_back(cname);
+                }
                 if (next == std::string::npos) break;
                 pos = next + 1;
             }
         } else {
-            // Strip :DESC suffix if present
-            size_t descPos = line.find(":DESC");
+            // Strip :DESC and :INCLUDE suffixes
+            size_t includePos = line.find(":INCLUDE");
+            std::string base = (includePos != std::string::npos) ? line.substr(0, includePos) : line;
+            size_t descPos = base.find(":DESC");
             if (descPos != std::string::npos) {
-                cols.push_back(line.substr(0, descPos));
+                cols.push_back(base.substr(0, descPos));
             } else {
-                cols.push_back(line);
+                cols.push_back(base);
             }
         }
     }
@@ -1485,9 +1490,43 @@ bool StorageEngine::isDescendingIndex(const std::string& dbname, const std::stri
     std::string line;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
-        if (line == colname + ":DESC") return true;
+        size_t incPos = line.find(":INCLUDE");
+        std::string base = (incPos != std::string::npos) ? line.substr(0, incPos) : line;
+        if (base == colname + ":DESC") return true;
     }
     return false;
+}
+
+std::vector<std::string> StorageEngine::getIndexIncludeColumns(const std::string& dbname,
+                                                               const std::string& tablename,
+                                                               const std::string& colname) const {
+    std::vector<std::string> result;
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::ifstream in(meta);
+    if (!in) return result;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        size_t incPos = line.find(":INCLUDE:");
+        if (incPos == std::string::npos) continue;
+        // For single-column index: colname[:DESC]:INCLUDE:...
+        std::string base = line.substr(0, incPos);
+        size_t descPos = base.find(":DESC");
+        std::string idxCol = (descPos != std::string::npos) ? base.substr(0, descPos) : base;
+        if (idxCol == colname) {
+            std::string incStr = line.substr(incPos + 9); // after ":INCLUDE:"
+            size_t p = 0;
+            while (p < incStr.size()) {
+                size_t comma = incStr.find(',', p);
+                std::string c = trim((comma == std::string::npos) ? incStr.substr(p) : incStr.substr(p, comma - p));
+                if (!c.empty()) result.push_back(c);
+                if (comma == std::string::npos) break;
+                p = comma + 1;
+            }
+            return result;
+        }
+    }
+    return result;
 }
 
 std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexes(
@@ -1794,7 +1833,8 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
 }
 
 OpResult StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
-                                     const std::string& colname, bool ascending) {
+                                     const std::string& colname, bool ascending,
+                                     const std::vector<std::string>& includeCols) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -1831,10 +1871,18 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
         }
     });
 
-    // Record in metadata (append :DESC for descending indexes)
+    // Record in metadata (append :DESC for descending indexes, :INCLUDE:... for include cols)
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
     std::ofstream out(meta, std::ios::out | std::ios::app);
-    out << colname << (ascending ? "" : ":DESC") << '\n';
+    out << colname << (ascending ? "" : ":DESC");
+    if (!includeCols.empty()) {
+        out << ":INCLUDE:";
+        for (size_t i = 0; i < includeCols.size(); ++i) {
+            if (i > 0) out << ",";
+            out << includeCols[i];
+        }
+    }
+    out << '\n';
     return OpResult::Success;
 }
 
@@ -1861,7 +1909,8 @@ OpResult StorageEngine::dropIndex(const std::string& dbname, const std::string& 
 OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::vector<std::string>& colnames,
-                                              const std::string& indexName) {
+                                              const std::string& indexName,
+                                              const std::vector<std::string>& includeCols) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -1893,11 +1942,18 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
         }
     });
 
-    // Record in metadata: C:indexName:col1:col2:...
+    // Record in metadata: C:indexName:col1:col2:...:INCLUDE:inc1,inc2
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
     std::ofstream out(meta, std::ios::out | std::ios::app);
     out << "C:" << indexName;
     for (const auto& c : colnames) out << ":" << c;
+    if (!includeCols.empty()) {
+        out << ":INCLUDE:";
+        for (size_t i = 0; i < includeCols.size(); ++i) {
+            if (i > 0) out << ",";
+            out << includeCols[i];
+        }
+    }
     out << '\n';
     return OpResult::Success;
 }

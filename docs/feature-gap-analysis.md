@@ -364,8 +364,8 @@
 | **部分索引 (WHERE 条件)** | ❌ | ✅ PG | P2 |
 | **表达式索引 / 函数索引** | ❌ | ✅ | P2 |
 | **覆盖索引 / Index Only Scan** | ✅ | ✅ | - |
-| **INCLUDE 列** | ❌ | ✅ | P2 |
-| **聚集索引 (Clustered Index)** | 部分 | ✅ MSSQL | P2 |
+| **INCLUDE 列** | ✅ | ✅ | - |
+| **聚集索引 (Clustered Index)** | ✅ | ✅ MSSQL | - |
 | **并发索引创建 (CONCURRENTLY)** | ❌ | ✅ | P3 |
 | **索引重建 (REINDEX)** | ✅ | ✅ | - |
 
@@ -930,7 +930,7 @@
 | 15 | CLOB / 数组类型 / ENUM / UUID ✅ |
 | 16 | ~~JSON 操作符~~ ✅ |
 | 17 | 部分索引 / 表达式索引 |
-| 18 | INCLUDE 列 / 聚集索引 |
+| 18 | ~~INCLUDE 列 / 聚集索引~~ ✅ |
 | 19 | 意向锁 / 元数据锁 |
 | 20 | ~~NOWAIT~~ / SKIP LOCKED |
 | 21 | ~~只读事务~~ ✅ |

@@ -2352,13 +2352,30 @@ bool execute(const string& rawSql, Session& s) {
             string tnameOrig = trim(afterOn.substr(0, lp));
             string tname = resolveTableName(s, tnameOrig);
             string colsStr = trim(afterOn.substr(lp + 1, rp - lp - 1));
+            // Check for INCLUDE clause in the full afterOn (after the closing paren)
+            vector<string> includeCols;
+            string afterParens = trim(afterOn.substr(rp + 1));
+            size_t includePos = afterParens.find("include ");
+            if (includePos == string::npos) includePos = afterParens.find("include(");
+            if (includePos != string::npos) {
+                string incPart = trim(afterParens.substr(includePos + 7)); // skip "include"
+                if (!incPart.empty() && incPart.front() == '(') incPart = incPart.substr(1);
+                if (!incPart.empty() && incPart.back() == ')') incPart.pop_back();
+                stringstream icss(incPart);
+                string ic;
+                while (getline(icss, ic, ',')) {
+                    string tc = trim(ic);
+                    if (!tc.empty()) includeCols.push_back(tc);
+                }
+            }
+            string keyColsStr = colsStr;
             // Parse comma-separated column list, supporting ASC/DESC
             vector<string> colnames;
             vector<bool> colAsc;
             size_t cpos = 0;
-            while (cpos < colsStr.size()) {
-                size_t comma = colsStr.find(',', cpos);
-                string c = trim(colsStr.substr(cpos, comma - cpos));
+            while (cpos < keyColsStr.size()) {
+                size_t comma = keyColsStr.find(',', cpos);
+                string c = trim(keyColsStr.substr(cpos, comma - cpos));
                 if (!c.empty()) {
                     bool asc = true;
                     size_t sp = c.find(' ');
@@ -2383,14 +2400,14 @@ bool execute(const string& rawSql, Session& s) {
                 if (isHash) {
                     res = g_engine.createHashIndex(s.currentDB, tname, colnames[0]);
                 } else {
-                    res = g_engine.createIndex(s.currentDB, tname, colnames[0], colAsc[0]);
+                    res = g_engine.createIndex(s.currentDB, tname, colnames[0], colAsc[0], includeCols);
                 }
             } else {
                 if (isHash) {
                     cout << "Hash index only supports single-column" << endl;
                     return true;
                 }
-                res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName);
+                res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName, includeCols);
             }
             if (res != OpResult::Success) {
                 cout << "Create index failed" << endl;
@@ -4513,6 +4530,37 @@ bool execute(const string& rawSql, Session& s) {
                      << c.defaultValue << ' '
                      << (c.isAutoIncrement ? "auto_increment" : "")
                      << endl;
+            }
+            return false;
+        }
+        if (rest == "indexes") {
+            if (!checkDB(s)) return true;
+            cout << "table column type include" << endl;
+            auto tables = g_engine.getTableNames(s.currentDB);
+            for (const auto& tname : tables) {
+                auto indexed = g_engine.getIndexedColumns(s.currentDB, tname);
+                for (const auto& col : indexed) {
+                    auto inc = g_engine.getIndexIncludeColumns(s.currentDB, tname, col);
+                    string incStr;
+                    for (size_t i = 0; i < inc.size(); ++i) {
+                        if (i > 0) incStr += ",";
+                        incStr += inc[i];
+                    }
+                    cout << tname << " " << col << " bptree " << incStr << endl;
+                }
+                auto hashIdx = g_engine.getHashIndexedColumns(s.currentDB, tname);
+                for (const auto& col : hashIdx) {
+                    cout << tname << " " << col << " hash " << endl;
+                }
+                auto compIdx = g_engine.getCompositeIndexes(s.currentDB, tname);
+                for (const auto& ci : compIdx) {
+                    string cols;
+                    for (size_t i = 0; i < ci.columns.size(); ++i) {
+                        if (i > 0) cols += ",";
+                        cols += ci.columns[i];
+                    }
+                    cout << tname << " " << cols << " composite " << endl;
+                }
             }
             return false;
         }

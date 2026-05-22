@@ -307,13 +307,17 @@ public:
 
     // Secondary index (single-column B+ tree)
     OpResult createIndex(const std::string& dbname, const std::string& tablename,
-                         const std::string& colname, bool ascending = true);
+                         const std::string& colname, bool ascending = true,
+                         const std::vector<std::string>& includeCols = {});
     OpResult dropIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname);
     std::vector<std::string> getIndexedColumns(const std::string& dbname,
                                                 const std::string& tablename) const;
     bool isDescendingIndex(const std::string& dbname, const std::string& tablename,
                            const std::string& colname) const;
+    std::vector<std::string> getIndexIncludeColumns(const std::string& dbname,
+                                                     const std::string& tablename,
+                                                     const std::string& colname) const;
 
     // Hash index (single-column, O(1) equality lookup)
     OpResult createHashIndex(const std::string& dbname, const std::string& tablename,
@@ -332,7 +336,8 @@ public:
     };
     OpResult createCompositeIndex(const std::string& dbname, const std::string& tablename,
                                   const std::vector<std::string>& colnames,
-                                  const std::string& indexName);
+                                  const std::string& indexName,
+                                  const std::vector<std::string>& includeCols = {});
     OpResult dropCompositeIndex(const std::string& dbname, const std::string& tablename,
                                 const std::string& indexName);
     std::vector<CompositeIndexInfo> getCompositeIndexes(const std::string& dbname,
