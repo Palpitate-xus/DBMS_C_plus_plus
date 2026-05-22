@@ -230,22 +230,23 @@ size_t TableSchema::getFixedColOffset(size_t colIdx) const {
 // ========================================================================
 // Column constructors
 // ========================================================================
-Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK) {
+Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK, bool isUnsigned) {
     Column c;
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
+    c.isUnsigned = isUnsigned;
     if (scale == 0) {
-        c.dataType = "smallint";
+        c.dataType = isUnsigned ? "smallint unsigned" : "smallint";
         c.dsize = 2;
     } else if (scale == 1) {
-        c.dataType = "tiny";
+        c.dataType = isUnsigned ? "tinyint unsigned" : "tinyint";
         c.dsize = 1;
     } else if (scale == 2) {
-        c.dataType = "int";
+        c.dataType = isUnsigned ? "int unsigned" : "int";
         c.dsize = 4;
     } else {
-        c.dataType = "bigint";
+        c.dataType = isUnsigned ? "bigint unsigned" : "bigint";
         c.dsize = 8;
     }
     return c;
@@ -2671,6 +2672,10 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;
             }
+            if (col.isUnsigned && num < 0) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
         }
     }
 
@@ -3450,8 +3455,10 @@ OpResult StorageEngine::update(const std::string& dbname,
                     Date d(kv.second.c_str());
                     if (d.year == 0) return OpResult::InvalidValue;
                 } else if (!col.isVariableLength && col.dataType != "char") {
-                    if (!kv.second.empty() && parseInt(kv.second) == INF) {
-                        return OpResult::InvalidValue;
+                    if (!kv.second.empty()) {
+                        int64_t num = parseInt(kv.second);
+                        if (num == INF) return OpResult::InvalidValue;
+                        if (col.isUnsigned && num < 0) return OpResult::InvalidValue;
                     }
                 }
                 colUpdates[i] = kv.second;

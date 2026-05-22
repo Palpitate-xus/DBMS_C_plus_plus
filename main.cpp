@@ -838,6 +838,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             bool isNull = true;
             bool isPK = false;
             bool isUnique = false;
+            bool isUnsigned = false;
             std::string defaultVal;
             std::string checkExpr;
             std::string generatedExpr;
@@ -871,6 +872,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                             isNull = false;
                         } else if (parts[i] == "unique") {
                             isUnique = true;
+                        } else if (parts[i] == "unsigned") {
+                            isUnsigned = true;
                         } else if (parts[i] == "default" && i + 1 < parts.size()) {
                             defaultVal = parts[i + 1];
                             if (defaultVal.size() >= 2 && defaultVal.front() == '\'' && defaultVal.back() == '\'') {
@@ -937,6 +940,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                     while (fs >> f) {
                         if (f == "0") isNull = false;
                         if (f == "pk" || f == "PK") isPK = true;
+                        if (f == "unsigned") isUnsigned = true;
                     }
                 }
 
@@ -970,15 +974,15 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 col.isAutoIncrement = true;
                 tbl.append(col);
             } else if (ctype.substr(0, 3) == "int") {
-                tbl.append(makeIntColumn(cname, isNull, 2, isPK));
+                tbl.append(makeIntColumn(cname, isNull, 2, isPK, isUnsigned));
             } else if (ctype.substr(0, 4) == "tiny") {
-                tbl.append(makeIntColumn(cname, isNull, 1, isPK));
+                tbl.append(makeIntColumn(cname, isNull, 1, isPK, isUnsigned));
             } else if (ctype.substr(0, 8) == "smallint") {
-                tbl.append(makeIntColumn(cname, isNull, 0, isPK));
+                tbl.append(makeIntColumn(cname, isNull, 0, isPK, isUnsigned));
             } else if (ctype.substr(0, 6) == "bigint") {
-                tbl.append(makeIntColumn(cname, isNull, 3, isPK));
+                tbl.append(makeIntColumn(cname, isNull, 3, isPK, isUnsigned));
             } else if (ctype.substr(0, 4) == "long") {
-                tbl.append(makeIntColumn(cname, isNull, 3, isPK));
+                tbl.append(makeIntColumn(cname, isNull, 3, isPK, isUnsigned));
             } else if (ctype.substr(0, 4) == "bool" || ctype.substr(0, 1) == "bit") {
                 tbl.append(makeBooleanColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 4) == "uuid") {

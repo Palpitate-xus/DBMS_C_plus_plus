@@ -39,6 +39,7 @@ struct Column {
     bool isVariableLength = false;  // true for VARCHAR, false for fixed-length types
     bool isUnique = false;          // UNIQUE constraint
     bool isAutoIncrement = false;   // AUTO_INCREMENT / SERIAL
+    bool isUnsigned = false;        // UNSIGNED for numeric types
     std::string dataType;
     std::string dataName;
     size_t dsize = 0;  // For VARCHAR: max length; for fixed: actual bytes
@@ -515,7 +516,7 @@ private:
 };
 
 // Column type constructors
-Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK = false);
+Column makeIntColumn(const std::string& name, bool isNull, int scale, bool isPK = false, bool isUnsigned = false);
 Column makeStringColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
 Column makeDateColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bool isPK = false);
