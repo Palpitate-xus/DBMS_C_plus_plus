@@ -51,6 +51,19 @@ double g_slowQueryThresholdMs = 100.0;
 static constexpr size_t MAX_SLOW_LOG_ENTRIES = 100;
 int g_checkpointInterval = 30;  // auto checkpoint every N SQLs
 
+// ========================================================================
+// Query plan cache
+// ========================================================================
+struct CachedPlanEntry {
+    std::string planText;
+    std::string dbname;
+    std::chrono::steady_clock::time_point cachedAt;
+};
+static std::map<std::string, CachedPlanEntry> g_queryPlanCache;
+static std::mutex g_planCacheMutex;
+static size_t g_planCacheHits = 0;
+static size_t g_planCacheMisses = 0;
+
 struct SlowQueryEntry {
     std::string timestamp;
     std::string username;
@@ -3627,6 +3640,16 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (sql.substr(0, 16) == "clear plan cache") {
+        std::lock_guard<std::mutex> lock(g_planCacheMutex);
+        size_t cleared = g_queryPlanCache.size();
+        g_queryPlanCache.clear();
+        g_planCacheHits = 0;
+        g_planCacheMisses = 0;
+        cout << "Cleared " << cleared << " plan cache entries" << endl;
+        return false;
+    }
+
     if (sql.substr(0, 6) == "vacuum") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
@@ -3967,6 +3990,27 @@ bool execute(const string& rawSql, Session& s) {
             cout << "buffer_pool_hits " << bpStats.totalHits << endl;
             cout << "buffer_pool_misses " << bpStats.totalMisses << endl;
             cout << "buffer_pool_hit_rate " << std::fixed << std::setprecision(2) << bpStats.hitRate << "%" << endl;
+            {
+                std::lock_guard<std::mutex> lock(g_planCacheMutex);
+                cout << "plan_cache_size " << g_queryPlanCache.size() << endl;
+                cout << "plan_cache_hits " << g_planCacheHits << endl;
+                cout << "plan_cache_misses " << g_planCacheMisses << endl;
+                size_t total = g_planCacheHits + g_planCacheMisses;
+                cout << "plan_cache_hit_rate " << std::fixed << std::setprecision(2)
+                     << (total == 0 ? 0.0 : 100.0 * static_cast<double>(g_planCacheHits) / static_cast<double>(total)) << "%" << endl;
+            }
+            return false;
+        }
+        if (rest == "plan cache") {
+            std::lock_guard<std::mutex> lock(g_planCacheMutex);
+            if (g_queryPlanCache.empty()) {
+                cout << "Plan cache is empty" << endl;
+                return false;
+            }
+            cout << "sql plan" << endl;
+            for (const auto& kv : g_queryPlanCache) {
+                cout << kv.first << endl;
+            }
             return false;
         }
         if (rest == "deadlocks") {
@@ -4480,12 +4524,47 @@ bool execute(const string& rawSql, Session& s) {
         ctx.orderByAsc = orderByAsc;
         ctx.limit = limitVal;
         ctx.distinct = isDistinct;
-        auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-        if (isJson) {
-            cout << dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB);
-        } else {
-            cout << dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB);
+
+        // Query plan cache lookup
+        string cacheKey = s.currentDB + "::" + inner;
+        string planOutput;
+        bool cacheHit = false;
+        {
+            std::lock_guard<std::mutex> lock(g_planCacheMutex);
+            auto it = g_queryPlanCache.find(cacheKey);
+            if (it != g_queryPlanCache.end() && it->second.dbname == s.currentDB) {
+                planOutput = it->second.planText;
+                it->second.cachedAt = std::chrono::steady_clock::now();
+                cacheHit = true;
+                ++g_planCacheHits;
+            } else {
+                ++g_planCacheMisses;
+            }
         }
+
+        if (!cacheHit) {
+            auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+            if (isJson) {
+                planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB);
+            } else {
+                planOutput = dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB);
+            }
+            // Store in cache (limit to 100 entries)
+            {
+                std::lock_guard<std::mutex> lock(g_planCacheMutex);
+                if (g_queryPlanCache.size() >= 100) {
+                    auto oldest = g_queryPlanCache.begin();
+                    for (auto it = g_queryPlanCache.begin(); it != g_queryPlanCache.end(); ++it) {
+                        if (it->second.cachedAt < oldest->second.cachedAt) oldest = it;
+                    }
+                    g_queryPlanCache.erase(oldest);
+                }
+                g_queryPlanCache[cacheKey] = {planOutput, s.currentDB, std::chrono::steady_clock::now()};
+            }
+        }
+
+        cout << planOutput;
+        if (cacheHit) cout << "\n[plan cache hit]";
 
         if (isAnalyze) {
             // Execute the query and collect actual statistics
