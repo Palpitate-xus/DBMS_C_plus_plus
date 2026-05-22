@@ -389,6 +389,10 @@ public:
                                                  const std::string& tablename,
                                                  const std::string& username) const;
 
+    // Lock manager access
+    LockManager& getLockManager() { return lockManager_; }
+    const LockManager& getLockManager() const { return lockManager_; }
+
     // Trigger support
     struct Trigger {
         std::string name;
@@ -481,7 +485,7 @@ private:
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,
                                  const std::vector<Condition>& conds);
 
-    // Lock manager
+private:
     mutable LockManager lockManager_;
 
     // Transaction state

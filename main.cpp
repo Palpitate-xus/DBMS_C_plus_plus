@@ -3965,6 +3965,36 @@ bool execute(const string& rawSql, Session& s) {
             cout << "buffer_pool_hit_rate " << std::fixed << std::setprecision(2) << bpStats.hitRate << "%" << endl;
             return false;
         }
+        if (rest == "deadlocks") {
+            auto entries = g_engine.getLockManager().getDeadlockLog();
+            if (entries.empty()) {
+                cout << "No deadlocks recorded" << endl;
+                return false;
+            }
+            cout << "timestamp description" << endl;
+            for (const auto& e : entries) {
+                cout << e.timestamp << " " << e.description << endl;
+            }
+            return false;
+        }
+        if (rest == "locks") {
+            auto holds = g_engine.getLockManager().getLockHolds();
+            auto waits = g_engine.getLockManager().getLockWaits();
+            cout << "resource holder mode" << endl;
+            for (const auto& h : holds) {
+                cout << h.resource << " " << h.holderTid << " " << h.mode << endl;
+            }
+            if (!waits.empty()) {
+                cout << "--- waits ---" << endl;
+                cout << "waiter holders" << endl;
+                for (const auto& w : waits) {
+                    cout << w.waiterTid << " ";
+                    for (const auto& h : w.holderTids) cout << h << " ";
+                    cout << endl;
+                }
+            }
+            return false;
+        }
         if (rest == "databases") {
             auto names = g_engine.getDatabaseNames();
             for (const auto& n : names) cout << n << endl;

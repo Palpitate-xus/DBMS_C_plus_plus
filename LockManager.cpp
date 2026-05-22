@@ -18,6 +18,21 @@ void LockManager::removeWaitEdges(std::thread::id waiter) {
     waitFor_.erase(waiter);
 }
 
+static std::string tidToString(std::thread::id tid) {
+    std::ostringstream oss;
+    oss << tid;
+    return oss.str();
+}
+
+static std::string nowIso8601() {
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&time_t_now);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    return std::string(buf);
+}
+
 bool LockManager::hasCycle(std::thread::id start) {
     std::lock_guard<std::mutex> guard(waitMutex_);
     std::set<std::thread::id> visited, recStack;
@@ -30,7 +45,25 @@ bool LockManager::hasCycle(std::thread::id start) {
             auto it = waitFor_.find(node);
             if (it != waitFor_.end()) {
                 for (const auto& neighbor : it->second) {
-                    if (recStack.find(neighbor) != recStack.end()) return true;
+                    if (recStack.find(neighbor) != recStack.end()) {
+                        // Deadlock detected — record it before returning
+                        std::string desc = "cycle: " + tidToString(node) + " -> " + tidToString(neighbor);
+                        for (const auto& e : waitFor_) {
+                            desc += "; " + tidToString(e.first) + " waits for ";
+                            bool first = true;
+                            for (const auto& h : e.second) {
+                                if (!first) desc += ",";
+                                desc += tidToString(h);
+                                first = false;
+                            }
+                        }
+                        {
+                            std::lock_guard<std::mutex> dlGuard(deadlockMutex_);
+                            deadlockLog_.push_back({nowIso8601(), desc});
+                            if (deadlockLog_.size() > 100) deadlockLog_.erase(deadlockLog_.begin());
+                        }
+                        return true;
+                    }
                     if (visited.find(neighbor) == visited.end()) {
                         stack.push_back(neighbor);
                     }
@@ -428,6 +461,65 @@ void LockManager::unlockAllGaps() {
             ++it;
         }
     }
+}
+
+// ========================================================================
+// Monitoring
+// ========================================================================
+
+void LockManager::logDeadlock(const std::string& description) {
+    std::lock_guard<std::mutex> guard(deadlockMutex_);
+    deadlockLog_.push_back({nowIso8601(), description});
+    if (deadlockLog_.size() > 100) deadlockLog_.erase(deadlockLog_.begin());
+}
+
+std::vector<LockManager::DeadlockEntry> LockManager::getDeadlockLog() const {
+    std::lock_guard<std::mutex> guard(deadlockMutex_);
+    return deadlockLog_;
+}
+
+void LockManager::clearDeadlockLog() {
+    std::lock_guard<std::mutex> guard(deadlockMutex_);
+    deadlockLog_.clear();
+}
+
+std::vector<LockManager::LockWaitInfo> LockManager::getLockWaits() const {
+    std::vector<LockWaitInfo> result;
+    std::lock_guard<std::mutex> guard(waitMutex_);
+    for (const auto& kv : waitFor_) {
+        LockWaitInfo info;
+        info.waiterTid = tidToString(kv.first);
+        for (const auto& h : kv.second) {
+            info.holderTids.push_back(tidToString(h));
+        }
+        result.push_back(info);
+    }
+    return result;
+}
+
+std::vector<LockManager::LockHoldInfo> LockManager::getLockHolds() const {
+    std::vector<LockHoldInfo> result;
+    {
+        std::lock_guard<std::mutex> guard(globalMutex_);
+        for (const auto& kv : locks_) {
+            const auto& state = kv.second;
+            std::string mode = state.exclusive ? "exclusive" : "shared";
+            for (const auto& holder : state.holders) {
+                result.push_back({kv.first, tidToString(holder), mode});
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(rowMutex_);
+        for (const auto& kv : rowLocks_) {
+            const auto& state = kv.second;
+            std::string mode = state.exclusive ? "exclusive" : "shared";
+            for (const auto& holder : state.holders) {
+                result.push_back({kv.first, tidToString(holder), mode});
+            }
+        }
+    }
+    return result;
 }
 
 } // namespace dbms

@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <set>
 #include <shared_mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -28,6 +30,31 @@ public:
 
     // Get list of currently locked tables
     std::vector<std::string> lockedTables() const;
+
+    // ========================================================================
+    // Monitoring
+    // ========================================================================
+    struct DeadlockEntry {
+        std::string timestamp;
+        std::string description;
+    };
+    void logDeadlock(const std::string& description);
+    std::vector<DeadlockEntry> getDeadlockLog() const;
+    void clearDeadlockLog();
+
+    struct LockWaitInfo {
+        std::string resource;
+        std::string waiterTid;
+        std::vector<std::string> holderTids;
+    };
+    std::vector<LockWaitInfo> getLockWaits() const;
+
+    struct LockHoldInfo {
+        std::string resource;
+        std::string holderTid;
+        std::string mode; // "shared" | "exclusive"
+    };
+    std::vector<LockHoldInfo> getLockHolds() const;
 
     // ========================================================================
     // Row-level locking
@@ -61,11 +88,11 @@ private:
         std::vector<std::thread::id> holders;  // threads currently holding this lock
     };
     std::map<std::string, LockState> locks_;
-    std::mutex globalMutex_;
+    mutable std::mutex globalMutex_;
 
     // Row locks: key = "table:rid"
     std::map<std::string, LockState> rowLocks_;
-    std::mutex rowMutex_;
+    mutable std::mutex rowMutex_;
 
     // Gap locks: table -> list of (leftKey, rightKey, holder)
     struct GapLock {
@@ -78,7 +105,11 @@ private:
 
     // Wait-for graph: thread A waits for thread B to release a lock
     std::map<std::thread::id, std::set<std::thread::id>> waitFor_;
-    std::mutex waitMutex_;
+    mutable std::mutex waitMutex_;
+
+    // Deadlock log
+    std::vector<DeadlockEntry> deadlockLog_;
+    mutable std::mutex deadlockMutex_;
 
     // Record that 'waiter' is waiting for 'holder'
     void addWaitEdge(std::thread::id waiter, std::thread::id holder);
@@ -86,6 +117,8 @@ private:
     void removeWaitEdges(std::thread::id waiter);
     // Detect cycle in wait-for graph starting from 'start'
     bool hasCycle(std::thread::id start);
+    // Build deadlock description from current wait-for graph
+    std::string buildDeadlockDescription(std::thread::id start) const;
 };
 
 } // namespace dbms
