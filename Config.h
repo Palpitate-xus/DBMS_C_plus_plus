@@ -22,6 +22,7 @@ struct Config {
     size_t queryPlanCacheSize = 100;
     int passwordPolicyLevel = 0; // 0=none, 1=warn, 2=medium required, 3=strong required
     std::string passwordHashAlgorithm = "sha256"; // "sha256" or "md5"
+    int auditLevel = 0; // 0=none, 1=DDL only, 2=DML+DDL, 3=all
 
     // Load from file; returns true on success.
     bool load(const std::string& filename);

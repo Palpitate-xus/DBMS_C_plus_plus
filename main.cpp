@@ -1963,10 +1963,32 @@ void logSlowQuery(const std::string& sql, double ms,
     }
 }
 
+// Determine SQL category for auditing: 1=DDL, 2=DML, 3=other
+static int sqlAuditCategory(const string& sql) {
+    if (sql.size() >= 6 && sql.substr(0, 6) == "create") return 1;
+    if (sql.size() >= 4 && sql.substr(0, 4) == "drop") return 1;
+    if (sql.size() >= 5 && sql.substr(0, 5) == "alter") return 1;
+    if (sql.size() >= 8 && sql.substr(0, 8) == "truncate") return 1;
+    if (sql.size() >= 6 && (sql.substr(0, 6) == "select" || sql.substr(0, 6) == "insert" ||
+        sql.substr(0, 6) == "update" || sql.substr(0, 6) == "delete" ||
+        sql.substr(0, 6) == "merge " || sql.substr(0, 6) == "replac")) return 2; // DML
+    return 3; // other (DCL, etc.)
+}
+
 bool execute(const string& rawSql, Session& s) {
     auto start = std::chrono::steady_clock::now();
     string sql = sqlProcessor(rawSql);
-    // (debug removed)
+    // Audit logging
+    {
+        int cat = sqlAuditCategory(sql);
+        bool shouldAudit = false;
+        if (g_config.auditLevel >= 3) shouldAudit = true;
+        else if (g_config.auditLevel >= 2 && cat <= 2) shouldAudit = true;
+        else if (g_config.auditLevel >= 1 && cat == 1) shouldAudit = true;
+        if (shouldAudit) {
+            auditLog(g_config.auditLevel, s.username, s.currentDB, rawSql, "EXEC");
+        }
+    }
     if (sql.substr(0, 3) == "use") {
         if (sql.substr(4, 8) == "database") {
             string dbname = trim(sql.substr(13));
@@ -4658,6 +4680,14 @@ bool execute(const string& rawSql, Session& s) {
         } else if (var == "password_hash_algorithm") {
             g_config.passwordHashAlgorithm = val;
             cout << "password_hash_algorithm set to " << g_config.passwordHashAlgorithm << endl;
+        } else if (var == "audit_level") {
+            try {
+                g_config.auditLevel = std::stoi(val);
+                cout << "audit_level set to " << g_config.auditLevel << endl;
+            } catch (...) {
+                cout << "Invalid value for audit_level" << endl;
+                return true;
+            }
         } else {
             cout << "Unknown variable: " << var << endl;
             return true;

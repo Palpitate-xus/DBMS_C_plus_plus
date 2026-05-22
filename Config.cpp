@@ -39,6 +39,8 @@ bool Config::load(const std::string& filename) {
             try { passwordPolicyLevel = std::stoi(val); } catch (...) {}
         } else if (key == "password_hash_algorithm") {
             passwordHashAlgorithm = val;
+        } else if (key == "audit_level") {
+            try { auditLevel = std::stoi(val); } catch (...) {}
         }
     }
     return true;
@@ -53,7 +55,8 @@ void Config::printAll() const {
               << "enable_query_plan_cache " << (enableQueryPlanCache ? "on" : "off") << "\n"
               << "query_plan_cache_size " << queryPlanCacheSize << "\n"
               << "password_policy_level " << passwordPolicyLevel << "\n"
-              << "password_hash_algorithm " << passwordHashAlgorithm << "\n";
+              << "password_hash_algorithm " << passwordHashAlgorithm << "\n"
+              << "audit_level " << auditLevel << "\n";
 }
 
 } // namespace dbms
