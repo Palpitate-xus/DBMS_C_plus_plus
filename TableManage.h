@@ -415,6 +415,10 @@ public:
     static bool evalConditionOnRow(const Condition& cond, const std::string& rowBuffer, const TableSchema& tbl);
     static int64_t parseInt(const std::string& s);
     static bool stringToBuffer(const std::string& src, char* dst, size_t len);
+    // extractColumnValue with optional dbname for TOAST resolution
+    static std::string extractColumnValue(const std::string& rowBuffer,
+                                           const TableSchema& tbl, size_t colIdx,
+                                           const std::string& dbname = "");
 
     // RID encode/decode (public for external use)
     static int64_t encodeRid(uint32_t pageId, uint16_t slotId);
@@ -439,7 +443,6 @@ public:
 
     // Schema helpers (public for execution plan use)
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);
-    static std::string extractColumnValue(const std::string& rowBuffer, const TableSchema& tbl, size_t colIdx);
 
     // Index access (public for execution plan)
     BPTree* getPKIndex(const std::string& dbname, const std::string& tablename) const;
@@ -522,6 +525,23 @@ public:
     std::filesystem::path statsPath(const std::string& dbname) const;
     std::filesystem::path permPath(const std::string& dbname) const;
     std::filesystem::path seqPath(const std::string& dbname, const std::string& tablename) const;
+
+    // TOAST (The Oversized-Attribute Storage Technique) for large values
+    static constexpr size_t TOAST_THRESHOLD = 1000; // bytes
+    static constexpr const char* TOAST_PREFIX = "__TOAST__";
+    static std::filesystem::path toastDir(const std::string& dbname, const std::string& tablename);
+    static std::filesystem::path toastMetaPath(const std::string& dbname, const std::string& tablename);
+    uint64_t allocToastId(const std::string& dbname, const std::string& tablename);
+    void writeToast(const std::string& dbname, const std::string& tablename, uint64_t toastId, const std::string& data);
+    static std::string readToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
+    void deleteToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
+    void deleteRowToast(const std::string& dbname, const std::string& tablename, int64_t rid);
+    // Parse toast ID from marker string __TOAST__<id>
+    static bool parseToastMarker(const std::string& val, uint64_t& toastId);
+
+    // Prepare values for insert/update: create TOAST entries for large var-len values
+    void prepareToastValues(const std::string& dbname, const std::string& tablename,
+                            const TableSchema& tbl, std::map<std::string, std::string>& values);
 
 private:
 

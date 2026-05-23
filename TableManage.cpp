@@ -1996,7 +1996,8 @@ BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
 }
 
 std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
-                                               const TableSchema& tbl, size_t colIdx) {
+                                               const TableSchema& tbl, size_t colIdx,
+                                               const std::string& dbname) {
     if (colIdx >= tbl.len) return "";
     const Column& col = tbl.cols[colIdx];
 
@@ -2010,7 +2011,13 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         std::memcpy(&dataOffset, rowBuffer.data() + arrPos, sizeof(uint16_t));
         std::memcpy(&dataLen, rowBuffer.data() + arrPos + 2, sizeof(uint16_t));
         if (dataOffset + dataLen > rowBuffer.size()) return "";
-        return rowBuffer.substr(dataOffset, dataLen);
+        std::string val = rowBuffer.substr(dataOffset, dataLen);
+        // TOAST: if value is a toast marker, read from external storage
+        uint64_t toastId = 0;
+        if (!dbname.empty() && parseToastMarker(val, toastId)) {
+            return readToast(dbname, tbl.tablename, toastId);
+        }
+        return val;
     }
 
     // Fixed-length column
@@ -2898,6 +2905,111 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     return tbl;
 }
 
+// ========================================================================
+// TOAST (The Oversized-Attribute Storage Technique)
+// ========================================================================
+
+std::filesystem::path StorageEngine::toastDir(const std::string& dbname,
+                                               const std::string& tablename) {
+    return std::filesystem::path(dbname) / (tablename + ".toast");
+}
+
+std::filesystem::path StorageEngine::toastMetaPath(const std::string& dbname,
+                                                    const std::string& tablename) {
+    return std::filesystem::path(dbname) / (tablename + ".toastmeta");
+}
+
+uint64_t StorageEngine::allocToastId(const std::string& dbname, const std::string& tablename) {
+    auto metaPath = toastMetaPath(dbname, tablename);
+    uint64_t nextId = 1;
+    if (std::filesystem::exists(metaPath)) {
+        std::ifstream ifs(metaPath, std::ios::binary);
+        if (ifs) ifs.read(reinterpret_cast<char*>(&nextId), sizeof(nextId));
+    }
+    uint64_t allocated = nextId;
+    nextId++;
+    std::ofstream ofs(metaPath, std::ios::binary);
+    if (ofs) ofs.write(reinterpret_cast<const char*>(&nextId), sizeof(nextId));
+    return allocated;
+}
+
+void StorageEngine::writeToast(const std::string& dbname, const std::string& tablename,
+                                uint64_t toastId, const std::string& data) {
+    auto tdir = toastDir(dbname, tablename);
+    if (!std::filesystem::exists(tdir)) {
+        std::filesystem::create_directories(tdir);
+    }
+    auto path = tdir / (std::to_string(toastId) + ".dat");
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) return;
+    uint32_t len = static_cast<uint32_t>(data.size());
+    ofs.write(reinterpret_cast<const char*>(&len), sizeof(len));
+    ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
+}
+
+std::string StorageEngine::readToast(const std::string& dbname, const std::string& tablename,
+                                      uint64_t toastId) {
+    auto path = toastDir(dbname, tablename) / (std::to_string(toastId) + ".dat");
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) return "";
+    uint32_t len = 0;
+    ifs.read(reinterpret_cast<char*>(&len), sizeof(len));
+    std::string data(len, '\0');
+    ifs.read(data.data(), static_cast<std::streamsize>(len));
+    return data;
+}
+
+void StorageEngine::deleteToast(const std::string& dbname, const std::string& tablename,
+                                 uint64_t toastId) {
+    auto path = toastDir(dbname, tablename) / (std::to_string(toastId) + ".dat");
+    if (std::filesystem::exists(path)) std::filesystem::remove(path);
+}
+
+bool StorageEngine::parseToastMarker(const std::string& val, uint64_t& toastId) {
+    size_t prefixLen = strlen(TOAST_PREFIX);
+    if (val.size() <= prefixLen) return false;
+    if (val.substr(0, prefixLen) != TOAST_PREFIX) return false;
+    try {
+        toastId = static_cast<uint64_t>(std::stoull(val.substr(prefixLen)));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+void StorageEngine::deleteRowToast(const std::string& dbname, const std::string& tablename,
+                                    int64_t rid) {
+    // Read the row and find all toast markers
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    std::string row;
+    if (!readRowByRid(pa, rid, row, tbl)) return;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (!tbl.cols[i].isVariableLength) continue;
+        std::string val = extractColumnValue(row, tbl, i);
+        uint64_t toastId = 0;
+        if (parseToastMarker(val, toastId)) {
+            deleteToast(dbname, tablename, toastId);
+        }
+    }
+}
+
+void StorageEngine::prepareToastValues(const std::string& dbname, const std::string& tablename,
+                                        const TableSchema& tbl,
+                                        std::map<std::string, std::string>& values) {
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        if (!col.isVariableLength) continue;
+        auto it = values.find(col.dataName);
+        if (it == values.end()) continue;
+        if (it->second.size() > TOAST_THRESHOLD) {
+            uint64_t toastId = allocToastId(dbname, tablename);
+            writeToast(dbname, tablename, toastId, it->second);
+            it->second = std::string(TOAST_PREFIX) + std::to_string(toastId);
+        }
+    }
+}
+
 OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl) {
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
     if (tableExists(dbname, tbl.tablename)) return OpResult::TableAlreadyExist;
@@ -2971,6 +3083,12 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
     removeSeq(dbname, tablename);
+    // Remove TOAST data
+    auto tdir = toastDir(dbname, tablename);
+    if (std::filesystem::exists(tdir)) {
+        std::filesystem::remove_all(tdir);
+    }
+    std::filesystem::remove(toastMetaPath(dbname, tablename));
 
     // Remove from cache
     std::string key = dbname + "/" + tablename;
@@ -3544,6 +3662,9 @@ OpResult StorageEngine::insert(const std::string& dbname,
             actualValues[col.dataName] = computed;
         }
     }
+
+    // TOAST: offload large variable-length values to external storage
+    prepareToastValues(dbname, tablename, tbl, actualValues);
 
     // Build row buffer
     uint64_t creatorTxnId = inTransaction_ ? currentTxnId_ : 0;
@@ -4237,6 +4358,11 @@ OpResult StorageEngine::remove(const std::string& dbname,
         }
     }
 
+    // Delete TOAST entries for rows being deleted
+    for (int64_t rid : toDelete) {
+        deleteRowToast(dbname, tablename, rid);
+    }
+
     // Delete rows via PageAllocator tombstones
     size_t delIdx = 0;
     for (int64_t rid : toDelete) {
@@ -4452,6 +4578,9 @@ OpResult StorageEngine::update(const std::string& dbname,
         for (const auto& kv : colUpdates) {
             rowValues[tbl.cols[kv.first].dataName] = kv.second;
         }
+        // TOAST: delete old toast entries, create new ones for large values
+        deleteRowToast(dbname, tablename, rid);
+        prepareToastValues(dbname, tablename, tbl, rowValues);
         std::string newRow = buildRowBuffer(tbl, rowValues, 0);
 
         // Write back via PageAllocator
