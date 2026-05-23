@@ -143,6 +143,13 @@ public:
     std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;
     std::vector<std::string> getViewNames(const std::string& dbname) const;
 
+    // Materialized view (stores query results in a backing table)
+    static std::string materializedViewPrefix(const std::string& viewname) { return "__mv_" + viewname; }
+    bool isMaterializedView(const std::string& dbname, const std::string& viewname) const;
+    std::string getMaterializedViewSQL(const std::string& dbname, const std::string& viewname) const;
+    std::vector<std::string> getMaterializedViewNames(const std::string& dbname) const;
+    OpResult dropMaterializedView(const std::string& dbname, const std::string& viewname);
+
     // Buffer pool stats (aggregated across all open tables and indexes)
     struct BufferPoolStats {
         size_t totalHits = 0;

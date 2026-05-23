@@ -627,6 +627,63 @@ std::vector<std::string> StorageEngine::getViewNames(const std::string& dbname) 
 }
 
 // ========================================================================
+// Materialized views
+// ========================================================================
+
+static std::filesystem::path materializedViewPath(const std::string& dbname,
+                                                   const std::string& viewname,
+                                                   const dbms::StorageEngine* engine) {
+    return engine->viewsDir(dbname) / (viewname + ".mview");
+}
+
+bool StorageEngine::isMaterializedView(const std::string& dbname,
+                                       const std::string& viewname) const {
+    return std::filesystem::exists(materializedViewPath(dbname, viewname, this));
+}
+
+std::string StorageEngine::getMaterializedViewSQL(const std::string& dbname,
+                                                   const std::string& viewname) const {
+    auto path = materializedViewPath(dbname, viewname, this);
+    if (!std::filesystem::exists(path)) return "";
+    std::ifstream ifs(path);
+    if (!ifs) return "";
+    std::string sql((std::istreambuf_iterator<char>(ifs)),
+                     std::istreambuf_iterator<char>());
+    return sql;
+}
+
+std::vector<std::string> StorageEngine::getMaterializedViewNames(const std::string& dbname) const {
+    std::vector<std::string> result;
+    auto vdir = viewsDir(dbname);
+    if (!std::filesystem::exists(vdir)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(vdir)) {
+        if (entry.is_regular_file()) {
+            std::string name = entry.path().filename().string();
+            if (name.size() > 6 && name.substr(name.size() - 6) == ".mview") {
+                result.push_back(name.substr(0, name.size() - 6));
+            }
+        }
+    }
+    return result;
+}
+
+OpResult StorageEngine::dropMaterializedView(const std::string& dbname,
+                                              const std::string& viewname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    // Drop backing table
+    std::string backingTable = materializedViewPrefix(viewname);
+    if (tableExists(dbname, backingTable)) {
+        dropTable(dbname, backingTable);
+    }
+    // Remove mview metadata
+    auto path = materializedViewPath(dbname, viewname, this);
+    if (std::filesystem::exists(path)) {
+        std::filesystem::remove(path);
+    }
+    return OpResult::Success;
+}
+
+// ========================================================================
 // Statistics
 // ========================================================================
 
