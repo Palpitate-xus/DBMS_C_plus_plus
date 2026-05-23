@@ -12,15 +12,22 @@
 
 namespace dbms {
 
-// Table-level lock manager with shared (read) / exclusive (write) locks
-// and deadlock detection via wait-for graph.
+// Table-level lock manager with shared (read) / exclusive (write) / intention locks
+// metadata locks, and deadlock detection via wait-for graph.
 class LockManager {
 public:
+    enum class LockMode { Shared, Exclusive, IntentShared, IntentExclusive, Metadata };
+
     // Acquire shared lock. Returns true on success, false if deadlock detected.
     bool lockShared(const std::string& table);
-
     // Acquire exclusive lock. Returns true on success, false if deadlock detected.
     bool lockExclusive(const std::string& table);
+    // Acquire intent shared lock (used before row-level shared locks).
+    bool lockIntentShared(const std::string& table);
+    // Acquire intent exclusive lock (used before row-level exclusive locks).
+    bool lockIntentExclusive(const std::string& table);
+    // Acquire metadata lock (used for DDL operations like ALTER TABLE / DROP TABLE).
+    bool lockMetadata(const std::string& table);
 
     // Release all locks held for a table
     void unlock(const std::string& table);
@@ -52,7 +59,7 @@ public:
     struct LockHoldInfo {
         std::string resource;
         std::string holderTid;
-        std::string mode; // "shared" | "exclusive"
+        std::string mode; // "shared" | "exclusive" | "IS" | "IX" | "MDL"
     };
     std::vector<LockHoldInfo> getLockHolds() const;
 
@@ -85,7 +92,11 @@ private:
         std::shared_mutex mtx;
         int sharedCount = 0;
         bool exclusive = false;
+        int intentSharedCount = 0;
+        int intentExclusiveCount = 0;
+        bool metadata = false;
         std::vector<std::thread::id> holders;  // threads currently holding this lock
+        std::map<std::thread::id, LockMode> holderModes; // mode per holder
     };
     std::map<std::string, LockState> locks_;
     mutable std::mutex globalMutex_;
@@ -110,6 +121,9 @@ private:
     // Deadlock log
     std::vector<DeadlockEntry> deadlockLog_;
     mutable std::mutex deadlockMutex_;
+
+    // Internal acquire with mode
+    bool acquireLock(const std::string& table, LockMode mode);
 
     // Record that 'waiter' is waiting for 'holder'
     void addWaitEdge(std::thread::id waiter, std::thread::id holder);

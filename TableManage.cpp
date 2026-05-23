@@ -1836,6 +1836,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
                                      const std::string& colname, bool ascending,
                                      const std::vector<std::string>& includeCols) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -1889,6 +1890,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
 OpResult StorageEngine::dropIndex(const std::string& dbname, const std::string& tablename,
                                    const std::string& colname) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
     std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
 
     // Update metadata
@@ -1912,6 +1914,7 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
                                               const std::string& indexName,
                                               const std::vector<std::string>& includeCols) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
     TableSchema tbl = getTableSchema(dbname, tablename);
 
     // Validate all columns exist
@@ -2458,6 +2461,7 @@ OpResult StorageEngine::createTable(const std::string& dbname,
 OpResult StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
 
     std::filesystem::remove(schemaPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
@@ -2486,6 +2490,7 @@ OpResult StorageEngine::alterTableAddColumn(const std::string& dbname,
                                              const std::string& tablename,
                                              const Column& col) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -2534,6 +2539,7 @@ OpResult StorageEngine::alterTableDropColumn(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t dropIdx = tbl.len;
@@ -3434,7 +3440,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
                                 const std::vector<std::string>& conditions) {
     if (readOnly_) return OpResult::InvalidValue;
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
-    lockManager_.lockExclusive(tablename);
+    lockManager_.lockIntentExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
@@ -3551,7 +3557,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
                 std::vector<std::string> sortedTables(cascadeTables.begin(), cascadeTables.end());
                 std::sort(sortedTables.begin(), sortedTables.end());
                 for (const auto& t : sortedTables) {
-                    lockManager_.lockExclusive(t);
+                    lockManager_.lockIntentExclusive(t);
                 }
 
                 // Apply SET NULL: set FK column to NULL
@@ -3840,7 +3846,7 @@ OpResult StorageEngine::update(const std::string& dbname,
         if (!found) return OpResult::InvalidValue;
     }
 
-    lockManager_.lockExclusive(tablename);
+    lockManager_.lockIntentExclusive(tablename);
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
@@ -4172,7 +4178,15 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     if (!tableExists(dbname, tablename)) return result;
-    lockManager_.lockShared(tablename);
+    if (inTransaction_) {
+        if (forUpdate) {
+            lockManager_.lockIntentExclusive(tablename);
+        } else {
+            lockManager_.lockIntentShared(tablename);
+        }
+    } else {
+        lockManager_.lockShared(tablename);
+    }
 
     // READ COMMITTED: refresh snapshot before each query
     if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::ReadCommitted) {

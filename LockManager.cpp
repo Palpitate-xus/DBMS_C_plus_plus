@@ -85,71 +85,125 @@ bool LockManager::hasCycle(std::thread::id start) {
 // Lock acquisition with deadlock detection
 // ========================================================================
 
-bool LockManager::lockShared(const std::string& table) {
+// ========================================================================
+// Lock compatibility
+// ========================================================================
+
+static bool isCompatible(LockManager::LockMode requested, LockManager::LockMode held, bool sameThread) {
+    if (sameThread) return true; // Same thread can upgrade or re-acquire
+    switch (requested) {
+        case LockManager::LockMode::Shared:
+            return held == LockManager::LockMode::Shared || held == LockManager::LockMode::IntentShared;
+        case LockManager::LockMode::Exclusive:
+            return false;
+        case LockManager::LockMode::IntentShared:
+            return held == LockManager::LockMode::Shared ||
+                   held == LockManager::LockMode::IntentShared ||
+                   held == LockManager::LockMode::IntentExclusive;
+        case LockManager::LockMode::IntentExclusive:
+            return held == LockManager::LockMode::IntentShared ||
+                   held == LockManager::LockMode::IntentExclusive;
+        case LockManager::LockMode::Metadata:
+            return false;
+    }
+    return false;
+}
+
+static const char* modeToStr(LockManager::LockMode mode) {
+    switch (mode) {
+        case LockManager::LockMode::Shared: return "shared";
+        case LockManager::LockMode::Exclusive: return "exclusive";
+        case LockManager::LockMode::IntentShared: return "IS";
+        case LockManager::LockMode::IntentExclusive: return "IX";
+        case LockManager::LockMode::Metadata: return "MDL";
+    }
+    return "";
+}
+
+bool LockManager::acquireLock(const std::string& table, LockMode mode) {
     std::thread::id self = std::this_thread::get_id();
     {
         std::lock_guard<std::mutex> guard(globalMutex_);
         auto& state = locks_[table];
-        // Fast path: no exclusive lock held
-        if (!state.exclusive && state.holders.empty()) {
-            state.mtx.lock_shared();
-            state.sharedCount++;
-            state.holders.push_back(self);
-            return true;
+        // Check compatibility with all holders
+        bool compatible = true;
+        for (const auto& holder : state.holders) {
+            auto it = state.holderModes.find(holder);
+            LockMode heldMode = (it != state.holderModes.end()) ? it->second : LockMode::Shared;
+            if (!isCompatible(mode, heldMode, holder == self)) {
+                compatible = false;
+                if (holder != self) addWaitEdge(self, holder);
+            }
         }
-        // Need to wait: check if any holder has exclusive lock
-        if (state.exclusive && !state.holders.empty()) {
-            addWaitEdge(self, state.holders[0]);
+        if (!compatible) {
             if (hasCycle(self)) {
-                // Deadlock detected - remove edge and fail
                 removeWaitEdges(self);
                 return false;
             }
+        } else {
+            // Fast path: compatible, acquire immediately
+            if (mode == LockMode::Shared) {
+                state.mtx.lock_shared();
+                state.sharedCount++;
+            } else if (mode == LockMode::Exclusive) {
+                state.mtx.lock();
+                state.exclusive = true;
+            } else if (mode == LockMode::IntentShared) {
+                state.mtx.lock_shared();
+                state.intentSharedCount++;
+            } else if (mode == LockMode::IntentExclusive) {
+                state.mtx.lock();
+                state.intentExclusiveCount++;
+            } else if (mode == LockMode::Metadata) {
+                state.mtx.lock();
+                state.metadata = true;
+            }
+            state.holders.push_back(self);
+            state.holderModes[self] = mode;
+            return true;
         }
     }
     // Slow path: block waiting for the lock
     auto& state = locks_[table];
-    state.mtx.lock_shared();
+    if (mode == LockMode::Shared || mode == LockMode::IntentShared) {
+        state.mtx.lock_shared();
+    } else {
+        state.mtx.lock();
+    }
     {
         std::lock_guard<std::mutex> guard(globalMutex_);
-        state.sharedCount++;
+        switch (mode) {
+            case LockMode::Shared: state.sharedCount++; break;
+            case LockMode::Exclusive: state.exclusive = true; break;
+            case LockMode::IntentShared: state.intentSharedCount++; break;
+            case LockMode::IntentExclusive: state.intentExclusiveCount++; break;
+            case LockMode::Metadata: state.metadata = true; break;
+        }
         state.holders.push_back(self);
+        state.holderModes[self] = mode;
         removeWaitEdges(self);
     }
     return true;
 }
 
+bool LockManager::lockShared(const std::string& table) {
+    return acquireLock(table, LockMode::Shared);
+}
+
 bool LockManager::lockExclusive(const std::string& table) {
-    std::thread::id self = std::this_thread::get_id();
-    {
-        std::lock_guard<std::mutex> guard(globalMutex_);
-        auto& state = locks_[table];
-        // Fast path: no one holds the lock
-        if (state.sharedCount == 0 && !state.exclusive) {
-            state.mtx.lock();
-            state.exclusive = true;
-            state.holders.push_back(self);
-            return true;
-        }
-        // Need to wait: add wait edges to all holders
-        for (const auto& holder : state.holders) {
-            if (holder != self) addWaitEdge(self, holder);
-        }
-        if (hasCycle(self)) {
-            removeWaitEdges(self);
-            return false;
-        }
-    }
-    // Slow path: block waiting for the lock
-    auto& state = locks_[table];
-    state.mtx.lock();
-    {
-        std::lock_guard<std::mutex> guard(globalMutex_);
-        state.exclusive = true;
-        state.holders.push_back(self);
-        removeWaitEdges(self);
-    }
-    return true;
+    return acquireLock(table, LockMode::Exclusive);
+}
+
+bool LockManager::lockIntentShared(const std::string& table) {
+    return acquireLock(table, LockMode::IntentShared);
+}
+
+bool LockManager::lockIntentExclusive(const std::string& table) {
+    return acquireLock(table, LockMode::IntentExclusive);
+}
+
+bool LockManager::lockMetadata(const std::string& table) {
+    return acquireLock(table, LockMode::Metadata);
 }
 
 // ========================================================================
@@ -166,12 +220,30 @@ void LockManager::unlock(const std::string& table) {
     // Remove self from holders list
     auto hit = std::find(state.holders.begin(), state.holders.end(), self);
     if (hit != state.holders.end()) state.holders.erase(hit);
-    if (state.exclusive) {
-        state.mtx.unlock();
-        state.exclusive = false;
-    } else if (state.sharedCount > 0) {
-        state.mtx.unlock_shared();
-        state.sharedCount--;
+    auto modeIt = state.holderModes.find(self);
+    LockMode mode = (modeIt != state.holderModes.end()) ? modeIt->second : LockMode::Shared;
+    if (modeIt != state.holderModes.end()) state.holderModes.erase(modeIt);
+    switch (mode) {
+        case LockMode::Shared:
+            state.mtx.unlock_shared();
+            state.sharedCount--;
+            break;
+        case LockMode::Exclusive:
+            state.mtx.unlock();
+            state.exclusive = false;
+            break;
+        case LockMode::IntentShared:
+            state.mtx.unlock_shared();
+            state.intentSharedCount--;
+            break;
+        case LockMode::IntentExclusive:
+            state.mtx.unlock();
+            state.intentExclusiveCount--;
+            break;
+        case LockMode::Metadata:
+            state.mtx.unlock();
+            state.metadata = false;
+            break;
     }
 }
 
@@ -185,13 +257,31 @@ void LockManager::unlockAll() {
             // Remove self from holders
             auto hit = std::find(state.holders.begin(), state.holders.end(), self);
             if (hit != state.holders.end()) state.holders.erase(hit);
-            if (state.exclusive) {
-                state.mtx.unlock();
-                state.exclusive = false;
-            }
-            while (state.sharedCount > 0) {
-                state.mtx.unlock_shared();
-                state.sharedCount--;
+            auto modeIt = state.holderModes.find(self);
+            if (modeIt != state.holderModes.end()) {
+                switch (modeIt->second) {
+                    case LockMode::Shared:
+                        state.mtx.unlock_shared();
+                        state.sharedCount--;
+                        break;
+                    case LockMode::Exclusive:
+                        state.mtx.unlock();
+                        state.exclusive = false;
+                        break;
+                    case LockMode::IntentShared:
+                        state.mtx.unlock_shared();
+                        state.intentSharedCount--;
+                        break;
+                    case LockMode::IntentExclusive:
+                        state.mtx.unlock();
+                        state.intentExclusiveCount--;
+                        break;
+                    case LockMode::Metadata:
+                        state.mtx.unlock();
+                        state.metadata = false;
+                        break;
+                }
+                state.holderModes.erase(modeIt);
             }
         }
     }
@@ -225,8 +315,12 @@ void LockManager::unlockAll() {
 
 std::vector<std::string> LockManager::lockedTables() const {
     std::vector<std::string> result;
+    std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(globalMutex_));
     for (const auto& kv : locks_) {
-        if (kv.second.exclusive || kv.second.sharedCount > 0) {
+        const auto& state = kv.second;
+        if (state.exclusive || state.sharedCount > 0 ||
+            state.intentSharedCount > 0 || state.intentExclusiveCount > 0 ||
+            state.metadata) {
             result.push_back(kv.first);
         }
     }
@@ -503,9 +597,11 @@ std::vector<LockManager::LockHoldInfo> LockManager::getLockHolds() const {
         std::lock_guard<std::mutex> guard(globalMutex_);
         for (const auto& kv : locks_) {
             const auto& state = kv.second;
-            std::string mode = state.exclusive ? "exclusive" : "shared";
             for (const auto& holder : state.holders) {
-                result.push_back({kv.first, tidToString(holder), mode});
+                auto modeIt = state.holderModes.find(holder);
+                std::string modeStr = modeToStr(
+                    (modeIt != state.holderModes.end()) ? modeIt->second : LockMode::Shared);
+                result.push_back({kv.first, tidToString(holder), modeStr});
             }
         }
     }
@@ -513,9 +609,9 @@ std::vector<LockManager::LockHoldInfo> LockManager::getLockHolds() const {
         std::lock_guard<std::mutex> guard(rowMutex_);
         for (const auto& kv : rowLocks_) {
             const auto& state = kv.second;
-            std::string mode = state.exclusive ? "exclusive" : "shared";
+            std::string modeStr = state.exclusive ? "exclusive" : "shared";
             for (const auto& holder : state.holders) {
-                result.push_back({kv.first, tidToString(holder), mode});
+                result.push_back({kv.first, tidToString(holder), modeStr});
             }
         }
     }
