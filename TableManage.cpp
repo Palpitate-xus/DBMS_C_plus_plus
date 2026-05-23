@@ -2623,6 +2623,130 @@ OpResult StorageEngine::reindex(const std::string& dbname,
     return OpResult::Success;
 }
 
+// ========================================================================
+// Full-text index (simplified inverted index)
+// ========================================================================
+
+static std::filesystem::path fullTextIndexPath(const std::string& dbname,
+                                                const std::string& tablename,
+                                                const std::string& colname) {
+    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".fti");
+}
+
+static std::vector<std::string> tokenizeText(const std::string& text) {
+    std::vector<std::string> tokens;
+    std::string current;
+    for (char c : text) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            current += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        } else {
+            if (!current.empty()) {
+                tokens.push_back(current);
+                current.clear();
+            }
+        }
+    }
+    if (!current.empty()) tokens.push_back(current);
+    return tokens;
+}
+
+OpResult StorageEngine::createFullTextIndex(const std::string& dbname,
+                                             const std::string& tablename,
+                                             const std::string& colname) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+
+    std::map<std::string, std::set<int64_t>> inverted;
+    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                       const char* data, size_t len) {
+        std::string row(data, len);
+        std::string val = extractColumnValue(row, tbl, colIdx);
+        auto tokens = tokenizeText(val);
+        int64_t rid = encodeRid(pageId, slotId);
+        for (const auto& tok : tokens) {
+            inverted[tok].insert(rid);
+        }
+    });
+
+    auto path = fullTextIndexPath(dbname, tablename, colname);
+    std::ofstream out(path);
+    if (!out) return OpResult::InvalidValue;
+    for (const auto& kv : inverted) {
+        out << kv.first;
+        for (int64_t rid : kv.second) {
+            out << ' ' << rid;
+        }
+        out << '\n';
+    }
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropFullTextIndex(const std::string& dbname,
+                                           const std::string& tablename,
+                                           const std::string& colname) {
+    auto path = fullTextIndexPath(dbname, tablename, colname);
+    if (std::filesystem::exists(path)) {
+        std::filesystem::remove(path);
+    }
+    return OpResult::Success;
+}
+
+bool StorageEngine::hasFullTextIndex(const std::string& dbname,
+                                      const std::string& tablename,
+                                      const std::string& colname) const {
+    return std::filesystem::exists(fullTextIndexPath(dbname, tablename, colname));
+}
+
+std::vector<int64_t> StorageEngine::fullTextSearch(const std::string& dbname,
+                                                     const std::string& tablename,
+                                                     const std::string& colname,
+                                                     const std::string& word) const {
+    std::vector<int64_t> result;
+    auto path = fullTextIndexPath(dbname, tablename, colname);
+    std::ifstream in(path);
+    if (!in) return result;
+    std::string searchWord = word;
+    for (char& c : searchWord) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t sp = line.find(' ');
+        std::string tok = (sp == std::string::npos) ? line : line.substr(0, sp);
+        if (tok == searchWord) {
+            if (sp != std::string::npos) {
+                std::string rest = line.substr(sp + 1);
+                std::stringstream ss(rest);
+                int64_t rid;
+                while (ss >> rid) result.push_back(rid);
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getFullTextIndexedColumns(const std::string& dbname,
+                                                                   const std::string& tablename) const {
+    std::vector<std::string> result;
+    auto dir = std::filesystem::path(dbname);
+    if (!std::filesystem::exists(dir)) return result;
+    std::string prefix = tablename + "_";
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+        if (name.size() > 4 && name.substr(name.size() - 4) == ".fti" &&
+            name.substr(0, prefix.size()) == prefix) {
+            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 4);
+            result.push_back(colname);
+        }
+    }
+    return result;
+}
+
 bool StorageEngine::databaseExists(const std::string& dbname) const {
     return std::filesystem::exists(dbPath(dbname));
 }
@@ -3285,6 +3409,16 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "!=" && val == cond.value)    return false;
         if (cond.op == "like" && !likeMatch(val, cond.value)) return false;
         if (cond.op == "regexp" && !regexMatch(val, cond.value)) return false;
+        if (cond.op == "contains") {
+            auto tokens = tokenizeText(val);
+            std::string searchWord = cond.value;
+            for (char& c : searchWord) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            bool found = false;
+            for (const auto& tok : tokens) {
+                if (tok == searchWord) { found = true; break; }
+            }
+            if (!found) return false;
+        }
     } else if (col.dataType == "date") {
         Date d = (val.empty() ? Date{} : Date(val.c_str()));
         Date v(cond.value.c_str());
@@ -3947,6 +4081,18 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             conds.push_back(c);
             continue;
         }
+        // Handle CONTAINS operator (full-text search)
+        if (s.size() >= 8 && s.substr(0, 8) == "contains") {
+            c.op = "contains";
+            size_t sp = s.find(' ', 8);
+            if (sp == std::string::npos) continue;
+            c.colName = s.substr(8, sp - 8);
+            c.value = s.substr(sp + 1);
+            if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
+                c.value = c.value.substr(1, c.value.size() - 2);
+            conds.push_back(c);
+            continue;
+        }
         // Handle IS NOT NULL operator
         if (s.size() >= 9 && s.substr(0, 9) == "isnotnull") {
             c.op = "isnotnull";
@@ -3981,6 +4127,34 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                              const std::vector<Condition>& conds) {
     std::set<int64_t> ids;
     TableSchema tbl = getTableSchema(dbname, tablename);
+
+    // Try full-text index for CONTAINS conditions
+    for (const auto& c : conds) {
+        if (c.op == "contains") {
+            if (hasFullTextIndex(dbname, tablename, c.colName)) {
+                auto rids = fullTextSearch(dbname, tablename, c.colName, c.value);
+                for (int64_t rid : rids) ids.insert(rid);
+                if (!ids.empty()) {
+                    if (conds.size() > 1) {
+                        PageAllocator* pa = getPageAllocator(dbname, tablename);
+                        std::set<int64_t> toRemove;
+                        for (int64_t rid : ids) {
+                            std::string row;
+                            if (!readRowByRid(pa, rid, row, tbl)) { toRemove.insert(rid); continue; }
+                            bool match = true;
+                            for (const auto& cond : conds) {
+                                if (cond.op == "contains" && cond.colName == c.colName) continue;
+                                if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
+                            }
+                            if (!match) toRemove.insert(rid);
+                        }
+                        for (auto r : toRemove) ids.erase(r);
+                    }
+                    return ids;
+                }
+            }
+        }
+    }
 
     // Try B+ tree PK index for = conditions
     for (const auto& c : conds) {

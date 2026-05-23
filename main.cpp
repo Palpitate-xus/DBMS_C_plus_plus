@@ -606,6 +606,20 @@ static string normalizeConditionStr(string s) {
             pos += 6;
         }
     }
+    // Normalize CONTAINS keyword: "name contains 'word'" → "namecontains'word'"
+    pos = 0;
+    while ((pos = s.find("contains", pos)) != string::npos) {
+        size_t before = pos;
+        while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
+        size_t after = pos + 8;
+        while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
+        if (before != pos || after != pos + 8) {
+            s = s.substr(0, before) + "contains" + s.substr(after);
+            pos = before + 8;
+        } else {
+            pos += 8;
+        }
+    }
     // Normalize IS NOT NULL (before IS NULL to avoid partial match)
     pos = 0;
     while ((pos = s.find("is not null", pos)) != string::npos) {
@@ -736,6 +750,13 @@ static string modifyLogic(const string& logic) {
         string before = logic.substr(0, regexpPos);
         string after = logic.substr(regexpPos + 6);
         return "regexp" + before + " " + after;
+    }
+    // Handle CONTAINS
+    size_t containsPos = logic.find("contains");
+    if (containsPos != string::npos) {
+        string before = logic.substr(0, containsPos);
+        string after = logic.substr(containsPos + 8);
+        return "contains" + before + " " + after;
     }
     // Handle IS NOT NULL
     size_t isnotPos = logic.find("isnotnull");
@@ -2448,6 +2469,35 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Index created" << endl;
+            return false;
+        }
+
+        if (sql.substr(7, 9) == "fulltext ") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            // create fulltext index idxname on tablename(column)
+            string rest = trim(sql.substr(17));
+            size_t onPos = rest.find(" on ");
+            if (onPos == string::npos) {
+                cout << "SQL syntax error: CREATE FULLTEXT INDEX idx ON t(col)" << endl;
+                return true;
+            }
+            string idxName = trim(rest.substr(0, onPos));
+            string afterOn = trim(rest.substr(onPos + 4));
+            size_t lp = afterOn.find('(');
+            size_t rp = afterOn.find(')');
+            if (lp == string::npos || rp == string::npos || rp <= lp + 1) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            string tname = resolveTableName(s, trim(afterOn.substr(0, lp)));
+            string colname = trim(afterOn.substr(lp + 1, rp - lp - 1));
+            auto res = g_engine.createFullTextIndex(s.currentDB, tname, colname);
+            if (res != OpResult::Success) {
+                cout << "Create fulltext index failed" << endl;
+                return true;
+            }
+            cout << "Fulltext index created" << endl;
             return false;
         }
 
@@ -4626,6 +4676,17 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Index dropped" << endl;
             return false;
         }
+        if (op == "fulltext") {
+            if (tokens.size() < 3 || tokens[1] != "index" || tokens.size() < 5 || tokens[3] != "on") {
+                cout << "SQL syntax error: DROP FULLTEXT INDEX idx ON t" << endl;
+                return true;
+            }
+            string idxName = tokens[2];
+            string tname = resolveTableName(s, tokens[4]);
+            g_engine.dropFullTextIndex(s.currentDB, tname, idxName);
+            cout << "Fulltext index dropped" << endl;
+            return false;
+        }
         if (op == "view") {
             auto res = g_engine.dropView(s.currentDB, name);
             if (res == OpResult::TableNotExist) {
@@ -5139,6 +5200,10 @@ bool execute(const string& rawSql, Session& s) {
                     cout << tname << " " << cols << " composite ";
                     if (!ci.whereCondition.empty()) cout << ci.whereCondition;
                     cout << endl;
+                }
+                auto ftCols = g_engine.getFullTextIndexedColumns(s.currentDB, tname);
+                for (const auto& col : ftCols) {
+                    cout << tname << " " << col << " fulltext " << endl;
                 }
             }
             return false;

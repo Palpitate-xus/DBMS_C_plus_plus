@@ -414,6 +414,18 @@ public:
     static std::string buildCompositeKey(const std::string& rowBuffer, const TableSchema& tbl,
                                           const std::vector<std::string>& colNames);
 
+    // Full-text index (simplified inverted index)
+    OpResult createFullTextIndex(const std::string& dbname, const std::string& tablename,
+                                  const std::string& colname);
+    OpResult dropFullTextIndex(const std::string& dbname, const std::string& tablename,
+                                const std::string& colname);
+    bool hasFullTextIndex(const std::string& dbname, const std::string& tablename,
+                          const std::string& colname) const;
+    std::vector<int64_t> fullTextSearch(const std::string& dbname, const std::string& tablename,
+                                        const std::string& colname, const std::string& word) const;
+    std::vector<std::string> getFullTextIndexedColumns(const std::string& dbname,
+                                                        const std::string& tablename) const;
+
     // Condition parsing (public for execution plan use)
     struct Condition {
         std::string op;  // "<", ">", "=", "<=", ">=", "!=", "like"
