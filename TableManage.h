@@ -150,6 +150,28 @@ public:
     std::vector<std::string> getMaterializedViewNames(const std::string& dbname) const;
     OpResult dropMaterializedView(const std::string& dbname, const std::string& viewname);
 
+    // Stored procedures
+    OpResult createProcedure(const std::string& dbname, const std::string& procname,
+                             const std::vector<std::string>& statements);
+    OpResult dropProcedure(const std::string& dbname, const std::string& procname);
+    bool procedureExists(const std::string& dbname, const std::string& procname) const;
+    std::vector<std::string> getProcedureStatements(const std::string& dbname,
+                                                     const std::string& procname) const;
+    std::vector<std::string> getProcedureNames(const std::string& dbname) const;
+
+    // User-defined functions (simple expression-based)
+    struct UDFInfo {
+        std::string name;
+        std::string paramName;
+        std::string expression;
+    };
+    OpResult createUDF(const std::string& dbname, const std::string& funcname,
+                       const std::string& param, const std::string& expression);
+    OpResult dropUDF(const std::string& dbname, const std::string& funcname);
+    bool udfExists(const std::string& dbname, const std::string& funcname) const;
+    UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;
+    std::vector<std::string> getUDFNames(const std::string& dbname) const;
+
     // Buffer pool stats (aggregated across all open tables and indexes)
     struct BufferPoolStats {
         size_t totalHits = 0;

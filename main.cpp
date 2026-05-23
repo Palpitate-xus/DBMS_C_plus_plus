@@ -2681,6 +2681,76 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Materialized view " << viewname << " created (" << results.size() << " rows)" << endl;
             return false;
         }
+
+        if (sql.substr(7, 9) == "procedure") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            // create procedure name as 'stmt1; stmt2; ...'
+            string rest = trim(sql.substr(17));
+            size_t asPos = rest.find(" as ");
+            if (asPos == string::npos) {
+                cout << "SQL syntax error: PROCEDURE requires AS clause" << endl;
+                return true;
+            }
+            string procname = trim(rest.substr(0, asPos));
+            string body = trim(rest.substr(asPos + 4));
+            // Remove surrounding quotes if present
+            if (body.size() >= 2 && body.front() == '\'' && body.back() == '\'') {
+                body = body.substr(1, body.size() - 2);
+            }
+            // Split by semicolon
+            vector<string> stmts;
+            size_t p = 0;
+            while (p < body.size()) {
+                size_t sc = body.find(';', p);
+                string stmt = trim(body.substr(p, sc - p));
+                if (!stmt.empty()) stmts.push_back(stmt);
+                if (sc == string::npos) break;
+                p = sc + 1;
+            }
+            if (stmts.empty()) {
+                cout << "SQL syntax error: procedure body is empty" << endl;
+                return true;
+            }
+            auto res = g_engine.createProcedure(s.currentDB, procname, stmts);
+            if (res != OpResult::Success) {
+                cout << "Create procedure failed" << endl;
+                return true;
+            }
+            cout << "Procedure " << procname << " created" << endl;
+            return false;
+        }
+
+        if (sql.substr(7, 8) == "function") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            // create function name(param) as 'expression'
+            string rest = trim(sql.substr(16));
+            size_t lp = rest.find('(');
+            size_t rp = rest.find(')');
+            if (lp == string::npos || rp == string::npos || rp <= lp + 1) {
+                cout << "SQL syntax error: FUNCTION requires (param)" << endl;
+                return true;
+            }
+            string funcname = trim(rest.substr(0, lp));
+            string param = trim(rest.substr(lp + 1, rp - lp - 1));
+            string after = trim(rest.substr(rp + 1));
+            if (after.substr(0, 3) != "as ") {
+                cout << "SQL syntax error: FUNCTION requires AS expression" << endl;
+                return true;
+            }
+            string expr = trim(after.substr(3));
+            if (expr.size() >= 2 && expr.front() == '\'' && expr.back() == '\'') {
+                expr = expr.substr(1, expr.size() - 2);
+            }
+            auto res = g_engine.createUDF(s.currentDB, funcname, param, expr);
+            if (res != OpResult::Success) {
+                cout << "Create function failed" << endl;
+                return true;
+            }
+            cout << "Function " << funcname << " created" << endl;
+            return false;
+        }
     }
 
     if (sql.substr(0, 5) == "alter") {
@@ -4104,6 +4174,25 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // CALL procedure_name
+    if (sql.substr(0, 4) == "call") {
+        if (!checkDB(s)) return true;
+        string procname = trim(sql.substr(4));
+        if (procname.empty()) {
+            cout << "SQL syntax error: CALL procedure_name" << endl;
+            return true;
+        }
+        if (!g_engine.procedureExists(s.currentDB, procname)) {
+            cout << "Procedure " << procname << " not exist" << endl;
+            return true;
+        }
+        auto stmts = g_engine.getProcedureStatements(s.currentDB, procname);
+        for (const auto& stmt : stmts) {
+            execute(stmt, s);
+        }
+        return false;
+    }
+
     if (sql.substr(0, 5) == "begin") {
         if (!checkDB(s)) return true;
         // Parse optional isolation level: "begin read committed"
@@ -4433,6 +4522,24 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Trigger dropped" << endl;
+            return false;
+        }
+        if (op == "procedure") {
+            if (!g_engine.procedureExists(s.currentDB, name)) {
+                cout << "Procedure " << name << " not exist" << endl;
+                return true;
+            }
+            g_engine.dropProcedure(s.currentDB, name);
+            cout << "Procedure " << name << " dropped" << endl;
+            return false;
+        }
+        if (op == "function") {
+            if (!g_engine.udfExists(s.currentDB, name)) {
+                cout << "Function " << name << " not exist" << endl;
+                return true;
+            }
+            g_engine.dropUDF(s.currentDB, name);
+            cout << "Function " << name << " dropped" << endl;
             return false;
         }
         cout << "SQL syntax error" << endl;
@@ -4804,6 +4911,24 @@ bool execute(const string& rawSql, Session& s) {
             if (!checkDB(s)) return true;
             auto names = g_engine.getMaterializedViewNames(s.currentDB);
             for (const auto& n : names) cout << n << endl;
+            return false;
+        }
+        if (rest == "procedures") {
+            if (!checkDB(s)) return true;
+            auto names = g_engine.getProcedureNames(s.currentDB);
+            for (const auto& n : names) {
+                auto stmts = g_engine.getProcedureStatements(s.currentDB, n);
+                cout << n << " (" << stmts.size() << " statements)" << endl;
+            }
+            return false;
+        }
+        if (rest == "functions") {
+            if (!checkDB(s)) return true;
+            auto names = g_engine.getUDFNames(s.currentDB);
+            for (const auto& n : names) {
+                auto udf = g_engine.getUDF(s.currentDB, n);
+                cout << n << "(" << udf.paramName << ") = " << udf.expression << endl;
+            }
             return false;
         }
         if (rest.substr(0, 7) == "columns") {

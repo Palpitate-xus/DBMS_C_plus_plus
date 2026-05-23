@@ -684,6 +684,146 @@ OpResult StorageEngine::dropMaterializedView(const std::string& dbname,
 }
 
 // ========================================================================
+// Stored procedures
+// ========================================================================
+
+static std::filesystem::path proceduresDir(const std::string& dbname) {
+    return std::filesystem::path(dbname) / ".procs";
+}
+
+static std::filesystem::path procedurePath(const std::string& dbname,
+                                           const std::string& procname) {
+    return std::filesystem::path(dbname) / ".procs" / (procname + ".proc");
+}
+
+OpResult StorageEngine::createProcedure(const std::string& dbname,
+                                         const std::string& procname,
+                                         const std::vector<std::string>& statements) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto pdir = proceduresDir(dbname);
+    if (!std::filesystem::exists(pdir)) {
+        std::filesystem::create_directories(pdir);
+    }
+    std::ofstream ofs(procedurePath(dbname, procname));
+    if (!ofs) return OpResult::InvalidValue;
+    for (const auto& stmt : statements) {
+        ofs << stmt << '\n';
+    }
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropProcedure(const std::string& dbname,
+                                       const std::string& procname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = procedurePath(dbname, procname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+bool StorageEngine::procedureExists(const std::string& dbname,
+                                    const std::string& procname) const {
+    return std::filesystem::exists(procedurePath(dbname, procname));
+}
+
+std::vector<std::string> StorageEngine::getProcedureStatements(
+    const std::string& dbname, const std::string& procname) const {
+    std::vector<std::string> result;
+    auto path = procedurePath(dbname, procname);
+    std::ifstream ifs(path);
+    if (!ifs) return result;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty()) result.push_back(line);
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getProcedureNames(const std::string& dbname) const {
+    std::vector<std::string> result;
+    auto pdir = proceduresDir(dbname);
+    if (!std::filesystem::exists(pdir)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(pdir)) {
+        if (entry.is_regular_file()) {
+            std::string name = entry.path().filename().string();
+            if (name.size() > 5 && name.substr(name.size() - 5) == ".proc") {
+                result.push_back(name.substr(0, name.size() - 5));
+            }
+        }
+    }
+    return result;
+}
+
+// ========================================================================
+// User-defined functions (simple expression-based)
+// ========================================================================
+
+static std::filesystem::path udfDir(const std::string& dbname) {
+    return std::filesystem::path(dbname) / ".funcs";
+}
+
+static std::filesystem::path udfPath(const std::string& dbname,
+                                     const std::string& funcname) {
+    return std::filesystem::path(dbname) / ".funcs" / (funcname + ".func");
+}
+
+OpResult StorageEngine::createUDF(const std::string& dbname,
+                                   const std::string& funcname,
+                                   const std::string& param,
+                                   const std::string& expression) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto fdir = udfDir(dbname);
+    if (!std::filesystem::exists(fdir)) {
+        std::filesystem::create_directories(fdir);
+    }
+    std::ofstream ofs(udfPath(dbname, funcname));
+    if (!ofs) return OpResult::InvalidValue;
+    ofs << param << "\n" << expression << "\n";
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropUDF(const std::string& dbname,
+                                 const std::string& funcname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = udfPath(dbname, funcname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+bool StorageEngine::udfExists(const std::string& dbname,
+                              const std::string& funcname) const {
+    return std::filesystem::exists(udfPath(dbname, funcname));
+}
+
+StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
+                                              const std::string& funcname) const {
+    UDFInfo info;
+    auto path = udfPath(dbname, funcname);
+    std::ifstream ifs(path);
+    if (!ifs) return info;
+    std::getline(ifs, info.paramName);
+    std::getline(ifs, info.expression);
+    info.name = funcname;
+    return info;
+}
+
+std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) const {
+    std::vector<std::string> result;
+    auto fdir = udfDir(dbname);
+    if (!std::filesystem::exists(fdir)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(fdir)) {
+        if (entry.is_regular_file()) {
+            std::string name = entry.path().filename().string();
+            if (name.size() > 5 && name.substr(name.size() - 5) == ".func") {
+                result.push_back(name.substr(0, name.size() - 5));
+            }
+        }
+    }
+    return result;
+}
+
+// ========================================================================
 // Statistics
 // ========================================================================
 
