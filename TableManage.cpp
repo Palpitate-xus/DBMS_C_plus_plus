@@ -7166,8 +7166,110 @@ void StorageEngine::checkpoint(const std::string& dbname) {
     }
     syncFile(cpPath);
 
+    // Archive WAL before truncation
+    archiveWal(dbname);
     // Truncate WAL after checkpoint
     walClear(walPath(dbname));
+}
+
+// ========================================================================
+// WAL archiving
+// ========================================================================
+
+void StorageEngine::archiveWal(const std::string& dbname) {
+    auto wpath = walPath(dbname);
+    if (!std::filesystem::exists(wpath)) return;
+    auto archiveDir = walArchiveDir(dbname);
+    if (!std::filesystem::exists(archiveDir)) {
+        std::filesystem::create_directories(archiveDir);
+    }
+    // Copy WAL to archive with timestamp suffix
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&time_t_now);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
+    auto dest = archiveDir / ("wal_" + oss.str());
+    try {
+        std::filesystem::copy_file(wpath, dest, std::filesystem::copy_options::overwrite_existing);
+    } catch (...) {}
+}
+
+// ========================================================================
+// Physical backup / restore
+// ========================================================================
+
+bool StorageEngine::physicalBackup(const std::string& dbname, const std::string& backupPath) {
+    if (!databaseExists(dbname)) return false;
+    auto src = dbPath(dbname);
+    auto dst = std::filesystem::path(backupPath);
+    try {
+        if (!std::filesystem::exists(dst)) {
+            std::filesystem::create_directories(dst);
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(src)) {
+            auto destPath = dst / entry.path().filename();
+            if (entry.is_directory()) {
+                std::filesystem::copy(entry.path(), destPath,
+                    std::filesystem::copy_options::overwrite_existing |
+                    std::filesystem::copy_options::recursive);
+            } else {
+                std::filesystem::copy_file(entry.path(), destPath,
+                    std::filesystem::copy_options::overwrite_existing);
+            }
+        }
+        // Also backup WAL archive if exists
+        auto archiveDir = walArchiveDir(dbname);
+        if (std::filesystem::exists(archiveDir)) {
+            auto destArchive = dst / "wal_archive";
+            std::filesystem::copy(archiveDir, destArchive,
+                std::filesystem::copy_options::overwrite_existing |
+                std::filesystem::copy_options::recursive);
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool StorageEngine::physicalRestore(const std::string& dbname, const std::string& backupPath) {
+    auto src = std::filesystem::path(backupPath);
+    if (!std::filesystem::exists(src)) return false;
+    auto dst = dbPath(dbname);
+    try {
+        // Remove existing database if present
+        if (std::filesystem::exists(dst)) {
+            std::filesystem::remove_all(dst);
+        }
+        std::filesystem::create_directories(dst);
+        for (const auto& entry : std::filesystem::directory_iterator(src)) {
+            auto destPath = dst / entry.path().filename();
+            if (entry.is_directory() && entry.path().filename() == "wal_archive") {
+                // Skip wal_archive in root, restore it separately
+                continue;
+            }
+            if (entry.is_directory()) {
+                std::filesystem::copy(entry.path(), destPath,
+                    std::filesystem::copy_options::recursive);
+            } else {
+                std::filesystem::copy_file(entry.path(), destPath,
+                    std::filesystem::copy_options::overwrite_existing);
+            }
+        }
+        // Restore WAL archive
+        auto srcArchive = src / "wal_archive";
+        if (std::filesystem::exists(srcArchive)) {
+            auto dstArchive = walArchiveDir(dbname);
+            if (std::filesystem::exists(dstArchive)) {
+                std::filesystem::remove_all(dstArchive);
+            }
+            std::filesystem::copy(srcArchive, dstArchive,
+                std::filesystem::copy_options::recursive);
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 // ========================================================================

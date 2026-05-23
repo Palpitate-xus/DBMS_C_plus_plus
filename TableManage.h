@@ -341,6 +341,13 @@ public:
 
     // Checkpoint: flush all dirty pages and write checkpoint record
     void checkpoint(const std::string& dbname);
+    // WAL archive directory
+    std::filesystem::path walArchiveDir(const std::string& dbname) const { return dbPath(dbname).string() + ".archive"; }
+    void archiveWal(const std::string& dbname);
+
+    // Physical backup / restore
+    bool physicalBackup(const std::string& dbname, const std::string& backupPath);
+    bool physicalRestore(const std::string& dbname, const std::string& backupPath);
 
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename);

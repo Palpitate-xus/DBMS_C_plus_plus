@@ -4440,6 +4440,54 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (sql.substr(0, 14) == "backup database") {
+        if (!checkAdmin(s)) return true;
+        string rest = trim(sql.substr(14));
+        size_t toPos = rest.find("to ");
+        if (toPos == string::npos) {
+            cout << "SQL syntax error: BACKUP DATABASE dbname TO 'path'" << endl;
+            return true;
+        }
+        string dbname = trim(rest.substr(0, toPos));
+        string backupPath = stripQuotes(trim(rest.substr(toPos + 3)));
+        if (backupPath.empty()) {
+            cout << "SQL syntax error: missing backup path" << endl;
+            return true;
+        }
+        if (g_engine.physicalBackup(dbname, backupPath)) {
+            cout << "Backup completed: " << dbname << " -> " << backupPath << endl;
+            log(s.username, "backup " + dbname + " to " + backupPath, getTime());
+        } else {
+            cout << "Backup failed" << endl;
+            return true;
+        }
+        return false;
+    }
+
+    if (sql.substr(0, 15) == "restore database") {
+        if (!checkAdmin(s)) return true;
+        string rest = trim(sql.substr(15));
+        size_t fromPos = rest.find("from ");
+        if (fromPos == string::npos) {
+            cout << "SQL syntax error: RESTORE DATABASE dbname FROM 'path'" << endl;
+            return true;
+        }
+        string dbname = trim(rest.substr(0, fromPos));
+        string backupPath = stripQuotes(trim(rest.substr(fromPos + 5)));
+        if (backupPath.empty()) {
+            cout << "SQL syntax error: missing backup path" << endl;
+            return true;
+        }
+        if (g_engine.physicalRestore(dbname, backupPath)) {
+            cout << "Restore completed: " << backupPath << " -> " << dbname << endl;
+            log(s.username, "restore " + dbname + " from " + backupPath, getTime());
+        } else {
+            cout << "Restore failed" << endl;
+            return true;
+        }
+        return false;
+    }
+
     if (sql.substr(0, 16) == "clear plan cache") {
         std::lock_guard<std::mutex> lock(g_planCacheMutex);
         size_t cleared = g_queryPlanCache.size();
