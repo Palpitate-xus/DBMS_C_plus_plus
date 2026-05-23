@@ -1467,10 +1467,20 @@ std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbn
                 if (next == std::string::npos) break;
                 pos = next + 1;
             }
+        } else if (line.substr(0, 5) == "EXPR:") {
+            // Expression index: extract expression name
+            size_t incPos = line.find(":INCLUDE:");
+            size_t wherePos = line.find(":WHERE:");
+            size_t endPos = std::min(
+                incPos != std::string::npos ? incPos : line.size(),
+                wherePos != std::string::npos ? wherePos : line.size());
+            cols.push_back(line.substr(5, endPos - 5));
         } else {
-            // Strip :DESC and :INCLUDE suffixes
-            size_t includePos = line.find(":INCLUDE");
-            std::string base = (includePos != std::string::npos) ? line.substr(0, includePos) : line;
+            // Strip :DESC, :INCLUDE, and :WHERE suffixes
+            size_t wherePos = line.find(":WHERE:");
+            std::string base = (wherePos != std::string::npos) ? line.substr(0, wherePos) : line;
+            size_t includePos = base.find(":INCLUDE");
+            base = (includePos != std::string::npos) ? base.substr(0, includePos) : base;
             size_t descPos = base.find(":DESC");
             if (descPos != std::string::npos) {
                 cols.push_back(base.substr(0, descPos));
@@ -1490,8 +1500,11 @@ bool StorageEngine::isDescendingIndex(const std::string& dbname, const std::stri
     std::string line;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
-        size_t incPos = line.find(":INCLUDE");
-        std::string base = (incPos != std::string::npos) ? line.substr(0, incPos) : line;
+        if (line.substr(0, 5) == "EXPR:") continue;
+        size_t wherePos = line.find(":WHERE:");
+        std::string base = (wherePos != std::string::npos) ? line.substr(0, wherePos) : line;
+        size_t incPos = base.find(":INCLUDE");
+        base = (incPos != std::string::npos) ? base.substr(0, incPos) : base;
         if (base == colname + ":DESC") return true;
     }
     return false;
@@ -1509,10 +1522,18 @@ std::vector<std::string> StorageEngine::getIndexIncludeColumns(const std::string
         if (line.empty()) continue;
         size_t incPos = line.find(":INCLUDE:");
         if (incPos == std::string::npos) continue;
-        // For single-column index: colname[:DESC]:INCLUDE:...
+        // For single-column index: colname[:DESC][:WHERE:...]:INCLUDE:...
+        // For expression index: EXPR:expr[:WHERE:...]:INCLUDE:...
         std::string base = line.substr(0, incPos);
-        size_t descPos = base.find(":DESC");
-        std::string idxCol = (descPos != std::string::npos) ? base.substr(0, descPos) : base;
+        std::string idxCol;
+        if (base.substr(0, 5) == "EXPR:") {
+            idxCol = base.substr(5);
+            size_t wherePos = idxCol.find(":WHERE:");
+            if (wherePos != std::string::npos) idxCol = idxCol.substr(0, wherePos);
+        } else {
+            size_t descPos = base.find(":DESC");
+            idxCol = (descPos != std::string::npos) ? base.substr(0, descPos) : base;
+        }
         if (idxCol == colname) {
             std::string incStr = line.substr(incPos + 9); // after ":INCLUDE:"
             size_t p = 0;
@@ -1525,6 +1546,92 @@ std::vector<std::string> StorageEngine::getIndexIncludeColumns(const std::string
             }
             return result;
         }
+    }
+    return result;
+}
+
+std::vector<StorageEngine::IndexMetadata> StorageEngine::getIndexMetadata(
+    const std::string& dbname, const std::string& tablename) const {
+    std::vector<IndexMetadata> result;
+    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::ifstream in(meta);
+    if (!in) return result;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        IndexMetadata info;
+        // Composite index lines start with "C:"
+        if (line.size() > 2 && line[0] == 'C' && line[1] == ':') continue;
+
+        // Check for EXPR prefix
+        if (line.substr(0, 5) == "EXPR:") {
+            info.isExpression = true;
+            size_t pos = 5;
+            // Extract expression, stopping at :INCLUDE or :WHERE
+            size_t incPos = line.find(":INCLUDE:", pos);
+            size_t wherePos = line.find(":WHERE:", pos);
+            size_t endPos = std::min(
+                incPos != std::string::npos ? incPos : line.size(),
+                wherePos != std::string::npos ? wherePos : line.size());
+            info.name = line.substr(pos, endPos - pos);
+            // Extract function from expression like "UPPER(col)"
+            size_t lp = info.name.find('(');
+            if (lp != std::string::npos) {
+                info.exprFunc = info.name.substr(0, lp);
+            }
+            pos = endPos;
+            if (incPos != std::string::npos && pos == incPos) {
+                size_t wPos = line.find(":WHERE:", incPos + 9);
+                std::string incStr = (wPos != std::string::npos)
+                    ? line.substr(incPos + 9, wPos - incPos - 9)
+                    : line.substr(incPos + 9);
+                std::stringstream ss(incStr);
+                std::string c;
+                while (getline(ss, c, ',')) {
+                    c = trim(c);
+                    if (!c.empty()) info.includeCols.push_back(c);
+                }
+                if (wPos != std::string::npos) pos = wPos;
+            }
+            if (wherePos != std::string::npos && pos == wherePos) {
+                info.whereCondition = line.substr(wherePos + 7);
+            }
+            result.push_back(std::move(info));
+            continue;
+        }
+
+        // Regular single-column index: colname[:DESC][:INCLUDE:...][:WHERE:...]
+        size_t wherePos = line.find(":WHERE:");
+        size_t incPos = line.find(":INCLUDE:");
+        size_t descPos = line.find(":DESC");
+
+        std::string base;
+        if (wherePos != std::string::npos) {
+            base = line.substr(0, wherePos);
+            info.whereCondition = line.substr(wherePos + 7);
+        } else {
+            base = line;
+        }
+
+        std::string colPart = base;
+        if (incPos != std::string::npos && incPos < base.size()) {
+            std::string incStr = base.substr(incPos + 9);
+            colPart = base.substr(0, incPos);
+            std::stringstream ss(incStr);
+            std::string c;
+            while (getline(ss, c, ',')) {
+                c = trim(c);
+                if (!c.empty()) info.includeCols.push_back(c);
+            }
+        }
+
+        if (descPos != std::string::npos && descPos < colPart.size()) {
+            info.name = colPart.substr(0, descPos);
+            info.descending = true;
+        } else {
+            info.name = colPart;
+        }
+        result.push_back(std::move(info));
     }
     return result;
 }
@@ -1547,7 +1654,28 @@ std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexe
             while (pos < line.size()) {
                 next = line.find(':', pos);
                 std::string cname = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
-                if (!cname.empty()) info.columns.push_back(cname);
+                if (!cname.empty()) {
+                    if (cname == "INCLUDE") {
+                        // Skip INCLUDE columns for composite index info
+                        if (next != std::string::npos) pos = next + 1;
+                        while (pos < line.size()) {
+                            next = line.find(':', pos);
+                            std::string inc = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
+                            if (inc.empty()) break;
+                            if (next != std::string::npos) pos = next + 1;
+                            else { pos = line.size(); break; }
+                        }
+                        continue;
+                    }
+                    if (cname == "WHERE") {
+                        // Remainder is WHERE condition
+                        if (next != std::string::npos) {
+                            info.whereCondition = line.substr(next + 1);
+                        }
+                        break;
+                    }
+                    info.columns.push_back(cname);
+                }
                 if (next == std::string::npos) break;
                 pos = next + 1;
             }
@@ -1832,56 +1960,112 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
     return key;
 }
 
+// Helper: evaluate simple expression (UPPER/LOWER) on a column value
+static std::string evalExpr(const std::string& val, const std::string& exprFunc) {
+    if (exprFunc == "UPPER") {
+        std::string result = val;
+        for (char& c : result) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return result;
+    }
+    if (exprFunc == "LOWER") {
+        std::string result = val;
+        for (char& c : result) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return result;
+    }
+    return val;
+}
+
 OpResult StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
                                      const std::string& colname, bool ascending,
-                                     const std::vector<std::string>& includeCols) {
+                                     const std::vector<std::string>& includeCols,
+                                     const std::string& whereCondition,
+                                     const std::string& expression) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
     lockManager_.lockMetadata(tablename);
     TableSchema tbl = getTableSchema(dbname, tablename);
+
+    bool isExpression = !expression.empty();
+    std::string actualColname = colname;
+    std::string exprFunc;
     size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+
+    if (isExpression) {
+        // Parse expression like "UPPER(name)"
+        size_t lp = expression.find('(');
+        size_t rp = expression.find(')');
+        if (lp == std::string::npos || rp == std::string::npos || rp <= lp + 1) {
+            return OpResult::InvalidValue;
+        }
+        exprFunc = expression.substr(0, lp);
+        actualColname = expression.substr(lp + 1, rp - lp - 1);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == actualColname) { colIdx = i; break; }
+        }
+    } else {
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+        }
     }
     if (colIdx >= tbl.len) return OpResult::InvalidValue;
+
+    // Parse WHERE condition for partial index
+    std::vector<Condition> whereConds;
+    if (!whereCondition.empty()) {
+        whereConds = parseConditions(std::vector<std::string>{whereCondition});
+    }
 
     // Already indexed? If direction differs, drop and recreate
     auto existing = getIndexedColumns(dbname, tablename);
     bool alreadyIndexed = false;
     for (const auto& c : existing) {
-        if (c == colname) { alreadyIndexed = true; break; }
+        if (c == actualColname) { alreadyIndexed = true; break; }
     }
-    if (alreadyIndexed) {
-        bool currentDesc = isDescendingIndex(dbname, tablename, colname);
+    if (alreadyIndexed && !isExpression) {
+        bool currentDesc = isDescendingIndex(dbname, tablename, actualColname);
         if (currentDesc == !ascending) {
             return OpResult::Success; // same direction, nothing to do
         }
-        // Direction changed: drop old index and recreate
-        dropIndex(dbname, tablename, colname);
+        dropIndex(dbname, tablename, actualColname);
     }
 
     // Build index from existing data using page-based iteration
-    BPTree* idx = getSecondaryIndex(dbname, tablename, colname);
+    BPTree* idx = getSecondaryIndex(dbname, tablename,
+        isExpression ? expression : actualColname);
     if (!idx) return OpResult::InvalidValue;
 
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
+        // Partial index: skip rows not matching WHERE condition
+        bool match = true;
+        for (const auto& wc : whereConds) {
+            if (!evalConditionOnRow(wc, row, tbl)) { match = false; break; }
+        }
+        if (!match) return;
         std::string val = extractColumnValue(row, tbl, colIdx);
         if (!val.empty()) {
+            if (isExpression) val = evalExpr(val, exprFunc);
             idx->insertMulti(val, encodeRid(pageId, slotId));
         }
     });
 
-    // Record in metadata (append :DESC for descending indexes, :INCLUDE:... for include cols)
+    // Record in metadata
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
     std::ofstream out(meta, std::ios::out | std::ios::app);
-    out << colname << (ascending ? "" : ":DESC");
+    if (isExpression) {
+        out << "EXPR:" << expression;
+    } else {
+        out << actualColname << (ascending ? "" : ":DESC");
+    }
     if (!includeCols.empty()) {
         out << ":INCLUDE:";
         for (size_t i = 0; i < includeCols.size(); ++i) {
             if (i > 0) out << ",";
             out << includeCols[i];
         }
+    }
+    if (!whereCondition.empty()) {
+        out << ":WHERE:" << whereCondition;
     }
     out << '\n';
     return OpResult::Success;
@@ -1893,14 +2077,41 @@ OpResult StorageEngine::dropIndex(const std::string& dbname, const std::string& 
     lockManager_.lockMetadata(tablename);
     std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
 
-    // Update metadata
-    auto cols = getIndexedColumns(dbname, tablename);
+    // Update metadata: remove lines matching this column/expression
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(meta);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            bool match = false;
+            if (line.substr(0, 5) == "EXPR:") {
+                // Expression index: match "EXPR:colname" or "EXPR:expression"
+                size_t endPos = line.find(':');
+                if (endPos == std::string::npos) endPos = line.size();
+                // Check if the expression part matches colname
+                size_t exprEnd = line.find(":INCLUDE:");
+                if (exprEnd == std::string::npos) exprEnd = line.find(":WHERE:");
+                if (exprEnd == std::string::npos) exprEnd = line.size();
+                std::string expr = line.substr(5, exprEnd - 5);
+                if (expr == colname) match = true;
+            } else {
+                // Regular index: extract column name (before :DESC, :INCLUDE, :WHERE)
+                size_t wherePos = line.find(":WHERE:");
+                std::string base = (wherePos != std::string::npos) ? line.substr(0, wherePos) : line;
+                size_t includePos = base.find(":INCLUDE");
+                base = (includePos != std::string::npos) ? base.substr(0, includePos) : base;
+                size_t descPos = base.find(":DESC");
+                std::string idxCol = (descPos != std::string::npos) ? base.substr(0, descPos) : base;
+                if (idxCol == colname) match = true;
+            }
+            if (!match) lines.push_back(line);
+        }
+    }
     {
         std::ofstream out(meta, std::ios::out);
-        for (const auto& c : cols) {
-            if (c != colname) out << c << '\n';
-        }
+        for (const auto& l : lines) out << l << '\n';
     }
     // Remove from cache
     std::string key = dbname + "/" + tablename + "/" + colname;
@@ -1912,7 +2123,8 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::vector<std::string>& colnames,
                                               const std::string& indexName,
-                                              const std::vector<std::string>& includeCols) {
+                                              const std::vector<std::string>& includeCols,
+                                              const std::string& whereCondition) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
     lockManager_.lockMetadata(tablename);
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -1932,6 +2144,12 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
         if (ci.name == indexName) return OpResult::Success;
     }
 
+    // Parse WHERE condition for partial index
+    std::vector<Condition> whereConds;
+    if (!whereCondition.empty()) {
+        whereConds = parseConditions(std::vector<std::string>{whereCondition});
+    }
+
     // Build index from existing data
     BPTree* idx = getCompositeIndexTree(dbname, tablename, indexName);
     if (!idx) return OpResult::InvalidValue;
@@ -1939,13 +2157,19 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
+        // Partial index: skip rows not matching WHERE condition
+        bool match = true;
+        for (const auto& wc : whereConds) {
+            if (!evalConditionOnRow(wc, row, tbl)) { match = false; break; }
+        }
+        if (!match) return;
         std::string key = buildCompositeKey(row, tbl, colnames);
         if (!key.empty()) {
             idx->insertMulti(key, encodeRid(pageId, slotId));
         }
     });
 
-    // Record in metadata: C:indexName:col1:col2:...:INCLUDE:inc1,inc2
+    // Record in metadata: C:indexName:col1:col2:...:INCLUDE:inc1,inc2[:WHERE:cond]
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
     std::ofstream out(meta, std::ios::out | std::ios::app);
     out << "C:" << indexName;
@@ -1956,6 +2180,9 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
             if (i > 0) out << ",";
             out << includeCols[i];
         }
+    }
+    if (!whereCondition.empty()) {
+        out << ":WHERE:" << whereCondition;
     }
     out << '\n';
     return OpResult::Success;
@@ -3370,6 +3597,44 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     if (secIdx) {
                         auto vals = secIdx->searchMulti(c.value);
                         for (int64_t v : vals) ids.insert(v);
+                    }
+                }
+                // Try expression index (e.g. UPPER(name) = 'FOO')
+                if (ids.empty()) {
+                    auto metaList = getIndexMetadata(dbname, tablename);
+                    for (const auto& meta : metaList) {
+                        if (!meta.isExpression) continue;
+                        // Normalize: compare uppercase versions
+                        std::string queryExpr = c.colName;
+                        std::string idxExpr = meta.name;
+                        // Convert function names to uppercase for comparison
+                        size_t qlp = queryExpr.find('(');
+                        size_t ilp = idxExpr.find('(');
+                        if (qlp != std::string::npos && ilp != std::string::npos) {
+                            std::string qfunc = queryExpr.substr(0, qlp);
+                            std::string ifunc = idxExpr.substr(0, ilp);
+                            for (char& ch : qfunc) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                            for (char& ch : ifunc) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                            if (qfunc == ifunc) {
+                                // Functions match, check inner column
+                                std::string qcol = queryExpr.substr(qlp + 1, queryExpr.find(')') - qlp - 1);
+                                std::string icol = idxExpr.substr(ilp + 1, idxExpr.find(')') - ilp - 1);
+                                if (qcol == icol) {
+                                    BPTree* exprIdx = getSecondaryIndex(dbname, tablename, meta.name);
+                                    if (exprIdx) {
+                                        std::string searchVal = c.value;
+                                        if (meta.exprFunc == "UPPER") {
+                                            for (char& ch : searchVal) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                                        } else if (meta.exprFunc == "LOWER") {
+                                            for (char& ch : searchVal) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                                        }
+                                        auto vals = exprIdx->searchMulti(searchVal);
+                                        for (int64_t v : vals) ids.insert(v);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }

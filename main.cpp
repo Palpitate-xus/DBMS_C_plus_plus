@@ -2352,13 +2352,22 @@ bool execute(const string& rawSql, Session& s) {
             string tnameOrig = trim(afterOn.substr(0, lp));
             string tname = resolveTableName(s, tnameOrig);
             string colsStr = trim(afterOn.substr(lp + 1, rp - lp - 1));
-            // Check for INCLUDE clause in the full afterOn (after the closing paren)
+            // Check for INCLUDE and WHERE clauses in the full afterOn (after the closing paren)
             vector<string> includeCols;
+            string whereCondition;
             string afterParens = trim(afterOn.substr(rp + 1));
-            size_t includePos = afterParens.find("include ");
-            if (includePos == string::npos) includePos = afterParens.find("include(");
+            // First extract WHERE if present (everything after WHERE)
+            size_t wherePos = afterParens.find("where ");
+            if (wherePos == string::npos) wherePos = afterParens.find("WHERE ");
+            string beforeWhere = afterParens;
+            if (wherePos != string::npos) {
+                beforeWhere = trim(afterParens.substr(0, wherePos));
+                whereCondition = trim(afterParens.substr(wherePos + 6));
+            }
+            size_t includePos = beforeWhere.find("include ");
+            if (includePos == string::npos) includePos = beforeWhere.find("include(");
             if (includePos != string::npos) {
-                string incPart = trim(afterParens.substr(includePos + 7)); // skip "include"
+                string incPart = trim(beforeWhere.substr(includePos + 7)); // skip "include"
                 if (!incPart.empty() && incPart.front() == '(') incPart = incPart.substr(1);
                 if (!incPart.empty() && incPart.back() == ')') incPart.pop_back();
                 stringstream icss(incPart);
@@ -2369,24 +2378,44 @@ bool execute(const string& rawSql, Session& s) {
                 }
             }
             string keyColsStr = colsStr;
-            // Parse comma-separated column list, supporting ASC/DESC
+            // Parse comma-separated column list, supporting ASC/DESC and expressions
             vector<string> colnames;
             vector<bool> colAsc;
+            vector<string> expressions; // expression string for each column (empty = regular column)
             size_t cpos = 0;
             while (cpos < keyColsStr.size()) {
                 size_t comma = keyColsStr.find(',', cpos);
                 string c = trim(keyColsStr.substr(cpos, comma - cpos));
                 if (!c.empty()) {
                     bool asc = true;
-                    size_t sp = c.find(' ');
-                    if (sp != string::npos) {
-                        string dir = trim(c.substr(sp + 1));
-                        transform(dir.begin(), dir.end(), dir.begin(), ::tolower);
-                        if (dir == "desc") asc = false;
-                        c = trim(c.substr(0, sp));
+                    string expr;
+                    // Check for expression like UPPER(col) or LOWER(col)
+                    size_t exprLp = c.find('(');
+                    size_t exprRp = c.find(')');
+                    if (exprLp != string::npos && exprRp != string::npos && exprRp > exprLp + 1) {
+                        // This is an expression index
+                        expr = c;
+                        // Extract inner column for validation
+                        string inner = trim(c.substr(exprLp + 1, exprRp - exprLp - 1));
+                        // Check for ASC/DESC after the expression
+                        string afterExpr = trim(c.substr(exprRp + 1));
+                        if (!afterExpr.empty()) {
+                            transform(afterExpr.begin(), afterExpr.end(), afterExpr.begin(), ::tolower);
+                            if (afterExpr == "desc") asc = false;
+                        }
+                        c = inner; // use inner column for validation
+                    } else {
+                        size_t sp = c.find(' ');
+                        if (sp != string::npos) {
+                            string dir = trim(c.substr(sp + 1));
+                            transform(dir.begin(), dir.end(), dir.begin(), ::tolower);
+                            if (dir == "desc") asc = false;
+                            c = trim(c.substr(0, sp));
+                        }
                     }
                     colnames.push_back(c);
                     colAsc.push_back(asc);
+                    expressions.push_back(expr);
                 }
                 if (comma == string::npos) break;
                 cpos = comma + 1;
@@ -2400,14 +2429,15 @@ bool execute(const string& rawSql, Session& s) {
                 if (isHash) {
                     res = g_engine.createHashIndex(s.currentDB, tname, colnames[0]);
                 } else {
-                    res = g_engine.createIndex(s.currentDB, tname, colnames[0], colAsc[0], includeCols);
+                    res = g_engine.createIndex(s.currentDB, tname, colnames[0], colAsc[0], includeCols, whereCondition, expressions[0]);
                 }
             } else {
                 if (isHash) {
                     cout << "Hash index only supports single-column" << endl;
                     return true;
                 }
-                res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName, includeCols);
+                // Expression indexes not supported for composite (simplified)
+                res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName, includeCols, whereCondition);
             }
             if (res != OpResult::Success) {
                 cout << "Create index failed" << endl;
@@ -4535,18 +4565,20 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (rest == "indexes") {
             if (!checkDB(s)) return true;
-            cout << "table column type include" << endl;
+            cout << "table column type include where" << endl;
             auto tables = g_engine.getTableNames(s.currentDB);
             for (const auto& tname : tables) {
-                auto indexed = g_engine.getIndexedColumns(s.currentDB, tname);
-                for (const auto& col : indexed) {
-                    auto inc = g_engine.getIndexIncludeColumns(s.currentDB, tname, col);
+                auto idxMeta = g_engine.getIndexMetadata(s.currentDB, tname);
+                for (const auto& meta : idxMeta) {
                     string incStr;
-                    for (size_t i = 0; i < inc.size(); ++i) {
+                    for (size_t i = 0; i < meta.includeCols.size(); ++i) {
                         if (i > 0) incStr += ",";
-                        incStr += inc[i];
+                        incStr += meta.includeCols[i];
                     }
-                    cout << tname << " " << col << " bptree " << incStr << endl;
+                    string idxType = meta.isExpression ? "expression" : "bptree";
+                    cout << tname << " " << meta.name << " " << idxType << " " << incStr;
+                    if (!meta.whereCondition.empty()) cout << " " << meta.whereCondition;
+                    cout << endl;
                 }
                 auto hashIdx = g_engine.getHashIndexedColumns(s.currentDB, tname);
                 for (const auto& col : hashIdx) {
@@ -4559,7 +4591,9 @@ bool execute(const string& rawSql, Session& s) {
                         if (i > 0) cols += ",";
                         cols += ci.columns[i];
                     }
-                    cout << tname << " " << cols << " composite " << endl;
+                    cout << tname << " " << cols << " composite ";
+                    if (!ci.whereCondition.empty()) cout << ci.whereCondition;
+                    cout << endl;
                 }
             }
             return false;

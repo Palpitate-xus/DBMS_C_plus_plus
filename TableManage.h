@@ -305,10 +305,24 @@ public:
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename);
 
+    // Index metadata (partial + expression index support)
+    struct IndexMetadata {
+        std::string name;           // column name or expression
+        bool isExpression = false;  // true for expression index (e.g. UPPER(col))
+        bool descending = false;
+        std::vector<std::string> includeCols;
+        std::string whereCondition; // partial index WHERE clause
+        std::string exprFunc;       // "UPPER" or "LOWER" for expression indexes
+    };
+    std::vector<IndexMetadata> getIndexMetadata(const std::string& dbname,
+                                                 const std::string& tablename) const;
+
     // Secondary index (single-column B+ tree)
     OpResult createIndex(const std::string& dbname, const std::string& tablename,
                          const std::string& colname, bool ascending = true,
-                         const std::vector<std::string>& includeCols = {});
+                         const std::vector<std::string>& includeCols = {},
+                         const std::string& whereCondition = "",
+                         const std::string& expression = "");
     OpResult dropIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname);
     std::vector<std::string> getIndexedColumns(const std::string& dbname,
@@ -333,11 +347,13 @@ public:
     struct CompositeIndexInfo {
         std::string name;
         std::vector<std::string> columns;
+        std::string whereCondition; // partial index WHERE clause
     };
     OpResult createCompositeIndex(const std::string& dbname, const std::string& tablename,
                                   const std::vector<std::string>& colnames,
                                   const std::string& indexName,
-                                  const std::vector<std::string>& includeCols = {});
+                                  const std::vector<std::string>& includeCols = {},
+                                  const std::string& whereCondition = "");
     OpResult dropCompositeIndex(const std::string& dbname, const std::string& tablename,
                                 const std::string& indexName);
     std::vector<CompositeIndexInfo> getCompositeIndexes(const std::string& dbname,
