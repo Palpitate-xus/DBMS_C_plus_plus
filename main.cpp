@@ -2529,12 +2529,36 @@ bool execute(const string& rawSql, Session& s) {
             }
             string viewname = trim(rest.substr(0, asPos));
             string viewSql = trim(rest.substr(asPos + 4));
-            auto res = g_engine.createView(s.currentDB, viewname, viewSql);
+            // Check if view is updatable (simple SELECT from single table)
+            string baseTable;
+            string lview = toLower(viewSql);
+            if (lview.substr(0, 6) == "select") {
+                size_t fromPos = lview.find(" from ");
+                if (fromPos != string::npos) {
+                    size_t wherePos = lview.find(" where ", fromPos);
+                    size_t orderPos = lview.find(" order by ", fromPos);
+                    size_t groupPos = lview.find(" group by ", fromPos);
+                    size_t endPos = min(wherePos != string::npos ? wherePos : viewSql.size(),
+                                        min(orderPos != string::npos ? orderPos : viewSql.size(),
+                                            groupPos != string::npos ? groupPos : viewSql.size()));
+                    string tablePart = trim(viewSql.substr(fromPos + 6, endPos - fromPos - 6));
+                    // Simple table name (no JOIN, no subquery)
+                    if (tablePart.find(' ') == string::npos && tablePart.find(',') == string::npos) {
+                        baseTable = tablePart;
+                    }
+                }
+            }
+            // Store view SQL + base table metadata for updatable views
+            string storeSql = viewSql;
+            if (!baseTable.empty()) {
+                storeSql += "\nBASE_TABLE:" + baseTable + "\n";
+            }
+            auto res = g_engine.createView(s.currentDB, viewname, storeSql);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "View " << viewname << " already exists" << endl;
                 return true;
             }
-            cout << "View " << viewname << " created" << endl;
+            cout << "View " << viewname << " created" << (baseTable.empty() ? "" : " (updatable)") << endl;
             return false;
         }
 
@@ -3139,6 +3163,23 @@ bool execute(const string& rawSql, Session& s) {
         }
         string tname = tokens[0];
         string resolvedName = resolveTableName(s, tname);
+        // Check for updatable view
+        string viewBaseTable;
+        if (!g_engine.tableExists(s.currentDB, resolvedName) &&
+            g_engine.viewExists(s.currentDB, tname)) {
+            viewBaseTable = g_engine.getViewBaseTable(s.currentDB, tname);
+            if (!viewBaseTable.empty()) {
+                // Rewrite SQL to use base table
+                string rewritten = rawSql;
+                size_t pos = rewritten.find(tname);
+                if (pos != string::npos) {
+                    rewritten = rewritten.substr(0, pos) + viewBaseTable + rewritten.substr(pos + tname.size());
+                    return execute(rewritten, s);
+                }
+            }
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
         if (!g_engine.tableExists(s.currentDB, resolvedName)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
@@ -3574,6 +3615,21 @@ bool execute(const string& rawSql, Session& s) {
         }
         string tname = tokens[0];
         string resolvedName = resolveTableName(s, tname);
+        // Check for updatable view
+        if (!g_engine.tableExists(s.currentDB, resolvedName) &&
+            g_engine.viewExists(s.currentDB, tname)) {
+            string viewBaseTable = g_engine.getViewBaseTable(s.currentDB, tname);
+            if (!viewBaseTable.empty()) {
+                string rewritten = rawSql;
+                size_t pos = rewritten.find(tname);
+                if (pos != string::npos) {
+                    rewritten = rewritten.substr(0, pos) + viewBaseTable + rewritten.substr(pos + tname.size());
+                    return execute(rewritten, s);
+                }
+            }
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
         if (!g_engine.tableExists(s.currentDB, resolvedName)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
@@ -3857,6 +3913,21 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         string resolvedName = resolveTableName(s, tname);
+        // Check for updatable view
+        if (!g_engine.tableExists(s.currentDB, resolvedName) &&
+            g_engine.viewExists(s.currentDB, tname)) {
+            string viewBaseTable = g_engine.getViewBaseTable(s.currentDB, tname);
+            if (!viewBaseTable.empty()) {
+                string rewritten = rawSql;
+                size_t pos = rewritten.find(tname);
+                if (pos != string::npos) {
+                    rewritten = rewritten.substr(0, pos) + viewBaseTable + rewritten.substr(pos + tname.size());
+                    return execute(rewritten, s);
+                }
+            }
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
         if (!g_engine.tableExists(s.currentDB, resolvedName)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
@@ -4924,7 +4995,12 @@ bool execute(const string& rawSql, Session& s) {
         if (rest == "views") {
             if (!checkDB(s)) return true;
             auto names = g_engine.getViewNames(s.currentDB);
-            for (const auto& n : names) cout << n << endl;
+            for (const auto& n : names) {
+                string baseTable = g_engine.getViewBaseTable(s.currentDB, n);
+                cout << n;
+                if (!baseTable.empty()) cout << " (updatable -> " << baseTable << ")";
+                cout << endl;
+            }
             return false;
         }
         if (rest == "materialized views") {

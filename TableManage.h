@@ -142,6 +142,8 @@ public:
     bool viewExists(const std::string& dbname, const std::string& viewname) const;
     std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;
     std::vector<std::string> getViewNames(const std::string& dbname) const;
+    // Get base table name for updatable views (empty if not updatable)
+    std::string getViewBaseTable(const std::string& dbname, const std::string& viewname) const;
 
     // Materialized view (stores query results in a backing table)
     static std::string materializedViewPrefix(const std::string& viewname) { return "__mv_" + viewname; }

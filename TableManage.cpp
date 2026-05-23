@@ -611,6 +611,21 @@ std::string StorageEngine::getViewSQL(const std::string& dbname,
     return sql;
 }
 
+std::string StorageEngine::getViewBaseTable(const std::string& dbname,
+                                             const std::string& viewname) const {
+    auto path = viewPath(dbname, viewname);
+    if (!std::filesystem::exists(path)) return "";
+    std::ifstream ifs(path);
+    if (!ifs) return "";
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.substr(0, 11) == "BASE_TABLE:") {
+            return line.substr(11);
+        }
+    }
+    return "";
+}
+
 std::vector<std::string> StorageEngine::getViewNames(const std::string& dbname) const {
     std::vector<std::string> result;
     auto vdir = viewsDir(dbname);
