@@ -824,6 +824,86 @@ std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) c
 }
 
 // ========================================================================
+// Table-valued functions
+// ========================================================================
+
+static std::filesystem::path tvfDir(const std::string& dbname) {
+    return std::filesystem::path(dbname) / ".tvf";
+}
+
+static std::filesystem::path tvfPath(const std::string& dbname,
+                                     const std::string& funcname) {
+    return std::filesystem::path(dbname) / ".tvf" / (funcname + ".tvf");
+}
+
+OpResult StorageEngine::createTVF(const std::string& dbname,
+                                   const std::string& funcname,
+                                   const std::string& param,
+                                   const std::string& sql) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto tdir = tvfDir(dbname);
+    if (!std::filesystem::exists(tdir)) {
+        std::filesystem::create_directories(tdir);
+    }
+    std::ofstream ofs(tvfPath(dbname, funcname));
+    if (!ofs) return OpResult::InvalidValue;
+    ofs << param << "\n" << sql << "\n";
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropTVF(const std::string& dbname,
+                                 const std::string& funcname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = tvfPath(dbname, funcname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+bool StorageEngine::tvfExists(const std::string& dbname,
+                              const std::string& funcname) const {
+    return std::filesystem::exists(tvfPath(dbname, funcname));
+}
+
+std::string StorageEngine::getTVFSQL(const std::string& dbname,
+                                      const std::string& funcname) const {
+    auto path = tvfPath(dbname, funcname);
+    if (!std::filesystem::exists(path)) return "";
+    std::ifstream ifs(path);
+    if (!ifs) return "";
+    std::string param, sql;
+    std::getline(ifs, param);
+    std::getline(ifs, sql);
+    return sql;
+}
+
+std::string StorageEngine::getTVFParam(const std::string& dbname,
+                                        const std::string& funcname) const {
+    auto path = tvfPath(dbname, funcname);
+    if (!std::filesystem::exists(path)) return "";
+    std::ifstream ifs(path);
+    if (!ifs) return "";
+    std::string param;
+    std::getline(ifs, param);
+    return param;
+}
+
+std::vector<std::string> StorageEngine::getTVFNames(const std::string& dbname) const {
+    std::vector<std::string> result;
+    auto tdir = tvfDir(dbname);
+    if (!std::filesystem::exists(tdir)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(tdir)) {
+        if (entry.is_regular_file()) {
+            std::string name = entry.path().filename().string();
+            if (name.size() > 4 && name.substr(name.size() - 4) == ".tvf") {
+                result.push_back(name.substr(0, name.size() - 4));
+            }
+        }
+    }
+    return result;
+}
+
+// ========================================================================
 // Statistics
 // ========================================================================
 

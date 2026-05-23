@@ -172,6 +172,15 @@ public:
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
+    // Table-valued functions (return a result set)
+    OpResult createTVF(const std::string& dbname, const std::string& funcname,
+                       const std::string& param, const std::string& sql);
+    OpResult dropTVF(const std::string& dbname, const std::string& funcname);
+    bool tvfExists(const std::string& dbname, const std::string& funcname) const;
+    std::string getTVFSQL(const std::string& dbname, const std::string& funcname) const;
+    std::string getTVFParam(const std::string& dbname, const std::string& funcname) const;
+    std::vector<std::string> getTVFNames(const std::string& dbname) const;
+
     // Buffer pool stats (aggregated across all open tables and indexes)
     struct BufferPoolStats {
         size_t totalHits = 0;

@@ -2724,7 +2724,7 @@ bool execute(const string& rawSql, Session& s) {
         if (sql.substr(7, 8) == "function") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
-            // create function name(param) as 'expression'
+            // create function name(param) [returns table] as 'expression/sql'
             string rest = trim(sql.substr(16));
             size_t lp = rest.find('(');
             size_t rp = rest.find(')');
@@ -2735,20 +2735,35 @@ bool execute(const string& rawSql, Session& s) {
             string funcname = trim(rest.substr(0, lp));
             string param = trim(rest.substr(lp + 1, rp - lp - 1));
             string after = trim(rest.substr(rp + 1));
+            // Check for RETURNS TABLE (table-valued function)
+            bool isTVF = false;
+            if (after.size() >= 13 && toLower(after.substr(0, 13)) == "returns table") {
+                isTVF = true;
+                after = trim(after.substr(13));
+            }
             if (after.substr(0, 3) != "as ") {
                 cout << "SQL syntax error: FUNCTION requires AS expression" << endl;
                 return true;
             }
-            string expr = trim(after.substr(3));
-            if (expr.size() >= 2 && expr.front() == '\'' && expr.back() == '\'') {
-                expr = expr.substr(1, expr.size() - 2);
+            string body = trim(after.substr(3));
+            if (body.size() >= 2 && body.front() == '\'' && body.back() == '\'') {
+                body = body.substr(1, body.size() - 2);
             }
-            auto res = g_engine.createUDF(s.currentDB, funcname, param, expr);
-            if (res != OpResult::Success) {
-                cout << "Create function failed" << endl;
-                return true;
+            if (isTVF) {
+                auto res = g_engine.createTVF(s.currentDB, funcname, param, body);
+                if (res != OpResult::Success) {
+                    cout << "Create table-valued function failed" << endl;
+                    return true;
+                }
+                cout << "Table-valued function " << funcname << " created" << endl;
+            } else {
+                auto res = g_engine.createUDF(s.currentDB, funcname, param, body);
+                if (res != OpResult::Success) {
+                    cout << "Create function failed" << endl;
+                    return true;
+                }
+                cout << "Function " << funcname << " created" << endl;
             }
-            cout << "Function " << funcname << " created" << endl;
             return false;
         }
     }
@@ -4534,13 +4549,18 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         if (op == "function") {
-            if (!g_engine.udfExists(s.currentDB, name)) {
-                cout << "Function " << name << " not exist" << endl;
-                return true;
+            if (g_engine.udfExists(s.currentDB, name)) {
+                g_engine.dropUDF(s.currentDB, name);
+                cout << "Function " << name << " dropped" << endl;
+                return false;
             }
-            g_engine.dropUDF(s.currentDB, name);
-            cout << "Function " << name << " dropped" << endl;
-            return false;
+            if (g_engine.tvfExists(s.currentDB, name)) {
+                g_engine.dropTVF(s.currentDB, name);
+                cout << "Function " << name << " dropped" << endl;
+                return false;
+            }
+            cout << "Function " << name << " not exist" << endl;
+            return true;
         }
         cout << "SQL syntax error" << endl;
         return true;
@@ -4924,10 +4944,15 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (rest == "functions") {
             if (!checkDB(s)) return true;
-            auto names = g_engine.getUDFNames(s.currentDB);
-            for (const auto& n : names) {
+            auto udfNames = g_engine.getUDFNames(s.currentDB);
+            for (const auto& n : udfNames) {
                 auto udf = g_engine.getUDF(s.currentDB, n);
                 cout << n << "(" << udf.paramName << ") = " << udf.expression << endl;
+            }
+            auto tvfNames = g_engine.getTVFNames(s.currentDB);
+            for (const auto& n : tvfNames) {
+                auto param = g_engine.getTVFParam(s.currentDB, n);
+                cout << n << "(" << param << ") RETURNS TABLE" << endl;
             }
             return false;
         }
@@ -5952,6 +5977,46 @@ bool execute(const string& rawSql, Session& s) {
                          : (offsetPos != string::npos) ? offsetPos : sql.size();
         string tnameOrig = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
         string tname = resolveTableName(s, tnameOrig);
+
+        // Table-valued function expansion: FROM func(arg) -> FROM (sql_with_arg) AS __tvf_func
+        size_t tvfLp = tnameOrig.find('(');
+        if (tvfLp != string::npos) {
+            string tvfName = trim(tnameOrig.substr(0, tvfLp));
+            size_t tvfRp = tnameOrig.find(')', tvfLp);
+            if (tvfRp != string::npos && g_engine.tvfExists(s.currentDB, tvfName)) {
+                string tvfArg = trim(tnameOrig.substr(tvfLp + 1, tvfRp - tvfLp - 1));
+                // Remove quotes from argument if present
+                if (tvfArg.size() >= 2 && tvfArg.front() == '\'' && tvfArg.back() == '\'') {
+                    tvfArg = tvfArg.substr(1, tvfArg.size() - 2);
+                }
+                string tvfSql = g_engine.getTVFSQL(s.currentDB, tvfName);
+                string tvfParam = g_engine.getTVFParam(s.currentDB, tvfName);
+                if (!tvfSql.empty()) {
+                    // Substitute parameter with argument
+                    // Replace $1 with argument value
+                    size_t p1 = tvfSql.find("$1");
+                    if (p1 != string::npos) {
+                        tvfSql = tvfSql.substr(0, p1) + tvfArg + tvfSql.substr(p1 + 2);
+                    }
+                    // Also replace param name if used
+                    if (!tvfParam.empty()) {
+                        size_t pp = tvfSql.find(tvfParam);
+                        while (pp != string::npos) {
+                            tvfSql = tvfSql.substr(0, pp) + tvfArg + tvfSql.substr(pp + tvfParam.size());
+                            pp = tvfSql.find(tvfParam);
+                        }
+                    }
+                    string expanded = rawSql;
+                    string pattern = "from " + tnameOrig;
+                    size_t fp = expanded.find(pattern);
+                    if (fp != string::npos) {
+                        string subq = "from (" + tvfSql + ") as __tvf_" + tvfName;
+                        expanded = expanded.substr(0, fp) + subq + expanded.substr(fp + pattern.size());
+                        return execute(expanded, s);
+                    }
+                }
+            }
+        }
 
         if (s.currentDB != "information_schema" && !g_engine.tableExists(s.currentDB, tname)) {
             if (g_engine.viewExists(s.currentDB, tnameOrig)) {
