@@ -4392,6 +4392,31 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // SET auto_vacuum = on / off / threshold N
+    if (sql.substr(0, 15) == "set auto_vacuum") {
+        string rest = trim(sql.substr(15));
+        if (rest == "= on" || rest == "on" || rest == "= 1" || rest == "1") {
+            g_config.autoVacuumEnabled = true;
+            cout << "auto_vacuum set to ON" << endl;
+        } else if (rest == "= off" || rest == "off" || rest == "= 0" || rest == "0") {
+            g_config.autoVacuumEnabled = false;
+            cout << "auto_vacuum set to OFF" << endl;
+        } else if (rest.substr(0, 10) == "threshold " || rest.substr(0, 12) == "= threshold ") {
+            size_t off = (rest.substr(0, 10) == "threshold ") ? 10 : 12;
+            try {
+                g_config.autoVacuumThreshold = std::stoi(trim(rest.substr(off)));
+                cout << "auto_vacuum_threshold set to " << g_config.autoVacuumThreshold << endl;
+            } catch (...) {
+                cout << "Invalid threshold value" << endl;
+                return true;
+            }
+        } else {
+            cout << "Usage: SET auto_vacuum = ON|OFF|THRESHOLD N" << endl;
+            return true;
+        }
+        return false;
+    }
+
     if (sql.substr(0, 6) == "commit") {
         auto res = g_engine.commitTransaction();
         if (res != OpResult::Success) {
@@ -5058,6 +5083,23 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (rest == "variables") {
             g_config.printAll();
+            return false;
+        }
+        if (rest.substr(0, 11) == "dead tuples") {
+            string tname = trim(rest.substr(11));
+            if (tname.substr(0, 5) == "from ") tname = trim(tname.substr(5));
+            if (tname.empty()) {
+                cout << "Usage: SHOW DEAD TUPLES FROM table_name" << endl;
+                return true;
+            }
+            string resolved = resolveTableName(s, tname);
+            if (!g_engine.tableExists(s.currentDB, resolved)) {
+                cout << "Table " << tname << " not exist" << endl;
+                return true;
+            }
+            size_t count = g_engine.getDeadTupleCount(s.currentDB, resolved);
+            cout << "dead_tuples " << count << endl;
+            cout << "auto_vacuum_threshold " << g_config.autoVacuumThreshold << endl;
             return false;
         }
         if (rest == "deadlocks") {
