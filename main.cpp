@@ -5846,10 +5846,16 @@ bool execute(const string& rawSql, Session& s) {
         // Process derived tables: (SELECT ...) AS alias
         sql = processDerivedTables(sql, s);
 
-        // Parse FOR UPDATE / FOR SHARE / NOWAIT
+        // Parse FOR UPDATE / FOR SHARE / NOWAIT / SKIP LOCKED
         bool forUpdate = false;
         bool noWait = false;
+        bool skipLocked = false;
         {
+            size_t skPos = sql.find("skip locked");
+            if (skPos != string::npos) {
+                skipLocked = true;
+                sql = trim(sql.substr(0, skPos));
+            }
             size_t nwPos = sql.find("nowait");
             if (nwPos != string::npos) {
                 noWait = true;
@@ -6838,7 +6844,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs, forUpdate, noWait);
+                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -6846,7 +6852,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs, forUpdate, noWait);
+                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
