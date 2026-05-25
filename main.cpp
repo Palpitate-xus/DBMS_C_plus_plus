@@ -4417,6 +4417,24 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // SET TIMEZONE = '+08:00' | 'Asia/Shanghai' | 'UTC'
+    if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 15) == "set time zone ") {
+        size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 15;
+        string tzVal = trim(sql.substr(off));
+        // Remove leading '=' if present
+        if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
+        s.timezoneOffsetMinutes = parseTimezoneOffset(tzVal);
+        // Format offset for display
+        int absOff = std::abs(s.timezoneOffsetMinutes);
+        int tzh = absOff / 60;
+        int tzm = absOff % 60;
+        std::string sign = (s.timezoneOffsetMinutes >= 0) ? "+" : "-";
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s%02d:%02d", sign.c_str(), tzh, tzm);
+        cout << "Timezone set to UTC" << buf << " (" << tzVal << ")" << endl;
+        return false;
+    }
+
     if (sql.substr(0, 6) == "commit") {
         auto res = g_engine.commitTransaction();
         if (res != OpResult::Success) {
@@ -6319,6 +6337,21 @@ bool execute(const string& rawSql, Session& s) {
                     asc = false;
                     sortItem = trim(sortItem.substr(0, sortItem.size() - 4));
                 }
+                // Detect COLLATE
+                string collation;
+                size_t collatePos = sortItem.find("collate");
+                if (collatePos != string::npos) {
+                    string afterCollate = trim(sortItem.substr(collatePos + 7));
+                    // Remove quotes if present
+                    if (!afterCollate.empty() && (afterCollate.front() == '\'' || afterCollate.front() == '"')) {
+                        afterCollate = afterCollate.substr(1);
+                    }
+                    if (!afterCollate.empty() && (afterCollate.back() == '\'' || afterCollate.back() == '"')) {
+                        afterCollate.pop_back();
+                    }
+                    collation = trim(afterCollate);
+                    sortItem = trim(sortItem.substr(0, collatePos));
+                }
                 size_t lp = sortItem.find('(');
                 size_t rp = sortItem.rfind(')');
                 if (lp != string::npos && rp != string::npos && rp > lp) {
@@ -6332,6 +6365,7 @@ bool execute(const string& rawSql, Session& s) {
                         spec.exprArg = arg;
                         spec.ascending = asc;
                         spec.nullsFirst = nullsFirst;
+                        spec.collation = collation;
                         exprOrderBySpecs.push_back(spec);
                         continue;
                     }
@@ -6341,6 +6375,7 @@ bool execute(const string& rawSql, Session& s) {
                 spec.colName = sortItem;
                 spec.ascending = asc;
                 spec.nullsFirst = nullsFirst;
+                spec.collation = collation;
                 orderBySpecs.push_back(spec);
             }
         }
@@ -6886,7 +6921,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked);
+                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -6894,7 +6929,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked);
+                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
