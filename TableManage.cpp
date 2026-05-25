@@ -1,5 +1,8 @@
 #include "TableManage.h"
 #include "TxnIdGenerator.h"
+#include "Config.h"
+
+extern dbms::Config g_config;
 
 #include <algorithm>
 #include <cmath>
@@ -4662,6 +4665,14 @@ OpResult StorageEngine::remove(const std::string& dbname,
         }
     }
 
+    // Track dead tuples for auto-vacuum
+    {
+        auto key = std::make_pair(dbname, tablename);
+        std::lock_guard<std::mutex> lock(deadTupleMutex_);
+        deadTupleCounts_[key] += toDelete.size();
+    }
+    maybeAutoVacuum(dbname, tablename);
+
     return OpResult::Success;
 }
 
@@ -7495,6 +7506,14 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     }
 
     lockManager_.unlock(tablename);
+
+    // Reset dead tuple count after successful vacuum
+    if (freedPages > 0) {
+        auto key = std::make_pair(dbname, tablename);
+        std::lock_guard<std::mutex> lock(deadTupleMutex_);
+        deadTupleCounts_[key] = 0;
+    }
+
     return freedPages;
 }
 
@@ -7912,6 +7931,40 @@ void StorageEngine::removeSeq(const std::string& dbname, const std::string& tabl
     if (std::filesystem::exists(path)) {
         std::filesystem::remove(path);
     }
+}
+
+// Auto-VACUUM: trigger vacuum when dead tuple count exceeds threshold
+void StorageEngine::maybeAutoVacuum(const std::string& dbname,
+                                    const std::string& tablename) {
+    if (!g_config.autoVacuumEnabled) return;
+    auto key = std::make_pair(dbname, tablename);
+    size_t count = 0;
+    {
+        std::lock_guard<std::mutex> lock(deadTupleMutex_);
+        auto it = deadTupleCounts_.find(key);
+        if (it == deadTupleCounts_.end()) return;
+        count = it->second;
+    }
+    if (count >= static_cast<size_t>(g_config.autoVacuumThreshold)) {
+        vacuum(dbname, tablename);
+        std::lock_guard<std::mutex> lock(deadTupleMutex_);
+        deadTupleCounts_[key] = 0;
+    }
+}
+
+size_t StorageEngine::getDeadTupleCount(const std::string& dbname,
+                                        const std::string& tablename) const {
+    auto key = std::make_pair(dbname, tablename);
+    std::lock_guard<std::mutex> lock(deadTupleMutex_);
+    auto it = deadTupleCounts_.find(key);
+    return (it != deadTupleCounts_.end()) ? it->second : 0;
+}
+
+void StorageEngine::resetDeadTupleCount(const std::string& dbname,
+                                        const std::string& tablename) {
+    auto key = std::make_pair(dbname, tablename);
+    std::lock_guard<std::mutex> lock(deadTupleMutex_);
+    deadTupleCounts_[key] = 0;
 }
 
 static std::string privToStr(StorageEngine::TablePrivilege p) {

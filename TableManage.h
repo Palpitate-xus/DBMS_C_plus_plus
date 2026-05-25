@@ -353,6 +353,11 @@ public:
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename);
 
+    // Auto-VACUUM: per-table dead tuple tracking and automatic triggering
+    void maybeAutoVacuum(const std::string& dbname, const std::string& tablename);
+    size_t getDeadTupleCount(const std::string& dbname, const std::string& tablename) const;
+    void resetDeadTupleCount(const std::string& dbname, const std::string& tablename);
+
     // Index metadata (partial + expression index support)
     struct IndexMetadata {
         std::string name;           // column name or expression
@@ -614,6 +619,10 @@ private:
 
 private:
     mutable LockManager lockManager_;
+
+    // Auto-VACUUM: per-table dead tuple tracking
+    mutable std::mutex deadTupleMutex_;
+    mutable std::map<std::pair<std::string, std::string>, size_t> deadTupleCounts_;
 
     // Transaction state
     bool inTransaction_ = false;
