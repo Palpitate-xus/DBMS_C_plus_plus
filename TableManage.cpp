@@ -5041,7 +5041,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::vector<OrderBySpec>& orderBy,
                                                bool forUpdate,
                                                bool noWait,
-                                               bool skipLocked) {
+                                               bool skipLocked,
+                                               int timezoneOffsetMinutes) {
     std::vector<std::string> result;
 
     // information_schema virtual tables
@@ -5190,8 +5191,23 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                 const Column& scol = tbl.cols[sortIdx];
                 bool less = false, greater = false;
                 if (scol.dataType == "char" || scol.isVariableLength) {
-                    less = std::get<0>(a.vals[i]) < std::get<0>(b.vals[i]);
-                    greater = std::get<0>(b.vals[i]) < std::get<0>(a.vals[i]);
+                    std::string av = std::get<0>(a.vals[i]);
+                    std::string bv = std::get<0>(b.vals[i]);
+                    // Apply collation for string comparison
+                    if (spec.collation == "nocase" || spec.collation == "NOCASE") {
+                        std::string al = av, bl = bv;
+                        for (char& c : al) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                        for (char& c : bl) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                        less = al < bl;
+                        greater = bl < al;
+                    } else if (spec.collation == "reverse" || spec.collation == "REVERSE") {
+                        less = bv < av;
+                        greater = av < bv;
+                    } else {
+                        // Default: binary collation
+                        less = av < bv;
+                        greater = bv < av;
+                    }
                 } else if (scol.dataType == "date") {
                     less = std::get<2>(a.vals[i]) < std::get<2>(b.vals[i]);
                     greater = std::get<2>(b.vals[i]) < std::get<2>(a.vals[i]);
@@ -5220,6 +5236,21 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
                 continue;
             std::string val = extractColumnValue(mr.second, tbl, i);
+            // Apply session timezone for TIMESTAMPTZ columns
+            if (timezoneOffsetMinutes != 0 && col.dataType == "timestamptz" && !val.empty()) {
+                // Read raw seconds directly from row buffer (extractColumnValue already formats it)
+                size_t offset = 0;
+                for (size_t j = 0; j < i; ++j) {
+                    if (!tbl.cols[j].isVariableLength) offset += tbl.cols[j].dsize;
+                }
+                if (offset + TIMESTAMP_SIZE <= mr.second.size()) {
+                    int64_t utcSec = 0;
+                    std::memcpy(&utcSec, mr.second.data() + offset, TIMESTAMP_SIZE);
+                    if (utcSec != INF && utcSec != 0) {
+                        val = formatTimestampWithTz(utcSec, timezoneOffsetMinutes);
+                    }
+                }
+            }
             if (val.empty() && !col.isNull) rowStr += "NULL ";
             else rowStr += val + ' ';
         }

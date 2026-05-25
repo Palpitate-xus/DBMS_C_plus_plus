@@ -232,6 +232,7 @@ public:
         std::string exprArg;    // e.g., "name"
         bool isExpression = false;
         bool nullsFirst = false;  // NULLS FIRST / NULLS LAST
+        std::string collation;    // e.g., "nocase", "binary" (default), "unicode"
     };
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
                                    const std::vector<std::string>& conditions,
@@ -239,7 +240,8 @@ public:
                                    const std::vector<OrderBySpec>& orderBy = {},
                                    bool forUpdate = false,
                                    bool noWait = false,
-                                   bool skipLocked = false);
+                                   bool skipLocked = false,
+                                   int timezoneOffsetMinutes = 0);
 
     // Scalar function expression for queryExpr
     struct SelectExpr {
