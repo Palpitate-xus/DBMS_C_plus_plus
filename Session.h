@@ -14,4 +14,5 @@ struct Session {
     int isolationLevel = 2; // 0=READ UNCOMMITTED, 1=READ COMMITTED, 2=REPEATABLE READ, 3=SERIALIZABLE
     std::set<std::string> tempTables; // temporary table names in this session
     int statementTimeoutMs = 0; // 0 = disabled
+    int timezoneOffsetMinutes = 0; // Session timezone offset from UTC (e.g. +480 for Asia/Shanghai)
 };

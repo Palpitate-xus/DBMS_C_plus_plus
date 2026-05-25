@@ -251,3 +251,75 @@ inline std::string formatTimestampSeconds(int64_t ts) {
     res += transstr(s);
     return res;
 }
+
+// Format timestamp seconds with timezone offset (e.g. +480 min = Asia/Shanghai)
+inline std::string formatTimestampWithTz(int64_t utcSeconds, int tzOffsetMinutes) {
+    int64_t localSeconds = utcSeconds + tzOffsetMinutes * 60LL;
+    if (localSeconds < 0) localSeconds = 0;
+    std::string base = formatTimestampSeconds(localSeconds);
+    if (base.empty()) return "";
+    // Append timezone offset: [+-]HH:MM
+    int absOff = std::abs(tzOffsetMinutes);
+    int tzh = absOff / 60;
+    int tzm = absOff % 60;
+    base += (tzOffsetMinutes >= 0) ? " +" : " -";
+    if (tzh < 10) base += "0";
+    base += transstr(tzh) + ":";
+    if (tzm < 10) base += "0";
+    base += transstr(tzm);
+    return base;
+}
+
+// Parse timezone name or offset string to minutes offset from UTC
+// Supports: "+08:00", "-05:30", "UTC", "Asia/Shanghai", "America/New_York", etc.
+inline int parseTimezoneOffset(const std::string& tzStr) {
+    std::string s = tzStr;
+    // Trim whitespace and quotes
+    {
+        size_t a = 0;
+        while (a < s.size() && (std::isspace(static_cast<unsigned char>(s[a])) || s[a] == '\'' || s[a] == '"')) ++a;
+        size_t b = s.size();
+        while (b > a && (std::isspace(static_cast<unsigned char>(s[b-1])) || s[b-1] == '\'' || s[b-1] == '"')) --b;
+        s = s.substr(a, b - a);
+    }
+    // Normalize to lowercase for case-insensitive comparison
+    for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    if (s.empty() || s == "utc" || s == "gmt" || s == "z") return 0;
+    // Parse [+-]HH:MM or [+-]HH
+    if (s[0] == '+' || s[0] == '-') {
+        bool negative = (s[0] == '-');
+        int tzh = 0, tzm = 0;
+        size_t colon = s.find(':');
+        if (colon != std::string::npos) {
+            for (size_t i = 1; i < colon; ++i) if (s[i] >= '0' && s[i] <= '9') tzh = tzh * 10 + s[i] - '0';
+            for (size_t i = colon + 1; i < s.size(); ++i) if (s[i] >= '0' && s[i] <= '9') tzm = tzm * 10 + s[i] - '0';
+        } else {
+            for (size_t i = 1; i < s.size(); ++i) if (s[i] >= '0' && s[i] <= '9') tzh = tzh * 10 + s[i] - '0';
+        }
+        return (negative ? -1 : 1) * (tzh * 60 + tzm);
+    }
+    // Named timezone mapping (common zones) — all lowercase
+    if (s == "asia/shanghai" || s == "asia/hong_kong" || s == "asia/singapore" || s == "asia/taipei") return 480;
+    if (s == "asia/tokyo" || s == "asia/seoul" || s == "asia/osaka") return 540;
+    if (s == "asia/bangkok" || s == "asia/jakarta" || s == "asia/ho_chi_minh") return 420;
+    if (s == "asia/dubai") return 240;
+    if (s == "asia/kolkata" || s == "asia/calcutta") return 330;
+    if (s == "europe/london") return 0;
+    if (s == "europe/paris" || s == "europe/berlin" || s == "europe/madrid" || s == "europe/rome" || s == "europe/amsterdam" || s == "europe/vienna") return 60;
+    if (s == "europe/athens" || s == "europe/helsinki" || s == "europe/bucharest") return 120;
+    if (s == "europe/moscow" || s == "europe/istanbul") return 180;
+    if (s == "america/new_york" || s == "america/toronto" || s == "america/miami" || s == "america/detroit") return -300;
+    if (s == "america/chicago" || s == "america/mexico_city" || s == "america/denver") return -360;
+    if (s == "america/los_angeles" || s == "america/vancouver" || s == "america/seattle") return -480;
+    if (s == "america/anchorage") return -540;
+    if (s == "pacific/honolulu") return -600;
+    if (s == "australia/sydney" || s == "australia/melbourne") return 600;
+    if (s == "australia/perth") return 480;
+    if (s == "australia/adelaide") return 570;
+    if (s == "australia/darwin") return 570;
+    if (s == "africa/cairo") return 120;
+    if (s == "africa/johannesburg") return 120;
+    if (s == "america/sao_paulo" || s == "america/buenos_aires") return -180;
+    if (s == "pacific/auckland") return 720;
+    return 0; // Default to UTC for unknown zones
+}
