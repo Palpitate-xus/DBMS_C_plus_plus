@@ -5029,7 +5029,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::set<std::string>& selectCols,
                                                const std::vector<OrderBySpec>& orderBy,
                                                bool forUpdate,
-                                               bool noWait) {
+                                               bool noWait,
+                                               bool skipLocked) {
     std::vector<std::string> result;
 
     // information_schema virtual tables
@@ -5087,9 +5088,10 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
 
     // Row-level locks within transaction
     if (inTransaction_) {
+        std::vector<std::pair<int64_t, std::string>> lockedRows;
         for (auto& mr : matchRows) {
             bool locked;
-            if (noWait) {
+            if (noWait || skipLocked) {
                 locked = forUpdate
                     ? lockManager_.rowLockExclusiveNoWait(tablename, mr.first)
                     : lockManager_.rowLockSharedNoWait(tablename, mr.first);
@@ -5099,10 +5101,15 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                     : lockManager_.rowLockShared(tablename, mr.first);
             }
             if (!locked) {
+                if (skipLocked) {
+                    continue; // skip locked rows
+                }
                 lockManager_.unlock(tablename);
                 return result;
             }
+            lockedRows.push_back(std::move(mr));
         }
+        matchRows = std::move(lockedRows);
         // Gap locking for FOR UPDATE (simplified: lock gaps between matching rows)
         if (forUpdate && !matchRows.empty()) {
             std::vector<std::string> pkVals;
