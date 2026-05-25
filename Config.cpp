@@ -41,6 +41,10 @@ bool Config::load(const std::string& filename) {
             passwordHashAlgorithm = val;
         } else if (key == "audit_level") {
             try { auditLevel = std::stoi(val); } catch (...) {}
+        } else if (key == "auto_vacuum") {
+            autoVacuumEnabled = (val == "1" || val == "true" || val == "on");
+        } else if (key == "auto_vacuum_threshold") {
+            try { autoVacuumThreshold = std::stoi(val); } catch (...) {}
         }
     }
     return true;
@@ -56,7 +60,9 @@ void Config::printAll() const {
               << "query_plan_cache_size " << queryPlanCacheSize << "\n"
               << "password_policy_level " << passwordPolicyLevel << "\n"
               << "password_hash_algorithm " << passwordHashAlgorithm << "\n"
-              << "audit_level " << auditLevel << "\n";
+              << "audit_level " << auditLevel << "\n"
+              << "auto_vacuum " << (autoVacuumEnabled ? "on" : "off") << "\n"
+              << "auto_vacuum_threshold " << autoVacuumThreshold << "\n";
 }
 
 } // namespace dbms
