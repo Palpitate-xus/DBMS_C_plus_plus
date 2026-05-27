@@ -5211,6 +5211,33 @@ bool execute(const string& rawSql, Session& s) {
             for (const auto& n : names) cout << n << endl;
             return false;
         }
+        if (rest.substr(0, 6) == "grants") {
+            string targetUser = s.username;
+            string after = trim(rest.substr(6));
+            if (after.substr(0, 3) == "for") {
+                string reqUser = trim(after.substr(3));
+                if (!reqUser.empty()) {
+                    if (!checkAdmin(s)) return true;
+                    targetUser = reqUser;
+                }
+            }
+            if (!checkDB(s)) return true;
+            auto tables = g_engine.getTableNames(s.currentDB);
+            bool hasAny = false;
+            for (const auto& tname : tables) {
+                auto perms = g_engine.getUserPermissions(s.currentDB, tname, targetUser);
+                if (!perms.empty()) {
+                    hasAny = true;
+                    for (const auto& p : perms) {
+                        cout << "GRANT " << p << " ON " << tname << " TO " << targetUser << endl;
+                    }
+                }
+            }
+            if (!hasAny) {
+                cout << "No grants found for user " << targetUser << endl;
+            }
+            return false;
+        }
         if (rest == "tables") {
             if (!checkDB(s)) return true;
             auto names = g_engine.getTableNames(s.currentDB);

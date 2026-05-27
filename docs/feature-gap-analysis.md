@@ -735,7 +735,7 @@
 | **SHOW INDEX FROM table** | ✅ | ✅ | - |
 | **SHOW VARIABLES** | ✅ | ✅ | - |
 | **SHOW PROCESSLIST** | 部分 | ✅ | P2 |
-| **SHOW GRANTS** | ❌ | ✅ | P2 |
+| **SHOW GRANTS** | ✅ | ✅ | - |
 | **DESC / DESCRIBE table** | ✅ | ✅ | - |
 
 ### 16.3 在线 DDL
