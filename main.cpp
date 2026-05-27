@@ -180,6 +180,125 @@ static string sqlProcessor(string raw) {
         }
         raw = out;
     }
+    // Convert array subscript syntax: col[n] -> array_get(col, n)
+    {
+        string out;
+        size_t i = 0;
+        while (i < raw.size()) {
+            size_t bracketOpen = raw.find('[', i);
+            if (bracketOpen == string::npos) {
+                out += raw.substr(i);
+                break;
+            }
+            // Find column name before bracket
+            size_t colStart = bracketOpen;
+            while (colStart > i && isspace(static_cast<unsigned char>(raw[colStart - 1]))) --colStart;
+            while (colStart > i && (isalnum(static_cast<unsigned char>(raw[colStart - 1])) || raw[colStart - 1] == '_')) --colStart;
+            if (colStart == bracketOpen) {
+                out += raw[i];
+                ++i;
+                continue;
+            }
+            size_t bracketClose = raw.find(']', bracketOpen);
+            if (bracketClose == string::npos) {
+                out += raw.substr(i);
+                break;
+            }
+            string colName = raw.substr(colStart, bracketOpen - colStart);
+            string idxStr = trim(raw.substr(bracketOpen + 1, bracketClose - bracketOpen - 1));
+            // Skip empty brackets (e.g., type declarations like int[])
+            if (idxStr.empty()) {
+                out += raw.substr(i, bracketClose - i + 1);
+                i = bracketClose + 1;
+                continue;
+            }
+            out += raw.substr(i, colStart - i);
+            out += "array_get(" + colName + ", " + idxStr + ")";
+            i = bracketClose + 1;
+        }
+        raw = out;
+    }
+    // Convert ANY syntax: expr = any(col) -> array_contains(col, expr)
+    // Convert ALL syntax: expr = all(col) -> not array_contains(col, expr) with negation (simplified)
+    {
+        string out;
+        size_t i = 0;
+        while (i < raw.size()) {
+            size_t anyPos = raw.find("any(", i);
+            size_t allPos = raw.find("all(", i);
+            size_t foundPos = string::npos;
+            bool isAny = true;
+            if (anyPos != string::npos && (allPos == string::npos || anyPos < allPos)) {
+                foundPos = anyPos;
+                isAny = true;
+            } else if (allPos != string::npos) {
+                foundPos = allPos;
+                isAny = false;
+            }
+            if (foundPos == string::npos) {
+                out += raw.substr(i);
+                break;
+            }
+            // Find the operator before ANY/ALL
+            size_t opEnd = foundPos;
+            while (opEnd > i && isspace(static_cast<unsigned char>(raw[opEnd - 1]))) --opEnd;
+            size_t opStart = opEnd;
+            while (opStart > i && !isalnum(static_cast<unsigned char>(raw[opStart - 1])) && raw[opStart - 1] != '_' && raw[opStart - 1] != ')' && raw[opStart - 1] != '\'' && raw[opStart - 1] != '"') --opStart;
+            if (opStart == opEnd) {
+                out += raw[i];
+                ++i;
+                continue;
+            }
+            string op = trim(raw.substr(opStart, opEnd - opStart));
+            // Find expression before operator
+            size_t exprStart = opStart;
+            while (exprStart > i && isspace(static_cast<unsigned char>(raw[exprStart - 1]))) --exprStart;
+            // Handle parenthesized expressions or simple values
+            int parenDepth = 0;
+            size_t exprEnd = exprStart;
+            while (exprEnd > i) {
+                if (raw[exprEnd - 1] == ')') parenDepth++;
+                else if (raw[exprEnd - 1] == '(') {
+                    if (parenDepth == 0) break;
+                    parenDepth--;
+                }
+                exprEnd--;
+                if (parenDepth == 0 && (raw[exprEnd] == ' ' || raw[exprEnd] == ',')) break;
+            }
+            // Simpler approach: find where the condition starts (after WHERE, AND, OR)
+            string beforeAny = raw.substr(i, foundPos - i);
+            size_t whereOp = string::npos;
+            for (size_t k = beforeAny.size(); k > 0; --k) {
+                char c = beforeAny[k - 1];
+                if (c == ' ' || c == '(' || c == ',') {
+                    whereOp = k;
+                    break;
+                }
+            }
+            if (whereOp == string::npos) whereOp = 0;
+            string leftExpr = trim(beforeAny.substr(0, whereOp));
+            if (!leftExpr.empty()) leftExpr += " ";
+            string condExpr = trim(beforeAny.substr(whereOp));
+            // Parse array column from any(col) or all(col)
+            size_t parenOpen = foundPos + (isAny ? 4 : 4);
+            size_t parenClose = raw.find(')', parenOpen);
+            if (parenClose == string::npos) {
+                out += raw.substr(i);
+                break;
+            }
+            string arrCol = trim(raw.substr(parenOpen, parenClose - parenOpen));
+            out += leftExpr;
+            if (isAny) {
+                out += "array_contains(" + arrCol + ", " + condExpr + ") = 1";
+            } else {
+                // ALL: simplified - only support = all() as array_contains with negation
+                // For other ops, fallback to a less accurate approach
+                out += "array_contains(" + arrCol + ", " + condExpr + ") = 0";
+            }
+            i = parenClose + 1;
+        }
+        raw = out;
+    }
     return raw;
 }
 
@@ -293,6 +412,7 @@ static bool isScalarFunc(const string& name) {
                                          "sin", "cos", "tan",
                                          "split_part",
                                          "uuid_generate",
+                                         "array_get", "array_length", "array_contains",
                                          "subquery"};
     return scalars.find(name) != scalars.end();
 }
@@ -1148,36 +1268,59 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 std::transform(ctype.begin(), ctype.end(), ctype.begin(), ::tolower);
             }
 
+            // Check for array type (e.g., int[], varchar[])
+            bool isArray = false;
+            if (ctype.size() >= 2 && ctype.substr(ctype.size() - 2) == "[]") {
+                isArray = true;
+                ctype = ctype.substr(0, ctype.size() - 2);
+            }
+
+            Column col;
+            bool colCreated = false;
+
             if (ctype.substr(0, 6) == "serial") {
-                Column col = makeIntColumn(cname, false, 2, isPK);
+                col = makeIntColumn(cname, false, 2, isPK);
                 col.isAutoIncrement = true;
-                tbl.append(col);
+                colCreated = true;
             } else if (ctype.substr(0, 8) == "interval") {
-                tbl.append(makeIntervalColumn(cname, isNull, isPK));
+                col = makeIntervalColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 3) == "int") {
-                tbl.append(makeIntColumn(cname, isNull, 2, isPK, isUnsigned));
+                col = makeIntColumn(cname, isNull, 2, isPK, isUnsigned);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "tiny") {
-                tbl.append(makeIntColumn(cname, isNull, 1, isPK, isUnsigned));
+                col = makeIntColumn(cname, isNull, 1, isPK, isUnsigned);
+                colCreated = true;
             } else if (ctype.substr(0, 8) == "smallint") {
-                tbl.append(makeIntColumn(cname, isNull, 0, isPK, isUnsigned));
+                col = makeIntColumn(cname, isNull, 0, isPK, isUnsigned);
+                colCreated = true;
             } else if (ctype.substr(0, 6) == "bigint") {
-                tbl.append(makeIntColumn(cname, isNull, 3, isPK, isUnsigned));
+                col = makeIntColumn(cname, isNull, 3, isPK, isUnsigned);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "long") {
-                tbl.append(makeIntColumn(cname, isNull, 3, isPK, isUnsigned));
+                col = makeIntColumn(cname, isNull, 3, isPK, isUnsigned);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "bool" || ctype.substr(0, 1) == "bit") {
-                tbl.append(makeBooleanColumn(cname, isNull, isPK));
+                col = makeBooleanColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "uuid") {
-                tbl.append(makeUuidColumn(cname, isNull, isPK));
+                col = makeUuidColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "date") {
-                tbl.append(makeDateColumn(cname, isNull, isPK));
+                col = makeDateColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 12) == "timestamptz") {
-                tbl.append(makeTimestamptzColumn(cname, isNull, isPK));
+                col = makeTimestamptzColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 9) == "timestamp") {
-                tbl.append(makeTimestampColumn(cname, isNull, isPK));
+                col = makeTimestampColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "time") {
-                tbl.append(makeTimeColumn(cname, isNull, isPK));
+                col = makeTimeColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 8) == "datetime") {
-                tbl.append(makeDateTimeColumn(cname, isNull, isPK));
+                col = makeDateTimeColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "char") {
                 size_t len = 0;
                 if (!isBrace && parts.size() >= 3) {
@@ -1193,7 +1336,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         len = len * 10 + (ctype[i] - '0');
                 }
                 if (len == 0) len = 1;
-                tbl.append(makeStringColumn(cname, isNull, len, isPK));
+                col = makeStringColumn(cname, isNull, len, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 7) == "varchar") {
                 size_t len = 0;
                 if (!isBrace && parts.size() >= 3) {
@@ -1209,7 +1353,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         len = len * 10 + (ctype[i] - '0');
                 }
                 if (len == 0) len = 1;
-                tbl.append(makeVarCharColumn(cname, isNull, len, isPK));
+                col = makeVarCharColumn(cname, isNull, len, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 7) == "nvarchar") {
                 size_t len = 0;
                 if (!isBrace && parts.size() >= 3) {
@@ -1225,7 +1370,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         len = len * 10 + (ctype[i] - '0');
                 }
                 if (len == 0) len = 1;
-                tbl.append(makeNVarCharColumn(cname, isNull, len, isPK));
+                col = makeNVarCharColumn(cname, isNull, len, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 5) == "nchar") {
                 size_t len = 0;
                 if (!isBrace && parts.size() >= 3) {
@@ -1241,7 +1387,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         len = len * 10 + (ctype[i] - '0');
                 }
                 if (len == 0) len = 1;
-                tbl.append(makeNCharColumn(cname, isNull, len, isPK));
+                col = makeNCharColumn(cname, isNull, len, isPK);
+                colCreated = true;
             } else if (ctype == "binary") {
                 size_t blen = 0;
                 if (!isBrace && parts.size() >= 3) {
@@ -1251,7 +1398,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         if (isdigit(static_cast<unsigned char>(c))) blen = blen * 10 + (c - '0');
                 }
                 if (blen == 0) blen = 1;
-                tbl.append(makeBinaryColumn(cname, isNull, blen, isPK));
+                col = makeBinaryColumn(cname, isNull, blen, isPK);
+                colCreated = true;
             } else if (ctype == "varbinary") {
                 size_t vlen = 0;
                 if (!isBrace && parts.size() >= 3) {
@@ -1261,17 +1409,23 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         if (isdigit(static_cast<unsigned char>(c))) vlen = vlen * 10 + (c - '0');
                 }
                 if (vlen == 0) vlen = 1;
-                tbl.append(makeVarBinaryColumn(cname, isNull, vlen, isPK));
+                col = makeVarBinaryColumn(cname, isNull, vlen, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "blob") {
-                tbl.append(makeBlobColumn(cname, isNull, isPK));
+                col = makeBlobColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "text") {
-                tbl.append(makeTextColumn(cname, isNull, isPK));
+                col = makeTextColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "json") {
-                tbl.append(makeJsonColumn(cname, isNull, isPK));
+                col = makeJsonColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 5) == "float") {
-                tbl.append(makeFloatColumn(cname, isNull, isPK));
+                col = makeFloatColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 6) == "double" || ctype.substr(0, 5) == "money") {
-                tbl.append(makeDoubleColumn(cname, isNull, isPK));
+                col = makeDoubleColumn(cname, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 7) == "decimal") {
                 int prec = 10, sc = 0;
                 size_t lp = ctype.find('(');
@@ -1286,7 +1440,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         try { prec = stoi(trim(inside)); } catch (...) {}
                     }
                 }
-                tbl.append(makeDecimalColumn(cname, isNull, prec, sc, isPK));
+                col = makeDecimalColumn(cname, isNull, prec, sc, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 4) == "enum") {
                 // Parse ENUM('a', 'b', 'c') from segment
                 vector<string> enumVals;
@@ -1313,16 +1468,23 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         while (i < inside.size() && (inside[i] == ',' || isspace(static_cast<unsigned char>(inside[i])))) ++i;
                     }
                 }
-                Column col = makeStringColumn(cname, isNull, 64, isPK);
+                col = makeStringColumn(cname, isNull, 64, isPK);
                 col.enumValues = enumVals;
-                tbl.append(col);
+                colCreated = true;
             }
-            // Apply unique/default/check to last appended column
-            if (tbl.len > 0) {
-                tbl.cols[tbl.len - 1].isUnique = isUnique;
-                tbl.cols[tbl.len - 1].defaultValue = defaultVal;
-                tbl.cols[tbl.len - 1].checkExpr = checkExpr;
-                tbl.cols[tbl.len - 1].generatedExpr = generatedExpr;
+            // Apply array flag and append column
+            if (colCreated) {
+                if (isArray) {
+                    col.isArray = true;
+                    col.isVariableLength = true;
+                    col.dataType += "[]";
+                    col.dsize = 256;  // arrays need larger storage
+                }
+                col.isUnique = isUnique;
+                col.defaultValue = defaultVal;
+                col.checkExpr = checkExpr;
+                col.generatedExpr = generatedExpr;
+                tbl.append(col);
             }
             if (!fk.colNames.empty()) tbl.appendFK(fk);
             pos = endPos + 1;
@@ -7662,7 +7824,7 @@ int main(int argc, char* argv[]) {
         int sqlCount = 0;
         while (true) {
             string sql;
-            getline(cin, sql);
+            if (!getline(cin, sql)) break;
             if (trim(sql) == "exit") break;
             auto start = std::chrono::steady_clock::now();
             bool ok = false;

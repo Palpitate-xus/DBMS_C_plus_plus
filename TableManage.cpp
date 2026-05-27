@@ -2866,7 +2866,7 @@ OpResult StorageEngine::dropDatabase(const std::string& dbname) {
     return OpResult::Success;
 }
 
-constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420001;  // "DB" + version 1
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420002;  // "DB" + version 2 (added isArray support)
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -2899,6 +2899,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         for (const auto& ev : tbl.cols[i].enumValues) {
             writeFixedString(out, ev, MAX_COL_NAME_LEN);
         }
+        // Write array flag (new in version 2)
+        uint8_t arrFlag = tbl.cols[i].isArray ? 1 : 0;
+        out.write(reinterpret_cast<const char*>(&arrFlag), 1);
     }
     // Write foreign keys (multi-column support: version 1 format)
     int32_t fkLen = static_cast<int32_t>(tbl.fkLen);
@@ -3021,6 +3024,12 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 std::string ev = readFixedString(in, MAX_COL_NAME_LEN);
                 if (!ev.empty()) tbl.cols[i].enumValues.push_back(ev);
             }
+        }
+        // Read array flag (new in version 2)
+        if (isNewFormat) {
+            uint8_t arrFlag = 0;
+            in.read(reinterpret_cast<char*>(&arrFlag), 1);
+            if (in) tbl.cols[i].isArray = (arrFlag != 0);
         }
     }
     // Read foreign keys
@@ -3662,7 +3671,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
             if (col.isVariableLength) {
-                if (val.size() > col.dsize) val.resize(col.dsize);
+                size_t maxLen = col.isArray ? 1024 : col.dsize;
+                if (val.size() > maxLen) val.resize(maxLen);
                 varDataList.push_back(val);
             } else {
                 if (col.dataType == "char") {
@@ -6324,6 +6334,68 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::string firstRow = trim(rows[0]);
         size_t sp = firstRow.find(' ');
         return (sp == std::string::npos) ? firstRow : trim(firstRow.substr(0, sp));
+    }
+    // Array functions
+    if (expr.funcName == "array_get" && expr.funcArgs.size() >= 2) {
+        std::string arr = getVal(expr.funcArgs[0]);
+        try {
+            int idx = std::stoi(getVal(expr.funcArgs[1]));
+            if (idx <= 0) return "";
+            std::vector<std::string> elems;
+            if (arr.size() >= 2 && arr.front() == '[' && arr.back() == ']') {
+                arr = arr.substr(1, arr.size() - 2);
+            }
+            size_t i = 0;
+            while (i < arr.size()) {
+                while (i < arr.size() && isspace(static_cast<unsigned char>(arr[i]))) ++i;
+                if (i >= arr.size()) break;
+                std::string elem;
+                if (arr[i] == '\'' || arr[i] == '"') {
+                    char q = arr[i++];
+                    while (i < arr.size() && arr[i] != q) elem += arr[i++];
+                    if (i < arr.size()) ++i;
+                } else {
+                    while (i < arr.size() && arr[i] != ',') elem += arr[i++];
+                }
+                elems.push_back(trim(elem));
+                if (i < arr.size() && arr[i] == ',') ++i;
+            }
+            if (static_cast<size_t>(idx) > elems.size()) return "";
+            return elems[idx - 1];
+        } catch (...) { return ""; }
+    }
+    if (expr.funcName == "array_length" && !expr.funcArgs.empty()) {
+        std::string arr = getVal(expr.funcArgs[0]);
+        if (arr.size() >= 2 && arr.front() == '[' && arr.back() == ']') {
+            arr = arr.substr(1, arr.size() - 2);
+        }
+        if (arr.empty()) return "0";
+        int count = 1;
+        for (char c : arr) if (c == ',') ++count;
+        return std::to_string(count);
+    }
+    if (expr.funcName == "array_contains" && expr.funcArgs.size() >= 2) {
+        std::string arr = getVal(expr.funcArgs[0]);
+        std::string search = getVal(expr.funcArgs[1]);
+        if (arr.size() >= 2 && arr.front() == '[' && arr.back() == ']') {
+            arr = arr.substr(1, arr.size() - 2);
+        }
+        size_t i = 0;
+        while (i < arr.size()) {
+            while (i < arr.size() && isspace(static_cast<unsigned char>(arr[i]))) ++i;
+            if (i >= arr.size()) break;
+            std::string elem;
+            if (arr[i] == '\'' || arr[i] == '"') {
+                char q = arr[i++];
+                while (i < arr.size() && arr[i] != q) elem += arr[i++];
+                if (i < arr.size()) ++i;
+            } else {
+                while (i < arr.size() && arr[i] != ',') elem += arr[i++];
+            }
+            if (trim(elem) == search) return "1";
+            if (i < arr.size() && arr[i] == ',') ++i;
+        }
+        return "0";
     }
     return "";
 }

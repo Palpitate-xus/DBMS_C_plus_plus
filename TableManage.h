@@ -40,6 +40,7 @@ struct Column {
     bool isUnique = false;          // UNIQUE constraint
     bool isAutoIncrement = false;   // AUTO_INCREMENT / SERIAL
     bool isUnsigned = false;        // UNSIGNED for numeric types
+    bool isArray = false;           // true for array types (INT[], VARCHAR[])
     std::string dataType;
     std::string dataName;
     size_t dsize = 0;  // For VARCHAR: max length; for fixed: actual bytes
