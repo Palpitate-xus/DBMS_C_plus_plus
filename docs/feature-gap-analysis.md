@@ -689,7 +689,7 @@
 | **CPU/内存统计** | ❌ | ✅ | P3 |
 | **等待事件 (Wait Events)** | ❌ | ✅ | P3 |
 | **Performance Schema** | ❌ | ✅ MySQL | P3 |
-| **pg_stat_statements** | ❌ | ✅ PG | P3 |
+| **pg_stat_statements** | ✅ | ✅ PG | - |
 
 ---
 

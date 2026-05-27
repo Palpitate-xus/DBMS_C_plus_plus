@@ -82,6 +82,83 @@ void logSlowQuery(const std::string& sql, double ms,
                   const std::string& username = "",
                   const std::string& dbname = "");
 
+// ========================================================================
+// SQL execution statistics (pg_stat_statements)
+// ========================================================================
+struct SqlStatEntry {
+    std::string sql;
+    uint64_t calls = 0;
+    double totalTimeMs = 0.0;
+    double minTimeMs = 0.0;
+    double maxTimeMs = 0.0;
+    double meanTimeMs = 0.0;
+    std::string dbname;
+};
+static std::map<std::string, SqlStatEntry> g_sqlStats; // key = db + "|" + normalized_sql
+static std::mutex g_sqlStatsMutex;
+
+std::string normalizeSqlForStats(const std::string& sql) {
+    std::string s = sql;
+    // Trim whitespace
+    size_t a = 0;
+    while (a < s.size() && isspace(static_cast<unsigned char>(s[a]))) ++a;
+    size_t b = s.size();
+    while (b > a && isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    s = s.substr(a, b - a);
+    // Replace consecutive whitespace with single space
+    std::string r;
+    bool lastWasSpace = false;
+    for (char c : s) {
+        if (isspace(static_cast<unsigned char>(c))) {
+            if (!lastWasSpace) r += ' ';
+            lastWasSpace = true;
+        } else {
+            r += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            lastWasSpace = false;
+        }
+    }
+    return r;
+}
+
+void recordSqlStat(const std::string& sql, double ms, const std::string& dbname) {
+    std::lock_guard<std::mutex> lock(g_sqlStatsMutex);
+    std::string key = dbname + "|" + normalizeSqlForStats(sql);
+    auto& entry = g_sqlStats[key];
+    if (entry.calls == 0) {
+        entry.sql = sql;
+        entry.dbname = dbname;
+        entry.minTimeMs = ms;
+        entry.maxTimeMs = ms;
+    } else {
+        if (ms < entry.minTimeMs) entry.minTimeMs = ms;
+        if (ms > entry.maxTimeMs) entry.maxTimeMs = ms;
+    }
+    entry.calls++;
+    entry.totalTimeMs += ms;
+    entry.meanTimeMs = entry.totalTimeMs / static_cast<double>(entry.calls);
+}
+
+static std::vector<SqlStatEntry> getSqlStats(const std::string& dbFilter = "") {
+    std::lock_guard<std::mutex> lock(g_sqlStatsMutex);
+    std::vector<SqlStatEntry> result;
+    for (const auto& kv : g_sqlStats) {
+        if (dbFilter.empty() || kv.second.dbname == dbFilter) {
+            result.push_back(kv.second);
+        }
+    }
+    // Sort by total time descending
+    std::sort(result.begin(), result.end(),
+        [](const SqlStatEntry& a, const SqlStatEntry& b) {
+            return a.totalTimeMs > b.totalTimeMs;
+        });
+    return result;
+}
+
+static void resetSqlStats() {
+    std::lock_guard<std::mutex> lock(g_sqlStatsMutex);
+    g_sqlStats.clear();
+}
+
 // Forward declaration for SHOW VARIABLES
 extern dbms::Config g_config;
 
@@ -5611,6 +5688,30 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
+        if (rest == "statements") {
+            auto stats = getSqlStats(s.currentDB);
+            cout << "query calls total_time min_time max_time mean_time dbname " << endl;
+            for (const auto& st : stats) {
+                std::string q = st.sql;
+                std::string compact;
+                bool lastSpace = false;
+                for (char c : q) {
+                    if (isspace(static_cast<unsigned char>(c))) {
+                        if (!lastSpace) compact += ' ';
+                        lastSpace = true;
+                    } else {
+                        compact += c;
+                        lastSpace = false;
+                    }
+                }
+                if (compact.size() > 60) compact = compact.substr(0, 57) + "...";
+                cout << compact << " " << st.calls << " "
+                     << std::fixed << std::setprecision(2) << st.totalTimeMs << " "
+                     << st.minTimeMs << " " << st.maxTimeMs << " " << st.meanTimeMs << " "
+                     << st.dbname << endl;
+            }
+            return false;
+        }
         if (rest == "status") {
             auto& s = dbms::getServerStats();
             cout << "active_connections " << s.activeConnections.load() << endl;
@@ -6901,17 +7002,40 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
                 for (const auto& dbname : g_engine.getDatabaseNames()) {
                     cout << dbname << " 0 " << bpStats.totalMisses << " " << bpStats.totalHits << " 0 " << endl;
                 }
-            } else {
+            } else if (tname == "pg_stat_tables") {
                 cout << "relname seq_scan idx_scan n_tup_ins n_tup_upd n_tup_del " << endl;
                 for (const auto& t : g_engine.getTableNames(s.currentDB)) {
                     cout << t << " 0 0 0 0 0 " << endl;
+                }
+            } else {
+                cout << "query calls total_time min_time max_time mean_time dbname " << endl;
+                auto stats = getSqlStats(s.currentDB);
+                for (const auto& st : stats) {
+                    std::string q = st.sql;
+                    // Replace spaces with single space for compact display
+                    std::string compact;
+                    bool lastSpace = false;
+                    for (char c : q) {
+                        if (isspace(static_cast<unsigned char>(c))) {
+                            if (!lastSpace) compact += ' ';
+                            lastSpace = true;
+                        } else {
+                            compact += c;
+                            lastSpace = false;
+                        }
+                    }
+                    if (compact.size() > 50) compact = compact.substr(0, 47) + "...";
+                    cout << compact << " " << st.calls << " "
+                         << std::fixed << std::setprecision(2) << st.totalTimeMs << " "
+                         << st.minTimeMs << " " << st.maxTimeMs << " " << st.meanTimeMs << " "
+                         << st.dbname << endl;
                 }
             }
             return false;
@@ -7936,6 +8060,7 @@ int main(int argc, char* argv[]) {
             } else if (ms > g_slowQueryThresholdMs) {
                 logSlowQuery(sql, ms, s.username, s.currentDB);
             }
+            recordSqlStat(sql, ms, s.currentDB);
             if (ok && !s.currentDB.empty() && g_checkpointInterval > 0) {
                 if (++sqlCount >= g_checkpointInterval) {
                     g_engine.checkpoint(s.currentDB);

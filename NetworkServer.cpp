@@ -23,6 +23,7 @@ extern int g_checkpointInterval;
 extern void logSlowQuery(const std::string& sql, double ms,
                          const std::string& username,
                          const std::string& dbname);
+extern void recordSqlStat(const std::string& sql, double ms, const std::string& dbname);
 
 namespace dbms {
 
@@ -171,6 +172,7 @@ static void handleClient(SecureSocket sock, std::string clientHost) {
         auto end = std::chrono::steady_clock::now();
         double ms = std::chrono::duration<double, std::milli>(end - start).count();
         if (ms > g_slowQueryThresholdMs) logSlowQuery(sql, ms, s.username, s.currentDB);
+        recordSqlStat(sql, ms, s.currentDB);
 
         // Update DB if USE DATABASE was executed
         updateProcessDb(pid, s.currentDB);
