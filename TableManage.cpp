@@ -1596,6 +1596,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
             if (!ppa->open()) continue;
             uint32_t np = ppa->numPages();
             for (uint32_t pid = 1; pid < np; ++pid) {
+                lockManager_.pageLockShared(dbname, tablename, pid);
                 char* buf = ppa->fetchPage(pid);
                 Page page(buf);
                 page.forEachLive([&callback, pid, rv](uint16_t sid, const char* data, size_t len) {
@@ -1608,6 +1609,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
                 });
                 ppa->unpinPage(pid);
+                lockManager_.pageUnlock(dbname, tablename, pid);
             }
             ppa->close();
         }
@@ -1618,6 +1620,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     if (!pa) return;
     uint32_t np = pa->numPages();
     for (uint32_t pid = 1; pid < np; ++pid) {
+        lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = pa->fetchPage(pid);
         Page page(buf);
         page.forEachLive([&callback, pid, rv](uint16_t sid, const char* data, size_t len) {
@@ -1630,6 +1633,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
             callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
         });
         pa->unpinPage(pid);
+        lockManager_.pageUnlock(dbname, tablename, pid);
     }
 }
 
@@ -4036,6 +4040,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         bool inserted = false;
         size_t actualRowSize = rowBuffer.size();
         for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
+            lockManager_.pageLockExclusive(dbname, tablename, pid);
             char* buf = pa->fetchPage(pid);
             Page page(buf);
             if (page.canFit(actualRowSize)) {
@@ -4046,18 +4051,22 @@ OpResult StorageEngine::insert(const std::string& dbname,
             }
             if (inserted) pa->markDirty(pid);
             pa->unpinPage(pid);
+            lockManager_.pageUnlock(dbname, tablename, pid);
         }
         if (!inserted) {
             pageId = pa->allocPage();
+            lockManager_.pageLockExclusive(dbname, tablename, pageId);
             char* buf = pa->fetchPage(pageId);
             Page page(buf);
             if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                 pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
                 lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;
             }
             pa->markDirty(pageId);
             pa->unpinPage(pageId);
+            lockManager_.pageUnlock(dbname, tablename, pageId);
         }
     }
 
@@ -4654,6 +4663,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
 
         uint32_t pageId; uint16_t slotId;
         decodeRid(rid, pageId, slotId);
+        lockManager_.pageLockExclusive(dbname, tablename, pageId);
         char* pageBuf = pa->fetchPage(pageId);
         if (pageBuf) {
             Page page(pageBuf);
@@ -4661,6 +4671,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
             pa->markDirty(pageId);
             pa->unpinPage(pageId);
         }
+        lockManager_.pageUnlock(dbname, tablename, pageId);
         ++delIdx;
     }
 
@@ -4894,15 +4905,18 @@ OpResult StorageEngine::update(const std::string& dbname,
         char* pageBuf = pa->fetchPage(pageId);
         int64_t actualRid = rid;
         if (pageBuf) {
+            lockManager_.pageLockExclusive(dbname, tablename, pageId);
             Page page(pageBuf);
             uint16_t newSlotId = slotId;
             if (!page.update(slotId, newRow.data(), newRow.size(), &newSlotId)) {
                 pa->unpinPage(pageId);
+                lockManager_.pageUnlock(dbname, tablename, pageId);
                 lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;
             }
             pa->markDirty(pageId);
             pa->unpinPage(pageId);
+            lockManager_.pageUnlock(dbname, tablename, pageId);
             if (newSlotId != slotId) {
                 actualRid = encodeRid(pageId, newSlotId);
             }

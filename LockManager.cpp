@@ -307,6 +307,28 @@ void LockManager::unlockAll() {
             }
         }
     }
+    // Also release all page locks held by this thread
+    {
+        std::lock_guard<std::mutex> guard(pageMutex_);
+        for (auto it = pageLocks_.begin(); it != pageLocks_.end(); ) {
+            auto& state = it->second;
+            auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+            if (hit != state.holders.end()) state.holders.erase(hit);
+            if (state.exclusive) {
+                state.mtx.unlock();
+                state.exclusive = false;
+            }
+            while (state.sharedCount > 0) {
+                state.mtx.unlock_shared();
+                state.sharedCount--;
+            }
+            if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+                it = pageLocks_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 }
 
 // ========================================================================
@@ -615,7 +637,166 @@ std::vector<LockManager::LockHoldInfo> LockManager::getLockHolds() const {
             }
         }
     }
+    {
+        std::lock_guard<std::mutex> guard(pageMutex_);
+        for (const auto& kv : pageLocks_) {
+            const auto& state = kv.second;
+            std::string modeStr = state.exclusive ? "exclusive" : "shared";
+            for (const auto& holder : state.holders) {
+                result.push_back({kv.first, tidToString(holder), modeStr});
+            }
+        }
+    }
     return result;
+}
+
+// ========================================================================
+// Page-level locking
+// ========================================================================
+
+static std::string makePageKey(const std::string& dbname, const std::string& table, uint32_t pageId) {
+    return "page:" + dbname + ":" + table + ":" + std::to_string(pageId);
+}
+
+bool LockManager::pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const {
+    std::thread::id self = std::this_thread::get_id();
+    std::string key = makePageKey(dbname, table, pageId);
+    {
+        std::lock_guard<std::mutex> guard(pageMutex_);
+        auto& state = const_cast<LockState&>(pageLocks_[key]);
+        if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
+            state.sharedCount++;
+            return true;
+        }
+        if (!state.exclusive && state.holders.empty()) {
+            state.mtx.lock_shared();
+            state.sharedCount++;
+            state.holders.push_back(self);
+            return true;
+        }
+        if (state.exclusive && !state.holders.empty()) {
+            const_cast<LockManager*>(this)->addWaitEdge(self, state.holders[0]);
+            if (const_cast<LockManager*>(this)->hasCycle(self)) {
+                const_cast<LockManager*>(this)->removeWaitEdges(self);
+                return false;
+            }
+        }
+    }
+    auto& state = const_cast<LockState&>(pageLocks_[key]);
+    state.mtx.lock_shared();
+    {
+        std::lock_guard<std::mutex> guard(pageMutex_);
+        state.sharedCount++;
+        state.holders.push_back(self);
+        const_cast<LockManager*>(this)->removeWaitEdges(self);
+    }
+    return true;
+}
+
+bool LockManager::pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const {
+    std::thread::id self = std::this_thread::get_id();
+    std::string key = makePageKey(dbname, table, pageId);
+    {
+        std::lock_guard<std::mutex> guard(pageMutex_);
+        auto& state = const_cast<LockState&>(pageLocks_[key]);
+        if (state.exclusive && state.holders.size() == 1 && state.holders[0] == self) {
+            return true;
+        }
+        if (state.sharedCount == 0 && !state.exclusive) {
+            state.mtx.lock();
+            state.exclusive = true;
+            state.holders.push_back(self);
+            return true;
+        }
+        for (const auto& holder : state.holders) {
+            if (holder != self) const_cast<LockManager*>(this)->addWaitEdge(self, holder);
+        }
+        if (const_cast<LockManager*>(this)->hasCycle(self)) {
+            const_cast<LockManager*>(this)->removeWaitEdges(self);
+            return false;
+        }
+    }
+    auto& state = const_cast<LockState&>(pageLocks_[key]);
+    state.mtx.lock();
+    {
+        std::lock_guard<std::mutex> guard(pageMutex_);
+        state.exclusive = true;
+        state.holders.push_back(self);
+        const_cast<LockManager*>(this)->removeWaitEdges(self);
+    }
+    return true;
+}
+
+void LockManager::pageUnlock(const std::string& dbname, const std::string& table, uint32_t pageId) const {
+    std::thread::id self = std::this_thread::get_id();
+    std::string key = makePageKey(dbname, table, pageId);
+    std::lock_guard<std::mutex> guard(pageMutex_);
+    const_cast<LockManager*>(this)->removeWaitEdges(self);
+    auto it = pageLocks_.find(key);
+    if (it == pageLocks_.end()) return;
+    auto& state = const_cast<LockState&>(it->second);
+    auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+    if (hit != state.holders.end()) state.holders.erase(hit);
+    if (state.exclusive) {
+        state.mtx.unlock();
+        state.exclusive = false;
+    } else if (state.sharedCount > 0) {
+        state.mtx.unlock_shared();
+        state.sharedCount--;
+    }
+    if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+        pageLocks_.erase(it);
+    }
+}
+
+void LockManager::pageUnlockAll(const std::string& dbname, const std::string& table) const {
+    std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> guard(pageMutex_);
+    const_cast<LockManager*>(this)->removeWaitEdges(self);
+    std::string prefix = "page:" + dbname + ":" + table + ":";
+    for (auto it = pageLocks_.begin(); it != pageLocks_.end(); ) {
+        if (it->first.find(prefix) != 0) { ++it; continue; }
+        auto& state = const_cast<LockState&>(it->second);
+        auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+        if (hit != state.holders.end()) state.holders.erase(hit);
+        if (state.exclusive) {
+            state.mtx.unlock();
+            state.exclusive = false;
+        }
+        while (state.sharedCount > 0) {
+            state.mtx.unlock_shared();
+            state.sharedCount--;
+        }
+        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+            it = pageLocks_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void LockManager::pageUnlockAll() const {
+    std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> guard(pageMutex_);
+    const_cast<LockManager*>(this)->removeWaitEdges(self);
+    for (auto it = pageLocks_.begin(); it != pageLocks_.end(); ) {
+        auto& state = const_cast<LockState&>(it->second);
+        auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+        if (hit != state.holders.end()) state.holders.erase(hit);
+        if (state.exclusive) {
+            state.mtx.unlock();
+            state.exclusive = false;
+        }
+        while (state.sharedCount > 0) {
+            state.mtx.unlock_shared();
+            state.sharedCount--;
+        }
+        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+            it = pageLocks_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 } // namespace dbms

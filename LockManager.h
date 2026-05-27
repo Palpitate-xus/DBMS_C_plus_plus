@@ -87,6 +87,16 @@ public:
     // Release all gap locks held by current thread
     void unlockAllGaps();
 
+    // ========================================================================
+    // Page-level locking (used inside table-level locks for finer granularity)
+    // Resource format: "page:dbname:tablename:pageId"
+    // ========================================================================
+    bool pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const;
+    bool pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const;
+    void pageUnlock(const std::string& dbname, const std::string& table, uint32_t pageId) const;
+    void pageUnlockAll(const std::string& dbname, const std::string& table) const;
+    void pageUnlockAll() const;
+
 private:
     struct LockState {
         std::shared_mutex mtx;
@@ -104,6 +114,10 @@ private:
     // Row locks: key = "table:rid"
     std::map<std::string, LockState> rowLocks_;
     mutable std::mutex rowMutex_;
+
+    // Page locks: key = "page:dbname:table:pageId"
+    mutable std::map<std::string, LockState> pageLocks_;
+    mutable std::mutex pageMutex_;
 
     // Gap locks: table -> list of (leftKey, rightKey, holder)
     struct GapLock {
