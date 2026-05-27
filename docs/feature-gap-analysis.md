@@ -177,7 +177,7 @@
 | **NTILE(n)** | ✅ | ✅ | - |
 | **FIRST_VALUE / LAST_VALUE** | ✅ | ✅ | - |
 | **NTH_VALUE** | ❌ | ✅ | P2 |
-| **PERCENT_RANK / CUME_DIST** | ❌ | ✅ | P3 |
+| **PERCENT_RANK / CUME_DIST** | ✅ | ✅ | - |
 | **PARTITION BY 子句** | ✅ | ✅ | - |
 | **聚合函数 OVER 子句** | ✅ | ✅ | - |
 | **窗口帧 (ROWS/RANGE BETWEEN)** | ✅ | ✅ | - |

@@ -418,6 +418,11 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
         }
     }
 
+    // PERCENT_RANK and CUME_DIST require ORDER BY (set flag for validation later)
+    if (wf.name == "percent_rank" || wf.name == "cume_dist") {
+        wf.isAggregate = false; // treated as ranking functions
+    }
+
     // ORDER BY is optional for window functions like row_number with partition only
     if (orderPos != string::npos) {
         string orderRest = trim(overContent.substr(orderPos + 8));
@@ -6883,6 +6888,56 @@ bool execute(const string& rawSql, Session& s) {
                         if (n <= 0) n = 1;
                         size_t bucket = (partIdx * static_cast<size_t>(n)) / partitionSize + 1;
                         val = to_string(bucket);
+                    } else if (wf.name == "percent_rank") {
+                        size_t partEnd = i;
+                        while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
+                        size_t partitionSize = partEnd - partStart + 1;
+                        if (partitionSize <= 1) {
+                            val = "0";
+                        } else {
+                            // Compute RANK of current row within partition
+                            int64_t rankVal = 1;
+                            for (size_t j = partStart; j <= i; ++j) {
+                                if (j == partStart) continue;
+                                auto itCur = rows[j].find(wf.orderByCol);
+                                auto itPrev = rows[j - 1].find(wf.orderByCol);
+                                if (itCur != rows[j].end() && itPrev != rows[j - 1].end()
+                                    && itCur->second == itPrev->second) {
+                                    // Same rank as previous
+                                } else {
+                                    rankVal = static_cast<int64_t>(j - partStart + 1);
+                                }
+                            }
+                            double pr = static_cast<double>(rankVal - 1) / static_cast<double>(partitionSize - 1);
+                            std::ostringstream oss;
+                            oss << std::fixed << std::setprecision(4) << pr;
+                            val = oss.str();
+                        }
+                    } else if (wf.name == "cume_dist") {
+                        size_t partEnd = i;
+                        while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
+                        size_t partitionSize = partEnd - partStart + 1;
+                        // Count rows with value <= current row's value
+                        auto itCur = rows[i].find(wf.orderByCol);
+                        size_t countLe = 0;
+                        if (itCur != rows[i].end()) {
+                            for (size_t j = partStart; j <= partEnd; ++j) {
+                                auto itJ = rows[j].find(wf.orderByCol);
+                                if (itJ != rows[j].end()) {
+                                    try {
+                                        int64_t vCur = stoll(itCur->second);
+                                        int64_t vJ = stoll(itJ->second);
+                                        if (vJ <= vCur) countLe++;
+                                    } catch (...) {
+                                        if (itJ->second <= itCur->second) countLe++;
+                                    }
+                                }
+                            }
+                        }
+                        double cd = partitionSize > 0 ? static_cast<double>(countLe) / static_cast<double>(partitionSize) : 0.0;
+                        std::ostringstream oss;
+                        oss << std::fixed << std::setprecision(4) << cd;
+                        val = oss.str();
                     }
                     rows[i]["_win_" + to_string(wi)] = val;
                 }
