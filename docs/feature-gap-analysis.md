@@ -678,7 +678,7 @@
 | SHOW CONNECTIONS | ✅ | 部分 | - |
 | SHOW STATUS | ✅ | 部分 | - |
 | **information_schema** | ✅ | ✅ | - |
-| **pg_stat_* / sys.dm_* 系统视图** | ❌ | ✅ | **P1** |
+| **pg_stat_* / sys.dm_* 系统视图** | 部分 | ✅ | - |
 | **慢查询日志** | ✅ | ✅ | - |
 | **慢查询分析 (pt-query-digest)** | ❌ | ✅ | P3 |
 | **锁等待监控** | ✅ | ✅ | - |

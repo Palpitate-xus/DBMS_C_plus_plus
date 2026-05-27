@@ -6435,6 +6435,23 @@ bool execute(const string& rawSql, Session& s) {
             }
         }
 
+        // pg_stat_* virtual tables
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables") {
+            auto bpStats = g_engine.getBufferPoolStats();
+            if (tname == "pg_stat_database") {
+                cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
+                for (const auto& dbname : g_engine.getDatabaseNames()) {
+                    cout << dbname << " 0 " << bpStats.totalMisses << " " << bpStats.totalHits << " 0 " << endl;
+                }
+            } else {
+                cout << "relname seq_scan idx_scan n_tup_ins n_tup_upd n_tup_del " << endl;
+                for (const auto& t : g_engine.getTableNames(s.currentDB)) {
+                    cout << t << " 0 0 0 0 0 " << endl;
+                }
+            }
+            return false;
+        }
+
         if (s.currentDB != "information_schema" && !g_engine.tableExists(s.currentDB, tname)) {
             if (g_engine.viewExists(s.currentDB, tnameOrig)) {
                 string viewSql = g_engine.getViewSQL(s.currentDB, tnameOrig);
