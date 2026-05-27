@@ -7622,6 +7622,9 @@ bool execute(const string& rawSql, Session& s) {
 dbms::Config g_config;
 
 int main(int argc, char* argv[]) {
+    // Set locale for Unicode support
+    std::setlocale(LC_CTYPE, "");
+
     // Load runtime configuration
     if (g_config.load("dbms.conf")) {
         g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;

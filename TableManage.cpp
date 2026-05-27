@@ -14,6 +14,7 @@ extern dbms::Config g_config;
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <locale>
 #include <memory>
 #include <regex>
 #include <set>
@@ -21,12 +22,64 @@ extern dbms::Config g_config;
 #include <string>
 #include <unistd.h>
 #include <vector>
+#include <cwctype>
 
 namespace dbms {
 
 // Global active transaction tracking
 std::mutex StorageEngine::globalTxnMutex_;
 std::set<uint64_t> StorageEngine::activeTransactions_;
+
+// ========================================================================
+// Unicode string helpers
+// ========================================================================
+static std::string toUpperUtf8(const std::string& s) {
+    std::wstring ws;
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = s[i];
+        if (c < 0x80) { ws.push_back(static_cast<wchar_t>(c)); ++i; }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) {
+            ws.push_back(static_cast<wchar_t>(((c & 0x1F) << 6) | (s[i + 1] & 0x3F))); i += 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) {
+            ws.push_back(static_cast<wchar_t>(((c & 0x0F) << 12) | ((s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F))); i += 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < s.size()) {
+            ws.push_back(static_cast<wchar_t>(((c & 0x07) << 18) | ((s[i + 1] & 0x3F) << 12) | ((s[i + 2] & 0x3F) << 6) | (s[i + 3] & 0x3F))); i += 4;
+        } else { ws.push_back(static_cast<wchar_t>(c)); ++i; }
+    }
+    for (wchar_t& wc : ws) wc = std::towupper(wc);
+    std::string out;
+    for (wchar_t wc : ws) {
+        if (wc < 0x80) out.push_back(static_cast<char>(wc));
+        else if (wc < 0x800) { out.push_back(static_cast<char>(0xC0 | (wc >> 6))); out.push_back(static_cast<char>(0x80 | (wc & 0x3F))); }
+        else { out.push_back(static_cast<char>(0xE0 | (wc >> 12))); out.push_back(static_cast<char>(0x80 | ((wc >> 6) & 0x3F))); out.push_back(static_cast<char>(0x80 | (wc & 0x3F))); }
+    }
+    return out;
+}
+
+static std::string toLowerUtf8(const std::string& s) {
+    std::wstring ws;
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = s[i];
+        if (c < 0x80) { ws.push_back(static_cast<wchar_t>(c)); ++i; }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) {
+            ws.push_back(static_cast<wchar_t>(((c & 0x1F) << 6) | (s[i + 1] & 0x3F))); i += 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) {
+            ws.push_back(static_cast<wchar_t>(((c & 0x0F) << 12) | ((s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F))); i += 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < s.size()) {
+            ws.push_back(static_cast<wchar_t>(((c & 0x07) << 18) | ((s[i + 1] & 0x3F) << 12) | ((s[i + 2] & 0x3F) << 6) | (s[i + 3] & 0x3F))); i += 4;
+        } else { ws.push_back(static_cast<wchar_t>(c)); ++i; }
+    }
+    for (wchar_t& wc : ws) wc = std::towlower(wc);
+    std::string out;
+    for (wchar_t wc : ws) {
+        if (wc < 0x80) out.push_back(static_cast<char>(wc));
+        else if (wc < 0x800) { out.push_back(static_cast<char>(0xC0 | (wc >> 6))); out.push_back(static_cast<char>(0x80 | (wc & 0x3F))); }
+        else { out.push_back(static_cast<char>(0xE0 | (wc >> 12))); out.push_back(static_cast<char>(0x80 | ((wc >> 6) & 0x3F))); out.push_back(static_cast<char>(0x80 | (wc & 0x3F))); }
+    }
+    return out;
+}
 
 bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
     if (rowTxnId == creatorTxnId) return true;
@@ -5526,11 +5579,17 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "upper" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
+        bool hasMultiByte = false;
+        for (unsigned char c : val) if (c >= 0x80) { hasMultiByte = true; break; }
+        if (hasMultiByte) return toUpperUtf8(val);
         for (char& c : val) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return val;
     }
     if (expr.funcName == "lower" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
+        bool hasMultiByte = false;
+        for (unsigned char c : val) if (c >= 0x80) { hasMultiByte = true; break; }
+        if (hasMultiByte) return toLowerUtf8(val);
         for (char& c : val) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         return val;
     }
