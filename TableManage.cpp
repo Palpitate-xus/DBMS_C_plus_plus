@@ -5376,6 +5376,46 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (field == "day") return std::to_string(d.day);
         return "";
     }
+    // YEAR / MONTH / DAY - date extraction functions
+    if ((expr.funcName == "year" || expr.funcName == "month" || expr.funcName == "day") && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        Date d(val.c_str());
+        if (d.year == 0) {
+            // Try parsing as timestamp "YYYY-MM-DD HH:MM:SS"
+            size_t sp = val.find(' ');
+            if (sp != std::string::npos) d = Date(val.substr(0, sp).c_str());
+        }
+        if (d.year == 0) return "";
+        if (expr.funcName == "year") return std::to_string(d.year);
+        if (expr.funcName == "month") return std::to_string(d.month);
+        return std::to_string(d.day);
+    }
+    // HOUR / MINUTE / SECOND - timestamp extraction functions
+    if ((expr.funcName == "hour" || expr.funcName == "minute" || expr.funcName == "second") && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        // Parse time part: "YYYY-MM-DD HH:MM:SS" or "HH:MM:SS"
+        std::string timePart;
+        size_t sp = val.find(' ');
+        if (sp != std::string::npos) timePart = val.substr(sp + 1);
+        else timePart = val;
+        // Parse HH:MM:SS
+        int h = 0, m = 0, s = 0;
+        int tpos[2] = {0, 0};
+        int k = 0;
+        for (size_t i = 0; i < timePart.size() && k < 2; i++) {
+            if (timePart[i] == ':') tpos[k++] = static_cast<int>(i);
+        }
+        if (tpos[0] && tpos[1]) {
+            for (int i = 0; i < tpos[0]; i++) if (timePart[i] >= '0' && timePart[i] <= '9') h = h * 10 + timePart[i] - '0';
+            for (int i = tpos[0] + 1; i < tpos[1]; i++) if (timePart[i] >= '0' && timePart[i] <= '9') m = m * 10 + timePart[i] - '0';
+            for (size_t i = tpos[1] + 1; i < timePart.size(); i++) if (timePart[i] >= '0' && timePart[i] <= '9') s = s * 10 + timePart[i] - '0';
+        } else {
+            return "";
+        }
+        if (expr.funcName == "hour") return std::to_string(h);
+        if (expr.funcName == "minute") return std::to_string(m);
+        return std::to_string(s);
+    }
     if (expr.funcName == "case_when") {
         // Args: cond1, val1, cond2, val2, ..., default
         for (size_t i = 0; i + 1 < expr.funcArgs.size(); i += 2) {

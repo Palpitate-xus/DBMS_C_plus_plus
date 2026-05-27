@@ -265,7 +265,7 @@
 | **TIMESTAMPTZ (带时区)** | ✅ | ✅ | - |
 | **INTERVAL** | ❌ | ✅ | P2 |
 | **DATETIME** | ✅ | ✅ MySQL | - |
-| **YEAR** | ❌ | ✅ MySQL | P3 |
+| **YEAR** | ✅ | ✅ MySQL | - |
 
 ### 3.5 布尔类型
 

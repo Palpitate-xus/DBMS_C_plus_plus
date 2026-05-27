@@ -275,6 +275,8 @@ static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "char_length", "character_length", "upper", "lower", "trim", "substring", "concat",
                                          "abs", "round", "ceil", "floor",
                                          "now", "current_timestamp", "extract",
+                                         "year", "month", "day",
+                                         "hour", "minute", "second",
                                          "case_when", "cast", "convert",
                                          "to_number", "to_char", "to_date",
                                          "coalesce", "nullif",
