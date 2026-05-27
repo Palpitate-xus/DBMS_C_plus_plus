@@ -413,6 +413,7 @@ static bool isScalarFunc(const string& name) {
                                          "split_part",
                                          "uuid_generate",
                                          "array_get", "array_length", "array_contains",
+                                         "unnest",
                                          "subquery"};
     return scalars.find(name) != scalars.end();
 }

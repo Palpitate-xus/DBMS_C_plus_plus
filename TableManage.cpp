@@ -6397,6 +6397,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return "0";
     }
+    if (expr.funcName == "unnest" && !expr.funcArgs.empty()) {
+        // Return raw array value; expansion happens in queryExpr
+        return getVal(expr.funcArgs[0]);
+    }
     return "";
 }
 
@@ -6505,23 +6509,84 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
         matchRows = std::move(sorted);
     }
 
+    // Detect unnest in SELECT expressions
+    bool hasUnnest = false;
+    size_t unnestIdx = 0;
+    for (size_t i = 0; i < exprs.size(); ++i) {
+        if (exprs[i].isScalar && exprs[i].funcName == "unnest") {
+            hasUnnest = true;
+            unnestIdx = i;
+            break;
+        }
+    }
+
     for (auto& mr : matchRows) {
-        std::string rowStr;
-        for (const auto& expr : exprs) {
-            std::string val;
-            if (expr.isScalar) {
-                val = applyScalarFunc(expr, mr.second, tbl, this, dbname);
-            } else {
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == expr.colName) {
-                        val = extractColumnValue(mr.second, tbl, i);
-                        break;
+        if (hasUnnest) {
+            // Compute all column values first
+            std::vector<std::string> vals;
+            vals.reserve(exprs.size());
+            for (const auto& expr : exprs) {
+                if (expr.isScalar) {
+                    vals.push_back(applyScalarFunc(expr, mr.second, tbl, this, dbname));
+                } else {
+                    std::string v;
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (tbl.cols[ci].dataName == expr.colName) {
+                            v = extractColumnValue(mr.second, tbl, ci);
+                            break;
+                        }
                     }
+                    vals.push_back(v);
                 }
             }
-            rowStr += val + ' ';
+            // Parse array elements from unnest column
+            std::string arr = vals[unnestIdx];
+            std::vector<std::string> elems;
+            if (arr.size() >= 2 && arr.front() == '[' && arr.back() == ']') {
+                arr = arr.substr(1, arr.size() - 2);
+            }
+            size_t ai = 0;
+            while (ai < arr.size()) {
+                while (ai < arr.size() && std::isspace(static_cast<unsigned char>(arr[ai]))) ++ai;
+                if (ai >= arr.size()) break;
+                std::string elem;
+                if (arr[ai] == '\'' || arr[ai] == '"') {
+                    char q = arr[ai++];
+                    while (ai < arr.size() && arr[ai] != q) elem += arr[ai++];
+                    if (ai < arr.size()) ++ai;
+                } else {
+                    while (ai < arr.size() && arr[ai] != ',') elem += arr[ai++];
+                }
+                elems.push_back(trim(elem));
+                if (ai < arr.size() && arr[ai] == ',') ++ai;
+            }
+            if (elems.empty()) elems.push_back("");
+            for (const auto& elem : elems) {
+                std::string rowStr;
+                for (size_t vi = 0; vi < vals.size(); ++vi) {
+                    rowStr += (vi == unnestIdx ? elem : vals[vi]);
+                    rowStr += ' ';
+                }
+                result.push_back(rowStr);
+            }
+        } else {
+            std::string rowStr;
+            for (const auto& expr : exprs) {
+                std::string val;
+                if (expr.isScalar) {
+                    val = applyScalarFunc(expr, mr.second, tbl, this, dbname);
+                } else {
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == expr.colName) {
+                            val = extractColumnValue(mr.second, tbl, i);
+                            break;
+                        }
+                    }
+                }
+                rowStr += val + ' ';
+            }
+            result.push_back(rowStr);
         }
-        result.push_back(rowStr);
     }
     lockManager_.unlock(tablename);
     return result;
