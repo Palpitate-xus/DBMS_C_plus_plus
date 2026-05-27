@@ -5033,6 +5033,45 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
                 }
             }
         }
+    } else if (tablename == "routines" || tablename == "ROUTINES") {
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& pname : getProcedureNames(dbname)) {
+                std::string row = dbname + " " + pname + " PROCEDURE ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "routine_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                    if (c.colName == "routine_name" && c.op == "=" && pname != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+            for (const auto& fname : getUDFNames(dbname)) {
+                std::string row = dbname + " " + fname + " FUNCTION ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "routine_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                    if (c.colName == "routine_name" && c.op == "=" && fname != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+            for (const auto& tname : getTVFNames(dbname)) {
+                std::string row = dbname + " " + tname + " FUNCTION ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "routine_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                    if (c.colName == "routine_name" && c.op == "=" && tname != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+            for (const auto& trg : getAllTriggers(dbname)) {
+                std::string row = dbname + " " + trg.name + " TRIGGER ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "routine_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                    if (c.colName == "routine_name" && c.op == "=" && trg.name != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+        }
     } else if (tablename == "views" || tablename == "VIEWS") {
         for (const auto& dbname : getDatabaseNames()) {
             for (const auto& vname : getViewNames(dbname)) {

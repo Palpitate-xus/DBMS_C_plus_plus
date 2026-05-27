@@ -717,7 +717,7 @@
 | **information_schema.tables** | ✅ | ✅ | - |
 | **information_schema.columns** | ✅ | ✅ | - |
 | **information_schema.views** | ✅ | ✅ | - |
-| **information_schema.routines** | ❌ | ✅ | P2 |
+| **information_schema.routines** | ✅ | ✅ | - |
 | **information_schema.triggers** | ❌ | ✅ | P2 |
 | **information_schema.statistics** | ✅ | ✅ | - |
 | **information_schema.key_column_usage** | ✅ | ✅ | - |
