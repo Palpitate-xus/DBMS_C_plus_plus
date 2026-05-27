@@ -721,7 +721,7 @@
 | **information_schema.triggers** | ✅ | ✅ | - |
 | **information_schema.statistics** | ✅ | ✅ | - |
 | **information_schema.key_column_usage** | ✅ | ✅ | - |
-| **pg_catalog / sys.* 表** | ❌ | ✅ | P2 |
+| **pg_catalog / sys.* 表** | ✅ | ✅ | P2 |
 
 ### 16.2 SHOW 命令
 

@@ -265,6 +265,13 @@ public:
         const std::set<std::string>& selectCols,
         const std::vector<OrderBySpec>& orderBy) const;
 
+    // pg_catalog virtual tables (PostgreSQL compatibility)
+    std::vector<std::string> queryPgCatalog(
+        const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        const std::set<std::string>& selectCols,
+        const std::vector<OrderBySpec>& orderBy) const;
+
     // Aggregate item with optional FILTER (WHERE ...) clause
     struct AggItem {
         std::string func;

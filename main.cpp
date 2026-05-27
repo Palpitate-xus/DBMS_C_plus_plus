@@ -6452,6 +6452,18 @@ bool execute(const string& rawSql, Session& s) {
         string tnameOrig = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
         string tname = resolveTableName(s, tnameOrig);
 
+        // Support dbname.tablename syntax for special catalogs
+        string queryDb = s.currentDB;
+        size_t dotPos = tnameOrig.find('.');
+        if (dotPos != string::npos) {
+            string maybeDb = trim(tnameOrig.substr(0, dotPos));
+            if (maybeDb == "pg_catalog" || maybeDb == "information_schema") {
+                queryDb = maybeDb;
+                tname = trim(tnameOrig.substr(dotPos + 1));
+                tnameOrig = tname;
+            }
+        }
+
         // Table-valued function expansion: FROM func(arg) -> FROM (sql_with_arg) AS __tvf_func
         size_t tvfLp = tnameOrig.find('(');
         if (tvfLp != string::npos) {
@@ -6509,9 +6521,10 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (s.currentDB != "information_schema" && !g_engine.tableExists(s.currentDB, tname)) {
-            if (g_engine.viewExists(s.currentDB, tnameOrig)) {
-                string viewSql = g_engine.getViewSQL(s.currentDB, tnameOrig);
+        if (queryDb != "information_schema" && queryDb != "pg_catalog" &&
+            !g_engine.tableExists(queryDb, tname)) {
+            if (g_engine.viewExists(queryDb, tnameOrig)) {
+                string viewSql = g_engine.getViewSQL(queryDb, tnameOrig);
                 if (!viewSql.empty()) {
                     // View expansion: replace view reference with derived table
                     // Replace FROM viewname with FROM (view_sql) AS __view_name
@@ -6531,8 +6544,10 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Table " << tnameOrig << " not exist" << endl;
             return true;
         }
-        if (!isTempTable(s, tnameOrig) && !checkTablePermission(s, tnameOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
-        if (!isTempTable(s, tnameOrig) && !checkSelectColumnPermission(s, tnameOrig, columns)) return true;
+        if (queryDb != "pg_catalog" && queryDb != "information_schema" &&
+            !isTempTable(s, tnameOrig) && !checkTablePermission(s, tnameOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
+        if (queryDb != "pg_catalog" && queryDb != "information_schema" &&
+            !isTempTable(s, tnameOrig) && !checkSelectColumnPermission(s, tnameOrig, columns)) return true;
 
         vector<dbms::StorageEngine::OrderBySpec> orderBySpecs;
         vector<dbms::StorageEngine::OrderBySpec> exprOrderBySpecs; // expressions sorted post-query
@@ -6653,7 +6668,7 @@ bool execute(const string& rawSql, Session& s) {
             }
         }
 
-        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+        TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
         set<string> selectCols;
         bool selectAll = (columns == "*");
 
@@ -7269,7 +7284,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes);
+                answers = g_engine.query(queryDb, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -7277,7 +7292,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(s.currentDB, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes);
+                    auto part = g_engine.query(queryDb, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }

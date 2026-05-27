@@ -5144,6 +5144,118 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
     return result;
 }
 
+std::vector<std::string> StorageEngine::queryPgCatalog(
+    const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    const std::set<std::string>& selectCols,
+    const std::vector<OrderBySpec>& orderBy) const {
+
+    std::vector<std::string> result;
+    auto conds = parseConditions(conditions);
+
+    if (tablename == "pg_class" || tablename == "PG_CLASS") {
+        // PostgreSQL pg_class: relname relkind relnamespace relpages reltuples
+        for (const auto& dbname : getDatabaseNames()) {
+            // Tables
+            for (const auto& tname : getTableNames(dbname)) {
+                std::string row = tname + " r " + dbname + " 0 0 ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "relname" && c.op == "=" && tname != c.value) { match = false; break; }
+                    if (c.colName == "relnamespace" && c.op == "=" && dbname != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+            // Views
+            for (const auto& vname : getViewNames(dbname)) {
+                std::string row = vname + " v " + dbname + " 0 0 ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "relname" && c.op == "=" && vname != c.value) { match = false; break; }
+                    if (c.colName == "relnamespace" && c.op == "=" && dbname != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+        }
+    } else if (tablename == "pg_attribute" || tablename == "PG_ATTRIBUTE") {
+        // PostgreSQL pg_attribute: attrelid attname atttypid attnum attnotnull attlen
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& tname : getTableNames(dbname)) {
+                TableSchema tbl = getTableSchema(dbname, tname);
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    const Column& col = tbl.cols[i];
+                    std::string notnull = col.isNull ? "f" : "t";
+                    int attlen = col.isVariableLength ? -1 : col.dsize;
+                    std::string row = tname + " " + col.dataName + " " + col.dataType + " " +
+                                      std::to_string(i + 1) + " " + notnull + " " + std::to_string(attlen) + " ";
+                    bool match = true;
+                    for (const auto& c : conds) {
+                        if (c.colName == "attrelid" && c.op == "=" && tname != c.value) { match = false; break; }
+                        if (c.colName == "attname" && c.op == "=" && col.dataName != c.value) { match = false; break; }
+                    }
+                    if (match) result.push_back(row);
+                }
+            }
+        }
+    } else if (tablename == "pg_type" || tablename == "PG_TYPE") {
+        // PostgreSQL pg_type: typname typlen typtype
+        static const std::vector<std::pair<std::string, int>> pgTypes = {
+            {"int", 4}, {"bigint", 8}, {"smallint", 2}, {"varchar", -1}, {"char", 1},
+            {"text", -1}, {"boolean", 1}, {"real", 4}, {"double precision", 8},
+            {"date", 4}, {"timestamp", 8}, {"timestamptz", 8}, {"json", -1},
+            {"uuid", 16}, {"decimal", -1}, {"blob", -1}, {"binary", -1},
+            {"serial", 4}, {"time", 8}, {"datetime", 8}, {"float", 4},
+        };
+        for (const auto& pt : pgTypes) {
+            std::string row = pt.first + " " + std::to_string(pt.second) + " b ";
+            bool match = true;
+            for (const auto& c : conds) {
+                if (c.colName == "typname" && c.op == "=" && pt.first != c.value) { match = false; break; }
+            }
+            if (match) result.push_back(row);
+        }
+    } else if (tablename == "pg_index" || tablename == "PG_INDEX") {
+        // PostgreSQL pg_index: indrelid indkey indisunique indisprimary
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& tname : getTableNames(dbname)) {
+                TableSchema tbl = getTableSchema(dbname, tname);
+                // Single-column indexes
+                auto idxCols = getIndexedColumns(dbname, tname);
+                for (const auto& cname : idxCols) {
+                    std::string isUnique = "f";
+                    std::string isPrimary = "f";
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == cname) {
+                            if (tbl.cols[i].isUnique) isUnique = "t";
+                            if (tbl.cols[i].isPrimaryKey) isPrimary = "t";
+                        }
+                    }
+                    std::string row = tname + " " + cname + " " + isUnique + " " + isPrimary + " ";
+                    bool match = true;
+                    for (const auto& c : conds) {
+                        if (c.colName == "indrelid" && c.op == "=" && tname != c.value) { match = false; break; }
+                    }
+                    if (match) result.push_back(row);
+                }
+            }
+        }
+    } else if (tablename == "pg_namespace" || tablename == "PG_NAMESPACE") {
+        // PostgreSQL pg_namespace: nspname
+        for (const auto& dbname : getDatabaseNames()) {
+            std::string row = dbname + " ";
+            bool match = true;
+            for (const auto& c : conds) {
+                if (c.colName == "nspname" && c.op == "=" && dbname != c.value) { match = false; break; }
+            }
+            if (match) result.push_back(row);
+        }
+        // Also add information_schema and pg_catalog as namespaces
+        result.push_back("information_schema ");
+        result.push_back("pg_catalog ");
+    }
+    return result;
+}
+
 std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::vector<std::string>& conditions,
@@ -5158,6 +5270,11 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     // information_schema virtual tables
     if (dbname == "information_schema") {
         return queryInformationSchema(tablename, conditions, selectCols, orderBy);
+    }
+
+    // pg_catalog virtual tables
+    if (dbname == "pg_catalog") {
+        return queryPgCatalog(tablename, conditions, selectCols, orderBy);
     }
 
     if (!tableExists(dbname, tablename)) return result;
