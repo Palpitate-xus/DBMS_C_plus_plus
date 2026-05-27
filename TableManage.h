@@ -688,5 +688,6 @@ Column makeBooleanColumn(const std::string& name, bool isNull, bool isPK = false
 Column makeUuidColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTimeColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeDateTimeColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK = false);
 
 } // namespace dbms

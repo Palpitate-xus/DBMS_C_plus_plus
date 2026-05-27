@@ -505,6 +505,17 @@ Column makeDateTimeColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "interval";
+    c.isVariableLength = true;
+    c.dsize = 64;  // stores interval string like "1 day 2 hours"
+    return c;
+}
+
 // ========================================================================
 // StorageEngine
 // ========================================================================

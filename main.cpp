@@ -41,6 +41,7 @@ using dbms::makeBooleanColumn;
 using dbms::makeUuidColumn;
 using dbms::makeTimeColumn;
 using dbms::makeDateTimeColumn;
+using dbms::makeIntervalColumn;
 using dbms::OpResult;
 using dbms::StorageEngine;
 using dbms::TableSchema;
@@ -1151,6 +1152,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 Column col = makeIntColumn(cname, false, 2, isPK);
                 col.isAutoIncrement = true;
                 tbl.append(col);
+            } else if (ctype.substr(0, 8) == "interval") {
+                tbl.append(makeIntervalColumn(cname, isNull, isPK));
             } else if (ctype.substr(0, 3) == "int") {
                 tbl.append(makeIntColumn(cname, isNull, 2, isPK, isUnsigned));
             } else if (ctype.substr(0, 4) == "tiny") {
@@ -3217,7 +3220,9 @@ bool execute(const string& rawSql, Session& s) {
             bool isNull = (nullFlag != "0");
 
             Column col;
-            if (typeName.substr(0, 3) == "int") {
+            if (typeName.substr(0, 8) == "interval") {
+                col = makeIntervalColumn(cname, isNull);
+            } else if (typeName.substr(0, 3) == "int") {
                 col = makeIntColumn(cname, isNull, 2);
             } else if (typeName.substr(0, 4) == "tiny") {
                 col = makeIntColumn(cname, isNull, 1);
