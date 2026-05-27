@@ -1571,6 +1571,9 @@ static std::string createTempTableFromRows(Session& s,
     return tmpName;
 }
 
+// Forward declaration for CTE DML support
+bool execute(const std::string& rawSql, Session& s);
+
 // Process CTEs (WITH clause): WITH cte AS (SELECT ...) [, ...] SELECT ...
 // Returns modified SQL with CTE references replaced by temp table names.
 static std::string processCTEs(const std::string& sql, Session& s) {
@@ -1616,7 +1619,171 @@ static std::string processCTEs(const std::string& sql, Session& s) {
         std::string tmpName;
         std::vector<std::string> colNames;
 
-        // Detect UNION ALL split for recursive CTE
+        // Detect DML in CTE: INSERT/UPDATE/DELETE with optional RETURNING
+        bool isDmlCte = false;
+        std::string dmlLower = toLower(innerSelect);
+        if (dmlLower.substr(0, 6) == "insert" ||
+            dmlLower.substr(0, 6) == "update" ||
+            dmlLower.substr(0, 6) == "delete") {
+            isDmlCte = true;
+            // Extract RETURNING clause
+            size_t retPos = dmlLower.find(" returning ");
+            if (retPos != string::npos) {
+                string retColsStr = trim(innerSelect.substr(retPos + 11));
+                if (retColsStr == "*") {
+                    // Need to infer columns from the target table
+                    string tableName;
+                    if (dmlLower.substr(0, 6) == "insert") {
+                        size_t intoPos = dmlLower.find(" into ");
+                        if (intoPos != string::npos) {
+                            string afterInto = trim(innerSelect.substr(intoPos + 6));
+                            size_t sp = afterInto.find(' ');
+                            tableName = (sp == string::npos) ? afterInto : afterInto.substr(0, sp);
+                        }
+                    } else if (dmlLower.substr(0, 6) == "update") {
+                        size_t sp = innerSelect.find(' ');
+                        if (sp != string::npos) tableName = trim(innerSelect.substr(sp + 1));
+                        sp = tableName.find(' ');
+                        if (sp != string::npos) tableName = tableName.substr(0, sp);
+                    } else { // delete
+                        size_t fromPos = dmlLower.find(" from ");
+                        if (fromPos != string::npos) {
+                            string afterFrom = trim(innerSelect.substr(fromPos + 6));
+                            size_t sp = afterFrom.find(' ');
+                            tableName = (sp == string::npos) ? afterFrom : afterFrom.substr(0, sp);
+                        }
+                    }
+                    if (!tableName.empty() && g_engine.tableExists(s.currentDB, tableName)) {
+                        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tableName);
+                        for (size_t i = 0; i < tbl.len; ++i) colNames.push_back(tbl.cols[i].dataName);
+                    }
+                } else {
+                    // Parse comma-separated column names
+                    stringstream css(retColsStr);
+                    string c;
+                    while (getline(css, c, ',')) {
+                        string tc = trim(c);
+                        if (!tc.empty()) colNames.push_back(tc);
+                    }
+                }
+                // Don't strip RETURNING; we'll handle it manually
+            }
+
+            vector<string> returnRows;
+            string tableName;
+            if (dmlLower.substr(0, 6) == "insert") {
+                size_t intoPos = dmlLower.find(" into ");
+                if (intoPos != string::npos) {
+                    string afterInto = trim(innerSelect.substr(intoPos + 6));
+                    size_t sp = afterInto.find(' ');
+                    tableName = (sp == string::npos) ? afterInto : afterInto.substr(0, sp);
+                }
+            } else if (dmlLower.substr(0, 6) == "update") {
+                size_t sp = innerSelect.find(' ');
+                if (sp != string::npos) {
+                    string afterUpd = trim(innerSelect.substr(sp + 1));
+                    sp = afterUpd.find(' ');
+                    tableName = (sp == string::npos) ? afterUpd : afterUpd.substr(0, sp);
+                }
+            } else { // delete
+                size_t fromPos = dmlLower.find(" from ");
+                if (fromPos != string::npos) {
+                    string afterFrom = trim(innerSelect.substr(fromPos + 6));
+                    size_t sp = afterFrom.find(' ');
+                    tableName = (sp == string::npos) ? afterFrom : afterFrom.substr(0, sp);
+                }
+            }
+
+            if (!colNames.empty() && !tableName.empty() &&
+                g_engine.tableExists(s.currentDB, tableName)) {
+                // Build a SELECT query to get RETURNING data before DML
+                string selectSql = "select ";
+                for (size_t i = 0; i < colNames.size(); ++i) {
+                    if (i > 0) selectSql += ", ";
+                    selectSql += colNames[i];
+                }
+                selectSql += " from " + tableName;
+                // Append WHERE conditions from the DML (strip RETURNING first)
+                size_t wherePos = dmlLower.find(" where ");
+                if (wherePos != string::npos) {
+                    string whereClause = innerSelect.substr(wherePos);
+                    size_t retPos2 = toLower(whereClause).find(" returning ");
+                    if (retPos2 != string::npos) whereClause = trim(whereClause.substr(0, retPos2));
+                    selectSql += whereClause;
+                }
+                // For INSERT, we can't pre-select; use the VALUES directly
+                if (dmlLower.substr(0, 6) == "insert") {
+                    // Execute INSERT first without RETURNING
+                    string dmlNoRet = innerSelect;
+                    size_t rPos = toLower(dmlNoRet).find(" returning ");
+                    if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
+                    stringstream nullOut;
+                    streambuf* oldBuf = cout.rdbuf(nullOut.rdbuf());
+                    execute(dmlNoRet, s);
+                    cout.rdbuf(oldBuf);
+                    // Query the inserted row using primary key if possible
+                    size_t valPos = dmlLower.find(" values ");
+                    if (valPos != string::npos) {
+                        string vals = trim(innerSelect.substr(valPos + 8));
+                        // Remove parens
+                        if (vals.size() >= 2 && vals.front() == '(' && vals.back() == ')') {
+                            vals = vals.substr(1, vals.size() - 2);
+                        }
+                        // Build a simple row from values
+                        stringstream vss(vals);
+                        string v;
+                        vector<string> valueList;
+                        while (getline(vss, v, ',')) valueList.push_back(trim(v));
+                        // For single-row insert with matching columns, construct row
+                        if (valueList.size() == colNames.size()) {
+                            string row;
+                            for (size_t i = 0; i < valueList.size(); ++i) {
+                                if (i > 0) row += " ";
+                                row += valueList[i];
+                            }
+                            returnRows.push_back(row);
+                        } else {
+                            // Try to query the table for the last inserted row
+                            auto allRows = g_engine.query(s.currentDB, tableName, {}, {}, {});
+                            if (!allRows.empty()) returnRows.push_back(allRows.back());
+                        }
+                    }
+                } else {
+                    // DELETE/UPDATE: pre-select matching rows
+                    auto preRows = runDerivedSubQuery(selectSql, s, colNames);
+                    returnRows = preRows;
+                    // Execute DML without RETURNING
+                    string dmlNoRet = innerSelect;
+                    size_t rPos = toLower(dmlNoRet).find(" returning ");
+                    if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
+                    stringstream nullOut;
+                    streambuf* oldBuf = cout.rdbuf(nullOut.rdbuf());
+                    execute(dmlNoRet, s);
+                    cout.rdbuf(oldBuf);
+                }
+            } else {
+                // No RETURNING or no table: just execute DML
+                string dmlNoRet = innerSelect;
+                size_t rPos = toLower(dmlNoRet).find(" returning ");
+                if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
+                stringstream nullOut2;
+                streambuf* oldBuf = cout.rdbuf(nullOut2.rdbuf());
+                execute(dmlNoRet, s);
+                cout.rdbuf(oldBuf);
+            }
+
+            if (!colNames.empty()) {
+                tmpName = createTempTableFromRows(s, returnRows, colNames, cteCount);
+            } else {
+                colNames.push_back("count");
+                vector<string> emptyRow;
+                tmpName = createTempTableFromRows(s, emptyRow, colNames, cteCount);
+            }
+            if (tmpName.empty()) break;
+        }
+
+        if (!isDmlCte) {
+            // Detect UNION ALL split for recursive CTE
         size_t unionAllPos = std::string::npos;
         if (recursiveMode) {
             // Look for top-level UNION ALL
@@ -1694,6 +1861,7 @@ static std::string processCTEs(const std::string& sql, Session& s) {
             tmpName = createTempTableFromRows(s, rows, colNames, cteCount);
             if (tmpName.empty()) break;
         }
+        } // end if (!isDmlCte)
 
         // Replace CTE name references in the rest of the SQL
         size_t replacePos = parenEnd + 1;

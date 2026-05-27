@@ -81,7 +81,7 @@
 | **WITH ... AS (...)** | ✅ | ✅ | - |
 | **WITH RECURSIVE** | ✅ | ✅ | - |
 | **多 CTE 串联** | ✅ | ✅ | - |
-| **CTE 内 INSERT/UPDATE/DELETE** | ❌ | ✅ | P2 |
+| **CTE 内 INSERT/UPDATE/DELETE** | ✅ | ✅ | P2 |
 
 ### 2.4 子查询
 
@@ -555,7 +555,7 @@
 | 表级 GRANT/REVOKE | ✅ | ✅ | - |
 | **列级权限** | ✅ | ✅ | - |
 | **数据库级权限** | ✅ | ✅ | - |
-| **Schema 级权限** | ❌ | ✅ | P2 |
+| **Schema 级权限** | ✅ | ✅ | P2 |
 | **行级安全策略 (RLS)** | ❌ | ✅ PG | P3 |
 | **GRANT WITH GRANT OPTION** | ❌ | ✅ | P3 |
 | **执行权限 (EXECUTE)** | ❌ | ✅ | P3 |
