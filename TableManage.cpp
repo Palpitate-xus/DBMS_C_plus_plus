@@ -6192,6 +6192,12 @@ std::vector<std::string> StorageEngine::aggregate(
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
+        bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
+        bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
+        bool isStat = isVar || isStddev;
+        // Welford's online algorithm for variance
+        double wMean = 0.0, wM2 = 0.0;
+        size_t wCount = 0;
 
         if (func != "count" || actualColName != "*") {
             for (size_t i = 0; i < tbl.len; ++i) {
@@ -6248,6 +6254,12 @@ std::vector<std::string> StorageEngine::aggregate(
                     }
                     if (func == "min") {
                         if (!hasMin || num < minInt) { minInt = num; hasMin = true; }
+                    }
+                    if (isStat) {
+                        wCount++;
+                        double delta = static_cast<double>(num) - wMean;
+                        wMean += delta / wCount;
+                        wM2 += delta * (static_cast<double>(num) - wMean);
                     }
                 } else if (isDate) {
                     Date d = val.empty() ? Date{} : Date(val.c_str());
@@ -6311,6 +6323,24 @@ std::vector<std::string> StorageEngine::aggregate(
             else if (isInt) rowResult += transstr(minInt) + ' ';
             else if (isDate) rowResult += str(minDate) + ' ';
             else rowResult += minStr + ' ';
+        }
+        else if (isVar || isStddev) {
+            if (wCount == 0) {
+                rowResult += "NULL ";
+            } else if ((func == "var_samp" || func == "stddev_samp" || func == "variance" || func == "stddev") && wCount < 2) {
+                rowResult += "NULL ";
+            } else {
+                double variance = 0.0;
+                if (func == "var_pop" || func == "stddev_pop") {
+                    variance = wM2 / wCount;
+                } else {
+                    variance = wM2 / (wCount - 1);
+                }
+                if (isStddev) variance = std::sqrt(variance);
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(4) << variance;
+                rowResult += oss.str() + ' ';
+            }
         }
     }
     if (!rowResult.empty()) result.push_back(rowResult);
