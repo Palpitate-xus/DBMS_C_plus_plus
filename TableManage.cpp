@@ -5544,6 +5544,90 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         matchRows = std::move(sorted);
     }
 
+    // If any ORDER BY spec is an expression, apply expression-based sorting
+    // directly on the original row buffers to preserve MVCC/formatting state.
+    bool hasExprOrder = false;
+    for (const auto& spec : orderBy) {
+        if (spec.isExpression) { hasExprOrder = true; break; }
+    }
+    if (hasExprOrder) {
+        struct ExprKey {
+            size_t idx;
+            std::vector<std::string> exprVals;
+        };
+        std::vector<ExprKey> ekeys;
+        ekeys.reserve(matchRows.size());
+        for (size_t ri = 0; ri < matchRows.size(); ++ri) {
+            ExprKey ek{ri, {}};
+            // Build column value map for expression evaluation
+            std::map<std::string, std::string> rowData;
+            for (size_t ci = 0; ci < tbl.len; ++ci) {
+                rowData[tbl.cols[ci].dataName] = extractColumnValue(matchRows[ri].second, tbl, ci);
+            }
+            for (const auto& spec : orderBy) {
+                if (!spec.isExpression) continue;
+                std::string ev;
+                auto getCol = [&](const std::string& name) -> std::string {
+                    auto it = rowData.find(name);
+                    return (it != rowData.end()) ? it->second : "";
+                };
+                std::string argVal = getCol(spec.exprArg);
+                if (spec.exprFunc == "length") {
+                    ev = std::to_string(argVal.size());
+                } else if (spec.exprFunc == "upper") {
+                    ev = argVal;
+                    for (char& c : ev) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                } else if (spec.exprFunc == "lower") {
+                    ev = argVal;
+                    for (char& c : ev) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                } else if (spec.exprFunc == "abs") {
+                    try { ev = std::to_string(std::llabs(std::stoll(argVal))); } catch (...) { ev = "0"; }
+                } else if (spec.exprFunc == "add") {
+                    try { ev = std::to_string(std::stoll(argVal) + std::stoll(spec.exprArg2)); } catch (...) { ev = argVal; }
+                } else if (spec.exprFunc == "sub") {
+                    try { ev = std::to_string(std::stoll(argVal) - std::stoll(spec.exprArg2)); } catch (...) { ev = argVal; }
+                } else {
+                    ev = argVal;
+                }
+                ek.exprVals.push_back(ev);
+            }
+            ekeys.push_back(std::move(ek));
+        }
+        std::stable_sort(ekeys.begin(), ekeys.end(), [&](const ExprKey& a, const ExprKey& b) {
+            size_t evi = 0;
+            for (const auto& spec : orderBy) {
+                if (!spec.isExpression) continue;
+                const std::string& av = a.exprVals[evi];
+                const std::string& bv = b.exprVals[evi];
+                bool aNull = av.empty();
+                bool bNull = bv.empty();
+                if (aNull && bNull) { ++evi; continue; }
+                if (aNull) return spec.nullsFirst;
+                if (bNull) return !spec.nullsFirst;
+                bool less = false, greater = false;
+                try {
+                    int64_t na = std::stoll(av);
+                    int64_t nb = std::stoll(bv);
+                    less = na < nb;
+                    greater = na > nb;
+                } catch (...) {
+                    less = av < bv;
+                    greater = av > bv;
+                }
+                if (less) return spec.ascending;
+                if (greater) return !spec.ascending;
+                ++evi;
+            }
+            return false;
+        });
+        std::vector<std::pair<int64_t, std::string>> sorted;
+        sorted.reserve(matchRows.size());
+        for (const auto& ek : ekeys) {
+            sorted.push_back(std::move(matchRows[ek.idx]));
+        }
+        matchRows = std::move(sorted);
+    }
+
     for (auto& mr : matchRows) {
         std::string rowStr;
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -7183,6 +7267,18 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 for (char& c : ev) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             } else if (spec.exprFunc == "abs") {
                 try { ev = std::to_string(std::llabs(std::stoll(argVal))); } catch (...) { ev = "0"; }
+            } else if (spec.exprFunc == "add") {
+                try {
+                    int64_t a = std::stoll(argVal);
+                    int64_t b = std::stoll(spec.exprArg2);
+                    ev = std::to_string(a + b);
+                } catch (...) { ev = argVal; }
+            } else if (spec.exprFunc == "sub") {
+                try {
+                    int64_t a = std::stoll(argVal);
+                    int64_t b = std::stoll(spec.exprArg2);
+                    ev = std::to_string(a - b);
+                } catch (...) { ev = argVal; }
             } else {
                 ev = argVal;
             }

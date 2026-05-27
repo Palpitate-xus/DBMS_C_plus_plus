@@ -1664,12 +1664,62 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
         while (std::getline(oss, part, ',')) {
             part = trim(part);
             std::vector<std::string> ot = tokenize(part);
-            if (!ot.empty()) {
-                StorageEngine::OrderBySpec spec;
-                spec.colName = ot[0];
-                spec.ascending = !(ot.size() > 1 && ot[1] == "desc");
-                orderBy.push_back(spec);
+            if (ot.empty()) continue;
+            StorageEngine::OrderBySpec spec;
+            // Detect function expression: funcName ( arg )
+            if (ot.size() >= 4 && ot[1] == "(" && ot[3] == ")") {
+                spec.isExpression = true;
+                spec.exprFunc = toLower(ot[0]);
+                spec.exprArg = ot[2];
+                spec.colName = ot[0] + "(" + ot[2] + ")";
+                // Scan for ASC/DESC and NULLS FIRST/LAST
+                for (size_t ti = 4; ti < ot.size(); ++ti) {
+                    std::string lt = toLower(ot[ti]);
+                    if (lt == "desc") spec.ascending = false;
+                    else if (lt == "asc") spec.ascending = true;
+                    else if (lt == "nulls" && ti + 1 < ot.size()) {
+                        std::string nl = toLower(ot[ti + 1]);
+                        if (nl == "first") spec.nullsFirst = true;
+                        else if (nl == "last") spec.nullsFirst = false;
+                        ++ti;
+                    }
+                }
             }
+            // Detect simple arithmetic: col + num or col - num
+            else if (ot.size() >= 3 && (ot[1] == "+" || ot[1] == "-")) {
+                spec.isExpression = true;
+                spec.exprFunc = (ot[1] == "+") ? "add" : "sub";
+                spec.exprArg = ot[0];
+                spec.exprArg2 = ot[2];
+                spec.colName = ot[0] + " " + ot[1] + " " + ot[2];
+                for (size_t ti = 3; ti < ot.size(); ++ti) {
+                    std::string lt = toLower(ot[ti]);
+                    if (lt == "desc") spec.ascending = false;
+                    else if (lt == "asc") spec.ascending = true;
+                    else if (lt == "nulls" && ti + 1 < ot.size()) {
+                        std::string nl = toLower(ot[ti + 1]);
+                        if (nl == "first") spec.nullsFirst = true;
+                        else if (nl == "last") spec.nullsFirst = false;
+                        ++ti;
+                    }
+                }
+            }
+            // Plain column name
+            else {
+                spec.colName = ot[0];
+                for (size_t ti = 1; ti < ot.size(); ++ti) {
+                    std::string lt = toLower(ot[ti]);
+                    if (lt == "desc") spec.ascending = false;
+                    else if (lt == "asc") spec.ascending = true;
+                    else if (lt == "nulls" && ti + 1 < ot.size()) {
+                        std::string nl = toLower(ot[ti + 1]);
+                        if (nl == "first") spec.nullsFirst = true;
+                        else if (nl == "last") spec.nullsFirst = false;
+                        ++ti;
+                    }
+                }
+            }
+            orderBy.push_back(spec);
         }
     }
 
@@ -6955,6 +7005,28 @@ bool execute(const string& rawSql, Session& s) {
                         spec.collation = collation;
                         exprOrderBySpecs.push_back(spec);
                         continue;
+                    }
+                }
+                // Detect arithmetic expression: col + num or col - num
+                {
+                    size_t plusPos = sortItem.find('+');
+                    size_t minusPos = sortItem.find('-');
+                    size_t opPos = (plusPos != string::npos) ? plusPos : minusPos;
+                    if (opPos != string::npos) {
+                        string left = trim(sortItem.substr(0, opPos));
+                        string right = trim(sortItem.substr(opPos + 1));
+                        if (!left.empty() && !right.empty()) {
+                            dbms::StorageEngine::OrderBySpec spec;
+                            spec.isExpression = true;
+                            spec.exprFunc = (plusPos != string::npos) ? "add" : "sub";
+                            spec.exprArg = left;
+                            spec.exprArg2 = right;
+                            spec.ascending = asc;
+                            spec.nullsFirst = nullsFirst;
+                            spec.collation = collation;
+                            exprOrderBySpecs.push_back(spec);
+                            continue;
+                        }
                     }
                 }
                 // Simple column

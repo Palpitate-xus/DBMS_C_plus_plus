@@ -210,7 +210,7 @@
 |------|------|------|--------|
 | ORDER BY col [ASC/DESC] | ✅ | ✅ | - |
 | **ORDER BY 多列** | ✅ | ✅ | - |
-| **ORDER BY 表达式** | ❌ | ✅ | P1 |
+| **ORDER BY 表达式** | ✅ | ✅ | - |
 | **NULLS FIRST / NULLS LAST** | ✅ | ✅ | - |
 
 ### 2.15 GROUP BY 扩展
