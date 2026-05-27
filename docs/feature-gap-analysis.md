@@ -665,9 +665,9 @@
 |------|------|------|--------|
 | EXPLAIN (估算成本) | ✅ | ✅ | - |
 | **EXPLAIN ANALYZE (实际执行)** | ✅ | ✅ | - |
-| **EXPLAIN BUFFERS** | ❌ | ✅ | P2 |
+| **EXPLAIN BUFFERS** | ✅ | ✅ | - |
 | **EXPLAIN FORMAT JSON/XML** | ✅ | ✅ | - |
-| **EXPLAIN VERBOSE** | ❌ | ✅ | P2 |
+| **EXPLAIN VERBOSE** | ✅ | ✅ | - |
 
 ---
 

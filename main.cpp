@@ -5896,9 +5896,19 @@ bool execute(const string& rawSql, Session& s) {
         if (!checkDB(s)) return true;
         bool isAnalyze = false;
         bool isJson = false;
+        bool isBuffers = false;
+        bool isVerbose = false;
         string rest = trim(sql.substr(7));
         if (rest.size() >= 8 && rest.substr(0, 8) == "analyze ") {
             isAnalyze = true;
+            rest = trim(rest.substr(8));
+        }
+        if (rest.size() >= 8 && rest.substr(0, 8) == "buffers ") {
+            isBuffers = true;
+            rest = trim(rest.substr(8));
+        }
+        if (rest.size() >= 8 && rest.substr(0, 8) == "verbose ") {
+            isVerbose = true;
             rest = trim(rest.substr(8));
         }
         if (rest.size() >= 11 && rest.substr(0, 11) == "format json") {
@@ -5980,8 +5990,11 @@ bool execute(const string& rawSql, Session& s) {
         ctx.limit = limitVal;
         ctx.distinct = isDistinct;
 
-        // Query plan cache lookup
+        // Query plan cache lookup (cache key includes EXPLAIN options)
         string cacheKey = s.currentDB + "::" + inner;
+        if (isBuffers) cacheKey += ":B";
+        if (isVerbose) cacheKey += ":V";
+        if (isJson) cacheKey += ":J";
         string planOutput;
         bool cacheHit = false;
         {
@@ -5999,10 +6012,13 @@ bool execute(const string& rawSql, Session& s) {
 
         if (!cacheHit) {
             auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+            dbms::QueryPlanner::ExplainOptions opts;
+            opts.buffers = isBuffers;
+            opts.verbose = isVerbose;
             if (isJson) {
-                planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB);
+                planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts);
             } else {
-                planOutput = dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB);
+                planOutput = dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB, opts);
             }
             // Store in cache (limit to 100 entries)
             {

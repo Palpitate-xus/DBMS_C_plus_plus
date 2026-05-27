@@ -367,13 +367,22 @@ public:
                                 const std::vector<StorageEngine::Condition>& conds,
                                 const std::set<std::string>& selectCols);
 
-    // Get a human-readable description of the plan tree with cost estimates
+    struct ExplainOptions {
+        bool buffers = false;
+        bool verbose = false;
+    };
+
     static std::string explain(OpPtr& plan, StorageEngine* engine,
                                const std::string& dbname);
+    static std::string explain(OpPtr& plan, StorageEngine* engine,
+                               const std::string& dbname,
+                               const ExplainOptions& opts);
 
-    // Get JSON-formatted description of the plan tree with cost estimates
     static std::string explainJson(OpPtr& plan, StorageEngine* engine,
                                    const std::string& dbname);
+    static std::string explainJson(OpPtr& plan, StorageEngine* engine,
+                                   const std::string& dbname,
+                                   const ExplainOptions& opts);
 };
 
 } // namespace dbms

@@ -1064,10 +1064,23 @@ static CostEstimate explainOp(Operator* op, int indent,
 
 std::string QueryPlanner::explain(OpPtr& plan, StorageEngine* engine,
                                   const std::string& dbname) {
+    ExplainOptions opts;
+    return explain(plan, engine, dbname, opts);
+}
+
+std::string QueryPlanner::explain(OpPtr& plan, StorageEngine* engine,
+                                  const std::string& dbname,
+                                  const ExplainOptions& opts) {
     std::string result;
     CostEstimate total = explainOp(plan.get(), 0, engine, dbname, result);
     result += "\nTotal estimated cost: " + std::to_string(static_cast<int>(total.cost));
     result += ", estimated rows: " + std::to_string(static_cast<int>(total.rows)) + "\n";
+    if (opts.buffers) {
+        auto bpStats = engine->getBufferPoolStats();
+        result += "Buffers: shared_hit=" + std::to_string(bpStats.totalHits);
+        result += " shared_read=" + std::to_string(bpStats.totalMisses);
+        result += " hit_rate=" + std::to_string(static_cast<int>(bpStats.hitRate)) + "%\n";
+    }
     return result;
 }
 
@@ -1248,12 +1261,27 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
 
 std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
                                       const std::string& dbname) {
+    ExplainOptions opts;
+    return explainJson(plan, engine, dbname, opts);
+}
+
+std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
+                                      const std::string& dbname,
+                                      const ExplainOptions& opts) {
     auto [planJson, total] = explainOpJson(plan.get(), engine, dbname);
     std::string result = "{\n";
     result += "  \"plan\": " + planJson + ",\n";
     result += "  \"totalCost\": " + std::to_string(static_cast<int>(total.cost)) + ",\n";
-    result += "  \"totalRows\": " + std::to_string(static_cast<int>(total.rows)) + "\n";
-    result += "}\n";
+    result += "  \"totalRows\": " + std::to_string(static_cast<int>(total.rows));
+    if (opts.buffers) {
+        auto bpStats = engine->getBufferPoolStats();
+        result += ",\n  \"buffers\": {\n";
+        result += "    \"sharedHit\": " + std::to_string(bpStats.totalHits) + ",\n";
+        result += "    \"sharedRead\": " + std::to_string(bpStats.totalMisses) + ",\n";
+        result += "    \"hitRate\": " + std::to_string(static_cast<int>(bpStats.hitRate)) + "\n";
+        result += "  }";
+    }
+    result += "\n}\n";
     return result;
 }
 
