@@ -3515,8 +3515,17 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (!found) return false;
         }
     } else if (col.dataType == "date") {
-        Date d = (val.empty() ? Date{} : Date(val.c_str()));
-        Date v(cond.value.c_str());
+        auto normalizeDateStr = [](const std::string& s) -> std::string {
+            if (s.size() < 8) return s;
+            // YYYY/MM/DD or YYYY.MM.DD -> YYYY-MM-DD
+            std::string r = s;
+            for (char& c : r) if (c == '/' || c == '.') c = '-';
+            return r;
+        };
+        std::string nv = normalizeDateStr(val);
+        std::string nc = normalizeDateStr(cond.value);
+        Date d = (nv.empty() ? Date{} : Date(nv.c_str()));
+        Date v(nc.c_str());
         if (cond.op == "<"  && v.year && !(d < v))  return false;
         if (cond.op == ">"  && v.year && !(d > v))  return false;
         if (cond.op == "="  && v.year && d != v)    return false;
@@ -3560,8 +3569,15 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == ">=" && (num < cmp))  return false;
         if (cond.op == "!=" && num == cmp)   return false;
     } else if (col.dataType == "boolean") {
-        if (cond.op == "="  && val != cond.value) return false;
-        if (cond.op == "!=" && val == cond.value) return false;
+        auto normalizeBool = [](const std::string& s) -> std::string {
+            if (s == "1" || s == "true" || s == "yes" || s == "on") return "true";
+            if (s == "0" || s == "false" || s == "no" || s == "off") return "false";
+            return s;
+        };
+        std::string nv = normalizeBool(val);
+        std::string nc = normalizeBool(cond.value);
+        if (cond.op == "="  && nv != nc) return false;
+        if (cond.op == "!=" && nv == nc) return false;
     } else {
         int64_t num = val.empty() ? INF : parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
