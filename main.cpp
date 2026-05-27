@@ -2878,6 +2878,69 @@ bool execute(const string& rawSql, Session& s) {
         }
     }
 
+    // SET parameter = value  (session-level, non-persistent)
+    // SET GLOBAL parameter = value (persistent to dbms.conf)
+    if (sql.substr(0, 3) == "set" && sql.size() > 3 && isspace(static_cast<unsigned char>(sql[3]))) {
+        string rest = trim(sql.substr(3));
+        bool isGlobal = false;
+        if (rest.size() > 7 && rest.substr(0, 7) == "global ") {
+            isGlobal = true;
+            rest = trim(rest.substr(7));
+        }
+        size_t eqPos = rest.find('=');
+        if (eqPos == string::npos) {
+            cout << "SQL syntax error: SET [GLOBAL] parameter = value" << endl;
+            return true;
+        }
+        string param = trim(rest.substr(0, eqPos));
+        string val = trim(rest.substr(eqPos + 1));
+        bool ok = false;
+        if (param == "max_connections") {
+            try { g_config.maxConnections = std::stoi(val); ok = true; } catch (...) {}
+        } else if (param == "slow_query_threshold_ms") {
+            try { g_config.slowQueryThresholdMs = std::stod(val); ok = true; } catch (...) {}
+        } else if (param == "checkpoint_interval") {
+            try { g_config.checkpointInterval = std::stoi(val); ok = true; } catch (...) {}
+        } else if (param == "statement_timeout_ms") {
+            try { g_config.statementTimeoutMs = std::stoi(val); s.statementTimeoutMs = g_config.statementTimeoutMs; ok = true; } catch (...) {}
+        } else if (param == "buffer_pool_frames") {
+            try { g_config.bufferPoolFrames = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
+        } else if (param == "enable_query_plan_cache") {
+            g_config.enableQueryPlanCache = (val == "1" || val == "true" || val == "on");
+            ok = true;
+        } else if (param == "query_plan_cache_size") {
+            try { g_config.queryPlanCacheSize = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
+        } else if (param == "password_policy_level") {
+            try { g_config.passwordPolicyLevel = std::stoi(val); ok = true; } catch (...) {}
+        } else if (param == "password_hash_algorithm") {
+            g_config.passwordHashAlgorithm = val; ok = true;
+        } else if (param == "audit_level") {
+            try { g_config.auditLevel = std::stoi(val); ok = true; } catch (...) {}
+        } else if (param == "auto_vacuum") {
+            g_config.autoVacuumEnabled = (val == "1" || val == "true" || val == "on");
+            ok = true;
+        } else if (param == "auto_vacuum_threshold") {
+            try { g_config.autoVacuumThreshold = std::stoi(val); ok = true; } catch (...) {}
+        } else {
+            cout << "Unknown parameter: " << param << endl;
+            return true;
+        }
+        if (!ok) {
+            cout << "Invalid value for parameter " << param << endl;
+            return true;
+        }
+        if (isGlobal) {
+            if (!g_config.save("dbms.conf")) {
+                cout << "Failed to persist configuration" << endl;
+                return true;
+            }
+            cout << "Set global " << param << " = " << val << endl;
+        } else {
+            cout << "Set " << param << " = " << val << " (session)" << endl;
+        }
+        return false;
+    }
+
     if (sql.substr(0, 5) == "alter") {
         if (!checkAdmin(s)) return true;
         vector<string> tokens = tokenize(sql.substr(5));

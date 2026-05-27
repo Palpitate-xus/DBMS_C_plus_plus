@@ -65,4 +65,23 @@ void Config::printAll() const {
               << "auto_vacuum_threshold " << autoVacuumThreshold << "\n";
 }
 
+bool Config::save(const std::string& filename) const {
+    std::ofstream ofs(filename);
+    if (!ofs) return false;
+    ofs << "# DBMS runtime configuration\n"
+        << "max_connections=" << maxConnections << "\n"
+        << "slow_query_threshold_ms=" << slowQueryThresholdMs << "\n"
+        << "checkpoint_interval=" << checkpointInterval << "\n"
+        << "statement_timeout_ms=" << statementTimeoutMs << "\n"
+        << "buffer_pool_frames=" << bufferPoolFrames << "\n"
+        << "enable_query_plan_cache=" << (enableQueryPlanCache ? "on" : "off") << "\n"
+        << "query_plan_cache_size=" << queryPlanCacheSize << "\n"
+        << "password_policy_level=" << passwordPolicyLevel << "\n"
+        << "password_hash_algorithm=" << passwordHashAlgorithm << "\n"
+        << "audit_level=" << auditLevel << "\n"
+        << "auto_vacuum=" << (autoVacuumEnabled ? "on" : "off") << "\n"
+        << "auto_vacuum_threshold=" << autoVacuumThreshold << "\n";
+    return true;
+}
+
 } // namespace dbms

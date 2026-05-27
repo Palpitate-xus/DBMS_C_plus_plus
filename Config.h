@@ -28,6 +28,8 @@ struct Config {
 
     // Load from file; returns true on success.
     bool load(const std::string& filename);
+    // Save current values to file
+    bool save(const std::string& filename) const;
     // Dump current values for SHOW VARIABLES
     void printAll() const;
 };
