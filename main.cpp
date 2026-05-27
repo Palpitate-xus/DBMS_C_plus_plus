@@ -5601,6 +5601,16 @@ bool execute(const string& rawSql, Session& s) {
             cout << "rejected_connections: " << s.rejectedConnections.load() << endl;
             return false;
         }
+        if (rest == "processlist") {
+            auto procs = dbms::getProcessList();
+            cout << "id user host db command time state info" << endl;
+            for (const auto& p : procs) {
+                cout << p.id << " " << p.user << " " << p.host << " "
+                     << p.db << " " << p.command << " " << std::fixed << std::setprecision(2)
+                     << p.timeSec << " " << p.state << " " << p.info << endl;
+            }
+            return false;
+        }
         if (rest == "status") {
             auto& s = dbms::getServerStats();
             cout << "active_connections " << s.activeConnections.load() << endl;
@@ -7894,11 +7904,14 @@ int main(int argc, char* argv[]) {
         log(s.username, "login", getTime());
         s.permission = permissionQuery(username);
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
+        // Register interactive session in process list
+        uint64_t pid = dbms::registerProcess(s.username, "localhost", s.currentDB);
         int sqlCount = 0;
         while (true) {
             string sql;
             if (!getline(cin, sql)) break;
             if (trim(sql) == "exit") break;
+            dbms::updateProcessInfo(pid, "Query", "executing", sql);
             auto start = std::chrono::steady_clock::now();
             bool ok = false;
             bool timedOut = false;
@@ -7914,6 +7927,8 @@ int main(int argc, char* argv[]) {
             } else {
                 ok = execute(sql, s);
             }
+            dbms::updateProcessDb(pid, s.currentDB);
+            dbms::updateProcessInfo(pid, "Sleep", "", "");
             auto end = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
             if (timedOut) {
@@ -7928,6 +7943,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        dbms::unregisterProcess(pid);
     } else {
         cout << "wrong username or password" << endl;
     }

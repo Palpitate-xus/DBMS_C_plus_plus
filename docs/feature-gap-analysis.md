@@ -734,7 +734,7 @@
 | **SHOW CREATE TABLE** | ✅ | ✅ | - |
 | **SHOW INDEX FROM table** | ✅ | ✅ | - |
 | **SHOW VARIABLES** | ✅ | ✅ | - |
-| **SHOW PROCESSLIST** | 部分 | ✅ | P2 |
+| **SHOW PROCESSLIST** | ✅ | ✅ | - |
 | **SHOW GRANTS** | ✅ | ✅ | - |
 | **DESC / DESCRIBE table** | ✅ | ✅ | - |
 
