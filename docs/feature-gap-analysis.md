@@ -718,7 +718,7 @@
 | **information_schema.columns** | ✅ | ✅ | - |
 | **information_schema.views** | ✅ | ✅ | - |
 | **information_schema.routines** | ✅ | ✅ | - |
-| **information_schema.triggers** | ❌ | ✅ | P2 |
+| **information_schema.triggers** | ✅ | ✅ | - |
 | **information_schema.statistics** | ✅ | ✅ | - |
 | **information_schema.key_column_usage** | ✅ | ✅ | - |
 | **pg_catalog / sys.* 表** | ❌ | ✅ | P2 |

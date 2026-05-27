@@ -5084,6 +5084,19 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
                 if (match) result.push_back(row);
             }
         }
+    } else if (tablename == "triggers" || tablename == "TRIGGERS") {
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& trg : getAllTriggers(dbname)) {
+                std::string row = dbname + " " + trg.name + " " + trg.event + " " + trg.tableName + " " + trg.timing + " ";
+                bool match = true;
+                for (const auto& c : conds) {
+                    if (c.colName == "trigger_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                    if (c.colName == "trigger_name" && c.op == "=" && trg.name != c.value) { match = false; break; }
+                    if (c.colName == "event_object_table" && c.op == "=" && trg.tableName != c.value) { match = false; break; }
+                }
+                if (match) result.push_back(row);
+            }
+        }
     } else if (tablename == "key_column_usage" || tablename == "KEY_COLUMN_USAGE") {
         for (const auto& dbname : getDatabaseNames()) {
             for (const auto& tname : getTableNames(dbname)) {
