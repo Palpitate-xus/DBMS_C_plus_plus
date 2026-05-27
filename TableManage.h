@@ -264,16 +264,23 @@ public:
         const std::set<std::string>& selectCols,
         const std::vector<OrderBySpec>& orderBy) const;
 
+    // Aggregate item with optional FILTER (WHERE ...) clause
+    struct AggItem {
+        std::string func;
+        std::string arg;
+        std::vector<std::string> filterConds; // FILTER (WHERE ...) conditions
+    };
+
     // Aggregate query: items = {("count","*"), ("max","score"), ...}
     std::vector<std::string> aggregate(const std::string& dbname, const std::string& tablename,
                                        const std::vector<std::string>& conditions,
-                                       const std::vector<std::pair<std::string, std::string>>& items);
+                                       const std::vector<AggItem>& items);
 
     // Group aggregate: GROUP BY groupCol(s) with HAVING filter
     std::vector<std::string> groupAggregate(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
-        const std::vector<std::pair<std::string, std::string>>& items,
+        const std::vector<AggItem>& items,
         const std::vector<std::string>& groupByCols,
         const std::vector<std::string>& havingConds);
 

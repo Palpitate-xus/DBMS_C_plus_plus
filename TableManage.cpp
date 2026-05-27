@@ -6161,7 +6161,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
 std::vector<std::string> StorageEngine::aggregate(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,
-    const std::vector<std::pair<std::string, std::string>>& items) {
+    const std::vector<AggItem>& items) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
     lockManager_.lockShared(tablename);
@@ -6176,8 +6176,8 @@ std::vector<std::string> StorageEngine::aggregate(
 
     std::string rowResult;
     for (const auto& item : items) {
-        const std::string& func = item.first;
-        const std::string& colName = item.second;
+        const std::string& func = item.func;
+        const std::string& colName = item.arg;
         int64_t count = 0, sum = 0;
         bool hasMax = false, hasMin = false;
         std::string maxStr, minStr;
@@ -6211,11 +6211,22 @@ std::vector<std::string> StorageEngine::aggregate(
             }
         }
 
+        // Parse FILTER (WHERE ...) conditions if present
+        auto filterConds = parseConditions(item.filterConds);
+
         if (isDistinctCount) {
             std::set<std::string> distinctVals;
             for (int64_t rid : matchIds) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                // Check FILTER condition
+                if (!filterConds.empty()) {
+                    bool pass = true;
+                    for (const auto& fc : filterConds) {
+                        if (!evalConditionOnRow(fc, row, tbl)) { pass = false; break; }
+                    }
+                    if (!pass) continue;
+                }
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
                 if (!val.empty()) distinctVals.insert(val);
@@ -6225,6 +6236,14 @@ std::vector<std::string> StorageEngine::aggregate(
             for (int64_t rid : matchIds) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                // Check FILTER condition
+                if (!filterConds.empty()) {
+                    bool pass = true;
+                    for (const auto& fc : filterConds) {
+                        if (!evalConditionOnRow(fc, row, tbl)) { pass = false; break; }
+                    }
+                    if (!pass) continue;
+                }
                 if (func == "count") {
                     if (colName == "*") { count++; continue; }
                     if (colIdx >= tbl.len) continue;
@@ -6355,7 +6374,7 @@ std::vector<std::string> StorageEngine::aggregate(
 std::vector<std::string> StorageEngine::groupAggregate(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,
-    const std::vector<std::pair<std::string, std::string>>& items,
+    const std::vector<AggItem>& items,
     const std::vector<std::string>& groupByCols,
     const std::vector<std::string>& havingConds) {
     std::vector<std::string> result;
@@ -6409,7 +6428,8 @@ std::vector<std::string> StorageEngine::groupAggregate(
 
     // Helper: compute aggregate for a group
     auto computeAgg = [&](const std::vector<int64_t>& gids,
-                           const std::string& func, const std::string& colName) -> std::string {
+                           const std::string& func, const std::string& colName,
+                           const std::vector<std::string>& filterConds = {}) -> std::string {
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
@@ -6447,9 +6467,19 @@ std::vector<std::string> StorageEngine::groupAggregate(
             }
             count = static_cast<int64_t>(distinctVals.size());
         } else {
+            // Parse FILTER conditions
+            auto parsedFilters = parseConditions(filterConds);
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
+                // Check FILTER condition
+                if (!parsedFilters.empty()) {
+                    bool pass = true;
+                    for (const auto& fc : parsedFilters) {
+                        if (!evalConditionOnRow(fc, row, tbl)) { pass = false; break; }
+                    }
+                    if (!pass) continue;
+                }
 
                 if (func == "count") {
                     if (colName == "*") { count++; continue; }
@@ -6561,7 +6591,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
 
     // Evaluate HAVING condition for a group
     auto evalHaving = [&](const HavingCond& h, const std::vector<int64_t>& gids) -> bool {
-        std::string aggVal = computeAgg(gids, h.func, h.colName);
+        std::string aggVal = computeAgg(gids, h.func, h.colName, {});
         if (h.op == "=") return aggVal == h.value;
         if (h.op == "!=") return aggVal != h.value;
         // Numeric comparison
@@ -6599,7 +6629,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         }
         row += ' ';
         for (const auto& item : items) {
-            row += computeAgg(gids, item.first, item.second) + ' ';
+            row += computeAgg(gids, item.func, item.arg, item.filterConds) + ' ';
         }
         result.push_back(row);
     }

@@ -6424,7 +6424,7 @@ bool execute(const string& rawSql, Session& s) {
         bool selectAll = (columns == "*");
 
         // Detect aggregate functions, window functions, and scalar functions in columns
-        vector<pair<string, string>> aggItems;
+        vector<dbms::StorageEngine::AggItem> aggItems;
         vector<WindowFunc> windowFuncs;
         vector<dbms::StorageEngine::SelectExpr> selectExprs;
         vector<int> exprTypes; // 0=normal, 1=agg, 2=window, 3=scalar
@@ -6439,7 +6439,10 @@ bool execute(const string& rawSql, Session& s) {
                     windowFuncs.push_back(wf);
                     hasWindow = true;
                     exprTypes.push_back(2);
-                    aggItems.emplace_back(wf.name, wf.arg);
+                    dbms::StorageEngine::AggItem ai;
+                    ai.func = wf.name;
+                    ai.arg = wf.arg;
+                    aggItems.push_back(ai);
                     dbms::StorageEngine::SelectExpr expr;
                     expr.displayName = item;
                     expr.isScalar = false;
@@ -6457,11 +6460,42 @@ bool execute(const string& rawSql, Session& s) {
                     hasScalar = true;
                     exprTypes.push_back(3);
                 } else {
-                    size_t lp = item.find('(');
-                    size_t rp = item.find(')');
+                    // Detect FILTER (WHERE condition) after aggregate function
+                    vector<string> filterConds;
+                    string itemBase = item;
+                    size_t filterPos = item.find("filter (where ");
+                    if (filterPos == string::npos) filterPos = item.find("filter(where ");
+                    if (filterPos != string::npos) {
+                        size_t filterStart = item.find("where ", filterPos);
+                        if (filterStart != string::npos) {
+                            // Find the closing ')' of FILTER clause
+                            size_t filterEnd = item.find(')', filterStart);
+                            if (filterEnd == string::npos) filterEnd = item.size();
+                            string filterStr = trim(item.substr(filterStart + 6, filterEnd - filterStart - 6));
+                            string ms = modifyLogic(filterStr);
+                            string parseStr = ms.empty() ? filterStr : ms;
+                            // Normalize spaces: replace multiple spaces with single space
+                            {
+                                string normalized;
+                                bool inSpace = false;
+                                for (char c : parseStr) {
+                                    if (isspace(static_cast<unsigned char>(c))) {
+                                        if (!inSpace) { normalized += ' '; inSpace = true; }
+                                    } else {
+                                        normalized += c; inSpace = false;
+                                    }
+                                }
+                                parseStr = trim(normalized);
+                            }
+                            filterConds.push_back(parseStr);
+                        }
+                        itemBase = trim(item.substr(0, filterPos));
+                    }
+                    size_t lp = itemBase.find('(');
+                    size_t rp = itemBase.find(')');
                     if (lp != string::npos && rp != string::npos && rp > lp) {
-                        string func = item.substr(0, lp);
-                        string arg = item.substr(lp + 1, rp - lp - 1);
+                        string func = itemBase.substr(0, lp);
+                        string arg = itemBase.substr(lp + 1, rp - lp - 1);
                         // Preprocess cast: "expr as type" → "expr,type"
                         if (func == "cast") {
                             size_t asPos = arg.find(" as ");
@@ -6499,7 +6533,11 @@ bool execute(const string& rawSql, Session& s) {
                                 }
                             }
                         } else {
-                            aggItems.emplace_back(func, arg);
+                            dbms::StorageEngine::AggItem ai;
+                            ai.func = func;
+                            ai.arg = arg;
+                            ai.filterConds = filterConds;
+                            aggItems.push_back(ai);
                             hasAgg = true;
                             exprTypes.push_back(1);
                             dbms::StorageEngine::SelectExpr expr;
@@ -6509,7 +6547,10 @@ bool execute(const string& rawSql, Session& s) {
                             selectExprs.push_back(expr);
                         }
                     } else {
-                        aggItems.emplace_back("", item);
+                        dbms::StorageEngine::AggItem ai;
+                        ai.func = "";
+                        ai.arg = item;
+                        aggItems.push_back(ai);
                         exprTypes.push_back(0);
                         dbms::StorageEngine::SelectExpr expr;
                         expr.displayName = item;
@@ -6550,10 +6591,10 @@ bool execute(const string& rawSql, Session& s) {
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
             for (const auto& gc : groupByCols) cout << gc << ' ';
-            vector<pair<string, string>> pureAgg;
+            vector<dbms::StorageEngine::AggItem> pureAgg;
             for (const auto& it : aggItems) {
-                if (!it.first.empty()) {
-                    cout << it.first << '(' << it.second << ") ";
+                if (!it.func.empty()) {
+                    cout << it.func << '(' << it.arg << ") ";
                     pureAgg.push_back(it);
                 }
             }
@@ -6575,13 +6616,13 @@ bool execute(const string& rawSql, Session& s) {
             }
         } else if (hasAgg) {
             for (const auto& it : aggItems) {
-                if (it.first.empty()) cout << it.second << ' ';
-                else cout << it.first << '(' << it.second << ") ";
+                if (it.func.empty()) cout << it.arg << ' ';
+                else cout << it.func << '(' << it.arg << ") ";
             }
             cout << '\n';
-            vector<pair<string, string>> pureAgg;
+            vector<dbms::StorageEngine::AggItem> pureAgg;
             for (const auto& it : aggItems) {
-                if (!it.first.empty()) pureAgg.push_back(it);
+                if (!it.func.empty()) pureAgg.push_back(it);
             }
             if (pureAgg.empty()) {
                 cout << "SQL syntax error" << endl;
@@ -6608,7 +6649,7 @@ bool execute(const string& rawSql, Session& s) {
             // Output header
             for (size_t i = 0; i < aggItems.size(); ++i) {
                 if (exprTypes[i] == 2) {
-                    cout << aggItems[i].first << "(" << aggItems[i].second << ") over (";
+                    cout << aggItems[i].func << "(" << aggItems[i].arg << ") over (";
                     bool hasPart = !windowFuncs[0].partitionByCols.empty();
                     if (hasPart) {
                         cout << "partition by ";
@@ -6623,9 +6664,9 @@ bool execute(const string& rawSql, Session& s) {
                     }
                     cout << ") ";
                 } else if (exprTypes[i] == 1) {
-                    cout << aggItems[i].first << "(" << aggItems[i].second << ") ";
+                    cout << aggItems[i].func << "(" << aggItems[i].arg << ") ";
                 } else {
-                    cout << aggItems[i].second << " ";
+                    cout << aggItems[i].arg << " ";
                 }
             }
             cout << '\n';
@@ -6860,7 +6901,7 @@ bool execute(const string& rawSql, Session& s) {
                         auto it = row.find("_win_" + to_string(wi));
                         if (it != row.end()) line += it->second + " ";
                     } else if (exprTypes[i] == 0) {
-                        auto it = row.find(aggItems[i].second);
+                        auto it = row.find(aggItems[i].arg);
                         if (it != row.end()) line += it->second + " ";
                     }
                 }
@@ -6973,8 +7014,8 @@ bool execute(const string& rawSql, Session& s) {
                     ofs << escapeCSVField(gc);
                 }
                 for (const auto& it : aggItems) {
-                    if (!it.first.empty()) {
-                        ofs << "," << escapeCSVField(it.first + "(" + it.second + ")");
+                    if (!it.func.empty()) {
+                        ofs << "," << escapeCSVField(it.func + "(" + it.arg + ")");
                     }
                 }
                 ofs << "\n";
@@ -6983,8 +7024,8 @@ bool execute(const string& rawSql, Session& s) {
                 for (const auto& it : aggItems) {
                     if (!first) ofs << ",";
                     first = false;
-                    if (it.first.empty()) ofs << escapeCSVField(it.second);
-                    else ofs << escapeCSVField(it.first + "(" + it.second + ")");
+                    if (it.func.empty()) ofs << escapeCSVField(it.arg);
+                    else ofs << escapeCSVField(it.func + "(" + it.arg + ")");
                 }
                 ofs << "\n";
             } else if (hasScalar) {

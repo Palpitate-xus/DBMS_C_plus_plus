@@ -323,7 +323,7 @@ class AggregateOp : public Operator {
 public:
     AggregateOp(StorageEngine* engine, const std::string& dbname,
                 const std::string& tablename,
-                const std::vector<std::pair<std::string, std::string>>& items);
+                const std::vector<StorageEngine::AggItem>& items);
 
     bool open() override;
     bool next(std::string& outRow) override;
@@ -333,7 +333,7 @@ private:
     StorageEngine* engine_;
     std::string dbname_;
     std::string tablename_;
-    std::vector<std::pair<std::string, std::string>> items_;
+    std::vector<StorageEngine::AggItem> items_;
     bool done_ = false;
 };
 
@@ -358,7 +358,7 @@ public:
 
     // Build operator tree for SELECT agg(...) FROM t WHERE ...
     static OpPtr buildAggregatePlan(StorageEngine* engine, const PlanContext& ctx,
-                                     const std::vector<std::pair<std::string, std::string>>& items);
+                                     const std::vector<StorageEngine::AggItem>& items);
 
     // Build operator tree for JOIN
     static OpPtr buildJoinPlan(StorageEngine* engine, const std::string& dbname,

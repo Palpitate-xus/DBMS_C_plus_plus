@@ -165,7 +165,7 @@
 | **JSON_AGG / JSONB_AGG** | ✅ | ✅ | - |
 | **VAR / STDDEV** | ✅ | ✅ | - |
 | **PERCENTILE_CONT/DISC** | ❌ | ✅ | P3 |
-| **FILTER 子句** | ❌ | ✅ | P3 |
+| **FILTER 子句** | ✅ | ✅ | - |
 
 ### 2.11 窗口函数扩展
 

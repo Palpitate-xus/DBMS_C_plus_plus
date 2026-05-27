@@ -712,7 +712,7 @@ void MergeJoinOp::close() {
 
 AggregateOp::AggregateOp(StorageEngine* engine, const std::string& dbname,
                           const std::string& tablename,
-                          const std::vector<std::pair<std::string, std::string>>& items)
+                          const std::vector<StorageEngine::AggItem>& items)
     : engine_(engine), dbname_(dbname), tablename_(tablename), items_(items) {}
 
 bool AggregateOp::open() {
@@ -855,7 +855,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
 }
 
 OpPtr QueryPlanner::buildAggregatePlan(StorageEngine* engine, const PlanContext& ctx,
-                                        const std::vector<std::pair<std::string, std::string>>& items) {
+                                        const std::vector<StorageEngine::AggItem>& items) {
     (void)ctx;
     return std::make_unique<AggregateOp>(engine, ctx.dbname, ctx.tablename, items);
 }
