@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 #include "sha256.h"
 
 struct user {
@@ -10,6 +11,122 @@ struct user {
     std::string password;
     std::string permission;
 };
+
+// ===================== Role Management =====================
+// role.dat format: role_name username
+// username = "__ROLE__" means the role itself exists
+
+inline bool roleExists(const std::string& roleName) {
+    // Check role.dat for explicit roles
+    std::ifstream rolefile("role.dat");
+    if (rolefile) {
+        std::string r, u;
+        while (rolefile >> r >> u) {
+            if (r == roleName && u == "__ROLE__") return true;
+        }
+    }
+    // In PostgreSQL, users are also roles; check user.dat
+    std::ifstream userfile("user.dat");
+    if (userfile) {
+        user temp;
+        while (userfile >> temp.username >> temp.password >> temp.permission) {
+            if (temp.username == roleName) return true;
+        }
+    }
+    return false;
+}
+
+inline int createRole(const std::string& roleName) {
+    if (roleExists(roleName)) return -1; // already exists
+    std::ofstream fs("role.dat", std::ios::binary | std::ios::out | std::ios::app);
+    fs << roleName << " __ROLE__" << std::endl;
+    return 0;
+}
+
+inline bool dropRole(const std::string& roleName) {
+    std::ifstream infile("role.dat");
+    if (!infile) return false;
+    std::vector<std::pair<std::string, std::string>> entries;
+    std::string r, u;
+    bool found = false;
+    while (infile >> r >> u) {
+        if (r == roleName) {
+            found = true;
+            continue;
+        }
+        entries.emplace_back(r, u);
+    }
+    if (!found) return false;
+    std::ofstream outfile("role.dat", std::ios::trunc);
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) outfile << '\n';
+        outfile << entries[i].first << " " << entries[i].second;
+    }
+    if (!entries.empty()) outfile << std::endl;
+    return true;
+}
+
+inline int grantRoleToUser(const std::string& roleName, const std::string& username) {
+    if (!roleExists(roleName)) return -1;
+    std::ifstream infile("role.dat");
+    std::string r, u;
+    while (infile >> r >> u) {
+        if (r == roleName && u == username) return -2; // already granted
+    }
+    std::ofstream fs("role.dat", std::ios::binary | std::ios::out | std::ios::app);
+    fs << roleName << " " << username << std::endl;
+    return 0;
+}
+
+inline bool revokeRoleFromUser(const std::string& roleName, const std::string& username) {
+    std::ifstream infile("role.dat");
+    if (!infile) return false;
+    std::vector<std::pair<std::string, std::string>> entries;
+    std::string r, u;
+    bool found = false;
+    while (infile >> r >> u) {
+        if (r == roleName && u == username) {
+            found = true;
+            continue;
+        }
+        entries.emplace_back(r, u);
+    }
+    if (!found) return false;
+    std::ofstream outfile("role.dat", std::ios::trunc);
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) outfile << '\n';
+        outfile << entries[i].first << " " << entries[i].second;
+    }
+    if (!entries.empty()) outfile << std::endl;
+    return true;
+}
+
+inline std::vector<std::string> getUserRoles(const std::string& username) {
+    std::vector<std::string> roles;
+    std::ifstream infile("role.dat");
+    if (!infile) return roles;
+    std::string r, u;
+    while (infile >> r >> u) {
+        if (u == username && r != "__ROLE__") {
+            roles.push_back(r);
+        }
+    }
+    return roles;
+}
+
+inline bool userHasRole(const std::string& username, const std::string& roleName) {
+    std::ifstream infile("role.dat");
+    if (!infile) return false;
+    std::string r, u;
+    while (infile >> r >> u) {
+        if (r == roleName && u == username) return true;
+    }
+    return false;
+}
+
+inline bool userIsAdminViaRole(const std::string& username) {
+    return userHasRole(username, "admin");
+}
 
 inline int checkPasswordStrength(const std::string& pw) {
     // Returns 0-100 score based on complexity

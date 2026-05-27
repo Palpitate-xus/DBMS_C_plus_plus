@@ -544,8 +544,8 @@
 | CREATE USER | ✅ | ✅ | - |
 | **DROP USER** | ✅ | ✅ | - |
 | **ALTER USER (改密码)** | ✅ | ✅ | - |
-| **CREATE ROLE / DROP ROLE** | ❌ | ✅ | P2 |
-| **角色继承 (GRANT role TO user)** | ❌ | ✅ | P2 |
+| **CREATE ROLE / DROP ROLE** | ✅ | ✅ | P2 |
+| **角色继承 (GRANT role TO user)** | ✅ | ✅ | P2 |
 | **SET ROLE** | ❌ | ✅ | P3 |
 
 ### 10.2 权限粒度

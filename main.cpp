@@ -1923,7 +1923,7 @@ static std::string expandSubqueries(std::string sql, Session& s) {
 // SQL execution
 // ========================================================================
 static bool checkAdmin(const Session& s) {
-    if (s.permission == 0) {
+    if (s.permission == 0 && !userIsAdminViaRole(s.username)) {
         cout << "permission denied" << endl;
         log(s.username, "permission denied", getTime());
         return false;
@@ -2205,6 +2205,28 @@ bool execute(const string& rawSql, Session& s) {
             }
             createUser(temp, g_config.passwordHashAlgorithm);
             cout << "create user  " << temp.username << "  succeeded" << endl;
+            return false;
+        }
+
+        if (sql.substr(7, 4) == "role") {
+            if (!checkAdmin(s)) return true;
+            string rest = trim(sql.substr(12));
+            if (rest.empty()) {
+                cout << "SQL syntax error: CREATE ROLE role_name" << endl;
+                return true;
+            }
+            string roleName = rest;
+            // Check if role name conflicts with existing user
+            if (permissionQuery(roleName) != -1) {
+                cout << "error: role name conflicts with existing user" << endl;
+                return true;
+            }
+            int res = createRole(roleName);
+            if (res == -1) {
+                cout << "error: role already exists" << endl;
+                return true;
+            }
+            cout << "CREATE ROLE succeeded" << endl;
             return false;
         }
 
@@ -4805,6 +4827,14 @@ bool execute(const string& rawSql, Session& s) {
             cout << "User dropped" << endl;
             return false;
         }
+        if (op == "role") {
+            if (!dropRole(name)) {
+                cout << "Role " << name << " not exist" << endl;
+                return true;
+            }
+            cout << "Role dropped" << endl;
+            return false;
+        }
         if (op == "database") {
             auto res = g_engine.dropDatabase(name);
             if (res == OpResult::DatabaseNotExist) {
@@ -5593,6 +5623,22 @@ bool execute(const string& rawSql, Session& s) {
         string rest = trim(sql.substr(6));
         size_t onPos = rest.find(" on ");
         size_t toPos = rest.find(" to ");
+        if (onPos == string::npos && toPos != string::npos) {
+            // GRANT role_name TO user_name
+            string roleName = trim(rest.substr(0, toPos));
+            string username = trim(rest.substr(toPos + 4));
+            int res = grantRoleToUser(roleName, username);
+            if (res == -1) {
+                cout << "error: role does not exist" << endl;
+                return true;
+            }
+            if (res == -2) {
+                cout << "error: role already granted to user" << endl;
+                return true;
+            }
+            cout << "Granted role " << roleName << " to " << username << endl;
+            return false;
+        }
         if (onPos == string::npos || toPos == string::npos) {
             cout << "SQL syntax error: GRANT privilege[(cols)] ON table TO user" << endl;
             return true;
@@ -5649,6 +5695,17 @@ bool execute(const string& rawSql, Session& s) {
         string rest = trim(sql.substr(7));
         size_t onPos = rest.find(" on ");
         size_t fromPos = rest.find(" from ");
+        if (onPos == string::npos && fromPos != string::npos) {
+            // REVOKE role_name FROM user_name
+            string roleName = trim(rest.substr(0, fromPos));
+            string username = trim(rest.substr(fromPos + 6));
+            if (!revokeRoleFromUser(roleName, username)) {
+                cout << "error: role not granted to user" << endl;
+                return true;
+            }
+            cout << "Revoked role " << roleName << " from " << username << endl;
+            return false;
+        }
         if (onPos == string::npos || fromPos == string::npos) {
             cout << "SQL syntax error: REVOKE privilege[(cols)] ON table FROM user" << endl;
             return true;
