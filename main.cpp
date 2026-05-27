@@ -418,8 +418,8 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
         }
     }
 
-    // PERCENT_RANK and CUME_DIST require ORDER BY (set flag for validation later)
-    if (wf.name == "percent_rank" || wf.name == "cume_dist") {
+    // PERCENT_RANK, CUME_DIST, NTH_VALUE require ORDER BY (set flag for validation later)
+    if (wf.name == "percent_rank" || wf.name == "cume_dist" || wf.name == "nth_value") {
         wf.isAggregate = false; // treated as ranking functions
     }
 
@@ -6938,6 +6938,27 @@ bool execute(const string& rawSql, Session& s) {
                         std::ostringstream oss;
                         oss << std::fixed << std::setprecision(4) << cd;
                         val = oss.str();
+                    } else if (wf.name == "nth_value") {
+                        size_t partEnd = i;
+                        while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
+                        size_t partitionSize = partEnd - partStart + 1;
+                        // Parse "col,n" from wf.arg
+                        string nthCol;
+                        int n = 1;
+                        size_t commaPos = wf.arg.find(',');
+                        if (commaPos != string::npos) {
+                            nthCol = trim(wf.arg.substr(0, commaPos));
+                            try { n = std::stoi(trim(wf.arg.substr(commaPos + 1))); } catch (...) { n = 1; }
+                        } else {
+                            nthCol = wf.arg;
+                        }
+                        if (n <= 0) n = 1;
+                        if (static_cast<size_t>(n) <= partitionSize) {
+                            auto it = rows[partStart + n - 1].find(nthCol);
+                            val = (it != rows[partStart + n - 1].end()) ? it->second : "NULL";
+                        } else {
+                            val = "NULL";
+                        }
                     }
                     rows[i]["_win_" + to_string(wi)] = val;
                 }
