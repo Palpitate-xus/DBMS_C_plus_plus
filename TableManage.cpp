@@ -5045,6 +5045,49 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
                 if (match) result.push_back(row);
             }
         }
+    } else if (tablename == "key_column_usage" || tablename == "KEY_COLUMN_USAGE") {
+        for (const auto& dbname : getDatabaseNames()) {
+            for (const auto& tname : getTableNames(dbname)) {
+                TableSchema tbl = getTableSchema(dbname, tname);
+                // Primary key columns
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (!tbl.cols[i].isPrimaryKey) continue;
+                    std::string row = dbname + " " + tname + " " + tbl.cols[i].dataName + " PRIMARY ";
+                    bool match = true;
+                    for (const auto& c : conds) {
+                        if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                        if (c.colName == "table_name" && c.op == "=" && tname != c.value) { match = false; break; }
+                        if (c.colName == "column_name" && c.op == "=" && tbl.cols[i].dataName != c.value) { match = false; break; }
+                    }
+                    if (match) result.push_back(row);
+                }
+                // Foreign key columns
+                for (size_t i = 0; i < tbl.fkLen; ++i) {
+                    for (const auto& colName : tbl.fks[i].colNames) {
+                        std::string row = dbname + " " + tname + " " + colName + " FOREIGN ";
+                        bool match = true;
+                        for (const auto& c : conds) {
+                            if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                            if (c.colName == "table_name" && c.op == "=" && tname != c.value) { match = false; break; }
+                            if (c.colName == "column_name" && c.op == "=" && colName != c.value) { match = false; break; }
+                        }
+                        if (match) result.push_back(row);
+                    }
+                }
+                // Unique columns
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (!tbl.cols[i].isUnique || tbl.cols[i].isPrimaryKey) continue;
+                    std::string row = dbname + " " + tname + " " + tbl.cols[i].dataName + " UNIQUE ";
+                    bool match = true;
+                    for (const auto& c : conds) {
+                        if (c.colName == "table_schema" && c.op == "=" && dbname != c.value) { match = false; break; }
+                        if (c.colName == "table_name" && c.op == "=" && tname != c.value) { match = false; break; }
+                        if (c.colName == "column_name" && c.op == "=" && tbl.cols[i].dataName != c.value) { match = false; break; }
+                    }
+                    if (match) result.push_back(row);
+                }
+            }
+        }
     }
     return result;
 }

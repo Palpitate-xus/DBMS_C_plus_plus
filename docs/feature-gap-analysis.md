@@ -720,7 +720,7 @@
 | **information_schema.routines** | ❌ | ✅ | P2 |
 | **information_schema.triggers** | ❌ | ✅ | P2 |
 | **information_schema.statistics** | ✅ | ✅ | - |
-| **information_schema.key_column_usage** | ❌ | ✅ | P2 |
+| **information_schema.key_column_usage** | ✅ | ✅ | - |
 | **pg_catalog / sys.* 表** | ❌ | ✅ | P2 |
 
 ### 16.2 SHOW 命令
