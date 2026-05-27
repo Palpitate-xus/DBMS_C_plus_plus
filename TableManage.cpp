@@ -6188,10 +6188,12 @@ std::vector<std::string> StorageEngine::aggregate(
         std::string groupConcat;
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
+        std::vector<std::string> arrayAggVals;
 
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
+        bool isArrayAgg = (func == "array_agg");
         bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
         bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
         bool isStat = isVar || isStddev;
@@ -6260,6 +6262,10 @@ std::vector<std::string> StorageEngine::aggregate(
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     jsonAggVals.push_back(val);
+                } else if (isArrayAgg) {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    arrayAggVals.push_back(val);
                 } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
@@ -6330,6 +6336,17 @@ std::vector<std::string> StorageEngine::aggregate(
             }
             json += "]";
             rowResult += json + ' ';
+        }
+        else if (isArrayAgg) {
+            std::string arr = "{";
+            bool first = true;
+            for (const auto& v : arrayAggVals) {
+                if (!first) arr += ",";
+                arr += v;
+                first = false;
+            }
+            arr += "}";
+            rowResult += arr + ' ';
         }
         else if (func == "max") {
             if (!hasMax) rowResult += "NULL ";
@@ -6433,6 +6450,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
+        bool isArrayAgg = (func == "array_agg");
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false, isChar = false;
         if (func != "count" || actualColName != "*") {
@@ -6454,6 +6472,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         std::string groupConcat;
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
+        std::vector<std::string> arrayAggVals;
         bool jsonAggFirst = true;
 
         if (isDistinctCount) {
@@ -6497,6 +6516,10 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     if (colIdx >= tbl.len) continue;
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     jsonAggVals.push_back(val);
+                } else if (isArrayAgg) {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    arrayAggVals.push_back(val);
                 } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
@@ -6545,6 +6568,17 @@ std::vector<std::string> StorageEngine::groupAggregate(
             }
             json += "]";
             return json;
+        }
+        if (isArrayAgg) {
+            std::string arr = "{";
+            bool first = true;
+            for (const auto& v : arrayAggVals) {
+                if (!first) arr += ",";
+                arr += v;
+                first = false;
+            }
+            arr += "}";
+            return arr;
         }
         if (func == "max") {
             if (!hasMax) return "NULL";

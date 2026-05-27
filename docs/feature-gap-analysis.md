@@ -161,7 +161,7 @@
 | COUNT/MAX/MIN/SUM/AVG | ✅ | ✅ | - |
 | **COUNT(DISTINCT col)** | ✅ | ✅ | - |
 | **STRING_AGG / GROUP_CONCAT** | ✅ | ✅ | - |
-| **ARRAY_AGG** | ❌ | ✅ | P2 |
+| **ARRAY_AGG** | ✅ | ✅ | - |
 | **JSON_AGG / JSONB_AGG** | ✅ | ✅ | - |
 | **VAR / STDDEV** | ✅ | ✅ | - |
 | **PERCENTILE_CONT/DISC** | ❌ | ✅ | P3 |
@@ -522,7 +522,7 @@
 | **异常处理 (EXCEPTION)** | ❌ | ✅ | P3 |
 | **CALL 调用** | ❌ | ✅ | P2 |
 | **OUT/INOUT 参数** | ❌ | ✅ | P3 |
-| **表值函数** | ❌ | ✅ | P3 |
+| **表值函数** | ✅ | ✅ | - |
 | **聚合函数 (UDAF)** | ❌ | ✅ | P3 |
 
 ### 9.3 游标
