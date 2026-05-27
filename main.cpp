@@ -1284,6 +1284,35 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                     }
                 }
                 tbl.append(makeDecimalColumn(cname, isNull, prec, sc, isPK));
+            } else if (ctype.substr(0, 4) == "enum") {
+                // Parse ENUM('a', 'b', 'c') from segment
+                vector<string> enumVals;
+                size_t lp = segment.find('(');
+                size_t rp = segment.rfind(')');
+                if (lp != string::npos && rp != string::npos && rp > lp) {
+                    string inside = segment.substr(lp + 1, rp - lp - 1);
+                    // Split by comma, respecting quotes
+                    size_t i = 0;
+                    while (i < inside.size()) {
+                        while (i < inside.size() && isspace(static_cast<unsigned char>(inside[i]))) ++i;
+                        if (i >= inside.size()) break;
+                        if (inside[i] == '\'' || inside[i] == '"') {
+                            char quote = inside[i++];
+                            size_t start = i;
+                            while (i < inside.size() && inside[i] != quote) ++i;
+                            enumVals.push_back(inside.substr(start, i - start));
+                            if (i < inside.size()) ++i; // skip quote
+                        } else {
+                            size_t start = i;
+                            while (i < inside.size() && inside[i] != ',') ++i;
+                            enumVals.push_back(trim(inside.substr(start, i - start)));
+                        }
+                        while (i < inside.size() && (inside[i] == ',' || isspace(static_cast<unsigned char>(inside[i])))) ++i;
+                    }
+                }
+                Column col = makeStringColumn(cname, isNull, 64, isPK);
+                col.enumValues = enumVals;
+                tbl.append(col);
             }
             // Apply unique/default/check to last appended column
             if (tbl.len > 0) {
@@ -3440,6 +3469,26 @@ bool execute(const string& rawSql, Session& s) {
 
             map<string, string> values;
             for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = stripQuotes(vals[i]);
+
+            // Validate ENUM constraints
+            {
+                TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
+                for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    if (tbl.cols[ci].enumValues.empty()) continue;
+                    auto it = values.find(tbl.cols[ci].dataName);
+                    if (it == values.end()) continue;
+                    const string& v = it->second;
+                    if (v.empty()) continue;
+                    bool found = false;
+                    for (const auto& ev : tbl.cols[ci].enumValues) {
+                        if (ev == v) { found = true; break; }
+                    }
+                    if (!found) {
+                        cout << "Invalid enum value '" << v << "' for column " << tbl.cols[ci].dataName << endl;
+                        return true;
+                    }
+                }
+            }
 
             auto res = g_engine.insert(s.currentDB, resolvedName, values);
             if (res == OpResult::DuplicateKey) {

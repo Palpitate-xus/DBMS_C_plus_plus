@@ -2829,6 +2829,12 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(reinterpret_cast<const char*>(&genLen), 2);
             out.write(tbl.cols[i].generatedExpr.data(), genLen);
         }
+        // Write enum values
+        uint16_t enumCount = static_cast<uint16_t>(tbl.cols[i].enumValues.size());
+        out.write(reinterpret_cast<const char*>(&enumCount), 2);
+        for (const auto& ev : tbl.cols[i].enumValues) {
+            writeFixedString(out, ev, MAX_COL_NAME_LEN);
+        }
     }
     // Write foreign keys (multi-column support: version 1 format)
     int32_t fkLen = static_cast<int32_t>(tbl.fkLen);
@@ -2941,6 +2947,15 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 std::string genExpr(genLen, '\0');
                 in.read(genExpr.data(), genLen);
                 tbl.cols[i].generatedExpr = genExpr;
+            }
+        }
+        // Read enum values (backward-compatible: may not exist in old files)
+        uint16_t enumCount = 0;
+        in.read(reinterpret_cast<char*>(&enumCount), 2);
+        if (in && enumCount > 0 && enumCount <= 1000) {
+            for (uint16_t ei = 0; ei < enumCount; ++ei) {
+                std::string ev = readFixedString(in, MAX_COL_NAME_LEN);
+                if (!ev.empty()) tbl.cols[i].enumValues.push_back(ev);
             }
         }
     }

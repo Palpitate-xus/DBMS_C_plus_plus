@@ -46,6 +46,7 @@ struct Column {
     std::string defaultValue;       // DEFAULT value
     std::string checkExpr;          // CHECK constraint expression
     std::string generatedExpr;      // GENERATED ALWAYS AS (expr)
+    std::vector<std::string> enumValues;  // ENUM('a','b','c') values
 
     void print() const;
 };
