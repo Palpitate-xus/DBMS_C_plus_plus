@@ -3507,6 +3507,12 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     const Column& col = tbl.cols[ci];
     if (cond.op == "isnull") return val.empty();
     if (cond.op == "isnotnull") return !val.empty();
+
+    // Three-valued logic: any comparison with NULL yields UNKNOWN (FALSE in WHERE)
+    bool valIsNull = val.empty();
+    bool condIsNull = cond.value.empty();
+    if (valIsNull || condIsNull) return false;
+
     if (col.dataType == "char" || col.dataType == "uuid" || col.isVariableLength) {
         if (cond.op == "<"  && !(val <  cond.value)) return false;
         if (cond.op == ">"  && !(val >  cond.value)) return false;
@@ -3563,8 +3569,13 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == ">=" && cmp >= 0 && (num < cmp))  return false;
         if (cond.op == "!=" && cmp >= 0 && num == cmp)   return false;
     } else if (col.dataType == "float") {
-        float num = val.empty() ? 0.0f : std::stof(val);
-        float cmp = std::stof(cond.value);
+        float num = 0.0f, cmp = 0.0f;
+        try {
+            num = val.empty() ? 0.0f : std::stof(val);
+            cmp = std::stof(cond.value);
+        } catch (...) {
+            return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
+        }
         if (cond.op == "<"  && !(num < cmp)) return false;
         if (cond.op == ">"  && !(num > cmp)) return false;
         if (cond.op == "="  && num != cmp)   return false;
@@ -3572,8 +3583,13 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == ">=" && (num < cmp))  return false;
         if (cond.op == "!=" && num == cmp)   return false;
     } else if (col.dataType == "double" || col.dataType == "decimal") {
-        double num = val.empty() ? 0.0 : std::stod(val);
-        double cmp = std::stod(cond.value);
+        double num = 0.0, cmp = 0.0;
+        try {
+            num = val.empty() ? 0.0 : std::stod(val);
+            cmp = std::stod(cond.value);
+        } catch (...) {
+            return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
+        }
         if (cond.op == "<"  && !(num < cmp)) return false;
         if (cond.op == ">"  && !(num > cmp)) return false;
         if (cond.op == "="  && num != cmp)   return false;
@@ -3593,12 +3609,13 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     } else {
         int64_t num = val.empty() ? INF : parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
-        if (cond.op == "<"  && cmp != INF && !(num < cmp)) return false;
-        if (cond.op == ">"  && cmp != INF && !(num > cmp)) return false;
-        if (cond.op == "="  && cmp != INF && num != cmp)   return false;
-        if (cond.op == "<=" && cmp != INF && (num > cmp))  return false;
-        if (cond.op == ">=" && cmp != INF && (num < cmp))  return false;
-        if (cond.op == "!=" && cmp != INF && num == cmp)   return false;
+        if (cmp == INF) return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
+        if (cond.op == "<"  && !(num < cmp)) return false;
+        if (cond.op == ">"  && !(num > cmp)) return false;
+        if (cond.op == "="  && num != cmp)   return false;
+        if (cond.op == "<=" && (num > cmp))  return false;
+        if (cond.op == ">=" && (num < cmp))  return false;
+        if (cond.op == "!=" && num == cmp)   return false;
     }
     return true;
 }
