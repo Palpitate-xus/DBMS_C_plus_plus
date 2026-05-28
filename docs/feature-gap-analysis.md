@@ -311,7 +311,7 @@
 | **NULL 字面量** | ✅ | ✅ | - |
 | **IS NULL / IS NOT NULL** | ✅ | ✅ | - |
 | **三值逻辑 (TRUE/FALSE/UNKNOWN)** | 部分 | ✅ | **P1** |
-| **DISTINCT NULL 处理** | 部分 | ✅ | P1 |
+| **DISTINCT NULL 处理** | ✅ | ✅ | - |
 
 ---
 
@@ -328,7 +328,7 @@
 | **复合主键** | ✅ | ✅ | - |
 | **复合 UNIQUE** | ✅ | ✅ | - |
 | **多列 FOREIGN KEY** | ✅ | ✅ | - |
-| **ON UPDATE CASCADE / RESTRICT** | 部分 | ✅ | P1 |
+| **ON UPDATE CASCADE / RESTRICT** | ✅ | ✅ | - |
 | **DEFERRABLE 约束** | ❌ | ✅ PG | P3 |
 | **EXCLUSION 约束** | ❌ | ✅ PG | P3 |
 | **域 (CREATE DOMAIN)** | ❌ | ✅ PG | P3 |
