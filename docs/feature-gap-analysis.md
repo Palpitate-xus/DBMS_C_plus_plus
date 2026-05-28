@@ -37,7 +37,7 @@
 | DDL | CREATE/DROP DATABASE/TABLE/INDEX/VIEW，ALTER TABLE ADD/DROP COLUMN，CREATE TEMPORARY TABLE |
 | DML | INSERT/SELECT/UPDATE/DELETE |
 | 查询 | WHERE、ORDER BY (多列/NULLS FIRST/LAST)、LIMIT/OFFSET、DISTINCT、GROUP BY (多列)/HAVING、JOIN (INNER/LEFT/RIGHT/SELF/FULL OUTER/CROSS)、UNION/UNION ALL/INTERSECT/EXCEPT、子查询 (IN/EXISTS/ANY/ALL/标量/派生表)、CTE (WITH RECURSIVE)、聚合 (COUNT/MAX/MIN/SUM/AVG/COUNT DISTINCT)、窗口函数 (ROW_NUMBER/RANK/DENSE_RANK/LAG/LEAD/NTILE/FIRST_VALUE/LAST_VALUE + PARTITION BY)、EXPLAIN、REGEXP、MERGE INTO、UPSERT |
-| 数据类型 | INT、TINYINT、LONG、CHAR(n)、VARCHAR(n)、BINARY(n)、VARBINARY(n)、BLOB、DATE、SERIAL、BOOLEAN、FLOAT、DOUBLE、DECIMAL、TEXT、TIME、TIMESTAMP、TIMESTAMPTZ、DATETIME、JSON、UUID、INTERVAL、INT[]、VARCHAR[] |
+| 数据类型 | INT、TINYINT、LONG、CHAR(n)、VARCHAR(n)、BINARY(n)、VARBINARY(n)、BLOB、DATE、SERIAL、BOOLEAN、FLOAT、DOUBLE、DECIMAL、TEXT、TIME、TIMESTAMP、TIMESTAMPTZ、DATETIME、JSON、JSONB、UUID、INTERVAL、INT[]、VARCHAR[] |
 | 约束 | PRIMARY KEY (含复合)、NOT NULL、UNIQUE (含复合)、FOREIGN KEY (含 ON DELETE/多列)、DEFAULT、CHECK |
 | 事务 | BEGIN/COMMIT/ROLLBACK、SAVEPOINT/RELEASE/ROLLBACK TO、只读事务 (READ ONLY)、4 级隔离 (RU/RC/RR/SERIALIZABLE)、MVCC ReadView、WAL、Undo Log、Checkpoint |
 | 索引 | B+ 树主键索引、B+ 树二级索引、复合索引、索引列排序 (ASC/DESC)、Hash 索引 |
@@ -279,8 +279,8 @@
 | 功能 | 当前 | 主流 | 优先级 |
 |------|------|------|--------|
 | **JSON** | ✅ | ✅ | - |
-| **JSONB (二进制 JSON)** | 部分 | ✅ PG | P1 |
-| **JSON 操作符 (->, ->>, @>)** | ✅ (json_extract/json_value) | ✅ | - |
+| **JSONB (二进制 JSON)** | ✅ | ✅ PG | - |
+| **JSON 操作符 (->, ->>, @>)** | ✅ (json_extract/json_value/jsonb_*) | ✅ | - |
 | **JSON 路径查询** | ✅ | ✅ | - |
 | **XML** | ❌ | ✅ | P3 |
 
@@ -310,7 +310,7 @@
 |------|------|------|--------|
 | **NULL 字面量** | ✅ | ✅ | - |
 | **IS NULL / IS NOT NULL** | ✅ | ✅ | - |
-| **三值逻辑 (TRUE/FALSE/UNKNOWN)** | 部分 | ✅ | **P1** |
+| **三值逻辑 (TRUE/FALSE/UNKNOWN)** | ✅ | ✅ | - |
 | **DISTINCT NULL 处理** | ✅ | ✅ | - |
 
 ---
