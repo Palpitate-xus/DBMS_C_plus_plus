@@ -1204,6 +1204,30 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                     }
                 }
                 fk.onDelete = "restrict";
+                fk.onUpdate = "restrict";
+                // Parse ON DELETE / ON UPDATE from remaining tokens
+                auto parseActionToken = [&](size_t& idx) -> string {
+                    string a = trim(parts[idx]);
+                    if (a.size() >= 7 && a.substr(0, 7) == "cascade") { idx++; return "cascade"; }
+                    if (a == "set" && idx + 1 < parts.size() && parts[idx + 1] == "null") { idx += 2; return "setnull"; }
+                    if (a.size() >= 7 && a.substr(0, 7) == "setnull") { idx++; return "setnull"; }
+                    idx++; return "restrict";
+                };
+                while (i < parts.size()) {
+                    if (parts[i] == "on" && i + 2 < parts.size()) {
+                        if (parts[i + 1] == "delete") {
+                            i += 2;
+                            fk.onDelete = parseActionToken(i);
+                        } else if (parts[i + 1] == "update") {
+                            i += 2;
+                            fk.onUpdate = parseActionToken(i);
+                        } else {
+                            ++i;
+                        }
+                    } else {
+                        ++i;
+                    }
+                }
                 if (!fk.colNames.empty() && !fk.refTable.empty() && !fk.refCols.empty()) {
                     tbl.appendFK(fk);
                 }
@@ -1329,16 +1353,23 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                         fk.refTable = trim(fkStr.substr(0, lp));
                         fk.refCols.push_back(trim(fkStr.substr(lp + 1, rp - lp - 1)));
                         fk.onDelete = "restrict";
-                        // Parse ON DELETE action
+                        fk.onUpdate = "restrict";
+                        // Parse ON DELETE / ON UPDATE action
                         string afterRp = trim(fkStr.substr(rp + 1));
+                        auto parseAction = [](const string& s) -> string {
+                            string a = trim(s);
+                            if (a.size() >= 7 && a.substr(0, 7) == "cascade") return "cascade";
+                            if ((a.size() >= 7 && a.substr(0, 7) == "setnull") ||
+                                (a.size() >= 8 && a.substr(0, 8) == "set null")) return "setnull";
+                            return "restrict";
+                        };
                         size_t odPos = afterRp.find("on delete");
                         if (odPos != string::npos) {
-                            string action = trim(afterRp.substr(odPos + 9));
-                            if (action.size() >= 7 && action.substr(0, 7) == "cascade")
-                                fk.onDelete = "cascade";
-                            else if ((action.size() >= 7 && action.substr(0, 7) == "setnull") ||
-                                     (action.size() >= 8 && action.substr(0, 8) == "set null"))
-                                fk.onDelete = "setnull";
+                            fk.onDelete = parseAction(afterRp.substr(odPos + 9));
+                        }
+                        size_t ouPos = afterRp.find("on update");
+                        if (ouPos != string::npos) {
+                            fk.onUpdate = parseAction(afterRp.substr(ouPos + 9));
                         }
                     }
                 }
@@ -6075,6 +6106,7 @@ bool execute(const string& rawSql, Session& s) {
                 }
                 ddl += ")";
                 if (!fk.onDelete.empty()) ddl += " ON DELETE " + fk.onDelete;
+                if (!fk.onUpdate.empty() && fk.onUpdate != "restrict") ddl += " ON UPDATE " + fk.onUpdate;
             }
             ddl += ")";
             cout << ddl << endl;

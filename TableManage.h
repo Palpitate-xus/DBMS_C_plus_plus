@@ -57,6 +57,7 @@ struct ForeignKey {
     std::vector<std::string> refCols;      // referenced columns
     std::string refTable;                  // referenced table
     std::string onDelete = "restrict";     // restrict | cascade | setnull
+    std::string onUpdate = "restrict";     // restrict | cascade | setnull
 
     // Back-compat helpers
     bool isSingleColumn() const { return colNames.size() <= 1; }

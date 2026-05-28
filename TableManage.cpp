@@ -233,7 +233,10 @@ void TableSchema::print() const {
                 if (ci > 0) std::cout << ",";
                 std::cout << fks[i].refCols[ci];
             }
-            std::cout << ") ON DELETE " << fks[i].onDelete << "\n";
+            std::cout << ") ON DELETE " << fks[i].onDelete;
+            if (!fks[i].onUpdate.empty() && fks[i].onUpdate != "restrict")
+                std::cout << " ON UPDATE " << fks[i].onUpdate;
+            std::cout << "\n";
         }
     }
 }
@@ -2870,7 +2873,7 @@ OpResult StorageEngine::dropDatabase(const std::string& dbname) {
     return OpResult::Success;
 }
 
-constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420002;  // "DB" + version 2 (added isArray support)
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420003;  // "DB" + version 3 (added onUpdate support)
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -2919,6 +2922,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         }
         writeFixedString(out, tbl.fks[i].refTable, MAX_TABLE_NAME_LEN);
         writeFixedString(out, tbl.fks[i].onDelete, 10);
+        writeFixedString(out, tbl.fks[i].onUpdate, 10);
     }
     // Write composite primary key column indices (0 = use legacy isPrimaryKey)
     int32_t pkCount = static_cast<int32_t>(tbl.pkColIndices.size());
@@ -2973,9 +2977,11 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return tbl;
 
-    bool isNewFormat = (firstInt == SCHEMA_FORMAT_VERSION);
+    bool hasVersionHeader = (firstInt >= 0x44420001 && firstInt <= 0x44420003);
+    bool hasArray = (firstInt >= 0x44420002);
+    bool hasOnUpdate = (firstInt >= 0x44420003);
     int32_t len = 0;
-    if (isNewFormat) {
+    if (hasVersionHeader) {
         in.read(reinterpret_cast<char*>(&len), 4);
     } else {
         // Legacy format: first 4 bytes are column count
@@ -3030,7 +3036,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
         // Read array flag (new in version 2)
-        if (isNewFormat) {
+        if (hasArray) {
             uint8_t arrFlag = 0;
             in.read(reinterpret_cast<char*>(&arrFlag), 1);
             if (in) tbl.cols[i].isArray = (arrFlag != 0);
@@ -3042,7 +3048,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (in && fkLen > 0 && fkLen <= static_cast<int32_t>(MAX_COLUMNS)) {
         tbl.fkLen = static_cast<size_t>(fkLen);
         for (size_t i = 0; i < tbl.fkLen; ++i) {
-            if (isNewFormat) {
+            if (hasVersionHeader) {
                 int32_t numCols = 0;
                 in.read(reinterpret_cast<char*>(&numCols), 4);
                 if (!in || numCols <= 0 || numCols > static_cast<int32_t>(MAX_COLUMNS)) break;
@@ -3054,12 +3060,18 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 }
                 tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
                 tbl.fks[i].onDelete = readFixedString(in, 10);
+                if (hasOnUpdate) {
+                    tbl.fks[i].onUpdate = readFixedString(in, 10);
+                } else {
+                    tbl.fks[i].onUpdate = "restrict";
+                }
             } else {
                 // Legacy single-column format
                 std::string colName = readFixedString(in, MAX_COL_NAME_LEN);
                 tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
                 std::string refCol = readFixedString(in, MAX_COL_NAME_LEN);
                 tbl.fks[i].onDelete = readFixedString(in, 10);
+                tbl.fks[i].onUpdate = "restrict";
                 tbl.fks[i].colNames.push_back(colName);
                 tbl.fks[i].refCols.push_back(refCol);
             }
@@ -4915,6 +4927,175 @@ OpResult StorageEngine::update(const std::string& dbname,
                     lockManager_.unlock(tablename);
                     return OpResult::InvalidValue;
                 }
+            }
+        }
+
+        // Check if PK changed and apply ON UPDATE foreign key actions
+        std::string newPK = extractPKValue(strippedNewRow, tbl);
+        if (!oldPK.empty() && oldPK != newPK) {
+            // Collect all referencing rows and their ON UPDATE actions
+            struct UpdateCascadeAction { std::string table; int64_t rid; std::map<std::string, std::string> newFkVals; };
+            struct UpdateSetNullAction { std::string table; int64_t rid; std::vector<size_t> colIndices; };
+            std::vector<UpdateCascadeAction> updateCascadeActions;
+            std::vector<UpdateSetNullAction> updateSetNullActions;
+            std::set<std::string> restrictTables;
+
+            // Get the old PK values as a map
+            std::map<std::string, std::string> oldPKVals;
+            if (!tbl.pkColIndices.empty()) {
+                for (size_t pki : tbl.pkColIndices) {
+                    oldPKVals[tbl.cols[pki].dataName] = extractColumnValue(row, tbl, pki);
+                }
+            } else {
+                size_t pkIdxCol = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].isPrimaryKey) { pkIdxCol = i; break; }
+                }
+                if (pkIdxCol < tbl.len) oldPKVals[tbl.cols[pkIdxCol].dataName] = extractColumnValue(row, tbl, pkIdxCol);
+            }
+
+            if (!oldPKVals.empty()) {
+                auto allTables = getTableNames(dbname);
+                for (const auto& otherTable : allTables) {
+                    if (otherTable == tablename) continue;
+                    TableSchema otherTbl = getTableSchema(dbname, otherTable);
+                    for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                        const ForeignKey& fk = otherTbl.fks[fi];
+                        if (fk.refTable != tablename) continue;
+
+                        // Build mapping from refCols to local col indices in otherTbl
+                        std::vector<size_t> fkColIndices;
+                        bool allFound = true;
+                        for (const auto& colName : fk.colNames) {
+                            size_t colIdx = otherTbl.len;
+                            for (size_t ci = 0; ci < otherTbl.len; ++ci) {
+                                if (otherTbl.cols[ci].dataName == colName) { colIdx = ci; break; }
+                            }
+                            if (colIdx >= otherTbl.len) { allFound = false; break; }
+                            fkColIndices.push_back(colIdx);
+                        }
+                        if (!allFound || fkColIndices.empty()) continue;
+
+                        forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
+                            std::string oRow(data, len);
+                            // Build FK value map for this row
+                            std::map<std::string, std::string> fkVals;
+                            for (size_t ci = 0; ci < fk.colNames.size() && ci < fk.refCols.size(); ++ci) {
+                                fkVals[fk.refCols[ci]] = extractColumnValue(oRow, otherTbl, fkColIndices[ci]);
+                            }
+                            // Check if old PK row matches this FK
+                            bool matched = true;
+                            for (const auto& [refCol, refVal] : oldPKVals) {
+                                auto it = fkVals.find(refCol);
+                                if (it == fkVals.end() || it->second != refVal) {
+                                    matched = false; break;
+                                }
+                            }
+                            if (matched) {
+                                int64_t orid = encodeRid(opid, osid);
+                                if (fk.onUpdate == "cascade") {
+                                    UpdateCascadeAction ca;
+                                    ca.table = otherTable;
+                                    ca.rid = orid;
+                                    // Build new FK values: map refCols to new PK values
+                                    for (size_t ci = 0; ci < fk.colNames.size() && ci < fk.refCols.size(); ++ci) {
+                                        auto it = rowValues.find(fk.refCols[ci]);
+                                        if (it != rowValues.end()) {
+                                            ca.newFkVals[fk.colNames[ci]] = it->second;
+                                        }
+                                    }
+                                    if (!ca.newFkVals.empty()) updateCascadeActions.push_back(std::move(ca));
+                                } else if (fk.onUpdate == "setnull") {
+                                    updateSetNullActions.push_back({otherTable, orid, fkColIndices});
+                                } else {
+                                    restrictTables.insert(otherTable);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            if (!restrictTables.empty()) {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+
+            // Acquire locks on referenced tables in alphabetical order
+            std::set<std::string> affectedTables;
+            for (const auto& ca : updateCascadeActions) affectedTables.insert(ca.table);
+            for (const auto& sa : updateSetNullActions) affectedTables.insert(sa.table);
+            std::vector<std::string> sortedTables(affectedTables.begin(), affectedTables.end());
+            std::sort(sortedTables.begin(), sortedTables.end());
+            for (const auto& t : sortedTables) {
+                lockManager_.lockIntentExclusive(t);
+            }
+
+            // Apply ON UPDATE SET NULL
+            for (const auto& sa : updateSetNullActions) {
+                TableSchema otbl = getTableSchema(dbname, sa.table);
+                PageAllocator* opa = getPageAllocator(dbname, sa.table);
+                std::string oRow;
+                if (!readRowByRid(opa, sa.rid, oRow, otbl)) continue;
+
+                // Transaction log
+                if (inTransaction_ && dbname == txnDB_) {
+                    logTxnUpdate(sa.table, sa.rid, oRow);
+                }
+
+                // Rebuild row with FK columns set to NULL
+                std::map<std::string, std::string> oRowVals;
+                for (size_t i = 0; i < otbl.len; ++i) {
+                    oRowVals[otbl.cols[i].dataName] = extractColumnValue(oRow, otbl, i);
+                }
+                for (size_t ci : sa.colIndices) {
+                    oRowVals[otbl.cols[ci].dataName] = "";
+                }
+                std::string newORow = buildRowBuffer(otbl, oRowVals, 0);
+                uint32_t opid; uint16_t osid;
+                decodeRid(sa.rid, opid, osid);
+                char* obuf = opa->fetchPage(opid);
+                if (obuf) {
+                    Page opage(obuf);
+                    opage.update(osid, newORow.data(), newORow.size());
+                    pa->markDirty(opid);
+                    opa->unpinPage(opid);
+                }
+            }
+
+            // Apply ON UPDATE CASCADE: update referencing rows' FK values
+            for (const auto& ca : updateCascadeActions) {
+                TableSchema otbl = getTableSchema(dbname, ca.table);
+                PageAllocator* opa = getPageAllocator(dbname, ca.table);
+                std::string oRow;
+                if (!readRowByRid(opa, ca.rid, oRow, otbl)) continue;
+
+                // Transaction log
+                if (inTransaction_ && dbname == txnDB_) {
+                    logTxnUpdate(ca.table, ca.rid, oRow);
+                }
+
+                std::map<std::string, std::string> oRowVals;
+                for (size_t i = 0; i < otbl.len; ++i) {
+                    oRowVals[otbl.cols[i].dataName] = extractColumnValue(oRow, otbl, i);
+                }
+                for (const auto& kv : ca.newFkVals) {
+                    oRowVals[kv.first] = kv.second;
+                }
+                std::string newORow = buildRowBuffer(otbl, oRowVals, 0);
+                uint32_t opid; uint16_t osid;
+                decodeRid(ca.rid, opid, osid);
+                char* obuf = opa->fetchPage(opid);
+                if (obuf) {
+                    Page opage(obuf);
+                    opage.update(osid, newORow.data(), newORow.size());
+                    pa->markDirty(opid);
+                    opa->unpinPage(opid);
+                }
+            }
+
+            for (const auto& t : sortedTables) {
+                lockManager_.unlock(t);
             }
         }
 
