@@ -34,6 +34,7 @@ using dbms::makeBlobColumn;
 using dbms::makeBinaryColumn;
 using dbms::makeVarBinaryColumn;
 using dbms::makeJsonColumn;
+using dbms::makeJsonbColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makeDecimalColumn;
@@ -486,6 +487,8 @@ static bool isScalarFunc(const string& name) {
                                          "datediff", "date_trunc", "date_format",
                                          "age",
                                          "json_extract", "json_value",
+                                         "jsonb_extract", "jsonb_extract_text",
+                                         "jsonb_contains", "jsonb_exists", "jsonb_pretty",
                                          "sin", "cos", "tan",
                                          "split_part",
                                          "uuid_generate",
@@ -1525,6 +1528,9 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 colCreated = true;
             } else if (ctype.substr(0, 4) == "text") {
                 col = makeTextColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 5) == "jsonb") {
+                col = makeJsonbColumn(cname, isNull, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 4) == "json") {
                 col = makeJsonColumn(cname, isNull, isPK);
@@ -3619,6 +3625,8 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeBlobColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "text") {
                 col = makeTextColumn(cname, isNull);
+            } else if (typeName.substr(0, 5) == "jsonb") {
+                col = makeJsonbColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "json") {
                 col = makeJsonColumn(cname, isNull);
             } else if (typeName.substr(0, 5) == "float") {

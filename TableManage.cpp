@@ -438,6 +438,17 @@ Column makeJsonColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeJsonbColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "jsonb";
+    c.dsize = 65535;
+    return c;
+}
+
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;
@@ -3782,6 +3793,192 @@ static std::string buildRowBuffer(const TableSchema& tbl,
     return rowBuffer;
 }
 
+// ========================================================================
+// JSON validator: structural + token-level validation
+// ========================================================================
+static bool isValidJson(const std::string& s) {
+    if (s.empty()) return true;  // empty = NULL
+    struct Token {
+        enum Type { LBrace, RBrace, LBracket, RBracket, Colon, Comma,
+                    String, Number, True, False, Null, End } type;
+        std::string text;
+    };
+    size_t i = 0;
+    auto skipSpace = [&]() { while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i; };
+    auto nextToken = [&]() -> Token {
+        skipSpace();
+        if (i >= s.size()) return {Token::End, ""};
+        char c = s[i];
+        if (c == '{') { ++i; return {Token::LBrace, "{"}; }
+        if (c == '}') { ++i; return {Token::RBrace, "}"}; }
+        if (c == '[') { ++i; return {Token::LBracket, "["}; }
+        if (c == ']') { ++i; return {Token::RBracket, "]"}; }
+        if (c == ':') { ++i; return {Token::Colon, ":"}; }
+        if (c == ',') { ++i; return {Token::Comma, ","}; }
+        if (c == '"') {
+            ++i;
+            std::string str;
+            while (i < s.size() && s[i] != '"') {
+                if (s[i] == '\\' && i + 1 < s.size()) { str += s[i]; str += s[i+1]; i += 2; }
+                else { str += s[i]; ++i; }
+            }
+            if (i >= s.size()) return {Token::End, ""};  // unclosed string
+            ++i; // skip closing "
+            return {Token::String, str};
+        }
+        // Number
+        if (c == '-' || (c >= '0' && c <= '9')) {
+            size_t start = i;
+            if (c == '-') ++i;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+            if (i < s.size() && s[i] == '.') {
+                ++i;
+                while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+            }
+            if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+                ++i;
+                if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+                while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+            }
+            return {Token::Number, s.substr(start, i - start)};
+        }
+        // Literals: true, false, null
+        if (i + 4 <= s.size() && s.substr(i, 4) == "true") { i += 4; return {Token::True, "true"}; }
+        if (i + 5 <= s.size() && s.substr(i, 5) == "false") { i += 5; return {Token::False, "false"}; }
+        if (i + 4 <= s.size() && s.substr(i, 4) == "null") { i += 4; return {Token::Null, "null"}; }
+        return {Token::End, ""};  // invalid token
+    };
+
+    // Parse value
+    std::function<bool()> parseValue;
+    parseValue = [&]() -> bool {
+        Token t = nextToken();
+        if (t.type == Token::String || t.type == Token::Number ||
+            t.type == Token::True || t.type == Token::False || t.type == Token::Null) {
+            return true;
+        }
+        if (t.type == Token::LBrace) {
+            Token peek = nextToken();
+            if (peek.type == Token::RBrace) return true;  // empty object
+            if (peek.type != Token::String) return false;  // key must be string
+            Token colon = nextToken();
+            if (colon.type != Token::Colon) return false;
+            if (!parseValue()) return false;
+            while (true) {
+                Token commaOrEnd = nextToken();
+                if (commaOrEnd.type == Token::RBrace) return true;
+                if (commaOrEnd.type != Token::Comma) return false;
+                Token key = nextToken();
+                if (key.type != Token::String) return false;
+                Token c = nextToken();
+                if (c.type != Token::Colon) return false;
+                if (!parseValue()) return false;
+            }
+        }
+        if (t.type == Token::LBracket) {
+            Token peek = nextToken();
+            if (peek.type == Token::RBracket) return true;  // empty array
+            // Put back peek token (simplified: we already consumed it, so parse as value)
+            // Actually we consumed it. We need to handle this differently.
+            // Since we can't un-get, we'll restructure.
+            return false;  // Will handle differently below
+        }
+        return false;
+    };
+
+    // Array parsing (separate to handle the consumed first token issue)
+    std::function<bool()> parseArray = [&]() -> bool {
+        Token peek = nextToken();
+        if (peek.type == Token::RBracket) return true;
+        // We consumed the first token of the first element. Need to re-parse from there.
+        // Since the tokenizer is linear and we can't un-get, we'll use a different approach:
+        // Count tokens and re-parse the whole thing. This is a simplified validator.
+        return false;
+    };
+
+    // Simpler approach: just validate the full string recursively with index tracking
+    i = 0;
+    skipSpace();
+    if (i >= s.size()) return true;
+
+    std::function<bool()> parseVal;
+    parseVal = [&]() -> bool {
+        skipSpace();
+        if (i >= s.size()) return false;
+        char c = s[i];
+        if (c == '"') {
+            ++i;
+            while (i < s.size() && s[i] != '"') {
+                if (s[i] == '\\' && i + 1 < s.size()) i += 2;
+                else ++i;
+            }
+            if (i >= s.size()) return false;
+            ++i;
+            return true;
+        }
+        if (c == '{') {
+            ++i;
+            skipSpace();
+            if (i < s.size() && s[i] == '}') { ++i; return true; }
+            while (true) {
+                skipSpace();
+                if (i >= s.size() || s[i] != '"') return false;
+                if (!parseVal()) return false;  // key string
+                skipSpace();
+                if (i >= s.size() || s[i] != ':') return false;
+                ++i;
+                if (!parseVal()) return false;  // value
+                skipSpace();
+                if (i < s.size() && s[i] == ',') { ++i; continue; }
+                if (i < s.size() && s[i] == '}') { ++i; return true; }
+                return false;
+            }
+        }
+        if (c == '[') {
+            ++i;
+            skipSpace();
+            if (i < s.size() && s[i] == ']') { ++i; return true; }
+            while (true) {
+                if (!parseVal()) return false;
+                skipSpace();
+                if (i < s.size() && s[i] == ',') { ++i; continue; }
+                if (i < s.size() && s[i] == ']') { ++i; return true; }
+                return false;
+            }
+        }
+        // Number
+        if (c == '-' || (c >= '0' && c <= '9')) {
+            if (c == '-') ++i;
+            bool hasDigits = false;
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; hasDigits = true; }
+            if (!hasDigits) return false;
+            if (i < s.size() && s[i] == '.') {
+                ++i;
+                hasDigits = false;
+                while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; hasDigits = true; }
+            }
+            if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+                ++i;
+                if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+                hasDigits = false;
+                while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; hasDigits = true; }
+                if (!hasDigits) return false;
+            }
+            return true;
+        }
+        // true, false, null
+        if (i + 4 <= s.size() && s.substr(i, 4) == "true") { i += 4; return true; }
+        if (i + 5 <= s.size() && s.substr(i, 5) == "false") { i += 5; return true; }
+        if (i + 4 <= s.size() && s.substr(i, 4) == "null") { i += 4; return true; }
+        return false;
+    };
+
+    bool ok = parseVal();
+    if (!ok) return false;
+    skipSpace();
+    return i == s.size();
+}
+
 OpResult StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values) {
@@ -3924,6 +4121,13 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
         if (!col.isVariableLength && col.dataType == "boolean" && !val.empty()) {
             if (val != "1" && val != "0" && val != "true" && val != "false" && val != "TRUE" && val != "FALSE") {
+                lockManager_.unlock(tablename);
+                return OpResult::InvalidValue;
+            }
+        }
+        // Validate JSON / JSONB columns
+        if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
+            if (!isValidJson(val)) {
                 lockManager_.unlock(tablename);
                 return OpResult::InvalidValue;
             }
@@ -5504,7 +5708,7 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
         static const std::vector<std::pair<std::string, int>> pgTypes = {
             {"int", 4}, {"bigint", 8}, {"smallint", 2}, {"varchar", -1}, {"char", 1},
             {"text", -1}, {"boolean", 1}, {"real", 4}, {"double precision", 8},
-            {"date", 4}, {"timestamp", 8}, {"timestamptz", 8}, {"json", -1},
+            {"date", 4}, {"timestamp", 8}, {"timestamptz", 8}, {"json", -1}, {"jsonb", -1},
             {"uuid", 16}, {"decimal", -1}, {"blob", -1}, {"binary", -1},
             {"serial", 4}, {"time", 8}, {"datetime", 8}, {"float", 4},
         };
@@ -6548,6 +6752,163 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         subExpr.funcName = "json_extract";
         subExpr.funcArgs = expr.funcArgs;
         return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname);
+    }
+    // ---- JSONB scalar functions ----
+    if (expr.funcName == "jsonb_extract" && expr.funcArgs.size() >= 2) {
+        // jsonb_extract is alias for json_extract
+        StorageEngine::SelectExpr subExpr;
+        subExpr.isScalar = true;
+        subExpr.funcName = "json_extract";
+        subExpr.funcArgs = expr.funcArgs;
+        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname);
+    }
+    if (expr.funcName == "jsonb_extract_text" && expr.funcArgs.size() >= 2) {
+        // jsonb_extract_text is alias for json_value
+        StorageEngine::SelectExpr subExpr;
+        subExpr.isScalar = true;
+        subExpr.funcName = "json_value";
+        subExpr.funcArgs = expr.funcArgs;
+        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname);
+    }
+    if (expr.funcName == "jsonb_contains" && expr.funcArgs.size() >= 2) {
+        // JSONB @> operator: check if target contains pattern (shallow check)
+        std::string target = getVal(expr.funcArgs[0]);
+        std::string pattern = getVal(expr.funcArgs[1]);
+        if (target.empty() || pattern.empty()) return "false";
+        // Simple shallow contains: extract all "key":value from pattern
+        // and verify each exists in target
+        size_t pi = 0;
+        while (pi < pattern.size()) {
+            size_t q = pattern.find('"', pi);
+            if (q == std::string::npos) break;
+            size_t q2 = pattern.find('"', q + 1);
+            if (q2 == std::string::npos) break;
+            std::string key = pattern.substr(q + 1, q2 - q - 1);
+            size_t colon = pattern.find(':', q2 + 1);
+            if (colon == std::string::npos) break;
+            size_t vStart = colon + 1;
+            while (vStart < pattern.size() && std::isspace(static_cast<unsigned char>(pattern[vStart]))) ++vStart;
+            if (vStart >= pattern.size()) break;
+            std::string val;
+            if (pattern[vStart] == '{') {
+                int d = 1; size_t ve = vStart + 1;
+                while (ve < pattern.size() && d > 0) {
+                    if (pattern[ve] == '{') ++d;
+                    else if (pattern[ve] == '}') --d;
+                    ++ve;
+                }
+                val = pattern.substr(vStart, ve - vStart);
+                pi = ve;
+            } else if (pattern[vStart] == '[') {
+                int d = 1; size_t ve = vStart + 1;
+                while (ve < pattern.size() && d > 0) {
+                    if (pattern[ve] == '[') ++d;
+                    else if (pattern[ve] == ']') --d;
+                    ++ve;
+                }
+                val = pattern.substr(vStart, ve - vStart);
+                pi = ve;
+            } else if (pattern[vStart] == '"') {
+                size_t ve = vStart + 1;
+                while (ve < pattern.size() && pattern[ve] != '"') {
+                    if (pattern[ve] == '\\' && ve + 1 < pattern.size()) ve += 2;
+                    else ++ve;
+                }
+                val = pattern.substr(vStart, ve - vStart + 1);
+                pi = ve + 1;
+            } else {
+                size_t ve = vStart;
+                while (ve < pattern.size() && pattern[ve] != ',' && pattern[ve] != '}') ++ve;
+                val = trim(pattern.substr(vStart, ve - vStart));
+                pi = ve;
+            }
+            // Search for key in target
+            std::string searchKey = "\"" + key + "\"";
+            size_t tk = target.find(searchKey);
+            if (tk == std::string::npos) return "false";
+            size_t tc = target.find(':', tk + searchKey.size());
+            if (tc == std::string::npos) return "false";
+            size_t tvStart = tc + 1;
+            while (tvStart < target.size() && std::isspace(static_cast<unsigned char>(target[tvStart]))) ++tvStart;
+            std::string tval;
+            if (tvStart < target.size() && target[tvStart] == '{') {
+                int d = 1; size_t ve = tvStart + 1;
+                while (ve < target.size() && d > 0) {
+                    if (target[ve] == '{') ++d;
+                    else if (target[ve] == '}') --d;
+                    ++ve;
+                }
+                tval = target.substr(tvStart, ve - tvStart);
+            } else if (tvStart < target.size() && target[tvStart] == '[') {
+                int d = 1; size_t ve = tvStart + 1;
+                while (ve < target.size() && d > 0) {
+                    if (target[ve] == '[') ++d;
+                    else if (target[ve] == ']') --d;
+                    ++ve;
+                }
+                tval = target.substr(tvStart, ve - tvStart);
+            } else if (tvStart < target.size() && target[tvStart] == '"') {
+                size_t ve = tvStart + 1;
+                while (ve < target.size() && target[ve] != '"') {
+                    if (target[ve] == '\\' && ve + 1 < target.size()) ve += 2;
+                    else ++ve;
+                }
+                tval = target.substr(tvStart, ve - tvStart + 1);
+            } else {
+                size_t ve = tvStart;
+                while (ve < target.size() && target[ve] != ',' && target[ve] != '}') ++ve;
+                tval = trim(target.substr(tvStart, ve - tvStart));
+            }
+            if (tval != val) return "false";
+        }
+        return "true";
+    }
+    if (expr.funcName == "jsonb_exists" && expr.funcArgs.size() >= 2) {
+        // JSONB ? operator: check if top-level key exists
+        std::string target = getVal(expr.funcArgs[0]);
+        std::string key = getVal(expr.funcArgs[1]);
+        if (target.empty() || key.empty()) return "false";
+        if (key.size() >= 2 && key.front() == '\'' && key.back() == '\'') key = key.substr(1, key.size() - 2);
+        std::string searchKey = "\"" + key + "\"";
+        return (target.find(searchKey) != std::string::npos) ? "true" : "false";
+    }
+    if (expr.funcName == "jsonb_pretty" && !expr.funcArgs.empty()) {
+        // Pretty-print JSON with indentation
+        std::string json = getVal(expr.funcArgs[0]);
+        if (json.empty()) return "";
+        std::string out;
+        int indent = 0;
+        bool inStr = false;
+        for (size_t i = 0; i < json.size(); ++i) {
+            char c = json[i];
+            if (c == '"' && (i == 0 || json[i - 1] != '\\')) {
+                inStr = !inStr;
+                out += c;
+                continue;
+            }
+            if (inStr) { out += c; continue; }
+            if (c == '{' || c == '[') {
+                out += c;
+                out += '\n';
+                indent += 2;
+                out.append(indent, ' ');
+            } else if (c == '}' || c == ']') {
+                out += '\n';
+                indent -= 2;
+                out.append(indent, ' ');
+                out += c;
+            } else if (c == ',') {
+                out += c;
+                out += '\n';
+                out.append(indent, ' ');
+            } else if (c == ':') {
+                out += c;
+                out += ' ';
+            } else if (!std::isspace(static_cast<unsigned char>(c))) {
+                out += c;
+            }
+        }
+        return out;
     }
     if (expr.funcName == "subquery" && !expr.funcArgs.empty() && engine) {
         // Simplified scalar subquery: funcArgs[0] = "select col from table [where ...]"
