@@ -2838,6 +2838,123 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             string tname = rest.substr(0, sp);
+            // CTAS: CREATE TABLE new_table AS SELECT ...
+            size_t asPos = rest.find(" as ", sp);
+            if (asPos != string::npos) {
+                string newTname = tname;
+                string selectPart = trim(rest.substr(asPos + 4));
+                if (selectPart.size() >= 6 && selectPart.substr(0, 6) == "select") {
+                    // Parse column names from SELECT part
+                    size_t fromPos = findTopLevelKeyword(selectPart, "from");
+                    if (fromPos == string::npos) {
+                        cout << "SQL syntax error: CTAS requires SELECT ... FROM" << endl;
+                        return true;
+                    }
+                    string columns = trim(selectPart.substr(6, fromPos - 6));
+                    bool selectAll = (columns == "*");
+
+                    // Parse source table name
+                    size_t tnameEnd = selectPart.find(' ', fromPos + 5);
+                    if (tnameEnd == string::npos) tnameEnd = selectPart.size();
+                    string srcTname = trim(selectPart.substr(fromPos + 4, tnameEnd - fromPos - 4));
+                    srcTname = resolveTableName(s, srcTname);
+                    if (!g_engine.tableExists(s.currentDB, srcTname)) {
+                        cout << "Source table not found" << endl;
+                        return true;
+                    }
+                    TableSchema srcTbl = g_engine.getTableSchema(s.currentDB, srcTname);
+
+                    vector<string> colNames;
+                    if (selectAll) {
+                        for (size_t i = 0; i < srcTbl.len; ++i)
+                            colNames.push_back(srcTbl.cols[i].dataName);
+                    } else {
+                        stringstream css(columns);
+                        string item;
+                        while (getline(css, item, ',')) {
+                            item = trim(item);
+                            if (!item.empty()) colNames.push_back(item);
+                        }
+                    }
+                    if (colNames.empty()) {
+                        cout << "CTAS: no columns in SELECT" << endl;
+                        return true;
+                    }
+
+                    // Build query conditions from WHERE clause
+                    set<string> selectColsSet(colNames.begin(), colNames.end());
+                    size_t wherePos = findTopLevelKeyword(selectPart, "where", fromPos);
+                    vector<string> conditions;
+                    if (wherePos != string::npos) {
+                        string condStr = normalizeConditionStr(trim(selectPart.substr(wherePos + 5)));
+                        // Split by AND for simple multi-condition support
+                        size_t andPos = 0;
+                        while (andPos < condStr.size()) {
+                            size_t nextAnd = condStr.find("AND", andPos);
+                            string singleCond = (nextAnd == string::npos)
+                                ? trim(condStr.substr(andPos))
+                                : trim(condStr.substr(andPos, nextAnd - andPos));
+                            if (!singleCond.empty()) conditions.push_back(singleCond);
+                            if (nextAnd == string::npos) break;
+                            andPos = nextAnd + 3;
+                        }
+                    }
+
+                    auto rows = g_engine.query(s.currentDB, srcTname, conditions, selectColsSet, {});
+
+                    // Build schema: infer types from first data row if available
+                    TableSchema newTbl;
+                    newTbl.tablename = newTname;
+                    for (const auto& cname : colNames) {
+                        dbms::Column col = dbms::makeVarCharColumn(cname, true, 255);
+                        if (!rows.empty()) {
+                            size_t idx = 0;
+                            stringstream rss(rows[0]);
+                            string val;
+                            while (rss >> val && idx < colNames.size()) {
+                                if (colNames[idx] == cname) break;
+                                ++idx;
+                            }
+                            if (idx < colNames.size() && val != "NULL" && !val.empty()) {
+                                bool isInt = true;
+                                for (char ch : val) {
+                                    if (!isdigit(static_cast<unsigned char>(ch))) { isInt = false; break; }
+                                }
+                                if (isInt) col = dbms::makeIntColumn(cname, true, 2);
+                            }
+                        }
+                        newTbl.append(col);
+                    }
+
+                    auto res = g_engine.createTable(s.currentDB, newTbl);
+                    if (res == OpResult::TableAlreadyExist) {
+                        cout << "Table " << newTname << " already exists" << endl;
+                        return true;
+                    }
+
+                    size_t rowCount = 0;
+                    for (const auto& row : rows) {
+                        vector<string> vals;
+                        stringstream rss(row);
+                        string v;
+                        while (rss >> v) vals.push_back(v);
+                        if (vals.size() != colNames.size()) continue;
+                        std::map<string, string> values;
+                        for (size_t j = 0; j < colNames.size(); ++j) {
+                            if (vals[j] == "NULL") vals[j] = "";
+                            values[colNames[j]] = vals[j];
+                        }
+                        g_engine.insert(s.currentDB, newTname, values);
+                        ++rowCount;
+                    }
+
+                    cout << "Table created with " << rowCount << " rows" << endl;
+                    log(s.username, "ctas succeeded", getTime());
+                    return false;
+                }
+                cout << "SQL syntax error: CTAS requires SELECT" << endl;
+                return true;
+            }
             // Check for PARTITION BY clause
             size_t partPos = sql.find("partition by");
             string colsSql = sql;
