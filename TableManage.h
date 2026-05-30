@@ -161,6 +161,13 @@ public:
                                         const std::string& onDelete = "restrict", const std::string& onUpdate = "restrict");
     OpResult alterTableDropConstraint(const std::string& dbname, const std::string& tablename,
                                        const std::string& name);
+    OpResult commentOnTable(const std::string& dbname, const std::string& tablename,
+                             const std::string& comment);
+    OpResult commentOnColumn(const std::string& dbname, const std::string& tablename,
+                              const std::string& colname, const std::string& comment);
+    std::string getTableComment(const std::string& dbname, const std::string& tablename) const;
+    std::string getColumnComment(const std::string& dbname, const std::string& tablename,
+                                  const std::string& colname) const;
     bool tableExists(const std::string& dbname, const std::string& tablename) const;
     std::vector<std::string> getTableNames(const std::string& dbname) const;
     TableSchema getTableSchema(const std::string& dbname, const std::string& tablename) const;

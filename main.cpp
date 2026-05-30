@@ -3626,6 +3626,69 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (sql.substr(0, 7) == "comment") {
+        if (!checkDB(s)) return true;
+        size_t onPos = sql.find(" on ");
+        if (onPos == string::npos) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        string rest = trim(sql.substr(onPos + 4));
+        auto extractComment = [&](const string& raw) -> string {
+            size_t rawIsPos = raw.find(" is ");
+            if (rawIsPos == string::npos) return "";
+            string afterIs = trim(raw.substr(rawIsPos + 4));
+            if (afterIs.size() >= 2 && ((afterIs.front() == '\'' && afterIs.back() == '\'') ||
+                                               (afterIs.front() == '"' && afterIs.back() == '"'))) {
+                return afterIs.substr(1, afterIs.size() - 2);
+            }
+            return afterIs;
+        };
+        if (rest.substr(0, 5) == "table") {
+            string afterTable = trim(rest.substr(5));
+            size_t isPos = afterTable.find(" is ");
+            if (isPos == string::npos) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            string tname = resolveTableName(s, trim(afterTable.substr(0, isPos)));
+            string comment = extractComment(rawSql);
+            auto res = g_engine.commentOnTable(s.currentDB, tname, comment);
+            if (res == OpResult::TableNotExist) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            cout << "Comment added" << endl;
+            return false;
+        }
+        if (rest.substr(0, 6) == "column") {
+            string afterCol = trim(rest.substr(6));
+            size_t isPos = afterCol.find(" is ");
+            if (isPos == string::npos) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            string qual = trim(afterCol.substr(0, isPos));
+            size_t dotPos = qual.find('.');
+            if (dotPos == string::npos) {
+                cout << "SQL syntax error: use table.column" << endl;
+                return true;
+            }
+            string tname = resolveTableName(s, trim(qual.substr(0, dotPos)));
+            string cname = trim(qual.substr(dotPos + 1));
+            string comment = extractComment(rawSql);
+            auto res = g_engine.commentOnColumn(s.currentDB, tname, cname, comment);
+            if (res == OpResult::TableNotExist) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            cout << "Comment added" << endl;
+            return false;
+        }
+        cout << "SQL syntax error" << endl;
+        return true;
+    }
+
     if (sql.substr(0, 5) == "alter") {
         if (!checkAdmin(s)) return true;
         vector<string> tokens = tokenize(sql.substr(5));

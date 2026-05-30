@@ -4292,6 +4292,114 @@ OpResult StorageEngine::alterTableDropConstraint(const std::string& dbname,
     return OpResult::Success;
 }
 
+static std::filesystem::path commentsPath(const std::string& dbname) {
+    return std::filesystem::path(dbname) / ".comments";
+}
+
+OpResult StorageEngine::commentOnTable(const std::string& dbname,
+                                        const std::string& tablename,
+                                        const std::string& comment) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    auto path = commentsPath(dbname);
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty()) lines.push_back(line);
+        }
+    }
+    bool updated = false;
+    std::string prefix = "T|" + tablename + "|";
+    for (auto& line : lines) {
+        if (line.substr(0, prefix.size()) == prefix) {
+            if (comment.empty()) {
+                line.clear();
+            } else {
+                line = prefix + comment;
+            }
+            updated = true;
+            break;
+        }
+    }
+    if (!updated && !comment.empty()) {
+        lines.push_back(prefix + comment);
+    }
+    std::ofstream out(path, std::ios::trunc);
+    for (const auto& line : lines) {
+        if (!line.empty()) out << line << '\n';
+    }
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::commentOnColumn(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname,
+                                         const std::string& comment) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    auto path = commentsPath(dbname);
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty()) lines.push_back(line);
+        }
+    }
+    bool updated = false;
+    std::string prefix = "C|" + tablename + "|" + colname + "|";
+    for (auto& line : lines) {
+        if (line.substr(0, prefix.size()) == prefix) {
+            if (comment.empty()) {
+                line.clear();
+            } else {
+                line = prefix + comment;
+            }
+            updated = true;
+            break;
+        }
+    }
+    if (!updated && !comment.empty()) {
+        lines.push_back(prefix + comment);
+    }
+    std::ofstream out(path, std::ios::trunc);
+    for (const auto& line : lines) {
+        if (!line.empty()) out << line << '\n';
+    }
+    return OpResult::Success;
+}
+
+std::string StorageEngine::getTableComment(const std::string& dbname,
+                                            const std::string& tablename) const {
+    auto path = commentsPath(dbname);
+    std::ifstream in(path);
+    if (!in) return "";
+    std::string prefix = "T|" + tablename + "|";
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.substr(0, prefix.size()) == prefix) {
+            return line.substr(prefix.size());
+        }
+    }
+    return "";
+}
+
+std::string StorageEngine::getColumnComment(const std::string& dbname,
+                                             const std::string& tablename,
+                                             const std::string& colname) const {
+    auto path = commentsPath(dbname);
+    std::ifstream in(path);
+    if (!in) return "";
+    std::string prefix = "C|" + tablename + "|" + colname + "|";
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.substr(0, prefix.size()) == prefix) {
+            return line.substr(prefix.size());
+        }
+    }
+    return "";
+}
+
 std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname) const {
     std::vector<std::string> names;
     std::ifstream in(tableListPath(dbname), std::ios::binary);
