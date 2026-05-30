@@ -3781,6 +3781,24 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Default value dropped" << endl;
                 return false;
             }
+            if (tokens.size() >= 8 && tokens[5] == "set" && tokens[6] == "not" && tokens[7] == "null") {
+                auto res = g_engine.alterTableSetNotNull(s.currentDB, tname, cname);
+                if (res == OpResult::InvalidValue) {
+                    cout << "Column not found" << endl;
+                    return true;
+                }
+                cout << "Not null constraint set" << endl;
+                return false;
+            }
+            if (tokens.size() >= 8 && tokens[5] == "drop" && tokens[6] == "not" && tokens[7] == "null") {
+                auto res = g_engine.alterTableDropNotNull(s.currentDB, tname, cname);
+                if (res == OpResult::InvalidValue) {
+                    cout << "Column not found" << endl;
+                    return true;
+                }
+                cout << "Not null constraint dropped" << endl;
+                return false;
+            }
         }
         cout << "SQL syntax error" << endl;
         return true;

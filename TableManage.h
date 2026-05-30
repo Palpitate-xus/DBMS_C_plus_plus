@@ -144,6 +144,10 @@ public:
                                    const std::string& colName, const std::string& defaultValue);
     OpResult alterTableDropDefault(const std::string& dbname, const std::string& tablename,
                                     const std::string& colName);
+    OpResult alterTableSetNotNull(const std::string& dbname, const std::string& tablename,
+                                   const std::string& colName);
+    OpResult alterTableDropNotNull(const std::string& dbname, const std::string& tablename,
+                                    const std::string& colName);
     bool tableExists(const std::string& dbname, const std::string& tablename) const;
     std::vector<std::string> getTableNames(const std::string& dbname) const;
     TableSchema getTableSchema(const std::string& dbname, const std::string& tablename) const;

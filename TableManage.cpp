@@ -3973,6 +3973,56 @@ OpResult StorageEngine::alterTableDropDefault(const std::string& dbname,
     return OpResult::Success;
 }
 
+OpResult StorageEngine::alterTableSetNotNull(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& colName) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+
+    tbl.cols[colIdx].isNull = false;
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterTableDropNotNull(const std::string& dbname,
+                                               const std::string& tablename,
+                                               const std::string& colName) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+
+    tbl.cols[colIdx].isNull = true;
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
 std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname) const {
     std::vector<std::string> names;
     std::ifstream in(tableListPath(dbname), std::ios::binary);
