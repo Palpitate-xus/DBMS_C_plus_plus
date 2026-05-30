@@ -46,6 +46,7 @@ struct Column {
     size_t dsize = 0;  // For VARCHAR: max length; for fixed: actual bytes
     std::string defaultValue;       // DEFAULT value
     std::string checkExpr;          // CHECK constraint expression
+    std::string checkConstraintName; // Name of the CHECK constraint
     std::string generatedExpr;      // GENERATED ALWAYS AS (expr)
     std::vector<std::string> enumValues;  // ENUM('a','b','c') values
 
@@ -58,6 +59,7 @@ struct ForeignKey {
     std::string refTable;                  // referenced table
     std::string onDelete = "restrict";     // restrict | cascade | setnull
     std::string onUpdate = "restrict";     // restrict | cascade | setnull
+    std::string name;                      // constraint name
 
     // Back-compat helpers
     bool isSingleColumn() const { return colNames.size() <= 1; }
@@ -76,6 +78,7 @@ struct TableSchema {
     std::vector<size_t> pkColIndices;
     // Composite UNIQUE constraints: each inner vector is column indices
     std::vector<std::vector<size_t>> uniqueConstraints;
+    std::vector<std::string> uniqueConstraintNames; // names parallel to uniqueConstraints
 
     // Partitioning
     enum class PartitionType { None, Range, List, Hash };
@@ -148,6 +151,16 @@ public:
                                    const std::string& colName);
     OpResult alterTableDropNotNull(const std::string& dbname, const std::string& tablename,
                                     const std::string& colName);
+    OpResult alterTableAddCheckConstraint(const std::string& dbname, const std::string& tablename,
+                                           const std::string& name, const std::string& expr);
+    OpResult alterTableAddUniqueConstraint(const std::string& dbname, const std::string& tablename,
+                                            const std::string& name, const std::vector<std::string>& colNames);
+    OpResult alterTableAddFKConstraint(const std::string& dbname, const std::string& tablename,
+                                        const std::string& name, const std::vector<std::string>& localCols,
+                                        const std::string& refTable, const std::vector<std::string>& refCols,
+                                        const std::string& onDelete = "restrict", const std::string& onUpdate = "restrict");
+    OpResult alterTableDropConstraint(const std::string& dbname, const std::string& tablename,
+                                       const std::string& name);
     bool tableExists(const std::string& dbname, const std::string& tablename) const;
     std::vector<std::string> getTableNames(const std::string& dbname) const;
     TableSchema getTableSchema(const std::string& dbname, const std::string& tablename) const;

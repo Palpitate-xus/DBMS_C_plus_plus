@@ -3800,6 +3800,142 @@ bool execute(const string& rawSql, Session& s) {
                 return false;
             }
         }
+        if (op == "add" && tokens.size() >= 5 && tokens[3] == "constraint") {
+            string constrName = tokens[4];
+            // CHECK constraint
+            size_t checkPos = sql.find("check");
+            if (checkPos != string::npos) {
+                size_t lp = sql.find('(', checkPos);
+                size_t rp = sql.find(')', lp);
+                if (lp != string::npos && rp != string::npos) {
+                    string expr = trim(sql.substr(lp + 1, rp - lp - 1));
+                    auto res = g_engine.alterTableAddCheckConstraint(s.currentDB, tname, constrName, expr);
+                    if (res == OpResult::InvalidValue) {
+                        cout << "Invalid check constraint: no referenced column found" << endl;
+                        return true;
+                    }
+                    if (res == OpResult::TableAlreadyExist) {
+                        cout << "Constraint name already exists" << endl;
+                        return true;
+                    }
+                    cout << "Check constraint added" << endl;
+                    return false;
+                }
+            }
+            // UNIQUE constraint
+            size_t uniquePos = sql.find("unique");
+            if (uniquePos != string::npos) {
+                size_t lp = sql.find('(', uniquePos);
+                size_t rp = sql.find(')', lp);
+                if (lp != string::npos && rp != string::npos) {
+                    string colsStr = trim(sql.substr(lp + 1, rp - lp - 1));
+                    vector<string> cols;
+                    stringstream css(colsStr);
+                    string c;
+                    while (getline(css, c, ',')) {
+                        c = trim(c);
+                        if (!c.empty()) cols.push_back(c);
+                    }
+                    auto res = g_engine.alterTableAddUniqueConstraint(s.currentDB, tname, constrName, cols);
+                    if (res == OpResult::InvalidValue) {
+                        cout << "Column not found" << endl;
+                        return true;
+                    }
+                    if (res == OpResult::TableAlreadyExist) {
+                        cout << "Constraint name already exists" << endl;
+                        return true;
+                    }
+                    cout << "Unique constraint added" << endl;
+                    return false;
+                }
+            }
+            // FOREIGN KEY constraint
+            size_t fkPos = sql.find("foreign key");
+            if (fkPos != string::npos) {
+                size_t lp1 = sql.find('(', fkPos);
+                size_t rp1 = sql.find(')', lp1);
+                size_t refPos = sql.find("references", rp1);
+                if (lp1 != string::npos && rp1 != string::npos && refPos != string::npos) {
+                    string localColsStr = trim(sql.substr(lp1 + 1, rp1 - lp1 - 1));
+                    vector<string> localCols;
+                    stringstream lcss(localColsStr);
+                    string c;
+                    while (getline(lcss, c, ',')) {
+                        c = trim(c);
+                        if (!c.empty()) localCols.push_back(c);
+                    }
+                    string refRest = trim(sql.substr(refPos + 10));
+                    size_t lp2 = refRest.find('(');
+                    size_t rp2 = refRest.find(')', lp2);
+                    string refTable = (lp2 != string::npos) ? trim(refRest.substr(0, lp2)) : refRest;
+                    vector<string> refCols;
+                    if (lp2 != string::npos && rp2 != string::npos) {
+                        string refColsStr = trim(refRest.substr(lp2 + 1, rp2 - lp2 - 1));
+                        stringstream rcss(refColsStr);
+                        while (getline(rcss, c, ',')) {
+                            c = trim(c);
+                            if (!c.empty()) refCols.push_back(c);
+                        }
+                    }
+                    string onDelete = "restrict";
+                    string onUpdate = "restrict";
+                    size_t odPos = sql.find("on delete");
+                    if (odPos != string::npos) {
+                        string odStr = trim(sql.substr(odPos + 9));
+                        size_t sp = odStr.find(' ');
+                        if (sp != string::npos) {
+                            onDelete = trim(odStr.substr(0, sp));
+                            if (onDelete == "set" && odStr.substr(sp + 1, 4) == "null") onDelete = "setnull";
+                        } else {
+                            onDelete = odStr;
+                        }
+                    }
+                    size_t ouPos = sql.find("on update");
+                    if (ouPos != string::npos) {
+                        string ouStr = trim(sql.substr(ouPos + 9));
+                        size_t sp = ouStr.find(' ');
+                        if (sp != string::npos) {
+                            onUpdate = trim(ouStr.substr(0, sp));
+                            if (onUpdate == "set" && ouStr.substr(sp + 1, 4) == "null") onUpdate = "setnull";
+                        } else {
+                            onUpdate = ouStr;
+                        }
+                    }
+                    auto res = g_engine.alterTableAddFKConstraint(s.currentDB, tname, constrName,
+                                                                  localCols, refTable, refCols,
+                                                                  onDelete, onUpdate);
+                    if (res == OpResult::InvalidValue) {
+                        cout << "Invalid foreign key definition" << endl;
+                        return true;
+                    }
+                    if (res == OpResult::TableNotExist) {
+                        cout << "Referenced table not found" << endl;
+                        return true;
+                    }
+                    if (res == OpResult::TableAlreadyExist) {
+                        cout << "Constraint name already exists" << endl;
+                        return true;
+                    }
+                    cout << "Foreign key constraint added" << endl;
+                    return false;
+                }
+            }
+            cout << "SQL syntax error: unsupported constraint type" << endl;
+            return true;
+        }
+        if (op == "drop" && tokens.size() >= 4 && tokens[3] == "constraint") {
+            if (tokens.size() < 5) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            auto res = g_engine.alterTableDropConstraint(s.currentDB, tname, tokens[4]);
+            if (res == OpResult::InvalidValue) {
+                cout << "Constraint not found" << endl;
+                return true;
+            }
+            cout << "Constraint dropped" << endl;
+            return false;
+        }
         cout << "SQL syntax error" << endl;
         return true;
     }

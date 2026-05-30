@@ -2979,6 +2979,39 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         int32_t hcount = static_cast<int32_t>(tbl.hashPartitions);
         out.write(reinterpret_cast<const char*>(&hcount), 4);
     }
+
+    // Named constraint names (appended for backward compatibility)
+    int32_t namedCheckCount = 0;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (!tbl.cols[i].checkConstraintName.empty()) namedCheckCount++;
+    }
+    out.write(reinterpret_cast<const char*>(&namedCheckCount), 4);
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (!tbl.cols[i].checkConstraintName.empty()) {
+            int32_t cidx = static_cast<int32_t>(i);
+            out.write(reinterpret_cast<const char*>(&cidx), 4);
+            writeFixedString(out, tbl.cols[i].checkConstraintName, MAX_COL_NAME_LEN);
+        }
+    }
+
+    int32_t namedUniqueCount = static_cast<int32_t>(tbl.uniqueConstraintNames.size());
+    out.write(reinterpret_cast<const char*>(&namedUniqueCount), 4);
+    for (const auto& name : tbl.uniqueConstraintNames) {
+        writeFixedString(out, name, MAX_TABLE_NAME_LEN);
+    }
+
+    int32_t namedFkCount = 0;
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        if (!tbl.fks[i].name.empty()) namedFkCount++;
+    }
+    out.write(reinterpret_cast<const char*>(&namedFkCount), 4);
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        if (!tbl.fks[i].name.empty()) {
+            int32_t fidx = static_cast<int32_t>(i);
+            out.write(reinterpret_cast<const char*>(&fidx), 4);
+            writeFixedString(out, tbl.fks[i].name, MAX_TABLE_NAME_LEN);
+        }
+    }
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -3159,6 +3192,47 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             if (in && hcount > 0) tbl.hashPartitions = static_cast<size_t>(hcount);
         }
     }
+
+    // Read named CHECK constraints (new, ignore if EOF for backward compatibility)
+    int32_t namedCheckCount = 0;
+    in.read(reinterpret_cast<char*>(&namedCheckCount), 4);
+    if (in && namedCheckCount > 0 && namedCheckCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+        for (int32_t i = 0; i < namedCheckCount; ++i) {
+            int32_t cidx = 0;
+            in.read(reinterpret_cast<char*>(&cidx), 4);
+            if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len)) {
+                tbl.cols[cidx].checkConstraintName = readFixedString(in, MAX_COL_NAME_LEN);
+            } else if (in) {
+                readFixedString(in, MAX_COL_NAME_LEN); // skip
+            }
+        }
+    }
+
+    // Read named UNIQUE constraints (new, ignore if EOF)
+    int32_t namedUniqueCount = 0;
+    in.read(reinterpret_cast<char*>(&namedUniqueCount), 4);
+    if (in && namedUniqueCount >= 0 && namedUniqueCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+        tbl.uniqueConstraintNames.reserve(namedUniqueCount);
+        for (int32_t i = 0; i < namedUniqueCount; ++i) {
+            tbl.uniqueConstraintNames.push_back(readFixedString(in, MAX_TABLE_NAME_LEN));
+        }
+    }
+
+    // Read named FK constraints (new, ignore if EOF)
+    int32_t namedFkCount = 0;
+    in.read(reinterpret_cast<char*>(&namedFkCount), 4);
+    if (in && namedFkCount > 0 && namedFkCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+        for (int32_t i = 0; i < namedFkCount; ++i) {
+            int32_t fidx = 0;
+            in.read(reinterpret_cast<char*>(&fidx), 4);
+            if (in && fidx >= 0 && fidx < static_cast<int32_t>(tbl.fkLen)) {
+                tbl.fks[fidx].name = readFixedString(in, MAX_TABLE_NAME_LEN);
+            } else if (in) {
+                readFixedString(in, MAX_TABLE_NAME_LEN); // skip
+            }
+        }
+    }
+
     return tbl;
 }
 
@@ -4015,6 +4089,201 @@ OpResult StorageEngine::alterTableDropNotNull(const std::string& dbname,
     }
 
     tbl.cols[colIdx].isNull = true;
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
+                                                        const std::string& tablename,
+                                                        const std::string& name,
+                                                        const std::string& expr) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    // Find the first column referenced in the expression
+    size_t targetCol = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (expr.find(tbl.cols[i].dataName) != std::string::npos) {
+            targetCol = i;
+            break;
+        }
+    }
+    if (targetCol >= tbl.len) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+    // Ensure constraint name is unique
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].checkConstraintName == name) {
+            lockManager_.unlock(tablename);
+            return OpResult::TableAlreadyExist;
+        }
+    }
+
+    tbl.cols[targetCol].checkExpr = expr;
+    tbl.cols[targetCol].checkConstraintName = name;
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
+                                                         const std::string& tablename,
+                                                         const std::string& name,
+                                                         const std::vector<std::string>& colNames) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<size_t> colIndices;
+    for (const auto& cname : colNames) {
+        bool found = false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == cname) {
+                colIndices.push_back(i);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            lockManager_.unlock(tablename);
+            return OpResult::InvalidValue;
+        }
+    }
+    // Check for duplicate constraint name
+    for (const auto& n : tbl.uniqueConstraintNames) {
+        if (n == name) {
+            lockManager_.unlock(tablename);
+            return OpResult::TableAlreadyExist;
+        }
+    }
+
+    tbl.uniqueConstraints.push_back(colIndices);
+    tbl.uniqueConstraintNames.push_back(name);
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
+                                                     const std::string& tablename,
+                                                     const std::string& name,
+                                                     const std::vector<std::string>& localCols,
+                                                     const std::string& refTable,
+                                                     const std::vector<std::string>& refCols,
+                                                     const std::string& onDelete,
+                                                     const std::string& onUpdate) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, refTable)) {
+        // FK references a table in the same database
+        if (!std::filesystem::exists(schemaPath(dbname, refTable))) {
+            return OpResult::TableNotExist;
+        }
+    }
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    if (tbl.fkLen >= MAX_COLUMNS) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+    // Verify local columns exist
+    for (const auto& cname : localCols) {
+        bool found = false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == cname) { found = true; break; }
+        }
+        if (!found) {
+            lockManager_.unlock(tablename);
+            return OpResult::InvalidValue;
+        }
+    }
+    // Check for duplicate constraint name
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        if (tbl.fks[i].name == name) {
+            lockManager_.unlock(tablename);
+            return OpResult::TableAlreadyExist;
+        }
+    }
+
+    ForeignKey fk;
+    fk.name = name;
+    fk.colNames = localCols;
+    fk.refCols = refCols;
+    fk.refTable = refTable;
+    fk.onDelete = onDelete.empty() ? "restrict" : onDelete;
+    fk.onUpdate = onUpdate.empty() ? "restrict" : onUpdate;
+    tbl.appendFK(fk);
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterTableDropConstraint(const std::string& dbname,
+                                                  const std::string& tablename,
+                                                  const std::string& name) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    bool found = false;
+
+    // Search CHECK constraints
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].checkConstraintName == name) {
+            tbl.cols[i].checkExpr.clear();
+            tbl.cols[i].checkConstraintName.clear();
+            found = true;
+            break;
+        }
+    }
+
+    // Search UNIQUE constraints
+    if (!found) {
+        for (size_t i = 0; i < tbl.uniqueConstraintNames.size(); ++i) {
+            if (tbl.uniqueConstraintNames[i] == name) {
+                tbl.uniqueConstraints.erase(tbl.uniqueConstraints.begin() + i);
+                tbl.uniqueConstraintNames.erase(tbl.uniqueConstraintNames.begin() + i);
+                found = true;
+                break;
+            }
+        }
+    }
+
+    // Search FK constraints
+    if (!found) {
+        for (size_t i = 0; i < tbl.fkLen; ++i) {
+            if (tbl.fks[i].name == name) {
+                // Shift left
+                for (size_t j = i; j + 1 < tbl.fkLen; ++j) {
+                    tbl.fks[j] = tbl.fks[j + 1];
+                }
+                tbl.fkLen--;
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+
     {
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
