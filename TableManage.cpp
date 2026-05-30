@@ -3365,6 +3365,86 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
     return OpResult::Success;
 }
 
+OpResult StorageEngine::truncateTable(const std::string& dbname,
+                                       const std::string& tablename) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    // Remove and recreate data file
+    std::filesystem::remove(dataPath(dbname, tablename));
+    {
+        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize());
+        pa->open();
+        pa->close();
+    }
+
+    // Remove and recreate primary key index
+    if (tbl.hasPrimaryKey()) {
+        std::filesystem::remove(indexPath(dbname, tablename));
+        BPTree idx(indexPath(dbname, tablename));
+        idx.open();
+        idx.close();
+    }
+
+    // Remove and recreate secondary indexes
+    auto idxMeta = getIndexMetadata(dbname, tablename);
+    for (const auto& meta : idxMeta) {
+        std::filesystem::remove(dbPath(dbname) / (tablename + ".idx_" + meta.name));
+    }
+    auto hashIdx = getHashIndexedColumns(dbname, tablename);
+    for (const auto& col : hashIdx) {
+        std::filesystem::remove(hashIndexPath(dbname, tablename, col));
+    }
+    auto compIdx = getCompositeIndexes(dbname, tablename);
+    for (const auto& ci : compIdx) {
+        std::filesystem::remove(dbPath(dbname) / (tablename + ".idx_" + ci.name));
+    }
+    auto ftCols = getFullTextIndexedColumns(dbname, tablename);
+    for (const auto& col : ftCols) {
+        std::filesystem::remove(fullTextIndexPath(dbname, tablename, col));
+    }
+
+    // Clear caches
+    std::string key = dbname + "/" + tablename;
+    pkIndexCache_.erase(key);
+    pageAllocators_.erase(key);
+    secondaryIndexCache_.erase(key);
+    hashIndexCache_.erase(key);
+
+    // Reset auto-increment sequences
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isAutoIncrement) {
+            writeNextSeq(dbname, tablename, tbl.cols[i].dataName, 1);
+        }
+    }
+
+    // Clear statistics
+    auto spath = statsPath(dbname);
+    if (std::filesystem::exists(spath)) {
+        std::ifstream ifs(spath);
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (!line.empty()) {
+                std::stringstream ss(line);
+                std::string t;
+                ss >> t;
+                if (t != tablename) lines.push_back(line);
+            }
+        }
+        std::ofstream ofs(spath);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (i > 0) ofs << '\n';
+            ofs << lines[i];
+        }
+        if (!lines.empty()) ofs << '\n';
+    }
+
+    return OpResult::Success;
+}
+
 OpResult StorageEngine::alterTableAddColumn(const std::string& dbname,
                                              const std::string& tablename,
                                              const Column& col) {

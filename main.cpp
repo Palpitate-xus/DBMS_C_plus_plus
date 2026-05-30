@@ -377,6 +377,54 @@ static string sqlProcessor(string raw) {
         }
         raw = out;
     }
+    // Convert IS DISTINCT FROM / IS NOT DISTINCT FROM to equivalent expressions
+    {
+        auto extractExprBefore = [&](size_t pos) -> std::pair<size_t, std::string> {
+            size_t end = pos;
+            while (end > 0 && isspace(static_cast<unsigned char>(raw[end - 1]))) end--;
+            size_t start = end;
+            while (start > 0 && !isspace(static_cast<unsigned char>(raw[start - 1])) && raw[start - 1] != '(' && raw[start - 1] != ',') start--;
+            return {start, raw.substr(start, end - start)};
+        };
+        auto extractExprAfter = [&](size_t pos, size_t len) -> std::pair<size_t, std::string> {
+            size_t start = pos + len;
+            while (start < raw.size() && isspace(static_cast<unsigned char>(raw[start]))) start++;
+            size_t end = start;
+            while (end < raw.size() && raw[end] != ',' && raw[end] != ')' && raw[end] != ' ' && raw[end] != ';') end++;
+            return {end, raw.substr(start, end - start)};
+        };
+        size_t pos = 0;
+        // IS NOT DISTINCT FROM first (longer match)
+        while ((pos = raw.find("is not distinct from", pos)) != string::npos) {
+            auto [leftStart, leftExpr] = extractExprBefore(pos);
+            auto [rightEnd, rightExpr] = extractExprAfter(pos, 20);
+            string replacement = "((" + leftExpr + " = " + rightExpr + ") or (" + leftExpr + " is null and " + rightExpr + " is null))";
+            raw = raw.substr(0, leftStart) + replacement + raw.substr(rightEnd);
+            pos = leftStart + replacement.size();
+        }
+        pos = 0;
+        while ((pos = raw.find("is distinct from", pos)) != string::npos) {
+            auto [leftStart, leftExpr] = extractExprBefore(pos);
+            auto [rightEnd, rightExpr] = extractExprAfter(pos, 16);
+            string replacement = "((" + leftExpr + " <> " + rightExpr + ") or (" + leftExpr + " is null and " + rightExpr + " is not null) or (" + leftExpr + " is not null and " + rightExpr + " is null))";
+            raw = raw.substr(0, leftStart) + replacement + raw.substr(rightEnd);
+            pos = leftStart + replacement.size();
+        }
+    }
+    // Convert SQL:2008 FETCH FIRST ... ROWS ONLY to LIMIT syntax
+    {
+        size_t fetchPos = raw.find("fetch first");
+        if (fetchPos != string::npos) {
+            size_t rowsPos = raw.find(" rows ", fetchPos);
+            if (rowsPos != string::npos) {
+                string numStr = trim(raw.substr(fetchPos + 11, rowsPos - fetchPos - 11));
+                size_t onlyPos = raw.find("only", rowsPos);
+                size_t endPos = (onlyPos != string::npos) ? onlyPos + 4 : raw.size();
+                string replacement = "limit " + numStr;
+                raw = raw.substr(0, fetchPos) + replacement + raw.substr(endPos);
+            }
+        }
+    }
     return raw;
 }
 
@@ -2900,7 +2948,7 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 5) == "index" || sql.substr(7, 9) == "hash ind" || sql.substr(7, 12) == "unique index") {
+        if (sql.substr(7, 5) == "index" || sql.substr(7, 4) == "hash" || sql.substr(7, 6) == "unique") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
             bool isHash = false;
@@ -5254,6 +5302,23 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // TRUNCATE TABLE tablename
+    if (sql.substr(0, 8) == "truncate") {
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
+        string rest = trim(sql.substr(8));
+        if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
+        string tname = resolveTableName(s, rest);
+        auto res = g_engine.truncateTable(s.currentDB, tname);
+        if (res == OpResult::TableNotExist) {
+            cout << "Table not exist" << endl;
+            return true;
+        }
+        cout << "TRUNCATE TABLE " << tname << " completed" << endl;
+        log(s.username, "truncate table " + tname, getTime());
+        return false;
+    }
+
     if (sql.substr(0, 4) == "drop") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
@@ -6145,6 +6210,36 @@ bool execute(const string& rawSql, Session& s) {
             for (const auto& ci : compIdxs) {
                 for (size_t seq = 0; seq < ci.columns.size(); ++seq) {
                     cout << tname << " " << ci.name << " " << ci.columns[seq] << " " << (seq + 1) << endl;
+                }
+            }
+            return false;
+        }
+        if (rest == "users") {
+            if (!checkAdmin(s)) return true;
+            std::ifstream infile("user.dat");
+            if (!infile) {
+                cout << "No users found" << endl;
+                return false;
+            }
+            user temp;
+            cout << "username permission" << endl;
+            while (infile >> temp.username >> temp.password >> temp.permission) {
+                cout << temp.username << " " << temp.permission << endl;
+            }
+            return false;
+        }
+        if (rest == "roles") {
+            if (!checkAdmin(s)) return true;
+            std::ifstream infile("role.dat");
+            if (!infile) {
+                cout << "No roles found" << endl;
+                return false;
+            }
+            std::string r, u;
+            cout << "role_name" << endl;
+            while (infile >> r >> u) {
+                if (u == "__ROLE__") {
+                    cout << r << endl;
                 }
             }
             return false;
