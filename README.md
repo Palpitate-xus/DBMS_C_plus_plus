@@ -8,11 +8,11 @@
 - **数据库管理**：`CREATE DATABASE`, `DROP DATABASE`, `USE DATABASE`
 - **表管理**：`CREATE TABLE`, `CREATE TEMPORARY TABLE`, `DROP TABLE`, `ALTER TABLE ADD/DROP/ALTER COLUMN`
 - **视图**：`CREATE VIEW`, `CREATE MATERIALIZED VIEW`, `DROP VIEW`, `REFRESH MATERIALIZED VIEW`
-- **索引**：`CREATE INDEX`, `CREATE UNIQUE INDEX`, `CREATE HASH INDEX`, `CREATE FULLTEXT INDEX`, `DROP INDEX`
+- **索引**：`CREATE INDEX`, `CREATE UNIQUE INDEX`, `CREATE INDEX ... USING HASH`, `CREATE FULLTEXT INDEX`, `DROP INDEX`
   - 覆盖索引（`INCLUDE` 列）、部分索引（`WHERE` 条件）、复合索引
 - **触发器**：`CREATE TRIGGER`（BEFORE/AFTER + INSERT/UPDATE/DELETE）
 - **存储程序**：`CREATE PROCEDURE`, `CREATE FUNCTION`（UDF）, `CALL`
-- **角色**：`CREATE ROLE`
+- **角色**：`CREATE ROLE`, `GRANT role TO user`, `REVOKE role FROM user`
 - **分区表**：`CREATE TABLE ... PARTITION BY RANGE`
 - **查看结构**：`VIEW TABLE`, `VIEW DATABASE`, `DESC`, `SHOW COLUMNS`, `SHOW CREATE TABLE`
 - **数据类型**：`INT`, `SMALLINT`, `BIGINT`, `FLOAT`, `DOUBLE`, `MONEY`, `BOOL`, `CHAR(n)`, `VARCHAR(n)`, `NCHAR(n)`, `NVARCHAR(n)`, `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`, `TIMESTAMPTZ`, `BLOB`, `TEXT`, `JSON`, `JSONB`, `ARRAY type`, `SERIAL`
@@ -22,7 +22,7 @@
 - **插入**：`INSERT INTO ... VALUES (...)`, `INSERT INTO ... SELECT ...`
 - **替换**：`REPLACE INTO`（冲突时先删后插）
 - **合并**：`MERGE INTO ... USING ... ON ... UPDATE SET ... INSERT ...`
-- **Upsert**：`UPSERT INTO ... ON CONFLICT DO UPDATE SET ...`
+- **Upsert**：`INSERT INTO ... VALUES ... ON CONFLICT (col) DO UPDATE SET ...`
 - **查询**：`SELECT` 支持 `*`、指定列、`WHERE`、`ORDER BY`、`LIMIT`、`OFFSET`、`DISTINCT`
 - **更新**：`UPDATE ... SET ... WHERE ...`, `UPDATE ... FROM ... WHERE ...`, `UPDATE ... LIMIT n`
 - **删除**：`DELETE FROM ... WHERE ...`, `DELETE ... USING ... WHERE ...`, `DELETE ... LIMIT n`
@@ -282,7 +282,7 @@ refresh materialized view daily_sales;
 ```sql
 create index idx_name on users(name);
 create unique index idx_email on users(email);
-create hash index idx_hash on users(id);
+create index idx_hash on users(id) using hash;
 create index idx_cover on users(name) include (email, age);
 create index idx_partial on orders(amount) where amount > 100;
 drop index idx_name on users;
@@ -511,6 +511,14 @@ Var Offset Array 每项 (4 bytes):
   - dataOffset (2B): 变长数据起始偏移（相对行数据起始）
   - dataLen    (2B): 变长数据长度
 ```
+
+## 已知限制
+
+- **数据存储为小写**：所有字符串值在存储时会被转换为小写（通过 `toLower()` 预处理），`SELECT 'Hello' → 'hello'`
+- **标量函数不支持独立 SELECT**：`SELECT upper('hello')` 会报语法错误，需用于表列：`SELECT upper(name) FROM users`
+- **`SAVEPOINT` 需要在事务内**：`SAVEPOINT` 命令必须在 `BEGIN` 之后执行，否则返回 "Not in transaction"
+- **`CREATE HASH INDEX` 语法不工作**：请使用 `CREATE INDEX name ON table(col) USING HASH` 代替
+- **`SHOW USERS` / `SHOW ROLES` 尚未实现**：用户信息存储在 `user.dat`，角色存储在数据库目录 `.roles` 文件中
 
 ## 参考项目
 

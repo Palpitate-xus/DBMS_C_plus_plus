@@ -281,7 +281,7 @@ DROP VIEW active_users;
 
 **语法**
 ```sql
-CREATE [UNIQUE | HASH | FULLTEXT] INDEX index_name ON table_name (column_name)
+CREATE [UNIQUE | FULLTEXT] INDEX index_name ON table_name (column_name) [USING HASH]
     [INCLUDE (column_name [, ...])]
     [WHERE condition]
 ```
@@ -299,7 +299,7 @@ CREATE [UNIQUE | HASH | FULLTEXT] INDEX index_name ON table_name (column_name)
 ```sql
 CREATE INDEX idx_users_name ON users (name);
 CREATE UNIQUE INDEX idx_users_email ON users (email);
-CREATE HASH INDEX idx_users_id ON users (id);
+CREATE INDEX idx_users_id ON users (id) USING HASH;
 CREATE INDEX idx_orders_user ON orders (user_id) INCLUDE (amount);
 CREATE INDEX idx_orders_amount ON orders (amount) WHERE amount > 100;
 ```
@@ -421,20 +421,20 @@ REPLACE INTO users (id, name, email) VALUES (1, 'Alice Smith', 'alice@new.com');
 
 ---
 
-### UPSERT
+### UPSERT（INSERT ... ON CONFLICT）
 
 **语法**
 ```sql
-UPSERT INTO table_name (column1, column2, ...) VALUES (value1, value2, ...)
-ON CONFLICT DO UPDATE SET column = value [, ...]
+INSERT INTO table_name (column1, column2, ...) VALUES (value1, value2, ...)
+ON CONFLICT (conflict_column) DO UPDATE SET column = value [, ...]
 ```
 
-**说明** 插入时若主键冲突，则执行 UPDATE 操作。
+**说明** 插入时若主键冲突，则执行 UPDATE 操作。本质是 `INSERT ... ON CONFLICT` 语法，不是独立的 `UPSERT` 命令。
 
 **示例**
 ```sql
-UPSERT INTO users (id, name, age) VALUES (1, 'Alice', 26)
-ON CONFLICT DO UPDATE SET name = 'Alice', age = 26;
+INSERT INTO users (id, name, age) VALUES (1, 'Alice', 26)
+ON CONFLICT (id) DO UPDATE SET name = 'Alice', age = 26;
 ```
 
 ---
@@ -1253,25 +1253,15 @@ SHOW PLAN CACHE;
 
 ---
 
-### SHOW USERS
+### SHOW USERS (未实现)
 
-**说明** 列出所有用户。
-
-**示例**
-```sql
-SHOW USERS;
-```
+> **注意**：`SHOW USERS` 命令尚未实现。可通过查看 `user.dat` 文件了解用户列表。
 
 ---
 
-### SHOW ROLES
+### SHOW ROLES (未实现)
 
-**说明** 列出所有角色。
-
-**示例**
-```sql
-SHOW ROLES;
-```
+> **注意**：`SHOW ROLES` 命令尚未实现。角色信息存储在数据库目录的 `.roles` 文件中。
 
 ---
 
