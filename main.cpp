@@ -3708,6 +3708,51 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Column dropped" << endl;
             return false;
         }
+        if (op == "rename") {
+            if (tokens.size() >= 5 && tokens[3] == "column" && tokens[5] == "to") {
+                // alter table tname rename column old_name to new_name
+                string oldName = tokens[4];
+                string newName = tokens[6];
+                auto res = g_engine.alterTableRenameColumn(s.currentDB, tname, oldName, newName);
+                if (res == OpResult::InvalidValue) {
+                    cout << "Column not found" << endl;
+                    return true;
+                }
+                if (res == OpResult::TableAlreadyExist) {
+                    cout << "Column name already exists" << endl;
+                    return true;
+                }
+                cout << "Column renamed" << endl;
+                return false;
+            }
+            if (tokens.size() >= 4 && tokens[3] == "to") {
+                // alter table tname rename to new_table_name
+                string newTname = tokens[4];
+                auto res = g_engine.alterTableRenameTable(s.currentDB, tname, newTname);
+                if (res == OpResult::TableAlreadyExist) {
+                    cout << "Table name already exists" << endl;
+                    return true;
+                }
+                cout << "Table renamed" << endl;
+                return false;
+            }
+            // PostgreSQL shorthand: alter table tname rename old_name to new_name (for column)
+            if (tokens.size() >= 5 && tokens[4] == "to") {
+                string oldName = tokens[3];
+                string newName = tokens[5];
+                auto res = g_engine.alterTableRenameColumn(s.currentDB, tname, oldName, newName);
+                if (res == OpResult::InvalidValue) {
+                    cout << "Column not found" << endl;
+                    return true;
+                }
+                if (res == OpResult::TableAlreadyExist) {
+                    cout << "Column name already exists" << endl;
+                    return true;
+                }
+                cout << "Column renamed" << endl;
+                return false;
+            }
+        }
         cout << "SQL syntax error" << endl;
         return true;
     }

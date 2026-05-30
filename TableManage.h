@@ -136,6 +136,10 @@ public:
                                   const Column& col);
     OpResult alterTableDropColumn(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName);
+    OpResult alterTableRenameColumn(const std::string& dbname, const std::string& tablename,
+                                     const std::string& oldName, const std::string& newName);
+    OpResult alterTableRenameTable(const std::string& dbname, const std::string& oldName,
+                                    const std::string& newName);
     bool tableExists(const std::string& dbname, const std::string& tablename) const;
     std::vector<std::string> getTableNames(const std::string& dbname) const;
     TableSchema getTableSchema(const std::string& dbname, const std::string& tablename) const;

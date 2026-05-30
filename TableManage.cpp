@@ -3362,6 +3362,7 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
             }
         }
     }
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
@@ -3442,6 +3443,7 @@ OpResult StorageEngine::truncateTable(const std::string& dbname,
         if (!lines.empty()) ofs << '\n';
     }
 
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
@@ -3453,9 +3455,15 @@ OpResult StorageEngine::alterTableAddColumn(const std::string& dbname,
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].dataName == col.dataName) return OpResult::TableAlreadyExist;
+        if (tbl.cols[i].dataName == col.dataName) {
+            lockManager_.unlock(tablename);
+            return OpResult::TableAlreadyExist;
+        }
     }
-    if (tbl.len >= MAX_COLUMNS) return OpResult::InvalidValue;
+    if (tbl.len >= MAX_COLUMNS) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
 
     size_t oldRowSize = tbl.rowSize();
     tbl.append(col);
@@ -3491,6 +3499,7 @@ OpResult StorageEngine::alterTableAddColumn(const std::string& dbname,
     }
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
@@ -3505,7 +3514,10 @@ OpResult StorageEngine::alterTableDropColumn(const std::string& dbname,
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colName) { dropIdx = i; break; }
     }
-    if (dropIdx >= tbl.len) return OpResult::InvalidValue;
+    if (dropIdx >= tbl.len) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
 
     size_t oldRowSize = tbl.rowSize();
     size_t dropSize = tbl.cols[dropIdx].dsize;
@@ -3546,6 +3558,367 @@ OpResult StorageEngine::alterTableDropColumn(const std::string& dbname,
     }
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterTableRenameColumn(const std::string& dbname,
+                                                const std::string& tablename,
+                                                const std::string& oldName,
+                                                const std::string& newName) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (oldName == newName) return OpResult::Success;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == oldName) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == newName) {
+            lockManager_.unlock(tablename);
+            return OpResult::TableAlreadyExist;
+        }
+    }
+
+    // Update schema
+    tbl.cols[colIdx].dataName = newName;
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+
+    auto dbDir = dbPath(dbname);
+
+    // Update secondary index meta (.secidx)
+    {
+        std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+        if (std::filesystem::exists(meta)) {
+            std::ifstream in(meta);
+            std::vector<std::string> lines;
+            std::string line;
+            while (std::getline(in, line)) {
+                if (!line.empty()) {
+                    // Replace old column name with new in each line
+                    // Simple token replacement by splitting on ':'
+                    std::string updated;
+                    size_t pos = 0;
+                    while (pos < line.size()) {
+                        size_t next = line.find(':', pos);
+                        std::string token = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
+                        if (token == oldName) token = newName;
+                        updated += token;
+                        if (next == std::string::npos) break;
+                        updated += ':';
+                        pos = next + 1;
+                    }
+                    lines.push_back(updated);
+                }
+            }
+            std::ofstream out(meta, std::ios::trunc);
+            for (const auto& l : lines) out << l << '\n';
+        }
+    }
+
+    // Update hash index meta (.hashidx)
+    {
+        std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
+        if (std::filesystem::exists(meta)) {
+            std::ifstream in(meta);
+            std::vector<std::string> lines;
+            std::string line;
+            while (std::getline(in, line)) {
+                if (!line.empty()) {
+                    if (line == oldName) line = newName;
+                    lines.push_back(line);
+                }
+            }
+            std::ofstream out(meta, std::ios::trunc);
+            for (const auto& l : lines) out << l << '\n';
+        }
+    }
+
+    // Rename secondary index file if exists
+    {
+        std::filesystem::path oldIdx = secondaryIndexPath(dbname, tablename, oldName);
+        std::filesystem::path newIdx = secondaryIndexPath(dbname, tablename, newName);
+        if (std::filesystem::exists(oldIdx)) {
+            std::filesystem::rename(oldIdx, newIdx);
+            std::string oldKey = dbname + "/" + tablename + "/" + oldName;
+            std::string newKey = dbname + "/" + tablename + "/" + newName;
+            auto it = secondaryIndexCache_.find(oldKey);
+            if (it != secondaryIndexCache_.end()) {
+                secondaryIndexCache_[newKey] = std::move(it->second);
+                secondaryIndexCache_.erase(it);
+            }
+        }
+    }
+
+    // Rename hash index file if exists
+    {
+        std::filesystem::path oldIdx = hashIndexPath(dbname, tablename, oldName);
+        std::filesystem::path newIdx = hashIndexPath(dbname, tablename, newName);
+        if (std::filesystem::exists(oldIdx)) {
+            std::filesystem::rename(oldIdx, newIdx);
+            std::string oldKey = dbname + "." + tablename + "." + oldName;
+            auto it = hashIndexCache_.find(oldKey);
+            if (it != hashIndexCache_.end()) {
+                hashIndexCache_.erase(it);
+            }
+        }
+    }
+
+    // Rename fulltext index file if exists
+    {
+        std::filesystem::path oldIdx = fullTextIndexPath(dbname, tablename, oldName);
+        std::filesystem::path newIdx = fullTextIndexPath(dbname, tablename, newName);
+        if (std::filesystem::exists(oldIdx)) {
+            std::filesystem::rename(oldIdx, newIdx);
+        }
+    }
+
+    // Update sequence file (.seq)
+    {
+        std::filesystem::path sp = seqPath(dbname, tablename);
+        if (std::filesystem::exists(sp)) {
+            std::ifstream ifs(sp);
+            std::map<std::string, int64_t> seqs;
+            std::string line;
+            while (std::getline(ifs, line)) {
+                size_t p = line.find(' ');
+                if (p == std::string::npos) continue;
+                std::string cname = line.substr(0, p);
+                try {
+                    seqs[cname] = std::stoll(line.substr(p + 1));
+                } catch (...) {}
+            }
+            auto it = seqs.find(oldName);
+            if (it != seqs.end()) {
+                int64_t val = it->second;
+                seqs.erase(it);
+                seqs[newName] = val;
+                std::ofstream ofs(sp);
+                for (const auto& p : seqs) ofs << p.first << ' ' << p.second << '\n';
+            }
+        }
+    }
+
+    // Update stats file (.stats)
+    {
+        std::filesystem::path sp = statsPath(dbname);
+        if (std::filesystem::exists(sp)) {
+            std::ifstream ifs(sp);
+            std::vector<std::string> lines;
+            std::string line;
+            while (std::getline(ifs, line)) {
+                if (!line.empty()) {
+                    std::stringstream ss(line);
+                    std::string t, c;
+                    ss >> t >> c;
+                    if (t == tablename && c == oldName) {
+                        // Replace column name in line
+                        size_t pos = line.find(oldName);
+                        if (pos != std::string::npos) line.replace(pos, oldName.size(), newName);
+                    }
+                    lines.push_back(line);
+                }
+            }
+            std::ofstream ofs(sp);
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (i > 0) ofs << '\n';
+                ofs << lines[i];
+            }
+            if (!lines.empty()) ofs << '\n';
+        }
+    }
+
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterTableRenameTable(const std::string& dbname,
+                                               const std::string& oldName,
+                                               const std::string& newName) {
+    if (!tableExists(dbname, oldName)) return OpResult::TableNotExist;
+    if (tableExists(dbname, newName)) return OpResult::TableAlreadyExist;
+    lockManager_.lockMetadata(oldName);
+    lockManager_.lockMetadata(newName);
+
+    auto dbDir = dbPath(dbname);
+
+    // Rename schema, data, PK index, sequence files
+    std::filesystem::rename(schemaPath(dbname, oldName), schemaPath(dbname, newName));
+    std::filesystem::rename(dataPath(dbname, oldName), dataPath(dbname, newName));
+    if (std::filesystem::exists(indexPath(dbname, oldName))) {
+        std::filesystem::rename(indexPath(dbname, oldName), indexPath(dbname, newName));
+    }
+    if (std::filesystem::exists(seqPath(dbname, oldName))) {
+        std::filesystem::rename(seqPath(dbname, oldName), seqPath(dbname, newName));
+    }
+
+    // Rename secondary indexes and meta
+    if (std::filesystem::exists(secondaryIndexMetaPath(dbname, oldName))) {
+        auto cols = getIndexedColumns(dbname, oldName);
+        for (const auto& c : cols) {
+            std::filesystem::path oldIdx = secondaryIndexPath(dbname, oldName, c);
+            std::filesystem::path newIdx = secondaryIndexPath(dbname, newName, c);
+            if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+        }
+        std::filesystem::rename(secondaryIndexMetaPath(dbname, oldName), secondaryIndexMetaPath(dbname, newName));
+    }
+
+    // Rename hash indexes and meta
+    if (std::filesystem::exists(hashIndexMetaPath(dbname, oldName))) {
+        auto cols = getHashIndexedColumns(dbname, oldName);
+        for (const auto& c : cols) {
+            std::filesystem::path oldIdx = hashIndexPath(dbname, oldName, c);
+            std::filesystem::path newIdx = hashIndexPath(dbname, newName, c);
+            if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+        }
+        std::filesystem::rename(hashIndexMetaPath(dbname, oldName), hashIndexMetaPath(dbname, newName));
+    }
+
+    // Rename composite indexes
+    auto compIdxs = getCompositeIndexes(dbname, oldName);
+    for (const auto& ci : compIdxs) {
+        std::filesystem::path oldIdx = dbDir / (oldName + ".idx_" + ci.name);
+        std::filesystem::path newIdx = dbDir / (newName + ".idx_" + ci.name);
+        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+
+    // Rename fulltext indexes
+    auto ftCols = getFullTextIndexedColumns(dbname, oldName);
+    for (const auto& c : ftCols) {
+        std::filesystem::path oldIdx = fullTextIndexPath(dbname, oldName, c);
+        std::filesystem::path newIdx = fullTextIndexPath(dbname, newName, c);
+        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+
+    // Rename TOAST directory and meta
+    {
+        std::filesystem::path oldToast = toastDir(dbname, oldName);
+        std::filesystem::path newToast = toastDir(dbname, newName);
+        if (std::filesystem::exists(oldToast)) std::filesystem::rename(oldToast, newToast);
+    }
+    {
+        std::filesystem::path oldMeta = toastMetaPath(dbname, oldName);
+        std::filesystem::path newMeta = toastMetaPath(dbname, newName);
+        if (std::filesystem::exists(oldMeta)) std::filesystem::rename(oldMeta, newMeta);
+    }
+
+    // Update table list
+    {
+        auto names = getTableNames(dbname);
+        std::ofstream out(tableListPath(dbname), std::ios::binary);
+        for (const auto& name : names) {
+            std::string writeName = (name == oldName) ? newName : name;
+            writeFixedString(out, writeName, MAX_TABLE_NAME_LEN);
+        }
+    }
+
+    // Update caches: remove old keys, keep new files on disk for lazy open
+    std::string oldKey = dbname + "/" + oldName;
+    pkIndexCache_.erase(oldKey);
+    pageAllocators_.erase(oldKey);
+    {
+        std::vector<std::string> keysToRemove;
+        for (const auto& p : secondaryIndexCache_) {
+            if (p.first.rfind(oldKey + "/", 0) == 0) keysToRemove.push_back(p.first);
+        }
+        for (const auto& k : keysToRemove) secondaryIndexCache_.erase(k);
+    }
+    {
+        std::vector<std::string> keysToRemove;
+        for (const auto& p : hashIndexCache_) {
+            if (p.first.rfind(dbname + "." + oldName + ".", 0) == 0) keysToRemove.push_back(p.first);
+        }
+        for (const auto& k : keysToRemove) hashIndexCache_.erase(k);
+    }
+
+    // Update permissions file
+    {
+        std::filesystem::path pp = permPath(dbname);
+        if (std::filesystem::exists(pp)) {
+            std::ifstream ifs(pp);
+            std::vector<std::string> lines;
+            std::string line;
+            while (std::getline(ifs, line)) {
+                if (!line.empty()) {
+                    std::stringstream ss(line);
+                    std::string user, t;
+                    ss >> user >> t;
+                    if (t == oldName) {
+                        size_t pos = line.find(oldName);
+                        if (pos != std::string::npos) line.replace(pos, oldName.size(), newName);
+                    }
+                    lines.push_back(line);
+                }
+            }
+            std::ofstream ofs(pp);
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (i > 0) ofs << '\n';
+                ofs << lines[i];
+            }
+            if (!lines.empty()) ofs << '\n';
+        }
+    }
+
+    // Update stats file
+    {
+        std::filesystem::path sp = statsPath(dbname);
+        if (std::filesystem::exists(sp)) {
+            std::ifstream ifs(sp);
+            std::vector<std::string> lines;
+            std::string line;
+            while (std::getline(ifs, line)) {
+                if (!line.empty()) {
+                    std::stringstream ss(line);
+                    std::string t;
+                    ss >> t;
+                    if (t == oldName) {
+                        size_t pos = line.find(oldName);
+                        if (pos != std::string::npos) line.replace(pos, oldName.size(), newName);
+                    }
+                    lines.push_back(line);
+                }
+            }
+            std::ofstream ofs(sp);
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (i > 0) ofs << '\n';
+                ofs << lines[i];
+            }
+            if (!lines.empty()) ofs << '\n';
+        }
+    }
+
+    // Update trigger file
+    {
+        std::filesystem::path tp = triggerPath(dbname);
+        if (std::filesystem::exists(tp)) {
+            auto triggers = getAllTriggers(dbname);
+            bool changed = false;
+            for (auto& t : triggers) {
+                if (t.tableName == oldName) {
+                    t.tableName = newName;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                std::ofstream out(tp, std::ios::binary | std::ios::trunc);
+                size_t count = triggers.size();
+                out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+                for (const auto& t : triggers) writeTrigger(out, t);
+            }
+        }
+    }
+
+    lockManager_.unlock(oldName);
+    lockManager_.unlock(newName);
     return OpResult::Success;
 }
 
