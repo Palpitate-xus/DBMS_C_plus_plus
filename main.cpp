@@ -3753,6 +3753,35 @@ bool execute(const string& rawSql, Session& s) {
                 return false;
             }
         }
+        if (op == "alter" && tokens.size() >= 5 && tokens[3] == "column") {
+            string cname = tokens[4];
+            if (tokens.size() >= 7 && tokens[5] == "set" && tokens[6] == "default") {
+                // alter table t alter column c set default value
+                string defVal = (tokens.size() >= 8) ? tokens[7] : "";
+                // Reconstruct multi-token default from raw SQL if needed
+                if (tokens.size() > 8) {
+                    for (size_t i = 8; i < tokens.size(); ++i) {
+                        defVal += " " + tokens[i];
+                    }
+                }
+                auto res = g_engine.alterTableSetDefault(s.currentDB, tname, cname, defVal);
+                if (res == OpResult::InvalidValue) {
+                    cout << "Column not found" << endl;
+                    return true;
+                }
+                cout << "Default value set" << endl;
+                return false;
+            }
+            if (tokens.size() >= 7 && tokens[5] == "drop" && tokens[6] == "default") {
+                auto res = g_engine.alterTableDropDefault(s.currentDB, tname, cname);
+                if (res == OpResult::InvalidValue) {
+                    cout << "Column not found" << endl;
+                    return true;
+                }
+                cout << "Default value dropped" << endl;
+                return false;
+            }
+        }
         cout << "SQL syntax error" << endl;
         return true;
     }
