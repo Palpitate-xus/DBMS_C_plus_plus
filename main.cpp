@@ -3288,11 +3288,18 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 4) == "view") {
+        bool orReplace = false;
+        size_t createOffset = 7;
+        if (sql.substr(7, 10) == "or replace") {
+            orReplace = true;
+            createOffset = 18;
+        }
+
+        if (sql.substr(createOffset, 4) == "view") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
-            // create view viewname as select ...
-            string rest = trim(sql.substr(12));
+            // create [or replace] view viewname as select ...
+            string rest = trim(sql.substr(createOffset + 5));
             size_t asPos = rest.find(" as ");
             if (asPos == string::npos) {
                 cout << "SQL syntax error: VIEW requires AS clause" << endl;
@@ -3324,20 +3331,24 @@ bool execute(const string& rawSql, Session& s) {
             if (!baseTable.empty()) {
                 storeSql += "\nBASE_TABLE:" + baseTable + "\n";
             }
+            if (orReplace && g_engine.viewExists(s.currentDB, viewname)) {
+                g_engine.dropView(s.currentDB, viewname);
+            }
             auto res = g_engine.createView(s.currentDB, viewname, storeSql);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "View " << viewname << " already exists" << endl;
                 return true;
             }
-            cout << "View " << viewname << " created" << (baseTable.empty() ? "" : " (updatable)") << endl;
+            cout << "View " << viewname << (orReplace ? " replaced" : " created")
+                 << (baseTable.empty() ? "" : " (updatable)") << endl;
             return false;
         }
 
-        if (sql.substr(7, 12) == "materialized") {
+        if (sql.substr(createOffset, 12) == "materialized") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
-            // create materialized view viewname as select ...
-            string rest = trim(sql.substr(20)); // after "create materialized view "
+            // create [or replace] materialized view viewname as select ...
+            string rest = trim(sql.substr(createOffset + 13)); // after "create materialized view "
             size_t asPos = rest.find(" as ");
             if (asPos == string::npos) {
                 cout << "SQL syntax error: MATERIALIZED VIEW requires AS clause" << endl;
@@ -3346,10 +3357,15 @@ bool execute(const string& rawSql, Session& s) {
             string viewname = trim(rest.substr(0, asPos));
             string viewSql = trim(rest.substr(asPos + 4));
             // Check if view already exists
-            if (g_engine.viewExists(s.currentDB, viewname) ||
-                g_engine.isMaterializedView(s.currentDB, viewname)) {
+            if (!orReplace && (g_engine.viewExists(s.currentDB, viewname) ||
+                g_engine.isMaterializedView(s.currentDB, viewname))) {
                 cout << "View " << viewname << " already exists" << endl;
                 return true;
+            }
+            if (orReplace && g_engine.isMaterializedView(s.currentDB, viewname)) {
+                g_engine.dropMaterializedView(s.currentDB, viewname);
+            } else if (orReplace && g_engine.viewExists(s.currentDB, viewname)) {
+                g_engine.dropView(s.currentDB, viewname);
             }
             // Execute the query to get column names and data
             // We need to extract column names from the SELECT
@@ -7589,18 +7605,22 @@ bool execute(const string& rawSql, Session& s) {
             if (g_engine.viewExists(queryDb, tnameOrig)) {
                 string viewSql = g_engine.getViewSQL(queryDb, tnameOrig);
                 if (!viewSql.empty()) {
+                    // Strip BASE_TABLE metadata line for expansion
+                    string expandedSql = viewSql;
+                    size_t btPos = expandedSql.find("\nBASE_TABLE:");
+                    if (btPos != string::npos) expandedSql = expandedSql.substr(0, btPos);
                     // View expansion: replace view reference with derived table
                     // Replace FROM viewname with FROM (view_sql) AS __view_name
                     string expanded = rawSql;
                     string pattern = "from " + tnameOrig;
                     size_t fp = expanded.find(pattern);
                     if (fp != string::npos) {
-                        string subq = "from (" + viewSql + ") as __view_" + tnameOrig;
+                        string subq = "from (" + expandedSql + ") as __view_" + tnameOrig;
                         expanded = expanded.substr(0, fp) + subq + expanded.substr(fp + pattern.size());
                         return execute(expanded, s);
                     }
                     // Fallback: execute view standalone
-                    execute(viewSql, s);
+                    execute(expandedSql, s);
                     return false;
                 }
             }
