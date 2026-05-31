@@ -168,6 +168,14 @@ public:
     std::string getTableComment(const std::string& dbname, const std::string& tablename) const;
     std::string getColumnComment(const std::string& dbname, const std::string& tablename,
                                   const std::string& colname) const;
+    // Sequence support
+    OpResult createSequence(const std::string& dbname, const std::string& seqname,
+                            int64_t start = 1, int64_t increment = 1);
+    OpResult dropSequence(const std::string& dbname, const std::string& seqname);
+    int64_t nextval(const std::string& dbname, const std::string& seqname);
+    int64_t currval(const std::string& dbname, const std::string& seqname);
+    bool sequenceExists(const std::string& dbname, const std::string& seqname) const;
+    std::vector<std::string> getSequenceNames(const std::string& dbname) const;
     bool tableExists(const std::string& dbname, const std::string& tablename) const;
     std::vector<std::string> getTableNames(const std::string& dbname) const;
     TableSchema getTableSchema(const std::string& dbname, const std::string& tablename) const;

@@ -4411,6 +4411,80 @@ std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname)
     return names;
 }
 
+static std::filesystem::path sequencePath(const std::string& dbname, const std::string& seqname) {
+    return std::filesystem::path(dbname) / (seqname + ".seq");
+}
+
+OpResult StorageEngine::createSequence(const std::string& dbname,
+                                        const std::string& seqname,
+                                        int64_t start, int64_t increment) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = sequencePath(dbname, seqname);
+    if (std::filesystem::exists(path)) return OpResult::TableAlreadyExist;
+    std::ofstream ofs(path);
+    ofs << start << " " << increment << "\n";
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropSequence(const std::string& dbname,
+                                      const std::string& seqname) {
+    auto path = sequencePath(dbname, seqname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+int64_t StorageEngine::nextval(const std::string& dbname,
+                                const std::string& seqname) {
+    auto path = sequencePath(dbname, seqname);
+    int64_t val = 1, inc = 1;
+    {
+        std::ifstream ifs(path);
+        if (ifs) ifs >> val >> inc;
+    }
+    int64_t result = val;
+    val += inc;
+    std::ofstream ofs(path);
+    ofs << val << " " << inc << "\n";
+    return result;
+}
+
+int64_t StorageEngine::currval(const std::string& dbname,
+                                const std::string& seqname) {
+    auto path = sequencePath(dbname, seqname);
+    int64_t val = 1, inc = 1;
+    {
+        std::ifstream ifs(path);
+        if (ifs) ifs >> val >> inc;
+    }
+    return val;
+}
+
+bool StorageEngine::sequenceExists(const std::string& dbname,
+                                    const std::string& seqname) const {
+    return std::filesystem::exists(sequencePath(dbname, seqname));
+}
+
+std::vector<std::string> StorageEngine::getSequenceNames(const std::string& dbname) const {
+    std::vector<std::string> names;
+    auto dir = dbPath(dbname);
+    if (!std::filesystem::exists(dir)) return names;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.is_regular_file()) {
+            std::string fname = entry.path().filename().string();
+            if (fname.size() > 4 && fname.substr(fname.size() - 4) == ".seq") {
+                // Exclude table auto-increment sequences (tablename.seq)
+                // Keep only sequences that don't match a table name
+                std::string tname = fname.substr(0, fname.size() - 4);
+                if (!std::filesystem::exists(schemaPath(dbname, tname))) {
+                    names.push_back(tname);
+                }
+            }
+        }
+    }
+    return names;
+}
+
 TableSchema StorageEngine::getTableSchema(const std::string& dbname,
                                             const std::string& tablename) const {
     std::ifstream in(schemaPath(dbname, tablename), std::ios::binary);

@@ -3288,6 +3288,33 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
+        if (sql.substr(7, 8) == "sequence") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            string rest = trim(sql.substr(16));
+            string seqName = rest;
+            int64_t start = 1, increment = 1;
+            size_t startPos = rest.find("start with");
+            if (startPos != string::npos) {
+                seqName = trim(rest.substr(0, startPos));
+                string numStr = trim(rest.substr(startPos + 10));
+                try { start = std::stoll(numStr); } catch (...) {}
+            }
+            size_t incPos = rest.find("increment by");
+            if (incPos != string::npos) {
+                if (startPos == string::npos) seqName = trim(rest.substr(0, incPos));
+                string numStr = trim(rest.substr(incPos + 12));
+                try { increment = std::stoll(numStr); } catch (...) {}
+            }
+            auto res = g_engine.createSequence(s.currentDB, seqName, start, increment);
+            if (res == OpResult::TableAlreadyExist) {
+                cout << "Sequence " << seqName << " already exists" << endl;
+                return true;
+            }
+            cout << "Sequence " << seqName << " created" << endl;
+            return false;
+        }
+
         bool orReplace = false;
         size_t createOffset = 7;
         if (sql.substr(7, 10) == "or replace") {
@@ -4465,8 +4492,12 @@ bool execute(const string& rawSql, Session& s) {
 
         // Regular INSERT INTO ... VALUES
         size_t valStart = sql.find('(', colEnd);
-        size_t valEnd = sql.find(')', valStart);
         if (valStart == string::npos) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        size_t valEnd = findMatchingParen(sql, valStart);
+        if (valEnd == string::npos) {
             cout << "SQL syntax error" << endl;
             return true;
         }
@@ -4481,7 +4512,7 @@ bool execute(const string& rawSql, Session& s) {
             ++nextPos;
             while (nextPos < sql.size() && isspace(static_cast<unsigned char>(sql[nextPos]))) ++nextPos;
             if (nextPos >= sql.size() || sql[nextPos] != '(') break;
-            size_t nextValEnd = sql.find(')', nextPos);
+            size_t nextValEnd = findMatchingParen(sql, nextPos);
             if (nextValEnd == string::npos) break;
             allValStrs.push_back(trim(sql.substr(nextPos + 1, nextValEnd - nextPos - 1)));
             nextPos = nextValEnd + 1;
@@ -4557,7 +4588,26 @@ bool execute(const string& rawSql, Session& s) {
             }
 
             map<string, string> values;
-            for (size_t i = 0; i < cols.size(); ++i) values[cols[i]] = stripQuotes(vals[i]);
+            for (size_t i = 0; i < cols.size(); ++i) {
+                string val = stripQuotes(vals[i]);
+                string lval = toLower(val);
+                if (lval.size() >= 7 && lval.substr(0, 7) == "nextval") {
+                    size_t lp = val.find('(');
+                    size_t rp = val.find(')', lp);
+                    if (lp != string::npos && rp != string::npos) {
+                        string seqName = stripQuotes(trim(val.substr(lp + 1, rp - lp - 1)));
+                        val = std::to_string(g_engine.nextval(s.currentDB, seqName));
+                    }
+                } else if (lval.size() >= 7 && lval.substr(0, 7) == "currval") {
+                    size_t lp = val.find('(');
+                    size_t rp = val.find(')', lp);
+                    if (lp != string::npos && rp != string::npos) {
+                        string seqName = stripQuotes(trim(val.substr(lp + 1, rp - lp - 1)));
+                        val = std::to_string(g_engine.currval(s.currentDB, seqName));
+                    }
+                }
+                values[cols[i]] = val;
+            }
 
             // Validate ENUM constraints
             {
@@ -5822,6 +5872,15 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Table dropped" << endl;
+            return false;
+        }
+        if (op == "sequence") {
+            auto res = g_engine.dropSequence(s.currentDB, name);
+            if (res == OpResult::TableNotExist) {
+                cout << "Sequence " << name << " not exist" << endl;
+                return true;
+            }
+            cout << "Sequence dropped" << endl;
             return false;
         }
         if (op == "user") {
