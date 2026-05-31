@@ -7150,6 +7150,23 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // DISCARD ALL: reset session state
+    if (sql == "discard all") {
+        // Drop all temporary tables
+        for (const auto& t : s.tempTables) {
+            g_engine.dropTable(s.currentDB, tempTablePrefix(t));
+        }
+        s.tempTables.clear();
+        // Clear prepared statements
+        s.preparedStmts.clear();
+        // Reset session variables
+        s.timezoneOffsetMinutes = 0;
+        s.statementTimeoutMs = 0;
+        s.isolationLevel = 2; // REPEATABLE READ default
+        cout << "Session state discarded" << endl;
+        return false;
+    }
+
     // LOAD DATA INFILE: import CSV
     if (sql.substr(0, 17) == "load data infile ") {
         if (!checkAdmin(s)) return true;
