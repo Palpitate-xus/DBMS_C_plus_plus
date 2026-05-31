@@ -3705,6 +3705,36 @@ bool execute(const string& rawSql, Session& s) {
         return true;
     }
 
+    if (sql.substr(0, 4) == "lock") {
+        if (!checkDB(s)) return true;
+        string rest = trim(sql.substr(4));
+        if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
+        vector<string> tokens = tokenize(rest);
+        if (tokens.size() < 4) {
+            cout << "SQL syntax error: LOCK TABLE tname IN SHARE|EXCLUSIVE MODE" << endl;
+            return true;
+        }
+        string tname = resolveTableName(s, tokens[0]);
+        if (!g_engine.tableExists(s.currentDB, tname)) {
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
+        string mode = tokens[2];
+        for (auto& c : mode) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        bool ok = false;
+        if (mode == "share") {
+            ok = g_engine.getLockManager().lockShared(tname);
+        } else if (mode == "exclusive") {
+            ok = g_engine.getLockManager().lockExclusive(tname);
+        }
+        if (!ok) {
+            cout << "Lock acquisition failed (deadlock detected)" << endl;
+            return true;
+        }
+        cout << "Table " << tname << " locked in " << mode << " mode" << endl;
+        return false;
+    }
+
     if (sql.substr(0, 5) == "alter") {
         if (!checkAdmin(s)) return true;
         vector<string> tokens = tokenize(sql.substr(5));
