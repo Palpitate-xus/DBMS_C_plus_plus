@@ -7174,6 +7174,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return arg;
     };
 
+    if ((expr.funcName == "current_user" || expr.funcName == "session_user") && !expr.sessionUser.empty()) {
+        return expr.sessionUser;
+    }
     if (expr.funcName == "length" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
         return std::to_string(val.size());

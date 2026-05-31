@@ -297,6 +297,7 @@ public:
         std::string funcName;
         std::vector<std::string> funcArgs;
         std::string colName;
+        std::string sessionUser; // filled for current_user / session_user pseudo-functions
     };
     std::vector<std::string> queryExpr(const std::string& dbname,
                                         const std::string& tablename,

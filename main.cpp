@@ -542,7 +542,8 @@ static bool isScalarFunc(const string& name) {
                                          "uuid_generate",
                                          "array_get", "array_length", "array_contains",
                                          "unnest",
-                                         "subquery"};
+                                         "subquery",
+                                         "current_user", "session_user"};
     return scalars.find(name) != scalars.end();
 }
 
@@ -3668,6 +3669,24 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
+    }
+
+    // SET ROLE rolename
+    if (sql.substr(0, 9) == "set role ") {
+        string roleName = trim(sql.substr(9));
+        if (roleName.empty()) {
+            cout << "SQL syntax error: SET ROLE role_name" << endl;
+            return true;
+        }
+        s.currentRole = roleName;
+        cout << "Role set to " << roleName << endl;
+        return false;
+    }
+    // RESET ROLE
+    if (sql == "reset role") {
+        s.currentRole = s.originalRole;
+        cout << "Role reset to " << s.currentRole << endl;
+        return false;
     }
 
     // SET parameter = value  (session-level, non-persistent)
@@ -8112,6 +8131,19 @@ bool execute(const string& rawSql, Session& s) {
         {
             for (const auto& itemRaw : splitSelectColumns(columns)) {
                 string item = trim(itemRaw);
+                if (item == "current_user" || item == "session_user") {
+                    dbms::StorageEngine::SelectExpr expr;
+                    expr.displayName = item;
+                    expr.isScalar = true;
+                    expr.funcName = item;
+                    expr.sessionUser = (item == "current_user")
+                        ? (s.currentRole.empty() ? s.username : s.currentRole)
+                        : s.username;
+                    selectExprs.push_back(expr);
+                    hasScalar = true;
+                    exprTypes.push_back(3);
+                    continue;
+                }
                 WindowFunc wf;
                 if (parseWindowFunc(item, wf)) {
                     windowFuncs.push_back(wf);
@@ -8933,6 +8965,7 @@ int main(int argc, char* argv[]) {
     cin >> username >> password;
     if (login(username, password)) {
         s.username = username;
+        s.originalRole = username;
         log(s.username, "login", getTime());
         s.permission = permissionQuery(username);
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
