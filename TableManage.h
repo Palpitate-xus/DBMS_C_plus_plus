@@ -424,6 +424,8 @@ public:
 
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename);
+    // VACUUM FULL: rewrite table entirely, reclaiming all dead space
+    size_t vacuumFull(const std::string& dbname, const std::string& tablename);
 
     // Auto-VACUUM: per-table dead tuple tracking and automatic triggering
     void maybeAutoVacuum(const std::string& dbname, const std::string& tablename);

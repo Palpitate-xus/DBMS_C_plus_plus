@@ -10180,6 +10180,83 @@ size_t StorageEngine::vacuum(const std::string& dbname,
 }
 
 // ========================================================================
+// VACUUM FULL: completely rewrite table, reclaiming all dead space
+// ========================================================================
+size_t StorageEngine::vacuumFull(const std::string& dbname,
+                                 const std::string& tablename) {
+    if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
+    lockManager_.lockExclusive(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<std::map<std::string, std::string>> rows;
+
+    // Collect all live rows
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        std::string row(data, len);
+        std::map<std::string, std::string> values;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+        }
+        rows.push_back(std::move(values));
+    });
+
+    std::string key = dbname + "/" + tablename;
+    // Evict caches so new files will be created
+    pageAllocators_.erase(key);
+    pkIndexCache_.erase(key);
+    secondaryIndexCache_.erase(key);
+    hashIndexCache_.erase(key);
+
+    // Remove old data file
+    std::filesystem::remove(dataPath(dbname, tablename));
+    // Remove all index files for this table
+    std::filesystem::remove(indexPath(dbname, tablename)); // PK index .idx
+    auto indexedCols = getIndexedColumns(dbname, tablename);
+    for (const auto& colname : indexedCols) {
+        std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
+        std::filesystem::remove(hashIndexPath(dbname, tablename, colname));
+    }
+    // Remove any named secondary index meta files
+    std::filesystem::path dbDir = dbPath(dbname);
+    for (const auto& entry : std::filesystem::directory_iterator(dbDir)) {
+        std::string fname = entry.path().filename().string();
+        if (fname.size() > tablename.size() + 1 &&
+            fname.substr(0, tablename.size() + 1) == tablename + "_") {
+            auto endsWith = [](const std::string& s, const std::string& suffix) {
+                return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+            };
+            if (endsWith(fname, ".idx") || endsWith(fname, ".hidx") ||
+                endsWith(fname, ".fti") || endsWith(fname, ".secidx") ||
+                endsWith(fname, ".hashidx")) {
+                std::filesystem::remove(entry.path());
+            }
+        }
+    }
+
+    // Re-create empty data file via getPageAllocator (lazy creation)
+    {
+        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize());
+        pa->open();
+        pageAllocators_[key] = std::move(pa);
+    }
+
+    // Release exclusive lock before re-inserting (insert acquires its own lock)
+    lockManager_.unlock(tablename);
+
+    // Re-insert all rows (this rebuilds PK and secondary indexes)
+    for (const auto& values : rows) {
+        insert(dbname, tablename, values);
+    }
+
+    // Reset dead tuple count
+    auto dtKey = std::make_pair(dbname, tablename);
+    std::lock_guard<std::mutex> lock(deadTupleMutex_);
+    deadTupleCounts_[dtKey] = 0;
+
+    return rows.size();
+}
+
+// ========================================================================
 // Transaction logging helpers
 // ========================================================================
 

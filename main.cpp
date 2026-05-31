@@ -5867,6 +5867,20 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (sql.size() >= 11 && sql.substr(0, 11) == "vacuum full") {
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
+        string tname = trim(sql.substr(11));
+        if (tname.empty()) {
+            cout << "VACUUM FULL requires a table name" << endl;
+            return true;
+        }
+        string resolvedName = resolveTableName(s, tname);
+        size_t n = g_engine.vacuumFull(s.currentDB, resolvedName);
+        cout << "VACUUM FULL completed, " << n << " rows rewritten" << endl;
+        return false;
+    }
+
     if (sql.substr(0, 6) == "vacuum") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
