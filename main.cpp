@@ -2884,10 +2884,17 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 5) == "table") {
+        bool isUnlogged = false;
+        size_t tableKeywordPos = 7;
+        if (sql.size() > 16 && sql.substr(7, 9) == "unlogged ") {
+            isUnlogged = true;
+            tableKeywordPos = 16;
+        }
+        if (sql.substr(tableKeywordPos, 5) == "table") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
-            string rest = trim(sql.substr(13));
+            size_t restOff = tableKeywordPos + 6;
+            string rest = trim(sql.substr(restOff));
             size_t sp = rest.find(' ');
             if (sp == string::npos) {
                 cout << "SQL syntax error" << endl;
@@ -3015,8 +3022,9 @@ bool execute(const string& rawSql, Session& s) {
             size_t partPos = sql.find("partition by");
             string colsSql = sql;
             if (partPos != string::npos) colsSql = sql.substr(0, partPos);
-            TableSchema tbl = parseTableColumns(colsSql, 13 + sp + 1);
+            TableSchema tbl = parseTableColumns(colsSql, restOff + sp + 1);
             tbl.tablename = tname;
+            tbl.isUnlogged = isUnlogged;
             // Parse partitioning
             if (partPos != string::npos) {
                 string partRest = trim(sql.substr(partPos + 12)); // after "partition by"

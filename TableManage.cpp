@@ -3012,6 +3012,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             writeFixedString(out, tbl.fks[i].name, MAX_TABLE_NAME_LEN);
         }
     }
+    // UNLOGGED flag (backward-compatible: new field at tail)
+    uint8_t unloggedFlag = tbl.isUnlogged ? 1 : 0;
+    out.write(reinterpret_cast<const char*>(&unloggedFlag), 1);
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -3232,6 +3235,10 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
+    // UNLOGGED flag (backward-compatible: may not exist in old files)
+    uint8_t unloggedFlag = 0;
+    in.read(reinterpret_cast<char*>(&unloggedFlag), 1);
+    if (in) tbl.isUnlogged = (unloggedFlag != 0);
 
     return tbl;
 }
@@ -9957,6 +9964,21 @@ void StorageEngine::recoverAllDatabases() {
             // Clear stale index cache entries for this db
             pkIndexCache_.clear();
         }
+        // After any recovery action, truncate UNLOGGED tables (PG semantics)
+        try {
+            auto tnames = getTableNames(dbname);
+            for (const auto& tn : tnames) {
+                TableSchema ts = getTableSchema(dbname, tn);
+                if (ts.isUnlogged) {
+                    std::filesystem::path dtPath = dbPath(dbname) / (tn + ".dt");
+                    std::filesystem::path idxPath = dbPath(dbname) / (tn + ".idx");
+                    if (std::filesystem::exists(dtPath)) std::filesystem::remove(dtPath);
+                    if (std::filesystem::exists(idxPath)) std::filesystem::remove(idxPath);
+                    // Recreate empty data file
+                    std::ofstream(dtPath, std::ios::binary).close();
+                }
+            }
+        } catch (...) {}
     }
 }
 
@@ -10184,6 +10206,16 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
 
     // Keep a backup for crash recovery (recoverAllDatabases)
+    // Skip data/index files of UNLOGGED tables (they are truncated on crash)
+    std::set<std::string> unloggedFiles;
+    auto tblNames = getTableNames(dbname);
+    for (const auto& tn : tblNames) {
+        TableSchema ts = getTableSchema(dbname, tn);
+        if (ts.isUnlogged) {
+            unloggedFiles.insert(tn + ".dt");
+            unloggedFiles.insert(tn + ".idx");
+        }
+    }
     std::filesystem::path backup = dbPath(dbname);
     backup += ".txn_backup";
     if (std::filesystem::exists(backup)) {
@@ -10191,6 +10223,7 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
     }
     std::filesystem::create_directories(backup);
     for (const auto& entry : std::filesystem::directory_iterator(dbPath(dbname))) {
+        if (unloggedFiles.count(entry.path().filename().string())) continue;
         std::filesystem::path dest = backup / entry.path().filename();
         if (entry.is_directory()) {
             std::filesystem::copy(entry.path(), dest, std::filesystem::copy_options::recursive);

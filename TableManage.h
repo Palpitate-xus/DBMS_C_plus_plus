@@ -87,6 +87,7 @@ struct TableSchema {
     std::vector<std::pair<std::string, std::string>> rangePartitions;  // name -> upper bound
     std::vector<std::pair<std::string, std::vector<std::string>>> listPartitions;  // name -> values
     size_t hashPartitions = 0;  // number of hash partitions
+    bool isUnlogged = false;    // UNLOGGED table: no WAL, truncated on crash
 
     void append(const Column& ncol);
     void appendFK(const ForeignKey& fk);
