@@ -27,7 +27,7 @@
 | ALTER SCHEMA | ❌ | ✅ | — |
 | CREATE TABLE | ✅ | ✅ | 支持广泛的数据类型和约束 |
 | CREATE TEMPORARY TABLE | ✅ | ✅ | 会话级临时表 |
-| CREATE UNLOGGED TABLE | ❌ | ✅ | **无 UNLOGGED 表** |
+| CREATE UNLOGGED TABLE | ✅ | ✅ | — |
 | CREATE TABLE AS | ❌ | ✅ | 不支持 `CREATE TABLE ... AS SELECT` |
 | CREATE TABLE ... PARTITION BY | ✅ | ✅ | Range/List/Hash |
 | CREATE TABLE ... PARTITION OF | ❌ | ✅ | **声明式分区仅通过子句**，不支持独立 `PARTITION OF` |
@@ -173,18 +173,18 @@
 | WHERE 条件 | ✅ | ✅ | — |
 | 三值逻辑 (NULL) | ✅ | ✅ | — |
 | IS NULL / IS NOT NULL | ✅ | ✅ | — |
-| IS DISTINCT FROM | ❌ | ✅ | **缺失** |
-| IS NOT DISTINCT FROM | ❌ | ✅ | **缺失** |
+| IS DISTINCT FROM | ✅ | ✅ | — |
+| IS NOT DISTINCT FROM | ✅ | ✅ | — |
 | LIKE / ILIKE | ✅ | ✅ | ILIKE 需验证 |
-| SIMILAR TO (SQL 标准正则) | ❌ | ✅ | **缺失** |
+| SIMILAR TO (SQL 标准正则) | ✅ | ✅ | — |
 | BETWEEN | ✅ | ✅ | — |
-| OVERLAPS | ❌ | ✅ | **缺失**（日期区间重叠） |
+| OVERLAPS | ✅ | ✅ | — |
 | DISTINCT | ✅ | ✅ | — |
-| DISTINCT ON | ❌ | ✅ | **缺失**（PG 扩展） |
+| DISTINCT ON | ✅ | ✅ | — |
 | ORDER BY | ✅ | ✅ | 含 NULLS FIRST/LAST |
 | ORDER BY 表达式/位置编号 | ⚠️ | ✅ | 位置编号 `ORDER BY 1` 待验证 |
 | LIMIT / OFFSET | ✅ | ✅ | — |
-| FETCH FIRST ... ROWS ONLY | ❌ | ✅ | **SQL 标准分页语法缺失** |
+| FETCH FIRST ... ROWS ONLY | ✅ | ✅ | — |
 | INNER / LEFT / RIGHT JOIN | ✅ | ✅ | — |
 | FULL OUTER JOIN | ✅ | ✅ | — |
 | CROSS JOIN | ✅ | ✅ | — |
@@ -207,10 +207,10 @@
 | GROUP BY | ✅ | ✅ | — |
 | GROUP BY 多列 | ✅ | ✅ | — |
 | HAVING | ✅ | ✅ | — |
-| GROUPING SETS | ❌ | ✅ | **完全缺失** |
-| ROLLUP | ❌ | ✅ | **完全缺失** |
-| CUBE | ❌ | ✅ | **完全缺失** |
-| GROUPING() 函数 | ❌ | ✅ | — |
+| GROUPING SETS | ✅ | ✅ | — |
+| ROLLUP | ✅ | ✅ | — |
+| CUBE | ✅ | ✅ | — |
+| GROUPING() 函数 | ✅ | ✅ | — |
 | 窗口函数（基础10个） | ✅ | ✅ | — |
 | 聚合函数 OVER 窗口 | ✅ | ✅ | — |
 | 窗口帧 ROWS BETWEEN | ⚠️ | ✅ | 解析器有代码剥离，**运行时实现不完整** |
@@ -292,8 +292,8 @@
 | SELECT FOR UPDATE/SHARE | ✅ | ✅ | — |
 | NOWAIT / SKIP LOCKED | ✅ | ✅ | — |
 | 死锁检测（等待图） | ✅ | ✅ | — |
-| lock_timeout 设置 | ❌ | ✅ | **缺失** |
-| deadlock_timeout 设置 | ❌ | ✅ | **缺失** |
+| lock_timeout 设置 | ✅ | ✅ | — |
+| deadlock_timeout 设置 | ✅ | ✅ | — |
 | LOCK TABLE 命令 | ❌ | ✅ | **缺失** |
 | Advisory Locks (pg_advisory_lock) | ❌ | ✅ | **缺失** |
 | 行级安全策略 (RLS) | ❌ | ✅ | **完全缺失** |
@@ -312,8 +312,8 @@
 | 变长行（VARCHAR 偏移数组） | ✅ | ✅ | — |
 | TOAST（溢出页，超大字段） | ✅ | ✅ | — |
 | VACUUM | ✅ | ✅ | — |
-| VACUUM FULL | ❌ | ✅ | **无 FULL 模式（完全重写表）** |
-| ANALYZE（不指定表，全局） | ❌ | ✅ | 仅支持 `ANALYZE TABLE tablename` |
+| VACUUM FULL | ✅ | ✅ | — |
+| ANALYZE（不指定表，全局） | ✅ | ✅ | — |
 | 自动 VACUUM | ✅ | ✅ | 可配置阈值 |
 | 自动 ANALYZE | ⚠️ | ✅ | 需手动执行，非自动 |
 | 表空间 (TABLESPACE) | ❌ | ✅ | **完全缺失**，数据固定在当前目录 |
@@ -331,7 +331,7 @@
 |------|--------|------------|----------|
 | 普通视图 (CREATE VIEW) | ✅ | ✅ | — |
 | DROP VIEW | ✅ | ✅ | — |
-| CREATE OR REPLACE VIEW | ❌ | ✅ | **缺失** |
+| CREATE OR REPLACE VIEW | ✅ | ✅ | — |
 | ALTER VIEW | ❌ | ✅ | — |
 | 可更新视图 | ✅ | ✅ | — |
 | WITH CHECK OPTION | ❌ | ✅ | **缺失** |
@@ -406,9 +406,9 @@
 | DROP ROLE | ✅ | ✅ | — |
 | GRANT role TO user | ✅ | ✅ | — |
 | REVOKE role FROM user | ✅ | ✅ | — |
-| SET ROLE | ❌ | ✅ | **缺失** |
-| RESET ROLE | ❌ | ✅ | — |
-| CURRENT_USER / SESSION_USER | ❌ | ✅ | **缺失** |
+| SET ROLE | ✅ | ✅ | — |
+| RESET ROLE | ✅ | ✅ | — |
+| CURRENT_USER / SESSION_USER | ✅ | ✅ | — |
 | GRANT ON TABLE | ✅ | ✅ | SELECT/INSERT/UPDATE/DELETE/ALL |
 | GRANT ON COLUMN | ✅ | ✅ | — |
 | GRANT ON DATABASE | ✅ | ✅ | — |
@@ -534,7 +534,7 @@
 | pg_prewarm | ❌ | ✅ | — |
 | pageinspect | ❌ | ✅ | — |
 | pg_buffercache | ❌ | ✅ | — |
-| SEQUENCE 对象 (CREATE SEQUENCE, nextval) | ❌ | ✅ | 仅 SERIAL 伪类型隐式序列 |
+| SEQUENCE 对象 (CREATE SEQUENCE, nextval) | ✅ | ✅ | 支持 CREATE SEQUENCE / DROP SEQUENCE / nextval() / currval() / setval() |
 
 ---
 
@@ -545,7 +545,7 @@
 | SET / RESET 参数 | ✅ | ✅ | — |
 | ALTER SYSTEM | ❌ | ✅ | **缺失**（postgresql.conf 直接编辑） |
 | SELECT pg_reload_conf() | ❌ | ✅ | — |
-| DISCARD ALL | ❌ | ✅ | **缺失** |
+| DISCARD ALL | ✅ | ✅ | — |
 | 查询取消 (pg_cancel_backend) | ❌ | ✅ | **缺失** |
 | 连接终止 (pg_terminate_backend) | ❌ | ✅ | **缺失** |
 | 信号管理 | ❌ | ✅ | — |
@@ -562,27 +562,27 @@
 
 | 功能域 | 已实现 | 部分实现 | 缺失 | 完成度 |
 |--------|--------|----------|------|--------|
-| DDL | 10 | 1 | 22 | ~30% |
+| DDL | 11 | 1 | 21 | ~33% |
 | 数据类型 | 23 | 1 | 17 | ~56% |
 | 约束 | 7 | 1 | 5 | ~54% |
 | 索引 | 12 | 0 | 10 | ~55% |
 | DML | 12 | 0 | 6 | ~67% |
-| DQL | 31 | 3 | 16 | ~62% |
+| DQL | 41 | 3 | 6 | ~78% |
 | 查询优化器 | 16 | 0 | 16 | ~50% |
 | 事务/MVCC | 13 | 0 | 8 | ~62% |
-| 并发控制 | 8 | 0 | 9 | ~47% |
-| 存储引擎 | 10 | 1 | 10 | ~48% |
-| 视图 | 5 | 0 | 8 | ~38% |
+| 并发控制 | 10 | 0 | 7 | ~59% |
+| 存储引擎 | 12 | 1 | 8 | ~57% |
+| 视图 | 6 | 0 | 7 | ~46% |
 | 触发器/规则 | 5 | 0 | 12 | ~29% |
 | 存储过程/函数 | 4 | 0 | 13 | ~24% |
-| 安全与权限 | 16 | 0 | 22 | ~42% |
+| 安全与权限 | 19 | 0 | 19 | ~50% |
 | 复制与高可用 | 0 | 0 | 11 | **0%** |
 | 备份与恢复 | 4 | 0 | 9 | ~31% |
 | 监控与诊断 | 9 | 2 | 9 | ~45% |
 | 扩展性 | 0 | 0 | 9 | **0%** |
 | 国际化 | 3 | 0 | 5 | ~38% |
-| 高级特性 | 0 | 0 | 20 | **0%** |
-| 系统管理 | 1 | 0 | 12 | ~8% |
+| 高级特性 | 1 | 0 | 19 | ~5% |
+| 系统管理 | 2 | 0 | 11 | ~15% |
 
 ### 核心差距 TOP 20（按重要性排序）
 
@@ -590,22 +590,22 @@
 2. ❌ **并行查询** — 无法利用多核 CPU
 3. ❌ **真正的 SERIALIZABLE (SSI)** — 仅快照隔离模拟
 4. ❌ **LATERAL JOIN** — 无法在 JOIN 中引用左侧列的子查询
-5. ❌ **GROUPING SETS / ROLLUP / CUBE** — OLAP 核心功能
-6. ❌ **流复制 / 逻辑复制** — 无任何复制能力
-7. ❌ **时间点恢复 (PITR)** — 无法恢复到任意时间点
-8. ❌ **声明式分区管理 (ATTACH/DETACH)** — 分区运维能力
-9. ❌ **PL/pgSQL 过程语言** — 存储过程无编程能力
-10. ❌ **扩展系统 (EXTENSION + FDW)** — 无法集成外部数据源
-11. ❌ **行级安全 (RLS)** — 多租户场景必备
-12. ❌ **GiST / GIN / BRIN 索引** — 空间/全文/JSON 加速
-13. ❌ **NOTIFY / LISTEN** — 无异步消息
-14. ❌ **SEQUENCE 对象** — 仅 AUTO_INCREMENT/SERIAL 隐式序列
-15. ❌ **TRUNCATE TABLE** — 代码仅做权限检查后返回，未真正实现
-16. ❌ **VACUUM FULL** — 无法完全回收空间
-17. ❌ **IS DISTINCT FROM / FETCH FIRST / OVERLAPS** — SQL 标准细节
-18. ❌ **两阶段提交** — 分布式事务基础
-19. ❌ **SCRAM 认证 / pg_hba.conf** — 企业级认证
-20. ❌ **游标 / OUT 参数 / 函数重载** — 存储过程完整性
+5. ❌ **流复制 / 逻辑复制** — 无任何复制能力
+6. ❌ **时间点恢复 (PITR)** — 无法恢复到任意时间点
+7. ❌ **声明式分区管理 (ATTACH/DETACH)** — 分区运维能力
+8. ❌ **PL/pgSQL 过程语言** — 存储过程无编程能力
+9. ❌ **扩展系统 (EXTENSION + FDW)** — 无法集成外部数据源
+10. ❌ **行级安全 (RLS)** — 多租户场景必备
+11. ❌ **GiST / GIN / BRIN 索引** — 空间/全文/JSON 加速
+12. ❌ **NOTIFY / LISTEN** — 无异步消息
+13. ❌ **TRUNCATE TABLE** — 代码仅做权限检查后返回，未真正实现
+14. ❌ **两阶段提交** — 分布式事务基础
+15. ❌ **SCRAM 认证 / pg_hba.conf** — 企业级认证
+16. ❌ **游标 / OUT 参数 / 函数重载** — 存储过程完整性
+17. ❌ **WITH CHECK OPTION** — 可更新视图完整性约束
+18. ❌ **GRANT WITH GRANT OPTION** — 权限级联授权
+19. ❌ **窗口帧 RANGE/GROUPS BETWEEN** — 高级窗口分析
+20. ❌ **EXPLAIN 选项 (TIMING, COSTS, SETTINGS)** — 执行计划诊断能力
 
 ### 总体评估
 
