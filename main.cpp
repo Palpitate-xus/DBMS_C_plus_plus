@@ -5409,6 +5409,19 @@ bool execute(const string& rawSql, Session& s) {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
         string rest = trim(sql.substr(7));
+        // ANALYZE without args, or ANALYZE ALL TABLES, or ANALYZE DATABASE → analyze all tables
+        if (rest.empty() || rest == "all tables" || rest == "database") {
+            auto tables = g_engine.getTableNames(s.currentDB);
+            if (tables.empty()) {
+                cout << "No tables to analyze in database " << s.currentDB << endl;
+                return false;
+            }
+            for (const auto& tname : tables) {
+                g_engine.analyzeTable(s.currentDB, tname);
+                cout << "Table " << tname << " analyzed" << endl;
+            }
+            return false;
+        }
         if (rest.substr(0, 5) != "table") {
             cout << "SQL syntax error" << endl;
             return true;
