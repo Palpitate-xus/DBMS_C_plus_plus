@@ -8826,6 +8826,290 @@ std::vector<std::string> StorageEngine::groupAggregate(
     return result;
 }
 
+// ========================================================================
+// Grouping Sets / ROLLUP / CUBE aggregate
+// ========================================================================
+
+std::vector<std::string> StorageEngine::groupAggregateSets(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& conditions,
+    const std::vector<AggItem>& items,
+    const std::vector<std::string>& allGroupByCols,
+    const std::vector<std::vector<std::string>>& groupingSets,
+    const std::vector<std::string>& havingConds) {
+    std::vector<std::string> result;
+    if (!tableExists(dbname, tablename)) return result;
+    lockManager_.lockShared(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    // Map all GROUP BY columns to indices
+    std::vector<size_t> allGroupIdxs;
+    for (const auto& gcol : allGroupByCols) {
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == gcol) { allGroupIdxs.push_back(i); break; }
+        }
+    }
+    if (allGroupIdxs.size() != allGroupByCols.size()) {
+        lockManager_.unlock(tablename);
+        return result;
+    }
+
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    auto conds = parseConditions(conditions);
+    std::vector<int64_t> matchIds;
+    if (conds.empty()) {
+        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+            matchIds.push_back(encodeRid(pageId, slotId));
+        });
+    } else {
+        auto ids = filterRows(dbname, tablename, conds);
+        matchIds.assign(ids.begin(), ids.end());
+    }
+
+    // Reuse computeAgg lambda from groupAggregate
+    auto computeAgg = [&](const std::vector<int64_t>& gids,
+                           const std::string& func, const std::string& colName,
+                           const std::vector<std::string>& filterConds = {}) -> std::string {
+        bool isDistinctCount = (func == "count" && colName.size() > 9 && colName.substr(0, 9) == "distinct ");
+        std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
+        bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
+        bool isArrayAgg = (func == "array_agg");
+        size_t colIdx = tbl.len;
+        bool isInt = false, isDate = false, isChar = false;
+        if (func != "count" || actualColName != "*") {
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == actualColName) {
+                    colIdx = i;
+                    isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
+                    isDate = (tbl.cols[i].dataType == "date");
+                    isChar = (tbl.cols[i].dataType == "char" || tbl.cols[i].isVariableLength);
+                    break;
+                }
+            }
+        }
+        int64_t count = 0, sum = 0;
+        bool hasMax = false, hasMin = false;
+        std::string maxStr, minStr;
+        int64_t maxInt = 0, minInt = 0;
+        Date maxDate, minDate;
+        std::string groupConcat;
+        bool groupConcatFirst = true;
+        std::vector<std::string> jsonAggVals;
+        std::vector<std::string> arrayAggVals;
+
+        if (isDistinctCount) {
+            std::set<std::string> distinctVals;
+            for (int64_t rid : gids) {
+                std::string row;
+                if (!readRowByRid(pa, rid, row, tbl)) continue;
+                if (colIdx >= tbl.len) continue;
+                std::string val = extractColumnValue(row, tbl, colIdx);
+                if (!val.empty()) distinctVals.insert(val);
+            }
+            count = static_cast<int64_t>(distinctVals.size());
+        } else {
+            auto parsedFilters = parseConditions(filterConds);
+            for (int64_t rid : gids) {
+                std::string row;
+                if (!readRowByRid(pa, rid, row, tbl)) continue;
+                if (!parsedFilters.empty()) {
+                    bool pass = true;
+                    for (const auto& fc : parsedFilters) {
+                        if (!evalConditionOnRow(fc, row, tbl)) { pass = false; break; }
+                    }
+                    if (!pass) continue;
+                }
+                if (func == "count") {
+                    if (colName == "*") { count++; continue; }
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (!val.empty()) count++;
+                } else if (func == "group_concat" || func == "string_agg") {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (val.empty()) continue;
+                    if (!groupConcatFirst) groupConcat += ",";
+                    groupConcat += val;
+                    groupConcatFirst = false;
+                } else if (isJsonAgg) {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    jsonAggVals.push_back(val);
+                } else if (isArrayAgg) {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    arrayAggVals.push_back(val);
+                } else {
+                    if (colIdx >= tbl.len) continue;
+                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    if (isInt) {
+                        int64_t num = val.empty() ? INF : parseInt(val);
+                        if (num == INF) continue;
+                        if (func == "sum") sum += num;
+                        if (func == "avg") { sum += num; count++; }
+                        if (func == "max") { if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; } }
+                        if (func == "min") { if (!hasMin || num < minInt) { minInt = num; hasMin = true; } }
+                    } else if (isDate) {
+                        Date d = val.empty() ? Date{} : Date(val.c_str());
+                        if (d.year == 0) continue;
+                        if (func == "max") { if (!hasMax || d > maxDate) { maxDate = d; hasMax = true; } }
+                        if (func == "min") { if (!hasMin || d < minDate) { minDate = d; hasMin = true; } }
+                    } else {
+                        if (val.empty()) continue;
+                        if (func == "max") { if (!hasMax || val > maxStr) { maxStr = val; hasMax = true; } }
+                        if (func == "min") { if (!hasMin || val < minStr) { minStr = val; hasMin = true; } }
+                    }
+                }
+            }
+        }
+        if (func == "count") return transstr(count);
+        if (func == "sum") return transstr(sum);
+        if (func == "avg") return (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count));
+        if (func == "group_concat" || func == "string_agg") return groupConcat.empty() ? "NULL" : groupConcat;
+        if (isJsonAgg) {
+            std::string json = "[";
+            bool first = true;
+            for (const auto& v : jsonAggVals) {
+                if (!first) json += ",";
+                if (v.empty()) {
+                    json += "null";
+                } else if (isInt || v == "true" || v == "false" || v == "null") {
+                    json += v;
+                } else {
+                    std::string esc;
+                    for (char c : v) { if (c == '"' || c == '\\') esc += '\\'; esc += c; }
+                    json += '"' + esc + '"';
+                }
+                first = false;
+            }
+            json += "]";
+            return json;
+        }
+        if (isArrayAgg) {
+            std::string arr = "{";
+            bool first = true;
+            for (const auto& v : arrayAggVals) { if (!first) arr += ","; arr += v; first = false; }
+            arr += "}";
+            return arr;
+        }
+        if (func == "max") {
+            if (!hasMax) return "NULL";
+            if (isInt) return transstr(maxInt);
+            if (isDate) return str(maxDate);
+            return maxStr;
+        }
+        if (func == "min") {
+            if (!hasMin) return "NULL";
+            if (isInt) return transstr(minInt);
+            if (isDate) return str(minDate);
+            return minStr;
+        }
+        return "";
+    };
+
+    struct HavingCond {
+        std::string func, colName, op, value;
+    };
+    std::vector<HavingCond> havings;
+    for (const auto& hc : havingConds) {
+        if (hc.empty()) continue;
+        std::string s = hc;
+        size_t lp = s.find('(');
+        size_t rp = s.find(')');
+        if (lp != std::string::npos && rp != std::string::npos && rp > lp + 1) {
+            HavingCond h;
+            h.func = s.substr(0, lp);
+            h.colName = s.substr(lp + 1, rp - lp - 1);
+            std::string rest = trim(s.substr(rp + 1));
+            size_t opEnd = 0;
+            while (opEnd < rest.size() && (rest[opEnd] == '<' || rest[opEnd] == '>' || rest[opEnd] == '=' || rest[opEnd] == '!')) ++opEnd;
+            if (opEnd > 0) {
+                h.op = rest.substr(0, opEnd);
+                h.value = trim(rest.substr(opEnd));
+                havings.push_back(h);
+            }
+        }
+    }
+    auto evalHaving = [&](const HavingCond& h, const std::vector<int64_t>& gids) -> bool {
+        std::string aggVal = computeAgg(gids, h.func, h.colName, {});
+        if (h.op == "=") return aggVal == h.value;
+        if (h.op == "!=") return aggVal != h.value;
+        double a = 0, v = 0;
+        try { a = std::stod(aggVal); } catch (...) {}
+        try { v = std::stod(h.value); } catch (...) {}
+        if (h.op == ">") return a > v;
+        if (h.op == "<") return a < v;
+        if (h.op == ">=") return a >= v;
+        if (h.op == "<=") return a <= v;
+        return true;
+    };
+
+    // Process each grouping set
+    for (const auto& gset : groupingSets) {
+        std::vector<size_t> setIdxs;
+        for (const auto& col : gset) {
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == col) { setIdxs.push_back(i); break; }
+            }
+        }
+
+        auto readSetKey = [&](int64_t rid) -> std::string {
+            std::string row;
+            if (!readRowByRid(pa, rid, row, tbl)) return "";
+            std::string key;
+            for (size_t idx : setIdxs) {
+                if (!key.empty()) key += "\x01";
+                key += extractColumnValue(row, tbl, idx);
+            }
+            return key;
+        };
+
+        std::map<std::string, std::vector<int64_t>> groups;
+        for (int64_t rowIdx : matchIds) {
+            groups[readSetKey(rowIdx)].push_back(rowIdx);
+        }
+
+        for (const auto& kv : groups) {
+            const auto& gids = kv.second;
+            bool pass = true;
+            for (const auto& h : havings) {
+                if (!evalHaving(h, gids)) { pass = false; break; }
+            }
+            if (!pass) continue;
+
+            // Build a map from column name to its value in this group key
+            std::map<std::string, std::string> colValues;
+            const std::string& gkey = kv.first;
+            size_t p = 0;
+            size_t partIdx = 0;
+            while (p < gkey.size()) {
+                size_t sep = gkey.find('\x01', p);
+                std::string part = (sep == std::string::npos) ? gkey.substr(p) : gkey.substr(p, sep - p);
+                if (partIdx < gset.size()) colValues[gset[partIdx]] = part;
+                if (sep == std::string::npos) break;
+                p = sep + 1;
+                ++partIdx;
+            }
+
+            std::string row;
+            for (const auto& col : allGroupByCols) {
+                if (!row.empty()) row += ' ';
+                auto it = colValues.find(col);
+                if (it != colValues.end()) row += it->second;
+            }
+            row += ' ';
+            for (const auto& item : items) {
+                row += computeAgg(gids, item.func, item.arg, item.filterConds) + ' ';
+            }
+            result.push_back(row);
+        }
+    }
+
+    lockManager_.unlock(tablename);
+    return result;
+}
+
 // Simple comma-split for function arguments (used by ORDER BY expression)
 static std::vector<std::string> splitExprArgs(const std::string& s) {
     std::vector<std::string> args;

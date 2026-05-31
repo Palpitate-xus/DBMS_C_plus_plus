@@ -7895,13 +7895,89 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         vector<string> groupByCols;
+        vector<vector<string>> groupingSets;
+        bool isGroupingSets = false;
         if (groupPos != string::npos) {
             size_t groupEnd = (havingPos != string::npos) ? havingPos
                             : (orderPos != string::npos) ? orderPos
                             : (limitPos != string::npos) ? limitPos
                             : (offsetPos != string::npos) ? offsetPos : sql.size();
             string groupRest = trim(sql.substr(groupPos + 8, groupEnd - groupPos - 8));
-            {
+            // Detect ROLLUP / CUBE / GROUPING SETS
+            if (groupRest.size() > 7 && groupRest.substr(0, 7) == "rollup(") {
+                string inner = groupRest.substr(7);
+                if (!inner.empty() && inner.back() == ')') inner.pop_back();
+                stringstream gss(inner);
+                string part;
+                while (getline(gss, part, ',')) groupByCols.push_back(trim(part));
+                // Generate grouping sets: (a,b,c), (a,b), (a), ()
+                for (size_t i = groupByCols.size(); i > 0; --i) {
+                    vector<string> set;
+                    for (size_t j = 0; j < i; ++j) set.push_back(groupByCols[j]);
+                    groupingSets.push_back(set);
+                }
+                groupingSets.push_back({});
+                isGroupingSets = true;
+            } else if (groupRest.size() > 5 && groupRest.substr(0, 5) == "cube(") {
+                string inner = groupRest.substr(5);
+                if (!inner.empty() && inner.back() == ')') inner.pop_back();
+                stringstream gss(inner);
+                string part;
+                while (getline(gss, part, ',')) groupByCols.push_back(trim(part));
+                size_t n = groupByCols.size();
+                for (size_t mask = 0; mask < (1u << n); ++mask) {
+                    vector<string> set;
+                    for (size_t i = 0; i < n; ++i) {
+                        if (mask & (1u << i)) set.push_back(groupByCols[i]);
+                    }
+                    groupingSets.push_back(set);
+                }
+                isGroupingSets = true;
+            } else if (groupRest.size() > 14 && groupRest.substr(0, 14) == "grouping sets(") {
+                string inner = groupRest.substr(14);
+                if (!inner.empty() && inner.back() == ')') inner.pop_back();
+                size_t pos = 0;
+                set<string> seenCols;
+                while (pos < inner.size()) {
+                    while (pos < inner.size() && isspace(static_cast<unsigned char>(inner[pos]))) ++pos;
+                    if (pos >= inner.size()) break;
+                    if (inner[pos] == '(') {
+                        size_t end = pos + 1;
+                        while (end < inner.size() && inner[end] != ')') ++end;
+                        string setInner = inner.substr(pos + 1, end - pos - 1);
+                        vector<string> set;
+                        stringstream sss(setInner);
+                        string p;
+                        while (getline(sss, p, ',')) {
+                            string tp = trim(p);
+                            if (!tp.empty()) { set.push_back(tp); seenCols.insert(tp); }
+                        }
+                        groupingSets.push_back(set);
+                        pos = end + 1;
+                        while (pos < inner.size() && isspace(static_cast<unsigned char>(inner[pos]))) ++pos;
+                        if (pos < inner.size() && inner[pos] == ',') ++pos;
+                    } else {
+                        size_t end = pos;
+                        while (end < inner.size() && inner[end] != ',') ++end;
+                        string col = trim(inner.substr(pos, end - pos));
+                        if (!col.empty()) {
+                            groupingSets.push_back({col});
+                            seenCols.insert(col);
+                        }
+                        pos = end + 1;
+                    }
+                }
+                // Preserve first-seen order for allGroupByCols
+                for (const auto& set : groupingSets) {
+                    for (const auto& c : set) {
+                        if (seenCols.count(c)) {
+                            groupByCols.push_back(c);
+                            seenCols.erase(c);
+                        }
+                    }
+                }
+                isGroupingSets = true;
+            } else {
                 stringstream gss(groupRest);
                 string part;
                 while (getline(gss, part, ',')) groupByCols.push_back(trim(part));
@@ -8111,18 +8187,36 @@ bool execute(const string& rawSql, Session& s) {
                 }
             }
             cout << '\n';
-            if (condTokens.empty()) {
-                answers = g_engine.groupAggregate(s.currentDB, tname, {}, pureAgg, groupByCols, havingConds);
+            if (isGroupingSets) {
+                if (condTokens.empty()) {
+                    answers = g_engine.groupAggregateSets(s.currentDB, tname, {}, pureAgg, groupByCols, groupingSets, havingConds);
+                } else {
+                    condTokens.insert(condTokens.begin(), "(");
+                    condTokens.push_back(")");
+                    for (auto& t : condTokens) t = modifyLogic(t);
+                    auto groups = breakDownConditions(condTokens);
+                    set<string> seen;
+                    for (const auto& g : groups) {
+                        auto part = g_engine.groupAggregateSets(s.currentDB, tname, g, pureAgg, groupByCols, groupingSets, havingConds);
+                        for (const auto& row : part) {
+                            if (seen.insert(row).second) answers.push_back(row);
+                        }
+                    }
+                }
             } else {
-                condTokens.insert(condTokens.begin(), "(");
-                condTokens.push_back(")");
-                for (auto& t : condTokens) t = modifyLogic(t);
-                auto groups = breakDownConditions(condTokens);
-                set<string> seen;
-                for (const auto& g : groups) {
-                    auto part = g_engine.groupAggregate(s.currentDB, tname, g, pureAgg, groupByCols, havingConds);
-                    for (const auto& row : part) {
-                        if (seen.insert(row).second) answers.push_back(row);
+                if (condTokens.empty()) {
+                    answers = g_engine.groupAggregate(s.currentDB, tname, {}, pureAgg, groupByCols, havingConds);
+                } else {
+                    condTokens.insert(condTokens.begin(), "(");
+                    condTokens.push_back(")");
+                    for (auto& t : condTokens) t = modifyLogic(t);
+                    auto groups = breakDownConditions(condTokens);
+                    set<string> seen;
+                    for (const auto& g : groups) {
+                        auto part = g_engine.groupAggregate(s.currentDB, tname, g, pureAgg, groupByCols, havingConds);
+                        for (const auto& row : part) {
+                            if (seen.insert(row).second) answers.push_back(row);
+                        }
                     }
                 }
             }

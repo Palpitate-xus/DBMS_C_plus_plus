@@ -336,6 +336,15 @@ public:
         const std::vector<std::string>& groupByCols,
         const std::vector<std::string>& havingConds);
 
+    // Grouping Sets / ROLLUP / CUBE aggregate
+    std::vector<std::string> groupAggregateSets(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& conditions,
+        const std::vector<AggItem>& items,
+        const std::vector<std::string>& allGroupByCols,
+        const std::vector<std::vector<std::string>>& groupingSets,
+        const std::vector<std::string>& havingConds);
+
     // Sort result rows by expression (post-query ORDER BY expression)
     std::vector<std::string> sortByExpression(
         const std::string& dbname, const std::string& tablename,
