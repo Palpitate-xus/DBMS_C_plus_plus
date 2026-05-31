@@ -863,6 +863,16 @@ static string normalizeConditionStr(string s) {
             pos += 6;
         }
     }
+    // Normalize SIMILAR TO keyword: "name similar to '^a%'" → "nameregexp'^a%'"
+    pos = 0;
+    while ((pos = s.find("similar to", pos)) != string::npos) {
+        size_t before = pos;
+        while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
+        size_t after = pos + 10;
+        while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
+        s = s.substr(0, before) + "regexp" + s.substr(after);
+        pos = before + 6;
+    }
     // Normalize CONTAINS keyword: "name contains 'word'" → "namecontains'word'"
     pos = 0;
     while ((pos = s.find("contains", pos)) != string::npos) {
