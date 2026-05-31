@@ -873,6 +873,45 @@ static string normalizeConditionStr(string s) {
         s = s.substr(0, before) + "regexp" + s.substr(after);
         pos = before + 6;
     }
+    // Normalize OVERLAPS keyword: "(d1,d2) overlaps (d3,d4)" → "(d1,d2)overlaps(d3,d4)"
+    pos = 0;
+    while ((pos = s.find("overlaps", pos)) != string::npos) {
+        size_t before = pos;
+        while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
+        size_t after = pos + 8;
+        while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
+        if (before != pos || after != pos + 8) {
+            s = s.substr(0, before) + "overlaps" + s.substr(after);
+            pos = before + 8;
+        } else {
+            pos += 8;
+        }
+    }
+    // Convert OVERLAPS expression to parenthesis-free form:
+    // "(s1,e1)overlaps(s2,e2)" → "overlaps:s1,e1,s2,e2"
+    // This avoids tokenize() splitting on '(' / ')' and breaking the condition.
+    pos = 0;
+    while ((pos = s.find("overlaps", pos)) != string::npos) {
+        size_t leftStart = pos;
+        while (leftStart > 0 && s[leftStart - 1] != '(') leftStart--;
+        if (leftStart == 0 || s[leftStart - 1] != '(') { pos += 8; continue; }
+        leftStart--;
+        size_t rightEnd = pos + 8;
+        while (rightEnd < s.size() && s[rightEnd] != ')') rightEnd++;
+        if (rightEnd >= s.size()) { pos += 8; continue; }
+        rightEnd++;
+        string expr = s.substr(leftStart, rightEnd - leftStart);
+        // expr = "(s1,e1)overlaps(s2,e2)"
+        string inner = expr.substr(1, expr.size() - 2); // "s1,e1)overlaps(s2,e2"
+        size_t opPos = inner.find(")overlaps(");
+        if (opPos != string::npos) {
+            string replacement = "overlaps:" + inner.substr(0, opPos) + "," + inner.substr(opPos + 10);
+            s = s.substr(0, leftStart) + replacement + s.substr(rightEnd);
+            pos = leftStart + replacement.size();
+        } else {
+            pos += 8;
+        }
+    }
     // Normalize CONTAINS keyword: "name contains 'word'" → "namecontains'word'"
     pos = 0;
     while ((pos = s.find("contains", pos)) != string::npos) {
@@ -1024,6 +1063,13 @@ static string modifyLogic(const string& logic) {
         string before = logic.substr(0, containsPos);
         string after = logic.substr(containsPos + 8);
         return "contains" + before + " " + after;
+    }
+    // Handle OVERLAPS
+    size_t overlapsPos = logic.find("overlaps");
+    if (overlapsPos != string::npos) {
+        string before = logic.substr(0, overlapsPos);
+        string after = logic.substr(overlapsPos + 8);
+        return "overlaps" + before + " " + after;
     }
     // Handle IS NOT NULL
     size_t isnotPos = logic.find("isnotnull");

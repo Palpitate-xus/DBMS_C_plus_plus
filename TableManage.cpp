@@ -4515,6 +4515,42 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                                         const std::string& rowBuffer, const TableSchema& tbl) {
     if (cond.colName == "__true__") return true;
     if (cond.colName == "__false__") return false;
+
+    // Handle OVERLAPS operator: overlaps:s1,e1,s2,e2
+    if (cond.op == "overlaps") {
+        std::string expr = cond.colName;
+        if (!expr.empty() && expr.front() == ':') expr = expr.substr(1);
+        std::vector<std::string> parts;
+        std::stringstream ss(expr);
+        std::string part;
+        while (std::getline(ss, part, ',')) {
+            // trim whitespace around each part
+            size_t a = 0, b = part.size();
+            while (a < b && std::isspace(static_cast<unsigned char>(part[a]))) ++a;
+            while (b > a && std::isspace(static_cast<unsigned char>(part[b - 1]))) --b;
+            if (a < b) parts.push_back(part.substr(a, b - a));
+        }
+        if (parts.size() == 4) {
+            auto findCol = [&](const std::string& name) -> size_t {
+                for (size_t i = 0; i < tbl.len; ++i)
+                    if (tbl.cols[i].dataName == name) return i;
+                return tbl.len;
+            };
+            size_t s1i = findCol(parts[0]);
+            size_t e1i = findCol(parts[1]);
+            size_t s2i = findCol(parts[2]);
+            size_t e2i = findCol(parts[3]);
+            if (s1i < tbl.len && e1i < tbl.len && s2i < tbl.len && e2i < tbl.len) {
+                std::string s1 = extractColumnValue(rowBuffer, tbl, s1i);
+                std::string e1 = extractColumnValue(rowBuffer, tbl, e1i);
+                std::string s2 = extractColumnValue(rowBuffer, tbl, s2i);
+                std::string e2 = extractColumnValue(rowBuffer, tbl, e2i);
+                return (s1 < e2) && (s2 < e1);
+            }
+        }
+        return false;
+    }
+
     size_t ci = 0;
     for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci) {}
     if (ci >= tbl.len) return false;
@@ -5445,6 +5481,13 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             c.value = s.substr(sp + 1);
             if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
                 c.value = c.value.substr(1, c.value.size() - 2);
+            conds.push_back(c);
+            continue;
+        }
+        // Handle OVERLAPS operator
+        if (s.size() >= 8 && s.substr(0, 8) == "overlaps") {
+            c.op = "overlaps";
+            c.colName = trim(s.substr(8));
             conds.push_back(c);
             continue;
         }
