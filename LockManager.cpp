@@ -18,6 +18,14 @@ void LockManager::removeWaitEdges(std::thread::id waiter) {
     waitFor_.erase(waiter);
 }
 
+void LockManager::setLockTimeout(int ms) {
+    lockTimeoutMs_ = ms > 0 ? ms : 0;
+}
+
+void LockManager::setDeadlockTimeout(int ms) {
+    deadlockTimeoutMs_ = ms > 0 ? ms : 0;
+}
+
 static std::string tidToString(std::thread::id tid) {
     std::ostringstream oss;
     oss << tid;
@@ -122,6 +130,7 @@ static const char* modeToStr(LockManager::LockMode mode) {
 
 bool LockManager::acquireLock(const std::string& table, LockMode mode) {
     std::thread::id self = std::this_thread::get_id();
+    bool needWait = false;
     {
         std::lock_guard<std::mutex> guard(globalMutex_);
         auto& state = locks_[table];
@@ -136,10 +145,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
             }
         }
         if (!compatible) {
-            if (hasCycle(self)) {
-                removeWaitEdges(self);
-                return false;
-            }
+            needWait = true;
         } else {
             // Fast path: compatible, acquire immediately
             if (mode == LockMode::Shared) {
@@ -163,12 +169,75 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
             return true;
         }
     }
-    // Slow path: block waiting for the lock
+    // Slow path: incompatible — apply deadlock_timeout then recheck / detect deadlock
+    if (needWait) {
+        if (deadlockTimeoutMs_ > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(deadlockTimeoutMs_));
+        }
+        std::lock_guard<std::mutex> guard(globalMutex_);
+        auto& state = locks_[table];
+        bool stillIncompatible = false;
+        for (const auto& holder : state.holders) {
+            auto it = state.holderModes.find(holder);
+            LockMode heldMode = (it != state.holderModes.end()) ? it->second : LockMode::Shared;
+            if (!isCompatible(mode, heldMode, holder == self)) {
+                stillIncompatible = true;
+                if (holder != self) addWaitEdge(self, holder);
+            }
+        }
+        if (!stillIncompatible) {
+            // Lock became available during deadlock_timeout sleep
+            if (mode == LockMode::Shared) {
+                state.mtx.lock_shared();
+                state.sharedCount++;
+            } else if (mode == LockMode::Exclusive) {
+                state.mtx.lock();
+                state.exclusive = true;
+            } else if (mode == LockMode::IntentShared) {
+                state.mtx.lock_shared();
+                state.intentSharedCount++;
+            } else if (mode == LockMode::IntentExclusive) {
+                state.mtx.lock();
+                state.intentExclusiveCount++;
+            } else if (mode == LockMode::Metadata) {
+                state.mtx.lock();
+                state.metadata = true;
+            }
+            state.holders.push_back(self);
+            state.holderModes[self] = mode;
+            return true;
+        }
+        if (hasCycle(self)) {
+            removeWaitEdges(self);
+            return false;
+        }
+    }
+    // Block waiting for the lock with optional lock_timeout
     auto& state = locks_[table];
-    if (mode == LockMode::Shared || mode == LockMode::IntentShared) {
-        state.mtx.lock_shared();
+    if (lockTimeoutMs_ > 0) {
+        auto start = std::chrono::steady_clock::now();
+        while (true) {
+            bool acquired = false;
+            if (mode == LockMode::Shared || mode == LockMode::IntentShared) {
+                acquired = state.mtx.try_lock_shared();
+            } else {
+                acquired = state.mtx.try_lock();
+            }
+            if (acquired) break;
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed >= lockTimeoutMs_) {
+                removeWaitEdges(self);
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
     } else {
-        state.mtx.lock();
+        if (mode == LockMode::Shared || mode == LockMode::IntentShared) {
+            state.mtx.lock_shared();
+        } else {
+            state.mtx.lock();
+        }
     }
     {
         std::lock_guard<std::mutex> guard(globalMutex_);

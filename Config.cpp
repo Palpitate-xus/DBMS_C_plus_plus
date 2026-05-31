@@ -45,6 +45,10 @@ bool Config::load(const std::string& filename) {
             autoVacuumEnabled = (val == "1" || val == "true" || val == "on");
         } else if (key == "auto_vacuum_threshold") {
             try { autoVacuumThreshold = std::stoi(val); } catch (...) {}
+        } else if (key == "lock_timeout_ms") {
+            try { lockTimeoutMs = std::stoi(val); } catch (...) {}
+        } else if (key == "deadlock_timeout_ms") {
+            try { deadlockTimeoutMs = std::stoi(val); } catch (...) {}
         }
     }
     return true;
@@ -62,7 +66,9 @@ void Config::printAll() const {
               << "password_hash_algorithm " << passwordHashAlgorithm << "\n"
               << "audit_level " << auditLevel << "\n"
               << "auto_vacuum " << (autoVacuumEnabled ? "on" : "off") << "\n"
-              << "auto_vacuum_threshold " << autoVacuumThreshold << "\n";
+              << "auto_vacuum_threshold " << autoVacuumThreshold << "\n"
+              << "lock_timeout_ms " << lockTimeoutMs << "\n"
+              << "deadlock_timeout_ms " << deadlockTimeoutMs << "\n";
 }
 
 bool Config::save(const std::string& filename) const {
@@ -80,7 +86,9 @@ bool Config::save(const std::string& filename) const {
         << "password_hash_algorithm=" << passwordHashAlgorithm << "\n"
         << "audit_level=" << auditLevel << "\n"
         << "auto_vacuum=" << (autoVacuumEnabled ? "on" : "off") << "\n"
-        << "auto_vacuum_threshold=" << autoVacuumThreshold << "\n";
+        << "auto_vacuum_threshold=" << autoVacuumThreshold << "\n"
+        << "lock_timeout_ms=" << lockTimeoutMs << "\n"
+        << "deadlock_timeout_ms=" << deadlockTimeoutMs << "\n";
     return true;
 }
 

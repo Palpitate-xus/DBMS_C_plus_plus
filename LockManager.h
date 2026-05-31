@@ -35,6 +35,11 @@ public:
     // Release all locks (used on COMMIT/ROLLBACK)
     void unlockAll();
 
+    // Set lock timeout (0 = no timeout)
+    void setLockTimeout(int ms);
+    // Set deadlock detection timeout (0 = immediate check)
+    void setDeadlockTimeout(int ms);
+
     // Get list of currently locked tables
     std::vector<std::string> lockedTables() const;
 
@@ -135,6 +140,10 @@ private:
     // Deadlock log
     std::vector<DeadlockEntry> deadlockLog_;
     mutable std::mutex deadlockMutex_;
+
+    // Timeout configuration
+    int lockTimeoutMs_ = 0;
+    int deadlockTimeoutMs_ = 0;
 
     // Internal acquire with mode
     bool acquireLock(const std::string& table, LockMode mode);

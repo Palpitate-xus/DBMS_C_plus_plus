@@ -3705,6 +3705,10 @@ bool execute(const string& rawSql, Session& s) {
             ok = true;
         } else if (param == "auto_vacuum_threshold") {
             try { g_config.autoVacuumThreshold = std::stoi(val); ok = true; } catch (...) {}
+        } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
+            try { g_config.lockTimeoutMs = std::stoi(val); g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs); ok = true; } catch (...) {}
+        } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
+            try { g_config.deadlockTimeoutMs = std::stoi(val); g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs); ok = true; } catch (...) {}
         } else {
             cout << "Unknown parameter: " << param << endl;
             return true;
@@ -7021,6 +7025,26 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Invalid value for audit_level" << endl;
                 return true;
             }
+        } else if (var == "lock_timeout") {
+            try {
+                int ms = std::stoi(val);
+                g_config.lockTimeoutMs = ms;
+                g_engine.getLockManager().setLockTimeout(ms);
+                cout << "lock_timeout set to " << ms << "ms" << endl;
+            } catch (...) {
+                cout << "Invalid value for lock_timeout" << endl;
+                return true;
+            }
+        } else if (var == "deadlock_timeout") {
+            try {
+                int ms = std::stoi(val);
+                g_config.deadlockTimeoutMs = ms;
+                g_engine.getLockManager().setDeadlockTimeout(ms);
+                cout << "deadlock_timeout set to " << ms << "ms" << endl;
+            } catch (...) {
+                cout << "Invalid value for deadlock_timeout" << endl;
+                return true;
+            }
         } else {
             cout << "Unknown variable: " << var << endl;
             return true;
@@ -8846,6 +8870,8 @@ int main(int argc, char* argv[]) {
     if (g_config.load("dbms.conf")) {
         g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
         g_checkpointInterval = g_config.checkpointInterval;
+        g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs);
+        g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
     }
 
     // Server mode: ./dbms_main --server PORT
