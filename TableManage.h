@@ -286,7 +286,8 @@ public:
                                    bool forUpdate = false,
                                    bool noWait = false,
                                    bool skipLocked = false,
-                                   int timezoneOffsetMinutes = 0);
+                                   int timezoneOffsetMinutes = 0,
+                                   const std::vector<std::string>& distinctOnCols = {});
 
     // Scalar function expression for queryExpr
     struct SelectExpr {

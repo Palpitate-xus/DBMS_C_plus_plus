@@ -6818,7 +6818,8 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                bool forUpdate,
                                                bool noWait,
                                                bool skipLocked,
-                                               int timezoneOffsetMinutes) {
+                                               int timezoneOffsetMinutes,
+                                               const std::vector<std::string>& distinctOnCols) {
     std::vector<std::string> result;
 
     // information_schema virtual tables
@@ -7092,6 +7093,29 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             sorted.push_back(std::move(matchRows[ek.idx]));
         }
         matchRows = std::move(sorted);
+    }
+
+    // DISTINCT ON: keep first row for each distinct combination of specified columns
+    if (!distinctOnCols.empty()) {
+        std::vector<size_t> distinctIdxs;
+        for (const auto& colName : distinctOnCols) {
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colName) { distinctIdxs.push_back(i); break; }
+            }
+        }
+        if (distinctIdxs.size() == distinctOnCols.size()) {
+            std::set<std::string> seen;
+            std::vector<std::pair<int64_t, std::string>> deduped;
+            for (auto& mr : matchRows) {
+                std::string key;
+                for (size_t idx : distinctIdxs) {
+                    if (!key.empty()) key += "\x01";
+                    key += extractColumnValue(mr.second, tbl, idx);
+                }
+                if (seen.insert(key).second) deduped.push_back(std::move(mr));
+            }
+            matchRows = std::move(deduped);
+        }
     }
 
     for (auto& mr : matchRows) {

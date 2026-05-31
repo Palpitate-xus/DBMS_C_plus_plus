@@ -7398,7 +7398,34 @@ bool execute(const string& rawSql, Session& s) {
         }
         string columns = trim(sql.substr(6, fromPos - 6));
         bool isDistinct = false;
-        if (columns.size() >= 9 && columns.substr(0, 9) == "distinct ") {
+        vector<string> distinctOnCols;
+        if (columns.size() >= 12 && columns.substr(0, 12) == "distinct on(") {
+            isDistinct = true;
+            size_t rp = columns.find(')', 12);
+            if (rp != string::npos) {
+                string inner = columns.substr(12, rp - 12);
+                stringstream ss(inner);
+                string part;
+                while (getline(ss, part, ',')) {
+                    string c = trim(part);
+                    if (!c.empty()) distinctOnCols.push_back(c);
+                }
+                columns = trim(columns.substr(rp + 1));
+            }
+        } else if (columns.size() >= 13 && columns.substr(0, 13) == "distinct on (") {
+            isDistinct = true;
+            size_t rp = columns.find(')', 13);
+            if (rp != string::npos) {
+                string inner = columns.substr(13, rp - 13);
+                stringstream ss(inner);
+                string part;
+                while (getline(ss, part, ',')) {
+                    string c = trim(part);
+                    if (!c.empty()) distinctOnCols.push_back(c);
+                }
+                columns = trim(columns.substr(rp + 1));
+            }
+        } else if (columns.size() >= 9 && columns.substr(0, 9) == "distinct ") {
             isDistinct = true;
             columns = trim(columns.substr(9));
         }
@@ -8641,7 +8668,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.query(queryDb, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes);
+                answers = g_engine.query(queryDb, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -8649,7 +8676,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(queryDb, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes);
+                    auto part = g_engine.query(queryDb, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
@@ -8660,7 +8687,8 @@ bool execute(const string& rawSql, Session& s) {
         if (!exprOrderBySpecs.empty()) {
             answers = g_engine.sortByExpression(s.currentDB, tname, std::move(answers), exprOrderBySpecs);
         }
-        if (isDistinct) {
+        // Post-query DISTINCT deduplication (skip if DISTINCT ON already handled in query())
+        if (isDistinct && distinctOnCols.empty()) {
             vector<string> deduped;
             set<string> seen;
             for (const auto& row : answers) {
