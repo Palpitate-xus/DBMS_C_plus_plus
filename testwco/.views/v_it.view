@@ -1,3 +1,0 @@
-select * from employees where dept = it
-BASE_TABLE:employees
-WITH_CHECK_OPTION:LOCAL

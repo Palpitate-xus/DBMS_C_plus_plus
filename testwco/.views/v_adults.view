@@ -1,3 +1,0 @@
-select * from employees where age >= 18
-BASE_TABLE:employees
-WITH_CHECK_OPTION:CASCADED
