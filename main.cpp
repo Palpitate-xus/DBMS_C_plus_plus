@@ -622,9 +622,13 @@ struct WindowFunc {
     bool orderByAsc;
     vector<string> partitionByCols;
     bool isAggregate = false;
-    // Frame: rows between <start> and <end>
-    // frameStartOffset / frameEndOffset are relative to current row index within partition
-    // -1 means unbounded (partition start/end), 0 means current row
+    // Frame type: ROWS (default), RANGE, GROUPS
+    enum class FrameType { ROWS, RANGE, GROUPS };
+    FrameType frameType = FrameType::ROWS;
+    // For ROWS: frameStartOffset / frameEndOffset are relative to current row index
+    // For RANGE: they are value offsets from current row's ORDER BY value
+    // For GROUPS: they are peer-group offsets
+    // -1 means unbounded (partition start/end), 0 means current row / current value / current group
     int frameStartOffset = -1; // -1 = unbounded preceding, N = N preceding
     int frameEndOffset = 0;    // 0 = current row, N = N following, -1 = unbounded following
     bool hasFrame = false;
@@ -677,18 +681,33 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
     // ORDER BY is optional for window functions like row_number with partition only
     if (orderPos != string::npos) {
         string orderRest = trim(overContent.substr(orderPos + 8));
-        // Strip ROWS BETWEEN clause from orderRest
-        size_t rowsPos = toLower(orderRest).find("rows");
-        if (rowsPos != string::npos) {
-            string frameStr = trim(orderRest.substr(rowsPos));
-            orderRest = trim(orderRest.substr(0, rowsPos));
-            // Parse "rows between N preceding and current row"
+        // Detect frame clause: ROWS / RANGE / GROUPS BETWEEN
+        string lowOrderRest = toLower(orderRest);
+        size_t framePos = string::npos;
+        string frameKeyword;
+        for (const string& kw : {"rows", "range", "groups"}) {
+            size_t fp = lowOrderRest.find(kw);
+            if (fp != string::npos) {
+                framePos = fp;
+                frameKeyword = kw;
+                break;
+            }
+        }
+        if (framePos != string::npos) {
+            string frameStr = trim(orderRest.substr(framePos));
+            orderRest = trim(orderRest.substr(0, framePos));
             string lfs = toLower(frameStr);
             if (lfs.find("between") != string::npos) {
                 wf.hasFrame = true;
+                if (frameKeyword == "range") wf.frameType = WindowFunc::FrameType::RANGE;
+                else if (frameKeyword == "groups") wf.frameType = WindowFunc::FrameType::GROUPS;
+                else wf.frameType = WindowFunc::FrameType::ROWS;
                 // start bound
                 if (lfs.find("unbounded preceding") != string::npos) {
                     wf.frameStartOffset = -1;
+                } else if (lfs.find("current row") != string::npos &&
+                           lfs.find("current row") < lfs.find(" and ")) {
+                    wf.frameStartOffset = 0;
                 } else {
                     size_t precPos = lfs.find("preceding");
                     if (precPos != string::npos) {
@@ -8788,24 +8807,129 @@ bool execute(const string& rawSql, Session& s) {
                 // Compute aggregate per partition
                 for (const auto& pr : partRows) {
                     const auto& idxs = pr.second;
+                    // For RANGE/GROUPS frames, pre-sort by ORDER BY within partition
+                    vector<size_t> sortedIdxs = idxs;
+                    if (wf.hasFrame && wf.frameType != WindowFunc::FrameType::ROWS && !wf.orderByCol.empty()) {
+                        sort(sortedIdxs.begin(), sortedIdxs.end(), [&](size_t a, size_t b) {
+                            auto itA = rows[a].find(wf.orderByCol);
+                            auto itB = rows[b].find(wf.orderByCol);
+                            string va = (itA != rows[a].end()) ? itA->second : "";
+                            string vb = (itB != rows[b].end()) ? itB->second : "";
+                            try { return stoll(va) < stoll(vb); } catch (...) { return va < vb; }
+                        });
+                    }
+                    const auto& effIdxs = (wf.hasFrame && wf.frameType != WindowFunc::FrameType::ROWS) ? sortedIdxs : idxs;
+                    // Pre-compute peer group boundaries for GROUPS
+                    vector<size_t> groupStart; // start index of each peer group in effIdxs
+                    if (wf.hasFrame && wf.frameType == WindowFunc::FrameType::GROUPS && !wf.orderByCol.empty()) {
+                        for (size_t gi = 0; gi < effIdxs.size(); ) {
+                            groupStart.push_back(gi);
+                            size_t gj = gi + 1;
+                            while (gj < effIdxs.size()) {
+                                auto itA = rows[effIdxs[gi]].find(wf.orderByCol);
+                                auto itB = rows[effIdxs[gj]].find(wf.orderByCol);
+                                if ((itA == rows[effIdxs[gi]].end()) != (itB == rows[effIdxs[gj]].end())) break;
+                                if (itA != rows[effIdxs[gi]].end() && itA->second != itB->second) break;
+                                ++gj;
+                            }
+                            gi = gj;
+                        }
+                    }
+                    // Map from original row index to position in effIdxs
+                    unordered_map<size_t, size_t> posInEff;
+                    for (size_t ei = 0; ei < effIdxs.size(); ++ei) posInEff[effIdxs[ei]] = ei;
                     for (size_t ii = 0; ii < idxs.size(); ++ii) {
                         size_t ri = idxs[ii];
                         // Determine frame boundaries within this partition
-                        size_t fStart = 0, fEnd = idxs.size();
+                        size_t fStart = 0, fEnd = effIdxs.size();
                         if (wf.hasFrame) {
-                            if (wf.frameStartOffset >= 0) {
-                                fStart = (ii >= static_cast<size_t>(wf.frameStartOffset)) ? (ii - wf.frameStartOffset) : 0;
-                            }
-                            if (wf.frameEndOffset >= 0) {
-                                fEnd = ii + wf.frameEndOffset + 1;
-                                if (fEnd > idxs.size()) fEnd = idxs.size();
+                            if (wf.frameType == WindowFunc::FrameType::ROWS) {
+                                if (wf.frameStartOffset >= 0) {
+                                    size_t pos = posInEff.count(ri) ? posInEff[ri] : ii;
+                                    fStart = (pos >= static_cast<size_t>(wf.frameStartOffset)) ? (pos - wf.frameStartOffset) : 0;
+                                }
+                                if (wf.frameEndOffset >= 0) {
+                                    size_t pos = posInEff.count(ri) ? posInEff[ri] : ii;
+                                    fEnd = pos + wf.frameEndOffset + 1;
+                                    if (fEnd > effIdxs.size()) fEnd = effIdxs.size();
+                                }
+                            } else if (wf.frameType == WindowFunc::FrameType::RANGE && !wf.orderByCol.empty()) {
+                                auto itCur = rows[ri].find(wf.orderByCol);
+                                if (itCur != rows[ri].end() && !itCur->second.empty()) {
+                                    try {
+                                        int64_t curVal = stoll(itCur->second);
+                                        // Find start: first row with value >= curVal - startOffset (or unbounded)
+                                        if (wf.frameStartOffset == -1) {
+                                            fStart = 0;
+                                        } else if (wf.frameStartOffset == 0) {
+                                            // current row means value == curVal
+                                            for (size_t k = 0; k < effIdxs.size(); ++k) {
+                                                auto itK = rows[effIdxs[k]].find(wf.orderByCol);
+                                                if (itK != rows[effIdxs[k]].end()) {
+                                                    try {
+                                                        if (stoll(itK->second) >= curVal) { fStart = k; break; }
+                                                    } catch (...) {}
+                                                }
+                                            }
+                                        } else {
+                                            int64_t bound = curVal - wf.frameStartOffset;
+                                            for (size_t k = 0; k < effIdxs.size(); ++k) {
+                                                auto itK = rows[effIdxs[k]].find(wf.orderByCol);
+                                                if (itK != rows[effIdxs[k]].end()) {
+                                                    try {
+                                                        if (stoll(itK->second) >= bound) { fStart = k; break; }
+                                                    } catch (...) {}
+                                                }
+                                            }
+                                        }
+                                        // Find end: last row with value <= curVal + endOffset (or unbounded)
+                                        if (wf.frameEndOffset == -1) {
+                                            fEnd = effIdxs.size();
+                                        } else if (wf.frameEndOffset == 0) {
+                                            for (size_t k = effIdxs.size(); k-- > 0; ) {
+                                                auto itK = rows[effIdxs[k]].find(wf.orderByCol);
+                                                if (itK != rows[effIdxs[k]].end()) {
+                                                    try {
+                                                        if (stoll(itK->second) <= curVal) { fEnd = k + 1; break; }
+                                                    } catch (...) {}
+                                                }
+                                            }
+                                        } else {
+                                            int64_t bound = curVal + wf.frameEndOffset;
+                                            for (size_t k = effIdxs.size(); k-- > 0; ) {
+                                                auto itK = rows[effIdxs[k]].find(wf.orderByCol);
+                                                if (itK != rows[effIdxs[k]].end()) {
+                                                    try {
+                                                        if (stoll(itK->second) <= bound) { fEnd = k + 1; break; }
+                                                    } catch (...) {}
+                                                }
+                                            }
+                                        }
+                                    } catch (...) {}
+                                }
+                            } else if (wf.frameType == WindowFunc::FrameType::GROUPS && !groupStart.empty()) {
+                                size_t pos = posInEff.count(ri) ? posInEff[ri] : ii;
+                                // Find which group current row belongs to
+                                size_t curGroup = 0;
+                                for (size_t g = 0; g < groupStart.size(); ++g) {
+                                    if (groupStart[g] <= pos && (g + 1 >= groupStart.size() || groupStart[g + 1] > pos)) {
+                                        curGroup = g; break;
+                                    }
+                                }
+                                size_t startGroup = (wf.frameStartOffset == -1) ? 0 :
+                                    (curGroup >= static_cast<size_t>(wf.frameStartOffset) ? curGroup - wf.frameStartOffset : 0);
+                                size_t endGroup = (wf.frameEndOffset == -1) ? groupStart.size() - 1 :
+                                    (curGroup + wf.frameEndOffset);
+                                if (endGroup >= groupStart.size()) endGroup = groupStart.size() - 1;
+                                fStart = groupStart[startGroup];
+                                fEnd = (endGroup + 1 < groupStart.size()) ? groupStart[endGroup + 1] : effIdxs.size();
                             }
                         }
                         int64_t sum = 0, count = 0;
                         bool hasMax = false, hasMin = false;
                         int64_t maxVal = 0, minVal = 0;
                         for (size_t fj = fStart; fj < fEnd; ++fj) {
-                            size_t rj = idxs[fj];
+                            size_t rj = effIdxs[fj];
                             if (wf.name == "count") {
                                 count++;
                                 continue;

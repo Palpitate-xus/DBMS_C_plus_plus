@@ -213,9 +213,9 @@
 | GROUPING() 函数 | ✅ | ✅ | — |
 | 窗口函数（基础10个） | ✅ | ✅ | — |
 | 聚合函数 OVER 窗口 | ✅ | ✅ | — |
-| 窗口帧 ROWS BETWEEN | ⚠️ | ✅ | 解析器有代码剥离，**运行时实现不完整** |
-| 窗口帧 RANGE BETWEEN | ❌ | ✅ | **缺失** |
-| 窗口帧 GROUPS BETWEEN | ❌ | ✅ | PG 支持 |
+| 窗口帧 ROWS BETWEEN | ✅ | ✅ | 支持 `ROWS BETWEEN N PRECEDING AND M FOLLOWING` |
+| 窗口帧 RANGE BETWEEN | ✅ | ✅ | 支持数值型 ORDER BY 列的 RANGE 帧 |
+| 窗口帧 GROUPS BETWEEN | ✅ | ✅ | 支持 peer group 级别的 GROUPS 帧 |
 
 ---
 
@@ -604,7 +604,7 @@
 16. ⚠️ **游标 / 函数重载** — OUT/INOUT 参数已完成，游标和重载待实现
 17. ✅ **WITH CHECK OPTION** — 可更新视图完整性约束（INSERT 预校验）
 18. ✅ **GRANT WITH GRANT OPTION** — 权限级联授权
-19. ❌ **窗口帧 RANGE/GROUPS BETWEEN** — 高级窗口分析
+19. ✅ **窗口帧 RANGE/GROUPS BETWEEN** — 支持 ROWS / RANGE / GROUPS 三种帧类型
 20. ✅ **EXPLAIN 选项 (TIMING, COSTS, SETTINGS)** — 支持 `EXPLAIN (ANALYZE, BUFFERS, TIMING, COSTS, SETTINGS, VERBOSE)`
 
 ### 总体评估
