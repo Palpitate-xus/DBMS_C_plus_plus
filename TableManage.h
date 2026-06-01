@@ -88,6 +88,8 @@ struct TableSchema {
     std::vector<std::pair<std::string, std::vector<std::string>>> listPartitions;  // name -> values
     size_t hashPartitions = 0;  // number of hash partitions
     bool isUnlogged = false;    // UNLOGGED table: no WAL, truncated on crash
+    bool rowLevelSecurity = false; // ENABLE ROW LEVEL SECURITY
+    bool forceRowLevelSecurity = false; // FORCE ROW LEVEL SECURITY (applies to table owner too)
 
     void append(const Column& ncol);
     void appendFK(const ForeignKey& fk);
@@ -610,6 +612,30 @@ public:
                                                  const std::string& tablename,
                                                  const std::string& username) const;
 
+    // Row-Level Security (RLS)
+    struct RowPolicy {
+        std::string name;
+        std::string cmd;           // ALL, SELECT, INSERT, UPDATE, DELETE
+        std::string usingExpr;     // USING expression (for SELECT/UPDATE/DELETE)
+        std::string withCheckExpr; // WITH CHECK expression (for INSERT/UPDATE)
+        std::vector<std::string> roles; // empty = PUBLIC
+    };
+    OpResult createPolicy(const std::string& dbname, const std::string& tablename,
+                          const RowPolicy& policy);
+    OpResult dropPolicy(const std::string& dbname, const std::string& tablename,
+                        const std::string& policyName);
+    std::vector<RowPolicy> getPolicies(const std::string& dbname, const std::string& tablename) const;
+    std::vector<RowPolicy> getApplicablePolicies(const std::string& dbname, const std::string& tablename,
+                                                  const std::string& cmd,
+                                                  const std::string& username) const;
+    OpResult enableRowLevelSecurity(const std::string& dbname, const std::string& tablename,
+                                     bool force = false);
+    OpResult disableRowLevelSecurity(const std::string& dbname, const std::string& tablename);
+
+    // RLS current user (thread-local, for transparent policy application inside engine)
+    static void setRLSUser(const std::string& user) { rlsCurrentUser_ = user; }
+    static std::string getRLSUser() { return rlsCurrentUser_; }
+
     // Partition pruning: given conditions, return partition names to scan
     // (empty = all partitions, only applicable for partitioned tables)
     std::vector<std::string> getTargetPartitions(const TableSchema& tbl,
@@ -666,6 +692,7 @@ public:
     std::filesystem::path viewsDir(const std::string& dbname) const;
     std::filesystem::path statsPath(const std::string& dbname) const;
     std::filesystem::path permPath(const std::string& dbname) const;
+    std::filesystem::path rlsPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path seqPath(const std::string& dbname, const std::string& tablename) const;
 
     // TOAST (The Oversized-Attribute Storage Technique) for large values
@@ -773,6 +800,9 @@ private:
     static std::map<uint64_t, std::set<int64_t>> ssiWriteSets_;  // txId -> RIDs written
     static std::map<uint64_t, std::set<uint64_t>> ssiOutEdges_; // T1 -> {T2} means T1 read something written by T2
     static std::map<uint64_t, std::set<uint64_t>> ssiInEdges_;  // T2 -> {T1} means T1 read something written by T2
+
+    // Row-Level Security: per-thread current user (for transparent RLS application)
+    inline static thread_local std::string rlsCurrentUser_;
 };
 
 // Column type constructors

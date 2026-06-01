@@ -4,6 +4,32 @@
 
 extern dbms::Config g_config;
 
+static std::string escapeString(const std::string& s) {
+    std::string r;
+    for (char c : s) {
+        if (c == ' ') r += "\\s";
+        else if (c == '\n') r += "\\n";
+        else if (c == '\\') r += "\\\\";
+        else r += c;
+    }
+    return r;
+}
+
+static std::string unescapeString(const std::string& s) {
+    std::string r;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            if (s[i + 1] == 's') { r += ' '; ++i; }
+            else if (s[i + 1] == 'n') { r += '\n'; ++i; }
+            else if (s[i + 1] == '\\') { r += '\\'; ++i; }
+            else r += s[i];
+        } else {
+            r += s[i];
+        }
+    }
+    return r;
+}
+
 #include <algorithm>
 #include <cmath>
 #include <ctime>
@@ -34,6 +60,35 @@ std::map<uint64_t, std::set<int64_t>> StorageEngine::ssiReadSets_;
 std::map<uint64_t, std::set<int64_t>> StorageEngine::ssiWriteSets_;
 std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiOutEdges_;
 std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiInEdges_;
+
+// ========================================================================
+// Row-Level Security helpers
+// ========================================================================
+static std::vector<std::string> buildRLSConditions(const StorageEngine* engine,
+                                                    const std::string& dbname,
+                                                    const std::string& tablename,
+                                                    const std::string& cmd) {
+    std::vector<std::string> extra;
+    if (!engine) return extra;
+    auto tbl = engine->getTableSchema(dbname, tablename);
+    if (!tbl.rowLevelSecurity) return extra;
+    std::string user = StorageEngine::getRLSUser();
+    if (user.empty()) return extra;
+    // Admin bypasses RLS unless FORCE
+    if (user == "admin" && !tbl.forceRowLevelSecurity) return extra;
+    auto policies = engine->getApplicablePolicies(dbname, tablename, cmd, user);
+    for (const auto& p : policies) {
+        if (!p.usingExpr.empty()) {
+            std::string expr = p.usingExpr;
+            // Strip surrounding parentheses if present
+            if (expr.size() >= 2 && expr.front() == '(' && expr.back() == ')') {
+                expr = expr.substr(1, expr.size() - 2);
+            }
+            extra.push_back(expr);
+        }
+    }
+    return extra;
+}
 
 // ========================================================================
 // Unicode string helpers
@@ -3568,6 +3623,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // UNLOGGED flag (backward-compatible: new field at tail)
     uint8_t unloggedFlag = tbl.isUnlogged ? 1 : 0;
     out.write(reinterpret_cast<const char*>(&unloggedFlag), 1);
+    // Row-Level Security flags (backward-compatible)
+    uint8_t rlsFlags = (tbl.rowLevelSecurity ? 1 : 0) | (tbl.forceRowLevelSecurity ? 2 : 0);
+    out.write(reinterpret_cast<const char*>(&rlsFlags), 1);
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -3792,6 +3850,13 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     uint8_t unloggedFlag = 0;
     in.read(reinterpret_cast<char*>(&unloggedFlag), 1);
     if (in) tbl.isUnlogged = (unloggedFlag != 0);
+    // Row-Level Security flags (backward-compatible)
+    uint8_t rlsFlags = 0;
+    in.read(reinterpret_cast<char*>(&rlsFlags), 1);
+    if (in) {
+        tbl.rowLevelSecurity = (rlsFlags & 1) != 0;
+        tbl.forceRowLevelSecurity = (rlsFlags & 2) != 0;
+    }
 
     return tbl;
 }
@@ -6255,7 +6320,12 @@ OpResult StorageEngine::remove(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
-    auto conds = parseConditions(conditions);
+    // Apply Row-Level Security policies
+    std::vector<std::string> allConditions = conditions;
+    auto rlsConds = buildRLSConditions(this, dbname, tablename, "DELETE");
+    allConditions.insert(allConditions.end(), rlsConds.begin(), rlsConds.end());
+
+    auto conds = parseConditions(allConditions);
     std::set<int64_t> toDelete = filterRows(dbname, tablename, conds);
 
     if (toDelete.empty()) {
@@ -6675,7 +6745,12 @@ OpResult StorageEngine::update(const std::string& dbname,
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
-    auto conds = parseConditions(conditions);
+    // Apply Row-Level Security policies
+    std::vector<std::string> allConditions = conditions;
+    auto rlsConds = buildRLSConditions(this, dbname, tablename, "UPDATE");
+    allConditions.insert(allConditions.end(), rlsConds.begin(), rlsConds.end());
+
+    auto conds = parseConditions(allConditions);
     std::set<int64_t> matchIds = conds.empty()
         ? [&](){ std::set<int64_t> s; forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) { s.insert(encodeRid(pid, sid)); }); return s; }()
         : filterRows(dbname, tablename, conds);
@@ -7412,7 +7487,12 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     size_t rowSize = tbl.rowSize();
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
-    auto conds = parseConditions(conditions);
+    // Apply Row-Level Security policies
+    std::vector<std::string> allConditions = conditions;
+    auto rlsConds = buildRLSConditions(this, dbname, tablename, "SELECT");
+    allConditions.insert(allConditions.end(), rlsConds.begin(), rlsConds.end());
+
+    auto conds = parseConditions(allConditions);
     std::vector<std::pair<int64_t, std::string>> matchRows;
     if (conds.empty()) {
         forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
@@ -11507,6 +11587,152 @@ OpResult StorageEngine::releaseSavepoint(const std::string& name) {
     auto it = savepoints_.find(name);
     if (it == savepoints_.end()) return OpResult::InvalidValue;
     savepoints_.erase(it);
+    return OpResult::Success;
+}
+
+// ========================================================================
+// Row-Level Security (RLS)
+// ========================================================================
+
+std::filesystem::path StorageEngine::rlsPath(const std::string& dbname, const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".rls");
+}
+
+OpResult StorageEngine::createPolicy(const std::string& dbname, const std::string& tablename,
+                                      const RowPolicy& policy) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    auto rpath = rlsPath(dbname, tablename);
+    auto policies = getPolicies(dbname, tablename);
+    for (const auto& p : policies) {
+        if (p.name == policy.name) return OpResult::TableAlreadyExist;
+    }
+    policies.push_back(policy);
+    std::ofstream ofs(rpath);
+    if (!ofs) return OpResult::InvalidValue;
+    for (const auto& p : policies) {
+        ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
+        ofs << " USING:" << escapeString(p.usingExpr);
+        ofs << " WITHCHECK:" << escapeString(p.withCheckExpr);
+        ofs << " ROLES:";
+        for (size_t i = 0; i < p.roles.size(); ++i) {
+            if (i > 0) ofs << ",";
+            ofs << escapeString(p.roles[i]);
+        }
+        ofs << "\n";
+    }
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropPolicy(const std::string& dbname, const std::string& tablename,
+                                    const std::string& policyName) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    auto rpath = rlsPath(dbname, tablename);
+    auto policies = getPolicies(dbname, tablename);
+    bool found = false;
+    for (auto it = policies.begin(); it != policies.end(); ) {
+        if (it->name == policyName) {
+            it = policies.erase(it);
+            found = true;
+        } else {
+            ++it;
+        }
+    }
+    if (!found) return OpResult::TableNotExist;
+    std::ofstream ofs(rpath);
+    if (!ofs) return OpResult::InvalidValue;
+    for (const auto& p : policies) {
+        ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
+        ofs << " USING:" << escapeString(p.usingExpr);
+        ofs << " WITHCHECK:" << escapeString(p.withCheckExpr);
+        ofs << " ROLES:";
+        for (size_t i = 0; i < p.roles.size(); ++i) {
+            if (i > 0) ofs << ",";
+            ofs << escapeString(p.roles[i]);
+        }
+        ofs << "\n";
+    }
+    return OpResult::Success;
+}
+
+std::vector<StorageEngine::RowPolicy> StorageEngine::getPolicies(const std::string& dbname,
+                                                                   const std::string& tablename) const {
+    std::vector<RowPolicy> result;
+    auto rpath = rlsPath(dbname, tablename);
+    if (!std::filesystem::exists(rpath)) return result;
+    std::ifstream ifs(rpath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.substr(0, 7) != "POLICY ") continue;
+        size_t pos = 7;
+        size_t sp = line.find(' ', pos);
+        if (sp == std::string::npos) continue;
+        RowPolicy p;
+        p.name = unescapeString(line.substr(pos, sp - pos));
+        pos = sp + 1;
+        sp = line.find(" USING:", pos);
+        if (sp == std::string::npos) continue;
+        p.cmd = line.substr(pos, sp - pos);
+        pos = sp + 7;
+        sp = line.find(" WITHCHECK:", pos);
+        if (sp == std::string::npos) continue;
+        p.usingExpr = unescapeString(line.substr(pos, sp - pos));
+        pos = sp + 11;
+        sp = line.find(" ROLES:", pos);
+        if (sp == std::string::npos) continue;
+        p.withCheckExpr = unescapeString(line.substr(pos, sp - pos));
+        pos = sp + 7;
+        std::string rolesStr = line.substr(pos);
+        if (!rolesStr.empty()) {
+            std::stringstream ss(rolesStr);
+            std::string role;
+            while (std::getline(ss, role, ',')) {
+                if (!role.empty()) p.roles.push_back(unescapeString(role));
+            }
+        }
+        result.push_back(p);
+    }
+    return result;
+}
+
+std::vector<StorageEngine::RowPolicy> StorageEngine::getApplicablePolicies(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& cmd, const std::string& username) const {
+    auto all = getPolicies(dbname, tablename);
+    std::vector<RowPolicy> result;
+    for (const auto& p : all) {
+        if (p.cmd != "ALL" && p.cmd != cmd) continue;
+        if (p.roles.empty()) {
+            result.push_back(p);
+        } else {
+            for (const auto& r : p.roles) {
+                if (r == username) {
+                    result.push_back(p);
+                    break;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+OpResult StorageEngine::enableRowLevelSecurity(const std::string& dbname, const std::string& tablename,
+                                                  bool force) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    tbl.rowLevelSecurity = true;
+    tbl.forceRowLevelSecurity = force;
+    std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+    writeSchema(out, tbl);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::disableRowLevelSecurity(const std::string& dbname, const std::string& tablename) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    tbl.rowLevelSecurity = false;
+    tbl.forceRowLevelSecurity = false;
+    std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+    writeSchema(out, tbl);
     return OpResult::Success;
 }
 
