@@ -296,7 +296,7 @@
 | deadlock_timeout 设置 | ✅ | ✅ | — |
 | LOCK TABLE 命令 | ❌ | ✅ | **缺失** |
 | Advisory Locks (pg_advisory_lock) | ❌ | ✅ | **缺失** |
-| 行级安全策略 (RLS) | ❌ | ✅ | **完全缺失** |
+| 行级安全策略 (RLS) | ✅ | ✅ | 支持 CREATE/DROP POLICY，ENABLE ROW LEVEL SECURITY，FOR ALL/SELECT/UPDATE/DELETE 策略，透明集成到 query/update/remove |
 | ALTER TABLE ... ENABLE ROW LEVEL SECURITY | ❌ | ✅ | — |
 
 ---
@@ -418,7 +418,7 @@
 | GRANT WITH GRANT OPTION | ❌ | ✅ | **缺失** |
 | REVOKE CASCADE | ❌ | ✅ | **缺失** |
 | ALTER DEFAULT PRIVILEGES | ❌ | ✅ | **缺失** |
-| 行级安全策略 (RLS) | ❌ | ✅ | **缺失** |
+| 行级安全策略 (RLS) | ✅ | ✅ | 支持 CREATE/DROP POLICY，ENABLE ROW LEVEL SECURITY，FOR ALL/SELECT/UPDATE/DELETE 策略，透明集成到 query/update/remove |
 | SECURITY LABEL | ❌ | ✅ | — |
 | 审计日志 | ✅ | ✅ | — |
 | 密码强度策略 | ✅ | ✅ | — |
@@ -595,7 +595,7 @@
 7. ❌ **声明式分区管理 (ATTACH/DETACH)** — 分区运维能力
 8. ❌ **PL/pgSQL 过程语言** — 存储过程无编程能力
 9. ❌ **扩展系统 (EXTENSION + FDW)** — 无法集成外部数据源
-10. ❌ **行级安全 (RLS)** — 多租户场景必备
+10. ✅ **行级安全 (RLS)** — 支持 CREATE/DROP POLICY，ENABLE/FORCE ROW LEVEL SECURITY，策略自动集成到 query/update/remove
 11. ❌ **GiST / GIN / BRIN 索引** — 空间/全文/JSON 加速
 12. ✅ **NOTIFY / LISTEN** — 支持 LISTEN/NOTIFY/UNLISTEN 异步消息
 13. ✅ **TRUNCATE TABLE** — 数据文件重建、索引重建、缓存清理、自增重置
