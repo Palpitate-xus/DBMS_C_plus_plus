@@ -707,6 +707,319 @@ std::string StorageEngine::getViewBaseTable(const std::string& dbname,
     return "";
 }
 
+std::string StorageEngine::getViewCheckOption(const std::string& dbname,
+                                               const std::string& viewname) const {
+    auto path = viewPath(dbname, viewname);
+    if (!std::filesystem::exists(path)) return "";
+    std::ifstream ifs(path);
+    if (!ifs) return "";
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.substr(0, 17) == "WITH_CHECK_OPTION") {
+            size_t colon = line.find(':');
+            if (colon != std::string::npos) return line.substr(colon + 1);
+            return "CASCADED";
+        }
+    }
+    return "";
+}
+
+// Forward declaration for validateViewCheckOption
+static std::string buildRowBuffer(const TableSchema& tbl,
+                                  const std::map<std::string, std::string>& values,
+                                  uint64_t creatorTxnId);
+
+// ========================================================================
+// WITH CHECK OPTION helpers
+// ========================================================================
+
+static std::string extractViewWhereClause(const std::string& selectSql) {
+    std::string lower = selectSql;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    size_t wherePos = lower.find(" where ");
+    if (wherePos == std::string::npos) return "";
+    size_t clauseStart = wherePos + 7;
+    static const char* endMarkers[] = {" order by ", " group by ", " limit ", " having ", " union ", " intersect ", " except "};
+    size_t clauseEnd = selectSql.size();
+    for (const char* marker : endMarkers) {
+        size_t pos = lower.find(marker, clauseStart);
+        if (pos != std::string::npos && pos < clauseEnd) clauseEnd = pos;
+    }
+    return trim(selectSql.substr(clauseStart, clauseEnd - clauseStart));
+}
+
+static std::string normalizeViewCondStr(std::string s) {
+    static const char* ops[] = {">=", "<=", "!=", "<>", ">", "<", "="};
+    for (const char* op : ops) {
+        size_t len = std::strlen(op);
+        size_t pos = 0;
+        while ((pos = s.find(op, pos)) != std::string::npos) {
+            size_t before = pos;
+            while (before > 0 && std::isspace(static_cast<unsigned char>(s[before - 1]))) before--;
+            size_t after = pos + len;
+            while (after < s.size() && std::isspace(static_cast<unsigned char>(s[after]))) after++;
+            if (before != pos || after != pos + len) {
+                s = s.substr(0, before) + op + s.substr(after);
+                pos = before + len;
+            } else {
+                pos += len;
+            }
+        }
+    }
+    struct KW { const char* w; size_t l; const char* r; };
+    static const KW kws[] = {
+        {"like", 4, "like"}, {"regexp", 6, "regexp"}, {"contains", 8, "contains"},
+        {"overlaps", 8, "overlaps"}, {"is not null", 11, "isnotnull"}, {"is null", 7, "isnull"}
+    };
+    for (const auto& kw : kws) {
+        size_t pos = 0;
+        while ((pos = s.find(kw.w, pos)) != std::string::npos) {
+            size_t before = pos;
+            while (before > 0 && std::isspace(static_cast<unsigned char>(s[before - 1]))) before--;
+            size_t after = pos + kw.l;
+            while (after < s.size() && std::isspace(static_cast<unsigned char>(s[after]))) after++;
+            if (before != pos || after != pos + kw.l) {
+                s = s.substr(0, before) + kw.r + s.substr(after);
+                pos = before + std::strlen(kw.r);
+            } else {
+                pos += kw.l;
+            }
+        }
+    }
+    // overlaps parenthesis form
+    size_t pos = 0;
+    while ((pos = s.find("overlaps", pos)) != std::string::npos) {
+        size_t leftStart = pos;
+        while (leftStart > 0 && s[leftStart - 1] != '(') leftStart--;
+        if (leftStart == 0 || s[leftStart - 1] != '(') { pos += 8; continue; }
+        leftStart--;
+        size_t rightEnd = pos + 8;
+        while (rightEnd < s.size() && s[rightEnd] != ')') rightEnd++;
+        if (rightEnd >= s.size()) { pos += 8; continue; }
+        rightEnd++;
+        std::string expr = s.substr(leftStart, rightEnd - leftStart);
+        std::string inner = expr.substr(1, expr.size() - 2);
+        size_t opPos = inner.find(")overlaps(");
+        if (opPos != std::string::npos) {
+            std::string repl = "overlaps:" + inner.substr(0, opPos) + "," + inner.substr(opPos + 10);
+            s = s.substr(0, leftStart) + repl + s.substr(rightEnd);
+            pos = leftStart + repl.size();
+        } else { pos += 8; }
+    }
+    return s;
+}
+
+static std::string modifyViewLogic(const std::string& logic) {
+    if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
+    size_t p = logic.find("like");
+    if (p != std::string::npos)
+        return "like" + logic.substr(0, p) + " " + logic.substr(p + 4);
+    p = logic.find("regexp");
+    if (p != std::string::npos)
+        return "regexp" + logic.substr(0, p) + " " + logic.substr(p + 6);
+    p = logic.find("contains");
+    if (p != std::string::npos)
+        return "contains" + logic.substr(0, p) + " " + logic.substr(p + 8);
+    p = logic.find("overlaps");
+    if (p != std::string::npos)
+        return "overlaps" + logic.substr(0, p) + " " + logic.substr(p + 8);
+    p = logic.find("isnotnull");
+    if (p != std::string::npos && p + 9 == logic.size())
+        return "isnotnull " + logic.substr(0, p);
+    p = logic.find("isnull");
+    if (p != std::string::npos && p + 6 == logic.size())
+        return "isnull " + logic.substr(0, p);
+    size_t opStart = std::string::npos, opLen = 0;
+    for (size_t i = 0; i < logic.size(); ++i) {
+        if (logic[i] == '>' || logic[i] == '<' || logic[i] == '=' || logic[i] == '!') {
+            opStart = i; opLen = 1;
+            if (i + 1 < logic.size() && (logic[i + 1] == '=' || logic[i + 1] == '>')) {
+                if ((logic[i] == '<' && logic[i + 1] == '=') ||
+                    (logic[i] == '>' && logic[i + 1] == '=') ||
+                    (logic[i] == '!' && logic[i + 1] == '=') ||
+                    (logic[i] == '<' && logic[i + 1] == '>')) opLen = 2;
+            }
+            break;
+        }
+    }
+    if (opStart == std::string::npos) return "";
+    std::string op = logic.substr(opStart, opLen);
+    std::string before = logic.substr(0, opStart);
+    std::string after = logic.substr(opStart + opLen);
+    if (after.size() >= 2 && after.front() == '\'' && after.back() == '\'')
+        after = after.substr(1, after.size() - 2);
+    return op + before + " " + after;
+}
+
+static std::vector<std::string> tokenizeViewCond(const std::string& s) {
+    std::vector<std::string> tokens;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+        if (i >= s.size()) break;
+        if (s[i] == '(' || s[i] == ')') {
+            tokens.emplace_back(1, s[i]);
+            ++i; continue;
+        }
+        size_t start = i;
+        while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])) && s[i] != '(' && s[i] != ')') ++i;
+        tokens.push_back(s.substr(start, i - start));
+    }
+    return tokens;
+}
+
+// Simple DNF breakdown (AND-of-groups for OR semantics)
+static std::vector<std::vector<std::string>> breakDownViewConds(const std::vector<std::string>& tokens) {
+    if (tokens.size() == 3 && tokens[0] == "(" && tokens[2] == ")")
+        return {{tokens[1]}};
+    struct Frame { std::vector<std::vector<std::string>> groups; };
+    std::vector<Frame> stack;
+    stack.push_back(Frame());
+    std::vector<std::string> operandStack;
+    auto applyAnd = [&](const std::string& right) {
+        Frame& cur = stack.back();
+        if (!operandStack.empty()) {
+            std::string left = operandStack.back(); operandStack.pop_back();
+            if (cur.groups.empty()) cur.groups.push_back({left, right});
+            else for (auto& g : cur.groups) g.push_back(right);
+        } else {
+            if (cur.groups.empty()) cur.groups.push_back({right});
+            else for (auto& g : cur.groups) g.push_back(right);
+        }
+    };
+    auto applyOr = [&](const std::string& right) {
+        Frame& cur = stack.back();
+        if (!operandStack.empty()) {
+            std::string left = operandStack.back(); operandStack.pop_back();
+            if (cur.groups.empty()) { cur.groups.push_back({left}); cur.groups.push_back({right}); }
+            else {
+                auto old = cur.groups;
+                cur.groups.clear();
+                for (auto& g : old) {
+                    auto g2 = g;
+                    g2.push_back(right);
+                    cur.groups.push_back(std::move(g));
+                    cur.groups.push_back(std::move(g2));
+                }
+            }
+        } else {
+            cur.groups.push_back({right});
+        }
+    };
+    auto flushOp = [&](const std::string& op, const std::string& right) {
+        if (op == "and") applyAnd(right);
+        else if (op == "or") applyOr(right);
+    };
+    std::string pendingOp;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const std::string& tok = tokens[i];
+        if (tok == "(") {
+            stack.push_back(Frame());
+            pendingOp.clear();
+        } else if (tok == ")") {
+            if (!operandStack.empty()) {
+                std::string last = operandStack.back(); operandStack.pop_back();
+                if (!pendingOp.empty()) { flushOp(pendingOp, last); pendingOp.clear(); }
+                else if (!stack.back().groups.empty()) {
+                    for (auto& g : stack.back().groups) g.push_back(last);
+                } else {
+                    stack.back().groups.push_back({last});
+                }
+            }
+            auto curGroups = std::move(stack.back().groups);
+            stack.pop_back();
+            if (!curGroups.empty()) {
+                if (stack.back().groups.empty()) stack.back().groups = std::move(curGroups);
+                else {
+                    auto old = stack.back().groups;
+                    stack.back().groups.clear();
+                    for (auto& g1 : old)
+                        for (auto& g2 : curGroups) {
+                            auto merged = g1;
+                            merged.insert(merged.end(), g2.begin(), g2.end());
+                            stack.back().groups.push_back(std::move(merged));
+                        }
+                }
+            }
+        } else if (tok == "and" || tok == "or") {
+            if (!operandStack.empty()) {
+                std::string last = operandStack.back(); operandStack.pop_back();
+                if (!pendingOp.empty()) flushOp(pendingOp, last);
+                else operandStack.push_back(last);
+            }
+            pendingOp = tok;
+        } else {
+            operandStack.push_back(tok);
+        }
+    }
+    if (!operandStack.empty()) {
+        std::string last = operandStack.back(); operandStack.pop_back();
+        if (!pendingOp.empty()) flushOp(pendingOp, last);
+        else if (!stack.back().groups.empty()) {
+            for (auto& g : stack.back().groups) g.push_back(last);
+        } else {
+            stack.back().groups.push_back({last});
+        }
+    }
+    return stack.back().groups;
+}
+
+bool StorageEngine::validateViewCheckOption(
+    const std::string& dbname,
+    const std::string& viewname,
+    const std::map<std::string, std::string>& colValues) const {
+
+    std::string checkOpt = getViewCheckOption(dbname, viewname);
+    if (checkOpt.empty()) return true;
+
+    std::string baseTable = getViewBaseTable(dbname, viewname);
+    if (baseTable.empty()) return true;
+
+    TableSchema tbl = getTableSchema(dbname, baseTable);
+
+    // Build simulated row buffer and strip MVCC header
+    std::string rowBuffer = buildRowBuffer(tbl, colValues, 0);
+    std::string dataOnly(rowBuffer.data() + MVCC_HEADER_SIZE,
+                         rowBuffer.size() - MVCC_HEADER_SIZE);
+
+    // Get view SQL and extract WHERE clause
+    std::string viewSql = getViewSQL(dbname, viewname);
+    std::string selectSql;
+    {
+        std::stringstream ss(viewSql);
+        std::getline(ss, selectSql);
+    }
+    std::string whereClause = extractViewWhereClause(selectSql);
+    if (whereClause.empty()) return true;
+
+    // Parse WHERE conditions into DNF groups
+    std::string normWhere = normalizeViewCondStr(whereClause);
+    auto tokens = tokenizeViewCond(normWhere);
+    auto groups = breakDownViewConds(tokens);
+
+    // For each DNF group (OR branch), all conditions in the group must be satisfied
+    // If ANY group is fully satisfied, the WHERE clause is satisfied
+    for (const auto& group : groups) {
+        std::vector<std::string> condStrs;
+        for (const auto& tok : group) {
+            if (tok == "and" || tok == "or" || tok == "(" || tok == ")") continue;
+            std::string mc = modifyViewLogic(tok);
+            if (!mc.empty()) condStrs.push_back(mc);
+        }
+        if (condStrs.empty()) continue;
+        auto conds = parseConditions(condStrs);
+        bool groupSatisfied = true;
+        for (const auto& c : conds) {
+            if (!evalConditionOnRow(c, dataOnly, tbl)) {
+                groupSatisfied = false;
+                break;
+            }
+        }
+        if (groupSatisfied) return true;
+    }
+    return false;
+}
+
 std::vector<std::string> StorageEngine::getViewNames(const std::string& dbname) const {
     std::vector<std::string> result;
     auto vdir = viewsDir(dbname);

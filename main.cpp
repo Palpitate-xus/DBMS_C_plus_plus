@@ -818,6 +818,21 @@ static string escapeCSVField(const string& val) {
     return result;
 }
 
+// Quote-aware comma split for INSERT VALUES
+static vector<string> splitValues(const string& s) {
+    vector<string> parts;
+    size_t start = 0;
+    bool inQuote = false;
+    for (size_t i = 0; i <= s.size(); ++i) {
+        if (i < s.size() && s[i] == '\'') inQuote = !inQuote;
+        if (i == s.size() || (!inQuote && s[i] == ',')) {
+            parts.push_back(trim(s.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    return parts;
+}
+
 static string normalizeConditionStr(string s) {
     static const char* ops[] = {">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
@@ -3418,10 +3433,29 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
             }
+            // Detect WITH CHECK OPTION
+            string checkOption;
+            string lvs = toLower(viewSql);
+            size_t wcoPos = lvs.find(" with check option");
+            size_t wcoLocalPos = lvs.find(" with local check option");
+            size_t wcoCascadedPos = lvs.find(" with cascaded check option");
+            if (wcoLocalPos != string::npos) {
+                checkOption = "LOCAL";
+                viewSql = trim(viewSql.substr(0, wcoLocalPos));
+            } else if (wcoCascadedPos != string::npos) {
+                checkOption = "CASCADED";
+                viewSql = trim(viewSql.substr(0, wcoCascadedPos));
+            } else if (wcoPos != string::npos) {
+                checkOption = "CASCADED";
+                viewSql = trim(viewSql.substr(0, wcoPos));
+            }
             // Store view SQL + base table metadata for updatable views
             string storeSql = viewSql;
             if (!baseTable.empty()) {
                 storeSql += "\nBASE_TABLE:" + baseTable + "\n";
+            }
+            if (!checkOption.empty()) {
+                storeSql += "WITH_CHECK_OPTION:" + checkOption + "\n";
             }
             if (orReplace && g_engine.viewExists(s.currentDB, viewname)) {
                 g_engine.dropView(s.currentDB, viewname);
@@ -3432,7 +3466,8 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "View " << viewname << (orReplace ? " replaced" : " created")
-                 << (baseTable.empty() ? "" : " (updatable)") << endl;
+                 << (baseTable.empty() ? "" : " (updatable)")
+                 << (checkOption.empty() ? "" : " [with check option " + checkOption + "]") << endl;
             return false;
         }
 
@@ -4454,15 +4489,54 @@ bool execute(const string& rawSql, Session& s) {
         string resolvedName = resolveTableName(s, tname);
         // Check for updatable view
         string viewBaseTable;
+        string viewCheckOpt;
         if (!g_engine.tableExists(s.currentDB, resolvedName) &&
             g_engine.viewExists(s.currentDB, tname)) {
             viewBaseTable = g_engine.getViewBaseTable(s.currentDB, tname);
+            viewCheckOpt = g_engine.getViewCheckOption(s.currentDB, tname);
             if (!viewBaseTable.empty()) {
                 // Rewrite SQL to use base table
                 string rewritten = rawSql;
                 size_t pos = rewritten.find(tname);
                 if (pos != string::npos) {
                     rewritten = rewritten.substr(0, pos) + viewBaseTable + rewritten.substr(pos + tname.size());
+                    if (!viewCheckOpt.empty()) {
+                        // Pre-validate WITH CHECK OPTION for INSERT INTO ... VALUES
+                        size_t valuesPos = sql.find("values");
+                        size_t selectPos = sql.find("select");
+                        bool isValuesInsert = (valuesPos != string::npos);
+                        bool isSelectInsert = (selectPos != string::npos);
+                        if (isValuesInsert && !isSelectInsert) {
+                            size_t colStart = sql.find('(', 12);
+                            size_t colEnd = sql.find(')', colStart);
+                            size_t valStart = sql.find('(', colEnd);
+                            size_t valEnd = findMatchingParen(sql, valStart);
+                            if (colStart != string::npos && colEnd != string::npos &&
+                                valStart != string::npos && valEnd != string::npos) {
+                                string colsStr = trim(sql.substr(colStart + 1, colEnd - colStart - 1));
+                                string valsStr = trim(sql.substr(valStart + 1, valEnd - valStart - 1));
+                                vector<string> insertCols;
+                                {
+                                    stringstream css(colsStr);
+                                    string item;
+                                    while (getline(css, item, ',')) insertCols.push_back(trim(item));
+                                }
+                                vector<string> insertVals = splitValues(valsStr);
+                                if (insertCols.size() == insertVals.size()) {
+                                    map<string, string> colVals;
+                                    for (size_t i = 0; i < insertCols.size(); ++i)
+                                        colVals[insertCols[i]] = insertVals[i];
+                                    if (!g_engine.validateViewCheckOption(s.currentDB, tname, colVals)) {
+                                        cout << "ERROR: new row violates WITH CHECK OPTION on view \"" << tname << "\"" << endl;
+                                        return true;
+                                    }
+                                }
+                            }
+                        } else if (isSelectInsert) {
+                            cout << "ERROR: INSERT INTO view WITH CHECK OPTION does not support INSERT ... SELECT" << endl;
+                            return true;
+                        }
+                    }
                     return execute(rewritten, s);
                 }
             }
@@ -5249,7 +5323,12 @@ bool execute(const string& rawSql, Session& s) {
         if (!g_engine.tableExists(s.currentDB, resolvedName) &&
             g_engine.viewExists(s.currentDB, tname)) {
             string viewBaseTable = g_engine.getViewBaseTable(s.currentDB, tname);
+            string viewCheckOpt = g_engine.getViewCheckOption(s.currentDB, tname);
             if (!viewBaseTable.empty()) {
+                if (!viewCheckOpt.empty()) {
+                    cout << "ERROR: UPDATE on view WITH CHECK OPTION not yet supported" << endl;
+                    return true;
+                }
                 string rewritten = rawSql;
                 size_t pos = rewritten.find(tname);
                 if (pos != string::npos) {

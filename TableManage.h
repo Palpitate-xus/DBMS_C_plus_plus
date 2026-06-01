@@ -189,6 +189,11 @@ public:
     std::vector<std::string> getViewNames(const std::string& dbname) const;
     // Get base table name for updatable views (empty if not updatable)
     std::string getViewBaseTable(const std::string& dbname, const std::string& viewname) const;
+    // Get WITH CHECK OPTION for a view ("CASCADED", "LOCAL", or "")
+    std::string getViewCheckOption(const std::string& dbname, const std::string& viewname) const;
+    // Validate that a row (colValues) satisfies the view's WHERE clause
+    bool validateViewCheckOption(const std::string& dbname, const std::string& viewname,
+                                  const std::map<std::string, std::string>& colValues) const;
 
     // Materialized view (stores query results in a backing table)
     static std::string materializedViewPrefix(const std::string& viewname) { return "__mv_" + viewname; }
