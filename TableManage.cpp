@@ -11067,7 +11067,18 @@ OpResult StorageEngine::rollbackTransaction() {
             if (pageBuf) {
                 Page page(pageBuf);
                 page.restore(slotId);  // clear tombstone if present
-                page.update(slotId, it->rowData.data(), it->rowData.size());
+                // rowData in txnLog is data-only (without MVCC header).
+                // Preserve the existing MVCC header and only replace the data portion.
+                const char* currentData = nullptr;
+                size_t currentLen = 0;
+                if (page.get(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
+                    std::string fullRow;
+                    fullRow.append(currentData, MVCC_HEADER_SIZE);  // keep MVCC header
+                    fullRow.append(it->rowData);                    // restore old data
+                    page.update(slotId, fullRow.data(), fullRow.size());
+                } else {
+                    page.update(slotId, it->rowData.data(), it->rowData.size());
+                }
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
             }
@@ -11155,6 +11166,210 @@ OpResult StorageEngine::rollbackTransaction() {
 }
 
 // ========================================================================
+// Two-phase commit support
+// ========================================================================
+
+static std::filesystem::path preparedDir() {
+    return std::filesystem::path("info") / ".prepared";
+}
+
+static std::filesystem::path preparedPath(const std::string& xid) {
+    return preparedDir() / xid;
+}
+
+OpResult StorageEngine::prepareTransaction(const std::string& xid) {
+    if (!inTransaction_) return OpResult::InvalidValue;
+    if (xid.empty()) return OpResult::InvalidValue;
+
+    std::filesystem::path pdir = preparedDir();
+    if (!std::filesystem::exists(pdir)) {
+        std::filesystem::create_directories(pdir);
+    }
+    std::filesystem::path pfile = preparedPath(xid);
+    if (std::filesystem::exists(pfile)) return OpResult::DuplicateKey;
+
+    std::ofstream ofs(pfile, std::ios::binary);
+    if (!ofs) return OpResult::InvalidValue;
+
+    // Transaction metadata
+    ofs << "TXN_ID " << currentTxnId_ << "\n";
+    ofs << "DBNAME " << txnDB_ << "\n";
+    ofs << "ISOLATION " << static_cast<int>(txnIsolationLevel_) << "\n";
+    ofs << "READONLY " << (readOnly_ ? 1 : 0) << "\n";
+
+    // Held locks (resource mode)
+    auto locks = lockManager_.getLockHolds();
+    for (const auto& lk : locks) {
+        ofs << "LOCK " << lk.resource << " " << lk.mode << "\n";
+    }
+
+    // Transaction log
+    for (const auto& entry : txnLog_) {
+        ofs << "LOG ";
+        if (entry.op == TxnLogEntry::Op::Insert) ofs << "INSERT";
+        else if (entry.op == TxnLogEntry::Op::Update) ofs << "UPDATE";
+        else if (entry.op == TxnLogEntry::Op::Delete) ofs << "DELETE";
+        ofs << " " << entry.tableName << " " << entry.rowIdx << " ";
+        for (unsigned char c : entry.rowData) {
+            char buf[3];
+            snprintf(buf, sizeof(buf), "%02x", c);
+            ofs << buf;
+        }
+        ofs << "\n";
+    }
+    ofs.close();
+
+    // WAL PREPARE marker
+    walAppend(walPath(txnDB_), "PREPARE " + std::to_string(currentTxnId_) + " " + xid);
+
+    // Remove from active set (prepared txns are not active for ReadView)
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        activeTransactions_.erase(currentTxnId_);
+    }
+
+    // Clear transaction state but KEEP locks (2PC semantics)
+    txnLog_.clear();
+    savepoints_.clear();
+    walClear(walPath(txnDB_));
+
+    {
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiReadSets_.erase(currentTxnId_);
+        ssiWriteSets_.erase(currentTxnId_);
+        ssiOutEdges_.erase(currentTxnId_);
+        for (auto& [k, v] : ssiInEdges_) v.erase(currentTxnId_);
+        ssiInEdges_.erase(currentTxnId_);
+        for (auto& [k, v] : ssiOutEdges_) v.erase(currentTxnId_);
+    }
+    txnReadRids_.clear();
+    txnWrittenRids_.clear();
+
+    currentTxnId_ = 0;
+    inTransaction_ = false;
+    readOnly_ = false;
+    txnDB_.clear();
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::commitPrepared(const std::string& xid) {
+    std::filesystem::path pfile = preparedPath(xid);
+    if (!std::filesystem::exists(pfile)) return OpResult::TableNotExist;
+
+    uint64_t savedTxnId = 0;
+    std::string savedDB;
+    {
+        std::ifstream ifs(pfile, std::ios::binary);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.substr(0, 6) == "TXN_ID") savedTxnId = std::stoull(line.substr(7));
+            else if (line.substr(0, 6) == "DBNAME") savedDB = line.substr(7);
+        }
+    }
+    if (savedTxnId == 0 || savedDB.empty()) return OpResult::InvalidValue;
+
+    // WAL COMMIT PREPARED marker
+    walAppend(walPath(savedDB), "COMMIT PREPARED " + std::to_string(savedTxnId) + " " + xid);
+
+    // Normal commit logic
+    TxnIdGenerator::instance().notifyCommit(savedTxnId);
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        activeTransactions_.erase(savedTxnId);
+    }
+
+    txnLog_.clear();
+    savepoints_.clear();
+    walClear(walPath(savedDB));
+    lockManager_.unlockAll();
+    lockManager_.unlockAllGaps();
+    currentTxnId_ = 0;
+    inTransaction_ = false;
+    readOnly_ = false;
+    txnDB_.clear();
+
+    std::filesystem::remove(pfile);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::rollbackPrepared(const std::string& xid) {
+    std::filesystem::path pfile = preparedPath(xid);
+    if (!std::filesystem::exists(pfile)) return OpResult::TableNotExist;
+
+    uint64_t savedTxnId = 0;
+    std::string savedDB;
+    IsolationLevel savedIso = IsolationLevel::RepeatableRead;
+    std::vector<TxnLogEntry> savedLog;
+
+    {
+        std::ifstream ifs(pfile, std::ios::binary);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.substr(0, 6) == "TXN_ID") {
+                savedTxnId = std::stoull(line.substr(7));
+            } else if (line.substr(0, 6) == "DBNAME") {
+                savedDB = line.substr(7);
+            } else if (line.substr(0, 9) == "ISOLATION") {
+                savedIso = static_cast<IsolationLevel>(std::stoi(line.substr(10)));
+            } else if (line.substr(0, 3) == "LOG") {
+                size_t pos = 4;
+                size_t sp = line.find(' ', pos);
+                std::string opStr = line.substr(pos, sp - pos);
+                pos = sp + 1;
+                sp = line.find(' ', pos);
+                std::string tbl = line.substr(pos, sp - pos);
+                pos = sp + 1;
+                sp = line.find(' ', pos);
+                int64_t rid = std::stoll(line.substr(pos, sp - pos));
+                pos = sp + 1;
+                std::string hexData = line.substr(pos);
+                std::string rowData;
+                for (size_t i = 0; i + 1 < hexData.size(); i += 2) {
+                    rowData.push_back(static_cast<char>(std::stoi(hexData.substr(i, 2), nullptr, 16)));
+                }
+                TxnLogEntry entry;
+                if (opStr == "INSERT") entry.op = TxnLogEntry::Op::Insert;
+                else if (opStr == "UPDATE") entry.op = TxnLogEntry::Op::Update;
+                else if (opStr == "DELETE") entry.op = TxnLogEntry::Op::Delete;
+                entry.tableName = tbl;
+                entry.rowIdx = rid;
+                entry.rowData = rowData;
+                savedLog.push_back(entry);
+            }
+        }
+    }
+
+    if (savedTxnId == 0 || savedDB.empty()) return OpResult::InvalidValue;
+
+    // Temporarily restore state and use normal rollback
+    currentTxnId_ = savedTxnId;
+    txnDB_ = savedDB;
+    txnIsolationLevel_ = savedIso;
+    inTransaction_ = true;
+    txnLog_ = std::move(savedLog);
+
+    OpResult res = rollbackTransaction();
+
+    // WAL ROLLBACK PREPARED marker
+    walAppend(walPath(savedDB), "ROLLBACK PREPARED " + std::to_string(savedTxnId) + " " + xid);
+
+    std::filesystem::remove(pfile);
+    return res;
+}
+
+std::vector<std::string> StorageEngine::listPreparedTransactions() const {
+    std::vector<std::string> result;
+    std::filesystem::path pdir = preparedDir();
+    if (!std::filesystem::exists(pdir)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(pdir)) {
+        if (entry.is_regular_file()) {
+            result.push_back(entry.path().filename().string());
+        }
+    }
+    return result;
+}
+
+// ========================================================================
 // Savepoint support
 // ========================================================================
 
@@ -11217,7 +11432,17 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 Page page(pageBuf);
-                page.update(slotId, entry.rowData.data(), entry.rowData.size());
+                // Preserve MVCC header, only replace data portion
+                const char* currentData = nullptr;
+                size_t currentLen = 0;
+                if (page.get(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
+                    std::string fullRow;
+                    fullRow.append(currentData, MVCC_HEADER_SIZE);
+                    fullRow.append(entry.rowData);
+                    page.update(slotId, fullRow.data(), fullRow.size());
+                } else {
+                    page.update(slotId, entry.rowData.data(), entry.rowData.size());
+                }
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
             }

@@ -435,6 +435,12 @@ public:
     OpResult commitTransaction();
     OpResult rollbackTransaction();
 
+    // Two-phase commit (PREPARE TRANSACTION / COMMIT PREPARED / ROLLBACK PREPARED)
+    OpResult prepareTransaction(const std::string& xid);
+    OpResult commitPrepared(const std::string& xid);
+    OpResult rollbackPrepared(const std::string& xid);
+    std::vector<std::string> listPreparedTransactions() const;
+
     // Savepoint support
     OpResult savepoint(const std::string& name);
     OpResult rollbackToSavepoint(const std::string& name);

@@ -6458,6 +6458,25 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // COMMIT PREPARED 'xid'
+    if (sql.substr(0, 15) == "commit prepared") {
+        string xid = stripQuotes(trim(sql.substr(15)));
+        if (xid.empty()) {
+            cout << "SQL syntax error: COMMIT PREPARED requires a transaction ID" << endl;
+            return true;
+        }
+        auto res = g_engine.commitPrepared(xid);
+        if (res == OpResult::Success) {
+            cout << "COMMIT PREPARED " << xid << endl;
+            log(s.username, "commit prepared " + xid, getTime());
+        } else if (res == OpResult::TableNotExist) {
+            cout << "Prepared transaction not found" << endl;
+        } else {
+            cout << "COMMIT PREPARED failed" << endl;
+        }
+        return false;
+    }
+
     if (sql.substr(0, 6) == "commit") {
         auto res = g_engine.commitTransaction();
         if (res != OpResult::Success) {
@@ -6534,6 +6553,25 @@ bool execute(const string& rawSql, Session& s) {
         }
         cout << "Rolled back to savepoint " << name << endl;
         log(s.username, "rollback to savepoint " + name, getTime());
+        return false;
+    }
+
+    // ROLLBACK PREPARED 'xid'
+    if (sql.substr(0, 17) == "rollback prepared") {
+        string xid = stripQuotes(trim(sql.substr(17)));
+        if (xid.empty()) {
+            cout << "SQL syntax error: ROLLBACK PREPARED requires a transaction ID" << endl;
+            return true;
+        }
+        auto res = g_engine.rollbackPrepared(xid);
+        if (res == OpResult::Success) {
+            cout << "ROLLBACK PREPARED " << xid << endl;
+            log(s.username, "rollback prepared " + xid, getTime());
+        } else if (res == OpResult::TableNotExist) {
+            cout << "Prepared transaction not found" << endl;
+        } else {
+            cout << "ROLLBACK PREPARED failed" << endl;
+        }
         return false;
     }
 
@@ -7862,6 +7900,26 @@ bool execute(const string& rawSql, Session& s) {
     // PREPARE stmt_name FROM 'sql_template'
     if (sql.substr(0, 8) == "prepare ") {
         string rest = trim(sql.substr(8));
+        // PREPARE TRANSACTION 'xid'
+        if (rest.substr(0, 12) == "transaction ") {
+            string xid = stripQuotes(trim(rest.substr(12)));
+            if (xid.empty()) {
+                cout << "SQL syntax error: PREPARE TRANSACTION requires a transaction ID" << endl;
+                return true;
+            }
+            auto res = g_engine.prepareTransaction(xid);
+            if (res == OpResult::Success) {
+                cout << "PREPARE TRANSACTION " << xid << endl;
+                log(s.username, "prepare transaction " + xid, getTime());
+            } else if (res == OpResult::InvalidValue) {
+                cout << "No active transaction" << endl;
+            } else if (res == OpResult::DuplicateKey) {
+                cout << "Transaction ID already exists" << endl;
+            } else {
+                cout << "PREPARE TRANSACTION failed" << endl;
+            }
+            return false;
+        }
         size_t fromPos = rest.find(" from ");
         if (fromPos == string::npos) {
             cout << "SQL syntax error: expected FROM" << endl;
