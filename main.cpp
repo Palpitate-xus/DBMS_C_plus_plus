@@ -760,6 +760,15 @@ static string resolveTableName(Session& s, const string& name) {
     if (g_engine.isMaterializedView(s.currentDB, name)) {
         return dbms::StorageEngine::materializedViewPrefix(name);
     }
+    // Schema-qualified table: schema.table -> schema__table
+    size_t dotPos = name.find('.');
+    if (dotPos != string::npos && dotPos > 0 && dotPos + 1 < name.size()) {
+        string schema = name.substr(0, dotPos);
+        string table = name.substr(dotPos + 1);
+        if (g_engine.schemaExists(s.currentDB, schema)) {
+            return schema + "__" + table;
+        }
+    }
     return name;
 }
 
@@ -3117,6 +3126,7 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             string tname = rest.substr(0, sp);
+            tname = resolveTableName(s, tname);
             // CTAS: CREATE TABLE new_table AS SELECT ...
             size_t asPos = rest.find(" as ", sp);
             if (asPos != string::npos) {
@@ -3820,6 +3830,19 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
+        if (sql.substr(7, 6) == "schema") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            string schemaname = trim(sql.substr(14));
+            auto res = g_engine.createSchema(s.currentDB, schemaname);
+            if (res != OpResult::Success) {
+                cout << "Create schema failed" << endl;
+                return true;
+            }
+            cout << "Schema " << schemaname << " created" << endl;
+            return false;
+        }
+
         if (sql.substr(7, 9) == "procedure") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
@@ -4206,6 +4229,26 @@ bool execute(const string& rawSql, Session& s) {
             }
             outfile << endl;
             cout << "User password updated" << endl;
+            return false;
+        }
+        if (tokens[0] == "schema") {
+            if (!checkDB(s)) return true;
+            if (tokens.size() < 5 || tokens[2] != "rename" || tokens[3] != "to") {
+                cout << "SQL syntax error: ALTER SCHEMA name RENAME TO newname" << endl;
+                return true;
+            }
+            string oldName = tokens[1];
+            string newName = tokens[4];
+            auto res = g_engine.renameSchema(s.currentDB, oldName, newName);
+            if (res == OpResult::TableNotExist) {
+                cout << "Schema " << oldName << " not exist" << endl;
+                return true;
+            }
+            if (res != OpResult::Success) {
+                cout << "Rename schema failed" << endl;
+                return true;
+            }
+            cout << "Schema " << oldName << " renamed to " << newName << endl;
             return false;
         }
         if (!checkDB(s)) return true;
@@ -6451,6 +6494,17 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Role dropped" << endl;
+            return false;
+        }
+        if (op == "schema") {
+            bool cascade = false;
+            if (tokens.size() >= 3 && tokens[2] == "cascade") cascade = true;
+            auto res = g_engine.dropSchema(s.currentDB, name, cascade);
+            if (res == OpResult::TableNotExist) {
+                cout << "Schema " << name << " not exist" << endl;
+                return true;
+            }
+            cout << "Schema " << name << " dropped" << (cascade ? " (cascade)" : "") << endl;
             return false;
         }
         if (op == "database") {

@@ -1209,6 +1209,138 @@ std::vector<std::string> StorageEngine::getProcedureNames(const std::string& dbn
 }
 
 // ========================================================================
+// Schema management
+// ========================================================================
+
+static std::filesystem::path schemaMarkerPath(const std::string& dbname,
+                                              const std::string& schemaname) {
+    return std::filesystem::path(dbname) / (".schema_" + schemaname);
+}
+
+OpResult StorageEngine::createSchema(const std::string& dbname,
+                                     const std::string& schemaname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = schemaMarkerPath(dbname, schemaname);
+    if (std::filesystem::exists(path)) return OpResult::Success; // already exists
+    std::ofstream ofs(path);
+    if (!ofs) return OpResult::InvalidValue;
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropSchema(const std::string& dbname,
+                                   const std::string& schemaname,
+                                   bool cascade) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = schemaMarkerPath(dbname, schemaname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (cascade) {
+        std::string prefix = schemaname + "__";
+        auto dbPath = std::filesystem::path(dbname);
+        for (const auto& entry : std::filesystem::directory_iterator(dbPath)) {
+            if (!entry.is_regular_file()) continue;
+            std::string name = entry.path().filename().string();
+            if (name.size() > 3 && name.substr(name.size() - 3) == ".dt") {
+                std::string tname = name.substr(0, name.size() - 3);
+                if (tname.size() > prefix.size() && tname.substr(0, prefix.size()) == prefix) {
+                    dropTable(dbname, tname);
+                }
+            }
+        }
+    }
+    std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::renameSchema(const std::string& dbname,
+                                     const std::string& oldname,
+                                     const std::string& newname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto oldPath = schemaMarkerPath(dbname, oldname);
+    auto newPath = schemaMarkerPath(dbname, newname);
+    if (!std::filesystem::exists(oldPath)) return OpResult::TableNotExist;
+    if (std::filesystem::exists(newPath)) return OpResult::InvalidValue;
+    std::filesystem::rename(oldPath, newPath);
+    // Rename all tables in the old schema
+    std::string oldPrefix = oldname + "__";
+    std::string newPrefix = newname + "__";
+    auto dbPath = std::filesystem::path(dbname);
+    for (const auto& entry : std::filesystem::directory_iterator(dbPath)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+        if (name.size() > 3 && name.substr(name.size() - 3) == ".dt") {
+            std::string tname = name.substr(0, name.size() - 3);
+            if (tname.size() > oldPrefix.size() && tname.substr(0, oldPrefix.size()) == oldPrefix) {
+                std::string rest = tname.substr(oldPrefix.size());
+                std::string newTname = newPrefix + rest;
+                // Rename .dt, .stc, .idx files
+                for (const char* ext : {".dt", ".stc", ".idx"}) {
+                    auto oldFile = dbPath / (tname + ext);
+                    auto newFile = dbPath / (newTname + ext);
+                    if (std::filesystem::exists(oldFile)) {
+                        std::filesystem::rename(oldFile, newFile);
+                    }
+                }
+                // Update tlist.lst
+                auto tlistPath = dbPath / "tlist.lst";
+                if (std::filesystem::exists(tlistPath)) {
+                    std::ifstream ifs(tlistPath);
+                    std::vector<std::string> lines;
+                    std::string line;
+                    while (std::getline(ifs, line)) lines.push_back(line);
+                    std::ofstream ofs(tlistPath);
+                    for (const auto& l : lines) {
+                        if (l == tname) ofs << newTname << '\n';
+                        else ofs << l << '\n';
+                    }
+                }
+            }
+        }
+    }
+    return OpResult::Success;
+}
+
+bool StorageEngine::schemaExists(const std::string& dbname,
+                                 const std::string& schemaname) const {
+    return std::filesystem::exists(schemaMarkerPath(dbname, schemaname));
+}
+
+std::vector<std::string> StorageEngine::getSchemaNames(const std::string& dbname) const {
+    std::vector<std::string> result;
+    auto dbPath = std::filesystem::path(dbname);
+    if (!std::filesystem::exists(dbPath)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(dbPath)) {
+        if (entry.is_regular_file()) {
+            std::string name = entry.path().filename().string();
+            if (name.size() > 8 && name.substr(0, 8) == ".schema_") {
+                result.push_back(name.substr(8));
+            }
+        }
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getTablesInSchema(
+    const std::string& dbname, const std::string& schemaname) const {
+    std::vector<std::string> result;
+    std::string prefix = schemaname + "__";
+    auto dbPath = std::filesystem::path(dbname);
+    if (!std::filesystem::exists(dbPath)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(dbPath)) {
+        if (entry.is_regular_file()) {
+            std::string name = entry.path().filename().string();
+            if (name.size() > 3 && name.substr(name.size() - 3) == ".dt") {
+                std::string tname = name.substr(0, name.size() - 3);
+                if (tname.size() > prefix.size() &&
+                    tname.substr(0, prefix.size()) == prefix) {
+                    result.push_back(tname.substr(prefix.size()));
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// ========================================================================
 // User-defined functions (simple expression-based)
 // ========================================================================
 

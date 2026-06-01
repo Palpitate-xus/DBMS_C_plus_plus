@@ -219,6 +219,16 @@ public:
                                                const std::string& procname) const;
     std::vector<std::string> getProcedureNames(const std::string& dbname) const;
 
+    // Schema management
+    OpResult createSchema(const std::string& dbname, const std::string& schemaname);
+    OpResult dropSchema(const std::string& dbname, const std::string& schemaname, bool cascade);
+    OpResult renameSchema(const std::string& dbname, const std::string& oldname,
+                          const std::string& newname);
+    bool schemaExists(const std::string& dbname, const std::string& schemaname) const;
+    std::vector<std::string> getSchemaNames(const std::string& dbname) const;
+    std::vector<std::string> getTablesInSchema(const std::string& dbname,
+                                               const std::string& schemaname) const;
+
     // User-defined functions (simple expression-based)
     struct UDFInfo {
         std::string name;

@@ -22,9 +22,9 @@
 |------|--------|------------|----------|
 | CREATE DATABASE | ✅ | ✅ | 支持 CHARACTER SET |
 | DROP DATABASE | ✅ | ✅ | — |
-| CREATE SCHEMA | ❌ | ✅ | **无 Schema 概念**，只有 database 一层命名空间 |
-| DROP SCHEMA | ❌ | ✅ | — |
-| ALTER SCHEMA | ❌ | ✅ | — |
+| CREATE SCHEMA | ✅ | ✅ | 支持 `schema.table` 限定名，表名编码为 `schema__table` |
+| DROP SCHEMA | ✅ | ✅ | 支持 `CASCADE` 级联删除表 |
+| ALTER SCHEMA | ✅ | ✅ | 支持 `RENAME TO`，自动重命名 schema 下所有表 |
 | CREATE TABLE | ✅ | ✅ | 支持广泛的数据类型和约束 |
 | CREATE TEMPORARY TABLE | ✅ | ✅ | 会话级临时表 |
 | CREATE UNLOGGED TABLE | ✅ | ✅ | — |
@@ -586,7 +586,7 @@
 
 ### 核心差距 TOP 20（按重要性排序）
 
-1. ❌ **CREATE SCHEMA** — 无命名空间分层，所有表在同一层级
+1. ✅ **CREATE SCHEMA** — 支持 schema 限定表名 (`schema.table` → `schema__table`)
 2. ❌ **并行查询** — 无法利用多核 CPU
 3. ❌ **真正的 SERIALIZABLE (SSI)** — 仅快照隔离模拟
 4. ✅ **LATERAL JOIN** — 支持 `CROSS JOIN LATERAL` 和 `, LATERAL` 语法
