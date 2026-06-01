@@ -4267,6 +4267,35 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // SET TRANSACTION ISOLATION LEVEL (must come before generic SET)
+    if (sql.substr(0, 25) == "set transaction isolation" ||
+        sql.substr(0, 31) == "set transaction isolation level") {
+        string rawRest;
+        if (sql.substr(0, 31) == "set transaction isolation level") {
+            rawRest = sql.substr(31);
+        } else {
+            rawRest = sql.substr(25);
+        }
+        string rest = trim(rawRest);
+        if (rest.find("read uncommitted") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
+            cout << "Isolation level set to READ UNCOMMITTED" << endl;
+        } else if (rest.find("read committed") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
+            cout << "Isolation level set to READ COMMITTED" << endl;
+        } else if (rest.find("repeatable read") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+            cout << "Isolation level set to REPEATABLE READ" << endl;
+        } else if (rest.find("serializable") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            cout << "Isolation level set to SERIALIZABLE" << endl;
+        } else {
+            cout << "Unknown isolation level" << endl;
+            return true;
+        }
+        return false;
+    }
+
     // SET parameter = value  (session-level, non-persistent)
     // SET GLOBAL parameter = value (persistent to dbms.conf)
     if (sql.substr(0, 3) == "set" && sql.size() > 3 && isspace(static_cast<unsigned char>(sql[3]))) {
@@ -6382,34 +6411,6 @@ bool execute(const string& rawSql, Session& s) {
         } else {
             cout << "Transaction started" << endl;
             log(s.username, "begin transaction", getTime());
-        }
-        return false;
-    }
-
-    if (sql.substr(0, 25) == "set transaction isolation" ||
-        sql.substr(0, 31) == "set transaction isolation level") {
-        string rawRest;
-        if (sql.substr(0, 31) == "set transaction isolation level") {
-            rawRest = sql.substr(31);
-        } else {
-            rawRest = sql.substr(25);
-        }
-        string rest = trim(rawRest);
-        if (rest.find("read uncommitted") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
-            cout << "Isolation level set to READ UNCOMMITTED" << endl;
-        } else if (rest.find("read committed") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
-            cout << "Isolation level set to READ COMMITTED" << endl;
-        } else if (rest.find("repeatable read") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
-            cout << "Isolation level set to REPEATABLE READ" << endl;
-        } else if (rest.find("serializable") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
-            cout << "Isolation level set to SERIALIZABLE" << endl;
-        } else {
-            cout << "Unknown isolation level" << endl;
-            return true;
         }
         return false;
     }

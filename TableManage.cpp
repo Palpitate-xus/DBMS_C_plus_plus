@@ -29,6 +29,11 @@ namespace dbms {
 // Global active transaction tracking
 std::mutex StorageEngine::globalTxnMutex_;
 std::set<uint64_t> StorageEngine::activeTransactions_;
+std::mutex StorageEngine::ssiMutex_;
+std::map<uint64_t, std::set<int64_t>> StorageEngine::ssiReadSets_;
+std::map<uint64_t, std::set<int64_t>> StorageEngine::ssiWriteSets_;
+std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiOutEdges_;
+std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiInEdges_;
 
 // ========================================================================
 // Unicode string helpers
@@ -2149,12 +2154,18 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 lockManager_.pageLockShared(dbname, tablename, pid);
                 char* buf = ppa->fetchPage(pid);
                 Page page(buf);
-                page.forEachLive([&callback, pid, rv](uint16_t sid, const char* data, size_t len) {
+                page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
                     if (len <= MVCC_HEADER_SIZE) return;
                     if (rv) {
                         uint64_t rowTxnId = 0;
                         std::memcpy(&rowTxnId, data, sizeof(uint64_t));
                         if (!rv->isVisible(rowTxnId)) return;
+                    }
+                    if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                        int64_t rid = this->encodeRid(pid, sid);
+                        this->txnReadRids_.insert(rid);
+                        std::lock_guard<std::mutex> lock(ssiMutex_);
+                        ssiReadSets_[this->currentTxnId_].insert(rid);
                     }
                     callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
                 });
@@ -2173,12 +2184,18 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = pa->fetchPage(pid);
         Page page(buf);
-        page.forEachLive([&callback, pid, rv](uint16_t sid, const char* data, size_t len) {
+        page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
             if (len <= MVCC_HEADER_SIZE) return;
             if (rv) {
                 uint64_t rowTxnId = 0;
                 std::memcpy(&rowTxnId, data, sizeof(uint64_t));
                 if (!rv->isVisible(rowTxnId)) return;
+            }
+            if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                int64_t rid = this->encodeRid(pid, sid);
+                this->txnReadRids_.insert(rid);
+                std::lock_guard<std::mutex> lock(ssiMutex_);
+                ssiReadSets_[this->currentTxnId_].insert(rid);
             }
             callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
         });
@@ -10817,16 +10834,31 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
 
 void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx) {
     txnLog_.push_back({TxnLogEntry::Op::Insert, tableName, rowIdx, ""});
+    if (txnIsolationLevel_ == IsolationLevel::Serializable) {
+        txnWrittenRids_.insert(rowIdx);
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiWriteSets_[currentTxnId_].insert(rowIdx);
+    }
 }
 
 void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
     txnLog_.push_back({TxnLogEntry::Op::Update, tableName, rowIdx, oldRowData});
+    if (txnIsolationLevel_ == IsolationLevel::Serializable) {
+        txnWrittenRids_.insert(rowIdx);
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiWriteSets_[currentTxnId_].insert(rowIdx);
+    }
 }
 
 void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
     txnLog_.push_back({TxnLogEntry::Op::Delete, tableName, rowIdx, oldRowData});
+    if (txnIsolationLevel_ == IsolationLevel::Serializable) {
+        txnWrittenRids_.insert(rowIdx);
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiWriteSets_[currentTxnId_].insert(rowIdx);
+    }
 }
 
 // ========================================================================
@@ -10870,6 +10902,14 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.insert(currentTxnId_);
     }
+    // Initialize SSI tracking
+    {
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiReadSets_[currentTxnId_].clear();
+        ssiWriteSets_[currentTxnId_].clear();
+    }
+    txnReadRids_.clear();
+    txnWrittenRids_.clear();
     if (txnIsolationLevel_ != IsolationLevel::ReadUncommitted) {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         readView_.creatorTxnId = currentTxnId_;
@@ -10890,6 +10930,64 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
 
 OpResult StorageEngine::commitTransaction() {
     if (!inTransaction_) return OpResult::Success;
+
+    // SSI conflict detection for Serializable isolation
+    if (txnIsolationLevel_ == IsolationLevel::Serializable) {
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        bool hasOutgoing = false, hasIncoming = false;
+
+        for (const auto& [otherTxId, otherWriteSet] : ssiWriteSets_) {
+            if (otherTxId == currentTxnId_) continue;
+            for (int64_t rid : txnReadRids_) {
+                if (otherWriteSet.count(rid)) {
+                    hasOutgoing = true;
+                    ssiOutEdges_[currentTxnId_].insert(otherTxId);
+                    ssiInEdges_[otherTxId].insert(currentTxnId_);
+                    break;
+                }
+            }
+            if (hasOutgoing) break;
+        }
+
+        for (const auto& [otherTxId, otherReadSet] : ssiReadSets_) {
+            if (otherTxId == currentTxnId_) continue;
+            for (int64_t rid : txnWrittenRids_) {
+                if (otherReadSet.count(rid)) {
+                    hasIncoming = true;
+                    ssiInEdges_[currentTxnId_].insert(otherTxId);
+                    ssiOutEdges_[otherTxId].insert(currentTxnId_);
+                    break;
+                }
+            }
+            if (hasIncoming) break;
+        }
+
+        if (hasOutgoing && hasIncoming) {
+            // Dangerous structure detected - must abort
+            uint64_t abortedId = currentTxnId_;
+            ssiReadSets_.erase(abortedId);
+            ssiWriteSets_.erase(abortedId);
+            ssiOutEdges_.erase(abortedId);
+            for (auto& [k, v] : ssiInEdges_) v.erase(abortedId);
+            ssiInEdges_.erase(abortedId);
+            for (auto& [k, v] : ssiOutEdges_) v.erase(abortedId);
+            txnReadRids_.clear();
+            txnWrittenRids_.clear();
+            rollbackTransaction();
+            return OpResult::SerializationFailure;
+        }
+
+        // No conflict - clean up SSI data for committed transaction
+        ssiReadSets_.erase(currentTxnId_);
+        ssiWriteSets_.erase(currentTxnId_);
+        ssiOutEdges_.erase(currentTxnId_);
+        for (auto& [k, v] : ssiInEdges_) v.erase(currentTxnId_);
+        ssiInEdges_.erase(currentTxnId_);
+        for (auto& [k, v] : ssiOutEdges_) v.erase(currentTxnId_);
+        txnReadRids_.clear();
+        txnWrittenRids_.clear();
+    }
+
     // Update max committed txId
     TxnIdGenerator::instance().notifyCommit(currentTxnId_);
     // Remove from active set
@@ -11035,6 +11133,20 @@ OpResult StorageEngine::rollbackTransaction() {
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
+
+    // Clean up SSI data for aborted transaction
+    {
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiReadSets_.erase(currentTxnId_);
+        ssiWriteSets_.erase(currentTxnId_);
+        ssiOutEdges_.erase(currentTxnId_);
+        for (auto& [k, v] : ssiInEdges_) v.erase(currentTxnId_);
+        ssiInEdges_.erase(currentTxnId_);
+        for (auto& [k, v] : ssiOutEdges_) v.erase(currentTxnId_);
+    }
+    txnReadRids_.clear();
+    txnWrittenRids_.clear();
+
     currentTxnId_ = 0;
     inTransaction_ = false;
     readOnly_ = false;

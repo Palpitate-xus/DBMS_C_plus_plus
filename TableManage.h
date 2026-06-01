@@ -118,6 +118,7 @@ enum class OpResult {
     SyntaxError,
     DuplicateKey,
     LockConflict,
+    SerializationFailure,
 };
 
 class StorageEngine {
@@ -753,9 +754,19 @@ private:
     // Savepoint support
     std::map<std::string, size_t> savepoints_; // name -> txnLog_ index
 
+    // SSI (Serializable Snapshot Isolation) read/write sets
+    mutable std::set<int64_t> txnReadRids_;    // RIDs read by current transaction
+    mutable std::set<int64_t> txnWrittenRids_; // RIDs written by current transaction
+
     // Global active transaction tracking (for ReadView)
     static std::mutex globalTxnMutex_;
     static std::set<uint64_t> activeTransactions_;
+    // Global SSI conflict tracking: txId -> set of txIds that it has rw-conflict with
+    static std::mutex ssiMutex_;
+    static std::map<uint64_t, std::set<int64_t>> ssiReadSets_;   // txId -> RIDs read
+    static std::map<uint64_t, std::set<int64_t>> ssiWriteSets_;  // txId -> RIDs written
+    static std::map<uint64_t, std::set<uint64_t>> ssiOutEdges_; // T1 -> {T2} means T1 read something written by T2
+    static std::map<uint64_t, std::set<uint64_t>> ssiInEdges_;  // T2 -> {T1} means T1 read something written by T2
 };
 
 // Column type constructors
