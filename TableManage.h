@@ -203,12 +203,20 @@ public:
     OpResult dropMaterializedView(const std::string& dbname, const std::string& viewname);
 
     // Stored procedures
+    struct ProcParam {
+        std::string name;
+        std::string mode; // "IN", "OUT", "INOUT"
+        std::string type;
+    };
     OpResult createProcedure(const std::string& dbname, const std::string& procname,
+                             const std::vector<ProcParam>& params,
                              const std::vector<std::string>& statements);
     OpResult dropProcedure(const std::string& dbname, const std::string& procname);
     bool procedureExists(const std::string& dbname, const std::string& procname) const;
     std::vector<std::string> getProcedureStatements(const std::string& dbname,
                                                      const std::string& procname) const;
+    std::vector<ProcParam> getProcedureParams(const std::string& dbname,
+                                               const std::string& procname) const;
     std::vector<std::string> getProcedureNames(const std::string& dbname) const;
 
     // User-defined functions (simple expression-based)

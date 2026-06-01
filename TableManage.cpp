@@ -1107,6 +1107,7 @@ static std::filesystem::path procedurePath(const std::string& dbname,
 
 OpResult StorageEngine::createProcedure(const std::string& dbname,
                                          const std::string& procname,
+                                         const std::vector<ProcParam>& params,
                                          const std::vector<std::string>& statements) {
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
     auto pdir = proceduresDir(dbname);
@@ -1115,6 +1116,15 @@ OpResult StorageEngine::createProcedure(const std::string& dbname,
     }
     std::ofstream ofs(procedurePath(dbname, procname));
     if (!ofs) return OpResult::InvalidValue;
+    // Write params metadata line first
+    if (!params.empty()) {
+        ofs << "PARAMS:";
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i > 0) ofs << ',';
+            ofs << params[i].name << ':' << params[i].mode << ':' << params[i].type;
+        }
+        ofs << '\n';
+    }
     for (const auto& stmt : statements) {
         ofs << stmt << '\n';
     }
@@ -1143,7 +1153,42 @@ std::vector<std::string> StorageEngine::getProcedureStatements(
     if (!ifs) return result;
     std::string line;
     while (std::getline(ifs, line)) {
-        if (!line.empty()) result.push_back(line);
+        if (line.empty()) continue;
+        if (line.substr(0, 7) == "PARAMS:") continue;
+        result.push_back(line);
+    }
+    return result;
+}
+
+std::vector<StorageEngine::ProcParam> StorageEngine::getProcedureParams(
+    const std::string& dbname, const std::string& procname) const {
+    std::vector<ProcParam> result;
+    auto path = procedurePath(dbname, procname);
+    std::ifstream ifs(path);
+    if (!ifs) return result;
+    std::string line;
+    if (std::getline(ifs, line)) {
+        if (line.substr(0, 7) == "PARAMS:") {
+            std::string rest = line.substr(7);
+            size_t p = 0;
+            while (p < rest.size()) {
+                size_t comma = rest.find(',', p);
+                std::string part = rest.substr(p, comma - p);
+                if (!part.empty()) {
+                    size_t c1 = part.find(':');
+                    size_t c2 = part.find(':', c1 + 1);
+                    if (c1 != std::string::npos && c2 != std::string::npos) {
+                        ProcParam pp;
+                        pp.name = part.substr(0, c1);
+                        pp.mode = part.substr(c1 + 1, c2 - c1 - 1);
+                        pp.type = part.substr(c2 + 1);
+                        result.push_back(pp);
+                    }
+                }
+                if (comma == std::string::npos) break;
+                p = comma + 1;
+            }
+        }
     }
     return result;
 }

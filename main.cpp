@@ -2739,6 +2739,37 @@ static int sqlAuditCategory(const string& sql) {
 bool execute(const string& rawSql, Session& s) {
     auto start = std::chrono::steady_clock::now();
     string sql = sqlProcessor(rawSql);
+    // Replace user variables @varname with their values
+    // Skip CALL statements so OUT/INOUT parameter references remain intact
+    if (sql.substr(0, 4) != "call") {
+        // For SET @var = value, do not replace the target variable on the left side of '='
+        size_t replaceStart = 0;
+        if (sql.substr(0, 3) == "set") {
+            size_t eqPos = sql.find('=');
+            if (eqPos != string::npos) {
+                string lhs = trim(sql.substr(3, eqPos - 3));
+                if (!lhs.empty() && lhs[0] == '@') {
+                    replaceStart = eqPos + 1;
+                }
+            }
+        }
+        for (const auto& kv : s.userVariables) {
+            string varName = "@" + kv.first;
+            size_t pos = replaceStart;
+            while ((pos = sql.find(varName, pos)) != string::npos) {
+                // Ensure it's a standalone token (not part of an identifier)
+                bool okBefore = (pos == 0) || !isalnum(static_cast<unsigned char>(sql[pos - 1]));
+                bool okAfter = (pos + varName.size() >= sql.size()) ||
+                               !isalnum(static_cast<unsigned char>(sql[pos + varName.size()]));
+                if (okBefore && okAfter) {
+                    sql.replace(pos, varName.size(), kv.second);
+                    pos += kv.second.size();
+                } else {
+                    ++pos;
+                }
+            }
+        }
+    }
     // Audit logging
     {
         int cat = sqlAuditCategory(sql);
@@ -3623,14 +3654,74 @@ bool execute(const string& rawSql, Session& s) {
         if (sql.substr(7, 9) == "procedure") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
-            // create procedure name as 'stmt1; stmt2; ...'
+            // create procedure name[(params)] as 'stmt1; stmt2; ...'
             string rest = trim(sql.substr(17));
+            vector<dbms::StorageEngine::ProcParam> params;
+            string procname;
             size_t asPos = rest.find(" as ");
-            if (asPos == string::npos) {
-                cout << "SQL syntax error: PROCEDURE requires AS clause" << endl;
-                return true;
+            // Check for parameter list: name ( ... ) as
+            size_t lp = rest.find('(');
+            if (lp != string::npos && asPos != string::npos && lp < asPos) {
+                // Find matching ')', skipping nested parentheses (e.g., varchar(20))
+                size_t rp = string::npos;
+                int depth = 0;
+                bool inQuote = false;
+                for (size_t i = lp; i < rest.size() && (asPos == string::npos || i < asPos); ++i) {
+                    if (rest[i] == '\'') inQuote = !inQuote;
+                    if (!inQuote) {
+                        if (rest[i] == '(') ++depth;
+                        else if (rest[i] == ')') {
+                            --depth;
+                            if (depth == 0) { rp = i; break; }
+                        }
+                    }
+                }
+                if (rp == string::npos || rp > asPos) {
+                    cout << "SQL syntax error: unclosed parameter list in PROCEDURE" << endl;
+                    return true;
+                }
+                procname = trim(rest.substr(0, lp));
+                string plist = trim(rest.substr(lp + 1, rp - lp - 1));
+                // Parse each parameter: [IN|OUT|INOUT] name type
+                vector<string> pdefs = splitValues(plist);
+                for (const string& pd : pdefs) {
+                    string ptrim = trim(pd);
+                    if (ptrim.empty()) continue;
+                    vector<string> ptokens;
+                    stringstream pss(ptrim);
+                    string tok;
+                    while (pss >> tok) ptokens.push_back(tok);
+                    if (ptokens.size() < 2) {
+                        cout << "SQL syntax error: invalid parameter definition: " << ptrim << endl;
+                        return true;
+                    }
+                    dbms::StorageEngine::ProcParam pp;
+                    if (ptokens[0] == "out") {
+                        pp.mode = "OUT";
+                        pp.name = ptokens[1];
+                        if (ptokens.size() >= 3) pp.type = ptokens[2];
+                    } else if (ptokens[0] == "inout") {
+                        pp.mode = "INOUT";
+                        pp.name = ptokens[1];
+                        if (ptokens.size() >= 3) pp.type = ptokens[2];
+                    } else if (ptokens[0] == "in") {
+                        pp.mode = "IN";
+                        pp.name = ptokens[1];
+                        if (ptokens.size() >= 3) pp.type = ptokens[2];
+                    } else {
+                        pp.mode = "IN";
+                        pp.name = ptokens[0];
+                        if (ptokens.size() >= 2) pp.type = ptokens[1];
+                    }
+                    params.push_back(pp);
+                }
+            } else {
+                if (asPos == string::npos) {
+                    cout << "SQL syntax error: PROCEDURE requires AS clause" << endl;
+                    return true;
+                }
+                procname = trim(rest.substr(0, asPos));
             }
-            string procname = trim(rest.substr(0, asPos));
             string body = trim(rest.substr(asPos + 4));
             // Remove surrounding quotes if present
             if (body.size() >= 2 && body.front() == '\'' && body.back() == '\'') {
@@ -3650,7 +3741,7 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "SQL syntax error: procedure body is empty" << endl;
                 return true;
             }
-            auto res = g_engine.createProcedure(s.currentDB, procname, stmts);
+            auto res = g_engine.createProcedure(s.currentDB, procname, params, stmts);
             if (res != OpResult::Success) {
                 cout << "Create procedure failed" << endl;
                 return true;
@@ -3740,6 +3831,12 @@ bool execute(const string& rawSql, Session& s) {
         }
         string param = trim(rest.substr(0, eqPos));
         string val = trim(rest.substr(eqPos + 1));
+        // User-defined variable: SET @var = value
+        if (!param.empty() && param[0] == '@') {
+            s.userVariables[param.substr(1)] = val;
+            cout << "Set variable " << param << " = " << val << endl;
+            return false;
+        }
         bool ok = false;
         if (param == "max_connections") {
             try { g_config.maxConnections = std::stoi(val); ok = true; } catch (...) {}
@@ -5684,21 +5781,100 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // CALL procedure_name
+    // CALL procedure_name[(args)]
     if (sql.substr(0, 4) == "call") {
         if (!checkDB(s)) return true;
-        string procname = trim(sql.substr(4));
-        if (procname.empty()) {
+        string rest = trim(sql.substr(4));
+        if (rest.empty()) {
             cout << "SQL syntax error: CALL procedure_name" << endl;
             return true;
+        }
+        string procname;
+        vector<string> args;
+        size_t lp = rest.find('(');
+        if (lp != string::npos) {
+            procname = trim(rest.substr(0, lp));
+            // Find matching ')', handling nested parentheses
+            size_t rp = string::npos;
+            int depth = 0;
+            bool inQuote = false;
+            for (size_t i = lp; i < rest.size(); ++i) {
+                if (rest[i] == '\'') inQuote = !inQuote;
+                if (!inQuote) {
+                    if (rest[i] == '(') ++depth;
+                    else if (rest[i] == ')') {
+                        --depth;
+                        if (depth == 0) { rp = i; break; }
+                    }
+                }
+            }
+            if (rp == string::npos) {
+                cout << "SQL syntax error: unclosed parenthesis in CALL" << endl;
+                return true;
+            }
+            string alist = trim(rest.substr(lp + 1, rp - lp - 1));
+            if (!alist.empty()) {
+                args = splitValues(alist);
+                for (auto& a : args) a = trim(a);
+            }
+        } else {
+            procname = rest;
         }
         if (!g_engine.procedureExists(s.currentDB, procname)) {
             cout << "Procedure " << procname << " not exist" << endl;
             return true;
         }
+        auto params = g_engine.getProcedureParams(s.currentDB, procname);
+        if (args.size() != params.size()) {
+            cout << "SQL syntax error: procedure " << procname << " expects "
+                 << params.size() << " arguments, got " << args.size() << endl;
+            return true;
+        }
+        // Build argMap: paramName -> replacement value
+        unordered_map<string, string> argMap;
+        for (size_t i = 0; i < params.size(); ++i) {
+            const auto& pp = params[i];
+            const string& arg = args[i];
+            if (pp.mode == "OUT") {
+                // OUT param: must be a variable reference like @var
+                if (arg.empty() || arg[0] != '@') {
+                    cout << "SQL syntax error: OUT parameter must be a variable reference (@var)" << endl;
+                    return true;
+                }
+                argMap[pp.name] = arg; // replace ?name with @var so SET @var works
+            } else if (pp.mode == "INOUT") {
+                if (arg.empty() || arg[0] != '@') {
+                    cout << "SQL syntax error: INOUT parameter must be a variable reference (@var)" << endl;
+                    return true;
+                }
+                // For INOUT, store the variable name so SET ?x = ... becomes SET @var = ...
+                argMap[pp.name] = arg;
+            } else {
+                // IN param: literal or variable value
+                if (!arg.empty() && arg[0] == '@') {
+                    auto it = s.userVariables.find(arg.substr(1));
+                    argMap[pp.name] = (it != s.userVariables.end()) ? it->second : "null";
+                } else {
+                    argMap[pp.name] = arg;
+                }
+            }
+        }
         auto stmts = g_engine.getProcedureStatements(s.currentDB, procname);
         for (const auto& stmt : stmts) {
-            execute(stmt, s);
+            string replaced = stmt;
+            // Replace ?paramName with mapped value (longest names first to avoid partial replacement)
+            vector<pair<string, string>> sortedMap(argMap.begin(), argMap.end());
+            sort(sortedMap.begin(), sortedMap.end(),
+                 [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+            for (const auto& kv : sortedMap) {
+                string placeholder = "?" + kv.first;
+                size_t pos = 0;
+                while ((pos = replaced.find(placeholder, pos)) != string::npos) {
+                    replaced.replace(pos, placeholder.size(), kv.second);
+                    pos += kv.second.size();
+                }
+            }
+            execute(replaced, s);
         }
         return false;
     }
