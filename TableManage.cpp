@@ -11068,11 +11068,36 @@ static std::string joinColumns(const std::vector<std::string>& cols) {
     return s;
 }
 
+static constexpr const char* GRANT_OPTION_MARK = "__grant__";
+
+// Check if columns set represents table-level permission (ignoring grant option marker)
+static bool isTableLevelIgnoreGrant(const std::set<std::string>& cols) {
+    for (const auto& c : cols) {
+        if (c != GRANT_OPTION_MARK) return false;
+    }
+    return true;
+}
+
+static bool colsEmptyIgnoreGrant(const std::string& colsStr) {
+    if (colsStr.empty()) return true;
+    // colsStr may start with space
+    size_t start = 0;
+    while (start < colsStr.size() && std::isspace(static_cast<unsigned char>(colsStr[start]))) ++start;
+    if (start >= colsStr.size()) return true;
+    // Check if remaining is only __grant__
+    std::string rest = colsStr.substr(start);
+    auto cols = parseColumns(rest);
+    for (const auto& c : cols) {
+        if (c != GRANT_OPTION_MARK) return false;
+    }
+    return true;
+}
+
 void StorageEngine::grant(const std::string& dbname, const std::string& tablename,
                           const std::string& username, TablePrivilege priv,
-                          const std::vector<std::string>& columns) {
+                          const std::vector<std::string>& columns,
+                          bool withGrantOption) {
     auto ppath = permPath(dbname);
-    // Read: key -> set of columns (empty set = table-level)
     std::map<std::string, std::set<std::string>> perms;
     if (std::filesystem::exists(ppath)) {
         std::ifstream ifs(ppath);
@@ -11082,30 +11107,31 @@ void StorageEngine::grant(const std::string& dbname, const std::string& tablenam
             std::stringstream ss(line);
             std::string u, t, p, cols;
             ss >> u >> t >> p;
-            std::getline(ss, cols); // rest may be columns
+            std::getline(ss, cols);
             if (!cols.empty() && cols[0] == ' ') cols = cols.substr(1);
             auto key = permKey(u, t, p);
             if (!cols.empty()) {
                 for (const auto& c : parseColumns(cols)) perms[key].insert(c);
             } else {
-                perms[key] = {}; // table-level marker
+                perms[key] = {};
             }
         }
     }
     auto key = permKey(username, tablename, privToStr(priv));
     if (columns.empty()) {
-        perms[key] = {}; // table-level
+        perms[key] = {};
     } else {
         if (perms[key].empty()) {
-            // If transitioning from table-level to column-level, start fresh
             auto it = perms.find(key);
             if (it != perms.end() && it->second.empty()) {
-                it->second.clear(); // was table-level
+                it->second.clear();
             }
         }
         for (const auto& c : columns) perms[key].insert(c);
     }
-    // Write back
+    if (withGrantOption) {
+        perms[key].insert(GRANT_OPTION_MARK);
+    }
     std::ofstream ofs(ppath);
     for (const auto& kv : perms) {
         size_t p1 = kv.first.find('|');
@@ -11121,7 +11147,8 @@ void StorageEngine::grant(const std::string& dbname, const std::string& tablenam
 
 void StorageEngine::revoke(const std::string& dbname, const std::string& tablename,
                            const std::string& username, TablePrivilege priv,
-                           const std::vector<std::string>& columns) {
+                           const std::vector<std::string>& columns, bool cascade) {
+    (void)cascade; // CASCADE not yet fully implemented
     auto ppath = permPath(dbname);
     if (!std::filesystem::exists(ppath)) return;
     std::map<std::string, std::set<std::string>> perms;
@@ -11181,14 +11208,38 @@ bool StorageEngine::hasPermission(const std::string& dbname, const std::string& 
         ss >> u >> t >> p;
         std::getline(ss, cols);
         if (u != username) continue;
-        // Table-level permission (no column restriction)
         if (t == tablename && (p == "all" || p == target)) {
-            if (cols.empty() || (cols.size() == 1 && cols[0] == ' ')) return true;
+            if (colsEmptyIgnoreGrant(cols)) return true;
         }
-        // Database-level permission (wildcard table "*")
         if (t == "*" && (p == "all" || p == target)) hasDbLevel = true;
     }
     return hasDbLevel;
+}
+
+bool StorageEngine::hasGrantOption(const std::string& dbname, const std::string& tablename,
+                                   const std::string& username, TablePrivilege priv) const {
+    auto ppath = permPath(dbname);
+    if (!std::filesystem::exists(ppath)) return false;
+    std::string target = privToStr(priv);
+    std::ifstream ifs(ppath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string u, t, p, cols;
+        ss >> u >> t >> p;
+        std::getline(ss, cols);
+        if (!cols.empty() && cols[0] == ' ') cols = cols.substr(1);
+        if (u != username) continue;
+        if (t != tablename && t != "*") continue;
+        if (p == "all" || p == target) {
+            auto colList = parseColumns(cols);
+            for (const auto& c : colList) {
+                if (c == GRANT_OPTION_MARK) return true;
+            }
+        }
+    }
+    return false;
 }
 
 bool StorageEngine::hasColumnPermission(const std::string& dbname, const std::string& tablename,
@@ -11198,7 +11249,6 @@ bool StorageEngine::hasColumnPermission(const std::string& dbname, const std::st
     auto ppath = permPath(dbname);
     if (!std::filesystem::exists(ppath)) return false;
     std::string target = privToStr(priv);
-    // Gather allowed columns for this user/table/priv
     std::set<std::string> allowedCols;
     bool hasTableLevel = false;
     bool hasDbLevel = false;
@@ -11219,7 +11269,9 @@ bool StorageEngine::hasColumnPermission(const std::string& dbname, const std::st
             if (p == target) {
                 if (cols.empty()) hasTableLevel = true;
                 else {
-                    for (const auto& c : parseColumns(cols)) allowedCols.insert(c);
+                    for (const auto& c : parseColumns(cols)) {
+                        if (c != GRANT_OPTION_MARK) allowedCols.insert(c);
+                    }
                 }
             }
         }

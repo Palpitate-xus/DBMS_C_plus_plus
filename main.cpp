@@ -6954,14 +6954,14 @@ bool execute(const string& rawSql, Session& s) {
         return true;
     }
 
-    // GRANT privilege[(col1,col2)] ON table TO user
+    // GRANT privilege[(col1,col2)] ON table TO user [WITH GRANT OPTION]
     if (sql.substr(0, 6) == "grant ") {
-        if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
         string rest = trim(sql.substr(6));
         size_t onPos = rest.find(" on ");
         size_t toPos = rest.find(" to ");
         if (onPos == string::npos && toPos != string::npos) {
+            if (!checkAdmin(s)) return true;
             // GRANT role_name TO user_name
             string roleName = trim(rest.substr(0, toPos));
             string username = trim(rest.substr(toPos + 4));
@@ -6978,12 +6978,22 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         if (onPos == string::npos || toPos == string::npos) {
-            cout << "SQL syntax error: GRANT privilege[(cols)] ON table TO user" << endl;
+            cout << "SQL syntax error: GRANT privilege[(cols)] ON table TO user [WITH GRANT OPTION]" << endl;
             return true;
         }
         string privPart = trim(rest.substr(0, onPos));
         string tname = trim(rest.substr(onPos + 4, toPos - onPos - 4));
-        string uname = trim(rest.substr(toPos + 4));
+        string afterTo = trim(rest.substr(toPos + 4));
+        // Check for WITH GRANT OPTION
+        bool withGrantOpt = false;
+        size_t wgoPos = afterTo.find("with grant option");
+        string uname;
+        if (wgoPos != string::npos) {
+            withGrantOpt = true;
+            uname = trim(afterTo.substr(0, wgoPos));
+        } else {
+            uname = afterTo;
+        }
         // Parse privilege and optional column list: select(col1,col2)
         string privStr;
         vector<string> colList;
@@ -7011,17 +7021,27 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
-        g_engine.grant(s.currentDB, tname, uname, priv, colList);
+        // Permission check: admin OR user with grant option for this privilege
+        bool canGrant = (s.permission == 1 || userIsAdminViaRole(s.username));
+        if (!canGrant) {
+            canGrant = g_engine.hasGrantOption(s.currentDB, tname, s.username, priv);
+        }
+        if (!canGrant) {
+            cout << "permission denied: you do not have GRANT OPTION for " << privStr << " on " << tname << endl;
+            return true;
+        }
+        g_engine.grant(s.currentDB, tname, uname, priv, colList, withGrantOpt);
         string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
+        string goStr = withGrantOpt ? " WITH GRANT OPTION" : "";
         if (!colList.empty()) {
             string cols;
             for (size_t i = 0; i < colList.size(); ++i) {
                 if (i > 0) cols += ",";
                 cols += colList[i];
             }
-            cout << "Granted " << privStr << "(" << cols << ") on " << scope << " to " << uname << endl;
+            cout << "Granted " << privStr << "(" << cols << ") on " << scope << " to " << uname << goStr << endl;
         } else {
-            cout << "Granted " << privStr << " on " << scope << " to " << uname << endl;
+            cout << "Granted " << privStr << " on " << scope << " to " << uname << goStr << endl;
         }
         return false;
     }
@@ -7077,7 +7097,7 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
-        g_engine.revoke(s.currentDB, tname, uname, priv, colList);
+        g_engine.revoke(s.currentDB, tname, uname, priv, colList, false);
         string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
         if (!colList.empty()) {
             string cols;
