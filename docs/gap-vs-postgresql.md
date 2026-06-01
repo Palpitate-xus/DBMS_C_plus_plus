@@ -48,7 +48,7 @@
 | ALTER TABLE ADD CONSTRAINT | ❌ | ✅ | 约束仅在 CREATE 时定义 |
 | ALTER TABLE DROP CONSTRAINT | ❌ | ✅ | — |
 | ALTER TABLE ENABLE/DISABLE TRIGGER | ❌ | ✅ | — |
-| TRUNCATE TABLE | ⚠️ | ✅ | 仅做权限检查（立即返回），**未真正实现** |
+| TRUNCATE TABLE | ✅ | ✅ | — |
 | TRUNCATE ... CASCADE / RESTART IDENTITY | ❌ | ✅ | — |
 | COMMENT ON | ❌ | ✅ | **无对象注释系统** |
 
