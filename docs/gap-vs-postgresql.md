@@ -272,7 +272,7 @@
 | WAL (Write-Ahead Log) | ✅ | ✅ | — |
 | WAL 归档 | ✅ | ✅ | — |
 | Checkpoint | ✅ | ✅ | 含自动 checkpoint |
-| PREPARE TRANSACTION（两阶段提交） | ❌ | ✅ | **缺失** |
+| PREPARE TRANSACTION（两阶段提交） | ✅ | ✅ | 支持 PREPARE TRANSACTION / COMMIT PREPARED / ROLLBACK PREPARED |
 | COMMIT PREPARED / ROLLBACK PREPARED | ❌ | ✅ | — |
 | 嵌套事务 | ❌ | ⚠️ | PG 也不直接支持（SAVEPOINT 等效） |
 | 自治事务 | ❌ | ⚠️ | PG 也不直接支持 |
@@ -599,7 +599,7 @@
 11. ❌ **GiST / GIN / BRIN 索引** — 空间/全文/JSON 加速
 12. ✅ **NOTIFY / LISTEN** — 支持 LISTEN/NOTIFY/UNLISTEN 异步消息
 13. ✅ **TRUNCATE TABLE** — 数据文件重建、索引重建、缓存清理、自增重置
-14. ❌ **两阶段提交** — 分布式事务基础
+14. ✅ **两阶段提交** — 支持 PREPARE TRANSACTION / COMMIT PREPARED / ROLLBACK PREPARED，含锁保持与 WAL 持久化
 15. ❌ **SCRAM 认证 / pg_hba.conf** — 企业级认证
 16. ✅ **函数重载** — 支持多参数 UDF 重载
 17. ✅ **WITH CHECK OPTION** — 可更新视图完整性约束（INSERT 预校验）
