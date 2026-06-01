@@ -27,6 +27,10 @@ struct Config {
     int autoVacuumThreshold = 50;  // dead tuple count threshold to trigger auto-vacuum
     int lockTimeoutMs = 0;         // 0 = no timeout
     int deadlockTimeoutMs = 1000;  // ms to wait before declaring deadlock (0 = immediate check)
+    size_t workMemKb = 4096;       // work memory per query in KB
+    bool enableSeqScan = true;     // enable sequential scan
+    bool enableHashJoin = true;    // enable hash join
+    bool enableMergeJoin = true;   // enable merge join
 
     // Load from file; returns true on success.
     bool load(const std::string& filename);

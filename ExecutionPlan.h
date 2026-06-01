@@ -368,8 +368,12 @@ public:
                                 const std::set<std::string>& selectCols);
 
     struct ExplainOptions {
+        bool analyze = false;
         bool buffers = false;
         bool verbose = false;
+        bool timing = true;     // default true (PostgreSQL compatible)
+        bool costs = true;      // default true
+        bool settings = false;
     };
 
     static std::string explain(OpPtr& plan, StorageEngine* engine,

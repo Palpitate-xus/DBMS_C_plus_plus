@@ -1,7 +1,7 @@
 # DBMS_C_plus_plus vs PostgreSQL 功能差距分析
 
 > 对标版本：PostgreSQL 16/17
-> 更新日期：2026-05-29
+> 更新日期：2026-06-01
 > 基于代码验证（非仅文档声明）
 
 ---
@@ -250,7 +250,7 @@
 | EXPLAIN BUFFERS | ✅ | ✅ | — |
 | EXPLAIN VERBOSE | ✅ | ✅ | — |
 | EXPLAIN FORMAT JSON | ✅ | ✅ | — |
-| EXPLAIN (TIMING, COSTS, SETTINGS) | ❌ | ✅ | **选项较少** |
+| EXPLAIN (TIMING, COSTS, SETTINGS) | ✅ | ✅ | 支持 `EXPLAIN (ANALYZE, BUFFERS, TIMING, COSTS, SETTINGS, VERBOSE)` |
 
 ---
 
@@ -598,14 +598,14 @@
 10. ❌ **行级安全 (RLS)** — 多租户场景必备
 11. ❌ **GiST / GIN / BRIN 索引** — 空间/全文/JSON 加速
 12. ❌ **NOTIFY / LISTEN** — 无异步消息
-13. ❌ **TRUNCATE TABLE** — 代码仅做权限检查后返回，未真正实现
+13. ✅ **TRUNCATE TABLE** — 数据文件重建、索引重建、缓存清理、自增重置
 14. ❌ **两阶段提交** — 分布式事务基础
 15. ❌ **SCRAM 认证 / pg_hba.conf** — 企业级认证
 16. ❌ **游标 / OUT 参数 / 函数重载** — 存储过程完整性
-17. ❌ **WITH CHECK OPTION** — 可更新视图完整性约束
-18. ❌ **GRANT WITH GRANT OPTION** — 权限级联授权
+17. ✅ **WITH CHECK OPTION** — 可更新视图完整性约束（INSERT 预校验）
+18. ✅ **GRANT WITH GRANT OPTION** — 权限级联授权
 19. ❌ **窗口帧 RANGE/GROUPS BETWEEN** — 高级窗口分析
-20. ❌ **EXPLAIN 选项 (TIMING, COSTS, SETTINGS)** — 执行计划诊断能力
+20. ✅ **EXPLAIN 选项 (TIMING, COSTS, SETTINGS)** — 支持 `EXPLAIN (ANALYZE, BUFFERS, TIMING, COSTS, SETTINGS, VERBOSE)`
 
 ### 总体评估
 

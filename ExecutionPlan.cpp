@@ -1,8 +1,11 @@
 #include "ExecutionPlan.h"
+#include "Config.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+
+extern dbms::Config g_config;
 
 namespace dbms {
 
@@ -930,10 +933,17 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
     return 0.3;
 }
 
+static std::string costRowsStr(const CostEstimate& est, const QueryPlanner::ExplainOptions& opts) {
+    if (!opts.costs) return "";
+    return "  cost=" + std::to_string(static_cast<int>(est.cost)) +
+           "  rows=" + std::to_string(static_cast<int>(est.rows));
+}
+
 static CostEstimate explainOp(Operator* op, int indent,
                               StorageEngine* engine,
                               const std::string& dbname,
-                              std::string& out) {
+                              std::string& out,
+                              const QueryPlanner::ExplainOptions& opts) {
     std::string prefix(indent * 2, ' ');
     CostEstimate est;
 
@@ -941,13 +951,11 @@ static CostEstimate explainOp(Operator* op, int indent,
         double rows = static_cast<double>(engine->getTableRowCount(dbname, scan->tableName()));
         est.rows = rows;
         est.cost = rows * 1.0;
-        out += prefix + "TableScan(table=" + scan->tableName() +
-               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        out += prefix + "TableScan(table=" + scan->tableName() + ")" +
+               costRowsStr(est, opts) + "\n";
 
     } else if (auto* idx = dynamic_cast<IndexScanOp*>(op)) {
         double rows = idx->colName().empty() ? 1.0 : 5.0;
-        // PK scan usually returns 1 row
         TableSchema tbl = engine->getTableSchema(dbname, idx->tableName());
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == idx->colName() && tbl.cols[i].isPrimaryKey) {
@@ -962,18 +970,15 @@ static CostEstimate explainOp(Operator* op, int indent,
             if (rows < 1.0) rows = 1.0;
         }
         est.rows = rows;
-        est.cost = rows * 2.0;  // index lookup + row fetch
+        est.cost = rows * 2.0;
         out += prefix + "IndexScan(table=" + idx->tableName() +
-               ", col=" + idx->colName() + ", val=" + idx->value() +
-               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+               ", col=" + idx->colName() + ", val=" + idx->value() + ")" +
+               costRowsStr(est, opts) + "\n";
 
     } else if (auto* filt = dynamic_cast<FilterOp*>(op)) {
-        CostEstimate child = explainOp(filt->child(), indent + 1, engine, dbname, out);
+        CostEstimate child = explainOp(filt->child(), indent + 1, engine, dbname, out, opts);
         double sel = 1.0;
         for (const auto& c : filt->conditions()) {
-            // Try to find the table name for this condition
-            // We look at the child operator to determine the table
             std::string tblName;
             if (auto* ts = dynamic_cast<TableScanOp*>(filt->child())) {
                 tblName = ts->tableName();
@@ -984,76 +989,67 @@ static CostEstimate explainOp(Operator* op, int indent,
         }
         est.rows = child.rows * sel;
         est.cost = child.cost + est.rows * 0.5;
-        out += prefix + "Filter  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        out += prefix + "Filter" + costRowsStr(est, opts) + "\n";
 
     } else if (auto* proj = dynamic_cast<ProjectOp*>(op)) {
-        CostEstimate child = explainOp(proj->child(), indent + 1, engine, dbname, out);
+        CostEstimate child = explainOp(proj->child(), indent + 1, engine, dbname, out, opts);
         est.rows = child.rows;
         est.cost = child.cost + child.rows * 0.1;
-        out += prefix + "Project  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        out += prefix + "Project" + costRowsStr(est, opts) + "\n";
 
     } else if (auto* sort = dynamic_cast<SortOp*>(op)) {
-        CostEstimate child = explainOp(sort->child(), indent + 1, engine, dbname, out);
+        CostEstimate child = explainOp(sort->child(), indent + 1, engine, dbname, out, opts);
         est.rows = child.rows;
         double logFactor = child.rows > 1.0 ? std::log2(child.rows) : 1.0;
         est.cost = child.cost + child.rows * logFactor * 0.1;
-        out += prefix + "Sort  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        out += prefix + "Sort" + costRowsStr(est, opts) + "\n";
 
     } else if (auto* lim = dynamic_cast<LimitOp*>(op)) {
-        CostEstimate child = explainOp(lim->child(), indent + 1, engine, dbname, out);
+        CostEstimate child = explainOp(lim->child(), indent + 1, engine, dbname, out, opts);
         est.rows = std::min(child.rows, static_cast<double>(lim->limit()));
         est.cost = child.cost + est.rows * 0.01;
-        out += prefix + "Limit(limit=" + std::to_string(lim->limit()) +
-               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        out += prefix + "Limit(limit=" + std::to_string(lim->limit()) + ")" +
+               costRowsStr(est, opts) + "\n";
 
     } else if (auto* dist = dynamic_cast<DistinctOp*>(op)) {
-        CostEstimate child = explainOp(dist->child(), indent + 1, engine, dbname, out);
+        CostEstimate child = explainOp(dist->child(), indent + 1, engine, dbname, out, opts);
         est.rows = child.rows * 0.5;
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = child.cost + child.rows * 0.5;
-        out += prefix + "Distinct  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        out += prefix + "Distinct" + costRowsStr(est, opts) + "\n";
 
     } else if (auto* join = dynamic_cast<NestedLoopJoinOp*>(op)) {
-        CostEstimate left = explainOp(join->leftChild(), indent + 1, engine, dbname, out);
-        CostEstimate right = explainOp(join->rightChild(), indent + 1, engine, dbname, out);
+        CostEstimate left = explainOp(join->leftChild(), indent + 1, engine, dbname, out, opts);
+        CostEstimate right = explainOp(join->rightChild(), indent + 1, engine, dbname, out, opts);
         est.rows = left.rows * right.rows * 0.1;
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + left.rows * right.cost;
-        out += prefix + "NestedLoopJoin(" + join->leftTable() + ", " + join->rightTable() +
-               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        out += prefix + "NestedLoopJoin(" + join->leftTable() + ", " + join->rightTable() + ")" +
+               costRowsStr(est, opts) + "\n";
 
     } else if (auto* hjoin = dynamic_cast<HashJoinOp*>(op)) {
-        CostEstimate left = explainOp(hjoin->leftChild(), indent + 1, engine, dbname, out);
-        CostEstimate right = explainOp(hjoin->rightChild(), indent + 1, engine, dbname, out);
+        CostEstimate left = explainOp(hjoin->leftChild(), indent + 1, engine, dbname, out, opts);
+        CostEstimate right = explainOp(hjoin->rightChild(), indent + 1, engine, dbname, out, opts);
         est.rows = left.rows * right.rows * 0.1;
         if (est.rows < 1.0) est.rows = 1.0;
-        est.cost = left.cost + right.cost + right.rows * 2.0;  // hash build cost
-        out += prefix + "HashJoin(" + hjoin->leftTable() + ", " + hjoin->rightTable() +
-               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        est.cost = left.cost + right.cost + right.rows * 2.0;
+        out += prefix + "HashJoin(" + hjoin->leftTable() + ", " + hjoin->rightTable() + ")" +
+               costRowsStr(est, opts) + "\n";
 
     } else if (auto* mjoin = dynamic_cast<MergeJoinOp*>(op)) {
-        CostEstimate left = explainOp(mjoin->leftChild(), indent + 1, engine, dbname, out);
-        CostEstimate right = explainOp(mjoin->rightChild(), indent + 1, engine, dbname, out);
+        CostEstimate left = explainOp(mjoin->leftChild(), indent + 1, engine, dbname, out, opts);
+        CostEstimate right = explainOp(mjoin->rightChild(), indent + 1, engine, dbname, out, opts);
         est.rows = left.rows * right.rows * 0.1;
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + right.cost + left.rows * std::log2(left.rows + 1) * 0.1
                    + right.rows * std::log2(right.rows + 1) * 0.1;
-        out += prefix + "MergeJoin(" + mjoin->leftTable() + ", " + mjoin->rightTable() +
-               ")  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        out += prefix + "MergeJoin(" + mjoin->leftTable() + ", " + mjoin->rightTable() + ")" +
+               costRowsStr(est, opts) + "\n";
 
     } else if (dynamic_cast<AggregateOp*>(op)) {
         est.rows = 1;
-        est.cost = 10;  // base aggregate cost
-        out += prefix + "Aggregate  cost=" + std::to_string(static_cast<int>(est.cost)) +
-               "  rows=" + std::to_string(static_cast<int>(est.rows)) + "\n";
+        est.cost = 10;
+        out += prefix + "Aggregate" + costRowsStr(est, opts) + "\n";
 
     } else {
         out += prefix + "Unknown\n";
@@ -1072,9 +1068,19 @@ std::string QueryPlanner::explain(OpPtr& plan, StorageEngine* engine,
                                   const std::string& dbname,
                                   const ExplainOptions& opts) {
     std::string result;
-    CostEstimate total = explainOp(plan.get(), 0, engine, dbname, result);
-    result += "\nTotal estimated cost: " + std::to_string(static_cast<int>(total.cost));
-    result += ", estimated rows: " + std::to_string(static_cast<int>(total.rows)) + "\n";
+    CostEstimate total = explainOp(plan.get(), 0, engine, dbname, result, opts);
+    if (opts.settings) {
+        auto cfg = g_config;
+        result += "Settings: work_mem=" + std::to_string(cfg.workMemKb) + "kB";
+        result += ", enable_seqscan=" + std::string(cfg.enableSeqScan ? "on" : "off");
+        result += ", enable_hashjoin=" + std::string(cfg.enableHashJoin ? "on" : "off");
+        result += ", enable_mergejoin=" + std::string(cfg.enableMergeJoin ? "on" : "off");
+        result += ", checkpoint_interval=" + std::to_string(cfg.checkpointInterval) + "\n";
+    }
+    if (opts.costs) {
+        result += "\nTotal estimated cost: " + std::to_string(static_cast<int>(total.cost));
+        result += ", estimated rows: " + std::to_string(static_cast<int>(total.rows)) + "\n";
+    }
     if (opts.buffers) {
         auto bpStats = engine->getBufferPoolStats();
         result += "Buffers: shared_hit=" + std::to_string(bpStats.totalHits);
@@ -1103,9 +1109,16 @@ static std::string jsonEscape(const std::string& s) {
     return out;
 }
 
+static std::string jsonCostRows(const CostEstimate& est, const QueryPlanner::ExplainOptions& opts) {
+    if (!opts.costs) return "";
+    return "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ","
+         + "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+}
+
 static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
                                                             StorageEngine* engine,
-                                                            const std::string& dbname) {
+                                                            const std::string& dbname,
+                                                            const QueryPlanner::ExplainOptions& opts) {
     std::string json = "{";
     CostEstimate est;
 
@@ -1115,8 +1128,7 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         est.cost = rows * 1.0;
         json += "\"nodeType\":\"TableScan\",";
         json += "\"table\":\"" + jsonEscape(scan->tableName()) + "\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[]";
 
     } else if (auto* idx = dynamic_cast<IndexScanOp*>(op)) {
@@ -1140,12 +1152,11 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         json += "\"table\":\"" + jsonEscape(idx->tableName()) + "\",";
         json += "\"column\":\"" + jsonEscape(idx->colName()) + "\",";
         json += "\"value\":\"" + jsonEscape(idx->value()) + "\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[]";
 
     } else if (auto* filt = dynamic_cast<FilterOp*>(op)) {
-        auto [childJson, child] = explainOpJson(filt->child(), engine, dbname);
+        auto [childJson, child] = explainOpJson(filt->child(), engine, dbname, opts);
         double sel = 1.0;
         for (const auto& c : filt->conditions()) {
             std::string tblName;
@@ -1159,78 +1170,71 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         est.rows = child.rows * sel;
         est.cost = child.cost + est.rows * 0.5;
         json += "\"nodeType\":\"Filter\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
 
     } else if (auto* proj = dynamic_cast<ProjectOp*>(op)) {
-        auto [childJson, child] = explainOpJson(proj->child(), engine, dbname);
+        auto [childJson, child] = explainOpJson(proj->child(), engine, dbname, opts);
         est.rows = child.rows;
         est.cost = child.cost + child.rows * 0.1;
         json += "\"nodeType\":\"Project\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
 
     } else if (auto* sort = dynamic_cast<SortOp*>(op)) {
-        auto [childJson, child] = explainOpJson(sort->child(), engine, dbname);
+        auto [childJson, child] = explainOpJson(sort->child(), engine, dbname, opts);
         est.rows = child.rows;
         double logFactor = child.rows > 1.0 ? std::log2(child.rows) : 1.0;
         est.cost = child.cost + child.rows * logFactor * 0.1;
         json += "\"nodeType\":\"Sort\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
 
     } else if (auto* lim = dynamic_cast<LimitOp*>(op)) {
-        auto [childJson, child] = explainOpJson(lim->child(), engine, dbname);
+        auto [childJson, child] = explainOpJson(lim->child(), engine, dbname, opts);
         est.rows = std::min(child.rows, static_cast<double>(lim->limit()));
         est.cost = child.cost + est.rows * 0.01;
         json += "\"nodeType\":\"Limit\",";
         json += "\"limit\":" + std::to_string(lim->limit()) + ",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
 
     } else if (auto* dist = dynamic_cast<DistinctOp*>(op)) {
-        auto [childJson, child] = explainOpJson(dist->child(), engine, dbname);
+        auto [childJson, child] = explainOpJson(dist->child(), engine, dbname, opts);
         est.rows = child.rows * 0.5;
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = child.cost + child.rows * 0.5;
         json += "\"nodeType\":\"Distinct\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
 
     } else if (auto* join = dynamic_cast<NestedLoopJoinOp*>(op)) {
-        auto [leftJson, left] = explainOpJson(join->leftChild(), engine, dbname);
-        auto [rightJson, right] = explainOpJson(join->rightChild(), engine, dbname);
+        auto [leftJson, left] = explainOpJson(join->leftChild(), engine, dbname, opts);
+        auto [rightJson, right] = explainOpJson(join->rightChild(), engine, dbname, opts);
         est.rows = left.rows * right.rows * 0.1;
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + left.rows * right.cost;
         json += "\"nodeType\":\"NestedLoopJoin\",";
         json += "\"leftTable\":\"" + jsonEscape(join->leftTable()) + "\",";
         json += "\"rightTable\":\"" + jsonEscape(join->rightTable()) + "\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[" + leftJson + "," + rightJson + "]";
 
     } else if (auto* hjoin = dynamic_cast<HashJoinOp*>(op)) {
-        auto [leftJson, left] = explainOpJson(hjoin->leftChild(), engine, dbname);
-        auto [rightJson, right] = explainOpJson(hjoin->rightChild(), engine, dbname);
+        auto [leftJson, left] = explainOpJson(hjoin->leftChild(), engine, dbname, opts);
+        auto [rightJson, right] = explainOpJson(hjoin->rightChild(), engine, dbname, opts);
         est.rows = left.rows * right.rows * 0.1;
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + right.cost + right.rows * 2.0;
         json += "\"nodeType\":\"HashJoin\",";
         json += "\"leftTable\":\"" + jsonEscape(hjoin->leftTable()) + "\",";
         json += "\"rightTable\":\"" + jsonEscape(hjoin->rightTable()) + "\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[" + leftJson + "," + rightJson + "]";
 
     } else if (auto* mjoin = dynamic_cast<MergeJoinOp*>(op)) {
-        auto [leftJson, left] = explainOpJson(mjoin->leftChild(), engine, dbname);
-        auto [rightJson, right] = explainOpJson(mjoin->rightChild(), engine, dbname);
+        auto [leftJson, left] = explainOpJson(mjoin->leftChild(), engine, dbname, opts);
+        auto [rightJson, right] = explainOpJson(mjoin->rightChild(), engine, dbname, opts);
         est.rows = left.rows * right.rows * 0.1;
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + right.cost + left.rows * std::log2(left.rows + 1) * 0.1
@@ -1238,16 +1242,14 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         json += "\"nodeType\":\"MergeJoin\",";
         json += "\"leftTable\":\"" + jsonEscape(mjoin->leftTable()) + "\",";
         json += "\"rightTable\":\"" + jsonEscape(mjoin->rightTable()) + "\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[" + leftJson + "," + rightJson + "]";
 
     } else if (dynamic_cast<AggregateOp*>(op)) {
         est.rows = 1;
         est.cost = 10;
         json += "\"nodeType\":\"Aggregate\",";
-        json += "\"cost\":" + std::to_string(static_cast<int>(est.cost)) + ",";
-        json += "\"rows\":" + std::to_string(static_cast<int>(est.rows)) + ",";
+        json += jsonCostRows(est, opts);
         json += "\"children\":[]";
 
     } else {
@@ -1268,11 +1270,24 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
 std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
                                       const std::string& dbname,
                                       const ExplainOptions& opts) {
-    auto [planJson, total] = explainOpJson(plan.get(), engine, dbname);
+    auto [planJson, total] = explainOpJson(plan.get(), engine, dbname, opts);
     std::string result = "{\n";
     result += "  \"plan\": " + planJson + ",\n";
-    result += "  \"totalCost\": " + std::to_string(static_cast<int>(total.cost)) + ",\n";
-    result += "  \"totalRows\": " + std::to_string(static_cast<int>(total.rows));
+    if (opts.costs) {
+        result += "  \"totalCost\": " + std::to_string(static_cast<int>(total.cost)) + ",\n";
+        result += "  \"totalRows\": " + std::to_string(static_cast<int>(total.rows));
+    }
+    if (opts.settings) {
+        auto cfg = g_config;
+        if (opts.costs) result += ",";
+        result += "\n  \"settings\": {\n";
+        result += "    \"workMemKb\": " + std::to_string(cfg.workMemKb) + ",\n";
+        result += "    \"enableSeqScan\": " + std::string(cfg.enableSeqScan ? "true" : "false") + ",\n";
+        result += "    \"enableHashJoin\": " + std::string(cfg.enableHashJoin ? "true" : "false") + ",\n";
+        result += "    \"enableMergeJoin\": " + std::string(cfg.enableMergeJoin ? "true" : "false") + ",\n";
+        result += "    \"checkpointInterval\": " + std::to_string(cfg.checkpointInterval) + "\n";
+        result += "  }";
+    }
     if (opts.buffers) {
         auto bpStats = engine->getBufferPoolStats();
         result += ",\n  \"buffers\": {\n";

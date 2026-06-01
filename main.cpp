@@ -7343,29 +7343,54 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // EXPLAIN / EXPLAIN ANALYZE / EXPLAIN FORMAT JSON
+    // EXPLAIN / EXPLAIN ANALYZE / EXPLAIN FORMAT JSON / EXPLAIN (OPTIONS)
     if (sql.substr(0, 7) == "explain") {
         if (!checkDB(s)) return true;
-        bool isAnalyze = false;
+        dbms::QueryPlanner::ExplainOptions opts;
         bool isJson = false;
-        bool isBuffers = false;
-        bool isVerbose = false;
         string rest = trim(sql.substr(7));
-        if (rest.size() >= 8 && rest.substr(0, 8) == "analyze ") {
-            isAnalyze = true;
-            rest = trim(rest.substr(8));
-        }
-        if (rest.size() >= 8 && rest.substr(0, 8) == "buffers ") {
-            isBuffers = true;
-            rest = trim(rest.substr(8));
-        }
-        if (rest.size() >= 8 && rest.substr(0, 8) == "verbose ") {
-            isVerbose = true;
-            rest = trim(rest.substr(8));
-        }
-        if (rest.size() >= 11 && rest.substr(0, 11) == "format json") {
-            isJson = true;
-            rest = trim(rest.substr(11));
+        // Parenthesized options: EXPLAIN (ANALYZE, BUFFERS, TIMING, COSTS, SETTINGS, VERBOSE)
+        if (!rest.empty() && rest.front() == '(') {
+            size_t closeParen = rest.find(')');
+            if (closeParen != string::npos) {
+                string optStr = trim(rest.substr(1, closeParen - 1));
+                rest = trim(rest.substr(closeParen + 1));
+                // Split by comma
+                stringstream oss(optStr);
+                string opt;
+                while (getline(oss, opt, ',')) {
+                    string o = trim(opt);
+                    size_t sp = o.find(' ');
+                    string name = (sp == string::npos) ? o : trim(o.substr(0, sp));
+                    string val = (sp == string::npos) ? "true" : trim(o.substr(sp + 1));
+                    bool on = (val != "false" && val != "0" && val != "off");
+                    if (name == "analyze") opts.analyze = on;
+                    else if (name == "buffers") opts.buffers = on;
+                    else if (name == "timing") opts.timing = on;
+                    else if (name == "costs") opts.costs = on;
+                    else if (name == "settings") opts.settings = on;
+                    else if (name == "verbose") opts.verbose = on;
+                    else if (name == "format" && val == "json") isJson = true;
+                }
+            }
+        } else {
+            // Legacy prefix-style options
+            if (rest.size() >= 8 && rest.substr(0, 8) == "analyze ") {
+                opts.analyze = true;
+                rest = trim(rest.substr(8));
+            }
+            if (rest.size() >= 8 && rest.substr(0, 8) == "buffers ") {
+                opts.buffers = true;
+                rest = trim(rest.substr(8));
+            }
+            if (rest.size() >= 8 && rest.substr(0, 8) == "verbose ") {
+                opts.verbose = true;
+                rest = trim(rest.substr(8));
+            }
+            if (rest.size() >= 11 && rest.substr(0, 11) == "format json") {
+                isJson = true;
+                rest = trim(rest.substr(11));
+            }
         }
         string inner = rest;
         if (inner.size() < 6 || inner.substr(0, 6) != "select") {
@@ -7444,9 +7469,13 @@ bool execute(const string& rawSql, Session& s) {
 
         // Query plan cache lookup (cache key includes EXPLAIN options)
         string cacheKey = s.currentDB + "::" + inner;
-        if (isBuffers) cacheKey += ":B";
-        if (isVerbose) cacheKey += ":V";
+        if (opts.buffers) cacheKey += ":B";
+        if (opts.verbose) cacheKey += ":V";
         if (isJson) cacheKey += ":J";
+        if (opts.analyze) cacheKey += ":A";
+        if (opts.timing) cacheKey += ":T";
+        if (opts.costs) cacheKey += ":C";
+        if (opts.settings) cacheKey += ":S";
         string planOutput;
         bool cacheHit = false;
         {
@@ -7464,9 +7493,6 @@ bool execute(const string& rawSql, Session& s) {
 
         if (!cacheHit) {
             auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-            dbms::QueryPlanner::ExplainOptions opts;
-            opts.buffers = isBuffers;
-            opts.verbose = isVerbose;
             if (isJson) {
                 planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts);
             } else {
@@ -7489,23 +7515,18 @@ bool execute(const string& rawSql, Session& s) {
         cout << planOutput;
         if (cacheHit) cout << "\n[plan cache hit]";
 
-        if (isAnalyze) {
-            // Execute the query and collect actual statistics
+        if (opts.analyze) {
             auto execStart = std::chrono::steady_clock::now();
             size_t actualRows = 0;
-
-            // Use the query engine to execute the parsed SELECT
-            // We need to re-run through the normal SELECT path
-            // For simplicity, execute via engine.query() with parsed params
             auto answers = g_engine.query(s.currentDB, tname, conds, selectCols,
                 {dbms::StorageEngine::OrderBySpec{orderByCol, orderByAsc}}, false);
             actualRows = answers.size();
-
             auto execEnd = std::chrono::steady_clock::now();
             double execMs = std::chrono::duration<double, std::milli>(execEnd - execStart).count();
-
             cout << "\n--- ANALYZE ---\n";
-            cout << "Actual time: " << std::fixed << std::setprecision(3) << execMs << " ms\n";
+            if (opts.timing) {
+                cout << "Actual time: " << std::fixed << std::setprecision(3) << execMs << " ms\n";
+            }
             cout << "Actual rows: " << actualRows << "\n";
         }
         return false;
