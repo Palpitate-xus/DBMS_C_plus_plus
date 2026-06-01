@@ -261,7 +261,7 @@
 | BEGIN / COMMIT / ROLLBACK | ✅ | ✅ | — |
 | SAVEPOINT / ROLLBACK TO / RELEASE | ✅ | ✅ | — |
 | 4 级隔离 (RU/RC/RR/SERIALIZABLE) | ✅ | ✅ | Serializable 为快照隔离模拟 |
-| 真正的 Serializable (SSI) | ❌ | ✅ | PG 使用 Serializable Snapshot Isolation，**本项目仅用快照隔离模拟** |
+| 真正的 Serializable (SSI) | ✅ | ✅ | 基于 ReadView + rw-conflict 检测实现 SSI，检测到危险结构时返回 SerializationFailure |
 | SET TRANSACTION ISOLATION LEVEL | ✅ | ✅ | — |
 | READ ONLY 事务 | ✅ | ✅ | — |
 | READ WRITE 事务 | ❌ | ✅ | 默认可写但无显式声明 |
@@ -588,7 +588,7 @@
 
 1. ✅ **CREATE SCHEMA** — 支持 schema 限定表名 (`schema.table` → `schema__table`)
 2. ❌ **并行查询** — 无法利用多核 CPU
-3. ❌ **真正的 SERIALIZABLE (SSI)** — 仅快照隔离模拟
+3. ✅ **真正的 SERIALIZABLE (SSI)** — 基于 ReadView + rw-conflict 检测实现 SSI，commit 时检测 outgoing/incoming 冲突，危险结构触发 SerializationFailure
 4. ✅ **LATERAL JOIN** — 支持 `CROSS JOIN LATERAL` 和 `, LATERAL` 语法
 5. ❌ **流复制 / 逻辑复制** — 无任何复制能力
 6. ❌ **时间点恢复 (PITR)** — 无法恢复到任意时间点
