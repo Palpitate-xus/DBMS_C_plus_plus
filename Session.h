@@ -18,4 +18,12 @@ struct Session {
     std::string currentRole;      // SET ROLE target (empty = use original user)
     std::string originalRole;     // Session user's role (set at login)
     std::map<std::string, std::string> userVariables; // user-defined variables @var
+
+    // Cursors: named result sets for DECLARE CURSOR / FETCH / CLOSE
+    struct Cursor {
+        std::vector<std::string> rows;    // result rows (including header as first element)
+        std::vector<std::string> colNames;
+        int pos = -1;                     // -1 = before first row (FETCH NEXT gives row 0)
+    };
+    std::map<std::string, Cursor> cursors;
 };

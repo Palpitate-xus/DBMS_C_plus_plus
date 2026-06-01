@@ -375,7 +375,7 @@
 | 变量声明 (DECLARE) | ❌ | ✅ | — |
 | 流程控制 (IF/WHILE/LOOP/FOR) | ❌ | ✅ | — |
 | 异常处理 (BEGIN ... EXCEPTION) | ❌ | ✅ | — |
-| 游标 (CURSOR / FETCH / CLOSE) | ❌ | ✅ | **缺失** |
+| 游标 (CURSOR / FETCH / CLOSE) | ✅ | ✅ | 支持 DECLARE / FETCH (NEXT/PRIOR/FIRST/LAST/ABSOLUTE/RELATIVE/ALL/FORWARD/BACKWARD) / CLOSE |
 | OUT / INOUT 参数 | ✅ | ✅ | 支持 `CREATE PROCEDURE p(IN a INT, OUT b INT, INOUT c INT)` 和 `CALL p(1, @b, @c)` |
 | 函数重载 (Overloading) | ❌ | ✅ | — |
 | 自定义聚合函数 (UDAF) | ❌ | ✅ | **缺失** |
@@ -601,7 +601,7 @@
 13. ✅ **TRUNCATE TABLE** — 数据文件重建、索引重建、缓存清理、自增重置
 14. ❌ **两阶段提交** — 分布式事务基础
 15. ❌ **SCRAM 认证 / pg_hba.conf** — 企业级认证
-16. ⚠️ **游标 / 函数重载** — OUT/INOUT 参数已完成，游标和重载待实现
+16. ⚠️ **函数重载** — 游标已完成，重载待实现
 17. ✅ **WITH CHECK OPTION** — 可更新视图完整性约束（INSERT 预校验）
 18. ✅ **GRANT WITH GRANT OPTION** — 权限级联授权
 19. ✅ **窗口帧 RANGE/GROUPS BETWEEN** — 支持 ROWS / RANGE / GROUPS 三种帧类型

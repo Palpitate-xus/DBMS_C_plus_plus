@@ -2975,6 +2975,141 @@ bool execute(const string& rawSql, Session& s) {
         }
     }
 
+    // DECLARE CURSOR
+    if (sql.substr(0, 7) == "declare") {
+        if (!checkDB(s)) return true;
+        string rest = trim(sql.substr(7));
+        size_t cursorPos = rest.find("cursor");
+        if (cursorPos == string::npos) {
+            cout << "SQL syntax error: DECLARE cursor_name CURSOR FOR select_sql" << endl;
+            return true;
+        }
+        string cursorName = trim(rest.substr(0, cursorPos));
+        string afterCursor = trim(rest.substr(cursorPos + 6));
+        if (afterCursor.substr(0, 3) != "for") {
+            cout << "SQL syntax error: DECLARE cursor_name CURSOR FOR select_sql" << endl;
+            return true;
+        }
+        string selectSql = trim(afterCursor.substr(3));
+        // Execute SELECT and capture output
+        std::stringstream ss;
+        auto oldBuf = std::cout.rdbuf(ss.rdbuf());
+        bool err = execute(selectSql, s);
+        std::cout.rdbuf(oldBuf);
+        if (err) {
+            cout << "DECLARE CURSOR failed: " << ss.str() << endl;
+            return true;
+        }
+        Session::Cursor cur;
+        string line;
+        bool first = true;
+        while (getline(ss, line)) {
+            if (first) {
+                stringstream hs(line);
+                string col;
+                while (hs >> col) cur.colNames.push_back(col);
+                first = false;
+            } else if (!line.empty()) {
+                cur.rows.push_back(line);
+            }
+        }
+        cur.pos = -1;
+        s.cursors[cursorName] = std::move(cur);
+        cout << "Cursor " << cursorName << " declared" << endl;
+        return false;
+    }
+
+    // FETCH
+    if (sql.substr(0, 5) == "fetch") {
+        string rest = trim(sql.substr(5));
+        string direction = "next";
+        string cursorName;
+        size_t fromPos = rest.find("from");
+        if (fromPos == string::npos) fromPos = rest.find("in");
+        if (fromPos != string::npos) {
+            string beforeFrom = trim(rest.substr(0, fromPos));
+            if (!beforeFrom.empty()) direction = beforeFrom;
+            cursorName = trim(rest.substr(fromPos + 4));
+        } else {
+            cursorName = rest;
+        }
+        auto it = s.cursors.find(cursorName);
+        if (it == s.cursors.end()) {
+            cout << "Cursor " << cursorName << " not found" << endl;
+            return true;
+        }
+        auto& cur = it->second;
+        if (cur.rows.empty()) {
+            cout << "No data" << endl;
+            return false;
+        }
+        auto moveTo = [&](int p) {
+            if (p < 0 || p >= (int)cur.rows.size()) {
+                cout << "No more rows" << endl;
+                return false;
+            }
+            // Output header on first fetch
+            if (cur.pos == -1 && !cur.colNames.empty()) {
+                for (size_t i = 0; i < cur.colNames.size(); ++i) {
+                    if (i > 0) cout << ' ';
+                    cout << cur.colNames[i];
+                }
+                cout << endl;
+            }
+            cout << cur.rows[p] << endl;
+            cur.pos = p;
+            return true;
+        };
+        if (direction == "next") {
+            moveTo(cur.pos + 1);
+        } else if (direction == "prior" || direction == "backward") {
+            moveTo(cur.pos - 1);
+        } else if (direction == "first") {
+            moveTo(0);
+        } else if (direction == "last") {
+            moveTo((int)cur.rows.size() - 1);
+        } else if (direction == "all") {
+            for (size_t i = 0; i < cur.rows.size(); ++i) cout << cur.rows[i] << endl;
+            cur.pos = (int)cur.rows.size() - 1;
+        } else {
+            // ABSOLUTE n, RELATIVE n, FORWARD n, BACKWARD n
+            int n = 1;
+            try {
+                size_t dp = direction.find_first_of("0123456789");
+                if (dp != string::npos) n = stoi(direction.substr(dp));
+            } catch (...) {}
+            if (direction.find("absolute") != string::npos) {
+                moveTo(n);
+            } else if (direction.find("relative") != string::npos) {
+                moveTo(cur.pos + n);
+            } else if (direction.find("forward") != string::npos) {
+                moveTo(cur.pos + n);
+            } else if (direction.find("backward") != string::npos) {
+                moveTo(cur.pos - n);
+            } else {
+                moveTo(cur.pos + 1);
+            }
+        }
+        return false;
+    }
+
+    // CLOSE
+    if (sql.substr(0, 5) == "close") {
+        string cursorName = trim(sql.substr(5));
+        if (cursorName.empty()) {
+            cout << "SQL syntax error: CLOSE cursor_name" << endl;
+            return true;
+        }
+        auto it = s.cursors.find(cursorName);
+        if (it == s.cursors.end()) {
+            cout << "Cursor " << cursorName << " not found" << endl;
+            return true;
+        }
+        s.cursors.erase(it);
+        cout << "Cursor " << cursorName << " closed" << endl;
+        return false;
+    }
+
     if (sql.substr(0, 6) == "create") {
         if (sql.substr(7, 4) == "user") {
             if (!checkAdmin(s)) return true;

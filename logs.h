@@ -9,7 +9,6 @@
 inline std::string getTime() {
     time_t now = time(0);
     std::string now_dt = ctime(&now);
-    std::cout << now_dt;
     return now_dt;
 }
 
