@@ -190,7 +190,7 @@
 | CROSS JOIN | ✅ | ✅ | — |
 | NATURAL JOIN | ✅ | ✅ | — |
 | SELF JOIN | ✅ | ✅ | — |
-| LATERAL JOIN | ❌ | ✅ | **完全缺失** |
+| LATERAL JOIN | ✅ | ✅ | 支持 `CROSS JOIN LATERAL (SELECT ...) AS alias` 和 `, LATERAL (...) AS alias` |
 | 子查询 (IN/EXISTS/ANY/ALL) | ✅ | ✅ | — |
 | 关联子查询 | ✅ | ✅ | — |
 | 标量子查询 | ✅ | ✅ | — |
@@ -589,7 +589,7 @@
 1. ❌ **CREATE SCHEMA** — 无命名空间分层，所有表在同一层级
 2. ❌ **并行查询** — 无法利用多核 CPU
 3. ❌ **真正的 SERIALIZABLE (SSI)** — 仅快照隔离模拟
-4. ❌ **LATERAL JOIN** — 无法在 JOIN 中引用左侧列的子查询
+4. ✅ **LATERAL JOIN** — 支持 `CROSS JOIN LATERAL` 和 `, LATERAL` 语法
 5. ❌ **流复制 / 逻辑复制** — 无任何复制能力
 6. ❌ **时间点恢复 (PITR)** — 无法恢复到任意时间点
 7. ❌ **声明式分区管理 (ATTACH/DETACH)** — 分区运维能力

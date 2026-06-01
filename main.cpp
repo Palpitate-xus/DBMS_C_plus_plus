@@ -2373,6 +2373,17 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
     while (true) {
         size_t parenStart = result.find("(select");
         if (parenStart == std::string::npos) break;
+        // Skip LATERAL subqueries — they are handled dynamically per left-row
+        std::string beforeParen = trim(result.substr(0, parenStart));
+        if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
+            // Move past this occurrence to avoid infinite loop
+            parenStart = result.find("(select", parenStart + 1);
+            if (parenStart == std::string::npos) break;
+            beforeParen = trim(result.substr(0, parenStart));
+            if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
+                continue;
+            }
+        }
         size_t parenEnd = findMatchingParen(result, parenStart);
         if (parenEnd == std::string::npos) break;
 
@@ -2410,6 +2421,145 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
             aliasEnd += alias.size();
         }
         result = result.substr(0, parenStart) + tmpName + result.substr(aliasEnd);
+    }
+
+    return result;
+}
+
+// Detect and process LATERAL JOINs by materializing them into temporary tables.
+// Supports: FROM t CROSS JOIN LATERAL (SELECT ...) AS alias
+//           FROM t, LATERAL (SELECT ...) AS alias
+// The lateral subquery can reference columns from the left table.
+static std::string processLateralJoins(const std::string& sql, Session& s) {
+    std::string result = sql;
+    int lateralCount = 0;
+
+    while (true) {
+        size_t latPos = result.find("lateral");
+        if (latPos == std::string::npos) break;
+        size_t parenStart = result.find("(select", latPos);
+        if (parenStart == std::string::npos) break;
+        size_t parenEnd = findMatchingParen(result, parenStart);
+        if (parenEnd == std::string::npos) break;
+
+        std::string afterParen = trim(result.substr(parenEnd + 1));
+        if (afterParen.size() < 3 || afterParen.substr(0, 3) != "as ") break;
+        std::string alias = trim(afterParen.substr(3));
+        size_t sp = alias.find(' ');
+        if (sp != std::string::npos) alias = alias.substr(0, sp);
+        if (alias.empty()) break;
+
+        // Extract the inner SELECT
+        std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
+
+        // Determine left table: text between "from" and the lateral construct
+        std::string leftTableName, leftAlias;
+        size_t fromPos = result.rfind("from", latPos);
+        if (fromPos != std::string::npos) {
+            std::string afterFrom = trim(result.substr(fromPos + 4, latPos - fromPos - 4));
+            // afterFrom could be "t cross join " or "t, " or "t inner join u cross join "
+            // Find the last table reference before lateral
+            size_t lastJoin = afterFrom.rfind("join");
+            size_t lastComma = afterFrom.rfind(",");
+            std::string tableSegment;
+            if (lastJoin != std::string::npos) {
+                // Take text before "join" (e.g., "t cross" -> "t")
+                tableSegment = trim(afterFrom.substr(0, lastJoin));
+            } else if (lastComma != std::string::npos) {
+                // If comma is at end (e.g., "t,"), take text before comma
+                std::string afterComma = trim(afterFrom.substr(lastComma + 1));
+                if (afterComma.empty()) {
+                    tableSegment = trim(afterFrom.substr(0, lastComma));
+                } else {
+                    tableSegment = afterComma;
+                }
+            } else {
+                tableSegment = trim(afterFrom);
+            }
+            size_t spc = tableSegment.find(' ');
+            if (spc != std::string::npos) {
+                leftTableName = trim(tableSegment.substr(0, spc));
+                leftAlias = trim(tableSegment.substr(spc + 1));
+            } else {
+                leftTableName = tableSegment;
+            }
+        }
+        if (leftTableName.empty()) break;
+
+        std::string resolvedLeft = resolveTableName(s, leftTableName);
+        if (!g_engine.tableExists(s.currentDB, resolvedLeft)) break;
+        TableSchema leftTbl = g_engine.getTableSchema(s.currentDB, resolvedLeft);
+        std::string leftPrefix = leftAlias.empty() ? leftTableName : leftAlias;
+
+        // Read all left rows
+        std::vector<std::string> leftRows;
+        std::vector<std::string> leftColNames;
+        for (size_t i = 0; i < leftTbl.len; ++i) leftColNames.push_back(leftTbl.cols[i].dataName);
+        g_engine.forEachRow(s.currentDB, resolvedLeft, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            leftRows.emplace_back(data, len);
+        });
+
+        // Execute lateral subquery for each left row and collect results
+        std::vector<std::string> allRows;
+        std::vector<std::string> colNames;
+        for (const auto& lrow : leftRows) {
+            std::string replacedSql = innerSelect;
+            // Replace left table column references with literal values
+            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                std::string val = g_engine.extractColumnValue(lrow, leftTbl, ci);
+                // Escape single quotes in value
+                std::string escVal;
+                for (char c : val) {
+                    if (c == '\'') escVal += "''";
+                    else escVal += c;
+                }
+                bool isNum = leftTbl.cols[ci].dataType != "char" && !leftTbl.cols[ci].isVariableLength;
+                std::string lit = isNum ? escVal : "'" + escVal + "'";
+
+                for (const std::string& pref : {leftPrefix + ".", resolvedLeft + "."}) {
+                    std::string place = pref + leftTbl.cols[ci].dataName;
+                    size_t pos = 0;
+                    while ((pos = replacedSql.find(place, pos)) != std::string::npos) {
+                        replacedSql.replace(pos, place.size(), lit);
+                        pos += lit.size();
+                    }
+                }
+            }
+            auto rows = runDerivedSubQuery(replacedSql, s, colNames);
+            for (const auto& r : rows) {
+                allRows.push_back(r);
+            }
+        }
+
+        if (colNames.empty()) break;
+
+        int counter = lateralCount;
+        std::string tmpName = createTempTableFromRows(s, allRows, colNames, counter);
+        if (tmpName.empty()) break;
+        lateralCount = counter;
+
+        // Replace the lateral join construct with temp table name first
+        size_t aliasEnd = parenEnd + 1;
+        while (aliasEnd < result.size() && isspace((unsigned char)result[aliasEnd])) ++aliasEnd;
+        if (aliasEnd + 2 < result.size() && result.substr(aliasEnd, 3) == "as ") {
+            aliasEnd += 3;
+            while (aliasEnd < result.size() && isspace((unsigned char)result[aliasEnd])) ++aliasEnd;
+            aliasEnd += alias.size();
+        }
+        // If preceded by comma, replace comma with "cross join" to make a valid JOIN
+        size_t commaBefore = result.rfind(",", latPos);
+        if (commaBefore != std::string::npos && commaBefore > fromPos) {
+            result = result.substr(0, commaBefore) + " cross join " + tmpName + result.substr(aliasEnd);
+        } else {
+            result = result.substr(0, latPos) + tmpName + result.substr(aliasEnd);
+        }
+
+        // Then replace alias references with bare column names
+        std::string aliasDot = alias + ".";
+        size_t pos = 0;
+        while ((pos = result.find(aliasDot, pos)) != std::string::npos) {
+            result = result.substr(0, pos) + result.substr(pos + aliasDot.size());
+        }
     }
 
     return result;
@@ -7735,6 +7885,8 @@ bool execute(const string& rawSql, Session& s) {
 
         // Process derived tables: (SELECT ...) AS alias
         sql = processDerivedTables(sql, s);
+        // Process LATERAL JOINs: materialize into temp tables
+        sql = processLateralJoins(sql, s);
 
         // Parse FOR UPDATE / FOR SHARE / NOWAIT / SKIP LOCKED
         bool forUpdate = false;
