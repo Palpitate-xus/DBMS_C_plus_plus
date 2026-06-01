@@ -232,11 +232,17 @@ public:
     // User-defined functions (simple expression-based)
     struct UDFInfo {
         std::string name;
-        std::string paramName;
+        std::string paramName; // single-param compat
         std::string expression;
+        std::vector<std::string> paramNames; // multi-param support
+        std::vector<std::string> paramTypes; // multi-param support
     };
     OpResult createUDF(const std::string& dbname, const std::string& funcname,
                        const std::string& param, const std::string& expression);
+    OpResult createUDF(const std::string& dbname, const std::string& funcname,
+                       const std::vector<std::string>& params,
+                       const std::vector<std::string>& types,
+                       const std::string& expression);
     OpResult dropUDF(const std::string& dbname, const std::string& funcname);
     bool udfExists(const std::string& dbname, const std::string& funcname) const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;

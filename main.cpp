@@ -4080,7 +4080,7 @@ bool execute(const string& rawSql, Session& s) {
         if (sql.substr(7, 8) == "function") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
-            // create function name(param) [returns table] as 'expression/sql'
+            // create function name[(params)] [returns table] as 'expression/sql'
             string rest = trim(sql.substr(16));
             size_t lp = rest.find('(');
             size_t rp = rest.find(')');
@@ -4089,8 +4089,26 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             string funcname = trim(rest.substr(0, lp));
-            string param = trim(rest.substr(lp + 1, rp - lp - 1));
+            string plist = trim(rest.substr(lp + 1, rp - lp - 1));
             string after = trim(rest.substr(rp + 1));
+            // Parse parameter list: name [type] [, name [type] ...]
+            vector<string> params;
+            vector<string> types;
+            if (!plist.empty()) {
+                vector<string> pdefs = splitValues(plist);
+                for (const string& pd : pdefs) {
+                    string ptrim = trim(pd);
+                    if (ptrim.empty()) continue;
+                    vector<string> ptokens;
+                    stringstream pss(ptrim);
+                    string tok;
+                    while (pss >> tok) ptokens.push_back(tok);
+                    if (ptokens.empty()) continue;
+                    params.push_back(ptokens[0]);
+                    if (ptokens.size() >= 2) types.push_back(ptokens[1]);
+                    else types.push_back("");
+                }
+            }
             // Check for RETURNS TABLE (table-valued function)
             bool isTVF = false;
             if (after.size() >= 13 && toLower(after.substr(0, 13)) == "returns table") {
@@ -4106,14 +4124,21 @@ bool execute(const string& rawSql, Session& s) {
                 body = body.substr(1, body.size() - 2);
             }
             if (isTVF) {
-                auto res = g_engine.createTVF(s.currentDB, funcname, param, body);
+                string singleParam = params.empty() ? "" : params[0];
+                auto res = g_engine.createTVF(s.currentDB, funcname, singleParam, body);
                 if (res != OpResult::Success) {
                     cout << "Create table-valued function failed" << endl;
                     return true;
                 }
                 cout << "Table-valued function " << funcname << " created" << endl;
             } else {
-                auto res = g_engine.createUDF(s.currentDB, funcname, param, body);
+                OpResult res;
+                if (params.size() <= 1) {
+                    string singleParam = params.empty() ? "" : params[0];
+                    res = g_engine.createUDF(s.currentDB, funcname, singleParam, body);
+                } else {
+                    res = g_engine.createUDF(s.currentDB, funcname, params, types, body);
+                }
                 if (res != OpResult::Success) {
                     cout << "Create function failed" << endl;
                     return true;
@@ -7209,7 +7234,14 @@ bool execute(const string& rawSql, Session& s) {
             auto udfNames = g_engine.getUDFNames(s.currentDB);
             for (const auto& n : udfNames) {
                 auto udf = g_engine.getUDF(s.currentDB, n);
-                cout << n << "(" << udf.paramName << ") = " << udf.expression << endl;
+                string sig;
+                for (size_t i = 0; i < udf.paramNames.size(); ++i) {
+                    if (i > 0) sig += ", ";
+                    sig += udf.paramNames[i];
+                    if (i < udf.paramTypes.size() && !udf.paramTypes[i].empty()) sig += " " + udf.paramTypes[i];
+                }
+                if (sig.empty()) sig = udf.paramName;
+                cout << n << "(" << sig << ") = " << udf.expression << endl;
             }
             auto tvfNames = g_engine.getTVFNames(s.currentDB);
             for (const auto& n : tvfNames) {
@@ -8878,7 +8910,8 @@ bool execute(const string& rawSql, Session& s) {
                                 arg = "distinct " + trim(arg.substr(9));
                             }
                         }
-                        if (isScalarFunc(func)) {
+                        bool isUDF = (!s.currentDB.empty() && g_engine.udfExists(s.currentDB, func));
+                        if (isScalarFunc(func) || isUDF) {
                             dbms::StorageEngine::SelectExpr expr;
                             expr.displayName = item;
                             expr.isScalar = true;

@@ -1368,6 +1368,27 @@ OpResult StorageEngine::createUDF(const std::string& dbname,
     return OpResult::Success;
 }
 
+OpResult StorageEngine::createUDF(const std::string& dbname,
+                                   const std::string& funcname,
+                                   const std::vector<std::string>& params,
+                                   const std::vector<std::string>& types,
+                                   const std::string& expression) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto fdir = udfDir(dbname);
+    if (!std::filesystem::exists(fdir)) {
+        std::filesystem::create_directories(fdir);
+    }
+    std::ofstream ofs(udfPath(dbname, funcname));
+    if (!ofs) return OpResult::InvalidValue;
+    ofs << "PARAMS:";
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i > 0) ofs << ',';
+        ofs << params[i] << ':' << (i < types.size() ? types[i] : "");
+    }
+    ofs << "\n" << expression << "\n";
+    return OpResult::Success;
+}
+
 OpResult StorageEngine::dropUDF(const std::string& dbname,
                                  const std::string& funcname) {
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
@@ -1388,7 +1409,32 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
     auto path = udfPath(dbname, funcname);
     std::ifstream ifs(path);
     if (!ifs) return info;
-    std::getline(ifs, info.paramName);
+    std::string line;
+    if (std::getline(ifs, line)) {
+        if (line.substr(0, 7) == "PARAMS:") {
+            std::string rest = line.substr(7);
+            size_t p = 0;
+            while (p < rest.size()) {
+                size_t comma = rest.find(',', p);
+                std::string part = rest.substr(p, comma - p);
+                if (!part.empty()) {
+                    size_t colon = part.find(':');
+                    if (colon != std::string::npos) {
+                        info.paramNames.push_back(part.substr(0, colon));
+                        info.paramTypes.push_back(part.substr(colon + 1));
+                    } else {
+                        info.paramNames.push_back(part);
+                    }
+                }
+                if (comma == std::string::npos) break;
+                p = comma + 1;
+            }
+            info.paramName = info.paramNames.empty() ? "" : info.paramNames[0];
+        } else {
+            info.paramName = line;
+            info.paramNames.push_back(line);
+        }
+    }
     std::getline(ifs, info.expression);
     info.name = funcname;
     return info;
@@ -8645,6 +8691,22 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "unnest" && !expr.funcArgs.empty()) {
         // Return raw array value; expansion happens in queryExpr
         return getVal(expr.funcArgs[0]);
+    }
+    // User-defined function fallback
+    if (engine && !dbname.empty()) {
+        auto udf = engine->getUDF(dbname, expr.funcName);
+        if (!udf.expression.empty()) {
+            std::string result = udf.expression;
+            for (size_t i = 0; i < udf.paramNames.size() && i < expr.funcArgs.size(); ++i) {
+                std::string val = getVal(expr.funcArgs[i]);
+                size_t pos = 0;
+                while ((pos = result.find(udf.paramNames[i], pos)) != std::string::npos) {
+                    result.replace(pos, udf.paramNames[i].size(), val);
+                    pos += val.size();
+                }
+            }
+            return result;
+        }
     }
     return "";
 }
