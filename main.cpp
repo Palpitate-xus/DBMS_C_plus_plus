@@ -98,6 +98,26 @@ struct SqlStatEntry {
 static std::map<std::string, SqlStatEntry> g_sqlStats; // key = db + "|" + normalized_sql
 static std::mutex g_sqlStatsMutex;
 
+// ========================================================================
+// NOTIFY / LISTEN async messaging
+// ========================================================================
+static std::mutex g_notifyMutex;
+static std::map<std::string, std::set<std::string>> g_listeners; // channel -> usernames
+static std::map<std::string, std::vector<std::pair<std::string, std::string>>> g_pendingNotifies; // username -> [(channel, payload)]
+
+static void checkNotifications(Session& s) {
+    std::lock_guard<std::mutex> lock(g_notifyMutex);
+    auto it = g_pendingNotifies.find(s.username);
+    if (it != g_pendingNotifies.end()) {
+        for (const auto& np : it->second) {
+            std::cout << "NOTIFY " << np.first;
+            if (!np.second.empty()) std::cout << " " << np.second;
+            std::cout << std::endl;
+        }
+        g_pendingNotifies.erase(it);
+    }
+}
+
 std::string normalizeSqlForStats(const std::string& sql) {
     std::string s = sql;
     // Trim whitespace
@@ -2959,6 +2979,9 @@ bool execute(const string& rawSql, Session& s) {
             auditLog(g_config.auditLevel, s.username, s.currentDB, rawSql, "EXEC");
         }
     }
+    // Check pending notifications at the start of each command
+    checkNotifications(s);
+
     if (sql.substr(0, 3) == "use") {
         if (sql.substr(4, 8) == "database") {
             string dbname = trim(sql.substr(13));
@@ -2973,6 +2996,83 @@ bool execute(const string& rawSql, Session& s) {
             log(s.username, "use database success", getTime());
             return false;
         }
+    }
+
+    // LISTEN
+    if (sql.substr(0, 6) == "listen") {
+        string channel = trim(sql.substr(6));
+        if (channel.empty()) {
+            cout << "SQL syntax error: LISTEN channel" << endl;
+            return true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_notifyMutex);
+            g_listeners[channel].insert(s.username);
+        }
+        s.listenedChannels.insert(channel);
+        cout << "LISTEN " << channel << endl;
+        return false;
+    }
+
+    // NOTIFY
+    if (sql.substr(0, 6) == "notify") {
+        string rest = trim(sql.substr(6));
+        size_t commaPos = rest.find(',');
+        string channel = trim(rest.substr(0, commaPos));
+        string payload;
+        if (commaPos != string::npos) {
+            payload = trim(rest.substr(commaPos + 1));
+            if (payload.size() >= 2 && payload.front() == '\'' && payload.back() == '\'') {
+                payload = payload.substr(1, payload.size() - 2);
+            }
+        }
+        if (channel.empty()) {
+            cout << "SQL syntax error: NOTIFY channel [, payload]" << endl;
+            return true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_notifyMutex);
+            auto it = g_listeners.find(channel);
+            if (it != g_listeners.end()) {
+                for (const auto& uname : it->second) {
+                    g_pendingNotifies[uname].push_back({channel, payload});
+                }
+            }
+        }
+        cout << "NOTIFY " << channel << endl;
+        return false;
+    }
+
+    // UNLISTEN
+    if (sql.substr(0, 8) == "unlisten") {
+        string channel = trim(sql.substr(8));
+        if (channel == "*") {
+            std::lock_guard<std::mutex> lock(g_notifyMutex);
+            for (const auto& ch : s.listenedChannels) {
+                auto it = g_listeners.find(ch);
+                if (it != g_listeners.end()) {
+                    it->second.erase(s.username);
+                    if (it->second.empty()) g_listeners.erase(it);
+                }
+            }
+            s.listenedChannels.clear();
+            cout << "UNLISTEN *" << endl;
+        } else if (!channel.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(g_notifyMutex);
+                auto it = g_listeners.find(channel);
+                if (it != g_listeners.end()) {
+                    it->second.erase(s.username);
+                    if (it->second.empty()) g_listeners.erase(it);
+                }
+            }
+            s.listenedChannels.erase(channel);
+            cout << "UNLISTEN " << channel << endl;
+        } else {
+            cout << "SQL syntax error: UNLISTEN channel | UNLISTEN *" << endl;
+            return true;
+        }
+        return false;
     }
 
     // DECLARE CURSOR

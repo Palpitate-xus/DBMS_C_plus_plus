@@ -528,7 +528,7 @@
 | Apache AGE（图查询） | ❌ | ✅ | — |
 | pg_cron / 定时任务 | ❌ | ⚠️ | 需扩展 |
 | 表继承 (INHERITS) | ❌ | ✅ | PG 特有，非 SQL 标准 |
-| NOTIFY / LISTEN（异步通知） | ❌ | ✅ | **缺失** |
+| NOTIFY / LISTEN（异步通知） | ✅ | ✅ | 支持 `LISTEN channel`, `NOTIFY channel, payload`, `UNLISTEN channel/*` |
 | COPY 协议（客户端批量传输） | ❌ | ✅ | — |
 | 大对象 (Large Objects, lo_*) | ❌ | ✅ | — |
 | pg_prewarm | ❌ | ✅ | — |
@@ -597,7 +597,7 @@
 9. ❌ **扩展系统 (EXTENSION + FDW)** — 无法集成外部数据源
 10. ❌ **行级安全 (RLS)** — 多租户场景必备
 11. ❌ **GiST / GIN / BRIN 索引** — 空间/全文/JSON 加速
-12. ❌ **NOTIFY / LISTEN** — 无异步消息
+12. ✅ **NOTIFY / LISTEN** — 支持 LISTEN/NOTIFY/UNLISTEN 异步消息
 13. ✅ **TRUNCATE TABLE** — 数据文件重建、索引重建、缓存清理、自增重置
 14. ❌ **两阶段提交** — 分布式事务基础
 15. ❌ **SCRAM 认证 / pg_hba.conf** — 企业级认证

@@ -18,6 +18,7 @@ struct Session {
     std::string currentRole;      // SET ROLE target (empty = use original user)
     std::string originalRole;     // Session user's role (set at login)
     std::map<std::string, std::string> userVariables; // user-defined variables @var
+    std::set<std::string> listenedChannels; // channels this session is LISTENing to
 
     // Cursors: named result sets for DECLARE CURSOR / FETCH / CLOSE
     struct Cursor {
