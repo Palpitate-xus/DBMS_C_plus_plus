@@ -31,7 +31,7 @@
 | CREATE TABLE AS | ❌ | ✅ | 不支持 `CREATE TABLE ... AS SELECT` |
 | CREATE TABLE ... PARTITION BY | ✅ | ✅ | Range/List/Hash |
 | CREATE TABLE ... PARTITION OF | ❌ | ✅ | **声明式分区仅通过子句**，不支持独立 `PARTITION OF` |
-| ATTACH/DETACH PARTITION | ❌ | ✅ | **分区管理**缺失 |
+| ATTACH/DETACH PARTITION | ✅ | ✅ | 支持 Range/List/Hash 分区 ATTACH/DETACH |
 | SUBPARTITION（子分区） | ❌ | ✅ | 仅支持单层分区 |
 | DEFAULT PARTITION | ❌ | ✅ | 缺失 |
 | DROP TABLE | ✅ | ✅ | — |
@@ -592,7 +592,7 @@
 4. ✅ **LATERAL JOIN** — 支持 `CROSS JOIN LATERAL` 和 `, LATERAL` 语法
 5. ❌ **流复制 / 逻辑复制** — 无任何复制能力
 6. ❌ **时间点恢复 (PITR)** — 无法恢复到任意时间点
-7. ❌ **声明式分区管理 (ATTACH/DETACH)** — 分区运维能力
+7. ✅ **声明式分区管理 (ATTACH/DETACH)** — 支持 Range/List/Hash 分区 ATTACH/DETACH，含分区数据文件创建与 schema 持久化
 8. ❌ **PL/pgSQL 过程语言** — 存储过程无编程能力
 9. ❌ **扩展系统 (EXTENSION + FDW)** — 无法集成外部数据源
 10. ✅ **行级安全 (RLS)** — 支持 CREATE/DROP POLICY，ENABLE/FORCE ROW LEVEL SECURITY，策略自动集成到 query/update/remove
