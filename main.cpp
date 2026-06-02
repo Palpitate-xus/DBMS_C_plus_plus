@@ -5001,6 +5001,52 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
+        // ALTER TABLE ... ATTACH/DETACH PARTITION
+        if (sql.find("attach partition") != string::npos) {
+            // ALTER TABLE tname ATTACH PARTITION pname [FOR VALUES ...]
+            // Hash partitions don't need FOR VALUES (just the partition name)
+            size_t attachPos = sql.find("attach partition");
+            string afterAttach = trim(sql.substr(attachPos + 16)); // after "attach partition"
+            size_t sp = afterAttach.find(' ');
+            string pname;
+            string spec;
+            if (sp == string::npos) {
+                // No spec (hash partition attach)
+                pname = afterAttach;
+                spec = "";
+            } else {
+                pname = afterAttach.substr(0, sp);
+                spec = trim(afterAttach.substr(sp + 1));
+            }
+            auto res = g_engine.attachPartition(s.currentDB, tname, pname, spec);
+            if (res == OpResult::TableNotExist) {
+                cout << "Table not found" << endl;
+            } else if (res == OpResult::InvalidValue) {
+                cout << "Table is not partitioned or invalid partition specification" << endl;
+            } else if (res == OpResult::TableAlreadyExist) {
+                cout << "Partition " << pname << " already exists" << endl;
+            } else if (res == OpResult::SyntaxError) {
+                cout << "SQL syntax error: invalid partition specification" << endl;
+            } else {
+                cout << "Partition " << pname << " attached to " << tname << endl;
+            }
+            return false;
+        }
+        if (sql.find("detach partition") != string::npos) {
+            // ALTER TABLE tname DETACH PARTITION pname
+            size_t detachPos = sql.find("detach partition");
+            string afterDetach = trim(sql.substr(detachPos + 16)); // after "detach partition"
+            string pname = afterDetach;
+            auto res = g_engine.detachPartition(s.currentDB, tname, pname);
+            if (res == OpResult::TableNotExist) {
+                cout << "Table not found" << endl;
+            } else if (res == OpResult::InvalidValue) {
+                cout << "Partition " << pname << " not found or table is not partitioned" << endl;
+            } else {
+                cout << "Partition " << pname << " detached from " << tname << endl;
+            }
+            return false;
+        }
         cout << "SQL syntax error" << endl;
         return true;
     }

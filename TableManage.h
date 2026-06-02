@@ -641,6 +641,13 @@ public:
     std::vector<std::string> getTargetPartitions(const TableSchema& tbl,
                                                   const std::vector<Condition>& conds) const;
 
+    // Declarative partition management (ATTACH/DETACH PARTITION)
+    OpResult attachPartition(const std::string& dbname, const std::string& tablename,
+                              const std::string& partitionName,
+                              const std::string& partitionSpec);
+    OpResult detachPartition(const std::string& dbname, const std::string& tablename,
+                              const std::string& partitionName);
+
     // Lock manager access
     LockManager& getLockManager() { return lockManager_; }
     const LockManager& getLockManager() const { return lockManager_; }

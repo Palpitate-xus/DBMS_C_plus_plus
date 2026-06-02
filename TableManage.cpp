@@ -696,6 +696,193 @@ std::vector<std::string> StorageEngine::getTargetPartitions(
     return result;
 }
 
+OpResult StorageEngine::attachPartition(const std::string& dbname,
+                                          const std::string& tablename,
+                                          const std::string& partitionName,
+                                          const std::string& partitionSpec) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    if (tbl.partitionType == TableSchema::PartitionType::None) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;  // table is not partitioned
+    }
+
+    // Check partition name doesn't already exist
+    auto nameExists = [&]() -> bool {
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& rp : tbl.rangePartitions)
+                if (rp.first == partitionName) return true;
+        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& lp : tbl.listPartitions)
+                if (lp.first == partitionName) return true;
+        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+            size_t hidx = std::stoull(partitionName.substr(1));
+            if (hidx < tbl.hashPartitions) return true;
+        }
+        return false;
+    };
+    if (nameExists()) {
+        lockManager_.unlock(tablename);
+        return OpResult::TableAlreadyExist;
+    }
+
+    // Parse partition spec based on partition type
+    std::string specLower = partitionSpec;
+    std::transform(specLower.begin(), specLower.end(), specLower.begin(), ::tolower);
+
+    if (tbl.partitionType == TableSchema::PartitionType::Range) {
+        // Parse: FOR VALUES FROM (val) TO (val)
+        size_t fromPos = specLower.find("from");
+        size_t toPos = specLower.find(" to ");
+        if (fromPos == std::string::npos || toPos == std::string::npos) {
+            lockManager_.unlock(tablename);
+            return OpResult::SyntaxError;
+        }
+        size_t val1lp = partitionSpec.find('(', fromPos);
+        size_t val1rp = partitionSpec.find(')', val1lp);
+        size_t val2lp = partitionSpec.find('(', toPos);
+        size_t val2rp = partitionSpec.find(')', val2lp);
+        if (val1lp == std::string::npos || val1rp == std::string::npos ||
+            val2lp == std::string::npos || val2rp == std::string::npos) {
+            lockManager_.unlock(tablename);
+            return OpResult::SyntaxError;
+        }
+        std::string lowerBound = trim(partitionSpec.substr(val1lp + 1, val1rp - val1lp - 1));
+        std::string upperBound = trim(partitionSpec.substr(val2lp + 1, val2rp - val2lp - 1));
+        // Strip quotes
+        auto unquote = [](std::string& s) {
+            if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') ||
+                                   (s.front() == '"' && s.back() == '"')))
+                s = s.substr(1, s.size() - 2);
+        };
+        unquote(lowerBound);
+        unquote(upperBound);
+        // Insert in sorted position (lower bound ascending)
+        auto it = tbl.rangePartitions.begin();
+        while (it != tbl.rangePartitions.end() && it->second < lowerBound) ++it;
+        tbl.rangePartitions.insert(it, {partitionName, upperBound});
+    } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+        // Parse: FOR VALUES IN (v1, v2, ...)
+        size_t inPos = specLower.find(" in ");
+        if (inPos == std::string::npos) {
+            lockManager_.unlock(tablename);
+            return OpResult::SyntaxError;
+        }
+        size_t valLp = partitionSpec.find('(', inPos);
+        size_t valRp = partitionSpec.find(')', valLp);
+        if (valLp == std::string::npos || valRp == std::string::npos) {
+            lockManager_.unlock(tablename);
+            return OpResult::SyntaxError;
+        }
+        std::string valsStr = partitionSpec.substr(valLp + 1, valRp - valLp - 1);
+        std::vector<std::string> values;
+        size_t cp = 0;
+        while (cp < valsStr.size()) {
+            size_t c = valsStr.find(',', cp);
+            std::string v = trim(valsStr.substr(cp, c - cp));
+            if (v.size() >= 2 && ((v.front() == '\'' && v.back() == '\'') ||
+                                   (v.front() == '"' && v.back() == '"')))
+                v = v.substr(1, v.size() - 2);
+            if (!v.empty()) values.push_back(v);
+            if (c == std::string::npos) break;
+            cp = c + 1;
+        }
+        tbl.listPartitions.push_back({partitionName, values});
+    } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+        // Hash attach: increase hash partition count if partition name is "pN" where N == current count
+        // e.g., ATTACH PARTITION p4 when hashPartitions is 4 → hashPartitions becomes 5
+        if (partitionName.size() > 1 && partitionName[0] == 'p') {
+            try {
+                size_t idx = std::stoull(partitionName.substr(1));
+                if (idx == tbl.hashPartitions) {
+                    tbl.hashPartitions = idx + 1;
+                } else {
+                    lockManager_.unlock(tablename);
+                    return OpResult::InvalidValue; // hash partitions must be attached in order
+                }
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                return OpResult::SyntaxError;
+            }
+        } else {
+            lockManager_.unlock(tablename);
+            return OpResult::SyntaxError;
+        }
+    }
+
+    // Create the partition data file
+    {
+        auto ppa = std::make_unique<PageAllocator>(
+            partitionDataPath(dbname, tablename, partitionName).string(), tbl.rowSize());
+        ppa->open();
+        ppa->close();
+    }
+
+    // Rewrite schema
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::detachPartition(const std::string& dbname,
+                                          const std::string& tablename,
+                                          const std::string& partitionName) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    if (tbl.partitionType == TableSchema::PartitionType::None) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+
+    bool found = false;
+    if (tbl.partitionType == TableSchema::PartitionType::Range) {
+        auto it = std::find_if(tbl.rangePartitions.begin(), tbl.rangePartitions.end(),
+                                [&](const auto& rp) { return rp.first == partitionName; });
+        if (it != tbl.rangePartitions.end()) {
+            tbl.rangePartitions.erase(it);
+            found = true;
+        }
+    } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+        auto it = std::find_if(tbl.listPartitions.begin(), tbl.listPartitions.end(),
+                                [&](const auto& lp) { return lp.first == partitionName; });
+        if (it != tbl.listPartitions.end()) {
+            tbl.listPartitions.erase(it);
+            found = true;
+        }
+    } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+        // Removing a hash partition reduces count; only the last partition can be detached
+        if (partitionName == "p" + std::to_string(tbl.hashPartitions - 1) && tbl.hashPartitions > 0) {
+            tbl.hashPartitions--;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
+
+    // Rewrite schema
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+
+    // Close any cached page allocator for the detached partition
+    pageAllocators_.erase(dbname + "/" + tablename + "#" + partitionName);
+
+    lockManager_.unlock(tablename);
+    return OpResult::Success;
+}
+
 std::filesystem::path StorageEngine::walPath(const std::string& dbname) const {
     return dbPath(dbname) / "wal.log";
 }
