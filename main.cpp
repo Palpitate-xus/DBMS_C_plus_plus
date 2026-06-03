@@ -1738,6 +1738,56 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                 }
             }
 
+            // Resolve composite types: expand into multiple columns
+            if (!dbname.empty() && !cname.empty()) {
+                string typeNameOnly = ctype;
+                size_t sp = ctype.find(' ');
+                if (sp != string::npos) typeNameOnly = ctype.substr(0, sp);
+                size_t lp = typeNameOnly.find('(');
+                if (lp != string::npos) typeNameOnly = typeNameOnly.substr(0, lp);
+                auto ct = g_engine.getCompositeType(dbname, typeNameOnly);
+                if (!ct.name.empty()) {
+                    for (const auto& f : ct.fields) {
+                        Column fcol;
+                        fcol.dataName = cname + "_" + f.first;
+                        // Parse field type (e.g., "varchar(100)" -> "varchar", dsize=100)
+                        string ftype = f.second;
+                        std::transform(ftype.begin(), ftype.end(), ftype.begin(), ::tolower);
+                        size_t flp = ftype.find('(');
+                        if (flp != string::npos) {
+                            size_t frp = ftype.find(')', flp);
+                            if (frp != string::npos) {
+                                try { fcol.dsize = std::stoi(trim(ftype.substr(flp + 1, frp - flp - 1))); } catch (...) { fcol.dsize = 255; }
+                            }
+                            ftype = ftype.substr(0, flp);
+                        }
+                        fcol.dataType = ftype;
+                        if (ftype == "varchar" || ftype == "text") {
+                            fcol.isVariableLength = true;
+                            if (fcol.dsize == 0) fcol.dsize = 255;
+                        } else if (ftype == "int" || ftype == "integer") {
+                            fcol.dsize = 4;
+                        } else if (ftype == "bigint") {
+                            fcol.dsize = 8;
+                        } else if (ftype == "float") {
+                            fcol.dsize = 4;
+                        } else if (ftype == "double") {
+                            fcol.dsize = 8;
+                        } else if (ftype == "date") {
+                            fcol.dsize = 12;
+                        } else if (ftype == "boolean" || ftype == "bool") {
+                            fcol.dsize = 1;
+                        } else {
+                            if (fcol.dsize == 0) fcol.dsize = 255;
+                        }
+                        fcol.isNull = isNull;
+                        tbl.append(fcol);
+                    }
+                    pos = endPos + 1;
+                    continue;
+                }
+            }
+
             // Parse type and flags for brace format
             if (isBrace) {
                 size_t fkPos = ctype.find("->");
@@ -3579,6 +3629,50 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Domain " << dname << " created" << endl;
+            return false;
+        }
+
+        if (sql.substr(7, 4) == "type") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            string rest = trim(sql.substr(12));
+            // Parse: type_name AS (field1 type1, field2 type2, ...)
+            size_t asPos = rest.find(" as ");
+            if (asPos == string::npos) {
+                cout << "SQL syntax error: CREATE TYPE name AS (field1 type1, ...)" << endl;
+                return true;
+            }
+            string tname = trim(rest.substr(0, asPos));
+            string afterAs = trim(rest.substr(asPos + 4));
+            if (afterAs.empty() || afterAs.front() != '(' || afterAs.back() != ')') {
+                cout << "SQL syntax error: CREATE TYPE requires field list in parentheses" << endl;
+                return true;
+            }
+            string fieldsStr = trim(afterAs.substr(1, afterAs.size() - 2));
+            dbms::StorageEngine::CompositeType ct;
+            ct.name = tname;
+            vector<string> fieldDefs = splitValues(fieldsStr);
+            for (const string& fd : fieldDefs) {
+                string ftrim = trim(fd);
+                size_t sp = ftrim.find(' ');
+                if (sp == string::npos) {
+                    cout << "SQL syntax error: field definition requires 'name type'" << endl;
+                    return true;
+                }
+                string fname = trim(ftrim.substr(0, sp));
+                string ftype = trim(ftrim.substr(sp + 1));
+                ct.fields.emplace_back(fname, ftype);
+            }
+            if (ct.fields.empty()) {
+                cout << "SQL syntax error: composite type must have at least one field" << endl;
+                return true;
+            }
+            auto res = g_engine.createCompositeType(s.currentDB, ct);
+            if (res == OpResult::TableAlreadyExist) {
+                cout << "Type " << tname << " already exists" << endl;
+                return true;
+            }
+            cout << "Type " << tname << " created" << endl;
             return false;
         }
 
@@ -7535,6 +7629,15 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Domain dropped" << endl;
+            return false;
+        }
+        if (op == "type") {
+            auto res = g_engine.dropCompositeType(s.currentDB, name);
+            if (res == OpResult::TableNotExist) {
+                cout << "Type " << name << " not exist" << endl;
+                return true;
+            }
+            cout << "Type dropped" << endl;
             return false;
         }
         if (op == "sequence") {

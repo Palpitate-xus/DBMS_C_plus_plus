@@ -251,6 +251,17 @@ public:
     DomainInfo getDomain(const std::string& dbname, const std::string& name) const;
     std::vector<std::string> getDomainNames(const std::string& dbname) const;
 
+    // Composite types (ROW types)
+    struct CompositeType {
+        std::string name;
+        std::vector<std::pair<std::string, std::string>> fields; // (fieldName, fieldType)
+    };
+    OpResult createCompositeType(const std::string& dbname, const CompositeType& ct);
+    OpResult dropCompositeType(const std::string& dbname, const std::string& name);
+    CompositeType getCompositeType(const std::string& dbname, const std::string& name) const;
+    std::vector<std::string> getCompositeTypeNames(const std::string& dbname) const;
+    bool isCompositeType(const std::string& dbname, const std::string& name) const;
+
     // Advisory locks (session-level)
     bool advisoryLock(int64_t key);
     bool advisoryUnlock(int64_t key);
