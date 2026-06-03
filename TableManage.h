@@ -707,9 +707,12 @@ public:
         std::string tableName;
         std::string action;   // SQL action (e.g., "insert into audit_log values (...)")
         bool forEachRow = true;  // true = FOR EACH ROW, false = FOR EACH STATEMENT
+        bool enabled = true;     // true = ENABLED, false = DISABLED
     };
     OpResult createTrigger(const std::string& dbname, const Trigger& trg);
     OpResult dropTrigger(const std::string& dbname, const std::string& trgName);
+    OpResult enableTrigger(const std::string& dbname, const std::string& trgName);
+    OpResult disableTrigger(const std::string& dbname, const std::string& trgName);
     std::vector<Trigger> getTriggers(const std::string& dbname, const std::string& tablename,
                                       const std::string& timing, const std::string& event) const;
     std::vector<Trigger> getAllTriggers(const std::string& dbname) const;

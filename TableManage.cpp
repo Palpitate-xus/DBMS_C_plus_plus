@@ -3007,6 +3007,8 @@ void StorageEngine::writeTrigger(std::ostream& out, const Trigger& trg) const {
     out.write(trg.action.data(), static_cast<std::streamsize>(n));
     char forEachRow = trg.forEachRow ? 1 : 0;
     out.write(&forEachRow, sizeof(char));
+    char enabled = trg.enabled ? 1 : 0;
+    out.write(&enabled, sizeof(char));
 }
 
 StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
@@ -3027,6 +3029,10 @@ StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
     char forEachRow = 1;
     in.read(&forEachRow, sizeof(char));
     if (in) trg.forEachRow = (forEachRow != 0);
+    // Backward compatibility: enabled flag may not exist in old files
+    char enabled = 1;
+    in.read(&enabled, sizeof(char));
+    if (in) trg.enabled = (enabled != 0);
     return trg;
 }
 
@@ -3068,7 +3074,7 @@ std::vector<StorageEngine::Trigger> StorageEngine::getTriggers(
     std::vector<Trigger> result;
     auto all = getAllTriggers(dbname);
     for (const auto& t : all) {
-        if (t.tableName == tablename && t.timing == timing && t.event == event) {
+        if (t.tableName == tablename && t.timing == timing && t.event == event && t.enabled) {
             result.push_back(t);
         }
     }
@@ -3087,6 +3093,36 @@ std::vector<StorageEngine::Trigger> StorageEngine::getAllTriggers(const std::str
         if (!t.name.empty()) result.push_back(std::move(t));
     }
     return result;
+}
+
+OpResult StorageEngine::enableTrigger(const std::string& dbname, const std::string& trgName) {
+    auto existing = getAllTriggers(dbname);
+    bool found = false;
+    {
+        std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
+        size_t count = existing.size();
+        out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+        for (auto& t : existing) {
+            if (t.name == trgName) { t.enabled = true; found = true; }
+            writeTrigger(out, t);
+        }
+    }
+    return found ? OpResult::Success : OpResult::TableNotExist;
+}
+
+OpResult StorageEngine::disableTrigger(const std::string& dbname, const std::string& trgName) {
+    auto existing = getAllTriggers(dbname);
+    bool found = false;
+    {
+        std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
+        size_t count = existing.size();
+        out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+        for (auto& t : existing) {
+            if (t.name == trgName) { t.enabled = false; found = true; }
+            writeTrigger(out, t);
+        }
+    }
+    return found ? OpResult::Success : OpResult::TableNotExist;
 }
 
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)

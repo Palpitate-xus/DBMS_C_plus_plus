@@ -5118,6 +5118,20 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
+        // ALTER TABLE ... ENABLE/DISABLE TRIGGER
+        if (sql.find("enable trigger") != string::npos || sql.find("disable trigger") != string::npos) {
+            bool enable = (sql.find("enable trigger") != string::npos);
+            size_t trigPos = sql.find(" trigger");
+            string trigName = trim(sql.substr(trigPos + 8));
+            auto res = enable ? g_engine.enableTrigger(s.currentDB, trigName)
+                              : g_engine.disableTrigger(s.currentDB, trigName);
+            if (res == OpResult::Success) {
+                cout << "Trigger " << trigName << (enable ? " enabled" : " disabled") << endl;
+            } else {
+                cout << "Trigger not found" << endl;
+            }
+            return false;
+        }
         cout << "SQL syntax error" << endl;
         return true;
     }
