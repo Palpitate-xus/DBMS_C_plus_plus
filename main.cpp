@@ -3887,6 +3887,7 @@ bool execute(const string& rawSql, Session& s) {
             if (!checkDB(s)) return true;
             bool isHash = false;
             bool isUnique = false;
+            bool isConcurrently = false;
             size_t restStart = 13;
             // Check for "create hash index"
             if (sql.substr(7, 4) == "hash") {
@@ -3898,7 +3899,14 @@ bool execute(const string& rawSql, Session& s) {
                 isUnique = true;
                 restStart = 20; // after "create unique index "
             }
-            string rest = trim(sql.substr(restStart));
+            // Check for CONCURRENTLY keyword after "index"
+            string afterCreate = trim(sql.substr(restStart));
+            if (afterCreate.size() >= 13 && afterCreate.substr(0, 13) == "concurrently ") {
+                isConcurrently = true;
+                restStart += 13;
+                afterCreate = trim(sql.substr(restStart));
+            }
+            string rest = afterCreate;
             size_t onPos = rest.find(" on ");
             if (onPos == string::npos) {
                 cout << "SQL syntax error" << endl;
@@ -3990,9 +3998,9 @@ bool execute(const string& rawSql, Session& s) {
             OpResult res;
             if (colnames.size() == 1) {
                 if (isHash) {
-                    res = g_engine.createHashIndex(s.currentDB, tname, colnames[0]);
+                    res = g_engine.createHashIndex(s.currentDB, tname, colnames[0], isConcurrently);
                 } else {
-                    res = g_engine.createIndex(s.currentDB, tname, colnames[0], colAsc[0], includeCols, whereCondition, expressions[0]);
+                    res = g_engine.createIndex(s.currentDB, tname, colnames[0], colAsc[0], includeCols, whereCondition, expressions[0], isConcurrently);
                 }
             } else {
                 if (isHash) {
@@ -4000,13 +4008,13 @@ bool execute(const string& rawSql, Session& s) {
                     return true;
                 }
                 // Expression indexes not supported for composite (simplified)
-                res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName, includeCols, whereCondition);
+                res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName, includeCols, whereCondition, isConcurrently);
             }
             if (res != OpResult::Success) {
                 cout << "Create index failed" << endl;
                 return true;
             }
-            cout << "Index created" << endl;
+            cout << "Index created" << (isConcurrently ? " concurrently" : "") << endl;
             return false;
         }
 

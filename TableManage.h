@@ -514,7 +514,8 @@ public:
                          const std::string& colname, bool ascending = true,
                          const std::vector<std::string>& includeCols = {},
                          const std::string& whereCondition = "",
-                         const std::string& expression = "");
+                         const std::string& expression = "",
+                         bool concurrently = false);
     OpResult dropIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname);
     std::vector<std::string> getIndexedColumns(const std::string& dbname,
@@ -527,7 +528,7 @@ public:
 
     // Hash index (single-column, O(1) equality lookup)
     OpResult createHashIndex(const std::string& dbname, const std::string& tablename,
-                              const std::string& colname);
+                              const std::string& colname, bool concurrently = false);
     OpResult dropHashIndex(const std::string& dbname, const std::string& tablename,
                             const std::string& colname);
     std::vector<std::string> getHashIndexedColumns(const std::string& dbname,
@@ -545,7 +546,8 @@ public:
                                   const std::vector<std::string>& colnames,
                                   const std::string& indexName,
                                   const std::vector<std::string>& includeCols = {},
-                                  const std::string& whereCondition = "");
+                                  const std::string& whereCondition = "",
+                                  bool concurrently = false);
     OpResult dropCompositeIndex(const std::string& dbname, const std::string& tablename,
                                 const std::string& indexName);
     std::vector<CompositeIndexInfo> getCompositeIndexes(const std::string& dbname,

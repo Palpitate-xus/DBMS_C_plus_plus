@@ -2646,7 +2646,8 @@ HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
 
 OpResult StorageEngine::createHashIndex(const std::string& dbname,
                                          const std::string& tablename,
-                                         const std::string& colname) {
+                                         const std::string& colname,
+                                         bool /*concurrently*/) {
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -3290,9 +3291,14 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
                                      const std::string& colname, bool ascending,
                                      const std::vector<std::string>& includeCols,
                                      const std::string& whereCondition,
-                                     const std::string& expression) {
+                                     const std::string& expression,
+                                     bool concurrently) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
-    lockManager_.lockMetadata(tablename);
+    if (concurrently) {
+        lockManager_.lockShared(tablename);
+    } else {
+        lockManager_.lockMetadata(tablename);
+    }
     TableSchema tbl = getTableSchema(dbname, tablename);
 
     bool isExpression = !expression.empty();
@@ -3305,6 +3311,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
         size_t lp = expression.find('(');
         size_t rp = expression.find(')');
         if (lp == std::string::npos || rp == std::string::npos || rp <= lp + 1) {
+            lockManager_.unlock(tablename);
             return OpResult::InvalidValue;
         }
         exprFunc = expression.substr(0, lp);
@@ -3317,7 +3324,10 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
             if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
         }
     }
-    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+    if (colIdx >= tbl.len) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
 
     // Parse WHERE condition for partial index
     std::vector<Condition> whereConds;
@@ -3334,6 +3344,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
     if (alreadyIndexed && !isExpression) {
         bool currentDesc = isDescendingIndex(dbname, tablename, actualColname);
         if (currentDesc == !ascending) {
+            lockManager_.unlock(tablename);
             return OpResult::Success; // same direction, nothing to do
         }
         dropIndex(dbname, tablename, actualColname);
@@ -3379,6 +3390,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
         out << ":WHERE:" << whereCondition;
     }
     out << '\n';
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
@@ -3435,9 +3447,14 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
                                               const std::vector<std::string>& colnames,
                                               const std::string& indexName,
                                               const std::vector<std::string>& includeCols,
-                                              const std::string& whereCondition) {
+                                              const std::string& whereCondition,
+                                              bool concurrently) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
-    lockManager_.lockMetadata(tablename);
+    if (concurrently) {
+        lockManager_.lockShared(tablename);
+    } else {
+        lockManager_.lockMetadata(tablename);
+    }
     TableSchema tbl = getTableSchema(dbname, tablename);
 
     // Validate all columns exist
@@ -3446,13 +3463,19 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == cname) { found = true; break; }
         }
-        if (!found) return OpResult::InvalidValue;
+        if (!found) {
+            lockManager_.unlock(tablename);
+            return OpResult::InvalidValue;
+        }
     }
 
     // Check name collision with existing composite indexes
     auto existingComp = getCompositeIndexes(dbname, tablename);
     for (const auto& ci : existingComp) {
-        if (ci.name == indexName) return OpResult::Success;
+        if (ci.name == indexName) {
+            lockManager_.unlock(tablename);
+            return OpResult::Success;
+        }
     }
 
     // Parse WHERE condition for partial index
@@ -3463,7 +3486,10 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
 
     // Build index from existing data
     BPTree* idx = getCompositeIndexTree(dbname, tablename, indexName);
-    if (!idx) return OpResult::InvalidValue;
+    if (!idx) {
+        lockManager_.unlock(tablename);
+        return OpResult::InvalidValue;
+    }
 
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -3496,6 +3522,7 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
         out << ":WHERE:" << whereCondition;
     }
     out << '\n';
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
