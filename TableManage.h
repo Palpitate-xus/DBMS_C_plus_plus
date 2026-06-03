@@ -262,6 +262,10 @@ public:
     std::vector<std::string> getCompositeTypeNames(const std::string& dbname) const;
     bool isCompositeType(const std::string& dbname, const std::string& name) const;
 
+    // Table inheritance: get all direct child table names for a parent table
+    std::vector<std::string> getInheritedChildren(const std::string& dbname,
+                                                   const std::string& parentName) const;
+
     // Advisory locks (session-level)
     bool advisoryLock(int64_t key);
     bool advisoryUnlock(int64_t key);
@@ -773,8 +777,10 @@ public:
     IsolationLevel getIsolationLevel() const { return txnIsolationLevel_; }
     void refreshReadView();  // For READ COMMITTED: re-snapshot before each query
 
-private:
+public:
     std::filesystem::path dbPath(const std::string& dbname) const;
+
+private:
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path partitionDataPath(const std::string& dbname, const std::string& tablename,

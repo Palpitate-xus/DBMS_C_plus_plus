@@ -3909,11 +3909,64 @@ bool execute(const string& rawSql, Session& s) {
                 return false;
             }
 
+            // Check for INHERITS clause
+            size_t inheritsPos = sql.find("inherits");
+            string parentName;
+            if (inheritsPos != string::npos) {
+                string inheritsRest = trim(sql.substr(inheritsPos + 8));
+                if (!inheritsRest.empty() && inheritsRest.front() == '(') {
+                    size_t rp = inheritsRest.find(')');
+                    if (rp != string::npos) {
+                        parentName = trim(inheritsRest.substr(1, rp - 1));
+                        parentName = resolveTableName(s, parentName);
+                    }
+                }
+            }
+
             // Check for PARTITION BY clause
             size_t partPos = sql.find("partition by");
             string colsSql = sql;
             if (partPos != string::npos) colsSql = sql.substr(0, partPos);
+            if (inheritsPos != string::npos && (partPos == string::npos || inheritsPos < partPos)) {
+                colsSql = sql.substr(0, inheritsPos);
+            }
             TableSchema tbl = parseTableColumns(colsSql, restOff + sp + 1, s.currentDB);
+
+            // Merge inherited columns from parent
+            if (!parentName.empty()) {
+                if (!g_engine.tableExists(s.currentDB, parentName)) {
+                    cout << "Parent table " << parentName << " not exist" << endl;
+                    return true;
+                }
+                TableSchema parentTbl = g_engine.getTableSchema(s.currentDB, parentName);
+                // Prepend parent columns (skip duplicates by name)
+                std::set<string> childCols;
+                for (size_t i = 0; i < tbl.len; ++i) childCols.insert(tbl.cols[i].dataName);
+                TableSchema merged;
+                merged.tablename = tbl.tablename;
+                merged.isUnlogged = tbl.isUnlogged;
+                merged.partitionType = tbl.partitionType;
+                merged.partitionKey = tbl.partitionKey;
+                merged.rangePartitions = tbl.rangePartitions;
+                merged.listPartitions = tbl.listPartitions;
+                merged.hashPartitions = tbl.hashPartitions;
+                merged.defaultPartitionName = tbl.defaultPartitionName;
+                merged.pkColIndices = tbl.pkColIndices;
+                merged.uniqueConstraints = tbl.uniqueConstraints;
+                for (size_t i = 0; i < parentTbl.len; ++i) {
+                    if (childCols.count(parentTbl.cols[i].dataName)) continue;
+                    merged.append(parentTbl.cols[i]);
+                }
+                for (size_t i = 0; i < tbl.len; ++i) merged.append(tbl.cols[i]);
+                for (size_t i = 0; i < tbl.fkLen; ++i) merged.appendFK(tbl.fks[i]);
+                tbl = merged;
+                // Record inheritance relationship
+                auto inhPath = std::filesystem::path(g_engine.dbPath(s.currentDB)) / ".inherits";
+                {
+                    std::ofstream ofs(inhPath, std::ios::app);
+                    if (ofs) ofs << parentName << "|" << tname << "\n";
+                }
+            }
             tbl.tablename = tname;
             tbl.isUnlogged = isUnlogged;
             // Parse partitioning
@@ -10911,6 +10964,45 @@ bool execute(const string& rawSql, Session& s) {
                     auto part = g_engine.query(queryDb, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
+                    }
+                }
+            }
+            // Inheritance: UNION rows from child tables
+            if (queryDb != "information_schema" && queryDb != "pg_catalog") {
+                auto children = g_engine.getInheritedChildren(queryDb, tname);
+                if (!children.empty()) {
+                    set<string> childSelectCols = selectCols;
+                    if (selectAll) {
+                        for (size_t i = 0; i < tbl.len; ++i) childSelectCols.insert(tbl.cols[i].dataName);
+                    }
+                    for (const auto& childName : children) {
+                        if (!g_engine.tableExists(queryDb, childName)) continue;
+                        if (condTokens.empty()) {
+                            auto childRows = g_engine.query(queryDb, childName, {}, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                            for (const auto& row : childRows) answers.push_back(row);
+                        } else {
+                            // Re-tokenize conditions for each child (they were modified above)
+                            size_t condEnd = (groupPos != string::npos) ? groupPos
+                                           : (havingPos != string::npos) ? havingPos
+                                           : (orderPos != string::npos) ? orderPos
+                                           : (limitPos != string::npos) ? limitPos
+                                           : (offsetPos != string::npos) ? offsetPos : sql.size();
+                            string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
+                            whereClause = expandSubqueries(whereClause, s);
+                            string condStr = normalizeConditionStr(whereClause);
+                            auto childCondTokens = tokenize(condStr);
+                            childCondTokens.insert(childCondTokens.begin(), "(");
+                            childCondTokens.push_back(")");
+                            for (auto& t : childCondTokens) t = modifyLogic(t);
+                            auto childGroups = breakDownConditions(childCondTokens);
+                            set<string> childSeen;
+                            for (const auto& g : childGroups) {
+                                auto part = g_engine.query(queryDb, childName, g, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                                for (const auto& row : part) {
+                                    if (childSeen.insert(row).second) answers.push_back(row);
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -12879,6 +12879,24 @@ bool StorageEngine::isCompositeType(const std::string& dbname, const std::string
     return !getCompositeType(dbname, name).name.empty();
 }
 
+std::vector<std::string> StorageEngine::getInheritedChildren(const std::string& dbname,
+                                                             const std::string& parentName) const {
+    std::vector<std::string> children;
+    auto inhPath = std::filesystem::path(dbPath(dbname)) / ".inherits";
+    if (!std::filesystem::exists(inhPath)) return children;
+    std::ifstream ifs(inhPath);
+    if (!ifs) return children;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        size_t sep = line.find('|');
+        if (sep == std::string::npos) continue;
+        std::string parent = line.substr(0, sep);
+        std::string child = line.substr(sep + 1);
+        if (parent == parentName) children.push_back(child);
+    }
+    return children;
+}
+
 // ========================================================================
 // Advisory locks (session-level)
 // ========================================================================
