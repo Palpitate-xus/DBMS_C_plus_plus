@@ -4018,6 +4018,12 @@ static std::filesystem::path giSTIndexPath(const std::string& dbname,
     return std::filesystem::path(dbname) / (tablename + "_" + colname + ".gist");
 }
 
+static std::filesystem::path spGiSTIndexPath(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& colname) {
+    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".spgist");
+}
+
 OpResult StorageEngine::createGiSTIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
@@ -4117,6 +4123,149 @@ std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string&
         if (name.size() > 6 && name.substr(name.size() - 6) == ".gist" &&
             name.substr(0, prefix.size()) == prefix) {
             std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 6);
+            result.push_back(colname);
+        }
+    }
+    return result;
+}
+
+// ========================================================================
+// SP-GiST index (Space-Partitioned GiST) - quadtree for POINT type
+// ========================================================================
+
+OpResult StorageEngine::createSPGiSTIndex(const std::string& dbname,
+                                           const std::string& tablename,
+                                           const std::string& colname) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+
+    auto path = spGiSTIndexPath(dbname, tablename, colname);
+    std::ofstream out(path);
+    if (!out) return OpResult::InvalidValue;
+
+    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                       const char* data, size_t len) {
+        std::string row(data, len);
+        std::string val = extractColumnValue(row, tbl, colIdx);
+        int64_t rid = encodeRid(pageId, slotId);
+        out << rid << ' ' << val << '\n';
+    });
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropSPGiSTIndex(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname) {
+    auto path = spGiSTIndexPath(dbname, tablename, colname);
+    if (std::filesystem::exists(path)) std::filesystem::remove(path);
+    spGiSTCache_.erase(dbname + "/" + tablename + "/" + colname);
+    return OpResult::Success;
+}
+
+bool StorageEngine::hasSPGiSTIndex(const std::string& dbname,
+                                    const std::string& tablename,
+                                    const std::string& colname) const {
+    return std::filesystem::exists(spGiSTIndexPath(dbname, tablename, colname));
+}
+
+std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
+                                                  const std::string& tablename,
+                                                  const std::string& colname,
+                                                  const std::string& op,
+                                                  const std::string& value) const {
+    std::vector<int64_t> result;
+    auto path = spGiSTIndexPath(dbname, tablename, colname);
+    if (!std::filesystem::exists(path)) return result;
+
+    // Build or retrieve cached quadtree
+    std::string cacheKey = dbname + "/" + tablename + "/" + colname;
+    SPGiSTIndex* idx = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(spGiSTMutex_);
+        auto it = spGiSTCache_.find(cacheKey);
+        if (it != spGiSTCache_.end()) {
+            idx = it->second.get();
+        } else {
+            auto newIdx = std::make_unique<SPGiSTIndex>(-1e9, -1e9, 1e9, 1e9);
+            std::ifstream in(path);
+            if (in) {
+                std::string line;
+                while (std::getline(in, line)) {
+                    std::stringstream ss(line);
+                    int64_t rid;
+                    std::string pt;
+                    if (!(ss >> rid >> pt)) continue;
+                    double x = 0, y = 0;
+                    size_t comma = pt.find(',');
+                    if (comma != std::string::npos) {
+                        try {
+                            x = std::stod(pt.substr(0, comma));
+                            y = std::stod(pt.substr(comma + 1));
+                        } catch (...) { continue; }
+                    }
+                    newIdx->insert(x, y, rid);
+                }
+            }
+            idx = newIdx.get();
+            spGiSTCache_[cacheKey] = std::move(newIdx);
+        }
+    }
+
+    if (!idx) return result;
+
+    // Parse value as "x,y" for point, or "x" / "y" for directional queries
+    if (op == "=") {
+        double qx = 0, qy = 0;
+        size_t comma = value.find(',');
+        if (comma != std::string::npos) {
+            try {
+                qx = std::stod(value.substr(0, comma));
+                qy = std::stod(value.substr(comma + 1));
+            } catch (...) { return result; }
+        }
+        result = idx->searchEquals(qx, qy);
+    } else if (op == "<<") {
+        try { result = idx->searchLeftOf(std::stod(value)); } catch (...) {}
+    } else if (op == ">>") {
+        try { result = idx->searchRightOf(std::stod(value)); } catch (...) {}
+    } else if (op == "<^") {
+        try { result = idx->searchBelow(std::stod(value)); } catch (...) {}
+    } else if (op == ">^") {
+        try { result = idx->searchAbove(std::stod(value)); } catch (...) {}
+    } else if (op == "<@") {
+        // contained within circle: "cx,cy,radius"
+        double cx = 0, cy = 0, r = 0;
+        size_t c1 = value.find(',');
+        size_t c2 = value.rfind(',');
+        if (c1 != std::string::npos && c2 != std::string::npos && c2 > c1) {
+            try {
+                cx = std::stod(value.substr(0, c1));
+                cy = std::stod(value.substr(c1 + 1, c2 - c1 - 1));
+                r = std::stod(value.substr(c2 + 1));
+            } catch (...) { return result; }
+        }
+        result = idx->searchWithin(cx, cy, r);
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::string& dbname,
+                                                                 const std::string& tablename) const {
+    std::vector<std::string> result;
+    auto dir = std::filesystem::path(dbname);
+    if (!std::filesystem::exists(dir)) return result;
+    std::string prefix = tablename + "_";
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+        if (name.size() > 8 && name.substr(name.size() - 8) == ".spgist" &&
+            name.substr(0, prefix.size()) == prefix) {
+            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 8);
             result.push_back(colname);
         }
     }

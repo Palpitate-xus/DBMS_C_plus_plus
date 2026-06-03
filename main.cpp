@@ -4267,12 +4267,13 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 4) == "gin " || sql.substr(7, 5) == "gist " || sql.substr(7, 5) == "brin ") {
+        if (sql.substr(7, 4) == "gin " || sql.substr(7, 5) == "gist " || sql.substr(7, 5) == "brin " || sql.substr(7, 7) == "spgist ") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
             bool isGin = (sql.substr(7, 4) == "gin ");
             bool isGist = (sql.substr(7, 5) == "gist ");
-            size_t restStart = isGin ? 11 : 12; // after "create gin " or "create gist " / "create brin "
+            bool isSpgist = (sql.substr(7, 7) == "spgist ");
+            size_t restStart = isGin ? 11 : (isSpgist ? 14 : 12); // after "create gin " or "create gist " / "create brin " / "create spgist "
             string rest = trim(sql.substr(restStart));
             // Remove "index " prefix if present
             if (rest.size() >= 6 && rest.substr(0, 6) == "index ") {
@@ -4298,6 +4299,8 @@ bool execute(const string& rawSql, Session& s) {
                 res = g_engine.createGinIndex(s.currentDB, tname, colname);
             } else if (isGist) {
                 res = g_engine.createGiSTIndex(s.currentDB, tname, colname);
+            } else if (isSpgist) {
+                res = g_engine.createSPGiSTIndex(s.currentDB, tname, colname);
             } else {
                 res = g_engine.createBrinIndex(s.currentDB, tname, colname);
             }

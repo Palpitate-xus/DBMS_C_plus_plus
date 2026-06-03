@@ -17,6 +17,7 @@
 #include "PageAllocator.h"
 #include "LockManager.h"
 #include "HashIndex.h"
+#include "SPGiSTIndex.h"
 
 namespace dbms {
 
@@ -638,6 +639,20 @@ public:
     std::vector<std::string> getBrinIndexedColumns(const std::string& dbname,
                                                     const std::string& tablename) const;
 
+    // SP-GiST index (Space-Partitioned GiST): quadtree for POINT type
+    OpResult createSPGiSTIndex(const std::string& dbname, const std::string& tablename,
+                                const std::string& colname);
+    OpResult dropSPGiSTIndex(const std::string& dbname, const std::string& tablename,
+                              const std::string& colname);
+    bool hasSPGiSTIndex(const std::string& dbname, const std::string& tablename,
+                         const std::string& colname) const;
+    std::vector<int64_t> spGiSTSearch(const std::string& dbname, const std::string& tablename,
+                                       const std::string& colname,
+                                       const std::string& op,
+                                       const std::string& value) const;
+    std::vector<std::string> getSPGiSTIndexedColumns(const std::string& dbname,
+                                                      const std::string& tablename) const;
+
     // Condition parsing (public for execution plan use)
     struct Condition {
         std::string op;  // "<", ">", "=", "<=", ">=", "!=", "like"
@@ -861,6 +876,10 @@ private:
     std::filesystem::path hashIndexMetaPath(const std::string& dbname,
                                              const std::string& tablename) const;
     mutable std::map<std::string, std::unique_ptr<HashIndex>> hashIndexCache_;
+
+    // SP-GiST index cache
+    mutable std::mutex spGiSTMutex_;
+    mutable std::map<std::string, std::unique_ptr<SPGiSTIndex>> spGiSTCache_;
 
     // Trigger helpers
     std::filesystem::path triggerPath(const std::string& dbname) const;
