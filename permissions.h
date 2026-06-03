@@ -205,7 +205,7 @@ inline int permissionQuery(const std::string& username) {
     user temp;
     while (infile >> temp.username >> temp.password >> temp.permission) {
         if (temp.username == username) {
-            return (temp.permission == "admin") ? 1 : 0;
+            return (temp.permission == "admin" || temp.permission == "1") ? 1 : 0;
         }
     }
     return -1;
