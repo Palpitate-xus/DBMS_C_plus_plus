@@ -239,6 +239,18 @@ public:
     OpResult alterTableSetSchema(const std::string& dbname, const std::string& tablename,
                                  const std::string& targetDbname);
 
+    // Domain support
+    struct DomainInfo {
+        std::string name;
+        std::string baseType;
+        std::string defaultValue;
+        std::string checkExpr;
+    };
+    OpResult createDomain(const std::string& dbname, const DomainInfo& info);
+    OpResult dropDomain(const std::string& dbname, const std::string& name);
+    DomainInfo getDomain(const std::string& dbname, const std::string& name) const;
+    std::vector<std::string> getDomainNames(const std::string& dbname) const;
+
     // User-defined functions (simple expression-based)
     struct UDFInfo {
         std::string name;

@@ -6122,11 +6122,11 @@ static std::vector<StorageEngine::Condition> parseCheckConditions(const std::str
             while (opStart < condStr.size() && !strchr("<>=!", condStr[opStart])) ++opStart;
             if (opStart > 0 && opStart < condStr.size()) {
                 StorageEngine::Condition c;
-                c.colName = condStr.substr(0, opStart);
+                c.colName = trim(condStr.substr(0, opStart));
                 size_t opEnd = opStart;
                 while (opEnd < condStr.size() && strchr("<>=!", condStr[opEnd])) ++opEnd;
-                c.op = condStr.substr(opStart, opEnd - opStart);
-                c.value = condStr.substr(opEnd);
+                c.op = trim(condStr.substr(opStart, opEnd - opStart));
+                c.value = trim(condStr.substr(opEnd));
                 if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
                     c.value = c.value.substr(1, c.value.size() - 2);
                 result.push_back(c);
@@ -12691,6 +12691,80 @@ void StorageEngine::removeSeq(const std::string& dbname, const std::string& tabl
 void StorageEngine::resetSequence(const std::string& dbname, const std::string& tablename,
                                   const std::string& colname, int64_t val) {
     writeNextSeq(dbname, tablename, colname, val);
+}
+
+// ========================================================================
+// Domain support
+// ========================================================================
+static std::filesystem::path domainPath(const std::string& dbname) {
+    return std::filesystem::path(dbname) / ".domains";
+}
+
+OpResult StorageEngine::createDomain(const std::string& dbname, const DomainInfo& info) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = domainPath(dbname);
+    auto existing = getDomain(dbname, info.name);
+    if (!existing.name.empty()) return OpResult::TableAlreadyExist;
+    std::ofstream ofs(path, std::ios::app);
+    if (!ofs) return OpResult::InvalidValue;
+    ofs << info.name << "|" << info.baseType << "|" << info.defaultValue << "|" << info.checkExpr << "\n";
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropDomain(const std::string& dbname, const std::string& name) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = domainPath(dbname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    std::ifstream ifs(path);
+    std::vector<std::string> lines;
+    std::string line;
+    bool found = false;
+    while (std::getline(ifs, line)) {
+        size_t sp = line.find('|');
+        if (sp != std::string::npos && line.substr(0, sp) == name) {
+            found = true;
+        } else {
+            lines.push_back(line);
+        }
+    }
+    if (!found) return OpResult::TableNotExist;
+    std::ofstream ofs(path, std::ios::trunc);
+    for (const auto& l : lines) ofs << l << '\n';
+    return OpResult::Success;
+}
+
+StorageEngine::DomainInfo StorageEngine::getDomain(const std::string& dbname, const std::string& name) const {
+    DomainInfo result;
+    auto path = domainPath(dbname);
+    if (!std::filesystem::exists(path)) return result;
+    std::ifstream ifs(path);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        size_t sp1 = line.find('|');
+        if (sp1 == std::string::npos) continue;
+        if (line.substr(0, sp1) != name) continue;
+        size_t sp2 = line.find('|', sp1 + 1);
+        size_t sp3 = line.find('|', sp2 + 1);
+        result.name = name;
+        result.baseType = line.substr(sp1 + 1, sp2 - sp1 - 1);
+        result.defaultValue = (sp3 == std::string::npos) ? line.substr(sp2 + 1) : line.substr(sp2 + 1, sp3 - sp2 - 1);
+        if (sp3 != std::string::npos) result.checkExpr = line.substr(sp3 + 1);
+        break;
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getDomainNames(const std::string& dbname) const {
+    std::vector<std::string> result;
+    auto path = domainPath(dbname);
+    if (!std::filesystem::exists(path)) return result;
+    std::ifstream ifs(path);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        size_t sp = line.find('|');
+        if (sp != std::string::npos) result.push_back(line.substr(0, sp));
+    }
+    return result;
 }
 
 // Auto-VACUUM: trigger vacuum when dead tuple count exceeds threshold

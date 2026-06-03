@@ -1354,7 +1354,7 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
 // ========================================================================
 // Parse CREATE TABLE columns
 // ========================================================================
-static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
+static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const string& dbname = "") {
     TableSchema tbl;
     std::vector<std::string> pkColNames;  // raw names from PRIMARY KEY (a,b)
     std::vector<std::vector<std::string>> uniqueColNames; // raw names from UNIQUE (a,b)
@@ -1666,6 +1666,28 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             }
 
             if (cname.empty() || ctype.empty()) break;
+
+            // Resolve domain types
+            if (!dbname.empty()) {
+                auto domain = g_engine.getDomain(dbname, ctype);
+                if (!domain.name.empty()) {
+                    ctype = domain.baseType;
+                    if (defaultVal.empty() && !domain.defaultValue.empty()) defaultVal = domain.defaultValue;
+                    if (checkExpr.empty() && !domain.checkExpr.empty()) {
+                        checkExpr = domain.checkExpr;
+                        // Replace 'value' placeholder with actual column name
+                        size_t vp = 0;
+                        while ((vp = checkExpr.find("value", vp)) != string::npos) {
+                            bool leftOk = (vp == 0) || !isalnum(static_cast<unsigned char>(checkExpr[vp - 1]));
+                            bool rightOk = (vp + 5 >= checkExpr.size()) || !isalnum(static_cast<unsigned char>(checkExpr[vp + 5]));
+                            if (leftOk && rightOk) {
+                                checkExpr = checkExpr.substr(0, vp) + cname + checkExpr.substr(vp + 5);
+                            }
+                            vp += cname.size();
+                        }
+                    }
+                }
+            }
 
             // Parse type and flags for brace format
             if (isBrace) {
@@ -3465,6 +3487,52 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
+        if (sql.substr(7, 6) == "domain") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            string rest = trim(sql.substr(14));
+            // Parse: domain_name AS base_type [DEFAULT 'val'] [CHECK (expr)]
+            size_t asPos = rest.find(" as ");
+            if (asPos == string::npos) {
+                cout << "SQL syntax error: CREATE DOMAIN name AS type" << endl;
+                return true;
+            }
+            string dname = trim(rest.substr(0, asPos));
+            string afterAs = trim(rest.substr(asPos + 4));
+            size_t defPos = afterAs.find(" default ");
+            size_t checkPos = afterAs.find(" check ");
+            size_t typeEnd = afterAs.size();
+            if (defPos != string::npos) typeEnd = std::min(typeEnd, defPos);
+            if (checkPos != string::npos) typeEnd = std::min(typeEnd, checkPos);
+            string baseType = trim(afterAs.substr(0, typeEnd));
+            string defVal;
+            if (defPos != string::npos) {
+                size_t defStart = defPos + 9;
+                size_t defEnd = (checkPos != string::npos && checkPos > defPos) ? checkPos : afterAs.size();
+                defVal = stripQuotes(trim(afterAs.substr(defStart, defEnd - defStart)));
+            }
+            string checkExpr;
+            if (checkPos != string::npos) {
+                size_t lp = afterAs.find('(', checkPos);
+                size_t rp = afterAs.find(')', lp);
+                if (lp != string::npos && rp != string::npos) {
+                    checkExpr = trim(afterAs.substr(lp + 1, rp - lp - 1));
+                }
+            }
+            dbms::StorageEngine::DomainInfo info;
+            info.name = dname;
+            info.baseType = baseType;
+            info.defaultValue = defVal;
+            info.checkExpr = checkExpr;
+            auto res = g_engine.createDomain(s.currentDB, info);
+            if (res == OpResult::TableAlreadyExist) {
+                cout << "Domain " << dname << " already exists" << endl;
+                return true;
+            }
+            cout << "Domain " << dname << " created" << endl;
+            return false;
+        }
+
         if (sql.substr(7, 8) == "database") {
             if (!checkAdmin(s)) return true;
             string rest = trim(sql.substr(16));
@@ -3504,7 +3572,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             string origName = rest.substr(0, sp);
             string tmpName = tempTablePrefix(origName);
-            TableSchema tbl = parseTableColumns(sql, 17 + 5 + 1 + sp + 1);
+            TableSchema tbl = parseTableColumns(sql, 17 + 5 + 1 + sp + 1, s.currentDB);
             tbl.tablename = tmpName;
             auto res = g_engine.createTable(s.currentDB, tbl);
             if (res == OpResult::TableAlreadyExist) {
@@ -3702,7 +3770,7 @@ bool execute(const string& rawSql, Session& s) {
             size_t partPos = sql.find("partition by");
             string colsSql = sql;
             if (partPos != string::npos) colsSql = sql.substr(0, partPos);
-            TableSchema tbl = parseTableColumns(colsSql, restOff + sp + 1);
+            TableSchema tbl = parseTableColumns(colsSql, restOff + sp + 1, s.currentDB);
             tbl.tablename = tname;
             tbl.isUnlogged = isUnlogged;
             // Parse partitioning
@@ -7180,6 +7248,15 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Table dropped" << endl;
             return false;
         }
+        if (op == "domain") {
+            auto res = g_engine.dropDomain(s.currentDB, name);
+            if (res == OpResult::TableNotExist) {
+                cout << "Domain " << name << " not exist" << endl;
+                return true;
+            }
+            cout << "Domain dropped" << endl;
+            return false;
+        }
         if (op == "sequence") {
             auto res = g_engine.dropSequence(s.currentDB, name);
             if (res == OpResult::TableNotExist) {
@@ -7714,6 +7791,20 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (rest == "variables") {
             g_config.printAll();
+            return false;
+        }
+        if (rest == "domains") {
+            if (!checkDB(s)) return true;
+            auto names = g_engine.getDomainNames(s.currentDB);
+            if (names.empty()) {
+                cout << "No domains found" << endl;
+                return false;
+            }
+            cout << "domain_name base_type" << endl;
+            for (const auto& n : names) {
+                auto d = g_engine.getDomain(s.currentDB, n);
+                cout << d.name << " " << d.baseType << endl;
+            }
             return false;
         }
         if (rest.substr(0, 11) == "dead tuples") {

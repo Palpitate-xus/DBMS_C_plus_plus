@@ -10,6 +10,9 @@ t_base region 1|us|us||2:us
 t_copy __rows__ 1||
 t_copy id 1|1|1||1:1
 t_copy name 1|alice|alice||1:alice
+t_domain __rows__ 1||
+t_domain id 1|1|1||1:1
+t_domain name 1|alice|alice||1:alice
 t_explicit __rows__ 2||
 t_explicit age 2|0|30||1:0;1:30
 t_explicit id 2|1|2||1:1;1:2
