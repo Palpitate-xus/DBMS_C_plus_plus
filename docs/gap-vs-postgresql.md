@@ -130,9 +130,9 @@
 | 索引排序 (ASC/DESC) | ✅ | ✅ | — |
 | REINDEX | ✅ | ✅ | — |
 | CREATE INDEX CONCURRENTLY | ❌ | ✅ | **无并发索引创建** |
-| GiST 索引 | ❌ | ✅ | **无通用搜索树**（空间索引基础） |
-| GIN 索引 | ❌ | ✅ | **无倒排索引**（全文/数组/JSON 加速） |
-| BRIN 索引 | ❌ | ✅ | **无块范围索引** |
+| GiST 索引 | ✅ | ✅ | 简化空间/范围索引，支持 overlap/contained-by 查询 |
+| GIN 索引 | ✅ | ✅ | 倒排索引，支持 text/json/array 多键查询 |
+| BRIN 索引 | ✅ | ✅ | 块范围索引，per-block min/max 摘要加速范围查询 |
 | SP-GiST 索引 | ❌ | ✅ | — |
 | 自定义索引方法 | ❌ | ✅ | — |
 | Bitmap 索引 | ❌ | ❌ | PG 也没有（Oracle 有），不要求 |
@@ -565,7 +565,7 @@
 | DDL | 11 | 1 | 21 | ~33% |
 | 数据类型 | 23 | 1 | 17 | ~56% |
 | 约束 | 7 | 1 | 5 | ~54% |
-| 索引 | 12 | 0 | 10 | ~55% |
+| 索引 | 15 | 0 | 7 | ~68% |
 | DML | 12 | 0 | 6 | ~67% |
 | DQL | 41 | 3 | 6 | ~78% |
 | 查询优化器 | 16 | 0 | 16 | ~50% |
@@ -596,7 +596,7 @@
 8. ❌ **PL/pgSQL 过程语言** — 存储过程无编程能力
 9. ❌ **扩展系统 (EXTENSION + FDW)** — 无法集成外部数据源
 10. ✅ **行级安全 (RLS)** — 支持 CREATE/DROP POLICY，ENABLE/FORCE ROW LEVEL SECURITY，策略自动集成到 query/update/remove
-11. ❌ **GiST / GIN / BRIN 索引** — 空间/全文/JSON 加速
+11. ✅ **GiST / GIN / BRIN 索引** — GIN 倒排索引(text/json/array)、GiST 范围查询(overlap/contained-by)、BRIN 块范围摘要，均支持 CREATE/DROP INDEX SQL 语法
 12. ✅ **NOTIFY / LISTEN** — 支持 LISTEN/NOTIFY/UNLISTEN 异步消息
 13. ✅ **TRUNCATE TABLE** — 数据文件重建、索引重建、缓存清理、自增重置
 14. ✅ **两阶段提交** — 支持 PREPARE TRANSACTION / COMMIT PREPARED / ROLLBACK PREPARED，含锁保持与 WAL 持久化
