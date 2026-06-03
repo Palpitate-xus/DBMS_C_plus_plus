@@ -9015,6 +9015,49 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // pg_advisory_lock / pg_advisory_unlock (intercept before SELECT)
+    if (sql.find("pg_advisory") != string::npos) {
+        if (!checkDB(s)) return true;
+        size_t lockPos = sql.find("pg_advisory_lock(");
+        size_t unlockPos = sql.find("pg_advisory_unlock(");
+        size_t lockSharedPos = sql.find("pg_advisory_lock_shared(");
+        size_t unlockSharedPos = sql.find("pg_advisory_unlock_shared(");
+        auto extractKey = [](const string& sql, size_t pos) -> int64_t {
+            size_t lp = sql.find('(', pos);
+            size_t rp = sql.find(')', lp);
+            if (lp == string::npos || rp == string::npos) return -1;
+            try { return stoll(trim(sql.substr(lp + 1, rp - lp - 1))); } catch (...) { return -1; }
+        };
+        if (lockPos != string::npos) {
+            int64_t key = extractKey(sql, lockPos);
+            if (key < 0) { cout << "SQL syntax error" << endl; return true; }
+            bool ok = g_engine.advisoryLock(key);
+            cout << (ok ? "Lock acquired" : "Lock not available") << endl;
+            return false;
+        }
+        if (unlockPos != string::npos) {
+            int64_t key = extractKey(sql, unlockPos);
+            if (key < 0) { cout << "SQL syntax error" << endl; return true; }
+            bool ok = g_engine.advisoryUnlock(key);
+            cout << (ok ? "Lock released" : "Lock not held") << endl;
+            return false;
+        }
+        if (lockSharedPos != string::npos) {
+            int64_t key = extractKey(sql, lockSharedPos);
+            if (key < 0) { cout << "SQL syntax error" << endl; return true; }
+            bool ok = g_engine.advisoryLockShared(key);
+            cout << (ok ? "Shared lock acquired" : "Lock not available") << endl;
+            return false;
+        }
+        if (unlockSharedPos != string::npos) {
+            int64_t key = extractKey(sql, unlockSharedPos);
+            if (key < 0) { cout << "SQL syntax error" << endl; return true; }
+            bool ok = g_engine.advisoryUnlockShared(key);
+            cout << (ok ? "Shared lock released" : "Lock not held") << endl;
+            return false;
+        }
+    }
+
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
 

@@ -251,6 +251,13 @@ public:
     DomainInfo getDomain(const std::string& dbname, const std::string& name) const;
     std::vector<std::string> getDomainNames(const std::string& dbname) const;
 
+    // Advisory locks (session-level)
+    bool advisoryLock(int64_t key);
+    bool advisoryUnlock(int64_t key);
+    bool advisoryLockShared(int64_t key);
+    bool advisoryUnlockShared(int64_t key);
+    bool advisoryLockExists(int64_t key) const;
+
     // User-defined functions (simple expression-based)
     struct UDFInfo {
         std::string name;
@@ -834,6 +841,10 @@ private:
 
 private:
     mutable LockManager lockManager_;
+
+    // Advisory locks (session-level, non-persistent)
+    mutable std::mutex advisoryMutex_;
+    std::map<int64_t, int> advisoryLocks_; // key -> exclusive count (positive) or shared count (negative)
 
     // Auto-VACUUM: per-table dead tuple tracking
     mutable std::mutex deadTupleMutex_;

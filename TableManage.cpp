@@ -12767,6 +12767,58 @@ std::vector<std::string> StorageEngine::getDomainNames(const std::string& dbname
     return result;
 }
 
+// ========================================================================
+// Advisory locks (session-level)
+// ========================================================================
+bool StorageEngine::advisoryLock(int64_t key) {
+    std::lock_guard<std::mutex> lock(advisoryMutex_);
+    auto it = advisoryLocks_.find(key);
+    if (it == advisoryLocks_.end()) {
+        advisoryLocks_[key] = 1;
+        return true;
+    }
+    if (it->second > 0) {
+        ++it->second;
+        return true;
+    }
+    return false; // held by shared lock
+}
+
+bool StorageEngine::advisoryUnlock(int64_t key) {
+    std::lock_guard<std::mutex> lock(advisoryMutex_);
+    auto it = advisoryLocks_.find(key);
+    if (it == advisoryLocks_.end() || it->second <= 0) return false;
+    if (--it->second == 0) advisoryLocks_.erase(it);
+    return true;
+}
+
+bool StorageEngine::advisoryLockShared(int64_t key) {
+    std::lock_guard<std::mutex> lock(advisoryMutex_);
+    auto it = advisoryLocks_.find(key);
+    if (it == advisoryLocks_.end()) {
+        advisoryLocks_[key] = -1;
+        return true;
+    }
+    if (it->second < 0) {
+        --it->second;
+        return true;
+    }
+    return false; // held by exclusive lock
+}
+
+bool StorageEngine::advisoryUnlockShared(int64_t key) {
+    std::lock_guard<std::mutex> lock(advisoryMutex_);
+    auto it = advisoryLocks_.find(key);
+    if (it == advisoryLocks_.end() || it->second >= 0) return false;
+    if (++it->second == 0) advisoryLocks_.erase(it);
+    return true;
+}
+
+bool StorageEngine::advisoryLockExists(int64_t key) const {
+    std::lock_guard<std::mutex> lock(advisoryMutex_);
+    return advisoryLocks_.find(key) != advisoryLocks_.end();
+}
+
 // Auto-VACUUM: trigger vacuum when dead tuple count exceeds threshold
 void StorageEngine::maybeAutoVacuum(const std::string& dbname,
                                     const std::string& tablename) {
