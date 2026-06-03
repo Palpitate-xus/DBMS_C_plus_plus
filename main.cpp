@@ -4254,7 +4254,7 @@ bool execute(const string& rawSql, Session& s) {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
             // create [or replace] materialized view viewname as select ...
-            string rest = trim(sql.substr(createOffset + 13)); // after "create materialized view "
+            string rest = trim(sql.substr(createOffset + 18)); // after "create materialized view "
             size_t asPos = rest.find(" as ");
             if (asPos == string::npos) {
                 cout << "SQL syntax error: MATERIALIZED VIEW requires AS clause" << endl;
@@ -4361,6 +4361,7 @@ bool execute(const string& rawSql, Session& s) {
                 dbms::Column col;
                 col.dataName = cname;
                 col.dataType = "varchar";
+                col.isVariableLength = true;
                 col.dsize = 255;
                 col.isNull = true;
                 tbl.append(col);
@@ -4386,7 +4387,11 @@ bool execute(const string& rawSql, Session& s) {
                 g_engine.insert(s.currentDB, backingTable, values);
             }
             // Save SQL to .mview file
-            auto mviewPath = g_engine.viewsDir(s.currentDB) / (viewname + ".mview");
+            auto mviewDir = g_engine.viewsDir(s.currentDB);
+            if (!std::filesystem::exists(mviewDir)) {
+                std::filesystem::create_directories(mviewDir);
+            }
+            auto mviewPath = mviewDir / (viewname + ".mview");
             {
                 ofstream ofs(mviewPath);
                 if (!ofs) {
@@ -7046,6 +7051,112 @@ bool execute(const string& rawSql, Session& s) {
         cout << "Transaction rolled back" << endl;
         log(s.username, "rollback transaction", getTime());
         return false;
+    }
+
+    // REFRESH MATERIALIZED VIEW [CONCURRENTLY] viewname
+    if (sql.substr(0, 6) == "refresh") {
+        if (!checkDB(s)) return true;
+        string rest = trim(sql.substr(6));
+        if (rest.substr(0, 20) == "materialized view ") {
+            rest = trim(rest.substr(20));
+            bool concurrently = false;
+            if (rest.substr(0, 12) == "concurrently") {
+                concurrently = true;
+                rest = trim(rest.substr(12));
+            }
+            string viewname = rest;
+            if (!g_engine.isMaterializedView(s.currentDB, viewname)) {
+                cout << "Materialized view " << viewname << " not found" << endl;
+                return true;
+            }
+            string viewSql = g_engine.getMaterializedViewSQL(s.currentDB, viewname);
+            if (viewSql.empty()) {
+                cout << "Failed to read materialized view SQL" << endl;
+                return true;
+            }
+            // Re-execute the query (same logic as CREATE MATERIALIZED VIEW)
+            string lsql = toLower(viewSql);
+            size_t fromPos = lsql.find(" from ");
+            if (fromPos == string::npos) {
+                cout << "Invalid materialized view SQL" << endl;
+                return true;
+            }
+            string colsPart = trim(viewSql.substr(6, fromPos - 6));
+            vector<string> colNames;
+            if (colsPart == "*") {
+                cout << "Materialized view with SELECT * not supported, use explicit columns" << endl;
+                return true;
+            }
+            size_t cp = 0;
+            while (cp < colsPart.size()) {
+                size_t comma = colsPart.find(',', cp);
+                string c = trim(colsPart.substr(cp, comma - cp));
+                size_t aliasPos = toLower(c).find(" as ");
+                if (aliasPos != string::npos) {
+                    c = trim(c.substr(aliasPos + 4));
+                } else {
+                    size_t sp = c.find(' ');
+                    if (sp != string::npos) {
+                        string before = trim(c.substr(0, sp));
+                        string after = trim(c.substr(sp + 1));
+                        if (after != "" && after.find_first_of("+-*/=<>") == string::npos) {
+                            c = after;
+                        } else {
+                            c = before;
+                        }
+                    }
+                }
+                size_t dotPos = c.find('.');
+                if (dotPos != string::npos) c = c.substr(dotPos + 1);
+                colNames.push_back(c);
+                if (comma == string::npos) break;
+                cp = comma + 1;
+            }
+            string inner = trim(viewSql.substr(fromPos + 5));
+            size_t wPos = toLower(inner).find(" where ");
+            size_t oPos = toLower(inner).find(" order by ");
+            size_t lPos = toLower(inner).find(" limit ");
+            string tname = trim(inner.substr(0,
+                min(wPos != string::npos ? wPos : inner.size(),
+                    min(oPos != string::npos ? oPos : inner.size(),
+                        lPos != string::npos ? lPos : inner.size()))));
+            tname = resolveTableName(s, tname);
+            vector<string> conds;
+            if (wPos != string::npos) {
+                size_t condEnd = min(oPos != string::npos ? oPos : inner.size(),
+                                    lPos != string::npos ? lPos : inner.size());
+                string condStr = normalizeConditionStr(trim(inner.substr(wPos + 6, condEnd - wPos - 6)));
+                if (!condStr.empty()) {
+                    vector<string> rawConds = splitConds(condStr);
+                    for (auto& c : rawConds) {
+                        string mc = modifyLogic(c);
+                        if (!mc.empty()) conds.push_back(mc);
+                    }
+                }
+            }
+            auto results = g_engine.query(s.currentDB, tname, conds, {}, {}, false, false);
+            string backingTable = dbms::StorageEngine::materializedViewPrefix(viewname);
+            // Truncate backing table and re-insert
+            if (g_engine.tableExists(s.currentDB, backingTable)) {
+                g_engine.truncateTable(s.currentDB, backingTable);
+            }
+            int inserted = 0;
+            for (const auto& row : results) {
+                stringstream ss(row);
+                map<string, string> values;
+                for (const auto& cname : colNames) {
+                    string val;
+                    ss >> val;
+                    values[cname] = val;
+                }
+                auto res = g_engine.insert(s.currentDB, backingTable, values);
+                if (res == OpResult::Success) ++inserted;
+            }
+            cout << "Materialized view " << viewname << " refreshed (" << inserted << " rows)" << endl;
+            return false;
+        }
+        cout << "SQL syntax error: REFRESH MATERIALIZED VIEW [CONCURRENTLY] viewname" << endl;
+        return true;
     }
 
     if (sql.substr(0, 10) == "checkpoint") {
