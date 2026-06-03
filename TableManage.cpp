@@ -3627,6 +3627,443 @@ std::vector<std::string> StorageEngine::getFullTextIndexedColumns(const std::str
     return result;
 }
 
+// ========================================================================
+// GIN index (Generalized Inverted Index)
+// ========================================================================
+
+static std::filesystem::path ginIndexPath(const std::string& dbname,
+                                            const std::string& tablename,
+                                            const std::string& colname) {
+    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".gin");
+}
+
+// Extract keys from a column value for GIN indexing
+static std::vector<std::string> extractGinKeys(const std::string& value, const std::string& dataType) {
+    std::vector<std::string> keys;
+    if (dataType == "text" || dataType == "varchar" || dataType == "char") {
+        // Text: tokenize (same as full-text)
+        keys = tokenizeText(value);
+    } else if (dataType == "json" || dataType == "jsonb") {
+        // JSON: extract all string/number leaf values
+        // Simple parser: find "..." or numeric values outside quotes
+        size_t i = 0;
+        while (i < value.size()) {
+            // Skip whitespace and structural chars
+            while (i < value.size() && (std::isspace(static_cast<unsigned char>(value[i])) ||
+                                         value[i] == '{' || value[i] == '}' ||
+                                         value[i] == '[' || value[i] == ']' ||
+                                         value[i] == ':' || value[i] == ',')) ++i;
+            if (i >= value.size()) break;
+            if (value[i] == '"') {
+                // String value
+                size_t end = value.find('"', i + 1);
+                if (end == std::string::npos) break;
+                std::string s = value.substr(i + 1, end - i - 1);
+                // Skip keys (strings followed by ':')
+                size_t after = end + 1;
+                while (after < value.size() && std::isspace(static_cast<unsigned char>(value[after]))) ++after;
+                if (after < value.size() && value[after] == ':') {
+                    // This is a key, skip it
+                } else {
+                    keys.push_back(s);
+                }
+                i = end + 1;
+            } else if (std::isdigit(static_cast<unsigned char>(value[i])) || value[i] == '-') {
+                // Number value
+                size_t j = i + 1;
+                while (j < value.size() && (std::isdigit(static_cast<unsigned char>(value[j])) ||
+                                             value[j] == '.' || value[j] == 'e' || value[j] == 'E' ||
+                                             value[j] == '+' || value[j] == '-')) ++j;
+                keys.push_back(value.substr(i, j - i));
+                i = j;
+            } else {
+                // true/false/null
+                if (value.substr(i, 4) == "true") { keys.push_back("true"); i += 4; }
+                else if (value.substr(i, 5) == "false") { keys.push_back("false"); i += 5; }
+                else if (value.substr(i, 4) == "null") { keys.push_back("null"); i += 4; }
+                else { ++i; }
+            }
+        }
+    } else if (dataType.find("[") != std::string::npos || dataType == "array") {
+        // Array: split by comma, strip brackets
+        std::string trimmed = value;
+        if (!trimmed.empty() && trimmed.front() == '{') trimmed = trimmed.substr(1);
+        if (!trimmed.empty() && trimmed.back() == '}') trimmed.pop_back();
+        size_t cp = 0;
+        while (cp < trimmed.size()) {
+            size_t c = trimmed.find(',', cp);
+            std::string v = trim(trimmed.substr(cp, c - cp));
+            if (!v.empty()) keys.push_back(v);
+            if (c == std::string::npos) break;
+            cp = c + 1;
+        }
+    } else {
+        // Other types: value itself as single key
+        keys.push_back(value);
+    }
+    return keys;
+}
+
+OpResult StorageEngine::createGinIndex(const std::string& dbname,
+                                        const std::string& tablename,
+                                        const std::string& colname) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+
+    std::map<std::string, std::set<int64_t>> inverted;
+    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                       const char* data, size_t len) {
+        std::string row(data, len);
+        std::string val = extractColumnValue(row, tbl, colIdx);
+        auto keys = extractGinKeys(val, tbl.cols[colIdx].dataType);
+        int64_t rid = encodeRid(pageId, slotId);
+        for (const auto& k : keys) {
+            if (!k.empty()) inverted[k].insert(rid);
+        }
+    });
+
+    auto path = ginIndexPath(dbname, tablename, colname);
+    std::ofstream out(path);
+    if (!out) return OpResult::InvalidValue;
+    for (const auto& kv : inverted) {
+        out << kv.first;
+        for (int64_t rid : kv.second) {
+            out << ' ' << rid;
+        }
+        out << '\n';
+    }
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropGinIndex(const std::string& dbname,
+                                      const std::string& tablename,
+                                      const std::string& colname) {
+    auto path = ginIndexPath(dbname, tablename, colname);
+    if (std::filesystem::exists(path)) std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+bool StorageEngine::hasGinIndex(const std::string& dbname,
+                                 const std::string& tablename,
+                                 const std::string& colname) const {
+    return std::filesystem::exists(ginIndexPath(dbname, tablename, colname));
+}
+
+std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
+                                               const std::string& tablename,
+                                               const std::string& colname,
+                                               const std::string& key) const {
+    std::vector<int64_t> result;
+    auto path = ginIndexPath(dbname, tablename, colname);
+    std::ifstream in(path);
+    if (!in) return result;
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t sp = line.find(' ');
+        std::string tok = (sp == std::string::npos) ? line : line.substr(0, sp);
+        if (tok == key) {
+            if (sp != std::string::npos) {
+                std::string rest = line.substr(sp + 1);
+                std::stringstream ss(rest);
+                int64_t rid;
+                while (ss >> rid) result.push_back(rid);
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getGinIndexedColumns(const std::string& dbname,
+                                                              const std::string& tablename) const {
+    std::vector<std::string> result;
+    auto dir = std::filesystem::path(dbname);
+    if (!std::filesystem::exists(dir)) return result;
+    std::string prefix = tablename + "_";
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+        if (name.size() > 4 && name.substr(name.size() - 4) == ".gin" &&
+            name.substr(0, prefix.size()) == prefix) {
+            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 4);
+            result.push_back(colname);
+        }
+    }
+    return result;
+}
+
+// ========================================================================
+// GiST index (Generalized Search Tree) - simplified range/spatial index
+// ========================================================================
+
+static std::filesystem::path giSTIndexPath(const std::string& dbname,
+                                             const std::string& tablename,
+                                             const std::string& colname) {
+    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".gist");
+}
+
+OpResult StorageEngine::createGiSTIndex(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+
+    auto path = giSTIndexPath(dbname, tablename, colname);
+    std::ofstream out(path);
+    if (!out) return OpResult::InvalidValue;
+
+    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                       const char* data, size_t len) {
+        std::string row(data, len);
+        std::string val = extractColumnValue(row, tbl, colIdx);
+        int64_t rid = encodeRid(pageId, slotId);
+        // For GiST we store each row's value range.
+        // For single scalar values, min=max=val.
+        // For multi-value (array), min=min element, max=max element.
+        // For text, we store the value itself (prefix containment).
+        out << rid << ' ' << val << ' ' << val << '\n';
+    });
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropGiSTIndex(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& colname) {
+    auto path = giSTIndexPath(dbname, tablename, colname);
+    if (std::filesystem::exists(path)) std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+bool StorageEngine::hasGiSTIndex(const std::string& dbname,
+                                  const std::string& tablename,
+                                  const std::string& colname) const {
+    return std::filesystem::exists(giSTIndexPath(dbname, tablename, colname));
+}
+
+std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
+                                                       const std::string& tablename,
+                                                       const std::string& colname,
+                                                       const std::string& low,
+                                                       const std::string& high) const {
+    std::vector<int64_t> result;
+    auto path = giSTIndexPath(dbname, tablename, colname);
+    std::ifstream in(path);
+    if (!in) return result;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::stringstream ss(line);
+        int64_t rid;
+        std::string entryLow, entryHigh;
+        if (!(ss >> rid >> entryLow >> entryHigh)) continue;
+        // Overlap: entry range [entryLow, entryHigh] intersects [low, high]
+        // i.e., NOT (entryHigh < low OR entryLow > high)
+        if (!(entryHigh < low || entryLow > high)) result.push_back(rid);
+    }
+    return result;
+}
+
+std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbname,
+                                                           const std::string& tablename,
+                                                           const std::string& colname,
+                                                           const std::string& low,
+                                                           const std::string& high) const {
+    std::vector<int64_t> result;
+    auto path = giSTIndexPath(dbname, tablename, colname);
+    std::ifstream in(path);
+    if (!in) return result;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::stringstream ss(line);
+        int64_t rid;
+        std::string entryLow, entryHigh;
+        if (!(ss >> rid >> entryLow >> entryHigh)) continue;
+        // Contained by: entry range is fully within [low, high]
+        // i.e., low <= entryLow AND entryHigh <= high
+        if (low <= entryLow && entryHigh <= high) result.push_back(rid);
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string& dbname,
+                                                               const std::string& tablename) const {
+    std::vector<std::string> result;
+    auto dir = std::filesystem::path(dbname);
+    if (!std::filesystem::exists(dir)) return result;
+    std::string prefix = tablename + "_";
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+        if (name.size() > 6 && name.substr(name.size() - 6) == ".gist" &&
+            name.substr(0, prefix.size()) == prefix) {
+            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 6);
+            result.push_back(colname);
+        }
+    }
+    return result;
+}
+
+// ========================================================================
+// BRIN index (Block Range Index) - per-block min/max summary
+// ========================================================================
+
+static std::filesystem::path brinIndexPath(const std::string& dbname,
+                                            const std::string& tablename,
+                                            const std::string& colname) {
+    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".brin");
+}
+
+OpResult StorageEngine::createBrinIndex(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname,
+                                         size_t pagesPerRange) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (pagesPerRange == 0) pagesPerRange = 64;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+
+    auto path = brinIndexPath(dbname, tablename, colname);
+    std::ofstream out(path);
+    if (!out) return OpResult::InvalidValue;
+
+    // If table is partitioned, scan partition files; otherwise scan main data file
+    auto scanTable = [&](const std::string& actualTableName) {
+        TableSchema t = getTableSchema(dbname, actualTableName);
+        if (t.partitionType != TableSchema::PartitionType::None) {
+            std::vector<std::string> partNames;
+            if (t.partitionType == TableSchema::PartitionType::Range) {
+                for (const auto& rp : t.rangePartitions) partNames.push_back(rp.first);
+            } else if (t.partitionType == TableSchema::PartitionType::List) {
+                for (const auto& lp : t.listPartitions) partNames.push_back(lp.first);
+            } else if (t.partitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < t.hashPartitions; ++i) partNames.push_back("p" + std::to_string(i));
+            }
+            for (const auto& pname : partNames) {
+                auto ppa = std::make_unique<PageAllocator>(
+                    partitionDataPath(dbname, actualTableName, pname).string(), t.rowSize());
+                if (!ppa->open()) continue;
+                uint32_t np = ppa->numPages();
+                for (uint32_t blockStart = 1; blockStart < np; blockStart += static_cast<uint32_t>(pagesPerRange)) {
+                    uint32_t blockEnd = std::min(blockStart + static_cast<uint32_t>(pagesPerRange) - 1, np - 1);
+                    bool hasValue = false;
+                    std::string rangeMin, rangeMax;
+                    for (uint32_t pid = blockStart; pid <= blockEnd; ++pid) {
+                        char* buf = ppa->fetchPage(pid);
+                        Page page(buf);
+                        page.forEachLive([&](uint16_t, const char* data, size_t len) {
+                            if (len <= MVCC_HEADER_SIZE) return;
+                            std::string row(data, len);
+                            std::string val = extractColumnValue(row, t, colIdx);
+                            if (!hasValue) { rangeMin = rangeMax = val; hasValue = true; }
+                            else { if (val < rangeMin) rangeMin = val; if (val > rangeMax) rangeMax = val; }
+                        });
+                    }
+                    if (hasValue) out << blockStart << ' ' << blockEnd << ' ' << rangeMin << ' ' << rangeMax << '\n';
+                }
+            }
+        } else {
+            auto pa = std::make_unique<PageAllocator>(dataPath(dbname, actualTableName).string(), t.rowSize());
+            if (!pa->open()) return;
+            uint32_t np = pa->numPages();
+            for (uint32_t blockStart = 1; blockStart < np; blockStart += static_cast<uint32_t>(pagesPerRange)) {
+                uint32_t blockEnd = std::min(blockStart + static_cast<uint32_t>(pagesPerRange) - 1, np - 1);
+                bool hasValue = false;
+                std::string rangeMin, rangeMax;
+                for (uint32_t pid = blockStart; pid <= blockEnd; ++pid) {
+                    char* buf = pa->fetchPage(pid);
+                    Page page(buf);
+                    page.forEachLive([&](uint16_t, const char* data, size_t len) {
+                        if (len <= MVCC_HEADER_SIZE) return;
+                        std::string row(data, len);
+                        std::string val = extractColumnValue(row, t, colIdx);
+                        if (!hasValue) { rangeMin = rangeMax = val; hasValue = true; }
+                        else { if (val < rangeMin) rangeMin = val; if (val > rangeMax) rangeMax = val; }
+                    });
+                }
+                if (hasValue) out << blockStart << ' ' << blockEnd << ' ' << rangeMin << ' ' << rangeMax << '\n';
+            }
+        }
+    };
+
+    scanTable(tablename);
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropBrinIndex(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& colname) {
+    auto path = brinIndexPath(dbname, tablename, colname);
+    if (std::filesystem::exists(path)) std::filesystem::remove(path);
+    return OpResult::Success;
+}
+
+bool StorageEngine::hasBrinIndex(const std::string& dbname,
+                                  const std::string& tablename,
+                                  const std::string& colname) const {
+    return std::filesystem::exists(brinIndexPath(dbname, tablename, colname));
+}
+
+std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
+    const std::string& dbname, const std::string& tablename, const std::string& colname,
+    const std::string& op, const std::string& value) const {
+    std::vector<std::pair<uint32_t, uint32_t>> result;
+    auto path = brinIndexPath(dbname, tablename, colname);
+    std::ifstream in(path);
+    if (!in) return result;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::stringstream ss(line);
+        uint32_t pstart, pend;
+        std::string rangeMin, rangeMax;
+        if (!(ss >> pstart >> pend >> rangeMin >> rangeMax)) continue;
+        bool mayMatch = false;
+        if (op == "=") {
+            mayMatch = (rangeMin <= value && value <= rangeMax);
+        } else if (op == "<") {
+            mayMatch = (rangeMin < value);
+        } else if (op == "<=") {
+            mayMatch = (rangeMin <= value);
+        } else if (op == ">") {
+            mayMatch = (rangeMax > value);
+        } else if (op == ">=") {
+            mayMatch = (rangeMax >= value);
+        }
+        if (mayMatch) result.push_back({pstart, pend});
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string& dbname,
+                                                               const std::string& tablename) const {
+    std::vector<std::string> result;
+    auto dir = std::filesystem::path(dbname);
+    if (!std::filesystem::exists(dir)) return result;
+    std::string prefix = tablename + "_";
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+        if (name.size() > 6 && name.substr(name.size() - 6) == ".brin" &&
+            name.substr(0, prefix.size()) == prefix) {
+            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 6);
+            result.push_back(colname);
+        }
+    }
+    return result;
+}
+
 bool StorageEngine::databaseExists(const std::string& dbname) const {
     return std::filesystem::exists(dbPath(dbname));
 }
@@ -4292,6 +4729,18 @@ OpResult StorageEngine::truncateTable(const std::string& dbname,
     for (const auto& col : ftCols) {
         std::filesystem::remove(fullTextIndexPath(dbname, tablename, col));
     }
+    auto ginCols = getGinIndexedColumns(dbname, tablename);
+    for (const auto& col : ginCols) {
+        std::filesystem::remove(ginIndexPath(dbname, tablename, col));
+    }
+    auto gistCols = getGiSTIndexedColumns(dbname, tablename);
+    for (const auto& col : gistCols) {
+        std::filesystem::remove(giSTIndexPath(dbname, tablename, col));
+    }
+    auto brinCols = getBrinIndexedColumns(dbname, tablename);
+    for (const auto& col : brinCols) {
+        std::filesystem::remove(brinIndexPath(dbname, tablename, col));
+    }
 
     // Clear caches
     std::string key = dbname + "/" + tablename;
@@ -4568,6 +5017,23 @@ OpResult StorageEngine::alterTableRenameColumn(const std::string& dbname,
         }
     }
 
+    // Rename GIN/GiST/BRIN index files if exists
+    {
+        std::filesystem::path oldIdx = ginIndexPath(dbname, tablename, oldName);
+        std::filesystem::path newIdx = ginIndexPath(dbname, tablename, newName);
+        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+    {
+        std::filesystem::path oldIdx = giSTIndexPath(dbname, tablename, oldName);
+        std::filesystem::path newIdx = giSTIndexPath(dbname, tablename, newName);
+        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+    {
+        std::filesystem::path oldIdx = brinIndexPath(dbname, tablename, oldName);
+        std::filesystem::path newIdx = brinIndexPath(dbname, tablename, newName);
+        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+
     // Update sequence file (.seq)
     {
         std::filesystem::path sp = seqPath(dbname, tablename);
@@ -4682,6 +5148,26 @@ OpResult StorageEngine::alterTableRenameTable(const std::string& dbname,
     for (const auto& c : ftCols) {
         std::filesystem::path oldIdx = fullTextIndexPath(dbname, oldName, c);
         std::filesystem::path newIdx = fullTextIndexPath(dbname, newName, c);
+        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+
+    // Rename GIN/GiST/BRIN indexes
+    auto ginCols = getGinIndexedColumns(dbname, oldName);
+    for (const auto& c : ginCols) {
+        std::filesystem::path oldIdx = ginIndexPath(dbname, oldName, c);
+        std::filesystem::path newIdx = ginIndexPath(dbname, newName, c);
+        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+    auto gistCols = getGiSTIndexedColumns(dbname, oldName);
+    for (const auto& c : gistCols) {
+        std::filesystem::path oldIdx = giSTIndexPath(dbname, oldName, c);
+        std::filesystem::path newIdx = giSTIndexPath(dbname, newName, c);
+        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+    auto brinCols = getBrinIndexedColumns(dbname, oldName);
+    for (const auto& c : brinCols) {
+        std::filesystem::path oldIdx = brinIndexPath(dbname, oldName, c);
+        std::filesystem::path newIdx = brinIndexPath(dbname, newName, c);
         if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
     }
 
@@ -6456,7 +6942,84 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         }
     }
 
-    // Full table scan via page iterator
+    // Try GIN index for = conditions (supports text/json/array multi-key lookup)
+    for (const auto& c : conds) {
+        if (c.op == "=") {
+            if (hasGinIndex(dbname, tablename, c.colName)) {
+                auto rids = ginSearch(dbname, tablename, c.colName, c.value);
+                for (int64_t rid : rids) ids.insert(rid);
+                if (!ids.empty()) {
+                    if (conds.size() > 1) {
+                        PageAllocator* pa = getPageAllocator(dbname, tablename);
+                        std::set<int64_t> toRemove;
+                        for (int64_t rid : ids) {
+                            std::string row;
+                            if (!readRowByRid(pa, rid, row, tbl)) { toRemove.insert(rid); continue; }
+                            bool match = true;
+                            for (const auto& cond : conds) {
+                                if (cond.op == "=" && cond.colName == c.colName) continue;
+                                if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
+                            }
+                            if (!match) toRemove.insert(rid);
+                        }
+                        for (auto r : toRemove) ids.erase(r);
+                    }
+                    return ids;
+                }
+            }
+        }
+    }
+
+    // Try GiST index for range conditions (overlap/containment)
+    for (const auto& c : conds) {
+        if (hasGiSTIndex(dbname, tablename, c.colName)) {
+            if (c.op == "=") {
+                // GiST overlap with [val, val] is equivalent to equality for scalars
+                auto rids = giSTSearchOverlap(dbname, tablename, c.colName, c.value, c.value);
+                for (int64_t rid : rids) ids.insert(rid);
+            } else if (c.op == ">=" || c.op == ">") {
+                // Search for values that overlap with [query_val, +inf)
+                auto rids = giSTSearchOverlap(dbname, tablename, c.colName, c.value, "");
+                for (int64_t rid : rids) ids.insert(rid);
+            } else if (c.op == "<=" || c.op == "<") {
+                // Search for values that overlap with (-inf, query_val]
+                auto rids = giSTSearchOverlap(dbname, tablename, c.colName, "", c.value);
+                for (int64_t rid : rids) ids.insert(rid);
+            }
+            if (!ids.empty()) {
+                if (conds.size() > 1) {
+                    PageAllocator* pa = getPageAllocator(dbname, tablename);
+                    std::set<int64_t> toRemove;
+                    for (int64_t rid : ids) {
+                        std::string row;
+                        if (!readRowByRid(pa, rid, row, tbl)) { toRemove.insert(rid); continue; }
+                        bool match = true;
+                        for (const auto& cond : conds) {
+                            if (cond.colName == c.colName) continue;
+                            if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
+                        }
+                        if (!match) toRemove.insert(rid);
+                    }
+                    for (auto r : toRemove) ids.erase(r);
+                }
+                return ids;
+            }
+        }
+    }
+
+    // Collect BRIN-suggested page ranges to narrow full scan
+    std::vector<std::pair<uint32_t, uint32_t>> brinRanges;
+    for (const auto& c : conds) {
+        if (hasBrinIndex(dbname, tablename, c.colName)) {
+            auto ranges = brinSearchRange(dbname, tablename, c.colName, c.op, c.value);
+            if (!ranges.empty()) {
+                brinRanges = ranges;
+                break; // Use first applicable BRIN index
+            }
+        }
+    }
+
+    // Full table scan via page iterator (with optional BRIN page-range filtering)
     // Partition pruning: if conditions involve partition key, scan only matching partitions
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         auto targetParts = getTargetPartitions(tbl, conds);

@@ -545,6 +545,50 @@ public:
     std::vector<std::string> getFullTextIndexedColumns(const std::string& dbname,
                                                         const std::string& tablename) const;
 
+    // GIN index (Generalized Inverted Index): supports text/json/array multi-key queries
+    OpResult createGinIndex(const std::string& dbname, const std::string& tablename,
+                             const std::string& colname);
+    OpResult dropGinIndex(const std::string& dbname, const std::string& tablename,
+                           const std::string& colname);
+    bool hasGinIndex(const std::string& dbname, const std::string& tablename,
+                      const std::string& colname) const;
+    std::vector<int64_t> ginSearch(const std::string& dbname, const std::string& tablename,
+                                    const std::string& colname, const std::string& key) const;
+    std::vector<std::string> getGinIndexedColumns(const std::string& dbname,
+                                                   const std::string& tablename) const;
+
+    // GiST index (Generalized Search Tree): simplified spatial/range index
+    OpResult createGiSTIndex(const std::string& dbname, const std::string& tablename,
+                              const std::string& colname);
+    OpResult dropGiSTIndex(const std::string& dbname, const std::string& tablename,
+                            const std::string& colname);
+    bool hasGiSTIndex(const std::string& dbname, const std::string& tablename,
+                       const std::string& colname) const;
+    // Search rows whose indexed value OVERLAPS with query range [low,high]
+    std::vector<int64_t> giSTSearchOverlap(const std::string& dbname, const std::string& tablename,
+                                            const std::string& colname,
+                                            const std::string& low, const std::string& high) const;
+    // Search rows whose indexed value is CONTAINED BY query range [low,high]
+    std::vector<int64_t> giSTSearchContainedBy(const std::string& dbname, const std::string& tablename,
+                                                const std::string& colname,
+                                                const std::string& low, const std::string& high) const;
+    std::vector<std::string> getGiSTIndexedColumns(const std::string& dbname,
+                                                    const std::string& tablename) const;
+
+    // BRIN index (Block Range Index): per-block min/max summary for range queries
+    OpResult createBrinIndex(const std::string& dbname, const std::string& tablename,
+                              const std::string& colname, size_t pagesPerRange = 64);
+    OpResult dropBrinIndex(const std::string& dbname, const std::string& tablename,
+                            const std::string& colname);
+    bool hasBrinIndex(const std::string& dbname, const std::string& tablename,
+                       const std::string& colname) const;
+    // Returns page ranges (start,end) that MAY contain rows matching the condition
+    std::vector<std::pair<uint32_t, uint32_t>> brinSearchRange(
+        const std::string& dbname, const std::string& tablename, const std::string& colname,
+        const std::string& op, const std::string& value) const;
+    std::vector<std::string> getBrinIndexedColumns(const std::string& dbname,
+                                                    const std::string& tablename) const;
+
     // Condition parsing (public for execution plan use)
     struct Condition {
         std::string op;  // "<", ">", "=", "<=", ">=", "!=", "like"
