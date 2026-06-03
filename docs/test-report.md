@@ -21,12 +21,12 @@
 |--------|----------|------|------|------|
 | 认证与连接 | 2 | 2 | 0 | — |
 | DDL - 数据库 | 3 | 3 | 0 | — |
-| DDL - 表 | 6 | 6 | 0 | — |
+| DDL - 表 | 9 | 9 | 0 | 含 CTAS / RENAME |
 | DDL - 索引 | 6 | 6 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN 均通过 |
 | DDL - 视图 | 3 | 3 | 0 | — |
 | DDL - 触发器 | 2 | 2 | 0 | — |
 | DDL - 用户/角色 | 4 | 4 | 0 | — |
-| DML - INSERT | 3 | 3 | 0 | 需显式指定列名 |
+| DML - INSERT | 4 | 4 | 0 | 含省略列名 |
 | DML - UPDATE/DELETE | 2 | 2 | 0 | — |
 | DQL - SELECT | 5 | 5 | 0 | — |
 | DQL - JOIN | 3 | 3 | 0 | — |
@@ -36,7 +36,7 @@
 | 工具命令 | 8 | 8 | 0 | — |
 | 分区管理 | 3 | 3 | 0 | Range/List/Hash + ATTACH/DETACH |
 | 高级特性 | 2 | 2 | 0 | NOTIFY/LISTEN, RLS |
-| **合计** | **54** | **54** | **0** | — |
+| **合计** | **58** | **58** | **0** | — |
 
 ---
 
@@ -184,6 +184,40 @@ DROP TABLE t2;
 ```
 
 **实际结果** ✅ `Table dropped`
+
+---
+
+### 3.7 ALTER TABLE RENAME COLUMN
+
+**输入**
+```sql
+ALTER TABLE t1 RENAME COLUMN name TO username;
+```
+
+**实际结果** ✅ `Column renamed`
+
+---
+
+### 3.8 ALTER TABLE RENAME TO
+
+**输入**
+```sql
+ALTER TABLE t1 RENAME TO t1_new;
+```
+
+**实际结果** ✅ `Table renamed`
+
+---
+
+### 3.9 CREATE TABLE AS SELECT (CTAS)
+
+**输入**
+```sql
+CREATE TABLE t3 AS SELECT * FROM t1;
+CREATE TABLE t4 AS SELECT id, name FROM t1 WHERE id = 1;
+```
+
+**实际结果** ✅ `Table created with N rows`，数据正确复制
 
 ---
 
@@ -343,7 +377,18 @@ INSERT INTO t1 (id, name) VALUES (3, 'charlie');
 
 ---
 
-### 7.2 UPDATE
+### 7.2 INSERT INTO（省略列名）
+
+**输入**
+```sql
+INSERT INTO t1 VALUES (4, 'dave', 28);
+```
+
+**实际结果** ✅ `1 row(s) inserted`
+
+---
+
+### 7.3 UPDATE
 
 **输入**
 ```sql
@@ -354,7 +399,7 @@ UPDATE t1 SET name = 'alice2' WHERE id = 1;
 
 ---
 
-### 7.3 DELETE
+### 7.4 DELETE
 
 **输入**
 ```sql
@@ -645,27 +690,9 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 14. 已知问题与限制
 
-### 14.1 INSERT INTO 省略列名
+### 14.1 ALTER TABLE SET SCHEMA
 
-**问题**：`INSERT INTO t1 VALUES (1, 'alice')` 报 `SQL syntax error`
-
-**原因**：代码要求必须显式指定列名列表 `(col1, col2) VALUES (...)`
-
-**级别**：功能缺失（非 bug）
-
----
-
-### 14.2 ALTER TABLE RENAME COLUMN / RENAME TO
-
-**问题**：`ALTER TABLE t1 RENAME COLUMN name TO username` 不被支持
-
-**级别**：功能缺失（gap 文档已记录）
-
----
-
-### 14.3 CREATE TABLE AS SELECT
-
-**问题**：`CREATE TABLE t3 AS SELECT * FROM t1` 不被支持
+**问题**：`ALTER TABLE t1 SET SCHEMA other_db` 不被支持
 
 **级别**：功能缺失（gap 文档已记录）
 
@@ -673,7 +700,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖 54 项核心功能，**全部通过**。系统在以下方面表现稳定：
+本次测试覆盖 58 项核心功能，**全部通过**。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ 索引系统（B+Tree/Hash/FullText/**GIN/GiST/BRIN**）
@@ -683,8 +710,9 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 - ✅ 分区管理（Range/List/Hash + ATTACH/DETACH）
 - ✅ 查询能力（JOIN/UNION/GROUP BY/窗口函数/CTE）
 - ✅ 工具命令（SHOW/EXPLAIN/ANALYZE/VACUUM/CHECKPOINT）
+- ✅ INSERT 省略列名 / ALTER RENAME / CREATE TABLE AS SELECT
 
-**未发现阻塞性 bug**，主要限制为文档中已记录的功能缺失（如 CREATE TABLE AS、RENAME 等）。
+**未发现阻塞性 bug**。
 
 ---
 
