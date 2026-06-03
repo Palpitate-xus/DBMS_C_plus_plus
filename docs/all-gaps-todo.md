@@ -137,7 +137,7 @@ TOP20 当前完成度 16/20，剩余 4 项：
 - [x] ALTER TABLE ADD/DROP CONSTRAINT
 - [x] ALTER TABLE ENABLE/DISABLE TRIGGER
 - [x] CREATE TABLE AS SELECT
-- [ ] CREATE TABLE ... PARTITION OF（声明式分区独立语法）
+- [x] CREATE TABLE ... PARTITION OF（声明式分区独立语法）
 - [ ] SUBPARTITION（子分区）
 - [x] DEFAULT PARTITION
 - [x] TRUNCATE ... CASCADE / RESTART IDENTITY
@@ -145,7 +145,7 @@ TOP20 当前完成度 16/20，剩余 4 项：
 
 ### 数据类型
 - [x] SERIAL4 / BIGSERIAL
-- [ ] GENERATED AS IDENTITY
+- [x] GENERATED AS IDENTITY
 - [ ] 范围类型 (int4range, tsrange 等)
 - [ ] 几何类型 (POINT, POLYGON 等)
 - [ ] 网络类型 (INET, CIDR, MACADDR)

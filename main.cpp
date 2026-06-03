@@ -5488,6 +5488,7 @@ bool execute(const string& rawSql, Session& s) {
                                     while (getline(css, item, ',')) insertCols.push_back(trim(item));
                                 }
                                 vector<string> insertVals = splitValues(valsStr);
+                                for (auto& v : insertVals) v = stripQuotes(v);
                                 if (insertCols.size() == insertVals.size()) {
                                     map<string, string> colVals;
                                     for (size_t i = 0; i < insertCols.size(); ++i)
