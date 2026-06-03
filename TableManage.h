@@ -88,6 +88,12 @@ struct TableSchema {
     std::vector<std::pair<std::string, std::vector<std::string>>> listPartitions;  // name -> values
     size_t hashPartitions = 0;  // number of hash partitions
     std::string defaultPartitionName; // DEFAULT partition for LIST partitioning
+
+    // Subpartitioning (two-level partitioning)
+    PartitionType subPartitionType = PartitionType::None;
+    std::string subPartitionKey;  // column name for sub-partitioning
+    size_t subHashPartitions = 0; // number of hash sub-partitions
+
     bool isUnlogged = false;    // UNLOGGED table: no WAL, truncated on crash
     bool rowLevelSecurity = false; // ENABLE ROW LEVEL SECURITY
     bool forceRowLevelSecurity = false; // FORCE ROW LEVEL SECURITY (applies to table owner too)
@@ -785,7 +791,11 @@ private:
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path partitionDataPath(const std::string& dbname, const std::string& tablename,
                                             const std::string& partitionName) const;
+    std::filesystem::path partitionDataPath(const std::string& dbname, const std::string& tablename,
+                                            const std::string& partitionName,
+                                            const std::string& subPartitionName) const;
     std::string getPartitionName(const TableSchema& tbl, const std::string& keyVal) const;
+    std::string getSubPartitionName(const TableSchema& tbl, const std::string& keyVal) const;
     std::filesystem::path tableListPath(const std::string& dbname) const;
     std::filesystem::path walPath(const std::string& dbname) const;
     std::filesystem::path checkpointPath(const std::string& dbname) const;

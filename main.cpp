@@ -4067,6 +4067,30 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
             }
+
+            // Check for SUBPARTITION BY clause
+            size_t subPartPos = sql.find("subpartition by");
+            if (subPartPos != string::npos && partPos != string::npos) {
+                string subRest = trim(sql.substr(subPartPos + 15)); // after "subpartition by"
+                size_t lp = subRest.find('(');
+                size_t rp = subRest.find(')', lp);
+                if (lp != string::npos) {
+                    string sptype = trim(subRest.substr(0, lp));
+                    string spkey = trim(subRest.substr(lp + 1, rp - lp - 1));
+                    tbl.subPartitionKey = spkey;
+                    transform(sptype.begin(), sptype.end(), sptype.begin(), ::tolower);
+                    if (sptype == "hash") {
+                        tbl.subPartitionType = dbms::TableSchema::PartitionType::Hash;
+                        size_t np = subRest.find("partitions");
+                        if (np != string::npos) {
+                            string nstr = trim(subRest.substr(np + 10));
+                            try { tbl.subHashPartitions = stoul(nstr); } catch (...) {}
+                        }
+                        if (tbl.subHashPartitions == 0) tbl.subHashPartitions = 4;
+                    }
+                }
+            }
+
             auto res = g_engine.createTable(s.currentDB, tbl);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "Table " << tname << " already exists" << endl;

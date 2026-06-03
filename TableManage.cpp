@@ -621,6 +621,13 @@ std::filesystem::path StorageEngine::partitionDataPath(const std::string& dbname
     return dbPath(dbname) / (tablename + "#" + partitionName + ".dt");
 }
 
+std::filesystem::path StorageEngine::partitionDataPath(const std::string& dbname,
+                                                        const std::string& tablename,
+                                                        const std::string& partitionName,
+                                                        const std::string& subPartitionName) const {
+    return dbPath(dbname) / (tablename + "#" + partitionName + "#" + subPartitionName + ".dt");
+}
+
 std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) const {
     return dbPath(dbname) / "tlist.lst";
 }
@@ -645,6 +652,16 @@ std::string StorageEngine::getPartitionName(const TableSchema& tbl, const std::s
         if (tbl.hashPartitions == 0) return "";
         size_t h = std::hash<std::string>{}(keyVal) % tbl.hashPartitions;
         return "p" + std::to_string(h);
+    }
+    return "";
+}
+
+std::string StorageEngine::getSubPartitionName(const TableSchema& tbl, const std::string& keyVal) const {
+    if (tbl.subPartitionType == TableSchema::PartitionType::None) return "";
+    if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+        if (tbl.subHashPartitions == 0) return "";
+        size_t h = std::hash<std::string>{}(keyVal) % tbl.subHashPartitions;
+        return "sp" + std::to_string(h);
     }
     return "";
 }
@@ -2485,32 +2502,67 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
             }
         }
         for (const auto& pname : partNames) {
-            auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize());
-            if (!ppa->open()) continue;
-            uint32_t np = ppa->numPages();
-            for (uint32_t pid = 1; pid < np; ++pid) {
-                lockManager_.pageLockShared(dbname, tablename, pid);
-                char* buf = ppa->fetchPage(pid);
-                Page page(buf);
-                page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
-                    if (len <= MVCC_HEADER_SIZE) return;
-                    if (rv) {
-                        uint64_t rowTxnId = 0;
-                        std::memcpy(&rowTxnId, data, sizeof(uint64_t));
-                        if (!rv->isVisible(rowTxnId)) return;
+            if (tbl.subPartitionType != TableSchema::PartitionType::None) {
+                std::vector<std::string> subNames;
+                if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+                    for (size_t i = 0; i < tbl.subHashPartitions; ++i) subNames.push_back("sp" + std::to_string(i));
+                }
+                for (const auto& spname : subNames) {
+                    auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname, spname).string(), tbl.rowSize());
+                    if (!ppa->open()) continue;
+                    uint32_t np = ppa->numPages();
+                    for (uint32_t pid = 1; pid < np; ++pid) {
+                        lockManager_.pageLockShared(dbname, tablename, pid);
+                        char* buf = ppa->fetchPage(pid);
+                        Page page(buf);
+                        page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
+                            if (len <= MVCC_HEADER_SIZE) return;
+                            if (rv) {
+                                uint64_t rowTxnId = 0;
+                                std::memcpy(&rowTxnId, data, sizeof(uint64_t));
+                                if (!rv->isVisible(rowTxnId)) return;
+                            }
+                            if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                                int64_t rid = this->encodeRid(pid, sid);
+                                this->txnReadRids_.insert(rid);
+                                std::lock_guard<std::mutex> lock(ssiMutex_);
+                                ssiReadSets_[this->currentTxnId_].insert(rid);
+                            }
+                            callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        });
+                        ppa->unpinPage(pid);
+                        lockManager_.pageUnlock(dbname, tablename, pid);
                     }
-                    if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                        int64_t rid = this->encodeRid(pid, sid);
-                        this->txnReadRids_.insert(rid);
-                        std::lock_guard<std::mutex> lock(ssiMutex_);
-                        ssiReadSets_[this->currentTxnId_].insert(rid);
-                    }
-                    callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
-                });
-                ppa->unpinPage(pid);
-                lockManager_.pageUnlock(dbname, tablename, pid);
+                    ppa->close();
+                }
+            } else {
+                auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize());
+                if (!ppa->open()) continue;
+                uint32_t np = ppa->numPages();
+                for (uint32_t pid = 1; pid < np; ++pid) {
+                    lockManager_.pageLockShared(dbname, tablename, pid);
+                    char* buf = ppa->fetchPage(pid);
+                    Page page(buf);
+                    page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
+                        if (len <= MVCC_HEADER_SIZE) return;
+                        if (rv) {
+                            uint64_t rowTxnId = 0;
+                            std::memcpy(&rowTxnId, data, sizeof(uint64_t));
+                            if (!rv->isVisible(rowTxnId)) return;
+                        }
+                        if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                            int64_t rid = this->encodeRid(pid, sid);
+                            this->txnReadRids_.insert(rid);
+                            std::lock_guard<std::mutex> lock(ssiMutex_);
+                            ssiReadSets_[this->currentTxnId_].insert(rid);
+                        }
+                        callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                    });
+                    ppa->unpinPage(pid);
+                    lockManager_.pageUnlock(dbname, tablename, pid);
+                }
+                ppa->close();
             }
-            ppa->close();
         }
         return;
     }
@@ -4371,6 +4423,17 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         out.write(reinterpret_cast<const char*>(&hcount), 4);
     }
 
+    // Subpartitioning info (new, backward-compatible)
+    int32_t sptype = static_cast<int32_t>(tbl.subPartitionType);
+    out.write(reinterpret_cast<const char*>(&sptype), 4);
+    if (tbl.subPartitionType != TableSchema::PartitionType::None) {
+        writeFixedString(out, tbl.subPartitionKey, MAX_COL_NAME_LEN);
+        if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+            int32_t shcount = static_cast<int32_t>(tbl.subHashPartitions);
+            out.write(reinterpret_cast<const char*>(&shcount), 4);
+        }
+    }
+
     // Named constraint names (appended for backward compatibility)
     int32_t namedCheckCount = 0;
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -4589,6 +4652,21 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             int32_t hcount = 0;
             in.read(reinterpret_cast<char*>(&hcount), 4);
             if (in && hcount > 0) tbl.hashPartitions = static_cast<size_t>(hcount);
+        }
+    }
+
+    // Read subpartitioning info (new, ignore if EOF for backward compatibility)
+    int32_t sptype = 0;
+    in.read(reinterpret_cast<char*>(&sptype), 4);
+    if (in) {
+        tbl.subPartitionType = static_cast<TableSchema::PartitionType>(sptype);
+        if (tbl.subPartitionType != TableSchema::PartitionType::None) {
+            tbl.subPartitionKey = readFixedString(in, MAX_COL_NAME_LEN);
+            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+                int32_t shcount = 0;
+                in.read(reinterpret_cast<char*>(&shcount), 4);
+                if (in && shcount > 0) tbl.subHashPartitions = static_cast<size_t>(shcount);
+            }
         }
     }
 
@@ -6761,6 +6839,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
 
     // Determine target partition for partitioned tables
     std::string targetPartition;
+    std::string targetSubPartition;
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         auto pit = actualValues.find(tbl.partitionKey);
         if (pit != actualValues.end() && !pit->second.empty()) {
@@ -6771,11 +6850,28 @@ OpResult StorageEngine::insert(const std::string& dbname,
             return OpResult::InvalidValue;
         }
     }
+    if (tbl.subPartitionType != TableSchema::PartitionType::None) {
+        auto spit = actualValues.find(tbl.subPartitionKey);
+        if (spit != actualValues.end() && !spit->second.empty()) {
+            targetSubPartition = getSubPartitionName(tbl, spit->second);
+        }
+        if (targetSubPartition.empty()) {
+            lockManager_.unlock(tablename);
+            return OpResult::InvalidValue;
+        }
+    }
 
     // Write row into page-based storage
     PageAllocator* pa = nullptr;
     std::unique_ptr<PageAllocator> partPa;
-    if (!targetPartition.empty()) {
+    if (!targetPartition.empty() && !targetSubPartition.empty()) {
+        partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition, targetSubPartition).string(), tbl.rowSize());
+        if (!partPa->open()) {
+            lockManager_.unlock(tablename);
+            return OpResult::InvalidValue;
+        }
+        pa = partPa.get();
+    } else if (!targetPartition.empty()) {
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition).string(), tbl.rowSize());
         if (!partPa->open()) {
             lockManager_.unlock(tablename);

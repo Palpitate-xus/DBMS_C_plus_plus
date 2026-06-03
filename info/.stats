@@ -5,6 +5,10 @@ orders __rows__ 0||
 parent __rows__ 2||
 parent id 2|1|2||1:1;1:2
 parent name 2|alice|bob||1:alice;1:bob
+sales __rows__ 4||
+sales amount 4|100|400||1:100;1:200;1:300;1:400
+sales month 4|1|4||1:1;1:2;1:3;1:4
+sales year 2|2020|2021||2:2020;2:2021
 t1 __rows__ 2||
 t1 id 2|1|2||1:1;1:2
 t1 name 2|alice|bob||1:alice;1:bob
