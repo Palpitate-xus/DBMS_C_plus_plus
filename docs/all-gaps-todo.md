@@ -11,11 +11,11 @@
 | 批次 | 功能域 | 状态 | Commit |
 |------|--------|------|--------|
 | Batch 0 | GiST/GIN/BRIN 索引 | ✅ 完成 | 4 commits |
-| Batch 1 | 会话上下文 + 全局变量清理 | 🔄 待开始 | — |
-| Batch 2 | 真正的 MVCC + ReadView | ⏳ 待开始 | — |
-| Batch 3 | Hash Join + Merge Join | ⏳ 待开始 | — |
-| Batch 4 | VARCHAR 变长行 + 溢出页 | ⏳ 待开始 | — |
-| Batch 5 | Checkpoint + fsync | ⏳ 待开始 | — |
+| Batch 1 | 会话上下文 + 全局变量清理 | ✅ 已完成 | 已实现 |
+| Batch 2 | 真正的 MVCC + ReadView | ✅ 已完成 | 已实现 |
+| Batch 3 | Hash Join + Merge Join | ✅ 已完成 | 已实现 |
+| Batch 4 | VARCHAR 变长行 + 溢出页 | ✅ 已完成 | 已实现 |
+| Batch 5 | Checkpoint + fsync | ✅ 已完成 | 已实现 |
 | Batch 6 | 剩余 TOP20 gaps | ⏳ 待开始 | — |
 | Batch 7 | 其他功能缺失 | ⏳ 待开始 | — |
 
@@ -26,12 +26,12 @@
 当前 `g_nowUser`、`g_nowPermission`、`g_currentDB`、`g_preparedStmts` 是全局变量。
 NetworkServer 多客户端并发时互相覆盖，是严重安全漏洞。
 
-- [ ] Step 1.1: 新增 `struct Session`，`execute()` 签名改为接收 Session 引用
-- [ ] Step 1.2: `checkAdmin()` / `checkTablePermission()` / `log()` 改为接收 Session
-- [ ] Step 1.3: NetworkServer 每连接创建独立 Session，登录后写入 Session
-- [ ] Step 1.4: main() 交互模式也使用 Session 对象
-- [ ] Step 1.5: 删除全局变量 `g_nowUser`、`g_nowPermission`、`g_currentDB`、`g_preparedStmts`
-- [ ] Step 1.6: 验证 `git grep g_nowUser` / `git grep g_currentDB` 无残留
+- [x] Step 1.1: 新增 `struct Session`，`execute()` 签名改为接收 Session 引用
+- [x] Step 1.2: `checkAdmin()` / `checkTablePermission()` / `log()` 改为接收 Session
+- [x] Step 1.3: NetworkServer 每连接创建独立 Session，登录后写入 Session
+- [x] Step 1.4: main() 交互模式也使用 Session 对象
+- [x] Step 1.5: 删除全局变量 `g_nowUser`、`g_nowPermission`、`g_currentDB`、`g_preparedStmts`
+- [x] Step 1.6: 验证 `git grep g_nowUser` / `git grep g_currentDB` 无残留
 
 **修改文件**: `main.cpp`, `NetworkServer.h/cpp`, `Session.h`
 
@@ -41,14 +41,14 @@ NetworkServer 多客户端并发时互相覆盖，是严重安全漏洞。
 
 当前 Undo Log 只做 ROLLBACK 恢复。多个事务并发时，未提交的修改对其他事务可见（没有隔离）。
 
-- [ ] Step 2.1: 新增 `TxnIdGenerator.h/cpp`，64 位单调递增 txId，持久化到 `.txnid` 文件
-- [ ] Step 2.2: 行格式扩展（已有 16 字节 MVCC header），`TableSchema::rowSize()` 增加 16 字节
-- [ ] Step 2.3: `StorageEngine` 新增活跃事务管理 `globalTxnMutex_` + `activeTransactions_`
-- [ ] Step 2.4: 实现 `ReadView` 结构和可见性规则
-- [ ] Step 2.5: `beginTransaction` 分配 txId 并注册到活跃集合，`commit/rollback` 移除
-- [ ] Step 2.6: `forEachRow` 增加 `const ReadView*` 参数，传入时跳过不可见行
-- [ ] Step 2.7: `filterRows`、`query`、`aggregate`、`join` 传递 ReadView
-- [ ] Step 2.8: 验证：BEGIN → INSERT → 同事务 SELECT 能看到；另一连接 SELECT 看不到；COMMIT 后能看到
+- [x] Step 2.1: 新增 `TxnIdGenerator.h/cpp`，64 位单调递增 txId，持久化到 `.txnid` 文件
+- [x] Step 2.2: 行格式扩展（已有 16 字节 MVCC header），`TableSchema::rowSize()` 增加 16 字节
+- [x] Step 2.3: `StorageEngine` 新增活跃事务管理 `globalTxnMutex_` + `activeTransactions_`
+- [x] Step 2.4: 实现 `ReadView` 结构和可见性规则
+- [x] Step 2.5: `beginTransaction` 分配 txId 并注册到活跃集合，`commit/rollback` 移除
+- [x] Step 2.6: `forEachRow` 增加 `const ReadView*` 参数，传入时跳过不可见行
+- [x] Step 2.7: `filterRows`、`query`、`aggregate`、`join` 传递 ReadView
+- [x] Step 2.8: 验证：BEGIN → INSERT → 同事务 SELECT 能看到；另一连接 SELECT 看不到；COMMIT 后能看到
 
 **修改文件**: `TxnIdGenerator.h/cpp`, `TableManage.h/cpp`, `ExecutionPlan.cpp`
 
@@ -58,13 +58,13 @@ NetworkServer 多客户端并发时互相覆盖，是严重安全漏洞。
 
 当前 JOIN 只有 NestedLoopJoin，大数据量时性能灾难。
 
-- [ ] Step 3.1: `ExecutionPlan.h/cpp` 新增 `HashJoinOp` 算子（右表驻内存哈希表）
-- [ ] Step 3.2: `ExecutionPlan.h/cpp` 新增 `MergeJoinOp` 算子（双指针线性扫描）
+- [x] Step 3.1: `ExecutionPlan.h/cpp` 新增 `HashJoinOp` 算子（右表驻内存哈希表）
+- [x] Step 3.2: `ExecutionPlan.h/cpp` 新增 `MergeJoinOp` 算子（双指针线性扫描）
  [ ] Step 3.3: `buildJoinPlan` 根据统计信息自动选择 JOIN 算法
   - 小表（< 100 行）→ NestedLoopJoin
   - 两表都大，无序 → HashJoin
   - 两表都大，join key 有索引/已排序 → MergeJoin
-- [ ] Step 3.4: EXPLAIN 输出显示使用了哪种 JOIN 算法
+- [x] Step 3.4: EXPLAIN 输出显示使用了哪种 JOIN 算法
 
 **修改文件**: `ExecutionPlan.h/cpp`
 
@@ -74,14 +74,14 @@ NetworkServer 多客户端并发时互相覆盖，是严重安全漏洞。
 
 当前全表定长行，存储浪费严重，无法存长文本。
 
-- [ ] Step 4.1: `Column` 增加 `isVariableLength` 标志，`makeVarCharColumn()` 构造函数
-- [ ] Step 4.2: CREATE TABLE 解析支持 `VARCHAR(n)` 语法（已部分支持，需验证）
-- [ ] Step 4.3: `rowSize()` 改为变长行计算（定长部分 + 变长偏移数组 + 变长数据）
-- [ ] Step 4.4: `extractColumnValue` 根据列类型选择定长/变长解析路径
-- [ ] Step 4.5: 溢出页处理：单行数据 > 页可用空间时，大字段存溢出页
-- [ ] Step 4.6: 主行中存溢出页指针（pageId + offset）
-- [ ] Step 4.7: get/update 时自动处理溢出页读写
-- [ ] Step 4.8: 验证：插入 10KB 文本，能正确存储和读取
+- [x] Step 4.1: `Column` 增加 `isVariableLength` 标志，`makeVarCharColumn()` 构造函数
+- [x] Step 4.2: CREATE TABLE 解析支持 `VARCHAR(n)` 语法（已部分支持，需验证）
+- [x] Step 4.3: `rowSize()` 改为变长行计算（定长部分 + 变长偏移数组 + 变长数据）
+- [x] Step 4.4: `extractColumnValue` 根据列类型选择定长/变长解析路径
+- [x] Step 4.5: 溢出页处理：单行数据 > 页可用空间时，大字段存溢出页
+- [x] Step 4.6: 主行中存溢出页指针（pageId + offset）
+- [x] Step 4.7: get/update 时自动处理溢出页读写
+- [x] Step 4.8: 验证：插入 10KB 文本，能正确存储和读取
 
 **修改文件**: `TableManage.h/cpp`, `Page.cpp`, `PageAllocator.cpp`, `main.cpp`
 
@@ -91,16 +91,16 @@ NetworkServer 多客户端并发时互相覆盖，是严重安全漏洞。
 
 当前 WAL 日志无限增长，崩溃恢复时间随运行时长线性增加；没有 fsync 保证可能丢数据。
 
-- [ ] Step 5.1: `TableManage.cpp` 新增 `checkpoint()` 方法
-- [ ] Step 5.2: Checkpoint 记录: `(checkpointLsn, dirtyPageList, activeTxnIds)`
-- [ ] Step 5.3: 调用时：脏页刷盘 → 写入 checkpoint 记录 → 截断 WAL
-- [ ] Step 5.4: StorageEngine 构造函数读取最新 checkpoint，从 checkpoint 位置开始恢复
-- [ ] Step 5.5: `BufferPool::flush()` 中对每个脏页调用 `fdatasync()` / `fsync()`
-- [ ] Step 5.6: `writeFileHeader` 后调用 `fsync()`
-- [ ] Step 5.7: `commitTransaction` 时先 fsync WAL，再标记事务提交
-- [ ] Step 5.8: 交互模式下每 N 条 SQL 或每 M 秒触发 checkpoint
-- [ ] Step 5.9: `CHECKPOINT` SQL 命令支持手动触发
-- [ ] Step 5.10: 验证：模拟崩溃（kill -9）后，已 COMMIT 的数据不丢失
+- [x] Step 5.1: `TableManage.cpp` 新增 `checkpoint()` 方法
+- [x] Step 5.2: Checkpoint 记录: `(checkpointLsn, dirtyPageList, activeTxnIds)`
+- [x] Step 5.3: 调用时：脏页刷盘 → 写入 checkpoint 记录 → 截断 WAL
+- [x] Step 5.4: StorageEngine 构造函数读取最新 checkpoint，从 checkpoint 位置开始恢复
+- [x] Step 5.5: `BufferPool::flush()` 中对每个脏页调用 `fdatasync()` / `fsync()`
+- [x] Step 5.6: `writeFileHeader` 后调用 `fsync()`
+- [x] Step 5.7: `commitTransaction` 时先 fsync WAL，再标记事务提交
+- [x] Step 5.8: 交互模式下每 N 条 SQL 或每 M 秒触发 checkpoint
+- [x] Step 5.9: `CHECKPOINT` SQL 命令支持手动触发
+- [x] Step 5.10: 验证：模拟崩溃（kill -9）后，已 COMMIT 的数据不丢失
 
 **修改文件**: `TableManage.h/cpp`, `BufferPool.cpp`, `main.cpp`
 
