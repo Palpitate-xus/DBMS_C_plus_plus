@@ -10,6 +10,9 @@ user.dat
 *.txn_backup
 testdb/
 testdb*
+cttest/
+info/
+mvtest/
 *.tmp
 build-*/
 slow_query.log
