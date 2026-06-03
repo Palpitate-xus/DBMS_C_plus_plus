@@ -11,6 +11,9 @@ t_explicit __rows__ 2||
 t_explicit age 2|0|30||1:0;1:30
 t_explicit id 2|1|2||1:1;1:2
 t_explicit name 2|alice|bob||1:alice;1:bob
+t_move __rows__ 1||
+t_move id 1|1|1||1:1
+t_move name 1|alice|alice||1:alice
 t_newname __rows__ 1||
 t_newname age 1|25|25||1:25
 t_newname id 1|1|1||1:1

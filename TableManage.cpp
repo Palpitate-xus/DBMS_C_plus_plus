@@ -1546,6 +1546,101 @@ OpResult StorageEngine::renameSchema(const std::string& dbname,
     return OpResult::Success;
 }
 
+OpResult StorageEngine::alterTableSetSchema(const std::string& dbname,
+                                            const std::string& tablename,
+                                            const std::string& targetDbname) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(targetDbname)) return OpResult::DatabaseNotExist;
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (tableExists(targetDbname, tablename)) return OpResult::TableAlreadyExist;
+
+    auto srcPath = std::filesystem::path(dbname);
+    auto dstPath = std::filesystem::path(targetDbname);
+
+    // Move known table files (.dt, .idx, .stc, .seq)
+    for (const char* ext : {".dt", ".idx", ".stc", ".seq"}) {
+        auto oldFile = srcPath / (tablename + ext);
+        auto newFile = dstPath / (tablename + ext);
+        if (std::filesystem::exists(oldFile)) {
+            std::filesystem::rename(oldFile, newFile);
+        }
+    }
+
+    // Move index files: {tname}_{col}.{ext}
+    for (const auto& entry : std::filesystem::directory_iterator(srcPath)) {
+        if (!entry.is_regular_file()) continue;
+        std::string name = entry.path().filename().string();
+        // Match patterns like tname_col.fti, tname_col.gin, etc.
+        size_t underscore = name.find('_');
+        if (underscore != std::string::npos && name.substr(0, underscore) == tablename) {
+            std::filesystem::rename(entry.path(), dstPath / name);
+        }
+    }
+
+    // Also move composite index file if exists
+    auto compIdx = srcPath / (tablename + "_composite.idx");
+    if (std::filesystem::exists(compIdx)) {
+        std::filesystem::rename(compIdx, dstPath / (tablename + "_composite.idx"));
+    }
+
+    // Update tlist.lst in source database: remove tablename
+    {
+        auto srcTlist = srcPath / "tlist.lst";
+        if (std::filesystem::exists(srcTlist)) {
+            std::ifstream ifs(srcTlist);
+            std::vector<std::string> lines;
+            std::string line;
+            while (std::getline(ifs, line)) lines.push_back(line);
+            std::ofstream ofs(srcTlist);
+            for (const auto& l : lines) {
+                if (l != tablename) ofs << l << '\n';
+            }
+        }
+    }
+
+    // Update tlist.lst in target database: add tablename
+    {
+        auto dstTlist = dstPath / "tlist.lst";
+        std::vector<std::string> lines;
+        if (std::filesystem::exists(dstTlist)) {
+            std::ifstream ifs(dstTlist);
+            std::string line;
+            while (std::getline(ifs, line)) lines.push_back(line);
+        }
+        lines.push_back(tablename);
+        std::ofstream ofs(dstTlist);
+        for (const auto& l : lines) ofs << l << '\n';
+    }
+
+    // Move permissions from source to target database
+    {
+        auto permPath = dbPath("permissions.dat");
+        if (std::filesystem::exists(permPath)) {
+            std::ifstream ifs(permPath);
+            std::vector<std::string> keepLines;
+            std::vector<std::string> moveLines;
+            std::string line;
+            while (std::getline(ifs, line)) {
+                // Format: dbname tablename username permission
+                std::stringstream ss(line);
+                std::string ldb, ltbl, luser, lperm;
+                ss >> ldb >> ltbl >> luser >> lperm;
+                if (ldb == dbname && ltbl == tablename) {
+                    moveLines.push_back(targetDbname + " " + tablename + " " + luser + " " + lperm);
+                } else {
+                    keepLines.push_back(line);
+                }
+            }
+            std::ofstream ofs(permPath);
+            for (const auto& l : keepLines) ofs << l << '\n';
+            std::ofstream ofsAppend(permPath, std::ios::app);
+            for (const auto& l : moveLines) ofsAppend << l << '\n';
+        }
+    }
+
+    return OpResult::Success;
+}
+
 bool StorageEngine::schemaExists(const std::string& dbname,
                                  const std::string& schemaname) const {
     return std::filesystem::exists(schemaMarkerPath(dbname, schemaname));

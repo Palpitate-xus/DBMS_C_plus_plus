@@ -234,6 +234,9 @@ public:
     // Sequence reset (for TRUNCATE RESTART IDENTITY)
     void resetSequence(const std::string& dbname, const std::string& tablename,
                        const std::string& colname, int64_t val = 1);
+    // Move table to another database/schema
+    OpResult alterTableSetSchema(const std::string& dbname, const std::string& tablename,
+                                 const std::string& targetDbname);
 
     // User-defined functions (simple expression-based)
     struct UDFInfo {

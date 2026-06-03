@@ -5132,6 +5132,26 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
+        // ALTER TABLE ... SET SCHEMA
+        if (sql.find("set schema") != string::npos) {
+            size_t schemaPos = sql.find("set schema");
+            string targetDb = trim(sql.substr(schemaPos + 10));
+            auto res = g_engine.alterTableSetSchema(s.currentDB, tname, targetDb);
+            if (res == OpResult::DatabaseNotExist) {
+                cout << "Target database not found" << endl;
+                return true;
+            }
+            if (res == OpResult::TableNotExist) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            if (res == OpResult::TableAlreadyExist) {
+                cout << "Table already exists in target database" << endl;
+                return true;
+            }
+            cout << "Table " << tname << " moved to database " << targetDb << endl;
+            return false;
+        }
         cout << "SQL syntax error" << endl;
         return true;
     }
