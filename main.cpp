@@ -1480,6 +1480,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
             bool isPK = false;
             bool isUnique = false;
             bool isUnsigned = false;
+            bool isAutoIncrement = false;
             std::string defaultVal;
             std::string checkExpr;
             std::string generatedExpr;
@@ -1501,7 +1502,73 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                     string rest = trim(segment.substr(firstColon + 1));
                     size_t secondColon = rest.find(':');
                     if (secondColon == string::npos) {
-                        ctype = rest;
+                        // (col:type flags) mixed format - parse type then remaining tokens as flags
+                        parts = tokenize(rest);
+                        if (!parts.empty()) {
+                            ctype = parts[0];
+                            for (size_t i = 1; i < parts.size(); ++i) {
+                                if (parts[i] == "primary") {
+                                    if (i + 1 < parts.size() && parts[i + 1] == "key") {
+                                        isPK = true; ++i;
+                                    }
+                                } else if (parts[i] == "key") {
+                                } else if (parts[i] == "not" && i + 1 < parts.size() && parts[i + 1] == "null") {
+                                    isNull = false; ++i;
+                                } else if (parts[i] == "0") {
+                                    isNull = false;
+                                } else if (parts[i] == "unique") {
+                                    isUnique = true;
+                                } else if (parts[i] == "unsigned") {
+                                    isUnsigned = true;
+                                } else if (parts[i] == "default" && i + 1 < parts.size()) {
+                                    defaultVal = parts[i + 1];
+                                    if (defaultVal.size() >= 2 && defaultVal.front() == '\'' && defaultVal.back() == '\'') {
+                                        defaultVal = defaultVal.substr(1, defaultVal.size() - 2);
+                                    }
+                                    ++i;
+                                } else if (parts[i] == "check" && i + 1 < parts.size()) {
+                                    ++i;
+                                    int parenDepth = 0;
+                                    std::string expr;
+                                    for (; i < parts.size(); ++i) {
+                                        if (parts[i] == "(") {
+                                            if (parenDepth > 0) expr += "(";
+                                            ++parenDepth;
+                                        } else if (parts[i] == ")") {
+                                            --parenDepth;
+                                            if (parenDepth > 0) expr += ")";
+                                        } else {
+                                            expr += parts[i];
+                                        }
+                                        if (parenDepth == 0 && !expr.empty()) break;
+                                    }
+                                    checkExpr = normalizeConditionStr(expr);
+                                } else if (parts[i] == "generated" && i + 3 < parts.size() && parts[i + 1] == "always" && parts[i + 2] == "as" && parts[i + 3] == "identity") {
+                                    isAutoIncrement = true;
+                                    i += 3;
+                                } else if (parts[i] == "generated" && i + 4 < parts.size() && parts[i + 1] == "by" && parts[i + 2] == "default" && parts[i + 3] == "as" && parts[i + 4] == "identity") {
+                                    isAutoIncrement = true;
+                                    i += 4;
+                                } else if (parts[i] == "generated" && i + 2 < parts.size() && parts[i + 1] == "always" && parts[i + 2] == "as") {
+                                    i += 3;
+                                    int parenDepth = 0;
+                                    std::string expr;
+                                    for (; i < parts.size(); ++i) {
+                                        if (parts[i] == "(") {
+                                            if (parenDepth > 0) expr += "(";
+                                            ++parenDepth;
+                                        } else if (parts[i] == ")") {
+                                            --parenDepth;
+                                            if (parenDepth > 0) expr += ")";
+                                        } else {
+                                            expr += parts[i];
+                                        }
+                                        if (parenDepth == 0 && !expr.empty()) break;
+                                    }
+                                    generatedExpr = normalizeConditionStr(expr);
+                                }
+                            }
+                        }
                     } else {
                         ctype = trim(rest.substr(0, secondColon));
                         string flagsStr = trim(rest.substr(secondColon + 1));
@@ -1565,6 +1632,14 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                                 }
                                 // Store normalized expression
                                 checkExpr = normalizeConditionStr(expr);
+                            } else if (parts[i] == "generated" && i + 3 < parts.size() && parts[i + 1] == "always" && parts[i + 2] == "as" && parts[i + 3] == "identity") {
+                                // GENERATED ALWAYS AS IDENTITY
+                                isAutoIncrement = true;
+                                i += 3;
+                            } else if (parts[i] == "generated" && i + 4 < parts.size() && parts[i + 1] == "by" && parts[i + 2] == "default" && parts[i + 3] == "as" && parts[i + 4] == "identity") {
+                                // GENERATED BY DEFAULT AS IDENTITY
+                                isAutoIncrement = true;
+                                i += 4;
                             } else if (parts[i] == "generated" && i + 2 < parts.size() && parts[i + 1] == "always" && parts[i + 2] == "as") {
                                 // GENERATED ALWAYS AS (expr)
                                 i += 3;
@@ -1655,6 +1730,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
 
             if (ctype.substr(0, 6) == "serial") {
                 col = makeIntColumn(cname, false, 2, isPK);
+                isAutoIncrement = true;
                 col.isAutoIncrement = true;
                 colCreated = true;
             } else if (ctype.substr(0, 8) == "interval") {
@@ -1858,6 +1934,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                     col.dataType += "[]";
                     col.dsize = 256;  // arrays need larger storage
                 }
+                col.isAutoIncrement = isAutoIncrement;
                 col.isUnique = isUnique;
                 col.defaultValue = defaultVal;
                 col.checkExpr = checkExpr;
@@ -3459,8 +3536,10 @@ bool execute(const string& rawSql, Session& s) {
             string tname = rest.substr(0, sp);
             tname = resolveTableName(s, tname);
             // CTAS: CREATE TABLE new_table AS SELECT ...
+            size_t parenStart = rest.find('(', sp);
             size_t asPos = rest.find(" as ", sp);
-            if (asPos != string::npos) {
+            // Only treat as CTAS if " as " appears before the column list paren
+            if (asPos != string::npos && (parenStart == string::npos || asPos < parenStart)) {
                 string newTname = tname;
                 string selectPart = trim(rest.substr(asPos + 4));
                 if (selectPart.size() >= 6 && selectPart.substr(0, 6) == "select") {
