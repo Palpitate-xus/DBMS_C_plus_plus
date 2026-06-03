@@ -5353,15 +5353,40 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Insert)) return true;
 
-        // Find column list
-        size_t colStart = sql.find('(', 12);
-        size_t colEnd = sql.find(')', colStart);
-        if (colStart == string::npos) {
+        // Find column list (optional - can omit columns)
+        size_t valuesPos = sql.find("values");
+        size_t selectPosCheck = sql.find("select", 12);
+        bool isSelectInsert = (selectPosCheck != string::npos && (valuesPos == string::npos || selectPosCheck < valuesPos));
+        if (valuesPos == string::npos && !isSelectInsert) {
             cout << "SQL syntax error" << endl;
             return true;
         }
 
-        string colsStr = trim(sql.substr(colStart + 1, colEnd - colStart - 1));
+        string colsStr;
+        size_t colStart = sql.find('(', 12);
+        size_t colEnd = 0;
+        bool hasExplicitCols = (colStart != string::npos && colStart < valuesPos);
+
+        if (hasExplicitCols) {
+            colEnd = sql.find(')', colStart);
+            if (colEnd == string::npos || colEnd > valuesPos) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            colsStr = trim(sql.substr(colStart + 1, colEnd - colStart - 1));
+        } else {
+            // Omit column list: use all columns from table schema
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
+            if (tbl.len == 0) {
+                cout << "Table has no columns" << endl;
+                return true;
+            }
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (i > 0) colsStr += ",";
+                colsStr += tbl.cols[i].dataName;
+            }
+            colEnd = valuesPos;
+        }
         // Column-level permission check
         {
             vector<string> insertCols;
