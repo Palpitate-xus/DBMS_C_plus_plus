@@ -866,6 +866,55 @@ static bool isTempTable(Session& s, const string& name) {
 }
 
 // ========================================================================
+// INSTEAD OF trigger helper: execute trigger action on view
+// Returns true if an INSTEAD OF trigger was executed, false otherwise
+// ========================================================================
+static bool executeInsteadOfTrigger(Session& s, const string& viewname,
+                                     const string& event,
+                                     const map<string, string>& newValues,
+                                     const map<string, string>& oldValues) {
+    if (!g_engine.viewExists(s.currentDB, viewname)) return false;
+    auto triggers = g_engine.getTriggers(s.currentDB, viewname, "instead of", event);
+    if (triggers.empty()) return false;
+    for (const auto& trg : triggers) {
+        string action = trg.action;
+        // Substitute NEW.column (case-insensitive search)
+        for (const auto& [col, val] : newValues) {
+            string placeholderLower = "new." + col;
+            string placeholderUpper = "NEW." + col;
+            size_t pos = 0;
+            while ((pos = action.find(placeholderLower, pos)) != string::npos) {
+                action.replace(pos, placeholderLower.size(), val);
+                pos += val.size();
+            }
+            pos = 0;
+            while ((pos = action.find(placeholderUpper, pos)) != string::npos) {
+                action.replace(pos, placeholderUpper.size(), val);
+                pos += val.size();
+            }
+        }
+        // Substitute OLD.column (case-insensitive search)
+        for (const auto& [col, val] : oldValues) {
+            string placeholderLower = "old." + col;
+            string placeholderUpper = "OLD." + col;
+            size_t pos = 0;
+            while ((pos = action.find(placeholderLower, pos)) != string::npos) {
+                action.replace(pos, placeholderLower.size(), val);
+                pos += val.size();
+            }
+            pos = 0;
+            while ((pos = action.find(placeholderUpper, pos)) != string::npos) {
+                action.replace(pos, placeholderUpper.size(), val);
+                pos += val.size();
+            }
+        }
+        // Execute the action SQL via trigger executor
+        g_engine.executeTriggerAction(action);
+    }
+    return true;
+}
+
+// ========================================================================
 // Normalize condition string: remove spaces around operators so tokenize
 // keeps each condition as a single token (e.g. "score > 80" → "score>80")
 // ========================================================================
@@ -4105,22 +4154,38 @@ bool execute(const string& rawSql, Session& s) {
                 }
                 if (!cur.empty()) tparts.push_back(cur);
             }
-            if (tparts.size() < 6) {
+            // Handle INSTEAD OF (two-word timing)
+            bool isInsteadOf = (tparts.size() >= 2 && tparts[1] == "instead");
+            size_t minParts = isInsteadOf ? 7 : 6;
+            if (tparts.size() < minParts) {
                 cout << "SQL syntax error: CREATE TRIGGER name timing event ON table action" << endl;
                 return true;
             }
             string trgName = tparts[0];
-            string timing = tparts[1];
-            string event = tparts[2];
-            if (tparts[3] != "on") {
+            string timing;
+            string event;
+            size_t onPos = 3;
+            if (isInsteadOf) {
+                if (tparts[2] != "of") {
+                    cout << "SQL syntax error: expected INSTEAD OF" << endl;
+                    return true;
+                }
+                timing = "instead of";
+                event = tparts[3];
+                onPos = 4;
+            } else {
+                timing = tparts[1];
+                event = tparts[2];
+            }
+            if (tparts[onPos] != "on") {
                 cout << "SQL syntax error: expected ON" << endl;
                 return true;
             }
-            string tname = resolveTableName(s, tparts[4]);
+            string tname = resolveTableName(s, tparts[onPos + 1]);
             // Detect FOR EACH ROW / FOR EACH STATEMENT
             bool forEachRow = true;
-            size_t actionStart = 5;
-            for (size_t i = 5; i + 2 < tparts.size(); ++i) {
+            size_t actionStart = onPos + 2;
+            for (size_t i = actionStart; i + 2 < tparts.size(); ++i) {
                 if (tparts[i] == "for" && tparts[i+1] == "each") {
                     if (tparts[i+2] == "statement") {
                         forEachRow = false;
@@ -5534,6 +5599,35 @@ bool execute(const string& rawSql, Session& s) {
         }
         string tname = tokens[0];
         string resolvedName = resolveTableName(s, tname);
+        // Check for INSTEAD OF triggers on view (takes precedence over base table rewriting)
+        if (!g_engine.tableExists(s.currentDB, resolvedName) &&
+            g_engine.viewExists(s.currentDB, tname)) {
+            map<string, string> newValues;
+            // Parse VALUES to build NEW values
+            size_t valuesPos = sql.find("values");
+            size_t valStart = (valuesPos != string::npos) ? sql.find('(', valuesPos) : string::npos;
+            size_t valEnd = (valStart != string::npos) ? findMatchingParen(sql, valStart) : string::npos;
+            if (valStart != string::npos && valEnd != string::npos) {
+                string valsStr = trim(sql.substr(valStart + 1, valEnd - valStart - 1));
+                vector<string> vals = splitValues(valsStr);
+                // Try to find column list (before VALUES)
+                size_t colStart = sql.find('(', 12);
+                if (colStart != string::npos && colStart < valStart) {
+                    size_t colEnd = sql.find(')', colStart);
+                    if (colEnd != string::npos && colEnd < valStart) {
+                        string colsStr = trim(sql.substr(colStart + 1, colEnd - colStart - 1));
+                        vector<string> cols = splitValues(colsStr);
+                        for (size_t i = 0; i < cols.size() && i < vals.size(); ++i) {
+                            newValues[trim(cols[i])] = trim(vals[i]);
+                        }
+                    }
+                }
+            }
+            if (executeInsteadOfTrigger(s, tname, "insert", newValues, {})) {
+                cout << "INSTEAD OF INSERT trigger executed on view " << tname << endl;
+                return false;
+            }
+        }
         // Check for updatable view
         string viewBaseTable;
         string viewCheckOpt;
@@ -5973,13 +6067,46 @@ bool execute(const string& rawSql, Session& s) {
         if (!checkDB(s)) return true;
         string delRest = expandSubqueries(sql.substr(12), s);
         size_t usingPos = findTopLevelKeyword(delRest, "using");
+        size_t wherePos = findTopLevelKeyword(delRest, "where",
+            (usingPos != string::npos) ? usingPos : 0);
+        string targetPart = trim(delRest.substr(0,
+            (usingPos != string::npos) ? usingPos
+            : (wherePos != string::npos) ? wherePos
+            : delRest.size()));
+        // Check for INSTEAD OF DELETE triggers on view
+        {
+            string ioTname = targetPart;
+            string ioResolved = resolveTableName(s, ioTname);
+            if (!g_engine.tableExists(s.currentDB, ioResolved) &&
+                g_engine.viewExists(s.currentDB, ioTname)) {
+                map<string, string> oldValues;
+                // Parse WHERE clause for OLD values
+                if (wherePos != string::npos) {
+                    string whereClause = trim(delRest.substr(wherePos + 5));
+                    vector<string> conds = splitConds(normalizeConditionStr(whereClause));
+                    for (const auto& c : conds) {
+                        string mc = modifyLogic(c);
+                        if (!mc.empty() && mc[0] == '=') {
+                            size_t sp = mc.find(' ', 1);
+                            if (sp != string::npos) {
+                                string col = trim(mc.substr(1, sp - 1));
+                                string val = trim(mc.substr(sp + 1));
+                                oldValues[col] = val;
+                            }
+                        }
+                    }
+                }
+                if (executeInsteadOfTrigger(s, ioTname, "delete", {}, oldValues)) {
+                    cout << "INSTEAD OF DELETE trigger executed on view " << ioTname << endl;
+                    return false;
+                }
+            }
+        }
         if (usingPos != string::npos) {
-            string targetPart = trim(delRest.substr(0, usingPos));
-            size_t wherePos = findTopLevelKeyword(delRest, "where", usingPos);
+            string tname = targetPart;
             string sourceName = trim(delRest.substr(usingPos + 5,
                 (wherePos != string::npos) ? (wherePos - usingPos - 5)
                 : (delRest.size() - usingPos - 5)));
-            string tname = targetPart;
             string resolvedSource = resolveTableName(s, sourceName);
             string resolvedTarget = resolveTableName(s, tname);
             if (!g_engine.tableExists(s.currentDB, resolvedSource)) {
@@ -6257,6 +6384,40 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         string tname = trim(sql.substr(6, setPos - 6));
+        // Check for INSTEAD OF UPDATE triggers on view
+        {
+            string ioResolved = resolveTableName(s, tname);
+            if (!g_engine.tableExists(s.currentDB, ioResolved) &&
+                g_engine.viewExists(s.currentDB, tname)) {
+                map<string, string> newValues;
+                map<string, string> oldValues;
+                // Parse SET clause for NEW values
+                auto updates = parseSetClause(sql, setPos + 3, sql.size());
+                for (const auto& kv : updates) newValues[kv.first] = kv.second;
+                // Parse WHERE clause for OLD values (simplified: just pass condition string)
+                size_t wherePos = findTopLevelKeyword(sql, "where", setPos);
+                if (wherePos != string::npos) {
+                    string whereClause = trim(sql.substr(wherePos + 5));
+                    // Try to extract OLD values from WHERE conditions like "id = 1"
+                    vector<string> conds = splitConds(normalizeConditionStr(whereClause));
+                    for (const auto& c : conds) {
+                        string mc = modifyLogic(c);
+                        if (!mc.empty() && mc[0] == '=') {
+                            size_t sp = mc.find(' ', 1);
+                            if (sp != string::npos) {
+                                string col = trim(mc.substr(1, sp - 1));
+                                string val = trim(mc.substr(sp + 1));
+                                oldValues[col] = val;
+                            }
+                        }
+                    }
+                }
+                if (executeInsteadOfTrigger(s, tname, "update", newValues, oldValues)) {
+                    cout << "INSTEAD OF UPDATE trigger executed on view " << tname << endl;
+                    return false;
+                }
+            }
+        }
         size_t fromPos = findTopLevelKeyword(sql, "from", setPos);
         if (fromPos != std::string::npos) {
             // Multi-table update: UPDATE target SET ... FROM source WHERE ...

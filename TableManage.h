@@ -745,6 +745,10 @@ public:
     // Trigger executor callback: action SQL -> success/failure
     using TriggerExecutor = std::function<bool(const std::string& actionSql)>;
     void setTriggerExecutor(TriggerExecutor executor) { triggerExecutor_ = executor; }
+    bool executeTriggerAction(const std::string& actionSql) const {
+        if (triggerExecutor_) return triggerExecutor_(actionSql);
+        return false;
+    }
 
     // Current transaction ID (0 = not in a transaction)
     uint64_t currentTxnId() const { return currentTxnId_; }
