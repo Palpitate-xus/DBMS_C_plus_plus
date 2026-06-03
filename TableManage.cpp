@@ -639,7 +639,7 @@ std::string StorageEngine::getPartitionName(const TableSchema& tbl, const std::s
                 if (v == keyVal) return lp.first;
             }
         }
-        return "";
+        return tbl.defaultPartitionName;
     }
     if (tbl.partitionType == TableSchema::PartitionType::Hash) {
         if (tbl.hashPartitions == 0) return "";
@@ -2479,6 +2479,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 for (const auto& rp : tbl.rangePartitions) partNames.push_back(rp.first);
             } else if (tbl.partitionType == TableSchema::PartitionType::List) {
                 for (const auto& lp : tbl.listPartitions) partNames.push_back(lp.first);
+                if (!tbl.defaultPartitionName.empty()) partNames.push_back(tbl.defaultPartitionName);
             } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
                 for (size_t i = 0; i < tbl.hashPartitions; ++i) partNames.push_back("p" + std::to_string(i));
             }
@@ -4381,6 +4382,8 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Row-Level Security flags (backward-compatible)
     uint8_t rlsFlags = (tbl.rowLevelSecurity ? 1 : 0) | (tbl.forceRowLevelSecurity ? 2 : 0);
     out.write(reinterpret_cast<const char*>(&rlsFlags), 1);
+    // Default partition name (backward-compatible)
+    writeFixedString(out, tbl.defaultPartitionName, MAX_TABLE_NAME_LEN);
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -4612,6 +4615,9 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         tbl.rowLevelSecurity = (rlsFlags & 1) != 0;
         tbl.forceRowLevelSecurity = (rlsFlags & 2) != 0;
     }
+    // Default partition name (backward-compatible)
+    std::string dpName = readFixedString(in, MAX_TABLE_NAME_LEN);
+    if (in) tbl.defaultPartitionName = dpName;
 
     return tbl;
 }

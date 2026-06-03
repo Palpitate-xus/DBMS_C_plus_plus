@@ -3639,6 +3639,7 @@ bool execute(const string& rawSql, Session& s) {
                                     string defLower = def;
                                     transform(defLower.begin(), defLower.end(), defLower.begin(), ::tolower);
                                     size_t vp = defLower.find("values in");
+                                    size_t dpPos = defLower.find("default");
                                     if (vp != string::npos) {
                                         string pname = trim(def.substr(0, vp));
                                         if (pname.size() > 10 && pname.substr(0, 10) == "partition ") pname = trim(pname.substr(10));
@@ -3661,6 +3662,10 @@ bool execute(const string& rawSql, Session& s) {
                                             }
                                             tbl.listPartitions.push_back({pname, vlist});
                                         }
+                                    } else if (dpPos != string::npos) {
+                                        string pname = trim(def.substr(0, dpPos));
+                                        if (pname.size() > 10 && pname.substr(0, 10) == "partition ") pname = trim(pname.substr(10));
+                                        tbl.defaultPartitionName = pname;
                                     }
                                 }
                                 if (nextPart == string::npos) break;

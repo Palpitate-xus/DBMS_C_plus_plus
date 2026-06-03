@@ -87,6 +87,7 @@ struct TableSchema {
     std::vector<std::pair<std::string, std::string>> rangePartitions;  // name -> upper bound
     std::vector<std::pair<std::string, std::vector<std::string>>> listPartitions;  // name -> values
     size_t hashPartitions = 0;  // number of hash partitions
+    std::string defaultPartitionName; // DEFAULT partition for LIST partitioning
     bool isUnlogged = false;    // UNLOGGED table: no WAL, truncated on crash
     bool rowLevelSecurity = false; // ENABLE ROW LEVEL SECURITY
     bool forceRowLevelSecurity = false; // FORCE ROW LEVEL SECURITY (applies to table owner too)
