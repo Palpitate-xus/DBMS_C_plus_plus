@@ -8434,6 +8434,115 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // COPY ... FROM / TO (PostgreSQL-style bulk load)
+    if (sql.substr(0, 4) == "copy") {
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
+        string rest = trim(sql.substr(4));
+        size_t fromPos = rest.find(" from ");
+        size_t toPos = rest.find(" to ");
+        if (fromPos != string::npos) {
+            // COPY table_name FROM 'filename'
+            string tname = trim(rest.substr(0, fromPos));
+            tname = resolveTableName(s, tname);
+            string fileRest = trim(rest.substr(fromPos + 6));
+            size_t q1 = fileRest.find('\'');
+            size_t q2 = fileRest.find('\'', q1 + 1);
+            if (q1 == string::npos || q2 == string::npos) {
+                cout << "SQL syntax error: COPY FROM requires 'filename'" << endl;
+                return true;
+            }
+            string filename = fileRest.substr(q1 + 1, q2 - q1 - 1);
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table " << tname << " not exist" << endl;
+                return true;
+            }
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+            ifstream csvIn(filename);
+            if (!csvIn) {
+                cout << "Cannot open file: " << filename << endl;
+                return true;
+            }
+            size_t imported = 0, skipped = 0;
+            string line;
+            bool firstLine = true;
+            while (getline(csvIn, line)) {
+                if (trim(line).empty()) continue;
+                auto fields = parseCSVLine(line);
+                if (fields.size() != tbl.len) {
+                    if (firstLine) { firstLine = false; continue; }
+                    skipped++;
+                    continue;
+                }
+                firstLine = false;
+                map<string, string> values;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    values[tbl.cols[i].dataName] = trim(fields[i]);
+                }
+                auto res = g_engine.insert(s.currentDB, tname, values);
+                if (res == OpResult::Success) imported++;
+                else skipped++;
+            }
+            cout << "COPY " << imported << " rows imported, " << skipped << " skipped" << endl;
+            return false;
+        }
+        if (toPos != string::npos) {
+            // COPY table_name TO 'filename'
+            string tname = trim(rest.substr(0, toPos));
+            tname = resolveTableName(s, tname);
+            string fileRest = trim(rest.substr(toPos + 4));
+            size_t q1 = fileRest.find('\'');
+            size_t q2 = fileRest.find('\'', q1 + 1);
+            if (q1 == string::npos || q2 == string::npos) {
+                cout << "SQL syntax error: COPY TO requires 'filename'" << endl;
+                return true;
+            }
+            string filename = fileRest.substr(q1 + 1, q2 - q1 - 1);
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table " << tname << " not exist" << endl;
+                return true;
+            }
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+            ofstream csvOut(filename);
+            if (!csvOut) {
+                cout << "Cannot write file: " << filename << endl;
+                return true;
+            }
+            // Write header
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (i > 0) csvOut << ",";
+                csvOut << tbl.cols[i].dataName;
+            }
+            csvOut << "\n";
+            size_t exported = 0;
+            g_engine.forEachRow(s.currentDB, tname, [&](uint32_t, uint16_t, const char* data, size_t len) {
+                std::string row(data, len);
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (i > 0) csvOut << ",";
+                    string val = dbms::StorageEngine::extractColumnValue(row, tbl, i);
+                    // Quote if contains comma or quote
+                    bool needQuote = (val.find(',') != string::npos || val.find('"') != string::npos || val.find('\n') != string::npos);
+                    if (needQuote) {
+                        csvOut << '"';
+                        for (char c : val) {
+                            if (c == '"') csvOut << "\"\"";
+                            else csvOut << c;
+                        }
+                        csvOut << '"';
+                    } else {
+                        csvOut << val;
+                    }
+                }
+                csvOut << "\n";
+                ++exported;
+            });
+            cout << "COPY " << exported << " rows exported to " << filename << endl;
+            return false;
+        }
+        cout << "SQL syntax error: COPY table_name FROM 'file' | TO 'file'" << endl;
+        return true;
+    }
+
     // EXPLAIN / EXPLAIN ANALYZE / EXPLAIN FORMAT JSON / EXPLAIN (OPTIONS)
     if (sql.substr(0, 7) == "explain") {
         if (!checkDB(s)) return true;
