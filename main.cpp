@@ -3514,7 +3514,10 @@ bool execute(const string& rawSql, Session& s) {
                             string singleCond = (nextAnd == string::npos)
                                 ? trim(condStr.substr(andPos))
                                 : trim(condStr.substr(andPos, nextAnd - andPos));
-                            if (!singleCond.empty()) conditions.push_back(singleCond);
+                            if (!singleCond.empty()) {
+                                string mc = modifyLogic(singleCond);
+                                if (!mc.empty()) conditions.push_back(mc);
+                            }
                             if (nextAnd == string::npos) break;
                             andPos = nextAnd + 3;
                         }
