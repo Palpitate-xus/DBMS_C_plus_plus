@@ -1,1 +1,0 @@
-select id, name from t_mv where id > 0
