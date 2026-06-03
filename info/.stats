@@ -26,6 +26,9 @@ t_newname id 1|1|1||1:1
 t_normal __rows__ 1||
 t_normal id 1|1|1||1:1
 t_normal region 1|us|us||1:us
+t_parent __rows__ 3||
+t_parent amount 3|1200|500||1:1200;1:1800;1:500
+t_parent id 3|120|50||1:120;1:180;1:50
 t_reusername __rows__ 0||
 t_reusername name 1|alice|alice||1:alice
 t_ro __rows__ 1||

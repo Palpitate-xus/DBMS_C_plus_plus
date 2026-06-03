@@ -3657,6 +3657,47 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "SQL syntax error: CTAS requires SELECT" << endl;
                 return true;
             }
+            // Check for PARTITION OF clause (CREATE TABLE pname PARTITION OF parent)
+            size_t poPos = rest.find("partition of");
+            if (poPos != string::npos) {
+                string pname = trim(rest.substr(0, poPos));
+                string afterPo = trim(rest.substr(poPos + 12));
+                size_t sp2 = afterPo.find(' ');
+                string parentName = (sp2 == string::npos) ? afterPo : trim(afterPo.substr(0, sp2));
+                parentName = resolveTableName(s, parentName);
+                if (!g_engine.tableExists(s.currentDB, parentName)) {
+                    cout << "Parent table not found" << endl;
+                    return true;
+                }
+                TableSchema parentTbl = g_engine.getTableSchema(s.currentDB, parentName);
+                if (parentTbl.partitionType == dbms::TableSchema::PartitionType::None) {
+                    cout << "Parent table is not partitioned" << endl;
+                    return true;
+                }
+                string spec = (sp2 == string::npos) ? "" : trim(afterPo.substr(sp2));
+                TableSchema newTbl = parentTbl;
+                newTbl.tablename = pname;
+                newTbl.partitionType = dbms::TableSchema::PartitionType::None;
+                newTbl.partitionKey.clear();
+                newTbl.rangePartitions.clear();
+                newTbl.listPartitions.clear();
+                newTbl.hashPartitions = 0;
+                newTbl.defaultPartitionName.clear();
+                auto res = g_engine.createTable(s.currentDB, newTbl);
+                if (res == OpResult::TableAlreadyExist) {
+                    cout << "Table " << pname << " already exists" << endl;
+                    return true;
+                }
+                res = g_engine.attachPartition(s.currentDB, parentName, pname, spec);
+                if (res != OpResult::Success) {
+                    g_engine.dropTable(s.currentDB, pname);
+                    cout << "Failed to attach partition" << endl;
+                    return true;
+                }
+                cout << "Partition " << pname << " created and attached to " << parentName << endl;
+                return false;
+            }
+
             // Check for PARTITION BY clause
             size_t partPos = sql.find("partition by");
             string colsSql = sql;
