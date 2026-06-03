@@ -6926,11 +6926,43 @@ bool execute(const string& rawSql, Session& s) {
         if (!checkDB(s)) return true;
         string rest = trim(sql.substr(8));
         if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
-        string tname = resolveTableName(s, rest);
+        // Parse options: RESTART IDENTITY, CASCADE
+        bool restartIdentity = (rest.find("restart identity") != string::npos);
+        bool cascade = (rest.find("cascade") != string::npos);
+        // Extract table name (before any options)
+        size_t optPos = rest.find(' ');
+        string tname = rest;
+        if (optPos != string::npos) {
+            tname = trim(rest.substr(0, optPos));
+        }
+        tname = resolveTableName(s, tname);
         auto res = g_engine.truncateTable(s.currentDB, tname);
         if (res == OpResult::TableNotExist) {
             cout << "Table not exist" << endl;
             return true;
+        }
+        if (restartIdentity) {
+            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].isAutoIncrement) {
+                    g_engine.resetSequence(s.currentDB, tname, tbl.cols[i].dataName, 1);
+                }
+            }
+        }
+        if (cascade) {
+            // CASCADE: truncate all tables that have foreign keys referencing this table
+            // Find referencing tables by scanning all table schemas
+            vector<string> allTables = g_engine.getTableNames(s.currentDB);
+            for (const string& otherTname : allTables) {
+                if (otherTname == tname) continue;
+                TableSchema otherTbl = g_engine.getTableSchema(s.currentDB, otherTname);
+                for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                    if (otherTbl.fks[fi].refTable == tname) {
+                        g_engine.truncateTable(s.currentDB, otherTname);
+                        break;
+                    }
+                }
+            }
         }
         cout << "TRUNCATE TABLE " << tname << " completed" << endl;
         log(s.username, "truncate table " + tname, getTime());

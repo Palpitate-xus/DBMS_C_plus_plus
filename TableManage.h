@@ -231,6 +231,9 @@ public:
     std::vector<std::string> getSchemaNames(const std::string& dbname) const;
     std::vector<std::string> getTablesInSchema(const std::string& dbname,
                                                const std::string& schemaname) const;
+    // Sequence reset (for TRUNCATE RESTART IDENTITY)
+    void resetSequence(const std::string& dbname, const std::string& tablename,
+                       const std::string& colname, int64_t val = 1);
 
     // User-defined functions (simple expression-based)
     struct UDFInfo {

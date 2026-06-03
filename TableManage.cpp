@@ -12551,6 +12551,11 @@ void StorageEngine::removeSeq(const std::string& dbname, const std::string& tabl
     }
 }
 
+void StorageEngine::resetSequence(const std::string& dbname, const std::string& tablename,
+                                  const std::string& colname, int64_t val) {
+    writeNextSeq(dbname, tablename, colname, val);
+}
+
 // Auto-VACUUM: trigger vacuum when dead tuple count exceeds threshold
 void StorageEngine::maybeAutoVacuum(const std::string& dbname,
                                     const std::string& tablename) {
