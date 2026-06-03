@@ -1493,72 +1493,98 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd) {
                 ctype = trim(segment.substr(colon + 1));
                 std::transform(ctype.begin(), ctype.end(), ctype.begin(), ::tolower);
             } else {
-                // (col type flags) format
-                parts = tokenize(segment);
-                if (parts.empty()) break;
-                cname = parts[0];
-                if (parts.size() >= 2) {
-                    ctype = parts[1];
+                // (col type flags) format, or (col:type:flags) format with colons
+                size_t firstColon = segment.find(':');
+                if (firstColon != string::npos) {
+                    // (col:type:flags) colon-separated format
+                    cname = trim(segment.substr(0, firstColon));
+                    string rest = trim(segment.substr(firstColon + 1));
+                    size_t secondColon = rest.find(':');
+                    if (secondColon == string::npos) {
+                        ctype = rest;
+                    } else {
+                        ctype = trim(rest.substr(0, secondColon));
+                        string flagsStr = trim(rest.substr(secondColon + 1));
+                        stringstream fs(flagsStr);
+                        string f;
+                        while (getline(fs, f, ':')) {
+                            string tf = trim(f);
+                            if (tf == "0") isNull = false;
+                            if (tf == "1") isPK = true;
+                            if (tf == "pk" || tf == "PK") isPK = true;
+                            if (tf == "unsigned") isUnsigned = true;
+                            if (tf == "unique") isUnique = true;
+                        }
+                    }
                     std::transform(ctype.begin(), ctype.end(), ctype.begin(), ::tolower);
-                    for (size_t i = 2; i < parts.size(); ++i) {
-                        if (parts[i] == "primary") {
-                            if (i + 1 < parts.size() && parts[i + 1] == "key") {
-                                isPK = true; ++i;
-                            }
-                        } else if (parts[i] == "key") {
-                            // handled above
-                        } else if (parts[i] == "not" && i + 1 < parts.size() && parts[i + 1] == "null") {
-                            isNull = false; ++i;
-                        } else if (parts[i] == "0") {
-                            isNull = false;
-                        } else if (parts[i] == "unique") {
-                            isUnique = true;
-                        } else if (parts[i] == "unsigned") {
-                            isUnsigned = true;
-                        } else if (parts[i] == "default" && i + 1 < parts.size()) {
-                            defaultVal = parts[i + 1];
-                            if (defaultVal.size() >= 2 && defaultVal.front() == '\'' && defaultVal.back() == '\'') {
-                                defaultVal = defaultVal.substr(1, defaultVal.size() - 2);
-                            }
-                            ++i;
-                        } else if (parts[i] == "check" && i + 1 < parts.size()) {
-                            // Collect CHECK expression
-                            ++i;
-                            int parenDepth = 0;
-                            std::string expr;
-                            for (; i < parts.size(); ++i) {
-                                if (parts[i] == "(") {
-                                    if (parenDepth > 0) expr += "(";
-                                    ++parenDepth;
-                                } else if (parts[i] == ")") {
-                                    --parenDepth;
-                                    if (parenDepth > 0) expr += ")";
-                                } else {
-                                    expr += parts[i];
+                } else {
+                    // (col type flags) space-separated format (original)
+                    parts = tokenize(segment);
+                    if (parts.empty()) break;
+                    cname = parts[0];
+                    if (parts.size() >= 2) {
+                        ctype = parts[1];
+                        std::transform(ctype.begin(), ctype.end(), ctype.begin(), ::tolower);
+                        for (size_t i = 2; i < parts.size(); ++i) {
+                            if (parts[i] == "primary") {
+                                if (i + 1 < parts.size() && parts[i + 1] == "key") {
+                                    isPK = true; ++i;
                                 }
-                                if (parenDepth == 0 && !expr.empty()) break;
-                            }
-                            // Store normalized expression
-                            checkExpr = normalizeConditionStr(expr);
-                        } else if (parts[i] == "generated" && i + 2 < parts.size() && parts[i + 1] == "always" && parts[i + 2] == "as") {
-                            // GENERATED ALWAYS AS (expr)
-                            i += 3;
-                            int parenDepth = 0;
-                            std::string expr;
-                            for (; i < parts.size(); ++i) {
-                                if (parts[i] == "(") {
-                                    if (parenDepth > 0) expr += "(";
-                                    ++parenDepth;
-                                } else if (parts[i] == ")") {
-                                    --parenDepth;
-                                    if (parenDepth > 0) expr += ")";
-                                } else {
-                                    expr += parts[i];
+                            } else if (parts[i] == "key") {
+                                // handled above
+                            } else if (parts[i] == "not" && i + 1 < parts.size() && parts[i + 1] == "null") {
+                                isNull = false; ++i;
+                            } else if (parts[i] == "0") {
+                                isNull = false;
+                            } else if (parts[i] == "unique") {
+                                isUnique = true;
+                            } else if (parts[i] == "unsigned") {
+                                isUnsigned = true;
+                            } else if (parts[i] == "default" && i + 1 < parts.size()) {
+                                defaultVal = parts[i + 1];
+                                if (defaultVal.size() >= 2 && defaultVal.front() == '\'' && defaultVal.back() == '\'') {
+                                    defaultVal = defaultVal.substr(1, defaultVal.size() - 2);
                                 }
-                                if (parenDepth == 0 && !expr.empty()) break;
+                                ++i;
+                            } else if (parts[i] == "check" && i + 1 < parts.size()) {
+                                // Collect CHECK expression
+                                ++i;
+                                int parenDepth = 0;
+                                std::string expr;
+                                for (; i < parts.size(); ++i) {
+                                    if (parts[i] == "(") {
+                                        if (parenDepth > 0) expr += "(";
+                                        ++parenDepth;
+                                    } else if (parts[i] == ")") {
+                                        --parenDepth;
+                                        if (parenDepth > 0) expr += ")";
+                                    } else {
+                                        expr += parts[i];
+                                    }
+                                    if (parenDepth == 0 && !expr.empty()) break;
+                                }
+                                // Store normalized expression
+                                checkExpr = normalizeConditionStr(expr);
+                            } else if (parts[i] == "generated" && i + 2 < parts.size() && parts[i + 1] == "always" && parts[i + 2] == "as") {
+                                // GENERATED ALWAYS AS (expr)
+                                i += 3;
+                                int parenDepth = 0;
+                                std::string expr;
+                                for (; i < parts.size(); ++i) {
+                                    if (parts[i] == "(") {
+                                        if (parenDepth > 0) expr += "(";
+                                        ++parenDepth;
+                                    } else if (parts[i] == ")") {
+                                        --parenDepth;
+                                        if (parenDepth > 0) expr += ")";
+                                    } else {
+                                        expr += parts[i];
+                                    }
+                                    if (parenDepth == 0 && !expr.empty()) break;
+                                }
+                                // Store generated expression (normalize as condition)
+                                generatedExpr = normalizeConditionStr(expr);
                             }
-                            // Store generated expression (normalize as condition)
-                            generatedExpr = normalizeConditionStr(expr);
                         }
                     }
                 }
@@ -3814,6 +3840,48 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Fulltext index created" << endl;
+            return false;
+        }
+
+        if (sql.substr(7, 4) == "gin " || sql.substr(7, 5) == "gist " || sql.substr(7, 5) == "brin ") {
+            if (!checkAdmin(s)) return true;
+            if (!checkDB(s)) return true;
+            bool isGin = (sql.substr(7, 4) == "gin ");
+            bool isGist = (sql.substr(7, 5) == "gist ");
+            size_t restStart = isGin ? 11 : 12; // after "create gin " or "create gist " / "create brin "
+            string rest = trim(sql.substr(restStart));
+            // Remove "index " prefix if present
+            if (rest.size() >= 6 && rest.substr(0, 6) == "index ") {
+                rest = trim(rest.substr(6));
+            }
+            size_t onPos = rest.find(" on ");
+            if (onPos == string::npos) {
+                cout << "SQL syntax error: CREATE GIN/GiST/BRIN INDEX idx ON t(col)" << endl;
+                return true;
+            }
+            string idxName = trim(rest.substr(0, onPos));
+            string afterOn = trim(rest.substr(onPos + 4));
+            size_t lp = afterOn.find('(');
+            size_t rp = afterOn.find(')');
+            if (lp == string::npos || rp == string::npos || rp <= lp + 1) {
+                cout << "SQL syntax error" << endl;
+                return true;
+            }
+            string tname = resolveTableName(s, trim(afterOn.substr(0, lp)));
+            string colname = trim(afterOn.substr(lp + 1, rp - lp - 1));
+            OpResult res;
+            if (isGin) {
+                res = g_engine.createGinIndex(s.currentDB, tname, colname);
+            } else if (isGist) {
+                res = g_engine.createGiSTIndex(s.currentDB, tname, colname);
+            } else {
+                res = g_engine.createBrinIndex(s.currentDB, tname, colname);
+            }
+            if (res != OpResult::Success) {
+                cout << "Create index failed" << endl;
+                return true;
+            }
+            cout << "Index created" << endl;
             return false;
         }
 
@@ -6962,7 +7030,23 @@ bool execute(const string& rawSql, Session& s) {
             }
             string tnameOrig = tokens[3];
             string tname = resolveTableName(s, tnameOrig);
-            // Try composite index first, then single-column index
+            // Check GIN/GiST/BRIN first (they have explicit has* checks)
+            if (g_engine.hasGinIndex(s.currentDB, tname, name)) {
+                g_engine.dropGinIndex(s.currentDB, tname, name);
+                cout << "Index dropped" << endl;
+                return false;
+            }
+            if (g_engine.hasGiSTIndex(s.currentDB, tname, name)) {
+                g_engine.dropGiSTIndex(s.currentDB, tname, name);
+                cout << "Index dropped" << endl;
+                return false;
+            }
+            if (g_engine.hasBrinIndex(s.currentDB, tname, name)) {
+                g_engine.dropBrinIndex(s.currentDB, tname, name);
+                cout << "Index dropped" << endl;
+                return false;
+            }
+            // Try composite index, single-column index, hash index
             auto res = g_engine.dropCompositeIndex(s.currentDB, tname, name);
             if (res != OpResult::Success) {
                 res = g_engine.dropIndex(s.currentDB, tname, name);
@@ -6986,6 +7070,23 @@ bool execute(const string& rawSql, Session& s) {
             string tname = resolveTableName(s, tokens[4]);
             g_engine.dropFullTextIndex(s.currentDB, tname, idxName);
             cout << "Fulltext index dropped" << endl;
+            return false;
+        }
+        if (op == "gin" || op == "gist" || op == "brin") {
+            if (tokens.size() < 3 || tokens[1] != "index" || tokens.size() < 5 || tokens[3] != "on") {
+                cout << "SQL syntax error: DROP GIN/GiST/BRIN INDEX idx ON t" << endl;
+                return true;
+            }
+            string idxName = tokens[2];
+            string tname = resolveTableName(s, tokens[4]);
+            if (op == "gin") {
+                g_engine.dropGinIndex(s.currentDB, tname, idxName);
+            } else if (op == "gist") {
+                g_engine.dropGiSTIndex(s.currentDB, tname, idxName);
+            } else {
+                g_engine.dropBrinIndex(s.currentDB, tname, idxName);
+            }
+            cout << "Index dropped" << endl;
             return false;
         }
         if (op == "view") {
