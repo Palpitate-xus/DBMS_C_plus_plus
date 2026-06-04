@@ -1,6 +1,7 @@
 #include "TableManage.h"
 #include "TxnIdGenerator.h"
 #include "Config.h"
+#include <cmath>
 
 extern dbms::Config g_config;
 
@@ -526,6 +527,16 @@ Column makeDoubleColumn(const std::string& name, bool isNull, bool isPK) {
     c.isPrimaryKey = isPK;
     c.dataType = "double";
     c.dsize = 8;
+    return c;
+}
+
+Column makePointColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "point";
+    c.dsize = 16;  // two doubles: x, y
     return c;
 }
 
@@ -3101,6 +3112,13 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         if (val == 0.0) return "";
         std::ostringstream oss;
         oss << val;
+        return oss.str();
+    } else if (col.dataType == "point") {
+        double x = 0.0, y = 0.0;
+        std::memcpy(&x, rowBuffer.data() + offset, sizeof(double));
+        std::memcpy(&y, rowBuffer.data() + offset + sizeof(double), sizeof(double));
+        std::ostringstream oss;
+        oss << x << "," << y;
         return oss.str();
     } else if (col.dataType == "boolean") {
         int8_t val = 0;
@@ -6347,6 +6365,43 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         std::string nc = normalizeBool(cond.value);
         if (cond.op == "="  && nv != nc) return false;
         if (cond.op == "!=" && nv == nc) return false;
+    } else if (col.dataType == "point") {
+        // Parse POINT value format: "x,y"
+        auto parsePoint = [](const std::string& s) -> std::pair<double, double> {
+            double x = 0.0, y = 0.0;
+            if (!s.empty()) {
+                size_t comma = s.find(',');
+                if (comma != std::string::npos) {
+                    try { x = std::stod(s.substr(0, comma)); } catch (...) {}
+                    try { y = std::stod(s.substr(comma + 1)); } catch (...) {}
+                }
+            }
+            return {x, y};
+        };
+        auto [px, py] = parsePoint(val);
+        auto [cx, cy] = parsePoint(cond.value);
+        if (cond.op == "=") {
+            if (px != cx || py != cy) return false;
+        } else if (cond.op == "!=") {
+            if (px == cx && py == cy) return false;
+        } else if (cond.op == "<<") {
+            if (!(px < cx)) return false;
+        } else if (cond.op == ">>") {
+            if (!(px > cx)) return false;
+        } else if (cond.op == "<^") {
+            if (!(py < cy)) return false;
+        } else if (cond.op == ">^") {
+            if (!(py > cy)) return false;
+        } else if (cond.op == "<@") {
+            double dx = px - cx, dy = py - cy;
+            double dist = std::sqrt(dx * dx + dy * dy);
+            double radius = std::abs(cy); // radius encoded as y component of cond value
+            if (!(dist <= radius)) return false;
+        } else {
+            // Fallback to string comparison for other operators
+            if (cond.op == "<"  && !(val <  cond.value)) return false;
+            if (cond.op == ">"  && !(val >  cond.value)) return false;
+        }
     } else {
         int64_t num = val.empty() ? INF : parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
@@ -6437,6 +6492,25 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             } else if (col.dataType == "double" || col.dataType == "decimal") {
                 double num = val.empty() ? 0.0 : std::stod(val);
                 std::memcpy(&rowBuffer[offset], &num, sizeof(double));
+            } else if (col.dataType == "point") {
+                double x = 0.0, y = 0.0;
+                if (!val.empty()) {
+                    std::string clean = val;
+                    // Strip POINT( prefix and ) suffix
+                    if (clean.size() > 6 && clean.substr(0, 6) == "point(") {
+                        clean = clean.substr(6);
+                        if (!clean.empty() && clean.back() == ')') clean.pop_back();
+                    } else if (clean.front() == '(' && clean.back() == ')') {
+                        clean = clean.substr(1, clean.size() - 2);
+                    }
+                    size_t comma = clean.find(',');
+                    if (comma != std::string::npos) {
+                        try { x = std::stod(trim(clean.substr(0, comma))); } catch (...) {}
+                        try { y = std::stod(trim(clean.substr(comma + 1))); } catch (...) {}
+                    }
+                }
+                std::memcpy(&rowBuffer[offset], &x, sizeof(double));
+                std::memcpy(&rowBuffer[offset + sizeof(double)], &y, sizeof(double));
             } else if (col.dataType == "boolean") {
                 int8_t bval = val.empty() ? INT8_MIN :
                     (val == "1" || val == "true" || val == "TRUE") ? 1 :
@@ -6862,7 +6936,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
@@ -7195,6 +7269,21 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         if (s.size() >= 8 && s.substr(0, 8) == "overlaps") {
             c.op = "overlaps";
             c.colName = trim(s.substr(8));
+            conds.push_back(c);
+            continue;
+        }
+        // Handle SP-GiST spatial operators: <<, >>, <^, >^, <@
+        // Format: operator_colname value (e.g., "<<loc 5.0,0.0")
+        if (s.size() >= 4 && (s.substr(0, 2) == "<<" || s.substr(0, 2) == ">>" ||
+                               s.substr(0, 2) == "<^" || s.substr(0, 2) == ">^" ||
+                               s.substr(0, 2) == "<@")) {
+            c.op = s.substr(0, 2);
+            size_t sp = s.find(' ', 2);
+            if (sp == std::string::npos) continue;
+            c.colName = s.substr(2, sp - 2);
+            c.value = s.substr(sp + 1);
+            if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
+                c.value = c.value.substr(1, c.value.size() - 2);
             conds.push_back(c);
             continue;
         }

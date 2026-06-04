@@ -37,6 +37,7 @@ using dbms::makeJsonColumn;
 using dbms::makeJsonbColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
+using dbms::makePointColumn;
 using dbms::makeDecimalColumn;
 using dbms::makeBooleanColumn;
 using dbms::makeUuidColumn;
@@ -523,7 +524,7 @@ static string sqlProcessor(string raw) {
 // ========================================================================
 static string normalizeCaseCondition(string s) {
     s = trim(s);
-    static const char* ops[] = {">=", "<=", "!=", "<>", ">", "<", "="};
+    static const char* ops[] = {"<<", ">>", "<^", ">^", "<@", ">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
         size_t len = strlen(op);
         size_t pos = s.find(op);
@@ -1000,7 +1001,7 @@ static vector<string> splitValues(const string& s) {
 }
 
 static string normalizeConditionStr(string s) {
-    static const char* ops[] = {">=", "<=", "!=", "<>", ">", "<", "="};
+    static const char* ops[] = {"<<", ">>", "<^", ">^", "<@", ">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
         size_t len = strlen(op);
         size_t pos = 0;
@@ -1274,6 +1275,13 @@ static string modifyLogic(const string& logic) {
                     (logic[i] == '>' && logic[i + 1] == '=') ||
                     (logic[i] == '!' && logic[i + 1] == '=') ||
                     (logic[i] == '<' && logic[i + 1] == '>')) {
+                    opLen = 2;
+                }
+            }
+            // Spatial operators: <<, >>, <^, >^, <@
+            if (i + 1 < logic.size() && opLen == 1) {
+                if ((logic[i] == '<' && (logic[i + 1] == '<' || logic[i + 1] == '^' || logic[i + 1] == '@')) ||
+                    (logic[i] == '>' && (logic[i + 1] == '>' || logic[i + 1] == '^'))) {
                     opLen = 2;
                 }
             }
@@ -2000,6 +2008,9 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                 colCreated = true;
             } else if (ctype.substr(0, 6) == "double" || ctype.substr(0, 5) == "money") {
                 col = makeDoubleColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 5) == "point") {
+                col = makePointColumn(cname, isNull, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 7) == "decimal") {
                 int prec = 10, sc = 0;
