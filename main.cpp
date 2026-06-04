@@ -5137,6 +5137,62 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Schema " << oldName << " renamed to " << newName << endl;
             return false;
         }
+        if (tokens[0] == "view") {
+            // ALTER VIEW viewname RENAME TO newname
+            // ALTER VIEW viewname SET SCHEMA dbname
+            if (!checkDB(s)) return true;
+            if (tokens.size() < 5) {
+                cout << "SQL syntax error: ALTER VIEW name RENAME TO newname / SET SCHEMA dbname" << endl;
+                return true;
+            }
+            string vname = tokens[1];
+            // Resolve schema-qualified view name
+            size_t dotPos = vname.find('.');
+            string actualVname = (dotPos != string::npos) ? vname.substr(dotPos + 1) : vname;
+            if (tokens[2] == "rename" && tokens[3] == "to") {
+                string newName = tokens[4];
+                if (!g_engine.viewExists(s.currentDB, actualVname)) {
+                    cout << "View " << actualVname << " not exist" << endl;
+                    return true;
+                }
+                if (g_engine.viewExists(s.currentDB, newName)) {
+                    cout << "View " << newName << " already exists" << endl;
+                    return true;
+                }
+                // Read view SQL, drop old, create new with new name
+                string viewSql = g_engine.getViewSQL(s.currentDB, actualVname);
+                string checkOpt = g_engine.getViewCheckOption(s.currentDB, actualVname);
+                g_engine.dropView(s.currentDB, actualVname);
+                auto res = g_engine.createView(s.currentDB, newName, viewSql);
+                if (res != OpResult::Success) {
+                    // Restore old view
+                    g_engine.createView(s.currentDB, actualVname, viewSql);
+                    cout << "Rename view failed" << endl;
+                    return true;
+                }
+                cout << "View renamed" << endl;
+                return false;
+            }
+            if (tokens[2] == "set" && tokens[3] == "schema") {
+                string targetDb = tokens[4];
+                if (!g_engine.databaseExists(targetDb)) {
+                    cout << "Database " << targetDb << " not exist" << endl;
+                    return true;
+                }
+                string viewSql = g_engine.getViewSQL(s.currentDB, actualVname);
+                g_engine.dropView(s.currentDB, actualVname);
+                auto res = g_engine.createView(targetDb, actualVname, viewSql);
+                if (res != OpResult::Success) {
+                    g_engine.createView(s.currentDB, actualVname, viewSql);
+                    cout << "Set schema failed" << endl;
+                    return true;
+                }
+                cout << "View schema changed" << endl;
+                return false;
+            }
+            cout << "SQL syntax error: ALTER VIEW name RENAME TO newname / SET SCHEMA dbname" << endl;
+            return true;
+        }
         if (!checkDB(s)) return true;
         if (tokens.size() < 4 || tokens[0] != "table") {
             cout << "SQL syntax error" << endl;
