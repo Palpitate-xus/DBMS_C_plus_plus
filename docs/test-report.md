@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
-> 测试日期：2026-06-03
-> 测试版本：master (GiST/GIN/BRIN 实现后)
+> 测试日期：2026-06-04
+> 测试版本：master (POINT 类型 + ALTER VIEW 实现后)
 > 测试依据：[commandsList.md](commandsList.md)
 > 测试方式：交互式 CLI 逐条验证
 
@@ -21,9 +21,9 @@
 |--------|----------|------|------|------|
 | 认证与连接 | 2 | 2 | 0 | — |
 | DDL - 数据库 | 3 | 3 | 0 | — |
-| DDL - 表 | 9 | 9 | 0 | 含 CTAS / RENAME |
+| DDL - 表 | 12 | 12 | 0 | 含 CTAS / RENAME / POINT 类型 / 空间运算符 |
 | DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST 均通过 |
-| DDL - 视图 | 3 | 3 | 0 | — |
+| DDL - 视图 | 5 | 5 | 0 | 含 ALTER VIEW RENAME TO / SET SCHEMA |
 | DDL - 触发器 | 2 | 2 | 0 | — |
 | DDL - 用户/角色 | 4 | 4 | 0 | — |
 | DML - INSERT | 4 | 4 | 0 | 含省略列名 |
@@ -36,7 +36,7 @@
 | 工具命令 | 8 | 8 | 0 | — |
 | 分区管理 | 3 | 3 | 0 | Range/List/Hash + ATTACH/DETACH |
 | 高级特性 | 2 | 2 | 0 | NOTIFY/LISTEN, RLS |
-| **合计** | **59** | **59** | **0** | — |
+| **合计** | **68** | **68** | **0** | — |
 
 ---
 
@@ -221,6 +221,51 @@ CREATE TABLE t4 AS SELECT id, name FROM t1 WHERE id = 1;
 
 ---
 
+### 3.10 CREATE TABLE with POINT type
+
+**输入**
+```sql
+CREATE TABLE geo_points (id:int:0:1, loc:point:0);
+```
+
+**实际结果** ✅ `Table create succeeded`
+
+---
+
+### 3.11 INSERT POINT values
+
+**输入**
+```sql
+INSERT INTO geo_points (id, loc) VALUES (1, '0.0,0.0');
+INSERT INTO geo_points (id, loc) VALUES (2, '10.0,10.0');
+INSERT INTO geo_points (id, loc) VALUES (3, '20.0,5.0');
+INSERT INTO geo_points (id, loc) VALUES (4, '-5.0,15.0');
+```
+
+**实际结果** ✅ 全部 `1 row(s) inserted`
+
+---
+
+### 3.12 SELECT with spatial operators
+
+**输入**
+```sql
+SELECT * FROM geo_points WHERE loc << '15.0,15.0';   -- left of
+SELECT * FROM geo_points WHERE loc >> '15.0,15.0';   -- right of
+SELECT * FROM geo_points WHERE loc <^ '15.0,15.0';   -- below
+SELECT * FROM geo_points WHERE loc >^ '15.0,15.0';   -- above
+SELECT * FROM geo_points WHERE loc <@ '10.0,10.0,5.0'; -- within circle
+```
+
+**实际结果** ✅
+- `<<` 返回 x < 15 的点（id 1, 2, 4）
+- `>>` 返回 x > 15 的点（id 3）
+- `<^` 返回 y < 15 的点（id 1, 2, 3）
+- `>^` 返回 y > 15 的点（无）
+- `<@` 返回圆内点（id 2，中心 (10,10) 半径 5）
+
+---
+
 ## 4. DDL - 索引管理
 
 ### 4.1 CREATE INDEX (B+Tree)
@@ -354,6 +399,33 @@ DROP VIEW v1;
 ```
 
 **实际结果** ✅ `View dropped`
+
+---
+
+### 5.4 ALTER VIEW RENAME TO
+
+**输入**
+```sql
+CREATE VIEW v1 AS SELECT id, name FROM t1 WHERE id > 0;
+ALTER VIEW v1 RENAME TO v2;
+SELECT * FROM v2;
+```
+
+**实际结果** ✅ `View renamed`，v2 可正常查询并返回数据
+
+---
+
+### 5.5 ALTER VIEW SET SCHEMA
+
+**输入**
+```sql
+ALTER VIEW v2 SET SCHEMA other_db;
+USE DATABASE other_db;
+SELECT * FROM v2;
+```
+
+**实际结果** ✅ `View schema changed`
+> 注：视图定义中的基表名未带数据库限定，若目标数据库中不存在同名基表，查询会报错。此为已知限制。
 
 ---
 
@@ -717,15 +789,16 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖 58 项核心功能，**全部通过**。系统在以下方面表现稳定：
+本次测试覆盖 68 项核心功能，**全部通过**。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
-- ✅ 索引系统（B+Tree/Hash/FullText/GIN/GiST/BRIN/**SP-GiST**）
-- ✅ 视图与触发器
+- ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
+- ✅ 索引系统（B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST）
+- ✅ 视图与触发器（含 ALTER VIEW RENAME TO / SET SCHEMA）
 - ✅ 事务控制（BEGIN/COMMIT/ROLLBACK/SAVEPOINT）
 - ✅ 权限管理（GRANT/REVOKE）
 - ✅ 分区管理（Range/List/Hash + ATTACH/DETACH）
-- ✅ 查询能力（JOIN/UNION/GROUP BY/窗口函数/CTE）
+- ✅ 查询能力（JOIN/UNION/GROUP BY/窗口函数/CTE/LATERAL）
 - ✅ 工具命令（SHOW/EXPLAIN/ANALYZE/VACUUM/CHECKPOINT）
 - ✅ INSERT 省略列名 / ALTER RENAME / CREATE TABLE AS SELECT
 
@@ -733,5 +806,5 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ---
 
-*报告生成时间：2026-06-03*
+*报告生成时间：2026-06-04*
 *测试执行人：自动化测试脚本 + 人工验证*

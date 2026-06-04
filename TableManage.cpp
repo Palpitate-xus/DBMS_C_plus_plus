@@ -6393,9 +6393,22 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         } else if (cond.op == ">^") {
             if (!(py > cy)) return false;
         } else if (cond.op == "<@") {
-            double dx = px - cx, dy = py - cy;
+            // contained within circle: "cx,cy,radius"
+            double cx2 = 0, cy2 = 0, radius = 0;
+            std::string v = cond.value;
+            if (v.size() >= 2 && v.front() == '\'' && v.back() == '\'')
+                v = v.substr(1, v.size() - 2);
+            size_t c1 = v.find(',');
+            size_t c2 = v.rfind(',');
+            if (c1 != std::string::npos && c2 != std::string::npos && c2 > c1) {
+                try {
+                    cx2 = std::stod(v.substr(0, c1));
+                    cy2 = std::stod(v.substr(c1 + 1, c2 - c1 - 1));
+                    radius = std::stod(v.substr(c2 + 1));
+                } catch (...) {}
+            }
+            double dx = px - cx2, dy = py - cy2;
             double dist = std::sqrt(dx * dx + dy * dy);
-            double radius = std::abs(cy); // radius encoded as y component of cond value
             if (!(dist <= radius)) return false;
         } else {
             // Fallback to string comparison for other operators
