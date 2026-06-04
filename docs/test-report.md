@@ -22,7 +22,7 @@
 | 认证与连接 | 2 | 2 | 0 | — |
 | DDL - 数据库 | 3 | 3 | 0 | — |
 | DDL - 表 | 9 | 9 | 0 | 含 CTAS / RENAME |
-| DDL - 索引 | 6 | 6 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN 均通过 |
+| DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST 均通过 |
 | DDL - 视图 | 3 | 3 | 0 | — |
 | DDL - 触发器 | 2 | 2 | 0 | — |
 | DDL - 用户/角色 | 4 | 4 | 0 | — |
@@ -36,7 +36,7 @@
 | 工具命令 | 8 | 8 | 0 | — |
 | 分区管理 | 3 | 3 | 0 | Range/List/Hash + ATTACH/DETACH |
 | 高级特性 | 2 | 2 | 0 | NOTIFY/LISTEN, RLS |
-| **合计** | **58** | **58** | **0** | — |
+| **合计** | **59** | **59** | **0** | — |
 
 ---
 
@@ -289,7 +289,24 @@ CREATE BRIN INDEX idx_brin ON t1(id);
 
 ---
 
-### 4.7 DROP INDEX
+### 4.7 CREATE SPGIST INDEX
+
+**输入**
+```sql
+CREATE TABLE locations (id INT PRIMARY KEY, pos CHAR(20));
+INSERT INTO locations VALUES (1, '0.0,0.0');
+INSERT INTO locations VALUES (2, '10.0,10.0');
+INSERT INTO locations VALUES (3, '20.0,20.0');
+INSERT INTO locations VALUES (4, '-5.0,5.0');
+CREATE SPGIST INDEX idx_spg ON locations(pos);
+SELECT * FROM locations;
+```
+
+**实际结果** ✅ 四叉树空间索引创建成功，查询返回 4 行坐标数据
+
+---
+
+### 4.8 DROP INDEX
 
 **输入**
 ```sql
@@ -703,7 +720,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 本次测试覆盖 58 项核心功能，**全部通过**。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
-- ✅ 索引系统（B+Tree/Hash/FullText/**GIN/GiST/BRIN**）
+- ✅ 索引系统（B+Tree/Hash/FullText/GIN/GiST/BRIN/**SP-GiST**）
 - ✅ 视图与触发器
 - ✅ 事务控制（BEGIN/COMMIT/ROLLBACK/SAVEPOINT）
 - ✅ 权限管理（GRANT/REVOKE）
