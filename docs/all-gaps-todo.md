@@ -60,7 +60,7 @@ NetworkServer 多客户端并发时互相覆盖，是严重安全漏洞。
 
 - [x] Step 3.1: `ExecutionPlan.h/cpp` 新增 `HashJoinOp` 算子（右表驻内存哈希表）
 - [x] Step 3.2: `ExecutionPlan.h/cpp` 新增 `MergeJoinOp` 算子（双指针线性扫描）
- [ ] Step 3.3: `buildJoinPlan` 根据统计信息自动选择 JOIN 算法
+- [x] Step 3.3: `buildJoinPlan` 根据统计信息自动选择 JOIN 算法
   - 小表（< 100 行）→ NestedLoopJoin
   - 两表都大，无序 → HashJoin
   - 两表都大，join key 有索引/已排序 → MergeJoin
@@ -108,7 +108,7 @@ NetworkServer 多客户端并发时互相覆盖，是严重安全漏洞。
 
 ## Batch 6: 剩余 TOP20 Gaps
 
-TOP20 当前完成度 16/20，剩余 4 项：
+TOP20 当前完成度 14/20，剩余 6 项：
 
 | # | 功能 | 难度 | 计划 |
 |---|------|------|------|
@@ -138,7 +138,7 @@ TOP20 当前完成度 16/20，剩余 4 项：
 - [x] ALTER TABLE ENABLE/DISABLE TRIGGER
 - [x] CREATE TABLE AS SELECT
 - [x] CREATE TABLE ... PARTITION OF（声明式分区独立语法）
-- [ ] SUBPARTITION（子分区）
+- [x] SUBPARTITION（子分区）
 - [x] DEFAULT PARTITION
 - [x] TRUNCATE ... CASCADE / RESTART IDENTITY
 - [x] COMMENT ON
@@ -152,9 +152,9 @@ TOP20 当前完成度 16/20，剩余 4 项：
 - [ ] XML
 - [ ] pg_lsn
 - [ ] tsvector / tsquery（PG 风格全文搜索类型）
-- [ ] 组合类型 (ROW 类型)
-- [ ] DOMAIN (CREATE DOMAIN)
-- [ ] 自定义类型 (CREATE TYPE)
+- [x] 组合类型 (ROW 类型)
+- [x] DOMAIN (CREATE DOMAIN)
+- [x] 自定义类型 (CREATE TYPE)
 
 ### 约束
 - [ ] DEFERRABLE / INITIALLY DEFERRED
@@ -162,8 +162,8 @@ TOP20 当前完成度 16/20，剩余 4 项：
 - [ ] CREATE ASSERTION
 
 ### 索引
-- [ ] CREATE INDEX CONCURRENTLY
-- [ ] SP-GiST 索引
+- [x] CREATE INDEX CONCURRENTLY
+- [x] SP-GiST 索引
 
 ### DML
 - [x] INSERT INTO t1 VALUES (...)（省略列名）
@@ -180,9 +180,9 @@ TOP20 当前完成度 16/20，剩余 4 项：
 ### 事务/MVCC
 - [x] SET TRANSACTION READ ONLY（只读事务显式声明）
 - [ ] 子事务（SAVEPOINT 已支持，需完善嵌套）
-- [ ] 两阶段提交 PREPARED / ROLLBACK PREPARED（已部分支持）
+- [x] 两阶段提交 PREPARED / ROLLBACK PREPARED（已完整支持）
 - [x] LOCK TABLE 命令
-- [ ] Advisory Locks (pg_advisory_lock)
+- [x] Advisory Locks (pg_advisory_lock)
 - [x] ALTER TABLE ... ENABLE ROW LEVEL SECURITY（FORCE 已支持）
 
 ### 存储引擎
@@ -192,9 +192,9 @@ TOP20 当前完成度 16/20，剩余 4 项：
 - [ ] 透明数据加密 (TDE)
 
 ### 视图
-- [ ] INSTEAD OF 触发器（视图可更新）
-- [ ] WITH LOCAL/CASCADED CHECK OPTION
-- [ ] MATERIALIZED VIEW CONCURRENTLY（增量刷新）
+- [x] INSTEAD OF 触发器（视图可更新）
+- [x] WITH LOCAL/CASCADED CHECK OPTION
+- [x] MATERIALIZED VIEW CONCURRENTLY（增量刷新）
 
 ### 触发器
 - [ ] 触发器诊断变量

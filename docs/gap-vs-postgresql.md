@@ -28,29 +28,29 @@
 | CREATE TABLE | ✅ | ✅ | 支持广泛的数据类型和约束 |
 | CREATE TEMPORARY TABLE | ✅ | ✅ | 会话级临时表 |
 | CREATE UNLOGGED TABLE | ✅ | ✅ | — |
-| CREATE TABLE AS | ❌ | ✅ | 不支持 `CREATE TABLE ... AS SELECT` |
+| CREATE TABLE AS | ✅ | ✅ | 支持 `CREATE TABLE ... AS SELECT` |
 | CREATE TABLE ... PARTITION BY | ✅ | ✅ | Range/List/Hash |
-| CREATE TABLE ... PARTITION OF | ❌ | ✅ | **声明式分区仅通过子句**，不支持独立 `PARTITION OF` |
+| CREATE TABLE ... PARTITION OF | ✅ | ✅ | 声明式分区独立语法 |
 | ATTACH/DETACH PARTITION | ✅ | ✅ | 支持 Range/List/Hash 分区 ATTACH/DETACH |
-| SUBPARTITION（子分区） | ❌ | ✅ | 仅支持单层分区 |
-| DEFAULT PARTITION | ❌ | ✅ | 缺失 |
+| SUBPARTITION（子分区） | ✅ | ✅ | 两级子分区 (HASH) |
+| DEFAULT PARTITION | ✅ | ✅ | LIST 分区支持 DEFAULT PARTITION |
 | DROP TABLE | ✅ | ✅ | — |
 | ALTER TABLE ADD COLUMN | ✅ | ✅ | — |
 | ALTER TABLE DROP COLUMN | ✅ | ✅ | — |
 | ALTER TABLE ALTER COLUMN TYPE | ✅ | ✅ | — |
-| ALTER TABLE RENAME COLUMN | ❌ | ✅ | **不支持 RENAME** |
-| ALTER TABLE RENAME TO | ❌ | ✅ | **不支持表重命名** |
-| ALTER TABLE SET SCHEMA | ❌ | ✅ | 无 Schema 概念 |
-| ALTER TABLE ALTER COLUMN SET DEFAULT | ❌ | ✅ | 仅 CREATE 时支持 DEFAULT |
-| ALTER TABLE ALTER COLUMN DROP DEFAULT | ❌ | ✅ | — |
-| ALTER TABLE ALTER COLUMN SET NOT NULL | ❌ | ✅ | — |
-| ALTER TABLE ALTER COLUMN DROP NOT NULL | ❌ | ✅ | — |
-| ALTER TABLE ADD CONSTRAINT | ❌ | ✅ | 约束仅在 CREATE 时定义 |
-| ALTER TABLE DROP CONSTRAINT | ❌ | ✅ | — |
-| ALTER TABLE ENABLE/DISABLE TRIGGER | ❌ | ✅ | — |
+| ALTER TABLE RENAME COLUMN | ✅ | ✅ | — |
+| ALTER TABLE RENAME TO | ✅ | ✅ | — |
+| ALTER TABLE SET SCHEMA | ✅ | ✅ | 跨数据库移动表 |
+| ALTER TABLE ALTER COLUMN SET DEFAULT | ✅ | ✅ | — |
+| ALTER TABLE ALTER COLUMN DROP DEFAULT | ✅ | ✅ | — |
+| ALTER TABLE ALTER COLUMN SET NOT NULL | ✅ | ✅ | — |
+| ALTER TABLE ALTER COLUMN DROP NOT NULL | ✅ | ✅ | — |
+| ALTER TABLE ADD CONSTRAINT | ✅ | ✅ | CHECK / UNIQUE / FK 约束 |
+| ALTER TABLE DROP CONSTRAINT | ✅ | ✅ | — |
+| ALTER TABLE ENABLE/DISABLE TRIGGER | ✅ | ✅ | 持久化触发器状态 |
 | TRUNCATE TABLE | ✅ | ✅ | — |
-| TRUNCATE ... CASCADE / RESTART IDENTITY | ❌ | ✅ | — |
-| COMMENT ON | ❌ | ✅ | **无对象注释系统** |
+| TRUNCATE ... CASCADE / RESTART IDENTITY | ✅ | ✅ | — |
+| COMMENT ON | ✅ | ✅ | 表/列注释 |
 
 ---
 
@@ -83,17 +83,17 @@
 | ARRAY | ✅ | ✅ | `INT[]`, `VARCHAR[]` |
 | ENUM | ✅ | ✅ | 通过列定义中的 ENUM values |
 | SERIAL / AUTO_INCREMENT | ✅ | ✅ | 伪类型 → 自动分配序列值 |
-| SERIAL4 / BIGSERIAL | ❌ | ✅ | — |
-| GENERATED AS IDENTITY | ❌ | ✅ | **无 SQL 标准标识列**，仅 SERIAL |
+| SERIAL4 / BIGSERIAL | ✅ | ✅ | — |
+| GENERATED AS IDENTITY | ✅ | ✅ | 支持 GENERATED ALWAYS/BY DEFAULT |
 | 范围类型 (int4range, tsrange 等) | ❌ | ✅ | **完全缺失** |
 | 几何类型 (POINT, POLYGON 等) | ❌ | ✅ | **完全缺失** |
 | 网络类型 (INET, CIDR, MACADDR) | ❌ | ✅ | **完全缺失** |
 | XML | ❌ | ✅ | — |
 | pg_lsn | ❌ | ✅ | 无 LSN 概念 |
 | tsvector / tsquery | ❌ | ✅ | **PG 全文搜索类型缺失** |
-| 组合类型 (ROW 类型) | ❌ | ✅ | **缺失** |
-| DOMAIN (CREATE DOMAIN) | ❌ | ✅ | **缺失** |
-| 自定义类型 (CREATE TYPE) | ❌ | ✅ | **缺失** |
+| 组合类型 (ROW 类型) | ✅ | ✅ | — |
+| DOMAIN (CREATE DOMAIN) | ✅ | ✅ | — |
+| 自定义类型 (CREATE TYPE) | ✅ | ✅ | 支持 `CREATE TYPE name AS (...)` |
 
 ---
 
@@ -129,11 +129,11 @@
 | 覆盖索引 / INCLUDE 列 | ✅ | ✅ | — |
 | 索引排序 (ASC/DESC) | ✅ | ✅ | — |
 | REINDEX | ✅ | ✅ | — |
-| CREATE INDEX CONCURRENTLY | ❌ | ✅ | **无并发索引创建** |
+| CREATE INDEX CONCURRENTLY | ✅ | ✅ | 支持 CONCURRENTLY 并发索引创建 |
 | GiST 索引 | ✅ | ✅ | 简化空间/范围索引，支持 overlap/contained-by 查询 |
 | GIN 索引 | ✅ | ✅ | 倒排索引，支持 text/json/array 多键查询 |
 | BRIN 索引 | ✅ | ✅ | 块范围索引，per-block min/max 摘要加速范围查询 |
-| SP-GiST 索引 | ❌ | ✅ | — |
+| SP-GiST 索引 | ✅ | ✅ | 四叉树空间索引，支持 POINT 类型的空间查询 |
 | 自定义索引方法 | ❌ | ✅ | — |
 | Bitmap 索引 | ❌ | ❌ | PG 也没有（Oracle 有），不要求 |
 | 并行索引扫描 | ❌ | ✅ | — |
@@ -160,7 +160,7 @@
 | DELETE ... RETURNING | ✅ | ✅ | — |
 | DELETE ... LIMIT | ✅ | ❌ | PG 无 LIMIT |
 | SELECT FOR UPDATE / SHARE | ✅ | ✅ | 含 NOWAIT / SKIP LOCKED |
-| COPY ... FROM/TO | ❌ | ✅ | **无批量 COPY 协议**，有 LOAD DATA INFILE（MySQL 风格） |
+| COPY ... FROM/TO | ✅ | ✅ | 批量 CSV COPY 协议 |
 | \\copy (psql 客户端命令) | ❌ | ✅ | 无 psql 客户端 |
 
 ---
@@ -273,7 +273,7 @@
 | WAL 归档 | ✅ | ✅ | — |
 | Checkpoint | ✅ | ✅ | 含自动 checkpoint |
 | PREPARE TRANSACTION（两阶段提交） | ✅ | ✅ | 支持 PREPARE TRANSACTION / COMMIT PREPARED / ROLLBACK PREPARED |
-| COMMIT PREPARED / ROLLBACK PREPARED | ❌ | ✅ | — |
+| COMMIT PREPARED / ROLLBACK PREPARED | ✅ | ✅ | — |
 | 嵌套事务 | ❌ | ⚠️ | PG 也不直接支持（SAVEPOINT 等效） |
 | 自治事务 | ❌ | ⚠️ | PG 也不直接支持 |
 
@@ -294,8 +294,8 @@
 | 死锁检测（等待图） | ✅ | ✅ | — |
 | lock_timeout 设置 | ✅ | ✅ | — |
 | deadlock_timeout 设置 | ✅ | ✅ | — |
-| LOCK TABLE 命令 | ❌ | ✅ | **缺失** |
-| Advisory Locks (pg_advisory_lock) | ❌ | ✅ | **缺失** |
+| LOCK TABLE 命令 | ✅ | ✅ | — |
+| Advisory Locks (pg_advisory_lock) | ✅ | ✅ | 支持 exclusive/shared advisory locks |
 | 行级安全策略 (RLS) | ✅ | ✅ | 支持 CREATE/DROP POLICY，ENABLE ROW LEVEL SECURITY，FOR ALL/SELECT/UPDATE/DELETE 策略，透明集成到 query/update/remove |
 | ALTER TABLE ... ENABLE ROW LEVEL SECURITY | ❌ | ✅ | — |
 
@@ -334,11 +334,11 @@
 | CREATE OR REPLACE VIEW | ✅ | ✅ | — |
 | ALTER VIEW | ❌ | ✅ | — |
 | 可更新视图 | ✅ | ✅ | — |
-| WITH CHECK OPTION | ❌ | ✅ | **缺失** |
-| WITH LOCAL/CASCADED CHECK OPTION | ❌ | ✅ | — |
+| WITH CHECK OPTION | ✅ | ✅ | — |
+| WITH LOCAL/CASCADED CHECK OPTION | ✅ | ✅ | — |
 | 物化视图 (CREATE MATERIALIZED VIEW) | ✅ | ✅ | — |
-| REFRESH MATERIALIZED VIEW | ✅ | ✅ | 仅全量刷新 |
-| REFRESH MATERIALIZED VIEW CONCURRENTLY | ❌ | ✅ | **缺失**（无增量刷新） |
+| REFRESH MATERIALIZED VIEW | ✅ | ✅ | 支持全量刷新 |
+| REFRESH MATERIALIZED VIEW CONCURRENTLY | ✅ | ✅ | 支持 CONCURRENTLY 选项 |
 | 物化视图增量刷新 | ❌ | ✅ | — |
 
 ---
@@ -348,7 +348,7 @@
 | 功能 | 本DBMS | PostgreSQL | 差距说明 |
 |------|--------|------------|----------|
 | CREATE TRIGGER (BEFORE/AFTER) | ✅ | ✅ | — |
-| INSTEAD OF 触发器 | ❌ | ✅ | **缺失** |
+| INSTEAD OF 触发器 | ✅ | ✅ | — |
 | 语句级/行级触发器 | ✅ | ✅ | — |
 | OLD/NEW 引用 | ✅ | ✅ | 通过 action string 隐式传递 |
 | TG_* 诊断变量 | ❌ | ✅ | **缺失** |
@@ -359,7 +359,7 @@
 | CREATE RULE | ❌ | ✅ | **PG 重写规则系统完全缺失** |
 | DROP RULE | ❌ | ✅ | — |
 | ALTER TRIGGER | ❌ | ✅ | — |
-| ENABLE/DISABLE TRIGGER | ❌ | ✅ | — |
+| ENABLE/DISABLE TRIGGER | ✅ | ✅ | 持久化触发器启用/禁用状态 |
 
 ---
 
@@ -527,7 +527,7 @@
 | TimescaleDB（时序数据） | ❌ | ✅ | — |
 | Apache AGE（图查询） | ❌ | ✅ | — |
 | pg_cron / 定时任务 | ❌ | ⚠️ | 需扩展 |
-| 表继承 (INHERITS) | ❌ | ✅ | PG 特有，非 SQL 标准 |
+| 表继承 (INHERITS) | ✅ | ✅ | PG 风格表继承，SELECT 自动合并子表行 |
 | NOTIFY / LISTEN（异步通知） | ✅ | ✅ | 支持 `LISTEN channel`, `NOTIFY channel, payload`, `UNLISTEN channel/*` |
 | COPY 协议（客户端批量传输） | ❌ | ✅ | — |
 | 大对象 (Large Objects, lo_*) | ❌ | ✅ | — |
@@ -562,11 +562,11 @@
 
 | 功能域 | 已实现 | 部分实现 | 缺失 | 完成度 |
 |--------|--------|----------|------|--------|
-| DDL | 11 | 1 | 21 | ~33% |
-| 数据类型 | 23 | 1 | 17 | ~56% |
+| DDL | 22 | 0 | 10 | ~69% |
+| 数据类型 | 28 | 1 | 12 | ~68% |
 | 约束 | 7 | 1 | 5 | ~54% |
-| 索引 | 15 | 0 | 7 | ~68% |
-| DML | 12 | 0 | 6 | ~67% |
+| 索引 | 17 | 0 | 5 | ~77% |
+| DML | 13 | 0 | 5 | ~72% |
 | DQL | 41 | 3 | 6 | ~78% |
 | 查询优化器 | 16 | 0 | 16 | ~50% |
 | 事务/MVCC | 13 | 0 | 8 | ~62% |
