@@ -517,8 +517,8 @@ Var Offset Array 每项 (4 bytes):
 - **数据存储为小写**：所有字符串值在存储时会被转换为小写（通过 `toLower()` 预处理），`SELECT 'Hello' → 'hello'`
 - **标量函数不支持独立 SELECT**：`SELECT upper('hello')` 会报语法错误，需用于表列：`SELECT upper(name) FROM users`
 - **`SAVEPOINT` 需要在事务内**：`SAVEPOINT` 命令必须在 `BEGIN` 之后执行，否则返回 "Not in transaction"
-- **`CREATE HASH INDEX` 语法不工作**：请使用 `CREATE INDEX name ON table(col) USING HASH` 代替
-- **`SHOW USERS` / `SHOW ROLES` 尚未实现**：用户信息存储在 `user.dat`，角色存储在数据库目录 `.roles` 文件中
+- **`CREATE HASH INDEX`** ✅ 已实现：`CREATE HASH INDEX name ON table(col)` 创建哈希索引，支持 O(1) 等值查询
+- **`SHOW USERS` / `SHOW ROLES`** ✅ 已实现：`SHOW USERS` 读取 `user.dat` 展示所有用户及权限级别，`SHOW ROLES` 读取 `role.dat` 展示所有角色名称（需 admin 权限）
 
 ## 参考项目
 
