@@ -540,6 +540,26 @@ Column makePointColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeINetColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "inet";
+    c.dsize = 20;  // 1B family + 1B prefix_len + 1B is_cidr + 1B reserved + 16B addr
+    return c;
+}
+
+Column makeCidrColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "cidr";
+    c.dsize = 20;
+    return c;
+}
+
 Column makeDecimalColumn(const std::string& name, bool isNull, int precision, int scale, bool isPK) {
     Column c;
     c.dataName = name;
@@ -3120,6 +3140,25 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         std::ostringstream oss;
         oss << x << "," << y;
         return oss.str();
+    } else if (col.dataType == "inet" || col.dataType == "cidr") {
+        // Format: 1B family | 1B prefix_len | 1B is_cidr | 1B reserved | 16B addr
+        uint8_t family = static_cast<uint8_t>(rowBuffer[offset]);
+        uint8_t prefix = static_cast<uint8_t>(rowBuffer[offset + 1]);
+        std::string addrStr;
+        if (family == 2) {  // IPv4
+            uint8_t a = static_cast<uint8_t>(rowBuffer[offset + 4]);
+            uint8_t b = static_cast<uint8_t>(rowBuffer[offset + 5]);
+            uint8_t c = static_cast<uint8_t>(rowBuffer[offset + 6]);
+            uint8_t d = static_cast<uint8_t>(rowBuffer[offset + 7]);
+            std::ostringstream oss;
+            oss << (int)a << "." << (int)b << "." << (int)c << "." << (int)d;
+            addrStr = oss.str();
+            if (col.dataType == "cidr" || prefix < 32)
+                addrStr += "/" + std::to_string(prefix);
+        } else {
+            return "";  // IPv6 not yet supported
+        }
+        return addrStr;
     } else if (col.dataType == "boolean") {
         int8_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(int8_t));
@@ -6415,6 +6454,62 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (cond.op == "<"  && !(val <  cond.value)) return false;
             if (cond.op == ">"  && !(val >  cond.value)) return false;
         }
+    } else if (col.dataType == "inet" || col.dataType == "cidr") {
+        // Parse INET from string representation: "192.168.1.1" or "192.168.1.0/24"
+        auto parseINet = [](const std::string& s) -> std::tuple<uint8_t, uint8_t, uint32_t> {
+            uint8_t family = 0, prefix = 32;
+            uint32_t addr = 0;
+            std::string clean = s;
+            if (clean.size() >= 2 && clean.front() == '\'' && clean.back() == '\'')
+                clean = clean.substr(1, clean.size() - 2);
+            if (clean.empty()) return {family, prefix, addr};
+            size_t slash = clean.find('/');
+            std::string addrPart = clean;
+            if (slash != std::string::npos) {
+                try { prefix = static_cast<uint8_t>(std::stoi(clean.substr(slash + 1))); }
+                catch (...) { prefix = 32; }
+                addrPart = clean.substr(0, slash);
+            }
+            int a = 0, b = 0, c = 0, d = 0;
+            if (sscanf(addrPart.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
+                family = 2;
+                addr = (static_cast<uint32_t>(a) << 24) |
+                       (static_cast<uint32_t>(b) << 16) |
+                       (static_cast<uint32_t>(c) << 8) |
+                        static_cast<uint32_t>(d);
+            }
+            return {family, prefix, addr};
+        };
+        auto [vfam, vpref, vaddr] = parseINet(val);
+        auto [cfam, cpref, caddr] = parseINet(cond.value);
+        if (vfam == 0 || cfam == 0) return false;
+        if (cond.op == "=") {
+            if (vaddr != caddr || vpref != cpref) return false;
+        } else if (cond.op == "!=") {
+            if (vaddr == caddr && vpref == cpref) return false;
+        } else if (cond.op == "<<") {
+            // subnet of: this network is contained within the given network
+            // Given network must have smaller or equal prefix (be a supernet)
+            if (cpref > vpref) return false;
+            uint32_t mask = (cpref == 0) ? 0 : (0xFFFFFFFF << (32 - cpref));
+            if ((vaddr & mask) != (caddr & mask)) return false;
+        } else if (cond.op == ">>") {
+            // contains: this network contains the given network
+            if (vpref > cpref) return false;
+            uint32_t mask = (vpref == 0) ? 0 : (0xFFFFFFFF << (32 - vpref));
+            if ((vaddr & mask) != (caddr & mask)) return false;
+        } else if (cond.op == "&&") {
+            // overlap: two networks share any addresses
+            uint32_t vmask = (vpref == 0) ? 0 : (0xFFFFFFFF << (32 - vpref));
+            uint32_t cmask = (cpref == 0) ? 0 : (0xFFFFFFFF << (32 - cpref));
+            uint32_t vnet = vaddr & vmask;
+            uint32_t cnet = caddr & cmask;
+            uint32_t vbroad = vaddr | ~vmask;
+            uint32_t cbroad = caddr | ~cmask;
+            if (vnet > cbroad || cnet > vbroad) return false;
+        } else {
+            return false;
+        }
     } else {
         int64_t num = val.empty() ? INF : parseInt(val);
         int64_t cmp = StorageEngine::parseInt(cond.value);
@@ -6524,6 +6619,34 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 }
                 std::memcpy(&rowBuffer[offset], &x, sizeof(double));
                 std::memcpy(&rowBuffer[offset + sizeof(double)], &y, sizeof(double));
+            } else if (col.dataType == "inet" || col.dataType == "cidr") {
+                // Parse IPv4 address with optional prefix: "192.168.1.1" or "192.168.1.0/24"
+                uint8_t family = 0, prefix = 32;
+                uint8_t addr[16] = {0};
+                if (!val.empty()) {
+                    std::string addrPart = val;
+                    // Extract prefix if present
+                    size_t slash = addrPart.find('/');
+                    if (slash != std::string::npos) {
+                        try { prefix = static_cast<uint8_t>(std::stoi(addrPart.substr(slash + 1))); }
+                        catch (...) { prefix = 32; }
+                        addrPart = addrPart.substr(0, slash);
+                    }
+                    // Parse IPv4 dotted-decimal
+                    int a = 0, b = 0, c = 0, d = 0;
+                    if (sscanf(addrPart.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
+                        family = 2;  // IPv4
+                        addr[0] = static_cast<uint8_t>(a);
+                        addr[1] = static_cast<uint8_t>(b);
+                        addr[2] = static_cast<uint8_t>(c);
+                        addr[3] = static_cast<uint8_t>(d);
+                    }
+                }
+                rowBuffer[offset] = static_cast<char>(family);
+                rowBuffer[offset + 1] = static_cast<char>(prefix);
+                rowBuffer[offset + 2] = static_cast<char>(col.dataType == "cidr" ? 1 : 0);
+                rowBuffer[offset + 3] = 0;  // reserved
+                std::memcpy(&rowBuffer[offset + 4], addr, 16);
             } else if (col.dataType == "boolean") {
                 int8_t bval = val.empty() ? INT8_MIN :
                     (val == "1" || val == "true" || val == "TRUE") ? 1 :
@@ -6583,6 +6706,31 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                         (val == "1" || val == "true" || val == "TRUE") ? 1 :
                         (val == "0" || val == "false" || val == "FALSE") ? 0 : INT8_MIN;
                     std::memcpy(&fixedData[fixedOff], &bval, sizeof(int8_t));
+                } else if (col.dataType == "inet" || col.dataType == "cidr") {
+                    uint8_t family = 0, prefix = 32;
+                    uint8_t addr[16] = {0};
+                    if (!val.empty()) {
+                        std::string addrPart = val;
+                        size_t slash = addrPart.find('/');
+                        if (slash != std::string::npos) {
+                            try { prefix = static_cast<uint8_t>(std::stoi(addrPart.substr(slash + 1))); }
+                            catch (...) { prefix = 32; }
+                            addrPart = addrPart.substr(0, slash);
+                        }
+                        int a = 0, b = 0, c = 0, d = 0;
+                        if (sscanf(addrPart.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
+                            family = 2;
+                            addr[0] = static_cast<uint8_t>(a);
+                            addr[1] = static_cast<uint8_t>(b);
+                            addr[2] = static_cast<uint8_t>(c);
+                            addr[3] = static_cast<uint8_t>(d);
+                        }
+                    }
+                    fixedData[fixedOff] = static_cast<char>(family);
+                    fixedData[fixedOff + 1] = static_cast<char>(prefix);
+                    fixedData[fixedOff + 2] = static_cast<char>(col.dataType == "cidr" ? 1 : 0);
+                    fixedData[fixedOff + 3] = 0;
+                    std::memcpy(&fixedData[fixedOff + 4], addr, 16);
                 } else {
                     int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
                     std::memcpy(&fixedData[fixedOff], &num, col.dsize);
@@ -6949,7 +7097,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
@@ -7285,11 +7433,11 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             conds.push_back(c);
             continue;
         }
-        // Handle SP-GiST spatial operators: <<, >>, <^, >^, <@
-        // Format: operator_colname value (e.g., "<<loc 5.0,0.0")
+        // Handle 2-char operators: spatial << >> <^ >^ <@ and network &&
+        // Format: operator_colname value (e.g., "<<loc 5.0,0.0" or "&&ip '192.168.1.0/24'")
         if (s.size() >= 4 && (s.substr(0, 2) == "<<" || s.substr(0, 2) == ">>" ||
                                s.substr(0, 2) == "<^" || s.substr(0, 2) == ">^" ||
-                               s.substr(0, 2) == "<@")) {
+                               s.substr(0, 2) == "<@" || s.substr(0, 2) == "&&")) {
             c.op = s.substr(0, 2);
             size_t sp = s.find(' ', 2);
             if (sp == std::string::npos) continue;

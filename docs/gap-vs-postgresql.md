@@ -87,7 +87,7 @@
 | GENERATED AS IDENTITY | ✅ | ✅ | 支持 GENERATED ALWAYS/BY DEFAULT |
 | 范围类型 (int4range, tsrange 等) | ❌ | ✅ | **完全缺失** |
 | 几何类型 (POINT, POLYGON 等) | ⚠️ | ✅ | POINT 已实现（含空间运算符 <<、>>、<^、>^、<@），POLYGON/LINE/CIRCLE 等缺失 |
-| 网络类型 (INET, CIDR, MACADDR) | ❌ | ✅ | **完全缺失** |
+| 网络类型 (INET, CIDR, MACADDR) | ⚠️ | ✅ | INET/CIDR 已实现（IPv4，含 << >> && 运算符），MACADDR 缺失 |
 | XML | ❌ | ✅ | — |
 | pg_lsn | ❌ | ✅ | 无 LSN 概念 |
 | tsvector / tsquery | ❌ | ✅ | **PG 全文搜索类型缺失** |

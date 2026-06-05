@@ -21,7 +21,7 @@
 |--------|----------|------|------|------|
 | 认证与连接 | 2 | 2 | 0 | — |
 | DDL - 数据库 | 3 | 3 | 0 | — |
-| DDL - 表 | 12 | 12 | 0 | 含 CTAS / RENAME / POINT 类型 / 空间运算符 |
+| DDL - 表 | 14 | 14 | 0 | 含 CTAS / RENAME / POINT / INET/CIDR 类型 |
 | DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST 均通过 |
 | DDL - 视图 | 5 | 5 | 0 | 含 ALTER VIEW RENAME TO / SET SCHEMA |
 | DDL - 触发器 | 2 | 2 | 0 | — |
@@ -36,7 +36,7 @@
 | 工具命令 | 8 | 8 | 0 | — |
 | 分区管理 | 3 | 3 | 0 | Range/List/Hash + ATTACH/DETACH |
 | 高级特性 | 2 | 2 | 0 | NOTIFY/LISTEN, RLS |
-| **合计** | **70** | **70** | **0** | — |
+| **合计** | **72** | **72** | **0** | — |
 
 ---
 
@@ -263,6 +263,38 @@ SELECT * FROM geo_points WHERE loc <@ '10.0,10.0,5.0'; -- within circle
 - `<^` 返回 y < 15 的点（id 1, 2, 3）
 - `>^` 返回 y > 15 的点（无）
 - `<@` 返回圆内点（id 2，中心 (10,10) 半径 5）
+
+---
+
+### 3.13 CREATE TABLE with INET / CIDR type
+
+**输入**
+```sql
+CREATE TABLE networks (id INT, name VARCHAR(50), ip INET, net CIDR);
+```
+
+**实际结果** ✅ `Table create succeeded`
+
+---
+
+### 3.14 INSERT and query INET/CIDR with operators
+
+**输入**
+```sql
+INSERT INTO networks (id, name, ip, net) VALUES (1, 'host1', '192.168.1.1', '192.168.1.0/24');
+INSERT INTO networks (id, name, ip, net) VALUES (2, 'host2', '192.168.2.1', '192.168.2.0/24');
+INSERT INTO networks (id, name, ip, net) VALUES (3, 'host3', '10.0.0.1', '10.0.0.0/16');
+-- subnet-of: MATCH rows 1,2
+SELECT * FROM networks WHERE net << '192.168.0.0/16';
+-- contains: MATCH row 1
+SELECT * FROM networks WHERE net >> '192.168.1.1';
+-- overlap: MATCH rows 1,2
+SELECT * FROM networks WHERE net && '192.168.0.0/16';
+-- equality
+SELECT * FROM networks WHERE ip = '192.168.1.1';
+```
+
+**实际结果** ✅ 所有操作符返回正确结果：`<<` 子网判断、`>>` 包含判断、`&&` 重叠判断、`=` 精确匹配
 
 ---
 
@@ -814,10 +846,11 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖 70 项核心功能，**全部通过**。系统在以下方面表现稳定：
+本次测试覆盖 72 项核心功能，**全部通过**。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
+- ✅ **INET/CIDR 网络类型**与网络运算符（`<<` / `>>` / `&&`）
 - ✅ 索引系统（B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST）
 - ✅ 视图与触发器（含 ALTER VIEW RENAME TO / SET SCHEMA）
 - ✅ 事务控制（BEGIN/COMMIT/ROLLBACK/SAVEPOINT）

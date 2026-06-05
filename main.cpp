@@ -38,6 +38,8 @@ using dbms::makeJsonbColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makePointColumn;
+using dbms::makeINetColumn;
+using dbms::makeCidrColumn;
 using dbms::makeDecimalColumn;
 using dbms::makeBooleanColumn;
 using dbms::makeUuidColumn;
@@ -524,7 +526,7 @@ static string sqlProcessor(string raw) {
 // ========================================================================
 static string normalizeCaseCondition(string s) {
     s = trim(s);
-    static const char* ops[] = {"<<", ">>", "<^", ">^", "<@", ">=", "<=", "!=", "<>", ">", "<", "="};
+    static const char* ops[] = {"<<", ">>", "<^", ">^", "<@", "&&", ">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
         size_t len = strlen(op);
         size_t pos = s.find(op);
@@ -1001,7 +1003,7 @@ static vector<string> splitValues(const string& s) {
 }
 
 static string normalizeConditionStr(string s) {
-    static const char* ops[] = {"<<", ">>", "<^", ">^", "<@", ">=", "<=", "!=", "<>", ">", "<", "="};
+    static const char* ops[] = {"<<", ">>", "<^", ">^", "<@", "&&", ">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
         size_t len = strlen(op);
         size_t pos = 0;
@@ -1146,6 +1148,14 @@ static string normalizeConditionStr(string s) {
 // Constant folding: evaluate arithmetic expressions of literal numbers
 // ========================================================================
 static string foldConstants(const string& s) {
+    // Helper: count unescaped single quotes before a position
+    auto insideQuotes = [&](size_t pos) -> bool {
+        int count = 0;
+        for (size_t k = 0; k < pos; ++k) {
+            if (s[k] == '\'' && (k == 0 || s[k-1] != '\\')) count++;
+        }
+        return (count % 2) == 1;
+    };
     string result;
     size_t i = 0;
     while (i < s.size()) {
@@ -1178,6 +1188,11 @@ static string foldConstants(const string& s) {
             num2End++;
         }
         if (num2End == num2Start) { result += s[i++]; continue; }
+
+        // Don't fold inside SQL string literals (e.g., '192.168.1.0/24')
+        if (insideQuotes(num1Start) || insideQuotes(num2Start)) {
+            result += s[i++]; continue;
+        }
 
         // Ensure standalone: not part of an identifier or larger expression
         if (num1Start > 0 && (isalnum(static_cast<unsigned char>(s[num1Start - 1])) || s[num1Start - 1] == '_')) {
@@ -1267,7 +1282,7 @@ static string modifyLogic(const string& logic) {
     size_t opStart = string::npos;
     size_t opLen = 0;
     for (size_t i = 0; i < logic.size(); ++i) {
-        if (logic[i] == '>' || logic[i] == '<' || logic[i] == '=' || logic[i] == '!') {
+        if (logic[i] == '>' || logic[i] == '<' || logic[i] == '=' || logic[i] == '!' || logic[i] == '&') {
             opStart = i;
             opLen = 1;
             if (i + 1 < logic.size() && (logic[i + 1] == '=' || logic[i + 1] == '>')) {
@@ -1278,10 +1293,11 @@ static string modifyLogic(const string& logic) {
                     opLen = 2;
                 }
             }
-            // Spatial operators: <<, >>, <^, >^, <@
+            // Spatial operators: <<, >>, <^, >^, <@ and network overlap: &&
             if (i + 1 < logic.size() && opLen == 1) {
                 if ((logic[i] == '<' && (logic[i + 1] == '<' || logic[i + 1] == '^' || logic[i + 1] == '@')) ||
-                    (logic[i] == '>' && (logic[i + 1] == '>' || logic[i + 1] == '^'))) {
+                    (logic[i] == '>' && (logic[i + 1] == '>' || logic[i + 1] == '^')) ||
+                    (logic[i] == '&' && logic[i + 1] == '&')) {
                     opLen = 2;
                 }
             }
@@ -2011,6 +2027,12 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                 colCreated = true;
             } else if (ctype.substr(0, 5) == "point") {
                 col = makePointColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype == "inet") {
+                col = makeINetColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype == "cidr") {
+                col = makeCidrColumn(cname, isNull, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 7) == "decimal") {
                 int prec = 10, sc = 0;
