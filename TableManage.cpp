@@ -3575,6 +3575,7 @@ OpResult StorageEngine::dropIndex(const std::string& dbname, const std::string& 
     // Remove from cache
     std::string key = dbname + "/" + tablename + "/" + colname;
     secondaryIndexCache_.erase(key);
+    lockManager_.unlock(tablename);
     return OpResult::Success;
 }
 
