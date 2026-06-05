@@ -3716,6 +3716,10 @@ bool execute(const string& rawSql, Session& s) {
 
         if (sql.substr(7, 8) == "database") {
             if (!checkAdmin(s)) return true;
+            if (g_engine.inTransaction()) {
+                g_engine.commitTransaction();
+                cout << "Note: DDL caused implicit commit of open transaction" << endl;
+            }
             string rest = trim(sql.substr(16));
             string dbname = rest;
             string charset = "utf8";
@@ -3784,6 +3788,11 @@ bool execute(const string& rawSql, Session& s) {
         if (sql.substr(tableKeywordPos, 5) == "table") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
+            // DDL implicitly commits any open transaction (PostgreSQL behavior)
+            if (g_engine.inTransaction()) {
+                g_engine.commitTransaction();
+                cout << "Note: DDL caused implicit commit of open transaction" << endl;
+            }
             size_t restOff = tableKeywordPos + 6;
             string rest = trim(sql.substr(restOff));
             // Determine table name end: stop at first '(', " as ", or space
@@ -4159,6 +4168,10 @@ bool execute(const string& rawSql, Session& s) {
         if (sql.substr(7, 5) == "index" || sql.substr(7, 4) == "hash" || sql.substr(7, 6) == "unique") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
+            if (g_engine.inTransaction()) {
+                g_engine.commitTransaction();
+                cout << "Note: DDL caused implicit commit of open transaction" << endl;
+            }
             bool isHash = false;
             bool isUnique = false;
             bool isConcurrently = false;
@@ -5240,6 +5253,10 @@ bool execute(const string& rawSql, Session& s) {
         if (tokens.size() < 4 || tokens[0] != "table") {
             cout << "SQL syntax error" << endl;
             return true;
+        }
+        if (g_engine.inTransaction()) {
+            g_engine.commitTransaction();
+            cout << "Note: DDL caused implicit commit of open transaction" << endl;
         }
         string tnameOrig = tokens[1];
         string tname = resolveTableName(s, tnameOrig);
@@ -7718,6 +7735,10 @@ bool execute(const string& rawSql, Session& s) {
     if (sql.substr(0, 8) == "truncate") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
+        if (g_engine.inTransaction()) {
+            g_engine.commitTransaction();
+            cout << "Note: DDL caused implicit commit of open transaction" << endl;
+        }
         string rest = trim(sql.substr(8));
         if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
         // Parse options: RESTART IDENTITY, CASCADE
@@ -7766,6 +7787,10 @@ bool execute(const string& rawSql, Session& s) {
     if (sql.substr(0, 4) == "drop") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
+        if (g_engine.inTransaction()) {
+            g_engine.commitTransaction();
+            cout << "Note: DDL caused implicit commit of open transaction" << endl;
+        }
         vector<string> tokens = tokenize(sql.substr(4));
         if (tokens.size() < 2) {
             cout << "SQL syntax error" << endl;
