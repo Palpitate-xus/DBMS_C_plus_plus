@@ -8464,6 +8464,10 @@ OpResult StorageEngine::update(const std::string& dbname,
             lockManager_.pageUnlock(dbname, tablename, pageId);
             if (newSlotId != slotId) {
                 actualRid = encodeRid(pageId, newSlotId);
+                // Update the last txnLog entry with the new rid since the row moved
+                if (inTransaction_ && dbname == txnDB_ && !txnLog_.empty()) {
+                    txnLog_.back().rowIdx = actualRid;
+                }
             }
         }
 
@@ -12590,18 +12594,33 @@ OpResult StorageEngine::rollbackTransaction() {
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 Page page(pageBuf);
-                page.restore(slotId);  // clear tombstone if present
                 // rowData in txnLog is data-only (without MVCC header).
                 // Preserve the existing MVCC header and only replace the data portion.
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
-                if (page.get(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
+                bool got = page.get(slotId, currentData, currentLen);
+                if (got && currentLen >= MVCC_HEADER_SIZE) {
                     std::string fullRow;
                     fullRow.append(currentData, MVCC_HEADER_SIZE);  // keep MVCC header
                     fullRow.append(it->rowData);                    // restore old data
                     page.update(slotId, fullRow.data(), fullRow.size());
-                } else {
-                    page.update(slotId, it->rowData.data(), it->rowData.size());
+                } else if (!got) {
+                    // Slot may have been deleted by a subsequent UPDATE that grew the row.
+                    // Search live slots on this page for a row with matching PK.
+                    std::string targetPk = extractPKValue(it->rowData, tbl);
+                    bool restored = false;
+                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                        if (restored || len <= MVCC_HEADER_SIZE) return;
+                        std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        std::string pk = extractPKValue(rowData, tbl);
+                        if (pk == targetPk) {
+                            std::string fullRow;
+                            fullRow.append(data, MVCC_HEADER_SIZE);
+                            fullRow.append(it->rowData);
+                            page.update(sid, fullRow.data(), fullRow.size());
+                            restored = true;
+                        }
+                    });
                 }
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
@@ -12956,7 +12975,8 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 Page page(pageBuf);
-                // Preserve MVCC header, only replace data portion
+                // rowData in txnLog is data-only (without MVCC header).
+                // Preserve the existing MVCC header and only replace the data portion.
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
                 if (page.get(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
@@ -12965,7 +12985,22 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
                     fullRow.append(entry.rowData);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else {
-                    page.update(slotId, entry.rowData.data(), entry.rowData.size());
+                    // Slot may have moved due to a previous UPDATE that grew the row.
+                    // Search live slots on this page for a row with matching PK.
+                    std::string targetPk = extractPKValue(entry.rowData, tbl);
+                    bool restored = false;
+                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                        if (restored || len <= MVCC_HEADER_SIZE) return;
+                        std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        std::string pk = extractPKValue(rowData, tbl);
+                        if (pk == targetPk) {
+                            std::string fullRow;
+                            fullRow.append(data, MVCC_HEADER_SIZE);
+                            fullRow.append(entry.rowData);
+                            page.update(sid, fullRow.data(), fullRow.size());
+                            restored = true;
+                        }
+                    });
                 }
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
