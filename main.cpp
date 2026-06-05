@@ -3984,7 +3984,7 @@ bool execute(const string& rawSql, Session& s) {
             if (inheritsPos != string::npos && (partPos == string::npos || inheritsPos < partPos)) {
                 colsSql = sql.substr(0, inheritsPos);
             }
-            TableSchema tbl = parseTableColumns(colsSql, restOff + sp + 1, s.currentDB);
+            TableSchema tbl = parseTableColumns(colsSql, restOff + tnameEnd, s.currentDB);
 
             // Merge inherited columns from parent
             if (!parentName.empty()) {
