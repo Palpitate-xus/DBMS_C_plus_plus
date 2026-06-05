@@ -8843,6 +8843,11 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
+        // Check if table exists (skip for database-wide grant with '*')
+        if (tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
         // Permission check: admin OR user with grant option for this privilege
         bool canGrant = (s.permission == 1 || userIsAdminViaRole(s.username));
         if (!canGrant) {
@@ -8917,6 +8922,11 @@ bool execute(const string& rawSql, Session& s) {
         else if (privStr == "all") priv = dbms::StorageEngine::TablePrivilege::All;
         else {
             cout << "Unknown privilege: " << privStr << endl;
+            return true;
+        }
+        // Check if table exists (skip for database-wide revoke with '*')
+        if (tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
+            cout << "Table " << tname << " not exist" << endl;
             return true;
         }
         g_engine.revoke(s.currentDB, tname, uname, priv, colList, false);
