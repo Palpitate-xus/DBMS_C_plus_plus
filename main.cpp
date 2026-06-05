@@ -7783,6 +7783,21 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Table dropped" << endl;
                 return false;
             }
+            // Check for foreign key references before dropping
+            {
+                auto allTables = g_engine.getTableNames(s.currentDB);
+                for (const auto& tbl : allTables) {
+                    if (tbl == name) continue;
+                    auto schema = g_engine.getTableSchema(s.currentDB, tbl);
+                    for (size_t i = 0; i < schema.fkLen; ++i) {
+                        if (schema.fks[i].refTable == name) {
+                            cout << "Cannot drop table " << name
+                                 << ": referenced by foreign key in table " << tbl << endl;
+                            return true;
+                        }
+                    }
+                }
+            }
             auto res = g_engine.dropTable(s.currentDB, name);
             if (res == OpResult::TableNotExist) {
                 cout << "Table " << name << " not exist" << endl;
