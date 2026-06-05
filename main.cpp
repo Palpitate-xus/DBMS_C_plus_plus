@@ -3777,16 +3777,23 @@ bool execute(const string& rawSql, Session& s) {
             if (!checkDB(s)) return true;
             size_t restOff = tableKeywordPos + 6;
             string rest = trim(sql.substr(restOff));
+            // Determine table name end: stop at first '(', " as ", or space
+            size_t parenStart = rest.find('(');
+            size_t asPos = rest.find(" as ");
             size_t sp = rest.find(' ');
-            if (sp == string::npos) {
+            size_t tnameEnd = rest.size();
+            if (parenStart != string::npos) tnameEnd = std::min(tnameEnd, parenStart);
+            if (asPos != string::npos) tnameEnd = std::min(tnameEnd, asPos);
+            if (sp != string::npos && sp < tnameEnd) tnameEnd = sp;
+            if (tnameEnd == 0 || tnameEnd == rest.size()) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            string tname = rest.substr(0, sp);
+            string tname = rest.substr(0, tnameEnd);
             tname = resolveTableName(s, tname);
             // CTAS: CREATE TABLE new_table AS SELECT ...
-            size_t parenStart = rest.find('(', sp);
-            size_t asPos = rest.find(" as ", sp);
+            if (parenStart == string::npos) parenStart = rest.find('(', tnameEnd);
+            if (asPos == string::npos) asPos = rest.find(" as ", tnameEnd);
             // Only treat as CTAS if " as " appears before the column list paren
             if (asPos != string::npos && (parenStart == string::npos || asPos < parenStart)) {
                 string newTname = tname;
