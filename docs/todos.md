@@ -1,7 +1,7 @@
 # DBMS_C_plus_plus 开发 TODO 路线图
 
 > 基于 [gap-vs-postgresql.md](./gap-vs-postgresql.md) 差距分析制定
-> 更新日期：2026-05-29
+> 更新日期：2026-06-04
 > 影响文件：`main.cpp`（SQL 解析/命令分发）、`TableManage.cpp/.h`（存储引擎）、`ExecutionPlan.cpp/.h`（优化器）、其它模块
 
 ---
@@ -18,65 +18,65 @@
 
 ---
 
-## P0: 阻塞性 Bug 与关键修复（立即）
+## P0: 阻塞性 Bug 与关键修复（全部完成 ✅）
 
-| # | 任务 | 影响文件 | 描述 | 难度 |
-|---|------|----------|------|------|
-| 1 | **修复 `CREATE HASH INDEX` 解析器 Bug** | `main.cpp:2903` | `sql.substr(7, 9) == "hash ind"` 应为 `8` 而非 `9`，当前 "hash inde" ≠ "hash ind" | ★ |
-| 2 | **实现 `TRUNCATE TABLE`** | `main.cpp` + `TableManage.cpp` | 目前仅做权限检查后直接返回（`main.cpp:2612`），需实现真正的快速清表逻辑：遍历数据页标记所有 slot 为已删除 | ★★ |
-| 3 | **修复 `SHOW USERS` / `SHOW ROLES`** | `main.cpp` | 两个命令完全未实现，在 `show` 处理器（line 5710+）中添加解析：读取 `user.dat` 显示用户列表，读取数据库目录 `.roles` 文件显示角色 | ★★ |
-| 4 | **实现 `IS DISTINCT FROM`** | `main.cpp` + `TableManage.cpp` | 添加 `IS DISTINCT FROM` / `IS NOT DISTINCT FROM` 条件运算符解析和行评估，处理 NULL-safe 比较 | ★★ |
-| 5 | **实现 `FETCH FIRST ... ROWS ONLY`** | `main.cpp` | SQL:2008 标准分页语法，等价于 `LIMIT n`，在 SELECT 语句解析中添加 | ★ |
+| # | 任务 | 状态 | 说明 |
+|---|------|------|------|
+| 1 | **修复 `CREATE HASH INDEX` 解析器 Bug** | ✅ | `CREATE HASH INDEX name ON table(col)` 原生语法已支持 |
+| 2 | **实现 `TRUNCATE TABLE`** | ✅ | 支持 CASCADE、RESTART IDENTITY |
+| 3 | **修复 `SHOW USERS` / `SHOW ROLES`** | ✅ | `SHOW USERS` 读取 `user.dat`，`SHOW ROLES` 读取 `role.dat`（需 admin 权限） |
+| 4 | **实现 `IS DISTINCT FROM`** | ✅ | NULL-safe 比较运算符 |
+| 5 | **实现 `FETCH FIRST ... ROWS ONLY`** | ✅ | SQL:2008 标准分页语法，等价于 `LIMIT n` |
 
 ---
 
 ## P1: 核心功能增强（短期）
 
-### P1-1: DDL 完善
+### P1-1: DDL 完善（全部完成 ✅）
 
-| # | 任务 | 影响文件 | 描述 | 难度 |
-|---|------|----------|------|------|
-| 6 | **实现 `ALTER TABLE RENAME COLUMN / RENAME TO`** | `main.cpp` + `TableManage.cpp/.h` | 新增 `StorageEngine::renameColumn()` 和 `renameTable()`，修改表结构文件 `.stc` 中的列名/表名 | ★★ |
-| 7 | **实现 `ALTER TABLE ALTER COLUMN SET/DROP DEFAULT`** | `main.cpp` + `TableManage.cpp` | 修改列元数据中的 `defaultValue` 字段 | ★★ |
-| 8 | **实现 `ALTER TABLE ALTER COLUMN SET/DROP NOT NULL`** | `main.cpp` + `TableManage.cpp` | 修改列元数据中的 `isNull` 标志 | ★★ |
-| 9 | **实现 `ALTER TABLE ADD/DROP CONSTRAINT`** | `main.cpp` + `TableManage.cpp` | 支持在已有表上添加/删除 CHECK、UNIQUE、FK 约束 | ★★★ |
-| 10 | **实现 `CREATE TABLE ... AS SELECT`** | `main.cpp` | 先执行 SELECT 获取结果集，再自动创建表结构并 INSERT（类似 CTAS） | ★★★ |
-| 11 | **实现 `COMMENT ON`** | `main.cpp` + `TableManage.cpp` | 新增注释系统，存储对象（表/列/索引）注释到 `.comment` 文件或在表结构中扩展字段 | ★★ |
+| # | 任务 | 状态 | 说明 |
+|---|------|------|------|
+| 6 | **实现 `ALTER TABLE RENAME COLUMN / RENAME TO`** | ✅ | 已实现 |
+| 7 | **实现 `ALTER TABLE ALTER COLUMN SET/DROP DEFAULT`** | ✅ | 已实现 |
+| 8 | **实现 `ALTER TABLE ALTER COLUMN SET/DROP NOT NULL`** | ✅ | 已实现 |
+| 9 | **实现 `ALTER TABLE ADD/DROP CONSTRAINT`** | ✅ | CHECK / UNIQUE / FK 约束 |
+| 10 | **实现 `CREATE TABLE ... AS SELECT`** | ✅ | CTAS 已支持 |
+| 11 | **实现 `COMMENT ON`** | ✅ | 表/列注释 |
 
-### P1-2: DQL 完善
+### P1-2: DQL 完善（全部完成 ✅）
 
-| # | 任务 | 影响文件 | 描述 | 难度 |
-|---|------|----------|------|------|
-| 12 | **实现 `LATERAL JOIN`** | `main.cpp` + `ExecutionPlan.cpp` | 语法 `SELECT ... FROM t1, LATERAL (SELECT ... FROM t2 WHERE t2.col = t1.col)`，需要在 JOIN 处理中传递左侧行的列值到子查询 | ★★★★ |
-| 13 | **实现 `GROUPING SETS` / `ROLLUP` / `CUBE`** | `main.cpp` + `ExecutionPlan.cpp` | OLAP 核心功能，在 `GROUP BY` 解析中添加多级分组语法，需新增 `GroupingSetsOp` 算子或改造 `AggregateOp` | ★★★★ |
-| 14 | **实现 `DISTINCT ON`** | `main.cpp` + `ExecutionPlan.cpp` | PostgreSQL 扩展：按指定列取每组第一行 | ★★ |
-| 15 | **实现窗口帧 `ROWS BETWEEN ... AND ...` 完整支持** | `main.cpp` + `ExecutionPlan.cpp` | 目前解析器仅剥离 `ROWS BETWEEN` 子句（`main.cpp:631`），未实际实现。需要：语法解析 → 窗口帧边界计算 → 聚合窗口函数应用 | ★★★ |
-| 16 | **实现 `SIMILAR TO`** | `main.cpp` | SQL 标准正则匹配，可转换为已有的 REGEXP 实现，或基于 `std::regex` 新增评估逻辑 | ★★ |
-| 17 | **实现 `OVERLAPS`** | `main.cpp` + `DateType.h` | 日期区间重叠判断：`(start1, end1) OVERLAPS (start2, end2)` | ★ |
+| # | 任务 | 状态 | 说明 |
+|---|------|------|------|
+| 12 | **实现 `LATERAL JOIN`** | ✅ | 已实现 |
+| 13 | **实现 `GROUPING SETS` / `ROLLUP` / `CUBE`** | ✅ | OLAP 多级分组 |
+| 14 | **实现 `DISTINCT ON`** | ✅ | PostgreSQL 扩展 |
+| 15 | **实现窗口帧 `ROWS/RANGE/GROUPS BETWEEN ... AND ...`** | ✅ | 完整支持三种窗口帧 |
+| 16 | **实现 `SIMILAR TO`** | ✅ | SQL 标准正则 |
+| 17 | **实现 `OVERLAPS`** | ✅ | 日期区间重叠 |
 
-### P1-3: 并发与事务
+### P1-3: 并发与事务（全部完成 ✅）
 
-| # | 任务 | 影响文件 | 描述 | 难度 |
-|---|------|----------|------|------|
-| 18 | **实现真正的 Serializable Snapshot Isolation (SSI)** | `TableManage.cpp` + `LockManager.cpp` | 当前仅用快照隔离模拟 SERIALIZABLE，需实现 SIREAD 锁 + 写偏斜（Write Skew）检测 + 事务中止/重试 | ★★★★★ |
-| 19 | **实现 `LOCK TABLE` 命令** | `main.cpp` + `LockManager.cpp` | 支持显式表级锁：`LOCK TABLE t IN SHARE/EXCLUSIVE MODE` | ★★ |
-| 20 | **实现 `lock_timeout` / `deadlock_timeout` 配置** | `Config.cpp/.h` + `LockManager.cpp` | 添加锁等待超时参数，支持 `SET lock_timeout = ...` | ★★ |
+| # | 任务 | 状态 | 说明 |
+|---|------|------|------|
+| 18 | **实现真正的 SSI** | ✅ | ReadView + rw-conflict 检测 |
+| 19 | **实现 `LOCK TABLE` 命令** | ✅ | 显式表级锁 |
+| 20 | **实现 `lock_timeout` / `deadlock_timeout`** | ✅ | 锁等待超时 |
 
 ### P1-4: 存储过程增强
 
-| # | 任务 | 影响文件 | 描述 | 难度 |
-|---|------|----------|------|------|
-| 21 | **实现简单的过程语言（变量/IF/WHILE）** | `main.cpp` | 在存储过程中支持：`DECLARE var INT;`、`IF ... THEN ... ELSE ... END IF;`、`WHILE ... DO ... END WHILE;` 基本流程控制 | ★★★★ |
-| 22 | **实现 `OUT` / `INOUT` 参数** | `main.cpp` + `TableManage.h` | 扩展 `CREATE FUNCTION` 参数类型支持 | ★★ |
-| 23 | **实现游标 `DECLARE CURSOR / FETCH / CLOSE`** | `main.cpp` | 允许在存储过程中逐行处理查询结果 | ★★★★ |
+| # | 任务 | 状态 | 说明 |
+|---|------|------|------|
+| 21 | **实现简单的过程语言（变量/IF/WHILE）** | ⚠️ | CREATE PROCEDURE 已支持多条 SQL，但 IF/WHILE 流程控制缺失 |
+| 22 | **实现 `OUT` / `INOUT` 参数** | ✅ | 已实现 |
+| 23 | **实现游标 `DECLARE CURSOR / FETCH / CLOSE`** | ✅ | FETCH NEXT/PRIOR/FIRST/LAST/ABSOLUTE/RELATIVE/ALL/FORWARD/BACKWARD |
 
-### P1-5: 存储引擎
+### P1-5: 存储引擎（全部完成 ✅）
 
-| # | 任务 | 影响文件 | 描述 | 难度 |
-|---|------|----------|------|------|
-| 24 | **实现 `VACUUM FULL`** | `TableManage.cpp` + `Page.cpp` | 完全重写表：创建新数据文件，复制存活行，删除旧文件。比当前仅压缩页（compact）更彻底 | ★★★ |
-| 25 | **实现 `ANALYZE`（全库）** | `main.cpp` + `TableManage.cpp` | 支持不指定表名的 `ANALYZE`，对当前数据库所有表收集统计信息 | ★ |
-| 26 | **实现 `CREATE UNLOGGED TABLE`** | `main.cpp` + `TableManage.cpp` | 无 WAL 日志的表，写入性能更高但不支持崩溃恢复 | ★★ |
+| # | 任务 | 状态 | 说明 |
+|---|------|------|------|
+| 24 | **实现 `VACUUM FULL`** | ✅ | 已实现 |
+| 25 | **实现 `ANALYZE`（全库）** | ✅ | 已实现 |
+| 26 | **实现 `CREATE UNLOGGED TABLE`** | ✅ | 已实现 |
 
 ---
 

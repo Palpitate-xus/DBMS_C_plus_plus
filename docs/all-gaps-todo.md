@@ -147,7 +147,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [x] SERIAL4 / BIGSERIAL
 - [x] GENERATED AS IDENTITY
 - [ ] 范围类型 (int4range, tsrange 等)
-- [ ] 几何类型 (POINT, POLYGON 等)
+- [x] 几何类型 - POINT（含空间运算符 << >> <^ >^ <@）
 - [ ] 网络类型 (INET, CIDR, MACADDR)
 - [ ] XML
 - [ ] pg_lsn

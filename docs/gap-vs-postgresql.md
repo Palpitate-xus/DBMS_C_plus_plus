@@ -86,7 +86,7 @@
 | SERIAL4 / BIGSERIAL | ✅ | ✅ | — |
 | GENERATED AS IDENTITY | ✅ | ✅ | 支持 GENERATED ALWAYS/BY DEFAULT |
 | 范围类型 (int4range, tsrange 等) | ❌ | ✅ | **完全缺失** |
-| 几何类型 (POINT, POLYGON 等) | ❌ | ✅ | **完全缺失** |
+| 几何类型 (POINT, POLYGON 等) | ⚠️ | ✅ | POINT 已实现（含空间运算符 <<、>>、<^、>^、<@），POLYGON/LINE/CIRCLE 等缺失 |
 | 网络类型 (INET, CIDR, MACADDR) | ❌ | ✅ | **完全缺失** |
 | XML | ❌ | ✅ | — |
 | pg_lsn | ❌ | ✅ | 无 LSN 概念 |
@@ -120,7 +120,7 @@
 | 功能 | 本DBMS | PostgreSQL | 差距说明 |
 |------|--------|------------|----------|
 | B+ 树索引 | ✅ | ✅ | — |
-| Hash 索引 | ⚠️ | ✅ | `CREATE HASH INDEX` 语法不工作（解析器 bug），需用 `CREATE INDEX ... USING HASH` |
+| Hash 索引 | ✅ | ✅ | `CREATE HASH INDEX name ON table(col)` 原生语法已支持 |
 | 全文索引（简化倒排索引） | ✅ | ⚠️ | 不自带 tsvector/tsquery 语义 |
 | 复合索引 | ✅ | ✅ | — |
 | 唯一索引 | ✅ | ✅ | — |
@@ -297,7 +297,7 @@
 | LOCK TABLE 命令 | ✅ | ✅ | — |
 | Advisory Locks (pg_advisory_lock) | ✅ | ✅ | 支持 exclusive/shared advisory locks |
 | 行级安全策略 (RLS) | ✅ | ✅ | 支持 CREATE/DROP POLICY，ENABLE ROW LEVEL SECURITY，FOR ALL/SELECT/UPDATE/DELETE 策略，透明集成到 query/update/remove |
-| ALTER TABLE ... ENABLE ROW LEVEL SECURITY | ❌ | ✅ | — |
+| ALTER TABLE ... ENABLE ROW LEVEL SECURITY | ✅ | ✅ | 含 FORCE 选项 |
 
 ---
 

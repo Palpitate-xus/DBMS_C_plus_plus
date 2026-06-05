@@ -1253,15 +1253,41 @@ SHOW PLAN CACHE;
 
 ---
 
-### SHOW USERS (未实现)
+### SHOW USERS
 
-> **注意**：`SHOW USERS` 命令尚未实现。可通过查看 `user.dat` 文件了解用户列表。
+**语法**
+```sql
+SHOW USERS;
+```
+
+**说明** 显示所有用户及其权限级别，从 `user.dat` 读取。需要 admin 权限。
+
+**示例**
+```sql
+SHOW USERS;
+-- 输出: username permission
+-- admin 1
+-- user1 0
+```
 
 ---
 
-### SHOW ROLES (未实现)
+### SHOW ROLES
 
-> **注意**：`SHOW ROLES` 命令尚未实现。角色信息存储在数据库目录的 `.roles` 文件中。
+**语法**
+```sql
+SHOW ROLES;
+```
+
+**说明** 显示所有角色名称，从 `role.dat` 读取（仅显示 `__ROLE__` 标记的条目）。需要 admin 权限。
+
+**示例**
+```sql
+CREATE ROLE auditor;
+SHOW ROLES;
+-- 输出: role_name
+-- auditor
+```
 
 ---
 
