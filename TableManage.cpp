@@ -3650,12 +3650,19 @@ OpResult StorageEngine::dropCompositeIndex(const std::string& dbname,
                                             const std::string& tablename,
                                             const std::string& indexName) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    // Verify the composite index actually exists
+    auto compIdxs = getCompositeIndexes(dbname, tablename);
+    bool found = false;
+    for (const auto& ci : compIdxs) {
+        if (ci.name == indexName) { found = true; break; }
+    }
+    if (!found) return OpResult::TableNotExist;
     std::filesystem::path p = dbPath(dbname) / (tablename + ".idx_" + indexName);
     std::filesystem::remove(p);
 
     // Rewrite metadata without this composite index
     auto singleCols = getIndexedColumns(dbname, tablename);
-    auto compIdxs = getCompositeIndexes(dbname, tablename);
+    // compIdxs already fetched above; filter out the dropped one
 
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
     {

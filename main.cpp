@@ -7901,7 +7901,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             string tnameOrig = tokens[3];
             string tname = resolveTableName(s, tnameOrig);
-            // Check GIN/GiST/BRIN first (they have explicit has* checks)
+            // Check GIN/GiST/BRIN/SP-GiST first (they have explicit has* checks)
             if (g_engine.hasGinIndex(s.currentDB, tname, name)) {
                 g_engine.dropGinIndex(s.currentDB, tname, name);
                 cout << "Index dropped" << endl;
@@ -7916,6 +7916,33 @@ bool execute(const string& rawSql, Session& s) {
                 g_engine.dropBrinIndex(s.currentDB, tname, name);
                 cout << "Index dropped" << endl;
                 return false;
+            }
+            if (g_engine.hasSPGiSTIndex(s.currentDB, tname, name)) {
+                g_engine.dropSPGiSTIndex(s.currentDB, tname, name);
+                cout << "Index dropped" << endl;
+                return false;
+            }
+            // Check if table exists
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table " << tname << " not exist" << endl;
+                return true;
+            }
+            // For composite/single-column/hash indexes, check metadata first
+            bool indexExists = false;
+            auto idxMeta = g_engine.getIndexedColumns(s.currentDB, tname);
+            for (const auto& entry : idxMeta) {
+                if (entry == name) { indexExists = true; break; }
+            }
+            if (!indexExists) {
+                // Try composite index name match
+                auto compIdx = g_engine.getCompositeIndexes(s.currentDB, tname);
+                for (const auto& e : compIdx) {
+                    if (e.name == name) { indexExists = true; break; }
+                }
+            }
+            if (!indexExists) {
+                cout << "Index " << name << " not exist on table " << tname << endl;
+                return true;
             }
             // Try composite index, single-column index, hash index
             auto res = g_engine.dropCompositeIndex(s.currentDB, tname, name);
@@ -7939,23 +7966,38 @@ bool execute(const string& rawSql, Session& s) {
             }
             string idxName = tokens[2];
             string tname = resolveTableName(s, tokens[4]);
+            if (!g_engine.hasFullTextIndex(s.currentDB, tname, idxName)) {
+                cout << "Index " << idxName << " not exist on table " << tname << endl;
+                return true;
+            }
             g_engine.dropFullTextIndex(s.currentDB, tname, idxName);
             cout << "Fulltext index dropped" << endl;
             return false;
         }
-        if (op == "gin" || op == "gist" || op == "brin") {
+        if (op == "gin" || op == "gist" || op == "brin" || op == "spgist") {
             if (tokens.size() < 3 || tokens[1] != "index" || tokens.size() < 5 || tokens[3] != "on") {
-                cout << "SQL syntax error: DROP GIN/GiST/BRIN INDEX idx ON t" << endl;
+                cout << "SQL syntax error: DROP GIN/GiST/BRIN/SP-GiST INDEX idx ON t" << endl;
                 return true;
             }
             string idxName = tokens[2];
             string tname = resolveTableName(s, tokens[4]);
+            bool hasIdx = false;
+            if (op == "gin") hasIdx = g_engine.hasGinIndex(s.currentDB, tname, idxName);
+            else if (op == "gist") hasIdx = g_engine.hasGiSTIndex(s.currentDB, tname, idxName);
+            else if (op == "brin") hasIdx = g_engine.hasBrinIndex(s.currentDB, tname, idxName);
+            else if (op == "spgist") hasIdx = g_engine.hasSPGiSTIndex(s.currentDB, tname, idxName);
+            if (!hasIdx) {
+                cout << "Index " << idxName << " not exist on table " << tname << endl;
+                return true;
+            }
             if (op == "gin") {
                 g_engine.dropGinIndex(s.currentDB, tname, idxName);
             } else if (op == "gist") {
                 g_engine.dropGiSTIndex(s.currentDB, tname, idxName);
-            } else {
+            } else if (op == "brin") {
                 g_engine.dropBrinIndex(s.currentDB, tname, idxName);
+            } else {
+                g_engine.dropSPGiSTIndex(s.currentDB, tname, idxName);
             }
             cout << "Index dropped" << endl;
             return false;
