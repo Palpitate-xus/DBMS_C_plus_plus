@@ -32,11 +32,11 @@
 | DQL - JOIN | 3 | 3 | 0 | — |
 | DQL - UNION | 1 | 1 | 0 | — |
 | TCL - 事务 | 3 | 3 | 0 | — |
-| DCL - 权限 | 2 | 2 | 0 | — |
+| DCL - 权限 | 4 | 4 | 0 | 含 SHOW USERS/SHOW ROLES |
 | 工具命令 | 8 | 8 | 0 | — |
 | 分区管理 | 3 | 3 | 0 | Range/List/Hash + ATTACH/DETACH |
 | 高级特性 | 2 | 2 | 0 | NOTIFY/LISTEN, RLS |
-| **合计** | **68** | **68** | **0** | — |
+| **合计** | **70** | **70** | **0** | — |
 
 ---
 
@@ -619,6 +619,31 @@ REVOKE SELECT ON t1 FROM testuser;
 
 ---
 
+### 10.3 SHOW USERS
+
+**输入**
+```sql
+SHOW USERS;
+```
+
+**实际结果** ✅ 列出所有用户及其权限级别（admin 1，普通用户 0 等）
+
+---
+
+### 10.4 SHOW ROLES
+
+**输入**
+```sql
+CREATE ROLE auditor;
+SHOW ROLES;
+GRANT auditor TO testuser;
+SHOW ROLES;
+```
+
+**实际结果** ✅ 列出所有角色名称，仅显示角色不显示已授予用户
+
+---
+
 ## 11. 工具与诊断
 
 ### 11.1 SHOW TABLES
@@ -789,7 +814,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖 68 项核心功能，**全部通过**。系统在以下方面表现稳定：
+本次测试覆盖 70 项核心功能，**全部通过**。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
