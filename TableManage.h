@@ -131,6 +131,8 @@ enum class OpResult {
     SerializationFailure,
 };
 
+std::string sqlstateForOpResult(OpResult res);
+
 class StorageEngine {
 public:
     StorageEngine();

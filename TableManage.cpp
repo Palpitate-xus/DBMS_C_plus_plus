@@ -5,6 +5,22 @@
 
 extern dbms::Config g_config;
 
+std::string dbms::sqlstateForOpResult(OpResult res) {
+    switch (res) {
+        case OpResult::Success: return "00000";
+        case OpResult::TableNotExist: return "42P01";
+        case OpResult::DatabaseNotExist: return "3D000";
+        case OpResult::TableAlreadyExist: return "42P07";
+        case OpResult::InvalidValue: return "22023";
+        case OpResult::NullNotAllowed: return "23502";
+        case OpResult::SyntaxError: return "42601";
+        case OpResult::DuplicateKey: return "23505";
+        case OpResult::LockConflict: return "55P03";
+        case OpResult::SerializationFailure: return "40001";
+    }
+    return "XX000"; // internal_error
+}
+
 static std::string escapeString(const std::string& s) {
     std::string r;
     for (char c : s) {
