@@ -956,6 +956,7 @@ Column makeBinaryColumn(const std::string& name, bool isNull, size_t length, boo
 Column makeVarBinaryColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
 Column makeJsonColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeJsonbColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeXmlColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeDoubleColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makePointColumn(const std::string& name, bool isNull, bool isPK = false);

@@ -35,6 +35,7 @@ using dbms::makeBinaryColumn;
 using dbms::makeVarBinaryColumn;
 using dbms::makeJsonColumn;
 using dbms::makeJsonbColumn;
+using dbms::makeXmlColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makePointColumn;
@@ -5325,6 +5326,8 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeJsonbColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "json") {
                 col = makeJsonColumn(cname, isNull);
+            } else if (typeName.substr(0, 3) == "xml") {
+                col = makeXmlColumn(cname, isNull);
             } else if (typeName.substr(0, 5) == "float") {
                 col = makeFloatColumn(cname, isNull);
             } else if (typeName.substr(0, 6) == "double" || typeName.substr(0, 5) == "money") {

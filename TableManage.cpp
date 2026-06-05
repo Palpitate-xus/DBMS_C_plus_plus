@@ -510,6 +510,17 @@ Column makeJsonbColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeXmlColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "xml";
+    c.dsize = 65535;
+    return c;
+}
+
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;
