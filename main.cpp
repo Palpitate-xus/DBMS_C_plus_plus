@@ -3719,11 +3719,20 @@ bool execute(const string& rawSql, Session& s) {
             string rest = trim(sql.substr(16));
             string dbname = rest;
             string charset = "utf8";
-            size_t csPos = rest.find(" character set ");
-            if (csPos == string::npos) csPos = rest.find(" charset ");
+            size_t csPos1 = rest.find(" character set ");
+            size_t csPos2 = rest.find(" charset ");
+            size_t csPos = string::npos;
+            size_t csOffset = 0;
+            if (csPos1 != string::npos) {
+                csPos = csPos1;
+                csOffset = 15;
+            } else if (csPos2 != string::npos) {
+                csPos = csPos2;
+                csOffset = 9;
+            }
             if (csPos != string::npos) {
                 dbname = trim(rest.substr(0, csPos));
-                charset = trim(rest.substr(csPos + ((rest[csPos+1] == 'c') ? 15 : 9)));
+                charset = trim(rest.substr(csPos + csOffset));
             }
             auto res = g_engine.createDatabase(dbname, charset);
             if (res == OpResult::TableAlreadyExist) {
