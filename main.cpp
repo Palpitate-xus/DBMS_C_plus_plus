@@ -326,6 +326,10 @@ static string sqlProcessor(string raw) {
     raw.erase(remove(raw.begin(), raw.end(), '\n'), raw.end());
     raw.erase(remove(raw.begin(), raw.end(), '\t'), raw.end());
     raw.erase(remove(raw.begin(), raw.end(), '\r'), raw.end());
+    // Trim leading/trailing whitespace
+    size_t start = raw.find_first_not_of(' ');
+    if (start == string::npos) raw.clear();
+    else raw = raw.substr(start, raw.find_last_not_of(' ') - start + 1);
     if (!raw.empty() && raw.back() == ';') raw.pop_back();
     raw = preprocessCaseWhen(raw);
     // Normalize boolean literals: true/false → 1/0
