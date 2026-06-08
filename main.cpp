@@ -10592,7 +10592,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_activity") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -10649,6 +10649,12 @@ bool execute(const string& rawSql, Session& s) {
                 auto waits = g_engine.getLockManager().getLockWaits();
                 for (const auto& w : waits) {
                     cout << "relation " << s.currentDB << " " << w.resource << " " << "wait" << " f" << endl;
+                }
+            } else if (tname == "pg_stat_activity") {
+                cout << "pid usename datname state query " << endl;
+                auto procs = dbms::getProcessList();
+                for (const auto& p : procs) {
+                    cout << p.id << " " << p.user << " " << p.db << " " << p.state << " " << p.info << endl;
                 }
             }
             return false;
