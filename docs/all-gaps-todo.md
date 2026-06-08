@@ -149,8 +149,8 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [ ] 范围类型 (int4range, tsrange 等)
 - [x] 几何类型 - POINT（含空间运算符 << >> <^ >^ <@）
 - [x] 网络类型 - INET/CIDR（IPv4，含 << >> && 运算符）
-- [ ] XML
-- [ ] pg_lsn
+- [x] XML
+- [x] pg_lsn
 - [ ] tsvector / tsquery（PG 风格全文搜索类型）
 - [x] 组合类型 (ROW 类型)
 - [x] DOMAIN (CREATE DOMAIN)
