@@ -12973,20 +12973,35 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
             uint32_t pageId; uint16_t slotId;
             decodeRid(entry.rowIdx, pageId, slotId);
             char* pageBuf = pa->fetchPage(pageId);
+            std::string currentRow;
+            bool foundCurrent = false;
             if (pageBuf) {
                 Page page(pageBuf);
-                // rowData in txnLog is data-only (without MVCC header).
-                // Preserve the existing MVCC header and only replace the data portion.
+                // Read current row data before restoring (needed to remove stale index entries)
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
+                if (page.get(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
+                    currentRow.assign(currentData + MVCC_HEADER_SIZE, currentLen - MVCC_HEADER_SIZE);
+                    foundCurrent = true;
+                } else {
+                    std::string targetPk = extractPKValue(entry.rowData, tbl);
+                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                        if (foundCurrent || len <= MVCC_HEADER_SIZE) return;
+                        std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        std::string pk = extractPKValue(rowData, tbl);
+                        if (pk == targetPk) {
+                            currentRow = rowData;
+                            foundCurrent = true;
+                        }
+                    });
+                }
+                // Restore old row data
                 if (page.get(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
                     std::string fullRow;
                     fullRow.append(currentData, MVCC_HEADER_SIZE);
                     fullRow.append(entry.rowData);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else {
-                    // Slot may have moved due to a previous UPDATE that grew the row.
-                    // Search live slots on this page for a row with matching PK.
                     std::string targetPk = extractPKValue(entry.rowData, tbl);
                     bool restored = false;
                     page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
@@ -13005,8 +13020,13 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
             }
+            // Rebuild indexes: remove current (stale) values then insert restored values
             BPTree* pkIdx = getPKIndex(txnDB_, entry.tableName);
             if (pkIdx) {
+                if (foundCurrent) {
+                    std::string currentPk = extractPKValue(currentRow, tbl);
+                    if (!currentPk.empty()) pkIdx->remove(currentPk);
+                }
                 std::string newPk = extractPKValue(entry.rowData, tbl);
                 if (!newPk.empty()) pkIdx->insert(newPk, entry.rowIdx);
             }
@@ -13019,6 +13039,10 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
                 if (colIdx >= tbl.len) continue;
                 BPTree* secIdx = getSecondaryIndex(txnDB_, entry.tableName, colname);
                 if (!secIdx) continue;
+                if (foundCurrent) {
+                    std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
+                    if (!currentVal.empty()) secIdx->remove(currentVal);
+                }
                 std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
             }
