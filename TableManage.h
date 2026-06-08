@@ -843,6 +843,15 @@ public:
     std::filesystem::path permPath(const std::string& dbname) const;
     std::filesystem::path rlsPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path seqPath(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path seclabelPath(const std::string& dbname) const;
+
+    // Security Labels
+    void setSecurityLabel(const std::string& dbname, const std::string& objType,
+                          const std::string& objName, const std::string& label);
+    std::string getSecurityLabel(const std::string& dbname, const std::string& objType,
+                                 const std::string& objName) const;
+    std::vector<std::tuple<std::string, std::string, std::string>> getAllSecurityLabels(
+        const std::string& dbname) const;
 
     // TOAST (The Oversized-Attribute Storage Technique) for large values
     static constexpr size_t TOAST_THRESHOLD = 1000; // bytes

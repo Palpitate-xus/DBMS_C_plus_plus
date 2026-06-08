@@ -7814,6 +7814,52 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // SECURITY LABEL ON table_name IS 'label'
+    if (sql.substr(0, 15) == "security label ") {
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
+        string rest = trim(sql.substr(15));
+        if (rest.substr(0, 3) != "on ") {
+            cout << "SQL syntax error: SECURITY LABEL ON object_type object_name IS \x27label\x27" << endl;
+            return true;
+        }
+        rest = trim(rest.substr(3));
+        size_t isPos = rest.find(" is ");
+        if (isPos == string::npos) {
+            cout << "SQL syntax error: SECURITY LABEL ON object IS \x27label\x27" << endl;
+            return true;
+        }
+        string objPart = trim(rest.substr(0, isPos));
+        string labelPart = trim(rest.substr(isPos + 4));
+        // Remove quotes from label; NULL means remove label
+        if (labelPart.size() >= 2 && labelPart.front() == '\'' && labelPart.back() == '\'') {
+            labelPart = labelPart.substr(1, labelPart.size() - 2);
+        }
+        if (labelPart == "NULL" || labelPart == "null") {
+            labelPart.clear();
+        }
+        // Support object_type object_name or just object_name (default table)
+        string objType = "table";
+        string objName = objPart;
+        size_t sp = objPart.find(' ');
+        if (sp != string::npos) {
+            objType = objPart.substr(0, sp);
+            objName = trim(objPart.substr(sp + 1));
+        }
+        string resolvedName = resolveTableName(s, objName);
+        if (objType == "table" && !g_engine.tableExists(s.currentDB, resolvedName)) {
+            cout << "Table " << resolvedName << " not exist" << endl;
+            return true;
+        }
+        g_engine.setSecurityLabel(s.currentDB, objType, resolvedName, labelPart);
+        if (labelPart.empty()) {
+            cout << "Security label removed from " << objType << " " << resolvedName << endl;
+        } else {
+            cout << "Security label set on " << objType << " " << resolvedName << endl;
+        }
+        return false;
+    }
+
     // TRUNCATE TABLE tablename
     if (sql.substr(0, 8) == "truncate") {
         if (!checkAdmin(s)) return true;
@@ -10276,7 +10322,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -10288,7 +10334,7 @@ bool execute(const string& rawSql, Session& s) {
                 for (const auto& t : g_engine.getTableNames(s.currentDB)) {
                     cout << t << " 0 0 0 0 0 " << endl;
                 }
-            } else {
+            } else if (tname == "pg_stat_statements") {
                 cout << "query calls total_time min_time max_time mean_time dbname " << endl;
                 auto stats = getSqlStats(s.currentDB);
                 for (const auto& st : stats) {
@@ -10310,6 +10356,12 @@ bool execute(const string& rawSql, Session& s) {
                          << std::fixed << std::setprecision(2) << st.totalTimeMs << " "
                          << st.minTimeMs << " " << st.maxTimeMs << " " << st.meanTimeMs << " "
                          << st.dbname << endl;
+                }
+            } else {
+                cout << "objtype objname label " << endl;
+                auto labels = g_engine.getAllSecurityLabels(s.currentDB);
+                for (const auto& [ot, on, lab] : labels) {
+                    cout << ot << " " << on << " " << lab << endl;
                 }
             }
             return false;

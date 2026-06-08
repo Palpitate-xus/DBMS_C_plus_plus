@@ -13358,6 +13358,78 @@ std::filesystem::path StorageEngine::seqPath(const std::string& dbname, const st
     return dbPath(dbname) / (tablename + ".seq");
 }
 
+std::filesystem::path StorageEngine::seclabelPath(const std::string& dbname) const {
+    return dbPath(dbname) / ".security_labels";
+}
+
+void StorageEngine::setSecurityLabel(const std::string& dbname, const std::string& objType,
+                                     const std::string& objName, const std::string& label) {
+    auto spath = seclabelPath(dbname);
+    std::map<std::string, std::string> labels; // key=objType|objName -> label
+    if (std::filesystem::exists(spath)) {
+        std::ifstream ifs(spath);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            size_t p1 = line.find(' ');
+            size_t p2 = line.find(' ', p1 + 1);
+            if (p1 == std::string::npos || p2 == std::string::npos) continue;
+            std::string key = line.substr(0, p1) + "|" + line.substr(p1 + 1, p2 - p1 - 1);
+            labels[key] = line.substr(p2 + 1);
+        }
+    }
+    std::string key = objType + "|" + objName;
+    if (label.empty()) {
+        labels.erase(key);
+    } else {
+        labels[key] = label;
+    }
+    std::ofstream ofs(spath);
+    for (const auto& kv : labels) {
+        size_t dp = kv.first.find('|');
+        std::string ot = kv.first.substr(0, dp);
+        std::string on = kv.first.substr(dp + 1);
+        ofs << ot << " " << on << " " << kv.second << "\n";
+    }
+}
+
+std::string StorageEngine::getSecurityLabel(const std::string& dbname, const std::string& objType,
+                                            const std::string& objName) const {
+    auto spath = seclabelPath(dbname);
+    if (!std::filesystem::exists(spath)) return "";
+    std::ifstream ifs(spath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string ot, on, lab;
+        ss >> ot >> on;
+        std::getline(ss, lab);
+        if (!lab.empty() && lab[0] == ' ') lab = lab.substr(1);
+        if (ot == objType && on == objName) return lab;
+    }
+    return "";
+}
+
+std::vector<std::tuple<std::string, std::string, std::string>> StorageEngine::getAllSecurityLabels(
+    const std::string& dbname) const {
+    std::vector<std::tuple<std::string, std::string, std::string>> result;
+    auto spath = seclabelPath(dbname);
+    if (!std::filesystem::exists(spath)) return result;
+    std::ifstream ifs(spath);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string ot, on, lab;
+        ss >> ot >> on;
+        std::getline(ss, lab);
+        if (!lab.empty() && lab[0] == ' ') lab = lab.substr(1);
+        result.emplace_back(ot, on, lab);
+    }
+    return result;
+}
+
 int64_t StorageEngine::readNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname) {
     auto path = seqPath(dbname, tablename);
     int64_t val = 1;
