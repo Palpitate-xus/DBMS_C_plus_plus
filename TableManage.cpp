@@ -12032,8 +12032,8 @@ void StorageEngine::recoverAllDatabases() {
         bool hasCommit = false;
         bool hasRollback = false;
         for (const auto& l : lines) {
-            if (l == "COMMIT") hasCommit = true;
-            if (l == "ROLLBACK") hasRollback = true;
+            if (l.size() >= 6 && l.substr(0, 6) == "COMMIT") hasCommit = true;
+            if (l.size() >= 8 && l.substr(0, 8) == "ROLLBACK") hasRollback = true;
         }
 
         std::filesystem::path backup = dbPath(dbname);
@@ -12397,10 +12397,16 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
     if (inTransaction_) return OpResult::Success;  // already in txn
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
 
+    // Flush all dirty pages so the on-disk files are up-to-date before backup
+    auto tblNames = getTableNames(dbname);
+    for (const auto& tn : tblNames) {
+        PageAllocator* pa = getPageAllocator(dbname, tn);
+        if (pa) pa->flush();
+    }
+
     // Keep a backup for crash recovery (recoverAllDatabases)
     // Skip data/index files of UNLOGGED tables (they are truncated on crash)
     std::set<std::string> unloggedFiles;
-    auto tblNames = getTableNames(dbname);
     for (const auto& tn : tblNames) {
         TableSchema ts = getTableSchema(dbname, tn);
         if (ts.isUnlogged) {
