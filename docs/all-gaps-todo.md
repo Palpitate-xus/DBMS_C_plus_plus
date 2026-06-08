@@ -170,7 +170,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [x] COPY ... FROM/TO（批量 COPY 协议）
 
 ### 查询优化器
-- [ ] 统计信息自动收集（ANALYZE 已支持，需定时触发）
+- [x] 统计信息自动收集（auto-analyze，基于修改计数阈值触发）
 - [ ] 直方图 / 相关性统计
 - [ ] 子查询内联 / 物化决策优化
 - [ ] 并行顺序扫描 / 并行索引扫描
@@ -197,8 +197,8 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [x] MATERIALIZED VIEW CONCURRENTLY（增量刷新）
 
 ### 触发器
-- [ ] 触发器诊断变量
-- [ ] WHEN 子句
+- [x] 触发器诊断变量 (tg_name, tg_when, tg_level, tg_op, tg_relname)
+- [x] WHEN 子句 (条件触发)
 - [ ] 复合触发器
 - [ ] Event Triggers
 
@@ -217,14 +217,14 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [ ] SSL 证书认证
 - [ ] RADIUS 认证
 - [ ] pg_hba.conf 风格访问控制
-- [ ] GRANT ON SCHEMA
-- [ ] GRANT ON SEQUENCE
-- [ ] GRANT ON FUNCTION
-- [ ] REVOKE CASCADE
-- [ ] DEFAULT PRIVILEGES
-- [ ] SECURITY LABEL
-- [ ] 行级安全 (RLS) 强制模式
-- [ ] REASSIGN OWNED / DROP OWNED
+- [x] GRANT ON SCHEMA
+- [x] GRANT ON SEQUENCE
+- [x] GRANT ON FUNCTION
+- [x] REVOKE CASCADE
+- [x] DEFAULT PRIVILEGES
+- [x] SECURITY LABEL
+- [x] 行级安全 (RLS) 强制模式
+- [x] REASSIGN OWNED / DROP OWNED
 
 ### 复制与高可用
 - [ ] 物理流复制 (Streaming Replication)
@@ -245,7 +245,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 ### 监控与诊断
 - [ ] pg_stat_statements 等价
 - [ ] Wait Events
-- [ ] pg_buffercache 等价
+- [x] pg_buffercache 等价
 - [ ] 锁等待拓扑统计
 - [ ] 慢查询日志 CSV 格式
 - [ ] auto_explain
@@ -276,9 +276,9 @@ TOP20 当前完成度 14/20，剩余 6 项：
 ### 系统管理
 - [ ] ALTER SYSTEM（postgresql.conf 动态修改）
 - [ ] pg_reload_conf()
-- [ ] pg_cancel_backend / pg_terminate_backend
+- [x] pg_cancel_backend / pg_terminate_backend
 - [ ] 连接池管理
-- [ ] VACUUM CONCURRENTLY
+- [x] VACUUM CONCURRENTLY
 
 ---
 
@@ -303,4 +303,4 @@ TOP20 当前完成度 14/20，剩余 6 项：
 
 ---
 
-*最后更新：2026-06-03*
+*最后更新：2026-06-08*
