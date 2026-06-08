@@ -1158,6 +1158,37 @@ static vector<string> splitTopLevelComma(const string& s) {
     return parts;
 }
 
+static vector<string> splitTopLevelSemicolon(const string& s) {
+    vector<string> parts;
+    string current;
+    int parenDepth = 0;
+    bool inQuote = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\'') {
+            current += c;
+            if (inQuote && i + 1 < s.size() && s[i + 1] == '\'') {
+                current += s[++i];
+                continue;
+            }
+            inQuote = !inQuote;
+            continue;
+        }
+        if (!inQuote) {
+            if (c == '(') ++parenDepth;
+            else if (c == ')' && parenDepth > 0) --parenDepth;
+            else if (c == ';' && parenDepth == 0) {
+                if (!trim(current).empty()) parts.push_back(trim(current));
+                current.clear();
+                continue;
+            }
+        }
+        current += c;
+    }
+    if (!trim(current).empty()) parts.push_back(trim(current));
+    return parts;
+}
+
 static vector<string> splitByDelimiter(const string& s, char delim) {
     vector<string> parts;
     size_t start = 0;
@@ -1471,6 +1502,7 @@ struct CatalogObjectInfo {
 
 static bool checkAdmin(const Session& s);
 static bool checkDB(const Session& s);
+bool execute(const std::string& rawSql, Session& s);
 
 static std::filesystem::path compatObjectCatalogPath(const string& dbname) {
     return g_engine.dbPath(dbname) / ".pg_compat_objects";
@@ -1898,6 +1930,152 @@ static bool showCompatObjects(Session& s, const string& rest) {
         cout << obj.kind << " " << obj.name << " " << obj.owner << " " << def << endl;
     }
     return true;
+}
+
+static bool isPgStringBackedType(const string& typeName) {
+    static const set<string> exact = {
+        "int4range", "int8range", "numrange", "tsrange", "tstzrange", "daterange",
+        "int4multirange", "int8multirange", "nummultirange", "tsmultirange",
+        "tstzmultirange", "datemultirange", "tsvector", "tsquery", "macaddr",
+        "macaddr8", "oid", "regclass", "regcollation", "regconfig", "regdictionary",
+        "regnamespace", "regoper", "regoperator", "regproc", "regprocedure",
+        "regrole", "regtype", "xid", "cid", "tid", "record", "anyelement",
+        "anyarray", "anynonarray", "anyenum", "anyrange", "anymultirange",
+        "cstring", "trigger", "event_trigger"
+    };
+    if (exact.count(typeName)) return true;
+    return (typeName.size() >= 5 &&
+            typeName.substr(typeName.size() - 5) == "range") ||
+           (typeName.size() >= 10 &&
+            typeName.substr(typeName.size() - 10) == "multirange");
+}
+
+static Column makePgStringBackedColumn(const string& cname,
+                                       const string& typeName,
+                                       bool isNull,
+                                       bool isPK) {
+    Column col = makeVarCharColumn(cname, isNull, 65535, isPK);
+    col.dataType = typeName;
+    col.isVariableLength = true;
+    col.dsize = 65535;
+    return col;
+}
+
+static bool handleLoadSharedLibrary(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string lib = stripQuotes(trim(sql.substr(4)));
+    if (lib.empty()) {
+        cout << "SQL syntax error: LOAD 'library'" << endl;
+        return true;
+    }
+    auto objects = loadCompatObjects(s.currentDB);
+    objects[compatObjectKey("loaded_library", lib)] =
+        {"loaded_library", lib, s.username, sql, ""};
+    if (!saveCompatObjects(s.currentDB, objects)) {
+        cout << "LOAD failed" << endl;
+        return true;
+    }
+    cout << "Library " << lib << " loaded" << endl;
+    return false;
+}
+
+static bool extractQuotedSqlBody(const string& s, string& body) {
+    string rest = trim(s);
+    size_t d1 = rest.find("$$");
+    if (d1 != string::npos) {
+        size_t d2 = rest.find("$$", d1 + 2);
+        if (d2 == string::npos) return false;
+        body = rest.substr(d1 + 2, d2 - d1 - 2);
+        return true;
+    }
+    size_t q1 = rest.find('\'');
+    if (q1 != string::npos) {
+        size_t q2 = q1 + 1;
+        while (q2 < rest.size()) {
+            if (rest[q2] == '\'' && q2 + 1 < rest.size() && rest[q2 + 1] == '\'') {
+                q2 += 2;
+                continue;
+            }
+            if (rest[q2] == '\'') break;
+            ++q2;
+        }
+        if (q2 >= rest.size()) return false;
+        body = rest.substr(q1 + 1, q2 - q1 - 1);
+        size_t p = 0;
+        while ((p = body.find("''", p)) != string::npos) {
+            body.replace(p, 2, "'");
+            ++p;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool handleDoBlock(const string& sql, Session& s) {
+    if (!checkDB(s)) return true;
+    string body;
+    if (!extractQuotedSqlBody(sql.substr(2), body)) {
+        cout << "SQL syntax error: DO requires a quoted block" << endl;
+        return true;
+    }
+    body = trim(body);
+    if (startsWithKeyword(body, "begin")) {
+        body = trim(body.substr(5));
+        if (body.size() >= 3 && body.substr(body.size() - 3) == "end") {
+            body = trim(body.substr(0, body.size() - 3));
+        } else if (body.size() >= 4 && body.substr(body.size() - 4) == "end;") {
+            body = trim(body.substr(0, body.size() - 4));
+        }
+    }
+    int executed = 0;
+    for (auto stmt : splitTopLevelSemicolon(body)) {
+        stmt = trim(stmt);
+        if (stmt.empty() || stmt == "begin" || stmt == "end") continue;
+        if (stmt.size() >= 3 && stmt.substr(stmt.size() - 3) == "end") {
+            stmt = trim(stmt.substr(0, stmt.size() - 3));
+            if (stmt.empty()) continue;
+        }
+        bool failed = execute(stmt, s);
+        if (failed) return true;
+        ++executed;
+    }
+    cout << "DO " << executed << " statement(s)" << endl;
+    return false;
+}
+
+static bool handleSelectIntoTable(const string& sql, Session& s, bool& handled) {
+    handled = false;
+    if (!startsWithKeyword(sql, "select")) return false;
+    size_t intoPos = findTopLevelKeyword(sql, "into", 6);
+    if (intoPos == string::npos) return false;
+    size_t fromPos = findTopLevelKeyword(sql, "from", intoPos + 4);
+    if (fromPos == string::npos || intoPos > fromPos) return false;
+    string target = trim(sql.substr(intoPos + 4, fromPos - intoPos - 4));
+    if (target.empty() || startsWithKeyword(target, "outfile")) return false;
+    bool temporary = false;
+    bool unlogged = false;
+    if (startsWithKeyword(target, "temporary")) {
+        temporary = true;
+        target = trim(target.substr(9));
+    } else if (startsWithKeyword(target, "temp")) {
+        temporary = true;
+        target = trim(target.substr(4));
+    } else if (startsWithKeyword(target, "unlogged")) {
+        unlogged = true;
+        target = trim(target.substr(8));
+    }
+    if (target.empty() || target.find(' ') != string::npos) return false;
+    string selectList = trim(sql.substr(6, intoPos - 6));
+    string fromRest = trim(sql.substr(fromPos));
+    string createTarget = temporary ? tempTablePrefix(target) : target;
+    string createSql = string("create ") +
+        (unlogged ? "unlogged " : "") +
+        "table " + createTarget + " as select " + selectList + " " + fromRest;
+    handled = true;
+    bool failed = execute(createSql, s);
+    if (!failed && temporary) s.tempTables.insert(target);
+    return failed;
 }
 
 static bool tableHasColumns(const string& dbname, const string& tablename, const vector<string>& columns) {
@@ -2792,6 +2970,9 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
             } else if (ctype.substr(0, 8) == "interval") {
                 col = makeIntervalColumn(cname, isNull, isPK);
                 colCreated = true;
+            } else if (isPgStringBackedType(ctype)) {
+                col = makePgStringBackedColumn(cname, ctype, isNull, isPK);
+                colCreated = true;
             } else if (ctype.substr(0, 3) == "int") {
                 col = makeIntColumn(cname, isNull, 2, isPK, isUnsigned);
                 colCreated = true;
@@ -2807,8 +2988,13 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
             } else if (ctype.substr(0, 4) == "long") {
                 col = makeIntColumn(cname, isNull, 3, isPK, isUnsigned);
                 colCreated = true;
-            } else if (ctype.substr(0, 4) == "bool" || ctype.substr(0, 1) == "bit") {
+            } else if (ctype.substr(0, 4) == "bool") {
                 col = makeBooleanColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 3) == "bit") {
+                string bitType = (ctype == "bit" && parts.size() >= 3 && parts[2] == "varying")
+                    ? "bit varying" : "bit";
+                col = makePgStringBackedColumn(cname, bitType, isNull, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 4) == "uuid") {
                 col = makeUuidColumn(cname, isNull, isPK);
@@ -3112,7 +3298,17 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
 // Helper: find matching closing paren from start position
 static size_t findMatchingParen(const std::string& s, size_t start) {
     int depth = 1;
+    bool inQuote = false;
     for (size_t i = start + 1; i < s.size(); ++i) {
+        if (s[i] == '\'') {
+            if (inQuote && i + 1 < s.size() && s[i + 1] == '\'') {
+                ++i;
+                continue;
+            }
+            inQuote = !inQuote;
+            continue;
+        }
+        if (inQuote) continue;
         if (s[i] == '(') ++depth;
         else if (s[i] == ')') { --depth; if (depth == 0) return i; }
     }
@@ -5334,6 +5530,10 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (startsWithKeyword(sql, "do")) {
+        return handleDoBlock(sql, s);
+    }
+
     if (sql.substr(0, 21) == "import foreign schema") {
         return handleImportForeignSchema(sql, s);
     }
@@ -7366,6 +7566,8 @@ bool execute(const string& rawSql, Session& s) {
             Column col;
             if (typeName.substr(0, 8) == "interval") {
                 col = makeIntervalColumn(cname, isNull);
+            } else if (isPgStringBackedType(typeName)) {
+                col = makePgStringBackedColumn(cname, typeName, isNull, false);
             } else if (typeName.substr(0, 3) == "int") {
                 col = makeIntColumn(cname, isNull, 2);
             } else if (typeName.substr(0, 4) == "tiny") {
@@ -7376,8 +7578,10 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeIntColumn(cname, isNull, 3);
             } else if (typeName.substr(0, 4) == "long") {
                 col = makeIntColumn(cname, isNull, 3);
-            } else if (typeName.substr(0, 4) == "bool" || typeName.substr(0, 3) == "bit") {
+            } else if (typeName.substr(0, 4) == "bool") {
                 col = makeBooleanColumn(cname, isNull);
+            } else if (typeName.substr(0, 3) == "bit") {
+                col = makePgStringBackedColumn(cname, typeName.substr(0, 11) == "bit varying" ? "bit varying" : "bit", isNull, false);
             } else if (typeName.substr(0, 4) == "uuid") {
                 col = makeUuidColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "date") {
@@ -11685,6 +11889,10 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (startsWithKeyword(sql, "load")) {
+        return handleLoadSharedLibrary(sql, s);
+    }
+
     // COPY ... FROM / TO (PostgreSQL-style bulk load)
     if (sql.substr(0, 4) == "copy") {
         if (!checkAdmin(s)) return true;
@@ -12024,6 +12232,12 @@ bool execute(const string& rawSql, Session& s) {
             cout << (ok ? "Shared lock released" : "Lock not held") << endl;
             return false;
         }
+    }
+
+    if (startsWithKeyword(sql, "select")) {
+        bool handledSelectInto = false;
+        bool failedSelectInto = handleSelectIntoTable(sql, s, handledSelectInto);
+        if (handledSelectInto) return failedSelectInto;
     }
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {

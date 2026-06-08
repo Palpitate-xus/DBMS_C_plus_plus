@@ -127,6 +127,7 @@ PostgreSQL 18 官方文档覆盖：
 
 > 2026-06-08 进展：`main.cpp` 新增 `.pg_compat_objects` 目录级兼容对象表后，下表中的多类对象已经有可持久化的 `CREATE` / `ALTER` / `DROP` 入口，包括 access method、operator/operator class/operator family、aggregate、transform、extension、FDW/server/user mapping/foreign table、publication/subscription、language、event trigger、rule、text search configuration/dictionary/parser/template、large object，以及 `IMPORT FOREIGN SCHEMA`。
 > 这些入口目前用于对象元数据登记、重命名/owner/定义更新、删除和 `SHOW COMPAT OBJECTS` 审计；由于尚未接入 PostgreSQL 的 catalog/OID/dependency、planner/executor、FDW API、逻辑复制、全文搜索运行时等基础设施，本节仍按“完整 PostgreSQL 语义缺口”保留。
+> 2026-06-08 后续进展：新增 `DO` 简化 SQL block 执行、`LOAD 'library'` 目录登记、PostgreSQL 风格 `SELECT ... INTO [TEMP|UNLOGGED] table FROM ...` 到 CTAS 的转换；这些能力已经过建库、建表、插入、查询和目录展示冒烟，但仍不等同于 PL/pgSQL runtime、动态共享库加载或 PostgreSQL executor 级 SELECT INTO 语义。
 
 | 类别 | 缺失命令 |
 |---|---|
@@ -140,7 +141,7 @@ PostgreSQL 18 官方文档覆盖：
 | 统计/表空间/全文配置 | `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
 | 事务/会话别名和状态 | 本轮已将 `SET CONSTRAINTS`、`SET SESSION AUTHORIZATION`、`MOVE` 移至“部分实现”；仍缺 PostgreSQL 完整语义。 |
 | 数据库/对象 ALTER 子集 | `ALTER DATABASE`, `ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER ROLE` 的完整 PG 语义、`ALTER SEQUENCE`, `ALTER TRIGGER`, `ALTER TYPE`, `ALTER GROUP` |
-| 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义（项目有非 PG 的 `SELECT ... INTO OUTFILE`）、`DROP GROUP` 等兼容别名 |
+| 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义已进入部分实现；仍缺真实共享库加载、安全限制、完整 CTAS 类型推断和 `DROP GROUP` 等兼容别名完整语义 |
 
 ## 5. 数据类型差距
 
@@ -156,19 +157,19 @@ PostgreSQL 18 官方文档覆盖：
 | 布尔 | 部分实现 | 基本值支持；SQL 三值逻辑、类型转换、函数/聚合边界仍简化。 |
 | ENUM | 部分实现 | 列定义里有 enum values；缺少 `CREATE TYPE ... AS ENUM` 的 catalog、排序、ALTER TYPE ADD VALUE 等。 |
 | 几何类型 | 部分实现 | 只明确支持 `point` 和少量空间比较；缺少 `line`、`lseg`、`box`、`path`、`polygon`、`circle` 及完整函数/操作符。 |
-| 网络类型 | 部分实现 | 有 `inet/cidr` IPv4 路径；缺少 IPv6、`macaddr/macaddr8` 和 PG 全套网络函数。 |
-| bit string | 基本缺失 | `bit` 在部分 ALTER 解析里被当作 bool；缺少 `bit(n)`、`bit varying`、位运算。 |
-| 全文搜索类型 | 缺失 | 缺少 `tsvector`、`tsquery`、文本搜索配置/词典/parser/template；项目 fulltext 是简化倒排索引。 |
+| 网络类型 | 部分实现 | 有 `inet/cidr` IPv4 路径；`macaddr/macaddr8` 已可作为字符串型列存取；缺少 IPv6、MAC 地址校验和 PG 全套网络函数。 |
+| bit string | 部分实现 | `bit` / `bit varying` 已不再按 bool 解析，可作为字符串型列存取；缺少长度约束和位运算。 |
+| 全文搜索类型 | 部分实现 | `tsvector`、`tsquery` 已可作为字符串型列存取；文本搜索配置/词典/parser/template 有目录级 DDL，但缺少 PG parser、ranking、operator 和 GIN opclass 语义。 |
 | UUID | 部分实现 | 有 uuid 列；缺少 PG 18 `uuidv7()`、uuid 函数、输入严格性与扩展生态。 |
 | XML | 部分实现 | 有 xml 列；缺少 XML 类型函数、XPath、XMLTABLE、schema/encoding 语义。 |
 | JSON/JSONB | 部分实现 | 有 JSON 校验和少量函数；缺少 jsonpath、SQL/JSON query functions、`JSON_TABLE`、完整操作符、GIN opclass。 |
 | 数组 | 部分实现 | 有 `INT[]`/`VARCHAR[]` 痕迹和 array_get/contains 简化；缺少多维数组、切片、unnest/array functions、ANY/ALL 完整语义。 |
 | Composite | 部分实现 | `CREATE TYPE AS (...)` 存字段；缺少 row constructor、字段访问、嵌套、函数参数/返回、catalog 语义。 |
-| Range/Multirange | 缺失 | 缺少 `int4range`、`numrange`、`tsrange`、`daterange`、multirange、range operators、GiST/SP-GiST opclass。 |
+| Range/Multirange | 部分实现 | `int4range`、`int8range`、`numrange`、`tsrange`、`tstzrange`、`daterange` 及 multirange 名称已可作为字符串型列存取；缺少范围 canonicalization、约束、operators、函数和 GiST/SP-GiST opclass。 |
 | Domain | 部分实现 | 有 base/default/check 文件；缺少 constraint validation、alter domain、依赖、权限、数组自动类型。 |
-| Object Identifier | 缺失 | 缺少 `oid`、`regclass`、`regproc`、`xid`、`cid` 等系统类型。 |
+| Object Identifier | 部分实现 | `oid`、`regclass`、`regproc`、`regtype`、`xid`、`cid` 等名称已可作为字符串型列存取；缺少 OID catalog 绑定、别名解析、依赖和系统函数语义。 |
 | `pg_lsn` | 部分实现/语义缺失 | 有列类型，但没有真实 WAL LSN 系统，因而不能承担 PG `pg_lsn` 语义。 |
-| Pseudo-types | 缺失 | 缺少 `record`、`anyelement`、`anyarray`、`cstring`、`trigger` 等函数类型系统。 |
+| Pseudo-types | 部分实现/语义缺失 | `record`、`anyelement`、`anyarray`、`cstring`、`trigger` 等名称已可被解析为字符串型列/元数据占位；仍缺 PostgreSQL 函数类型系统和调用约束语义。 |
 
 ## 6. 表达式、函数与操作符差距
 
