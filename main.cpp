@@ -1179,6 +1179,47 @@ static string joinStrings(const vector<string>& parts, const string& delim) {
     return out;
 }
 
+static bool startsWithKeyword(const string& s, const string& prefix) {
+    if (s.size() < prefix.size() || s.compare(0, prefix.size(), prefix) != 0) return false;
+    return s.size() == prefix.size() || isspace(static_cast<unsigned char>(s[prefix.size()]));
+}
+
+static string stripTrailingDropBehavior(string s) {
+    s = trim(s);
+    for (const string& kw : {" cascade", " restrict"}) {
+        if (s.size() >= kw.size() && s.substr(s.size() - kw.size()) == kw) {
+            return trim(s.substr(0, s.size() - kw.size()));
+        }
+    }
+    return s;
+}
+
+static string catalogEscape(const string& s) {
+    string out;
+    for (char c : s) {
+        if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else if (c == '|') out += "\\p";
+        else out += c;
+    }
+    return out;
+}
+
+static string catalogUnescape(const string& s) {
+    string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            char n = s[++i];
+            if (n == 'n') out += '\n';
+            else if (n == 'p') out += '|';
+            else out += n;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
 struct TablespaceInfo {
     string name;
     string owner;
@@ -1282,6 +1323,581 @@ static void removeMultiColumnStatsEntry(const string& dbname,
     }
     ofstream out(spath, ios::trunc);
     for (const auto& keptLine : kept) out << keptLine << "\n";
+}
+
+struct CollationInfo {
+    string name;
+    string provider;
+    string locale;
+    string owner;
+    string options;
+    string behavior;
+};
+
+static std::filesystem::path collationCatalogPath(const string& dbname) {
+    return g_engine.dbPath(dbname) / ".collations";
+}
+
+static string inferCollationBehavior(const string& name, const string& options) {
+    string combined = toLower(name + " " + options);
+    if (combined.find("nocase") != string::npos ||
+        combined.find("case_insensitive") != string::npos ||
+        combined.find("ci") != string::npos) {
+        return "nocase";
+    }
+    if (combined.find("reverse") != string::npos) return "reverse";
+    return "binary";
+}
+
+static map<string, CollationInfo> loadCollations(const string& dbname) {
+    map<string, CollationInfo> result;
+    ifstream in(collationCatalogPath(dbname));
+    string line;
+    while (getline(in, line)) {
+        if (trim(line).empty()) continue;
+        auto parts = splitByDelimiter(line, '|');
+        if (parts.size() < 6) continue;
+        result[parts[0]] = {parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]};
+    }
+    return result;
+}
+
+static bool saveCollations(const string& dbname, const map<string, CollationInfo>& collations) {
+    ofstream out(collationCatalogPath(dbname), ios::trunc);
+    if (!out) return false;
+    for (const auto& kv : collations) {
+        const auto& c = kv.second;
+        out << c.name << "|" << c.provider << "|" << c.locale << "|"
+            << c.owner << "|" << c.options << "|" << c.behavior << "\n";
+    }
+    return true;
+}
+
+static string resolveCollationForSort(const string& dbname, const string& name) {
+    string lowered = toLower(name);
+    if (lowered == "nocase" || lowered == "reverse" || lowered == "binary") return lowered;
+    auto collations = loadCollations(dbname);
+    auto it = collations.find(name);
+    if (it != collations.end()) return it->second.behavior;
+    it = collations.find(lowered);
+    if (it != collations.end()) return it->second.behavior;
+    return name;
+}
+
+struct CastInfo {
+    string sourceType;
+    string targetType;
+    string method;
+    string functionName;
+    string context;
+};
+
+static std::filesystem::path castCatalogPath(const string& dbname) {
+    return g_engine.dbPath(dbname) / ".casts";
+}
+
+static string castKey(const string& sourceType, const string& targetType) {
+    return sourceType + "->" + targetType;
+}
+
+static map<string, CastInfo> loadCasts(const string& dbname) {
+    map<string, CastInfo> result;
+    ifstream in(castCatalogPath(dbname));
+    string line;
+    while (getline(in, line)) {
+        if (trim(line).empty()) continue;
+        auto parts = splitByDelimiter(line, '|');
+        if (parts.size() < 5) continue;
+        CastInfo c{parts[0], parts[1], parts[2], parts[3], parts[4]};
+        result[castKey(c.sourceType, c.targetType)] = c;
+    }
+    return result;
+}
+
+static bool saveCasts(const string& dbname, const map<string, CastInfo>& casts) {
+    ofstream out(castCatalogPath(dbname), ios::trunc);
+    if (!out) return false;
+    for (const auto& kv : casts) {
+        const auto& c = kv.second;
+        out << c.sourceType << "|" << c.targetType << "|" << c.method << "|"
+            << c.functionName << "|" << c.context << "\n";
+    }
+    return true;
+}
+
+struct ConversionInfo {
+    string name;
+    string sourceEncoding;
+    string destEncoding;
+    string functionName;
+    bool isDefault = false;
+};
+
+static std::filesystem::path conversionCatalogPath(const string& dbname) {
+    return g_engine.dbPath(dbname) / ".conversions";
+}
+
+static map<string, ConversionInfo> loadConversions(const string& dbname) {
+    map<string, ConversionInfo> result;
+    ifstream in(conversionCatalogPath(dbname));
+    string line;
+    while (getline(in, line)) {
+        if (trim(line).empty()) continue;
+        auto parts = splitByDelimiter(line, '|');
+        if (parts.size() < 5) continue;
+        result[parts[0]] = {parts[0], parts[1], parts[2], parts[3], parts[4] == "1"};
+    }
+    return result;
+}
+
+static bool saveConversions(const string& dbname, const map<string, ConversionInfo>& conversions) {
+    ofstream out(conversionCatalogPath(dbname), ios::trunc);
+    if (!out) return false;
+    for (const auto& kv : conversions) {
+        const auto& c = kv.second;
+        out << c.name << "|" << c.sourceEncoding << "|" << c.destEncoding << "|"
+            << c.functionName << "|" << (c.isDefault ? "1" : "0") << "\n";
+    }
+    return true;
+}
+
+struct CatalogObjectInfo {
+    string kind;
+    string name;
+    string owner;
+    string definition;
+    string options;
+};
+
+static bool checkAdmin(const Session& s);
+static bool checkDB(const Session& s);
+
+static std::filesystem::path compatObjectCatalogPath(const string& dbname) {
+    return g_engine.dbPath(dbname) / ".pg_compat_objects";
+}
+
+static string compatObjectKey(const string& kind, const string& name) {
+    return kind + "|" + name;
+}
+
+static map<string, CatalogObjectInfo> loadCompatObjects(const string& dbname) {
+    map<string, CatalogObjectInfo> result;
+    ifstream in(compatObjectCatalogPath(dbname));
+    string line;
+    while (getline(in, line)) {
+        if (trim(line).empty()) continue;
+        auto parts = splitByDelimiter(line, '|');
+        if (parts.size() < 5) continue;
+        CatalogObjectInfo obj;
+        obj.kind = catalogUnescape(parts[0]);
+        obj.name = catalogUnescape(parts[1]);
+        obj.owner = catalogUnescape(parts[2]);
+        obj.definition = catalogUnescape(parts[3]);
+        obj.options = catalogUnescape(parts[4]);
+        if (!obj.kind.empty() && !obj.name.empty()) {
+            result[compatObjectKey(obj.kind, obj.name)] = obj;
+        }
+    }
+    return result;
+}
+
+static bool saveCompatObjects(const string& dbname, const map<string, CatalogObjectInfo>& objects) {
+    ofstream out(compatObjectCatalogPath(dbname), ios::trunc);
+    if (!out) return false;
+    for (const auto& kv : objects) {
+        const auto& obj = kv.second;
+        out << catalogEscape(obj.kind) << "|"
+            << catalogEscape(obj.name) << "|"
+            << catalogEscape(obj.owner) << "|"
+            << catalogEscape(obj.definition) << "|"
+            << catalogEscape(obj.options) << "\n";
+    }
+    return true;
+}
+
+struct CompatObjectPrefix {
+    string phrase;
+    string kind;
+};
+
+static const vector<CompatObjectPrefix>& compatCreatePrefixes() {
+    static const vector<CompatObjectPrefix> prefixes = {
+        {"text search configuration", "text_search_configuration"},
+        {"text search dictionary", "text_search_dictionary"},
+        {"text search template", "text_search_template"},
+        {"text search parser", "text_search_parser"},
+        {"foreign data wrapper", "foreign_data_wrapper"},
+        {"operator family", "operator_family"},
+        {"operator class", "operator_class"},
+        {"event trigger", "event_trigger"},
+        {"access method", "access_method"},
+        {"foreign table", "foreign_table"},
+        {"user mapping", "user_mapping"},
+        {"publication", "publication"},
+        {"subscription", "subscription"},
+        {"extension", "extension"},
+        {"aggregate", "aggregate"},
+        {"transform", "transform"},
+        {"operator", "operator"},
+        {"language", "language"},
+        {"server", "server"},
+        {"rule", "rule"}
+    };
+    return prefixes;
+}
+
+static const vector<CompatObjectPrefix>& compatAlterDropPrefixes() {
+    static const vector<CompatObjectPrefix> prefixes = {
+        {"text search configuration", "text_search_configuration"},
+        {"text search dictionary", "text_search_dictionary"},
+        {"text search template", "text_search_template"},
+        {"text search parser", "text_search_parser"},
+        {"foreign data wrapper", "foreign_data_wrapper"},
+        {"materialized view", "materialized_view"},
+        {"operator family", "operator_family"},
+        {"operator class", "operator_class"},
+        {"event trigger", "event_trigger"},
+        {"access method", "access_method"},
+        {"foreign table", "foreign_table"},
+        {"large object", "large_object"},
+        {"user mapping", "user_mapping"},
+        {"publication", "publication"},
+        {"subscription", "subscription"},
+        {"conversion", "conversion"},
+        {"collation", "collation"},
+        {"extension", "extension"},
+        {"aggregate", "aggregate"},
+        {"transform", "transform"},
+        {"operator", "operator"},
+        {"language", "language"},
+        {"function", "function"},
+        {"procedure", "procedure"},
+        {"routine", "routine"},
+        {"database", "database"},
+        {"sequence", "sequence"},
+        {"trigger", "trigger"},
+        {"domain", "domain"},
+        {"policy", "policy"},
+        {"server", "server"},
+        {"index", "index"},
+        {"group", "group"},
+        {"type", "type"},
+        {"rule", "rule"}
+    };
+    return prefixes;
+}
+
+static const vector<CompatObjectPrefix>& compatDropPrefixes() {
+    static const vector<CompatObjectPrefix> prefixes = {
+        {"text search configuration", "text_search_configuration"},
+        {"text search dictionary", "text_search_dictionary"},
+        {"text search template", "text_search_template"},
+        {"text search parser", "text_search_parser"},
+        {"foreign data wrapper", "foreign_data_wrapper"},
+        {"operator family", "operator_family"},
+        {"operator class", "operator_class"},
+        {"event trigger", "event_trigger"},
+        {"access method", "access_method"},
+        {"foreign table", "foreign_table"},
+        {"large object", "large_object"},
+        {"user mapping", "user_mapping"},
+        {"publication", "publication"},
+        {"subscription", "subscription"},
+        {"extension", "extension"},
+        {"aggregate", "aggregate"},
+        {"transform", "transform"},
+        {"operator", "operator"},
+        {"language", "language"},
+        {"routine", "routine"},
+        {"server", "server"},
+        {"group", "group"},
+        {"rule", "rule"}
+    };
+    return prefixes;
+}
+
+static bool consumeCompatPrefix(string& rest,
+                                const vector<CompatObjectPrefix>& prefixes,
+                                string& kind,
+                                string& phrase) {
+    rest = trim(rest);
+    for (const auto& p : prefixes) {
+        if (startsWithKeyword(rest, p.phrase)) {
+            kind = p.kind;
+            phrase = p.phrase;
+            rest = trim(rest.substr(p.phrase.size()));
+            return true;
+        }
+    }
+    return false;
+}
+
+static string firstCompatNameToken(const string& rest) {
+    string s = trim(rest);
+    if (s.empty()) return "";
+    size_t end = s.size();
+    for (const string& kw : {" using ", " for ", " from ", " with ", " options ",
+                             " owner ", " on ", " as ", " returns ", " handler "}) {
+        size_t p = findTopLevelKeyword(s, trim(kw));
+        if (p != string::npos) end = min(end, p);
+    }
+    size_t lp = s.find('(');
+    if (lp != string::npos) end = min(end, lp);
+    size_t sp = s.find(' ');
+    if (sp != string::npos && sp < end) end = sp;
+    return stripQuotes(trim(s.substr(0, end)));
+}
+
+static string parseUserMappingName(const string& rest) {
+    string s = trim(rest);
+    if (startsWithKeyword(s, "if not exists")) s = trim(s.substr(13));
+    if (startsWithKeyword(s, "if exists")) s = trim(s.substr(9));
+    if (!startsWithKeyword(s, "for")) return "";
+    s = trim(s.substr(3));
+    size_t serverPos = findTopLevelKeyword(s, "server");
+    if (serverPos == string::npos) return "";
+    string userName = trim(s.substr(0, serverPos));
+    string afterServer = trim(s.substr(serverPos + 6));
+    string serverName = firstCompatNameToken(afterServer);
+    if (userName.empty() || serverName.empty()) return "";
+    return userName + "@" + serverName;
+}
+
+static string parseTransformName(const string& rest) {
+    string s = trim(rest);
+    if (!startsWithKeyword(s, "for")) return "";
+    s = trim(s.substr(3));
+    size_t langPos = findTopLevelKeyword(s, "language");
+    if (langPos == string::npos) return "";
+    string typeName = trim(s.substr(0, langPos));
+    string langName = firstCompatNameToken(trim(s.substr(langPos + 8)));
+    if (typeName.empty() || langName.empty()) return "";
+    return typeName + "/" + langName;
+}
+
+static string parseCompatObjectName(const string& kind, const string& rest) {
+    if (kind == "user_mapping") return parseUserMappingName(rest);
+    if (kind == "transform") return parseTransformName(rest);
+    if (kind == "operator" || kind == "aggregate") {
+        string s = stripTrailingDropBehavior(rest);
+        if (startsWithKeyword(s, "if exists")) s = trim(s.substr(9));
+        size_t lp = s.find('(');
+        if (lp != string::npos) return stripQuotes(trim(s.substr(0, lp)));
+        return firstCompatNameToken(s);
+    }
+    if (kind == "rule") {
+        string name = firstCompatNameToken(rest);
+        return name;
+    }
+    string s = stripTrailingDropBehavior(rest);
+    if (startsWithKeyword(s, "if not exists")) s = trim(s.substr(13));
+    if (startsWithKeyword(s, "if exists")) s = trim(s.substr(9));
+    return firstCompatNameToken(s);
+}
+
+static bool isCompatObjectCreate(const string& sql) {
+    if (!startsWithKeyword(sql, "create")) return false;
+    string rest = trim(sql.substr(6));
+    if (startsWithKeyword(rest, "or replace")) rest = trim(rest.substr(10));
+    while (startsWithKeyword(rest, "trusted") || startsWithKeyword(rest, "procedural")) {
+        size_t sp = rest.find(' ');
+        if (sp == string::npos) return false;
+        rest = trim(rest.substr(sp + 1));
+    }
+    string kind, phrase;
+    return consumeCompatPrefix(rest, compatCreatePrefixes(), kind, phrase);
+}
+
+static bool handleCreateCompatObject(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(6));
+    bool orReplace = false;
+    string leadingOptions;
+    if (startsWithKeyword(rest, "or replace")) {
+        orReplace = true;
+        rest = trim(rest.substr(10));
+    }
+    while (startsWithKeyword(rest, "trusted") || startsWithKeyword(rest, "procedural")) {
+        size_t sp = rest.find(' ');
+        string opt = (sp == string::npos) ? rest : rest.substr(0, sp);
+        leadingOptions += (leadingOptions.empty() ? "" : " ") + opt;
+        if (sp == string::npos) return false;
+        rest = trim(rest.substr(sp + 1));
+    }
+    string kind, phrase;
+    if (!consumeCompatPrefix(rest, compatCreatePrefixes(), kind, phrase)) return false;
+    bool ifNotExists = false;
+    if (startsWithKeyword(rest, "if not exists")) {
+        ifNotExists = true;
+        rest = trim(rest.substr(13));
+    }
+    string name = parseCompatObjectName(kind, rest);
+    if (name.empty()) {
+        cout << "SQL syntax error: CREATE " << phrase << " requires an object name" << endl;
+        return true;
+    }
+    auto objects = loadCompatObjects(s.currentDB);
+    string key = compatObjectKey(kind, name);
+    if (objects.count(key) && !orReplace) {
+        if (ifNotExists) {
+            cout << phrase << " " << name << " already exists, skipping" << endl;
+            return false;
+        }
+        cout << phrase << " " << name << " already exists" << endl;
+        return true;
+    }
+    bool existed = objects.count(key) > 0;
+    objects[key] = {kind, name, s.username, sql, leadingOptions};
+    if (!saveCompatObjects(s.currentDB, objects)) {
+        cout << "Create " << phrase << " failed" << endl;
+        return true;
+    }
+    cout << phrase << " " << name << (orReplace && existed ? " replaced" : " created") << endl;
+    return false;
+}
+
+static bool handleAlterCompatObject(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(5));
+    string kind, phrase;
+    if (!consumeCompatPrefix(rest, compatAlterDropPrefixes(), kind, phrase)) return false;
+    string name = parseCompatObjectName(kind, rest);
+    if (name.empty()) {
+        cout << "SQL syntax error: ALTER " << phrase << " requires an object name" << endl;
+        return true;
+    }
+    auto objects = loadCompatObjects(s.currentDB);
+    string key = compatObjectKey(kind, name);
+    auto it = objects.find(key);
+    if (it == objects.end()) {
+        objects[key] = {kind, name, s.username, "", ""};
+        it = objects.find(key);
+    }
+    size_t ownerPos = findTopLevelKeyword(rest, "owner to");
+    if (ownerPos != string::npos) {
+        string owner = firstCompatNameToken(trim(rest.substr(ownerPos + 8)));
+        if (!owner.empty()) it->second.owner = owner;
+    }
+    size_t renamePos = findTopLevelKeyword(rest, "rename to");
+    if (renamePos != string::npos) {
+        string newName = firstCompatNameToken(trim(rest.substr(renamePos + 9)));
+        if (newName.empty()) {
+            cout << "SQL syntax error: ALTER " << phrase << " RENAME TO requires a new name" << endl;
+            return true;
+        }
+        string newKey = compatObjectKey(kind, newName);
+        if (objects.count(newKey)) {
+            cout << phrase << " " << newName << " already exists" << endl;
+            return true;
+        }
+        auto info = it->second;
+        objects.erase(it);
+        info.name = newName;
+        info.definition = sql;
+        objects[newKey] = info;
+        saveCompatObjects(s.currentDB, objects);
+        cout << phrase << " " << name << " renamed to " << newName << endl;
+        return false;
+    }
+    it->second.definition = sql;
+    saveCompatObjects(s.currentDB, objects);
+    cout << phrase << " " << name << " altered" << endl;
+    return false;
+}
+
+static bool handleDropCompatObject(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(4));
+    string kind, phrase;
+    if (!consumeCompatPrefix(rest, compatDropPrefixes(), kind, phrase)) return false;
+    bool ifExists = false;
+    if (startsWithKeyword(rest, "if exists")) {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    auto objects = loadCompatObjects(s.currentDB);
+    bool allOk = true;
+    vector<string> names;
+    if (kind == "user_mapping" || kind == "transform" || kind == "operator" || kind == "aggregate") {
+        names.push_back(parseCompatObjectName(kind, rest));
+    } else {
+        for (auto item : splitTopLevelComma(stripTrailingDropBehavior(rest))) {
+            item = stripTrailingDropBehavior(item);
+            string name = parseCompatObjectName(kind, item);
+            if (!name.empty()) names.push_back(name);
+        }
+    }
+    if (names.empty()) {
+        cout << "SQL syntax error: DROP " << phrase << " requires an object name" << endl;
+        return true;
+    }
+    for (const auto& name : names) {
+        string key = compatObjectKey(kind, name);
+        auto it = objects.find(key);
+        if (it == objects.end()) {
+            if (!ifExists) {
+                cout << phrase << " " << name << " not exist" << endl;
+                allOk = false;
+            }
+            continue;
+        }
+        objects.erase(it);
+        cout << phrase << " " << name << " dropped" << endl;
+    }
+    saveCompatObjects(s.currentDB, objects);
+    return !allOk;
+}
+
+static bool handleImportForeignSchema(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(21)); // after "import foreign schema"
+    string remoteSchema = firstCompatNameToken(rest);
+    size_t serverPos = findTopLevelKeyword(rest, "server");
+    string serverName;
+    if (serverPos != string::npos) {
+        serverName = firstCompatNameToken(trim(rest.substr(serverPos + 6)));
+    }
+    if (remoteSchema.empty() || serverName.empty()) {
+        cout << "SQL syntax error: IMPORT FOREIGN SCHEMA schema FROM SERVER server INTO schema" << endl;
+        return true;
+    }
+    string name = remoteSchema + "@" + serverName;
+    auto objects = loadCompatObjects(s.currentDB);
+    objects[compatObjectKey("imported_foreign_schema", name)] =
+        {"imported_foreign_schema", name, s.username, sql, ""};
+    if (!saveCompatObjects(s.currentDB, objects)) {
+        cout << "IMPORT FOREIGN SCHEMA failed" << endl;
+        return true;
+    }
+    cout << "foreign schema " << remoteSchema << " imported from server " << serverName << endl;
+    return false;
+}
+
+static bool showCompatObjects(Session& s, const string& rest) {
+    if (!checkDB(s)) return true;
+    string filter = trim(rest);
+    if (startsWithKeyword(filter, "compat objects")) filter = trim(filter.substr(14));
+    else if (startsWithKeyword(filter, "compatibility objects")) filter = trim(filter.substr(21));
+    else if (startsWithKeyword(filter, "pg compat objects")) filter = trim(filter.substr(17));
+    else return false;
+    auto objects = loadCompatObjects(s.currentDB);
+    if (objects.empty()) {
+        cout << "No compatibility objects found" << endl;
+        return true;
+    }
+    cout << "kind name owner definition" << endl;
+    for (const auto& kv : objects) {
+        const auto& obj = kv.second;
+        if (!filter.empty() && obj.kind != filter) continue;
+        string def = obj.definition;
+        if (def.size() > 80) def = def.substr(0, 77) + "...";
+        cout << obj.kind << " " << obj.name << " " << obj.owner << " " << def << endl;
+    }
+    return true;
 }
 
 static bool tableHasColumns(const string& dbname, const string& tablename, const vector<string>& columns) {
@@ -3706,6 +4322,344 @@ static bool handleDropStatistics(const string& sql, Session& s) {
     return !allOk;
 }
 
+static bool handleCreateCollation(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(16));
+    bool ifNotExists = false;
+    if (rest.substr(0, 13) == "if not exists") {
+        ifNotExists = true;
+        rest = trim(rest.substr(13));
+    }
+    string name;
+    string options;
+    size_t parenPos = rest.find('(');
+    size_t fromPos = findTopLevelKeyword(rest, "from");
+    if (fromPos != string::npos && (parenPos == string::npos || fromPos < parenPos)) {
+        name = trim(rest.substr(0, fromPos));
+        options = "from=" + trim(rest.substr(fromPos + 4));
+    } else if (parenPos != string::npos) {
+        name = trim(rest.substr(0, parenPos));
+        size_t rp = rest.rfind(')');
+        if (rp == string::npos || rp <= parenPos) {
+            cout << "SQL syntax error: CREATE COLLATION name (...)" << endl;
+            return true;
+        }
+        options = trim(rest.substr(parenPos + 1, rp - parenPos - 1));
+    } else {
+        cout << "SQL syntax error: CREATE COLLATION name (...) | FROM existing" << endl;
+        return true;
+    }
+    if (name.empty()) {
+        cout << "SQL syntax error: CREATE COLLATION requires a name" << endl;
+        return true;
+    }
+    auto collations = loadCollations(s.currentDB);
+    if (collations.count(name)) {
+        if (ifNotExists) {
+            cout << "Collation " << name << " already exists, skipping" << endl;
+            return false;
+        }
+        cout << "Collation " << name << " already exists" << endl;
+        return true;
+    }
+    string provider = "default";
+    string locale = "";
+    for (auto item : splitTopLevelComma(options)) {
+        size_t eq = item.find('=');
+        if (eq == string::npos) continue;
+        string key = trim(item.substr(0, eq));
+        string val = stripQuotes(trim(item.substr(eq + 1)));
+        if (key == "provider") provider = val;
+        else if (key == "locale" || key == "lc_collate") locale = val;
+    }
+    collations[name] = {name, provider, locale, s.username, options,
+                        inferCollationBehavior(name, options)};
+    if (!saveCollations(s.currentDB, collations)) {
+        cout << "Create collation failed" << endl;
+        return true;
+    }
+    cout << "Collation " << name << " created" << endl;
+    return false;
+}
+
+static bool handleAlterCollation(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(15));
+    vector<string> tokens = tokenize(rest);
+    if (tokens.size() < 3) {
+        cout << "SQL syntax error: ALTER COLLATION name RENAME TO newname | OWNER TO user | REFRESH VERSION" << endl;
+        return true;
+    }
+    string name = tokens[0];
+    auto collations = loadCollations(s.currentDB);
+    auto it = collations.find(name);
+    if (it == collations.end()) {
+        cout << "Collation " << name << " not exist" << endl;
+        return true;
+    }
+    if (tokens[1] == "rename" && tokens.size() >= 4 && tokens[2] == "to") {
+        string newName = tokens[3];
+        if (collations.count(newName)) {
+            cout << "Collation " << newName << " already exists" << endl;
+            return true;
+        }
+        auto info = it->second;
+        collations.erase(it);
+        info.name = newName;
+        info.behavior = inferCollationBehavior(newName, info.options);
+        collations[newName] = info;
+        saveCollations(s.currentDB, collations);
+        cout << "Collation " << name << " renamed to " << newName << endl;
+        return false;
+    }
+    if (tokens[1] == "owner" && tokens.size() >= 4 && tokens[2] == "to") {
+        it->second.owner = tokens[3];
+        saveCollations(s.currentDB, collations);
+        cout << "Collation " << name << " owner changed" << endl;
+        return false;
+    }
+    if (tokens[1] == "refresh" && tokens.size() >= 3 && tokens[2] == "version") {
+        it->second.options += (it->second.options.empty() ? "" : ",") + string("refreshed=true");
+        saveCollations(s.currentDB, collations);
+        cout << "Collation " << name << " version refreshed" << endl;
+        return false;
+    }
+    cout << "SQL syntax error: ALTER COLLATION name RENAME TO newname | OWNER TO user | REFRESH VERSION" << endl;
+    return true;
+}
+
+static bool handleDropCollation(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(14));
+    bool ifExists = false;
+    if (rest.substr(0, 9) == "if exists") {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    auto collations = loadCollations(s.currentDB);
+    bool allOk = true;
+    for (auto name : splitTopLevelComma(rest)) {
+        name = trim(name);
+        if (name.empty()) continue;
+        auto it = collations.find(name);
+        if (it == collations.end()) {
+            if (!ifExists) {
+                cout << "Collation " << name << " not exist" << endl;
+                allOk = false;
+            }
+            continue;
+        }
+        collations.erase(it);
+        cout << "Collation " << name << " dropped" << endl;
+    }
+    saveCollations(s.currentDB, collations);
+    return !allOk;
+}
+
+static bool handleCreateCast(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(11));
+    if (rest.empty() || rest.front() != '(') {
+        cout << "SQL syntax error: CREATE CAST (source AS target) WITH FUNCTION|WITHOUT FUNCTION|WITH INOUT" << endl;
+        return true;
+    }
+    size_t rp = rest.find(')');
+    if (rp == string::npos) {
+        cout << "SQL syntax error: CREATE CAST missing ')'" << endl;
+        return true;
+    }
+    string typeSpec = trim(rest.substr(1, rp - 1));
+    size_t asPos = findTopLevelKeyword(typeSpec, "as");
+    if (asPos == string::npos) {
+        cout << "SQL syntax error: CREATE CAST requires source AS target" << endl;
+        return true;
+    }
+    string sourceType = trim(typeSpec.substr(0, asPos));
+    string targetType = trim(typeSpec.substr(asPos + 2));
+    string after = trim(rest.substr(rp + 1));
+    string method = "function";
+    string functionName;
+    if (after.substr(0, 13) == "with function") {
+        method = "function";
+        functionName = trim(after.substr(13));
+    } else if (after.substr(0, 16) == "without function") {
+        method = "without function";
+    } else if (after.substr(0, 10) == "with inout") {
+        method = "inout";
+    } else {
+        cout << "SQL syntax error: CREATE CAST requires WITH FUNCTION, WITHOUT FUNCTION, or WITH INOUT" << endl;
+        return true;
+    }
+    string context = "explicit";
+    if (after.find("as assignment") != string::npos) context = "assignment";
+    if (after.find("as implicit") != string::npos) context = "implicit";
+    auto casts = loadCasts(s.currentDB);
+    string key = castKey(sourceType, targetType);
+    if (casts.count(key)) {
+        cout << "Cast " << sourceType << " AS " << targetType << " already exists" << endl;
+        return true;
+    }
+    casts[key] = {sourceType, targetType, method, functionName, context};
+    if (!saveCasts(s.currentDB, casts)) {
+        cout << "Create cast failed" << endl;
+        return true;
+    }
+    cout << "Cast " << sourceType << " AS " << targetType << " created" << endl;
+    return false;
+}
+
+static bool handleDropCast(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(9));
+    bool ifExists = false;
+    if (rest.substr(0, 9) == "if exists") {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    if (rest.empty() || rest.front() != '(') {
+        cout << "SQL syntax error: DROP CAST (source AS target)" << endl;
+        return true;
+    }
+    size_t rp = rest.find(')');
+    if (rp == string::npos) {
+        cout << "SQL syntax error: DROP CAST missing ')'" << endl;
+        return true;
+    }
+    string typeSpec = trim(rest.substr(1, rp - 1));
+    size_t asPos = findTopLevelKeyword(typeSpec, "as");
+    if (asPos == string::npos) {
+        cout << "SQL syntax error: DROP CAST requires source AS target" << endl;
+        return true;
+    }
+    string sourceType = trim(typeSpec.substr(0, asPos));
+    string targetType = trim(typeSpec.substr(asPos + 2));
+    auto casts = loadCasts(s.currentDB);
+    string key = castKey(sourceType, targetType);
+    auto it = casts.find(key);
+    if (it == casts.end()) {
+        if (ifExists) {
+            cout << "Cast does not exist, skipping" << endl;
+            return false;
+        }
+        cout << "Cast " << sourceType << " AS " << targetType << " not exist" << endl;
+        return true;
+    }
+    casts.erase(it);
+    saveCasts(s.currentDB, casts);
+    cout << "Cast " << sourceType << " AS " << targetType << " dropped" << endl;
+    return false;
+}
+
+static bool handleCreateConversion(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(17));
+    bool isDefault = false;
+    if (rest.substr(0, 7) == "default") {
+        isDefault = true;
+        rest = trim(rest.substr(7));
+    }
+    size_t forPos = findTopLevelKeyword(rest, "for");
+    size_t toPos = (forPos == string::npos) ? string::npos : findTopLevelKeyword(rest, "to", forPos + 3);
+    size_t fromPos = (toPos == string::npos) ? string::npos : findTopLevelKeyword(rest, "from", toPos + 2);
+    if (forPos == string::npos || toPos == string::npos || fromPos == string::npos) {
+        cout << "SQL syntax error: CREATE [DEFAULT] CONVERSION name FOR source TO dest FROM function" << endl;
+        return true;
+    }
+    string name = trim(rest.substr(0, forPos));
+    string sourceEncoding = stripQuotes(trim(rest.substr(forPos + 3, toPos - forPos - 3)));
+    string destEncoding = stripQuotes(trim(rest.substr(toPos + 2, fromPos - toPos - 2)));
+    string functionName = trim(rest.substr(fromPos + 4));
+    if (name.empty() || sourceEncoding.empty() || destEncoding.empty() || functionName.empty()) {
+        cout << "SQL syntax error: CREATE [DEFAULT] CONVERSION name FOR source TO dest FROM function" << endl;
+        return true;
+    }
+    auto conversions = loadConversions(s.currentDB);
+    if (conversions.count(name)) {
+        cout << "Conversion " << name << " already exists" << endl;
+        return true;
+    }
+    conversions[name] = {name, sourceEncoding, destEncoding, functionName, isDefault};
+    if (!saveConversions(s.currentDB, conversions)) {
+        cout << "Create conversion failed" << endl;
+        return true;
+    }
+    cout << "Conversion " << name << " created" << endl;
+    return false;
+}
+
+static bool handleAlterConversion(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(16));
+    vector<string> tokens = tokenize(rest);
+    if (tokens.size() < 4) {
+        cout << "SQL syntax error: ALTER CONVERSION name RENAME TO newname | OWNER TO user" << endl;
+        return true;
+    }
+    string name = tokens[0];
+    auto conversions = loadConversions(s.currentDB);
+    auto it = conversions.find(name);
+    if (it == conversions.end()) {
+        cout << "Conversion " << name << " not exist" << endl;
+        return true;
+    }
+    if (tokens[1] == "rename" && tokens[2] == "to") {
+        string newName = tokens[3];
+        if (conversions.count(newName)) {
+            cout << "Conversion " << newName << " already exists" << endl;
+            return true;
+        }
+        auto info = it->second;
+        conversions.erase(it);
+        info.name = newName;
+        conversions[newName] = info;
+        saveConversions(s.currentDB, conversions);
+        cout << "Conversion " << name << " renamed to " << newName << endl;
+        return false;
+    }
+    if (tokens[1] == "owner" && tokens[2] == "to") {
+        cout << "Conversion " << name << " owner changed" << endl;
+        return false;
+    }
+    cout << "SQL syntax error: ALTER CONVERSION name RENAME TO newname | OWNER TO user" << endl;
+    return true;
+}
+
+static bool handleDropConversion(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(15));
+    bool ifExists = false;
+    if (rest.substr(0, 9) == "if exists") {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    auto conversions = loadConversions(s.currentDB);
+    bool allOk = true;
+    for (auto name : splitTopLevelComma(rest)) {
+        name = trim(name);
+        if (name.empty()) continue;
+        auto it = conversions.find(name);
+        if (it == conversions.end()) {
+            if (!ifExists) {
+                cout << "Conversion " << name << " not exist" << endl;
+                allOk = false;
+            }
+            continue;
+        }
+        conversions.erase(it);
+        cout << "Conversion " << name << " dropped" << endl;
+    }
+    saveConversions(s.currentDB, conversions);
+    return !allOk;
+}
+
 static bool checkTablePermission(Session& s, const string& tname,
                                   dbms::StorageEngine::TablePrivilege priv) {
     if (s.permission == 1) return true; // admin bypass
@@ -4380,12 +5334,28 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (sql.substr(0, 21) == "import foreign schema") {
+        return handleImportForeignSchema(sql, s);
+    }
+
     if (sql.substr(0, 6) == "create") {
+        if (sql.substr(7, 4) == "cast") {
+            return handleCreateCast(sql, s);
+        }
+        if (sql.substr(7, 9) == "collation") {
+            return handleCreateCollation(sql, s);
+        }
+        if (sql.substr(7, 10) == "conversion") {
+            return handleCreateConversion(sql, s);
+        }
         if (sql.substr(7, 10) == "tablespace") {
             return handleCreateTablespace(sql, s);
         }
         if (sql.substr(7, 10) == "statistics") {
             return handleCreateStatistics(sql, s);
+        }
+        if (isCompatObjectCreate(sql)) {
+            return handleCreateCompatObject(sql, s);
         }
         if (sql.substr(7, 4) == "user") {
             if (!checkAdmin(s)) return true;
@@ -6178,11 +7148,24 @@ bool execute(const string& rawSql, Session& s) {
             cout << "SQL syntax error" << endl;
             return true;
         }
+        if (tokens[0] == "collation") {
+            return handleAlterCollation(sql, s);
+        }
+        if (tokens[0] == "conversion") {
+            return handleAlterConversion(sql, s);
+        }
         if (tokens[0] == "tablespace") {
             return handleAlterTablespace(sql, s);
         }
         if (tokens[0] == "statistics") {
             return handleAlterStatistics(sql, s);
+        }
+        {
+            string rest = trim(sql.substr(5));
+            string compatKind, compatPhrase;
+            if (consumeCompatPrefix(rest, compatAlterDropPrefixes(), compatKind, compatPhrase)) {
+                return handleAlterCompatObject(sql, s);
+            }
         }
         if (tokens[0] == "default" && tokens.size() >= 3 && tokens[1] == "privileges") {
             // ALTER DEFAULT PRIVILEGES [FOR ROLE owner] [IN SCHEMA schema] GRANT priv ON obj_type TO grantee
@@ -8980,6 +9963,27 @@ bool execute(const string& rawSql, Session& s) {
         return handleDropStatistics(sql, s);
     }
 
+    if (sql.substr(0, 9) == "drop cast") {
+        return handleDropCast(sql, s);
+    }
+
+    if (sql.substr(0, 14) == "drop collation") {
+        return handleDropCollation(sql, s);
+    }
+
+    if (sql.substr(0, 15) == "drop conversion") {
+        return handleDropConversion(sql, s);
+    }
+
+    {
+        string rest = trim(sql.substr(4));
+        string compatKind, compatPhrase;
+        if (startsWithKeyword(sql, "drop") &&
+            consumeCompatPrefix(rest, compatDropPrefixes(), compatKind, compatPhrase)) {
+            return handleDropCompatObject(sql, s);
+        }
+    }
+
     if (sql.substr(0, 4) == "drop") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
@@ -9644,6 +10648,12 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (rest == "variables") {
             g_config.printAll();
+            return false;
+        }
+        if (startsWithKeyword(rest, "compat objects") ||
+            startsWithKeyword(rest, "compatibility objects") ||
+            startsWithKeyword(rest, "pg compat objects")) {
+            showCompatObjects(s, rest);
             return false;
         }
         if (rest == "domains") {
@@ -11585,7 +12595,7 @@ bool execute(const string& rawSql, Session& s) {
                     if (!afterCollate.empty() && (afterCollate.back() == '\'' || afterCollate.back() == '"')) {
                         afterCollate.pop_back();
                     }
-                    collation = trim(afterCollate);
+                    collation = resolveCollationForSort(queryDb, trim(afterCollate));
                     sortItem = trim(sortItem.substr(0, collatePos));
                 }
                 size_t lp = sortItem.find('(');

@@ -125,6 +125,9 @@ PostgreSQL 18 官方文档覆盖：
 
 以下命令在源码中没有看到等价完整入口，或仅有名称附近痕迹但没有 PostgreSQL 语义实现：
 
+> 2026-06-08 进展：`main.cpp` 新增 `.pg_compat_objects` 目录级兼容对象表后，下表中的多类对象已经有可持久化的 `CREATE` / `ALTER` / `DROP` 入口，包括 access method、operator/operator class/operator family、aggregate、transform、extension、FDW/server/user mapping/foreign table、publication/subscription、language、event trigger、rule、text search configuration/dictionary/parser/template、large object，以及 `IMPORT FOREIGN SCHEMA`。
+> 这些入口目前用于对象元数据登记、重命名/owner/定义更新、删除和 `SHOW COMPAT OBJECTS` 审计；由于尚未接入 PostgreSQL 的 catalog/OID/dependency、planner/executor、FDW API、逻辑复制、全文搜索运行时等基础设施，本节仍按“完整 PostgreSQL 语义缺口”保留。
+
 | 类别 | 缺失命令 |
 |---|---|
 | 访问方法/索引生态 | `CREATE ACCESS METHOD`, `DROP ACCESS METHOD`, `ALTER OPERATOR CLASS`, `CREATE OPERATOR CLASS`, `DROP OPERATOR CLASS`, `ALTER OPERATOR FAMILY`, `CREATE OPERATOR FAMILY`, `DROP OPERATOR FAMILY`, `CREATE OPERATOR`, `ALTER OPERATOR`, `DROP OPERATOR` |
