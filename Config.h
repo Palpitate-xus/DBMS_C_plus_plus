@@ -33,6 +33,8 @@ struct Config {
     bool enableSeqScan = true;     // enable sequential scan
     bool enableHashJoin = true;    // enable hash join
     bool enableMergeJoin = true;   // enable merge join
+    bool autoExplainEnabled = false; // auto_explain: log query plan for slow queries
+    double autoExplainThresholdMs = 100.0; // threshold for auto_explain
 
     // Load from file; returns true on success.
     bool load(const std::string& filename);

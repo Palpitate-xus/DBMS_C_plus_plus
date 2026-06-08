@@ -53,6 +53,18 @@ bool Config::load(const std::string& filename) {
             try { lockTimeoutMs = std::stoi(val); } catch (...) {}
         } else if (key == "deadlock_timeout_ms") {
             try { deadlockTimeoutMs = std::stoi(val); } catch (...) {}
+        } else if (key == "work_mem_kb") {
+            try { workMemKb = static_cast<size_t>(std::stoull(val)); } catch (...) {}
+        } else if (key == "enable_seq_scan") {
+            enableSeqScan = (val == "1" || val == "true" || val == "on");
+        } else if (key == "enable_hash_join") {
+            enableHashJoin = (val == "1" || val == "true" || val == "on");
+        } else if (key == "enable_merge_join") {
+            enableMergeJoin = (val == "1" || val == "true" || val == "on");
+        } else if (key == "auto_explain") {
+            autoExplainEnabled = (val == "1" || val == "true" || val == "on");
+        } else if (key == "auto_explain_threshold_ms") {
+            try { autoExplainThresholdMs = std::stod(val); } catch (...) {}
         }
     }
     return true;
@@ -74,7 +86,13 @@ void Config::printAll() const {
               << "auto_analyze " << (autoAnalyzeEnabled ? "on" : "off") << "\n"
               << "auto_analyze_threshold " << autoAnalyzeThreshold << "\n"
               << "lock_timeout_ms " << lockTimeoutMs << "\n"
-              << "deadlock_timeout_ms " << deadlockTimeoutMs << "\n";
+              << "deadlock_timeout_ms " << deadlockTimeoutMs << "\n"
+              << "work_mem_kb " << workMemKb << "\n"
+              << "enable_seq_scan " << (enableSeqScan ? "on" : "off") << "\n"
+              << "enable_hash_join " << (enableHashJoin ? "on" : "off") << "\n"
+              << "enable_merge_join " << (enableMergeJoin ? "on" : "off") << "\n"
+              << "auto_explain " << (autoExplainEnabled ? "on" : "off") << "\n"
+              << "auto_explain_threshold_ms " << autoExplainThresholdMs << "\n";
 }
 
 bool Config::save(const std::string& filename) const {
@@ -96,7 +114,13 @@ bool Config::save(const std::string& filename) const {
         << "auto_analyze=" << (autoAnalyzeEnabled ? "on" : "off") << "\n"
         << "auto_analyze_threshold=" << autoAnalyzeThreshold << "\n"
         << "lock_timeout_ms=" << lockTimeoutMs << "\n"
-        << "deadlock_timeout_ms=" << deadlockTimeoutMs << "\n";
+        << "deadlock_timeout_ms=" << deadlockTimeoutMs << "\n"
+        << "work_mem_kb=" << workMemKb << "\n"
+        << "enable_seq_scan=" << (enableSeqScan ? "on" : "off") << "\n"
+        << "enable_hash_join=" << (enableHashJoin ? "on" : "off") << "\n"
+        << "enable_merge_join=" << (enableMergeJoin ? "on" : "off") << "\n"
+        << "auto_explain=" << (autoExplainEnabled ? "on" : "off") << "\n"
+        << "auto_explain_threshold_ms=" << autoExplainThresholdMs << "\n";
     return true;
 }
 

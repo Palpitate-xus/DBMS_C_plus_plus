@@ -3224,6 +3224,55 @@ static bool checkDB(const Session& s) {
     return true;
 }
 
+// Lightweight auto_explain: log query plan description for slow queries
+void autoExplainLog(const std::string& sql, double ms,
+                    const std::string& username,
+                    const std::string& dbname) {
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+
+    // Build a simple plan description based on SQL text
+    std::string plan;
+    std::string lsql = sql;
+    if (lsql.size() >= 6 && lsql.substr(0, 6) == "select") {
+        plan = "Seq Scan";
+        size_t joinPos = lsql.find(" join ");
+        if (joinPos != std::string::npos) {
+            size_t onPos = lsql.find(" on ", joinPos);
+            std::string joinType = "Nested Loop";
+            if (lsql.find(" hash ") != std::string::npos ||
+                lsql.find("hash join") != std::string::npos) {
+                joinType = "Hash Join";
+            } else if (lsql.find(" merge ") != std::string::npos ||
+                       lsql.find("merge join") != std::string::npos) {
+                joinType = "Merge Join";
+            }
+            plan = joinType;
+        }
+        size_t idxPos = lsql.find("where");
+        if (idxPos != std::string::npos) {
+            plan += " with Index Cond";
+        }
+    } else if (lsql.size() >= 6 && lsql.substr(0, 6) == "insert") {
+        plan = "Insert";
+    } else if (lsql.size() >= 6 && lsql.substr(0, 6) == "update") {
+        plan = "Update";
+    } else if (lsql.size() >= 6 && lsql.substr(0, 6) == "delete") {
+        plan = "Delete";
+    } else {
+        plan = "Other";
+    }
+
+    std::ofstream ofs("auto_explain.log", std::ios::app);
+    if (ofs) {
+        ofs << buf << " [" << username << "] [" << dbname << "] ["
+            << std::fixed << std::setprecision(2) << ms << "ms] "
+            << plan << " | " << sql << "\n";
+    }
+}
+
 void logSlowQuery(const std::string& sql, double ms,
                   const std::string& username,
                   const std::string& dbname) {
@@ -3287,11 +3336,15 @@ bool execute(const string& rawSql, Session& s) {
             string rest = trim(lsql.substr(7));
             size_t lp = rest.find('(');
             size_t rp = rest.find(')');
-            if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+            if (lp != string::npos && rp != string::npos && rp >= lp + 1) {
                 string func = trim(rest.substr(0, lp));
                 string arg = trim(rest.substr(lp + 1, rp - lp - 1));
                 if (func == "pg_cancel_backend" || func == "pg_terminate_backend") {
                     if (!checkAdmin(s)) return true;
+                    if (arg.empty()) {
+                        cout << "Invalid pid" << endl;
+                        return true;
+                    }
                     uint64_t targetPid = 0;
                     try { targetPid = static_cast<uint64_t>(std::stoull(arg)); } catch (...) {}
                     if (targetPid == 0) {
@@ -3305,6 +3358,16 @@ bool execute(const string& rawSql, Session& s) {
                         ok = dbms::terminateBackend(targetPid);
                     }
                     cout << (ok ? "t" : "f") << endl;
+                    return false;
+                }
+                if (func == "pg_reload_conf") {
+                    if (!checkAdmin(s)) return true;
+                    if (g_config.load("dbms.conf")) {
+                        g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
+                        cout << "t" << endl;
+                    } else {
+                        cout << "f" << endl;
+                    }
                     return false;
                 }
             }
@@ -11851,6 +11914,9 @@ int main(int argc, char* argv[]) {
                 logSlowQuery(sql, ms, s.username, s.currentDB);
             } else if (ms > g_slowQueryThresholdMs) {
                 logSlowQuery(sql, ms, s.username, s.currentDB);
+            }
+            if (g_config.autoExplainEnabled && ms >= g_config.autoExplainThresholdMs) {
+                autoExplainLog(sql, ms, s.username, s.currentDB);
             }
             recordSqlStat(sql, ms, s.currentDB);
             if (ok && !s.currentDB.empty() && g_checkpointInterval > 0) {
