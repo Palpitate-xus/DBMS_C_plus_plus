@@ -1568,6 +1568,7 @@ static const vector<CompatObjectPrefix>& compatCreatePrefixes() {
         {"publication", "publication"},
         {"subscription", "subscription"},
         {"extension", "extension"},
+        {"assertion", "assertion"},
         {"aggregate", "aggregate"},
         {"transform", "transform"},
         {"operator", "operator"},
@@ -1598,6 +1599,7 @@ static const vector<CompatObjectPrefix>& compatAlterDropPrefixes() {
         {"conversion", "conversion"},
         {"collation", "collation"},
         {"extension", "extension"},
+        {"assertion", "assertion"},
         {"aggregate", "aggregate"},
         {"transform", "transform"},
         {"operator", "operator"},
@@ -1636,6 +1638,7 @@ static const vector<CompatObjectPrefix>& compatDropPrefixes() {
         {"publication", "publication"},
         {"subscription", "subscription"},
         {"extension", "extension"},
+        {"assertion", "assertion"},
         {"aggregate", "aggregate"},
         {"transform", "transform"},
         {"operator", "operator"},
@@ -1930,6 +1933,227 @@ static bool showCompatObjects(Session& s, const string& rest) {
         cout << obj.kind << " " << obj.name << " " << obj.owner << " " << def << endl;
     }
     return true;
+}
+
+struct ConstraintCompatFlags {
+    string type = "constraint";
+    bool deferrable = false;
+    bool initiallyDeferred = false;
+    bool notValid = false;
+    bool validated = true;
+};
+
+static string constraintCompatName(const string& tableName, const string& constraintName) {
+    return stripQuotes(trim(tableName)) + "." + stripQuotes(trim(constraintName));
+}
+
+static string constraintOptionString(const string& options, const string& key, const string& fallback = "") {
+    string needle = key + "=";
+    size_t pos = options.find(needle);
+    if (pos == string::npos) return fallback;
+    pos += needle.size();
+    size_t end = options.find(';', pos);
+    if (end == string::npos) end = options.size();
+    string value = trim(options.substr(pos, end - pos));
+    return value.empty() ? fallback : value;
+}
+
+static bool constraintOptionBool(const string& options, const string& key, bool fallback = false) {
+    string value = constraintOptionString(options, key, fallback ? "1" : "0");
+    return value == "1" || value == "true" || value == "yes";
+}
+
+static string constraintFlagOptions(const ConstraintCompatFlags& flags) {
+    ostringstream out;
+    out << "type=" << flags.type
+        << ";deferrable=" << (flags.deferrable ? 1 : 0)
+        << ";initially_deferred=" << (flags.initiallyDeferred ? 1 : 0)
+        << ";not_valid=" << (flags.notValid ? 1 : 0)
+        << ";validated=" << (flags.validated ? 1 : 0);
+    return out.str();
+}
+
+static ConstraintCompatFlags constraintFlagsFromOptions(const string& options,
+                                                        const string& fallbackType = "constraint") {
+    ConstraintCompatFlags flags;
+    flags.type = constraintOptionString(options, "type", fallbackType);
+    flags.deferrable = constraintOptionBool(options, "deferrable", false);
+    flags.initiallyDeferred = constraintOptionBool(options, "initially_deferred", false);
+    flags.notValid = constraintOptionBool(options, "not_valid", false);
+    flags.validated = constraintOptionBool(options, "validated", !flags.notValid);
+    return flags;
+}
+
+static ConstraintCompatFlags parseConstraintFlags(const string& sql,
+                                                  const string& type = "constraint") {
+    ConstraintCompatFlags flags;
+    flags.type = type;
+    flags.notValid = sql.find("not valid") != string::npos;
+    flags.validated = !flags.notValid;
+    flags.initiallyDeferred = sql.find("initially deferred") != string::npos;
+    flags.deferrable = flags.initiallyDeferred ||
+                       (sql.find("deferrable") != string::npos &&
+                        sql.find("not deferrable") == string::npos);
+    return flags;
+}
+
+static ConstraintCompatFlags mergeConstraintFlagsFromSql(const string& sql,
+                                                         ConstraintCompatFlags flags) {
+    if (sql.find("not deferrable") != string::npos) {
+        flags.deferrable = false;
+        flags.initiallyDeferred = false;
+    } else if (sql.find("deferrable") != string::npos) {
+        flags.deferrable = true;
+    }
+    if (sql.find("initially deferred") != string::npos) {
+        flags.initiallyDeferred = true;
+        flags.deferrable = true;
+    } else if (sql.find("initially immediate") != string::npos) {
+        flags.initiallyDeferred = false;
+    }
+    if (sql.find("not valid") != string::npos) {
+        flags.notValid = true;
+        flags.validated = false;
+    }
+    if (sql.find("validate constraint") != string::npos) {
+        flags.notValid = false;
+        flags.validated = true;
+    }
+    return flags;
+}
+
+static bool tableConstraintExists(const string& dbname,
+                                  const string& tableName,
+                                  const string& constraintName) {
+    if (!g_engine.tableExists(dbname, tableName)) return false;
+    TableSchema tbl = g_engine.getTableSchema(dbname, tableName);
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].checkConstraintName == constraintName) return true;
+    }
+    for (const auto& name : tbl.uniqueConstraintNames) {
+        if (name == constraintName) return true;
+    }
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        if (tbl.fks[i].name == constraintName) return true;
+    }
+    return false;
+}
+
+static bool constraintCompatExists(const string& dbname,
+                                   const string& tableName,
+                                   const string& constraintName) {
+    auto objects = loadCompatObjects(dbname);
+    string name = constraintCompatName(tableName, constraintName);
+    return objects.count(compatObjectKey("constraint_option", name)) > 0 ||
+           objects.count(compatObjectKey("exclusion_constraint", name)) > 0;
+}
+
+static bool knownConstraintExists(const string& dbname,
+                                  const string& tableName,
+                                  const string& constraintName) {
+    return tableConstraintExists(dbname, tableName, constraintName) ||
+           constraintCompatExists(dbname, tableName, constraintName);
+}
+
+static bool recordConstraintCompat(const string& dbname,
+                                   const string& tableName,
+                                   const string& constraintName,
+                                   const string& type,
+                                   const string& definition,
+                                   const string& owner,
+                                   ConstraintCompatFlags flags) {
+    auto objects = loadCompatObjects(dbname);
+    string name = constraintCompatName(tableName, constraintName);
+    flags.type = type;
+    objects[compatObjectKey("constraint_option", name)] =
+        {"constraint_option", name, owner, definition, constraintFlagOptions(flags)};
+    return saveCompatObjects(dbname, objects);
+}
+
+static bool recordExclusionConstraintCompat(const string& dbname,
+                                            const string& tableName,
+                                            const string& constraintName,
+                                            const string& definition,
+                                            const string& owner,
+                                            ConstraintCompatFlags flags) {
+    auto objects = loadCompatObjects(dbname);
+    string name = constraintCompatName(tableName, constraintName);
+    flags.type = "exclusion";
+    string options = constraintFlagOptions(flags);
+    objects[compatObjectKey("exclusion_constraint", name)] =
+        {"exclusion_constraint", name, owner, definition, options};
+    objects[compatObjectKey("constraint_option", name)] =
+        {"constraint_option", name, owner, definition, options};
+    return saveCompatObjects(dbname, objects);
+}
+
+static bool removeConstraintCompat(const string& dbname,
+                                   const string& tableName,
+                                   const string& constraintName) {
+    auto objects = loadCompatObjects(dbname);
+    string name = constraintCompatName(tableName, constraintName);
+    bool removed = false;
+    removed = objects.erase(compatObjectKey("constraint_option", name)) > 0 || removed;
+    removed = objects.erase(compatObjectKey("exclusion_constraint", name)) > 0 || removed;
+    if (!removed) return false;
+    return saveCompatObjects(dbname, objects);
+}
+
+static bool alterConstraintOptionsCompat(const string& dbname,
+                                         const string& tableName,
+                                         const string& constraintName,
+                                         const string& definition,
+                                         const string& owner) {
+    auto objects = loadCompatObjects(dbname);
+    string name = constraintCompatName(tableName, constraintName);
+    string optionKey = compatObjectKey("constraint_option", name);
+    auto optionIt = objects.find(optionKey);
+    ConstraintCompatFlags flags = optionIt == objects.end()
+        ? ConstraintCompatFlags{}
+        : constraintFlagsFromOptions(optionIt->second.options, "constraint");
+    flags = mergeConstraintFlagsFromSql(definition, flags);
+    objects[optionKey] = {"constraint_option", name, owner, definition, constraintFlagOptions(flags)};
+
+    string exclusionKey = compatObjectKey("exclusion_constraint", name);
+    auto exclusionIt = objects.find(exclusionKey);
+    if (exclusionIt != objects.end()) {
+        ConstraintCompatFlags exclusionFlags = constraintFlagsFromOptions(exclusionIt->second.options, "exclusion");
+        exclusionFlags = mergeConstraintFlagsFromSql(definition, exclusionFlags);
+        exclusionFlags.type = "exclusion";
+        exclusionIt->second.owner = owner;
+        exclusionIt->second.definition = definition;
+        exclusionIt->second.options = constraintFlagOptions(exclusionFlags);
+    }
+    return saveCompatObjects(dbname, objects);
+}
+
+static bool validateConstraintCompat(const string& dbname,
+                                     const string& tableName,
+                                     const string& constraintName,
+                                     const string& definition,
+                                     const string& owner) {
+    auto objects = loadCompatObjects(dbname);
+    string name = constraintCompatName(tableName, constraintName);
+    string optionKey = compatObjectKey("constraint_option", name);
+    auto optionIt = objects.find(optionKey);
+    ConstraintCompatFlags flags = optionIt == objects.end()
+        ? ConstraintCompatFlags{}
+        : constraintFlagsFromOptions(optionIt->second.options, "constraint");
+    flags.notValid = false;
+    flags.validated = true;
+    objects[optionKey] = {"constraint_option", name, owner, definition, constraintFlagOptions(flags)};
+
+    string exclusionKey = compatObjectKey("exclusion_constraint", name);
+    auto exclusionIt = objects.find(exclusionKey);
+    if (exclusionIt != objects.end()) {
+        ConstraintCompatFlags exclusionFlags = constraintFlagsFromOptions(exclusionIt->second.options, "exclusion");
+        exclusionFlags.type = "exclusion";
+        exclusionFlags.notValid = false;
+        exclusionFlags.validated = true;
+        exclusionIt->second.owner = owner;
+        exclusionIt->second.options = constraintFlagOptions(exclusionFlags);
+    }
+    return saveCompatObjects(dbname, objects);
 }
 
 static bool isPgStringBackedType(const string& typeName) {
@@ -7544,6 +7768,40 @@ bool execute(const string& rawSql, Session& s) {
         string tnameOrig = tokens[1];
         string tname = resolveTableName(s, tnameOrig);
         string op = tokens[2];
+        if (op == "validate" && tokens.size() >= 5 && tokens[3] == "constraint") {
+            string constrName = tokens[4];
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            if (!knownConstraintExists(s.currentDB, tname, constrName)) {
+                cout << "Constraint not found" << endl;
+                return true;
+            }
+            if (!validateConstraintCompat(s.currentDB, tname, constrName, sql, s.username)) {
+                cout << "Constraint metadata save failed" << endl;
+                return true;
+            }
+            cout << "Constraint " << constrName << " validated" << endl;
+            return false;
+        }
+        if (op == "alter" && tokens.size() >= 5 && tokens[3] == "constraint") {
+            string constrName = tokens[4];
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            if (!knownConstraintExists(s.currentDB, tname, constrName)) {
+                cout << "Constraint not found" << endl;
+                return true;
+            }
+            if (!alterConstraintOptionsCompat(s.currentDB, tname, constrName, sql, s.username)) {
+                cout << "Constraint metadata save failed" << endl;
+                return true;
+            }
+            cout << "Constraint " << constrName << " options updated" << endl;
+            return false;
+        }
         if (op == "add" && tokens.size() >= 4 && tokens[3] == "column") {
             // alter table tname add column colname:type [0|1]
             if (tokens.size() < 5) {
@@ -7779,14 +8037,36 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (op == "add" && tokens.size() >= 5 && tokens[3] == "constraint") {
             string constrName = tokens[4];
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            if (constraintCompatExists(s.currentDB, tname, constrName)) {
+                cout << "Constraint name already exists" << endl;
+                return true;
+            }
+            size_t excludePos = findTopLevelKeyword(sql, "exclude");
+            if (excludePos != string::npos) {
+                ConstraintCompatFlags flags = parseConstraintFlags(sql, "exclusion");
+                if (!recordExclusionConstraintCompat(s.currentDB, tname, constrName, sql, s.username, flags)) {
+                    cout << "Constraint metadata save failed" << endl;
+                    return true;
+                }
+                cout << "Exclusion constraint added" << endl;
+                return false;
+            }
             // CHECK constraint
-            size_t checkPos = sql.find("check");
+            size_t checkPos = findTopLevelKeyword(sql, "check");
             if (checkPos != string::npos) {
                 size_t lp = sql.find('(', checkPos);
                 size_t rp = sql.find(')', lp);
                 if (lp != string::npos && rp != string::npos) {
                     string expr = trim(sql.substr(lp + 1, rp - lp - 1));
                     auto res = g_engine.alterTableAddCheckConstraint(s.currentDB, tname, constrName, expr);
+                    if (res == OpResult::TableNotExist) {
+                        cout << "Table not found" << endl;
+                        return true;
+                    }
                     if (res == OpResult::InvalidValue) {
                         cout << "Invalid check constraint: no referenced column found" << endl;
                         return true;
@@ -7795,12 +8075,17 @@ bool execute(const string& rawSql, Session& s) {
                         cout << "Constraint name already exists" << endl;
                         return true;
                     }
+                    ConstraintCompatFlags flags = parseConstraintFlags(sql, "check");
+                    if (!recordConstraintCompat(s.currentDB, tname, constrName, "check", sql, s.username, flags)) {
+                        cout << "Constraint metadata save failed" << endl;
+                        return true;
+                    }
                     cout << "Check constraint added" << endl;
                     return false;
                 }
             }
             // UNIQUE constraint
-            size_t uniquePos = sql.find("unique");
+            size_t uniquePos = findTopLevelKeyword(sql, "unique");
             if (uniquePos != string::npos) {
                 size_t lp = sql.find('(', uniquePos);
                 size_t rp = sql.find(')', lp);
@@ -7814,6 +8099,10 @@ bool execute(const string& rawSql, Session& s) {
                         if (!c.empty()) cols.push_back(c);
                     }
                     auto res = g_engine.alterTableAddUniqueConstraint(s.currentDB, tname, constrName, cols);
+                    if (res == OpResult::TableNotExist) {
+                        cout << "Table not found" << endl;
+                        return true;
+                    }
                     if (res == OpResult::InvalidValue) {
                         cout << "Column not found" << endl;
                         return true;
@@ -7822,16 +8111,22 @@ bool execute(const string& rawSql, Session& s) {
                         cout << "Constraint name already exists" << endl;
                         return true;
                     }
+                    ConstraintCompatFlags flags = parseConstraintFlags(sql, "unique");
+                    if (!recordConstraintCompat(s.currentDB, tname, constrName, "unique", sql, s.username, flags)) {
+                        cout << "Constraint metadata save failed" << endl;
+                        return true;
+                    }
                     cout << "Unique constraint added" << endl;
                     return false;
                 }
             }
             // FOREIGN KEY constraint
-            size_t fkPos = sql.find("foreign key");
+            size_t fkPos = findTopLevelKeyword(sql, "foreign key");
             if (fkPos != string::npos) {
                 size_t lp1 = sql.find('(', fkPos);
                 size_t rp1 = sql.find(')', lp1);
-                size_t refPos = sql.find("references", rp1);
+                size_t refPos = findTopLevelKeyword(sql, "references",
+                                                     rp1 == string::npos ? fkPos : rp1 + 1);
                 if (lp1 != string::npos && rp1 != string::npos && refPos != string::npos) {
                     string localColsStr = trim(sql.substr(lp1 + 1, rp1 - lp1 - 1));
                     vector<string> localCols;
@@ -7893,6 +8188,11 @@ bool execute(const string& rawSql, Session& s) {
                         cout << "Constraint name already exists" << endl;
                         return true;
                     }
+                    ConstraintCompatFlags flags = parseConstraintFlags(sql, "foreign_key");
+                    if (!recordConstraintCompat(s.currentDB, tname, constrName, "foreign_key", sql, s.username, flags)) {
+                        cout << "Constraint metadata save failed" << endl;
+                        return true;
+                    }
                     cout << "Foreign key constraint added" << endl;
                     return false;
                 }
@@ -7905,8 +8205,14 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            auto res = g_engine.alterTableDropConstraint(s.currentDB, tname, tokens[4]);
-            if (res == OpResult::InvalidValue) {
+            string constrName = tokens[4];
+            auto res = g_engine.alterTableDropConstraint(s.currentDB, tname, constrName);
+            bool droppedMeta = removeConstraintCompat(s.currentDB, tname, constrName);
+            if (res == OpResult::TableNotExist) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            if (res == OpResult::InvalidValue && !droppedMeta) {
                 cout << "Constraint not found" << endl;
                 return true;
             }

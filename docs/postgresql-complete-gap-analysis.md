@@ -63,7 +63,7 @@ PostgreSQL 18 官方文档覆盖：
 | `ALTER DEFAULT PRIVILEGES` | 部分实现 | 只解析 `GRANT` 路径；缺少完整 `REVOKE`、对象类型、角色继承、schema/default ACL 语义。 |
 | `ALTER SCHEMA` | 部分实现 | 主要支持 `RENAME TO`；缺少 owner、权限、依赖重写。 |
 | `ALTER SYSTEM` | 部分实现 | 只写项目 `dbms.conf` 中有限参数；不是 PG GUC 体系。 |
-| `ALTER TABLE` | 部分实现 | 支持若干 add/drop/rename/default/not-null/constraint/storage/RLS/partition 操作，但缺少 PG 全量子命令、`IF EXISTS`、`ONLY`、`INHERIT`、`VALIDATE CONSTRAINT`、`NOT VALID`、`OWNER`、`TABLESPACE`、`REPLICA IDENTITY`、统计目标、触发器状态全集等。 |
+| `ALTER TABLE` | 部分实现 | 支持若干 add/drop/rename/default/not-null/constraint/storage/RLS/partition 操作，并新增 `VALIDATE CONSTRAINT`、`ALTER CONSTRAINT` 及 `DEFERRABLE`/`NOT VALID` 元数据登记；仍缺 PG 全量子命令、`IF EXISTS`、`ONLY`、`INHERIT`、`OWNER`、`TABLESPACE`、`REPLICA IDENTITY`、统计目标、触发器状态全集和真正延迟约束队列。 |
 | `ALTER USER` / `ALTER ROLE` | 部分实现 | 基本是改密码/设置当前角色；缺少登录属性、superuser、createdb、replication、bypassrls、连接限制、valid until、配置参数等。 |
 | `ALTER VIEW` | 部分实现 | 支持 rename/set schema；缺少 owner、options、column default、安全屏障、security invoker 等。 |
 | `ANALYZE` | 部分实现 | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、VERBOSE 输出、系统统计视图集成。 |
@@ -128,6 +128,7 @@ PostgreSQL 18 官方文档覆盖：
 > 2026-06-08 进展：`main.cpp` 新增 `.pg_compat_objects` 目录级兼容对象表后，下表中的多类对象已经有可持久化的 `CREATE` / `ALTER` / `DROP` 入口，包括 access method、operator/operator class/operator family、aggregate、transform、extension、FDW/server/user mapping/foreign table、publication/subscription、language、event trigger、rule、text search configuration/dictionary/parser/template、large object，以及 `IMPORT FOREIGN SCHEMA`。
 > 这些入口目前用于对象元数据登记、重命名/owner/定义更新、删除和 `SHOW COMPAT OBJECTS` 审计；由于尚未接入 PostgreSQL 的 catalog/OID/dependency、planner/executor、FDW API、逻辑复制、全文搜索运行时等基础设施，本节仍按“完整 PostgreSQL 语义缺口”保留。
 > 2026-06-08 后续进展：新增 `DO` 简化 SQL block 执行、`LOAD 'library'` 目录登记、PostgreSQL 风格 `SELECT ... INTO [TEMP|UNLOGGED] table FROM ...` 到 CTAS 的转换；这些能力已经过建库、建表、插入、查询和目录展示冒烟，但仍不等同于 PL/pgSQL runtime、动态共享库加载或 PostgreSQL executor 级 SELECT INTO 语义。
+> 2026-06-08 约束兼容进展：新增 `CREATE/DROP ASSERTION` 目录级入口，并为 `ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE USING ...`、`DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE CONSTRAINT` 和 `ALTER CONSTRAINT` 写入 `.pg_compat_objects` 元数据；CHECK/UNIQUE/FK 的实际执行检查仍沿用项目内原有简化实现，EXCLUDE/延迟队列/提交时 recheck 尚未接入 executor。
 
 | 类别 | 缺失命令 |
 |---|---|
@@ -141,7 +142,7 @@ PostgreSQL 18 官方文档覆盖：
 | 统计/表空间/全文配置 | `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
 | 事务/会话别名和状态 | 本轮已将 `SET CONSTRAINTS`、`SET SESSION AUTHORIZATION`、`MOVE` 移至“部分实现”；仍缺 PostgreSQL 完整语义。 |
 | 数据库/对象 ALTER 子集 | `ALTER DATABASE`, `ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER ROLE` 的完整 PG 语义、`ALTER SEQUENCE`, `ALTER TRIGGER`, `ALTER TYPE`, `ALTER GROUP` |
-| 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义已进入部分实现；仍缺真实共享库加载、安全限制、完整 CTAS 类型推断和 `DROP GROUP` 等兼容别名完整语义 |
+| 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义、`CREATE/DROP ASSERTION` 目录级登记已进入部分实现；仍缺真实共享库加载、安全限制、完整 CTAS 类型推断、断言执行器和 `DROP GROUP` 等兼容别名完整语义 |
 
 ## 5. 数据类型差距
 
@@ -210,15 +211,15 @@ PostgreSQL 函数与操作符章节非常大，本项目只覆盖了一小部分
 | 约束能力 | 本项目状态 | 差距 |
 |---|---|---|
 | `PRIMARY KEY` | 部分实现 | 单列/复合有；缺少 deferrable、temporal constraints、partition/global uniqueness 完整语义。 |
-| `UNIQUE` | 部分实现 | 有单列/复合；NULL 语义、deferrable、partial unique、expression unique 与 PG 不等价。 |
-| `FOREIGN KEY` | 部分实现 | 支持多列和部分 ON DELETE/UPDATE；缺少 MATCH FULL/PARTIAL、DEFERRABLE、NOT VALID、VALIDATE、复杂锁与并发语义。 |
-| `CHECK` | 部分实现 | 表达式解析范围有限；缺少 NOT VALID、NO INHERIT、deferrable 实际语义。 |
+| `UNIQUE` | 部分实现 | 有单列/复合，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；NULL 语义、实际延迟检查、partial unique、expression unique 与 PG 不等价。 |
+| `FOREIGN KEY` | 部分实现 | 支持多列和部分 ON DELETE/UPDATE，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；缺少 MATCH FULL/PARTIAL、实际延迟检查、提交时 recheck、复杂锁与并发语义。 |
+| `CHECK` | 部分实现 | 表达式解析范围有限，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；缺少 NO INHERIT、实际延迟检查和 PostgreSQL 级表达式语义。 |
 | `DEFAULT` | 部分实现 | 缺少表达式默认值、稳定/易变函数、序列所有权精确行为。 |
 | `GENERATED` | 部分实现 | 有 identity/generated expr 痕迹；缺少 PostgreSQL 18 虚拟生成列默认语义、stored/virtual 完整实现。 |
-| Exclusion constraints | 缺失 | PostgreSQL GiST/exclusion 约束没有对应完整机制。 |
+| Exclusion constraints | 部分实现 | 支持 `ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE USING ...` 的目录级登记和 drop/validate/options 元数据；缺少 GiST/operator class 执行检查、并发冲突检测和 executor enforcement。 |
 | Temporal constraints | 缺失 | PostgreSQL 18 对 range 上的 temporal primary/unique/foreign key 支持缺失。 |
-| Assertions | 缺失 | `CREATE ASSERTION` PostgreSQL 本身也不常用/未实现，但 SQL 标准层面没有。 |
-| `SET CONSTRAINTS` | 缺失 | 无延迟约束体系。 |
+| Assertions | 部分实现/语义缺失 | `CREATE/DROP ASSERTION` 已有目录级入口；PostgreSQL 本身未实现 SQL 标准 ASSERTION，本项目也缺少全库断言执行、依赖和重验证机制。 |
+| `SET CONSTRAINTS` | 部分实现/语义缺失 | 已记录会话 immediate/deferred 标志，约束 DDL 也登记 deferrable/not-valid/validated 元数据；仍无延迟约束队列、提交时检查和 constraint trigger 语义。 |
 
 ## 9. DML 与查询差距
 
