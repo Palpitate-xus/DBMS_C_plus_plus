@@ -512,7 +512,8 @@ public:
     bool physicalRestore(const std::string& dbname, const std::string& backupPath);
 
     // VACUUM: reclaim space from deleted rows
-    size_t vacuum(const std::string& dbname, const std::string& tablename);
+    size_t vacuum(const std::string& dbname, const std::string& tablename,
+                  bool concurrent = false);
     // VACUUM FULL: rewrite table entirely, reclaiming all dead space
     size_t vacuumFull(const std::string& dbname, const std::string& tablename);
 

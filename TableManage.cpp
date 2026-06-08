@@ -12294,9 +12294,14 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
 // VACUUM: reclaim space from deleted rows
 // ========================================================================
 size_t StorageEngine::vacuum(const std::string& dbname,
-                             const std::string& tablename) {
+                             const std::string& tablename,
+                             bool concurrent) {
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
-    lockManager_.lockExclusive(tablename);
+    if (concurrent) {
+        lockManager_.lockShared(tablename);
+    } else {
+        lockManager_.lockExclusive(tablename);
+    }
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     if (!pa) { lockManager_.unlock(tablename); return 0; }

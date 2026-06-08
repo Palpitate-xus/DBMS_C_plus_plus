@@ -7790,19 +7790,26 @@ bool execute(const string& rawSql, Session& s) {
     if (sql.substr(0, 6) == "vacuum") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
-        string tname = trim(sql.substr(6));
-        if (tname.empty()) {
+        string rest = trim(sql.substr(6));
+        bool concurrent = false;
+        if (rest.substr(0, 12) == "concurrently") {
+            concurrent = true;
+            rest = trim(rest.substr(12));
+        }
+        if (rest.empty()) {
             // Vacuum all tables in current database (excluding temp tables)
             auto tables = g_engine.getTableNames(s.currentDB);
             size_t totalFreed = 0;
             for (const auto& tbl : tables) {
-                totalFreed += g_engine.vacuum(s.currentDB, tbl);
+                totalFreed += g_engine.vacuum(s.currentDB, tbl, concurrent);
             }
-            cout << "VACUUM completed, " << totalFreed << " pages freed" << endl;
+            string mode = concurrent ? " CONCURRENTLY" : "";
+            cout << "VACUUM" << mode << " completed, " << totalFreed << " pages freed" << endl;
         } else {
-            string resolvedName = resolveTableName(s, tname);
-            size_t freed = g_engine.vacuum(s.currentDB, resolvedName);
-            cout << "VACUUM completed, " << freed << " pages freed" << endl;
+            string resolvedName = resolveTableName(s, rest);
+            size_t freed = g_engine.vacuum(s.currentDB, resolvedName, concurrent);
+            string mode = concurrent ? " CONCURRENTLY" : "";
+            cout << "VACUUM" << mode << " completed, " << freed << " pages freed" << endl;
         }
         return false;
     }
