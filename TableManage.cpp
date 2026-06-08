@@ -13430,6 +13430,86 @@ std::vector<std::tuple<std::string, std::string, std::string>> StorageEngine::ge
     return result;
 }
 
+// ========================================================================
+// Default Privileges
+// ========================================================================
+static std::filesystem::path defaultPrivPath(const std::filesystem::path& dbPath) {
+    return dbPath / ".default_privs";
+}
+
+void StorageEngine::addDefaultPrivilege(const std::string& dbname, const std::string& owner,
+                                        const std::string& schema, const std::string& objType,
+                                        const std::string& privilege, const std::string& grantee) {
+    auto dpp = defaultPrivPath(dbPath(dbname));
+    std::ofstream ofs(dpp, std::ios::app);
+    ofs << owner << " " << schema << " " << objType << " " << privilege << " " << grantee << "\n";
+}
+
+void StorageEngine::removeDefaultPrivilege(const std::string& dbname, const std::string& owner,
+                                           const std::string& schema, const std::string& objType,
+                                           const std::string& privilege, const std::string& grantee) {
+    auto dpp = defaultPrivPath(dbPath(dbname));
+    if (!std::filesystem::exists(dpp)) return;
+    std::vector<std::string> remaining;
+    {
+        std::ifstream ifs(dpp);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string o, s, t, p, g;
+            ss >> o >> s >> t >> p >> g;
+            if (o == owner && s == schema && t == objType && p == privilege && g == grantee) continue;
+            remaining.push_back(line);
+        }
+    }
+    std::ofstream ofs(dpp);
+    for (const auto& r : remaining) ofs << r << "\n";
+}
+
+void StorageEngine::applyDefaultPrivileges(const std::string& dbname, const std::string& schema,
+                                           const std::string& objType, const std::string& objName,
+                                           const std::string& owner) const {
+    auto dpp = defaultPrivPath(dbPath(dbname));
+    if (!std::filesystem::exists(dpp)) return;
+    std::ifstream ifs(dpp);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string o, s, t, p, g;
+        ss >> o >> s >> t >> p >> g;
+        if (o != owner || s != schema || t != objType) continue;
+        TablePrivilege priv;
+        if (p == "select") priv = TablePrivilege::Select;
+        else if (p == "insert") priv = TablePrivilege::Insert;
+        else if (p == "update") priv = TablePrivilege::Update;
+        else if (p == "delete") priv = TablePrivilege::Delete;
+        else if (p == "all") priv = TablePrivilege::All;
+        else if (p == "usage") priv = TablePrivilege::Usage;
+        else if (p == "execute") priv = TablePrivilege::Execute;
+        else continue;
+        const_cast<StorageEngine*>(this)->grant(dbname, objName, g, priv, {}, false, owner);
+    }
+}
+
+std::vector<std::tuple<std::string, std::string, std::string, std::string, std::string>>
+StorageEngine::getDefaultPrivileges(const std::string& dbname) const {
+    std::vector<std::tuple<std::string, std::string, std::string, std::string, std::string>> result;
+    auto dpp = defaultPrivPath(dbPath(dbname));
+    if (!std::filesystem::exists(dpp)) return result;
+    std::ifstream ifs(dpp);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string o, s, t, p, g;
+        ss >> o >> s >> t >> p >> g;
+        result.emplace_back(o, s, t, p, g);
+    }
+    return result;
+}
+
 int64_t StorageEngine::readNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname) {
     auto path = seqPath(dbname, tablename);
     int64_t val = 1;

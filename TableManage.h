@@ -853,6 +853,19 @@ public:
     std::vector<std::tuple<std::string, std::string, std::string>> getAllSecurityLabels(
         const std::string& dbname) const;
 
+    // Default Privileges
+    void addDefaultPrivilege(const std::string& dbname, const std::string& owner,
+                             const std::string& schema, const std::string& objType,
+                             const std::string& privilege, const std::string& grantee);
+    void removeDefaultPrivilege(const std::string& dbname, const std::string& owner,
+                                const std::string& schema, const std::string& objType,
+                                const std::string& privilege, const std::string& grantee);
+    void applyDefaultPrivileges(const std::string& dbname, const std::string& schema,
+                                const std::string& objType, const std::string& objName,
+                                const std::string& owner) const;
+    std::vector<std::tuple<std::string, std::string, std::string, std::string, std::string>>
+    getDefaultPrivileges(const std::string& dbname) const;
+
     // TOAST (The Oversized-Attribute Storage Technique) for large values
     static constexpr size_t TOAST_THRESHOLD = 1000; // bytes
     static constexpr const char* TOAST_PREFIX = "__TOAST__";

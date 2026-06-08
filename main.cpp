@@ -4201,6 +4201,8 @@ bool execute(const string& rawSql, Session& s) {
                 log(s.username, "table already exists", getTime());
                 return true;
             }
+            // Apply default privileges for tables
+            g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname, s.username);
             cout << "Table create succeeded" << endl;
             log(s.username, "table create succeeded", getTime());
             return false;
@@ -5197,6 +5199,44 @@ bool execute(const string& rawSql, Session& s) {
         if (tokens.size() < 2) {
             cout << "SQL syntax error" << endl;
             return true;
+        }
+        if (tokens[0] == "default" && tokens.size() >= 3 && tokens[1] == "privileges") {
+            // ALTER DEFAULT PRIVILEGES [FOR ROLE owner] [IN SCHEMA schema] GRANT priv ON obj_type TO grantee
+            string rest = trim(sql.substr(5 + 17)); // after "alter default privileges"
+            string owner = s.username;
+            string schema = "public";
+            size_t forRolePos = rest.find("for role ");
+            if (forRolePos != string::npos) {
+                size_t nextSpace = rest.find(' ', forRolePos + 9);
+                if (nextSpace == string::npos) nextSpace = rest.size();
+                owner = trim(rest.substr(forRolePos + 9, nextSpace - forRolePos - 9));
+                rest = trim(rest.substr(0, forRolePos) + rest.substr(nextSpace));
+            }
+            size_t inSchemaPos = rest.find("in schema ");
+            if (inSchemaPos != string::npos) {
+                size_t nextSpace = rest.find(' ', inSchemaPos + 10);
+                if (nextSpace == string::npos) nextSpace = rest.size();
+                schema = trim(rest.substr(inSchemaPos + 10, nextSpace - inSchemaPos - 10));
+                rest = trim(rest.substr(0, inSchemaPos) + rest.substr(nextSpace));
+            }
+            size_t grantPos = rest.find("grant ");
+            size_t onPos = rest.find(" on ");
+            size_t toPos = rest.find(" to ");
+            if (grantPos == string::npos || onPos == string::npos || toPos == string::npos) {
+                cout << "SQL syntax error: ALTER DEFAULT PRIVILEGES [FOR ROLE owner] [IN SCHEMA schema] GRANT priv ON obj_type TO grantee" << endl;
+                return true;
+            }
+            string privStr = trim(rest.substr(grantPos + 6, onPos - grantPos - 6));
+            string objType = trim(rest.substr(onPos + 4, toPos - onPos - 4));
+            string grantee = trim(rest.substr(toPos + 4));
+            if (privStr.empty() || objType.empty() || grantee.empty()) {
+                cout << "SQL syntax error: missing privilege, object type, or grantee" << endl;
+                return true;
+            }
+            g_engine.addDefaultPrivilege(s.currentDB, owner, schema, objType, privStr, grantee);
+            cout << "Default privilege set: " << owner << " in schema " << schema
+                 << " grants " << privStr << " on " << objType << " to " << grantee << endl;
+            return false;
         }
         if (tokens[0] == "user") {
             if (tokens.size() < 3) {
