@@ -8929,7 +8929,7 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         string privPart = trim(rest.substr(0, onPos));
-        string tname = trim(rest.substr(onPos + 4, toPos - onPos - 4));
+        string onPart = trim(rest.substr(onPos + 4, toPos - onPos - 4));
         string afterTo = trim(rest.substr(toPos + 4));
         // Check for WITH GRANT OPTION
         bool withGrantOpt = false;
@@ -8964,12 +8964,27 @@ bool execute(const string& rawSql, Session& s) {
         else if (privStr == "update") priv = dbms::StorageEngine::TablePrivilege::Update;
         else if (privStr == "delete") priv = dbms::StorageEngine::TablePrivilege::Delete;
         else if (privStr == "all") priv = dbms::StorageEngine::TablePrivilege::All;
+        else if (privStr == "usage") priv = dbms::StorageEngine::TablePrivilege::Usage;
+        else if (privStr == "execute") priv = dbms::StorageEngine::TablePrivilege::Execute;
         else {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
-        // Check if table exists (skip for database-wide grant with '*')
-        if (tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
+        // Detect object type: schema, sequence, function, or table
+        string tname = onPart;
+        string objectType = "table";
+        if (onPart.substr(0, 7) == "schema ") {
+            objectType = "schema";
+            tname = "schema:" + trim(onPart.substr(7));
+        } else if (onPart.substr(0, 9) == "sequence ") {
+            objectType = "sequence";
+            tname = "sequence:" + trim(onPart.substr(9));
+        } else if (onPart.substr(0, 9) == "function ") {
+            objectType = "function";
+            tname = "function:" + trim(onPart.substr(9));
+        }
+        // Validate object existence
+        if (objectType == "table" && tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
@@ -8983,7 +8998,12 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         g_engine.grant(s.currentDB, tname, uname, priv, colList, withGrantOpt, s.username);
-        string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
+        string scope;
+        if (tname == "*") scope = "database " + s.currentDB;
+        else if (objectType == "schema") scope = "schema " + onPart.substr(7);
+        else if (objectType == "sequence") scope = "sequence " + onPart.substr(9);
+        else if (objectType == "function") scope = "function " + onPart.substr(9);
+        else scope = "table " + tname;
         string goStr = withGrantOpt ? " WITH GRANT OPTION" : "";
         if (!colList.empty()) {
             string cols;
@@ -9021,7 +9041,7 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         string privPart = trim(rest.substr(0, onPos));
-        string tname = trim(rest.substr(onPos + 4, fromPos - onPos - 4));
+        string onPart = trim(rest.substr(onPos + 4, fromPos - onPos - 4));
         string afterFrom = trim(rest.substr(fromPos + 6));
         bool cascade = false;
         string uname;
@@ -9054,17 +9074,37 @@ bool execute(const string& rawSql, Session& s) {
         else if (privStr == "update") priv = dbms::StorageEngine::TablePrivilege::Update;
         else if (privStr == "delete") priv = dbms::StorageEngine::TablePrivilege::Delete;
         else if (privStr == "all") priv = dbms::StorageEngine::TablePrivilege::All;
+        else if (privStr == "usage") priv = dbms::StorageEngine::TablePrivilege::Usage;
+        else if (privStr == "execute") priv = dbms::StorageEngine::TablePrivilege::Execute;
         else {
             cout << "Unknown privilege: " << privStr << endl;
             return true;
         }
-        // Check if table exists (skip for database-wide revoke with '*')
-        if (tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
+        // Detect object type: schema, sequence, function, or table
+        string tname = onPart;
+        string objectType = "table";
+        if (onPart.substr(0, 7) == "schema ") {
+            objectType = "schema";
+            tname = "schema:" + trim(onPart.substr(7));
+        } else if (onPart.substr(0, 9) == "sequence ") {
+            objectType = "sequence";
+            tname = "sequence:" + trim(onPart.substr(9));
+        } else if (onPart.substr(0, 9) == "function ") {
+            objectType = "function";
+            tname = "function:" + trim(onPart.substr(9));
+        }
+        // Validate object existence
+        if (objectType == "table" && tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
         g_engine.revoke(s.currentDB, tname, uname, priv, colList, cascade);
-        string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
+        string scope;
+        if (tname == "*") scope = "database " + s.currentDB;
+        else if (objectType == "schema") scope = "schema " + onPart.substr(7);
+        else if (objectType == "sequence") scope = "sequence " + onPart.substr(9);
+        else if (objectType == "function") scope = "function " + onPart.substr(9);
+        else scope = "table " + tname;
         string casStr = cascade ? " CASCADE" : "";
         if (!colList.empty()) {
             string cols;

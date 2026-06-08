@@ -13675,6 +13675,8 @@ static std::string privToStr(StorageEngine::TablePrivilege p) {
         case StorageEngine::TablePrivilege::Update: return "update";
         case StorageEngine::TablePrivilege::Delete: return "delete";
         case StorageEngine::TablePrivilege::All: return "all";
+        case StorageEngine::TablePrivilege::Usage: return "usage";
+        case StorageEngine::TablePrivilege::Execute: return "execute";
     }
     return "";
 }

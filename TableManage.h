@@ -701,7 +701,7 @@ public:
     PageAllocator* getPageAllocator(const std::string& dbname, const std::string& tablename) const;
 
     // Table-level permissions
-    enum class TablePrivilege { Select, Insert, Update, Delete, All };
+    enum class TablePrivilege { Select, Insert, Update, Delete, All, Usage, Execute };
     void grant(const std::string& dbname, const std::string& tablename,
                const std::string& username, TablePrivilege priv,
                const std::vector<std::string>& columns = {},
