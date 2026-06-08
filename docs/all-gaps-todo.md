@@ -247,6 +247,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [ ] Wait Events
 - [x] pg_buffercache 等价
 - [x] pg_locks 等价（锁等待拓扑统计）
+- [x] pg_stat_activity 等价
 - [x] 慢查询日志（文件 + 内存缓冲区 SHOW SLOW LOG）
 - [x] auto_explain
 
