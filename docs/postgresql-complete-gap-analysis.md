@@ -86,8 +86,10 @@ PostgreSQL 18 官方文档覆盖：
 | `CREATE ROLE` / `CREATE USER` | 部分实现 | 用户在 `user.dat`，角色在 `role.dat`；缺少 PG 角色属性、成员继承、admin option、系统 catalog。 |
 | `CREATE SCHEMA` | 部分实现 | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义。 |
 | `CREATE SEQUENCE` | 部分实现 | 有 nextval/currval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics/ALTER SEQUENCE。 |
+| `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 部分实现 | 已有扩展统计对象元数据，并联动已有多列统计计算；缺少 PostgreSQL `pg_statistic_ext` catalog、表达式统计、dependencies/ndistinct/mcv 精确算法和 planner 深度使用。 |
 | `CREATE TABLE` | 部分实现 | 可建表、分区、临时/unlogged、继承等部分；缺少大量表选项、LIKE INCLUDING 全集、typed table、OF type、access method、tablespace、identity/生成列完整语义。 |
 | `CREATE TABLE AS` | 部分实现 | 有 CTAS 路径；缺少 PG 选项、WITH [NO] DATA、tablespace/access method、精确类型推断。 |
+| `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 部分实现 | 已支持表空间对象元数据、owner/location/options/rename/drop；缺少 PostgreSQL 的物理存储路由、权限、依赖检查和 `pg_tblspc` 符号链接语义。 |
 | `CREATE TRIGGER` | 部分实现 | 支持 before/after/instead of、row/statement、WHEN、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime。 |
 | `CREATE TYPE` | 部分实现 | 主要支持 composite type；列内 enum 有痕迹，但缺少 PG 的 enum/range/base/shell 类型创建语义。 |
 | `CREATE VIEW` | 部分实现 | 支持保存 SQL 和简单 updatable view；缺少 recursive view、security_barrier、security_invoker、check option 完整性。 |
@@ -132,7 +134,7 @@ PostgreSQL 18 官方文档覆盖：
 | 扩展/FDW/外部数据 | `CREATE EXTENSION`, `ALTER EXTENSION`, `DROP EXTENSION`, `CREATE FOREIGN DATA WRAPPER`, `ALTER FOREIGN DATA WRAPPER`, `DROP FOREIGN DATA WRAPPER`, `CREATE FOREIGN TABLE`, `ALTER FOREIGN TABLE`, `DROP FOREIGN TABLE`, `CREATE SERVER`, `ALTER SERVER`, `DROP SERVER`, `CREATE USER MAPPING`, `ALTER USER MAPPING`, `DROP USER MAPPING`, `IMPORT FOREIGN SCHEMA` |
 | 高可用/逻辑复制 | `CREATE PUBLICATION`, `ALTER PUBLICATION`, `DROP PUBLICATION`, `CREATE SUBSCRIPTION`, `ALTER SUBSCRIPTION`, `DROP SUBSCRIPTION` |
 | 语言/大对象 | `CREATE LANGUAGE`, `ALTER LANGUAGE`, `DROP LANGUAGE`, `ALTER LARGE OBJECT`, `DROP LARGE OBJECT` |
-| 统计/表空间/全文配置 | `CREATE STATISTICS`, `ALTER STATISTICS`, `DROP STATISTICS`, `CREATE TABLESPACE`, `ALTER TABLESPACE`, `DROP TABLESPACE`, `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
+| 统计/表空间/全文配置 | `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
 | 事务/会话别名和状态 | 本轮已将 `SET CONSTRAINTS`、`SET SESSION AUTHORIZATION`、`MOVE` 移至“部分实现”；仍缺 PostgreSQL 完整语义。 |
 | 数据库/对象 ALTER 子集 | `ALTER DATABASE`, `ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER ROLE` 的完整 PG 语义、`ALTER SEQUENCE`, `ALTER TRIGGER`, `ALTER TYPE`, `ALTER GROUP` |
 | 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义（项目有非 PG 的 `SELECT ... INTO OUTFILE`）、`DROP GROUP` 等兼容别名 |
@@ -238,7 +240,7 @@ PostgreSQL 函数与操作符章节非常大，本项目只覆盖了一小部分
 |---|---|
 | Parser/analyzer/rewrite/planner/executor 分层 | 本项目主要在 `execute()` 中字符串解析并直接调用 engine。 |
 | Cost-based planner | 有简化成本、统计和 plan cache；缺少 path 枚举、参数化路径、join search、equivalence classes、pathkeys、parallel aware path。 |
-| 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化；缺少 `CREATE STATISTICS`、dependencies、ndistinct、correlation、extended stats catalog。 |
+| 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化和扩展统计对象元数据；缺少 PostgreSQL 级 dependencies、ndistinct、correlation、表达式统计、catalog 和 planner 深度使用。 |
 | Index selection | 有 equality/range 部分；缺少 bitmap heap scan、bitmap and/or、多索引组合、skip scan、index condition recheck、lossy pages。 |
 | Parallel query | 缺失：无 Gather/Gather Merge、parallel scan/join/aggregate、worker lifecycle。 |
 | JIT | 缺失 LLVM JIT。 |

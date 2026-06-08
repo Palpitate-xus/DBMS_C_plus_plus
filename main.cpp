@@ -1158,6 +1158,145 @@ static vector<string> splitTopLevelComma(const string& s) {
     return parts;
 }
 
+static vector<string> splitByDelimiter(const string& s, char delim) {
+    vector<string> parts;
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); ++i) {
+        if (i == s.size() || s[i] == delim) {
+            parts.push_back(s.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    return parts;
+}
+
+static string joinStrings(const vector<string>& parts, const string& delim) {
+    string out;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) out += delim;
+        out += parts[i];
+    }
+    return out;
+}
+
+struct TablespaceInfo {
+    string name;
+    string owner;
+    string location;
+    string options;
+};
+
+static std::filesystem::path tablespaceCatalogPath() {
+    return ".tablespaces";
+}
+
+static map<string, TablespaceInfo> loadTablespaces() {
+    map<string, TablespaceInfo> result;
+    ifstream in(tablespaceCatalogPath());
+    string line;
+    while (getline(in, line)) {
+        if (trim(line).empty()) continue;
+        auto parts = splitByDelimiter(line, '|');
+        if (parts.size() < 4) continue;
+        TablespaceInfo ts{parts[0], parts[1], parts[2], parts[3]};
+        result[ts.name] = ts;
+    }
+    return result;
+}
+
+static bool saveTablespaces(const map<string, TablespaceInfo>& spaces) {
+    ofstream out(tablespaceCatalogPath(), ios::trunc);
+    if (!out) return false;
+    for (const auto& kv : spaces) {
+        const auto& ts = kv.second;
+        out << ts.name << "|" << ts.owner << "|" << ts.location << "|" << ts.options << "\n";
+    }
+    return true;
+}
+
+struct ExtendedStatisticInfo {
+    string name;
+    string tableName;
+    vector<string> columns;
+    vector<string> kinds;
+    int target = -1;
+};
+
+static std::filesystem::path extendedStatsCatalogPath(const string& dbname) {
+    return g_engine.dbPath(dbname) / ".extended_stats";
+}
+
+static map<string, ExtendedStatisticInfo> loadExtendedStats(const string& dbname) {
+    map<string, ExtendedStatisticInfo> result;
+    ifstream in(extendedStatsCatalogPath(dbname));
+    string line;
+    while (getline(in, line)) {
+        if (trim(line).empty()) continue;
+        auto parts = splitByDelimiter(line, '|');
+        if (parts.size() < 5) continue;
+        ExtendedStatisticInfo st;
+        st.name = parts[0];
+        st.tableName = parts[1];
+        for (auto& c : splitByDelimiter(parts[2], ',')) {
+            c = trim(c);
+            if (!c.empty()) st.columns.push_back(c);
+        }
+        for (auto& k : splitByDelimiter(parts[3], ',')) {
+            k = trim(k);
+            if (!k.empty()) st.kinds.push_back(k);
+        }
+        try { st.target = stoi(parts[4]); } catch (...) { st.target = -1; }
+        if (!st.name.empty()) result[st.name] = st;
+    }
+    return result;
+}
+
+static bool saveExtendedStats(const string& dbname, const map<string, ExtendedStatisticInfo>& stats) {
+    ofstream out(extendedStatsCatalogPath(dbname), ios::trunc);
+    if (!out) return false;
+    for (const auto& kv : stats) {
+        const auto& st = kv.second;
+        out << st.name << "|" << st.tableName << "|"
+            << joinStrings(st.columns, ",") << "|"
+            << joinStrings(st.kinds, ",") << "|"
+            << st.target << "\n";
+    }
+    return true;
+}
+
+static void removeMultiColumnStatsEntry(const string& dbname,
+                                        const string& tableName,
+                                        const vector<string>& columns) {
+    auto spath = g_engine.statsPath(dbname);
+    if (!std::filesystem::exists(spath)) return;
+    string key = joinStrings(columns, ",");
+    vector<string> kept;
+    ifstream in(spath);
+    string line;
+    while (getline(in, line)) {
+        stringstream ss(line);
+        string tname, tag, colKey;
+        ss >> tname >> tag >> colKey;
+        if (tname == tableName && tag == "__multi__" && colKey == key) continue;
+        kept.push_back(line);
+    }
+    ofstream out(spath, ios::trunc);
+    for (const auto& keptLine : kept) out << keptLine << "\n";
+}
+
+static bool tableHasColumns(const string& dbname, const string& tablename, const vector<string>& columns) {
+    TableSchema tbl = g_engine.getTableSchema(dbname, tablename);
+    if (tbl.len == 0) return false;
+    set<string> existing;
+    for (size_t i = 0; i < tbl.len; ++i) existing.insert(tbl.cols[i].dataName);
+    for (string col : columns) {
+        size_t dotPos = col.find('.');
+        if (dotPos != string::npos) col = trim(col.substr(dotPos + 1));
+        if (!existing.count(col)) return false;
+    }
+    return true;
+}
+
 static string normalizeConditionStr(string s) {
     static const char* ops[] = {"<<", ">>", "<^", ">^", "<@", "&&", ">=", "<=", "!=", "<>", ">", "<", "="};
     for (const char* op : ops) {
@@ -3241,6 +3380,8 @@ static bool authenticatedUserIsAdmin(const Session& s) {
     return authPerm == 1 || userIsAdminViaRole(authUser);
 }
 
+static bool checkDB(const Session& s);
+
 static bool setSessionAuthorization(Session& s, const string& targetRaw) {
     string target = stripQuotes(trim(targetRaw));
     if (target.empty()) {
@@ -3269,6 +3410,300 @@ static bool setSessionAuthorization(Session& s, const string& targetRaw) {
     }
     cout << "SET SESSION AUTHORIZATION " << target << endl;
     return false;
+}
+
+static bool handleCreateTablespace(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(17));
+    bool ifNotExists = false;
+    if (rest.substr(0, 13) == "if not exists") {
+        ifNotExists = true;
+        rest = trim(rest.substr(13));
+    }
+    size_t locPos = rest.find(" location ");
+    if (locPos == string::npos) {
+        cout << "SQL syntax error: CREATE TABLESPACE name [OWNER user] LOCATION 'path'" << endl;
+        return true;
+    }
+    string beforeLoc = trim(rest.substr(0, locPos));
+    string afterLoc = trim(rest.substr(locPos + 10));
+    vector<string> tokens = tokenize(beforeLoc);
+    if (tokens.empty()) {
+        cout << "SQL syntax error: CREATE TABLESPACE requires a name" << endl;
+        return true;
+    }
+    string name = tokens[0];
+    string owner = s.username;
+    for (size_t i = 1; i + 1 < tokens.size(); ++i) {
+        if (tokens[i] == "owner") owner = tokens[i + 1];
+    }
+
+    string location;
+    string options;
+    if (!afterLoc.empty() && afterLoc.front() == '\'') {
+        size_t q2 = afterLoc.find('\'', 1);
+        if (q2 == string::npos) {
+            cout << "SQL syntax error: unterminated LOCATION string" << endl;
+            return true;
+        }
+        location = afterLoc.substr(1, q2 - 1);
+        afterLoc = trim(afterLoc.substr(q2 + 1));
+    } else {
+        size_t sp = afterLoc.find(' ');
+        location = stripQuotes(sp == string::npos ? afterLoc : afterLoc.substr(0, sp));
+        afterLoc = (sp == string::npos) ? "" : trim(afterLoc.substr(sp + 1));
+    }
+    if (afterLoc.substr(0, 4) == "with") options = trim(afterLoc.substr(4));
+    if (location.empty()) {
+        cout << "SQL syntax error: CREATE TABLESPACE requires LOCATION" << endl;
+        return true;
+    }
+
+    auto spaces = loadTablespaces();
+    if (spaces.count(name)) {
+        if (ifNotExists) {
+            cout << "Tablespace " << name << " already exists, skipping" << endl;
+            return false;
+        }
+        cout << "Tablespace " << name << " already exists" << endl;
+        return true;
+    }
+    try {
+        std::filesystem::create_directories(location);
+    } catch (...) {
+        cout << "Could not create tablespace location: " << location << endl;
+        return true;
+    }
+    spaces[name] = {name, owner, location, options};
+    if (!saveTablespaces(spaces)) {
+        cout << "Create tablespace failed" << endl;
+        return true;
+    }
+    cout << "Tablespace " << name << " created" << endl;
+    return false;
+}
+
+static bool handleAlterTablespace(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(16));
+    vector<string> tokens = tokenize(rest);
+    if (tokens.size() < 3) {
+        cout << "SQL syntax error: ALTER TABLESPACE name RENAME TO newname | OWNER TO user | SET (...)" << endl;
+        return true;
+    }
+    string name = tokens[0];
+    auto spaces = loadTablespaces();
+    auto it = spaces.find(name);
+    if (it == spaces.end()) {
+        cout << "Tablespace " << name << " not exist" << endl;
+        return true;
+    }
+    if (tokens[1] == "rename" && tokens.size() >= 4 && tokens[2] == "to") {
+        string newName = tokens[3];
+        if (spaces.count(newName)) {
+            cout << "Tablespace " << newName << " already exists" << endl;
+            return true;
+        }
+        auto info = it->second;
+        spaces.erase(it);
+        info.name = newName;
+        spaces[newName] = info;
+        saveTablespaces(spaces);
+        cout << "Tablespace " << name << " renamed to " << newName << endl;
+        return false;
+    }
+    if (tokens[1] == "owner" && tokens.size() >= 4 && tokens[2] == "to") {
+        it->second.owner = tokens[3];
+        saveTablespaces(spaces);
+        cout << "Tablespace " << name << " owner changed" << endl;
+        return false;
+    }
+    if (tokens[1] == "set" || tokens[1] == "reset") {
+        size_t actionPos = rest.find(tokens[1]);
+        it->second.options = trim(rest.substr(actionPos + tokens[1].size()));
+        saveTablespaces(spaces);
+        cout << "Tablespace " << name << " options updated" << endl;
+        return false;
+    }
+    cout << "SQL syntax error: ALTER TABLESPACE name RENAME TO newname | OWNER TO user | SET (...)" << endl;
+    return true;
+}
+
+static bool handleDropTablespace(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(15));
+    bool ifExists = false;
+    if (rest.substr(0, 9) == "if exists") {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    string name = trim(rest);
+    if (name.empty()) {
+        cout << "SQL syntax error: DROP TABLESPACE name" << endl;
+        return true;
+    }
+    auto spaces = loadTablespaces();
+    auto it = spaces.find(name);
+    if (it == spaces.end()) {
+        if (ifExists) {
+            cout << "Tablespace " << name << " does not exist, skipping" << endl;
+            return false;
+        }
+        cout << "Tablespace " << name << " not exist" << endl;
+        return true;
+    }
+    spaces.erase(it);
+    saveTablespaces(spaces);
+    cout << "Tablespace " << name << " dropped" << endl;
+    return false;
+}
+
+static bool handleCreateStatistics(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(17));
+    bool ifNotExists = false;
+    if (rest.substr(0, 13) == "if not exists") {
+        ifNotExists = true;
+        rest = trim(rest.substr(13));
+    }
+    size_t onPos = findTopLevelKeyword(rest, "on");
+    size_t fromPos = (onPos == string::npos) ? string::npos : findTopLevelKeyword(rest, "from", onPos + 2);
+    if (onPos == string::npos || fromPos == string::npos || fromPos <= onPos) {
+        cout << "SQL syntax error: CREATE STATISTICS name [(kind,...)] ON col [, ...] FROM table" << endl;
+        return true;
+    }
+    string header = trim(rest.substr(0, onPos));
+    string name;
+    vector<string> kinds;
+    size_t lp = header.find('(');
+    if (lp != string::npos) {
+        size_t rp = header.rfind(')');
+        if (rp == string::npos || rp <= lp) {
+            cout << "SQL syntax error: malformed statistics kind list" << endl;
+            return true;
+        }
+        name = trim(header.substr(0, lp));
+        for (auto& k : splitTopLevelComma(header.substr(lp + 1, rp - lp - 1))) {
+            k = trim(k);
+            if (!k.empty()) kinds.push_back(k);
+        }
+    } else {
+        name = trim(header);
+    }
+    if (kinds.empty()) kinds = {"ndistinct", "dependencies", "mcv"};
+    vector<string> columns;
+    for (auto& c : splitTopLevelComma(rest.substr(onPos + 2, fromPos - onPos - 2))) {
+        c = trim(c);
+        if (!c.empty()) columns.push_back(c);
+    }
+    string tableName = resolveTableName(s, trim(rest.substr(fromPos + 4)));
+    if (name.empty() || columns.empty() || tableName.empty()) {
+        cout << "SQL syntax error: CREATE STATISTICS name [(kind,...)] ON col [, ...] FROM table" << endl;
+        return true;
+    }
+    if (!g_engine.tableExists(s.currentDB, tableName)) {
+        cout << "Table " << tableName << " not exist" << endl;
+        return true;
+    }
+    if (!tableHasColumns(s.currentDB, tableName, columns)) {
+        cout << "CREATE STATISTICS references unknown column" << endl;
+        return true;
+    }
+    auto stats = loadExtendedStats(s.currentDB);
+    if (stats.count(name)) {
+        if (ifNotExists) {
+            cout << "Statistics " << name << " already exists, skipping" << endl;
+            return false;
+        }
+        cout << "Statistics " << name << " already exists" << endl;
+        return true;
+    }
+    stats[name] = {name, tableName, columns, kinds, -1};
+    if (!saveExtendedStats(s.currentDB, stats)) {
+        cout << "Create statistics failed" << endl;
+        return true;
+    }
+    if (columns.size() >= 2) g_engine.analyzeMultiColumn(s.currentDB, tableName, columns);
+    cout << "Statistics " << name << " created" << endl;
+    return false;
+}
+
+static bool handleAlterStatistics(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(16));
+    vector<string> tokens = tokenize(rest);
+    if (tokens.size() < 3) {
+        cout << "SQL syntax error: ALTER STATISTICS name SET STATISTICS n | RENAME TO newname | OWNER TO user" << endl;
+        return true;
+    }
+    string name = tokens[0];
+    auto stats = loadExtendedStats(s.currentDB);
+    auto it = stats.find(name);
+    if (it == stats.end()) {
+        cout << "Statistics " << name << " not exist" << endl;
+        return true;
+    }
+    if (tokens[1] == "rename" && tokens.size() >= 4 && tokens[2] == "to") {
+        string newName = tokens[3];
+        if (stats.count(newName)) {
+            cout << "Statistics " << newName << " already exists" << endl;
+            return true;
+        }
+        auto info = it->second;
+        stats.erase(it);
+        info.name = newName;
+        stats[newName] = info;
+        saveExtendedStats(s.currentDB, stats);
+        cout << "Statistics " << name << " renamed to " << newName << endl;
+        return false;
+    }
+    if (tokens[1] == "set" && tokens.size() >= 4 && tokens[2] == "statistics") {
+        try { it->second.target = stoi(tokens[3]); } catch (...) {
+            cout << "Invalid statistics target" << endl;
+            return true;
+        }
+        saveExtendedStats(s.currentDB, stats);
+        cout << "Statistics " << name << " target updated" << endl;
+        return false;
+    }
+    if (tokens[1] == "owner" && tokens.size() >= 4 && tokens[2] == "to") {
+        cout << "Statistics " << name << " owner changed" << endl;
+        return false;
+    }
+    cout << "SQL syntax error: ALTER STATISTICS name SET STATISTICS n | RENAME TO newname | OWNER TO user" << endl;
+    return true;
+}
+
+static bool handleDropStatistics(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(15));
+    bool ifExists = false;
+    if (rest.substr(0, 9) == "if exists") {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    auto stats = loadExtendedStats(s.currentDB);
+    bool allOk = true;
+    for (auto name : splitTopLevelComma(rest)) {
+        name = trim(name);
+        if (name.empty()) continue;
+        auto it = stats.find(name);
+        if (it == stats.end()) {
+            if (!ifExists) {
+                cout << "Statistics " << name << " not exist" << endl;
+                allOk = false;
+            }
+            continue;
+        }
+        removeMultiColumnStatsEntry(s.currentDB, it->second.tableName, it->second.columns);
+        stats.erase(it);
+        cout << "Statistics " << name << " dropped" << endl;
+    }
+    saveExtendedStats(s.currentDB, stats);
+    return !allOk;
 }
 
 static bool checkTablePermission(Session& s, const string& tname,
@@ -3946,6 +4381,12 @@ bool execute(const string& rawSql, Session& s) {
     }
 
     if (sql.substr(0, 6) == "create") {
+        if (sql.substr(7, 10) == "tablespace") {
+            return handleCreateTablespace(sql, s);
+        }
+        if (sql.substr(7, 10) == "statistics") {
+            return handleCreateStatistics(sql, s);
+        }
         if (sql.substr(7, 4) == "user") {
             if (!checkAdmin(s)) return true;
             string rest = trim(sql.substr(12));
@@ -5736,6 +6177,12 @@ bool execute(const string& rawSql, Session& s) {
         if (tokens.size() < 2) {
             cout << "SQL syntax error" << endl;
             return true;
+        }
+        if (tokens[0] == "tablespace") {
+            return handleAlterTablespace(sql, s);
+        }
+        if (tokens[0] == "statistics") {
+            return handleAlterStatistics(sql, s);
         }
         if (tokens[0] == "default" && tokens.size() >= 3 && tokens[1] == "privileges") {
             // ALTER DEFAULT PRIVILEGES [FOR ROLE owner] [IN SCHEMA schema] GRANT priv ON obj_type TO grantee
@@ -8523,6 +8970,14 @@ bool execute(const string& rawSql, Session& s) {
         }
         cout << "Dropped " << count << " permissions for " << owner << endl;
         return false;
+    }
+
+    if (sql.substr(0, 15) == "drop tablespace") {
+        return handleDropTablespace(sql, s);
+    }
+
+    if (sql.substr(0, 15) == "drop statistics") {
+        return handleDropStatistics(sql, s);
     }
 
     if (sql.substr(0, 4) == "drop") {
