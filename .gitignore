@@ -13,6 +13,13 @@ testdb*
 cttest/
 info/
 mvtest/
+debug_db/
+insert_test*/
+inter_test/
+round_test*/
+testoverdb/
+tmpidx/
+[0-9]*/
 *.tmp
 build-*/
 slow_query.log

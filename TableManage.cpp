@@ -12673,13 +12673,25 @@ OpResult StorageEngine::rollbackTransaction() {
                 if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
             }
         } else if (it->op == TxnLogEntry::Op::Delete) {
-            // Undo DELETE: restore the row by clearing tombstone
+            // Undo DELETE: restore the row by clearing tombstone and writing back old data
             uint32_t pageId; uint16_t slotId;
             decodeRid(it->rowIdx, pageId, slotId);
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 Page page(pageBuf);
                 page.restore(slotId);
+                // The slot may have been reused by a later INSERT in the same txn.
+                // Overwrite with the logged old data (preserving any MVCC header).
+                const char* currentData = nullptr;
+                size_t currentLen = 0;
+                if (page.get(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
+                    std::string fullRow;
+                    fullRow.append(currentData, MVCC_HEADER_SIZE);
+                    fullRow.append(it->rowData);
+                    page.update(slotId, fullRow.data(), fullRow.size());
+                } else {
+                    page.update(slotId, it->rowData.data(), it->rowData.size());
+                }
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
             }
