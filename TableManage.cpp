@@ -7436,6 +7436,8 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
     }
 
+    recordModification(dbname, tablename, 1);
+    maybeAutoAnalyze(dbname, tablename);
     return OpResult::Success;
 }
 
@@ -8182,6 +8184,8 @@ OpResult StorageEngine::remove(const std::string& dbname,
         deadTupleCounts_[key] += toDelete.size();
     }
     maybeAutoVacuum(dbname, tablename);
+    recordModification(dbname, tablename, toDelete.size());
+    maybeAutoAnalyze(dbname, tablename);
 
     return OpResult::Success;
 }
@@ -8644,6 +8648,8 @@ OpResult StorageEngine::update(const std::string& dbname,
         }
     }
 
+    recordModification(dbname, tablename, matchIds.size());
+    maybeAutoAnalyze(dbname, tablename);
     return OpResult::Success;
 }
 
@@ -13666,6 +13672,32 @@ void StorageEngine::resetDeadTupleCount(const std::string& dbname,
     auto key = std::make_pair(dbname, tablename);
     std::lock_guard<std::mutex> lock(deadTupleMutex_);
     deadTupleCounts_[key] = 0;
+}
+
+void StorageEngine::recordModification(const std::string& dbname,
+                                       const std::string& tablename,
+                                       size_t delta) {
+    auto key = std::make_pair(dbname, tablename);
+    std::lock_guard<std::mutex> lock(modifyMutex_);
+    modifyCounts_[key] += delta;
+}
+
+void StorageEngine::maybeAutoAnalyze(const std::string& dbname,
+                                     const std::string& tablename) {
+    if (!g_config.autoAnalyzeEnabled) return;
+    auto key = std::make_pair(dbname, tablename);
+    size_t count = 0;
+    {
+        std::lock_guard<std::mutex> lock(modifyMutex_);
+        auto it = modifyCounts_.find(key);
+        if (it == modifyCounts_.end()) return;
+        count = it->second;
+    }
+    if (count >= static_cast<size_t>(g_config.autoAnalyzeThreshold)) {
+        analyzeTable(dbname, tablename);
+        std::lock_guard<std::mutex> lock(modifyMutex_);
+        modifyCounts_[key] = 0;
+    }
 }
 
 static std::string privToStr(StorageEngine::TablePrivilege p) {

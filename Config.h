@@ -25,6 +25,8 @@ struct Config {
     int auditLevel = 0; // 0=none, 1=DDL only, 2=DML+DDL, 3=all
     bool autoVacuumEnabled = true; // automatically VACUUM when dead tuples exceed threshold
     int autoVacuumThreshold = 50;  // dead tuple count threshold to trigger auto-vacuum
+    bool autoAnalyzeEnabled = true; // automatically ANALYZE when modifications exceed threshold
+    int autoAnalyzeThreshold = 50;  // modification count threshold to trigger auto-analyze
     int lockTimeoutMs = 0;         // 0 = no timeout
     int deadlockTimeoutMs = 1000;  // ms to wait before declaring deadlock (0 = immediate check)
     size_t workMemKb = 4096;       // work memory per query in KB

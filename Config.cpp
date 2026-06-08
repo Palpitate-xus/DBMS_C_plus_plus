@@ -45,6 +45,10 @@ bool Config::load(const std::string& filename) {
             autoVacuumEnabled = (val == "1" || val == "true" || val == "on");
         } else if (key == "auto_vacuum_threshold") {
             try { autoVacuumThreshold = std::stoi(val); } catch (...) {}
+        } else if (key == "auto_analyze") {
+            autoAnalyzeEnabled = (val == "1" || val == "true" || val == "on");
+        } else if (key == "auto_analyze_threshold") {
+            try { autoAnalyzeThreshold = std::stoi(val); } catch (...) {}
         } else if (key == "lock_timeout_ms") {
             try { lockTimeoutMs = std::stoi(val); } catch (...) {}
         } else if (key == "deadlock_timeout_ms") {
@@ -67,6 +71,8 @@ void Config::printAll() const {
               << "audit_level " << auditLevel << "\n"
               << "auto_vacuum " << (autoVacuumEnabled ? "on" : "off") << "\n"
               << "auto_vacuum_threshold " << autoVacuumThreshold << "\n"
+              << "auto_analyze " << (autoAnalyzeEnabled ? "on" : "off") << "\n"
+              << "auto_analyze_threshold " << autoAnalyzeThreshold << "\n"
               << "lock_timeout_ms " << lockTimeoutMs << "\n"
               << "deadlock_timeout_ms " << deadlockTimeoutMs << "\n";
 }
@@ -87,6 +93,8 @@ bool Config::save(const std::string& filename) const {
         << "audit_level=" << auditLevel << "\n"
         << "auto_vacuum=" << (autoVacuumEnabled ? "on" : "off") << "\n"
         << "auto_vacuum_threshold=" << autoVacuumThreshold << "\n"
+        << "auto_analyze=" << (autoAnalyzeEnabled ? "on" : "off") << "\n"
+        << "auto_analyze_threshold=" << autoAnalyzeThreshold << "\n"
         << "lock_timeout_ms=" << lockTimeoutMs << "\n"
         << "deadlock_timeout_ms=" << deadlockTimeoutMs << "\n";
     return true;

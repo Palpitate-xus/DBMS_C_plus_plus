@@ -521,6 +521,10 @@ public:
     size_t getDeadTupleCount(const std::string& dbname, const std::string& tablename) const;
     void resetDeadTupleCount(const std::string& dbname, const std::string& tablename);
 
+    // Auto-ANALYZE: per-table modification tracking and automatic triggering
+    void recordModification(const std::string& dbname, const std::string& tablename, size_t delta = 1);
+    void maybeAutoAnalyze(const std::string& dbname, const std::string& tablename);
+
     // Index metadata (partial + expression index support)
     struct IndexMetadata {
         std::string name;           // column name or expression
@@ -918,6 +922,10 @@ private:
     // Auto-VACUUM: per-table dead tuple tracking
     mutable std::mutex deadTupleMutex_;
     mutable std::map<std::pair<std::string, std::string>, size_t> deadTupleCounts_;
+
+    // Auto-ANALYZE: per-table modification tracking
+    mutable std::mutex modifyMutex_;
+    mutable std::map<std::pair<std::string, std::string>, size_t> modifyCounts_;
 
     // Transaction state
     bool inTransaction_ = false;
