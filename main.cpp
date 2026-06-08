@@ -10362,7 +10362,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -10397,11 +10397,18 @@ bool execute(const string& rawSql, Session& s) {
                          << st.minTimeMs << " " << st.maxTimeMs << " " << st.meanTimeMs << " "
                          << st.dbname << endl;
                 }
-            } else {
+            } else if (tname == "pg_seclabels") {
                 cout << "objtype objname label " << endl;
                 auto labels = g_engine.getAllSecurityLabels(s.currentDB);
                 for (const auto& [ot, on, lab] : labels) {
                     cout << ot << " " << on << " " << lab << endl;
+                }
+            } else {
+                cout << "relname pageid dirty pincount " << endl;
+                auto entries = g_engine.getBufferCacheEntries();
+                for (const auto& e : entries) {
+                    cout << e.relname << " " << e.pageId << " "
+                         << (e.dirty ? "t" : "f") << " " << e.pinCount << endl;
                 }
             }
             return false;

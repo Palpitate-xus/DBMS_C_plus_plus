@@ -2321,6 +2321,22 @@ StorageEngine::BufferPoolStats StorageEngine::getBufferPoolStats() const {
     return stats;
 }
 
+std::vector<StorageEngine::BufferCacheEntry> StorageEngine::getBufferCacheEntries() const {
+    std::vector<BufferCacheEntry> result;
+    for (const auto& kv : pageAllocators_) {
+        if (kv.second && kv.second->bufferPool()) {
+            auto* bp = kv.second->bufferPool();
+            auto frames = bp->getFrameInfo();
+            for (const auto& f : frames) {
+                if (f.valid) {
+                    result.push_back({kv.first, f.pageId, f.dirty, f.pinCount});
+                }
+            }
+        }
+    }
+    return result;
+}
+
 size_t StorageEngine::getTableRowCount(const std::string& dbname,
                                         const std::string& tablename) const {
     auto spath = statsPath(dbname);

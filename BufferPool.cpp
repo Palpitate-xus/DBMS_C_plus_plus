@@ -154,4 +154,14 @@ void BufferPool::flush() {
     }
 }
 
+std::vector<BufferPool::FrameInfo> BufferPool::getFrameInfo() const {
+    std::vector<FrameInfo> result;
+    for (const auto& frame : frames_) {
+        if (frame.pageId != static_cast<uint32_t>(-1)) {
+            result.push_back({frame.pageId, frame.dirty, frame.pinCount, true});
+        }
+    }
+    return result;
+}
+
 } // namespace dbms

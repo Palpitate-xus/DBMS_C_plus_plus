@@ -318,6 +318,15 @@ public:
     };
     BufferPoolStats getBufferPoolStats() const;
 
+    // Buffer cache entries (for pg_buffercache virtual table)
+    struct BufferCacheEntry {
+        std::string relname;  // table name or index name
+        uint32_t pageId;
+        bool dirty;
+        int pinCount;
+    };
+    std::vector<BufferCacheEntry> getBufferCacheEntries() const;
+
     // Statistics
     struct ColumnStats {
         size_t cardinality = 0;

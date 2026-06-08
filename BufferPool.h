@@ -44,6 +44,15 @@ public:
     }
     void resetStats() { hits_ = 0; misses_ = 0; }
 
+    // Frame info for pg_buffercache
+    struct FrameInfo {
+        uint32_t pageId;
+        bool dirty;
+        int pinCount;
+        bool valid;
+    };
+    std::vector<FrameInfo> getFrameInfo() const;
+
 private:
     struct Frame {
         uint32_t pageId = static_cast<uint32_t>(-1);
