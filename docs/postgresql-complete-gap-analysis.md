@@ -102,14 +102,17 @@ PostgreSQL 18 官方文档覆盖：
 | `LISTEN` / `NOTIFY` / `UNLISTEN` | 部分实现 | 进程内 map；缺少事务提交后发送、payload 长度/通道语义、跨进程持久服务语义。 |
 | `LOCK` | 部分实现 | 支持 share/exclusive；缺少 PG 全锁模式、NOWAIT、ONLY、锁队列/冲突矩阵。 |
 | `MERGE` | 部分实现 | 支持 `MATCHED UPDATE` / `NOT MATCHED INSERT` 的窄路径；缺少 BY SOURCE、DELETE、DO NOTHING、多个 WHEN、RETURNING OLD/NEW、复杂 source query。 |
+| `MOVE` | 部分实现 | 已支持内存游标的位置移动和 `MOVE n` 返回；缺少 PostgreSQL portal、holdable/scrollable cursor、事务生命周期和精确边界语义。 |
 | `REFRESH MATERIALIZED VIEW` | 部分实现 | 重跑 SELECT，`CONCURRENTLY` 只是入口标志；缺少 PG 并发刷新条件和锁语义。 |
 | `REINDEX` | 部分实现 | 基本 `REINDEX TABLE`；缺少 index/schema/database/system、CONCURRENTLY、tablespace、verbose。 |
-| `RESET` | 部分实现 | 支持 `RESET ROLE`、`RESET ALL`、`RESET TIME ZONE`、`RESET statement_timeout`、`RESET transaction_isolation`；缺少完整 GUC、`RESET SESSION AUTHORIZATION` 等语义。 |
+| `RESET` | 部分实现 | 支持 `RESET ROLE`、`RESET SESSION AUTHORIZATION`、`RESET ALL`、`RESET TIME ZONE`、`RESET statement_timeout`、`RESET transaction_isolation`；缺少完整 GUC 语义。 |
 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 部分实现 | 基于 txn log index；缺少 PG 子事务资源/锁/错误状态完整语义。 |
 | `SECURITY LABEL` | 部分实现 | 保存 label 文件；缺少 provider、对象类型全集、SELinux/sepgsql 集成。 |
 | `SELECT` | 部分实现 | 支持大量子集；复杂 grammar、类型推断、表达式、函数、子查询、锁、并行、planner/rewrite 差距最大。 |
 | `SET` / `SHOW` | 部分实现 | 项目参数和少量 session 状态；不是 PG GUC 全体系。 |
+| `SET CONSTRAINTS` | 部分实现 | 已解析 `IMMEDIATE`/`DEFERRED` 并记录会话标志；缺少 deferrable 约束队列、提交时检查和约束触发器语义。 |
 | `SET ROLE` | 部分实现 | 只改 Session 字段；缺少权限检查、role stack、session authorization 联动。 |
+| `SET SESSION AUTHORIZATION` | 部分实现 | 已支持管理员切换 session user、`DEFAULT` 和 `RESET SESSION AUTHORIZATION`；缺少 PostgreSQL 角色继承、SET ROLE 权限矩阵和会话安全上下文完整语义。 |
 | `SET TRANSACTION` | 部分实现 | 隔离级别/只读部分；缺少 deferrable、当前事务时序限制完整语义。 |
 | `TRUNCATE` | 部分实现 | 支持 cascade/restart identity 部分；缺少 ONLY/多表/trigger/identity/foreign table/transactional details。 |
 | `UPDATE` | 部分实现 | 支持 FROM/LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、WHERE CURRENT OF、OLD/NEW RETURNING、复杂表达式。 |
@@ -130,7 +133,7 @@ PostgreSQL 18 官方文档覆盖：
 | 高可用/逻辑复制 | `CREATE PUBLICATION`, `ALTER PUBLICATION`, `DROP PUBLICATION`, `CREATE SUBSCRIPTION`, `ALTER SUBSCRIPTION`, `DROP SUBSCRIPTION` |
 | 语言/大对象 | `CREATE LANGUAGE`, `ALTER LANGUAGE`, `DROP LANGUAGE`, `ALTER LARGE OBJECT`, `DROP LARGE OBJECT` |
 | 统计/表空间/全文配置 | `CREATE STATISTICS`, `ALTER STATISTICS`, `DROP STATISTICS`, `CREATE TABLESPACE`, `ALTER TABLESPACE`, `DROP TABLESPACE`, `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
-| 事务/会话别名和状态 | `SET CONSTRAINTS`, `SET SESSION AUTHORIZATION`, `MOVE` |
+| 事务/会话别名和状态 | 本轮已将 `SET CONSTRAINTS`、`SET SESSION AUTHORIZATION`、`MOVE` 移至“部分实现”；仍缺 PostgreSQL 完整语义。 |
 | 数据库/对象 ALTER 子集 | `ALTER DATABASE`, `ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER ROLE` 的完整 PG 语义、`ALTER SEQUENCE`, `ALTER TRIGGER`, `ALTER TYPE`, `ALTER GROUP` |
 | 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义（项目有非 PG 的 `SELECT ... INTO OUTFILE`）、`DROP GROUP` 等兼容别名 |
 

@@ -3235,6 +3235,42 @@ static bool checkAdmin(const Session& s) {
     return true;
 }
 
+static bool authenticatedUserIsAdmin(const Session& s) {
+    const string& authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
+    int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
+    return authPerm == 1 || userIsAdminViaRole(authUser);
+}
+
+static bool setSessionAuthorization(Session& s, const string& targetRaw) {
+    string target = stripQuotes(trim(targetRaw));
+    if (target.empty()) {
+        cout << "SQL syntax error: SET SESSION AUTHORIZATION user_name | DEFAULT" << endl;
+        return true;
+    }
+    string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
+    int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
+    if (target == "default") target = authUser;
+    if (!authenticatedUserIsAdmin(s) && target != authUser) {
+        cout << "permission denied" << endl;
+        return true;
+    }
+    int perm = permissionQuery(target);
+    if (perm < 0) {
+        cout << "User " << target << " not exist" << endl;
+        return true;
+    }
+    s.username = target;
+    s.permission = perm;
+    s.originalRole = target;
+    s.currentRole.clear();
+    if (s.authenticatedUser.empty()) {
+        s.authenticatedUser = authUser;
+        s.authenticatedPermission = authPerm;
+    }
+    cout << "SET SESSION AUTHORIZATION " << target << endl;
+    return false;
+}
+
 static bool checkTablePermission(Session& s, const string& tname,
                                   dbms::StorageEngine::TablePrivilege priv) {
     if (s.permission == 1) return true; // admin bypass
@@ -3788,6 +3824,107 @@ bool execute(const string& rawSql, Session& s) {
                 moveTo(cur.pos + 1);
             }
         }
+        return false;
+    }
+
+    // MOVE [ direction ] [ FROM | IN ] cursor_name
+    if (sql == "move" || sql.substr(0, 5) == "move ") {
+        string rest = trim(sql.substr(4));
+        string direction = "next";
+        string cursorName;
+        size_t sepPos = string::npos;
+        size_t sepLen = 0;
+        if (rest.substr(0, 5) == "from ") {
+            sepPos = 0;
+            sepLen = 5;
+        } else if (rest.substr(0, 3) == "in ") {
+            sepPos = 0;
+            sepLen = 3;
+        } else {
+            size_t fromPos = rest.find(" from ");
+            size_t inPos = rest.find(" in ");
+            if (fromPos != string::npos && (inPos == string::npos || fromPos < inPos)) {
+                sepPos = fromPos;
+                sepLen = 6;
+            } else if (inPos != string::npos) {
+                sepPos = inPos;
+                sepLen = 4;
+            }
+        }
+        if (sepPos != string::npos) {
+            string before = trim(rest.substr(0, sepPos));
+            if (!before.empty()) direction = before;
+            cursorName = trim(rest.substr(sepPos + sepLen));
+        } else {
+            cursorName = rest;
+        }
+        if (cursorName.empty()) {
+            cout << "SQL syntax error: MOVE [direction] FROM cursor_name" << endl;
+            return true;
+        }
+        auto it = s.cursors.find(cursorName);
+        if (it == s.cursors.end()) {
+            cout << "Cursor " << cursorName << " not found" << endl;
+            return true;
+        }
+        auto& cur = it->second;
+        int rowCount = static_cast<int>(cur.rows.size());
+        int moved = 0;
+        auto parseCount = [](const string& dir, int defaultValue) {
+            if (dir.find("all") != string::npos) return std::numeric_limits<int>::max();
+            try {
+                size_t p = dir.find_first_of("-0123456789");
+                if (p != string::npos) return std::stoi(dir.substr(p));
+            } catch (...) {}
+            return defaultValue;
+        };
+        if (rowCount == 0) {
+            cout << "MOVE 0" << endl;
+            return false;
+        }
+        if (direction == "next" || direction.substr(0, 7) == "forward") {
+            int n = (direction == "next") ? 1 : parseCount(direction, 1);
+            if (n < 0) n = 0;
+            int available = rowCount - (cur.pos + 1);
+            moved = std::min(n, std::max(0, available));
+            cur.pos += moved;
+        } else if (direction == "prior" || direction.substr(0, 8) == "backward") {
+            int n = (direction == "prior") ? 1 : parseCount(direction, 1);
+            if (n < 0) n = 0;
+            int available = cur.pos + 1;
+            moved = std::min(n, std::max(0, available));
+            cur.pos -= moved;
+        } else if (direction == "first") {
+            cur.pos = 0;
+            moved = 1;
+        } else if (direction == "last") {
+            cur.pos = rowCount - 1;
+            moved = 1;
+        } else if (direction.substr(0, 8) == "absolute") {
+            int n = parseCount(direction, 0);
+            int target = (n > 0) ? n - 1 : (n < 0 ? rowCount + n : -1);
+            if (target >= 0 && target < rowCount) {
+                cur.pos = target;
+                moved = 1;
+            } else {
+                cur.pos = (target < 0) ? -1 : rowCount - 1;
+                moved = 0;
+            }
+        } else if (direction.substr(0, 8) == "relative") {
+            int n = parseCount(direction, 0);
+            int target = cur.pos + n;
+            if (target < -1) target = -1;
+            if (target >= rowCount) target = rowCount - 1;
+            moved = std::abs(target - cur.pos);
+            cur.pos = target;
+        } else if (direction == "all") {
+            moved = std::max(0, rowCount - (cur.pos + 1));
+            cur.pos = rowCount - 1;
+        } else {
+            cout << "SQL syntax error: unsupported MOVE direction" << endl;
+            return true;
+        }
+        cout << "MOVE " << moved << endl;
         return false;
     }
 
@@ -5254,6 +5391,16 @@ bool execute(const string& rawSql, Session& s) {
         cout << "Role reset to " << s.currentRole << endl;
         return false;
     }
+    if (sql == "reset session authorization") {
+        string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
+        int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
+        s.username = authUser;
+        s.permission = authPerm;
+        s.originalRole = authUser;
+        s.currentRole.clear();
+        cout << "RESET SESSION AUTHORIZATION" << endl;
+        return false;
+    }
     // RESET parameter | RESET ALL
     if (sql == "reset all" || sql.substr(0, 6) == "reset ") {
         auto resetIsolation = [&]() {
@@ -5262,9 +5409,16 @@ bool execute(const string& rawSql, Session& s) {
         };
         string rest = (sql == "reset all") ? "all" : trim(sql.substr(6));
         if (rest == "all") {
+            string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
+            int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
+            s.username = authUser;
+            s.permission = authPerm;
             s.currentRole = s.originalRole;
+            s.originalRole = authUser;
+            s.currentRole.clear();
             s.timezoneOffsetMinutes = 0;
             s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+            s.constraintsDeferred = false;
             resetIsolation();
             cout << "RESET ALL" << endl;
             return false;
@@ -5286,6 +5440,34 @@ bool execute(const string& rawSql, Session& s) {
         }
         cout << "RESET currently supports ROLE, ALL, TIME ZONE, statement_timeout, and transaction_isolation" << endl;
         return true;
+    }
+
+    // SET SESSION AUTHORIZATION user_name | DEFAULT
+    if (sql.substr(0, 25) == "set session authorization") {
+        return setSessionAuthorization(s, sql.substr(25));
+    }
+
+    // SET CONSTRAINTS { ALL | constraint_name [, ...] } { DEFERRED | IMMEDIATE }
+    if (sql.substr(0, 15) == "set constraints") {
+        string rest = trim(sql.substr(15));
+        if (rest.empty()) {
+            cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
+            return true;
+        }
+        bool deferred = false;
+        bool immediate = false;
+        if (rest.size() >= 8 && rest.substr(rest.size() - 8) == "deferred") {
+            deferred = true;
+        } else if (rest.size() >= 9 && rest.substr(rest.size() - 9) == "immediate") {
+            immediate = true;
+        }
+        if (!deferred && !immediate) {
+            cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
+            return true;
+        }
+        s.constraintsDeferred = deferred;
+        cout << "SET CONSTRAINTS" << endl;
+        return false;
     }
 
     // SET TRANSACTION ISOLATION LEVEL (must come before generic SET)
@@ -12181,9 +12363,11 @@ int main(int argc, char* argv[]) {
     cin >> username >> password;
     if (login(username, password)) {
         s.username = username;
+        s.authenticatedUser = username;
         s.originalRole = username;
         log(s.username, "login", getTime());
         s.permission = permissionQuery(username);
+        s.authenticatedPermission = s.permission;
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
         // Register interactive session in process list
         uint64_t pid = dbms::registerProcess(s.username, "localhost", s.currentDB);

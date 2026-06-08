@@ -9,6 +9,8 @@
 struct Session {
     std::string username;
     int permission = 0;
+    std::string authenticatedUser; // login identity for RESET SESSION AUTHORIZATION
+    int authenticatedPermission = 0;
     std::string currentDB = "info";
     std::map<std::string, std::string> preparedStmts;
     int isolationLevel = 2; // 0=READ UNCOMMITTED, 1=READ COMMITTED, 2=REPEATABLE READ, 3=SERIALIZABLE
@@ -19,6 +21,7 @@ struct Session {
     std::string currentRole;      // SET ROLE target (empty = use original user)
     std::string originalRole;     // Session user's role (set at login)
     std::map<std::string, std::string> userVariables; // user-defined variables @var
+    bool constraintsDeferred = false; // SET CONSTRAINTS ALL/constraint_list DEFERRED
     std::set<std::string> listenedChannels; // channels this session is LISTENing to
     uint64_t pid = 0; // process id for pg_cancel_backend / pg_terminate_backend
 

@@ -152,6 +152,8 @@ static void handleClient(SecureSocket sock, std::string clientHost) {
 
     s.username = username;
     s.permission = permissionQuery(username);
+    s.authenticatedUser = username;
+    s.authenticatedPermission = s.permission;
     s.currentDB = "info";
     s.originalRole = username;
     sendLine(sock, "successfully login");
