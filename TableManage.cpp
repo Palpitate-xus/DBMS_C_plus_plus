@@ -6275,6 +6275,26 @@ OpResult StorageEngine::createSequence(const std::string& dbname,
     return OpResult::Success;
 }
 
+OpResult StorageEngine::alterSequence(const std::string& dbname,
+                                       const std::string& seqname,
+                                       bool hasRestart, int64_t restart,
+                                       bool hasIncrement, int64_t increment) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = sequencePath(dbname, seqname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    int64_t current = 1;
+    int64_t inc = 1;
+    {
+        std::ifstream ifs(path);
+        if (ifs) ifs >> current >> inc;
+    }
+    if (hasRestart) current = restart;
+    if (hasIncrement) inc = increment;
+    std::ofstream ofs(path);
+    ofs << current << " " << inc << "\n";
+    return OpResult::Success;
+}
+
 OpResult StorageEngine::dropSequence(const std::string& dbname,
                                       const std::string& seqname) {
     auto path = sequencePath(dbname, seqname);

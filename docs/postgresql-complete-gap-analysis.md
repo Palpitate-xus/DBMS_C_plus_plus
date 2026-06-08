@@ -64,7 +64,7 @@ PostgreSQL 18 官方文档覆盖：
 | `ALTER SCHEMA` | 部分实现 | 主要支持 `RENAME TO`；缺少 owner、权限、依赖重写。 |
 | `ALTER SYSTEM` | 部分实现 | 只写项目 `dbms.conf` 中有限参数；不是 PG GUC 体系。 |
 | `ALTER TABLE` | 部分实现 | 支持若干 add/drop/rename/default/not-null/constraint/storage/RLS/partition 操作，并新增 `VALIDATE CONSTRAINT`、`ALTER CONSTRAINT` 及 `DEFERRABLE`/`NOT VALID` 元数据登记；仍缺 PG 全量子命令、`IF EXISTS`、`ONLY`、`INHERIT`、`OWNER`、`TABLESPACE`、`REPLICA IDENTITY`、统计目标、触发器状态全集和真正延迟约束队列。 |
-| `ALTER USER` / `ALTER ROLE` | 部分实现 | 基本是改密码/设置当前角色；缺少登录属性、superuser、createdb、replication、bypassrls、连接限制、valid until、配置参数等。 |
+| `ALTER USER` / `ALTER ROLE` | 部分实现 | `ALTER USER` 可改密码，`ALTER ROLE` 可记录 PostgreSQL 风格角色属性并支持显式 role rename；缺少真实 superuser/createdb/replication/bypassrls 权限位、连接限制、valid until、配置参数执行语义等。 |
 | `ALTER VIEW` | 部分实现 | 支持 rename/set schema；缺少 owner、options、column default、安全屏障、security invoker 等。 |
 | `ANALYZE` | 部分实现 | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、VERBOSE 输出、系统统计视图集成。 |
 | `ABORT` | 部分实现 | 已作为 `ROLLBACK` 别名接入；缺少 `AND [NO] CHAIN` 等 PostgreSQL 完整事务结束选项。 |
@@ -83,9 +83,9 @@ PostgreSQL 18 官方文档覆盖：
 | `CREATE MATERIALIZED VIEW` | 部分实现 | 用 backing table 保存结果；缺少 `WITH [NO] DATA`、唯一索引要求、并发刷新语义、依赖追踪。 |
 | `CREATE POLICY` | 部分实现 | 有 RLS policy 文件；`WITH CHECK` 评估在源码注释中明确为 best-effort/简化。 |
 | `CREATE PROCEDURE` | 部分实现 | 多条 SQL 字符串顺序执行；缺少语言运行时、事务控制规则、异常、变量、权限属性。 |
-| `CREATE ROLE` / `CREATE USER` | 部分实现 | 用户在 `user.dat`，角色在 `role.dat`；缺少 PG 角色属性、成员继承、admin option、系统 catalog。 |
+| `CREATE ROLE` / `CREATE USER` | 部分实现 | 用户在 `user.dat`，角色在 `role.dat`，`CREATE GROUP` 已作为 role 别名支持并可带初始用户；缺少 PG 角色属性执行、成员继承、admin option、系统 catalog。 |
 | `CREATE SCHEMA` | 部分实现 | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义。 |
-| `CREATE SEQUENCE` | 部分实现 | 有 nextval/currval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics/ALTER SEQUENCE。 |
+| `CREATE SEQUENCE` | 部分实现 | 有 nextval 文件、session-local `currval` 状态和顶层 `SELECT nextval/currval('seq')`，`ALTER SEQUENCE` 支持 `RESTART [WITH]`、`INCREMENT BY` 和 rename，并记录其他选项元数据；缺少 cache/cycle/min/max/ownership/transactional semantics。 |
 | `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 部分实现 | 已有扩展统计对象元数据，并联动已有多列统计计算；缺少 PostgreSQL `pg_statistic_ext` catalog、表达式统计、dependencies/ndistinct/mcv 精确算法和 planner 深度使用。 |
 | `CREATE TABLE` | 部分实现 | 可建表、分区、临时/unlogged、继承等部分；缺少大量表选项、LIKE INCLUDING 全集、typed table、OF type、access method、tablespace、identity/生成列完整语义。 |
 | `CREATE TABLE AS` | 部分实现 | 有 CTAS 路径；缺少 PG 选项、WITH [NO] DATA、tablespace/access method、精确类型推断。 |
@@ -96,7 +96,7 @@ PostgreSQL 18 官方文档覆盖：
 | `DEALLOCATE` / `PREPARE` / `EXECUTE` | 部分实现 | 使用字符串 `?` 替换；缺少服务器端类型推断、binary params、plan invalidation、generic/custom plan、portal。 |
 | `DELETE` | 部分实现 | 支持 WHERE/USING/LIMIT/RETURNING 部分；缺少 PG 全语义、CTE/ONLY/inheritance/RETURNING OLD/NEW 复杂表达式。 |
 | `DISCARD` | 部分实现 | 主要 `DISCARD ALL` 清 session 局部状态；不完整。 |
-| `DROP ...` 常见对象 | 部分实现 | table/database/view/mview/index/trigger/user/role/schema/domain/type/sequence/function/procedure 等部分；缺少依赖图、CASCADE/RESTRICT 精确行为、IF EXISTS/多对象列表完整支持。 |
+| `DROP ...` 常见对象 | 部分实现 | table/database/view/mview/index/trigger/user/role/group/schema/domain/type/sequence/function/procedure 等部分；缺少依赖图、CASCADE/RESTRICT 精确行为、IF EXISTS/多对象列表完整支持。 |
 | `END` | 部分实现 | 已作为 `COMMIT` 别名接入；缺少 `AND [NO] CHAIN` 等 PostgreSQL 完整事务结束选项。 |
 | `EXPLAIN` | 部分实现 | 只面向 SELECT 的简化计划；缺少真实 runtime instrumentation、JIT/WAL/BUFFERS/SETTINGS 完整输出和所有语句支持。 |
 | `GRANT` / `REVOKE` | 部分实现 | 支持有限 privilege 和列权限；缺少 PostgreSQL ACL item、PUBLIC、role inheritance/admin option/set option、对象类型全集、默认权限联动。 |
@@ -129,6 +129,7 @@ PostgreSQL 18 官方文档覆盖：
 > 这些入口目前用于对象元数据登记、重命名/owner/定义更新、删除和 `SHOW COMPAT OBJECTS` 审计；由于尚未接入 PostgreSQL 的 catalog/OID/dependency、planner/executor、FDW API、逻辑复制、全文搜索运行时等基础设施，本节仍按“完整 PostgreSQL 语义缺口”保留。
 > 2026-06-08 后续进展：新增 `DO` 简化 SQL block 执行、`LOAD 'library'` 目录登记、PostgreSQL 风格 `SELECT ... INTO [TEMP|UNLOGGED] table FROM ...` 到 CTAS 的转换；这些能力已经过建库、建表、插入、查询和目录展示冒烟，但仍不等同于 PL/pgSQL runtime、动态共享库加载或 PostgreSQL executor 级 SELECT INTO 语义。
 > 2026-06-08 约束兼容进展：新增 `CREATE/DROP ASSERTION` 目录级入口，并为 `ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE USING ...`、`DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE CONSTRAINT` 和 `ALTER CONSTRAINT` 写入 `.pg_compat_objects` 元数据；CHECK/UNIQUE/FK 的实际执行检查仍沿用项目内原有简化实现，EXCLUDE/延迟队列/提交时 recheck 尚未接入 executor。
+> 2026-06-08 角色与序列进展：新增 `CREATE/ALTER/DROP GROUP` 作为 role 别名，`ALTER ROLE` 可记录 PostgreSQL 风格属性并支持显式 role rename，`DROP ROLE` 不再依赖当前数据库；`ALTER SEQUENCE` 支持 `RESTART [WITH]`、`INCREMENT BY`、`RENAME TO` 并记录其他选项元数据。仍缺 PostgreSQL `pg_authid`/`pg_auth_members`、角色属性执行语义、依赖检查、序列 cache/cycle/min/max/owned-by 和事务性。
 
 | 类别 | 缺失命令 |
 |---|---|
@@ -141,8 +142,8 @@ PostgreSQL 18 官方文档覆盖：
 | 语言/大对象 | `CREATE LANGUAGE`, `ALTER LANGUAGE`, `DROP LANGUAGE`, `ALTER LARGE OBJECT`, `DROP LARGE OBJECT` |
 | 统计/表空间/全文配置 | `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
 | 事务/会话别名和状态 | 本轮已将 `SET CONSTRAINTS`、`SET SESSION AUTHORIZATION`、`MOVE` 移至“部分实现”；仍缺 PostgreSQL 完整语义。 |
-| 数据库/对象 ALTER 子集 | `ALTER DATABASE`, `ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER ROLE` 的完整 PG 语义、`ALTER SEQUENCE`, `ALTER TRIGGER`, `ALTER TYPE`, `ALTER GROUP` |
-| 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义、`CREATE/DROP ASSERTION` 目录级登记已进入部分实现；仍缺真实共享库加载、安全限制、完整 CTAS 类型推断、断言执行器和 `DROP GROUP` 等兼容别名完整语义 |
+| 数据库/对象 ALTER 子集 | `ALTER DATABASE`, `ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER TRIGGER`, `ALTER TYPE` 已有目录级兼容登记但缺完整 PG 语义；`ALTER ROLE`、`ALTER GROUP`、`ALTER SEQUENCE` 已进入部分实现，仍缺完整 catalog/依赖/权限/事务语义 |
+| 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义、`CREATE/DROP ASSERTION` 目录级登记、`CREATE/DROP GROUP` 兼容别名已进入部分实现；仍缺真实共享库加载、安全限制、完整 CTAS 类型推断和断言执行器 |
 
 ## 5. 数据类型差距
 
@@ -302,7 +303,7 @@ PostgreSQL 函数与操作符章节非常大，本项目只覆盖了一小部分
 
 | 领域 | 差距 |
 |---|---|
-| 用户/角色 catalog | `user.dat` / `role.dat` 文件，非 `pg_authid`/`pg_auth_members`；缺少 OID、role attrs、password expiration、membership options。 |
+| 用户/角色 catalog | `user.dat` / `role.dat` / `.pg_role_attrs` 文件，非 `pg_authid`/`pg_auth_members`；角色属性目前主要可记录和审计，缺少 OID、属性执行语义、password expiration、membership options。 |
 | 认证 | 支持 sha256/md5 哈希和 TLS 可选；缺少 `pg_hba.conf`、SCRAM-SHA-256、OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident 等。 |
 | 传输协议 | 不是 PostgreSQL wire protocol/libpq；客户端仅文本登录/SQL 行。 |
 | TLS | 有 OpenSSL wrapper 和 stub；缺少 PG SSL negotiation、client cert auth、channel binding。 |

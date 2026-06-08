@@ -4448,6 +4448,235 @@ static bool setSessionAuthorization(Session& s, const string& targetRaw) {
     return false;
 }
 
+static std::filesystem::path roleAttributesPath() {
+    return std::filesystem::path(".pg_role_attrs");
+}
+
+static map<string, string> loadRoleAttributes() {
+    map<string, string> attrs;
+    ifstream in(roleAttributesPath());
+    string line;
+    while (getline(in, line)) {
+        if (trim(line).empty()) continue;
+        auto parts = splitByDelimiter(line, '|');
+        if (parts.size() < 2) continue;
+        attrs[catalogUnescape(parts[0])] = catalogUnescape(parts[1]);
+    }
+    return attrs;
+}
+
+static bool saveRoleAttributes(const map<string, string>& attrs) {
+    ofstream out(roleAttributesPath(), ios::trunc);
+    if (!out) return false;
+    for (const auto& kv : attrs) {
+        out << catalogEscape(kv.first) << "|" << catalogEscape(kv.second) << "\n";
+    }
+    return true;
+}
+
+static bool renameExplicitRole(const string& oldName, const string& newName) {
+    ifstream in("role.dat");
+    if (!in) return false;
+    vector<pair<string, string>> rows;
+    string roleName, member;
+    bool found = false;
+    bool conflict = false;
+    while (in >> roleName >> member) {
+        if (roleName == newName) conflict = true;
+        if (roleName == oldName) {
+            roleName = newName;
+            found = true;
+        }
+        rows.emplace_back(roleName, member);
+    }
+    if (!found || conflict) return false;
+    ofstream out("role.dat", ios::trunc);
+    for (const auto& row : rows) out << row.first << " " << row.second << "\n";
+    auto attrs = loadRoleAttributes();
+    auto it = attrs.find(oldName);
+    if (it != attrs.end()) {
+        attrs[newName] = it->second;
+        attrs.erase(it);
+        saveRoleAttributes(attrs);
+    }
+    return true;
+}
+
+static bool handleCreateGroup(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(12)); // after "create group"
+    if (rest.empty()) {
+        cout << "SQL syntax error: CREATE GROUP group_name [WITH USER user,...]" << endl;
+        return true;
+    }
+    vector<string> tokens = tokenize(rest);
+    if (tokens.empty()) {
+        cout << "SQL syntax error: CREATE GROUP group_name [WITH USER user,...]" << endl;
+        return true;
+    }
+    string groupName = tokens[0];
+    int res = createRole(groupName);
+    if (res == -1) {
+        cout << "error: group already exists" << endl;
+        return true;
+    }
+    size_t userPos = findTopLevelKeyword(rest, "user");
+    if (userPos != string::npos) {
+        string userList = trim(rest.substr(userPos + 4));
+        for (auto userName : splitTopLevelComma(userList)) {
+            userName = stripQuotes(trim(userName));
+            if (!userName.empty()) grantRoleToUser(groupName, userName);
+        }
+    }
+    cout << "CREATE GROUP succeeded" << endl;
+    return false;
+}
+
+static bool handleAlterGroup(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(11)); // after "alter group"
+    vector<string> tokens = tokenize(rest);
+    if (tokens.size() < 3) {
+        cout << "SQL syntax error: ALTER GROUP group_name ADD|DROP USER user [, ...] | RENAME TO newname" << endl;
+        return true;
+    }
+    string groupName = tokens[0];
+    if (!roleExists(groupName)) {
+        cout << "Group " << groupName << " not exist" << endl;
+        return true;
+    }
+    if (tokens[1] == "rename" && tokens.size() >= 4 && tokens[2] == "to") {
+        string newName = tokens[3];
+        if (roleExists(newName) || permissionQuery(newName) != -1) {
+            cout << "Group " << newName << " already exists" << endl;
+            return true;
+        }
+        if (!renameExplicitRole(groupName, newName)) {
+            cout << "Rename group failed" << endl;
+            return true;
+        }
+        cout << "Group " << groupName << " renamed to " << newName << endl;
+        return false;
+    }
+    bool addUser = tokens[1] == "add" && tokens.size() >= 4 && tokens[2] == "user";
+    bool dropUser = tokens[1] == "drop" && tokens.size() >= 4 && tokens[2] == "user";
+    if (!addUser && !dropUser) {
+        cout << "SQL syntax error: ALTER GROUP group_name ADD|DROP USER user [, ...] | RENAME TO newname" << endl;
+        return true;
+    }
+    size_t userPos = findTopLevelKeyword(rest, "user");
+    string userList = userPos == string::npos ? "" : trim(rest.substr(userPos + 4));
+    int changed = 0;
+    for (auto userName : splitTopLevelComma(userList)) {
+        userName = stripQuotes(trim(userName));
+        if (userName.empty()) continue;
+        if (addUser) {
+            int grantRes = grantRoleToUser(groupName, userName);
+            if (grantRes == 0) ++changed;
+        } else {
+            if (revokeRoleFromUser(groupName, userName)) ++changed;
+        }
+    }
+    cout << "Group " << groupName << (addUser ? " users added: " : " users dropped: ") << changed << endl;
+    return false;
+}
+
+static bool handleAlterRole(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(10)); // after "alter role"
+    vector<string> tokens = tokenize(rest);
+    if (tokens.size() < 2) {
+        cout << "SQL syntax error: ALTER ROLE role_name [WITH] option [...] | RENAME TO newname" << endl;
+        return true;
+    }
+    string roleName = tokens[0];
+    if (!roleExists(roleName) && permissionQuery(roleName) == -1) {
+        cout << "Role " << roleName << " not exist" << endl;
+        return true;
+    }
+    if (tokens.size() >= 4 && tokens[1] == "rename" && tokens[2] == "to") {
+        string newName = tokens[3];
+        if (permissionQuery(roleName) != -1) {
+            cout << "ALTER ROLE RENAME for users is not supported" << endl;
+            return true;
+        }
+        if (roleExists(newName) || permissionQuery(newName) != -1) {
+            cout << "Role " << newName << " already exists" << endl;
+            return true;
+        }
+        if (!renameExplicitRole(roleName, newName)) {
+            cout << "Rename role failed" << endl;
+            return true;
+        }
+        cout << "Role " << roleName << " renamed to " << newName << endl;
+        return false;
+    }
+    auto attrs = loadRoleAttributes();
+    attrs[roleName] = trim(rest.substr(roleName.size()));
+    if (!saveRoleAttributes(attrs)) {
+        cout << "Alter role failed" << endl;
+        return true;
+    }
+    cout << "Role " << roleName << " altered" << endl;
+    return false;
+}
+
+static bool handleDropGroup(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(10)); // after "drop group"
+    bool ifExists = false;
+    if (startsWithKeyword(rest, "if exists")) {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    string groupName = firstCompatNameToken(stripTrailingDropBehavior(rest));
+    if (groupName.empty()) {
+        cout << "SQL syntax error: DROP GROUP group_name" << endl;
+        return true;
+    }
+    if (!dropRole(groupName)) {
+        if (ifExists) {
+            cout << "Group " << groupName << " does not exist, skipping" << endl;
+            return false;
+        }
+        cout << "Group " << groupName << " not exist" << endl;
+        return true;
+    }
+    auto attrs = loadRoleAttributes();
+    attrs.erase(groupName);
+    saveRoleAttributes(attrs);
+    cout << "Group dropped" << endl;
+    return false;
+}
+
+static bool handleDropRoleGlobal(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(9)); // after "drop role"
+    bool ifExists = false;
+    if (startsWithKeyword(rest, "if exists")) {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    string roleName = firstCompatNameToken(stripTrailingDropBehavior(rest));
+    if (roleName.empty()) {
+        cout << "SQL syntax error: DROP ROLE role_name" << endl;
+        return true;
+    }
+    if (!dropRole(roleName)) {
+        if (ifExists) {
+            cout << "Role " << roleName << " does not exist, skipping" << endl;
+            return false;
+        }
+        cout << "Role " << roleName << " not exist" << endl;
+        return true;
+    }
+    auto attrs = loadRoleAttributes();
+    attrs.erase(roleName);
+    saveRoleAttributes(attrs);
+    cout << "Role dropped" << endl;
+    return false;
+}
+
 static bool handleCreateTablespace(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     string rest = trim(sql.substr(17));
@@ -5080,6 +5309,121 @@ static bool handleDropConversion(const string& sql, Session& s) {
     return !allOk;
 }
 
+static bool handleAlterSequence(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(14)); // after "alter sequence"
+    bool ifExists = false;
+    if (startsWithKeyword(rest, "if exists")) {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    vector<string> tokens = tokenize(rest);
+    if (tokens.empty()) {
+        cout << "SQL syntax error: ALTER SEQUENCE name [RESTART [WITH] n] [INCREMENT BY n]" << endl;
+        return true;
+    }
+    string seqName = tokens[0];
+    if (!g_engine.sequenceExists(s.currentDB, seqName)) {
+        if (ifExists) {
+            cout << "Sequence " << seqName << " does not exist, skipping" << endl;
+            return false;
+        }
+        cout << "Sequence " << seqName << " not exist" << endl;
+        return true;
+    }
+    if (tokens.size() >= 4 && tokens[1] == "rename" && tokens[2] == "to") {
+        string newName = tokens[3];
+        if (g_engine.sequenceExists(s.currentDB, newName)) {
+            cout << "Sequence " << newName << " already exists" << endl;
+            return true;
+        }
+        auto oldPath = g_engine.dbPath(s.currentDB) / (seqName + ".seq");
+        auto newPath = g_engine.dbPath(s.currentDB) / (newName + ".seq");
+        try {
+            std::filesystem::rename(oldPath, newPath);
+        } catch (...) {
+            cout << "Rename sequence failed" << endl;
+            return true;
+        }
+        auto objects = loadCompatObjects(s.currentDB);
+        auto oldKey = compatObjectKey("sequence_option", seqName);
+        auto it = objects.find(oldKey);
+        if (it != objects.end()) {
+            auto info = it->second;
+            objects.erase(it);
+            info.name = newName;
+            info.definition = sql;
+            objects[compatObjectKey("sequence_option", newName)] = info;
+            saveCompatObjects(s.currentDB, objects);
+        }
+        cout << "Sequence " << seqName << " renamed to " << newName << endl;
+        return false;
+    }
+
+    bool hasRestart = false;
+    bool hasIncrement = false;
+    int64_t restart = 1;
+    int64_t increment = 1;
+    for (size_t i = 1; i < tokens.size(); ++i) {
+        if (tokens[i] == "restart") {
+            size_t j = i + 1;
+            if (j < tokens.size() && tokens[j] == "with") ++j;
+            if (j >= tokens.size()) {
+                cout << "SQL syntax error: ALTER SEQUENCE RESTART requires a value" << endl;
+                return true;
+            }
+            try {
+                restart = stoll(tokens[j]);
+                hasRestart = true;
+            } catch (...) {
+                cout << "Invalid restart value" << endl;
+                return true;
+            }
+            i = j;
+        } else if (tokens[i] == "increment") {
+            size_t j = i + 1;
+            if (j < tokens.size() && tokens[j] == "by") ++j;
+            if (j >= tokens.size()) {
+                cout << "SQL syntax error: ALTER SEQUENCE INCREMENT BY requires a value" << endl;
+                return true;
+            }
+            try {
+                increment = stoll(tokens[j]);
+                hasIncrement = true;
+            } catch (...) {
+                cout << "Invalid increment value" << endl;
+                return true;
+            }
+            i = j;
+        }
+    }
+    auto objects = loadCompatObjects(s.currentDB);
+    string options;
+    if (hasRestart) options += "restart=" + to_string(restart);
+    if (hasIncrement) {
+        if (!options.empty()) options += ";";
+        options += "increment=" + to_string(increment);
+    }
+    objects[compatObjectKey("sequence_option", seqName)] =
+        {"sequence_option", seqName, s.username, sql, options};
+    saveCompatObjects(s.currentDB, objects);
+
+    if (!hasRestart && !hasIncrement) {
+        cout << "Sequence " << seqName << " options recorded" << endl;
+        return false;
+    }
+    auto res = g_engine.alterSequence(s.currentDB, seqName,
+                                      hasRestart, restart,
+                                      hasIncrement, increment);
+    if (res != OpResult::Success) {
+        cout << "Alter sequence failed" << endl;
+        return true;
+    }
+    cout << "Sequence " << seqName << " altered" << endl;
+    return false;
+}
+
 static bool checkTablePermission(Session& s, const string& tname,
                                   dbms::StorageEngine::TablePrivilege priv) {
     if (s.permission == 1) return true; // admin bypass
@@ -5369,6 +5713,29 @@ bool execute(const string& rawSql, Session& s) {
                         cout << "t" << endl;
                     } else {
                         cout << "f" << endl;
+                    }
+                    return false;
+                }
+                if (func == "nextval" || func == "currval") {
+                    if (!checkDB(s)) return true;
+                    string seqName = stripQuotes(arg);
+                    if (!g_engine.sequenceExists(s.currentDB, seqName)) {
+                        cout << "Sequence " << seqName << " not exist" << endl;
+                        return true;
+                    }
+                    if (func == "nextval") {
+                        int64_t value = g_engine.nextval(s.currentDB, seqName);
+                        s.sequenceLastValues[seqName] = value;
+                        cout << func << endl;
+                        cout << value << endl;
+                    } else {
+                        auto it = s.sequenceLastValues.find(seqName);
+                        if (it == s.sequenceLastValues.end()) {
+                            cout << "currval of sequence " << seqName << " is not yet defined in this session" << endl;
+                            return true;
+                        }
+                        cout << func << endl;
+                        cout << it->second << endl;
                     }
                     return false;
                 }
@@ -5780,6 +6147,9 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (isCompatObjectCreate(sql)) {
             return handleCreateCompatObject(sql, s);
+        }
+        if (sql.substr(7, 5) == "group") {
+            return handleCreateGroup(sql, s);
         }
         if (sql.substr(7, 4) == "user") {
             if (!checkAdmin(s)) return true;
@@ -7584,6 +7954,15 @@ bool execute(const string& rawSql, Session& s) {
         if (tokens[0] == "statistics") {
             return handleAlterStatistics(sql, s);
         }
+        if (tokens[0] == "sequence") {
+            return handleAlterSequence(sql, s);
+        }
+        if (tokens[0] == "role") {
+            return handleAlterRole(sql, s);
+        }
+        if (tokens[0] == "group") {
+            return handleAlterGroup(sql, s);
+        }
         {
             string rest = trim(sql.substr(5));
             string compatKind, compatPhrase;
@@ -8822,14 +9201,21 @@ bool execute(const string& rawSql, Session& s) {
                     size_t rp = val.find(')', lp);
                     if (lp != string::npos && rp != string::npos) {
                         string seqName = stripQuotes(trim(val.substr(lp + 1, rp - lp - 1)));
-                        val = std::to_string(g_engine.nextval(s.currentDB, seqName));
+                        int64_t nextValue = g_engine.nextval(s.currentDB, seqName);
+                        s.sequenceLastValues[seqName] = nextValue;
+                        val = std::to_string(nextValue);
                     }
                 } else if (lval.size() >= 7 && lval.substr(0, 7) == "currval") {
                     size_t lp = val.find('(');
                     size_t rp = val.find(')', lp);
                     if (lp != string::npos && rp != string::npos) {
                         string seqName = stripQuotes(trim(val.substr(lp + 1, rp - lp - 1)));
-                        val = std::to_string(g_engine.currval(s.currentDB, seqName));
+                        auto it = s.sequenceLastValues.find(seqName);
+                        if (it == s.sequenceLastValues.end()) {
+                            cout << "currval of sequence " << seqName << " is not yet defined in this session" << endl;
+                            return true;
+                        }
+                        val = std::to_string(it->second);
                     }
                 }
                 values[cols[i]] = val;
@@ -10463,6 +10849,14 @@ bool execute(const string& rawSql, Session& s) {
         }
         cout << "Dropped " << count << " permissions for " << owner << endl;
         return false;
+    }
+
+    if (startsWithKeyword(sql, "drop role")) {
+        return handleDropRoleGlobal(sql, s);
+    }
+
+    if (startsWithKeyword(sql, "drop group")) {
+        return handleDropGroup(sql, s);
     }
 
     if (sql.substr(0, 15) == "drop tablespace") {
@@ -12544,6 +12938,41 @@ bool execute(const string& rawSql, Session& s) {
         bool handledSelectInto = false;
         bool failedSelectInto = handleSelectIntoTable(sql, s, handledSelectInto);
         if (handledSelectInto) return failedSelectInto;
+        string expr = trim(sql.substr(6));
+        if (findTopLevelKeyword(expr, "from") == string::npos) {
+            string funcName;
+            if (startsWithKeyword(expr, "nextval")) funcName = "nextval";
+            else if (startsWithKeyword(expr, "currval")) funcName = "currval";
+            if (!funcName.empty()) {
+                if (!checkDB(s)) return true;
+                size_t lp = expr.find('(');
+                size_t rp = expr.find(')', lp);
+                if (lp == string::npos || rp == string::npos || rp <= lp + 1) {
+                    cout << "SQL syntax error: SELECT " << funcName << "('sequence')" << endl;
+                    return true;
+                }
+                string seqName = stripQuotes(trim(expr.substr(lp + 1, rp - lp - 1)));
+                if (!g_engine.sequenceExists(s.currentDB, seqName)) {
+                    cout << "Sequence " << seqName << " not exist" << endl;
+                    return true;
+                }
+                if (funcName == "nextval") {
+                    int64_t value = g_engine.nextval(s.currentDB, seqName);
+                    s.sequenceLastValues[seqName] = value;
+                    cout << funcName << endl;
+                    cout << value << endl;
+                } else {
+                    auto it = s.sequenceLastValues.find(seqName);
+                    if (it == s.sequenceLastValues.end()) {
+                        cout << "currval of sequence " << seqName << " is not yet defined in this session" << endl;
+                        return true;
+                    }
+                    cout << funcName << endl;
+                    cout << it->second << endl;
+                }
+                return false;
+            }
+        }
     }
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {

@@ -188,6 +188,9 @@ public:
     // Sequence support
     OpResult createSequence(const std::string& dbname, const std::string& seqname,
                             int64_t start = 1, int64_t increment = 1);
+    OpResult alterSequence(const std::string& dbname, const std::string& seqname,
+                            bool hasRestart, int64_t restart,
+                            bool hasIncrement, int64_t increment);
     OpResult dropSequence(const std::string& dbname, const std::string& seqname);
     int64_t nextval(const std::string& dbname, const std::string& seqname);
     int64_t currval(const std::string& dbname, const std::string& seqname);
