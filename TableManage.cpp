@@ -7448,6 +7448,21 @@ OpResult StorageEngine::insert(const std::string& dbname,
                     }
                 }
             }
+            // Trigger diagnostic variables
+            {
+                auto replaceVar = [&](const std::string& var, const std::string& val) {
+                    size_t pos = 0;
+                    while ((pos = action.find(var, pos)) != std::string::npos) {
+                        action.replace(pos, var.size(), val);
+                        pos += val.size();
+                    }
+                };
+                replaceVar("tg_name", trg.name);
+                replaceVar("tg_when", trg.timing);
+                replaceVar("tg_level", trg.forEachRow ? "ROW" : "STATEMENT");
+                replaceVar("tg_op", "INSERT");
+                replaceVar("tg_relname", trg.tableName);
+            }
             triggerExecutor_(action);
         }
     }
@@ -8181,6 +8196,21 @@ OpResult StorageEngine::remove(const std::string& dbname,
                             pos += val.size();
                         }
                     }
+                    // Trigger diagnostic variables
+                    {
+                        auto replaceVar = [&](const std::string& var, const std::string& val) {
+                            size_t pos = 0;
+                            while ((pos = action.find(var, pos)) != std::string::npos) {
+                                action.replace(pos, var.size(), val);
+                                pos += val.size();
+                            }
+                        };
+                        replaceVar("tg_name", trg.name);
+                        replaceVar("tg_when", trg.timing);
+                        replaceVar("tg_level", trg.forEachRow ? "ROW" : "STATEMENT");
+                        replaceVar("tg_op", "DELETE");
+                        replaceVar("tg_relname", trg.tableName);
+                    }
                     triggerExecutor_(action);
                 }
             } else {
@@ -8188,7 +8218,22 @@ OpResult StorageEngine::remove(const std::string& dbname,
                 if (!trg.whenCondition.empty() && whenEvaluator_) {
                     if (!whenEvaluator_(trg.whenCondition, {}, {})) continue;
                 }
-                triggerExecutor_(trg.action);
+                std::string action = trg.action;
+                {
+                    auto replaceVar = [&](const std::string& var, const std::string& val) {
+                        size_t pos = 0;
+                        while ((pos = action.find(var, pos)) != std::string::npos) {
+                            action.replace(pos, var.size(), val);
+                            pos += val.size();
+                        }
+                    };
+                    replaceVar("tg_name", trg.name);
+                    replaceVar("tg_when", trg.timing);
+                    replaceVar("tg_level", trg.forEachRow ? "ROW" : "STATEMENT");
+                    replaceVar("tg_op", "DELETE");
+                    replaceVar("tg_relname", trg.tableName);
+                }
+                triggerExecutor_(action);
             }
         }
     }
@@ -8652,6 +8697,21 @@ OpResult StorageEngine::update(const std::string& dbname,
                             pos += val.size();
                         }
                     }
+                    // Trigger diagnostic variables
+                    {
+                        auto replaceVar = [&](const std::string& var, const std::string& val) {
+                            size_t pos = 0;
+                            while ((pos = action.find(var, pos)) != std::string::npos) {
+                                action.replace(pos, var.size(), val);
+                                pos += val.size();
+                            }
+                        };
+                        replaceVar("tg_name", trg.name);
+                        replaceVar("tg_when", trg.timing);
+                        replaceVar("tg_level", trg.forEachRow ? "ROW" : "STATEMENT");
+                        replaceVar("tg_op", "UPDATE");
+                        replaceVar("tg_relname", trg.tableName);
+                    }
                     triggerExecutor_(action);
                 }
             } else {
@@ -8659,7 +8719,22 @@ OpResult StorageEngine::update(const std::string& dbname,
                 if (!trg.whenCondition.empty() && whenEvaluator_) {
                     if (!whenEvaluator_(trg.whenCondition, {}, {})) continue;
                 }
-                triggerExecutor_(trg.action);
+                std::string action = trg.action;
+                {
+                    auto replaceVar = [&](const std::string& var, const std::string& val) {
+                        size_t pos = 0;
+                        while ((pos = action.find(var, pos)) != std::string::npos) {
+                            action.replace(pos, var.size(), val);
+                            pos += val.size();
+                        }
+                    };
+                    replaceVar("tg_name", trg.name);
+                    replaceVar("tg_when", trg.timing);
+                    replaceVar("tg_level", trg.forEachRow ? "ROW" : "STATEMENT");
+                    replaceVar("tg_op", "UPDATE");
+                    replaceVar("tg_relname", trg.tableName);
+                }
+                triggerExecutor_(action);
             }
         }
     }
