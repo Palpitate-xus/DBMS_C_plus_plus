@@ -153,6 +153,7 @@ static void handleClient(SecureSocket sock, std::string clientHost) {
     s.username = username;
     s.permission = permissionQuery(username);
     s.currentDB = "info";
+    s.originalRole = username;
     sendLine(sock, "successfully login");
 
     // Register in process list

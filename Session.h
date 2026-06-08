@@ -14,6 +14,7 @@ struct Session {
     int isolationLevel = 2; // 0=READ UNCOMMITTED, 1=READ COMMITTED, 2=REPEATABLE READ, 3=SERIALIZABLE
     std::set<std::string> tempTables; // temporary table names in this session
     int statementTimeoutMs = 0; // 0 = disabled
+    int defaultStatementTimeoutMs = 0; // RESET statement_timeout target
     int timezoneOffsetMinutes = 0; // Session timezone offset from UTC (e.g. +480 for Asia/Shanghai)
     std::string currentRole;      // SET ROLE target (empty = use original user)
     std::string originalRole;     // Session user's role (set at login)

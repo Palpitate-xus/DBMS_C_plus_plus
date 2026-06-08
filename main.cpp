@@ -710,6 +710,123 @@ static vector<string> splitFuncArgs(const string& s) {
     return args;
 }
 
+static vector<string> splitTopLevelComma(const string& s);
+
+static bool parseValuesRows(const string& valuesPart,
+                            vector<vector<string>>& rows,
+                            string& error) {
+    size_t i = 0;
+    size_t expectedCols = 0;
+    while (i < valuesPart.size()) {
+        while (i < valuesPart.size() && isspace(static_cast<unsigned char>(valuesPart[i]))) ++i;
+        if (i >= valuesPart.size()) break;
+        if (valuesPart[i] != '(') {
+            error = "SQL syntax error: VALUES requires parenthesized rows";
+            return false;
+        }
+
+        ++i;
+        string inner;
+        int parenDepth = 0;
+        bool inQuote = false;
+        bool closed = false;
+        for (; i < valuesPart.size(); ++i) {
+            char c = valuesPart[i];
+            if (c == '\'') {
+                inner += c;
+                if (inQuote && i + 1 < valuesPart.size() && valuesPart[i + 1] == '\'') {
+                    inner += valuesPart[++i];
+                    continue;
+                }
+                inQuote = !inQuote;
+                continue;
+            }
+            if (!inQuote) {
+                if (c == '(') {
+                    ++parenDepth;
+                } else if (c == ')') {
+                    if (parenDepth == 0) {
+                        closed = true;
+                        ++i;
+                        break;
+                    }
+                    --parenDepth;
+                }
+            }
+            inner += c;
+        }
+        if (!closed) {
+            error = "SQL syntax error: unterminated VALUES row";
+            return false;
+        }
+
+        vector<string> cells = splitTopLevelComma(inner);
+        if (cells.empty()) {
+            error = "SQL syntax error: VALUES row cannot be empty";
+            return false;
+        }
+        if (rows.empty()) {
+            expectedCols = cells.size();
+        } else if (cells.size() != expectedCols) {
+            error = "VALUES lists must all be the same length";
+            return false;
+        }
+        rows.push_back(std::move(cells));
+
+        while (i < valuesPart.size() && isspace(static_cast<unsigned char>(valuesPart[i]))) ++i;
+        if (i >= valuesPart.size()) break;
+        if (valuesPart[i] != ',') {
+            error = "SQL syntax error: expected comma between VALUES rows";
+            return false;
+        }
+        ++i;
+    }
+    if (rows.empty()) {
+        error = "SQL syntax error: VALUES requires at least one row";
+        return false;
+    }
+    return true;
+}
+
+static string formatValuesCell(string cell) {
+    cell = trim(cell);
+    if (cell == "null") return "NULL";
+    if (cell.size() >= 2 && cell.front() == '\'' && cell.back() == '\'') {
+        string out = cell.substr(1, cell.size() - 2);
+        size_t pos = 0;
+        while ((pos = out.find("''", pos)) != string::npos) {
+            out.replace(pos, 2, "'");
+            ++pos;
+        }
+        return out;
+    }
+    return cell;
+}
+
+static bool executeValuesStatement(const string& sql) {
+    string rest = trim(sql.substr(6));
+    vector<vector<string>> rows;
+    string error;
+    if (!parseValuesRows(rest, rows, error)) {
+        cout << error << endl;
+        return true;
+    }
+
+    for (size_t col = 0; col < rows.front().size(); ++col) {
+        if (col > 0) cout << ' ';
+        cout << "column" << (col + 1);
+    }
+    cout << endl;
+    for (const auto& row : rows) {
+        for (size_t col = 0; col < row.size(); ++col) {
+            if (col > 0) cout << ' ';
+            cout << formatValuesCell(row[col]);
+        }
+        cout << endl;
+    }
+    return false;
+}
+
 // ========================================================================
 // Window function support
 // ========================================================================
@@ -1005,6 +1122,39 @@ static vector<string> splitValues(const string& s) {
             start = i + 1;
         }
     }
+    return parts;
+}
+
+static vector<string> splitTopLevelComma(const string& s) {
+    vector<string> parts;
+    string current;
+    int parenDepth = 0;
+    bool inQuote = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\'') {
+            current += c;
+            if (inQuote && i + 1 < s.size() && s[i + 1] == '\'') {
+                current += s[++i];
+                continue;
+            }
+            inQuote = !inQuote;
+            continue;
+        }
+        if (!inQuote) {
+            if (c == '(') {
+                ++parenDepth;
+            } else if (c == ')') {
+                if (parenDepth > 0) --parenDepth;
+            } else if (c == ',' && parenDepth == 0) {
+                parts.push_back(trim(current));
+                current.clear();
+                continue;
+            }
+        }
+        current += c;
+    }
+    if (!trim(current).empty() || !parts.empty()) parts.push_back(trim(current));
     return parts;
 }
 
@@ -3425,6 +3575,11 @@ bool execute(const string& rawSql, Session& s) {
     // Check pending notifications at the start of each command
     checkNotifications(s);
 
+    // PostgreSQL-compatible top-level VALUES command.
+    if (sql == "values" || sql.substr(0, 7) == "values ") {
+        return executeValuesStatement(sql);
+    }
+
     if (sql.substr(0, 3) == "use") {
         if (sql.substr(4, 8) == "database") {
             string dbname = trim(sql.substr(13));
@@ -5099,6 +5254,39 @@ bool execute(const string& rawSql, Session& s) {
         cout << "Role reset to " << s.currentRole << endl;
         return false;
     }
+    // RESET parameter | RESET ALL
+    if (sql == "reset all" || sql.substr(0, 6) == "reset ") {
+        auto resetIsolation = [&]() {
+            s.isolationLevel = 2;
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+        };
+        string rest = (sql == "reset all") ? "all" : trim(sql.substr(6));
+        if (rest == "all") {
+            s.currentRole = s.originalRole;
+            s.timezoneOffsetMinutes = 0;
+            s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+            resetIsolation();
+            cout << "RESET ALL" << endl;
+            return false;
+        }
+        if (rest == "timezone" || rest == "time zone") {
+            s.timezoneOffsetMinutes = 0;
+            cout << "RESET " << rest << endl;
+            return false;
+        }
+        if (rest == "statement_timeout" || rest == "statement_timeout_ms") {
+            s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+            cout << "RESET " << rest << endl;
+            return false;
+        }
+        if (rest == "transaction_isolation" || rest == "transaction isolation") {
+            resetIsolation();
+            cout << "RESET " << rest << endl;
+            return false;
+        }
+        cout << "RESET currently supports ROLE, ALL, TIME ZONE, statement_timeout, and transaction_isolation" << endl;
+        return true;
+    }
 
     // SET TRANSACTION ISOLATION LEVEL (must come before generic SET)
     if (sql.substr(0, 25) == "set transaction isolation" ||
@@ -5112,20 +5300,40 @@ bool execute(const string& rawSql, Session& s) {
         string rest = trim(rawRest);
         if (rest.find("read uncommitted") != string::npos) {
             g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
+            s.isolationLevel = 0;
             cout << "Isolation level set to READ UNCOMMITTED" << endl;
         } else if (rest.find("read committed") != string::npos) {
             g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
+            s.isolationLevel = 1;
             cout << "Isolation level set to READ COMMITTED" << endl;
         } else if (rest.find("repeatable read") != string::npos) {
             g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+            s.isolationLevel = 2;
             cout << "Isolation level set to REPEATABLE READ" << endl;
         } else if (rest.find("serializable") != string::npos) {
             g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            s.isolationLevel = 3;
             cout << "Isolation level set to SERIALIZABLE" << endl;
         } else {
             cout << "Unknown isolation level" << endl;
             return true;
         }
+        return false;
+    }
+
+    // SET TIMEZONE = '+08:00' | SET TIME ZONE '+08:00' | SET TIME ZONE 'UTC'
+    if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 14) == "set time zone ") {
+        size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 14;
+        string tzVal = trim(sql.substr(off));
+        if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
+        s.timezoneOffsetMinutes = parseTimezoneOffset(tzVal);
+        int absOff = std::abs(s.timezoneOffsetMinutes);
+        int tzh = absOff / 60;
+        int tzm = absOff % 60;
+        std::string sign = (s.timezoneOffsetMinutes >= 0) ? "+" : "-";
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s%02d:%02d", sign.c_str(), tzh, tzm);
+        cout << "Timezone set to UTC" << buf << " (" << tzVal << ")" << endl;
         return false;
     }
 
@@ -7584,6 +7792,10 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (sql.substr(0, 17) == "start transaction") {
+        sql = "begin " + trim(sql.substr(17));
+    }
+
     if (sql.substr(0, 5) == "begin") {
         if (!checkDB(s)) return true;
         // Parse optional isolation level: "begin read committed"
@@ -7591,15 +7803,20 @@ bool execute(const string& rawSql, Session& s) {
         string rest = trim(sql.substr(5));
         bool readOnly = false;
         if (!rest.empty()) {
-            if (rest == "read uncommitted") {
+            if (rest.find("read uncommitted") != string::npos) {
                 g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
-            } else if (rest == "read committed") {
+                s.isolationLevel = 0;
+            } else if (rest.find("read committed") != string::npos) {
                 g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
-            } else if (rest == "repeatable read") {
+                s.isolationLevel = 1;
+            } else if (rest.find("repeatable read") != string::npos) {
                 g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
-            } else if (rest == "serializable") {
+                s.isolationLevel = 2;
+            } else if (rest.find("serializable") != string::npos) {
                 g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
-            } else if (rest == "read only") {
+                s.isolationLevel = 3;
+            }
+            if (rest.find("read only") != string::npos) {
                 readOnly = true;
             }
         }
@@ -7644,22 +7861,10 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // SET TIMEZONE = '+08:00' | 'Asia/Shanghai' | 'UTC'
-    if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 15) == "set time zone ") {
-        size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 15;
-        string tzVal = trim(sql.substr(off));
-        // Remove leading '=' if present
-        if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
-        s.timezoneOffsetMinutes = parseTimezoneOffset(tzVal);
-        // Format offset for display
-        int absOff = std::abs(s.timezoneOffsetMinutes);
-        int tzh = absOff / 60;
-        int tzm = absOff % 60;
-        std::string sign = (s.timezoneOffsetMinutes >= 0) ? "+" : "-";
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%s%02d:%02d", sign.c_str(), tzh, tzm);
-        cout << "Timezone set to UTC" << buf << " (" << tzVal << ")" << endl;
-        return false;
+    if (sql == "end" || sql == "end work" || sql == "end transaction") {
+        sql = "commit";
+    } else if (sql == "abort" || sql == "abort work" || sql == "abort transaction") {
+        sql = "rollback";
     }
 
     // COMMIT PREPARED 'xid'
@@ -11892,6 +12097,7 @@ int main(int argc, char* argv[]) {
 
     Session s;
     s.statementTimeoutMs = g_config.statementTimeoutMs;
+    s.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
     // Register trigger executor callback
     g_engine.setTriggerExecutor([&](const std::string& actionSql) -> bool {
         Session triggerSession = s;

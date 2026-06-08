@@ -67,7 +67,8 @@ PostgreSQL 18 官方文档覆盖：
 | `ALTER USER` / `ALTER ROLE` | 部分实现 | 基本是改密码/设置当前角色；缺少登录属性、superuser、createdb、replication、bypassrls、连接限制、valid until、配置参数等。 |
 | `ALTER VIEW` | 部分实现 | 支持 rename/set schema；缺少 owner、options、column default、安全屏障、security invoker 等。 |
 | `ANALYZE` | 部分实现 | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、VERBOSE 输出、系统统计视图集成。 |
-| `BEGIN` / `START TRANSACTION` | 部分实现 | `BEGIN` 有；`START TRANSACTION` 官方别名未见完整入口；事务特性选项不全。 |
+| `ABORT` | 部分实现 | 已作为 `ROLLBACK` 别名接入；缺少 `AND [NO] CHAIN` 等 PostgreSQL 完整事务结束选项。 |
+| `BEGIN` / `START TRANSACTION` | 部分实现 | 两者均有入口；隔离级别和只读选项为简化解析，事务特性选项不全。 |
 | `CALL` | 部分实现 | 只执行项目内字符串过程，参数替换简化；不是 PL/pgSQL/SQL procedure 运行时。 |
 | `CHECKPOINT` | 部分实现 | 刷页和清 WAL；没有真实 checkpoint LSN、redo pointer、WAL segment 管理。 |
 | `CLOSE` / `DECLARE` / `FETCH` | 部分实现 | 游标把 SELECT 结果捕获到内存；缺少可滚动/二进制/holdable cursor、事务生命周期、portal 语义、`MOVE`。 |
@@ -94,6 +95,7 @@ PostgreSQL 18 官方文档覆盖：
 | `DELETE` | 部分实现 | 支持 WHERE/USING/LIMIT/RETURNING 部分；缺少 PG 全语义、CTE/ONLY/inheritance/RETURNING OLD/NEW 复杂表达式。 |
 | `DISCARD` | 部分实现 | 主要 `DISCARD ALL` 清 session 局部状态；不完整。 |
 | `DROP ...` 常见对象 | 部分实现 | table/database/view/mview/index/trigger/user/role/schema/domain/type/sequence/function/procedure 等部分；缺少依赖图、CASCADE/RESTRICT 精确行为、IF EXISTS/多对象列表完整支持。 |
+| `END` | 部分实现 | 已作为 `COMMIT` 别名接入；缺少 `AND [NO] CHAIN` 等 PostgreSQL 完整事务结束选项。 |
 | `EXPLAIN` | 部分实现 | 只面向 SELECT 的简化计划；缺少真实 runtime instrumentation、JIT/WAL/BUFFERS/SETTINGS 完整输出和所有语句支持。 |
 | `GRANT` / `REVOKE` | 部分实现 | 支持有限 privilege 和列权限；缺少 PostgreSQL ACL item、PUBLIC、role inheritance/admin option/set option、对象类型全集、默认权限联动。 |
 | `INSERT` | 部分实现 | 支持 values、insert-select、on conflict、returning 部分；缺少 DEFAULT VALUES、OVERRIDING、ON CONFLICT constraint/index inference 全集、RETURNING OLD/NEW。 |
@@ -102,6 +104,7 @@ PostgreSQL 18 官方文档覆盖：
 | `MERGE` | 部分实现 | 支持 `MATCHED UPDATE` / `NOT MATCHED INSERT` 的窄路径；缺少 BY SOURCE、DELETE、DO NOTHING、多个 WHEN、RETURNING OLD/NEW、复杂 source query。 |
 | `REFRESH MATERIALIZED VIEW` | 部分实现 | 重跑 SELECT，`CONCURRENTLY` 只是入口标志；缺少 PG 并发刷新条件和锁语义。 |
 | `REINDEX` | 部分实现 | 基本 `REINDEX TABLE`；缺少 index/schema/database/system、CONCURRENTLY、tablespace、verbose。 |
+| `RESET` | 部分实现 | 支持 `RESET ROLE`、`RESET ALL`、`RESET TIME ZONE`、`RESET statement_timeout`、`RESET transaction_isolation`；缺少完整 GUC、`RESET SESSION AUTHORIZATION` 等语义。 |
 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 部分实现 | 基于 txn log index；缺少 PG 子事务资源/锁/错误状态完整语义。 |
 | `SECURITY LABEL` | 部分实现 | 保存 label 文件；缺少 provider、对象类型全集、SELinux/sepgsql 集成。 |
 | `SELECT` | 部分实现 | 支持大量子集；复杂 grammar、类型推断、表达式、函数、子查询、锁、并行、planner/rewrite 差距最大。 |
@@ -111,6 +114,7 @@ PostgreSQL 18 官方文档覆盖：
 | `TRUNCATE` | 部分实现 | 支持 cascade/restart identity 部分；缺少 ONLY/多表/trigger/identity/foreign table/transactional details。 |
 | `UPDATE` | 部分实现 | 支持 FROM/LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、WHERE CURRENT OF、OLD/NEW RETURNING、复杂表达式。 |
 | `VACUUM` | 部分实现 | compact/free page；缺少 freeze、visibility map、autovacuum launcher/workers、parallel vacuum、analyze coupling、wraparound 防护。 |
+| `VALUES` | 部分实现 | 已支持顶层 `VALUES (..), (..)` 输出；缺少完整表达式求值、类型合并、排序/limit 组合和作为通用 query expression 的全部语义。 |
 
 ### 4.2 PostgreSQL 18 命令级缺失清单
 
@@ -126,7 +130,7 @@ PostgreSQL 18 官方文档覆盖：
 | 高可用/逻辑复制 | `CREATE PUBLICATION`, `ALTER PUBLICATION`, `DROP PUBLICATION`, `CREATE SUBSCRIPTION`, `ALTER SUBSCRIPTION`, `DROP SUBSCRIPTION` |
 | 语言/大对象 | `CREATE LANGUAGE`, `ALTER LANGUAGE`, `DROP LANGUAGE`, `ALTER LARGE OBJECT`, `DROP LARGE OBJECT` |
 | 统计/表空间/全文配置 | `CREATE STATISTICS`, `ALTER STATISTICS`, `DROP STATISTICS`, `CREATE TABLESPACE`, `ALTER TABLESPACE`, `DROP TABLESPACE`, `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
-| 事务/会话别名和状态 | `ABORT`, `END`, `RESET`, `SET CONSTRAINTS`, `SET SESSION AUTHORIZATION`, `MOVE`, `VALUES` 作为顶层命令 |
+| 事务/会话别名和状态 | `SET CONSTRAINTS`, `SET SESSION AUTHORIZATION`, `MOVE` |
 | 数据库/对象 ALTER 子集 | `ALTER DATABASE`, `ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER ROLE` 的完整 PG 语义、`ALTER SEQUENCE`, `ALTER TRIGGER`, `ALTER TYPE`, `ALTER GROUP` |
 | 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义（项目有非 PG 的 `SELECT ... INTO OUTFILE`）、`DROP GROUP` 等兼容别名 |
 
