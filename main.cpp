@@ -5090,36 +5090,16 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // SET parameter = value  (session-level, non-persistent)
-    // SET GLOBAL parameter = value (persistent to dbms.conf)
-    if (sql.substr(0, 3) == "set" && sql.size() > 3 && isspace(static_cast<unsigned char>(sql[3]))) {
-        string rest = trim(sql.substr(3));
-        bool isGlobal = false;
-        if (rest.size() > 7 && rest.substr(0, 7) == "global ") {
-            isGlobal = true;
-            rest = trim(rest.substr(7));
-        }
-        size_t eqPos = rest.find('=');
-        if (eqPos == string::npos) {
-            cout << "SQL syntax error: SET [GLOBAL] parameter = value" << endl;
-            return true;
-        }
-        string param = trim(rest.substr(0, eqPos));
-        string val = trim(rest.substr(eqPos + 1));
-        // User-defined variable: SET @var = value
-        if (!param.empty() && param[0] == '@') {
-            s.userVariables[param.substr(1)] = val;
-            cout << "Set variable " << param << " = " << val << endl;
-            return false;
-        }
+    // Helper lambda to apply a config parameter
+    auto applyConfigParam = [&](const string& param, const string& val, bool isGlobal) -> bool {
         bool ok = false;
         if (param == "max_connections") {
             try { g_config.maxConnections = std::stoi(val); ok = true; } catch (...) {}
-        } else if (param == "slow_query_threshold_ms") {
+        } else if (param == "slow_query_threshold_ms" || param == "slow_query_threshold") {
             try { g_config.slowQueryThresholdMs = std::stod(val); ok = true; } catch (...) {}
         } else if (param == "checkpoint_interval") {
             try { g_config.checkpointInterval = std::stoi(val); ok = true; } catch (...) {}
-        } else if (param == "statement_timeout_ms") {
+        } else if (param == "statement_timeout_ms" || param == "statement_timeout") {
             try { g_config.statementTimeoutMs = std::stoi(val); s.statementTimeoutMs = g_config.statementTimeoutMs; ok = true; } catch (...) {}
         } else if (param == "buffer_pool_frames") {
             try { g_config.bufferPoolFrames = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
@@ -5139,6 +5119,27 @@ bool execute(const string& rawSql, Session& s) {
             ok = true;
         } else if (param == "auto_vacuum_threshold") {
             try { g_config.autoVacuumThreshold = std::stoi(val); ok = true; } catch (...) {}
+        } else if (param == "auto_analyze") {
+            g_config.autoAnalyzeEnabled = (val == "1" || val == "true" || val == "on");
+            ok = true;
+        } else if (param == "auto_analyze_threshold") {
+            try { g_config.autoAnalyzeThreshold = std::stoi(val); ok = true; } catch (...) {}
+        } else if (param == "work_mem_kb" || param == "work_mem") {
+            try { g_config.workMemKb = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
+        } else if (param == "enable_seq_scan") {
+            g_config.enableSeqScan = (val == "1" || val == "true" || val == "on");
+            ok = true;
+        } else if (param == "enable_hash_join") {
+            g_config.enableHashJoin = (val == "1" || val == "true" || val == "on");
+            ok = true;
+        } else if (param == "enable_merge_join") {
+            g_config.enableMergeJoin = (val == "1" || val == "true" || val == "on");
+            ok = true;
+        } else if (param == "auto_explain") {
+            g_config.autoExplainEnabled = (val == "1" || val == "true" || val == "on");
+            ok = true;
+        } else if (param == "auto_explain_threshold_ms" || param == "auto_explain_threshold") {
+            try { g_config.autoExplainThresholdMs = std::stod(val); ok = true; } catch (...) {}
         } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
             try { g_config.lockTimeoutMs = std::stoi(val); g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs); ok = true; } catch (...) {}
         } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
@@ -5161,6 +5162,50 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Set " << param << " = " << val << " (session)" << endl;
         }
         return false;
+    };
+
+    // ALTER SYSTEM SET parameter = value (PostgreSQL-compatible syntax for global config)
+    if (sql.size() >= 12 && sql.substr(0, 12) == "alter system") {
+        string rest = trim(sql.substr(12));
+        if (rest.size() >= 3 && rest.substr(0, 3) == "set") {
+            rest = trim(rest.substr(3));
+            size_t eqPos = rest.find('=');
+            if (eqPos == string::npos) {
+                cout << "SQL syntax error: ALTER SYSTEM SET parameter = value" << endl;
+                return true;
+            }
+            string param = trim(rest.substr(0, eqPos));
+            string val = trim(rest.substr(eqPos + 1));
+            if (!checkAdmin(s)) return true;
+            return applyConfigParam(param, val, true);
+        }
+        cout << "SQL syntax error: ALTER SYSTEM SET parameter = value" << endl;
+        return true;
+    }
+
+    // SET parameter = value  (session-level, non-persistent)
+    // SET GLOBAL parameter = value (persistent to dbms.conf)
+    if (sql.substr(0, 3) == "set" && sql.size() > 3 && isspace(static_cast<unsigned char>(sql[3]))) {
+        string rest = trim(sql.substr(3));
+        bool isGlobal = false;
+        if (rest.size() > 7 && rest.substr(0, 7) == "global ") {
+            isGlobal = true;
+            rest = trim(rest.substr(7));
+        }
+        size_t eqPos = rest.find('=');
+        if (eqPos == string::npos) {
+            cout << "SQL syntax error: SET [GLOBAL] parameter = value" << endl;
+            return true;
+        }
+        string param = trim(rest.substr(0, eqPos));
+        string val = trim(rest.substr(eqPos + 1));
+        // User-defined variable: SET @var = value
+        if (!param.empty() && param[0] == '@') {
+            s.userVariables[param.substr(1)] = val;
+            cout << "Set variable " << param << " = " << val << endl;
+            return false;
+        }
+        return applyConfigParam(param, val, isGlobal);
     }
 
     if (sql.substr(0, 7) == "comment") {

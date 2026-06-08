@@ -24,3 +24,4 @@ tmpidx/
 build-*/
 slow_query.log
 dbms.log
+dbms.conf
