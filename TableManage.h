@@ -705,7 +705,8 @@ public:
     void grant(const std::string& dbname, const std::string& tablename,
                const std::string& username, TablePrivilege priv,
                const std::vector<std::string>& columns = {},
-               bool withGrantOption = false);
+               bool withGrantOption = false,
+               const std::string& grantedBy = "");
     void revoke(const std::string& dbname, const std::string& tablename,
                 const std::string& username, TablePrivilege priv,
                 const std::vector<std::string>& columns = {},

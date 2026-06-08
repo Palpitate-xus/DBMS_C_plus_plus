@@ -13281,6 +13281,10 @@ std::filesystem::path StorageEngine::permPath(const std::string& dbname) const {
     return dbPath(dbname) / ".permissions";
 }
 
+static std::filesystem::path grantChainPath(const std::filesystem::path& dbPath) {
+    return dbPath / ".grant_chain";
+}
+
 std::filesystem::path StorageEngine::seqPath(const std::string& dbname, const std::string& tablename) const {
     return dbPath(dbname) / (tablename + ".seq");
 }
@@ -13669,7 +13673,8 @@ static bool colsEmptyIgnoreGrant(const std::string& colsStr) {
 void StorageEngine::grant(const std::string& dbname, const std::string& tablename,
                           const std::string& username, TablePrivilege priv,
                           const std::vector<std::string>& columns,
-                          bool withGrantOption) {
+                          bool withGrantOption,
+                          const std::string& grantedBy) {
     auto ppath = permPath(dbname);
     std::map<std::string, std::set<std::string>> perms;
     if (std::filesystem::exists(ppath)) {
@@ -13716,12 +13721,17 @@ void StorageEngine::grant(const std::string& dbname, const std::string& tablenam
         if (!kv.second.empty()) ofs << " " << joinColumns(std::vector<std::string>(kv.second.begin(), kv.second.end()));
         ofs << "\n";
     }
+    // Record grant chain when withGrantOption is used and granter is known
+    if (withGrantOption && !grantedBy.empty()) {
+        auto gcp = grantChainPath(dbPath(dbname));
+        std::ofstream gcfs(gcp, std::ios::app);
+        gcfs << username << " " << tablename << " " << privToStr(priv) << " " << grantedBy << "\n";
+    }
 }
 
 void StorageEngine::revoke(const std::string& dbname, const std::string& tablename,
                            const std::string& username, TablePrivilege priv,
                            const std::vector<std::string>& columns, bool cascade) {
-    (void)cascade; // CASCADE not yet fully implemented
     auto ppath = permPath(dbname);
     if (!std::filesystem::exists(ppath)) return;
     std::map<std::string, std::set<std::string>> perms;
@@ -13753,16 +13763,59 @@ void StorageEngine::revoke(const std::string& dbname, const std::string& tablena
             if (it->second.empty()) perms.erase(it);
         }
     }
-    std::ofstream ofs(ppath);
-    for (const auto& kv : perms) {
-        size_t p1 = kv.first.find('|');
-        size_t p2 = kv.first.find('|', p1 + 1);
-        std::string u = kv.first.substr(0, p1);
-        std::string t = kv.first.substr(p1 + 1, p2 - p1 - 1);
-        std::string p = kv.first.substr(p2 + 1);
-        ofs << u << " " << t << " " << p;
-        if (!kv.second.empty()) ofs << " " << joinColumns(std::vector<std::string>(kv.second.begin(), kv.second.end()));
-        ofs << "\n";
+    {
+        std::ofstream ofs(ppath);
+        for (const auto& kv : perms) {
+            size_t p1 = kv.first.find('|');
+            size_t p2 = kv.first.find('|', p1 + 1);
+            std::string u = kv.first.substr(0, p1);
+            std::string t = kv.first.substr(p1 + 1, p2 - p1 - 1);
+            std::string p = kv.first.substr(p2 + 1);
+            ofs << u << " " << t << " " << p;
+            if (!kv.second.empty()) ofs << " " << joinColumns(std::vector<std::string>(kv.second.begin(), kv.second.end()));
+            ofs << "\n";
+        }
+    }
+
+    // CASCADE: recursively revoke from users who received this privilege via the revoked user
+    if (cascade) {
+        auto gcp = grantChainPath(dbPath(dbname));
+        if (std::filesystem::exists(gcp)) {
+            std::vector<std::tuple<std::string, std::string, std::string>> chains; // grantee, obj, priv
+            {
+                std::ifstream ifs(gcp);
+                std::string line;
+                while (std::getline(ifs, line)) {
+                    if (line.empty()) continue;
+                    std::stringstream ss(line);
+                    std::string gee, obj, pr, grter;
+                    ss >> gee >> obj >> pr >> grter;
+                    if (grter == username && obj == tablename && pr == privToStr(priv)) {
+                        chains.emplace_back(gee, obj, pr);
+                    }
+                }
+            }
+            // Remove matching grant-chain entries
+            {
+                std::ifstream ifs(gcp);
+                std::vector<std::string> remaining;
+                std::string line;
+                while (std::getline(ifs, line)) {
+                    if (line.empty()) continue;
+                    std::stringstream ss(line);
+                    std::string gee, obj, pr, grter;
+                    ss >> gee >> obj >> pr >> grter;
+                    bool match = (grter == username && obj == tablename && pr == privToStr(priv));
+                    if (!match) remaining.push_back(line);
+                }
+                std::ofstream ofs(gcp);
+                for (const auto& r : remaining) ofs << r << "\n";
+            }
+            // Recursively revoke from downstream grantees
+            for (const auto& ch : chains) {
+                revoke(dbname, std::get<1>(ch), std::get<0>(ch), priv, {}, true);
+            }
+        }
     }
 }
 

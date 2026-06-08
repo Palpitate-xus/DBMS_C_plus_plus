@@ -8947,7 +8947,7 @@ bool execute(const string& rawSql, Session& s) {
             cout << "permission denied: you do not have GRANT OPTION for " << privStr << " on " << tname << endl;
             return true;
         }
-        g_engine.grant(s.currentDB, tname, uname, priv, colList, withGrantOpt);
+        g_engine.grant(s.currentDB, tname, uname, priv, colList, withGrantOpt, s.username);
         string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
         string goStr = withGrantOpt ? " WITH GRANT OPTION" : "";
         if (!colList.empty()) {
@@ -8987,7 +8987,16 @@ bool execute(const string& rawSql, Session& s) {
         }
         string privPart = trim(rest.substr(0, onPos));
         string tname = trim(rest.substr(onPos + 4, fromPos - onPos - 4));
-        string uname = trim(rest.substr(fromPos + 6));
+        string afterFrom = trim(rest.substr(fromPos + 6));
+        bool cascade = false;
+        string uname;
+        size_t cascadePos = afterFrom.find("cascade");
+        if (cascadePos != string::npos) {
+            cascade = true;
+            uname = trim(afterFrom.substr(0, cascadePos));
+        } else {
+            uname = afterFrom;
+        }
         string privStr;
         vector<string> colList;
         size_t lp = privPart.find('(');
@@ -9019,17 +9028,18 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Table " << tname << " not exist" << endl;
             return true;
         }
-        g_engine.revoke(s.currentDB, tname, uname, priv, colList, false);
+        g_engine.revoke(s.currentDB, tname, uname, priv, colList, cascade);
         string scope = (tname == "*") ? "database " + s.currentDB : "table " + tname;
+        string casStr = cascade ? " CASCADE" : "";
         if (!colList.empty()) {
             string cols;
             for (size_t i = 0; i < colList.size(); ++i) {
                 if (i > 0) cols += ",";
                 cols += colList[i];
             }
-            cout << "Revoked " << privStr << "(" << cols << ") on " << scope << " from " << uname << endl;
+            cout << "Revoked " << privStr << "(" << cols << ") on " << scope << " from " << uname << casStr << endl;
         } else {
-            cout << "Revoked " << privStr << " on " << scope << " from " << uname << endl;
+            cout << "Revoked " << privStr << " on " << scope << " from " << uname << casStr << endl;
         }
         return false;
     }
