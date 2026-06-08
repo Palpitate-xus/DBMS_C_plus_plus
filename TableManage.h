@@ -770,6 +770,7 @@ public:
         std::string event;    // "insert", "update", "delete"
         std::string tableName;
         std::string action;   // SQL action (e.g., "insert into audit_log values (...)")
+        std::string whenCondition; // WHEN (condition) — empty = no condition
         bool forEachRow = true;  // true = FOR EACH ROW, false = FOR EACH STATEMENT
         bool enabled = true;     // true = ENABLED, false = DISABLED
     };
@@ -787,6 +788,18 @@ public:
     bool executeTriggerAction(const std::string& actionSql) const {
         if (triggerExecutor_) return triggerExecutor_(actionSql);
         return false;
+    }
+    // WHEN condition evaluator: condition string + NEW/OLD values -> true/false
+    using WhenConditionEvaluator = std::function<bool(
+        const std::string& condition,
+        const std::map<std::string, std::string>& newValues,
+        const std::map<std::string, std::string>& oldValues)>;
+    void setWhenConditionEvaluator(WhenConditionEvaluator evaluator) { whenEvaluator_ = evaluator; }
+    bool evaluateWhenCondition(const std::string& condition,
+                               const std::map<std::string, std::string>& newValues,
+                               const std::map<std::string, std::string>& oldValues) const {
+        if (whenEvaluator_) return whenEvaluator_(condition, newValues, oldValues);
+        return true; // no evaluator = always true
     }
 
     // Current transaction ID (0 = not in a transaction)
@@ -889,6 +902,7 @@ private:
     void writeTrigger(std::ostream& out, const Trigger& trg) const;
     Trigger readTrigger(std::istream& in) const;
     TriggerExecutor triggerExecutor_;
+    WhenConditionEvaluator whenEvaluator_;
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,

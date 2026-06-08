@@ -3238,6 +3238,9 @@ void StorageEngine::writeTrigger(std::ostream& out, const Trigger& trg) const {
     n = trg.action.size();
     out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
     out.write(trg.action.data(), static_cast<std::streamsize>(n));
+    n = trg.whenCondition.size();
+    out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
+    out.write(trg.whenCondition.data(), static_cast<std::streamsize>(n));
     char forEachRow = trg.forEachRow ? 1 : 0;
     out.write(&forEachRow, sizeof(char));
     char enabled = trg.enabled ? 1 : 0;
@@ -3258,6 +3261,8 @@ StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
     readStr(trg.event);
     readStr(trg.tableName);
     readStr(trg.action);
+    // Backward compatibility: whenCondition may not exist in old files
+    readStr(trg.whenCondition);
     // Backward compatibility: forEachRow flag may not exist in old files
     char forEachRow = 1;
     in.read(&forEachRow, sizeof(char));
@@ -7401,6 +7406,21 @@ OpResult StorageEngine::insert(const std::string& dbname,
     if (triggerExecutor_) {
         auto triggers = getTriggers(dbname, tablename, "after", "insert");
         for (const auto& trg : triggers) {
+            // Evaluate WHEN condition if present
+            if (!trg.whenCondition.empty() && whenEvaluator_) {
+                std::string cond = trg.whenCondition;
+                if (trg.forEachRow) {
+                    for (const auto& [col, val] : actualValues) {
+                        std::string placeholder = "NEW." + col;
+                        size_t pos = 0;
+                        while ((pos = cond.find(placeholder, pos)) != std::string::npos) {
+                            cond.replace(pos, placeholder.size(), val);
+                            pos += val.size();
+                        }
+                    }
+                }
+                if (!whenEvaluator_(cond, actualValues, {})) continue;
+            }
             std::string action = trg.action;
             if (trg.forEachRow) {
                 for (const auto& [col, val] : actualValues) {
@@ -8117,10 +8137,26 @@ OpResult StorageEngine::remove(const std::string& dbname,
             if (trg.forEachRow) {
                 for (const auto& row : rowsToDelete) {
                     if (row.empty()) continue;
-                    std::string action = trg.action;
+                    std::map<std::string, std::string> oldValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
-                        std::string val = extractColumnValue(row, tbl, i);
-                        std::string placeholder = "OLD." + tbl.cols[i].dataName;
+                        oldValues[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+                    }
+                    // Evaluate WHEN condition if present
+                    if (!trg.whenCondition.empty() && whenEvaluator_) {
+                        std::string cond = trg.whenCondition;
+                        for (const auto& [col, val] : oldValues) {
+                            std::string placeholder = "OLD." + col;
+                            size_t pos = 0;
+                            while ((pos = cond.find(placeholder, pos)) != std::string::npos) {
+                                cond.replace(pos, placeholder.size(), val);
+                                pos += val.size();
+                            }
+                        }
+                        if (!whenEvaluator_(cond, {}, oldValues)) continue;
+                    }
+                    std::string action = trg.action;
+                    for (const auto& [col, val] : oldValues) {
+                        std::string placeholder = "OLD." + col;
                         size_t pos = 0;
                         while ((pos = action.find(placeholder, pos)) != std::string::npos) {
                             action.replace(pos, placeholder.size(), val);
@@ -8131,6 +8167,9 @@ OpResult StorageEngine::remove(const std::string& dbname,
                 }
             } else {
                 // Statement-level trigger: execute once
+                if (!trg.whenCondition.empty() && whenEvaluator_) {
+                    if (!whenEvaluator_(trg.whenCondition, {}, {})) continue;
+                }
                 triggerExecutor_(trg.action);
             }
         }
@@ -8567,10 +8606,26 @@ OpResult StorageEngine::update(const std::string& dbname,
                 for (int64_t rid : matchIds) {
                     std::string oldRow, newRow;
                     if (!readRowByRid(pa, rid, newRow, tbl)) continue;
-                    std::string action = trg.action;
+                    std::map<std::string, std::string> newValues;
                     for (size_t i = 0; i < tbl.len; ++i) {
-                        std::string val = extractColumnValue(newRow, tbl, i);
-                        std::string placeholder = "NEW." + tbl.cols[i].dataName;
+                        newValues[tbl.cols[i].dataName] = extractColumnValue(newRow, tbl, i);
+                    }
+                    // Evaluate WHEN condition if present
+                    if (!trg.whenCondition.empty() && whenEvaluator_) {
+                        std::string cond = trg.whenCondition;
+                        for (const auto& [col, val] : newValues) {
+                            std::string placeholder = "NEW." + col;
+                            size_t pos = 0;
+                            while ((pos = cond.find(placeholder, pos)) != std::string::npos) {
+                                cond.replace(pos, placeholder.size(), val);
+                                pos += val.size();
+                            }
+                        }
+                        if (!whenEvaluator_(cond, newValues, {})) continue;
+                    }
+                    std::string action = trg.action;
+                    for (const auto& [col, val] : newValues) {
+                        std::string placeholder = "NEW." + col;
                         size_t pos = 0;
                         while ((pos = action.find(placeholder, pos)) != std::string::npos) {
                             action.replace(pos, placeholder.size(), val);
@@ -8581,6 +8636,9 @@ OpResult StorageEngine::update(const std::string& dbname,
                 }
             } else {
                 // Statement-level trigger: execute once
+                if (!trg.whenCondition.empty() && whenEvaluator_) {
+                    if (!whenEvaluator_(trg.whenCondition, {}, {})) continue;
+                }
                 triggerExecutor_(trg.action);
             }
         }

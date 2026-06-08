@@ -4423,6 +4423,40 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             string tname = resolveTableName(s, tparts[onPos + 1]);
+            // Detect WHEN(condition) clause using raw rest string
+            string whenCondition;
+            string rawRest = rest; // preserve original case for action
+            size_t whenPos = rawRest.find("when(");
+            if (whenPos != string::npos) {
+                size_t condStart = whenPos + 5;
+                size_t condEnd = rawRest.find(")", condStart);
+                if (condEnd != string::npos) {
+                    whenCondition = rawRest.substr(condStart, condEnd - condStart);
+                    // Remove WHEN clause from rawRest for further parsing
+                    rawRest = rawRest.substr(0, whenPos) + rawRest.substr(condEnd + 1);
+                }
+            }
+            // Re-tokenize after removing WHEN clause
+            {
+                vector<string> newParts;
+                string cur;
+                for (char c : rawRest) {
+                    if (isspace(static_cast<unsigned char>(c))) {
+                        if (!cur.empty()) { newParts.push_back(cur); cur.clear(); }
+                    } else { cur += c; }
+                }
+                if (!cur.empty()) newParts.push_back(cur);
+                tparts = std::move(newParts);
+                // Recalculate positions after WHEN removal
+                onPos = 3;
+                if (isInsteadOf) onPos = 4;
+                while (onPos < tparts.size() && tparts[onPos] != "on") ++onPos;
+                if (onPos >= tparts.size() || tparts[onPos] != "on") {
+                    cout << "SQL syntax error: expected ON after removing WHEN clause" << endl;
+                    return true;
+                }
+                tname = resolveTableName(s, tparts[onPos + 1]);
+            }
             // Detect FOR EACH ROW / FOR EACH STATEMENT
             bool forEachRow = true;
             size_t actionStart = onPos + 2;
@@ -4451,6 +4485,7 @@ bool execute(const string& rawSql, Session& s) {
             trg.event = event;
             trg.tableName = tname;
             trg.action = action;
+            trg.whenCondition = whenCondition;
             trg.forEachRow = forEachRow;
             auto res = g_engine.createTrigger(s.currentDB, trg);
             if (res != OpResult::Success) {
@@ -11430,6 +11465,78 @@ int main(int argc, char* argv[]) {
         triggerSession.preparedStmts.clear();
         return execute(actionSql, triggerSession);
     });
+    // Register WHEN condition evaluator for triggers
+    g_engine.setWhenConditionEvaluator(
+        [&](const std::string& condition,
+            const std::map<std::string, std::string>& /*newValues*/,
+            const std::map<std::string, std::string>& /*oldValues*/) -> bool {
+            // Simple expression evaluator for trigger WHEN conditions.
+            // Supports numeric comparisons: val1 op val2 where op is ==, !=, <, >, <=, >=
+            // Supports string comparisons with quotes.
+            std::string cond = condition;
+            // Normalize spaces
+            std::string c;
+            bool lastSpace = false;
+            for (char ch : cond) {
+                if (isspace(static_cast<unsigned char>(ch))) {
+                    if (!lastSpace) c += ' ';
+                    lastSpace = true;
+                } else {
+                    c += ch;
+                    lastSpace = false;
+                }
+            }
+            // Extract operator
+            std::string ops[] = {"==", "!=", "<=", ">=", "<", ">"};
+            std::string foundOp;
+            size_t opPos = std::string::npos;
+            for (const auto& op : ops) {
+                opPos = c.find(op);
+                if (opPos != std::string::npos) {
+                    foundOp = op;
+                    break;
+                }
+            }
+            if (foundOp.empty()) {
+                // No operator found; treat as truthy if non-empty and not "0" or "false"
+                return !c.empty() && c != "0" && c != "false";
+            }
+            std::string left = trim(c.substr(0, opPos));
+            std::string right = trim(c.substr(opPos + foundOp.size()));
+            // Remove surrounding quotes for strings
+            auto unquote = [](const std::string& s) {
+                if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') return s.substr(1, s.size() - 2);
+                return s;
+            };
+            std::string l = unquote(left);
+            std::string r = unquote(right);
+            // Try numeric comparison
+            bool isNum = true;
+            double lv = 0, rv = 0;
+            try {
+                lv = std::stod(l);
+                rv = std::stod(r);
+            } catch (...) {
+                isNum = false;
+            }
+            if (isNum) {
+                if (foundOp == "==") return lv == rv;
+                if (foundOp == "!=") return lv != rv;
+                if (foundOp == "<") return lv < rv;
+                if (foundOp == ">") return lv > rv;
+                if (foundOp == "<=") return lv <= rv;
+                if (foundOp == ">=") return lv >= rv;
+            } else {
+                // String comparison
+                if (foundOp == "==") return l == r;
+                if (foundOp == "!=") return l != r;
+                if (foundOp == "<") return l < r;
+                if (foundOp == ">") return l > r;
+                if (foundOp == "<=") return l <= r;
+                if (foundOp == ">=") return l >= r;
+            }
+            return false;
+        });
     string username, password;
     cout << "login" << endl;
     cin >> username >> password;
