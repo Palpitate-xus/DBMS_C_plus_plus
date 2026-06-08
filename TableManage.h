@@ -100,6 +100,7 @@ struct TableSchema {
     bool isUnlogged = false;    // UNLOGGED table: no WAL, truncated on crash
     bool rowLevelSecurity = false; // ENABLE ROW LEVEL SECURITY
     bool forceRowLevelSecurity = false; // FORCE ROW LEVEL SECURITY (applies to table owner too)
+    std::map<std::string, std::string> storageParams; // WITH (fillfactor=70, autovacuum_enabled=off)
 
     void append(const Column& ncol);
     void appendFK(const ForeignKey& fk);
@@ -195,6 +196,13 @@ public:
     bool tableExists(const std::string& dbname, const std::string& tablename) const;
     std::vector<std::string> getTableNames(const std::string& dbname) const;
     TableSchema getTableSchema(const std::string& dbname, const std::string& tablename) const;
+
+    // Storage parameters (WITH clause)
+    std::map<std::string, std::string> getStorageParams(const std::string& dbname,
+                                                        const std::string& tablename) const;
+    OpResult setStorageParams(const std::string& dbname,
+                              const std::string& tablename,
+                              const std::map<std::string, std::string>& params);
 
     // View support
     OpResult createView(const std::string& dbname, const std::string& viewname, const std::string& sql);
@@ -835,6 +843,7 @@ public:
 
 private:
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path paramsPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path partitionDataPath(const std::string& dbname, const std::string& tablename,
                                             const std::string& partitionName) const;

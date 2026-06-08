@@ -4265,6 +4265,38 @@ bool execute(const string& rawSql, Session& s) {
                 }
             }
 
+            // Parse WITH (fillfactor=70, autovacuum_enabled=off) clause
+            size_t withPos = sql.find("with ");
+            if (withPos != string::npos) {
+                size_t lp = sql.find('(', withPos);
+                size_t rp = sql.find(')', lp);
+                if (lp != string::npos && rp != string::npos && rp > lp) {
+                    string inside = sql.substr(lp + 1, rp - lp - 1);
+                    std::map<std::string, std::string> params;
+                    size_t cp = 0;
+                    while (cp < inside.size()) {
+                        size_t c = inside.find(',', cp);
+                        string kv = trim(inside.substr(cp, c - cp));
+                        size_t eq = kv.find('=');
+                        if (eq != string::npos) {
+                            string k = trim(kv.substr(0, eq));
+                            string v = trim(kv.substr(eq + 1));
+                            // Strip quotes
+                            if (v.size() >= 2 && ((v.front() == '\'' && v.back() == '\'') ||
+                                (v.front() == '"' && v.back() == '"'))) {
+                                v = v.substr(1, v.size() - 2);
+                            }
+                            params[k] = v;
+                        }
+                        if (c == string::npos) break;
+                        cp = c + 1;
+                    }
+                    if (!params.empty()) {
+                        g_engine.setStorageParams(s.currentDB, tname, params);
+                    }
+                }
+            }
+
             auto res = g_engine.createTable(s.currentDB, tbl);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "Table " << tname << " already exists" << endl;

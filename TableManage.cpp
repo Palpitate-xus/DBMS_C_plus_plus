@@ -679,6 +679,11 @@ std::filesystem::path StorageEngine::schemaPath(const std::string& dbname,
     return dbPath(dbname) / (tablename + ".stc");
 }
 
+std::filesystem::path StorageEngine::paramsPath(const std::string& dbname,
+                                                 const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".params");
+}
+
 std::filesystem::path StorageEngine::dataPath(const std::string& dbname,
                                                const std::string& tablename) const {
     return dbPath(dbname) / (tablename + ".dt");
@@ -4998,6 +5003,37 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (in) tbl.defaultPartitionName = dpName;
 
     return tbl;
+}
+
+// ========================================================================
+// Storage parameters (WITH clause)
+// ========================================================================
+std::map<std::string, std::string> StorageEngine::getStorageParams(
+    const std::string& dbname, const std::string& tablename) const {
+    std::map<std::string, std::string> params;
+    auto pp = paramsPath(dbname, tablename);
+    std::ifstream ifs(pp);
+    if (!ifs) return params;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        size_t eq = line.find('=');
+        if (eq != std::string::npos) {
+            params[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
+        }
+    }
+    return params;
+}
+
+OpResult StorageEngine::setStorageParams(
+    const std::string& dbname, const std::string& tablename,
+    const std::map<std::string, std::string>& params) {
+    auto pp = paramsPath(dbname, tablename);
+    std::ofstream ofs(pp);
+    if (!ofs) return OpResult::InvalidValue;
+    for (const auto& kv : params) {
+        ofs << kv.first << "=" << kv.second << "\n";
+    }
+    return OpResult::Success;
 }
 
 // ========================================================================
