@@ -48,6 +48,8 @@ struct Column {
     std::string defaultValue;       // DEFAULT value
     std::string checkExpr;          // CHECK constraint expression
     std::string checkConstraintName; // Name of the CHECK constraint
+    bool deferrable = false;        // CHECK constraint is deferrable
+    bool initiallyDeferred = false; // Deferrable constraint initially deferred
     std::string generatedExpr;      // GENERATED ALWAYS AS (expr)
     std::vector<std::string> enumValues;  // ENUM('a','b','c') values
 

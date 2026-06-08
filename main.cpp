@@ -7953,6 +7953,42 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    // DROP OWNED BY owner
+    if (sql.substr(0, 11) == "drop owned ") {
+        if (!checkAdmin(s)) return true;
+        string rest = trim(sql.substr(11));
+        if (rest.substr(0, 3) != "by ") {
+            cout << "SQL syntax error: DROP OWNED BY owner" << endl;
+            return true;
+        }
+        string owner = trim(rest.substr(3));
+        int count = 0;
+        for (const auto& dbname : g_engine.getDatabaseNames()) {
+            auto ppath = g_engine.permPath(dbname);
+            if (!std::filesystem::exists(ppath)) continue;
+            std::vector<std::string> lines;
+            {
+                std::ifstream ifs(ppath);
+                std::string line;
+                while (std::getline(ifs, line)) {
+                    if (line.empty()) continue;
+                    std::stringstream ss(line);
+                    std::string u, t, p;
+                    ss >> u >> t >> p;
+                    if (u == owner) {
+                        count++;
+                        continue;
+                    }
+                    lines.push_back(line);
+                }
+            }
+            std::ofstream ofs(ppath);
+            for (const auto& l : lines) ofs << l << "\n";
+        }
+        cout << "Dropped " << count << " permissions for " << owner << endl;
+        return false;
+    }
+
     if (sql.substr(0, 4) == "drop") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
@@ -9250,6 +9286,51 @@ bool execute(const string& rawSql, Session& s) {
         } else {
             cout << "Revoked " << privStr << " on " << scope << " from " << uname << casStr << endl;
         }
+        return false;
+    }
+
+    // REASSIGN OWNED BY old_owner TO new_owner
+    if (sql.substr(0, 15) == "reassign owned ") {
+        if (!checkAdmin(s)) return true;
+        string rest = trim(sql.substr(15));
+        if (rest.substr(0, 3) != "by ") {
+            cout << "SQL syntax error: REASSIGN OWNED BY old_owner TO new_owner" << endl;
+            return true;
+        }
+        rest = trim(rest.substr(3));
+        size_t toPos = rest.find(" to ");
+        if (toPos == string::npos) {
+            cout << "SQL syntax error: REASSIGN OWNED BY old_owner TO new_owner" << endl;
+            return true;
+        }
+        string oldOwner = trim(rest.substr(0, toPos));
+        string newOwner = trim(rest.substr(toPos + 4));
+        int count = 0;
+        for (const auto& dbname : g_engine.getDatabaseNames()) {
+            auto ppath = g_engine.permPath(dbname);
+            if (!std::filesystem::exists(ppath)) continue;
+            std::vector<std::string> lines;
+            {
+                std::ifstream ifs(ppath);
+                std::string line;
+                while (std::getline(ifs, line)) {
+                    if (line.empty()) continue;
+                    std::stringstream ss(line);
+                    std::string u, t, p, cols;
+                    ss >> u >> t >> p;
+                    std::getline(ss, cols);
+                    if (u == oldOwner) {
+                        u = newOwner;
+                        count++;
+                    }
+                    std::string newline = u + " " + t + " " + p + cols;
+                    lines.push_back(newline);
+                }
+            }
+            std::ofstream ofs(ppath);
+            for (const auto& l : lines) ofs << l << "\n";
+        }
+        cout << "Reassigned " << count << " permissions from " << oldOwner << " to " << newOwner << endl;
         return false;
     }
 
