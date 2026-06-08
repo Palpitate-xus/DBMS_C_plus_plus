@@ -36,6 +36,7 @@ using dbms::makeVarBinaryColumn;
 using dbms::makeJsonColumn;
 using dbms::makeJsonbColumn;
 using dbms::makeXmlColumn;
+using dbms::makePgLsnColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makePointColumn;
@@ -2023,6 +2024,12 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                 colCreated = true;
             } else if (ctype.substr(0, 4) == "json") {
                 col = makeJsonColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 6) == "pg_lsn") {
+                col = makePgLsnColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 3) == "xml") {
+                col = makeXmlColumn(cname, isNull, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 5) == "float") {
                 col = makeFloatColumn(cname, isNull, isPK);
@@ -5589,6 +5596,8 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeJsonColumn(cname, isNull);
             } else if (typeName.substr(0, 3) == "xml") {
                 col = makeXmlColumn(cname, isNull);
+            } else if (typeName.substr(0, 6) == "pg_lsn") {
+                col = makePgLsnColumn(cname, isNull);
             } else if (typeName.substr(0, 5) == "float") {
                 col = makeFloatColumn(cname, isNull);
             } else if (typeName.substr(0, 6) == "double" || typeName.substr(0, 5) == "money") {

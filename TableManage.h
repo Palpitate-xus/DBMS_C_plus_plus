@@ -1022,6 +1022,7 @@ Column makePointColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeINetColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeCidrColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeDecimalColumn(const std::string& name, bool isNull, int precision, int scale, bool isPK = false);
+Column makePgLsnColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeBooleanColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeUuidColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTimeColumn(const std::string& name, bool isNull, bool isPK = false);

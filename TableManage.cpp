@@ -537,6 +537,17 @@ Column makeXmlColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makePgLsnColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "pg_lsn";
+    c.dsize = 32; // e.g. "FFFFFFFF/FFFFFFFF" plus margin
+    return c;
+}
+
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;
