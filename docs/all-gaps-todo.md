@@ -187,7 +187,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 
 ### 存储引擎
 - [ ] TABLESPACE 支持
-- [ ] 存储参数 (fillfactor, toast.* 等)
+- [x] 存储参数 (fillfactor, autovacuum_enabled 等，WITH 子句解析 + .params 文件持久化)
 - [ ] 压缩 (页级/行级)
 - [ ] 透明数据加密 (TDE)
 
