@@ -10560,7 +10560,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -10601,12 +10601,22 @@ bool execute(const string& rawSql, Session& s) {
                 for (const auto& [ot, on, lab] : labels) {
                     cout << ot << " " << on << " " << lab << endl;
                 }
-            } else {
+            } else if (tname == "pg_buffercache") {
                 cout << "relname pageid dirty pincount " << endl;
                 auto entries = g_engine.getBufferCacheEntries();
                 for (const auto& e : entries) {
                     cout << e.relname << " " << e.pageId << " "
                          << (e.dirty ? "t" : "f") << " " << e.pinCount << endl;
+                }
+            } else if (tname == "pg_locks") {
+                cout << "locktype database relation mode granted " << endl;
+                auto holds = g_engine.getLockManager().getLockHolds();
+                for (const auto& h : holds) {
+                    cout << "relation " << s.currentDB << " " << h.resource << " " << h.mode << " t" << endl;
+                }
+                auto waits = g_engine.getLockManager().getLockWaits();
+                for (const auto& w : waits) {
+                    cout << "relation " << s.currentDB << " " << w.resource << " " << "wait" << " f" << endl;
                 }
             }
             return false;
