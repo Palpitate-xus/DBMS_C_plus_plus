@@ -3266,9 +3266,50 @@ static int sqlAuditCategory(const string& sql) {
 }
 
 bool execute(const string& rawSql, Session& s) {
+    // Check for pg_terminate_backend / pg_cancel_backend flags
+    if (s.terminateRequested) {
+        cout << "ERROR: session terminated" << endl;
+        return true;
+    }
+    if (s.cancelRequested) {
+        s.cancelRequested = false;
+        cout << "ERROR: query cancelled" << endl;
+        return true;
+    }
     g_engine.setRLSUser(s.username);
     auto start = std::chrono::steady_clock::now();
     string sql = sqlProcessor(rawSql);
+    // Handle pg_cancel_backend / pg_terminate_backend
+    {
+        string lsql = sql;
+        while (!lsql.empty() && lsql.front() == ' ') lsql = lsql.substr(1);
+        if (lsql.substr(0, 7) == "select ") {
+            string rest = trim(lsql.substr(7));
+            size_t lp = rest.find('(');
+            size_t rp = rest.find(')');
+            if (lp != string::npos && rp != string::npos && rp > lp + 1) {
+                string func = trim(rest.substr(0, lp));
+                string arg = trim(rest.substr(lp + 1, rp - lp - 1));
+                if (func == "pg_cancel_backend" || func == "pg_terminate_backend") {
+                    if (!checkAdmin(s)) return true;
+                    uint64_t targetPid = 0;
+                    try { targetPid = static_cast<uint64_t>(std::stoull(arg)); } catch (...) {}
+                    if (targetPid == 0) {
+                        cout << "Invalid pid" << endl;
+                        return true;
+                    }
+                    bool ok;
+                    if (func == "pg_cancel_backend") {
+                        ok = dbms::cancelBackend(targetPid);
+                    } else {
+                        ok = dbms::terminateBackend(targetPid);
+                    }
+                    cout << (ok ? "t" : "f") << endl;
+                    return false;
+                }
+            }
+        }
+    }
     // Replace user variables @varname with their values
     // Skip CALL statements so OUT/INOUT parameter references remain intact
     if (sql.substr(0, 4) != "call") {
@@ -11588,6 +11629,7 @@ int main(int argc, char* argv[]) {
         cin.ignore(numeric_limits<streamsize>::max(), '\n');
         // Register interactive session in process list
         uint64_t pid = dbms::registerProcess(s.username, "localhost", s.currentDB);
+        s.pid = pid;
         int sqlCount = 0;
         while (true) {
             string sql;
@@ -11611,6 +11653,11 @@ int main(int argc, char* argv[]) {
             }
             dbms::updateProcessDb(pid, s.currentDB);
             dbms::updateProcessInfo(pid, "Sleep", "", "");
+            // Check if session was terminated
+            if (s.terminateRequested) {
+                cout << "Session terminated" << endl;
+                break;
+            }
             auto end = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
             if (timedOut) {

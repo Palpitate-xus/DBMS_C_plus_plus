@@ -79,6 +79,22 @@ void unregisterProcess(uint64_t pid) {
     g_processList.erase(pid);
 }
 
+bool cancelBackend(uint64_t pid) {
+    std::lock_guard<std::mutex> lock(g_processMutex);
+    auto it = g_processList.find(pid);
+    if (it == g_processList.end()) return false;
+    it->second.cancelRequested = true;
+    return true;
+}
+
+bool terminateBackend(uint64_t pid) {
+    std::lock_guard<std::mutex> lock(g_processMutex);
+    auto it = g_processList.find(pid);
+    if (it == g_processList.end()) return false;
+    it->second.terminateRequested = true;
+    return true;
+}
+
 std::vector<ProcessInfo> getProcessList() {
     std::lock_guard<std::mutex> lock(g_processMutex);
     std::vector<ProcessInfo> result;

@@ -19,6 +19,7 @@ struct Session {
     std::string originalRole;     // Session user's role (set at login)
     std::map<std::string, std::string> userVariables; // user-defined variables @var
     std::set<std::string> listenedChannels; // channels this session is LISTENing to
+    uint64_t pid = 0; // process id for pg_cancel_backend / pg_terminate_backend
 
     // Cursors: named result sets for DECLARE CURSOR / FETCH / CLOSE
     struct Cursor {
@@ -27,4 +28,8 @@ struct Session {
         int pos = -1;                     // -1 = before first row (FETCH NEXT gives row 0)
     };
     std::map<std::string, Cursor> cursors;
+
+    // Cancellation flags for pg_cancel_backend / pg_terminate_backend
+    bool cancelRequested = false;   // set true to cancel current query
+    bool terminateRequested = false; // set true to terminate session
 };

@@ -27,6 +27,8 @@ struct ProcessInfo {
     std::string state;
     std::string info;
     std::chrono::steady_clock::time_point connectTime;
+    bool cancelRequested = false;    // set by pg_cancel_backend
+    bool terminateRequested = false; // set by pg_terminate_backend
 };
 
 // Start a TCP server on the given port.
@@ -48,5 +50,9 @@ void updateProcessInfo(uint64_t pid, const std::string& command,
 void updateProcessDb(uint64_t pid, const std::string& db);
 void unregisterProcess(uint64_t pid);
 std::vector<ProcessInfo> getProcessList();
+
+// Cancel / terminate a backend by pid (for pg_cancel_backend / pg_terminate_backend)
+bool cancelBackend(uint64_t pid);
+bool terminateBackend(uint64_t pid);
 
 } // namespace dbms
