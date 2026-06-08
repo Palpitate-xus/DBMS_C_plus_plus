@@ -243,12 +243,12 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [ ] 表级/数据库级备份（DUMP/RESTORE 已支持）
 
 ### 监控与诊断
-- [ ] pg_stat_statements 等价
+- [x] pg_stat_statements 等价
 - [ ] Wait Events
 - [x] pg_buffercache 等价
 - [ ] 锁等待拓扑统计
-- [ ] 慢查询日志 CSV 格式
-- [ ] auto_explain
+- [x] 慢查询日志（文件 + 内存缓冲区 SHOW SLOW LOG）
+- [x] auto_explain
 
 ### 扩展性
 - [ ] CREATE EXTENSION
@@ -274,8 +274,8 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [ ] 规则系统 (RULE)
 
 ### 系统管理
-- [ ] ALTER SYSTEM（postgresql.conf 动态修改）
-- [ ] pg_reload_conf()
+- [x] ALTER SYSTEM（postgresql.conf 动态修改）
+- [x] pg_reload_conf()
 - [x] pg_cancel_backend / pg_terminate_backend
 - [ ] 连接池管理
 - [x] VACUUM CONCURRENTLY
