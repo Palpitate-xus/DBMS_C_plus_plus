@@ -760,6 +760,8 @@ public:
     };
     OpResult createPolicy(const std::string& dbname, const std::string& tablename,
                           const RowPolicy& policy);
+    OpResult alterPolicy(const std::string& dbname, const std::string& tablename,
+                         const std::string& policyName, const RowPolicy& policy);
     OpResult dropPolicy(const std::string& dbname, const std::string& tablename,
                         const std::string& policyName);
     std::vector<RowPolicy> getPolicies(const std::string& dbname, const std::string& tablename) const;

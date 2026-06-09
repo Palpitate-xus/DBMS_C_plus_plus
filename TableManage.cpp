@@ -13475,6 +13475,39 @@ OpResult StorageEngine::createPolicy(const std::string& dbname, const std::strin
     return OpResult::Success;
 }
 
+OpResult StorageEngine::alterPolicy(const std::string& dbname, const std::string& tablename,
+                                     const std::string& policyName, const RowPolicy& policy) {
+    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    auto rpath = rlsPath(dbname, tablename);
+    auto policies = getPolicies(dbname, tablename);
+    bool found = false;
+    for (const auto& p : policies) {
+        if (p.name == policy.name && policy.name != policyName) return OpResult::TableAlreadyExist;
+    }
+    for (auto& p : policies) {
+        if (p.name == policyName) {
+            p = policy;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return OpResult::TableNotExist;
+    std::ofstream ofs(rpath);
+    if (!ofs) return OpResult::InvalidValue;
+    for (const auto& p : policies) {
+        ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
+        ofs << " USING:" << escapeString(p.usingExpr);
+        ofs << " WITHCHECK:" << escapeString(p.withCheckExpr);
+        ofs << " ROLES:";
+        for (size_t i = 0; i < p.roles.size(); ++i) {
+            if (i > 0) ofs << ",";
+            ofs << escapeString(p.roles[i]);
+        }
+        ofs << "\n";
+    }
+    return OpResult::Success;
+}
+
 OpResult StorageEngine::dropPolicy(const std::string& dbname, const std::string& tablename,
                                     const std::string& policyName) {
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;

@@ -4827,6 +4827,120 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
     return true;
 }
 
+static vector<string> parsePolicyRoles(const string& roleStr) {
+    vector<string> roles;
+    for (auto role : splitTopLevelComma(roleStr)) {
+        role = trim(role);
+        if (!role.empty()) roles.push_back(role);
+    }
+    return roles;
+}
+
+static bool handleAlterPolicy(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(12)); // after "alter policy"
+    size_t onPos = findTopLevelKeyword(rest, "on");
+    if (onPos == string::npos) {
+        cout << "SQL syntax error: ALTER POLICY name ON table ..." << endl;
+        return true;
+    }
+    string policyName = trim(rest.substr(0, onPos));
+    string afterOn = trim(rest.substr(onPos + 2));
+    vector<string> afterTokens = tokenize(afterOn);
+    if (policyName.empty() || afterTokens.empty()) {
+        cout << "SQL syntax error: ALTER POLICY name ON table ..." << endl;
+        return true;
+    }
+    size_t renamePos = findTopLevelKeyword(afterOn, "rename to");
+    size_t toPos = findTopLevelKeyword(afterOn, "to");
+    size_t usingPos = findTopLevelKeyword(afterOn, "using");
+    size_t withCheckPos = findTopLevelKeyword(afterOn, "with check");
+    size_t tableEnd = afterOn.size();
+    for (size_t pos : {renamePos, toPos, usingPos, withCheckPos}) {
+        if (pos != string::npos) tableEnd = min(tableEnd, pos);
+    }
+    string tableName = resolveTableName(s, trim(afterOn.substr(0, tableEnd)));
+    string options = trim(afterOn.substr(tableEnd));
+    if (!g_engine.tableExists(s.currentDB, tableName)) {
+        cout << "Table not found" << endl;
+        return true;
+    }
+    auto policies = g_engine.getPolicies(s.currentDB, tableName);
+    auto it = std::find_if(policies.begin(), policies.end(),
+                           [&](const auto& p) { return p.name == policyName; });
+    if (it == policies.end()) {
+        cout << "Policy " << policyName << " not found" << endl;
+        return true;
+    }
+    dbms::StorageEngine::RowPolicy updated = *it;
+    if (startsWithKeyword(options, "rename to")) {
+        string newName = firstCompatNameToken(trim(options.substr(9)));
+        if (newName.empty()) {
+            cout << "SQL syntax error: ALTER POLICY name ON table RENAME TO newname" << endl;
+            return true;
+        }
+        updated.name = newName;
+    } else {
+        toPos = findTopLevelKeyword(options, "to");
+        usingPos = findTopLevelKeyword(options, "using");
+        withCheckPos = findTopLevelKeyword(options, "with check");
+        if (toPos == string::npos && usingPos == string::npos && withCheckPos == string::npos) {
+            cout << "SQL syntax error: ALTER POLICY name ON table [TO roles] [USING (...)] [WITH CHECK (...)]" << endl;
+            return true;
+        }
+        if (toPos != string::npos) {
+            size_t roleEnd = options.size();
+            if (usingPos != string::npos && usingPos > toPos) roleEnd = min(roleEnd, usingPos);
+            if (withCheckPos != string::npos && withCheckPos > toPos) roleEnd = min(roleEnd, withCheckPos);
+            updated.roles = parsePolicyRoles(options.substr(toPos + 2, roleEnd - toPos - 2));
+        }
+        if (usingPos != string::npos) {
+            size_t exprEnd = (withCheckPos != string::npos && withCheckPos > usingPos) ? withCheckPos : options.size();
+            updated.usingExpr = stripQuotes(trim(options.substr(usingPos + 5, exprEnd - usingPos - 5)));
+        }
+        if (withCheckPos != string::npos) {
+            updated.withCheckExpr = stripQuotes(trim(options.substr(withCheckPos + 10)));
+        }
+    }
+    auto res = g_engine.alterPolicy(s.currentDB, tableName, policyName, updated);
+    if (res == OpResult::TableAlreadyExist) {
+        cout << "Policy " << updated.name << " already exists" << endl;
+        return true;
+    }
+    if (res != OpResult::Success) {
+        cout << "Alter policy failed" << endl;
+        return true;
+    }
+    if (updated.name != policyName) {
+        cout << "Policy " << policyName << " renamed to " << updated.name << " on " << tableName << endl;
+    } else {
+        cout << "Policy " << policyName << " altered on " << tableName << endl;
+    }
+    return false;
+}
+
+static bool handleDropPolicy(const string& sql, Session& s) {
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(12));
+    size_t onPos = rest.find(" on ");
+    if (onPos == string::npos) {
+        cout << "SQL syntax error: DROP POLICY name ON table" << endl;
+        return true;
+    }
+    string pname = trim(rest.substr(0, onPos));
+    string tname = resolveTableName(s, trim(rest.substr(onPos + 4)));
+    auto res = g_engine.dropPolicy(s.currentDB, tname, pname);
+    if (res == OpResult::Success) {
+        cout << "Policy " << pname << " dropped from " << tname << endl;
+    } else if (res == OpResult::TableNotExist) {
+        cout << "Table or policy not found" << endl;
+    } else {
+        cout << "Drop policy failed" << endl;
+    }
+    return false;
+}
+
 static bool handleDropDatabaseGlobal(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     string rest = trim(sql.substr(13)); // after "drop database"
@@ -8146,6 +8260,9 @@ bool execute(const string& rawSql, Session& s) {
         if (tokens[0] == "database") {
             return handleAlterDatabase(sql, s);
         }
+        if (tokens[0] == "policy") {
+            return handleAlterPolicy(sql, s);
+        }
         {
             string rest = trim(sql.substr(5));
             string compatKind, compatPhrase;
@@ -11082,6 +11199,10 @@ bool execute(const string& rawSql, Session& s) {
         return handleDropConversion(sql, s);
     }
 
+    if (sql.substr(0, 12) == "drop policy ") {
+        return handleDropPolicy(sql, s);
+    }
+
     {
         string rest = trim(sql.substr(4));
         string compatKind, compatPhrase;
@@ -12524,24 +12645,7 @@ bool execute(const string& rawSql, Session& s) {
 
     // DROP POLICY name ON table
     if (sql.substr(0, 12) == "drop policy ") {
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(12));
-        size_t onPos = rest.find(" on ");
-        if (onPos == string::npos) {
-            cout << "SQL syntax error: DROP POLICY name ON table" << endl;
-            return true;
-        }
-        string pname = trim(rest.substr(0, onPos));
-        string tname = trim(rest.substr(onPos + 4));
-        auto res = g_engine.dropPolicy(s.currentDB, tname, pname);
-        if (res == OpResult::Success) {
-            cout << "Policy " << pname << " dropped from " << tname << endl;
-        } else if (res == OpResult::TableNotExist) {
-            cout << "Table or policy not found" << endl;
-        } else {
-            cout << "Drop policy failed" << endl;
-        }
-        return false;
+        return handleDropPolicy(sql, s);
     }
 
     // SET variable = value
