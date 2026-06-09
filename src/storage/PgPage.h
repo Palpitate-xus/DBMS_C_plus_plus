@@ -84,6 +84,10 @@ public:
 
     void init(PageId pageId);
 
+    // Free-list chaining (stored in special space, 4 bytes at end of page)
+    uint32_t nextPage() const;
+    void setNextPage(uint32_t next);
+
     // ------------------------------------------------------------------------
     // 行操作
     // ------------------------------------------------------------------------
@@ -92,6 +96,9 @@ public:
 
     // 删除一行（标记为 unused，空间不回收，等待 VACUUM）
     bool remove(OffsetNumber linePtr);
+
+    // 恢复一行（将 LP_UNUSED 改回 LP_NORMAL，用于 ROLLBACK）
+    bool restore(OffsetNumber linePtr);
 
     // 读取一行
     bool get(OffsetNumber linePtr, const char*& data, size_t& len) const;

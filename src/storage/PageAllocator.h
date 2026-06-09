@@ -6,6 +6,7 @@
 
 #include "BufferPool.h"
 #include "Page.h"
+#include "PageWrapper.h"
 
 namespace dbms {
 
@@ -15,7 +16,7 @@ namespace dbms {
 class PageAllocator {
 public:
     PageAllocator(const std::string& filename, size_t rowSize,
-                  size_t pageSize = 4096);
+                  size_t pageSize = 4096, uint32_t formatVersion = 0);
     ~PageAllocator();
 
     // Open or create the data file.
@@ -24,6 +25,7 @@ public:
     bool isOpen() const;
 
     size_t pageSize() const { return pageSize_; }
+    uint32_t formatVersion() const { return formatVersion_; }
 
     // Allocate a new data page (pageId >= 1).
     // Reuses a page from the free list if available.
@@ -52,6 +54,7 @@ private:
     std::string filename_;
     size_t rowSize_;
     size_t pageSize_;
+    uint32_t formatVersion_;
     std::unique_ptr<BufferPool> bp_;
 
     // Read/write the file header stored in page 0.

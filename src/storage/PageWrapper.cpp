@@ -62,6 +62,16 @@ bool PageWrapper::remove(uint16_t slotId) {
     }
 }
 
+bool PageWrapper::restore(uint16_t slotId) {
+    if (usePgPage()) {
+        PgPage pg(buf_);
+        return pg.restore(toInternalSlot(slotId));
+    } else {
+        Page page(buf_, pageSize_);
+        return page.restore(slotId);
+    }
+}
+
 void PageWrapper::compact() {
     if (usePgPage()) {
         PgPage pg(buf_);

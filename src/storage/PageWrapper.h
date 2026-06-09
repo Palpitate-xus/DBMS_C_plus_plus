@@ -33,11 +33,18 @@ public:
     bool read(uint16_t slotId, const char*& data, size_t& len) const;
 
     // Update a row in-place if possible, otherwise remove + re-insert.
-    // newSlotId receives the new slot id if re-inserted.
+    // newSlotId receives the new slot id if re-inserted (optional).
     bool update(uint16_t slotId, const char* data, size_t len, uint16_t& newSlotId);
+    bool update(uint16_t slotId, const char* data, size_t len) {
+        uint16_t dummy = slotId;
+        return update(slotId, data, len, dummy);
+    }
 
     // Delete a row (mark as deleted / LP_UNUSED)
     bool remove(uint16_t slotId);
+
+    // Restore a deleted row (clear tombstone / LP_UNUSED -> LP_NORMAL)
+    bool restore(uint16_t slotId);
 
     // Compact: defragment page, reclaim deleted space
     void compact();

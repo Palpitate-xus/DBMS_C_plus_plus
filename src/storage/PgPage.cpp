@@ -46,10 +46,21 @@ void PgPage::init(PageId pageId) {
     h->pd_checksum = 0;
     h->pd_flags = 0;
     h->pd_lower = sizeof(PageHeaderData);
-    h->pd_upper = static_cast<uint16_t>(PAGE_SIZE);
-    h->pd_special = static_cast<uint16_t>(PAGE_SIZE);
+    h->pd_upper = static_cast<uint16_t>(PAGE_SIZE - sizeof(uint32_t)); // reserve special space for nextPage
+    h->pd_special = static_cast<uint16_t>(PAGE_SIZE - sizeof(uint32_t));
     h->pd_pagesize_version = (static_cast<uint16_t>(PAGE_SIZE / 512) << 8) | PG_PAGE_LAYOUT_VERSION;
     h->pd_prune_xid = 0;
+    writeChecksum();
+}
+
+uint32_t PgPage::nextPage() const {
+    uint32_t val = 0;
+    std::memcpy(&val, buf_ + PAGE_SIZE - sizeof(uint32_t), sizeof(uint32_t));
+    return val;
+}
+
+void PgPage::setNextPage(uint32_t next) {
+    std::memcpy(buf_ + PAGE_SIZE - sizeof(uint32_t), &next, sizeof(uint32_t));
     writeChecksum();
 }
 
@@ -123,6 +134,26 @@ bool PgPage::remove(OffsetNumber linePtr) {
     setLpLen(id, 0);
 
     header()->pd_flags |= PD_HAS_FREE_LINES;
+    writeChecksum();
+    return true;
+}
+
+// ============================================================================
+// Restore (undo remove: LP_UNUSED -> LP_NORMAL)
+// ============================================================================
+
+bool PgPage::restore(OffsetNumber linePtr) {
+    if (linePtr == 0) return false;
+    uint16_t n = numLinePointers();
+    if (linePtr > n) return false;
+
+    ItemIdData* id = itemId(linePtr);
+    if (getLpFlags(id) != LP_UNUSED) return false;
+
+    setLpFlags(id, LP_NORMAL);
+    // Note: lp_off and lp_len should still hold valid data from before remove.
+    // If they were zeroed by remove, the caller must rewrite the data.
+
     writeChecksum();
     return true;
 }

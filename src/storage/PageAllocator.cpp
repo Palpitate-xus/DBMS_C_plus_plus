@@ -4,8 +4,8 @@
 
 namespace dbms {
 
-PageAllocator::PageAllocator(const std::string& filename, size_t rowSize, size_t pageSize)
-    : filename_(filename), rowSize_(rowSize), pageSize_(pageSize), bp_(std::make_unique<BufferPool>(filename, 16, pageSize)) {}
+PageAllocator::PageAllocator(const std::string& filename, size_t rowSize, size_t pageSize, uint32_t formatVersion)
+    : filename_(filename), rowSize_(rowSize), pageSize_(pageSize), formatVersion_(formatVersion), bp_(std::make_unique<BufferPool>(filename, 16, pageSize)) {}
 
 PageAllocator::~PageAllocator() {
     close();
@@ -25,8 +25,8 @@ bool PageAllocator::open() {
         fh->numPages = 1;  // only page 0 (header)
         fh->freeListHead = 0;
         fh->rowSize = static_cast<uint32_t>(rowSize_);
-        // Infer format version from page size: 8192 -> version 2, else version 0
-        fh->formatVersion = (pageSize_ >= 8192) ? 2 : 0;
+        // Infer format version from page size if not explicitly set
+        fh->formatVersion = (formatVersion_ == 0) ? ((pageSize_ >= 8192) ? 2 : 0) : formatVersion_;
         bp_->markDirty(0);
     }
     bp_->unpinPage(0);
@@ -55,7 +55,7 @@ uint32_t PageAllocator::allocPage() {
         // Reuse a page from the free list
         pageId = fh->freeListHead;
         char* pageBuf = bp_->fetchPage(pageId);
-        Page page(pageBuf, pageSize_);
+        PageWrapper page(pageBuf, pageSize_, formatVersion_);
         uint32_t nextFree = page.nextPage();
         bp_->unpinPage(pageId);
 
@@ -67,7 +67,7 @@ uint32_t PageAllocator::allocPage() {
 
         // Initialize the new page
         char* newBuf = bp_->fetchPage(pageId);
-        Page newPage(newBuf, pageSize_);
+        PageWrapper newPage(newBuf, pageSize_, formatVersion_);
         newPage.init(pageId);
         bp_->markDirty(pageId);
         bp_->unpinPage(pageId);
@@ -87,7 +87,7 @@ void PageAllocator::freePage(uint32_t pageId) {
 
     // Initialize the freed page and link it to free list
     char* pageBuf = bp_->fetchPage(pageId);
-    Page page(pageBuf, pageSize_);
+    PageWrapper page(pageBuf, pageSize_, formatVersion_);
     page.init(pageId);
     page.setNextPage(fh->freeListHead);
     bp_->markDirty(pageId);
@@ -112,7 +112,7 @@ char* PageAllocator::fetchPage(uint32_t pageId) {
     if (!isOpen()) return nullptr;
     char* buf = bp_->fetchPage(pageId);
     if (buf && pageId >= 1) {
-        Page page(buf, pageSize_);
+        PageWrapper page(buf, pageSize_, formatVersion_);
         if (!page.verifyChecksum()) {
             std::cerr << "[CHECKSUM ERROR] Page " << pageId << " checksum mismatch" << std::endl;
         }
