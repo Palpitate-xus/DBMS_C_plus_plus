@@ -2813,10 +2813,67 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname, spname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
                     if (!ppa->open()) continue;
                     uint32_t np = ppa->numPages();
+                    VisibilityMap* vm = getVM(dbname, tablename);
                     for (uint32_t pid = 1; pid < np; ++pid) {
                         lockManager_.pageLockShared(dbname, tablename, pid);
                         char* buf = ppa->fetchPage(pid);
                         PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
+                        bool allVisible = vm->isAllVisible(pid);
+                        if (allVisible && !rv) {
+                            page.forEachLive([&callback, pid, this](uint16_t sid, const char* data, size_t len) {
+                                if (len <= MVCC_HEADER_SIZE) return;
+                                if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                                    int64_t rid = this->encodeRid(pid, sid);
+                                    this->txnReadRids_.insert(rid);
+                                    std::lock_guard<std::mutex> lock(ssiMutex_);
+                                    ssiReadSets_[this->currentTxnId_].insert(rid);
+                                }
+                                callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                            });
+                        } else {
+                            page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
+                                if (len <= MVCC_HEADER_SIZE) return;
+                                if (rv) {
+                                    uint64_t rowTxnId = 0;
+                                    std::memcpy(&rowTxnId, data, sizeof(uint64_t));
+                                    if (!rv->isVisible(rowTxnId)) return;
+                                }
+                                if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                                    int64_t rid = this->encodeRid(pid, sid);
+                                    this->txnReadRids_.insert(rid);
+                                    std::lock_guard<std::mutex> lock(ssiMutex_);
+                                    ssiReadSets_[this->currentTxnId_].insert(rid);
+                                }
+                                callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                            });
+                        }
+                        ppa->unpinPage(pid);
+                        lockManager_.pageUnlock(dbname, tablename, pid);
+                    }
+                    ppa->close();
+                }
+            } else {
+                auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
+                if (!ppa->open()) continue;
+                uint32_t np = ppa->numPages();
+                VisibilityMap* vm = getVM(dbname, tablename);
+                for (uint32_t pid = 1; pid < np; ++pid) {
+                    lockManager_.pageLockShared(dbname, tablename, pid);
+                    char* buf = ppa->fetchPage(pid);
+                    PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
+                    bool allVisible = vm->isAllVisible(pid);
+                    if (allVisible && !rv) {
+                        page.forEachLive([&callback, pid, this](uint16_t sid, const char* data, size_t len) {
+                            if (len <= MVCC_HEADER_SIZE) return;
+                            if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                                int64_t rid = this->encodeRid(pid, sid);
+                                this->txnReadRids_.insert(rid);
+                                std::lock_guard<std::mutex> lock(ssiMutex_);
+                                ssiReadSets_[this->currentTxnId_].insert(rid);
+                            }
+                            callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        });
+                    } else {
                         page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
                             if (len <= MVCC_HEADER_SIZE) return;
                             if (rv) {
@@ -2832,34 +2889,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                             }
                             callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
                         });
-                        ppa->unpinPage(pid);
-                        lockManager_.pageUnlock(dbname, tablename, pid);
                     }
-                    ppa->close();
-                }
-            } else {
-                auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-                if (!ppa->open()) continue;
-                uint32_t np = ppa->numPages();
-                for (uint32_t pid = 1; pid < np; ++pid) {
-                    lockManager_.pageLockShared(dbname, tablename, pid);
-                    char* buf = ppa->fetchPage(pid);
-                    PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
-                    page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
-                        if (len <= MVCC_HEADER_SIZE) return;
-                        if (rv) {
-                            uint64_t rowTxnId = 0;
-                            std::memcpy(&rowTxnId, data, sizeof(uint64_t));
-                            if (!rv->isVisible(rowTxnId)) return;
-                        }
-                        if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                            int64_t rid = this->encodeRid(pid, sid);
-                            this->txnReadRids_.insert(rid);
-                            std::lock_guard<std::mutex> lock(ssiMutex_);
-                            ssiReadSets_[this->currentTxnId_].insert(rid);
-                        }
-                        callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
-                    });
                     ppa->unpinPage(pid);
                     lockManager_.pageUnlock(dbname, tablename, pid);
                 }
