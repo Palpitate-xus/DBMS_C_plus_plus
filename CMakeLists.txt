@@ -16,6 +16,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/utils
     ${CMAKE_SOURCE_DIR}/src/optimizer
     ${CMAKE_SOURCE_DIR}/src/commands
+    ${CMAKE_SOURCE_DIR}/src/interfaces
 )
 
 # 源文件列表

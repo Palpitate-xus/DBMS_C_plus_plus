@@ -25,6 +25,8 @@ bool PageAllocator::open() {
         fh->numPages = 1;  // only page 0 (header)
         fh->freeListHead = 0;
         fh->rowSize = static_cast<uint32_t>(rowSize_);
+        // Infer format version from page size: 8192 -> version 2, else version 0
+        fh->formatVersion = (pageSize_ >= 8192) ? 2 : 0;
         bp_->markDirty(0);
     }
     bp_->unpinPage(0);

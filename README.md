@@ -136,10 +136,35 @@
 - POSIX 线程支持
 
 ### 编译
+
+#### 方式一：CMake（推荐）
 ```bash
-g++ -std=c++17 -O2 -pthread main.cpp TableManage.cpp ExecutionPlan.cpp BufferPool.cpp \
-    PageAllocator.cpp Page.cpp BPTree.cpp LockManager.cpp NetworkServer.cpp \
-    TxnIdGenerator.cpp -o dbms_main
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+```
+
+#### 方式二：手动 g++
+```bash
+g++ -std=c++17 -O2 -pthread \
+    src/main.cpp \
+    src/commands/TableManage.cpp \
+    src/optimizer/ExecutionPlan.cpp \
+    src/storage/BufferPool.cpp \
+    src/storage/PageAllocator.cpp \
+    src/storage/Page.cpp \
+    src/access/BPTree.cpp \
+    src/access/HashIndex.cpp \
+    src/access/SPGiSTIndex.cpp \
+    src/transaction/LockManager.cpp \
+    src/transaction/TxnIdGenerator.cpp \
+    src/network/NetworkServer.cpp \
+    src/network/TLSWrapper_stub.cpp \
+    src/common/Config.cpp \
+    -I src -I src/common -I src/storage -I src/access \
+    -I src/transaction -I src/network -I src/utils \
+    -I src/optimizer -I src/commands \
+    -o dbms_main
 ```
 
 ### 交互式运行
