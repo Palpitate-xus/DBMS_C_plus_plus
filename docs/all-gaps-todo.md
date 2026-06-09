@@ -146,20 +146,20 @@ TOP20 当前完成度 14/20，剩余 6 项：
 ### 数据类型
 - [x] SERIAL4 / BIGSERIAL
 - [x] GENERATED AS IDENTITY
-- [ ] 范围类型 (int4range, tsrange 等)
+- [x] 范围类型 (int4range, int8range, numrange, tsrange, tstzrange, daterange)
 - [x] 几何类型 - POINT（含空间运算符 << >> <^ >^ <@）
 - [x] 网络类型 - INET/CIDR（IPv4，含 << >> && 运算符）
 - [x] XML
 - [x] pg_lsn
-- [ ] tsvector / tsquery（PG 风格全文搜索类型）
+- [x] tsvector / tsquery（PG 风格全文搜索类型）
 - [x] 组合类型 (ROW 类型)
 - [x] DOMAIN (CREATE DOMAIN)
 - [x] 自定义类型 (CREATE TYPE)
 
 ### 约束
-- [ ] DEFERRABLE / INITIALLY DEFERRED
-- [ ] EXCLUSION CONSTRAINTS
-- [ ] CREATE ASSERTION
+- [x] DEFERRABLE / INITIALLY DEFERRED（元数据登记）
+- [x] EXCLUSION CONSTRAINTS（元数据登记）
+- [x] CREATE ASSERTION（目录级登记）
 
 ### 索引
 - [x] CREATE INDEX CONCURRENTLY
@@ -186,7 +186,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [x] ALTER TABLE ... ENABLE ROW LEVEL SECURITY（FORCE 已支持）
 
 ### 存储引擎
-- [ ] TABLESPACE 支持
+- [x] TABLESPACE 支持（元数据命令）
 - [x] 存储参数 (fillfactor, autovacuum_enabled 等，WITH 子句解析 + .params 文件持久化)
 - [ ] 压缩 (页级/行级)
 - [ ] 透明数据加密 (TDE)
@@ -200,7 +200,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [x] 触发器诊断变量 (tg_name, tg_when, tg_level, tg_op, tg_relname)
 - [x] WHEN 子句 (条件触发)
 - [ ] 复合触发器
-- [ ] Event Triggers
+- [x] Event Triggers（目录级登记）
 
 ### 存储过程/函数
 - [ ] PL/pgSQL 过程语言
