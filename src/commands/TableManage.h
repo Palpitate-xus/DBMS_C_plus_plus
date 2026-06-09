@@ -17,6 +17,7 @@
 #include "PageAllocator.h"
 #include "FreeSpaceMap.h"
 #include "VisibilityMap.h"
+#include "PageWrapper.h"
 #include "LockManager.h"
 #include "HashIndex.h"
 #include "SPGiSTIndex.h"

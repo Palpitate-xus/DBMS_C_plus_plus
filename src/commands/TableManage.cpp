@@ -2875,7 +2875,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     for (uint32_t pid = 1; pid < np; ++pid) {
         lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = pa->fetchPage(pid);
-        Page page(buf, pa->pageSize());
+        PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
         page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
             if (len <= MVCC_HEADER_SIZE) return;
             if (rv) {
@@ -2903,10 +2903,10 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
     uint16_t slotId = 0;
     decodeRid(rid, pageId, slotId);
     char* buf = pa->fetchPage(pageId);
-    Page page(buf, pa->pageSize());
+    PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
     const char* data = nullptr;
     size_t len = 0;
-    bool ok = page.get(slotId, data, len);
+    bool ok = page.read(slotId, data, len);
     pa->unpinPage(pageId);
     if (!ok) return false;
     if (len > MVCC_HEADER_SIZE) {

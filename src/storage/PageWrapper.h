@@ -55,6 +55,22 @@ public:
     uint32_t nextPage() const;
     void setNextPage(uint32_t next);
 
+    // Iterate over all live records: calls fn(slotId, data, len) for each
+    template<typename Fn>
+    void forEachLive(Fn&& fn) const {
+        if (usePgPage()) {
+            PgPage pg(buf_);
+            pg.forEachLive([&fn](OffsetNumber lp, const char* data, size_t len) {
+                fn(toExternalSlot(lp), data, len);
+            });
+        } else {
+            Page page(buf_, pageSize_);
+            page.forEachLive([&fn](uint16_t slotId, const char* data, size_t len) {
+                fn(slotId, data, len);
+            });
+        }
+    }
+
 private:
     char* buf_;
     size_t pageSize_;
