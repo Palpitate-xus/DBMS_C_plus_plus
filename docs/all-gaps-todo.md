@@ -278,7 +278,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [x] ALTER SYSTEM（postgresql.conf 动态修改）
 - [x] pg_reload_conf()
 - [x] pg_cancel_backend / pg_terminate_backend
-- [ ] 连接池管理
+- [x] 连接池管理（SHOW CONNECTIONS / SHOW STATUS 统计）
 - [x] VACUUM CONCURRENTLY
 
 ---

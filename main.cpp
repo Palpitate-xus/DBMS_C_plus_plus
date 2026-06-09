@@ -13441,7 +13441,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -13522,6 +13522,28 @@ bool execute(const string& rawSql, Session& s) {
                 auto procs = dbms::getProcessList();
                 for (const auto& p : procs) {
                     cout << p.id << " " << p.user << " " << p.db << " " << p.state << " " << p.info << endl;
+                }
+            } else if (tname == "pg_database") {
+                cout << "datname encoding datcollate datctype " << endl;
+                for (const auto& dbname : g_engine.getDatabaseNames()) {
+                    cout << dbname << " UTF8 en_US.UTF-8 en_US.UTF-8 " << endl;
+                }
+            } else if (tname == "pg_tables") {
+                cout << "schemaname tablename tableowner " << endl;
+                if (queryDb != "information_schema" && queryDb != "pg_catalog") {
+                    for (const auto& t : g_engine.getTableNames(queryDb)) {
+                        cout << "public " << t << " " << s.username << " " << endl;
+                    }
+                }
+            } else if (tname == "pg_indexes") {
+                cout << "schemaname tablename indexname " << endl;
+                if (queryDb != "information_schema" && queryDb != "pg_catalog") {
+                    for (const auto& tblName : g_engine.getTableNames(queryDb)) {
+                        auto idxMeta = g_engine.getIndexMetadata(queryDb, tblName);
+                        for (const auto& meta : idxMeta) {
+                            cout << "public " << tblName << " " << meta.name << " " << endl;
+                        }
+                    }
                 }
             }
             return false;
