@@ -1040,5 +1040,13 @@ Column makeUuidColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTimeColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeDateTimeColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeInt4RangeColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeInt8RangeColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeNumRangeColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeTsRangeColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeTstzRangeColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeDateRangeColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeTsVectorColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeTsQueryColumn(const std::string& name, bool isNull, bool isPK = false);
 
 } // namespace dbms

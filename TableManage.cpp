@@ -548,6 +548,94 @@ Column makePgLsnColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeInt4RangeColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "int4range";
+    c.dsize = 64;
+    return c;
+}
+
+Column makeInt8RangeColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "int8range";
+    c.dsize = 64;
+    return c;
+}
+
+Column makeNumRangeColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "numrange";
+    c.dsize = 128;
+    return c;
+}
+
+Column makeTsRangeColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "tsrange";
+    c.dsize = 64;
+    return c;
+}
+
+Column makeTstzRangeColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "tstzrange";
+    c.dsize = 64;
+    return c;
+}
+
+Column makeDateRangeColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "daterange";
+    c.dsize = 64;
+    return c;
+}
+
+Column makeTsVectorColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "tsvector";
+    c.dsize = 65535;
+    return c;
+}
+
+Column makeTsQueryColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "tsquery";
+    c.dsize = 65535;
+    return c;
+}
+
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;

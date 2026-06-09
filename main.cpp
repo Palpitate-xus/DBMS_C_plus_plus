@@ -37,6 +37,14 @@ using dbms::makeJsonColumn;
 using dbms::makeJsonbColumn;
 using dbms::makeXmlColumn;
 using dbms::makePgLsnColumn;
+using dbms::makeInt4RangeColumn;
+using dbms::makeInt8RangeColumn;
+using dbms::makeNumRangeColumn;
+using dbms::makeTsRangeColumn;
+using dbms::makeTstzRangeColumn;
+using dbms::makeDateRangeColumn;
+using dbms::makeTsVectorColumn;
+using dbms::makeTsQueryColumn;
 using dbms::makeFloatColumn;
 using dbms::makeDoubleColumn;
 using dbms::makePointColumn;
@@ -3345,6 +3353,30 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                 colCreated = true;
             } else if (ctype.substr(0, 3) == "xml") {
                 col = makeXmlColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 9) == "int4range") {
+                col = makeInt4RangeColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 9) == "int8range") {
+                col = makeInt8RangeColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 8) == "numrange") {
+                col = makeNumRangeColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 7) == "tsrange") {
+                col = makeTsRangeColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 8) == "tstzrang") {
+                col = makeTstzRangeColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 9) == "daterange") {
+                col = makeDateRangeColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 8) == "tsvector") {
+                col = makeTsVectorColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype.substr(0, 7) == "tsquery") {
+                col = makeTsQueryColumn(cname, isNull, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 5) == "float") {
                 col = makeFloatColumn(cname, isNull, isPK);
@@ -8291,6 +8323,22 @@ bool execute(const string& rawSql, Session& s) {
                 col = makeXmlColumn(cname, isNull);
             } else if (typeName.substr(0, 6) == "pg_lsn") {
                 col = makePgLsnColumn(cname, isNull);
+            } else if (typeName.substr(0, 9) == "int4range") {
+                col = makeInt4RangeColumn(cname, isNull);
+            } else if (typeName.substr(0, 9) == "int8range") {
+                col = makeInt8RangeColumn(cname, isNull);
+            } else if (typeName.substr(0, 8) == "numrange") {
+                col = makeNumRangeColumn(cname, isNull);
+            } else if (typeName.substr(0, 7) == "tsrange") {
+                col = makeTsRangeColumn(cname, isNull);
+            } else if (typeName.substr(0, 8) == "tstzrang") {
+                col = makeTstzRangeColumn(cname, isNull);
+            } else if (typeName.substr(0, 9) == "daterange") {
+                col = makeDateRangeColumn(cname, isNull);
+            } else if (typeName.substr(0, 8) == "tsvector") {
+                col = makeTsVectorColumn(cname, isNull);
+            } else if (typeName.substr(0, 7) == "tsquery") {
+                col = makeTsQueryColumn(cname, isNull);
             } else if (typeName.substr(0, 5) == "float") {
                 col = makeFloatColumn(cname, isNull);
             } else if (typeName.substr(0, 6) == "double" || typeName.substr(0, 5) == "money") {
