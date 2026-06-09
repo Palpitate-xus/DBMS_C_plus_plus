@@ -179,7 +179,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 
 ### 事务/MVCC
 - [x] SET TRANSACTION READ ONLY（只读事务显式声明）
-- [ ] 子事务（SAVEPOINT 已支持，需完善嵌套）
+- [x] 子事务（SAVEPOINT 嵌套已支持）
 - [x] 两阶段提交 PREPARED / ROLLBACK PREPARED（已完整支持）
 - [x] LOCK TABLE 命令
 - [x] Advisory Locks (pg_advisory_lock)
@@ -244,7 +244,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 
 ### 监控与诊断
 - [x] pg_stat_statements 等价
-- [ ] Wait Events
+- [x] Wait Events（pg_stat_wait_events 虚拟表）
 - [x] pg_buffercache 等价
 - [x] pg_locks 等价（锁等待拓扑统计）
 - [x] pg_stat_activity 等价
@@ -279,6 +279,7 @@ TOP20 当前完成度 14/20，剩余 6 项：
 - [x] pg_reload_conf()
 - [x] pg_cancel_backend / pg_terminate_backend
 - [x] 连接池管理（SHOW CONNECTIONS / SHOW STATUS 统计）
+- [x] pg_settings / pg_roles / pg_namespace / pg_database / pg_tables / pg_indexes 虚拟表
 - [x] VACUUM CONCURRENTLY
 
 ---

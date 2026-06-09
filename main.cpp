@@ -13441,7 +13441,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -13564,6 +13564,40 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "auto_analyze " << (g_config.autoAnalyzeEnabled ? "on" : "off") << " " << endl;
                 cout << "password_policy_level " << g_config.passwordPolicyLevel << " " << endl;
                 cout << "audit_level " << g_config.auditLevel << " " << endl;
+            } else if (tname == "pg_roles") {
+                cout << "rolname rolsuper rolcreatedb rolcanlogin " << endl;
+                // Read users from user.dat
+                {
+                    ifstream uf("user.dat");
+                    string line;
+                    while (getline(uf, line)) {
+                        stringstream ss(line);
+                        string u, p;
+                        int perm = 0;
+                        ss >> u >> p >> perm;
+                        if (u.empty()) continue;
+                        cout << u << " " << (perm == 1 ? "t" : "f") << " t t " << endl;
+                    }
+                }
+                // Read roles from role.dat
+                {
+                    ifstream rf("role.dat");
+                    string line;
+                    while (getline(rf, line)) {
+                        string r = trim(line);
+                        if (r.empty()) continue;
+                        cout << r << " f f f " << endl;
+                    }
+                }
+            } else if (tname == "pg_namespace") {
+                cout << "nspname nspowner " << endl;
+                cout << "public admin " << endl;
+                if (queryDb != "information_schema" && queryDb != "pg_catalog") {
+                    auto schemas = g_engine.getSchemaNames(queryDb);
+                    for (const auto& sn : schemas) {
+                        cout << sn << " admin " << endl;
+                    }
+                }
             }
             return false;
         }
