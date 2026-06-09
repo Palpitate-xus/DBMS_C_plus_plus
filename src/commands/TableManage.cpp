@@ -12775,6 +12775,18 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         page.compact();
         pa->markDirty(pid);
 
+        // Update FSM with reclaimed free space
+        size_t freePct = page.freeSpace() * 100 / pa->pageSize();
+        getFSM(dbname, tablename)->setFreePercent(pid, static_cast<uint8_t>(freePct));
+
+        // Update VM: if page is fully live after compact, mark AllVisible
+        VisibilityMap* vm = getVM(dbname, tablename);
+        if (page.liveCount() > 0 && page.liveCount() == page.slotCount()) {
+            vm->setAllVisible(pid, true);
+        } else {
+            vm->setAllVisible(pid, false);
+        }
+
         // If page is now empty, return it to the free list
         if (page.liveCount() == 0) {
             pa->unpinPage(pid);
