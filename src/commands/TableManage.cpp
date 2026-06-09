@@ -7652,7 +7652,14 @@ OpResult StorageEngine::insert(const std::string& dbname,
                     inserted = true;
                 }
             }
-            if (inserted) pa->markDirty(pid);
+            if (inserted) {
+                pa->markDirty(pid);
+                // Update FSM with free space percentage after insert
+                size_t freePct = page.freeSpace() * 100 / pa->pageSize();
+                getFSM(dbname, tablename)->setFreePercent(pid, static_cast<uint8_t>(freePct));
+                // Insert invalidates AllVisible hint
+                getVM(dbname, tablename)->setAllVisible(pid, false);
+            }
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename, pid);
         }
@@ -7668,6 +7675,9 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
             pa->markDirty(pageId);
+            size_t freePct = page.freeSpace() * 100 / pa->pageSize();
+            getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
+            getVM(dbname, tablename)->setAllVisible(pageId, false);
             pa->unpinPage(pageId);
             lockManager_.pageUnlock(dbname, tablename, pageId);
         }
@@ -8409,6 +8419,9 @@ OpResult StorageEngine::remove(const std::string& dbname,
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
             page.remove(slotId);
             pa->markDirty(pageId);
+            size_t freePct = page.freeSpace() * 100 / pa->pageSize();
+            getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
+            getVM(dbname, tablename)->setAllVisible(pageId, false);
             pa->unpinPage(pageId);
         }
         lockManager_.pageUnlock(dbname, tablename, pageId);
@@ -8880,6 +8893,9 @@ OpResult StorageEngine::update(const std::string& dbname,
                 return OpResult::InvalidValue;
             }
             pa->markDirty(pageId);
+            size_t freePct = page.freeSpace() * 100 / pa->pageSize();
+            getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
+            getVM(dbname, tablename)->setAllVisible(pageId, false);
             pa->unpinPage(pageId);
             lockManager_.pageUnlock(dbname, tablename, pageId);
             if (newSlotId != slotId) {
