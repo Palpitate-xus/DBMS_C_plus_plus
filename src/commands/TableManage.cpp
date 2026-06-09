@@ -7642,6 +7642,32 @@ OpResult StorageEngine::insert(const std::string& dbname,
         uint32_t numPages = pa->numPages();
         bool inserted = false;
         size_t actualRowSize = rowBuffer.size();
+        uint8_t minPercent = static_cast<uint8_t>(std::min(size_t(100), actualRowSize * 100 / pa->pageSize() + 1));
+
+        // Try FSM first for fast page lookup
+        if (numPages > 1) {
+            FreeSpaceMap* fsm = getFSM(dbname, tablename);
+            uint32_t candidate = fsm->findPage(minPercent, 1);
+            if (candidate > 0 && candidate < numPages) {
+                lockManager_.pageLockExclusive(dbname, tablename, candidate);
+                char* buf = pa->fetchPage(candidate);
+                PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
+                if (page.canFit(actualRowSize)) {
+                    if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
+                        pageId = candidate;
+                        inserted = true;
+                        pa->markDirty(candidate);
+                        size_t freePct = page.freeSpace() * 100 / pa->pageSize();
+                        fsm->setFreePercent(candidate, static_cast<uint8_t>(freePct));
+                        getVM(dbname, tablename)->setAllVisible(candidate, false);
+                    }
+                }
+                pa->unpinPage(candidate);
+                lockManager_.pageUnlock(dbname, tablename, candidate);
+            }
+        }
+
+        // Fallback: sequential scan
         for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
             lockManager_.pageLockExclusive(dbname, tablename, pid);
             char* buf = pa->fetchPage(pid);
@@ -7654,15 +7680,14 @@ OpResult StorageEngine::insert(const std::string& dbname,
             }
             if (inserted) {
                 pa->markDirty(pid);
-                // Update FSM with free space percentage after insert
                 size_t freePct = page.freeSpace() * 100 / pa->pageSize();
                 getFSM(dbname, tablename)->setFreePercent(pid, static_cast<uint8_t>(freePct));
-                // Insert invalidates AllVisible hint
                 getVM(dbname, tablename)->setAllVisible(pid, false);
             }
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename, pid);
         }
+
         if (!inserted) {
             pageId = pa->allocPage();
             lockManager_.pageLockExclusive(dbname, tablename, pageId);
