@@ -102,6 +102,9 @@ struct TableSchema {
     bool forceRowLevelSecurity = false; // FORCE ROW LEVEL SECURITY (applies to table owner too)
     std::map<std::string, std::string> storageParams; // WITH (fillfactor=70, autovacuum_enabled=off)
 
+    // Storage format version: 0 = legacy 4KB, 1 = 4KB with MVCC, 2 = PostgreSQL 8KB
+    uint32_t formatVersion = 0;
+
     void append(const Column& ncol);
     void appendFK(const ForeignKey& fk);
     void print() const;
@@ -139,6 +142,11 @@ std::string sqlstateForOpResult(OpResult res);
 class StorageEngine {
 public:
     StorageEngine();
+
+    // Page size for a given storage format version
+    static size_t pageSizeForFormatVersion(uint32_t formatVersion) {
+        return formatVersion >= 2 ? 8192 : 4096;
+    }
 
     // Database operations
     OpResult createDatabase(const std::string& dbname, const std::string& charset = "utf8");

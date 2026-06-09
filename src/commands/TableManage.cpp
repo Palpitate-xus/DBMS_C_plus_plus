@@ -994,7 +994,7 @@ OpResult StorageEngine::attachPartition(const std::string& dbname,
     // Create the partition data file
     {
         auto ppa = std::make_unique<PageAllocator>(
-            partitionDataPath(dbname, tablename, partitionName).string(), tbl.rowSize());
+            partitionDataPath(dbname, tablename, partitionName).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
         ppa->open();
         ppa->close();
     }
@@ -2570,7 +2570,7 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    auto pa = std::make_unique<PageAllocator>(dt.string(), tbl.rowSize());
+    auto pa = std::make_unique<PageAllocator>(dt.string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
     pa->open();
     PageAllocator* ptr = pa.get();
     pageAllocators_[key] = std::move(pa);
@@ -2589,7 +2589,7 @@ void StorageEngine::migrateToPageStorage(const std::string& dbname,
     std::string tmpPath = oldPath.string() + ".new";
 
     {
-        PageAllocator pa(tmpPath, rowSize);
+        PageAllocator pa(tmpPath, rowSize, pageSizeForFormatVersion(tbl.formatVersion));
         pa.open();
         std::ifstream in(oldPath, std::ios::binary);
         if (in && rowSize > 0) {
@@ -2605,14 +2605,14 @@ void StorageEngine::migrateToPageStorage(const std::string& dbname,
                     currentPageId = pa.allocPage();
                 }
                 char* buf = pa.fetchPage(currentPageId);
-                Page page(buf);
+                Page page(buf, pa.pageSize());
                 uint16_t slotId = 0;
                 if (!page.insert(row.data(), rowSize, slotId)) {
                     pa.markDirty(currentPageId);
                     pa.unpinPage(currentPageId);
                     currentPageId = pa.allocPage();
                     buf = pa.fetchPage(currentPageId);
-                    page = Page(buf);
+                    page = Page(buf, pa.pageSize());
                     page.insert(row.data(), rowSize, slotId);
                 }
                 pa.markDirty(currentPageId);
@@ -2686,13 +2686,13 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     for (size_t i = 0; i < tbl.subHashPartitions; ++i) subNames.push_back("sp" + std::to_string(i));
                 }
                 for (const auto& spname : subNames) {
-                    auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname, spname).string(), tbl.rowSize());
+                    auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname, spname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
                     if (!ppa->open()) continue;
                     uint32_t np = ppa->numPages();
                     for (uint32_t pid = 1; pid < np; ++pid) {
                         lockManager_.pageLockShared(dbname, tablename, pid);
                         char* buf = ppa->fetchPage(pid);
-                        Page page(buf);
+                        Page page(buf, ppa->pageSize());
                         page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
                             if (len <= MVCC_HEADER_SIZE) return;
                             if (rv) {
@@ -2714,13 +2714,13 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     ppa->close();
                 }
             } else {
-                auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize());
+                auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
                 if (!ppa->open()) continue;
                 uint32_t np = ppa->numPages();
                 for (uint32_t pid = 1; pid < np; ++pid) {
                     lockManager_.pageLockShared(dbname, tablename, pid);
                     char* buf = ppa->fetchPage(pid);
-                    Page page(buf);
+                    Page page(buf, ppa->pageSize());
                     page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
                         if (len <= MVCC_HEADER_SIZE) return;
                         if (rv) {
@@ -2751,7 +2751,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     for (uint32_t pid = 1; pid < np; ++pid) {
         lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = pa->fetchPage(pid);
-        Page page(buf);
+        Page page(buf, pa->pageSize());
         page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
             if (len <= MVCC_HEADER_SIZE) return;
             if (rv) {
@@ -2779,7 +2779,7 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
     uint16_t slotId = 0;
     decodeRid(rid, pageId, slotId);
     char* buf = pa->fetchPage(pageId);
-    Page page(buf);
+    Page page(buf, pa->pageSize());
     const char* data = nullptr;
     size_t len = 0;
     bool ok = page.get(slotId, data, len);
@@ -4530,7 +4530,7 @@ OpResult StorageEngine::createBrinIndex(const std::string& dbname,
             }
             for (const auto& pname : partNames) {
                 auto ppa = std::make_unique<PageAllocator>(
-                    partitionDataPath(dbname, actualTableName, pname).string(), t.rowSize());
+                    partitionDataPath(dbname, actualTableName, pname).string(), t.rowSize(), pageSizeForFormatVersion(t.formatVersion));
                 if (!ppa->open()) continue;
                 uint32_t np = ppa->numPages();
                 for (uint32_t blockStart = 1; blockStart < np; blockStart += static_cast<uint32_t>(pagesPerRange)) {
@@ -4539,7 +4539,7 @@ OpResult StorageEngine::createBrinIndex(const std::string& dbname,
                     std::string rangeMin, rangeMax;
                     for (uint32_t pid = blockStart; pid <= blockEnd; ++pid) {
                         char* buf = ppa->fetchPage(pid);
-                        Page page(buf);
+                        Page page(buf, ppa->pageSize());
                         page.forEachLive([&](uint16_t, const char* data, size_t len) {
                             if (len <= MVCC_HEADER_SIZE) return;
                             std::string row(data, len);
@@ -4552,7 +4552,7 @@ OpResult StorageEngine::createBrinIndex(const std::string& dbname,
                 }
             }
         } else {
-            auto pa = std::make_unique<PageAllocator>(dataPath(dbname, actualTableName).string(), t.rowSize());
+            auto pa = std::make_unique<PageAllocator>(dataPath(dbname, actualTableName).string(), t.rowSize(), pageSizeForFormatVersion(t.formatVersion));
             if (!pa->open()) return;
             uint32_t np = pa->numPages();
             for (uint32_t blockStart = 1; blockStart < np; blockStart += static_cast<uint32_t>(pagesPerRange)) {
@@ -4561,7 +4561,7 @@ OpResult StorageEngine::createBrinIndex(const std::string& dbname,
                 std::string rangeMin, rangeMax;
                 for (uint32_t pid = blockStart; pid <= blockEnd; ++pid) {
                     char* buf = pa->fetchPage(pid);
-                    Page page(buf);
+                    Page page(buf, pa->pageSize());
                     page.forEachLive([&](uint16_t, const char* data, size_t len) {
                         if (len <= MVCC_HEADER_SIZE) return;
                         std::string row(data, len);
@@ -4693,7 +4693,7 @@ OpResult StorageEngine::dropDatabase(const std::string& dbname) {
     return OpResult::Success;
 }
 
-constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420003;  // "DB" + version 3 (added onUpdate support)
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420004;  // "DB" + version 4 (added formatVersion)
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -4840,6 +4840,8 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     out.write(reinterpret_cast<const char*>(&rlsFlags), 1);
     // Default partition name (backward-compatible)
     writeFixedString(out, tbl.defaultPartitionName, MAX_TABLE_NAME_LEN);
+    // Storage format version (new in version 4)
+    out.write(reinterpret_cast<const char*>(&tbl.formatVersion), 4);
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -4849,9 +4851,10 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return tbl;
 
-    bool hasVersionHeader = (firstInt >= 0x44420001 && firstInt <= 0x44420003);
+    bool hasVersionHeader = (firstInt >= 0x44420001 && firstInt <= 0x44420004);
     bool hasArray = (firstInt >= 0x44420002);
     bool hasOnUpdate = (firstInt >= 0x44420003);
+    bool hasFormatVersion = (firstInt >= 0x44420004);
     int32_t len = 0;
     if (hasVersionHeader) {
         in.read(reinterpret_cast<char*>(&len), 4);
@@ -5089,6 +5092,12 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // Default partition name (backward-compatible)
     std::string dpName = readFixedString(in, MAX_TABLE_NAME_LEN);
     if (in) tbl.defaultPartitionName = dpName;
+    // Storage format version (new in version 4)
+    if (hasFormatVersion) {
+        uint32_t fv = 0;
+        in.read(reinterpret_cast<char*>(&fv), 4);
+        if (in) tbl.formatVersion = fv;
+    }
 
     return tbl;
 }
@@ -5233,30 +5242,36 @@ OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
     if (tableExists(dbname, tbl.tablename)) return OpResult::TableAlreadyExist;
 
+    TableSchema tblWithVersion = tbl;
+    if (tblWithVersion.formatVersion == 0) {
+        tblWithVersion.formatVersion = 2;  // Default to PostgreSQL 8KB format
+    }
+    size_t pageSize = pageSizeForFormatVersion(tblWithVersion.formatVersion);
+
     {
-        std::ofstream out(schemaPath(dbname, tbl.tablename), std::ios::binary);
-        writeSchema(out, tbl);
+        std::ofstream out(schemaPath(dbname, tblWithVersion.tablename), std::ios::binary);
+        writeSchema(out, tblWithVersion);
     }
     // Initialize page-based data file(s) via PageAllocator
-    if (tbl.partitionType != TableSchema::PartitionType::None) {
-        if (tbl.partitionType == TableSchema::PartitionType::Range) {
-            for (const auto& rp : tbl.rangePartitions) {
-                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tbl.tablename, rp.first).string(), tbl.rowSize());
+    if (tblWithVersion.partitionType != TableSchema::PartitionType::None) {
+        if (tblWithVersion.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& rp : tblWithVersion.rangePartitions) {
+                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tblWithVersion.tablename, rp.first).string(), tblWithVersion.rowSize(), pageSize);
                 pa->open(); pa->close();
             }
-        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
-            for (const auto& lp : tbl.listPartitions) {
-                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tbl.tablename, lp.first).string(), tbl.rowSize());
+        } else if (tblWithVersion.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& lp : tblWithVersion.listPartitions) {
+                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tblWithVersion.tablename, lp.first).string(), tblWithVersion.rowSize(), pageSize);
                 pa->open(); pa->close();
             }
-        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
-            for (size_t i = 0; i < tbl.hashPartitions; ++i) {
-                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tbl.tablename, "p" + std::to_string(i)).string(), tbl.rowSize());
+        } else if (tblWithVersion.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < tblWithVersion.hashPartitions; ++i) {
+                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tblWithVersion.tablename, "p" + std::to_string(i)).string(), tblWithVersion.rowSize(), pageSize);
                 pa->open(); pa->close();
             }
         }
     } else {
-        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tbl.tablename).string(), tbl.rowSize());
+        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tblWithVersion.tablename).string(), tblWithVersion.rowSize(), pageSize);
         pa->open();
         pa->close();
     }
@@ -5338,7 +5353,7 @@ OpResult StorageEngine::truncateTable(const std::string& dbname,
     // Remove and recreate data file
     std::filesystem::remove(dataPath(dbname, tablename));
     {
-        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize());
+        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
         pa->open();
         pa->close();
     }
@@ -7460,14 +7475,14 @@ OpResult StorageEngine::insert(const std::string& dbname,
     PageAllocator* pa = nullptr;
     std::unique_ptr<PageAllocator> partPa;
     if (!targetPartition.empty() && !targetSubPartition.empty()) {
-        partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition, targetSubPartition).string(), tbl.rowSize());
+        partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition, targetSubPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
         if (!partPa->open()) {
             lockManager_.unlock(tablename);
             return OpResult::InvalidValue;
         }
         pa = partPa.get();
     } else if (!targetPartition.empty()) {
-        partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition).string(), tbl.rowSize());
+        partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
         if (!partPa->open()) {
             lockManager_.unlock(tablename);
             return OpResult::InvalidValue;
@@ -7485,7 +7500,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
             lockManager_.pageLockExclusive(dbname, tablename, pid);
             char* buf = pa->fetchPage(pid);
-            Page page(buf);
+            Page page(buf, pa->pageSize());
             if (page.canFit(actualRowSize)) {
                 if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                     pageId = pid;
@@ -7500,7 +7515,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
             pageId = pa->allocPage();
             lockManager_.pageLockExclusive(dbname, tablename, pageId);
             char* buf = pa->fetchPage(pageId);
-            Page page(buf);
+            Page page(buf, pa->pageSize());
             if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
@@ -7928,12 +7943,12 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         if (!targetParts.empty()) {
             for (const auto& pname : targetParts) {
                 auto ppa = std::make_unique<PageAllocator>(
-                    partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize());
+                    partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
                 if (!ppa->open()) continue;
                 uint32_t np = ppa->numPages();
                 for (uint32_t pid = 1; pid < np; ++pid) {
                     char* buf = ppa->fetchPage(pid);
-                    Page page(buf);
+                    Page page(buf, ppa->pageSize());
                     page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
                         int64_t rid = encodeRid(pid, sid);
                         bool match = true;
@@ -8125,7 +8140,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
                         decodeRid(sa.rid, pid, sid);
                         char* pbuf = opa->fetchPage(pid);
                         if (pbuf) {
-                            Page page(pbuf);
+                            Page page(pbuf, opa->pageSize());
                             page.update(sid, newRow.data(), newRow.size());
                             pa->markDirty(pid);
                             opa->unpinPage(pid);
@@ -8174,7 +8189,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
                     decodeRid(ca.rid, pid, sid);
                     char* pbuf = opa->fetchPage(pid);
                     if (pbuf) {
-                        Page page(pbuf);
+                        Page page(pbuf, opa->pageSize());
                         page.remove(sid);
                         pa->markDirty(pid);
                         opa->unpinPage(pid);
@@ -8245,7 +8260,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
         lockManager_.pageLockExclusive(dbname, tablename, pageId);
         char* pageBuf = pa->fetchPage(pageId);
         if (pageBuf) {
-            Page page(pageBuf);
+            Page page(pageBuf, pa->pageSize());
             page.remove(slotId);
             pa->markDirty(pageId);
             pa->unpinPage(pageId);
@@ -8663,7 +8678,7 @@ OpResult StorageEngine::update(const std::string& dbname,
                 decodeRid(sa.rid, opid, osid);
                 char* obuf = opa->fetchPage(opid);
                 if (obuf) {
-                    Page opage(obuf);
+                    Page opage(obuf, opa->pageSize());
                     opage.update(osid, newORow.data(), newORow.size());
                     pa->markDirty(opid);
                     opa->unpinPage(opid);
@@ -8694,7 +8709,7 @@ OpResult StorageEngine::update(const std::string& dbname,
                 decodeRid(ca.rid, opid, osid);
                 char* obuf = opa->fetchPage(opid);
                 if (obuf) {
-                    Page opage(obuf);
+                    Page opage(obuf, opa->pageSize());
                     opage.update(osid, newORow.data(), newORow.size());
                     pa->markDirty(opid);
                     opa->unpinPage(opid);
@@ -8710,7 +8725,7 @@ OpResult StorageEngine::update(const std::string& dbname,
         int64_t actualRid = rid;
         if (pageBuf) {
             lockManager_.pageLockExclusive(dbname, tablename, pageId);
-            Page page(pageBuf);
+            Page page(pageBuf, pa->pageSize());
             uint16_t newSlotId = slotId;
             if (!page.update(slotId, newRow.data(), newRow.size(), &newSlotId)) {
                 pa->unpinPage(pageId);
@@ -12558,7 +12573,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     for (uint32_t pid = 1; pid < np; ++pid) {
         char* buf = pa->fetchPage(pid);
         if (!buf) continue;
-        Page page(buf);
+        Page page(buf, pa->pageSize());
 
         // Skip pages that are already empty or fully live
         uint16_t beforeLive = page.liveCount();
@@ -12650,7 +12665,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
 
     // Re-create empty data file via getPageAllocator (lazy creation)
     {
-        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize());
+        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
         pa->open();
         pageAllocators_[key] = std::move(pa);
     }
@@ -12878,7 +12893,7 @@ OpResult StorageEngine::rollbackTransaction() {
             decodeRid(it->rowIdx, pageId, slotId);
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
-                Page page(pageBuf);
+                Page page(pageBuf, pa->pageSize());
                 page.remove(slotId);
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
@@ -12916,7 +12931,7 @@ OpResult StorageEngine::rollbackTransaction() {
             std::string currentRow;
             bool foundCurrent = false;
             if (pageBuf) {
-                Page page(pageBuf);
+                Page page(pageBuf, pa->pageSize());
                 // Read current row data before restoring (needed to remove stale index entries)
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
@@ -12993,7 +13008,7 @@ OpResult StorageEngine::rollbackTransaction() {
             decodeRid(it->rowIdx, pageId, slotId);
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
-                Page page(pageBuf);
+                Page page(pageBuf, pa->pageSize());
                 page.restore(slotId);
                 // The slot may have been reused by a later INSERT in the same txn.
                 // Overwrite with the logged old data (preserving any MVCC header).
@@ -13313,7 +13328,7 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
             decodeRid(entry.rowIdx, pageId, slotId);
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
-                Page page(pageBuf);
+                Page page(pageBuf, pa->pageSize());
                 page.remove(slotId);
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
@@ -13325,7 +13340,7 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
             std::string currentRow;
             bool foundCurrent = false;
             if (pageBuf) {
-                Page page(pageBuf);
+                Page page(pageBuf, pa->pageSize());
                 // Read current row data before restoring (needed to remove stale index entries)
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
@@ -13400,7 +13415,7 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
             decodeRid(entry.rowIdx, pageId, slotId);
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
-                Page page(pageBuf);
+                Page page(pageBuf, pa->pageSize());
                 page.restore(slotId);
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
