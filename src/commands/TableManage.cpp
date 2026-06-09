@@ -5269,12 +5269,13 @@ void StorageEngine::deleteRowToast(const std::string& dbname, const std::string&
 void StorageEngine::prepareToastValues(const std::string& dbname, const std::string& tablename,
                                         const TableSchema& tbl,
                                         std::map<std::string, std::string>& values) {
+    size_t threshold = toastThreshold(tbl.formatVersion);
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (!col.isVariableLength) continue;
         auto it = values.find(col.dataName);
         if (it == values.end()) continue;
-        if (it->second.size() > TOAST_THRESHOLD) {
+        if (it->second.size() > threshold) {
             uint64_t toastId = allocToastId(dbname, tablename);
             writeToast(dbname, tablename, toastId, it->second);
             it->second = std::string(TOAST_PREFIX) + std::to_string(toastId);
@@ -12658,7 +12659,54 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         deadTupleCounts_[key] = 0;
     }
 
+    // Clean up orphaned TOAST entries
+    vacuumToast(dbname, tablename);
+
     return freedPages;
+}
+
+// ========================================================================
+// VACUUM TOAST: remove orphaned toast files not referenced by any row
+// ========================================================================
+size_t StorageEngine::vacuumToast(const std::string& dbname,
+                                   const std::string& tablename) {
+    if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    std::set<uint64_t> activeToastIds;
+
+    // Collect all toast IDs referenced by live rows
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        std::string row(data, len);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (!tbl.cols[i].isVariableLength) continue;
+            std::string val = extractColumnValue(row, tbl, i);
+            uint64_t toastId = 0;
+            if (parseToastMarker(val, toastId)) {
+                activeToastIds.insert(toastId);
+            }
+        }
+    });
+
+    // Scan toast directory and remove orphaned files
+    auto tdir = toastDir(dbname, tablename);
+    if (!std::filesystem::exists(tdir)) return 0;
+
+    size_t removed = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(tdir)) {
+        std::string fname = entry.path().filename().string();
+        if (fname.size() < 5 || fname.substr(fname.size() - 4) != ".dat") continue;
+        try {
+            uint64_t toastId = static_cast<uint64_t>(std::stoull(fname.substr(0, fname.size() - 4)));
+            if (activeToastIds.find(toastId) == activeToastIds.end()) {
+                std::filesystem::remove(entry.path());
+                ++removed;
+            }
+        } catch (...) {
+            // skip non-numeric filenames
+        }
+    }
+    return removed;
 }
 
 // ========================================================================
@@ -12734,6 +12782,9 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     auto dtKey = std::make_pair(dbname, tablename);
     std::lock_guard<std::mutex> lock(deadTupleMutex_);
     deadTupleCounts_[dtKey] = 0;
+
+    // Clean up orphaned TOAST entries
+    vacuumToast(dbname, tablename);
 
     return rows.size();
 }

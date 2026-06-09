@@ -911,8 +911,13 @@ public:
     getDefaultPrivileges(const std::string& dbname) const;
 
     // TOAST (The Oversized-Attribute Storage Technique) for large values
-    static constexpr size_t TOAST_THRESHOLD = 1000; // bytes
+    static constexpr size_t TOAST_THRESHOLD_BASE = 1000; // bytes for 4KB pages
     static constexpr const char* TOAST_PREFIX = "__TOAST__";
+    // Dynamic threshold: larger pages can hold larger inline values
+    static size_t toastThreshold(uint32_t formatVersion) {
+        size_t ps = pageSizeForFormatVersion(formatVersion);
+        return std::max(TOAST_THRESHOLD_BASE, ps / 4);
+    }
     static std::filesystem::path toastDir(const std::string& dbname, const std::string& tablename);
     static std::filesystem::path toastMetaPath(const std::string& dbname, const std::string& tablename);
     uint64_t allocToastId(const std::string& dbname, const std::string& tablename);
@@ -926,6 +931,9 @@ public:
     // Prepare values for insert/update: create TOAST entries for large var-len values
     void prepareToastValues(const std::string& dbname, const std::string& tablename,
                             const TableSchema& tbl, std::map<std::string, std::string>& values);
+
+    // VACUUM orphaned TOAST files: remove toast entries no longer referenced by any row
+    size_t vacuumToast(const std::string& dbname, const std::string& tablename);
 
 private:
 
