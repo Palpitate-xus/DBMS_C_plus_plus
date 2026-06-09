@@ -91,7 +91,7 @@ PostgreSQL 18 官方文档覆盖：
 | `CREATE TABLE AS` | 部分实现 | 有 CTAS 路径；缺少 PG 选项、WITH [NO] DATA、tablespace/access method、精确类型推断。 |
 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 部分实现 | 已支持表空间对象元数据、owner/location/options/rename/drop；缺少 PostgreSQL 的物理存储路由、权限、依赖检查和 `pg_tblspc` 符号链接语义。 |
 | `CREATE TRIGGER` | 部分实现 | 支持 before/after/instead of、row/statement、WHEN、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime。 |
-| `CREATE TYPE` | 部分实现 | 主要支持 composite type；列内 enum 有痕迹，但缺少 PG 的 enum/range/base/shell 类型创建语义。 |
+| `CREATE TYPE` | 部分实现 | 主要支持 composite type，`ALTER TYPE` 已支持 composite rename、add/drop/rename attribute 和 alter attribute type；列内 enum 有痕迹，但缺少 PG 的 enum/range/base/shell 类型创建语义。 |
 | `CREATE VIEW` | 部分实现 | 支持保存 SQL 和简单 updatable view；缺少 recursive view、security_barrier、security_invoker、check option 完整性。 |
 | `DEALLOCATE` / `PREPARE` / `EXECUTE` | 部分实现 | 使用字符串 `?` 替换；缺少服务器端类型推断、binary params、plan invalidation、generic/custom plan、portal。 |
 | `DELETE` | 部分实现 | 支持 WHERE/USING/LIMIT/RETURNING 部分；缺少 PG 全语义、CTE/ONLY/inheritance/RETURNING OLD/NEW 复杂表达式。 |
@@ -133,6 +133,7 @@ PostgreSQL 18 官方文档覆盖：
 > 2026-06-09 数据库 ALTER 进展：`ALTER DATABASE` 支持实际目录 rename，并为 `OWNER TO`、`SET/RESET` 记录 `.pg_database_options` 元数据；`DROP DATABASE` 不再依赖当前数据库并支持 `IF EXISTS`，当前会同步当前会话数据库名，但仍缺 PostgreSQL catalog/OID、连接踢出、权限检查、依赖和事务性。
 > 2026-06-09 RLS policy ALTER 进展：`ALTER POLICY ... ON ... RENAME TO ...` 与 `TO`/`USING`/`WITH CHECK` 子句会真实改写表级 `.rls` policy 文件，`DROP POLICY` 会在通用 `DROP` 分支前触达真实删除；仍缺 PostgreSQL catalog/OID、表达式绑定、依赖、owner 权限和事务性。
 > 2026-06-09 Domain ALTER 进展：`ALTER DOMAIN` 会真实改写 `.domains`，支持 `RENAME TO`、`SET/DROP DEFAULT`、`ADD/DROP CONSTRAINT ... CHECK (...)` 与简化 `VALIDATE CONSTRAINT`；仍缺 PostgreSQL 多约束目录、对既有列数据的全量 revalidation、依赖重写、权限和事务性。
+> 2026-06-09 Composite TYPE ALTER 进展：`ALTER TYPE` 对 `.types` 中的 composite type 支持 `RENAME TO`、`ADD/DROP ATTRIBUTE`、`RENAME ATTRIBUTE` 和 `ALTER ATTRIBUTE ... TYPE` 真实改写；enum/range/base/shell 类型仍只保留目录级兼容登记。
 
 | 类别 | 缺失命令 |
 |---|---|
@@ -145,7 +146,7 @@ PostgreSQL 18 官方文档覆盖：
 | 语言/大对象 | `CREATE LANGUAGE`, `ALTER LANGUAGE`, `DROP LANGUAGE`, `ALTER LARGE OBJECT`, `DROP LARGE OBJECT` |
 | 统计/表空间/全文配置 | `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
 | 事务/会话别名和状态 | 本轮已将 `SET CONSTRAINTS`、`SET SESSION AUTHORIZATION`、`MOVE` 移至“部分实现”；仍缺 PostgreSQL 完整语义。 |
-| 数据库/对象 ALTER 子集 | `ALTER DATABASE` 已支持 rename 和 owner/options 元数据；`ALTER DOMAIN` 已支持 rename/default/单 check constraint 更新；`ALTER POLICY` 已支持 rename/roles/using/with check 改写；`ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER TRIGGER`, `ALTER TYPE` 已有目录级兼容登记但缺完整 PG 语义；`ALTER ROLE`、`ALTER GROUP`、`ALTER SEQUENCE` 已进入部分实现，仍缺完整 catalog/依赖/权限/事务语义 |
+| 数据库/对象 ALTER 子集 | `ALTER DATABASE` 已支持 rename 和 owner/options 元数据；`ALTER DOMAIN` 已支持 rename/default/单 check constraint 更新；`ALTER POLICY` 已支持 rename/roles/using/with check 改写；`ALTER TYPE` 已支持 composite type rename/attribute 更新；`ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER TRIGGER` 已有目录级兼容登记但缺完整 PG 语义；`ALTER ROLE`、`ALTER GROUP`、`ALTER SEQUENCE` 已进入部分实现，仍缺完整 catalog/依赖/权限/事务语义 |
 | 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义、`CREATE/DROP ASSERTION` 目录级登记、`CREATE/DROP GROUP` 兼容别名已进入部分实现；仍缺真实共享库加载、安全限制、完整 CTAS 类型推断和断言执行器 |
 
 ## 5. 数据类型差距
@@ -169,7 +170,7 @@ PostgreSQL 18 官方文档覆盖：
 | XML | 部分实现 | 有 xml 列；缺少 XML 类型函数、XPath、XMLTABLE、schema/encoding 语义。 |
 | JSON/JSONB | 部分实现 | 有 JSON 校验和少量函数；缺少 jsonpath、SQL/JSON query functions、`JSON_TABLE`、完整操作符、GIN opclass。 |
 | 数组 | 部分实现 | 有 `INT[]`/`VARCHAR[]` 痕迹和 array_get/contains 简化；缺少多维数组、切片、unnest/array functions、ANY/ALL 完整语义。 |
-| Composite | 部分实现 | `CREATE TYPE AS (...)` 存字段；缺少 row constructor、字段访问、嵌套、函数参数/返回、catalog 语义。 |
+| Composite | 部分实现 | `CREATE TYPE AS (...)` 存字段，并可通过 `ALTER TYPE` 更新 composite 名称和属性；缺少 row constructor、字段访问、嵌套、函数参数/返回、catalog 语义。 |
 | Range/Multirange | 部分实现 | `int4range`、`int8range`、`numrange`、`tsrange`、`tstzrange`、`daterange` 及 multirange 名称已可作为字符串型列存取；缺少范围 canonicalization、约束、operators、函数和 GiST/SP-GiST opclass。 |
 | Domain | 部分实现 | 有 base/default/check 文件并可通过 `ALTER DOMAIN` 更新 rename/default/单 check constraint；缺少多 constraint validation、依赖、权限、数组自动类型。 |
 | Object Identifier | 部分实现 | `oid`、`regclass`、`regproc`、`regtype`、`xid`、`cid` 等名称已可作为字符串型列存取；缺少 OID catalog 绑定、别名解析、依赖和系统函数语义。 |

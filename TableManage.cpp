@@ -13994,6 +13994,49 @@ OpResult StorageEngine::createCompositeType(const std::string& dbname, const Com
     return OpResult::Success;
 }
 
+OpResult StorageEngine::alterCompositeType(const std::string& dbname, const std::string& name,
+                                           const CompositeType& ct) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = compositeTypePath(dbname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (ct.name != name && isCompositeType(dbname, ct.name)) return OpResult::TableAlreadyExist;
+    std::ifstream ifs(path);
+    std::vector<CompositeType> types;
+    std::string line;
+    bool found = false;
+    while (std::getline(ifs, line)) {
+        size_t sp = line.find('|');
+        if (sp == std::string::npos) continue;
+        CompositeType current;
+        current.name = line.substr(0, sp);
+        size_t pos = sp + 1;
+        while (pos < line.size()) {
+            size_t next = line.find('|', pos);
+            std::string fieldDef = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
+            size_t colon = fieldDef.find(':');
+            if (colon != std::string::npos) {
+                current.fields.emplace_back(fieldDef.substr(0, colon), fieldDef.substr(colon + 1));
+            }
+            pos = (next == std::string::npos) ? line.size() : next + 1;
+        }
+        if (current.name == name) {
+            types.push_back(ct);
+            found = true;
+        } else {
+            types.push_back(current);
+        }
+    }
+    if (!found) return OpResult::TableNotExist;
+    std::ofstream ofs(path, std::ios::trunc);
+    if (!ofs) return OpResult::InvalidValue;
+    for (const auto& t : types) {
+        ofs << t.name;
+        for (const auto& f : t.fields) ofs << "|" << f.first << ":" << f.second;
+        ofs << '\n';
+    }
+    return OpResult::Success;
+}
+
 OpResult StorageEngine::dropCompositeType(const std::string& dbname, const std::string& name) {
     if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
     auto path = compositeTypePath(dbname);

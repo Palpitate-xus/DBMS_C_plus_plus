@@ -4977,6 +4977,146 @@ static bool handleAlterDomain(const string& sql, Session& s) {
     return false;
 }
 
+static bool handleAlterType(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(10)); // after "alter type"
+    string typeName = firstCompatNameToken(rest);
+    if (typeName.empty()) {
+        cout << "SQL syntax error: ALTER TYPE requires a type name" << endl;
+        return true;
+    }
+    string action = trim(rest.substr(typeName.size()));
+    auto ct = g_engine.getCompositeType(s.currentDB, typeName);
+    if (ct.name.empty()) {
+        return handleAlterCompatObject(sql, s);
+    }
+
+    string message;
+    if (startsWithKeyword(action, "rename to")) {
+        string newName = firstCompatNameToken(trim(action.substr(9)));
+        if (newName.empty()) {
+            cout << "SQL syntax error: ALTER TYPE name RENAME TO newname" << endl;
+            return true;
+        }
+        ct.name = newName;
+        message = "Type " + typeName + " renamed to " + newName;
+    } else if (startsWithKeyword(action, "add attribute")) {
+        string fieldDef = trim(action.substr(13));
+        vector<string> parts = tokenize(fieldDef);
+        if (parts.size() < 2) {
+            cout << "SQL syntax error: ALTER TYPE name ADD ATTRIBUTE attr type" << endl;
+            return true;
+        }
+        string attrName = parts[0];
+        for (const auto& f : ct.fields) {
+            if (f.first == attrName) {
+                cout << "Attribute " << attrName << " already exists" << endl;
+                return true;
+            }
+        }
+        size_t attrPos = fieldDef.find(attrName);
+        string attrType = trim(fieldDef.substr(attrPos + attrName.size()));
+        attrType = stripTrailingDropBehavior(attrType);
+        ct.fields.emplace_back(attrName, attrType);
+        message = "Type " + typeName + " attribute " + attrName + " added";
+    } else if (startsWithKeyword(action, "drop attribute")) {
+        string clause = trim(action.substr(14));
+        bool ifExists = false;
+        if (startsWithKeyword(clause, "if exists")) {
+            ifExists = true;
+            clause = trim(clause.substr(9));
+        }
+        clause = stripTrailingDropBehavior(clause);
+        string attrName = firstCompatNameToken(clause);
+        if (attrName.empty()) {
+            cout << "SQL syntax error: ALTER TYPE name DROP ATTRIBUTE attr" << endl;
+            return true;
+        }
+        auto it = std::find_if(ct.fields.begin(), ct.fields.end(),
+                               [&](const auto& f) { return f.first == attrName; });
+        if (it == ct.fields.end()) {
+            if (ifExists) {
+                cout << "Attribute " << attrName << " not found, skipping" << endl;
+                return false;
+            }
+            cout << "Attribute " << attrName << " not found" << endl;
+            return true;
+        }
+        ct.fields.erase(it);
+        if (ct.fields.empty()) {
+            cout << "Composite type must keep at least one attribute" << endl;
+            return true;
+        }
+        message = "Type " + typeName + " attribute " + attrName + " dropped";
+    } else if (startsWithKeyword(action, "rename attribute")) {
+        string clause = trim(action.substr(16));
+        size_t toPos = findTopLevelSqlKeyword(clause, "to");
+        if (toPos == string::npos) {
+            cout << "SQL syntax error: ALTER TYPE name RENAME ATTRIBUTE attr TO newattr" << endl;
+            return true;
+        }
+        string attrName = firstCompatNameToken(trim(clause.substr(0, toPos)));
+        string newAttrName = firstCompatNameToken(trim(clause.substr(toPos + 2)));
+        if (attrName.empty() || newAttrName.empty()) {
+            cout << "SQL syntax error: ALTER TYPE name RENAME ATTRIBUTE attr TO newattr" << endl;
+            return true;
+        }
+        for (const auto& f : ct.fields) {
+            if (f.first == newAttrName) {
+                cout << "Attribute " << newAttrName << " already exists" << endl;
+                return true;
+            }
+        }
+        auto it = std::find_if(ct.fields.begin(), ct.fields.end(),
+                               [&](const auto& f) { return f.first == attrName; });
+        if (it == ct.fields.end()) {
+            cout << "Attribute " << attrName << " not found" << endl;
+            return true;
+        }
+        it->first = newAttrName;
+        message = "Type " + typeName + " attribute " + attrName + " renamed to " + newAttrName;
+    } else if (startsWithKeyword(action, "alter attribute")) {
+        string clause = trim(action.substr(15));
+        size_t typePos = findTopLevelSqlKeyword(clause, "type");
+        if (typePos == string::npos) {
+            return handleAlterCompatObject(sql, s);
+        }
+        string attrName = firstCompatNameToken(trim(clause.substr(0, typePos)));
+        string newType = trim(clause.substr(typePos + 4));
+        if (attrName.empty() || newType.empty()) {
+            cout << "SQL syntax error: ALTER TYPE name ALTER ATTRIBUTE attr TYPE type" << endl;
+            return true;
+        }
+        auto it = std::find_if(ct.fields.begin(), ct.fields.end(),
+                               [&](const auto& f) { return f.first == attrName; });
+        if (it == ct.fields.end()) {
+            cout << "Attribute " << attrName << " not found" << endl;
+            return true;
+        }
+        it->second = newType;
+        message = "Type " + typeName + " attribute " + attrName + " type changed";
+    } else {
+        return handleAlterCompatObject(sql, s);
+    }
+
+    auto res = g_engine.alterCompositeType(s.currentDB, typeName, ct);
+    if (res == OpResult::TableAlreadyExist) {
+        cout << "Type " << ct.name << " already exists" << endl;
+        return true;
+    }
+    if (res == OpResult::TableNotExist) {
+        cout << "Type " << typeName << " not exist" << endl;
+        return true;
+    }
+    if (res != OpResult::Success) {
+        cout << "Alter type failed" << endl;
+        return true;
+    }
+    cout << message << endl;
+    return false;
+}
+
 static vector<string> parsePolicyRoles(const string& roleStr) {
     vector<string> roles;
     for (auto role : splitTopLevelComma(roleStr)) {
@@ -8427,6 +8567,9 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (tokens[0] == "domain") {
             return handleAlterDomain(sql, s);
+        }
+        if (tokens[0] == "type") {
+            return handleAlterType(sql, s);
         }
         if (tokens[0] == "policy") {
             return handleAlterPolicy(sql, s);
@@ -12069,6 +12212,22 @@ bool execute(const string& rawSql, Session& s) {
                      << (d.defaultValue.empty() ? "-" : d.defaultValue) << " "
                      << (d.checkExpr.empty() ? "-" : d.checkExpr) << " "
                      << (d.constraintName.empty() ? "-" : d.constraintName) << endl;
+            }
+            return false;
+        }
+        if (rest == "types") {
+            if (!checkDB(s)) return true;
+            auto names = g_engine.getCompositeTypeNames(s.currentDB);
+            if (names.empty()) {
+                cout << "No types found" << endl;
+                return false;
+            }
+            cout << "type_name attributes" << endl;
+            for (const auto& n : names) {
+                auto ct = g_engine.getCompositeType(s.currentDB, n);
+                vector<string> attrs;
+                for (const auto& f : ct.fields) attrs.push_back(f.first + ":" + f.second);
+                cout << ct.name << " " << joinStrings(attrs, ",") << endl;
             }
             return false;
         }

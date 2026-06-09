@@ -282,6 +282,8 @@ public:
         std::vector<std::pair<std::string, std::string>> fields; // (fieldName, fieldType)
     };
     OpResult createCompositeType(const std::string& dbname, const CompositeType& ct);
+    OpResult alterCompositeType(const std::string& dbname, const std::string& name,
+                                const CompositeType& ct);
     OpResult dropCompositeType(const std::string& dbname, const std::string& name);
     CompositeType getCompositeType(const std::string& dbname, const std::string& name) const;
     std::vector<std::string> getCompositeTypeNames(const std::string& dbname) const;
