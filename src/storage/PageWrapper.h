@@ -46,6 +46,7 @@ public:
     uint16_t liveCount() const;
     uint16_t slotCount() const;
     size_t freeSpace() const;
+    bool canFit(size_t len) const;
 
     // Checksum
     bool verifyChecksum() const;

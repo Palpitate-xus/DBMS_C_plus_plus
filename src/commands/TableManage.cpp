@@ -2816,7 +2816,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     for (uint32_t pid = 1; pid < np; ++pid) {
                         lockManager_.pageLockShared(dbname, tablename, pid);
                         char* buf = ppa->fetchPage(pid);
-                        Page page(buf, ppa->pageSize());
+                        PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
                         page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
                             if (len <= MVCC_HEADER_SIZE) return;
                             if (rv) {
@@ -7645,7 +7645,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
             lockManager_.pageLockExclusive(dbname, tablename, pid);
             char* buf = pa->fetchPage(pid);
-            Page page(buf, pa->pageSize());
+            PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             if (page.canFit(actualRowSize)) {
                 if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                     pageId = pid;
@@ -7660,7 +7660,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
             pageId = pa->allocPage();
             lockManager_.pageLockExclusive(dbname, tablename, pageId);
             char* buf = pa->fetchPage(pageId);
-            Page page(buf, pa->pageSize());
+            PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
@@ -12709,6 +12709,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         lockManager_.lockExclusive(tablename);
     }
 
+    TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     if (!pa) { lockManager_.unlock(tablename); return 0; }
 
@@ -12718,7 +12719,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     for (uint32_t pid = 1; pid < np; ++pid) {
         char* buf = pa->fetchPage(pid);
         if (!buf) continue;
-        Page page(buf, pa->pageSize());
+        PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
 
         // Skip pages that are already empty or fully live
         uint16_t beforeLive = page.liveCount();

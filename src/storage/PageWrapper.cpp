@@ -102,6 +102,16 @@ size_t PageWrapper::freeSpace() const {
     }
 }
 
+bool PageWrapper::canFit(size_t len) const {
+    if (usePgPage()) {
+        PgPage pg(buf_);
+        return pg.canFit(len);
+    } else {
+        Page page(buf_, pageSize_);
+        return page.canFit(len);
+    }
+}
+
 bool PageWrapper::verifyChecksum() const {
     if (usePgPage()) {
         PgPage pg(buf_);
