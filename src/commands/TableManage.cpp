@@ -2871,26 +2871,42 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     if (!pa) return;
+    VisibilityMap* vm = getVM(dbname, tablename);
     uint32_t np = pa->numPages();
     for (uint32_t pid = 1; pid < np; ++pid) {
         lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = pa->fetchPage(pid);
         PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-        page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
-            if (len <= MVCC_HEADER_SIZE) return;
-            if (rv) {
-                uint64_t rowTxnId = 0;
-                std::memcpy(&rowTxnId, data, sizeof(uint64_t));
-                if (!rv->isVisible(rowTxnId)) return;
-            }
-            if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                int64_t rid = this->encodeRid(pid, sid);
-                this->txnReadRids_.insert(rid);
-                std::lock_guard<std::mutex> lock(ssiMutex_);
-                ssiReadSets_[this->currentTxnId_].insert(rid);
-            }
-            callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
-        });
+        // VM optimization: skip MVCC check if page is AllVisible and no ReadView
+        bool allVisible = vm->isAllVisible(pid);
+        if (allVisible && !rv) {
+            page.forEachLive([&callback, pid, this](uint16_t sid, const char* data, size_t len) {
+                if (len <= MVCC_HEADER_SIZE) return;
+                if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                    int64_t rid = this->encodeRid(pid, sid);
+                    this->txnReadRids_.insert(rid);
+                    std::lock_guard<std::mutex> lock(ssiMutex_);
+                    ssiReadSets_[this->currentTxnId_].insert(rid);
+                }
+                callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+            });
+        } else {
+            page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
+                if (len <= MVCC_HEADER_SIZE) return;
+                if (rv) {
+                    uint64_t rowTxnId = 0;
+                    std::memcpy(&rowTxnId, data, sizeof(uint64_t));
+                    if (!rv->isVisible(rowTxnId)) return;
+                }
+                if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+                    int64_t rid = this->encodeRid(pid, sid);
+                    this->txnReadRids_.insert(rid);
+                    std::lock_guard<std::mutex> lock(ssiMutex_);
+                    ssiReadSets_[this->currentTxnId_].insert(rid);
+                }
+                callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+            });
+        }
         pa->unpinPage(pid);
         lockManager_.pageUnlock(dbname, tablename, pid);
     }
