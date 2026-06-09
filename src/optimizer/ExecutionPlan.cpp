@@ -875,13 +875,34 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     size_t leftRows = engine->getTableRowCount(dbname, leftTable);
     size_t rightRows = engine->getTableRowCount(dbname, rightTable);
 
+    // Check if join keys are indexed (candidate for MergeJoin)
+    auto leftIdxCols = engine->getIndexedColumns(dbname, leftTable);
+    auto rightIdxCols = engine->getIndexedColumns(dbname, rightTable);
+    bool leftColIndexed = (std::find(leftIdxCols.begin(), leftIdxCols.end(), leftCol) != leftIdxCols.end());
+    bool rightColIndexed = (std::find(rightIdxCols.begin(), rightIdxCols.end(), rightCol) != rightIdxCols.end());
+    // Also check if join column is the primary key (always indexed / sorted)
+    TableSchema leftTbl = engine->getTableSchema(dbname, leftTable);
+    TableSchema rightTbl = engine->getTableSchema(dbname, rightTable);
+    for (size_t i = 0; i < leftTbl.len; ++i) {
+        if (leftTbl.cols[i].dataName == leftCol && leftTbl.cols[i].isPrimaryKey) {
+            leftColIndexed = true; break;
+        }
+    }
+    for (size_t i = 0; i < rightTbl.len; ++i) {
+        if (rightTbl.cols[i].dataName == rightCol && rightTbl.cols[i].isPrimaryKey) {
+            rightColIndexed = true; break;
+        }
+    }
+
     // Decide join algorithm
     bool useNLJ = (leftRows < 100 || rightRows < 100);
-    bool useHash = !useNLJ;
+    bool useMerge = (!useNLJ && leftColIndexed && rightColIndexed);
+    bool useHash = (!useNLJ && !useMerge);
 
     // JOIN order optimization:
     // - NLJ: smaller table as LEFT (outer loop) to minimize full scans
     // - HashJoin: smaller table as RIGHT (build hash table) to reduce memory
+    // - MergeJoin: no swap needed, both sides sorted
     bool shouldSwap = false;
     if (useNLJ && rightRows < leftRows) {
         shouldSwap = true; // Put smaller table on the left for NLJ
@@ -899,6 +920,11 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
 
     if (useNLJ) {
         return std::make_unique<NestedLoopJoinOp>(
+            engine, dbname, std::move(leftScan), std::move(rightScan),
+            lTbl, rTbl, lCol, rCol);
+    }
+    if (useMerge) {
+        return std::make_unique<MergeJoinOp>(
             engine, dbname, std::move(leftScan), std::move(rightScan),
             lTbl, rTbl, lCol, rCol);
     }
