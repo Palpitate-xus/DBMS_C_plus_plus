@@ -790,6 +790,16 @@ std::filesystem::path StorageEngine::partitionDataPath(const std::string& dbname
     return dbPath(dbname) / (tablename + "#" + partitionName + "#" + subPartitionName + ".dt");
 }
 
+std::filesystem::path StorageEngine::fsmPath(const std::string& dbname,
+                                               const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".fsm");
+}
+
+std::filesystem::path StorageEngine::vmPath(const std::string& dbname,
+                                             const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".vm");
+}
+
 std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) const {
     return dbPath(dbname) / "tlist.lst";
 }
@@ -2579,6 +2589,40 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
 
 void StorageEngine::closeAllPageAllocators() {
     pageAllocators_.clear();
+}
+
+FreeSpaceMap* StorageEngine::getFSM(const std::string& dbname,
+                                     const std::string& tablename) const {
+    std::string key = dbname + "/" + tablename;
+    auto it = fsmCache_.find(key);
+    if (it != fsmCache_.end()) return it->second.get();
+
+    auto fsm = std::make_unique<FreeSpaceMap>(fsmPath(dbname, tablename).string());
+    fsm->open();
+    FreeSpaceMap* ptr = fsm.get();
+    fsmCache_[key] = std::move(fsm);
+    return ptr;
+}
+
+void StorageEngine::closeAllFSM() {
+    fsmCache_.clear();
+}
+
+VisibilityMap* StorageEngine::getVM(const std::string& dbname,
+                                     const std::string& tablename) const {
+    std::string key = dbname + "/" + tablename;
+    auto it = vmCache_.find(key);
+    if (it != vmCache_.end()) return it->second.get();
+
+    auto vm = std::make_unique<VisibilityMap>(vmPath(dbname, tablename).string());
+    vm->open();
+    VisibilityMap* ptr = vm.get();
+    vmCache_[key] = std::move(vm);
+    return ptr;
+}
+
+void StorageEngine::closeAllVM() {
+    vmCache_.clear();
 }
 
 void StorageEngine::migrateToPageStorage(const std::string& dbname,
@@ -5316,6 +5360,8 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(schemaPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
+    std::filesystem::remove(fsmPath(dbname, tablename));
+    std::filesystem::remove(vmPath(dbname, tablename));
     removeSeq(dbname, tablename);
     // Remove TOAST data
     auto tdir = toastDir(dbname, tablename);
@@ -5328,6 +5374,8 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
     std::string key = dbname + "/" + tablename;
     pkIndexCache_.erase(key);
     pageAllocators_.erase(key);
+    fsmCache_.erase(key);
+    vmCache_.erase(key);
     secondaryIndexCache_.erase(key);
 
     auto names = getTableNames(dbname);
@@ -5350,8 +5398,10 @@ OpResult StorageEngine::truncateTable(const std::string& dbname,
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
-    // Remove and recreate data file
+    // Remove and recreate data file + forks
     std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::remove(fsmPath(dbname, tablename));
+    std::filesystem::remove(vmPath(dbname, tablename));
     {
         auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tablename).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
         pa->open();
@@ -5400,6 +5450,8 @@ OpResult StorageEngine::truncateTable(const std::string& dbname,
     std::string key = dbname + "/" + tablename;
     pkIndexCache_.erase(key);
     pageAllocators_.erase(key);
+    fsmCache_.erase(key);
+    vmCache_.erase(key);
     secondaryIndexCache_.erase(key);
     hashIndexCache_.erase(key);
 

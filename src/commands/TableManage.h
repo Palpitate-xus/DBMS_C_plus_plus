@@ -15,6 +15,8 @@
 #include "BPTree.h"
 #include "BufferPool.h"
 #include "PageAllocator.h"
+#include "FreeSpaceMap.h"
+#include "VisibilityMap.h"
 #include "LockManager.h"
 #include "HashIndex.h"
 #include "SPGiSTIndex.h"
@@ -739,6 +741,8 @@ public:
     BPTree* getSecondaryIndex(const std::string& dbname, const std::string& tablename,
                               const std::string& colname) const;
     PageAllocator* getPageAllocator(const std::string& dbname, const std::string& tablename) const;
+    FreeSpaceMap* getFSM(const std::string& dbname, const std::string& tablename) const;
+    VisibilityMap* getVM(const std::string& dbname, const std::string& tablename) const;
 
     // Table-level permissions
     enum class TablePrivilege { Select, Insert, Update, Delete, All, Usage, Execute };
@@ -873,6 +877,8 @@ private:
     std::filesystem::path tableListPath(const std::string& dbname) const;
     std::filesystem::path walPath(const std::string& dbname) const;
     std::filesystem::path checkpointPath(const std::string& dbname) const;
+    std::filesystem::path fsmPath(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path vmPath(const std::string& dbname, const std::string& tablename) const;
 
 public:
     std::filesystem::path viewPath(const std::string& dbname, const std::string& viewname) const;
@@ -936,6 +942,12 @@ private:
     void closeAllPageAllocators();
     void migrateAllDataFiles();
     void migrateToPageStorage(const std::string& dbname, const std::string& tablename) const;
+
+    // Free Space Map + Visibility Map (fork files)
+    mutable std::map<std::string, std::unique_ptr<FreeSpaceMap>> fsmCache_;
+    mutable std::map<std::string, std::unique_ptr<VisibilityMap>> vmCache_;
+    void closeAllFSM();
+    void closeAllVM();
 
     // B+ Tree primary key index
     std::filesystem::path indexPath(const std::string& dbname, const std::string& tablename) const;

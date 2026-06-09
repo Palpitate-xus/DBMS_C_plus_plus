@@ -27,6 +27,9 @@ set(DBMS_SOURCES
     src/storage/BufferPool.cpp
     src/storage/PageAllocator.cpp
     src/storage/Page.cpp
+    src/storage/PgPage.cpp
+    src/storage/FreeSpaceMap.cpp
+    src/storage/VisibilityMap.cpp
     src/access/BPTree.cpp
     src/access/HashIndex.cpp
     src/access/SPGiSTIndex.cpp
