@@ -107,6 +107,9 @@ struct TableSchema {
     // Storage format version: 0 = legacy 4KB, 1 = 4KB with MVCC, 2 = PostgreSQL 8KB
     uint32_t formatVersion = 0;
 
+    // Tablespace: physical location for data files (default = "pg_default")
+    std::string tablespace = "pg_default";
+
     void append(const Column& ncol);
     void appendFK(const ForeignKey& fk);
     void print() const;
@@ -934,6 +937,19 @@ public:
 
     // VACUUM orphaned TOAST files: remove toast entries no longer referenced by any row
     size_t vacuumToast(const std::string& dbname, const std::string& tablename);
+
+    // ========================================================================
+    // Tablespace management
+    // ========================================================================
+    // Resolve the physical directory for a tablespace.
+    // "pg_default" returns dbPath(dbname); others read from dbname/pg_tblspc/<name>.path
+    std::filesystem::path tablespaceDir(const std::string& dbname, const std::string& tablespaceName) const;
+    // Create a new tablespace pointing to an absolute directory
+    OpResult createTablespace(const std::string& dbname, const std::string& tsName, const std::string& physicalPath);
+    // Drop a user-defined tablespace (must be empty)
+    OpResult dropTablespace(const std::string& dbname, const std::string& tsName);
+    // List all tablespaces
+    std::vector<std::string> listTablespaces(const std::string& dbname) const;
 
 private:
 

@@ -2556,6 +2556,83 @@ std::filesystem::path StorageEngine::indexPath(const std::string& dbname,
 }
 
 // ========================================================================
+// Tablespace management
+// ========================================================================
+std::filesystem::path StorageEngine::tablespaceDir(const std::string& dbname,
+                                                    const std::string& tablespaceName) const {
+    if (tablespaceName.empty() || tablespaceName == "pg_default") {
+        return dbPath(dbname);
+    }
+    auto tsPath = dbPath(dbname) / "pg_tblspc" / (tablespaceName + ".path");
+    if (std::filesystem::exists(tsPath)) {
+        std::ifstream ifs(tsPath);
+        std::string path;
+        if (std::getline(ifs, path) && !path.empty()) {
+            return std::filesystem::path(path);
+        }
+    }
+    // Fallback to default if tablespace file missing
+    return dbPath(dbname);
+}
+
+OpResult StorageEngine::createTablespace(const std::string& dbname,
+                                          const std::string& tsName,
+                                          const std::string& physicalPath) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (tsName.empty() || tsName == "pg_default" || tsName == "pg_global") {
+        return OpResult::InvalidValue; // reserved names
+    }
+    auto tsDir = dbPath(dbname) / "pg_tblspc";
+    if (!std::filesystem::exists(tsDir)) {
+        std::filesystem::create_directories(tsDir);
+    }
+    auto tsPath = tsDir / (tsName + ".path");
+    if (std::filesystem::exists(tsPath)) return OpResult::TableAlreadyExist;
+
+    // Ensure physical directory exists
+    if (!std::filesystem::exists(physicalPath)) {
+        std::filesystem::create_directories(physicalPath);
+    }
+    std::ofstream ofs(tsPath);
+    if (!ofs) return OpResult::InvalidValue;
+    ofs << physicalPath << "\n";
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::dropTablespace(const std::string& dbname,
+                                        const std::string& tsName) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (tsName.empty() || tsName == "pg_default" || tsName == "pg_global") {
+        return OpResult::InvalidValue;
+    }
+    auto tsPath = dbPath(dbname) / "pg_tblspc" / (tsName + ".path");
+    if (!std::filesystem::exists(tsPath)) return OpResult::TableNotExist;
+
+    // Check if any table uses this tablespace
+    auto tables = getTableNames(dbname);
+    for (const auto& tname : tables) {
+        TableSchema tbl = getTableSchema(dbname, tname);
+        if (tbl.tablespace == tsName) return OpResult::InvalidValue; // not empty
+    }
+    std::filesystem::remove(tsPath);
+    return OpResult::Success;
+}
+
+std::vector<std::string> StorageEngine::listTablespaces(const std::string& dbname) const {
+    std::vector<std::string> result;
+    result.push_back("pg_default");
+    auto tsDir = dbPath(dbname) / "pg_tblspc";
+    if (!std::filesystem::exists(tsDir)) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(tsDir)) {
+        std::string fname = entry.path().filename().string();
+        if (fname.size() > 5 && fname.substr(fname.size() - 5) == ".path") {
+            result.push_back(fname.substr(0, fname.size() - 5));
+        }
+    }
+    return result;
+}
+
+// ========================================================================
 // Page Allocator
 // ========================================================================
 
@@ -2565,7 +2642,11 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
     auto it = pageAllocators_.find(key);
     if (it != pageAllocators_.end()) return it->second.get();
 
-    std::filesystem::path dt = dataPath(dbname, tablename);
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    // Route data file according to tablespace
+    std::filesystem::path baseDir = tablespaceDir(dbname, tbl.tablespace);
+    std::filesystem::path dt = baseDir / (tablename + ".dt");
+
     // Migrate legacy file if needed
     if (std::filesystem::exists(dt)) {
         std::ifstream check(dt, std::ios::binary);
@@ -2579,7 +2660,6 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
         }
     }
 
-    TableSchema tbl = getTableSchema(dbname, tablename);
     auto pa = std::make_unique<PageAllocator>(dt.string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion));
     pa->open();
     PageAllocator* ptr = pa.get();
@@ -4886,6 +4966,10 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     writeFixedString(out, tbl.defaultPartitionName, MAX_TABLE_NAME_LEN);
     // Storage format version (new in version 4)
     out.write(reinterpret_cast<const char*>(&tbl.formatVersion), 4);
+    // Tablespace (backward-compatible tail append)
+    uint16_t tsLen = static_cast<uint16_t>(tbl.tablespace.size());
+    out.write(reinterpret_cast<const char*>(&tsLen), 2);
+    if (tsLen > 0) out.write(tbl.tablespace.data(), tsLen);
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -5141,6 +5225,14 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         uint32_t fv = 0;
         in.read(reinterpret_cast<char*>(&fv), 4);
         if (in) tbl.formatVersion = fv;
+        // Tablespace (backward-compatible tail append)
+        uint16_t tsLen = 0;
+        in.read(reinterpret_cast<char*>(&tsLen), 2);
+        if (in && tsLen > 0 && tsLen <= MAX_TABLE_NAME_LEN) {
+            std::string ts(tsLen, '\0');
+            in.read(ts.data(), tsLen);
+            if (in) tbl.tablespace = std::move(ts);
+        }
     }
 
     return tbl;
