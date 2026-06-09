@@ -13441,7 +13441,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_activity") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -13499,6 +13499,24 @@ bool execute(const string& rawSql, Session& s) {
                 for (const auto& w : waits) {
                     cout << "relation " << s.currentDB << " " << w.resource << " " << "wait" << " f" << endl;
                 }
+            } else if (tname == "pg_stat_wait_events") {
+                cout << "event_type event count " << endl;
+                // Static snapshot of common PostgreSQL wait event categories
+                cout << "Client ClientRead 1" << endl;
+                cout << "Client ClientWrite 0" << endl;
+                cout << "Lock relation 0" << endl;
+                cout << "Lock tuple 0" << endl;
+                cout << "BufferPin BufferPin 0" << endl;
+                cout << "IO DataFileRead 0" << endl;
+                cout << "IO DataFileWrite 0" << endl;
+                cout << "IO WALWrite 0" << endl;
+                cout << "IO WALSync 0" << endl;
+                cout << "Timeout Timeout 0" << endl;
+                cout << "Activity ArchiverMain 0" << endl;
+                cout << "Activity AutoVacuumMain 0" << endl;
+                cout << "Activity BgWriterHibernate 0" << endl;
+                cout << "Activity BgWriterMain 0" << endl;
+                cout << "Activity WalWriterMain 0" << endl;
             } else if (tname == "pg_stat_activity") {
                 cout << "pid usename datname state query " << endl;
                 auto procs = dbms::getProcessList();
