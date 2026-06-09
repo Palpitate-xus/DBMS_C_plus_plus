@@ -28,6 +28,7 @@ set(DBMS_SOURCES
     src/storage/PageAllocator.cpp
     src/storage/Page.cpp
     src/storage/PgPage.cpp
+    src/storage/PageWrapper.cpp
     src/storage/FreeSpaceMap.cpp
     src/storage/VisibilityMap.cpp
     src/access/BPTree.cpp
