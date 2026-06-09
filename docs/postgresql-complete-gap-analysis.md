@@ -130,6 +130,7 @@ PostgreSQL 18 官方文档覆盖：
 > 2026-06-08 后续进展：新增 `DO` 简化 SQL block 执行、`LOAD 'library'` 目录登记、PostgreSQL 风格 `SELECT ... INTO [TEMP|UNLOGGED] table FROM ...` 到 CTAS 的转换；这些能力已经过建库、建表、插入、查询和目录展示冒烟，但仍不等同于 PL/pgSQL runtime、动态共享库加载或 PostgreSQL executor 级 SELECT INTO 语义。
 > 2026-06-08 约束兼容进展：新增 `CREATE/DROP ASSERTION` 目录级入口，并为 `ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE USING ...`、`DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE CONSTRAINT` 和 `ALTER CONSTRAINT` 写入 `.pg_compat_objects` 元数据；CHECK/UNIQUE/FK 的实际执行检查仍沿用项目内原有简化实现，EXCLUDE/延迟队列/提交时 recheck 尚未接入 executor。
 > 2026-06-08 角色与序列进展：新增 `CREATE/ALTER/DROP GROUP` 作为 role 别名，`ALTER ROLE` 可记录 PostgreSQL 风格属性并支持显式 role rename，`DROP ROLE` 不再依赖当前数据库；`ALTER SEQUENCE` 支持 `RESTART [WITH]`、`INCREMENT BY`、`RENAME TO` 并记录其他选项元数据。仍缺 PostgreSQL `pg_authid`/`pg_auth_members`、角色属性执行语义、依赖检查、序列 cache/cycle/min/max/owned-by 和事务性。
+> 2026-06-09 数据库 ALTER 进展：`ALTER DATABASE` 支持实际目录 rename，并为 `OWNER TO`、`SET/RESET` 记录 `.pg_database_options` 元数据；`DROP DATABASE` 不再依赖当前数据库并支持 `IF EXISTS`，当前会同步当前会话数据库名，但仍缺 PostgreSQL catalog/OID、连接踢出、权限检查、依赖和事务性。
 
 | 类别 | 缺失命令 |
 |---|---|
@@ -142,7 +143,7 @@ PostgreSQL 18 官方文档覆盖：
 | 语言/大对象 | `CREATE LANGUAGE`, `ALTER LANGUAGE`, `DROP LANGUAGE`, `ALTER LARGE OBJECT`, `DROP LARGE OBJECT` |
 | 统计/表空间/全文配置 | `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
 | 事务/会话别名和状态 | 本轮已将 `SET CONSTRAINTS`、`SET SESSION AUTHORIZATION`、`MOVE` 移至“部分实现”；仍缺 PostgreSQL 完整语义。 |
-| 数据库/对象 ALTER 子集 | `ALTER DATABASE`, `ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER TRIGGER`, `ALTER TYPE` 已有目录级兼容登记但缺完整 PG 语义；`ALTER ROLE`、`ALTER GROUP`、`ALTER SEQUENCE` 已进入部分实现，仍缺完整 catalog/依赖/权限/事务语义 |
+| 数据库/对象 ALTER 子集 | `ALTER DATABASE` 已支持 rename 和 owner/options 元数据；`ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER POLICY`, `ALTER TRIGGER`, `ALTER TYPE` 已有目录级兼容登记但缺完整 PG 语义；`ALTER ROLE`、`ALTER GROUP`、`ALTER SEQUENCE` 已进入部分实现，仍缺完整 catalog/依赖/权限/事务语义 |
 | 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义、`CREATE/DROP ASSERTION` 目录级登记、`CREATE/DROP GROUP` 兼容别名已进入部分实现；仍缺真实共享库加载、安全限制、完整 CTAS 类型推断和断言执行器 |
 
 ## 5. 数据类型差距

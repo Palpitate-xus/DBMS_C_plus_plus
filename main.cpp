@@ -4709,6 +4709,154 @@ static bool handleDropRoleGlobal(const string& sql, Session& s) {
     return false;
 }
 
+struct DatabaseOptionInfo {
+    string name;
+    string owner;
+    string options;
+    string definition;
+};
+
+static std::filesystem::path databaseOptionsPath() {
+    return ".pg_database_options";
+}
+
+static map<string, DatabaseOptionInfo> loadDatabaseOptions() {
+    map<string, DatabaseOptionInfo> result;
+    ifstream in(databaseOptionsPath());
+    string line;
+    while (getline(in, line)) {
+        if (trim(line).empty()) continue;
+        auto parts = splitByDelimiter(line, '|');
+        if (parts.size() < 4) continue;
+        DatabaseOptionInfo info;
+        info.name = catalogUnescape(parts[0]);
+        info.owner = catalogUnescape(parts[1]);
+        info.options = catalogUnescape(parts[2]);
+        info.definition = catalogUnescape(parts[3]);
+        if (!info.name.empty()) result[info.name] = info;
+    }
+    return result;
+}
+
+static bool saveDatabaseOptions(const map<string, DatabaseOptionInfo>& options) {
+    ofstream out(databaseOptionsPath(), ios::trunc);
+    if (!out) return false;
+    for (const auto& kv : options) {
+        const auto& info = kv.second;
+        out << catalogEscape(info.name) << "|"
+            << catalogEscape(info.owner) << "|"
+            << catalogEscape(info.options) << "|"
+            << catalogEscape(info.definition) << "\n";
+    }
+    return true;
+}
+
+static bool handleAlterDatabase(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(14)); // after "alter database"
+    vector<string> tokens = tokenize(rest);
+    if (tokens.size() < 2) {
+        cout << "SQL syntax error: ALTER DATABASE name RENAME TO newname | OWNER TO user | SET/RESET option" << endl;
+        return true;
+    }
+    string dbname = tokens[0];
+    if (!g_engine.databaseExists(dbname)) {
+        cout << "Database " << dbname << " not exist" << endl;
+        return true;
+    }
+
+    auto dbOptions = loadDatabaseOptions();
+    auto ensureInfo = [&]() -> DatabaseOptionInfo& {
+        auto& info = dbOptions[dbname];
+        if (info.name.empty()) info.name = dbname;
+        if (info.owner.empty()) info.owner = s.username;
+        return info;
+    };
+
+    if (tokens.size() >= 4 && tokens[1] == "rename" && tokens[2] == "to") {
+        string newName = tokens[3];
+        if (g_engine.databaseExists(newName)) {
+            cout << "Database " << newName << " already exists" << endl;
+            return true;
+        }
+        try {
+            auto oldArchive = std::filesystem::path(g_engine.dbPath(dbname).string() + ".archive");
+            auto newArchive = std::filesystem::path(g_engine.dbPath(newName).string() + ".archive");
+            std::filesystem::rename(g_engine.dbPath(dbname), g_engine.dbPath(newName));
+            if (std::filesystem::exists(oldArchive)) std::filesystem::rename(oldArchive, newArchive);
+        } catch (...) {
+            cout << "Rename database failed" << endl;
+            return true;
+        }
+        auto it = dbOptions.find(dbname);
+        if (it != dbOptions.end()) {
+            auto info = it->second;
+            dbOptions.erase(it);
+            info.name = newName;
+            info.definition = sql;
+            dbOptions[newName] = info;
+            saveDatabaseOptions(dbOptions);
+        }
+        if (s.currentDB == dbname) s.currentDB = newName;
+        cout << "Database " << dbname << " renamed to " << newName << endl;
+        return false;
+    }
+
+    auto& info = ensureInfo();
+    info.definition = sql;
+    if (tokens.size() >= 4 && tokens[1] == "owner" && tokens[2] == "to") {
+        info.owner = tokens[3];
+        if (!saveDatabaseOptions(dbOptions)) {
+            cout << "Alter database failed" << endl;
+            return true;
+        }
+        cout << "Database " << dbname << " owner changed" << endl;
+        return false;
+    }
+    if (tokens[1] == "set" || tokens[1] == "reset") {
+        size_t actionPos = findTopLevelKeyword(rest, tokens[1]);
+        info.options = (actionPos == string::npos) ? tokens[1] : trim(rest.substr(actionPos));
+        if (!saveDatabaseOptions(dbOptions)) {
+            cout << "Alter database failed" << endl;
+            return true;
+        }
+        cout << "Database " << dbname << " options updated" << endl;
+        return false;
+    }
+    cout << "SQL syntax error: ALTER DATABASE name RENAME TO newname | OWNER TO user | SET/RESET option" << endl;
+    return true;
+}
+
+static bool handleDropDatabaseGlobal(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(13)); // after "drop database"
+    bool ifExists = false;
+    if (startsWithKeyword(rest, "if exists")) {
+        ifExists = true;
+        rest = trim(rest.substr(9));
+    }
+    string dbname = firstCompatNameToken(stripTrailingDropBehavior(rest));
+    if (dbname.empty()) {
+        cout << "SQL syntax error: DROP DATABASE name" << endl;
+        return true;
+    }
+    auto res = g_engine.dropDatabase(dbname);
+    if (res == OpResult::DatabaseNotExist) {
+        if (ifExists) {
+            cout << "Database " << dbname << " does not exist, skipping" << endl;
+            return false;
+        }
+        cout << "Database " << dbname << " not exist" << endl;
+        return true;
+    }
+    auto dbOptions = loadDatabaseOptions();
+    if (dbOptions.erase(dbname) > 0) saveDatabaseOptions(dbOptions);
+    if (s.currentDB == dbname) s.currentDB.clear();
+    cout << "Database dropped" << endl;
+    log(s.username, "database dropped", getTime());
+    return false;
+}
+
 static bool handleCreateTablespace(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     string rest = trim(sql.substr(17));
@@ -7995,6 +8143,9 @@ bool execute(const string& rawSql, Session& s) {
         if (tokens[0] == "group") {
             return handleAlterGroup(sql, s);
         }
+        if (tokens[0] == "database") {
+            return handleAlterDatabase(sql, s);
+        }
         {
             string rest = trim(sql.substr(5));
             string compatKind, compatPhrase;
@@ -10899,6 +11050,10 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
+    if (startsWithKeyword(sql, "drop database")) {
+        return handleDropDatabaseGlobal(sql, s);
+    }
+
     if (startsWithKeyword(sql, "drop role")) {
         return handleDropRoleGlobal(sql, s);
     }
@@ -11082,6 +11237,9 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Database " << name << " not exist" << endl;
                 return true;
             }
+            auto dbOptions = loadDatabaseOptions();
+            if (dbOptions.erase(name) > 0) saveDatabaseOptions(dbOptions);
+            if (s.currentDB == name) s.currentDB.clear();
             cout << "Database dropped" << endl;
             log(s.username, "database dropped", getTime());
             return false;
