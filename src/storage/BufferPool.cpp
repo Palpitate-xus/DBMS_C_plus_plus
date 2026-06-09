@@ -5,14 +5,14 @@
 
 namespace dbms {
 
-BufferPool::BufferPool(const std::string& filename, size_t numFrames)
-    : filename_(filename), numFrames_(numFrames) {
+BufferPool::BufferPool(const std::string& filename, size_t numFrames, size_t pageSize)
+    : filename_(filename), numFrames_(numFrames), pageSize_(pageSize) {
     frames_.resize(numFrames_);
     for (size_t i = 0; i < numFrames_; ++i) {
         frames_[i].pageId = static_cast<uint32_t>(-1);
         frames_[i].dirty = false;
         frames_[i].pinCount = 0;
-        frames_[i].data.resize(BP_POOL_PAGE_SIZE);
+        frames_[i].data.resize(pageSize_);
         frames_[i].lruIter = lruList_.end();
     }
 }
@@ -41,21 +41,21 @@ void BufferPool::close() {
 
 bool BufferPool::readFromDisk(uint32_t pageId, char* buf) {
     if (fd_ < 0) return false;
-    off_t offset = static_cast<off_t>(pageId) * BP_POOL_PAGE_SIZE;
-    ssize_t n = ::pread(fd_, buf, BP_POOL_PAGE_SIZE, offset);
-    if (n < static_cast<ssize_t>(BP_POOL_PAGE_SIZE)) {
+    off_t offset = static_cast<off_t>(pageId) * pageSize_;
+    ssize_t n = ::pread(fd_, buf, pageSize_, offset);
+    if (n < static_cast<ssize_t>(pageSize_)) {
         // New page: zero-fill remainder
         if (n < 0) n = 0;
-        std::memset(buf + n, 0, BP_POOL_PAGE_SIZE - n);
+        std::memset(buf + n, 0, pageSize_ - n);
     }
     return true;
 }
 
 bool BufferPool::writeToDisk(uint32_t pageId, const char* buf) {
     if (fd_ < 0) return false;
-    off_t offset = static_cast<off_t>(pageId) * BP_POOL_PAGE_SIZE;
-    ssize_t n = ::pwrite(fd_, buf, BP_POOL_PAGE_SIZE, offset);
-    return n == static_cast<ssize_t>(BP_POOL_PAGE_SIZE);
+    off_t offset = static_cast<off_t>(pageId) * pageSize_;
+    ssize_t n = ::pwrite(fd_, buf, pageSize_, offset);
+    return n == static_cast<ssize_t>(pageSize_);
 }
 
 size_t BufferPool::evictFrame() {

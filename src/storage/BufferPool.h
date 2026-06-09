@@ -10,12 +10,12 @@
 
 namespace dbms {
 
-constexpr size_t BP_POOL_PAGE_SIZE = 4096;
-
 // Simple page buffer pool with LRU eviction
+// Page size is runtime-configurable to support multiple storage formats.
 class BufferPool {
 public:
-    explicit BufferPool(const std::string& filename, size_t numFrames = 16);
+    explicit BufferPool(const std::string& filename, size_t numFrames = 16,
+                        size_t pageSize = 4096);
     ~BufferPool();
 
     bool open();
@@ -65,6 +65,7 @@ private:
     std::string filename_;
     int fd_ = -1;
     size_t numFrames_;
+    size_t pageSize_;
     std::vector<Frame> frames_;
     std::unordered_map<uint32_t, size_t> pageMap_; // pageId -> frame index
     std::list<size_t> lruList_; // frame indices, front = LRU, back = MRU

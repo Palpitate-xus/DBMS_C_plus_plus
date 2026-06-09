@@ -14,13 +14,16 @@ namespace dbms {
 // Pages 1..N are data pages managed via a free list.
 class PageAllocator {
 public:
-    PageAllocator(const std::string& filename, size_t rowSize);
+    PageAllocator(const std::string& filename, size_t rowSize,
+                  size_t pageSize = 4096);
     ~PageAllocator();
 
     // Open or create the data file.
     bool open();
     void close();
     bool isOpen() const;
+
+    size_t pageSize() const { return pageSize_; }
 
     // Allocate a new data page (pageId >= 1).
     // Reuses a page from the free list if available.
@@ -48,6 +51,7 @@ public:
 private:
     std::string filename_;
     size_t rowSize_;
+    size_t pageSize_;
     std::unique_ptr<BufferPool> bp_;
 
     // Read/write the file header stored in page 0.

@@ -4,8 +4,8 @@
 
 namespace dbms {
 
-PageAllocator::PageAllocator(const std::string& filename, size_t rowSize)
-    : filename_(filename), rowSize_(rowSize), bp_(std::make_unique<BufferPool>(filename, 16)) {}
+PageAllocator::PageAllocator(const std::string& filename, size_t rowSize, size_t pageSize)
+    : filename_(filename), rowSize_(rowSize), pageSize_(pageSize), bp_(std::make_unique<BufferPool>(filename, 16, pageSize)) {}
 
 PageAllocator::~PageAllocator() {
     close();
@@ -20,7 +20,7 @@ bool PageAllocator::open() {
     Page::FileHeader* fh = reinterpret_cast<Page::FileHeader*>(buf);
     if (fh->magic != Page::MAGIC) {
         // New file: initialize file header
-        std::memset(buf, 0, Page::PAGE_SIZE);
+        std::memset(buf, 0, pageSize_);
         fh->magic = Page::MAGIC;
         fh->numPages = 1;  // only page 0 (header)
         fh->freeListHead = 0;
@@ -53,7 +53,7 @@ uint32_t PageAllocator::allocPage() {
         // Reuse a page from the free list
         pageId = fh->freeListHead;
         char* pageBuf = bp_->fetchPage(pageId);
-        Page page(pageBuf);
+        Page page(pageBuf, pageSize_);
         uint32_t nextFree = page.nextPage();
         bp_->unpinPage(pageId);
 
@@ -65,7 +65,7 @@ uint32_t PageAllocator::allocPage() {
 
         // Initialize the new page
         char* newBuf = bp_->fetchPage(pageId);
-        Page newPage(newBuf);
+        Page newPage(newBuf, pageSize_);
         newPage.init(pageId);
         bp_->markDirty(pageId);
         bp_->unpinPage(pageId);
@@ -85,7 +85,7 @@ void PageAllocator::freePage(uint32_t pageId) {
 
     // Initialize the freed page and link it to free list
     char* pageBuf = bp_->fetchPage(pageId);
-    Page page(pageBuf);
+    Page page(pageBuf, pageSize_);
     page.init(pageId);
     page.setNextPage(fh->freeListHead);
     bp_->markDirty(pageId);
@@ -110,7 +110,7 @@ char* PageAllocator::fetchPage(uint32_t pageId) {
     if (!isOpen()) return nullptr;
     char* buf = bp_->fetchPage(pageId);
     if (buf && pageId >= 1) {
-        Page page(buf);
+        Page page(buf, pageSize_);
         if (!page.verifyChecksum()) {
             std::cerr << "[CHECKSUM ERROR] Page " << pageId << " checksum mismatch" << std::endl;
         }

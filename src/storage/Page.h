@@ -58,7 +58,9 @@ public:
     };
 #pragma pack(pop)
 
-    explicit Page(char* buf) : buf_(buf) {}
+    explicit Page(char* buf, size_t pageSize = PAGE_SIZE);
+
+    size_t pageSize() const { return pageSize_; }
 
     // Initialize a newly allocated page
     void init(uint32_t pageId);
@@ -114,6 +116,7 @@ public:
 
 private:
     char* buf_;
+    size_t pageSize_;
 
     Header* header() const { return reinterpret_cast<Header*>(buf_); }
     Slot* slot(uint16_t idx) const {

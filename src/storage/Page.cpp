@@ -4,6 +4,8 @@
 
 namespace dbms {
 
+Page::Page(char* buf, size_t pageSize) : buf_(buf), pageSize_(pageSize) {}
+
 // ========================================================================
 // Checksum
 // ========================================================================
@@ -20,7 +22,7 @@ uint16_t Page::computeChecksum(const char* data, size_t len) {
 void Page::writeChecksum() {
     Header* h = header();
     h->checksum = 0;
-    h->checksum = computeChecksum(buf_, PAGE_SIZE);
+    h->checksum = computeChecksum(buf_, pageSize_);
 }
 
 bool Page::verifyChecksum() const {
@@ -28,7 +30,7 @@ bool Page::verifyChecksum() const {
     uint16_t saved = h->checksum;
     if (saved == 0) return true; // unchecked / legacy page
     const_cast<Header*>(h)->checksum = 0;
-    uint16_t computed = computeChecksum(buf_, PAGE_SIZE);
+    uint16_t computed = computeChecksum(buf_, pageSize_);
     const_cast<Header*>(h)->checksum = saved;
     return saved == computed;
 }
@@ -38,12 +40,12 @@ bool Page::verifyChecksum() const {
 // ========================================================================
 
 void Page::init(uint32_t pageId) {
-    std::memset(buf_, 0, PAGE_SIZE);
+    std::memset(buf_, 0, pageSize_);
     Header* h = header();
     h->pageId = pageId;
     h->numSlots = 0;
     h->freeOffset = static_cast<uint16_t>(sizeof(Header));
-    h->dataOffset = static_cast<uint16_t>(PAGE_SIZE);
+    h->dataOffset = static_cast<uint16_t>(pageSize_);
     h->checksum = 0;
     h->nextPage = 0;
     writeChecksum();
@@ -54,7 +56,7 @@ void Page::init(uint32_t pageId) {
 // ========================================================================
 
 bool Page::insert(const char* data, size_t len, uint16_t& slotId) {
-    if (len == 0 || len > PAGE_SIZE - sizeof(Header) - sizeof(Slot)) return false;
+    if (len == 0 || len > pageSize_ - sizeof(Header) - sizeof(Slot)) return false;
 
     Header* h = header();
 
@@ -197,7 +199,7 @@ void Page::compact() {
               });
 
     // Move records to new compact positions, updating offsets in-place
-    uint16_t newDataOffset = static_cast<uint16_t>(PAGE_SIZE);
+    uint16_t newDataOffset = static_cast<uint16_t>(pageSize_);
     for (uint16_t i = 0; i < liveCount; ++i) {
         newDataOffset -= items[i].slot.length;
         std::memmove(buf_ + newDataOffset, buf_ + items[i].slot.offset, items[i].slot.length);
