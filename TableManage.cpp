@@ -13861,7 +13861,53 @@ OpResult StorageEngine::createDomain(const std::string& dbname, const DomainInfo
     if (!existing.name.empty()) return OpResult::TableAlreadyExist;
     std::ofstream ofs(path, std::ios::app);
     if (!ofs) return OpResult::InvalidValue;
-    ofs << info.name << "|" << info.baseType << "|" << info.defaultValue << "|" << info.checkExpr << "\n";
+    ofs << info.name << "|" << info.baseType << "|" << info.defaultValue << "|"
+        << info.checkExpr << "|" << info.constraintName << "\n";
+    return OpResult::Success;
+}
+
+OpResult StorageEngine::alterDomain(const std::string& dbname, const std::string& name,
+                                    const DomainInfo& info) {
+    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    auto path = domainPath(dbname);
+    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (info.name != name && !getDomain(dbname, info.name).name.empty()) {
+        return OpResult::TableAlreadyExist;
+    }
+    std::ifstream ifs(path);
+    std::vector<DomainInfo> domains;
+    std::string line;
+    bool found = false;
+    while (std::getline(ifs, line)) {
+        size_t sp1 = line.find('|');
+        if (sp1 == std::string::npos) continue;
+        size_t sp2 = line.find('|', sp1 + 1);
+        size_t sp3 = (sp2 == std::string::npos) ? std::string::npos : line.find('|', sp2 + 1);
+        size_t sp4 = (sp3 == std::string::npos) ? std::string::npos : line.find('|', sp3 + 1);
+        DomainInfo current;
+        current.name = line.substr(0, sp1);
+        current.baseType = (sp2 == std::string::npos) ? "" : line.substr(sp1 + 1, sp2 - sp1 - 1);
+        current.defaultValue = (sp2 == std::string::npos)
+            ? ""
+            : ((sp3 == std::string::npos) ? line.substr(sp2 + 1) : line.substr(sp2 + 1, sp3 - sp2 - 1));
+        current.checkExpr = (sp3 == std::string::npos)
+            ? ""
+            : ((sp4 == std::string::npos) ? line.substr(sp3 + 1) : line.substr(sp3 + 1, sp4 - sp3 - 1));
+        if (sp4 != std::string::npos) current.constraintName = line.substr(sp4 + 1);
+        if (current.name == name) {
+            domains.push_back(info);
+            found = true;
+        } else {
+            domains.push_back(current);
+        }
+    }
+    if (!found) return OpResult::TableNotExist;
+    std::ofstream ofs(path, std::ios::trunc);
+    if (!ofs) return OpResult::InvalidValue;
+    for (const auto& d : domains) {
+        ofs << d.name << "|" << d.baseType << "|" << d.defaultValue << "|"
+            << d.checkExpr << "|" << d.constraintName << "\n";
+    }
     return OpResult::Success;
 }
 
@@ -13898,11 +13944,17 @@ StorageEngine::DomainInfo StorageEngine::getDomain(const std::string& dbname, co
         if (sp1 == std::string::npos) continue;
         if (line.substr(0, sp1) != name) continue;
         size_t sp2 = line.find('|', sp1 + 1);
-        size_t sp3 = line.find('|', sp2 + 1);
+        size_t sp3 = (sp2 == std::string::npos) ? std::string::npos : line.find('|', sp2 + 1);
+        size_t sp4 = (sp3 == std::string::npos) ? std::string::npos : line.find('|', sp3 + 1);
         result.name = name;
-        result.baseType = line.substr(sp1 + 1, sp2 - sp1 - 1);
-        result.defaultValue = (sp3 == std::string::npos) ? line.substr(sp2 + 1) : line.substr(sp2 + 1, sp3 - sp2 - 1);
-        if (sp3 != std::string::npos) result.checkExpr = line.substr(sp3 + 1);
+        result.baseType = (sp2 == std::string::npos) ? "" : line.substr(sp1 + 1, sp2 - sp1 - 1);
+        result.defaultValue = (sp2 == std::string::npos)
+            ? ""
+            : ((sp3 == std::string::npos) ? line.substr(sp2 + 1) : line.substr(sp2 + 1, sp3 - sp2 - 1));
+        result.checkExpr = (sp3 == std::string::npos)
+            ? ""
+            : ((sp4 == std::string::npos) ? line.substr(sp3 + 1) : line.substr(sp3 + 1, sp4 - sp3 - 1));
+        if (sp4 != std::string::npos) result.constraintName = line.substr(sp4 + 1);
         break;
     }
     return result;

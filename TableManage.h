@@ -267,8 +267,11 @@ public:
         std::string baseType;
         std::string defaultValue;
         std::string checkExpr;
+        std::string constraintName;
     };
     OpResult createDomain(const std::string& dbname, const DomainInfo& info);
+    OpResult alterDomain(const std::string& dbname, const std::string& name,
+                         const DomainInfo& info);
     OpResult dropDomain(const std::string& dbname, const std::string& name);
     DomainInfo getDomain(const std::string& dbname, const std::string& name) const;
     std::vector<std::string> getDomainNames(const std::string& dbname) const;

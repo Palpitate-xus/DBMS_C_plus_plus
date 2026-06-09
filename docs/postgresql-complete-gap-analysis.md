@@ -77,7 +77,7 @@ PostgreSQL 18 官方文档覆盖：
 | `COMMIT PREPARED` / `PREPARE TRANSACTION` / `ROLLBACK PREPARED` | 部分实现 | 有二阶段入口，但没有 PG 的全局事务状态目录、崩溃恢复/锁/资源完整语义。 |
 | `COPY` | 部分实现 | 文件 CSV 导入导出；缺少 `STDIN/STDOUT` 协议、binary copy、PROGRAM、FREEZE、HEADER MATCH、encoding/options 完整矩阵和权限模型。 |
 | `CREATE DATABASE` | 部分实现 | 创建目录；缺少 template、owner、locale/collation provider、encoding、tablespace、OID/catalog 语义。 |
-| `CREATE DOMAIN` | 部分实现 | 支持 base/default/check；缺少 alter domain 完整语义、constraint naming/validation、依赖/类型系统集成。 |
+| `CREATE DOMAIN` | 部分实现 | 支持 base/default/check，`ALTER DOMAIN` 已支持 rename、set/drop default、add/drop/validate 单个 check constraint；缺少多约束、全表 revalidation、依赖/权限/类型系统深度集成。 |
 | `CREATE FUNCTION` | 部分实现 | 简单表达式/表值函数；缺少 language、volatility、strict、parallel、cost、rows、security definer、leakproof、set config、polymorphic、C/SQL/PL 函数。 |
 | `CREATE INDEX` | 部分实现 | 支持 btree/hash/GIN/GiST/BRIN/SP-GiST 风格、include/where/expression/concurrently；缺少 operator class/family、collation、NULLS sort、storage params、parallel build、真正 concurrent algorithm、AM API。 |
 | `CREATE MATERIALIZED VIEW` | 部分实现 | 用 backing table 保存结果；缺少 `WITH [NO] DATA`、唯一索引要求、并发刷新语义、依赖追踪。 |
@@ -132,6 +132,7 @@ PostgreSQL 18 官方文档覆盖：
 > 2026-06-08 角色与序列进展：新增 `CREATE/ALTER/DROP GROUP` 作为 role 别名，`ALTER ROLE` 可记录 PostgreSQL 风格属性并支持显式 role rename，`DROP ROLE` 不再依赖当前数据库；`ALTER SEQUENCE` 支持 `RESTART [WITH]`、`INCREMENT BY`、`RENAME TO` 并记录其他选项元数据。仍缺 PostgreSQL `pg_authid`/`pg_auth_members`、角色属性执行语义、依赖检查、序列 cache/cycle/min/max/owned-by 和事务性。
 > 2026-06-09 数据库 ALTER 进展：`ALTER DATABASE` 支持实际目录 rename，并为 `OWNER TO`、`SET/RESET` 记录 `.pg_database_options` 元数据；`DROP DATABASE` 不再依赖当前数据库并支持 `IF EXISTS`，当前会同步当前会话数据库名，但仍缺 PostgreSQL catalog/OID、连接踢出、权限检查、依赖和事务性。
 > 2026-06-09 RLS policy ALTER 进展：`ALTER POLICY ... ON ... RENAME TO ...` 与 `TO`/`USING`/`WITH CHECK` 子句会真实改写表级 `.rls` policy 文件，`DROP POLICY` 会在通用 `DROP` 分支前触达真实删除；仍缺 PostgreSQL catalog/OID、表达式绑定、依赖、owner 权限和事务性。
+> 2026-06-09 Domain ALTER 进展：`ALTER DOMAIN` 会真实改写 `.domains`，支持 `RENAME TO`、`SET/DROP DEFAULT`、`ADD/DROP CONSTRAINT ... CHECK (...)` 与简化 `VALIDATE CONSTRAINT`；仍缺 PostgreSQL 多约束目录、对既有列数据的全量 revalidation、依赖重写、权限和事务性。
 
 | 类别 | 缺失命令 |
 |---|---|
@@ -144,7 +145,7 @@ PostgreSQL 18 官方文档覆盖：
 | 语言/大对象 | `CREATE LANGUAGE`, `ALTER LANGUAGE`, `DROP LANGUAGE`, `ALTER LARGE OBJECT`, `DROP LARGE OBJECT` |
 | 统计/表空间/全文配置 | `CREATE TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH CONFIGURATION`, `DROP TEXT SEARCH CONFIGURATION`, `CREATE TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH DICTIONARY`, `DROP TEXT SEARCH DICTIONARY`, `CREATE TEXT SEARCH PARSER`, `ALTER TEXT SEARCH PARSER`, `DROP TEXT SEARCH PARSER`, `CREATE TEXT SEARCH TEMPLATE`, `ALTER TEXT SEARCH TEMPLATE`, `DROP TEXT SEARCH TEMPLATE` |
 | 事务/会话别名和状态 | 本轮已将 `SET CONSTRAINTS`、`SET SESSION AUTHORIZATION`、`MOVE` 移至“部分实现”；仍缺 PostgreSQL 完整语义。 |
-| 数据库/对象 ALTER 子集 | `ALTER DATABASE` 已支持 rename 和 owner/options 元数据；`ALTER POLICY` 已支持 rename/roles/using/with check 改写；`ALTER DOMAIN`, `ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER TRIGGER`, `ALTER TYPE` 已有目录级兼容登记但缺完整 PG 语义；`ALTER ROLE`、`ALTER GROUP`、`ALTER SEQUENCE` 已进入部分实现，仍缺完整 catalog/依赖/权限/事务语义 |
+| 数据库/对象 ALTER 子集 | `ALTER DATABASE` 已支持 rename 和 owner/options 元数据；`ALTER DOMAIN` 已支持 rename/default/单 check constraint 更新；`ALTER POLICY` 已支持 rename/roles/using/with check 改写；`ALTER INDEX`, `ALTER MATERIALIZED VIEW`, `ALTER TRIGGER`, `ALTER TYPE` 已有目录级兼容登记但缺完整 PG 语义；`ALTER ROLE`、`ALTER GROUP`、`ALTER SEQUENCE` 已进入部分实现，仍缺完整 catalog/依赖/权限/事务语义 |
 | 其他 | `LOAD` 共享库命令、`SELECT INTO` 建表语义、`CREATE/DROP ASSERTION` 目录级登记、`CREATE/DROP GROUP` 兼容别名已进入部分实现；仍缺真实共享库加载、安全限制、完整 CTAS 类型推断和断言执行器 |
 
 ## 5. 数据类型差距
@@ -170,7 +171,7 @@ PostgreSQL 18 官方文档覆盖：
 | 数组 | 部分实现 | 有 `INT[]`/`VARCHAR[]` 痕迹和 array_get/contains 简化；缺少多维数组、切片、unnest/array functions、ANY/ALL 完整语义。 |
 | Composite | 部分实现 | `CREATE TYPE AS (...)` 存字段；缺少 row constructor、字段访问、嵌套、函数参数/返回、catalog 语义。 |
 | Range/Multirange | 部分实现 | `int4range`、`int8range`、`numrange`、`tsrange`、`tstzrange`、`daterange` 及 multirange 名称已可作为字符串型列存取；缺少范围 canonicalization、约束、operators、函数和 GiST/SP-GiST opclass。 |
-| Domain | 部分实现 | 有 base/default/check 文件；缺少 constraint validation、alter domain、依赖、权限、数组自动类型。 |
+| Domain | 部分实现 | 有 base/default/check 文件并可通过 `ALTER DOMAIN` 更新 rename/default/单 check constraint；缺少多 constraint validation、依赖、权限、数组自动类型。 |
 | Object Identifier | 部分实现 | `oid`、`regclass`、`regproc`、`regtype`、`xid`、`cid` 等名称已可作为字符串型列存取；缺少 OID catalog 绑定、别名解析、依赖和系统函数语义。 |
 | `pg_lsn` | 部分实现/语义缺失 | 有列类型，但没有真实 WAL LSN 系统，因而不能承担 PG `pg_lsn` 语义。 |
 | Pseudo-types | 部分实现/语义缺失 | `record`、`anyelement`、`anyarray`、`cstring`、`trigger` 等名称已可被解析为字符串型列/元数据占位；仍缺 PostgreSQL 函数类型系统和调用约束语义。 |

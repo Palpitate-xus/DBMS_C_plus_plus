@@ -1223,6 +1223,32 @@ static bool startsWithKeyword(const string& s, const string& prefix) {
     return s.size() == prefix.size() || isspace(static_cast<unsigned char>(s[prefix.size()]));
 }
 
+static bool isSqlIdentChar(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+static size_t findTopLevelSqlKeyword(const string& sql, const string& kw, size_t startPos = 0) {
+    int depth = 0;
+    bool inStr = false;
+    size_t klen = kw.size();
+    for (size_t i = startPos; i < sql.size(); ++i) {
+        char c = sql[i];
+        if (inStr) {
+            if (c == '\'') inStr = false;
+            continue;
+        }
+        if (c == '\'') { inStr = true; continue; }
+        if (c == '(') { depth++; continue; }
+        if (c == ')') { if (depth > 0) depth--; continue; }
+        if (depth == 0 && i + klen <= sql.size() && sql.compare(i, klen, kw) == 0) {
+            bool leftOk = (i == 0) || !isSqlIdentChar(sql[i - 1]);
+            bool rightOk = (i + klen == sql.size()) || !isSqlIdentChar(sql[i + klen]);
+            if (leftOk && rightOk) return i;
+        }
+    }
+    return string::npos;
+}
+
 static string stripTrailingDropBehavior(string s) {
     s = trim(s);
     for (const string& kw : {" cascade", " restrict"}) {
@@ -4827,6 +4853,130 @@ static bool handleAlterDatabase(const string& sql, Session& s) {
     return true;
 }
 
+static string extractCheckExpression(const string& text, size_t checkPos) {
+    size_t lp = text.find('(', checkPos);
+    if (lp == string::npos) return "";
+    size_t rp = findMatchingParen(text, lp);
+    if (rp == string::npos) return "";
+    return trim(text.substr(lp + 1, rp - lp - 1));
+}
+
+static bool domainConstraintMatches(const dbms::StorageEngine::DomainInfo& info,
+                                    const string& constraintName) {
+    if (constraintName.empty()) return false;
+    if (!info.constraintName.empty()) return info.constraintName == constraintName;
+    return constraintName == info.name + "_check";
+}
+
+static bool handleAlterDomain(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(12)); // after "alter domain"
+    string domainName = firstCompatNameToken(rest);
+    if (domainName.empty()) {
+        cout << "SQL syntax error: ALTER DOMAIN requires a domain name" << endl;
+        return true;
+    }
+    string action = trim(rest.substr(domainName.size()));
+    auto info = g_engine.getDomain(s.currentDB, domainName);
+    if (info.name.empty()) {
+        cout << "Domain " << domainName << " not exist" << endl;
+        return true;
+    }
+
+    string message;
+    if (startsWithKeyword(action, "rename to")) {
+        string newName = firstCompatNameToken(trim(action.substr(9)));
+        if (newName.empty()) {
+            cout << "SQL syntax error: ALTER DOMAIN name RENAME TO newname" << endl;
+            return true;
+        }
+        info.name = newName;
+        message = "Domain " + domainName + " renamed to " + newName;
+    } else if (startsWithKeyword(action, "set default")) {
+        string defaultValue = trim(action.substr(11));
+        if (defaultValue.empty()) {
+            cout << "SQL syntax error: ALTER DOMAIN name SET DEFAULT value" << endl;
+            return true;
+        }
+        info.defaultValue = stripQuotes(defaultValue);
+        message = "Domain " + domainName + " default set";
+    } else if (startsWithKeyword(action, "drop default")) {
+        info.defaultValue.clear();
+        message = "Domain " + domainName + " default dropped";
+    } else if (startsWithKeyword(action, "add constraint") || startsWithKeyword(action, "add check")) {
+        size_t checkPos = findTopLevelSqlKeyword(action, "check");
+        string checkExpr = (checkPos == string::npos) ? "" : extractCheckExpression(action, checkPos);
+        if (checkExpr.empty()) {
+            cout << "SQL syntax error: ALTER DOMAIN name ADD [CONSTRAINT cname] CHECK (...)" << endl;
+            return true;
+        }
+        string constraintName;
+        if (startsWithKeyword(action, "add constraint")) {
+            string beforeCheck = (checkPos == string::npos) ? "" : trim(action.substr(14, checkPos - 14));
+            constraintName = firstCompatNameToken(beforeCheck);
+        }
+        if (constraintName.empty()) constraintName = domainName + "_check";
+        info.checkExpr = checkExpr;
+        info.constraintName = constraintName;
+        message = "Domain " + domainName + " constraint " + constraintName + " added";
+    } else if (startsWithKeyword(action, "drop constraint")) {
+        string clause = trim(action.substr(15));
+        bool ifExists = false;
+        if (startsWithKeyword(clause, "if exists")) {
+            ifExists = true;
+            clause = trim(clause.substr(9));
+        }
+        clause = stripTrailingDropBehavior(clause);
+        string constraintName = firstCompatNameToken(clause);
+        if (constraintName.empty()) {
+            cout << "SQL syntax error: ALTER DOMAIN name DROP CONSTRAINT constraint_name" << endl;
+            return true;
+        }
+        if (info.checkExpr.empty() || !domainConstraintMatches(info, constraintName)) {
+            if (ifExists) {
+                cout << "Domain constraint " << constraintName << " not found, skipping" << endl;
+                return false;
+            }
+            cout << "Domain constraint " << constraintName << " not found" << endl;
+            return true;
+        }
+        info.checkExpr.clear();
+        info.constraintName.clear();
+        message = "Domain " + domainName + " constraint " + constraintName + " dropped";
+    } else if (startsWithKeyword(action, "validate constraint")) {
+        string constraintName = firstCompatNameToken(trim(action.substr(19)));
+        if (constraintName.empty()) {
+            cout << "SQL syntax error: ALTER DOMAIN name VALIDATE CONSTRAINT constraint_name" << endl;
+            return true;
+        }
+        if (info.checkExpr.empty() || !domainConstraintMatches(info, constraintName)) {
+            cout << "Domain constraint " << constraintName << " not found" << endl;
+            return true;
+        }
+        cout << "Domain constraint " << constraintName << " validated" << endl;
+        return false;
+    } else {
+        return handleAlterCompatObject(sql, s);
+    }
+
+    auto res = g_engine.alterDomain(s.currentDB, domainName, info);
+    if (res == OpResult::TableAlreadyExist) {
+        cout << "Domain " << info.name << " already exists" << endl;
+        return true;
+    }
+    if (res == OpResult::TableNotExist) {
+        cout << "Domain " << domainName << " not exist" << endl;
+        return true;
+    }
+    if (res != OpResult::Success) {
+        cout << "Alter domain failed" << endl;
+        return true;
+    }
+    cout << message << endl;
+    return false;
+}
+
 static vector<string> parsePolicyRoles(const string& roleStr) {
     vector<string> roles;
     for (auto role : splitTopLevelComma(roleStr)) {
@@ -6538,22 +6688,36 @@ bool execute(const string& rawSql, Session& s) {
             }
             string dname = trim(rest.substr(0, asPos));
             string afterAs = trim(rest.substr(asPos + 4));
-            size_t defPos = afterAs.find(" default ");
-            size_t checkPos = afterAs.find(" check ");
+            size_t defPos = findTopLevelSqlKeyword(afterAs, "default");
+            size_t constraintPos = findTopLevelSqlKeyword(afterAs, "constraint");
+            size_t checkPos = findTopLevelSqlKeyword(afterAs, "check");
             size_t typeEnd = afterAs.size();
             if (defPos != string::npos) typeEnd = std::min(typeEnd, defPos);
+            if (constraintPos != string::npos) typeEnd = std::min(typeEnd, constraintPos);
             if (checkPos != string::npos) typeEnd = std::min(typeEnd, checkPos);
             string baseType = trim(afterAs.substr(0, typeEnd));
             string defVal;
             if (defPos != string::npos) {
-                size_t defStart = defPos + 9;
-                size_t defEnd = (checkPos != string::npos && checkPos > defPos) ? checkPos : afterAs.size();
+                size_t defStart = defPos + 7;
+                size_t defEnd = afterAs.size();
+                if (constraintPos != string::npos && constraintPos > defPos) defEnd = std::min(defEnd, constraintPos);
+                if (checkPos != string::npos && checkPos > defPos) defEnd = std::min(defEnd, checkPos);
                 defVal = stripQuotes(trim(afterAs.substr(defStart, defEnd - defStart)));
             }
             string checkExpr;
+            string constraintName;
             if (checkPos != string::npos) {
+                size_t constraintNameStart = (constraintPos == string::npos) ? string::npos : constraintPos + 10;
+                string beforeCheck = (constraintNameStart == string::npos || constraintNameStart > checkPos)
+                    ? ""
+                    : trim(afterAs.substr(constraintNameStart, checkPos - constraintNameStart));
+                if (startsWithKeyword(beforeCheck, "constraint")) {
+                    constraintName = firstCompatNameToken(trim(beforeCheck.substr(10)));
+                } else if (!beforeCheck.empty()) {
+                    constraintName = firstCompatNameToken(beforeCheck);
+                }
                 size_t lp = afterAs.find('(', checkPos);
-                size_t rp = afterAs.find(')', lp);
+                size_t rp = (lp == string::npos) ? string::npos : findMatchingParen(afterAs, lp);
                 if (lp != string::npos && rp != string::npos) {
                     checkExpr = trim(afterAs.substr(lp + 1, rp - lp - 1));
                 }
@@ -6563,6 +6727,7 @@ bool execute(const string& rawSql, Session& s) {
             info.baseType = baseType;
             info.defaultValue = defVal;
             info.checkExpr = checkExpr;
+            info.constraintName = constraintName;
             auto res = g_engine.createDomain(s.currentDB, info);
             if (res == OpResult::TableAlreadyExist) {
                 cout << "Domain " << dname << " already exists" << endl;
@@ -8259,6 +8424,9 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (tokens[0] == "database") {
             return handleAlterDatabase(sql, s);
+        }
+        if (tokens[0] == "domain") {
+            return handleAlterDomain(sql, s);
         }
         if (tokens[0] == "policy") {
             return handleAlterPolicy(sql, s);
@@ -11894,10 +12062,13 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "No domains found" << endl;
                 return false;
             }
-            cout << "domain_name base_type" << endl;
+            cout << "domain_name base_type default check constraint" << endl;
             for (const auto& n : names) {
                 auto d = g_engine.getDomain(s.currentDB, n);
-                cout << d.name << " " << d.baseType << endl;
+                cout << d.name << " " << d.baseType << " "
+                     << (d.defaultValue.empty() ? "-" : d.defaultValue) << " "
+                     << (d.checkExpr.empty() ? "-" : d.checkExpr) << " "
+                     << (d.constraintName.empty() ? "-" : d.constraintName) << endl;
             }
             return false;
         }
