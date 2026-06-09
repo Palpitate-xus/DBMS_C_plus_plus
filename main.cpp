@@ -13441,7 +13441,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -13545,6 +13545,25 @@ bool execute(const string& rawSql, Session& s) {
                         }
                     }
                 }
+            } else if (tname == "pg_settings") {
+                cout << "name setting unit " << endl;
+                cout << "max_connections " << g_config.maxConnections << " " << endl;
+                cout << "shared_buffers " << g_config.bufferPoolFrames << " 8kB" << endl;
+                cout << "work_mem " << g_config.workMemKb << " kB" << endl;
+                cout << "checkpoint_timeout " << g_config.checkpointInterval << " s" << endl;
+                cout << "statement_timeout " << g_config.statementTimeoutMs << " ms" << endl;
+                cout << "lock_timeout " << g_config.lockTimeoutMs << " ms" << endl;
+                cout << "deadlock_timeout " << g_config.deadlockTimeoutMs << " ms" << endl;
+                cout << "slow_query_threshold_ms " << g_config.slowQueryThresholdMs << " ms" << endl;
+                cout << "enable_seq_scan " << (g_config.enableSeqScan ? "on" : "off") << " " << endl;
+                cout << "enable_hash_join " << (g_config.enableHashJoin ? "on" : "off") << " " << endl;
+                cout << "enable_merge_join " << (g_config.enableMergeJoin ? "on" : "off") << " " << endl;
+                cout << "auto_explain " << (g_config.autoExplainEnabled ? "on" : "off") << " " << endl;
+                cout << "auto_explain.log_min_duration " << g_config.autoExplainThresholdMs << " ms" << endl;
+                cout << "auto_vacuum " << (g_config.autoVacuumEnabled ? "on" : "off") << " " << endl;
+                cout << "auto_analyze " << (g_config.autoAnalyzeEnabled ? "on" : "off") << " " << endl;
+                cout << "password_policy_level " << g_config.passwordPolicyLevel << " " << endl;
+                cout << "audit_level " << g_config.auditLevel << " " << endl;
             }
             return false;
         }
