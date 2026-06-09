@@ -12930,8 +12930,10 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     secondaryIndexCache_.erase(key);
     hashIndexCache_.erase(key);
 
-    // Remove old data file
+    // Remove old data file + fork files
     std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::remove(fsmPath(dbname, tablename));
+    std::filesystem::remove(vmPath(dbname, tablename));
     // Remove all index files for this table
     std::filesystem::remove(indexPath(dbname, tablename)); // PK index .idx
     auto indexedCols = getIndexedColumns(dbname, tablename);
