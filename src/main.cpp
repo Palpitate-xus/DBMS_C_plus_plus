@@ -1876,6 +1876,292 @@ static bool handleReindex(const string& sql, Session& s) {
     return true;
 }
 
+static bool handleCallProcedure(const string& sql, Session& s) {
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(4));
+    if (rest.empty()) {
+        cout << "SQL syntax error: CALL procedure_name" << endl;
+        return true;
+    }
+    string procname;
+    vector<string> args;
+    size_t lp = rest.find('(');
+    if (lp != string::npos) {
+        procname = trim(rest.substr(0, lp));
+        size_t rp = string::npos;
+        int depth = 0;
+        bool inQuote = false;
+        for (size_t i = lp; i < rest.size(); ++i) {
+            if (rest[i] == '\'') inQuote = !inQuote;
+            if (!inQuote) {
+                if (rest[i] == '(') ++depth;
+                else if (rest[i] == ')') {
+                    --depth;
+                    if (depth == 0) { rp = i; break; }
+                }
+            }
+        }
+        if (rp == string::npos) {
+            cout << "SQL syntax error: unclosed parenthesis in CALL" << endl;
+            return true;
+        }
+        string alist = trim(rest.substr(lp + 1, rp - lp - 1));
+        if (!alist.empty()) {
+            args = splitValues(alist);
+            for (auto& a : args) a = trim(a);
+        }
+    } else {
+        procname = rest;
+    }
+    if (!g_engine.procedureExists(s.currentDB, procname)) {
+        cout << "Procedure " << procname << " not exist" << endl;
+        return true;
+    }
+    auto params = g_engine.getProcedureParams(s.currentDB, procname);
+    if (args.size() != params.size()) {
+        cout << "SQL syntax error: procedure " << procname << " expects "
+             << params.size() << " arguments, got " << args.size() << endl;
+        return true;
+    }
+    unordered_map<string, string> argMap;
+    for (size_t i = 0; i < params.size(); ++i) {
+        const auto& pp = params[i];
+        const string& arg = args[i];
+        if (pp.mode == "OUT") {
+            if (arg.empty() || arg[0] != '@') {
+                cout << "SQL syntax error: OUT parameter must be a variable reference (@var)" << endl;
+                return true;
+            }
+            argMap[pp.name] = arg;
+        } else if (pp.mode == "INOUT") {
+            if (arg.empty() || arg[0] != '@') {
+                cout << "SQL syntax error: INOUT parameter must be a variable reference (@var)" << endl;
+                return true;
+            }
+            argMap[pp.name] = arg;
+        } else {
+            if (!arg.empty() && arg[0] == '@') {
+                auto it = s.userVariables.find(arg.substr(1));
+                argMap[pp.name] = (it != s.userVariables.end()) ? it->second : "null";
+            } else {
+                argMap[pp.name] = arg;
+            }
+        }
+    }
+    auto stmts = g_engine.getProcedureStatements(s.currentDB, procname);
+    for (const auto& stmt : stmts) {
+        string replaced = stmt;
+        vector<pair<string, string>> sortedMap(argMap.begin(), argMap.end());
+        sort(sortedMap.begin(), sortedMap.end(),
+             [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+        for (const auto& kv : sortedMap) {
+            string placeholder = "?" + kv.first;
+            size_t pos = 0;
+            while ((pos = replaced.find(placeholder, pos)) != string::npos) {
+                replaced.replace(pos, placeholder.size(), kv.second);
+                pos += kv.second.size();
+            }
+        }
+        execute(replaced, s);
+    }
+    return false;
+}
+
+static bool handleCopy(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(4));
+    size_t fromPos = rest.find(" from ");
+    size_t toPos = rest.find(" to ");
+    if (fromPos != string::npos) {
+        string tname = trim(rest.substr(0, fromPos));
+        tname = resolveTableName(s, tname);
+        string fileRest = trim(rest.substr(fromPos + 6));
+        size_t q1 = fileRest.find('\'');
+        size_t q2 = fileRest.find('\'', q1 + 1);
+        if (q1 == string::npos || q2 == string::npos) {
+            cout << "SQL syntax error: COPY FROM requires 'filename'" << endl;
+            return true;
+        }
+        string filename = fileRest.substr(q1 + 1, q2 - q1 - 1);
+        if (!g_engine.tableExists(s.currentDB, tname)) {
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
+        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+        ifstream csvIn(filename);
+        if (!csvIn) {
+            cout << "Cannot open file: " << filename << endl;
+            return true;
+        }
+        size_t imported = 0, skipped = 0;
+        string line;
+        bool firstLine = true;
+        while (getline(csvIn, line)) {
+            if (trim(line).empty()) continue;
+            auto fields = parseCSVLine(line);
+            if (fields.size() != tbl.len) {
+                if (firstLine) { firstLine = false; continue; }
+                skipped++;
+                continue;
+            }
+            firstLine = false;
+            map<string, string> values;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                values[tbl.cols[i].dataName] = trim(fields[i]);
+            }
+            auto res = g_engine.insert(s.currentDB, tname, values);
+            if (res == OpResult::Success) imported++;
+            else skipped++;
+        }
+        cout << "COPY " << imported << " rows imported, " << skipped << " skipped" << endl;
+        return false;
+    }
+    if (toPos != string::npos) {
+        string tname = trim(rest.substr(0, toPos));
+        tname = resolveTableName(s, tname);
+        string fileRest = trim(rest.substr(toPos + 4));
+        size_t q1 = fileRest.find('\'');
+        size_t q2 = fileRest.find('\'', q1 + 1);
+        if (q1 == string::npos || q2 == string::npos) {
+            cout << "SQL syntax error: COPY TO requires 'filename'" << endl;
+            return true;
+        }
+        string filename = fileRest.substr(q1 + 1, q2 - q1 - 1);
+        if (!g_engine.tableExists(s.currentDB, tname)) {
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
+        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+        ofstream csvOut(filename);
+        if (!csvOut) {
+            cout << "Cannot write file: " << filename << endl;
+            return true;
+        }
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (i > 0) csvOut << ",";
+            csvOut << tbl.cols[i].dataName;
+        }
+        csvOut << "\n";
+        size_t exported = 0;
+        g_engine.forEachRow(s.currentDB, tname, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            std::string row(data, len);
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (i > 0) csvOut << ",";
+                string val = dbms::StorageEngine::extractColumnValue(row, tbl, i);
+                bool needQuote = (val.find(',') != string::npos || val.find('"') != string::npos || val.find('\n') != string::npos);
+                if (needQuote) {
+                    csvOut << '"';
+                    for (char c : val) {
+                        if (c == '"') csvOut << "\"\"";
+                        else csvOut << c;
+                    }
+                    csvOut << '"';
+                } else {
+                    csvOut << val;
+                }
+            }
+            csvOut << "\n";
+            ++exported;
+        });
+        cout << "COPY " << exported << " rows exported to " << filename << endl;
+        return false;
+    }
+    cout << "SQL syntax error: COPY table_name FROM 'file' | TO 'file'" << endl;
+    return true;
+}
+
+static bool handlePrepare(const string& sql, Session& s) {
+    string rest = trim(sql.substr(8));
+    if (rest.substr(0, 12) == "transaction ") {
+        string xid = stripQuotes(trim(rest.substr(12)));
+        if (xid.empty()) {
+            cout << "SQL syntax error: PREPARE TRANSACTION requires a transaction ID" << endl;
+            return true;
+        }
+        auto res = g_engine.prepareTransaction(xid);
+        if (res == OpResult::Success) {
+            cout << "PREPARE TRANSACTION " << xid << endl;
+            log(s.username, "prepare transaction " + xid, getTime());
+        } else if (res == OpResult::InvalidValue) {
+            cout << "No active transaction" << endl;
+        } else if (res == OpResult::DuplicateKey) {
+            cout << "Transaction ID already exists" << endl;
+        } else {
+            cout << "PREPARE TRANSACTION failed" << endl;
+        }
+        return false;
+    }
+    size_t fromPos = rest.find(" from ");
+    if (fromPos == string::npos) {
+        cout << "SQL syntax error: expected FROM" << endl;
+        return true;
+    }
+    string stmtName = trim(rest.substr(0, fromPos));
+    string templateSql = trim(rest.substr(fromPos + 6));
+    templateSql = stripQuotes(templateSql);
+    if (templateSql.empty()) {
+        cout << "SQL syntax error: empty statement" << endl;
+        return true;
+    }
+    s.preparedStmts[stmtName] = templateSql;
+    cout << "Statement " << stmtName << " prepared" << endl;
+    return false;
+}
+
+static bool handleExecutePrepared(const string& sql, Session& s) {
+    string rest = trim(sql.substr(8));
+    size_t usingPos = rest.find(" using ");
+    string stmtName, usingClause;
+    if (usingPos == string::npos) {
+        stmtName = rest;
+    } else {
+        stmtName = trim(rest.substr(0, usingPos));
+        usingClause = trim(rest.substr(usingPos + 7));
+    }
+    auto it = s.preparedStmts.find(stmtName);
+    if (it == s.preparedStmts.end()) {
+        cout << "Prepared statement " << stmtName << " not found" << endl;
+        return true;
+    }
+    string expanded = it->second;
+    if (!usingClause.empty()) {
+        if (usingClause.size() >= 2 && usingClause.front() == '(' && usingClause.back() == ')') {
+            usingClause = trim(usingClause.substr(1, usingClause.size() - 2));
+        }
+        stringstream vss(usingClause);
+        string val;
+        vector<string> values;
+        while (getline(vss, val, ',')) values.push_back(trim(val));
+        size_t vidx = 0;
+        size_t pos = 0;
+        while ((pos = expanded.find('?', pos)) != string::npos) {
+            if (vidx >= values.size()) {
+                cout << "Not enough parameters for prepared statement" << endl;
+                return true;
+            }
+            expanded = expanded.substr(0, pos) + values[vidx] + expanded.substr(pos + 1);
+            pos += values[vidx].size();
+            ++vidx;
+        }
+        if (vidx < values.size()) {
+            cout << "Too many parameters for prepared statement" << endl;
+            return true;
+        }
+    }
+    return execute(expanded, s);
+}
+
+static bool handleDeallocate(const string& sql, Session& s) {
+    string stmtName = trim(sql.substr(19));
+    if (s.preparedStmts.erase(stmtName)) {
+        cout << "Statement " << stmtName << " deallocated" << endl;
+    } else {
+        cout << "Prepared statement " << stmtName << " not found" << endl;
+    }
+    return false;
+}
+
 // ========================================================================
 // Window function support
 // ========================================================================
@@ -7587,6 +7873,21 @@ bool execute(const string& rawSql, Session& s) {
         case dbms::SqlCommand::Reindex:
             return handleReindex(sql, s);
 
+        case dbms::SqlCommand::Call:
+            return handleCallProcedure(sql, s);
+
+        case dbms::SqlCommand::Copy:
+            return handleCopy(sql, s);
+
+        case dbms::SqlCommand::Prepare:
+            return handlePrepare(sql, s);
+
+        case dbms::SqlCommand::Execute:
+            return handleExecutePrepared(sql, s);
+
+        case dbms::SqlCommand::Deallocate:
+            return handleDeallocate(sql, s);
+
         default:
             break;
     }
@@ -11292,104 +11593,6 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // CALL procedure_name[(args)]
-    if (sql.substr(0, 4) == "call") {
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(4));
-        if (rest.empty()) {
-            cout << "SQL syntax error: CALL procedure_name" << endl;
-            return true;
-        }
-        string procname;
-        vector<string> args;
-        size_t lp = rest.find('(');
-        if (lp != string::npos) {
-            procname = trim(rest.substr(0, lp));
-            // Find matching ')', handling nested parentheses
-            size_t rp = string::npos;
-            int depth = 0;
-            bool inQuote = false;
-            for (size_t i = lp; i < rest.size(); ++i) {
-                if (rest[i] == '\'') inQuote = !inQuote;
-                if (!inQuote) {
-                    if (rest[i] == '(') ++depth;
-                    else if (rest[i] == ')') {
-                        --depth;
-                        if (depth == 0) { rp = i; break; }
-                    }
-                }
-            }
-            if (rp == string::npos) {
-                cout << "SQL syntax error: unclosed parenthesis in CALL" << endl;
-                return true;
-            }
-            string alist = trim(rest.substr(lp + 1, rp - lp - 1));
-            if (!alist.empty()) {
-                args = splitValues(alist);
-                for (auto& a : args) a = trim(a);
-            }
-        } else {
-            procname = rest;
-        }
-        if (!g_engine.procedureExists(s.currentDB, procname)) {
-            cout << "Procedure " << procname << " not exist" << endl;
-            return true;
-        }
-        auto params = g_engine.getProcedureParams(s.currentDB, procname);
-        if (args.size() != params.size()) {
-            cout << "SQL syntax error: procedure " << procname << " expects "
-                 << params.size() << " arguments, got " << args.size() << endl;
-            return true;
-        }
-        // Build argMap: paramName -> replacement value
-        unordered_map<string, string> argMap;
-        for (size_t i = 0; i < params.size(); ++i) {
-            const auto& pp = params[i];
-            const string& arg = args[i];
-            if (pp.mode == "OUT") {
-                // OUT param: must be a variable reference like @var
-                if (arg.empty() || arg[0] != '@') {
-                    cout << "SQL syntax error: OUT parameter must be a variable reference (@var)" << endl;
-                    return true;
-                }
-                argMap[pp.name] = arg; // replace ?name with @var so SET @var works
-            } else if (pp.mode == "INOUT") {
-                if (arg.empty() || arg[0] != '@') {
-                    cout << "SQL syntax error: INOUT parameter must be a variable reference (@var)" << endl;
-                    return true;
-                }
-                // For INOUT, store the variable name so SET ?x = ... becomes SET @var = ...
-                argMap[pp.name] = arg;
-            } else {
-                // IN param: literal or variable value
-                if (!arg.empty() && arg[0] == '@') {
-                    auto it = s.userVariables.find(arg.substr(1));
-                    argMap[pp.name] = (it != s.userVariables.end()) ? it->second : "null";
-                } else {
-                    argMap[pp.name] = arg;
-                }
-            }
-        }
-        auto stmts = g_engine.getProcedureStatements(s.currentDB, procname);
-        for (const auto& stmt : stmts) {
-            string replaced = stmt;
-            // Replace ?paramName with mapped value (longest names first to avoid partial replacement)
-            vector<pair<string, string>> sortedMap(argMap.begin(), argMap.end());
-            sort(sortedMap.begin(), sortedMap.end(),
-                 [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
-            for (const auto& kv : sortedMap) {
-                string placeholder = "?" + kv.first;
-                size_t pos = 0;
-                while ((pos = replaced.find(placeholder, pos)) != string::npos) {
-                    replaced.replace(pos, placeholder.size(), kv.second);
-                    pos += kv.second.size();
-                }
-            }
-            execute(replaced, s);
-        }
-        return false;
-    }
-
     if (sql.substr(0, 14) == "backup database") {
         if (!checkAdmin(s)) return true;
         string rest = trim(sql.substr(14));
@@ -13039,101 +13242,6 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // PREPARE stmt_name FROM 'sql_template'
-    if (sql.substr(0, 8) == "prepare ") {
-        string rest = trim(sql.substr(8));
-        // PREPARE TRANSACTION 'xid'
-        if (rest.substr(0, 12) == "transaction ") {
-            string xid = stripQuotes(trim(rest.substr(12)));
-            if (xid.empty()) {
-                cout << "SQL syntax error: PREPARE TRANSACTION requires a transaction ID" << endl;
-                return true;
-            }
-            auto res = g_engine.prepareTransaction(xid);
-            if (res == OpResult::Success) {
-                cout << "PREPARE TRANSACTION " << xid << endl;
-                log(s.username, "prepare transaction " + xid, getTime());
-            } else if (res == OpResult::InvalidValue) {
-                cout << "No active transaction" << endl;
-            } else if (res == OpResult::DuplicateKey) {
-                cout << "Transaction ID already exists" << endl;
-            } else {
-                cout << "PREPARE TRANSACTION failed" << endl;
-            }
-            return false;
-        }
-        size_t fromPos = rest.find(" from ");
-        if (fromPos == string::npos) {
-            cout << "SQL syntax error: expected FROM" << endl;
-            return true;
-        }
-        string stmtName = trim(rest.substr(0, fromPos));
-        string templateSql = trim(rest.substr(fromPos + 6));
-        templateSql = stripQuotes(templateSql);
-        if (templateSql.empty()) {
-            cout << "SQL syntax error: empty statement" << endl;
-            return true;
-        }
-        s.preparedStmts[stmtName] = templateSql;
-        cout << "Statement " << stmtName << " prepared" << endl;
-        return false;
-    }
-
-    // EXECUTE stmt_name USING (val1, val2, ...)
-    if (sql.substr(0, 8) == "execute ") {
-        string rest = trim(sql.substr(8));
-        size_t usingPos = rest.find(" using ");
-        string stmtName, usingClause;
-        if (usingPos == string::npos) {
-            stmtName = rest;
-        } else {
-            stmtName = trim(rest.substr(0, usingPos));
-            usingClause = trim(rest.substr(usingPos + 7));
-        }
-        auto it = s.preparedStmts.find(stmtName);
-        if (it == s.preparedStmts.end()) {
-            cout << "Prepared statement " << stmtName << " not found" << endl;
-            return true;
-        }
-        string expanded = it->second;
-        if (!usingClause.empty()) {
-            // Parse values: remove surrounding () if present
-            if (usingClause.size() >= 2 && usingClause.front() == '(' && usingClause.back() == ')') {
-                usingClause = trim(usingClause.substr(1, usingClause.size() - 2));
-            }
-            stringstream vss(usingClause);
-            string val;
-            vector<string> values;
-            while (getline(vss, val, ',')) values.push_back(trim(val));
-            size_t vidx = 0;
-            size_t pos = 0;
-            while ((pos = expanded.find('?', pos)) != string::npos) {
-                if (vidx >= values.size()) {
-                    cout << "Not enough parameters for prepared statement" << endl;
-                    return true;
-                }
-                expanded = expanded.substr(0, pos) + values[vidx] + expanded.substr(pos + 1);
-                pos += values[vidx].size();
-                ++vidx;
-            }
-            if (vidx < values.size()) {
-                cout << "Too many parameters for prepared statement" << endl;
-                return true;
-            }
-        }
-        return execute(expanded, s);
-    }
-
-    // DEALLOCATE PREPARE stmt_name
-    if (sql.substr(0, 19) == "deallocate prepare ") {
-        string stmtName = trim(sql.substr(19));
-        if (s.preparedStmts.erase(stmtName)) {
-            cout << "Statement " << stmtName << " deallocated" << endl;
-        } else {
-            cout << "Prepared statement " << stmtName << " not found" << endl;
-        }
-        return false;
-    }
 
     // DISCARD ALL: reset session state
     if (sql == "discard all") {
@@ -13212,115 +13320,6 @@ bool execute(const string& rawSql, Session& s) {
 
     if (startsWithKeyword(sql, "load")) {
         return handleLoadSharedLibrary(sql, s);
-    }
-
-    // COPY ... FROM / TO (PostgreSQL-style bulk load)
-    if (sql.substr(0, 4) == "copy") {
-        if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(4));
-        size_t fromPos = rest.find(" from ");
-        size_t toPos = rest.find(" to ");
-        if (fromPos != string::npos) {
-            // COPY table_name FROM 'filename'
-            string tname = trim(rest.substr(0, fromPos));
-            tname = resolveTableName(s, tname);
-            string fileRest = trim(rest.substr(fromPos + 6));
-            size_t q1 = fileRest.find('\'');
-            size_t q2 = fileRest.find('\'', q1 + 1);
-            if (q1 == string::npos || q2 == string::npos) {
-                cout << "SQL syntax error: COPY FROM requires 'filename'" << endl;
-                return true;
-            }
-            string filename = fileRest.substr(q1 + 1, q2 - q1 - 1);
-            if (!g_engine.tableExists(s.currentDB, tname)) {
-                cout << "Table " << tname << " not exist" << endl;
-                return true;
-            }
-            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-            ifstream csvIn(filename);
-            if (!csvIn) {
-                cout << "Cannot open file: " << filename << endl;
-                return true;
-            }
-            size_t imported = 0, skipped = 0;
-            string line;
-            bool firstLine = true;
-            while (getline(csvIn, line)) {
-                if (trim(line).empty()) continue;
-                auto fields = parseCSVLine(line);
-                if (fields.size() != tbl.len) {
-                    if (firstLine) { firstLine = false; continue; }
-                    skipped++;
-                    continue;
-                }
-                firstLine = false;
-                map<string, string> values;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    values[tbl.cols[i].dataName] = trim(fields[i]);
-                }
-                auto res = g_engine.insert(s.currentDB, tname, values);
-                if (res == OpResult::Success) imported++;
-                else skipped++;
-            }
-            cout << "COPY " << imported << " rows imported, " << skipped << " skipped" << endl;
-            return false;
-        }
-        if (toPos != string::npos) {
-            // COPY table_name TO 'filename'
-            string tname = trim(rest.substr(0, toPos));
-            tname = resolveTableName(s, tname);
-            string fileRest = trim(rest.substr(toPos + 4));
-            size_t q1 = fileRest.find('\'');
-            size_t q2 = fileRest.find('\'', q1 + 1);
-            if (q1 == string::npos || q2 == string::npos) {
-                cout << "SQL syntax error: COPY TO requires 'filename'" << endl;
-                return true;
-            }
-            string filename = fileRest.substr(q1 + 1, q2 - q1 - 1);
-            if (!g_engine.tableExists(s.currentDB, tname)) {
-                cout << "Table " << tname << " not exist" << endl;
-                return true;
-            }
-            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-            ofstream csvOut(filename);
-            if (!csvOut) {
-                cout << "Cannot write file: " << filename << endl;
-                return true;
-            }
-            // Write header
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (i > 0) csvOut << ",";
-                csvOut << tbl.cols[i].dataName;
-            }
-            csvOut << "\n";
-            size_t exported = 0;
-            g_engine.forEachRow(s.currentDB, tname, [&](uint32_t, uint16_t, const char* data, size_t len) {
-                std::string row(data, len);
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (i > 0) csvOut << ",";
-                    string val = dbms::StorageEngine::extractColumnValue(row, tbl, i);
-                    // Quote if contains comma or quote
-                    bool needQuote = (val.find(',') != string::npos || val.find('"') != string::npos || val.find('\n') != string::npos);
-                    if (needQuote) {
-                        csvOut << '"';
-                        for (char c : val) {
-                            if (c == '"') csvOut << "\"\"";
-                            else csvOut << c;
-                        }
-                        csvOut << '"';
-                    } else {
-                        csvOut << val;
-                    }
-                }
-                csvOut << "\n";
-                ++exported;
-            });
-            cout << "COPY " << exported << " rows exported to " << filename << endl;
-            return false;
-        }
-        cout << "SQL syntax error: COPY table_name FROM 'file' | TO 'file'" << endl;
-        return true;
     }
 
     // EXPLAIN / EXPLAIN ANALYZE / EXPLAIN FORMAT JSON / EXPLAIN (OPTIONS)
