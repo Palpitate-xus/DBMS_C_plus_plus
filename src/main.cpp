@@ -8079,6 +8079,147 @@ bool execute(const string& rawSql, Session& s) {
             // TODO: extract to helper functions (code blocks are very large)
             break;
 
+        // Core DQL/DML — complex blocks remain in execute() for now
+        case dbms::SqlCommand::Select:
+        case dbms::SqlCommand::Insert:
+        case dbms::SqlCommand::Update:
+        case dbms::SqlCommand::Delete:
+        case dbms::SqlCommand::Merge:
+            break;
+
+        // DDL — CREATE/DROP/ALTER complex blocks remain in execute() for now
+        // Subcommands with dedicated handlers are routed below.
+        case dbms::SqlCommand::CreateTable:
+        case dbms::SqlCommand::CreateTableAs:
+        case dbms::SqlCommand::CreateIndex:
+        case dbms::SqlCommand::CreateView:
+        case dbms::SqlCommand::CreateMaterializedView:
+        case dbms::SqlCommand::CreateDatabase:
+        case dbms::SqlCommand::CreateSchema:
+        case dbms::SqlCommand::CreateSequence:
+        case dbms::SqlCommand::CreateDomain:
+        case dbms::SqlCommand::CreateType:
+        case dbms::SqlCommand::CreateFunction:
+        case dbms::SqlCommand::CreateProcedure:
+        case dbms::SqlCommand::CreateTrigger:
+        case dbms::SqlCommand::CreateRole:
+        case dbms::SqlCommand::CreateUser:
+        case dbms::SqlCommand::CreateTablespace:
+        case dbms::SqlCommand::CreateStatistics:
+        case dbms::SqlCommand::CreatePolicy:
+        case dbms::SqlCommand::CreateRule:
+        case dbms::SqlCommand::CreateEventTrigger:
+        case dbms::SqlCommand::CreateExtension:
+        case dbms::SqlCommand::CreatePublication:
+        case dbms::SqlCommand::CreateSubscription:
+        case dbms::SqlCommand::CreateForeignDataWrapper:
+        case dbms::SqlCommand::CreateForeignTable:
+        case dbms::SqlCommand::CreateServer:
+        case dbms::SqlCommand::CreateUserMapping:
+        case dbms::SqlCommand::CreateTextSearchConfiguration:
+        case dbms::SqlCommand::CreateTextSearchDictionary:
+        case dbms::SqlCommand::CreateTextSearchParser:
+        case dbms::SqlCommand::CreateTextSearchTemplate:
+        case dbms::SqlCommand::CreateCast:
+        case dbms::SqlCommand::CreateCollation:
+        case dbms::SqlCommand::CreateConversion:
+        case dbms::SqlCommand::CreateOperator:
+        case dbms::SqlCommand::CreateOperatorClass:
+        case dbms::SqlCommand::CreateOperatorFamily:
+        case dbms::SqlCommand::CreateAggregate:
+        case dbms::SqlCommand::CreateTransform:
+        case dbms::SqlCommand::CreateLanguage:
+        case dbms::SqlCommand::CreateAccessMethod:
+            break;
+
+        case dbms::SqlCommand::DropTable:
+        case dbms::SqlCommand::DropIndex:
+        case dbms::SqlCommand::DropView:
+        case dbms::SqlCommand::DropMaterializedView:
+        case dbms::SqlCommand::DropDatabase:
+        case dbms::SqlCommand::DropSchema:
+        case dbms::SqlCommand::DropSequence:
+        case dbms::SqlCommand::DropDomain:
+        case dbms::SqlCommand::DropType:
+        case dbms::SqlCommand::DropFunction:
+        case dbms::SqlCommand::DropProcedure:
+        case dbms::SqlCommand::DropTrigger:
+        case dbms::SqlCommand::DropRole:
+        case dbms::SqlCommand::DropUser:
+        case dbms::SqlCommand::DropTablespace:
+        case dbms::SqlCommand::DropStatistics:
+        case dbms::SqlCommand::DropPolicy:
+        case dbms::SqlCommand::DropRule:
+        case dbms::SqlCommand::DropEventTrigger:
+        case dbms::SqlCommand::DropExtension:
+        case dbms::SqlCommand::DropPublication:
+        case dbms::SqlCommand::DropSubscription:
+        case dbms::SqlCommand::DropForeignDataWrapper:
+        case dbms::SqlCommand::DropForeignTable:
+        case dbms::SqlCommand::DropServer:
+        case dbms::SqlCommand::DropUserMapping:
+        case dbms::SqlCommand::DropTextSearchConfiguration:
+        case dbms::SqlCommand::DropTextSearchDictionary:
+        case dbms::SqlCommand::DropTextSearchParser:
+        case dbms::SqlCommand::DropTextSearchTemplate:
+        case dbms::SqlCommand::DropCast:
+        case dbms::SqlCommand::DropCollation:
+        case dbms::SqlCommand::DropConversion:
+        case dbms::SqlCommand::DropOperator:
+        case dbms::SqlCommand::DropOperatorClass:
+        case dbms::SqlCommand::DropOperatorFamily:
+        case dbms::SqlCommand::DropAggregate:
+        case dbms::SqlCommand::DropTransform:
+        case dbms::SqlCommand::DropLanguage:
+        case dbms::SqlCommand::DropAccessMethod:
+        case dbms::SqlCommand::DropOwned:
+        case dbms::SqlCommand::DropLargeObject:
+            break;
+
+        case dbms::SqlCommand::AlterTable:
+        case dbms::SqlCommand::AlterIndex:
+        case dbms::SqlCommand::AlterView:
+        case dbms::SqlCommand::AlterMaterializedView:
+        case dbms::SqlCommand::AlterDatabase:
+        case dbms::SqlCommand::AlterSchema:
+        case dbms::SqlCommand::AlterSequence:
+        case dbms::SqlCommand::AlterDomain:
+        case dbms::SqlCommand::AlterType:
+        case dbms::SqlCommand::AlterFunction:
+        case dbms::SqlCommand::AlterProcedure:
+        case dbms::SqlCommand::AlterRoutine:
+        case dbms::SqlCommand::AlterTrigger:
+        case dbms::SqlCommand::AlterRole:
+        case dbms::SqlCommand::AlterUser:
+        case dbms::SqlCommand::AlterSystem:
+        case dbms::SqlCommand::AlterTablespace:
+        case dbms::SqlCommand::AlterStatistics:
+        case dbms::SqlCommand::AlterPolicy:
+        case dbms::SqlCommand::AlterRule:
+        case dbms::SqlCommand::AlterEventTrigger:
+        case dbms::SqlCommand::AlterExtension:
+        case dbms::SqlCommand::AlterPublication:
+        case dbms::SqlCommand::AlterSubscription:
+        case dbms::SqlCommand::AlterForeignDataWrapper:
+        case dbms::SqlCommand::AlterForeignTable:
+        case dbms::SqlCommand::AlterServer:
+        case dbms::SqlCommand::AlterUserMapping:
+        case dbms::SqlCommand::AlterTextSearchConfiguration:
+        case dbms::SqlCommand::AlterTextSearchDictionary:
+        case dbms::SqlCommand::AlterTextSearchParser:
+        case dbms::SqlCommand::AlterTextSearchTemplate:
+        case dbms::SqlCommand::AlterCollation:
+        case dbms::SqlCommand::AlterConversion:
+        case dbms::SqlCommand::AlterOperator:
+        case dbms::SqlCommand::AlterOperatorClass:
+        case dbms::SqlCommand::AlterOperatorFamily:
+        case dbms::SqlCommand::AlterAggregate:
+        case dbms::SqlCommand::AlterTransform:
+        case dbms::SqlCommand::AlterLanguage:
+        case dbms::SqlCommand::AlterLargeObject:
+        case dbms::SqlCommand::AlterDefaultPrivileges:
+            break;
+
         default:
             break;
     }
