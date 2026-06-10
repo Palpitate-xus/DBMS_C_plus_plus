@@ -4583,15 +4583,13 @@ static bool handleAlterRole(const string& sql, Session& s) {
     }
     if (tokens.size() >= 4 && tokens[1] == "rename" && tokens[2] == "to") {
         string newName = tokens[3];
-        if (permissionQuery(roleName) != -1) {
-            cout << "ALTER ROLE RENAME for users is not supported" << endl;
-            return true;
-        }
+        bool isUser = (permissionQuery(roleName) != -1);
         if (roleExists(newName) || permissionQuery(newName) != -1) {
             cout << "Role " << newName << " already exists" << endl;
             return true;
         }
-        if (!renameExplicitRole(roleName, newName)) {
+        bool ok = isUser ? renameUser(roleName, newName) : renameExplicitRole(roleName, newName);
+        if (!ok) {
             cout << "Rename role failed" << endl;
             return true;
         }

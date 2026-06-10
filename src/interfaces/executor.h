@@ -11,6 +11,10 @@ namespace dbms {
 // ============================================================================
 // 执行引擎接口 (Volcano Iterator Model)
 // Phase 5 逐步实现：所有执行算子实现 IOperator
+//
+// 当前状态：执行算子（TableScanOp, IndexScanOp, HashJoinOp 等）
+// 已实现于 src/optimizer/ExecutionPlan.cpp，尚未继承 IOperator 接口。
+// 后续 Phase 将统一迁移至此目录（src/executor/）。
 // ============================================================================
 
 class IOperator;

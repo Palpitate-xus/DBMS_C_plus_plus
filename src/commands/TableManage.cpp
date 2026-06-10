@@ -3473,8 +3473,18 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
             addrStr = oss.str();
             if (col.dataType == "cidr" || prefix < 32)
                 addrStr += "/" + std::to_string(prefix);
+        } else if (family == 3) {  // IPv6
+            std::ostringstream oss;
+            for (int i = 0; i < 16; ++i) {
+                if (i > 0 && i % 2 == 0) oss << ":";
+                oss << std::hex << std::setw(2) << std::setfill('0')
+                   << static_cast<int>(static_cast<uint8_t>(rowBuffer[offset + 4 + i]));
+            }
+            addrStr = oss.str();
+            if (col.dataType == "cidr" || prefix < 128)
+                addrStr += "/" + std::to_string(prefix);
         } else {
-            return "";  // IPv6 not yet supported
+            addrStr = "unknown";
         }
         return addrStr;
     } else if (col.dataType == "boolean") {
