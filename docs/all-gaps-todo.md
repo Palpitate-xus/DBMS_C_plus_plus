@@ -1,308 +1,296 @@
-# DBMS 全部 PostgreSQL 差距补齐 TODO
+# DBMS 全部 Gap TODO（统一来源）
 
-> 生成日期：2026-06-03
-> 来源：gap-vs-postgresql.md + 测试报告
-> 原则：按**紧急程度 → 架构深度 → 功能广度**推进，每完成一批就 commit
-
----
-
-## 进度总览
-
-| 批次 | 功能域 | 状态 | Commit |
-|------|--------|------|--------|
-| Batch 0 | GiST/GIN/BRIN 索引 | ✅ 完成 | 4 commits |
-| Batch 1 | 会话上下文 + 全局变量清理 | ✅ 已完成 | 已实现 |
-| Batch 2 | 真正的 MVCC + ReadView | ✅ 已完成 | 已实现 |
-| Batch 3 | Hash Join + Merge Join | ✅ 已完成 | 已实现 |
-| Batch 4 | VARCHAR 变长行 + 溢出页 | ✅ 已完成 | 已实现 |
-| Batch 5 | Checkpoint + fsync | ✅ 已完成 | 已实现 |
-| Batch 6 | 剩余 TOP20 gaps | ⏳ 待开始 | — |
-| Batch 7 | 其他功能缺失 | ⏳ 待开始 | — |
+> 生成日期：2026-06-10
+> 来源：合并 postgresql-complete-gap-analysis.md + todos.md + feature-gap-analysis.md + gap-vs-postgresql.md
+> 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 
 ---
 
-## Batch 1: 会话上下文（P0 - 安全漏洞）
+## 总览统计
 
-当前 `g_nowUser`、`g_nowPermission`、`g_currentDB`、`g_preparedStmts` 是全局变量。
-NetworkServer 多客户端并发时互相覆盖，是严重安全漏洞。
-
-- [x] Step 1.1: 新增 `struct Session`，`execute()` 签名改为接收 Session 引用
-- [x] Step 1.2: `checkAdmin()` / `checkTablePermission()` / `log()` 改为接收 Session
-- [x] Step 1.3: NetworkServer 每连接创建独立 Session，登录后写入 Session
-- [x] Step 1.4: main() 交互模式也使用 Session 对象
-- [x] Step 1.5: 删除全局变量 `g_nowUser`、`g_nowPermission`、`g_currentDB`、`g_preparedStmts`
-- [x] Step 1.6: 验证 `git grep g_nowUser` / `git grep g_currentDB` 无残留
-
-**修改文件**: `main.cpp`, `NetworkServer.h/cpp`, `Session.h`
+| 类别 | 已完成 | 剩余 | 备注 |
+|------|--------|------|------|
+| 编译/构建 | 3 | 0 | 零警告 + TLS 条件编译 + build.sh |
+| P0 阻塞性 | 5 | 0 | 全部完成 |
+| P1 核心功能 | 26 | 0 | 全部完成 |
+| P2 增强功能 | 44 | ~8 | 大部分完成 |
+| P3 高级特性 | 0 | 40+ | 架构级大模块，需长期投入 |
+| P4 暂不列入 | — | 11 | 生态/极难实现，观望 |
 
 ---
 
-## Batch 2: 真正的 MVCC + ReadView（P0 - 核心架构）
+## ✅ 已完成（按批次）
 
-当前 Undo Log 只做 ROLLBACK 恢复。多个事务并发时，未提交的修改对其他事务可见（没有隔离）。
+### 批次 0：GiST / GIN / BRIN 索引（4 commits）
+- [x] GiST 索引（简化空间/范围索引）
+- [x] GIN 索引（倒排索引，text/json/array）
+- [x] BRIN 索引（块范围摘要）
+- [x] SP-GiST 索引（四叉树空间索引）
 
-- [x] Step 2.1: 新增 `TxnIdGenerator.h/cpp`，64 位单调递增 txId，持久化到 `.txnid` 文件
-- [x] Step 2.2: 行格式扩展（已有 16 字节 MVCC header），`TableSchema::rowSize()` 增加 16 字节
-- [x] Step 2.3: `StorageEngine` 新增活跃事务管理 `globalTxnMutex_` + `activeTransactions_`
-- [x] Step 2.4: 实现 `ReadView` 结构和可见性规则
-- [x] Step 2.5: `beginTransaction` 分配 txId 并注册到活跃集合，`commit/rollback` 移除
-- [x] Step 2.6: `forEachRow` 增加 `const ReadView*` 参数，传入时跳过不可见行
-- [x] Step 2.7: `filterRows`、`query`、`aggregate`、`join` 传递 ReadView
-- [x] Step 2.8: 验证：BEGIN → INSERT → 同事务 SELECT 能看到；另一连接 SELECT 看不到；COMMIT 后能看到
+### 批次 1：会话上下文（P0 - 安全漏洞）
+- [x] `struct Session` 替换全局变量
+- [x] `execute()` 签名接收 Session 引用
+- [x] `checkAdmin()` / `checkTablePermission()` / `log()` 改为接收 Session
+- [x] NetworkServer 每连接创建独立 Session
+- [x] `main()` 交互模式使用 Session 对象
+- [x] 删除 `g_nowUser`、`g_nowPermission`、`g_currentDB`、`g_preparedStmts`
 
-**修改文件**: `TxnIdGenerator.h/cpp`, `TableManage.h/cpp`, `ExecutionPlan.cpp`
+### 批次 2：真正的 MVCC + ReadView（P0 - 核心架构）
+- [x] `TxnIdGenerator` 64 位单调递增 txId
+- [x] 行格式扩展（16 字节 MVCC header）
+- [x] `StorageEngine` 活跃事务管理
+- [x] `ReadView` 结构和可见性规则
+- [x] `beginTransaction` 分配 txId，`commit/rollback` 移除
+- [x] `forEachRow` 增加 `const ReadView*` 参数
+- [x] `filterRows`、`query`、`aggregate`、`join` 传递 ReadView
+- [x] 验证：BEGIN → INSERT → 同事务可见，其他连接不可见，COMMIT 后可见
 
----
+### 批次 3：Hash Join + Merge Join（P1 - 查询优化）
+- [x] `HashJoinOp` 算子
+- [x] `MergeJoinOp` 算子
+- [x] `buildJoinPlan` 自动选择 JOIN 算法
+- [x] EXPLAIN 输出显示 JOIN 算法
 
-## Batch 3: Hash Join + Merge Join（P1 - 查询优化）
+### 批次 4：VARCHAR / 变长行 + 溢出页（P1 - 存储格式）
+- [x] `Column` 增加 `isVariableLength` 标志
+- [x] `VARCHAR(n)` 语法解析
+- [x] `rowSize()` 变长行计算
+- [x] `extractColumnValue` 定长/变长解析路径
+- [x] 溢出页处理（大字段存溢出页）
+- [x] 主行中存溢出页指针
+- [x] get/update 自动处理溢出页读写
 
-当前 JOIN 只有 NestedLoopJoin，大数据量时性能灾难。
+### 批次 5：Checkpoint + fsync（P2 - 持久化加固）
+- [x] `checkpoint()` 方法
+- [x] Checkpoint 记录 `(checkpointLsn, dirtyPageList, activeTxnIds)`
+- [x] 脏页刷盘 → checkpoint 记录 → 截断 WAL
+- [x] 构造函数读取 checkpoint 恢复
+- [x] `BufferPool::flush()` 调用 `fsync()`
+- [x] `writeFileHeader` 后 `fsync()`
+- [x] `commitTransaction` 先 fsync WAL
+- [x] 交互模式自动触发 checkpoint
+- [x] `CHECKPOINT` SQL 命令
 
-- [x] Step 3.1: `ExecutionPlan.h/cpp` 新增 `HashJoinOp` 算子（右表驻内存哈希表）
-- [x] Step 3.2: `ExecutionPlan.h/cpp` 新增 `MergeJoinOp` 算子（双指针线性扫描）
-- [x] Step 3.3: `buildJoinPlan` 根据统计信息自动选择 JOIN 算法
-  - 小表（< 100 行）→ NestedLoopJoin
-  - 两表都大，无序 → HashJoin
-  - 两表都大，join key 有索引/已排序 → MergeJoin
-- [x] Step 3.4: EXPLAIN 输出显示使用了哪种 JOIN 算法
+### 批次 6：TOP20 剩余 Gap
+- [x] **ALTER ROLE RENAME** 支持用户（本次新增 `renameUser()`）
+- [x] **GiST / GIN / BRIN 索引**（Batch 0）
+- [x] **NOTIFY / LISTEN**（已实现）
+- [x] **TRUNCATE TABLE**（已实现）
+- [x] **两阶段提交** PREPARE TRANSACTION / COMMIT PREPARED（已实现）
+- [x] **函数重载**（已实现）
+- [x] **WITH CHECK OPTION**（已实现）
+- [x] **GRANT WITH GRANT OPTION**（已实现）
+- [x] **窗口帧 RANGE/GROUPS BETWEEN**（已实现）
+- [x] **EXPLAIN 选项**（ANALYZE, BUFFERS, TIMING, COSTS, SETTINGS, VERBOSE）
 
-**修改文件**: `ExecutionPlan.h/cpp`
-
----
-
-## Batch 4: VARCHAR / 变长行 + 溢出页（P1 - 存储格式）
-
-当前全表定长行，存储浪费严重，无法存长文本。
-
-- [x] Step 4.1: `Column` 增加 `isVariableLength` 标志，`makeVarCharColumn()` 构造函数
-- [x] Step 4.2: CREATE TABLE 解析支持 `VARCHAR(n)` 语法（已部分支持，需验证）
-- [x] Step 4.3: `rowSize()` 改为变长行计算（定长部分 + 变长偏移数组 + 变长数据）
-- [x] Step 4.4: `extractColumnValue` 根据列类型选择定长/变长解析路径
-- [x] Step 4.5: 溢出页处理：单行数据 > 页可用空间时，大字段存溢出页
-- [x] Step 4.6: 主行中存溢出页指针（pageId + offset）
-- [x] Step 4.7: get/update 时自动处理溢出页读写
-- [x] Step 4.8: 验证：插入 10KB 文本，能正确存储和读取
-
-**修改文件**: `TableManage.h/cpp`, `Page.cpp`, `PageAllocator.cpp`, `main.cpp`
-
----
-
-## Batch 5: Checkpoint + fsync（P2 - 持久化加固）
-
-当前 WAL 日志无限增长，崩溃恢复时间随运行时长线性增加；没有 fsync 保证可能丢数据。
-
-- [x] Step 5.1: `TableManage.cpp` 新增 `checkpoint()` 方法
-- [x] Step 5.2: Checkpoint 记录: `(checkpointLsn, dirtyPageList, activeTxnIds)`
-- [x] Step 5.3: 调用时：脏页刷盘 → 写入 checkpoint 记录 → 截断 WAL
-- [x] Step 5.4: StorageEngine 构造函数读取最新 checkpoint，从 checkpoint 位置开始恢复
-- [x] Step 5.5: `BufferPool::flush()` 中对每个脏页调用 `fdatasync()` / `fsync()`
-- [x] Step 5.6: `writeFileHeader` 后调用 `fsync()`
-- [x] Step 5.7: `commitTransaction` 时先 fsync WAL，再标记事务提交
-- [x] Step 5.8: 交互模式下每 N 条 SQL 或每 M 秒触发 checkpoint
-- [x] Step 5.9: `CHECKPOINT` SQL 命令支持手动触发
-- [x] Step 5.10: 验证：模拟崩溃（kill -9）后，已 COMMIT 的数据不丢失
-
-**修改文件**: `TableManage.h/cpp`, `BufferPool.cpp`, `main.cpp`
-
----
-
-## Batch 6: 剩余 TOP20 Gaps
-
-TOP20 当前完成度 14/20，剩余 6 项：
-
-| # | 功能 | 难度 | 计划 |
-|---|------|------|------|
-| 2 | **并行查询** | 高 | 需要执行计划并行化 + 多线程结果合并 |
-| 5 | **流复制 / 逻辑复制** | 高 | 需要 WAL 解析 + 网络传输协议 |
-| 6 | **PITR（时间点恢复）** | 高 | 依赖 Checkpoint + 连续 WAL 归档 |
-| 8 | **PL/pgSQL 过程语言** | 高 | 需要词法/语法分析器 + 字节码 VM |
-| 9 | **EXTENSION + FDW** | 高 | 需要动态加载机制 + 外部数据源适配器 |
-| 15 | **SCRAM 认证 / pg_hba.conf** | 中 | 替换现有 SHA256 认证，增加配置解析 |
-
-**建议**：Batch 6 放在 Batch 1-5 之后实施，因为：
-- 并行查询需要稳定的执行计划框架
-- 流复制/PITR 需要稳定的 Checkpoint + WAL
-- PL/pgSQL 是独立的大模块
-
----
-
-## Batch 7: 其他功能缺失（中低优先级）
-
-### DDL 增强
-- [x] ALTER TABLE RENAME COLUMN
-- [x] ALTER TABLE RENAME TO
-- [x] ALTER TABLE SET SCHEMA
-- [x] ALTER TABLE ALTER COLUMN SET/DROP DEFAULT
-- [x] ALTER TABLE ALTER COLUMN SET/DROP NOT NULL
+### 批次 7：其他功能缺失
+- [x] ALTER TABLE RENAME COLUMN / RENAME TO / SET SCHEMA
+- [x] ALTER TABLE ALTER COLUMN SET/DROP DEFAULT / SET/DROP NOT NULL
 - [x] ALTER TABLE ADD/DROP CONSTRAINT
 - [x] ALTER TABLE ENABLE/DISABLE TRIGGER
 - [x] CREATE TABLE AS SELECT
-- [x] CREATE TABLE ... PARTITION OF（声明式分区独立语法）
+- [x] CREATE TABLE ... PARTITION OF / PARTITION BY
 - [x] SUBPARTITION（子分区）
 - [x] DEFAULT PARTITION
 - [x] TRUNCATE ... CASCADE / RESTART IDENTITY
 - [x] COMMENT ON
-
-### 数据类型
-- [x] SERIAL4 / BIGSERIAL
-- [x] GENERATED AS IDENTITY
+- [x] SERIAL4 / BIGSERIAL / GENERATED AS IDENTITY
 - [x] 范围类型 (int4range, int8range, numrange, tsrange, tstzrange, daterange)
-- [x] 几何类型 - POINT（含空间运算符 << >> <^ >^ <@）
-- [x] 网络类型 - INET/CIDR（IPv4，含 << >> && 运算符）
-- [x] XML
-- [x] pg_lsn
-- [x] tsvector / tsquery（PG 风格全文搜索类型）
+- [x] 几何类型 - POINT（含空间运算符）
+- [x] 网络类型 - INET/CIDR（含 IPv6 格式化，<< >> && 运算符）
+- [x] XML / pg_lsn / tsvector / tsquery（目录级列存取）
 - [x] 组合类型 (ROW 类型)
 - [x] DOMAIN (CREATE DOMAIN)
 - [x] 自定义类型 (CREATE TYPE)
-
-### 约束
 - [x] DEFERRABLE / INITIALLY DEFERRED（元数据登记）
 - [x] EXCLUSION CONSTRAINTS（元数据登记）
 - [x] CREATE ASSERTION（目录级登记）
-
-### 索引
 - [x] CREATE INDEX CONCURRENTLY
 - [x] SP-GiST 索引
-
-### DML
 - [x] INSERT INTO t1 VALUES (...)（省略列名）
-- [x] COPY ... FROM/TO（批量 COPY 协议）
-
-### 查询优化器
-- [x] 统计信息自动收集（auto-analyze，基于修改计数阈值触发）
-- [ ] 直方图 / 相关性统计
-- [ ] 子查询内联 / 物化决策优化
-- [ ] 并行顺序扫描 / 并行索引扫描
-- [ ] 并行 Gather / Gather Merge 节点
-- [ ] JIT 编译 (LLVM)
-
-### 事务/MVCC
-- [x] SET TRANSACTION READ ONLY（只读事务显式声明）
-- [x] 子事务（SAVEPOINT 嵌套已支持）
-- [x] 两阶段提交 PREPARED / ROLLBACK PREPARED（已完整支持）
+- [x] COPY ... FROM/TO（批量 CSV 协议）
+- [x] 统计信息自动收集（auto-analyze）
+- [x] SET TRANSACTION READ ONLY
+- [x] 子事务（SAVEPOINT 嵌套）
+- [x] 两阶段提交 PREPARED / ROLLBACK PREPARED
 - [x] LOCK TABLE 命令
 - [x] Advisory Locks (pg_advisory_lock)
 - [x] ALTER TABLE ... ENABLE ROW LEVEL SECURITY（FORCE 已支持）
-
-### 存储引擎
 - [x] TABLESPACE 支持（元数据命令）
-- [x] 存储参数 (fillfactor, autovacuum_enabled 等，WITH 子句解析 + .params 文件持久化)
-- [ ] 压缩 (页级/行级)
-- [ ] 透明数据加密 (TDE)
-
-### 视图
+- [x] 存储参数 (fillfactor, autovacuum_enabled 等，WITH 子句 + .params 文件)
 - [x] INSTEAD OF 触发器（视图可更新）
 - [x] WITH LOCAL/CASCADED CHECK OPTION
-- [x] MATERIALIZED VIEW CONCURRENTLY（增量刷新）
-
-### 触发器
+- [x] MATERIALIZED VIEW CONCURRENTLY（增量刷新标志）
 - [x] 触发器诊断变量 (tg_name, tg_when, tg_level, tg_op, tg_relname)
 - [x] WHEN 子句 (条件触发)
-- [ ] 复合触发器
 - [x] Event Triggers（目录级登记）
-
-### 存储过程/函数
-- [ ] PL/pgSQL 过程语言
-- [ ] 游标 (DECLARE)
-- [ ] 控制流 (IF/WHILE/LOOP/FOR)
-- [ ] 异常处理 (BEGIN ... EXCEPTION)
-- [ ] 自定义聚合函数 (UDAF)
-- [ ] SECURITY DEFINER / INVOKER
-- [ ] 外部语言 (plpython, plperl 等)
-
-### 安全与权限
-- [ ] SCRAM-SHA-256 认证
-- [ ] LDAP / Kerberos 认证
-- [ ] SSL 证书认证
-- [ ] RADIUS 认证
-- [ ] pg_hba.conf 风格访问控制
-- [x] GRANT ON SCHEMA
-- [x] GRANT ON SEQUENCE
-- [x] GRANT ON FUNCTION
+- [x] GRANT ON SCHEMA / SEQUENCE / FUNCTION
 - [x] REVOKE CASCADE
 - [x] DEFAULT PRIVILEGES
 - [x] SECURITY LABEL
 - [x] 行级安全 (RLS) 强制模式
 - [x] REASSIGN OWNED / DROP OWNED
-
-### 复制与高可用
-- [ ] 物理流复制 (Streaming Replication)
-- [ ] 逻辑复制 (Logical Replication)
-- [ ] PUBLICATION / SUBSCRIPTION
-- [ ] 逻辑解码 (Logical Decoding)
-- [ ] 复制槽 (Replication Slot)
-- [ ] 同步提交控制 (synchronous_commit)
-- [ ] 级联复制 / 热备
-
-### 备份与恢复
-- [ ] 基础备份 (pg_basebackup 等价)
-- [ ] PITR（时间点恢复）
-- [ ] WAL 归档 / recovery.signal
-- [ ] 增量备份
-- [ ] 表级/数据库级备份（DUMP/RESTORE 已支持）
-
-### 监控与诊断
-- [x] pg_stat_statements 等价
-- [x] Wait Events（pg_stat_wait_events 虚拟表）
-- [x] pg_buffercache 等价
-- [x] pg_locks 等价（锁等待拓扑统计）
-- [x] pg_stat_activity 等价
-- [x] 慢查询日志（文件 + 内存缓冲区 SHOW SLOW LOG）
-- [x] auto_explain
-
-### 扩展性
-- [ ] CREATE EXTENSION
-- [ ] FDW (postgres_fdw 等)
-- [ ] 自定义扫描节点
-- [ ] 自定义 WAL 资源管理器
-- [ ] 后台工作进程 (bgworker)
-- [ ] 共享内存扩展
-- [ ] 自定义索引访问方法
-- [ ] 自定义类型输入/输出函数
-
-### 全文搜索
-- [ ] PG 风格全文搜索 (tsvector/tsquery)
-- [ ] 文本搜索配置
-- [ ] 同义词词典
-
-### 高级特性
-- [ ] 图查询 (SQL/PGQ, AGE)
-- [ ] 表继承 (INHERITS)
-- [ ] COPY 协议（客户端批量传输）
-- [ ] Large Objects (lo_*)
-- [ ] 外部表 (非 FDW 方式)
-- [ ] 规则系统 (RULE)
-
-### 系统管理
 - [x] ALTER SYSTEM（postgresql.conf 动态修改）
 - [x] pg_reload_conf()
 - [x] pg_cancel_backend / pg_terminate_backend
-- [x] 连接池管理（SHOW CONNECTIONS / SHOW STATUS 统计）
+- [x] 连接池管理（SHOW CONNECTIONS / SHOW STATUS）
 - [x] pg_settings / pg_roles / pg_namespace / pg_database / pg_tables / pg_indexes 虚拟表
 - [x] VACUUM CONCURRENTLY
+- [x] 创建 `DO` 简化 SQL block 执行
+- [x] `LOAD 'library'` 目录登记
+- [x] `SELECT ... INTO [TEMP|UNLOGGED] table` 到 CTAS 转换
+- [x] `.pg_compat_objects` 目录级兼容对象表
+- [x] `ALTER DATABASE` 支持实际目录 rename
+- [x] `ALTER POLICY` 支持 rename/roles/using/with check 真实改写
+- [x] `ALTER DOMAIN` 真实改写 .domains
+- [x] `ALTER TYPE` 支持 composite type rename/attribute 更新
+
+### 本次新增完成（2026-06-10）
+- [x] **编译零警告**：清理 30+ 处未使用变量/参数/函数，修复 range-loop-construct，添加缺失初始化器
+- [x] **TLS 构建系统**：CMake + build.sh 自动检测 OpenSSL，条件编译 TLSWrapper
+- [x] **ALTER ROLE RENAME for users**：新增 `renameUser()`，支持用户重命名
+- [x] **IPv6 支持**：inet/cidr 类型新增 IPv6 地址格式化输出
+- [x] **空目录 README**：executor / parser / replication / catalog 补充状态说明
+- [x] **接口文件注释**：storage_engine.h / executor.h / index_am.h 补充迁移状态
 
 ---
 
-## 实施建议
+## ⏳ 待办（按优先级）
 
-### 推荐顺序
+### P2：增强功能（短期可补）
 
-1. **Batch 1**（会话上下文）— 安全漏洞，无依赖，立即实施
-2. **Batch 2**（MVCC + ReadView）— 核心架构，依赖 Batch 1
-3. **Batch 3**（Hash/Merge Join）— 查询优化，无存储层依赖
-4. **Batch 4**（VARCHAR / 变长行）— 存储格式大改，风险高
-5. **Batch 5**（Checkpoint + fsync）— 持久化加固，依赖 Batch 4 格式稳定
-6. **Batch 6**（剩余 TOP20）— 大模块，逐个突破
-7. **Batch 7**（其他缺失）— 按需补充
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 1 | 直方图 / 相关性统计 | 中 | 优化器统计增强 |
+| 2 | 子查询内联 / 物化决策优化 | 中 | CTE MATERIALIZED/NOT MATERIALIZED |
+| 3 | 压缩 (页级/行级) | 中 | LZ4/Zstd 页压缩 |
+| 4 | 透明数据加密 (TDE) | 中高 | 页级 AES 加密 |
+| 5 | 复合触发器 | 中 | Compound Trigger |
+| 6 | SECURITY DEFINER / INVOKER | 中 | 函数执行权限 |
+| 7 | 自定义聚合函数 (UDAF) | 中 | CREATE AGGREGATE |
+| 8 | 外部表 (非 FDW 方式) | 低 | 简单外部数据源读取 |
 
-### Commit 节奏
+### P3：高级特性（架构级大模块）
 
-- 每个 Step 完成后编译通过就 commit
-- 预计 Batch 1-5 共约 **15-20 个 commits**
-- Batch 6 每个 TOP20 gap 约 **3-5 个 commits**
-- Batch 7 按需 commit
+#### 查询优化器
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 9 | 并行查询计划 | 极高 | Gather/Gather Merge、并行扫描/Join/聚合 |
+| 10 | 并行 Hash Join / 并行索引扫描 | 极高 | 需 worker 生命周期管理 |
+| 11 | JIT 编译 (LLVM) | 极高 | 表达式 JIT |
+
+#### 存储过程/PL
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 12 | PL/pgSQL 过程语言 | 极高 | 需词法/语法分析器 + 字节码 VM |
+| 13 | 游标完善 (DECLARE) | 中 | 可滚动/二进制/holdable cursor |
+| 14 | 流程控制 (IF/WHILE/LOOP/FOR) | 高 | 过程语言控制流 |
+| 15 | 异常处理 (BEGIN ... EXCEPTION) | 高 | PL/pgSQL 风格异常 |
+| 16 | 外部语言 (plpython, plperl) | 极高 | 安全沙箱极难实现 |
+
+#### 安全与认证
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 17 | SCRAM-SHA-256 认证 | 中 | 替换现有 SHA256 |
+| 18 | LDAP / Kerberos / GSSAPI 认证 | 高 | 需外部库集成 |
+| 19 | SSL 证书认证 | 中 | 客户端证书验证 |
+| 20 | RADIUS 认证 | 中 | 企业级认证 |
+| 21 | pg_hba.conf 风格访问控制 | 中高 | Host-Based Authentication |
+
+#### 复制与高可用
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 22 | 物理流复制 (Streaming Replication) | 极高 | WAL 流式发送 + 备库回放 |
+| 23 | 逻辑复制 (Logical Replication) | 极高 | Publication/Subscription |
+| 24 | PUBLICATION / SUBSCRIPTION | 极高 | 基于表级别的变更捕获 |
+| 25 | 逻辑解码 (Logical Decoding) | 极高 | WAL 解析为逻辑变更 |
+| 26 | 复制槽 (Replication Slot) | 高 | 防止 WAL 被过早删除 |
+| 27 | 同步提交控制 (synchronous_commit) | 高 | 同步/异步复制切换 |
+| 28 | 级联复制 / 热备 | 极高 | 多层复制 + 热备只读 |
+
+#### 备份与恢复
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 29 | 基础备份 (pg_basebackup) | 高 | 一致性物理备份 |
+| 30 | PITR（时间点恢复） | 极高 | 依赖 Checkpoint + 连续 WAL 归档 |
+| 31 | WAL 归档 / recovery.signal | 高 | 连续归档恢复 |
+| 32 | 增量备份 | 高 | 块级增量备份 |
+
+#### 扩展性
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 33 | CREATE EXTENSION | 极高 | 插件加载框架 |
+| 34 | FDW (postgres_fdw 等) | 极高 | 外部数据包装器 |
+| 35 | 自定义扫描节点 | 高 | 扩展 planner/executor |
+| 36 | 自定义 WAL 资源管理器 | 极高 | 扩展 WAL 记录类型 |
+| 37 | 后台工作进程 (bgworker) | 极高 | 自定义后台任务 |
+| 38 | 共享内存扩展 | 高 | 扩展共享内存使用 |
+| 39 | 自定义索引访问方法 | 极高 | Access Method API |
+| 40 | 自定义类型输入/输出函数 | 高 | Base type 完整语义 |
+
+#### 全文搜索
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 41 | PG 风格全文搜索运行时 | 高 | tsvector/tsquery parser |
+| 42 | 文本搜索配置 | 高 | 配置/词典/parser/template |
+| 43 | 同义词词典 | 中 | 中文分词等 |
+
+#### 高级特性
+| # | 功能 | 难度 | 说明 |
+|---|------|------|------|
+| 44 | 图查询 (SQL/PGQ, AGE) | 极高 | Cypher 解析器 + 图遍历 |
+| 45 | 表继承完善 | 中 | ONLY/NO INHERIT 完整语义 |
+| 46 | COPY 协议（客户端批量传输） | 高 | Binary COPY |
+| 47 | Large Objects (lo_*) | 中 | 大对象存储 |
+| 48 | 规则系统 (RULE) | 高 | CREATE/DROP RULE |
+
+### P4：暂不列入（生态/极难实现）
+
+| 功能 | 理由 |
+|------|------|
+| PostGIS 风格空间扩展 | 需要完整 GIS 库（GEOS/PROJ/GDAL），体量等于本 DBMS |
+| TimescaleDB 风格时序 | 需要超表 + 连续聚合 + 压缩策略，独立项目级别 |
+| Apache AGE 风格图查询 | Cypher 解析器 + 图遍历引擎，独立项目级别 |
+| MPP 大规模并行处理 | 架构级变更，不现实 |
+| 自定义过程语言 (plpython/plperl) | 安全沙箱极难实现 |
+| 几何类型 (POLYGON/LINE/CIRCLE) | 不引入 GIS 则意义有限 |
+| MACADDR 类型 | 小众需求 |
+| 范围类型完整语义 | 需排他约束基础设施完善 |
 
 ---
 
-*最后更新：2026-06-08*
+## 架构级根本差距（详见 postgresql-complete-gap-analysis.md）
+
+以下差距不是单个功能点，而是系统级架构差异，需要整体重构：
+
+1. **Parser/AST**：当前 `execute()` 是巨大字符串分发器，不是完整 SQL grammar 管线
+2. **Catalog/OID**：没有完整 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`
+3. **WAL redo**：当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines
+4. **MVCC 版本链**：只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update
+5. **DDL 事务化**：多处 DDL 隐式提交，与 PG 事务语义不一致
+6. **PostgreSQL Wire Protocol**：不是 PG 协议，客户端仅文本登录
+7. **扩展系统**：没有插件加载框架、Hook 系统、共享内存扩展
+
+> **建议**：若目标是"更像 PostgreSQL"，需按以下顺序推进架构级重构：
+> 1. Parser/AST → 2. Catalog → 3. WAL/MVCC → 4. DDL 事务化 → 5. 类型系统 → 6. Planner → 7. Wire Protocol → 8. 复制/PITR → 9. 扩展/FDW/PL
+
+---
+
+## Commit 节奏建议
+
+| 阶段 | 范围 | 预估 commits |
+|------|------|-------------|
+| P2 补充 | 直方图/压缩/TDE/复合触发器/SECURITY DEFINER | 5-8 |
+| P3 安全 | SCRAM/pg_hba | 3-5 |
+| P3 存储过程 | PL/pgSQL 最小可行版本 | 10-15 |
+| P3 复制 | 流复制基础框架 | 15-20 |
+| P3 备份 | PITR 基础 | 10-15 |
+| P3 扩展 | EXTENSION/FDW 框架 | 15-20 |
+
+---
+
+*最后更新：2026-06-10*
+*关联文档：*
+- [postgresql-complete-gap-analysis.md](postgresql-complete-gap-analysis.md) — 最详细的差距分析（不可删除）
+- [test-report.md](test-report.md) — 功能测试报告
+- [commandsList.md](commandsList.md) — 支持的 SQL 命令列表
