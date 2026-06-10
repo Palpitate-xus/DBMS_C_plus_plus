@@ -2162,6 +2162,188 @@ static bool handleDeallocate(const string& sql, Session& s) {
     return false;
 }
 
+static bool handleExplain(const string& sql, Session& s) {
+    if (!checkDB(s)) return true;
+    dbms::QueryPlanner::ExplainOptions opts;
+    bool isJson = false;
+    string rest = trim(sql.substr(7));
+    if (!rest.empty() && rest.front() == '(') {
+        size_t closeParen = rest.find(')');
+        if (closeParen != string::npos) {
+            string optStr = trim(rest.substr(1, closeParen - 1));
+            rest = trim(rest.substr(closeParen + 1));
+            stringstream oss(optStr);
+            string opt;
+            while (getline(oss, opt, ',')) {
+                string o = trim(opt);
+                size_t sp = o.find(' ');
+                string name = (sp == string::npos) ? o : trim(o.substr(0, sp));
+                string val = (sp == string::npos) ? "true" : trim(o.substr(sp + 1));
+                bool on = (val != "false" && val != "0" && val != "off");
+                if (name == "analyze") opts.analyze = on;
+                else if (name == "buffers") opts.buffers = on;
+                else if (name == "timing") opts.timing = on;
+                else if (name == "costs") opts.costs = on;
+                else if (name == "settings") opts.settings = on;
+                else if (name == "verbose") opts.verbose = on;
+                else if (name == "format" && val == "json") isJson = true;
+            }
+        }
+    } else {
+        if (rest.size() >= 8 && rest.substr(0, 8) == "analyze ") {
+            opts.analyze = true;
+            rest = trim(rest.substr(8));
+        }
+        if (rest.size() >= 8 && rest.substr(0, 8) == "buffers ") {
+            opts.buffers = true;
+            rest = trim(rest.substr(8));
+        }
+        if (rest.size() >= 8 && rest.substr(0, 8) == "verbose ") {
+            opts.verbose = true;
+            rest = trim(rest.substr(8));
+        }
+        if (rest.size() >= 11 && rest.substr(0, 11) == "format json") {
+            isJson = true;
+            rest = trim(rest.substr(11));
+        }
+    }
+    string inner = rest;
+    if (inner.size() < 6 || inner.substr(0, 6) != "select") {
+        cout << "EXPLAIN only supports SELECT" << endl;
+        return true;
+    }
+    size_t fromPos = inner.find("from");
+    if (fromPos == string::npos) {
+        cout << "SQL syntax error" << endl;
+        return true;
+    }
+    string columns = trim(inner.substr(6, fromPos - 6));
+    bool isDistinct = false;
+    if (columns.size() >= 9 && columns.substr(0, 9) == "distinct ") {
+        isDistinct = true;
+        columns = trim(columns.substr(9));
+    }
+    size_t wherePos = inner.find("where", fromPos);
+    size_t orderPos = inner.find("order by", fromPos);
+    size_t limitPos = inner.find("limit", fromPos);
+    string tname = trim(inner.substr(fromPos + 4,
+        (wherePos != string::npos) ? (wherePos - fromPos - 4)
+        : (orderPos != string::npos) ? (orderPos - fromPos - 4)
+        : (limitPos != string::npos) ? (limitPos - fromPos - 4)
+        : (inner.size() - fromPos - 4)));
+    vector<string> conds;
+    if (wherePos != string::npos) {
+        size_t condEnd = (orderPos != string::npos) ? orderPos
+                       : (limitPos != string::npos) ? limitPos
+                       : inner.size();
+        string condStr = normalizeConditionStr(trim(inner.substr(wherePos + 5, condEnd - wherePos - 5)));
+        if (!condStr.empty()) {
+            vector<string> rawConds = splitConds(condStr);
+            for (auto& c : rawConds) {
+                string mc = modifyLogic(c);
+                if (!mc.empty()) conds.push_back(mc);
+            }
+        }
+    }
+    string orderByCol = "";
+    bool orderByAsc = true;
+    if (orderPos != string::npos) {
+        size_t sortEnd = (limitPos != string::npos) ? limitPos : inner.size();
+        string sortStr = trim(inner.substr(orderPos + 8, sortEnd - orderPos - 8));
+        if (!sortStr.empty()) {
+            if (sortStr.size() >= 5 && sortStr.substr(sortStr.size() - 4) == "desc") {
+                orderByCol = trim(sortStr.substr(0, sortStr.size() - 4));
+                orderByAsc = false;
+            } else {
+                orderByCol = trim(sortStr);
+            }
+        }
+    }
+    size_t limitVal = 0;
+    if (limitPos != string::npos) {
+        string lstr = trim(inner.substr(limitPos + 5));
+        try { limitVal = static_cast<size_t>(std::stoull(lstr)); } catch (...) {}
+    }
+    set<string> selectCols;
+    bool selectAll = (columns == "*");
+    if (!selectAll) {
+        for (const auto& item : splitSelectColumns(columns)) {
+            selectCols.insert(trim(item));
+        }
+    }
+    dbms::PlanContext ctx;
+    ctx.dbname = s.currentDB;
+    ctx.tablename = tname;
+    ctx.conds = dbms::StorageEngine::parseConditions(conds);
+    ctx.selectCols = selectCols;
+    ctx.orderByCol = orderByCol;
+    ctx.orderByAsc = orderByAsc;
+    ctx.limit = limitVal;
+    ctx.distinct = isDistinct;
+
+    string cacheKey = s.currentDB + "::" + inner;
+    if (opts.buffers) cacheKey += ":B";
+    if (opts.verbose) cacheKey += ":V";
+    if (isJson) cacheKey += ":J";
+    if (opts.analyze) cacheKey += ":A";
+    if (opts.timing) cacheKey += ":T";
+    if (opts.costs) cacheKey += ":C";
+    if (opts.settings) cacheKey += ":S";
+    string planOutput;
+    bool cacheHit = false;
+    {
+        std::lock_guard<std::mutex> lock(g_planCacheMutex);
+        auto it = g_queryPlanCache.find(cacheKey);
+        if (it != g_queryPlanCache.end() && it->second.dbname == s.currentDB) {
+            planOutput = it->second.planText;
+            it->second.cachedAt = std::chrono::steady_clock::now();
+            cacheHit = true;
+            ++g_planCacheHits;
+        } else {
+            ++g_planCacheMisses;
+        }
+    }
+
+    if (!cacheHit) {
+        auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+        if (isJson) {
+            planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts);
+        } else {
+            planOutput = dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB, opts);
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_planCacheMutex);
+            if (g_queryPlanCache.size() >= 100) {
+                auto oldest = g_queryPlanCache.begin();
+                for (auto it = g_queryPlanCache.begin(); it != g_queryPlanCache.end(); ++it) {
+                    if (it->second.cachedAt < oldest->second.cachedAt) oldest = it;
+                }
+                g_queryPlanCache.erase(oldest);
+            }
+            g_queryPlanCache[cacheKey] = {planOutput, s.currentDB, std::chrono::steady_clock::now()};
+        }
+    }
+
+    cout << planOutput;
+    if (cacheHit) cout << "\n[plan cache hit]";
+
+    if (opts.analyze) {
+        auto execStart = std::chrono::steady_clock::now();
+        size_t actualRows = 0;
+        auto answers = g_engine.query(s.currentDB, tname, conds, selectCols,
+            {dbms::StorageEngine::OrderBySpec{orderByCol, orderByAsc}}, false);
+        actualRows = answers.size();
+        auto execEnd = std::chrono::steady_clock::now();
+        double execMs = std::chrono::duration<double, std::milli>(execEnd - execStart).count();
+        cout << "\n--- ANALYZE ---\n";
+        if (opts.timing) {
+            cout << "Actual time: " << std::fixed << std::setprecision(3) << execMs << " ms\n";
+        }
+        cout << "Actual rows: " << actualRows << "\n";
+    }
+    return false;
+}
+
 // ========================================================================
 // Window function support
 // ========================================================================
@@ -7888,6 +8070,9 @@ bool execute(const string& rawSql, Session& s) {
         case dbms::SqlCommand::Deallocate:
             return handleDeallocate(sql, s);
 
+        case dbms::SqlCommand::Explain:
+            return handleExplain(sql, s);
+
         default:
             break;
     }
@@ -13320,195 +13505,6 @@ bool execute(const string& rawSql, Session& s) {
 
     if (startsWithKeyword(sql, "load")) {
         return handleLoadSharedLibrary(sql, s);
-    }
-
-    // EXPLAIN / EXPLAIN ANALYZE / EXPLAIN FORMAT JSON / EXPLAIN (OPTIONS)
-    if (sql.substr(0, 7) == "explain") {
-        if (!checkDB(s)) return true;
-        dbms::QueryPlanner::ExplainOptions opts;
-        bool isJson = false;
-        string rest = trim(sql.substr(7));
-        // Parenthesized options: EXPLAIN (ANALYZE, BUFFERS, TIMING, COSTS, SETTINGS, VERBOSE)
-        if (!rest.empty() && rest.front() == '(') {
-            size_t closeParen = rest.find(')');
-            if (closeParen != string::npos) {
-                string optStr = trim(rest.substr(1, closeParen - 1));
-                rest = trim(rest.substr(closeParen + 1));
-                // Split by comma
-                stringstream oss(optStr);
-                string opt;
-                while (getline(oss, opt, ',')) {
-                    string o = trim(opt);
-                    size_t sp = o.find(' ');
-                    string name = (sp == string::npos) ? o : trim(o.substr(0, sp));
-                    string val = (sp == string::npos) ? "true" : trim(o.substr(sp + 1));
-                    bool on = (val != "false" && val != "0" && val != "off");
-                    if (name == "analyze") opts.analyze = on;
-                    else if (name == "buffers") opts.buffers = on;
-                    else if (name == "timing") opts.timing = on;
-                    else if (name == "costs") opts.costs = on;
-                    else if (name == "settings") opts.settings = on;
-                    else if (name == "verbose") opts.verbose = on;
-                    else if (name == "format" && val == "json") isJson = true;
-                }
-            }
-        } else {
-            // Legacy prefix-style options
-            if (rest.size() >= 8 && rest.substr(0, 8) == "analyze ") {
-                opts.analyze = true;
-                rest = trim(rest.substr(8));
-            }
-            if (rest.size() >= 8 && rest.substr(0, 8) == "buffers ") {
-                opts.buffers = true;
-                rest = trim(rest.substr(8));
-            }
-            if (rest.size() >= 8 && rest.substr(0, 8) == "verbose ") {
-                opts.verbose = true;
-                rest = trim(rest.substr(8));
-            }
-            if (rest.size() >= 11 && rest.substr(0, 11) == "format json") {
-                isJson = true;
-                rest = trim(rest.substr(11));
-            }
-        }
-        string inner = rest;
-        if (inner.size() < 6 || inner.substr(0, 6) != "select") {
-            cout << "EXPLAIN only supports SELECT" << endl;
-            return true;
-        }
-        // Parse the SELECT to extract table name and conditions
-        size_t fromPos = inner.find("from");
-        if (fromPos == string::npos) {
-            cout << "SQL syntax error" << endl;
-            return true;
-        }
-        string columns = trim(inner.substr(6, fromPos - 6));
-        bool isDistinct = false;
-        if (columns.size() >= 9 && columns.substr(0, 9) == "distinct ") {
-            isDistinct = true;
-            columns = trim(columns.substr(9));
-        }
-        size_t wherePos = inner.find("where", fromPos);
-        size_t orderPos = inner.find("order by", fromPos);
-        size_t limitPos = inner.find("limit", fromPos);
-        string tname = trim(inner.substr(fromPos + 4,
-            (wherePos != string::npos) ? (wherePos - fromPos - 4)
-            : (orderPos != string::npos) ? (orderPos - fromPos - 4)
-            : (limitPos != string::npos) ? (limitPos - fromPos - 4)
-            : (inner.size() - fromPos - 4)));
-        vector<string> conds;
-        if (wherePos != string::npos) {
-            size_t condEnd = (orderPos != string::npos) ? orderPos
-                           : (limitPos != string::npos) ? limitPos
-                           : inner.size();
-            string condStr = normalizeConditionStr(trim(inner.substr(wherePos + 5, condEnd - wherePos - 5)));
-            if (!condStr.empty()) {
-                vector<string> rawConds = splitConds(condStr);
-                for (auto& c : rawConds) {
-                    string mc = modifyLogic(c);
-                    if (!mc.empty()) conds.push_back(mc);
-                }
-            }
-        }
-        string orderByCol = "";
-        bool orderByAsc = true;
-        if (orderPos != string::npos) {
-            size_t sortEnd = (limitPos != string::npos) ? limitPos : inner.size();
-            string sortStr = trim(inner.substr(orderPos + 8, sortEnd - orderPos - 8));
-            if (!sortStr.empty()) {
-                if (sortStr.size() >= 5 && sortStr.substr(sortStr.size() - 4) == "desc") {
-                    orderByCol = trim(sortStr.substr(0, sortStr.size() - 4));
-                    orderByAsc = false;
-                } else {
-                    orderByCol = trim(sortStr);
-                }
-            }
-        }
-        size_t limitVal = 0;
-        if (limitPos != string::npos) {
-            string lstr = trim(inner.substr(limitPos + 5));
-            try { limitVal = static_cast<size_t>(std::stoull(lstr)); } catch (...) {}
-        }
-        set<string> selectCols;
-        bool selectAll = (columns == "*");
-        if (!selectAll) {
-            for (const auto& item : splitSelectColumns(columns)) {
-                selectCols.insert(trim(item));
-            }
-        }
-        dbms::PlanContext ctx;
-        ctx.dbname = s.currentDB;
-        ctx.tablename = tname;
-        ctx.conds = dbms::StorageEngine::parseConditions(conds);
-        ctx.selectCols = selectCols;
-        ctx.orderByCol = orderByCol;
-        ctx.orderByAsc = orderByAsc;
-        ctx.limit = limitVal;
-        ctx.distinct = isDistinct;
-
-        // Query plan cache lookup (cache key includes EXPLAIN options)
-        string cacheKey = s.currentDB + "::" + inner;
-        if (opts.buffers) cacheKey += ":B";
-        if (opts.verbose) cacheKey += ":V";
-        if (isJson) cacheKey += ":J";
-        if (opts.analyze) cacheKey += ":A";
-        if (opts.timing) cacheKey += ":T";
-        if (opts.costs) cacheKey += ":C";
-        if (opts.settings) cacheKey += ":S";
-        string planOutput;
-        bool cacheHit = false;
-        {
-            std::lock_guard<std::mutex> lock(g_planCacheMutex);
-            auto it = g_queryPlanCache.find(cacheKey);
-            if (it != g_queryPlanCache.end() && it->second.dbname == s.currentDB) {
-                planOutput = it->second.planText;
-                it->second.cachedAt = std::chrono::steady_clock::now();
-                cacheHit = true;
-                ++g_planCacheHits;
-            } else {
-                ++g_planCacheMisses;
-            }
-        }
-
-        if (!cacheHit) {
-            auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-            if (isJson) {
-                planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts);
-            } else {
-                planOutput = dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB, opts);
-            }
-            // Store in cache (limit to 100 entries)
-            {
-                std::lock_guard<std::mutex> lock(g_planCacheMutex);
-                if (g_queryPlanCache.size() >= 100) {
-                    auto oldest = g_queryPlanCache.begin();
-                    for (auto it = g_queryPlanCache.begin(); it != g_queryPlanCache.end(); ++it) {
-                        if (it->second.cachedAt < oldest->second.cachedAt) oldest = it;
-                    }
-                    g_queryPlanCache.erase(oldest);
-                }
-                g_queryPlanCache[cacheKey] = {planOutput, s.currentDB, std::chrono::steady_clock::now()};
-            }
-        }
-
-        cout << planOutput;
-        if (cacheHit) cout << "\n[plan cache hit]";
-
-        if (opts.analyze) {
-            auto execStart = std::chrono::steady_clock::now();
-            size_t actualRows = 0;
-            auto answers = g_engine.query(s.currentDB, tname, conds, selectCols,
-                {dbms::StorageEngine::OrderBySpec{orderByCol, orderByAsc}}, false);
-            actualRows = answers.size();
-            auto execEnd = std::chrono::steady_clock::now();
-            double execMs = std::chrono::duration<double, std::milli>(execEnd - execStart).count();
-            cout << "\n--- ANALYZE ---\n";
-            if (opts.timing) {
-                cout << "Actual time: " << std::fixed << std::setprecision(3) << execMs << " ms\n";
-            }
-            cout << "Actual rows: " << actualRows << "\n";
-        }
-        return false;
     }
 
     // pg_advisory_lock / pg_advisory_unlock (intercept before SELECT)
