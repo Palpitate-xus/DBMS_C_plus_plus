@@ -34,6 +34,7 @@ public:
     static std::string toLower(const std::string& s);
     static std::string trim(const std::string& s);
     static std::vector<std::string> tokenize(const std::string& sql);
+    static bool isKeyword(const std::string& s);
 
 private:
     // 各命令类型的解析实现
@@ -148,10 +149,13 @@ private:
     StmtPtr parseAlterRoutine(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterTrigger(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterRole(const std::vector<std::string>& tokens, size_t& pos);
+    StmtPtr parseAlterUser(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterSystem(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterTablespace(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterStatistics(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterPolicy(const std::vector<std::string>& tokens, size_t& pos);
+    StmtPtr parseAlterRule(const std::vector<std::string>& tokens, size_t& pos);
+    StmtPtr parseAlterEventTrigger(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterExtension(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterPublication(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseAlterSubscription(const std::vector<std::string>& tokens, size_t& pos);
@@ -188,6 +192,7 @@ private:
     StmtPtr parseDropRoutine(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseDropTrigger(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseDropRole(const std::vector<std::string>& tokens, size_t& pos);
+    StmtPtr parseDropUser(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseDropTablespace(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseDropStatistics(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseDropPolicy(const std::vector<std::string>& tokens, size_t& pos);
@@ -221,7 +226,6 @@ private:
     static bool match(const std::vector<std::string>& tokens, size_t pos, const std::string& word);
     static bool matchAny(const std::vector<std::string>& tokens, size_t pos,
                          const std::vector<std::string>& words);
-    static bool isKeyword(const std::string& s);
 };
 
 } // namespace dbms

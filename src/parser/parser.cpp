@@ -1,8 +1,22 @@
 #include "parser.h"
 #include <cctype>
 #include <algorithm>
+#include <functional>
+#include <set>
 
 namespace dbms {
+
+// ============================================================================
+// Forward declarations for internal helper functions
+// ============================================================================
+
+static std::vector<std::string> collectParenthesized(const std::vector<std::string>& tokens, size_t& pos);
+static std::string collectExpression(const std::vector<std::string>& tokens, size_t& pos,
+                                      bool stopAtComma = false,
+                                      const std::set<std::string>& stopWords = {});
+static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos);
+static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t& pos);
+static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos);
 
 // ============================================================================
 // 工具函数
@@ -669,47 +683,865 @@ ParseResult SQLParser::parse(const std::string& sql) {
 // 各命令类型的解析实现（Phase 1 简化版：先分类，后续逐步完善参数解析）
 // ============================================================================
 
+// ============================================================================
+// 表达式解析辅助函数
+// ============================================================================
+
+static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos);
+
+// 解析逗号分隔的列表，每个元素用 parseItem 解析
+static std::vector<ExprPtr> parseExprList(const std::vector<std::string>& tokens, size_t& pos) {
+    std::vector<ExprPtr> result;
+    while (pos < tokens.size()) {
+        auto expr = parseSimpleExpr(tokens, pos);
+        if (expr) result.push_back(std::move(expr));
+        if (pos < tokens.size() && tokens[pos] == ",") {
+            ++pos;
+            continue;
+        }
+        break;
+    }
+    return result;
+}
+
+// 简化表达式解析：识别字面量、列引用、函数调用、基本运算
+static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    if (pos >= tokens.size()) return nullptr;
+
+    // Handle unary NOT
+    if (SQLParser::toLower(tokens[pos]) == "not") {
+        ++pos;
+        auto expr = std::make_unique<UnaryOpExpr>();
+        expr->op = "NOT";
+        expr->operand = parseSimpleExpr(tokens, pos);
+        return expr;
+    }
+
+    // Parenthesized expression or subquery
+    if (tokens[pos] == "(") {
+        ++pos;
+        auto inner = parseSimpleExpr(tokens, pos);
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+        return inner;
+    }
+
+    // Star
+    if (tokens[pos] == "*") {
+        ++pos;
+        auto expr = std::make_unique<LiteralExpr>();
+        expr->value = "*";
+        return expr;
+    }
+
+    std::string first = tokens[pos];
+    size_t savedPos = pos;
+    ++pos;
+
+    // Function call: func_name( ... )
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos; // skip '('
+        auto func = std::make_unique<FunctionCallExpr>();
+        func->funcName = first;
+        // Parse arguments
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            if (tokens[pos] == "distinct" || tokens[pos] == "DISTINCT") {
+                func->distinct = true;
+                ++pos;
+                continue;
+            }
+            auto arg = parseSimpleExpr(tokens, pos);
+            if (arg) func->args.push_back(std::move(arg));
+            if (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                continue;
+            }
+        }
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+
+        // FILTER (WHERE ...)
+        if (pos + 2 < tokens.size() && SQLParser::toLower(tokens[pos]) == "filter"
+            && tokens[pos + 1] == "(") {
+            pos += 2; // skip FILTER (
+            if (SQLParser::toLower(tokens[pos]) == "where") ++pos;
+            func->filter = parseSimpleExpr(tokens, pos);
+            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+        }
+
+        // Check for binary operator after function call
+        if (pos < tokens.size()) {
+            std::string op = tokens[pos];
+            static const std::set<std::string> binOps = {
+                "=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "^",
+                "and", "or", "like", "ilike", "in", "between", "is"
+            };
+            if (binOps.count(SQLParser::toLower(op)) > 0) {
+                ++pos;
+                auto bin = std::make_unique<BinaryOpExpr>();
+                bin->op = op;
+                bin->left = std::move(func);
+                bin->right = parseSimpleExpr(tokens, pos);
+                return bin;
+            }
+        }
+        return func;
+    }
+
+    // Column reference: table.column or just column
+    std::string tableName, colName = first;
+    if (pos < tokens.size() && tokens[pos] == ".") {
+        ++pos;
+        if (pos < tokens.size()) {
+            tableName = first;
+            colName = tokens[pos++];
+        }
+    }
+
+    auto colRef = std::make_unique<ColumnRefExpr>();
+    colRef->table = tableName;
+    colRef->column = colName;
+
+    // Check for binary operator
+    if (pos < tokens.size()) {
+        std::string op = tokens[pos];
+        static const std::set<std::string> binOps = {
+            "=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "^",
+            "and", "or", "like", "ilike", "in", "between", "is", "||", "->", "->>", "::"
+        };
+        if (binOps.count(SQLParser::toLower(op)) > 0) {
+            ++pos;
+            auto bin = std::make_unique<BinaryOpExpr>();
+            bin->op = op;
+            bin->left = std::move(colRef);
+            if (SQLParser::toLower(op) == "in" && pos < tokens.size() && tokens[pos] == "(") {
+                ++pos;
+                auto list = std::make_unique<LiteralExpr>();
+                std::string val;
+                while (pos < tokens.size() && tokens[pos] != ")") {
+                    if (!val.empty()) val += " ";
+                    val += tokens[pos++];
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                list->value = val;
+                bin->right = std::move(list);
+            } else if (SQLParser::toLower(op) == "between") {
+                auto betweenExpr = std::make_unique<LiteralExpr>();
+                std::string val;
+                while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) != "and") {
+                    if (!val.empty()) val += " ";
+                    val += tokens[pos++];
+                }
+                if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "and") {
+                    val += " AND ";
+                    ++pos;
+                    while (pos < tokens.size()) {
+                        std::string w = SQLParser::toLower(tokens[pos]);
+                        if (w == "and" || w == "or" || w == ")" || w == ",") break;
+                        if (!val.empty() && val.back() != ' ') val += " ";
+                        val += tokens[pos++];
+                    }
+                }
+                betweenExpr->value = val;
+                bin->right = std::move(betweenExpr);
+            } else if (SQLParser::toLower(op) == "is") {
+                std::string val;
+                while (pos < tokens.size()) {
+                    std::string w = SQLParser::toLower(tokens[pos]);
+                    if (w == "and" || w == "or" || w == ")" || w == ",") break;
+                    if (!val.empty()) val += " ";
+                    val += tokens[pos++];
+                }
+                auto right = std::make_unique<LiteralExpr>();
+                right->value = val;
+                bin->right = std::move(right);
+            } else {
+                bin->right = parseSimpleExpr(tokens, pos);
+            }
+            return bin;
+        }
+    }
+
+    // Postfix IS NULL / IS NOT NULL
+    if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "is") {
+        if (SQLParser::toLower(tokens[pos + 1]) == "null") {
+            pos += 2;
+            auto unary = std::make_unique<UnaryOpExpr>();
+            unary->op = "IS NULL";
+            unary->operand = std::move(colRef);
+            return unary;
+        } else if (pos + 2 < tokens.size() && SQLParser::toLower(tokens[pos + 1]) == "not"
+                   && SQLParser::toLower(tokens[pos + 2]) == "null") {
+            pos += 3;
+            auto unary = std::make_unique<UnaryOpExpr>();
+            unary->op = "IS NOT NULL";
+            unary->operand = std::move(colRef);
+            return unary;
+        }
+    }
+
+    // Literal (string, number)
+    auto lit = std::make_unique<LiteralExpr>();
+    lit->value = first;
+    return lit;
+}
+
+// 解析单个 SELECT 项（expr [AS alias]）
+static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t& pos) {
+    SelectItem item;
+    item.expr = parseSimpleExpr(tokens, pos);
+    if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
+        ++pos;
+        if (pos < tokens.size()) item.alias = tokens[pos++];
+    } else if (pos < tokens.size() && !SQLParser::isKeyword(tokens[pos])
+               && tokens[pos] != "," && tokens[pos] != "from"
+               && tokens[pos] != ")") {
+        // Implicit alias (no AS keyword)
+        item.alias = tokens[pos++];
+    }
+    return item;
+}
+
+// 解析 FROM 项（简化版：支持表名、别名、JOIN）
+static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos) {
+    if (pos >= tokens.size()) return nullptr;
+
+    auto item = std::make_unique<FromItem>();
+    item->type = FromItem::Type::Table;
+    item->tableName = tokens[pos++];
+
+    // AS alias or implicit alias
+    if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
+        ++pos;
+        if (pos < tokens.size()) item->alias = tokens[pos++];
+    } else if (pos < tokens.size() && !SQLParser::isKeyword(tokens[pos])
+               && tokens[pos] != "," && tokens[pos] != ")") {
+        item->alias = tokens[pos++];
+    }
+
+    // JOIN handling (simplified)
+    while (pos < tokens.size()) {
+        std::string jkw = SQLParser::toLower(tokens[pos]);
+        if (jkw == "join" || jkw == "inner" || jkw == "left" || jkw == "right"
+            || jkw == "full" || jkw == "cross" || jkw == "natural") {
+            std::string joinType = "INNER";
+            if (jkw == "left") { joinType = "LEFT"; ++pos; if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "outer") ++pos; }
+            else if (jkw == "right") { joinType = "RIGHT"; ++pos; if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "outer") ++pos; }
+            else if (jkw == "full") { joinType = "FULL"; ++pos; if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "outer") ++pos; }
+            else if (jkw == "cross") { joinType = "CROSS"; ++pos; }
+            else if (jkw == "natural") { joinType = "NATURAL"; ++pos; if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "join") ++pos; }
+            else if (jkw == "inner") { joinType = "INNER"; ++pos; }
+            else if (jkw == "join") { ++pos; }
+
+            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "join") ++pos;
+
+            auto rightItem = std::make_unique<FromItem>();
+            rightItem->type = FromItem::Type::Table;
+            if (pos < tokens.size()) rightItem->tableName = tokens[pos++];
+            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
+                ++pos;
+                if (pos < tokens.size()) rightItem->alias = tokens[pos++];
+            } else if (pos < tokens.size() && !SQLParser::isKeyword(tokens[pos])
+                       && tokens[pos] != "," && tokens[pos] != ")") {
+                rightItem->alias = tokens[pos++];
+            }
+
+            auto joinNode = std::make_unique<FromItem>();
+            joinNode->type = FromItem::Type::Join;
+            joinNode->joinType = joinType;
+            joinNode->left = std::move(item);
+            joinNode->right = std::move(rightItem);
+
+            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "on") {
+                ++pos;
+                joinNode->joinCondition = parseSimpleExpr(tokens, pos);
+            } else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "using") {
+                ++pos;
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    auto cols = collectParenthesized(tokens, pos);
+                    for (const auto& c : cols) {
+                        if (c != ",") joinNode->usingCols.push_back(c);
+                    }
+                }
+            }
+            item = std::move(joinNode);
+        } else {
+            break;
+        }
+    }
+
+    return item;
+}
+
 ParseResult SQLParser::parseSelect(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 2) {
+        r.error = "SELECT statement too short";
+        return r;
+    }
+
+    auto stmt = std::make_unique<SelectStmt>();
+    size_t pos = 1; // skip SELECT
+
+    // DISTINCT / DISTINCT ON (...)
+    if (pos < tokens.size() && toLower(tokens[pos]) == "distinct") {
+        ++pos;
+        if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "on" && tokens[pos + 1] == "(") {
+            pos += 2;
+            while (pos < tokens.size() && tokens[pos] != ")") {
+                auto expr = parseSimpleExpr(tokens, pos);
+                if (expr) stmt->distinctOn.push_back(std::move(expr));
+                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            }
+            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+        } else {
+            stmt->distinct = true;
+        }
+    } else if (pos < tokens.size() && toLower(tokens[pos]) == "all") {
+        ++pos;
+    }
+
+    // Select list
+    while (pos < tokens.size()) {
+        if (toLower(tokens[pos]) == "from" || toLower(tokens[pos]) == "where"
+            || toLower(tokens[pos]) == "group" || toLower(tokens[pos]) == "having"
+            || toLower(tokens[pos]) == "order" || toLower(tokens[pos]) == "limit"
+            || toLower(tokens[pos]) == "offset" || toLower(tokens[pos]) == "union"
+            || toLower(tokens[pos]) == "intersect" || toLower(tokens[pos]) == "except"
+            || toLower(tokens[pos]) == "for") {
+            break;
+        }
+        stmt->selectList.push_back(parseSelectItem(tokens, pos));
+        if (pos < tokens.size() && tokens[pos] == ",") {
+            ++pos;
+            continue;
+        }
+    }
+
+    // FROM
+    if (pos < tokens.size() && toLower(tokens[pos]) == "from") {
+        ++pos;
+        // Multiple tables or JOINs
+        auto firstItem = parseFromItem(tokens, pos);
+        if (firstItem) {
+            while (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                auto nextItem = parseFromItem(tokens, pos);
+                if (nextItem) {
+                    auto crossJoin = std::make_unique<FromItem>();
+                    crossJoin->type = FromItem::Type::Join;
+                    crossJoin->joinType = "CROSS";
+                    crossJoin->left = std::move(firstItem);
+                    crossJoin->right = std::move(nextItem);
+                    firstItem = std::move(crossJoin);
+                }
+            }
+            stmt->fromClause = std::move(firstItem);
+        }
+    }
+
+    // WHERE
+    if (pos < tokens.size() && toLower(tokens[pos]) == "where") {
+        ++pos;
+        stmt->whereClause = parseSimpleExpr(tokens, pos);
+    }
+
+    // GROUP BY
+    if (pos < tokens.size() && toLower(tokens[pos]) == "group") {
+        ++pos;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "by") ++pos;
+        while (pos < tokens.size()) {
+            std::string w = toLower(tokens[pos]);
+            if (w == "having" || w == "order" || w == "limit" || w == "offset"
+                || w == "union" || w == "intersect" || w == "except" || w == "for") break;
+            auto expr = parseSimpleExpr(tokens, pos);
+            if (expr) stmt->groupBy.push_back(std::move(expr));
+            if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
+        }
+    }
+
+    // HAVING
+    if (pos < tokens.size() && toLower(tokens[pos]) == "having") {
+        ++pos;
+        stmt->having = parseSimpleExpr(tokens, pos);
+    }
+
+    // ORDER BY
+    if (pos < tokens.size() && toLower(tokens[pos]) == "order") {
+        ++pos;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "by") ++pos;
+        while (pos < tokens.size()) {
+            std::string w = toLower(tokens[pos]);
+            if (w == "limit" || w == "offset" || w == "union"
+                || w == "intersect" || w == "except" || w == "for") break;
+            auto expr = parseSimpleExpr(tokens, pos);
+            bool asc = true;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
+            else if (pos < tokens.size() && toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
+            if (expr) stmt->orderBy.emplace_back(std::move(expr), asc);
+            if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
+        }
+    }
+
+    // LIMIT / OFFSET
+    if (pos < tokens.size() && toLower(tokens[pos]) == "limit") {
+        ++pos;
+        if (pos < tokens.size()) {
+            if (toLower(tokens[pos]) == "all") {
+                ++pos;
+            } else {
+                try { stmt->limit = std::stoull(tokens[pos]); } catch (...) {}
+                ++pos;
+            }
+        }
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "offset") {
+        ++pos;
+        if (pos < tokens.size()) {
+            try { stmt->offset = std::stoull(tokens[pos]); } catch (...) {}
+            ++pos;
+        }
+    }
+
+    // FOR UPDATE / FOR SHARE
+    if (pos < tokens.size() && toLower(tokens[pos]) == "for") {
+        ++pos;
+        SelectStmt::LockClause lc;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "update") {
+            lc.strength = "UPDATE"; ++pos;
+        } else if (pos < tokens.size() && toLower(tokens[pos]) == "share") {
+            lc.strength = "SHARE"; ++pos;
+        } else if (pos < tokens.size() && toLower(tokens[pos]) == "no") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "key") {
+                ++pos;
+                if (pos < tokens.size() && toLower(tokens[pos]) == "update") {
+                    lc.strength = "NO KEY UPDATE"; ++pos;
+                }
+            }
+        } else if (pos < tokens.size() && toLower(tokens[pos]) == "key") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "share") {
+                lc.strength = "KEY SHARE"; ++pos;
+            }
+        }
+        if (pos < tokens.size() && toLower(tokens[pos]) == "of") {
+            ++pos;
+            while (pos < tokens.size()) {
+                std::string w = toLower(tokens[pos]);
+                if (w == "nowait" || w == "skip" || w == ")" || w == ";" || w == "union"
+                    || w == "intersect" || w == "except") break;
+                lc.tables.push_back(tokens[pos++]);
+                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            }
+        }
+        if (pos < tokens.size() && toLower(tokens[pos]) == "nowait") {
+            lc.noWait = true; ++pos;
+        }
+        if (pos < tokens.size() && toLower(tokens[pos]) == "skip") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "locked") {
+                lc.skipLocked = true; ++pos;
+            }
+        }
+        stmt->locking.push_back(std::move(lc));
+    }
+
     r.success = true;
-    r.stmt = std::make_unique<SelectStmt>();
-    // TODO: Phase 1.2 实现完整 SELECT 解析
+    r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseInsert(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 3) {
+        r.error = "INSERT statement too short";
+        return r;
+    }
+
+    auto stmt = std::make_unique<InsertStmt>();
+    size_t pos = 1; // skip INSERT
+    if (pos < tokens.size() && toLower(tokens[pos]) == "into") ++pos;
+
+    // Table name
+    if (pos < tokens.size()) {
+        stmt->tableName = tokens[pos++];
+    }
+
+    // Optional column list: (col1, col2, ...)
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        auto cols = collectParenthesized(tokens, pos);
+        for (const auto& c : cols) {
+            if (c != ",") stmt->columns.push_back(c);
+        }
+    }
+
+    // VALUES or SELECT
+    if (pos < tokens.size() && toLower(tokens[pos]) == "values") {
+        ++pos;
+        while (pos < tokens.size()) {
+            if (tokens[pos] == "(") {
+                ++pos;
+                std::vector<ExprPtr> row;
+                while (pos < tokens.size() && tokens[pos] != ")") {
+                    if (toLower(tokens[pos]) == "default") {
+                        stmt->defaultValues = true;
+                        ++pos;
+                    } else {
+                        auto expr = parseSimpleExpr(tokens, pos);
+                        if (expr) row.push_back(std::move(expr));
+                    }
+                    if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                stmt->values.push_back(std::move(row));
+            }
+            if (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                continue;
+            }
+            if (pos < tokens.size() && toLower(tokens[pos]) == "on") break;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "returning") break;
+            if (pos < tokens.size() && tokens[pos] == ";") break;
+            // If next is not '(', break (e.g. started a new clause)
+            if (pos < tokens.size() && tokens[pos] != "(") break;
+        }
+    } else if (pos < tokens.size() && toLower(tokens[pos]) == "default") {
+        ++pos;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "values") {
+            ++pos;
+            stmt->defaultValues = true;
+        }
+    } else if (pos < tokens.size() && toLower(tokens[pos]) == "select") {
+        // INSERT INTO ... SELECT ...
+        std::string selectSql;
+        for (size_t i = pos; i < tokens.size(); ++i) {
+            if (!selectSql.empty()) selectSql += " ";
+            selectSql += tokens[i];
+        }
+        stmt->selectSource = parseSelect(selectSql).stmt;
+        pos = tokens.size();
+    }
+
+    // ON CONFLICT
+    if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "on"
+        && toLower(tokens[pos + 1]) == "conflict") {
+        pos += 2;
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            auto cols = collectParenthesized(tokens, pos);
+            for (const auto& c : cols) {
+                if (c != ",") stmt->conflictTarget.push_back(c);
+            }
+        }
+        if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "do"
+            && toLower(tokens[pos + 1]) == "nothing") {
+            stmt->conflictAction = "DO NOTHING";
+            pos += 2;
+        } else if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "do"
+                   && toLower(tokens[pos + 1]) == "update") {
+            stmt->conflictAction = "DO UPDATE";
+            pos += 2;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "set") {
+                ++pos;
+                while (pos < tokens.size()) {
+                    std::string w = toLower(tokens[pos]);
+                    if (w == "where" || w == "returning" || tokens[pos] == ";") break;
+                    if (pos + 1 < tokens.size() && tokens[pos + 1] == "=") {
+                        std::string col = tokens[pos];
+                        pos += 2; // skip col =
+                        auto expr = parseSimpleExpr(tokens, pos);
+                        stmt->conflictUpdateSet.emplace_back(col, std::move(expr));
+                    } else {
+                        ++pos;
+                    }
+                    if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                }
+            }
+            if (pos < tokens.size() && toLower(tokens[pos]) == "where") {
+                ++pos;
+                stmt->conflictWhere = parseSimpleExpr(tokens, pos);
+            }
+        }
+    }
+
+    // RETURNING
+    if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
+        ++pos;
+        while (pos < tokens.size() && tokens[pos] != ";") {
+            stmt->returning.push_back(parseSelectItem(tokens, pos));
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+    }
+
     r.success = true;
-    r.stmt = std::make_unique<InsertStmt>();
+    r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseUpdate(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 4) {
+        r.error = "UPDATE statement too short";
+        return r;
+    }
+
+    auto stmt = std::make_unique<UpdateStmt>();
+    size_t pos = 1; // skip UPDATE
+
+    // Table name
+    if (pos < tokens.size()) {
+        stmt->tableName = tokens[pos++];
+    }
+
+    // SET clause
+    if (pos < tokens.size() && toLower(tokens[pos]) == "set") {
+        ++pos;
+        while (pos < tokens.size()) {
+            std::string w = toLower(tokens[pos]);
+            if (w == "from" || w == "where" || w == "returning" || tokens[pos] == ";") break;
+            if (pos + 1 < tokens.size() && tokens[pos + 1] == "=") {
+                std::string col = tokens[pos];
+                pos += 2;
+                auto expr = parseSimpleExpr(tokens, pos);
+                stmt->setClauses[col] = std::move(expr);
+            } else {
+                ++pos;
+            }
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+    }
+
+    // FROM clause
+    if (pos < tokens.size() && toLower(tokens[pos]) == "from") {
+        ++pos;
+        stmt->fromClause = parseFromItem(tokens, pos);
+    }
+
+    // WHERE
+    if (pos < tokens.size() && toLower(tokens[pos]) == "where") {
+        ++pos;
+        stmt->whereClause = parseSimpleExpr(tokens, pos);
+    }
+
+    // RETURNING
+    if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
+        ++pos;
+        while (pos < tokens.size() && tokens[pos] != ";") {
+            stmt->returning.push_back(parseSelectItem(tokens, pos));
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+    }
+
     r.success = true;
-    r.stmt = std::make_unique<UpdateStmt>();
+    r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseDelete(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 3) {
+        r.error = "DELETE statement too short";
+        return r;
+    }
+
+    auto stmt = std::make_unique<DeleteStmt>();
+    size_t pos = 1; // skip DELETE
+
+    if (pos < tokens.size() && toLower(tokens[pos]) == "from") ++pos;
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true;
+        ++pos;
+    }
+
+    // Table name
+    if (pos < tokens.size()) {
+        stmt->tableName = tokens[pos++];
+    }
+
+    // USING
+    if (pos < tokens.size() && toLower(tokens[pos]) == "using") {
+        ++pos;
+        stmt->usingClause = parseFromItem(tokens, pos);
+    }
+
+    // WHERE
+    if (pos < tokens.size() && toLower(tokens[pos]) == "where") {
+        ++pos;
+        stmt->whereClause = parseSimpleExpr(tokens, pos);
+    }
+
+    // RETURNING
+    if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
+        ++pos;
+        while (pos < tokens.size() && tokens[pos] != ";") {
+            stmt->returning.push_back(parseSelectItem(tokens, pos));
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+    }
+
     r.success = true;
-    r.stmt = std::make_unique<DeleteStmt>();
+    r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseMerge(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 5) {
+        r.error = "MERGE statement too short";
+        return r;
+    }
+
+    auto stmt = std::make_unique<MergeStmt>();
+    size_t pos = 1; // skip MERGE
+
+    if (pos < tokens.size() && toLower(tokens[pos]) == "into") ++pos;
+
+    // Target table
+    if (pos < tokens.size()) {
+        stmt->targetTable = tokens[pos++];
+    }
+
+    // USING
+    if (pos < tokens.size() && toLower(tokens[pos]) == "using") {
+        ++pos;
+        stmt->source = parseFromItem(tokens, pos);
+    }
+
+    // ON
+    if (pos < tokens.size() && toLower(tokens[pos]) == "on") {
+        ++pos;
+        stmt->joinCondition = parseSimpleExpr(tokens, pos);
+    }
+
+    // WHEN clauses
+    while (pos < tokens.size() && toLower(tokens[pos]) == "when") {
+        ++pos;
+        MergeStmt::WhenClause wc;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "matched") {
+            wc.matched = true;
+            ++pos;
+        } else if (pos < tokens.size() && toLower(tokens[pos]) == "not") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "matched") {
+                wc.matched = false;
+                ++pos;
+                if (pos < tokens.size() && toLower(tokens[pos]) == "by") {
+                    ++pos;
+                    if (pos < tokens.size()) wc.bySource = toLower(tokens[pos++]);
+                }
+            }
+        }
+        // AND condition
+        if (pos < tokens.size() && toLower(tokens[pos]) == "and") {
+            ++pos;
+            wc.condition = parseSimpleExpr(tokens, pos);
+        }
+        if (pos < tokens.size() && toLower(tokens[pos]) == "then") ++pos;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "do") ++pos;
+
+        if (pos < tokens.size() && toLower(tokens[pos]) == "nothing") {
+            wc.action = "DO NOTHING";
+            ++pos;
+        } else if (pos < tokens.size() && toLower(tokens[pos]) == "update") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "set") ++pos;
+            wc.action = "UPDATE";
+            while (pos < tokens.size()) {
+                std::string w = toLower(tokens[pos]);
+                if (w == "when" || w == "returning" || tokens[pos] == ";") break;
+                if (pos + 1 < tokens.size() && tokens[pos + 1] == "=") {
+                    std::string col = tokens[pos];
+                    pos += 2;
+                    auto expr = parseSimpleExpr(tokens, pos);
+                    wc.updateSet[col] = std::move(expr);
+                } else {
+                    ++pos;
+                }
+                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            }
+        } else if (pos < tokens.size() && toLower(tokens[pos]) == "insert") {
+            ++pos;
+            wc.action = "INSERT";
+            if (pos < tokens.size() && toLower(tokens[pos]) == "(") {
+                auto cols = collectParenthesized(tokens, pos);
+                for (const auto& c : cols) {
+                    if (c != ",") {
+                        auto expr = std::make_unique<LiteralExpr>();
+                        expr->value = c;
+                        wc.insertCols.emplace_back(c, std::move(expr));
+                    }
+                }
+            }
+            if (pos < tokens.size() && toLower(tokens[pos]) == "values") {
+                ++pos;
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    auto vals = collectParenthesized(tokens, pos);
+                    for (size_t i = 0, j = 0; i < vals.size() && j < wc.insertCols.size(); ++i) {
+                        if (vals[i] == ",") continue;
+                        auto expr = std::make_unique<LiteralExpr>();
+                        expr->value = vals[i];
+                        wc.insertCols[j].second = std::move(expr);
+                        ++j;
+                    }
+                }
+            }
+        } else if (pos < tokens.size() && toLower(tokens[pos]) == "delete") {
+            wc.action = "DELETE";
+            ++pos;
+        }
+        stmt->whenClauses.push_back(std::move(wc));
+    }
+
+    // RETURNING
+    if (pos < tokens.size() && toLower(tokens[pos]) == "returning") {
+        ++pos;
+        while (pos < tokens.size() && tokens[pos] != ";") {
+            stmt->returning.push_back(parseSelectItem(tokens, pos));
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+    }
+
     r.success = true;
-    r.stmt = std::make_unique<MergeStmt>();
+    r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseValues(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    auto stmt = std::make_unique<SelectStmt>();
+    stmt->command = SqlCommand::Values;
+    size_t pos = 1; // skip VALUES
+
+    while (pos < tokens.size()) {
+        if (tokens[pos] == "(") {
+            ++pos;
+            std::vector<ExprPtr> row;
+            while (pos < tokens.size() && tokens[pos] != ")") {
+                auto expr = parseSimpleExpr(tokens, pos);
+                if (expr) row.push_back(std::move(expr));
+                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            }
+            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            // Store as a SelectItem in selectList for now (VALUES as query expr)
+            for (auto& expr : row) {
+                SelectItem si;
+                si.expr = std::move(expr);
+                stmt->selectList.push_back(std::move(si));
+            }
+        }
+        if (pos < tokens.size() && tokens[pos] == ",") {
+            ++pos;
+            continue;
+        }
+        break;
+    }
+
     r.success = true;
-    r.stmt = std::make_unique<SelectStmt>();
-    static_cast<SelectStmt*>(r.stmt.get())->command = SqlCommand::Values;
+    r.stmt = std::move(stmt);
     return r;
 }
 
@@ -742,81 +1574,103 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
         return r;
     }
 
-    static const std::map<std::string, std::function<StmtPtr(const std::vector<std::string>&, size_t&)>> creators = {
-        {"table", &SQLParser::parseCreateTable},
-        {"index", &SQLParser::parseCreateIndex},
-        {"view", &SQLParser::parseCreateView},
-        {"database", &SQLParser::parseCreateDatabase},
-        {"schema", &SQLParser::parseCreateSchema},
-        {"sequence", &SQLParser::parseCreateSequence},
-        {"domain", &SQLParser::parseCreateDomain},
-        {"type", &SQLParser::parseCreateType},
-        {"function", &SQLParser::parseCreateFunction},
-        {"procedure", &SQLParser::parseCreateProcedure},
-        {"trigger", &SQLParser::parseCreateTrigger},
-        {"role", &SQLParser::parseCreateRole},
-        {"user", &SQLParser::parseCreateRole},
-        {"tablespace", &SQLParser::parseCreateTablespace},
-        {"statistics", &SQLParser::parseCreateStatistics},
-        {"policy", &SQLParser::parseCreatePolicy},
-        {"rule", &SQLParser::parseCreateRule},
-        {"event", &SQLParser::parseCreateEventTrigger},
-        {"extension", &SQLParser::parseCreateExtension},
-        {"publication", &SQLParser::parseCreatePublication},
-        {"subscription", &SQLParser::parseCreateSubscription},
-        {"access", &SQLParser::parseCreateAccessMethod},
-        {"foreign", &SQLParser::parseCreateForeignDataWrapper},
-        {"cast", &SQLParser::parseCreateCast},
-        {"collation", &SQLParser::parseCreateCollation},
-        {"conversion", &SQLParser::parseCreateConversion},
-        {"operator", &SQLParser::parseCreateOperator},
-        {"aggregate", &SQLParser::parseCreateAggregate},
-        {"transform", &SQLParser::parseCreateTransform},
-        {"language", &SQLParser::parseCreateLanguage},
-        {"text", &SQLParser::parseCreateTextSearchConfiguration},
-    };
-
     if (pos < tokens.size()) {
         std::string kw = toLower(tokens[pos]);
-        auto it = creators.find(kw);
-        if (it != creators.end()) {
-            if (kw == "user" || kw == "role") {
+        ++pos;
+        if (kw == "table") {
+            r.stmt = parseCreateTable(tokens, pos);
+        } else if (kw == "index") {
+            r.stmt = parseCreateIndex(tokens, pos);
+        } else if (kw == "view") {
+            r.stmt = parseCreateView(tokens, pos);
+        } else if (kw == "database") {
+            r.stmt = parseCreateDatabase(tokens, pos);
+        } else if (kw == "schema") {
+            r.stmt = parseCreateSchema(tokens, pos);
+        } else if (kw == "sequence") {
+            r.stmt = parseCreateSequence(tokens, pos);
+        } else if (kw == "domain") {
+            r.stmt = parseCreateDomain(tokens, pos);
+        } else if (kw == "type") {
+            r.stmt = parseCreateType(tokens, pos);
+        } else if (kw == "function") {
+            r.stmt = parseCreateFunction(tokens, pos);
+        } else if (kw == "procedure") {
+            r.stmt = parseCreateProcedure(tokens, pos);
+        } else if (kw == "trigger") {
+            r.stmt = parseCreateTrigger(tokens, pos);
+        } else if (kw == "role" || kw == "user") {
+            r.stmt = parseCreateRole(tokens, pos);
+        } else if (kw == "tablespace") {
+            r.stmt = parseCreateTablespace(tokens, pos);
+        } else if (kw == "statistics") {
+            r.stmt = parseCreateStatistics(tokens, pos);
+        } else if (kw == "policy") {
+            r.stmt = parseCreatePolicy(tokens, pos);
+        } else if (kw == "rule") {
+            r.stmt = parseCreateRule(tokens, pos);
+        } else if (kw == "event") {
+            if (match(tokens, pos, "trigger")) ++pos;
+            r.stmt = parseCreateEventTrigger(tokens, pos);
+        } else if (kw == "extension") {
+            r.stmt = parseCreateExtension(tokens, pos);
+        } else if (kw == "publication") {
+            r.stmt = parseCreatePublication(tokens, pos);
+        } else if (kw == "subscription") {
+            r.stmt = parseCreateSubscription(tokens, pos);
+        } else if (kw == "access") {
+            if (match(tokens, pos, "method")) ++pos;
+            r.stmt = parseCreateAccessMethod(tokens, pos);
+        } else if (kw == "foreign") {
+            if (match(tokens, pos, "data")) {
                 ++pos;
-                r.stmt = parseCreateRole(tokens, pos);
-            } else if (kw == "foreign") {
+                if (match(tokens, pos, "wrapper")) ++pos;
+                r.stmt = parseCreateForeignDataWrapper(tokens, pos);
+            } else if (match(tokens, pos, "table")) {
                 ++pos;
-                if (match(tokens, pos, "data")) {
-                    ++pos;
-                    if (match(tokens, pos, "wrapper")) ++pos;
-                    r.stmt = parseCreateForeignDataWrapper(tokens, pos);
-                } else if (match(tokens, pos, "table")) {
-                    ++pos;
-                    r.stmt = parseCreateForeignTable(tokens, pos);
-                } else if (match(tokens, pos, "server")) {
-                    ++pos;
-                    r.stmt = parseCreateServer(tokens, pos);
-                }
-            } else if (kw == "text") {
+                r.stmt = parseCreateForeignTable(tokens, pos);
+            } else if (match(tokens, pos, "server")) {
                 ++pos;
-                if (match(tokens, pos, "search")) {
-                    ++pos;
-                    if (match(tokens, pos, "configuration")) {
-                        ++pos;
-                        r.stmt = parseCreateTextSearchConfiguration(tokens, pos);
-                    } else if (match(tokens, pos, "dictionary")) {
-                        ++pos;
-                        r.stmt = parseCreateTextSearchDictionary(tokens, pos);
-                    } else if (match(tokens, pos, "parser")) {
-                        ++pos;
-                        r.stmt = parseCreateTextSearchParser(tokens, pos);
-                    } else if (match(tokens, pos, "template")) {
-                        ++pos;
-                        r.stmt = parseCreateTextSearchTemplate(tokens, pos);
-                    }
-                }
+                r.stmt = parseCreateServer(tokens, pos);
+            }
+        } else if (kw == "cast") {
+            r.stmt = parseCreateCast(tokens, pos);
+        } else if (kw == "collation") {
+            r.stmt = parseCreateCollation(tokens, pos);
+        } else if (kw == "conversion") {
+            r.stmt = parseCreateConversion(tokens, pos);
+        } else if (kw == "operator") {
+            if (match(tokens, pos, "class")) {
+                ++pos;
+                r.stmt = parseCreateOperatorClass(tokens, pos);
+            } else if (match(tokens, pos, "family")) {
+                ++pos;
+                r.stmt = parseCreateOperatorFamily(tokens, pos);
             } else {
+                r.stmt = parseCreateOperator(tokens, pos);
+            }
+        } else if (kw == "aggregate") {
+            r.stmt = parseCreateAggregate(tokens, pos);
+        } else if (kw == "transform") {
+            r.stmt = parseCreateTransform(tokens, pos);
+        } else if (kw == "language") {
+            r.stmt = parseCreateLanguage(tokens, pos);
+        } else if (kw == "text") {
+            if (match(tokens, pos, "search")) {
                 ++pos;
-                r.stmt = it->second(tokens, pos);
+                if (match(tokens, pos, "configuration")) {
+                    ++pos;
+                    r.stmt = parseCreateTextSearchConfiguration(tokens, pos);
+                } else if (match(tokens, pos, "dictionary")) {
+                    ++pos;
+                    r.stmt = parseCreateTextSearchDictionary(tokens, pos);
+                } else if (match(tokens, pos, "parser")) {
+                    ++pos;
+                    r.stmt = parseCreateTextSearchParser(tokens, pos);
+                } else if (match(tokens, pos, "template")) {
+                    ++pos;
+                    r.stmt = parseCreateTextSearchTemplate(tokens, pos);
+                }
             }
         } else {
             r.stmt = std::make_unique<CreateTableStmt>();
@@ -1468,15 +2322,437 @@ ParseResult SQLParser::parseImportForeignSchema(const std::string& sql) {
 }
 
 // ============================================================================
-// CREATE 子命令解析 stub（Phase 1.2+ 逐步完善）
+// 表达式解析辅助（Phase 1.2 简化版：收集 token 直到匹配括号）
+// ============================================================================
+
+static std::string collectExpression(const std::vector<std::string>& tokens, size_t& pos,
+                                      bool stopAtComma,
+                                      const std::set<std::string>& stopWords) {
+    std::string expr;
+    int parenDepth = 0;
+    while (pos < tokens.size()) {
+        const std::string& tok = tokens[pos];
+        if (tok == "(") {
+            ++parenDepth;
+            expr += "(";
+            ++pos;
+            continue;
+        }
+        if (tok == ")") {
+            if (parenDepth > 0) {
+                --parenDepth;
+                expr += ")";
+                ++pos;
+                continue;
+            }
+            // 顶层右括号，结束
+            break;
+        }
+        if (parenDepth == 0) {
+            if (tok == ",") {
+                if (stopAtComma) break;
+                expr += ",";
+                ++pos;
+                continue;
+            }
+            if (stopWords.count(SQLParser::toLower(tok)) > 0) break;
+        }
+        if (!expr.empty() && expr.back() != '(' && expr.back() != ',') expr += " ";
+        expr += tok;
+        ++pos;
+    }
+    // trim trailing space
+    while (!expr.empty() && expr.back() == ' ') expr.pop_back();
+    return expr;
+}
+
+// 从当前位置解析到匹配的 ')'，返回包含在内的 token 列表（不含外层括号）
+static std::vector<std::string> collectParenthesized(const std::vector<std::string>& tokens, size_t& pos) {
+    std::vector<std::string> inner;
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos; // skip '('
+        int depth = 1;
+        while (pos < tokens.size() && depth > 0) {
+            if (tokens[pos] == "(") ++depth;
+            else if (tokens[pos] == ")") --depth;
+            if (depth > 0) inner.push_back(tokens[pos]);
+            ++pos;
+        }
+    }
+    return inner;
+}
+
+// ============================================================================
+// CREATE 子命令解析（Phase 1.2 逐步完善）
 // ============================================================================
 
 StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateTableStmt>();
+
+    // Parse table name (may be schema-qualified)
     if (pos < tokens.size()) {
         stmt->tableName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            // schema.table
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->tableName += "." + tokens[pos++];
+            }
+        }
     }
-    // TODO: 解析列定义、约束、选项
+
+    // Parse column/constraint list if present
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos; // skip '('
+        bool first = true;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            if (!first && pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                continue;
+            }
+            first = false;
+            if (pos >= tokens.size() || tokens[pos] == ")") break;
+
+            // Check for table-level constraint keywords
+            std::string ltok = toLower(tokens[pos]);
+            if (ltok == "constraint") {
+                ++pos;
+                std::string cname;
+                if (pos < tokens.size()) cname = tokens[pos++];
+                // Now the actual constraint type
+                if (pos < tokens.size()) {
+                    std::string ctype = toLower(tokens[pos]);
+                    if (ctype == "primary") {
+                        ++pos; if (pos < tokens.size() && toLower(tokens[pos]) == "key") ++pos;
+                        auto cols = collectParenthesized(tokens, pos);
+                        TableConstraint tc;
+                        tc.name = cname;
+                        tc.type = "PRIMARY KEY";
+                        for (const auto& c : cols) {
+                            if (c != ",") tc.columns.push_back(c);
+                        }
+                        stmt->constraints.push_back(std::move(tc));
+                    } else if (ctype == "unique") {
+                        ++pos;
+                        auto cols = collectParenthesized(tokens, pos);
+                        TableConstraint tc;
+                        tc.name = cname;
+                        tc.type = "UNIQUE";
+                        for (const auto& c : cols) {
+                            if (c != ",") tc.columns.push_back(c);
+                        }
+                        stmt->constraints.push_back(std::move(tc));
+                    } else if (ctype == "foreign") {
+                        ++pos; if (pos < tokens.size() && toLower(tokens[pos]) == "key") ++pos;
+                        auto cols = collectParenthesized(tokens, pos);
+                        TableConstraint tc;
+                        tc.name = cname;
+                        tc.type = "FOREIGN KEY";
+                        for (const auto& c : cols) {
+                            if (c != ",") tc.columns.push_back(c);
+                        }
+                        if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
+                            ++pos;
+                            if (pos < tokens.size()) {
+                                tc.refTable = tokens[pos++];
+                            }
+                            if (pos < tokens.size() && tokens[pos] == "(") {
+                                auto refcols = collectParenthesized(tokens, pos);
+                                for (const auto& c : refcols) {
+                                    if (c != ",") tc.refColumns.push_back(c);
+                                }
+                            }
+                            // ON DELETE / ON UPDATE
+                            while (pos < tokens.size()) {
+                                std::string w = toLower(tokens[pos]);
+                                if (w == "on") {
+                                    if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "delete") {
+                                        pos += 2;
+                                        tc.onDelete = toLower(tokens[pos++]);
+                                    } else if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "update") {
+                                        pos += 2;
+                                        tc.onUpdate = toLower(tokens[pos++]);
+                                    } else break;
+                                } else break;
+                            }
+                        }
+                        stmt->constraints.push_back(std::move(tc));
+                    } else if (ctype == "check") {
+                        ++pos;
+                        if (pos < tokens.size() && tokens[pos] == "(") {
+                            auto checkExprTokens = collectParenthesized(tokens, pos);
+                            TableConstraint tc;
+                            tc.name = cname;
+                            tc.type = "CHECK";
+                            std::string expr;
+                            for (const auto& t : checkExprTokens) {
+                                if (!expr.empty() && expr.back() != '(') expr += " ";
+                                expr += t;
+                            }
+                            tc.checkExpr = std::make_unique<LiteralExpr>();
+                            static_cast<LiteralExpr*>(tc.checkExpr.get())->value = expr;
+                            stmt->constraints.push_back(std::move(tc));
+                        }
+                    } else {
+                        // Unknown constraint, skip until comma or )
+                        while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ")") ++pos;
+                    }
+                }
+            } else if (ltok == "primary") {
+                ++pos; if (pos < tokens.size() && toLower(tokens[pos]) == "key") ++pos;
+                auto cols = collectParenthesized(tokens, pos);
+                TableConstraint tc;
+                tc.type = "PRIMARY KEY";
+                for (const auto& c : cols) {
+                    if (c != ",") tc.columns.push_back(c);
+                }
+                stmt->constraints.push_back(std::move(tc));
+            } else if (ltok == "unique") {
+                ++pos;
+                auto cols = collectParenthesized(tokens, pos);
+                TableConstraint tc;
+                tc.type = "UNIQUE";
+                for (const auto& c : cols) {
+                    if (c != ",") tc.columns.push_back(c);
+                }
+                stmt->constraints.push_back(std::move(tc));
+            } else if (ltok == "foreign") {
+                ++pos; if (pos < tokens.size() && toLower(tokens[pos]) == "key") ++pos;
+                auto cols = collectParenthesized(tokens, pos);
+                TableConstraint tc;
+                tc.type = "FOREIGN KEY";
+                for (const auto& c : cols) {
+                    if (c != ",") tc.columns.push_back(c);
+                }
+                if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
+                    ++pos;
+                    if (pos < tokens.size()) tc.refTable = tokens[pos++];
+                    if (pos < tokens.size() && tokens[pos] == "(") {
+                        auto refcols = collectParenthesized(tokens, pos);
+                        for (const auto& c : refcols) {
+                            if (c != ",") tc.refColumns.push_back(c);
+                        }
+                    }
+                    while (pos < tokens.size()) {
+                        std::string w = toLower(tokens[pos]);
+                        if (w == "on") {
+                            if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "delete") {
+                                pos += 2;
+                                tc.onDelete = toLower(tokens[pos++]);
+                            } else if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "update") {
+                                pos += 2;
+                                tc.onUpdate = toLower(tokens[pos++]);
+                            } else break;
+                        } else break;
+                    }
+                }
+                stmt->constraints.push_back(std::move(tc));
+            } else if (ltok == "check") {
+                ++pos;
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    auto checkExprTokens = collectParenthesized(tokens, pos);
+                    TableConstraint tc;
+                    tc.type = "CHECK";
+                    std::string expr;
+                    for (const auto& t : checkExprTokens) {
+                        if (!expr.empty() && expr.back() != '(') expr += " ";
+                        expr += t;
+                    }
+                    tc.checkExpr = std::make_unique<LiteralExpr>();
+                    static_cast<LiteralExpr*>(tc.checkExpr.get())->value = expr;
+                    stmt->constraints.push_back(std::move(tc));
+                }
+            } else {
+                // Column definition
+                ColumnDef col;
+                col.name = tokens[pos++];
+                if (pos < tokens.size()) {
+                    col.typeName = tokens[pos++];
+                    // Type may have parameters: VARCHAR(255), NUMERIC(10,2)
+                    if (pos < tokens.size() && tokens[pos] == "(") {
+                        ++pos; // skip '('
+                        while (pos < tokens.size() && tokens[pos] != ")") {
+                            if (tokens[pos] != ",") col.typeMods.push_back(tokens[pos]);
+                            ++pos;
+                        }
+                        if (pos < tokens.size() && tokens[pos] == ")") ++pos; // skip ')'
+                    }
+                    // Array type: TYPE[]
+                    if (pos < tokens.size() && tokens[pos] == "[") {
+                        ++pos;
+                        if (pos < tokens.size() && tokens[pos] == "]") ++pos;
+                        col.isArray = true;
+                    }
+                }
+                // Column constraints
+                while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ")") {
+                    std::string ckw = toLower(tokens[pos]);
+                    if (ckw == "not" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "null") {
+                        col.isNull = false;
+                        pos += 2;
+                    } else if (ckw == "null") {
+                        col.isNull = true;
+                        ++pos;
+                    } else if (ckw == "primary") {
+                        ++pos;
+                        if (pos < tokens.size() && toLower(tokens[pos]) == "key") ++pos;
+                        col.isPrimaryKey = true;
+                        col.isNull = false;
+                    } else if (ckw == "unique") {
+                        ++pos;
+                        col.isUnique = true;
+                    } else if (ckw == "default") {
+                        ++pos;
+                        std::string defVal;
+                        // Collect default value (may be literal, expression, or function call)
+                        while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ")") {
+                            if (!defVal.empty() && defVal.back() != '(') defVal += " ";
+                            defVal += tokens[pos++];
+                        }
+                        col.defaultValue = std::make_unique<LiteralExpr>();
+                        static_cast<LiteralExpr*>(col.defaultValue.get())->value = defVal;
+                    } else if (ckw == "check") {
+                        ++pos;
+                        if (pos < tokens.size() && tokens[pos] == "(") {
+                            auto checkExprTokens = collectParenthesized(tokens, pos);
+                            std::string expr;
+                            for (const auto& t : checkExprTokens) {
+                                if (!expr.empty() && expr.back() != '(') expr += " ";
+                                expr += t;
+                            }
+                            col.checkExprs.push_back(std::make_unique<LiteralExpr>());
+                            static_cast<LiteralExpr*>(col.checkExprs.back().get())->value = expr;
+                        }
+                    } else if (ckw == "generated") {
+                        ++pos;
+                        if (pos < tokens.size() && toLower(tokens[pos]) == "always") {
+                            ++pos;
+                            if (pos < tokens.size() && toLower(tokens[pos]) == "as") {
+                                ++pos;
+                                if (pos < tokens.size() && tokens[pos] == "identity") {
+                                    ++pos;
+                                    col.constraints.push_back("GENERATED ALWAYS AS IDENTITY");
+                                } else if (pos < tokens.size() && tokens[pos] == "(") {
+                                    auto genExprTokens = collectParenthesized(tokens, pos);
+                                    std::string expr;
+                                    for (const auto& t : genExprTokens) {
+                                        if (!expr.empty() && expr.back() != '(') expr += " ";
+                                        expr += t;
+                                    }
+                                    col.constraints.push_back("GENERATED ALWAYS AS (" + expr + ") STORED");
+                                }
+                            }
+                        } else if (pos < tokens.size() && toLower(tokens[pos]) == "by") {
+                            ++pos;
+                            if (pos < tokens.size() && toLower(tokens[pos]) == "default") {
+                                ++pos;
+                                if (pos < tokens.size() && toLower(tokens[pos]) == "as") {
+                                    ++pos;
+                                    if (pos < tokens.size() && tokens[pos] == "identity") {
+                                        ++pos;
+                                        col.constraints.push_back("GENERATED BY DEFAULT AS IDENTITY");
+                                    }
+                                }
+                            }
+                        }
+                    } else if (ckw == "collate") {
+                        ++pos;
+                        if (pos < tokens.size()) col.collation = tokens[pos++];
+                    } else if (ckw == "references") {
+                        ++pos;
+                        if (pos < tokens.size()) {
+                            std::string refTable = tokens[pos++];
+                            std::string refCol;
+                            if (pos < tokens.size() && tokens[pos] == "(") {
+                                auto refcols = collectParenthesized(tokens, pos);
+                                if (!refcols.empty()) refCol = refcols[0];
+                            }
+                            // Store as a simple foreign key constraint on this column
+                            TableConstraint tc;
+                            tc.type = "FOREIGN KEY";
+                            tc.columns.push_back(col.name);
+                            tc.refTable = refTable;
+                            if (!refCol.empty()) tc.refColumns.push_back(refCol);
+                            stmt->constraints.push_back(std::move(tc));
+                        }
+                    } else {
+                        // Unknown token, skip
+                        ++pos;
+                    }
+                }
+                stmt->columns.push_back(std::move(col));
+            }
+        }
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos; // skip ')'
+    }
+
+    // Parse remaining options after column list
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string kw = toLower(tokens[pos]);
+        if (kw == "inherits") {
+            ++pos;
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                auto parents = collectParenthesized(tokens, pos);
+                for (const auto& p : parents) {
+                    if (p != ",") stmt->inherits.push_back(p);
+                }
+            }
+        } else if (kw == "partition") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "by") {
+                ++pos;
+                std::string ptype = toLower(tokens[pos++]); // range, list, hash
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    auto pcols = collectParenthesized(tokens, pos);
+                    for (const auto& c : pcols) {
+                        if (c != ",") {
+                            SelectItem si;
+                            si.expr = std::make_unique<ColumnRefExpr>();
+                            static_cast<ColumnRefExpr*>(si.expr.get())->column = c;
+                            stmt->partitionBy.push_back(std::move(si));
+                        }
+                    }
+                }
+            }
+        } else if (kw == "with") {
+            ++pos;
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                auto opts = collectParenthesized(tokens, pos);
+                for (size_t i = 0; i < opts.size(); i += 2) {
+                    if (i + 1 < opts.size() && opts[i + 1] == "=") {
+                        if (i + 2 < opts.size()) {
+                            stmt->options[opts[i]] = opts[i + 2];
+                            i += 2;
+                        }
+                    } else if (i + 1 < opts.size()) {
+                        stmt->options[opts[i]] = opts[i + 1];
+                    }
+                }
+            }
+        } else if (kw == "without") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "oids") {
+                stmt->options["oids"] = "false";
+                ++pos;
+            }
+        } else if (kw == "tablespace") {
+            ++pos;
+            if (pos < tokens.size()) stmt->tablespace = tokens[pos++];
+        } else if (kw == "of") {
+            ++pos;
+            if (pos < tokens.size()) stmt->ofType = tokens[pos++];
+        } else if (kw == "like") {
+            ++pos;
+            if (pos < tokens.size()) {
+                ColumnDef likeDef;
+                likeDef.name = tokens[pos++];
+                stmt->likeTables.emplace_back(likeDef.name, ColumnDef());
+            }
+        } else {
+            ++pos;
+        }
+    }
+
     return stmt;
 }
 

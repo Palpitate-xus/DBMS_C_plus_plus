@@ -766,6 +766,20 @@ static bool executeValuesStatement(const string& sql) {
 }
 
 // ========================================================================
+// Forward declarations for command handlers (defined later in the file)
+// ========================================================================
+static bool checkAdmin(const Session& s);
+static bool checkDB(const Session& s);
+bool execute(const std::string& rawSql, Session& s);
+static string resolveTableName(Session& s, const string& name);
+static vector<string> splitConds(const string& s);
+static string normalizeConditionStr(string s);
+static string modifyLogic(const string& logic);
+static bool setSessionAuthorization(Session& s, const string& targetRaw);
+static vector<string> splitValues(const string& s);
+static vector<string> parseCSVLine(const string& line);
+
+// ========================================================================
 // Cursor command handlers (extracted for Parser switch/case dispatch)
 // ========================================================================
 static bool handleDeclareCursor(const string& sql, Session& s) {
@@ -8037,7 +8051,7 @@ bool execute(const string& rawSql, Session& s) {
         case dbms::SqlCommand::Analyze:
             return handleAnalyze(sql, s);
 
-        case dbms::SqlCommand::Refresh:
+        case dbms::SqlCommand::RefreshMaterializedView:
             return handleRefreshMaterializedView(sql, s);
 
         case dbms::SqlCommand::Checkpoint:
@@ -8191,7 +8205,6 @@ bool execute(const string& rawSql, Session& s) {
         case dbms::SqlCommand::AlterTrigger:
         case dbms::SqlCommand::AlterRole:
         case dbms::SqlCommand::AlterUser:
-        case dbms::SqlCommand::AlterSystem:
         case dbms::SqlCommand::AlterTablespace:
         case dbms::SqlCommand::AlterStatistics:
         case dbms::SqlCommand::AlterPolicy:

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dbms_defs.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -86,6 +87,7 @@ enum class SqlCommand {
     DropType,
     DropFunction,
     DropProcedure,
+    DropRoutine,
     DropTrigger,
     DropRole,
     DropUser,
@@ -157,6 +159,7 @@ enum class SqlCommand {
     AlterOperatorClass,
     AlterOperatorFamily,
     AlterAggregate,
+    AlterTransform,
     AlterLanguage,
     AlterLargeObject,
     AlterDefaultPrivileges,
