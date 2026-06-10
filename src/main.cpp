@@ -1466,6 +1466,417 @@ static bool handleAlterSystem(const string& sql, Session& s) {
 }
 
 // ========================================================================
+// Utility command handlers
+// ========================================================================
+static bool handleCommentOn(const string& sql, Session& s, const string& rawSql) {
+    if (!checkDB(s)) return true;
+    size_t onPos = sql.find(" on ");
+    if (onPos == string::npos) {
+        cout << "SQL syntax error" << endl;
+        return true;
+    }
+    string rest = trim(sql.substr(onPos + 4));
+    auto extractComment = [&](const string& raw) -> string {
+        size_t rawIsPos = raw.find(" is ");
+        if (rawIsPos == string::npos) return "";
+        string afterIs = trim(raw.substr(rawIsPos + 4));
+        if (afterIs.size() >= 2 && ((afterIs.front() == '\'' && afterIs.back() == '\'') ||
+                                           (afterIs.front() == '"' && afterIs.back() == '"'))) {
+            return afterIs.substr(1, afterIs.size() - 2);
+        }
+        return afterIs;
+    };
+    if (rest.substr(0, 5) == "table") {
+        string afterTable = trim(rest.substr(5));
+        size_t isPos = afterTable.find(" is ");
+        if (isPos == string::npos) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        string tname = resolveTableName(s, trim(afterTable.substr(0, isPos)));
+        string comment = extractComment(rawSql);
+        auto res = g_engine.commentOnTable(s.currentDB, tname, comment);
+        if (res == OpResult::TableNotExist) {
+            cout << "Table not found" << endl;
+            return true;
+        }
+        cout << "Comment added" << endl;
+        return false;
+    }
+    if (rest.substr(0, 6) == "column") {
+        string afterCol = trim(rest.substr(6));
+        size_t isPos = afterCol.find(" is ");
+        if (isPos == string::npos) {
+            cout << "SQL syntax error" << endl;
+            return true;
+        }
+        string qual = trim(afterCol.substr(0, isPos));
+        size_t dotPos = qual.find('.');
+        if (dotPos == string::npos) {
+            cout << "SQL syntax error: use table.column" << endl;
+            return true;
+        }
+        string tname = resolveTableName(s, trim(qual.substr(0, dotPos)));
+        string cname = trim(qual.substr(dotPos + 1));
+        string comment = extractComment(rawSql);
+        auto res = g_engine.commentOnColumn(s.currentDB, tname, cname, comment);
+        if (res == OpResult::TableNotExist) {
+            cout << "Table not found" << endl;
+            return true;
+        }
+        cout << "Comment added" << endl;
+        return false;
+    }
+    cout << "SQL syntax error" << endl;
+    return true;
+}
+
+static bool handleLockTable(const string& sql, Session& s) {
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(4));
+    if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
+    vector<string> tokens = tokenize(rest);
+    if (tokens.size() < 4) {
+        cout << "SQL syntax error: LOCK TABLE tname IN SHARE|EXCLUSIVE MODE" << endl;
+        return true;
+    }
+    string tname = resolveTableName(s, tokens[0]);
+    if (!g_engine.tableExists(s.currentDB, tname)) {
+        cout << "Table " << tname << " not exist" << endl;
+        return true;
+    }
+    string mode = tokens[2];
+    for (auto& c : mode) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    bool ok = false;
+    if (mode == "share") {
+        ok = g_engine.getLockManager().lockShared(tname);
+    } else if (mode == "exclusive") {
+        ok = g_engine.getLockManager().lockExclusive(tname);
+    }
+    if (!ok) {
+        cout << "Lock acquisition failed (deadlock detected)" << endl;
+        return true;
+    }
+    cout << "Table " << tname << " locked in " << mode << " mode" << endl;
+    return false;
+}
+
+static bool handleAnalyze(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(7));
+    if (rest.empty() || rest == "all tables" || rest == "database") {
+        auto tables = g_engine.getTableNames(s.currentDB);
+        if (tables.empty()) {
+            cout << "No tables to analyze in database " << s.currentDB << endl;
+            return false;
+        }
+        for (const auto& tname : tables) {
+            g_engine.analyzeTable(s.currentDB, tname);
+            cout << "Table " << tname << " analyzed" << endl;
+        }
+        return false;
+    }
+    if (rest.substr(0, 5) != "table") {
+        cout << "SQL syntax error" << endl;
+        return true;
+    }
+    string afterTable = trim(rest.substr(5));
+    size_t colsPos = afterTable.find(" columns ");
+    if (colsPos != string::npos) {
+        string tname = trim(afterTable.substr(0, colsPos));
+        string colsPart = trim(afterTable.substr(colsPos + 9));
+        if (!colsPart.empty() && colsPart.front() == '(') colsPart = colsPart.substr(1);
+        if (!colsPart.empty() && colsPart.back() == ')') colsPart.pop_back();
+        vector<string> colnames;
+        stringstream css(colsPart);
+        string c;
+        while (getline(css, c, ',')) {
+            string tc = trim(c);
+            if (!tc.empty()) colnames.push_back(tc);
+        }
+        if (colnames.size() < 2) {
+            cout << "Multi-column analyze requires at least 2 columns" << endl;
+            return true;
+        }
+        g_engine.analyzeMultiColumn(s.currentDB, tname, colnames);
+        string key;
+        for (size_t i = 0; i < colnames.size(); ++i) {
+            if (i > 0) key += ",";
+            key += colnames[i];
+        }
+        cout << "Multi-column stats (" << key << ") for table " << tname << " analyzed" << endl;
+        return false;
+    }
+    string tname = afterTable;
+    g_engine.analyzeTable(s.currentDB, tname);
+    cout << "Table " << tname << " analyzed" << endl;
+    return false;
+}
+
+static bool handleRefreshMaterializedView(const string& sql, Session& s) {
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(6));
+    if (rest.substr(0, 20) == "materialized view ") {
+        rest = trim(rest.substr(20));
+        if (rest.substr(0, 12) == "concurrently") {
+            rest = trim(rest.substr(12));
+        }
+        string viewname = rest;
+        if (!g_engine.isMaterializedView(s.currentDB, viewname)) {
+            cout << "Materialized view " << viewname << " not found" << endl;
+            return true;
+        }
+        string viewSql = g_engine.getMaterializedViewSQL(s.currentDB, viewname);
+        if (viewSql.empty()) {
+            cout << "Failed to read materialized view SQL" << endl;
+            return true;
+        }
+        string lsql = toLower(viewSql);
+        size_t fromPos = lsql.find(" from ");
+        if (fromPos == string::npos) {
+            cout << "Invalid materialized view SQL" << endl;
+            return true;
+        }
+        string colsPart = trim(viewSql.substr(6, fromPos - 6));
+        vector<string> colNames;
+        if (colsPart == "*") {
+            cout << "Materialized view with SELECT * not supported, use explicit columns" << endl;
+            return true;
+        }
+        size_t cp = 0;
+        while (cp < colsPart.size()) {
+            size_t comma = colsPart.find(',', cp);
+            string c = trim(colsPart.substr(cp, comma - cp));
+            size_t aliasPos = toLower(c).find(" as ");
+            if (aliasPos != string::npos) {
+                c = trim(c.substr(aliasPos + 4));
+            } else {
+                size_t sp = c.find(' ');
+                if (sp != string::npos) {
+                    string before = trim(c.substr(0, sp));
+                    string after = trim(c.substr(sp + 1));
+                    if (after != "" && after.find_first_of("+-*/=<>") == string::npos) {
+                        c = after;
+                    } else {
+                        c = before;
+                    }
+                }
+            }
+            size_t dotPos = c.find('.');
+            if (dotPos != string::npos) c = c.substr(dotPos + 1);
+            colNames.push_back(c);
+            if (comma == string::npos) break;
+            cp = comma + 1;
+        }
+        string inner = trim(viewSql.substr(fromPos + 5));
+        size_t wPos = toLower(inner).find(" where ");
+        size_t oPos = toLower(inner).find(" order by ");
+        size_t lPos = toLower(inner).find(" limit ");
+        string tname = trim(inner.substr(0,
+            min(wPos != string::npos ? wPos : inner.size(),
+                min(oPos != string::npos ? oPos : inner.size(),
+                    lPos != string::npos ? lPos : inner.size()))));
+        tname = resolveTableName(s, tname);
+        vector<string> conds;
+        if (wPos != string::npos) {
+            size_t condEnd = min(oPos != string::npos ? oPos : inner.size(),
+                                lPos != string::npos ? lPos : inner.size());
+            string condStr = normalizeConditionStr(trim(inner.substr(wPos + 6, condEnd - wPos - 6)));
+            if (!condStr.empty()) {
+                vector<string> rawConds = splitConds(condStr);
+                for (auto& c : rawConds) {
+                    string mc = modifyLogic(c);
+                    if (!mc.empty()) conds.push_back(mc);
+                }
+            }
+        }
+        auto results = g_engine.query(s.currentDB, tname, conds, {}, {}, false, false);
+        string backingTable = dbms::StorageEngine::materializedViewPrefix(viewname);
+        if (g_engine.tableExists(s.currentDB, backingTable)) {
+            g_engine.truncateTable(s.currentDB, backingTable);
+        }
+        int inserted = 0;
+        for (const auto& row : results) {
+            stringstream ss(row);
+            map<string, string> values;
+            for (const auto& cname : colNames) {
+                string val;
+                ss >> val;
+                values[cname] = val;
+            }
+            auto res = g_engine.insert(s.currentDB, backingTable, values);
+            if (res == OpResult::Success) ++inserted;
+        }
+        cout << "Materialized view " << viewname << " refreshed (" << inserted << " rows)" << endl;
+        return false;
+    }
+    cout << "SQL syntax error: REFRESH MATERIALIZED VIEW [CONCURRENTLY] viewname" << endl;
+    return true;
+}
+
+static bool handleCheckpoint(const string& sql, Session& s) {
+    (void)sql;
+    if (!checkDB(s)) return true;
+    g_engine.checkpoint(s.currentDB);
+    cout << "Checkpoint completed" << endl;
+    log(s.username, "checkpoint", getTime());
+    return false;
+}
+
+static bool handleVacuum(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    if (sql.size() >= 11 && sql.substr(0, 11) == "vacuum full") {
+        string tname = trim(sql.substr(11));
+        if (tname.empty()) {
+            cout << "VACUUM FULL requires a table name" << endl;
+            return true;
+        }
+        string resolvedName = resolveTableName(s, tname);
+        size_t n = g_engine.vacuumFull(s.currentDB, resolvedName);
+        cout << "VACUUM FULL completed, " << n << " rows rewritten" << endl;
+        return false;
+    }
+    string rest = trim(sql.substr(6));
+    bool concurrent = false;
+    if (rest.substr(0, 12) == "concurrently") {
+        concurrent = true;
+        rest = trim(rest.substr(12));
+    }
+    if (rest.empty()) {
+        auto tables = g_engine.getTableNames(s.currentDB);
+        size_t totalFreed = 0;
+        for (const auto& tbl : tables) {
+            totalFreed += g_engine.vacuum(s.currentDB, tbl, concurrent);
+        }
+        string mode = concurrent ? " CONCURRENTLY" : "";
+        cout << "VACUUM" << mode << " completed, " << totalFreed << " pages freed" << endl;
+    } else {
+        string resolvedName = resolveTableName(s, rest);
+        size_t freed = g_engine.vacuum(s.currentDB, resolvedName, concurrent);
+        string mode = concurrent ? " CONCURRENTLY" : "";
+        cout << "VACUUM" << mode << " completed, " << freed << " pages freed" << endl;
+    }
+    return false;
+}
+
+static bool handleSecurityLabel(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(15));
+    if (rest.substr(0, 3) != "on ") {
+        cout << "SQL syntax error: SECURITY LABEL ON object_type object_name IS 'label'" << endl;
+        return true;
+    }
+    rest = trim(rest.substr(3));
+    size_t isPos = rest.find(" is ");
+    if (isPos == string::npos) {
+        cout << "SQL syntax error: SECURITY LABEL ON object IS 'label'" << endl;
+        return true;
+    }
+    string objPart = trim(rest.substr(0, isPos));
+    string labelPart = trim(rest.substr(isPos + 4));
+    if (labelPart.size() >= 2 && labelPart.front() == '\'' && labelPart.back() == '\'') {
+        labelPart = labelPart.substr(1, labelPart.size() - 2);
+    }
+    if (labelPart == "NULL" || labelPart == "null") {
+        labelPart.clear();
+    }
+    string objType = "table";
+    string objName = objPart;
+    size_t sp = objPart.find(' ');
+    if (sp != string::npos) {
+        objType = objPart.substr(0, sp);
+        objName = trim(objPart.substr(sp + 1));
+    }
+    string resolvedName = resolveTableName(s, objName);
+    if (objType == "table" && !g_engine.tableExists(s.currentDB, resolvedName)) {
+        cout << "Table " << resolvedName << " not exist" << endl;
+        return true;
+    }
+    g_engine.setSecurityLabel(s.currentDB, objType, resolvedName, labelPart);
+    if (labelPart.empty()) {
+        cout << "Security label removed from " << objType << " " << resolvedName << endl;
+    } else {
+        cout << "Security label set on " << objType << " " << resolvedName << endl;
+    }
+    return false;
+}
+
+static bool handleTruncate(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    if (g_engine.inTransaction()) {
+        g_engine.commitTransaction();
+        cout << "Note: DDL caused implicit commit of open transaction" << endl;
+    }
+    string rest = trim(sql.substr(8));
+    if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
+    bool restartIdentity = (rest.find("restart identity") != string::npos);
+    bool cascade = (rest.find("cascade") != string::npos);
+    size_t optPos = rest.find(' ');
+    string tname = rest;
+    if (optPos != string::npos) {
+        tname = trim(rest.substr(0, optPos));
+    }
+    tname = resolveTableName(s, tname);
+    auto res = g_engine.truncateTable(s.currentDB, tname);
+    if (res == OpResult::TableNotExist) {
+        cout << "Table not exist" << endl;
+        return true;
+    }
+    if (restartIdentity) {
+        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].isAutoIncrement) {
+                g_engine.resetSequence(s.currentDB, tname, tbl.cols[i].dataName, 1);
+            }
+        }
+    }
+    if (cascade) {
+        vector<string> allTables = g_engine.getTableNames(s.currentDB);
+        for (const string& otherTname : allTables) {
+            if (otherTname == tname) continue;
+            TableSchema otherTbl = g_engine.getTableSchema(s.currentDB, otherTname);
+            for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                if (otherTbl.fks[fi].refTable == tname) {
+                    g_engine.truncateTable(s.currentDB, otherTname);
+                    break;
+                }
+            }
+        }
+    }
+    cout << "TRUNCATE TABLE " << tname << " completed" << endl;
+    log(s.username, "truncate table " + tname, getTime());
+    return false;
+}
+
+static bool handleReindex(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(7));
+    if (rest.substr(0, 5) == "table") {
+        string tname = trim(rest.substr(5));
+        tname = resolveTableName(s, tname);
+        if (!g_engine.tableExists(s.currentDB, tname)) {
+            cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
+        auto res = g_engine.reindex(s.currentDB, tname);
+        if (res != OpResult::Success) {
+            cout << "Reindex failed" << endl;
+            return true;
+        }
+        cout << "Reindex succeeded" << endl;
+        log(s.username, "reindex table " + tname, getTime());
+        return false;
+    }
+    cout << "SQL syntax error: REINDEX TABLE tablename" << endl;
+    return true;
+}
+
+// ========================================================================
 // Window function support
 // ========================================================================
 struct WindowFunc {
@@ -7149,6 +7560,33 @@ bool execute(const string& rawSql, Session& s) {
         case dbms::SqlCommand::AlterSystem:
             return handleAlterSystem(sql, s);
 
+        case dbms::SqlCommand::Comment:
+            return handleCommentOn(sql, s, rawSql);
+
+        case dbms::SqlCommand::Lock:
+            return handleLockTable(sql, s);
+
+        case dbms::SqlCommand::Analyze:
+            return handleAnalyze(sql, s);
+
+        case dbms::SqlCommand::Refresh:
+            return handleRefreshMaterializedView(sql, s);
+
+        case dbms::SqlCommand::Checkpoint:
+            return handleCheckpoint(sql, s);
+
+        case dbms::SqlCommand::Vacuum:
+            return handleVacuum(sql, s);
+
+        case dbms::SqlCommand::SecurityLabel:
+            return handleSecurityLabel(sql, s);
+
+        case dbms::SqlCommand::Truncate:
+            return handleTruncate(sql, s);
+
+        case dbms::SqlCommand::Reindex:
+            return handleReindex(sql, s);
+
         default:
             break;
     }
@@ -8614,99 +9052,6 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
-    }
-
-    if (sql.substr(0, 7) == "comment") {
-        if (!checkDB(s)) return true;
-        size_t onPos = sql.find(" on ");
-        if (onPos == string::npos) {
-            cout << "SQL syntax error" << endl;
-            return true;
-        }
-        string rest = trim(sql.substr(onPos + 4));
-        auto extractComment = [&](const string& raw) -> string {
-            size_t rawIsPos = raw.find(" is ");
-            if (rawIsPos == string::npos) return "";
-            string afterIs = trim(raw.substr(rawIsPos + 4));
-            if (afterIs.size() >= 2 && ((afterIs.front() == '\'' && afterIs.back() == '\'') ||
-                                               (afterIs.front() == '"' && afterIs.back() == '"'))) {
-                return afterIs.substr(1, afterIs.size() - 2);
-            }
-            return afterIs;
-        };
-        if (rest.substr(0, 5) == "table") {
-            string afterTable = trim(rest.substr(5));
-            size_t isPos = afterTable.find(" is ");
-            if (isPos == string::npos) {
-                cout << "SQL syntax error" << endl;
-                return true;
-            }
-            string tname = resolveTableName(s, trim(afterTable.substr(0, isPos)));
-            string comment = extractComment(rawSql);
-            auto res = g_engine.commentOnTable(s.currentDB, tname, comment);
-            if (res == OpResult::TableNotExist) {
-                cout << "Table not found" << endl;
-                return true;
-            }
-            cout << "Comment added" << endl;
-            return false;
-        }
-        if (rest.substr(0, 6) == "column") {
-            string afterCol = trim(rest.substr(6));
-            size_t isPos = afterCol.find(" is ");
-            if (isPos == string::npos) {
-                cout << "SQL syntax error" << endl;
-                return true;
-            }
-            string qual = trim(afterCol.substr(0, isPos));
-            size_t dotPos = qual.find('.');
-            if (dotPos == string::npos) {
-                cout << "SQL syntax error: use table.column" << endl;
-                return true;
-            }
-            string tname = resolveTableName(s, trim(qual.substr(0, dotPos)));
-            string cname = trim(qual.substr(dotPos + 1));
-            string comment = extractComment(rawSql);
-            auto res = g_engine.commentOnColumn(s.currentDB, tname, cname, comment);
-            if (res == OpResult::TableNotExist) {
-                cout << "Table not found" << endl;
-                return true;
-            }
-            cout << "Comment added" << endl;
-            return false;
-        }
-        cout << "SQL syntax error" << endl;
-        return true;
-    }
-
-    if (sql.substr(0, 4) == "lock") {
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(4));
-        if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
-        vector<string> tokens = tokenize(rest);
-        if (tokens.size() < 4) {
-            cout << "SQL syntax error: LOCK TABLE tname IN SHARE|EXCLUSIVE MODE" << endl;
-            return true;
-        }
-        string tname = resolveTableName(s, tokens[0]);
-        if (!g_engine.tableExists(s.currentDB, tname)) {
-            cout << "Table " << tname << " not exist" << endl;
-            return true;
-        }
-        string mode = tokens[2];
-        for (auto& c : mode) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        bool ok = false;
-        if (mode == "share") {
-            ok = g_engine.getLockManager().lockShared(tname);
-        } else if (mode == "exclusive") {
-            ok = g_engine.getLockManager().lockExclusive(tname);
-        }
-        if (!ok) {
-            cout << "Lock acquisition failed (deadlock detected)" << endl;
-            return true;
-        }
-        cout << "Table " << tname << " locked in " << mode << " mode" << endl;
-        return false;
     }
 
     if (sql.substr(0, 5) == "alter") {
@@ -10834,62 +11179,6 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    if (sql.substr(0, 7) == "analyze") {
-        if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(7));
-        // ANALYZE without args, or ANALYZE ALL TABLES, or ANALYZE DATABASE → analyze all tables
-        if (rest.empty() || rest == "all tables" || rest == "database") {
-            auto tables = g_engine.getTableNames(s.currentDB);
-            if (tables.empty()) {
-                cout << "No tables to analyze in database " << s.currentDB << endl;
-                return false;
-            }
-            for (const auto& tname : tables) {
-                g_engine.analyzeTable(s.currentDB, tname);
-                cout << "Table " << tname << " analyzed" << endl;
-            }
-            return false;
-        }
-        if (rest.substr(0, 5) != "table") {
-            cout << "SQL syntax error" << endl;
-            return true;
-        }
-        string afterTable = trim(rest.substr(5));
-        // Check for ANALYZE TABLE t COLUMNS (col1, col2)
-        size_t colsPos = afterTable.find(" columns ");
-        if (colsPos != string::npos) {
-            string tname = trim(afterTable.substr(0, colsPos));
-            string colsPart = trim(afterTable.substr(colsPos + 9));
-            // Strip parentheses
-            if (!colsPart.empty() && colsPart.front() == '(') colsPart = colsPart.substr(1);
-            if (!colsPart.empty() && colsPart.back() == ')') colsPart.pop_back();
-            vector<string> colnames;
-            stringstream css(colsPart);
-            string c;
-            while (getline(css, c, ',')) {
-                string tc = trim(c);
-                if (!tc.empty()) colnames.push_back(tc);
-            }
-            if (colnames.size() < 2) {
-                cout << "Multi-column analyze requires at least 2 columns" << endl;
-                return true;
-            }
-            g_engine.analyzeMultiColumn(s.currentDB, tname, colnames);
-            string key;
-            for (size_t i = 0; i < colnames.size(); ++i) {
-                if (i > 0) key += ",";
-                key += colnames[i];
-            }
-            cout << "Multi-column stats (" << key << ") for table " << tname << " analyzed" << endl;
-            return false;
-        }
-        string tname = afterTable;
-        g_engine.analyzeTable(s.currentDB, tname);
-        cout << "Table " << tname << " analyzed" << endl;
-        return false;
-    }
-
     // DUMP DATABASE dbname TO 'file.sql'
     if (sql.substr(0, 4) == "dump") {
         if (!checkAdmin(s)) return true;
@@ -11101,118 +11390,6 @@ bool execute(const string& rawSql, Session& s) {
         return false;
     }
 
-    // REFRESH MATERIALIZED VIEW [CONCURRENTLY] viewname
-    if (sql.substr(0, 6) == "refresh") {
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(6));
-        if (rest.substr(0, 20) == "materialized view ") {
-            rest = trim(rest.substr(20));
-            if (rest.substr(0, 12) == "concurrently") {
-                rest = trim(rest.substr(12));
-            }
-            string viewname = rest;
-            if (!g_engine.isMaterializedView(s.currentDB, viewname)) {
-                cout << "Materialized view " << viewname << " not found" << endl;
-                return true;
-            }
-            string viewSql = g_engine.getMaterializedViewSQL(s.currentDB, viewname);
-            if (viewSql.empty()) {
-                cout << "Failed to read materialized view SQL" << endl;
-                return true;
-            }
-            // Re-execute the query (same logic as CREATE MATERIALIZED VIEW)
-            string lsql = toLower(viewSql);
-            size_t fromPos = lsql.find(" from ");
-            if (fromPos == string::npos) {
-                cout << "Invalid materialized view SQL" << endl;
-                return true;
-            }
-            string colsPart = trim(viewSql.substr(6, fromPos - 6));
-            vector<string> colNames;
-            if (colsPart == "*") {
-                cout << "Materialized view with SELECT * not supported, use explicit columns" << endl;
-                return true;
-            }
-            size_t cp = 0;
-            while (cp < colsPart.size()) {
-                size_t comma = colsPart.find(',', cp);
-                string c = trim(colsPart.substr(cp, comma - cp));
-                size_t aliasPos = toLower(c).find(" as ");
-                if (aliasPos != string::npos) {
-                    c = trim(c.substr(aliasPos + 4));
-                } else {
-                    size_t sp = c.find(' ');
-                    if (sp != string::npos) {
-                        string before = trim(c.substr(0, sp));
-                        string after = trim(c.substr(sp + 1));
-                        if (after != "" && after.find_first_of("+-*/=<>") == string::npos) {
-                            c = after;
-                        } else {
-                            c = before;
-                        }
-                    }
-                }
-                size_t dotPos = c.find('.');
-                if (dotPos != string::npos) c = c.substr(dotPos + 1);
-                colNames.push_back(c);
-                if (comma == string::npos) break;
-                cp = comma + 1;
-            }
-            string inner = trim(viewSql.substr(fromPos + 5));
-            size_t wPos = toLower(inner).find(" where ");
-            size_t oPos = toLower(inner).find(" order by ");
-            size_t lPos = toLower(inner).find(" limit ");
-            string tname = trim(inner.substr(0,
-                min(wPos != string::npos ? wPos : inner.size(),
-                    min(oPos != string::npos ? oPos : inner.size(),
-                        lPos != string::npos ? lPos : inner.size()))));
-            tname = resolveTableName(s, tname);
-            vector<string> conds;
-            if (wPos != string::npos) {
-                size_t condEnd = min(oPos != string::npos ? oPos : inner.size(),
-                                    lPos != string::npos ? lPos : inner.size());
-                string condStr = normalizeConditionStr(trim(inner.substr(wPos + 6, condEnd - wPos - 6)));
-                if (!condStr.empty()) {
-                    vector<string> rawConds = splitConds(condStr);
-                    for (auto& c : rawConds) {
-                        string mc = modifyLogic(c);
-                        if (!mc.empty()) conds.push_back(mc);
-                    }
-                }
-            }
-            auto results = g_engine.query(s.currentDB, tname, conds, {}, {}, false, false);
-            string backingTable = dbms::StorageEngine::materializedViewPrefix(viewname);
-            // Truncate backing table and re-insert
-            if (g_engine.tableExists(s.currentDB, backingTable)) {
-                g_engine.truncateTable(s.currentDB, backingTable);
-            }
-            int inserted = 0;
-            for (const auto& row : results) {
-                stringstream ss(row);
-                map<string, string> values;
-                for (const auto& cname : colNames) {
-                    string val;
-                    ss >> val;
-                    values[cname] = val;
-                }
-                auto res = g_engine.insert(s.currentDB, backingTable, values);
-                if (res == OpResult::Success) ++inserted;
-            }
-            cout << "Materialized view " << viewname << " refreshed (" << inserted << " rows)" << endl;
-            return false;
-        }
-        cout << "SQL syntax error: REFRESH MATERIALIZED VIEW [CONCURRENTLY] viewname" << endl;
-        return true;
-    }
-
-    if (sql.substr(0, 10) == "checkpoint") {
-        if (!checkDB(s)) return true;
-        g_engine.checkpoint(s.currentDB);
-        cout << "Checkpoint completed" << endl;
-        log(s.username, "checkpoint", getTime());
-        return false;
-    }
-
     if (sql.substr(0, 14) == "backup database") {
         if (!checkAdmin(s)) return true;
         string rest = trim(sql.substr(14));
@@ -11268,146 +11445,6 @@ bool execute(const string& rawSql, Session& s) {
         g_planCacheHits = 0;
         g_planCacheMisses = 0;
         cout << "Cleared " << cleared << " plan cache entries" << endl;
-        return false;
-    }
-
-    if (sql.size() >= 11 && sql.substr(0, 11) == "vacuum full") {
-        if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
-        string tname = trim(sql.substr(11));
-        if (tname.empty()) {
-            cout << "VACUUM FULL requires a table name" << endl;
-            return true;
-        }
-        string resolvedName = resolveTableName(s, tname);
-        size_t n = g_engine.vacuumFull(s.currentDB, resolvedName);
-        cout << "VACUUM FULL completed, " << n << " rows rewritten" << endl;
-        return false;
-    }
-
-    if (sql.substr(0, 6) == "vacuum") {
-        if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(6));
-        bool concurrent = false;
-        if (rest.substr(0, 12) == "concurrently") {
-            concurrent = true;
-            rest = trim(rest.substr(12));
-        }
-        if (rest.empty()) {
-            // Vacuum all tables in current database (excluding temp tables)
-            auto tables = g_engine.getTableNames(s.currentDB);
-            size_t totalFreed = 0;
-            for (const auto& tbl : tables) {
-                totalFreed += g_engine.vacuum(s.currentDB, tbl, concurrent);
-            }
-            string mode = concurrent ? " CONCURRENTLY" : "";
-            cout << "VACUUM" << mode << " completed, " << totalFreed << " pages freed" << endl;
-        } else {
-            string resolvedName = resolveTableName(s, rest);
-            size_t freed = g_engine.vacuum(s.currentDB, resolvedName, concurrent);
-            string mode = concurrent ? " CONCURRENTLY" : "";
-            cout << "VACUUM" << mode << " completed, " << freed << " pages freed" << endl;
-        }
-        return false;
-    }
-
-    // SECURITY LABEL ON table_name IS 'label'
-    if (sql.substr(0, 15) == "security label ") {
-        if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(15));
-        if (rest.substr(0, 3) != "on ") {
-            cout << "SQL syntax error: SECURITY LABEL ON object_type object_name IS \x27label\x27" << endl;
-            return true;
-        }
-        rest = trim(rest.substr(3));
-        size_t isPos = rest.find(" is ");
-        if (isPos == string::npos) {
-            cout << "SQL syntax error: SECURITY LABEL ON object IS \x27label\x27" << endl;
-            return true;
-        }
-        string objPart = trim(rest.substr(0, isPos));
-        string labelPart = trim(rest.substr(isPos + 4));
-        // Remove quotes from label; NULL means remove label
-        if (labelPart.size() >= 2 && labelPart.front() == '\'' && labelPart.back() == '\'') {
-            labelPart = labelPart.substr(1, labelPart.size() - 2);
-        }
-        if (labelPart == "NULL" || labelPart == "null") {
-            labelPart.clear();
-        }
-        // Support object_type object_name or just object_name (default table)
-        string objType = "table";
-        string objName = objPart;
-        size_t sp = objPart.find(' ');
-        if (sp != string::npos) {
-            objType = objPart.substr(0, sp);
-            objName = trim(objPart.substr(sp + 1));
-        }
-        string resolvedName = resolveTableName(s, objName);
-        if (objType == "table" && !g_engine.tableExists(s.currentDB, resolvedName)) {
-            cout << "Table " << resolvedName << " not exist" << endl;
-            return true;
-        }
-        g_engine.setSecurityLabel(s.currentDB, objType, resolvedName, labelPart);
-        if (labelPart.empty()) {
-            cout << "Security label removed from " << objType << " " << resolvedName << endl;
-        } else {
-            cout << "Security label set on " << objType << " " << resolvedName << endl;
-        }
-        return false;
-    }
-
-    // TRUNCATE TABLE tablename
-    if (sql.substr(0, 8) == "truncate") {
-        if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
-        if (g_engine.inTransaction()) {
-            g_engine.commitTransaction();
-            cout << "Note: DDL caused implicit commit of open transaction" << endl;
-        }
-        string rest = trim(sql.substr(8));
-        if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
-        // Parse options: RESTART IDENTITY, CASCADE
-        bool restartIdentity = (rest.find("restart identity") != string::npos);
-        bool cascade = (rest.find("cascade") != string::npos);
-        // Extract table name (before any options)
-        size_t optPos = rest.find(' ');
-        string tname = rest;
-        if (optPos != string::npos) {
-            tname = trim(rest.substr(0, optPos));
-        }
-        tname = resolveTableName(s, tname);
-        auto res = g_engine.truncateTable(s.currentDB, tname);
-        if (res == OpResult::TableNotExist) {
-            cout << "Table not exist" << endl;
-            return true;
-        }
-        if (restartIdentity) {
-            TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].isAutoIncrement) {
-                    g_engine.resetSequence(s.currentDB, tname, tbl.cols[i].dataName, 1);
-                }
-            }
-        }
-        if (cascade) {
-            // CASCADE: truncate all tables that have foreign keys referencing this table
-            // Find referencing tables by scanning all table schemas
-            vector<string> allTables = g_engine.getTableNames(s.currentDB);
-            for (const string& otherTname : allTables) {
-                if (otherTname == tname) continue;
-                TableSchema otherTbl = g_engine.getTableSchema(s.currentDB, otherTname);
-                for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
-                    if (otherTbl.fks[fi].refTable == tname) {
-                        g_engine.truncateTable(s.currentDB, otherTname);
-                        break;
-                    }
-                }
-            }
-        }
-        cout << "TRUNCATE TABLE " << tname << " completed" << endl;
-        log(s.username, "truncate table " + tname, getTime());
         return false;
     }
 
@@ -11907,31 +11944,6 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         cout << "SQL syntax error: REFRESH MATERIALIZED VIEW viewname" << endl;
-        return true;
-    }
-
-    // REINDEX TABLE tablename
-    if (sql.substr(0, 7) == "reindex") {
-        if (!checkAdmin(s)) return true;
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(7));
-        if (rest.substr(0, 5) == "table") {
-            string tname = trim(rest.substr(5));
-            tname = resolveTableName(s, tname);
-            if (!g_engine.tableExists(s.currentDB, tname)) {
-                cout << "Table " << tname << " not exist" << endl;
-                return true;
-            }
-            auto res = g_engine.reindex(s.currentDB, tname);
-            if (res != OpResult::Success) {
-                cout << "Reindex failed" << endl;
-                return true;
-            }
-            cout << "Reindex succeeded" << endl;
-            log(s.username, "reindex table " + tname, getTime());
-            return false;
-        }
-        cout << "SQL syntax error: REINDEX TABLE tablename" << endl;
         return true;
     }
 
