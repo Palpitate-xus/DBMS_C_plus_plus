@@ -766,6 +766,706 @@ static bool executeValuesStatement(const string& sql) {
 }
 
 // ========================================================================
+// Cursor command handlers (extracted for Parser switch/case dispatch)
+// ========================================================================
+static bool handleDeclareCursor(const string& sql, Session& s) {
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(7));
+    size_t cursorPos = rest.find("cursor");
+    if (cursorPos == string::npos) {
+        cout << "SQL syntax error: DECLARE cursor_name CURSOR FOR select_sql" << endl;
+        return true;
+    }
+    string cursorName = trim(rest.substr(0, cursorPos));
+    string afterCursor = trim(rest.substr(cursorPos + 6));
+    if (afterCursor.substr(0, 3) != "for") {
+        cout << "SQL syntax error: DECLARE cursor_name CURSOR FOR select_sql" << endl;
+        return true;
+    }
+    string selectSql = trim(afterCursor.substr(3));
+    // Execute SELECT and capture output
+    std::stringstream ss;
+    auto oldBuf = std::cout.rdbuf(ss.rdbuf());
+    bool err = execute(selectSql, s);
+    std::cout.rdbuf(oldBuf);
+    if (err) {
+        cout << "DECLARE CURSOR failed: " << ss.str() << endl;
+        return true;
+    }
+    Session::Cursor cur;
+    string line;
+    bool first = true;
+    while (getline(ss, line)) {
+        if (first) {
+            stringstream hs(line);
+            string col;
+            while (hs >> col) cur.colNames.push_back(col);
+            first = false;
+        } else if (!line.empty()) {
+            cur.rows.push_back(line);
+        }
+    }
+    cur.pos = -1;
+    s.cursors[cursorName] = std::move(cur);
+    cout << "Cursor " << cursorName << " declared" << endl;
+    return false;
+}
+
+static bool handleFetchCursor(const string& sql, Session& s) {
+    string rest = trim(sql.substr(5));
+    string direction = "next";
+    string cursorName;
+    size_t fromPos = rest.find("from");
+    if (fromPos == string::npos) fromPos = rest.find("in");
+    if (fromPos != string::npos) {
+        string beforeFrom = trim(rest.substr(0, fromPos));
+        if (!beforeFrom.empty()) direction = beforeFrom;
+        cursorName = trim(rest.substr(fromPos + 4));
+    } else {
+        cursorName = rest;
+    }
+    auto it = s.cursors.find(cursorName);
+    if (it == s.cursors.end()) {
+        cout << "Cursor " << cursorName << " not found" << endl;
+        return true;
+    }
+    auto& cur = it->second;
+    if (cur.rows.empty()) {
+        cout << "No data" << endl;
+        return false;
+    }
+    auto moveTo = [&](int p) {
+        if (p < 0 || p >= (int)cur.rows.size()) {
+            cout << "No more rows" << endl;
+            return false;
+        }
+        // Output header on first fetch
+        if (cur.pos == -1 && !cur.colNames.empty()) {
+            for (size_t i = 0; i < cur.colNames.size(); ++i) {
+                if (i > 0) cout << ' ';
+                cout << cur.colNames[i];
+            }
+            cout << endl;
+        }
+        cout << cur.rows[p] << endl;
+        cur.pos = p;
+        return true;
+    };
+    if (direction == "next") {
+        moveTo(cur.pos + 1);
+    } else if (direction == "prior" || direction == "backward") {
+        moveTo(cur.pos - 1);
+    } else if (direction == "first") {
+        moveTo(0);
+    } else if (direction == "last") {
+        moveTo((int)cur.rows.size() - 1);
+    } else if (direction == "all") {
+        for (size_t i = 0; i < cur.rows.size(); ++i) cout << cur.rows[i] << endl;
+        cur.pos = (int)cur.rows.size() - 1;
+    } else {
+        // ABSOLUTE n, RELATIVE n, FORWARD n, BACKWARD n
+        int n = 1;
+        try {
+            size_t dp = direction.find_first_of("0123456789");
+            if (dp != string::npos) n = stoi(direction.substr(dp));
+        } catch (...) {}
+        if (direction.find("absolute") != string::npos) {
+            moveTo(n);
+        } else if (direction.find("relative") != string::npos) {
+            moveTo(cur.pos + n);
+        } else if (direction.find("forward") != string::npos) {
+            moveTo(cur.pos + n);
+        } else if (direction.find("backward") != string::npos) {
+            moveTo(cur.pos - n);
+        } else {
+            moveTo(cur.pos + 1);
+        }
+    }
+    return false;
+}
+
+static bool handleMoveCursor(const string& sql, Session& s) {
+    string rest = trim(sql.substr(4));
+    string direction = "next";
+    string cursorName;
+    size_t sepPos = string::npos;
+    size_t sepLen = 0;
+    if (rest.substr(0, 5) == "from ") {
+        sepPos = 0;
+        sepLen = 5;
+    } else if (rest.substr(0, 3) == "in ") {
+        sepPos = 0;
+        sepLen = 3;
+    } else {
+        size_t fromPos = rest.find(" from ");
+        size_t inPos = rest.find(" in ");
+        if (fromPos != string::npos && (inPos == string::npos || fromPos < inPos)) {
+            sepPos = fromPos;
+            sepLen = 6;
+        } else if (inPos != string::npos) {
+            sepPos = inPos;
+            sepLen = 4;
+        }
+    }
+    if (sepPos != string::npos) {
+        string before = trim(rest.substr(0, sepPos));
+        if (!before.empty()) direction = before;
+        cursorName = trim(rest.substr(sepPos + sepLen));
+    } else {
+        cursorName = rest;
+    }
+    if (cursorName.empty()) {
+        cout << "SQL syntax error: MOVE [direction] FROM cursor_name" << endl;
+        return true;
+    }
+    auto it = s.cursors.find(cursorName);
+    if (it == s.cursors.end()) {
+        cout << "Cursor " << cursorName << " not found" << endl;
+        return true;
+    }
+    auto& cur = it->second;
+    int rowCount = static_cast<int>(cur.rows.size());
+    int moved = 0;
+    auto parseCount = [](const string& dir, int defaultValue) {
+        if (dir.find("all") != string::npos) return std::numeric_limits<int>::max();
+        try {
+            size_t p = dir.find_first_of("-0123456789");
+            if (p != string::npos) return std::stoi(dir.substr(p));
+        } catch (...) {}
+        return defaultValue;
+    };
+    if (rowCount == 0) {
+        cout << "MOVE 0" << endl;
+        return false;
+    }
+    if (direction == "next" || direction.substr(0, 7) == "forward") {
+        int n = (direction == "next") ? 1 : parseCount(direction, 1);
+        if (n < 0) n = 0;
+        int available = rowCount - (cur.pos + 1);
+        moved = std::min(n, std::max(0, available));
+        cur.pos += moved;
+    } else if (direction == "prior" || direction.substr(0, 8) == "backward") {
+        int n = (direction == "prior") ? 1 : parseCount(direction, 1);
+        if (n < 0) n = 0;
+        int available = cur.pos + 1;
+        moved = std::min(n, std::max(0, available));
+        cur.pos -= moved;
+    } else if (direction == "first") {
+        cur.pos = 0;
+        moved = 1;
+    } else if (direction == "last") {
+        cur.pos = rowCount - 1;
+        moved = 1;
+    } else if (direction.substr(0, 8) == "absolute") {
+        int n = parseCount(direction, 0);
+        int target = (n > 0) ? n - 1 : (n < 0 ? rowCount + n : -1);
+        if (target >= 0 && target < rowCount) {
+            cur.pos = target;
+            moved = 1;
+        } else {
+            cur.pos = (target < 0) ? -1 : rowCount - 1;
+            moved = 0;
+        }
+    } else if (direction.substr(0, 8) == "relative") {
+        int n = parseCount(direction, 0);
+        int target = cur.pos + n;
+        if (target < -1) target = -1;
+        if (target >= rowCount) target = rowCount - 1;
+        moved = std::abs(target - cur.pos);
+        cur.pos = target;
+    } else if (direction == "all") {
+        moved = std::max(0, rowCount - (cur.pos + 1));
+        cur.pos = rowCount - 1;
+    } else {
+        cout << "SQL syntax error: unsupported MOVE direction" << endl;
+        return true;
+    }
+    cout << "MOVE " << moved << endl;
+    return false;
+}
+
+static bool handleCloseCursor(const string& sql, Session& s) {
+    string cursorName = trim(sql.substr(5));
+    if (cursorName.empty()) {
+        cout << "SQL syntax error: CLOSE cursor_name" << endl;
+        return true;
+    }
+    auto it = s.cursors.find(cursorName);
+    if (it == s.cursors.end()) {
+        cout << "Cursor " << cursorName << " not found" << endl;
+        return true;
+    }
+    s.cursors.erase(it);
+    cout << "Cursor " << cursorName << " closed" << endl;
+    return false;
+}
+
+// ========================================================================
+// Transaction command handlers
+// ========================================================================
+static bool handleBeginTransaction(const string& sql, Session& s) {
+    if (!checkDB(s)) return true;
+    // Parse optional isolation level: "begin read committed"
+    // Parse optional read only: "begin read only"
+    string rest = trim(sql.substr(5));
+    bool readOnly = false;
+    if (!rest.empty()) {
+        if (rest.find("read uncommitted") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
+            s.isolationLevel = 0;
+        } else if (rest.find("read committed") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
+            s.isolationLevel = 1;
+        } else if (rest.find("repeatable read") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+            s.isolationLevel = 2;
+        } else if (rest.find("serializable") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            s.isolationLevel = 3;
+        }
+        if (rest.find("read only") != string::npos) {
+            readOnly = true;
+        }
+    }
+    auto res = g_engine.beginTransaction(s.currentDB);
+    if (res != OpResult::Success) {
+        cout << "Begin transaction failed" << endl;
+        return true;
+    }
+    g_engine.setReadOnly(readOnly);
+    if (readOnly) {
+        cout << "Read-only transaction started" << endl;
+        log(s.username, "begin read-only transaction", getTime());
+    } else {
+        cout << "Transaction started" << endl;
+        log(s.username, "begin transaction", getTime());
+    }
+    return false;
+}
+
+static bool handleCommitTransaction(const string& sql, Session& s) {
+    (void)sql;
+    auto res = g_engine.commitTransaction();
+    if (res != OpResult::Success) {
+        cout << "Commit failed" << endl;
+        return true;
+    }
+    cout << "Transaction committed" << endl;
+    log(s.username, "commit transaction", getTime());
+    return false;
+}
+
+static bool handleCommitPrepared(const string& sql, Session& s) {
+    string xid = stripQuotes(trim(sql.substr(15)));
+    if (xid.empty()) {
+        cout << "SQL syntax error: COMMIT PREPARED requires a transaction ID" << endl;
+        return true;
+    }
+    auto res = g_engine.commitPrepared(xid);
+    if (res == OpResult::Success) {
+        cout << "COMMIT PREPARED " << xid << endl;
+        log(s.username, "commit prepared " + xid, getTime());
+    } else if (res == OpResult::TableNotExist) {
+        cout << "Prepared transaction not found" << endl;
+    } else {
+        cout << "COMMIT PREPARED failed" << endl;
+    }
+    return false;
+}
+
+static bool handleRollbackTransaction(const string& sql, Session& s) {
+    (void)sql;
+    auto res = g_engine.rollbackTransaction();
+    if (res != OpResult::Success) {
+        cout << "Rollback failed" << endl;
+        return true;
+    }
+    cout << "Transaction rolled back" << endl;
+    log(s.username, "rollback transaction", getTime());
+    return false;
+}
+
+static bool handleRollbackPrepared(const string& sql, Session& s) {
+    string xid = stripQuotes(trim(sql.substr(17)));
+    if (xid.empty()) {
+        cout << "SQL syntax error: ROLLBACK PREPARED requires a transaction ID" << endl;
+        return true;
+    }
+    auto res = g_engine.rollbackPrepared(xid);
+    if (res == OpResult::Success) {
+        cout << "ROLLBACK PREPARED " << xid << endl;
+        log(s.username, "rollback prepared " + xid, getTime());
+    } else if (res == OpResult::TableNotExist) {
+        cout << "Prepared transaction not found" << endl;
+    } else {
+        cout << "ROLLBACK PREPARED failed" << endl;
+    }
+    return false;
+}
+
+static bool handleSavepoint(const string& sql, Session& s) {
+    if (!g_engine.inTransaction()) {
+        cout << "Not in transaction" << endl;
+        return true;
+    }
+    string name = sql.substr(10);
+    while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
+    if (name.empty()) {
+        cout << "Savepoint name required" << endl;
+        return true;
+    }
+    auto res = g_engine.savepoint(name);
+    if (res != OpResult::Success) {
+        cout << "Savepoint failed" << endl;
+        return true;
+    }
+    cout << "Savepoint " << name << " created" << endl;
+    log(s.username, "savepoint " + name, getTime());
+    return false;
+}
+
+static bool handleReleaseSavepoint(const string& sql, Session& s) {
+    if (!g_engine.inTransaction()) {
+        cout << "Not in transaction" << endl;
+        return true;
+    }
+    string name = sql.substr(18);
+    while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
+    if (name.empty()) {
+        cout << "Savepoint name required" << endl;
+        return true;
+    }
+    auto res = g_engine.releaseSavepoint(name);
+    if (res != OpResult::Success) {
+        cout << "Savepoint not found" << endl;
+        return true;
+    }
+    cout << "Savepoint " << name << " released" << endl;
+    log(s.username, "release savepoint " + name, getTime());
+    return false;
+}
+
+static bool handleRollbackToSavepoint(const string& sql, Session& s) {
+    if (!g_engine.inTransaction()) {
+        cout << "Not in transaction" << endl;
+        return true;
+    }
+    string name = sql.substr(21);
+    while (!name.empty() && isspace((unsigned char)name.front())) name.erase(name.begin());
+    while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
+    if (name.empty()) {
+        cout << "Savepoint name required" << endl;
+        return true;
+    }
+    auto res = g_engine.rollbackToSavepoint(name);
+    if (res != OpResult::Success) {
+        cout << "Savepoint not found" << endl;
+        return true;
+    }
+    cout << "Rolled back to savepoint " << name << endl;
+    log(s.username, "rollback to savepoint " + name, getTime());
+    return false;
+}
+
+// ========================================================================
+// SET / RESET / ALTER SYSTEM command handlers
+// ========================================================================
+static bool handleResetCommand(const string& sql, Session& s) {
+    // RESET ROLE
+    if (sql == "reset role") {
+        s.currentRole = s.originalRole;
+        cout << "Role reset to " << s.currentRole << endl;
+        return false;
+    }
+    if (sql == "reset session authorization") {
+        string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
+        int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
+        s.username = authUser;
+        s.permission = authPerm;
+        s.originalRole = authUser;
+        s.currentRole.clear();
+        cout << "RESET SESSION AUTHORIZATION" << endl;
+        return false;
+    }
+    // RESET parameter | RESET ALL
+    auto resetIsolation = [&]() {
+        s.isolationLevel = 2;
+        g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+    };
+    string rest = (sql == "reset all") ? "all" : trim(sql.substr(6));
+    if (rest == "all") {
+        string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
+        int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
+        s.username = authUser;
+        s.permission = authPerm;
+        s.currentRole = s.originalRole;
+        s.originalRole = authUser;
+        s.currentRole.clear();
+        s.timezoneOffsetMinutes = 0;
+        s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+        s.constraintsDeferred = false;
+        resetIsolation();
+        cout << "RESET ALL" << endl;
+        return false;
+    }
+    if (rest == "timezone" || rest == "time zone") {
+        s.timezoneOffsetMinutes = 0;
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (rest == "statement_timeout" || rest == "statement_timeout_ms") {
+        s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (rest == "transaction_isolation" || rest == "transaction isolation") {
+        resetIsolation();
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    cout << "RESET currently supports ROLE, ALL, TIME ZONE, statement_timeout, and transaction_isolation" << endl;
+    return true;
+}
+
+// ========================================================================
+// SET / RESET / ALTER SYSTEM command helpers
+// ========================================================================
+static bool applyConfigParam(const string& param, const string& val, bool isGlobal, Session& s) {
+    bool ok = false;
+    if (param == "max_connections") {
+        try { g_config.maxConnections = std::stoi(val); ok = true; } catch (...) {}
+    } else if (param == "slow_query_threshold_ms" || param == "slow_query_threshold") {
+        try { g_config.slowQueryThresholdMs = std::stod(val); ok = true; } catch (...) {}
+    } else if (param == "checkpoint_interval") {
+        try { g_config.checkpointInterval = std::stoi(val); ok = true; } catch (...) {}
+    } else if (param == "statement_timeout_ms" || param == "statement_timeout") {
+        try { g_config.statementTimeoutMs = std::stoi(val); s.statementTimeoutMs = g_config.statementTimeoutMs; ok = true; } catch (...) {}
+    } else if (param == "buffer_pool_frames") {
+        try { g_config.bufferPoolFrames = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
+    } else if (param == "enable_query_plan_cache") {
+        g_config.enableQueryPlanCache = (val == "1" || val == "true" || val == "on");
+        ok = true;
+    } else if (param == "query_plan_cache_size") {
+        try { g_config.queryPlanCacheSize = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
+    } else if (param == "password_policy_level") {
+        try { g_config.passwordPolicyLevel = std::stoi(val); ok = true; } catch (...) {}
+    } else if (param == "password_hash_algorithm") {
+        g_config.passwordHashAlgorithm = val; ok = true;
+    } else if (param == "audit_level") {
+        try { g_config.auditLevel = std::stoi(val); ok = true; } catch (...) {}
+    } else if (param == "auto_vacuum") {
+        g_config.autoVacuumEnabled = (val == "1" || val == "true" || val == "on");
+        ok = true;
+    } else if (param == "auto_vacuum_threshold") {
+        try { g_config.autoVacuumThreshold = std::stoi(val); ok = true; } catch (...) {}
+    } else if (param == "auto_analyze") {
+        g_config.autoAnalyzeEnabled = (val == "1" || val == "true" || val == "on");
+        ok = true;
+    } else if (param == "auto_analyze_threshold") {
+        try { g_config.autoAnalyzeThreshold = std::stoi(val); ok = true; } catch (...) {}
+    } else if (param == "work_mem_kb" || param == "work_mem") {
+        try { g_config.workMemKb = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
+    } else if (param == "enable_seq_scan") {
+        g_config.enableSeqScan = (val == "1" || val == "true" || val == "on");
+        ok = true;
+    } else if (param == "enable_hash_join") {
+        g_config.enableHashJoin = (val == "1" || val == "true" || val == "on");
+        ok = true;
+    } else if (param == "enable_merge_join") {
+        g_config.enableMergeJoin = (val == "1" || val == "true" || val == "on");
+        ok = true;
+    } else if (param == "auto_explain") {
+        g_config.autoExplainEnabled = (val == "1" || val == "true" || val == "on");
+        ok = true;
+    } else if (param == "auto_explain_threshold_ms" || param == "auto_explain_threshold") {
+        try { g_config.autoExplainThresholdMs = std::stod(val); ok = true; } catch (...) {}
+    } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
+        try { g_config.lockTimeoutMs = std::stoi(val); g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs); ok = true; } catch (...) {}
+    } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
+        try { g_config.deadlockTimeoutMs = std::stoi(val); g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs); ok = true; } catch (...) {}
+    } else {
+        cout << "Unknown parameter: " << param << endl;
+        return true;
+    }
+    if (!ok) {
+        cout << "Invalid value for parameter " << param << endl;
+        return true;
+    }
+    if (isGlobal) {
+        if (!g_config.save("dbms.conf")) {
+            cout << "Failed to persist configuration" << endl;
+            return true;
+        }
+        cout << "Set global " << param << " = " << val << endl;
+    } else {
+        cout << "Set " << param << " = " << val << " (session)" << endl;
+    }
+    return false;
+}
+
+static bool handleSetCommand(const string& sql, Session& s) {
+    // SET ROLE rolename
+    if (sql.substr(0, 9) == "set role ") {
+        string roleName = trim(sql.substr(9));
+        if (roleName.empty()) {
+            cout << "SQL syntax error: SET ROLE role_name" << endl;
+            return true;
+        }
+        s.currentRole = roleName;
+        cout << "Role set to " << roleName << endl;
+        return false;
+    }
+
+    // SET SESSION AUTHORIZATION user_name | DEFAULT
+    if (sql.substr(0, 25) == "set session authorization") {
+        return setSessionAuthorization(s, sql.substr(25));
+    }
+
+    // SET CONSTRAINTS { ALL | constraint_name [, ...] } { DEFERRED | IMMEDIATE }
+    if (sql.substr(0, 15) == "set constraints") {
+        string rest = trim(sql.substr(15));
+        if (rest.empty()) {
+            cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
+            return true;
+        }
+        bool deferred = false;
+        bool immediate = false;
+        if (rest.size() >= 8 && rest.substr(rest.size() - 8) == "deferred") {
+            deferred = true;
+        } else if (rest.size() >= 9 && rest.substr(rest.size() - 9) == "immediate") {
+            immediate = true;
+        }
+        if (!deferred && !immediate) {
+            cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
+            return true;
+        }
+        s.constraintsDeferred = deferred;
+        cout << "SET CONSTRAINTS" << endl;
+        return false;
+    }
+
+    // SET TRANSACTION ISOLATION LEVEL (must come before generic SET)
+    if (sql.substr(0, 25) == "set transaction isolation" ||
+        sql.substr(0, 31) == "set transaction isolation level") {
+        string rawRest;
+        if (sql.substr(0, 31) == "set transaction isolation level") {
+            rawRest = sql.substr(31);
+        } else {
+            rawRest = sql.substr(25);
+        }
+        string rest = trim(rawRest);
+        if (rest.find("read uncommitted") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
+            s.isolationLevel = 0;
+            cout << "Isolation level set to READ UNCOMMITTED" << endl;
+        } else if (rest.find("read committed") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
+            s.isolationLevel = 1;
+            cout << "Isolation level set to READ COMMITTED" << endl;
+        } else if (rest.find("repeatable read") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+            s.isolationLevel = 2;
+            cout << "Isolation level set to REPEATABLE READ" << endl;
+        } else if (rest.find("serializable") != string::npos) {
+            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            s.isolationLevel = 3;
+            cout << "Isolation level set to SERIALIZABLE" << endl;
+        } else {
+            cout << "Unknown isolation level" << endl;
+            return true;
+        }
+        return false;
+    }
+
+    // SET TIMEZONE = '+08:00' | SET TIME ZONE '+08:00' | SET TIME ZONE 'UTC'
+    if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 14) == "set time zone ") {
+        size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 14;
+        string tzVal = trim(sql.substr(off));
+        if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
+        s.timezoneOffsetMinutes = parseTimezoneOffset(tzVal);
+        int absOff = std::abs(s.timezoneOffsetMinutes);
+        int tzh = absOff / 60;
+        int tzm = absOff % 60;
+        std::string sign = (s.timezoneOffsetMinutes >= 0) ? "+" : "-";
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s%02d:%02d", sign.c_str(), tzh, tzm);
+        cout << "Timezone set to UTC" << buf << " (" << tzVal << ")" << endl;
+        return false;
+    }
+
+    // SET parameter = value  (session-level, non-persistent)
+    // SET GLOBAL parameter = value (persistent to dbms.conf)
+    if (sql.substr(0, 3) == "set" && sql.size() > 3 && isspace(static_cast<unsigned char>(sql[3]))) {
+        string rest = trim(sql.substr(3));
+        bool isGlobal = false;
+        if (rest.size() > 7 && rest.substr(0, 7) == "global ") {
+            isGlobal = true;
+            rest = trim(rest.substr(7));
+        }
+        size_t eqPos = rest.find('=');
+        if (eqPos == string::npos) {
+            cout << "SQL syntax error: SET [GLOBAL] parameter = value" << endl;
+            return true;
+        }
+        string param = trim(rest.substr(0, eqPos));
+        string val = trim(rest.substr(eqPos + 1));
+        // User-defined variable: SET @var = value
+        if (!param.empty() && param[0] == '@') {
+            s.userVariables[param.substr(1)] = val;
+            cout << "Set variable " << param << " = " << val << endl;
+            return false;
+        }
+        return applyConfigParam(param, val, isGlobal, s);
+    }
+
+    // set auto_vacuum = on / off / threshold N (legacy compat)
+    if (sql.substr(0, 15) == "set auto_vacuum") {
+        string rest = trim(sql.substr(15));
+        if (rest == "= on" || rest == "on" || rest == "= 1" || rest == "1") {
+            g_config.autoVacuumEnabled = true;
+            cout << "auto_vacuum set to ON" << endl;
+        } else if (rest == "= off" || rest == "off" || rest == "= 0" || rest == "0") {
+            g_config.autoVacuumEnabled = false;
+            cout << "auto_vacuum set to OFF" << endl;
+        } else if (rest.substr(0, 10) == "threshold " || rest.substr(0, 12) == "= threshold ") {
+            size_t off = (rest.substr(0, 10) == "threshold ") ? 10 : 12;
+            try {
+                g_config.autoVacuumThreshold = std::stoi(trim(rest.substr(off)));
+                cout << "auto_vacuum_threshold set to " << g_config.autoVacuumThreshold << endl;
+            } catch (...) {
+                cout << "Invalid threshold value" << endl;
+                return true;
+            }
+        } else {
+            cout << "Usage: SET auto_vacuum = ON|OFF|THRESHOLD N" << endl;
+            return true;
+        }
+        return false;
+    }
+
+    cout << "SQL syntax error: unsupported SET command" << endl;
+    return true;
+}
+
+static bool handleAlterSystem(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    string rest = trim(sql.substr(12));
+    if (rest.size() >= 3 && rest.substr(0, 3) == "set") {
+        rest = trim(rest.substr(3));
+        size_t eqPos = rest.find('=');
+        if (eqPos == string::npos) {
+            cout << "SQL syntax error: ALTER SYSTEM SET parameter = value" << endl;
+            return true;
+        }
+        string param = trim(rest.substr(0, eqPos));
+        string val = trim(rest.substr(eqPos + 1));
+        return applyConfigParam(param, val, true, s);
+    }
+    cout << "SQL syntax error: ALTER SYSTEM SET parameter = value" << endl;
+    return true;
+}
+
+// ========================================================================
 // Window function support
 // ========================================================================
 struct WindowFunc {
@@ -6401,244 +7101,56 @@ bool execute(const string& rawSql, Session& s) {
         case dbms::SqlCommand::ImportForeignSchema:
             return handleImportForeignSchema(sql, s);
 
+        case dbms::SqlCommand::Declare:
+            return handleDeclareCursor(sql, s);
+
+        case dbms::SqlCommand::Fetch:
+            return handleFetchCursor(sql, s);
+
+        case dbms::SqlCommand::Move:
+            return handleMoveCursor(sql, s);
+
+        case dbms::SqlCommand::Close:
+            return handleCloseCursor(sql, s);
+
+        case dbms::SqlCommand::Begin:
+        case dbms::SqlCommand::StartTransaction:
+            return handleBeginTransaction(sql, s);
+
+        case dbms::SqlCommand::Commit:
+        case dbms::SqlCommand::End:
+            return handleCommitTransaction(sql, s);
+
+        case dbms::SqlCommand::CommitPrepared:
+            return handleCommitPrepared(sql, s);
+
+        case dbms::SqlCommand::Rollback:
+        case dbms::SqlCommand::Abort:
+            return handleRollbackTransaction(sql, s);
+
+        case dbms::SqlCommand::RollbackPrepared:
+            return handleRollbackPrepared(sql, s);
+
+        case dbms::SqlCommand::Savepoint:
+            return handleSavepoint(sql, s);
+
+        case dbms::SqlCommand::ReleaseSavepoint:
+            return handleReleaseSavepoint(sql, s);
+
+        case dbms::SqlCommand::RollbackToSavepoint:
+            return handleRollbackToSavepoint(sql, s);
+
+        case dbms::SqlCommand::Set:
+            return handleSetCommand(sql, s);
+
+        case dbms::SqlCommand::Reset:
+            return handleResetCommand(sql, s);
+
+        case dbms::SqlCommand::AlterSystem:
+            return handleAlterSystem(sql, s);
+
         default:
             break;
-    }
-
-    // DECLARE CURSOR
-    if (sql.substr(0, 7) == "declare") {
-        if (!checkDB(s)) return true;
-        string rest = trim(sql.substr(7));
-        size_t cursorPos = rest.find("cursor");
-        if (cursorPos == string::npos) {
-            cout << "SQL syntax error: DECLARE cursor_name CURSOR FOR select_sql" << endl;
-            return true;
-        }
-        string cursorName = trim(rest.substr(0, cursorPos));
-        string afterCursor = trim(rest.substr(cursorPos + 6));
-        if (afterCursor.substr(0, 3) != "for") {
-            cout << "SQL syntax error: DECLARE cursor_name CURSOR FOR select_sql" << endl;
-            return true;
-        }
-        string selectSql = trim(afterCursor.substr(3));
-        // Execute SELECT and capture output
-        std::stringstream ss;
-        auto oldBuf = std::cout.rdbuf(ss.rdbuf());
-        bool err = execute(selectSql, s);
-        std::cout.rdbuf(oldBuf);
-        if (err) {
-            cout << "DECLARE CURSOR failed: " << ss.str() << endl;
-            return true;
-        }
-        Session::Cursor cur;
-        string line;
-        bool first = true;
-        while (getline(ss, line)) {
-            if (first) {
-                stringstream hs(line);
-                string col;
-                while (hs >> col) cur.colNames.push_back(col);
-                first = false;
-            } else if (!line.empty()) {
-                cur.rows.push_back(line);
-            }
-        }
-        cur.pos = -1;
-        s.cursors[cursorName] = std::move(cur);
-        cout << "Cursor " << cursorName << " declared" << endl;
-        return false;
-    }
-
-    // FETCH
-    if (sql.substr(0, 5) == "fetch") {
-        string rest = trim(sql.substr(5));
-        string direction = "next";
-        string cursorName;
-        size_t fromPos = rest.find("from");
-        if (fromPos == string::npos) fromPos = rest.find("in");
-        if (fromPos != string::npos) {
-            string beforeFrom = trim(rest.substr(0, fromPos));
-            if (!beforeFrom.empty()) direction = beforeFrom;
-            cursorName = trim(rest.substr(fromPos + 4));
-        } else {
-            cursorName = rest;
-        }
-        auto it = s.cursors.find(cursorName);
-        if (it == s.cursors.end()) {
-            cout << "Cursor " << cursorName << " not found" << endl;
-            return true;
-        }
-        auto& cur = it->second;
-        if (cur.rows.empty()) {
-            cout << "No data" << endl;
-            return false;
-        }
-        auto moveTo = [&](int p) {
-            if (p < 0 || p >= (int)cur.rows.size()) {
-                cout << "No more rows" << endl;
-                return false;
-            }
-            // Output header on first fetch
-            if (cur.pos == -1 && !cur.colNames.empty()) {
-                for (size_t i = 0; i < cur.colNames.size(); ++i) {
-                    if (i > 0) cout << ' ';
-                    cout << cur.colNames[i];
-                }
-                cout << endl;
-            }
-            cout << cur.rows[p] << endl;
-            cur.pos = p;
-            return true;
-        };
-        if (direction == "next") {
-            moveTo(cur.pos + 1);
-        } else if (direction == "prior" || direction == "backward") {
-            moveTo(cur.pos - 1);
-        } else if (direction == "first") {
-            moveTo(0);
-        } else if (direction == "last") {
-            moveTo((int)cur.rows.size() - 1);
-        } else if (direction == "all") {
-            for (size_t i = 0; i < cur.rows.size(); ++i) cout << cur.rows[i] << endl;
-            cur.pos = (int)cur.rows.size() - 1;
-        } else {
-            // ABSOLUTE n, RELATIVE n, FORWARD n, BACKWARD n
-            int n = 1;
-            try {
-                size_t dp = direction.find_first_of("0123456789");
-                if (dp != string::npos) n = stoi(direction.substr(dp));
-            } catch (...) {}
-            if (direction.find("absolute") != string::npos) {
-                moveTo(n);
-            } else if (direction.find("relative") != string::npos) {
-                moveTo(cur.pos + n);
-            } else if (direction.find("forward") != string::npos) {
-                moveTo(cur.pos + n);
-            } else if (direction.find("backward") != string::npos) {
-                moveTo(cur.pos - n);
-            } else {
-                moveTo(cur.pos + 1);
-            }
-        }
-        return false;
-    }
-
-    // MOVE [ direction ] [ FROM | IN ] cursor_name
-    if (sql == "move" || sql.substr(0, 5) == "move ") {
-        string rest = trim(sql.substr(4));
-        string direction = "next";
-        string cursorName;
-        size_t sepPos = string::npos;
-        size_t sepLen = 0;
-        if (rest.substr(0, 5) == "from ") {
-            sepPos = 0;
-            sepLen = 5;
-        } else if (rest.substr(0, 3) == "in ") {
-            sepPos = 0;
-            sepLen = 3;
-        } else {
-            size_t fromPos = rest.find(" from ");
-            size_t inPos = rest.find(" in ");
-            if (fromPos != string::npos && (inPos == string::npos || fromPos < inPos)) {
-                sepPos = fromPos;
-                sepLen = 6;
-            } else if (inPos != string::npos) {
-                sepPos = inPos;
-                sepLen = 4;
-            }
-        }
-        if (sepPos != string::npos) {
-            string before = trim(rest.substr(0, sepPos));
-            if (!before.empty()) direction = before;
-            cursorName = trim(rest.substr(sepPos + sepLen));
-        } else {
-            cursorName = rest;
-        }
-        if (cursorName.empty()) {
-            cout << "SQL syntax error: MOVE [direction] FROM cursor_name" << endl;
-            return true;
-        }
-        auto it = s.cursors.find(cursorName);
-        if (it == s.cursors.end()) {
-            cout << "Cursor " << cursorName << " not found" << endl;
-            return true;
-        }
-        auto& cur = it->second;
-        int rowCount = static_cast<int>(cur.rows.size());
-        int moved = 0;
-        auto parseCount = [](const string& dir, int defaultValue) {
-            if (dir.find("all") != string::npos) return std::numeric_limits<int>::max();
-            try {
-                size_t p = dir.find_first_of("-0123456789");
-                if (p != string::npos) return std::stoi(dir.substr(p));
-            } catch (...) {}
-            return defaultValue;
-        };
-        if (rowCount == 0) {
-            cout << "MOVE 0" << endl;
-            return false;
-        }
-        if (direction == "next" || direction.substr(0, 7) == "forward") {
-            int n = (direction == "next") ? 1 : parseCount(direction, 1);
-            if (n < 0) n = 0;
-            int available = rowCount - (cur.pos + 1);
-            moved = std::min(n, std::max(0, available));
-            cur.pos += moved;
-        } else if (direction == "prior" || direction.substr(0, 8) == "backward") {
-            int n = (direction == "prior") ? 1 : parseCount(direction, 1);
-            if (n < 0) n = 0;
-            int available = cur.pos + 1;
-            moved = std::min(n, std::max(0, available));
-            cur.pos -= moved;
-        } else if (direction == "first") {
-            cur.pos = 0;
-            moved = 1;
-        } else if (direction == "last") {
-            cur.pos = rowCount - 1;
-            moved = 1;
-        } else if (direction.substr(0, 8) == "absolute") {
-            int n = parseCount(direction, 0);
-            int target = (n > 0) ? n - 1 : (n < 0 ? rowCount + n : -1);
-            if (target >= 0 && target < rowCount) {
-                cur.pos = target;
-                moved = 1;
-            } else {
-                cur.pos = (target < 0) ? -1 : rowCount - 1;
-                moved = 0;
-            }
-        } else if (direction.substr(0, 8) == "relative") {
-            int n = parseCount(direction, 0);
-            int target = cur.pos + n;
-            if (target < -1) target = -1;
-            if (target >= rowCount) target = rowCount - 1;
-            moved = std::abs(target - cur.pos);
-            cur.pos = target;
-        } else if (direction == "all") {
-            moved = std::max(0, rowCount - (cur.pos + 1));
-            cur.pos = rowCount - 1;
-        } else {
-            cout << "SQL syntax error: unsupported MOVE direction" << endl;
-            return true;
-        }
-        cout << "MOVE " << moved << endl;
-        return false;
-    }
-
-    // CLOSE
-    if (sql.substr(0, 5) == "close") {
-        string cursorName = trim(sql.substr(5));
-        if (cursorName.empty()) {
-            cout << "SQL syntax error: CLOSE cursor_name" << endl;
-            return true;
-        }
-        auto it = s.cursors.find(cursorName);
-        if (it == s.cursors.end()) {
-            cout << "Cursor " << cursorName << " not found" << endl;
-            return true;
-        }
-        s.cursors.erase(it);
-        cout << "Cursor " << cursorName << " closed" << endl;
-        return false;
     }
 
     if (sql.substr(0, 6) == "create") {
@@ -8102,269 +8614,6 @@ bool execute(const string& rawSql, Session& s) {
             }
             return false;
         }
-    }
-
-    // SET ROLE rolename
-    if (sql.substr(0, 9) == "set role ") {
-        string roleName = trim(sql.substr(9));
-        if (roleName.empty()) {
-            cout << "SQL syntax error: SET ROLE role_name" << endl;
-            return true;
-        }
-        s.currentRole = roleName;
-        cout << "Role set to " << roleName << endl;
-        return false;
-    }
-    // RESET ROLE
-    if (sql == "reset role") {
-        s.currentRole = s.originalRole;
-        cout << "Role reset to " << s.currentRole << endl;
-        return false;
-    }
-    if (sql == "reset session authorization") {
-        string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
-        int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
-        s.username = authUser;
-        s.permission = authPerm;
-        s.originalRole = authUser;
-        s.currentRole.clear();
-        cout << "RESET SESSION AUTHORIZATION" << endl;
-        return false;
-    }
-    // RESET parameter | RESET ALL
-    if (sql == "reset all" || sql.substr(0, 6) == "reset ") {
-        auto resetIsolation = [&]() {
-            s.isolationLevel = 2;
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
-        };
-        string rest = (sql == "reset all") ? "all" : trim(sql.substr(6));
-        if (rest == "all") {
-            string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
-            int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
-            s.username = authUser;
-            s.permission = authPerm;
-            s.currentRole = s.originalRole;
-            s.originalRole = authUser;
-            s.currentRole.clear();
-            s.timezoneOffsetMinutes = 0;
-            s.statementTimeoutMs = s.defaultStatementTimeoutMs;
-            s.constraintsDeferred = false;
-            resetIsolation();
-            cout << "RESET ALL" << endl;
-            return false;
-        }
-        if (rest == "timezone" || rest == "time zone") {
-            s.timezoneOffsetMinutes = 0;
-            cout << "RESET " << rest << endl;
-            return false;
-        }
-        if (rest == "statement_timeout" || rest == "statement_timeout_ms") {
-            s.statementTimeoutMs = s.defaultStatementTimeoutMs;
-            cout << "RESET " << rest << endl;
-            return false;
-        }
-        if (rest == "transaction_isolation" || rest == "transaction isolation") {
-            resetIsolation();
-            cout << "RESET " << rest << endl;
-            return false;
-        }
-        cout << "RESET currently supports ROLE, ALL, TIME ZONE, statement_timeout, and transaction_isolation" << endl;
-        return true;
-    }
-
-    // SET SESSION AUTHORIZATION user_name | DEFAULT
-    if (sql.substr(0, 25) == "set session authorization") {
-        return setSessionAuthorization(s, sql.substr(25));
-    }
-
-    // SET CONSTRAINTS { ALL | constraint_name [, ...] } { DEFERRED | IMMEDIATE }
-    if (sql.substr(0, 15) == "set constraints") {
-        string rest = trim(sql.substr(15));
-        if (rest.empty()) {
-            cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
-            return true;
-        }
-        bool deferred = false;
-        bool immediate = false;
-        if (rest.size() >= 8 && rest.substr(rest.size() - 8) == "deferred") {
-            deferred = true;
-        } else if (rest.size() >= 9 && rest.substr(rest.size() - 9) == "immediate") {
-            immediate = true;
-        }
-        if (!deferred && !immediate) {
-            cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
-            return true;
-        }
-        s.constraintsDeferred = deferred;
-        cout << "SET CONSTRAINTS" << endl;
-        return false;
-    }
-
-    // SET TRANSACTION ISOLATION LEVEL (must come before generic SET)
-    if (sql.substr(0, 25) == "set transaction isolation" ||
-        sql.substr(0, 31) == "set transaction isolation level") {
-        string rawRest;
-        if (sql.substr(0, 31) == "set transaction isolation level") {
-            rawRest = sql.substr(31);
-        } else {
-            rawRest = sql.substr(25);
-        }
-        string rest = trim(rawRest);
-        if (rest.find("read uncommitted") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
-            s.isolationLevel = 0;
-            cout << "Isolation level set to READ UNCOMMITTED" << endl;
-        } else if (rest.find("read committed") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
-            s.isolationLevel = 1;
-            cout << "Isolation level set to READ COMMITTED" << endl;
-        } else if (rest.find("repeatable read") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
-            s.isolationLevel = 2;
-            cout << "Isolation level set to REPEATABLE READ" << endl;
-        } else if (rest.find("serializable") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
-            s.isolationLevel = 3;
-            cout << "Isolation level set to SERIALIZABLE" << endl;
-        } else {
-            cout << "Unknown isolation level" << endl;
-            return true;
-        }
-        return false;
-    }
-
-    // SET TIMEZONE = '+08:00' | SET TIME ZONE '+08:00' | SET TIME ZONE 'UTC'
-    if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 14) == "set time zone ") {
-        size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 14;
-        string tzVal = trim(sql.substr(off));
-        if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
-        s.timezoneOffsetMinutes = parseTimezoneOffset(tzVal);
-        int absOff = std::abs(s.timezoneOffsetMinutes);
-        int tzh = absOff / 60;
-        int tzm = absOff % 60;
-        std::string sign = (s.timezoneOffsetMinutes >= 0) ? "+" : "-";
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%s%02d:%02d", sign.c_str(), tzh, tzm);
-        cout << "Timezone set to UTC" << buf << " (" << tzVal << ")" << endl;
-        return false;
-    }
-
-    // Helper lambda to apply a config parameter
-    auto applyConfigParam = [&](const string& param, const string& val, bool isGlobal) -> bool {
-        bool ok = false;
-        if (param == "max_connections") {
-            try { g_config.maxConnections = std::stoi(val); ok = true; } catch (...) {}
-        } else if (param == "slow_query_threshold_ms" || param == "slow_query_threshold") {
-            try { g_config.slowQueryThresholdMs = std::stod(val); ok = true; } catch (...) {}
-        } else if (param == "checkpoint_interval") {
-            try { g_config.checkpointInterval = std::stoi(val); ok = true; } catch (...) {}
-        } else if (param == "statement_timeout_ms" || param == "statement_timeout") {
-            try { g_config.statementTimeoutMs = std::stoi(val); s.statementTimeoutMs = g_config.statementTimeoutMs; ok = true; } catch (...) {}
-        } else if (param == "buffer_pool_frames") {
-            try { g_config.bufferPoolFrames = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
-        } else if (param == "enable_query_plan_cache") {
-            g_config.enableQueryPlanCache = (val == "1" || val == "true" || val == "on");
-            ok = true;
-        } else if (param == "query_plan_cache_size") {
-            try { g_config.queryPlanCacheSize = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
-        } else if (param == "password_policy_level") {
-            try { g_config.passwordPolicyLevel = std::stoi(val); ok = true; } catch (...) {}
-        } else if (param == "password_hash_algorithm") {
-            g_config.passwordHashAlgorithm = val; ok = true;
-        } else if (param == "audit_level") {
-            try { g_config.auditLevel = std::stoi(val); ok = true; } catch (...) {}
-        } else if (param == "auto_vacuum") {
-            g_config.autoVacuumEnabled = (val == "1" || val == "true" || val == "on");
-            ok = true;
-        } else if (param == "auto_vacuum_threshold") {
-            try { g_config.autoVacuumThreshold = std::stoi(val); ok = true; } catch (...) {}
-        } else if (param == "auto_analyze") {
-            g_config.autoAnalyzeEnabled = (val == "1" || val == "true" || val == "on");
-            ok = true;
-        } else if (param == "auto_analyze_threshold") {
-            try { g_config.autoAnalyzeThreshold = std::stoi(val); ok = true; } catch (...) {}
-        } else if (param == "work_mem_kb" || param == "work_mem") {
-            try { g_config.workMemKb = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
-        } else if (param == "enable_seq_scan") {
-            g_config.enableSeqScan = (val == "1" || val == "true" || val == "on");
-            ok = true;
-        } else if (param == "enable_hash_join") {
-            g_config.enableHashJoin = (val == "1" || val == "true" || val == "on");
-            ok = true;
-        } else if (param == "enable_merge_join") {
-            g_config.enableMergeJoin = (val == "1" || val == "true" || val == "on");
-            ok = true;
-        } else if (param == "auto_explain") {
-            g_config.autoExplainEnabled = (val == "1" || val == "true" || val == "on");
-            ok = true;
-        } else if (param == "auto_explain_threshold_ms" || param == "auto_explain_threshold") {
-            try { g_config.autoExplainThresholdMs = std::stod(val); ok = true; } catch (...) {}
-        } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
-            try { g_config.lockTimeoutMs = std::stoi(val); g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs); ok = true; } catch (...) {}
-        } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
-            try { g_config.deadlockTimeoutMs = std::stoi(val); g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs); ok = true; } catch (...) {}
-        } else {
-            cout << "Unknown parameter: " << param << endl;
-            return true;
-        }
-        if (!ok) {
-            cout << "Invalid value for parameter " << param << endl;
-            return true;
-        }
-        if (isGlobal) {
-            if (!g_config.save("dbms.conf")) {
-                cout << "Failed to persist configuration" << endl;
-                return true;
-            }
-            cout << "Set global " << param << " = " << val << endl;
-        } else {
-            cout << "Set " << param << " = " << val << " (session)" << endl;
-        }
-        return false;
-    };
-
-    // ALTER SYSTEM SET parameter = value (PostgreSQL-compatible syntax for global config)
-    if (sql.size() >= 12 && sql.substr(0, 12) == "alter system") {
-        string rest = trim(sql.substr(12));
-        if (rest.size() >= 3 && rest.substr(0, 3) == "set") {
-            rest = trim(rest.substr(3));
-            size_t eqPos = rest.find('=');
-            if (eqPos == string::npos) {
-                cout << "SQL syntax error: ALTER SYSTEM SET parameter = value" << endl;
-                return true;
-            }
-            string param = trim(rest.substr(0, eqPos));
-            string val = trim(rest.substr(eqPos + 1));
-            if (!checkAdmin(s)) return true;
-            return applyConfigParam(param, val, true);
-        }
-        cout << "SQL syntax error: ALTER SYSTEM SET parameter = value" << endl;
-        return true;
-    }
-
-    // SET parameter = value  (session-level, non-persistent)
-    // SET GLOBAL parameter = value (persistent to dbms.conf)
-    if (sql.substr(0, 3) == "set" && sql.size() > 3 && isspace(static_cast<unsigned char>(sql[3]))) {
-        string rest = trim(sql.substr(3));
-        bool isGlobal = false;
-        if (rest.size() > 7 && rest.substr(0, 7) == "global ") {
-            isGlobal = true;
-            rest = trim(rest.substr(7));
-        }
-        size_t eqPos = rest.find('=');
-        if (eqPos == string::npos) {
-            cout << "SQL syntax error: SET [GLOBAL] parameter = value" << endl;
-            return true;
-        }
-        string param = trim(rest.substr(0, eqPos));
-        string val = trim(rest.substr(eqPos + 1));
-        // User-defined variable: SET @var = value
-        if (!param.empty() && param[0] == '@') {
-            s.userVariables[param.substr(1)] = val;
-            cout << "Set variable " << param << " = " << val << endl;
-            return false;
-        }
-        return applyConfigParam(param, val, isGlobal);
     }
 
     if (sql.substr(0, 7) == "comment") {
@@ -10849,209 +11098,6 @@ bool execute(const string& rawSql, Session& s) {
             }
             execute(replaced, s);
         }
-        return false;
-    }
-
-    if (sql.substr(0, 17) == "start transaction") {
-        sql = "begin " + trim(sql.substr(17));
-    }
-
-    if (sql.substr(0, 5) == "begin") {
-        if (!checkDB(s)) return true;
-        // Parse optional isolation level: "begin read committed"
-        // Parse optional read only: "begin read only"
-        string rest = trim(sql.substr(5));
-        bool readOnly = false;
-        if (!rest.empty()) {
-            if (rest.find("read uncommitted") != string::npos) {
-                g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
-                s.isolationLevel = 0;
-            } else if (rest.find("read committed") != string::npos) {
-                g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
-                s.isolationLevel = 1;
-            } else if (rest.find("repeatable read") != string::npos) {
-                g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
-                s.isolationLevel = 2;
-            } else if (rest.find("serializable") != string::npos) {
-                g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
-                s.isolationLevel = 3;
-            }
-            if (rest.find("read only") != string::npos) {
-                readOnly = true;
-            }
-        }
-        auto res = g_engine.beginTransaction(s.currentDB);
-        if (res != OpResult::Success) {
-            cout << "Begin transaction failed" << endl;
-            return true;
-        }
-        g_engine.setReadOnly(readOnly);
-        if (readOnly) {
-            cout << "Read-only transaction started" << endl;
-            log(s.username, "begin read-only transaction", getTime());
-        } else {
-            cout << "Transaction started" << endl;
-            log(s.username, "begin transaction", getTime());
-        }
-        return false;
-    }
-
-    // SET auto_vacuum = on / off / threshold N
-    if (sql.substr(0, 15) == "set auto_vacuum") {
-        string rest = trim(sql.substr(15));
-        if (rest == "= on" || rest == "on" || rest == "= 1" || rest == "1") {
-            g_config.autoVacuumEnabled = true;
-            cout << "auto_vacuum set to ON" << endl;
-        } else if (rest == "= off" || rest == "off" || rest == "= 0" || rest == "0") {
-            g_config.autoVacuumEnabled = false;
-            cout << "auto_vacuum set to OFF" << endl;
-        } else if (rest.substr(0, 10) == "threshold " || rest.substr(0, 12) == "= threshold ") {
-            size_t off = (rest.substr(0, 10) == "threshold ") ? 10 : 12;
-            try {
-                g_config.autoVacuumThreshold = std::stoi(trim(rest.substr(off)));
-                cout << "auto_vacuum_threshold set to " << g_config.autoVacuumThreshold << endl;
-            } catch (...) {
-                cout << "Invalid threshold value" << endl;
-                return true;
-            }
-        } else {
-            cout << "Usage: SET auto_vacuum = ON|OFF|THRESHOLD N" << endl;
-            return true;
-        }
-        return false;
-    }
-
-    if (sql == "end" || sql == "end work" || sql == "end transaction") {
-        sql = "commit";
-    } else if (sql == "abort" || sql == "abort work" || sql == "abort transaction") {
-        sql = "rollback";
-    }
-
-    // COMMIT PREPARED 'xid'
-    if (sql.substr(0, 15) == "commit prepared") {
-        string xid = stripQuotes(trim(sql.substr(15)));
-        if (xid.empty()) {
-            cout << "SQL syntax error: COMMIT PREPARED requires a transaction ID" << endl;
-            return true;
-        }
-        auto res = g_engine.commitPrepared(xid);
-        if (res == OpResult::Success) {
-            cout << "COMMIT PREPARED " << xid << endl;
-            log(s.username, "commit prepared " + xid, getTime());
-        } else if (res == OpResult::TableNotExist) {
-            cout << "Prepared transaction not found" << endl;
-        } else {
-            cout << "COMMIT PREPARED failed" << endl;
-        }
-        return false;
-    }
-
-    if (sql.substr(0, 6) == "commit") {
-        auto res = g_engine.commitTransaction();
-        if (res != OpResult::Success) {
-            cout << "Commit failed" << endl;
-            return true;
-        }
-        cout << "Transaction committed" << endl;
-        log(s.username, "commit transaction", getTime());
-        return false;
-    }
-
-    // SAVEPOINT name
-    if (sql.substr(0, 10) == "savepoint ") {
-        if (!g_engine.inTransaction()) {
-            cout << "Not in transaction" << endl;
-            return true;
-        }
-        string name = sql.substr(10);
-        // trim trailing whitespace
-        while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
-        if (name.empty()) {
-            cout << "Savepoint name required" << endl;
-            return true;
-        }
-        auto res = g_engine.savepoint(name);
-        if (res != OpResult::Success) {
-            cout << "Savepoint failed" << endl;
-            return true;
-        }
-        cout << "Savepoint " << name << " created" << endl;
-        log(s.username, "savepoint " + name, getTime());
-        return false;
-    }
-
-    // RELEASE SAVEPOINT name
-    if (sql.substr(0, 18) == "release savepoint ") {
-        if (!g_engine.inTransaction()) {
-            cout << "Not in transaction" << endl;
-            return true;
-        }
-        string name = sql.substr(18);
-        while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
-        if (name.empty()) {
-            cout << "Savepoint name required" << endl;
-            return true;
-        }
-        auto res = g_engine.releaseSavepoint(name);
-        if (res != OpResult::Success) {
-            cout << "Savepoint not found" << endl;
-            return true;
-        }
-        cout << "Savepoint " << name << " released" << endl;
-        log(s.username, "release savepoint " + name, getTime());
-        return false;
-    }
-
-    // ROLLBACK TO SAVEPOINT name (must check before "rollback")
-    if (sql.substr(0, 21) == "rollback to savepoint") {
-        if (!g_engine.inTransaction()) {
-            cout << "Not in transaction" << endl;
-            return true;
-        }
-        string name = sql.substr(21);
-        while (!name.empty() && isspace((unsigned char)name.front())) name.erase(name.begin());
-        while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
-        if (name.empty()) {
-            cout << "Savepoint name required" << endl;
-            return true;
-        }
-        auto res = g_engine.rollbackToSavepoint(name);
-        if (res != OpResult::Success) {
-            cout << "Savepoint not found" << endl;
-            return true;
-        }
-        cout << "Rolled back to savepoint " << name << endl;
-        log(s.username, "rollback to savepoint " + name, getTime());
-        return false;
-    }
-
-    // ROLLBACK PREPARED 'xid'
-    if (sql.substr(0, 17) == "rollback prepared") {
-        string xid = stripQuotes(trim(sql.substr(17)));
-        if (xid.empty()) {
-            cout << "SQL syntax error: ROLLBACK PREPARED requires a transaction ID" << endl;
-            return true;
-        }
-        auto res = g_engine.rollbackPrepared(xid);
-        if (res == OpResult::Success) {
-            cout << "ROLLBACK PREPARED " << xid << endl;
-            log(s.username, "rollback prepared " + xid, getTime());
-        } else if (res == OpResult::TableNotExist) {
-            cout << "Prepared transaction not found" << endl;
-        } else {
-            cout << "ROLLBACK PREPARED failed" << endl;
-        }
-        return false;
-    }
-
-    if (sql.substr(0, 8) == "rollback") {
-        auto res = g_engine.rollbackTransaction();
-        if (res != OpResult::Success) {
-            cout << "Rollback failed" << endl;
-            return true;
-        }
-        cout << "Transaction rolled back" << endl;
-        log(s.username, "rollback transaction", getTime());
         return false;
     }
 
