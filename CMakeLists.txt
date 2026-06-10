@@ -19,7 +19,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/interfaces
 )
 
-# 源文件列表
+# 源文件列表 (TLSWrapper 在下方根据 OpenSSL 可用性条件添加)
 set(DBMS_SOURCES
     src/main.cpp
     src/commands/TableManage.cpp
@@ -37,7 +37,6 @@ set(DBMS_SOURCES
     src/transaction/LockManager.cpp
     src/transaction/TxnIdGenerator.cpp
     src/network/NetworkServer.cpp
-    src/network/TLSWrapper_stub.cpp
     src/common/Config.cpp
 )
 
@@ -53,6 +52,19 @@ target_compile_options(dbms_main PRIVATE
 target_link_libraries(dbms_main PRIVATE
     pthread
 )
+
+# ============================================================================
+# TLS support: auto-detect OpenSSL
+# ============================================================================
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    message(STATUS "OpenSSL found, enabling TLS support")
+    target_sources(dbms_main PRIVATE src/network/TLSWrapper.cpp)
+    target_link_libraries(dbms_main PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(dbms_main PRIVATE HAS_OPENSSL=1)
+else()
+    message(STATUS "OpenSSL not found, using TLS stub (plain TCP)")
+endif()
 
 # 安装目标
 install(TARGETS dbms_main DESTINATION bin)

@@ -144,7 +144,12 @@ cmake ..
 make -j$(nproc)
 ```
 
-#### 方式二：手动 g++
+#### 方式二：自动构建脚本（自动检测 OpenSSL）
+```bash
+./scripts/build.sh
+```
+
+#### 方式三：手动 g++
 ```bash
 g++ -std=c++17 -O2 -pthread \
     src/main.cpp \
@@ -153,6 +158,10 @@ g++ -std=c++17 -O2 -pthread \
     src/storage/BufferPool.cpp \
     src/storage/PageAllocator.cpp \
     src/storage/Page.cpp \
+    src/storage/PgPage.cpp \
+    src/storage/PageWrapper.cpp \
+    src/storage/FreeSpaceMap.cpp \
+    src/storage/VisibilityMap.cpp \
     src/access/BPTree.cpp \
     src/access/HashIndex.cpp \
     src/access/SPGiSTIndex.cpp \
@@ -163,9 +172,11 @@ g++ -std=c++17 -O2 -pthread \
     src/common/Config.cpp \
     -I src -I src/common -I src/storage -I src/access \
     -I src/transaction -I src/network -I src/utils \
-    -I src/optimizer -I src/commands \
+    -I src/optimizer -I src/commands -I src/interfaces \
     -o dbms_main
 ```
+
+> **TLS 说明**：若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会自动启用真实 TLS 支持；否则回退到明文 TCP（stub 实现）。
 
 ### 交互式运行
 ```bash
