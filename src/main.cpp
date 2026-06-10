@@ -8073,6 +8073,12 @@ bool execute(const string& rawSql, Session& s) {
         case dbms::SqlCommand::Explain:
             return handleExplain(sql, s);
 
+        case dbms::SqlCommand::Show:
+        case dbms::SqlCommand::Grant:
+        case dbms::SqlCommand::Revoke:
+            // TODO: extract to helper functions (code blocks are very large)
+            break;
+
         default:
             break;
     }
