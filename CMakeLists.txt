@@ -18,6 +18,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/commands
     ${CMAKE_SOURCE_DIR}/src/interfaces
     ${CMAKE_SOURCE_DIR}/src/executor
+    ${CMAKE_SOURCE_DIR}/src/parser
 )
 
 # 源文件列表 (TLSWrapper 在下方根据 OpenSSL 可用性条件添加)
@@ -41,6 +42,7 @@ set(DBMS_SOURCES
     src/transaction/TxnIdGenerator.cpp
     src/network/NetworkServer.cpp
     src/common/Config.cpp
+    src/parser/parser.cpp
 )
 
 add_executable(dbms_main ${DBMS_SOURCES})

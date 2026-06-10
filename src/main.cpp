@@ -18,6 +18,7 @@
 #include "permissions.h"
 #include "Session.h"
 #include "Config.h"
+#include "parser/parser.h"
 
 using namespace std;
 using dbms::Column;
@@ -6296,14 +6297,18 @@ bool execute(const string& rawSql, Session& s) {
     // Check pending notifications at the start of each command
     checkNotifications(s);
 
-    // PostgreSQL-compatible top-level VALUES command.
-    if (sql == "values" || sql.substr(0, 7) == "values ") {
-        return executeValuesStatement(sql);
-    }
+    // Phase 1: Parser integration — classify SQL command via AST parser
+    dbms::SqlCommand parsedCmd = dbms::SQLParser::classify(sql);
 
-    if (sql.substr(0, 3) == "use") {
-        if (sql.substr(4, 8) == "database") {
-            string dbname = trim(sql.substr(13));
+    // Simple command dispatch using Parser classification.
+    // Complex commands (CREATE/DROP/ALTER/SELECT/INSERT/UPDATE/DELETE)
+    // fall through to the legacy string-based dispatch below.
+    switch (parsedCmd) {
+        case dbms::SqlCommand::Values:
+            return executeValuesStatement(sql);
+
+        case dbms::SqlCommand::UseDatabase: {
+            string dbname = trim(sql.substr(13)); // skip "use database"
             if (dbname != "information_schema" && !g_engine.databaseExists(dbname)) {
                 cout << "Database not found" << endl;
                 s.currentDB = "";
@@ -6315,83 +6320,89 @@ bool execute(const string& rawSql, Session& s) {
             log(s.username, "use database success", getTime());
             return false;
         }
-    }
 
-    // LISTEN
-    if (sql.substr(0, 6) == "listen") {
-        string channel = trim(sql.substr(6));
-        if (channel.empty()) {
-            cout << "SQL syntax error: LISTEN channel" << endl;
-            return true;
-        }
-        {
-            std::lock_guard<std::mutex> lock(g_notifyMutex);
-            g_listeners[channel].insert(s.username);
-        }
-        s.listenedChannels.insert(channel);
-        cout << "LISTEN " << channel << endl;
-        return false;
-    }
-
-    // NOTIFY
-    if (sql.substr(0, 6) == "notify") {
-        string rest = trim(sql.substr(6));
-        size_t commaPos = rest.find(',');
-        string channel = trim(rest.substr(0, commaPos));
-        string payload;
-        if (commaPos != string::npos) {
-            payload = trim(rest.substr(commaPos + 1));
-            if (payload.size() >= 2 && payload.front() == '\'' && payload.back() == '\'') {
-                payload = payload.substr(1, payload.size() - 2);
+        case dbms::SqlCommand::Listen: {
+            string channel = trim(sql.substr(6));
+            if (channel.empty()) {
+                cout << "SQL syntax error: LISTEN channel" << endl;
+                return true;
             }
+            {
+                std::lock_guard<std::mutex> lock(g_notifyMutex);
+                g_listeners[channel].insert(s.username);
+            }
+            s.listenedChannels.insert(channel);
+            cout << "LISTEN " << channel << endl;
+            return false;
         }
-        if (channel.empty()) {
-            cout << "SQL syntax error: NOTIFY channel [, payload]" << endl;
-            return true;
-        }
-        {
-            std::lock_guard<std::mutex> lock(g_notifyMutex);
-            auto it = g_listeners.find(channel);
-            if (it != g_listeners.end()) {
-                for (const auto& uname : it->second) {
-                    g_pendingNotifies[uname].push_back({channel, payload});
+
+        case dbms::SqlCommand::Notify: {
+            string rest = trim(sql.substr(6));
+            size_t commaPos = rest.find(',');
+            string channel = trim(rest.substr(0, commaPos));
+            string payload;
+            if (commaPos != string::npos) {
+                payload = trim(rest.substr(commaPos + 1));
+                if (payload.size() >= 2 && payload.front() == '\'' && payload.back() == '\'') {
+                    payload = payload.substr(1, payload.size() - 2);
                 }
             }
-        }
-        cout << "NOTIFY " << channel << endl;
-        return false;
-    }
-
-    // UNLISTEN
-    if (sql.substr(0, 8) == "unlisten") {
-        string channel = trim(sql.substr(8));
-        if (channel == "*") {
-            std::lock_guard<std::mutex> lock(g_notifyMutex);
-            for (const auto& ch : s.listenedChannels) {
-                auto it = g_listeners.find(ch);
-                if (it != g_listeners.end()) {
-                    it->second.erase(s.username);
-                    if (it->second.empty()) g_listeners.erase(it);
-                }
+            if (channel.empty()) {
+                cout << "SQL syntax error: NOTIFY channel [, payload]" << endl;
+                return true;
             }
-            s.listenedChannels.clear();
-            cout << "UNLISTEN *" << endl;
-        } else if (!channel.empty()) {
             {
                 std::lock_guard<std::mutex> lock(g_notifyMutex);
                 auto it = g_listeners.find(channel);
                 if (it != g_listeners.end()) {
-                    it->second.erase(s.username);
-                    if (it->second.empty()) g_listeners.erase(it);
+                    for (const auto& uname : it->second) {
+                        g_pendingNotifies[uname].push_back({channel, payload});
+                    }
                 }
             }
-            s.listenedChannels.erase(channel);
-            cout << "UNLISTEN " << channel << endl;
-        } else {
-            cout << "SQL syntax error: UNLISTEN channel | UNLISTEN *" << endl;
-            return true;
+            cout << "NOTIFY " << channel << endl;
+            return false;
         }
-        return false;
+
+        case dbms::SqlCommand::Unlisten: {
+            string channel = trim(sql.substr(8));
+            if (channel == "*") {
+                std::lock_guard<std::mutex> lock(g_notifyMutex);
+                for (const auto& ch : s.listenedChannels) {
+                    auto it = g_listeners.find(ch);
+                    if (it != g_listeners.end()) {
+                        it->second.erase(s.username);
+                        if (it->second.empty()) g_listeners.erase(it);
+                    }
+                }
+                s.listenedChannels.clear();
+                cout << "UNLISTEN *" << endl;
+            } else if (!channel.empty()) {
+                {
+                    std::lock_guard<std::mutex> lock(g_notifyMutex);
+                    auto it = g_listeners.find(channel);
+                    if (it != g_listeners.end()) {
+                        it->second.erase(s.username);
+                        if (it->second.empty()) g_listeners.erase(it);
+                    }
+                }
+                s.listenedChannels.erase(channel);
+                cout << "UNLISTEN " << channel << endl;
+            } else {
+                cout << "SQL syntax error: UNLISTEN channel | UNLISTEN *" << endl;
+                return true;
+            }
+            return false;
+        }
+
+        case dbms::SqlCommand::Do:
+            return handleDoBlock(sql, s);
+
+        case dbms::SqlCommand::ImportForeignSchema:
+            return handleImportForeignSchema(sql, s);
+
+        default:
+            break;
     }
 
     // DECLARE CURSOR
@@ -6628,14 +6639,6 @@ bool execute(const string& rawSql, Session& s) {
         s.cursors.erase(it);
         cout << "Cursor " << cursorName << " closed" << endl;
         return false;
-    }
-
-    if (startsWithKeyword(sql, "do")) {
-        return handleDoBlock(sql, s);
-    }
-
-    if (sql.substr(0, 21) == "import foreign schema") {
-        return handleImportForeignSchema(sql, s);
     }
 
     if (sql.substr(0, 6) == "create") {
