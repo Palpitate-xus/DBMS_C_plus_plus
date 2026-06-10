@@ -17,6 +17,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/optimizer
     ${CMAKE_SOURCE_DIR}/src/commands
     ${CMAKE_SOURCE_DIR}/src/interfaces
+    ${CMAKE_SOURCE_DIR}/src/executor
 )
 
 # 源文件列表 (TLSWrapper 在下方根据 OpenSSL 可用性条件添加)
@@ -34,6 +35,8 @@ set(DBMS_SOURCES
     src/access/BPTree.cpp
     src/access/HashIndex.cpp
     src/access/SPGiSTIndex.cpp
+    src/access/BPTreeIndexAM.cpp
+    src/access/HashIndexAM.cpp
     src/transaction/LockManager.cpp
     src/transaction/TxnIdGenerator.cpp
     src/network/NetworkServer.cpp

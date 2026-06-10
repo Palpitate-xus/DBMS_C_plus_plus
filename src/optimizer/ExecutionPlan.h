@@ -7,25 +7,27 @@
 #include <vector>
 
 #include "TableManage.h"
+#include "executor.h"
 
 namespace dbms {
 
 // ========================================================================
 // Operator base class:火山模型 (iterator model)
+// 继承 IOperator 接口，Phase 0 接口统一
 // ========================================================================
-class Operator {
+class Operator : public IOperator {
 public:
-    virtual ~Operator() = default;
+    ~Operator() override = default;
 
     // Initialize the operator (acquire resources, open files, etc.)
-    virtual bool open() = 0;
+    bool open() override = 0;
 
     // Get the next output row. Returns false when no more rows.
     // outRow is the formatted string ready for display.
-    virtual bool next(std::string& outRow) = 0;
+    bool next(std::string& outRow) override = 0;
 
     // Clean up resources
-    virtual void close() = 0;
+    void close() override = 0;
 };
 
 using OpPtr = std::unique_ptr<Operator>;

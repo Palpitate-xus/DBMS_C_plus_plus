@@ -35,11 +35,11 @@ class IOperator {
 public:
     virtual ~IOperator() = default;
 
-    // 初始化：分配资源、打开子算子
-    virtual void open() = 0;
+    // 初始化：分配资源、打开子算子；返回 true 表示成功
+    virtual bool open() = 0;
 
     // 获取下一行；返回 true 表示有数据，false 表示流结束
-    virtual bool next(Tuple& out) = 0;
+    virtual bool next(std::string& out) = 0;
 
     // 关闭：释放资源
     virtual void close() = 0;
