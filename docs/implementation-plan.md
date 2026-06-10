@@ -71,11 +71,12 @@
   - ✅ 查询计划：`EXPLAIN`（含 ANALYZE / BUFFERS / FORMAT JSON / 括号选项）
   - 🔄 元数据/权限命令：`SHOW`、`GRANT`、`REVOKE` — 已通过 `switch/case` 路由（代码块极大，暂保留在 `execute()` 内，后续提取）
   - 🔄 核心 DQL/DDL：`SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MERGE`、`CREATE`/`DROP`/`ALTER` 全量子命令 — 已通过 `switch/case` 路由（执行逻辑复杂，暂保留在 `execute()` 内，后续逐步提取为独立 handler）
-- **Parser 参数解析完善（1.2 进行中）**：
+- **Parser 参数解析完善（1.2 已完成）**：
   - ✅ 填充实 `CREATE`/`DROP`/`ALTER` 全量子命令解析 stub（~100 个函数），从空实现改为提取对象名、IF EXISTS/NOT EXISTS、CASCADE/RESTRICT 等关键属性
   - ✅ 实现 `CREATE TABLE` 完整解析：列定义（名/类型/约束/生成列/IDENTITY）、表级约束（PK/FK/UNIQUE/CHECK/EXCLUSION）、`LIKE`、`INHERITS`、`PARTITION BY`、`WITH` 存储参数、`TABLESPACE`、`ON COMMIT`
   - ✅ 添加表达式解析辅助函数：`parseSimpleExpr`、`parseSelectItem`、`parseFromItem`、`collectParenthesized`、`collectExpression`、`parseExprList`
   - ✅ 修复编译问题：前向声明补齐、`DropRoutine`/`AlterTransform` 枚举缺失、`Refresh`→`RefreshMaterializedView` 重命名、`AlterSystem` 重复 case 清理、`isKeyword` 公开访问
+  - ✅ 实现分层 operator precedence 解析器（OR→AND→NOT→IS→Comparison→BETWEEN/IN/LIKE→||→+/-→*//%→^→Unary→::→Postfix→Primary），支持 CASE、EXISTS、子查询、数组下标、类型 cast
 
 > 未迁移到 switch/case 的命令（classify 暂不支持或非标准 PG 语法）：`DUMP`、`RESTORE`、`BACKUP DATABASE`、`RESTORE DATABASE`、`CLEAR PLAN CACHE`、`MERGE INTO`、`REPLACE INTO`、`INSERT INTO` 特定语法、`SELECT` 及复杂 DDL（CREATE/DROP/ALTER）。这些将在后续阶段逐步处理。
 

@@ -15,6 +15,7 @@ static std::string collectExpression(const std::vector<std::string>& tokens, siz
                                       bool stopAtComma = false,
                                       const std::set<std::string>& stopWords = {});
 static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseExpr(const std::vector<std::string>& tokens, size_t& pos);
 static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t& pos);
 static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos);
 
@@ -704,23 +705,485 @@ static std::vector<ExprPtr> parseExprList(const std::vector<std::string>& tokens
     return result;
 }
 
-// 简化表达式解析：识别字面量、列引用、函数调用、基本运算
-static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos) {
+// ============================================================================
+// Operator precedence expression parser (PostgreSQL-compatible)
+// ============================================================================
+
+static ExprPtr parseExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseOrExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseAndExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseNotExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseIsExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseComparisonExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseConcatExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseAddSubExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseMulDivModExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parsePowerExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseUnaryExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& pos);
+
+// Entry point
+static ExprPtr parseExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    return parseOrExpr(tokens, pos);
+}
+
+// OR (lowest precedence, left-associative)
+static ExprPtr parseOrExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseAndExpr(tokens, pos);
+    while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "or") {
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "OR";
+        bin->left = std::move(left);
+        bin->right = parseAndExpr(tokens, pos);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// AND (left-associative)
+static ExprPtr parseAndExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseNotExpr(tokens, pos);
+    while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "and") {
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "AND";
+        bin->left = std::move(left);
+        bin->right = parseNotExpr(tokens, pos);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// NOT (right-associative unary)
+static ExprPtr parseNotExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "not") {
+        ++pos;
+        auto unary = std::make_unique<UnaryOpExpr>();
+        unary->op = "NOT";
+        unary->operand = parseNotExpr(tokens, pos);
+        return unary;
+    }
+    return parseIsExpr(tokens, pos);
+}
+
+// IS [NOT] (NULL | TRUE | FALSE | UNKNOWN | DOCUMENT | DISTINCT FROM ... | OF ...)
+static ExprPtr parseIsExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseComparisonExpr(tokens, pos);
+    if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "is") {
+        ++pos;
+        std::string op = "IS";
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "not") {
+            op = "IS NOT";
+            ++pos;
+        }
+        if (pos < tokens.size()) {
+            std::string pred = SQLParser::toLower(tokens[pos]);
+            if (pred == "distinct") {
+                ++pos;
+                if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "from") {
+                    ++pos;
+                    auto right = parseComparisonExpr(tokens, pos);
+                    auto bin = std::make_unique<BinaryOpExpr>();
+                    bin->op = op + " DISTINCT FROM";
+                    bin->left = std::move(left);
+                    bin->right = std::move(right);
+                    return bin;
+                }
+            } else if (pred == "of") {
+                ++pos;
+                std::string types;
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    ++pos;
+                    while (pos < tokens.size() && tokens[pos] != ")") {
+                        if (!types.empty()) types += " ";
+                        types += tokens[pos++];
+                    }
+                    if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                }
+                auto unary = std::make_unique<UnaryOpExpr>();
+                unary->op = op + " OF (" + types + ")";
+                unary->operand = std::move(left);
+                return unary;
+            } else if (pred == "null" || pred == "true" || pred == "false"
+                       || pred == "unknown" || pred == "document") {
+                ++pos;
+                auto unary = std::make_unique<UnaryOpExpr>();
+                static const std::map<std::string, std::string> kIsPredUpper = {
+                    {"null", "NULL"}, {"true", "TRUE"}, {"false", "FALSE"},
+                    {"unknown", "UNKNOWN"}, {"document", "DOCUMENT"}
+                };
+                auto it = kIsPredUpper.find(pred);
+                unary->op = op + " " + (it != kIsPredUpper.end() ? it->second : pred);
+                unary->operand = std::move(left);
+                return unary;
+            } else {
+                // Unknown predicate, consume it as-is
+                ++pos;
+                auto unary = std::make_unique<UnaryOpExpr>();
+                unary->op = op + " " + pred;
+                unary->operand = std::move(left);
+                return unary;
+            }
+        }
+        auto unary = std::make_unique<UnaryOpExpr>();
+        unary->op = op;
+        unary->operand = std::move(left);
+        return unary;
+    }
+    return left;
+}
+
+// Comparison: =, <>, !=, <, >, <=, >=
+static ExprPtr parseComparisonExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseRangeExpr(tokens, pos);
+    while (pos < tokens.size()) {
+        std::string op = tokens[pos];
+        static const std::set<std::string> cmpOps = {
+            "=", "<>", "!=", "<", ">", "<=", ">="
+        };
+        if (cmpOps.count(op) == 0) break;
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = op;
+        bin->left = std::move(left);
+        bin->right = parseRangeExpr(tokens, pos);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// BETWEEN, IN, LIKE, ILIKE, SIMILAR TO
+static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseConcatExpr(tokens, pos);
+    if (pos >= tokens.size()) return left;
+
+    std::string w = SQLParser::toLower(tokens[pos]);
+
+    if (w == "between") {
+        ++pos;
+        auto lower = parseConcatExpr(tokens, pos);
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "and") ++pos;
+        auto upper = parseConcatExpr(tokens, pos);
+        auto betweenExpr = std::make_unique<FunctionCallExpr>();
+        betweenExpr->funcName = "BETWEEN";
+        betweenExpr->args.push_back(std::move(left));
+        betweenExpr->args.push_back(std::move(lower));
+        betweenExpr->args.push_back(std::move(upper));
+        return betweenExpr;
+    }
+
+    if (w == "in") {
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "IN";
+        bin->left = std::move(left);
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            ++pos;
+            auto list = std::make_unique<LiteralExpr>();
+            std::string val;
+            while (pos < tokens.size() && tokens[pos] != ")") {
+                if (!val.empty()) val += " ";
+                val += tokens[pos++];
+            }
+            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            list->value = val;
+            bin->right = std::move(list);
+        } else {
+            bin->right = parseConcatExpr(tokens, pos);
+        }
+        return bin;
+    }
+
+    if (w == "like" || w == "ilike") {
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = (w == "like") ? "LIKE" : "ILIKE";
+        bin->left = std::move(left);
+        bin->right = parseConcatExpr(tokens, pos);
+        // ESCAPE
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "escape") {
+            ++pos;
+            auto esc = parseConcatExpr(tokens, pos);
+            // For now, encode escape in a FunctionCallExpr wrapper
+            auto wrap = std::make_unique<FunctionCallExpr>();
+            wrap->funcName = bin->op + " ESCAPE";
+            wrap->args.push_back(std::move(bin->left));
+            wrap->args.push_back(std::move(bin->right));
+            wrap->args.push_back(std::move(esc));
+            return wrap;
+        }
+        return bin;
+    }
+
+    if (w == "similar") {
+        ++pos;
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "to") ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "SIMILAR TO";
+        bin->left = std::move(left);
+        bin->right = parseConcatExpr(tokens, pos);
+        return bin;
+    }
+
+    return left;
+}
+
+// || (concatenation, left-associative)
+static ExprPtr parseConcatExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseAddSubExpr(tokens, pos);
+    while (pos < tokens.size() && tokens[pos] == "||") {
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "||";
+        bin->left = std::move(left);
+        bin->right = parseAddSubExpr(tokens, pos);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// +, - (binary, left-associative)
+static ExprPtr parseAddSubExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseMulDivModExpr(tokens, pos);
+    while (pos < tokens.size()) {
+        std::string op = tokens[pos];
+        if (op != "+" && op != "-") break;
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = op;
+        bin->left = std::move(left);
+        bin->right = parseMulDivModExpr(tokens, pos);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// *, /, % (left-associative)
+static ExprPtr parseMulDivModExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parsePowerExpr(tokens, pos);
+    while (pos < tokens.size()) {
+        std::string op = tokens[pos];
+        if (op != "*" && op != "/" && op != "%") break;
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = op;
+        bin->left = std::move(left);
+        bin->right = parsePowerExpr(tokens, pos);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// ^ (power, left-associative in PG)
+static ExprPtr parsePowerExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseUnaryExpr(tokens, pos);
+    while (pos < tokens.size() && tokens[pos] == "^") {
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "^";
+        bin->left = std::move(left);
+        bin->right = parseUnaryExpr(tokens, pos);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// Unary +, -, NOT
+static ExprPtr parseUnaryExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    if (pos < tokens.size() && (tokens[pos] == "+" || tokens[pos] == "-")) {
+        std::string op = tokens[pos];
+        ++pos;
+        auto unary = std::make_unique<UnaryOpExpr>();
+        unary->op = op;
+        unary->operand = parseUnaryExpr(tokens, pos);
+        return unary;
+    }
+    return parseCastExpr(tokens, pos);
+}
+
+// :: (cast, left-associative)
+static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parsePostfixExpr(tokens, pos);
+    while (pos < tokens.size() && tokens[pos] == "::") {
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "::";
+        bin->left = std::move(left);
+        // Type name: read until next operator/terminator
+        std::string typeName;
+        while (pos < tokens.size()) {
+            std::string w = SQLParser::toLower(tokens[pos]);
+            if (w == "and" || w == "or" || w == "then" || w == "else" || w == "end"
+                || w == "when" || w == "from" || w == "where" || w == "group"
+                || w == "order" || w == "having" || w == "limit" || w == "offset"
+                || w == "union" || w == "intersect" || w == "except" || w == "for"
+                || w == "returning" || w == "on" || w == "using" || w == "set"
+                || w == "into" || w == "values" || w == "by" || w == "asc" || w == "desc"
+                || tokens[pos] == ")" || tokens[pos] == "," || tokens[pos] == ";"
+                || tokens[pos] == "::" || tokens[pos] == "||"
+                || tokens[pos] == "+" || tokens[pos] == "-"
+                || tokens[pos] == "*" || tokens[pos] == "/" || tokens[pos] == "%"
+                || tokens[pos] == "^" || tokens[pos] == "=" || tokens[pos] == "<"
+                || tokens[pos] == ">" || tokens[pos] == "<=" || tokens[pos] == ">="
+                || tokens[pos] == "<>" || tokens[pos] == "!=") {
+                break;
+            }
+            if (tokens[pos] == "(") {
+                ++pos;
+                while (pos < tokens.size() && tokens[pos] != ")") {
+                    if (!typeName.empty()) typeName += " ";
+                    typeName += tokens[pos++];
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") {
+                    typeName += ")";
+                    ++pos;
+                }
+                continue;
+            }
+            if (tokens[pos] == "[") {
+                ++pos;
+                if (pos < tokens.size() && tokens[pos] == "]") {
+                    typeName += "[]";
+                    ++pos;
+                }
+                continue;
+            }
+            if (!typeName.empty()) typeName += " ";
+            typeName += tokens[pos++];
+        }
+        auto right = std::make_unique<LiteralExpr>();
+        right->value = typeName;
+        bin->right = std::move(right);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// Postfix: array subscript [ ], IS NULL/NOT NULL (as postfix)
+static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parsePrimaryExpr(tokens, pos);
+
+    // Array subscript: expr[expr] or expr[lower:upper]
+    while (pos < tokens.size() && tokens[pos] == "[") {
+        ++pos;
+        auto idx = parseExpr(tokens, pos);
+        if (pos < tokens.size() && tokens[pos] == "]") ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "[]";
+        bin->left = std::move(left);
+        bin->right = std::move(idx);
+        left = std::move(bin);
+    }
+
+    // Postfix IS [NOT] NULL
+    if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "is") {
+        if (SQLParser::toLower(tokens[pos + 1]) == "null") {
+            pos += 2;
+            auto unary = std::make_unique<UnaryOpExpr>();
+            unary->op = "IS NULL";
+            unary->operand = std::move(left);
+            return unary;
+        } else if (pos + 2 < tokens.size() && SQLParser::toLower(tokens[pos + 1]) == "not"
+                   && SQLParser::toLower(tokens[pos + 2]) == "null") {
+            pos += 3;
+            auto unary = std::make_unique<UnaryOpExpr>();
+            unary->op = "IS NOT NULL";
+            unary->operand = std::move(left);
+            return unary;
+        }
+    }
+
+    return left;
+}
+
+// Primary: literals, column refs, function calls, parenthesized exprs, subqueries, CASE
+static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
 
-    // Handle unary NOT
-    if (SQLParser::toLower(tokens[pos]) == "not") {
+    // CASE expression
+    if (SQLParser::toLower(tokens[pos]) == "case") {
         ++pos;
-        auto expr = std::make_unique<UnaryOpExpr>();
-        expr->op = "NOT";
-        expr->operand = parseSimpleExpr(tokens, pos);
-        return expr;
+        auto caseExpr = std::make_unique<FunctionCallExpr>();
+        caseExpr->funcName = "CASE";
+        // Simple CASE: CASE expr WHEN ... END
+        // Searched CASE: CASE WHEN ... END
+        ExprPtr caseOperand;
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) != "when"
+            && SQLParser::toLower(tokens[pos]) != "end") {
+            caseOperand = parseExpr(tokens, pos);
+        }
+        if (caseOperand) caseExpr->args.push_back(std::move(caseOperand));
+
+        while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "when") {
+            ++pos;
+            auto whenExpr = parseExpr(tokens, pos);
+            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "then") ++pos;
+            auto thenExpr = parseExpr(tokens, pos);
+            if (whenExpr) caseExpr->args.push_back(std::move(whenExpr));
+            if (thenExpr) caseExpr->args.push_back(std::move(thenExpr));
+        }
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "else") {
+            ++pos;
+            auto elseExpr = parseExpr(tokens, pos);
+            if (elseExpr) caseExpr->args.push_back(std::move(elseExpr));
+        }
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "end") ++pos;
+        return caseExpr;
+    }
+
+    // EXISTS (subquery)
+    if (SQLParser::toLower(tokens[pos]) == "exists") {
+        ++pos;
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            ++pos;
+            std::string subq;
+            int depth = 1;
+            while (pos < tokens.size() && depth > 0) {
+                if (tokens[pos] == "(") ++depth;
+                else if (tokens[pos] == ")") --depth;
+                if (depth > 0) {
+                    if (!subq.empty()) subq += " ";
+                    subq += tokens[pos++];
+                }
+            }
+            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            auto func = std::make_unique<FunctionCallExpr>();
+            func->funcName = "EXISTS";
+            auto lit = std::make_unique<LiteralExpr>();
+            lit->value = "(" + subq + ")";
+            func->args.push_back(std::move(lit));
+            return func;
+        }
+        auto func = std::make_unique<FunctionCallExpr>();
+        func->funcName = "EXISTS";
+        return func;
     }
 
     // Parenthesized expression or subquery
     if (tokens[pos] == "(") {
         ++pos;
-        auto inner = parseSimpleExpr(tokens, pos);
+        // Check for subquery
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "select") {
+            std::string subq;
+            int depth = 1;
+            while (pos < tokens.size() && depth > 0) {
+                if (tokens[pos] == "(") ++depth;
+                else if (tokens[pos] == ")") --depth;
+                if (depth > 0) {
+                    if (!subq.empty()) subq += " ";
+                    subq += tokens[pos++];
+                }
+            }
+            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            auto lit = std::make_unique<LiteralExpr>();
+            lit->value = "(" + subq + ")";
+            return lit;
+        }
+        auto inner = parseExpr(tokens, pos);
         if (pos < tokens.size() && tokens[pos] == ")") ++pos;
         return inner;
     }
@@ -728,28 +1191,43 @@ static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& p
     // Star
     if (tokens[pos] == "*") {
         ++pos;
-        auto expr = std::make_unique<LiteralExpr>();
-        expr->value = "*";
-        return expr;
+        auto lit = std::make_unique<LiteralExpr>();
+        lit->value = "*";
+        return lit;
     }
 
     std::string first = tokens[pos];
-    size_t savedPos = pos;
     ++pos;
 
     // Function call: func_name( ... )
     if (pos < tokens.size() && tokens[pos] == "(") {
-        ++pos; // skip '('
+        ++pos;
         auto func = std::make_unique<FunctionCallExpr>();
         func->funcName = first;
-        // Parse arguments
         while (pos < tokens.size() && tokens[pos] != ")") {
-            if (tokens[pos] == "distinct" || tokens[pos] == "DISTINCT") {
+            if (SQLParser::toLower(tokens[pos]) == "distinct") {
                 func->distinct = true;
                 ++pos;
                 continue;
             }
-            auto arg = parseSimpleExpr(tokens, pos);
+            // ORDER BY inside aggregate (e.g., ARRAY_AGG(x ORDER BY y))
+            if (SQLParser::toLower(tokens[pos]) == "order") {
+                ++pos;
+                if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "by") ++pos;
+                auto orderExpr = parseExpr(tokens, pos);
+                bool asc = true;
+                if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
+                else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
+                // Store in a special arg or encode somehow
+                if (orderExpr) {
+                    auto orderLit = std::make_unique<LiteralExpr>();
+                    orderLit->value = "ORDER BY " + orderExpr->toString() + (asc ? " ASC" : " DESC");
+                    func->args.push_back(std::move(orderLit));
+                }
+                if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
+                continue;
+            }
+            auto arg = parseExpr(tokens, pos);
             if (arg) func->args.push_back(std::move(arg));
             if (pos < tokens.size() && tokens[pos] == ",") {
                 ++pos;
@@ -761,28 +1239,24 @@ static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& p
         // FILTER (WHERE ...)
         if (pos + 2 < tokens.size() && SQLParser::toLower(tokens[pos]) == "filter"
             && tokens[pos + 1] == "(") {
-            pos += 2; // skip FILTER (
+            pos += 2;
             if (SQLParser::toLower(tokens[pos]) == "where") ++pos;
-            func->filter = parseSimpleExpr(tokens, pos);
+            func->filter = parseExpr(tokens, pos);
             if (pos < tokens.size() && tokens[pos] == ")") ++pos;
         }
 
-        // Check for binary operator after function call
-        if (pos < tokens.size()) {
-            std::string op = tokens[pos];
-            static const std::set<std::string> binOps = {
-                "=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "^",
-                "and", "or", "like", "ilike", "in", "between", "is"
-            };
-            if (binOps.count(SQLParser::toLower(op)) > 0) {
+        // OVER (...) - window function (placeholder: collect and drop for now)
+        if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "over") {
+            ++pos;
+            if (pos < tokens.size() && tokens[pos] == "(") {
                 ++pos;
-                auto bin = std::make_unique<BinaryOpExpr>();
-                bin->op = op;
-                bin->left = std::move(func);
-                bin->right = parseSimpleExpr(tokens, pos);
-                return bin;
+                while (pos < tokens.size() && tokens[pos] != ")") ++pos;
+                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            } else if (pos < tokens.size()) {
+                ++pos; // named window reference
             }
         }
+
         return func;
     }
 
@@ -799,89 +1273,12 @@ static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& p
     auto colRef = std::make_unique<ColumnRefExpr>();
     colRef->table = tableName;
     colRef->column = colName;
+    return colRef;
+}
 
-    // Check for binary operator
-    if (pos < tokens.size()) {
-        std::string op = tokens[pos];
-        static const std::set<std::string> binOps = {
-            "=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "^",
-            "and", "or", "like", "ilike", "in", "between", "is", "||", "->", "->>", "::"
-        };
-        if (binOps.count(SQLParser::toLower(op)) > 0) {
-            ++pos;
-            auto bin = std::make_unique<BinaryOpExpr>();
-            bin->op = op;
-            bin->left = std::move(colRef);
-            if (SQLParser::toLower(op) == "in" && pos < tokens.size() && tokens[pos] == "(") {
-                ++pos;
-                auto list = std::make_unique<LiteralExpr>();
-                std::string val;
-                while (pos < tokens.size() && tokens[pos] != ")") {
-                    if (!val.empty()) val += " ";
-                    val += tokens[pos++];
-                }
-                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
-                list->value = val;
-                bin->right = std::move(list);
-            } else if (SQLParser::toLower(op) == "between") {
-                auto betweenExpr = std::make_unique<LiteralExpr>();
-                std::string val;
-                while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) != "and") {
-                    if (!val.empty()) val += " ";
-                    val += tokens[pos++];
-                }
-                if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "and") {
-                    val += " AND ";
-                    ++pos;
-                    while (pos < tokens.size()) {
-                        std::string w = SQLParser::toLower(tokens[pos]);
-                        if (w == "and" || w == "or" || w == ")" || w == ",") break;
-                        if (!val.empty() && val.back() != ' ') val += " ";
-                        val += tokens[pos++];
-                    }
-                }
-                betweenExpr->value = val;
-                bin->right = std::move(betweenExpr);
-            } else if (SQLParser::toLower(op) == "is") {
-                std::string val;
-                while (pos < tokens.size()) {
-                    std::string w = SQLParser::toLower(tokens[pos]);
-                    if (w == "and" || w == "or" || w == ")" || w == ",") break;
-                    if (!val.empty()) val += " ";
-                    val += tokens[pos++];
-                }
-                auto right = std::make_unique<LiteralExpr>();
-                right->value = val;
-                bin->right = std::move(right);
-            } else {
-                bin->right = parseSimpleExpr(tokens, pos);
-            }
-            return bin;
-        }
-    }
-
-    // Postfix IS NULL / IS NOT NULL
-    if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "is") {
-        if (SQLParser::toLower(tokens[pos + 1]) == "null") {
-            pos += 2;
-            auto unary = std::make_unique<UnaryOpExpr>();
-            unary->op = "IS NULL";
-            unary->operand = std::move(colRef);
-            return unary;
-        } else if (pos + 2 < tokens.size() && SQLParser::toLower(tokens[pos + 1]) == "not"
-                   && SQLParser::toLower(tokens[pos + 2]) == "null") {
-            pos += 3;
-            auto unary = std::make_unique<UnaryOpExpr>();
-            unary->op = "IS NOT NULL";
-            unary->operand = std::move(colRef);
-            return unary;
-        }
-    }
-
-    // Literal (string, number)
-    auto lit = std::make_unique<LiteralExpr>();
-    lit->value = first;
-    return lit;
+// Backward-compatible wrapper: delegates to full precedence parser
+static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    return parseExpr(tokens, pos);
 }
 
 // 解析单个 SELECT 项（expr [AS alias]）
