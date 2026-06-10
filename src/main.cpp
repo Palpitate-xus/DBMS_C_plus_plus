@@ -188,57 +188,12 @@ static std::vector<SqlStatEntry> getSqlStats(const std::string& dbFilter = "") {
     return result;
 }
 
-static void resetSqlStats() {
-    std::lock_guard<std::mutex> lock(g_sqlStatsMutex);
-    g_sqlStats.clear();
-}
-
 // Forward declaration for SHOW VARIABLES
 extern dbms::Config g_config;
 
 // ========================================================================
 // Row-Level Security helper
 // ========================================================================
-static void applyRLSConditions(Session& s, const string& tname, const string& cmd,
-                               vector<string>& conds) {
-    auto tbl = g_engine.getTableSchema(s.currentDB, tname);
-    if (!tbl.rowLevelSecurity) return;
-    // Simplified: admin bypasses RLS unless FORCE is set
-    if (s.username == "admin" && !tbl.forceRowLevelSecurity) return;
-    auto policies = g_engine.getApplicablePolicies(s.currentDB, tname, cmd, s.username);
-    for (const auto& p : policies) {
-        if (!p.usingExpr.empty()) {
-            conds.push_back(p.usingExpr);
-        }
-    }
-}
-
-static bool checkRLSWithCheck(Session& s, const string& tname, const string& cmd,
-                               const map<string, string>& values) {
-    auto tbl = g_engine.getTableSchema(s.currentDB, tname);
-    if (!tbl.rowLevelSecurity) return true;
-    if (s.username == "admin" && !tbl.forceRowLevelSecurity) return true;
-    auto policies = g_engine.getApplicablePolicies(s.currentDB, tname, cmd, s.username);
-    for (const auto& p : policies) {
-        if (!p.withCheckExpr.empty()) {
-            // Evaluate WITH CHECK expression against the new row values
-            // Simplified: build a dummy row and use evalConditionOnRow
-            // For now, we do a simple substitution check
-            string expr = p.withCheckExpr;
-            bool ok = true;
-            // Parse simple conditions like =col value
-            // This is a simplified evaluator; full expression support would need the condition parser
-            // For the demo, we check if the expression references columns that exist in values
-            // and if the value matches. This is a best-effort approach.
-            // A more robust implementation would reuse the condition evaluation logic.
-            // For now, skip complex WITH CHECK validation and allow the insert.
-            (void)values;
-            (void)expr;
-        }
-    }
-    return true;
-}
-
 // ========================================================================
 // Utility
 // ========================================================================
@@ -260,32 +215,6 @@ static string stripQuotes(const string& s) {
         return s.substr(1, s.size() - 2);
     }
     return s;
-}
-
-static string escapeString(const string& s) {
-    string r;
-    for (char c : s) {
-        if (c == ' ') r += "\\s";
-        else if (c == '\n') r += "\\n";
-        else if (c == '\\') r += "\\\\";
-        else r += c;
-    }
-    return r;
-}
-
-static string unescapeString(const string& s) {
-    string r;
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '\\' && i + 1 < s.size()) {
-            if (s[i + 1] == 's') { r += ' '; ++i; }
-            else if (s[i + 1] == 'n') { r += '\n'; ++i; }
-            else if (s[i + 1] == '\\') { r += '\\'; ++i; }
-            else r += s[i];
-        } else {
-            r += s[i];
-        }
-    }
-    return r;
 }
 
 static pair<set<string>, bool> parseReturningClause(const string& sql, size_t searchStart) {
@@ -908,7 +837,7 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
         string lowOrderRest = toLower(orderRest);
         size_t framePos = string::npos;
         string frameKeyword;
-        for (const string& kw : {"rows", "range", "groups"}) {
+        for (const char* kw : {"rows", "range", "groups"}) {
             size_t fp = lowOrderRest.find(kw);
             if (fp != string::npos) {
                 framePos = fp;
@@ -1251,7 +1180,7 @@ static size_t findTopLevelSqlKeyword(const string& sql, const string& kw, size_t
 
 static string stripTrailingDropBehavior(string s) {
     s = trim(s);
-    for (const string& kw : {" cascade", " restrict"}) {
+    for (const string kw : {" cascade", " restrict"}) {
         if (s.size() >= kw.size() && s.substr(s.size() - kw.size()) == kw) {
             return trim(s.substr(0, s.size() - kw.size()));
         }
@@ -1705,7 +1634,7 @@ static string firstCompatNameToken(const string& rest) {
     string s = trim(rest);
     if (s.empty()) return "";
     size_t end = s.size();
-    for (const string& kw : {" using ", " for ", " from ", " with ", " options ",
+    for (const char* kw : {" using ", " for ", " from ", " with ", " options ",
                              " owner ", " on ", " as ", " returns ", " handler "}) {
         size_t p = findTopLevelKeyword(s, trim(kw));
         if (p != string::npos) end = min(end, p);
@@ -6170,7 +6099,6 @@ void autoExplainLog(const std::string& sql, double ms,
         plan = "Seq Scan";
         size_t joinPos = lsql.find(" join ");
         if (joinPos != std::string::npos) {
-            size_t onPos = lsql.find(" on ", joinPos);
             std::string joinType = "Nested Loop";
             if (lsql.find(" hash ") != std::string::npos ||
                 lsql.find("hash join") != std::string::npos) {
@@ -6256,7 +6184,6 @@ bool execute(const string& rawSql, Session& s) {
         return true;
     }
     g_engine.setRLSUser(s.username);
-    auto start = std::chrono::steady_clock::now();
     string sql = sqlProcessor(rawSql);
     // Handle pg_cancel_backend / pg_terminate_backend
     {
@@ -7414,7 +7341,6 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Note: DDL caused implicit commit of open transaction" << endl;
             }
             bool isHash = false;
-            bool isUnique = false;
             bool isConcurrently = false;
             size_t restStart = 13;
             // Check for "create hash index"
@@ -7424,7 +7350,6 @@ bool execute(const string& rawSql, Session& s) {
             }
             // Check for "create unique index"
             if (sql.substr(7, 6) == "unique") {
-                isUnique = true;
                 restStart = 20; // after "create unique index "
             }
             // Check for CONCURRENTLY keyword after "index"
@@ -9381,7 +9306,6 @@ bool execute(const string& rawSql, Session& s) {
         map<string, string> updateMap; // targetCol -> sourceCol
         {
             vector<string> parts;
-            size_t i = 0;
             int depth = 0;
             string cur;
             for (char c : updateClause) {
@@ -11136,9 +11060,7 @@ bool execute(const string& rawSql, Session& s) {
         string rest = trim(sql.substr(6));
         if (rest.substr(0, 20) == "materialized view ") {
             rest = trim(rest.substr(20));
-            bool concurrently = false;
             if (rest.substr(0, 12) == "concurrently") {
-                concurrently = true;
                 rest = trim(rest.substr(12));
             }
             string viewname = rest;

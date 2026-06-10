@@ -687,6 +687,7 @@ Column makeCidrColumn(const std::string& name, bool isNull, bool isPK) {
 }
 
 Column makeDecimalColumn(const std::string& name, bool isNull, int precision, int scale, bool isPK) {
+    (void)precision; (void)scale;
     Column c;
     c.dataName = name;
     c.isNull = isNull;
@@ -6984,7 +6985,6 @@ static std::string buildRowBuffer(const TableSchema& tbl,
     rowBuffer.append(reinterpret_cast<const char*>(&rollbackPtr), sizeof(uint64_t));
 
     if (!tbl.hasVariableLength()) {
-        size_t dataSize = tbl.rowSize() - MVCC_HEADER_SIZE;
         rowBuffer.resize(tbl.rowSize(), '\0');
         size_t offset = MVCC_HEADER_SIZE;
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -7369,7 +7369,6 @@ OpResult StorageEngine::insert(const std::string& dbname,
     lockManager_.lockExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t rowSize = tbl.rowSize();
 
     // Apply DEFAULT values
     std::map<std::string, std::string> actualValues = values;
@@ -8175,7 +8174,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 for (uint32_t pid = 1; pid < np; ++pid) {
                     char* buf = ppa->fetchPage(pid);
                     PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
-                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                    page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         int64_t rid = encodeRid(pid, sid);
                         bool match = true;
                         std::string row(data, len);
@@ -8191,7 +8190,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             return ids;
         }
     }
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
         int64_t rid = encodeRid(pageId, slotId);
         bool match = true;
         std::string row(data, len);
@@ -8659,7 +8658,6 @@ OpResult StorageEngine::update(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t rowSize = tbl.rowSize();
 
     // Validate columns and pre-check values
     std::map<size_t, std::string> colUpdates;  // column index -> new value
@@ -9153,8 +9151,8 @@ OpResult StorageEngine::update(const std::string& dbname,
 std::vector<std::string> StorageEngine::queryInformationSchema(
     const std::string& tablename,
     const std::vector<std::string>& conditions,
-    const std::set<std::string>& selectCols,
-    const std::vector<OrderBySpec>& orderBy) const {
+    const std::set<std::string>& /*selectCols*/,
+    const std::vector<OrderBySpec>& /*orderBy*/) const {
 
     std::vector<std::string> result;
     auto conds = parseConditions(conditions);
@@ -9342,8 +9340,8 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
 std::vector<std::string> StorageEngine::queryPgCatalog(
     const std::string& tablename,
     const std::vector<std::string>& conditions,
-    const std::set<std::string>& selectCols,
-    const std::vector<OrderBySpec>& orderBy) const {
+    const std::set<std::string>& /*selectCols*/,
+    const std::vector<OrderBySpec>& /*orderBy*/) const {
 
     std::vector<std::string> result;
     auto conds = parseConditions(conditions);
@@ -9490,7 +9488,6 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t rowSize = tbl.rowSize();
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     // Apply Row-Level Security policies
@@ -10828,7 +10825,6 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t rowSize = tbl.rowSize();
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     auto conds = parseConditions(conditions);
@@ -11011,9 +11007,8 @@ std::vector<std::string> StorageEngine::aggregate(
     lockManager_.lockShared(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t rowSize = tbl.rowSize();
-
     PageAllocator* pa = getPageAllocator(dbname, tablename);
+
     auto conds = parseConditions(conditions);
     auto ids = filterRows(dbname, tablename, conds);
     std::vector<int64_t> matchIds(ids.begin(), ids.end());
@@ -11027,7 +11022,7 @@ std::vector<std::string> StorageEngine::aggregate(
         std::string maxStr, minStr;
         int64_t maxInt = 0, minInt = 0;
         Date maxDate, minDate;
-        bool isInt = false, isDate = false, isChar = false;
+        bool isInt = false, isDate = false;
         size_t colIdx = tbl.len;
         std::string groupConcat;
         bool groupConcatFirst = true;
@@ -11051,7 +11046,7 @@ std::vector<std::string> StorageEngine::aggregate(
                     colIdx = i;
                     isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
-                    isChar = (tbl.cols[i].dataType == "char" || tbl.cols[i].isVariableLength);
+                    // isChar removed (unused)
                     break;
                 }
             }
@@ -11243,7 +11238,6 @@ std::vector<std::string> StorageEngine::groupAggregate(
     lockManager_.lockShared(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t rowSize = tbl.rowSize();
 
     // Find group-by column indices
     std::vector<size_t> groupIdxs;
@@ -11261,7 +11255,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
     if (conds.empty()) {
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
             matchIds.push_back(encodeRid(pageId, slotId));
         });
     } else {
@@ -11296,14 +11290,14 @@ std::vector<std::string> StorageEngine::groupAggregate(
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
         bool isArrayAgg = (func == "array_agg");
         size_t colIdx = tbl.len;
-        bool isInt = false, isDate = false, isChar = false;
+        bool isInt = false, isDate = false;
         if (func != "count" || actualColName != "*") {
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == actualColName) {
                     colIdx = i;
                     isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
-                    isChar = (tbl.cols[i].dataType == "char" || tbl.cols[i].isVariableLength);
+                    // isChar removed (unused)
                     break;
                 }
             }
@@ -11317,7 +11311,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
-        bool jsonAggFirst = true;
+        // jsonAggFirst removed (unused)
 
         if (isDistinctCount) {
             std::set<std::string> distinctVals;
@@ -11548,7 +11542,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
     if (conds.empty()) {
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
             matchIds.push_back(encodeRid(pageId, slotId));
         });
     } else {
@@ -11565,14 +11559,14 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
         bool isArrayAgg = (func == "array_agg");
         size_t colIdx = tbl.len;
-        bool isInt = false, isDate = false, isChar = false;
+        bool isInt = false, isDate = false;
         if (func != "count" || actualColName != "*") {
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == actualColName) {
                     colIdx = i;
                     isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
-                    isChar = (tbl.cols[i].dataType == "char" || tbl.cols[i].isVariableLength);
+                    // isChar removed (unused)
                     break;
                 }
             }
@@ -11799,27 +11793,6 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
     return result;
 }
 
-// Simple comma-split for function arguments (used by ORDER BY expression)
-static std::vector<std::string> splitExprArgs(const std::string& s) {
-    std::vector<std::string> args;
-    size_t i = 0;
-    while (i < s.size()) {
-        while (i < s.size() && isspace(static_cast<unsigned char>(s[i]))) ++i;
-        if (i >= s.size()) break;
-        std::string arg;
-        if (s[i] == '\'') {
-            arg += s[i++];
-            while (i < s.size() && s[i] != '\'') arg += s[i++];
-            if (i < s.size()) arg += s[i++];
-        } else {
-            while (i < s.size() && s[i] != ',') arg += s[i++];
-        }
-        args.push_back(trim(arg));
-        if (i < s.size() && s[i] == ',') ++i;
-    }
-    return args;
-}
-
 // ========================================================================
 // Post-query ORDER BY expression sorting
 // ========================================================================
@@ -11942,8 +11915,6 @@ std::vector<std::string> StorageEngine::join(
 
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
-    size_t leftRowSize = leftTbl.rowSize();
-    size_t rightRowSize = rightTbl.rowSize();
 
     // Read all rows from left table
     std::vector<std::string> leftRows;
@@ -12171,8 +12142,6 @@ std::vector<std::string> StorageEngine::leftJoin(
 
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
-    size_t leftRowSize = leftTbl.rowSize();
-    size_t rightRowSize = rightTbl.rowSize();
 
     std::vector<std::string> leftRows;
     forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
@@ -12315,8 +12284,6 @@ std::vector<std::string> StorageEngine::rightJoin(
 
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
-    size_t leftRowSize = leftTbl.rowSize();
-    size_t rightRowSize = rightTbl.rowSize();
 
     std::vector<std::string> leftRows;
     forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
@@ -13239,7 +13206,7 @@ OpResult StorageEngine::rollbackTransaction() {
                     foundCurrent = true;
                 } else if (!got) {
                     std::string targetPk = extractPKValue(it->rowData, tbl);
-                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                    page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (foundCurrent || len <= MVCC_HEADER_SIZE) return;
                         std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
                         std::string pk = extractPKValue(rowData, tbl);
@@ -13258,7 +13225,7 @@ OpResult StorageEngine::rollbackTransaction() {
                 } else if (!got) {
                     std::string targetPk = extractPKValue(it->rowData, tbl);
                     bool restored = false;
-                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                    page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (restored || len <= MVCC_HEADER_SIZE) return;
                         std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
                         std::string pk = extractPKValue(rowData, tbl);
@@ -13647,7 +13614,7 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
                     foundCurrent = true;
                 } else {
                     std::string targetPk = extractPKValue(entry.rowData, tbl);
-                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                    page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (foundCurrent || len <= MVCC_HEADER_SIZE) return;
                         std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
                         std::string pk = extractPKValue(rowData, tbl);
@@ -13666,7 +13633,7 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
                 } else {
                     std::string targetPk = extractPKValue(entry.rowData, tbl);
                     bool restored = false;
-                    page.forEachLive([&](uint16_t sid, const char* data, size_t len) {
+                    page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (restored || len <= MVCC_HEADER_SIZE) return;
                         std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
                         std::string pk = extractPKValue(rowData, tbl);
@@ -14582,14 +14549,6 @@ static std::string joinColumns(const std::vector<std::string>& cols) {
 }
 
 static constexpr const char* GRANT_OPTION_MARK = "__grant__";
-
-// Check if columns set represents table-level permission (ignoring grant option marker)
-static bool isTableLevelIgnoreGrant(const std::set<std::string>& cols) {
-    for (const auto& c : cols) {
-        if (c != GRANT_OPTION_MARK) return false;
-    }
-    return true;
-}
 
 static bool colsEmptyIgnoreGrant(const std::string& colsStr) {
     if (colsStr.empty()) return true;

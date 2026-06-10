@@ -24,7 +24,7 @@ std::string BPTree::normalizeKey(const std::string& s) {
 // ========================================================================
 // Node serialization: pack into BP_PAGE_SIZE bytes
 // ========================================================================
-void BPTree::serializeNode(char* buf, const Node& node, uint16_t order) {
+void BPTree::serializeNode(char* buf, const Node& node, uint16_t /*order*/) {
     std::memset(buf, 0, BP_PAGE_SIZE);
     buf[0] = node.isLeaf;
     std::memcpy(buf + 1, &node.numKeys, sizeof(uint16_t));
@@ -49,7 +49,7 @@ void BPTree::serializeNode(char* buf, const Node& node, uint16_t order) {
     }
 }
 
-void BPTree::deserializeNode(const char* buf, Node& node, uint16_t order) {
+void BPTree::deserializeNode(const char* buf, Node& node, uint16_t /*order*/) {
     node.isLeaf = static_cast<uint8_t>(buf[0]);
     std::memcpy(&node.numKeys, buf + 1, sizeof(uint16_t));
     node.keys.clear();

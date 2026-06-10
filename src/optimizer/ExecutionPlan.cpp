@@ -186,7 +186,6 @@ bool IndexScanOp::open() {
 
 bool IndexScanOp::next(std::string& outRow) {
     if (pos_ >= rids_.size()) return false;
-    auto* pa = const_cast<StorageEngine*>(engine_)->getPageAllocator(dbname_, tablename_);
     // readRowByRid is const but getPageAllocator is mutable
     // Use the mutable getter through const_cast workaround
     // Actually, getPageAllocator is not const, so we need a non-const engine
