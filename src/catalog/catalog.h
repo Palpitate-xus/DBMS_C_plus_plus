@@ -46,6 +46,14 @@ public:
     bool dropNamespace(Oid oid);
 
     // =====================================================================
+    // 临时 schema（会话隔离）
+    // =====================================================================
+    Oid createTempNamespace(uint64_t sessionId);
+    bool dropTempNamespace(uint64_t sessionId);
+    const PgNamespaceRow* findTempNamespace(uint64_t sessionId) const;
+    void dropAllTempNamespaces(); // 服务器关闭时清理所有临时 schema
+
+    // =====================================================================
     // pg_class
     // =====================================================================
     Oid createClass(const PgClassRow& row);

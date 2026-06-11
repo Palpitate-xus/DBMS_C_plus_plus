@@ -123,6 +123,63 @@ bool CatalogManager::dropNamespace(Oid oid) {
 }
 
 // ============================================================================
+// 临时 schema（会话隔离）
+// ============================================================================
+
+Oid CatalogManager::createTempNamespace(uint64_t sessionId) {
+    std::string name = "pg_temp_" + std::to_string(sessionId);
+    auto existing = findNamespaceByName(name);
+    if (existing) return existing->oid;
+    return createNamespace(name, 10); // owner = bootstrap superuser
+}
+
+bool CatalogManager::dropTempNamespace(uint64_t sessionId) {
+    std::string name = "pg_temp_" + std::to_string(sessionId);
+    auto ns = findNamespaceByName(name);
+    if (!ns) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Drop all objects in this temp namespace
+    std::vector<Oid> objectsToDrop;
+    for (const auto& c : classes_) {
+        if (c.relnamespace == ns->oid) {
+            objectsToDrop.push_back(c.oid);
+        }
+    }
+    for (Oid oid : objectsToDrop) {
+        dropClass(oid);
+    }
+    return dropNamespace(ns->oid);
+}
+
+const PgNamespaceRow* CatalogManager::findTempNamespace(uint64_t sessionId) const {
+    return findNamespaceByName("pg_temp_" + std::to_string(sessionId));
+}
+
+void CatalogManager::dropAllTempNamespaces() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Oid> tempNsOids;
+    for (const auto& ns : namespaces_) {
+        if (ns.nspname.size() > 8 && ns.nspname.substr(0, 8) == "pg_temp_") {
+            tempNsOids.push_back(ns.oid);
+        }
+    }
+    for (Oid oid : tempNsOids) {
+        // Drop all objects in the temp namespace first
+        std::vector<Oid> objectsToDrop;
+        for (const auto& c : classes_) {
+            if (c.relnamespace == oid) {
+                objectsToDrop.push_back(c.oid);
+            }
+        }
+        for (Oid objOid : objectsToDrop) {
+            dropClass(objOid);
+        }
+        dropNamespace(oid);
+    }
+}
+
+// ============================================================================
 // pg_class
 // ============================================================================
 
