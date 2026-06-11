@@ -1377,7 +1377,65 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     }
 
     auto stmt = std::make_unique<SelectStmt>();
-    size_t pos = 1; // skip SELECT
+    size_t pos = 0;
+
+    // WITH [RECURSIVE] cte_name [(cols)] AS [NOT] MATERIALIZED (query) [, ...]
+    if (pos < tokens.size() && toLower(tokens[pos]) == "with") {
+        ++pos;
+        bool recursive = false;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "recursive") {
+            recursive = true;
+            ++pos;
+        }
+        while (pos < tokens.size()) {
+            SelectStmt::CTE cte;
+            cte.recursive = recursive;
+            if (pos < tokens.size()) {
+                cte.name = tokens[pos++];
+            }
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                auto cols = collectParenthesized(tokens, pos);
+                for (const auto& c : cols) {
+                    if (c != ",") cte.columnNames.push_back(c);
+                }
+            }
+            if (pos < tokens.size() && toLower(tokens[pos]) == "as") ++pos;
+            if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "not"
+                && toLower(tokens[pos + 1]) == "materialized") {
+                cte.materialized = false;
+                pos += 2;
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "materialized") {
+                cte.materialized = true;
+                ++pos;
+            }
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                ++pos;
+                std::string subq;
+                int depth = 1;
+                while (pos < tokens.size() && depth > 0) {
+                    if (tokens[pos] == "(") ++depth;
+                    else if (tokens[pos] == ")") --depth;
+                    if (depth > 0) {
+                        if (!subq.empty()) subq += " ";
+                        subq += tokens[pos++];
+                    }
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                cte.query = parseSelect(subq).stmt;
+            }
+            stmt->ctes.push_back(std::move(cte));
+            if (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                continue;
+            }
+            break;
+        }
+    }
+
+    // Skip SELECT
+    if (pos < tokens.size() && toLower(tokens[pos]) == "select") {
+        ++pos;
+    }
 
     // DISTINCT / DISTINCT ON (...)
     if (pos < tokens.size() && toLower(tokens[pos]) == "distinct") {
@@ -1414,23 +1472,63 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         }
     }
 
-    // FROM
+    // FROM (supports comma join and explicit JOINs)
     if (pos < tokens.size() && toLower(tokens[pos]) == "from") {
         ++pos;
-        // Multiple tables or JOINs
         auto firstItem = parseFromItem(tokens, pos);
         if (firstItem) {
-            while (pos < tokens.size() && tokens[pos] == ",") {
-                ++pos;
-                auto nextItem = parseFromItem(tokens, pos);
-                if (nextItem) {
-                    auto crossJoin = std::make_unique<FromItem>();
-                    crossJoin->type = FromItem::Type::Join;
-                    crossJoin->joinType = "CROSS";
-                    crossJoin->left = std::move(firstItem);
-                    crossJoin->right = std::move(nextItem);
-                    firstItem = std::move(crossJoin);
+            while (pos < tokens.size()) {
+                std::string w = toLower(tokens[pos]);
+                if (w == "where" || w == "group" || w == "having" || w == "order"
+                    || w == "limit" || w == "offset" || w == "union"
+                    || w == "intersect" || w == "except" || w == "for"
+                    || w == ")" || w == ";") {
+                    break;
                 }
+                auto joinItem = std::make_unique<FromItem>();
+                joinItem->type = FromItem::Type::Join;
+                joinItem->left = std::move(firstItem);
+                if (tokens[pos] == ",") {
+                    ++pos;
+                    joinItem->joinType = "CROSS";
+                } else if (w == "cross") {
+                    ++pos;
+                    if (pos < tokens.size() && toLower(tokens[pos]) == "join") ++pos;
+                    joinItem->joinType = "CROSS";
+                } else if (w == "natural") {
+                    ++pos;
+                    if (pos < tokens.size() && toLower(tokens[pos]) == "join") ++pos;
+                    joinItem->joinType = "NATURAL";
+                } else if (w == "inner") {
+                    ++pos;
+                    if (pos < tokens.size() && toLower(tokens[pos]) == "join") ++pos;
+                    joinItem->joinType = "INNER";
+                } else if (w == "join") {
+                    ++pos;
+                    joinItem->joinType = "INNER";
+                } else if (w == "left" || w == "right" || w == "full") {
+                    std::string jt = w;
+                    ++pos;
+                    if (pos < tokens.size() && toLower(tokens[pos]) == "outer") ++pos;
+                    if (pos < tokens.size() && toLower(tokens[pos]) == "join") ++pos;
+                    joinItem->joinType = jt;
+                } else {
+                    break;
+                }
+                joinItem->right = parseFromItem(tokens, pos);
+                if (pos < tokens.size() && toLower(tokens[pos]) == "on") {
+                    ++pos;
+                    joinItem->joinCondition = parseExpr(tokens, pos);
+                } else if (pos < tokens.size() && toLower(tokens[pos]) == "using") {
+                    ++pos;
+                    if (pos < tokens.size() && tokens[pos] == "(") {
+                        auto cols = collectParenthesized(tokens, pos);
+                        for (const auto& c : cols) {
+                            if (c != ",") joinItem->usingCols.push_back(c);
+                        }
+                    }
+                }
+                firstItem = std::move(joinItem);
             }
             stmt->fromClause = std::move(firstItem);
         }
@@ -1541,6 +1639,37 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             }
         }
         stmt->locking.push_back(std::move(lc));
+    }
+
+    // UNION / INTERSECT / EXCEPT [ALL | DISTINCT]
+    if (pos < tokens.size()) {
+        std::string w = toLower(tokens[pos]);
+        if (w == "union") {
+            stmt->setOp = SetOp::Union;
+            ++pos;
+        } else if (w == "intersect") {
+            stmt->setOp = SetOp::Intersect;
+            ++pos;
+        } else if (w == "except") {
+            stmt->setOp = SetOp::Except;
+            ++pos;
+        }
+        if (stmt->setOp != SetOp::None) {
+            if (pos < tokens.size() && toLower(tokens[pos]) == "all") {
+                stmt->setOpAll = true;
+                ++pos;
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "distinct") {
+                ++pos;
+            }
+            // Collect remaining tokens as RHS query and parse recursively
+            std::string rhsSql;
+            for (size_t i = pos; i < tokens.size(); ++i) {
+                if (!rhsSql.empty()) rhsSql += " ";
+                rhsSql += tokens[i];
+            }
+            stmt->setOpRhs = parseSelect(rhsSql).stmt;
+            pos = tokens.size();
+        }
     }
 
     r.success = true;
