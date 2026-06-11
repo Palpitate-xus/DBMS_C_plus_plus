@@ -291,10 +291,12 @@ struct LiteralExpr : public Expr {
 
 // 列引用
 struct ColumnRefExpr : public Expr {
+    std::string schema;    // 可为空（无 schema 限定）
     std::string table;     // 可为空（无表限定）
     std::string column;
     ColumnRefExpr() { type = ExprType::ColumnRef; }
     std::string toString() const override {
+        if (!schema.empty()) return schema + "." + table + "." + column;
         return table.empty() ? column : table + "." + column;
     }
 };

@@ -86,6 +86,7 @@
   - ✅ OID 分配器（单调递增、持久化、批量预留）
   - ✅ CatalogManager：内存缓存 + 按 OID/名称索引 + CSV 持久化
   - ✅ 依赖追踪接口（CASCADE/RESTRICT 基础）
+  - ✅ Schema-qualified 列引用（schema.table.column）解析
 
 > 未迁移到 switch/case 的命令（classify 暂不支持或非标准 PG 语法）：`DUMP`、`RESTORE`、`BACKUP DATABASE`、`RESTORE DATABASE`、`CLEAR PLAN CACHE`、`MERGE INTO`、`REPLACE INTO`、`INSERT INTO` 特定语法、`SELECT` 及复杂 DDL（CREATE/DROP/ALTER）。这些将在后续阶段逐步处理。
 

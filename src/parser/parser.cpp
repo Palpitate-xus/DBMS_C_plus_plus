@@ -1260,17 +1260,28 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
         return func;
     }
 
-    // Column reference: table.column or just column
-    std::string tableName, colName = first;
+    // Column reference: schema.table.column, table.column, or just column
+    std::string schemaName, tableName, colName = first;
     if (pos < tokens.size() && tokens[pos] == ".") {
         ++pos;
         if (pos < tokens.size()) {
-            tableName = first;
-            colName = tokens[pos++];
+            std::string second = tokens[pos++];
+            if (pos < tokens.size() && tokens[pos] == ".") {
+                // schema.table.column
+                ++pos;
+                schemaName = first;
+                tableName = second;
+                if (pos < tokens.size()) colName = tokens[pos++];
+            } else {
+                // table.column
+                tableName = first;
+                colName = second;
+            }
         }
     }
 
     auto colRef = std::make_unique<ColumnRefExpr>();
+    colRef->schema = schemaName;
     colRef->table = tableName;
     colRef->column = colName;
     return colRef;
