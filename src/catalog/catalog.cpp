@@ -1,0 +1,646 @@
+#include "catalog.h"
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <algorithm>
+
+namespace dbms {
+
+// ============================================================================
+// 辅助：CSV 风格持久化
+// ============================================================================
+
+static void writeOid(std::ostream& out, Oid oid) {
+    out << oid;
+}
+
+static void writeString(std::ostream& out, const std::string& s) {
+    out << '"';
+    for (char c : s) {
+        if (c == '"' || c == '\\') out << '\\';
+        out << c;
+    }
+    out << '"';
+}
+
+static std::string readString(std::istringstream& in) {
+    std::string result;
+    in >> std::ws;
+    if (in.peek() == '"') {
+        in.get(); // skip opening quote
+        char c;
+        while (in.get(c)) {
+            if (c == '\\') {
+                if (in.get(c)) result += c;
+            } else if (c == '"') {
+                break;
+            } else {
+                result += c;
+            }
+        }
+    } else {
+        std::string word;
+        if (std::getline(in, word, ',')) {
+            result = word;
+        }
+    }
+    return result;
+}
+
+static std::string oidPath(const std::string& dbPath) {
+    return dbPath + "/.oid_counter";
+}
+
+// ============================================================================
+// 构造函数 / 析构函数
+// ============================================================================
+
+CatalogManager::CatalogManager(const std::string& dbPath)
+    : dbPath_(dbPath) {
+    oidGen_ = std::make_unique<OidGenerator>(oidPath(dbPath));
+    loadAll();
+}
+
+CatalogManager::~CatalogManager() {
+    persistAll();
+}
+
+// ============================================================================
+// pg_namespace
+// ============================================================================
+
+Oid CatalogManager::createNamespace(const std::string& nspname, Oid owner) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Oid oid = oidGen_->allocate();
+    PgNamespaceRow row;
+    row.oid = oid;
+    row.nspname = nspname;
+    row.nspowner = owner;
+    size_t idx = namespaces_.size();
+    namespaces_.push_back(row);
+    nsByOid_[oid] = idx;
+    nsByName_[nspname] = oid;
+    return oid;
+}
+
+const PgNamespaceRow* CatalogManager::findNamespace(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = nsByOid_.find(oid);
+    if (it != nsByOid_.end() && it->second < namespaces_.size()) {
+        return &namespaces_[it->second];
+    }
+    return nullptr;
+}
+
+const PgNamespaceRow* CatalogManager::findNamespaceByName(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = nsByName_.find(name);
+    if (it != nsByName_.end()) {
+        return findNamespace(it->second);
+    }
+    return nullptr;
+}
+
+bool CatalogManager::dropNamespace(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = nsByOid_.find(oid);
+    if (it == nsByOid_.end() || it->second >= namespaces_.size()) return false;
+    // Check dependencies
+    auto deps = findAllDependents(PgClassOid_Namespace, oid);
+    if (!deps.empty()) return false;
+    // Mark as dropped by swapping with last and updating index
+    size_t idx = it->second;
+    nsByName_.erase(namespaces_[idx].nspname);
+    if (idx + 1 < namespaces_.size()) {
+        namespaces_[idx] = std::move(namespaces_.back());
+        nsByOid_[namespaces_[idx].oid] = idx;
+    }
+    namespaces_.pop_back();
+    nsByOid_.erase(oid);
+    return true;
+}
+
+// ============================================================================
+// pg_class
+// ============================================================================
+
+Oid CatalogManager::createClass(const PgClassRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Oid oid = (row.oid != INVALID_OID) ? row.oid : oidGen_->allocate();
+    PgClassRow r = row;
+    r.oid = oid;
+    size_t idx = classes_.size();
+    classes_.push_back(r);
+    classByOid_[oid] = idx;
+    return oid;
+}
+
+const PgClassRow* CatalogManager::findClass(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = classByOid_.find(oid);
+    if (it != classByOid_.end() && it->second < classes_.size()) {
+        return &classes_[it->second];
+    }
+    return nullptr;
+}
+
+const PgClassRow* CatalogManager::findClassByName(const std::string& name, Oid nspOid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& c : classes_) {
+        if (c.relname == name && c.relnamespace == nspOid) {
+            return &c;
+        }
+    }
+    return nullptr;
+}
+
+bool CatalogManager::updateClass(Oid oid, const PgClassRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = classByOid_.find(oid);
+    if (it == classByOid_.end() || it->second >= classes_.size()) return false;
+    classes_[it->second] = row;
+    classes_[it->second].oid = oid;
+    return true;
+}
+
+bool CatalogManager::dropClass(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = classByOid_.find(oid);
+    if (it == classByOid_.end() || it->second >= classes_.size()) return false;
+    size_t idx = it->second;
+    if (idx + 1 < classes_.size()) {
+        classes_[idx] = std::move(classes_.back());
+        classByOid_[classes_[idx].oid] = idx;
+    }
+    classes_.pop_back();
+    classByOid_.erase(oid);
+    // Also drop attributes
+    dropAttributes(oid);
+    return true;
+}
+
+// ============================================================================
+// pg_attribute
+// ============================================================================
+
+void CatalogManager::addAttribute(const PgAttributeRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    attributes_.push_back(row);
+}
+
+std::vector<PgAttributeRow> CatalogManager::findAttributes(Oid relOid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PgAttributeRow> result;
+    for (const auto& a : attributes_) {
+        if (a.attrelid == relOid) result.push_back(a);
+    }
+    return result;
+}
+
+std::vector<PgAttributeRow> CatalogManager::findAttributesByNum(Oid relOid) const {
+    auto result = findAttributes(relOid);
+    std::sort(result.begin(), result.end(),
+              [](const PgAttributeRow& a, const PgAttributeRow& b) {
+                  return a.attnum < b.attnum;
+              });
+    return result;
+}
+
+const PgAttributeRow* CatalogManager::findAttribute(Oid relOid, const std::string& attname) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& a : attributes_) {
+        if (a.attrelid == relOid && a.attname == attname) {
+            return &a;
+        }
+    }
+    return nullptr;
+}
+
+bool CatalogManager::dropAttributes(Oid relOid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = std::remove_if(attributes_.begin(), attributes_.end(),
+                             [relOid](const PgAttributeRow& a) {
+                                 return a.attrelid == relOid;
+                             });
+    attributes_.erase(it, attributes_.end());
+    return true;
+}
+
+// ============================================================================
+// pg_type
+// ============================================================================
+
+Oid CatalogManager::createType(const PgTypeRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Oid oid = (row.oid != INVALID_OID) ? row.oid : oidGen_->allocate();
+    PgTypeRow r = row;
+    r.oid = oid;
+    size_t idx = types_.size();
+    types_.push_back(r);
+    typeByOid_[oid] = idx;
+    return oid;
+}
+
+const PgTypeRow* CatalogManager::findType(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = typeByOid_.find(oid);
+    if (it != typeByOid_.end() && it->second < types_.size()) {
+        return &types_[it->second];
+    }
+    return nullptr;
+}
+
+const PgTypeRow* CatalogManager::findTypeByName(const std::string& name, Oid nspOid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& t : types_) {
+        if (t.typname == name && t.typnamespace == nspOid) {
+            return &t;
+        }
+    }
+    return nullptr;
+}
+
+bool CatalogManager::dropType(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = typeByOid_.find(oid);
+    if (it == typeByOid_.end() || it->second >= types_.size()) return false;
+    size_t idx = it->second;
+    if (idx + 1 < types_.size()) {
+        types_[idx] = std::move(types_.back());
+        typeByOid_[types_[idx].oid] = idx;
+    }
+    types_.pop_back();
+    typeByOid_.erase(oid);
+    return true;
+}
+
+// ============================================================================
+// pg_proc
+// ============================================================================
+
+Oid CatalogManager::createProc(const PgProcRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Oid oid = (row.oid != INVALID_OID) ? row.oid : oidGen_->allocate();
+    PgProcRow r = row;
+    r.oid = oid;
+    size_t idx = procs_.size();
+    procs_.push_back(r);
+    procByOid_[oid] = idx;
+    return oid;
+}
+
+const PgProcRow* CatalogManager::findProc(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = procByOid_.find(oid);
+    if (it != procByOid_.end() && it->second < procs_.size()) {
+        return &procs_[it->second];
+    }
+    return nullptr;
+}
+
+std::vector<const PgProcRow*> CatalogManager::findProcsByName(const std::string& name, Oid nspOid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<const PgProcRow*> result;
+    for (const auto& p : procs_) {
+        if (p.proname == name && p.pronamespace == nspOid) {
+            result.push_back(&p);
+        }
+    }
+    return result;
+}
+
+bool CatalogManager::dropProc(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = procByOid_.find(oid);
+    if (it == procByOid_.end() || it->second >= procs_.size()) return false;
+    size_t idx = it->second;
+    if (idx + 1 < procs_.size()) {
+        procs_[idx] = std::move(procs_.back());
+        procByOid_[procs_[idx].oid] = idx;
+    }
+    procs_.pop_back();
+    procByOid_.erase(oid);
+    return true;
+}
+
+// ============================================================================
+// pg_depend
+// ============================================================================
+
+void CatalogManager::addDepend(const PgDependRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    depends_.push_back(row);
+}
+
+std::vector<PgDependRow> CatalogManager::findDepends(Oid classid, Oid objid, int32_t objsubid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PgDependRow> result;
+    for (const auto& d : depends_) {
+        if (d.classid == classid && d.objid == objid &&
+            (objsubid < 0 || d.objsubid == objsubid)) {
+            result.push_back(d);
+        }
+    }
+    return result;
+}
+
+std::vector<PgDependRow> CatalogManager::findRefs(Oid refclassid, Oid refobjid, int32_t refobjsubid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PgDependRow> result;
+    for (const auto& d : depends_) {
+        if (d.refclassid == refclassid && d.refobjid == refobjid &&
+            (refobjsubid < 0 || d.refobjsubid == refobjsubid)) {
+            result.push_back(d);
+        }
+    }
+    return result;
+}
+
+std::vector<PgDependRow> CatalogManager::findAllDependents(Oid refclassid, Oid refobjid) const {
+    return findRefs(refclassid, refobjid, -1);
+}
+
+bool CatalogManager::removeDepend(Oid classid, Oid objid, int32_t objsubid,
+                                  Oid refclassid, Oid refobjid, int32_t refobjsubid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = std::remove_if(depends_.begin(), depends_.end(),
+                             [&](const PgDependRow& d) {
+                                 return d.classid == classid && d.objid == objid &&
+                                        d.objsubid == objsubid &&
+                                        d.refclassid == refclassid &&
+                                        d.refobjid == refobjid &&
+                                        d.refobjsubid == refobjsubid;
+                             });
+    if (it == depends_.end()) return false;
+    depends_.erase(it, depends_.end());
+    return true;
+}
+
+// ============================================================================
+// OID 分配
+// ============================================================================
+
+Oid CatalogManager::allocateOid() {
+    return oidGen_->allocate();
+}
+
+// ============================================================================
+// 持久化 / 加载
+// ============================================================================
+
+std::string CatalogManager::catalogFilePath(const std::string& tablename) const {
+    return dbPath_ + "/pg_" + tablename + ".cat";
+}
+
+void CatalogManager::persistAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // pg_namespace
+    {
+        std::ofstream out(catalogFilePath("namespace"));
+        for (const auto& r : namespaces_) {
+            writeOid(out, r.oid); out << ',';
+            writeString(out, r.nspname); out << ',';
+            writeOid(out, r.nspowner); out << '\n';
+        }
+    }
+
+    // pg_class
+    {
+        std::ofstream out(catalogFilePath("class"));
+        for (const auto& r : classes_) {
+            writeOid(out, r.oid); out << ',';
+            writeString(out, r.relname); out << ',';
+            writeOid(out, r.relnamespace); out << ',';
+            writeOid(out, r.reltype); out << ',';
+            writeOid(out, r.relowner); out << ',';
+            writeOid(out, r.relam); out << ',';
+            writeOid(out, r.relfilenode); out << ',';
+            out << r.relkind << ',';
+            out << r.relnatts << ',';
+            out << (r.relhasindex ? 't' : 'f') << ',';
+            out << (r.relpersistence) << ',';
+            out << (r.relisshared ? 't' : 'f');
+            out << '\n';
+        }
+    }
+
+    // pg_attribute
+    {
+        std::ofstream out(catalogFilePath("attribute"));
+        for (const auto& r : attributes_) {
+            writeOid(out, r.attrelid); out << ',';
+            writeString(out, r.attname); out << ',';
+            writeOid(out, r.atttypid); out << ',';
+            out << r.attnum << ',';
+            out << r.attlen << ',';
+            out << r.atttypmod << ',';
+            out << (r.attnotnull ? 't' : 'f') << ',';
+            out << (r.atthasdef ? 't' : 'f') << ',';
+            out << r.attstorage << ',';
+            out << r.attalign;
+            out << '\n';
+        }
+    }
+
+    // pg_type
+    {
+        std::ofstream out(catalogFilePath("type"));
+        for (const auto& r : types_) {
+            writeOid(out, r.oid); out << ',';
+            writeString(out, r.typname); out << ',';
+            writeOid(out, r.typnamespace); out << ',';
+            out << r.typlen << ',';
+            out << r.typtype << ',';
+            out << r.typcategory << ',';
+            writeOid(out, r.typelem); out << ',';
+            writeOid(out, r.typarray);
+            out << '\n';
+        }
+    }
+
+    // pg_proc
+    {
+        std::ofstream out(catalogFilePath("proc"));
+        for (const auto& r : procs_) {
+            writeOid(out, r.oid); out << ',';
+            writeString(out, r.proname); out << ',';
+            writeOid(out, r.pronamespace); out << ',';
+            out << r.prokind << ',';
+            writeOid(out, r.prorettype); out << ',';
+            out << r.pronargs << ',';
+            writeString(out, r.prosrc);
+            out << '\n';
+        }
+    }
+
+    // pg_depend
+    {
+        std::ofstream out(catalogFilePath("depend"));
+        for (const auto& r : depends_) {
+            writeOid(out, r.classid); out << ',';
+            writeOid(out, r.objid); out << ',';
+            out << r.objsubid << ',';
+            writeOid(out, r.refclassid); out << ',';
+            writeOid(out, r.refobjid); out << ',';
+            out << r.refobjsubid << ',';
+            out << r.deptype;
+            out << '\n';
+        }
+    }
+
+    oidGen_->persist();
+}
+
+void CatalogManager::loadAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // pg_namespace
+    {
+        std::ifstream in(catalogFilePath("namespace"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgNamespaceRow r;
+            iss >> r.oid; iss.ignore(1);
+            r.nspname = readString(iss); iss.ignore(1);
+            iss >> r.nspowner;
+            namespaces_.push_back(r);
+        }
+    }
+
+    // pg_class
+    {
+        std::ifstream in(catalogFilePath("class"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgClassRow r;
+            iss >> r.oid; iss.ignore(1);
+            r.relname = readString(iss); iss.ignore(1);
+            iss >> r.relnamespace; iss.ignore(1);
+            iss >> r.reltype; iss.ignore(1);
+            iss >> r.relowner; iss.ignore(1);
+            iss >> r.relam; iss.ignore(1);
+            iss >> r.relfilenode; iss.ignore(1);
+            iss >> r.relkind; iss.ignore(1);
+            iss >> r.relnatts; iss.ignore(1);
+            char flag;
+            iss >> flag; r.relhasindex = (flag == 't'); iss.ignore(1);
+            iss >> r.relpersistence; iss.ignore(1);
+            iss >> flag; r.relisshared = (flag == 't');
+            classes_.push_back(r);
+        }
+    }
+
+    // pg_attribute
+    {
+        std::ifstream in(catalogFilePath("attribute"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgAttributeRow r;
+            iss >> r.attrelid; iss.ignore(1);
+            r.attname = readString(iss); iss.ignore(1);
+            iss >> r.atttypid; iss.ignore(1);
+            iss >> r.attnum; iss.ignore(1);
+            iss >> r.attlen; iss.ignore(1);
+            iss >> r.atttypmod; iss.ignore(1);
+            char flag;
+            iss >> flag; r.attnotnull = (flag == 't'); iss.ignore(1);
+            iss >> flag; r.atthasdef = (flag == 't'); iss.ignore(1);
+            iss >> r.attstorage; iss.ignore(1);
+            iss >> r.attalign;
+            attributes_.push_back(r);
+        }
+    }
+
+    // pg_type
+    {
+        std::ifstream in(catalogFilePath("type"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgTypeRow r;
+            iss >> r.oid; iss.ignore(1);
+            r.typname = readString(iss); iss.ignore(1);
+            iss >> r.typnamespace; iss.ignore(1);
+            iss >> r.typlen; iss.ignore(1);
+            iss >> r.typtype; iss.ignore(1);
+            iss >> r.typcategory; iss.ignore(1);
+            iss >> r.typelem; iss.ignore(1);
+            iss >> r.typarray;
+            types_.push_back(r);
+        }
+    }
+
+    // pg_proc
+    {
+        std::ifstream in(catalogFilePath("proc"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgProcRow r;
+            iss >> r.oid; iss.ignore(1);
+            r.proname = readString(iss); iss.ignore(1);
+            iss >> r.pronamespace; iss.ignore(1);
+            iss >> r.prokind; iss.ignore(1);
+            iss >> r.prorettype; iss.ignore(1);
+            iss >> r.pronargs; iss.ignore(1);
+            r.prosrc = readString(iss);
+            procs_.push_back(r);
+        }
+    }
+
+    // pg_depend
+    {
+        std::ifstream in(catalogFilePath("depend"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgDependRow r;
+            iss >> r.classid; iss.ignore(1);
+            iss >> r.objid; iss.ignore(1);
+            iss >> r.objsubid; iss.ignore(1);
+            iss >> r.refclassid; iss.ignore(1);
+            iss >> r.refobjid; iss.ignore(1);
+            iss >> r.refobjsubid; iss.ignore(1);
+            iss >> r.deptype;
+            depends_.push_back(r);
+        }
+    }
+
+    rebuildIndexes();
+}
+
+void CatalogManager::rebuildIndexes() {
+    nsByOid_.clear();
+    nsByName_.clear();
+    for (size_t i = 0; i < namespaces_.size(); ++i) {
+        nsByOid_[namespaces_[i].oid] = i;
+        nsByName_[namespaces_[i].nspname] = namespaces_[i].oid;
+    }
+
+    classByOid_.clear();
+    for (size_t i = 0; i < classes_.size(); ++i) {
+        classByOid_[classes_[i].oid] = i;
+    }
+
+    typeByOid_.clear();
+    for (size_t i = 0; i < types_.size(); ++i) {
+        typeByOid_[types_[i].oid] = i;
+    }
+
+    procByOid_.clear();
+    for (size_t i = 0; i < procs_.size(); ++i) {
+        procByOid_[procs_[i].oid] = i;
+    }
+}
+
+} // namespace dbms
