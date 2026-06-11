@@ -135,6 +135,14 @@ public:
     bool removeAuthMember(Oid roleid, Oid member);
 
     // =====================================================================
+    // pg_description — COMMENT ON
+    // =====================================================================
+    void setDescription(Oid objoid, Oid classoid, int32_t objsubid,
+                        const std::string& description);
+    std::string getDescription(Oid objoid, Oid classoid, int32_t objsubid) const;
+    bool removeDescription(Oid objoid, Oid classoid, int32_t objsubid);
+
+    // =====================================================================
     // Bootstrap: 初始化标准 schema / 类型
     // =====================================================================
     void bootstrapSystemTypes();
@@ -157,6 +165,7 @@ private:
     std::vector<PgDependRow>     depends_;
     std::vector<PgAuthIdRow>     authIds_;
     std::vector<PgAuthMembersRow> authMembers_;
+    std::vector<PgDescriptionRow> descriptions_;
 
     // OID 索引: oid -> vector 下标
     std::unordered_map<Oid, size_t> nsByOid_;

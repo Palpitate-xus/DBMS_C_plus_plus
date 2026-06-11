@@ -223,4 +223,16 @@ struct PgAuthMembersRow {
     std::string toString() const;
 };
 
+// ---------------------------------------------------------------------------
+// pg_description — 对象注释（COMMENT ON）
+// ---------------------------------------------------------------------------
+struct PgDescriptionRow {
+    Oid      objoid = INVALID_OID;      // 对象 OID
+    Oid      classoid = INVALID_OID;    // 对象所在系统表 OID
+    int32_t  objsubid = 0;              // 子对象号（0 = 对象本身，>0 = 列号）
+    std::string description;            // 注释文本
+
+    std::string toString() const;
+};
+
 } // namespace dbms

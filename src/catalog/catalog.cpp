@@ -557,6 +557,50 @@ bool CatalogManager::removeDepend(Oid classid, Oid objid, int32_t objsubid,
 }
 
 // ============================================================================
+// pg_description — COMMENT ON
+// ============================================================================
+
+void CatalogManager::setDescription(Oid objoid, Oid classoid, int32_t objsubid,
+                                    const std::string& description) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Update existing or append new
+    for (auto& d : descriptions_) {
+        if (d.objoid == objoid && d.classoid == classoid && d.objsubid == objsubid) {
+            d.description = description;
+            return;
+        }
+    }
+    PgDescriptionRow r;
+    r.objoid = objoid;
+    r.classoid = classoid;
+    r.objsubid = objsubid;
+    r.description = description;
+    descriptions_.push_back(r);
+}
+
+std::string CatalogManager::getDescription(Oid objoid, Oid classoid, int32_t objsubid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& d : descriptions_) {
+        if (d.objoid == objoid && d.classoid == classoid && d.objsubid == objsubid) {
+            return d.description;
+        }
+    }
+    return "";
+}
+
+bool CatalogManager::removeDescription(Oid objoid, Oid classoid, int32_t objsubid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = std::remove_if(descriptions_.begin(), descriptions_.end(),
+                             [objoid, classoid, objsubid](const PgDescriptionRow& d) {
+                                 return d.objoid == objoid && d.classoid == classoid
+                                        && d.objsubid == objsubid;
+                             });
+    if (it == descriptions_.end()) return false;
+    descriptions_.erase(it, descriptions_.end());
+    return true;
+}
+
+// ============================================================================
 // 依赖追踪：CASCADE / RESTRICT 删除计划
 // ============================================================================
 
@@ -817,6 +861,18 @@ void CatalogManager::persistAll() {
         }
     }
 
+    // pg_description
+    {
+        std::ofstream out(catalogFilePath("description"));
+        for (const auto& r : descriptions_) {
+            writeOid(out, r.objoid); out << ',';
+            writeOid(out, r.classoid); out << ',';
+            out << r.objsubid << ',';
+            writeString(out, r.description);
+            out << '\n';
+        }
+    }
+
     oidGen_->persist();
 }
 
@@ -984,6 +1040,22 @@ void CatalogManager::loadAll() {
             char flag;
             iss >> flag; r.admin_option = (flag == 't');
             authMembers_.push_back(r);
+        }
+    }
+
+    // pg_description
+    {
+        std::ifstream in(catalogFilePath("description"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgDescriptionRow r;
+            iss >> r.objoid; iss.ignore(1);
+            iss >> r.classoid; iss.ignore(1);
+            iss >> r.objsubid; iss.ignore(1);
+            r.description = readString(iss);
+            descriptions_.push_back(r);
         }
     }
 

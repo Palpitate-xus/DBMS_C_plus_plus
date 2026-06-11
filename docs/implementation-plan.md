@@ -92,6 +92,7 @@
   - ✅ 现有元数据迁移工具（migrateDatabaseToCatalog：遍历 .stc 文件 → pg_namespace + pg_class + pg_attribute + pg_type + pg_depend）
   - ✅ 临时 schema（createTempNamespace / dropTempNamespace / dropAllTempNamespaces）
   - ✅ pg_authid / pg_auth_members（CatalogManager CRUD + CSV 持久化）
+  - ✅ pg_description（COMMENT ON：setDescription / getDescription / removeDescription）
 
 > 未迁移到 switch/case 的命令（classify 暂不支持或非标准 PG 语法）：`DUMP`、`RESTORE`、`BACKUP DATABASE`、`RESTORE DATABASE`、`CLEAR PLAN CACHE`、`MERGE INTO`、`REPLACE INTO`、`INSERT INTO` 特定语法、`SELECT` 及复杂 DDL（CREATE/DROP/ALTER）。这些将在后续阶段逐步处理。
 

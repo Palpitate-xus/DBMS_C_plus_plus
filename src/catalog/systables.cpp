@@ -59,4 +59,11 @@ std::string PgAuthMembersRow::toString() const {
     return oss.str();
 }
 
+std::string PgDescriptionRow::toString() const {
+    std::ostringstream oss;
+    oss << "PgDescription(obj=" << objoid << ", class=" << classoid
+        << ", sub=" << objsubid << ", desc=" << description << ")";
+    return oss.str();
+}
+
 } // namespace dbms
