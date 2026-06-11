@@ -190,4 +190,37 @@ struct PgDependRow {
     std::string toString() const;
 };
 
+// ---------------------------------------------------------------------------
+// pg_authid — 角色/用户认证信息
+// ---------------------------------------------------------------------------
+struct PgAuthIdRow {
+    Oid      oid = INVALID_OID;
+    std::string rolname;          // 角色名
+    bool     rolsuper = false;    // 超级用户
+    bool     rolinherit = true;   // 自动继承成员角色的权限
+    bool     rolcreaterole = false; // 可创建角色
+    bool     rolcreatedb = false; // 可创建数据库
+    bool     rolcanlogin = true;  // 可登录
+    bool     rolreplication = false; // 可复制
+    bool     rolbypassrls = false;   // 可绕过 RLS
+    int32_t  rolconnlimit = -1;   // 最大并发连接数（-1 = 无限制）
+    std::string rolpassword;      // 密码哈希
+    std::string rolvaliduntil;    // 密码有效期（ISO 时间字符串，空 = 永久）
+
+    std::string toString() const;
+};
+
+// ---------------------------------------------------------------------------
+// pg_auth_members — 角色成员关系
+// ---------------------------------------------------------------------------
+struct PgAuthMembersRow {
+    Oid      oid = INVALID_OID;
+    Oid      roleid = INVALID_OID;   // 被赋予成员资格的角色
+    Oid      member = INVALID_OID;   // 成员角色
+    Oid      grantor = INVALID_OID;  // 授权者
+    bool     admin_option = false;   // 是否有 ADMIN OPTION
+
+    std::string toString() const;
+};
+
 } // namespace dbms

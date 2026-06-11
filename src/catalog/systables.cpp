@@ -45,4 +45,18 @@ std::string PgDependRow::toString() const {
     return oss.str();
 }
 
+std::string PgAuthIdRow::toString() const {
+    std::ostringstream oss;
+    oss << "PgAuthId(oid=" << oid << ", name=" << rolname
+        << ", super=" << rolsuper << ", login=" << rolcanlogin << ")";
+    return oss.str();
+}
+
+std::string PgAuthMembersRow::toString() const {
+    std::ostringstream oss;
+    oss << "PgAuthMembers(oid=" << oid << ", role=" << roleid
+        << ", member=" << member << ", grantor=" << grantor << ")";
+    return oss.str();
+}
+
 } // namespace dbms

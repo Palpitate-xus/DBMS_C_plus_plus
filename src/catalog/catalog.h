@@ -120,6 +120,21 @@ public:
     DropPlan planDrop(Oid classid, Oid objid, DropBehavior behavior) const;
 
     // =====================================================================
+    // pg_authid / pg_auth_members — 角色与用户
+    // =====================================================================
+    Oid createAuthId(const PgAuthIdRow& row);
+    const PgAuthIdRow* findAuthId(Oid oid) const;
+    const PgAuthIdRow* findAuthIdByName(const std::string& name) const;
+    bool updateAuthId(Oid oid, const PgAuthIdRow& row);
+    bool dropAuthId(Oid oid);
+    std::vector<PgAuthIdRow> listAuthIds() const;
+
+    void addAuthMember(const PgAuthMembersRow& row);
+    std::vector<PgAuthMembersRow> findAuthMembers(Oid roleid) const;
+    std::vector<PgAuthMembersRow> findAuthMemberships(Oid member) const;
+    bool removeAuthMember(Oid roleid, Oid member);
+
+    // =====================================================================
     // Bootstrap: 初始化标准 schema / 类型
     // =====================================================================
     void bootstrapSystemTypes();
@@ -140,15 +155,20 @@ private:
     std::vector<PgTypeRow>       types_;
     std::vector<PgProcRow>       procs_;
     std::vector<PgDependRow>     depends_;
+    std::vector<PgAuthIdRow>     authIds_;
+    std::vector<PgAuthMembersRow> authMembers_;
 
     // OID 索引: oid -> vector 下标
     std::unordered_map<Oid, size_t> nsByOid_;
     std::unordered_map<Oid, size_t> classByOid_;
     std::unordered_map<Oid, size_t> typeByOid_;
     std::unordered_map<Oid, size_t> procByOid_;
+    std::unordered_map<Oid, size_t> authIdByOid_;
+    std::unordered_map<Oid, size_t> authMemberByOid_;
 
     // 名称索引
     std::unordered_map<std::string, Oid> nsByName_;   // nspname -> oid
+    std::unordered_map<std::string, Oid> authIdByName_; // rolname -> oid
 
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;

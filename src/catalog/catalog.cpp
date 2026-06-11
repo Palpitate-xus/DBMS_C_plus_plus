@@ -383,6 +383,127 @@ bool CatalogManager::dropProc(Oid oid) {
 }
 
 // ============================================================================
+// pg_authid
+// ============================================================================
+
+Oid CatalogManager::createAuthId(const PgAuthIdRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Oid oid = (row.oid != INVALID_OID) ? row.oid : oidGen_->allocate();
+    PgAuthIdRow r = row;
+    r.oid = oid;
+    size_t idx = authIds_.size();
+    authIds_.push_back(r);
+    authIdByOid_[oid] = idx;
+    authIdByName_[r.rolname] = oid;
+    return oid;
+}
+
+const PgAuthIdRow* CatalogManager::findAuthId(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = authIdByOid_.find(oid);
+    if (it != authIdByOid_.end() && it->second < authIds_.size()) {
+        return &authIds_[it->second];
+    }
+    return nullptr;
+}
+
+const PgAuthIdRow* CatalogManager::findAuthIdByName(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = authIdByName_.find(name);
+    if (it != authIdByName_.end()) {
+        return findAuthId(it->second);
+    }
+    return nullptr;
+}
+
+bool CatalogManager::updateAuthId(Oid oid, const PgAuthIdRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = authIdByOid_.find(oid);
+    if (it == authIdByOid_.end() || it->second >= authIds_.size()) return false;
+    authIdByName_.erase(authIds_[it->second].rolname);
+    authIds_[it->second] = row;
+    authIds_[it->second].oid = oid;
+    authIdByName_[row.rolname] = oid;
+    return true;
+}
+
+bool CatalogManager::dropAuthId(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = authIdByOid_.find(oid);
+    if (it == authIdByOid_.end() || it->second >= authIds_.size()) return false;
+    size_t idx = it->second;
+    authIdByName_.erase(authIds_[idx].rolname);
+    // Remove all memberships involving this role
+    auto amIt = std::remove_if(authMembers_.begin(), authMembers_.end(),
+                               [oid](const PgAuthMembersRow& m) {
+                                   return m.roleid == oid || m.member == oid || m.grantor == oid;
+                               });
+    authMembers_.erase(amIt, authMembers_.end());
+    authMemberByOid_.clear();
+    for (size_t i = 0; i < authMembers_.size(); ++i) {
+        authMemberByOid_[authMembers_[i].oid] = i;
+    }
+    if (idx + 1 < authIds_.size()) {
+        authIds_[idx] = std::move(authIds_.back());
+        authIdByOid_[authIds_[idx].oid] = idx;
+    }
+    authIds_.pop_back();
+    authIdByOid_.erase(oid);
+    return true;
+}
+
+std::vector<PgAuthIdRow> CatalogManager::listAuthIds() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return authIds_;
+}
+
+// ============================================================================
+// pg_auth_members
+// ============================================================================
+
+void CatalogManager::addAuthMember(const PgAuthMembersRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    PgAuthMembersRow r = row;
+    if (r.oid == INVALID_OID) r.oid = oidGen_->allocate();
+    size_t idx = authMembers_.size();
+    authMembers_.push_back(r);
+    authMemberByOid_[r.oid] = idx;
+}
+
+std::vector<PgAuthMembersRow> CatalogManager::findAuthMembers(Oid roleid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PgAuthMembersRow> result;
+    for (const auto& m : authMembers_) {
+        if (m.roleid == roleid) result.push_back(m);
+    }
+    return result;
+}
+
+std::vector<PgAuthMembersRow> CatalogManager::findAuthMemberships(Oid member) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PgAuthMembersRow> result;
+    for (const auto& m : authMembers_) {
+        if (m.member == member) result.push_back(m);
+    }
+    return result;
+}
+
+bool CatalogManager::removeAuthMember(Oid roleid, Oid member) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = std::remove_if(authMembers_.begin(), authMembers_.end(),
+                             [roleid, member](const PgAuthMembersRow& m) {
+                                 return m.roleid == roleid && m.member == member;
+                             });
+    if (it == authMembers_.end()) return false;
+    authMembers_.erase(it, authMembers_.end());
+    authMemberByOid_.clear();
+    for (size_t i = 0; i < authMembers_.size(); ++i) {
+        authMemberByOid_[authMembers_[i].oid] = i;
+    }
+    return true;
+}
+
+// ============================================================================
 // pg_depend
 // ============================================================================
 
@@ -663,6 +784,39 @@ void CatalogManager::persistAll() {
         }
     }
 
+    // pg_authid
+    {
+        std::ofstream out(catalogFilePath("authid"));
+        for (const auto& r : authIds_) {
+            writeOid(out, r.oid); out << ',';
+            writeString(out, r.rolname); out << ',';
+            out << (r.rolsuper ? 't' : 'f') << ',';
+            out << (r.rolinherit ? 't' : 'f') << ',';
+            out << (r.rolcreaterole ? 't' : 'f') << ',';
+            out << (r.rolcreatedb ? 't' : 'f') << ',';
+            out << (r.rolcanlogin ? 't' : 'f') << ',';
+            out << (r.rolreplication ? 't' : 'f') << ',';
+            out << (r.rolbypassrls ? 't' : 'f') << ',';
+            out << r.rolconnlimit << ',';
+            writeString(out, r.rolpassword); out << ',';
+            writeString(out, r.rolvaliduntil);
+            out << '\n';
+        }
+    }
+
+    // pg_auth_members
+    {
+        std::ofstream out(catalogFilePath("authmembers"));
+        for (const auto& r : authMembers_) {
+            writeOid(out, r.oid); out << ',';
+            writeOid(out, r.roleid); out << ',';
+            writeOid(out, r.member); out << ',';
+            writeOid(out, r.grantor); out << ',';
+            out << (r.admin_option ? 't' : 'f');
+            out << '\n';
+        }
+    }
+
     oidGen_->persist();
 }
 
@@ -790,6 +944,49 @@ void CatalogManager::loadAll() {
         }
     }
 
+    // pg_authid
+    {
+        std::ifstream in(catalogFilePath("authid"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgAuthIdRow r;
+            iss >> r.oid; iss.ignore(1);
+            r.rolname = readString(iss); iss.ignore(1);
+            char flag;
+            iss >> flag; r.rolsuper = (flag == 't'); iss.ignore(1);
+            iss >> flag; r.rolinherit = (flag == 't'); iss.ignore(1);
+            iss >> flag; r.rolcreaterole = (flag == 't'); iss.ignore(1);
+            iss >> flag; r.rolcreatedb = (flag == 't'); iss.ignore(1);
+            iss >> flag; r.rolcanlogin = (flag == 't'); iss.ignore(1);
+            iss >> flag; r.rolreplication = (flag == 't'); iss.ignore(1);
+            iss >> flag; r.rolbypassrls = (flag == 't'); iss.ignore(1);
+            iss >> r.rolconnlimit; iss.ignore(1);
+            r.rolpassword = readString(iss); iss.ignore(1);
+            r.rolvaliduntil = readString(iss);
+            authIds_.push_back(r);
+        }
+    }
+
+    // pg_auth_members
+    {
+        std::ifstream in(catalogFilePath("authmembers"));
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            std::istringstream iss(line);
+            PgAuthMembersRow r;
+            iss >> r.oid; iss.ignore(1);
+            iss >> r.roleid; iss.ignore(1);
+            iss >> r.member; iss.ignore(1);
+            iss >> r.grantor; iss.ignore(1);
+            char flag;
+            iss >> flag; r.admin_option = (flag == 't');
+            authMembers_.push_back(r);
+        }
+    }
+
     rebuildIndexes();
 }
 
@@ -814,6 +1011,18 @@ void CatalogManager::rebuildIndexes() {
     procByOid_.clear();
     for (size_t i = 0; i < procs_.size(); ++i) {
         procByOid_[procs_[i].oid] = i;
+    }
+
+    authIdByOid_.clear();
+    authIdByName_.clear();
+    for (size_t i = 0; i < authIds_.size(); ++i) {
+        authIdByOid_[authIds_[i].oid] = i;
+        authIdByName_[authIds_[i].rolname] = authIds_[i].oid;
+    }
+
+    authMemberByOid_.clear();
+    for (size_t i = 0; i < authMembers_.size(); ++i) {
+        authMemberByOid_[authMembers_[i].oid] = i;
     }
 }
 
