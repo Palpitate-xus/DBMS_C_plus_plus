@@ -97,6 +97,26 @@ public:
     void persistAll();
     void loadAll();
 
+    // =====================================================================
+    // 依赖追踪：CASCADE / RESTRICT 删除计划
+    // =====================================================================
+    enum class DropBehavior { Restrict, Cascade };
+
+    struct DropPlan {
+        std::vector<std::pair<Oid, Oid>> objectsToDrop; // (classid, objid) 按依赖顺序
+        std::string error;
+        bool ok() const { return error.empty(); }
+    };
+
+    // 生成删除计划（不实际执行删除）
+    DropPlan planDrop(Oid classid, Oid objid, DropBehavior behavior) const;
+
+    // =====================================================================
+    // Bootstrap: 初始化标准 schema / 类型
+    // =====================================================================
+    void bootstrapSystemTypes();
+    void bootstrapSystemNamespaces();
+
     // 获取下一个可用 OID（用于外部手动分配）
     Oid allocateOid();
 

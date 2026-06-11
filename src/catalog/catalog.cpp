@@ -3,6 +3,8 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <set>
+#include <functional>
 
 namespace dbms {
 
@@ -374,6 +376,121 @@ bool CatalogManager::removeDepend(Oid classid, Oid objid, int32_t objsubid,
     if (it == depends_.end()) return false;
     depends_.erase(it, depends_.end());
     return true;
+}
+
+// ============================================================================
+// 依赖追踪：CASCADE / RESTRICT 删除计划
+// ============================================================================
+
+CatalogManager::DropPlan CatalogManager::planDrop(Oid classid, Oid objid,
+                                                   DropBehavior behavior) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DropPlan plan;
+
+    std::vector<std::pair<Oid, Oid>> toDrop;       // 后序遍历结果
+    std::set<std::pair<Oid, Oid>> visited;
+    std::set<std::pair<Oid, Oid>> inStack;
+
+    std::function<bool(Oid, Oid)> dfs = [&](Oid cid, Oid oid) -> bool {
+        auto key = std::make_pair(cid, oid);
+        if (visited.count(key)) return true;
+        if (inStack.count(key)) return true; // 循环依赖理论上不应发生
+        inStack.insert(key);
+
+        auto deps = findRefs(cid, oid, -1);
+        for (const auto& d : deps) {
+            if (d.deptype == 'p') {
+                plan.error = "cannot drop object because it is required by the database system";
+                return false;
+            }
+            auto depKey = std::make_pair(d.classid, d.objid);
+            if (!dfs(d.classid, d.objid)) return false;
+        }
+
+        inStack.erase(key);
+        visited.insert(key);
+        toDrop.push_back(key);
+        return true;
+    };
+
+    if (!dfs(classid, objid)) return plan;
+
+    if (behavior == DropBehavior::Restrict && toDrop.size() > 1) {
+        plan.error = "cannot drop object because other objects depend on it";
+        return plan;
+    }
+
+    plan.objectsToDrop = std::move(toDrop);
+    return plan;
+}
+
+// ============================================================================
+// Bootstrap: 初始化标准 namespace / 类型
+// ============================================================================
+
+void CatalogManager::bootstrapSystemNamespaces() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto ensureNs = [&](Oid oid, const std::string& name, Oid owner) {
+        if (nsByOid_.count(oid)) return;
+        PgNamespaceRow row;
+        row.oid = oid;
+        row.nspname = name;
+        row.nspowner = owner;
+        size_t idx = namespaces_.size();
+        namespaces_.push_back(row);
+        nsByOid_[oid] = idx;
+        nsByName_[name] = oid;
+    };
+    ensureNs(11,    "pg_catalog",   10);  // PG 标准 OID
+    ensureNs(99,    "pg_toast",     10);
+    ensureNs(2200,  "public",       10);
+    ensureNs(1213,  "pg_temp_1",    10);
+}
+
+void CatalogManager::bootstrapSystemTypes() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto ensureType = [&](Oid oid, const std::string& name, int16_t len,
+                         char typtype, char category) {
+        if (typeByOid_.count(oid)) return;
+        PgTypeRow row;
+        row.oid = oid;
+        row.typname = name;
+        row.typnamespace = 11; // pg_catalog
+        row.typlen = len;
+        row.typtype = typtype;
+        row.typcategory = category;
+        size_t idx = types_.size();
+        types_.push_back(row);
+        typeByOid_[oid] = idx;
+    };
+    // PG 标准类型 OID（bootstrap 固定值）
+    ensureType(16,    "bool",        1,   'b', 'B');
+    ensureType(17,    "bytea",      -1,   'b', 'U');
+    ensureType(18,    "char",        1,   'b', 'S');
+    ensureType(19,    "name",       64,   'b', 'S');
+    ensureType(20,    "int8",        8,   'b', 'N');
+    ensureType(21,    "int2",        2,   'b', 'N');
+    ensureType(23,    "int4",        4,   'b', 'N');
+    ensureType(24,    "regproc",     4,   'b', 'N');
+    ensureType(25,    "text",       -1,   'b', 'S');
+    ensureType(26,    "oid",         4,   'b', 'N');
+    ensureType(27,    "tid",         6,   'b', 'U');
+    ensureType(28,    "xid",         4,   'b', 'U');
+    ensureType(29,    "cid",         4,   'b', 'U');
+    ensureType(30,    "oidvector",  -1,   'b', 'A');
+    ensureType(700,   "float4",      4,   'b', 'N');
+    ensureType(701,   "float8",      8,   'b', 'N');
+    ensureType(1042,  "bpchar",     -1,   'b', 'S');
+    ensureType(1043,  "varchar",    -1,   'b', 'S');
+    ensureType(1082,  "date",        4,   'b', 'D');
+    ensureType(1083,  "time",        8,   'b', 'D');
+    ensureType(1114,  "timestamp",   8,   'b', 'D');
+    ensureType(1184,  "timestamptz", 8,   'b', 'D');
+    ensureType(1186,  "interval",   16,   'b', 'D');
+    ensureType(1266,  "timetz",     12,   'b', 'D');
+    ensureType(1700,  "numeric",    -1,   'b', 'N');
+    ensureType(2950,  "uuid",       16,   'b', 'U');
+    ensureType(3802,  "jsonb",      -1,   'b', 'U');
 }
 
 // ============================================================================
