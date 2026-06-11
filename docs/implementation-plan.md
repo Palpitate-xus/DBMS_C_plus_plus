@@ -93,6 +93,9 @@
   - ✅ 临时 schema（createTempNamespace / dropTempNamespace / dropAllTempNamespaces）
   - ✅ pg_authid / pg_auth_members（CatalogManager CRUD + CSV 持久化）
   - ✅ pg_description（COMMENT ON：setDescription / getDescription / removeDescription）
+- **存储引擎 / Cluster Layout（Phase 3 进行中）**：
+  - ✅ ClusterLayout：初始化标准 PG 数据目录结构（base、global、pg_wal、pg_xact、pg_tblspc 等 20+ 子目录）
+  - ✅ 数据库/表空间路径管理、符号链接、关系文件路径（含 fork：main/fsm/vm/init）
 
 > 未迁移到 switch/case 的命令（classify 暂不支持或非标准 PG 语法）：`DUMP`、`RESTORE`、`BACKUP DATABASE`、`RESTORE DATABASE`、`CLEAR PLAN CACHE`、`MERGE INTO`、`REPLACE INTO`、`INSERT INTO` 特定语法、`SELECT` 及复杂 DDL（CREATE/DROP/ALTER）。这些将在后续阶段逐步处理。
 
