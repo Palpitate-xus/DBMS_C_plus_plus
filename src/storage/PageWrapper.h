@@ -46,6 +46,9 @@ public:
     // Restore a deleted row (clear tombstone / LP_UNUSED -> LP_NORMAL)
     bool restore(uint16_t slotId);
 
+    // HOT update: redirect one slot to another (PgPage only)
+    bool redirect(uint16_t fromSlotId, uint16_t toSlotId);
+
     // Compact: defragment page, reclaim deleted space
     void compact();
 

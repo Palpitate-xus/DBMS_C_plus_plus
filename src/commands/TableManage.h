@@ -729,6 +729,8 @@ public:
         std::set<uint64_t> activeTxnIds;
         const CommitLog* commitLog = nullptr; // for CLOG lookups
         bool isVisible(uint64_t rowTxnId) const;
+        // PostgreSQL-style visibility using full HeapTupleHeader row buffer
+        bool isVisible(const char* rowBuffer, size_t len, uint32_t formatVersion) const;
     };
 
     // Row iteration (public for execution plan use)

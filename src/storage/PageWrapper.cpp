@@ -72,6 +72,15 @@ bool PageWrapper::restore(uint16_t slotId) {
     }
 }
 
+bool PageWrapper::redirect(uint16_t fromSlotId, uint16_t toSlotId) {
+    if (usePgPage()) {
+        PgPage pg(buf_);
+        return pg.redirect(toInternalSlot(fromSlotId), toInternalSlot(toSlotId));
+    }
+    // Legacy Page does not support HOT redirect
+    return false;
+}
+
 void PageWrapper::compact() {
     if (usePgPage()) {
         PgPage pg(buf_);

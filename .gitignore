@@ -21,6 +21,7 @@ testoverdb/
 tmpidx/
 [0-9]*/
 *.tmp
+build/
 build-*/
 slow_query.log
 dbms.log

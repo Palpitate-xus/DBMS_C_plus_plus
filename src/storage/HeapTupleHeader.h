@@ -83,6 +83,42 @@ inline const HeapTupleHeaderData* castHeapHeader(const char* data) {
     return reinterpret_cast<const HeapTupleHeaderData*>(data);
 }
 
+// 获取/设置 ctid（指向最新版本的 ItemPointer）
+inline ItemPointer getCtid(const HeapTupleHeaderData* htup) {
+    return { htup->t_ctid_page, htup->t_ctid_offset };
+}
+inline void setCtid(HeapTupleHeaderData* htup, const ItemPointer& ctid) {
+    htup->t_ctid_page = ctid.pageId;
+    htup->t_ctid_offset = ctid.offset;
+}
+
+// 计算 header 总大小（包括 null bitmap）
+inline uint8_t computeHeapHeaderSize(int natts) {
+    size_t size = sizeof(HeapTupleHeaderData);
+    if (natts > 0) {
+        size += (natts + 7) / 8; // null bitmap
+    }
+    // 对齐到 MAXALIGN (8)
+    size = (size + MAXALIGN - 1) & ~(MAXALIGN - 1);
+    return static_cast<uint8_t>(size);
+}
+
+// 初始化 HeapTupleHeader
+inline void initHeapTupleHeader(HeapTupleHeaderData* htup, uint32_t xmin,
+                                uint16_t natts, bool hasNull = false,
+                                bool hasVarWidth = false) {
+    htup->t_fields.t_xmin = static_cast<uint32_t>(xmin);
+    htup->t_fields.t_xmax = 0;
+    htup->t_fields.t_cid = 0;
+    htup->t_ctid_page = 0;
+    htup->t_ctid_offset = 0;
+    htup->t_infomask2 = natts & HEAP_NATTS_MASK;
+    htup->t_infomask = 0;
+    if (hasNull) htup->t_infomask |= HEAP_HASNULL;
+    if (hasVarWidth) htup->t_infomask |= HEAP_HASVARWIDTH;
+    htup->t_hoff = computeHeapHeaderSize(static_cast<int>(natts));
+}
+
 // 获取 null bitmap 指针（紧跟在固定 header 之后）
 inline uint8_t* getNullBitmap(HeapTupleHeaderData* htup) {
     return reinterpret_cast<uint8_t*>(htup) + sizeof(HeapTupleHeaderData);
@@ -110,15 +146,41 @@ inline void setNotNull(HeapTupleHeaderData* htup, int attnum) {
     bits[attnum >> 3] |= (1 << (attnum & 0x07));
 }
 
-// 计算 header 总大小（包括 null bitmap）
-inline uint8_t computeHeapHeaderSize(int natts) {
-    size_t size = sizeof(HeapTupleHeaderData);
-    if (natts > 0) {
-        size += (natts + 7) / 8; // null bitmap
-    }
-    // 对齐到 MAXALIGN (8)
-    size = (size + MAXALIGN - 1) & ~(MAXALIGN - 1);
-    return static_cast<uint8_t>(size);
+// 检查 xmax 是否为锁标记（非删除）
+inline bool xmaxIsLock(const HeapTupleHeaderData* htup) {
+    return (htup->t_infomask & (HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK | HEAP_XMAX_LOCK_ONLY)) != 0;
+}
+
+// 检查 xmax 是否已提交（hint bit）
+inline bool xmaxCommitted(const HeapTupleHeaderData* htup) {
+    return (htup->t_infomask & HEAP_XMAX_COMMITTED) != 0;
+}
+inline bool xmaxInvalid(const HeapTupleHeaderData* htup) {
+    return (htup->t_infomask & HEAP_XMAX_INVALID) != 0;
+}
+inline bool xminCommitted(const HeapTupleHeaderData* htup) {
+    return (htup->t_infomask & HEAP_XMIN_COMMITTED) != 0;
+}
+inline bool xminInvalid(const HeapTupleHeaderData* htup) {
+    return (htup->t_infomask & HEAP_XMIN_INVALID) != 0;
+}
+
+// 设置/清除 hint bits
+inline void setXminCommitted(HeapTupleHeaderData* htup) {
+    htup->t_infomask |= HEAP_XMIN_COMMITTED;
+    htup->t_infomask &= ~HEAP_XMIN_INVALID;
+}
+inline void setXminInvalid(HeapTupleHeaderData* htup) {
+    htup->t_infomask |= HEAP_XMIN_INVALID;
+    htup->t_infomask &= ~HEAP_XMIN_COMMITTED;
+}
+inline void setXmaxCommitted(HeapTupleHeaderData* htup) {
+    htup->t_infomask |= HEAP_XMAX_COMMITTED;
+    htup->t_infomask &= ~HEAP_XMAX_INVALID;
+}
+inline void setXmaxInvalid(HeapTupleHeaderData* htup) {
+    htup->t_infomask |= HEAP_XMAX_INVALID;
+    htup->t_infomask &= ~HEAP_XMAX_COMMITTED;
 }
 
 // 获取实际列数据起始地址

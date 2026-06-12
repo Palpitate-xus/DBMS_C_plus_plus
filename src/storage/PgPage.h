@@ -100,6 +100,9 @@ public:
     // 恢复一行（将 LP_UNUSED 改回 LP_NORMAL，用于 ROLLBACK）
     bool restore(OffsetNumber linePtr);
 
+    // HOT update：将 from 行的 line pointer 重定向到 to 行
+    bool redirect(OffsetNumber fromLinePtr, OffsetNumber toLinePtr);
+
     // 读取一行
     bool get(OffsetNumber linePtr, const char*& data, size_t& len) const;
 

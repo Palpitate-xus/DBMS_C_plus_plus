@@ -159,6 +159,29 @@ bool PgPage::restore(OffsetNumber linePtr) {
 }
 
 // ============================================================================
+// HOT redirect: LP_NORMAL -> LP_REDIRECT
+// ============================================================================
+
+bool PgPage::redirect(OffsetNumber fromLinePtr, OffsetNumber toLinePtr) {
+    if (fromLinePtr == 0 || toLinePtr == 0) return false;
+    uint16_t n = numLinePointers();
+    if (fromLinePtr > n || toLinePtr > n) return false;
+
+    ItemIdData* fromId = itemId(fromLinePtr);
+    if (getLpFlags(fromId) != LP_NORMAL) return false;
+
+    ItemIdData* toId = itemId(toLinePtr);
+    if (getLpFlags(toId) != LP_NORMAL) return false;
+
+    // Redirect: store target offset in lp_off, set flag to LP_REDIRECT, len = 0
+    setLpOff(fromId, toLinePtr);
+    setLpLen(fromId, 0);
+    setLpFlags(fromId, LP_REDIRECT);
+    writeChecksum();
+    return true;
+}
+
+// ============================================================================
 // Get
 // ============================================================================
 
@@ -168,7 +191,25 @@ bool PgPage::get(OffsetNumber linePtr, const char*& data, size_t& len) const {
     if (linePtr > n) return false;
 
     const ItemIdData* id = itemId(linePtr);
-    if (getLpFlags(id) != LP_NORMAL) return false;
+    uint16_t flags = getLpFlags(id);
+
+    // Follow HOT redirect chain (with simple cycle guard)
+    if (flags == LP_REDIRECT) {
+        OffsetNumber target = getLpOff(id);
+        for (int guard = 0; guard < 16 && target != 0 && target <= n; ++guard) {
+            const ItemIdData* tid = itemId(target);
+            if (getLpFlags(tid) != LP_REDIRECT) {
+                id = tid;
+                flags = getLpFlags(id);
+                linePtr = target;
+                break;
+            }
+            target = getLpOff(tid);
+        }
+        if (flags == LP_REDIRECT) return false;
+    }
+
+    if (flags != LP_NORMAL) return false;
 
     uint16_t off = getLpOff(id);
     uint16_t l = getLpLen(id);

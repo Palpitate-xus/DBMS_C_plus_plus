@@ -1,6 +1,7 @@
 #include "TableManage.h"
 #include "TxnIdGenerator.h"
 #include "Config.h"
+#include "HeapTupleHeader.h"
 #include <cmath>
 
 extern dbms::Config g_config;
@@ -68,6 +69,10 @@ static std::string unescapeString(const std::string& s) {
 #include <cwctype>
 
 namespace dbms {
+
+// Forward declarations for row-header helpers used by TableSchema::rowSize().
+static bool usesHeapTupleHeader(uint32_t formatVersion);
+static size_t rowHeaderSize(uint32_t formatVersion, size_t natts);
 
 // Global active transaction tracking
 std::mutex StorageEngine::globalTxnMutex_;
@@ -177,6 +182,75 @@ bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
 
     // Fallback: assume committed for xids that left the active set
     return true;
+}
+
+// PostgreSQL-style visibility using HeapTupleHeader (formatVersion >= 2)
+bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint32_t formatVersion) const {
+    if (len == 0) return false;
+    if (!usesHeapTupleHeader(formatVersion)) {
+        uint64_t rowTxnId = 0;
+        std::memcpy(&rowTxnId, rowBuffer, sizeof(uint64_t));
+        return isVisible(rowTxnId);
+    }
+
+    if (len < sizeof(HeapTupleHeaderData)) return false;
+    const auto* htup = castHeapHeader(rowBuffer);
+
+    uint64_t xmin = htup->t_fields.t_xmin;
+    uint64_t xmax = htup->t_fields.t_xmax;
+
+    // Use hint bits when available
+    bool xminComm = xminCommitted(htup);
+    bool xminInv = xminInvalid(htup);
+    bool xmaxComm = xmaxCommitted(htup);
+    bool xmaxInv = xmaxInvalid(htup);
+
+    // --- xmin visibility ---
+    bool xminVisible = false;
+    if (xmin == 0 || xminComm) {
+        xminVisible = true;
+    } else if (xminInv) {
+        xminVisible = false;
+    } else if (xmin == creatorTxnId) {
+        xminVisible = true;
+    } else if (xmin < upLimitId) {
+        xminVisible = true;
+    } else if (xmin >= lowLimitId) {
+        xminVisible = false;
+    } else if (activeTxnIds.count(xmin)) {
+        xminVisible = false;
+    } else if (commitLog) {
+        auto s = commitLog->getStatus(static_cast<TxnId>(xmin));
+        xminVisible = (s == CommitLog::Status::Committed);
+    } else {
+        xminVisible = true; // fallback
+    }
+
+    if (!xminVisible) return false;
+
+    // --- xmax (deletion/lock) visibility ---
+    if (xmax == 0 || xmaxInv) return true; // not deleted
+    if (xmaxIsLock(htup)) return true;     // xmax is only a lock, not deletion
+
+    bool xmaxVisible = false; // true means row is still visible (delete not committed)
+    if (xmax == creatorTxnId) {
+        xmaxVisible = false; // current tx deleted it
+    } else if (xmaxComm) {
+        xmaxVisible = false;
+    } else if (xmax < upLimitId) {
+        xmaxVisible = false;
+    } else if (xmax >= lowLimitId) {
+        xmaxVisible = true;
+    } else if (activeTxnIds.count(xmax)) {
+        xmaxVisible = true;
+    } else if (commitLog) {
+        auto s = commitLog->getStatus(static_cast<TxnId>(xmax));
+        xmaxVisible = (s != CommitLog::Status::Committed);
+    } else {
+        xmaxVisible = true;
+    }
+
+    return xmaxVisible;
 }
 
 static std::string trim(const std::string& s) {
@@ -334,7 +408,7 @@ void TableSchema::print() const {
 size_t TableSchema::rowSize() const {
     size_t total = 0;
     for (size_t i = 0; i < len; ++i) total += cols[i].dsize;
-    return total + MVCC_HEADER_SIZE;
+    return total + rowHeaderSize(formatVersion, len);
 }
 
 bool TableSchema::hasVariableLength() const {
@@ -1180,6 +1254,164 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                                   uint64_t creatorTxnId);
 
 // ========================================================================
+// Row header abstraction: legacy 16-byte header vs PostgreSQL HeapTupleHeader
+// ========================================================================
+// formatVersion 0/1: 16 bytes [creatorTxnId:8][rollbackPtr:8]
+// formatVersion 2:   HeapTupleHeaderData (t_xmin/t_xmax/t_ctid/infomask/t_hoff)
+
+static constexpr size_t LEGACY_MVCC_HEADER_SIZE = 16;
+
+static bool usesHeapTupleHeader(uint32_t formatVersion) {
+    return formatVersion >= 2;
+}
+
+static size_t heapTupleHeaderSize(const TableSchema& tbl) {
+    return computeHeapHeaderSize(static_cast<int>(tbl.len));
+}
+
+static size_t rowHeaderSize(const TableSchema& tbl) {
+    return usesHeapTupleHeader(tbl.formatVersion) ? heapTupleHeaderSize(tbl) : LEGACY_MVCC_HEADER_SIZE;
+}
+
+static size_t rowHeaderSize(uint32_t formatVersion, size_t natts) {
+    return usesHeapTupleHeader(formatVersion) ? computeHeapHeaderSize(static_cast<int>(natts)) : LEGACY_MVCC_HEADER_SIZE;
+}
+
+static size_t dataOffset(const TableSchema& tbl) {
+    return rowHeaderSize(tbl);
+}
+
+static size_t dataOffset(uint32_t formatVersion, size_t natts) {
+    return rowHeaderSize(formatVersion, natts);
+}
+
+// Build a legacy 16-byte MVCC header
+static std::string buildLegacyHeader(uint64_t creatorTxnId) {
+    std::string header;
+    uint64_t rollbackPtr = 0;
+    header.append(reinterpret_cast<const char*>(&creatorTxnId), sizeof(uint64_t));
+    header.append(reinterpret_cast<const char*>(&rollbackPtr), sizeof(uint64_t));
+    return header;
+}
+
+// Build a PostgreSQL HeapTupleHeader
+static std::string buildHeapTupleHeader(const TableSchema& tbl,
+                                        uint64_t creatorTxnId,
+                                        bool hasNull,
+                                        bool hasVarWidth) {
+    std::string header;
+    header.resize(heapTupleHeaderSize(tbl), '\0');
+    auto* htup = castHeapHeader(header.data());
+    initHeapTupleHeader(htup,
+                        static_cast<uint32_t>(creatorTxnId),
+                        static_cast<uint16_t>(tbl.len),
+                        hasNull,
+                        hasVarWidth);
+    return header;
+}
+
+// Read xmin from a row buffer
+static uint64_t getRowXmin(const char* rowBuffer, size_t len, uint32_t formatVersion) {
+    if (len == 0) return 0;
+    if (usesHeapTupleHeader(formatVersion)) {
+        if (len < sizeof(HeapTupleHeaderData)) return 0;
+        auto* htup = castHeapHeader(rowBuffer);
+        return htup->t_fields.t_xmin;
+    }
+    uint64_t creatorTxnId = 0;
+    std::memcpy(&creatorTxnId, rowBuffer, sizeof(uint64_t));
+    return creatorTxnId;
+}
+
+// Read xmax from a row buffer
+static uint64_t getRowXmax(const char* rowBuffer, size_t len, uint32_t formatVersion) {
+    if (len == 0) return 0;
+    if (usesHeapTupleHeader(formatVersion)) {
+        if (len < sizeof(HeapTupleHeaderData)) return 0;
+        auto* htup = castHeapHeader(rowBuffer);
+        return htup->t_fields.t_xmax;
+    }
+    // Legacy header has no xmax; treat as never deleted
+    return 0;
+}
+
+// Set xmax on a mutable row buffer
+static void setRowXmax(char* rowBuffer, size_t len, uint32_t formatVersion, uint64_t xmax) {
+    if (len == 0) return;
+    if (usesHeapTupleHeader(formatVersion)) {
+        if (len < sizeof(HeapTupleHeaderData)) return;
+        auto* htup = castHeapHeader(rowBuffer);
+        htup->t_fields.t_xmax = static_cast<uint32_t>(xmax);
+    }
+    // Legacy: no-op
+}
+
+// Read ctid from a row buffer
+static ItemPointer getRowCtid(const char* rowBuffer, size_t len, uint32_t formatVersion) {
+    if (len == 0) return { INVALID_PAGE_ID, 0 };
+    if (usesHeapTupleHeader(formatVersion)) {
+        if (len < sizeof(HeapTupleHeaderData)) return { INVALID_PAGE_ID, 0 };
+        return getCtid(castHeapHeader(rowBuffer));
+    }
+    return { INVALID_PAGE_ID, 0 };
+}
+
+// Set ctid on a mutable row buffer
+static void setRowCtid(char* rowBuffer, size_t len, uint32_t formatVersion, const ItemPointer& ctid) {
+    if (len == 0) return;
+    if (usesHeapTupleHeader(formatVersion)) {
+        if (len < sizeof(HeapTupleHeaderData)) return;
+        setCtid(castHeapHeader(rowBuffer), ctid);
+    }
+}
+
+// Strip the MVCC header and return the payload data
+static std::string stripRowHeader(const char* rowBuffer, size_t len, uint32_t formatVersion, size_t natts) {
+    size_t hdrLen = rowHeaderSize(formatVersion, natts);
+    if (len <= hdrLen) return {};
+    if (usesHeapTupleHeader(formatVersion)) {
+        if (len < sizeof(HeapTupleHeaderData)) return {};
+        auto* htup = castHeapHeader(rowBuffer);
+        size_t off = htup->t_hoff;
+        if (off == 0 || off > len) off = hdrLen;
+        return std::string(rowBuffer + off, len - off);
+    }
+    return std::string(rowBuffer + hdrLen, len - hdrLen);
+}
+
+static std::string stripRowHeader(const std::string& rowBuffer, uint32_t formatVersion, size_t natts) {
+    return stripRowHeader(rowBuffer.data(), rowBuffer.size(), formatVersion, natts);
+}
+
+// Replace the payload data of a full row while preserving its MVCC header.
+// Used by transaction rollback to restore old column values.
+static std::string replaceRowData(const std::string& fullRow,
+                                  const std::string& newData,
+                                  uint32_t formatVersion,
+                                  size_t natts) {
+    if (fullRow.empty()) return newData;
+    size_t hdrLen = rowHeaderSize(formatVersion, natts);
+    if (fullRow.size() < hdrLen) return newData;
+    if (usesHeapTupleHeader(formatVersion)) {
+        const auto* htup = castHeapHeader(fullRow.data());
+        hdrLen = htup->t_hoff;
+    }
+    std::string result;
+    result.reserve(hdrLen + newData.size());
+    result.append(fullRow.data(), hdrLen);
+    result.append(newData);
+    return result;
+}
+
+// For header-stripped data, return the fixed-data offset for a given column index.
+// This mirrors buildRowBuffer's layout and is used by extractColumnValue.
+static size_t legacyDataOffset(uint32_t formatVersion, size_t natts) {
+    (void)formatVersion; (void)natts;
+    return 0; // stripped data always starts at 0
+}
+
+
+// ========================================================================
 // WITH CHECK OPTION helpers
 // ========================================================================
 
@@ -1429,8 +1661,7 @@ bool StorageEngine::validateViewCheckOption(
 
     // Build simulated row buffer and strip MVCC header
     std::string rowBuffer = buildRowBuffer(tbl, colValues, 0);
-    std::string dataOnly(rowBuffer.data() + MVCC_HEADER_SIZE,
-                         rowBuffer.size() - MVCC_HEADER_SIZE);
+    std::string dataOnly = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
 
     // Get view SQL and extract WHERE clause
     std::string viewSql = getViewSQL(dbname, viewname);
@@ -2818,6 +3049,32 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     if (!rv && inTransaction_) rv = &readView_;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+
+    // Helper: visibility check, SSI tracking, header stripping, then callback
+    auto emitRow = [
+        &callback, rv, this, fmtVer = tbl.formatVersion, natts = tbl.len
+    ](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+        if (len == 0) return;
+        size_t hdrLen = rowHeaderSize(fmtVer, natts);
+        if (len <= hdrLen) return;
+        if (rv) {
+            if (!rv->isVisible(data, len, fmtVer)) return;
+        }
+        if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+            int64_t rid = this->encodeRid(pid, sid);
+            this->txnReadRids_.insert(rid);
+            std::lock_guard<std::mutex> lock(ssiMutex_);
+            ssiReadSets_[this->currentTxnId_].insert(rid);
+        }
+        size_t off = dataOffset(fmtVer, natts);
+        if (usesHeapTupleHeader(fmtVer)) {
+            const auto* htup = castHeapHeader(data);
+            off = htup->t_hoff;
+        }
+        if (off >= len) return;
+        callback(pid, sid, data + off, len - off);
+    };
+
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         // Partitioned table: iterate over target partition files (or all if empty)
         std::vector<std::string> partNames = targetPartitions;
@@ -2848,31 +3105,12 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                         PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
                         bool allVisible = vm->isAllVisible(pid);
                         if (allVisible && !rv) {
-                            page.forEachLive([&callback, pid, this](uint16_t sid, const char* data, size_t len) {
-                                if (len <= MVCC_HEADER_SIZE) return;
-                                if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                                    int64_t rid = this->encodeRid(pid, sid);
-                                    this->txnReadRids_.insert(rid);
-                                    std::lock_guard<std::mutex> lock(ssiMutex_);
-                                    ssiReadSets_[this->currentTxnId_].insert(rid);
-                                }
-                                callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                            page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
+                                emitRow(pid, sid, data, len);
                             });
                         } else {
-                            page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
-                                if (len <= MVCC_HEADER_SIZE) return;
-                                if (rv) {
-                                    uint64_t rowTxnId = 0;
-                                    std::memcpy(&rowTxnId, data, sizeof(uint64_t));
-                                    if (!rv->isVisible(rowTxnId)) return;
-                                }
-                                if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                                    int64_t rid = this->encodeRid(pid, sid);
-                                    this->txnReadRids_.insert(rid);
-                                    std::lock_guard<std::mutex> lock(ssiMutex_);
-                                    ssiReadSets_[this->currentTxnId_].insert(rid);
-                                }
-                                callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                            page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
+                                emitRow(pid, sid, data, len);
                             });
                         }
                         ppa->unpinPage(pid);
@@ -2891,31 +3129,12 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
                     bool allVisible = vm->isAllVisible(pid);
                     if (allVisible && !rv) {
-                        page.forEachLive([&callback, pid, this](uint16_t sid, const char* data, size_t len) {
-                            if (len <= MVCC_HEADER_SIZE) return;
-                            if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                                int64_t rid = this->encodeRid(pid, sid);
-                                this->txnReadRids_.insert(rid);
-                                std::lock_guard<std::mutex> lock(ssiMutex_);
-                                ssiReadSets_[this->currentTxnId_].insert(rid);
-                            }
-                            callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
+                            emitRow(pid, sid, data, len);
                         });
                     } else {
-                        page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
-                            if (len <= MVCC_HEADER_SIZE) return;
-                            if (rv) {
-                                uint64_t rowTxnId = 0;
-                                std::memcpy(&rowTxnId, data, sizeof(uint64_t));
-                                if (!rv->isVisible(rowTxnId)) return;
-                            }
-                            if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                                int64_t rid = this->encodeRid(pid, sid);
-                                this->txnReadRids_.insert(rid);
-                                std::lock_guard<std::mutex> lock(ssiMutex_);
-                                ssiReadSets_[this->currentTxnId_].insert(rid);
-                            }
-                            callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
+                            emitRow(pid, sid, data, len);
                         });
                     }
                     ppa->unpinPage(pid);
@@ -2935,36 +3154,11 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = pa->fetchPage(pid);
         PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-        // VM optimization: skip MVCC check if page is AllVisible and no ReadView
-        bool allVisible = vm->isAllVisible(pid);
-        if (allVisible && !rv) {
-            page.forEachLive([&callback, pid, this](uint16_t sid, const char* data, size_t len) {
-                if (len <= MVCC_HEADER_SIZE) return;
-                if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                    int64_t rid = this->encodeRid(pid, sid);
-                    this->txnReadRids_.insert(rid);
-                    std::lock_guard<std::mutex> lock(ssiMutex_);
-                    ssiReadSets_[this->currentTxnId_].insert(rid);
-                }
-                callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
-            });
-        } else {
-            page.forEachLive([&callback, pid, rv, this](uint16_t sid, const char* data, size_t len) {
-                if (len <= MVCC_HEADER_SIZE) return;
-                if (rv) {
-                    uint64_t rowTxnId = 0;
-                    std::memcpy(&rowTxnId, data, sizeof(uint64_t));
-                    if (!rv->isVisible(rowTxnId)) return;
-                }
-                if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
-                    int64_t rid = this->encodeRid(pid, sid);
-                    this->txnReadRids_.insert(rid);
-                    std::lock_guard<std::mutex> lock(ssiMutex_);
-                    ssiReadSets_[this->currentTxnId_].insert(rid);
-                }
-                callback(pid, sid, data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
-            });
-        }
+        // VM optimization is implicitly handled by emitRow (no ReadView = no visibility skip)
+        (void)vm->isAllVisible(pid);
+        page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
+            emitRow(pid, sid, data, len);
+        });
         pa->unpinPage(pid);
         lockManager_.pageUnlock(dbname, tablename, pid);
     }
@@ -2983,11 +3177,7 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
     bool ok = page.read(slotId, data, len);
     pa->unpinPage(pageId);
     if (!ok) return false;
-    if (len > MVCC_HEADER_SIZE) {
-        rowBuffer.assign(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
-    } else {
-        rowBuffer.clear();
-    }
+    rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
     return true;
 }
 
@@ -7016,14 +7206,25 @@ static std::vector<StorageEngine::Condition> parseCheckConditions(const std::str
 static std::string buildRowBuffer(const TableSchema& tbl,
                                    const std::map<std::string, std::string>& values,
                                    uint64_t creatorTxnId) {
+    bool hasNull = false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        auto it = values.find(tbl.cols[i].dataName);
+        if (it == values.end() || it->second.empty()) {
+            hasNull = true;
+            break;
+        }
+    }
+
     std::string rowBuffer;
-    uint64_t rollbackPtr = 0;
-    rowBuffer.append(reinterpret_cast<const char*>(&creatorTxnId), sizeof(uint64_t));
-    rowBuffer.append(reinterpret_cast<const char*>(&rollbackPtr), sizeof(uint64_t));
+    if (usesHeapTupleHeader(tbl.formatVersion)) {
+        rowBuffer = buildHeapTupleHeader(tbl, creatorTxnId, hasNull, tbl.hasVariableLength());
+    } else {
+        rowBuffer = buildLegacyHeader(creatorTxnId);
+    }
 
     if (!tbl.hasVariableLength()) {
         rowBuffer.resize(tbl.rowSize(), '\0');
-        size_t offset = MVCC_HEADER_SIZE;
+        size_t offset = dataOffset(tbl);
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
@@ -7583,8 +7784,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
     std::string rowBuffer = buildRowBuffer(tbl, actualValues, creatorTxnId);
 
     // Check CHECK constraints before writing
-    std::string strippedRow(rowBuffer.data() + MVCC_HEADER_SIZE,
-                            rowBuffer.size() - MVCC_HEADER_SIZE);
+    std::string strippedRow = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (col.checkExpr.empty()) continue;
@@ -7791,6 +7991,27 @@ OpResult StorageEngine::insert(const std::string& dbname,
     }
 
     int64_t rid = encodeRid(pageId, slotId);
+
+    // For PostgreSQL-style tuples, set ctid to point to self after insertion.
+    if (usesHeapTupleHeader(tbl.formatVersion)) {
+        lockManager_.pageLockExclusive(dbname, tablename, pageId);
+        char* buf = pa->fetchPage(pageId);
+        if (buf) {
+            PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
+            const char* data = nullptr;
+            size_t len = 0;
+            if (page.read(slotId, data, len)) {
+                ItemPointer selfCtid{ pageId, static_cast<OffsetNumber>(slotId + 1) };
+                // Mutable copy: rewrite tuple with updated ctid
+                std::string mutableRow(data, len);
+                setRowCtid(mutableRow.data(), mutableRow.size(), tbl.formatVersion, selfCtid);
+                page.update(slotId, mutableRow.data(), mutableRow.size());
+                pa->markDirty(pageId);
+            }
+            pa->unpinPage(pageId);
+        }
+        lockManager_.pageUnlock(dbname, tablename, pageId);
+    }
 
     // Log for transaction rollback
     if (inTransaction_ && dbname == txnDB_) {
@@ -8397,7 +8618,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
                         for (size_t ci : sa.colIndices) {
                             rowValues[otbl.cols[ci].dataName] = "";
                         }
-                        std::string newRow = buildRowBuffer(otbl, rowValues, 0);
+                        std::string newRow = buildRowBuffer(otbl, rowValues, currentTxnId_);
                         uint32_t pid; uint16_t sid;
                         decodeRid(sa.rid, pid, sid);
                         char* pbuf = opa->fetchPage(pid);
@@ -8524,6 +8745,16 @@ OpResult StorageEngine::remove(const std::string& dbname,
         char* pageBuf = pa->fetchPage(pageId);
         if (pageBuf) {
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+            // Mark row as deleted by setting xmax for PostgreSQL-style tuples.
+            if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
+                const char* data = nullptr;
+                size_t len = 0;
+                if (page.read(slotId, data, len)) {
+                    std::string mutableRow(data, len);
+                    setRowXmax(mutableRow.data(), mutableRow.size(), tbl.formatVersion, currentTxnId_);
+                    page.update(slotId, mutableRow.data(), mutableRow.size());
+                }
+            }
             page.remove(slotId);
             pa->markDirty(pageId);
             size_t freePct = page.freeSpace() * 100 / pa->pageSize();
@@ -8796,15 +9027,15 @@ OpResult StorageEngine::update(const std::string& dbname,
         // TOAST: delete old toast entries, create new ones for large values
         deleteRowToast(dbname, tablename, rid);
         prepareToastValues(dbname, tablename, tbl, rowValues);
-        std::string newRow = buildRowBuffer(tbl, rowValues, 0);
+        uint64_t updateTxnId = inTransaction_ ? currentTxnId_ : 0;
+        std::string newRow = buildRowBuffer(tbl, rowValues, updateTxnId);
 
         // Write back via PageAllocator
         uint32_t pageId; uint16_t slotId;
         decodeRid(rid, pageId, slotId);
 
         // Check CHECK constraints before writing
-        std::string strippedNewRow(newRow.data() + MVCC_HEADER_SIZE,
-                                   newRow.size() - MVCC_HEADER_SIZE);
+        std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (col.checkExpr.empty()) continue;
@@ -8938,7 +9169,7 @@ OpResult StorageEngine::update(const std::string& dbname,
                 for (size_t ci : sa.colIndices) {
                     oRowVals[otbl.cols[ci].dataName] = "";
                 }
-                std::string newORow = buildRowBuffer(otbl, oRowVals, 0);
+                std::string newORow = buildRowBuffer(otbl, oRowVals, currentTxnId_);
                 uint32_t opid; uint16_t osid;
                 decodeRid(sa.rid, opid, osid);
                 char* obuf = opa->fetchPage(opid);
@@ -8969,7 +9200,7 @@ OpResult StorageEngine::update(const std::string& dbname,
                 for (const auto& kv : ca.newFkVals) {
                     oRowVals[kv.first] = kv.second;
                 }
-                std::string newORow = buildRowBuffer(otbl, oRowVals, 0);
+                std::string newORow = buildRowBuffer(otbl, oRowVals, currentTxnId_);
                 uint32_t opid; uint16_t osid;
                 decodeRid(ca.rid, opid, osid);
                 char* obuf = opa->fetchPage(opid);
@@ -8991,13 +9222,86 @@ OpResult StorageEngine::update(const std::string& dbname,
         if (pageBuf) {
             lockManager_.pageLockExclusive(dbname, tablename, pageId);
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-            uint16_t newSlotId = slotId;
-            if (!page.update(slotId, newRow.data(), newRow.size(), newSlotId)) {
-                pa->unpinPage(pageId);
-                lockManager_.pageUnlock(dbname, tablename, pageId);
-                lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+            // Mark old row as updated (xmax) for PostgreSQL-style tuples.
+            if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
+                const char* oldData = nullptr;
+                size_t oldLen = 0;
+                if (page.read(slotId, oldData, oldLen)) {
+                    std::string mutableOld(oldData, oldLen);
+                    setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, currentTxnId_);
+                    uint16_t dummySlot = slotId;
+                    page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
+                }
             }
+            uint16_t newSlotId = slotId;
+            bool usedHot = false;
+
+            // Attempt HOT update for PostgreSQL-style tuples when no indexed column changes.
+            if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
+                bool indexesAffected = false;
+                for (const auto& kv : oldIdxVals) {
+                    size_t colIdx = tbl.len;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == kv.first) { colIdx = i; break; }
+                    }
+                    if (colIdx < tbl.len && colUpdates.find(colIdx) != colUpdates.end()) {
+                        indexesAffected = true;
+                        break;
+                    }
+                }
+                if (!indexesAffected && !tbl.hasPrimaryKey()) {
+                    // Try to insert new version on the same page and redirect old line pointer.
+                    if (page.canFit(newRow.size())) {
+                        if (page.insert(newRow.data(), newRow.size(), newSlotId)) {
+                            ItemPointer newCtid{ pageId, static_cast<OffsetNumber>(newSlotId + 1) };
+                            const char* oldData = nullptr;
+                            size_t oldLen = 0;
+                            if (page.read(slotId, oldData, oldLen)) {
+                                std::string mutableOld(oldData, oldLen);
+                                setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, currentTxnId_);
+                                setRowCtid(mutableOld.data(), mutableOld.size(), tbl.formatVersion, newCtid);
+                                uint16_t dummySlot = slotId;
+                                page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
+                                page.redirect(slotId, newSlotId);
+                            }
+                            usedHot = true;
+                        }
+                    }
+                }
+            }
+
+            if (!usedHot) {
+                // Mark old row as updated (xmax) for PostgreSQL-style tuples.
+                if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
+                    const char* oldData = nullptr;
+                    size_t oldLen = 0;
+                    if (page.read(slotId, oldData, oldLen)) {
+                        std::string mutableOld(oldData, oldLen);
+                        setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, currentTxnId_);
+                        uint16_t dummySlot = slotId;
+                        page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
+                    }
+                }
+                if (!page.update(slotId, newRow.data(), newRow.size(), newSlotId)) {
+                    pa->unpinPage(pageId);
+                    lockManager_.pageUnlock(dbname, tablename, pageId);
+                    lockManager_.unlock(tablename);
+                    return OpResult::InvalidValue;
+                }
+            }
+
+            // Set ctid of the new (or updated) row to point to itself.
+            if (usesHeapTupleHeader(tbl.formatVersion)) {
+                const char* finalData = nullptr;
+                size_t finalLen = 0;
+                if (page.read(newSlotId, finalData, finalLen)) {
+                    std::string mutableFinal(finalData, finalLen);
+                    ItemPointer selfCtid{ pageId, static_cast<OffsetNumber>(newSlotId + 1) };
+                    setRowCtid(mutableFinal.data(), mutableFinal.size(), tbl.formatVersion, selfCtid);
+                    page.update(newSlotId, mutableFinal.data(), mutableFinal.size());
+                }
+            }
+
             pa->markDirty(pageId);
             size_t freePct = page.freeSpace() * 100 / pa->pageSize();
             getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
@@ -13249,14 +13553,14 @@ OpResult StorageEngine::rollbackTransaction() {
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
                 bool got = page.read(slotId, currentData, currentLen);
-                if (got && currentLen >= MVCC_HEADER_SIZE) {
-                    currentRow.assign(currentData + MVCC_HEADER_SIZE, currentLen - MVCC_HEADER_SIZE);
+                if (got && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
+                    currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len);
                     foundCurrent = true;
                 } else if (!got) {
                     std::string targetPk = extractPKValue(it->rowData, tbl);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
-                        if (foundCurrent || len <= MVCC_HEADER_SIZE) return;
-                        std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
+                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
                         std::string pk = extractPKValue(rowData, tbl);
                         if (pk == targetPk) {
                             currentRow = rowData;
@@ -13265,22 +13569,20 @@ OpResult StorageEngine::rollbackTransaction() {
                     });
                 }
                 // Restore old row data
-                if (got && currentLen >= MVCC_HEADER_SIZE) {
-                    std::string fullRow;
-                    fullRow.append(currentData, MVCC_HEADER_SIZE);  // keep MVCC header
-                    fullRow.append(it->rowData);                    // restore old data
+                if (got && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
+                    std::string fullRow = replaceRowData(
+                        std::string(currentData, currentLen), it->rowData, tbl.formatVersion, tbl.len);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else if (!got) {
                     std::string targetPk = extractPKValue(it->rowData, tbl);
                     bool restored = false;
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
-                        if (restored || len <= MVCC_HEADER_SIZE) return;
-                        std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
+                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
                         std::string pk = extractPKValue(rowData, tbl);
                         if (pk == targetPk) {
-                            std::string fullRow;
-                            fullRow.append(data, MVCC_HEADER_SIZE);
-                            fullRow.append(it->rowData);
+                            std::string fullRow = replaceRowData(
+                                std::string(data, len), it->rowData, tbl.formatVersion, tbl.len);
                             page.update(sid, fullRow.data(), fullRow.size());
                             restored = true;
                         }
@@ -13327,10 +13629,10 @@ OpResult StorageEngine::rollbackTransaction() {
                 // Overwrite with the logged old data (preserving any MVCC header).
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
-                if (page.read(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
-                    std::string fullRow;
-                    fullRow.append(currentData, MVCC_HEADER_SIZE);
-                    fullRow.append(it->rowData);
+                size_t hdrLen = rowHeaderSize(tbl.formatVersion, tbl.len);
+                if (page.read(slotId, currentData, currentLen) && currentLen >= hdrLen) {
+                    std::string fullRow = replaceRowData(
+                        std::string(currentData, currentLen), it->rowData, tbl.formatVersion, tbl.len);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else {
                     page.update(slotId, it->rowData.data(), it->rowData.size());
@@ -13657,14 +13959,14 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
                 // Read current row data before restoring (needed to remove stale index entries)
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
-                if (page.read(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
-                    currentRow.assign(currentData + MVCC_HEADER_SIZE, currentLen - MVCC_HEADER_SIZE);
+                if (page.read(slotId, currentData, currentLen) && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
+                    currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len);
                     foundCurrent = true;
                 } else {
                     std::string targetPk = extractPKValue(entry.rowData, tbl);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
-                        if (foundCurrent || len <= MVCC_HEADER_SIZE) return;
-                        std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
+                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
                         std::string pk = extractPKValue(rowData, tbl);
                         if (pk == targetPk) {
                             currentRow = rowData;
@@ -13673,22 +13975,20 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
                     });
                 }
                 // Restore old row data
-                if (page.read(slotId, currentData, currentLen) && currentLen >= MVCC_HEADER_SIZE) {
-                    std::string fullRow;
-                    fullRow.append(currentData, MVCC_HEADER_SIZE);
-                    fullRow.append(entry.rowData);
+                if (page.read(slotId, currentData, currentLen) && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
+                    std::string fullRow = replaceRowData(
+                        std::string(currentData, currentLen), entry.rowData, tbl.formatVersion, tbl.len);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else {
                     std::string targetPk = extractPKValue(entry.rowData, tbl);
                     bool restored = false;
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
-                        if (restored || len <= MVCC_HEADER_SIZE) return;
-                        std::string rowData(data + MVCC_HEADER_SIZE, len - MVCC_HEADER_SIZE);
+                        if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
+                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
                         std::string pk = extractPKValue(rowData, tbl);
                         if (pk == targetPk) {
-                            std::string fullRow;
-                            fullRow.append(data, MVCC_HEADER_SIZE);
-                            fullRow.append(entry.rowData);
+                            std::string fullRow = replaceRowData(
+                                std::string(data, len), entry.rowData, tbl.formatVersion, tbl.len);
                             page.update(sid, fullRow.data(), fullRow.size());
                             restored = true;
                         }

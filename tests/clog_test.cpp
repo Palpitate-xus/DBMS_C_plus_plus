@@ -1,3 +1,4 @@
+// test_sources: src/storage/CommitLog.cpp
 #include "CommitLog.h"
 #include <cassert>
 #include <iostream>
