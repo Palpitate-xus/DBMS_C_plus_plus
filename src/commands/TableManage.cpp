@@ -159,10 +159,23 @@ static std::string toLowerUtf8(const std::string& s) {
 }
 
 bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
-    if (rowTxnId == creatorTxnId) return true;
-    if (rowTxnId < upLimitId) return true;
-    if (rowTxnId >= lowLimitId) return false;
-    if (activeTxnIds.count(rowTxnId)) return false;
+    if (rowTxnId == 0) return true;              // non-transactional rows always visible
+    if (rowTxnId == creatorTxnId) return true;   // inserted by current transaction
+    if (rowTxnId < upLimitId) return true;       // all older xids committed
+    if (rowTxnId >= lowLimitId) return false;    // all newer xids not started
+    if (activeTxnIds.count(rowTxnId)) return false; // still in progress
+
+    // For xids in [upLimitId, lowLimitId) that are no longer active,
+    // consult CLOG to distinguish committed vs aborted.
+    if (commitLog) {
+        auto status = commitLog->getStatus(static_cast<TxnId>(rowTxnId));
+        if (status == CommitLog::Status::Committed) return true;
+        if (status == CommitLog::Status::Aborted) return false;
+        // SUB_COMMITTED: not visible until parent commits (simplified)
+        if (status == CommitLog::Status::SubCommitted) return false;
+    }
+
+    // Fallback: assume committed for xids that left the active set
     return true;
 }
 
@@ -2704,6 +2717,20 @@ VisibilityMap* StorageEngine::getVM(const std::string& dbname,
 
 void StorageEngine::closeAllVM() {
     vmCache_.clear();
+}
+
+CommitLog* StorageEngine::getCommitLog(const std::string& dbname) const {
+    auto it = commitLogs_.find(dbname);
+    if (it != commitLogs_.end()) return it->second.get();
+
+    auto clog = std::make_unique<CommitLog>(dbPath(dbname).string());
+    CommitLog* ptr = clog.get();
+    commitLogs_[dbname] = std::move(clog);
+    return ptr;
+}
+
+void StorageEngine::closeAllCommitLogs() {
+    commitLogs_.clear();
 }
 
 void StorageEngine::migrateToPageStorage(const std::string& dbname,
@@ -12628,6 +12655,7 @@ void StorageEngine::refreshReadView() {
     readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
     readView_.activeTxnIds = activeTransactions_;
     readView_.activeTxnIds.erase(currentTxnId_);
+    readView_.commitLog = getCommitLog(txnDB_);
 }
 
 // ========================================================================
@@ -13056,6 +13084,7 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
         readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
         readView_.activeTxnIds = activeTransactions_;
         readView_.activeTxnIds.erase(currentTxnId_);
+        readView_.commitLog = getCommitLog(dbname);
     }
 
     txnLog_.clear();
@@ -13127,6 +13156,10 @@ OpResult StorageEngine::commitTransaction() {
         txnWrittenRids_.clear();
     }
 
+    // Update CLOG before clearing state
+    CommitLog* clog = getCommitLog(txnDB_);
+    if (clog) clog->setStatus(currentTxnId_, CommitLog::Status::Committed);
+
     // Update max committed txId
     TxnIdGenerator::instance().notifyCommit(currentTxnId_);
     // Remove from active set
@@ -13150,6 +13183,11 @@ OpResult StorageEngine::commitTransaction() {
 
 OpResult StorageEngine::rollbackTransaction() {
     if (!inTransaction_) return OpResult::Success;
+
+    // Mark transaction as aborted in CLOG
+    CommitLog* clog = getCommitLog(txnDB_);
+    if (clog) clog->setStatus(currentTxnId_, CommitLog::Status::Aborted);
+
     // Remove from active set (aborted, not committed)
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);

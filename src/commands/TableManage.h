@@ -18,6 +18,7 @@
 #include "FreeSpaceMap.h"
 #include "VisibilityMap.h"
 #include "PageWrapper.h"
+#include "CommitLog.h"
 #include "LockManager.h"
 #include "HashIndex.h"
 #include "SPGiSTIndex.h"
@@ -726,6 +727,7 @@ public:
         uint64_t upLimitId = 0;
         uint64_t lowLimitId = 0;
         std::set<uint64_t> activeTxnIds;
+        const CommitLog* commitLog = nullptr; // for CLOG lookups
         bool isVisible(uint64_t rowTxnId) const;
     };
 
@@ -867,6 +869,9 @@ public:
 public:
     std::filesystem::path dbPath(const std::string& dbname) const;
 
+    // CommitLog access (lazy init)
+    CommitLog* getCommitLog(const std::string& dbname) const;
+
 private:
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path paramsPath(const std::string& dbname, const std::string& tablename) const;
@@ -973,6 +978,10 @@ private:
     mutable std::map<std::string, std::unique_ptr<VisibilityMap>> vmCache_;
     void closeAllFSM();
     void closeAllVM();
+
+    // CommitLog (pg_xact)
+    mutable std::unordered_map<std::string, std::unique_ptr<CommitLog>> commitLogs_;
+    void closeAllCommitLogs();
 
     // B+ Tree primary key index
     std::filesystem::path indexPath(const std::string& dbname, const std::string& tablename) const;

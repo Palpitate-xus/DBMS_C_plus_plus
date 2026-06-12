@@ -33,6 +33,7 @@ set(DBMS_SOURCES
     src/storage/PageWrapper.cpp
     src/storage/FreeSpaceMap.cpp
     src/storage/VisibilityMap.cpp
+    src/storage/CommitLog.cpp
     src/access/BPTree.cpp
     src/access/HashIndex.cpp
     src/access/SPGiSTIndex.cpp

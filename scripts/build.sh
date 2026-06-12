@@ -28,13 +28,17 @@ SOURCES=(
     src/storage/PageWrapper.cpp
     src/storage/FreeSpaceMap.cpp
     src/storage/VisibilityMap.cpp
+    src/storage/CommitLog.cpp
     src/access/BPTree.cpp
     src/access/HashIndex.cpp
     src/access/SPGiSTIndex.cpp
+    src/access/BPTreeIndexAM.cpp
+    src/access/HashIndexAM.cpp
     src/transaction/LockManager.cpp
     src/transaction/TxnIdGenerator.cpp
     src/network/NetworkServer.cpp
     src/common/Config.cpp
+    src/parser/parser.cpp
 )
 
 # 选择 TLS 实现
@@ -60,6 +64,8 @@ INCLUDES=(
     -Isrc/optimizer
     -Isrc/commands
     -Isrc/interfaces
+    -Isrc/parser
+    -Isrc/catalog
 )
 
 # 编译选项
