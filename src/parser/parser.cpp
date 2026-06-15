@@ -30,6 +30,13 @@ std::string SQLParser::toLower(const std::string& s) {
     return r;
 }
 
+static std::string toUpper(const std::string& s) {
+    std::string r = s;
+    std::transform(r.begin(), r.end(), r.begin(),
+                   [](unsigned char c){ return std::toupper(c); });
+    return r;
+}
+
 std::string SQLParser::trim(const std::string& s) {
     size_t a = 0;
     while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
@@ -97,7 +104,7 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
             c == '=' || c == '<' || c == '>' || c == '+' || c == '-' ||
             c == '/' || c == '%' || c == '^' || c == '~' || c == '!' ||
             c == '|' || c == '&' || c == '#' || c == '@' || c == '?' ||
-            c == ':' || c == '[' || c == ']') {
+            c == ':' || c == '[' || c == ']' || c == '.') {
             if (!cur.empty()) {
                 tokens.push_back(cur);
                 cur.clear();
@@ -109,7 +116,7 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
                 if (two == "<=" || two == ">=" || two == "<>" || two == "!=" ||
                     two == "::" || two == "||" || two == "->" || two == "~*" ||
                     two == "!~" || two == "@@" || two == "&&" || two == "<<" ||
-                    two == ">>") {
+                    two == ">>" || two == "=>") {
                     tokens.push_back(two);
                     ++i;
                     continue;
@@ -1199,11 +1206,51 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
     std::string first = tokens[pos];
     ++pos;
 
-    // Function call: func_name( ... )
+    // Collect possible qualified name parts before deciding function vs column.
+    std::string second, third;
+    bool hasSecond = false, hasThird = false;
+    if (pos < tokens.size() && tokens[pos] == ".") {
+        ++pos;
+        if (pos < tokens.size()) { second = tokens[pos++]; hasSecond = true; }
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) { third = tokens[pos++]; hasThird = true; }
+        }
+    }
+
+    // Function call: func_name( ... ) or schema.func( ... )
     if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos;
         auto func = std::make_unique<FunctionCallExpr>();
-        func->funcName = first;
+        if (hasThird) {
+            func->schema = first;
+            func->funcName = third;
+            (void)second;
+        } else if (hasSecond) {
+            func->schema = first;
+            func->funcName = second;
+        } else {
+            func->funcName = first;
+        }
+
+        auto parseArg = [&](ExprPtr arg) {
+            // Detect named argument: name => value
+            if (arg && arg->type == ExprType::ColumnRef && pos + 1 < tokens.size() &&
+                ((tokens[pos] == "=" && tokens[pos + 1] == ">") || tokens[pos] == "=>")) {
+                FunctionCallExpr::NamedArg na;
+                na.name = static_cast<ColumnRefExpr*>(arg.get())->column;
+                if (tokens[pos] == "=>") {
+                    ++pos;
+                } else {
+                    pos += 2; // skip '=' and '>'
+                }
+                na.value = parseExpr(tokens, pos);
+                func->namedArgs.push_back(std::move(na));
+            } else if (arg) {
+                func->args.push_back(std::move(arg));
+            }
+        };
+
         while (pos < tokens.size() && tokens[pos] != ")") {
             if (SQLParser::toLower(tokens[pos]) == "distinct") {
                 func->distinct = true;
@@ -1218,7 +1265,6 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
                 bool asc = true;
                 if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
                 else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
-                // Store in a special arg or encode somehow
                 if (orderExpr) {
                     auto orderLit = std::make_unique<LiteralExpr>();
                     orderLit->value = "ORDER BY " + orderExpr->toString() + (asc ? " ASC" : " DESC");
@@ -1228,7 +1274,7 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
                 continue;
             }
             auto arg = parseExpr(tokens, pos);
-            if (arg) func->args.push_back(std::move(arg));
+            parseArg(std::move(arg));
             if (pos < tokens.size() && tokens[pos] == ",") {
                 ++pos;
                 continue;
@@ -1245,16 +1291,64 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
             if (pos < tokens.size() && tokens[pos] == ")") ++pos;
         }
 
-        // OVER (...) - window function (placeholder: collect and drop for now)
+        // OVER (...) - window function
         if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "over") {
             ++pos;
+            WindowDef winDef;
             if (pos < tokens.size() && tokens[pos] == "(") {
                 ++pos;
-                while (pos < tokens.size() && tokens[pos] != ")") ++pos;
+                while (pos < tokens.size() && tokens[pos] != ")") {
+                    std::string w = SQLParser::toLower(tokens[pos]);
+                    if (w == "partition") {
+                        ++pos;
+                        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "by") ++pos;
+                        while (pos < tokens.size() && tokens[pos] != ")" &&
+                               SQLParser::toLower(tokens[pos]) != "order" &&
+                               SQLParser::toLower(tokens[pos]) != "rows" &&
+                               SQLParser::toLower(tokens[pos]) != "range" &&
+                               SQLParser::toLower(tokens[pos]) != "groups") {
+                            auto part = parseExpr(tokens, pos);
+                            if (part) winDef.partitionBy.push_back(std::move(part));
+                            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                        }
+                    } else if (w == "order") {
+                        ++pos;
+                        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "by") ++pos;
+                        while (pos < tokens.size() && tokens[pos] != ")" &&
+                               SQLParser::toLower(tokens[pos]) != "rows" &&
+                               SQLParser::toLower(tokens[pos]) != "range" &&
+                               SQLParser::toLower(tokens[pos]) != "groups") {
+                            auto obExpr = parseExpr(tokens, pos);
+                            bool asc = true;
+                            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
+                            else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
+                            if (obExpr) winDef.orderBy.emplace_back(std::move(obExpr), asc);
+                            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                        }
+                    } else if (w == "rows" || w == "range" || w == "groups") {
+                        winDef.frameMode = w; ++pos;
+                        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "between") {
+                            ++pos;
+                            winDef.frameStart = parseExpr(tokens, pos);
+                            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "and") { ++pos; winDef.frameEnd = parseExpr(tokens, pos); }
+                        } else {
+                            winDef.frameStart = parseExpr(tokens, pos);
+                        }
+                        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "exclude") {
+                            ++pos;
+                            if (pos < tokens.size()) winDef.frameExclusion = SQLParser::toLower(tokens[pos++]);
+                        }
+                    } else {
+                        ++pos;
+                    }
+                }
                 if (pos < tokens.size() && tokens[pos] == ")") ++pos;
             } else if (pos < tokens.size()) {
-                ++pos; // named window reference
+                winDef.name = tokens[pos++]; // named window reference
             }
+            // Attach window specification to the function call.
+            func->hasOver = true;
+            func->over = std::move(winDef);
         }
 
         return func;
@@ -1262,22 +1356,13 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
 
     // Column reference: schema.table.column, table.column, or just column
     std::string schemaName, tableName, colName = first;
-    if (pos < tokens.size() && tokens[pos] == ".") {
-        ++pos;
-        if (pos < tokens.size()) {
-            std::string second = tokens[pos++];
-            if (pos < tokens.size() && tokens[pos] == ".") {
-                // schema.table.column
-                ++pos;
-                schemaName = first;
-                tableName = second;
-                if (pos < tokens.size()) colName = tokens[pos++];
-            } else {
-                // table.column
-                tableName = first;
-                colName = second;
-            }
-        }
+    if (hasThird) {
+        schemaName = first;
+        tableName = second;
+        colName = third;
+    } else if (hasSecond) {
+        tableName = first;
+        colName = second;
     }
 
     auto colRef = std::make_unique<ColumnRefExpr>();
@@ -1551,7 +1636,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         stmt->whereClause = parseSimpleExpr(tokens, pos);
     }
 
-    // GROUP BY
+    // GROUP BY (with ROLLUP / CUBE / GROUPING SETS support)
     if (pos < tokens.size() && toLower(tokens[pos]) == "group") {
         ++pos;
         if (pos < tokens.size() && toLower(tokens[pos]) == "by") ++pos;
@@ -1559,8 +1644,59 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             std::string w = toLower(tokens[pos]);
             if (w == "having" || w == "order" || w == "limit" || w == "offset"
                 || w == "union" || w == "intersect" || w == "except" || w == "for") break;
-            auto expr = parseSimpleExpr(tokens, pos);
-            if (expr) stmt->groupBy.push_back(std::move(expr));
+
+            SelectStmt::GroupByElem elem;
+            if (w == "rollup") {
+                elem.kind = SelectStmt::GroupByElem::Kind::Rollup; ++pos;
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    ++pos;
+                    while (pos < tokens.size() && tokens[pos] != ")") {
+                        auto expr = parseSimpleExpr(tokens, pos);
+                        if (expr) elem.exprs.push_back(std::move(expr));
+                        if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                    }
+                    if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                }
+            } else if (w == "cube") {
+                elem.kind = SelectStmt::GroupByElem::Kind::Cube; ++pos;
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    ++pos;
+                    while (pos < tokens.size() && tokens[pos] != ")") {
+                        auto expr = parseSimpleExpr(tokens, pos);
+                        if (expr) elem.exprs.push_back(std::move(expr));
+                        if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                    }
+                    if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                }
+            } else if (w == "grouping") {
+                elem.kind = SelectStmt::GroupByElem::Kind::GroupingSets; ++pos;
+                if (pos < tokens.size() && toLower(tokens[pos]) == "sets") ++pos;
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    ++pos;
+                    while (pos < tokens.size() && tokens[pos] != ")") {
+                        if (tokens[pos] == "(") {
+                            ++pos;
+                            while (pos < tokens.size() && tokens[pos] != ")") {
+                                auto expr = parseSimpleExpr(tokens, pos);
+                                if (expr) elem.exprs.push_back(std::move(expr));
+                                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                            }
+                            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                        } else {
+                            auto expr = parseSimpleExpr(tokens, pos);
+                            if (expr) elem.exprs.push_back(std::move(expr));
+                        }
+                        if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                    }
+                    if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                }
+            } else {
+                elem.kind = SelectStmt::GroupByElem::Kind::Plain;
+                auto expr = parseSimpleExpr(tokens, pos);
+                if (expr) elem.exprs.push_back(std::move(expr));
+            }
+            for (auto& e : elem.exprs) stmt->groupBy.push_back(std::move(e));
+            stmt->groupByElems.push_back(std::move(elem));
             if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
         }
     }
@@ -1583,12 +1719,20 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             bool asc = true;
             if (pos < tokens.size() && toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
             else if (pos < tokens.size() && toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
-            if (expr) stmt->orderBy.emplace_back(std::move(expr), asc);
+            if (expr) stmt->orderBy.push_back({std::move(expr), asc});
+            if (pos < tokens.size() && toLower(tokens[pos]) == "nulls") {
+                ++pos;
+                if (pos < tokens.size() && toLower(tokens[pos]) == "first") {
+                    stmt->orderBy.back().nullsFirst = true; ++pos;
+                } else if (pos < tokens.size() && toLower(tokens[pos]) == "last") {
+                    stmt->orderBy.back().nullsFirst = false; ++pos;
+                }
+            }
             if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
         }
     }
 
-    // LIMIT / OFFSET
+    // LIMIT / OFFSET / FETCH
     if (pos < tokens.size() && toLower(tokens[pos]) == "limit") {
         ++pos;
         if (pos < tokens.size()) {
@@ -1599,12 +1743,34 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                 ++pos;
             }
         }
+        if (pos < tokens.size() && toLower(tokens[pos]) == "with") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "ties") {
+                stmt->withTies = true; ++pos;
+            }
+        }
     }
     if (pos < tokens.size() && toLower(tokens[pos]) == "offset") {
         ++pos;
         if (pos < tokens.size()) {
             try { stmt->offset = std::stoull(tokens[pos]); } catch (...) {}
             ++pos;
+        }
+    }
+    // FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "fetch") {
+        ++pos;
+        if (pos < tokens.size() && (toLower(tokens[pos]) == "first" || toLower(tokens[pos]) == "next")) {
+            ++pos;
+            stmt->fetchFirst = true;
+        }
+        if (pos < tokens.size()) {
+            try { stmt->limit = std::stoull(tokens[pos]); ++pos; } catch (...) {}
+        }
+        if (pos < tokens.size() && (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) ++pos;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "only") ++pos;
+        if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "with" && toLower(tokens[pos + 1]) == "ties") {
+            stmt->withTies = true; pos += 2;
         }
     }
 
@@ -2063,12 +2229,13 @@ ParseResult SQLParser::parseValues(const std::string& sql) {
                 if (pos < tokens.size() && tokens[pos] == ",") ++pos;
             }
             if (pos < tokens.size() && tokens[pos] == ")") ++pos;
-            // Store as a SelectItem in selectList for now (VALUES as query expr)
+            // Back-compat: also flatten into selectList
             for (auto& expr : row) {
                 SelectItem si;
                 si.expr = std::move(expr);
                 stmt->selectList.push_back(std::move(si));
             }
+            stmt->valuesRows.push_back(std::move(row));
         }
         if (pos < tokens.size() && tokens[pos] == ",") {
             ++pos;
@@ -2100,7 +2267,8 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
     if (match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
         pos += 3;
     }
-    if (match(tokens, pos, "unique")) ++pos;
+    bool isUnique = false;
+    if (match(tokens, pos, "unique")) { isUnique = true; ++pos; }
     if (match(tokens, pos, "temp") || match(tokens, pos, "temporary")) ++pos;
     if (match(tokens, pos, "materialized")) {
         ++pos;
@@ -2118,6 +2286,7 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
             r.stmt = parseCreateTable(tokens, pos);
         } else if (kw == "index") {
             r.stmt = parseCreateIndex(tokens, pos);
+            if (r.stmt && isUnique) static_cast<CreateIndexStmt*>(r.stmt.get())->unique = true;
         } else if (kw == "view") {
             r.stmt = parseCreateView(tokens, pos);
         } else if (kw == "database") {
@@ -2614,35 +2783,111 @@ ParseResult SQLParser::parseRelease(const std::string& sql) {
 
 ParseResult SQLParser::parseSet(const std::string& sql) {
     ParseResult r;
-    r.success = true;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 2) {
+        r.error = "SET statement too short";
+        return r;
+    }
+    size_t pos = 1; // skip SET
     auto stmt = std::make_unique<SetStmt>();
-    // TODO: 解析参数名和值
+
+    // SET [SESSION | LOCAL] name TO|=' value(s)
+    if (pos < tokens.size() && toLower(tokens[pos]) == "session") {
+        stmt->scope = SetStmt::Scope::Session; ++pos;
+    } else if (pos < tokens.size() && toLower(tokens[pos]) == "local") {
+        stmt->scope = SetStmt::Scope::Local; ++pos;
+    }
+
+    // Handle special SET ROLE / SESSION AUTHORIZATION forms
+    if (pos < tokens.size() && toLower(tokens[pos]) == "role") {
+        stmt->name = "role"; ++pos;
+        while (pos < tokens.size() && tokens[pos] != ";") {
+            stmt->values.push_back(tokens[pos++]);
+        }
+        r.success = true; r.stmt = std::move(stmt); return r;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "session" && pos + 1 < tokens.size() &&
+        toLower(tokens[pos + 1]) == "authorization") {
+        stmt->name = "session_authorization"; pos += 2;
+        while (pos < tokens.size() && tokens[pos] != ";") {
+            stmt->values.push_back(tokens[pos++]);
+        }
+        r.success = true; r.stmt = std::move(stmt); return r;
+    }
+
+    if (pos >= tokens.size() || tokens[pos] == ";") {
+        r.error = "SET requires a parameter name";
+        return r;
+    }
+    stmt->name = tokens[pos++];
+
+    if (pos < tokens.size() && (toLower(tokens[pos]) == "to" || tokens[pos] == "=")) ++pos;
+
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        stmt->values.push_back(tokens[pos++]);
+    }
+
+    r.success = true;
     r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseShow(const std::string& sql) {
     ParseResult r;
-    r.success = true;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 2) {
+        r.error = "SHOW statement too short";
+        return r;
+    }
+    size_t pos = 1; // skip SHOW
     auto stmt = std::make_unique<SetStmt>();
     stmt->isShow = true;
+    if (pos < tokens.size() && toLower(tokens[pos]) == "all") {
+        stmt->name = "all"; ++pos;
+    } else if (pos < tokens.size()) {
+        stmt->name = tokens[pos++];
+    }
+    r.success = true;
     r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseReset(const std::string& sql) {
     ParseResult r;
-    r.success = true;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 2) {
+        r.error = "RESET statement too short";
+        return r;
+    }
+    size_t pos = 1; // skip RESET
     auto stmt = std::make_unique<SetStmt>();
     stmt->isReset = true;
+    if (pos < tokens.size() && toLower(tokens[pos]) == "all") {
+        stmt->name = "all"; ++pos;
+    } else if (pos < tokens.size()) {
+        stmt->name = tokens[pos++];
+    }
+    r.success = true;
     r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseUse(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    auto stmt = std::make_unique<SetStmt>();
+    stmt->command = SqlCommand::UseDatabase;
+    // USE DATABASE name -> mapped to SET search_path = name, public
+    // Retain backward-compatible bare Stmt behavior for callers that expect it.
+    size_t pos = 1;
+    if (pos < tokens.size() && toLower(tokens[pos]) == "database") ++pos;
+    if (pos < tokens.size()) {
+        stmt->name = "search_path";
+        stmt->values.push_back(tokens[pos]);
+        stmt->values.push_back("public");
+    }
     r.success = true;
-    r.stmt = std::make_unique<Stmt>(SqlCommand::UseDatabase);
+    r.stmt = std::move(stmt);
     return r;
 }
 
@@ -2659,19 +2904,74 @@ ParseResult SQLParser::parseDiscard(const std::string& sql) {
 
 ParseResult SQLParser::parseExplain(const std::string& sql) {
     ParseResult r;
-    r.success = true;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 2) {
+        r.error = "EXPLAIN statement too short";
+        return r;
+    }
+    size_t pos = 1; // skip EXPLAIN
     auto stmt = std::make_unique<ExplainStmt>();
-    // TODO: 解析选项 (ANALYZE, BUFFERS, etc.)
+
+    // Optional parenthesized option list: EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ...
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            std::string opt = toLower(tokens[pos++]);
+            if (opt == "analyze") stmt->analyze = true;
+            else if (opt == "verbose") stmt->verbose = true;
+            else if (opt == "costs") stmt->costs = true;
+            else if (opt == "buffers") stmt->buffers = true;
+            else if (opt == "timing") stmt->timing = true;
+            else if (opt == "settings") stmt->settings = true;
+            else if (opt == "generic_plan") stmt->genericPlan = true;
+            else if (opt == "format") {
+                if (pos < tokens.size() && toLower(tokens[pos]) == "=") ++pos;
+                if (pos < tokens.size()) {
+                    std::string fmt = toLower(tokens[pos++]);
+                    stmt->json = (fmt == "json");
+                    stmt->xml  = (fmt == "xml");
+                    stmt->yaml = (fmt == "yaml");
+                }
+            }
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+    } else {
+        // Legacy unparenthesized options: EXPLAIN ANALYZE, EXPLAIN VERBOSE
+        while (pos < tokens.size()) {
+            std::string w = toLower(tokens[pos]);
+            if (w == "analyze") { stmt->analyze = true; ++pos; }
+            else if (w == "verbose") { stmt->verbose = true; ++pos; }
+            else break;
+        }
+    }
+
+    // Remaining tokens are the statement to explain.
+    std::string innerSql;
+    for (size_t i = pos; i < tokens.size(); ++i) {
+        if (!innerSql.empty()) innerSql += " ";
+        innerSql += tokens[i];
+    }
+    if (!innerSql.empty()) {
+        stmt->query = parse(innerSql).stmt;
+    }
+
+    r.success = true;
     r.stmt = std::move(stmt);
     return r;
 }
 
 ParseResult SQLParser::parseAnalyze(const std::string& sql) {
     ParseResult r;
+    auto tokens = tokenize(sql);
+    size_t pos = 1; // skip ANALYZE
+    // ANALYZE without EXPLAIN keyword is the vacuum-analyze utility, not EXPLAIN ANALYZE.
+    if (pos < tokens.size() && toLower(tokens[pos]) == "(") {
+        // EXPLAIN-style ANALYZE (...) is rare; treat as EXPLAIN ANALYZE.
+        return parseExplain("EXPLAIN " + sql.substr(6));
+    }
     r.success = true;
-    auto stmt = std::make_unique<ExplainStmt>();
-    stmt->analyze = true;
-    r.stmt = std::move(stmt);
+    r.stmt = std::make_unique<Stmt>(SqlCommand::Analyze);
     return r;
 }
 
@@ -3295,13 +3595,97 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
 
 StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateIndexStmt>();
+    if (pos < tokens.size() && match(tokens, pos, "unique")) {
+        stmt->unique = true; ++pos;
+    }
+    if (pos < tokens.size() && match(tokens, pos, "concurrently")) {
+        stmt->concurrently = true; ++pos;
+    }
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
     if (pos < tokens.size()) {
         stmt->indexName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->indexName = tokens[pos++]; // schema was first token; not stored separately here
+            }
+        }
     }
-    if (pos < tokens.size() && match(tokens, pos, "on")) {
+    if (pos < tokens.size() && match(tokens, pos, "on")) ++pos;
+    if (pos < tokens.size()) {
+        stmt->tableName = tokens[pos++];
+    }
+    if (pos < tokens.size() && match(tokens, pos, "using")) {
         ++pos;
-        if (pos < tokens.size()) {
-            stmt->tableName = tokens[pos++];
+        if (pos < tokens.size()) stmt->accessMethod = tokens[pos++];
+    }
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            IndexElem elem;
+            if (tokens[pos] == "(") {
+                // expression index
+                auto exprTokens = collectParenthesized(tokens, pos);
+                std::string exprStr;
+                for (const auto& t : exprTokens) {
+                    if (!exprStr.empty() && exprStr.back() != '(') exprStr += " ";
+                    exprStr += t;
+                }
+                elem.expr = std::make_unique<LiteralExpr>();
+                static_cast<LiteralExpr*>(elem.expr.get())->value = exprStr;
+            } else {
+                elem.column = tokens[pos++];
+                if (pos < tokens.size() && toLower(tokens[pos]) == "collate") {
+                    ++pos;
+                    if (pos < tokens.size()) elem.collation = tokens[pos++];
+                }
+                if (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ")" &&
+                    toLower(tokens[pos]) != "asc" && toLower(tokens[pos]) != "desc" &&
+                    toLower(tokens[pos]) != "nulls") {
+                    elem.opclass = tokens[pos++];
+                }
+                if (pos < tokens.size() && toLower(tokens[pos]) == "asc") { elem.ascending = true; ++pos; }
+                else if (pos < tokens.size() && toLower(tokens[pos]) == "desc") { elem.ascending = false; ++pos; }
+                if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "nulls" &&
+                    (toLower(tokens[pos + 1]) == "first" || toLower(tokens[pos + 1]) == "last")) {
+                    elem.nullsFirst = (toLower(tokens[pos + 1]) == "first");
+                    pos += 2;
+                }
+            }
+            stmt->columns.push_back(std::move(elem));
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string kw = toLower(tokens[pos]);
+        if (kw == "include" && pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+            pos += 2;
+            while (pos < tokens.size() && tokens[pos] != ")") {
+                if (tokens[pos] != ",") stmt->includeCols.push_back(tokens[pos]);
+                ++pos;
+            }
+            if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+        } else if (kw == "where") {
+            ++pos;
+            stmt->whereClause = parseExpr(tokens, pos);
+        } else if (kw == "with" && pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+            pos += 2;
+            auto opts = collectParenthesized(tokens, pos);
+            for (size_t i = 0; i < opts.size(); i += 2) {
+                if (i + 1 < opts.size() && opts[i + 1] == "=") {
+                    if (i + 2 < opts.size()) { stmt->options[opts[i]] = opts[i + 2]; i += 2; }
+                } else if (i + 1 < opts.size()) {
+                    stmt->options[opts[i]] = opts[i + 1];
+                }
+            }
+        } else if (kw == "tablespace") {
+            ++pos;
+            if (pos < tokens.size()) stmt->tablespace = tokens[pos++];
+        } else {
+            ++pos;
         }
     }
     return stmt;
@@ -3311,32 +3695,129 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
     auto stmt = std::make_unique<CreateViewStmt>();
     if (pos < tokens.size()) {
         stmt->viewName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) stmt->viewName = tokens[pos++];
+        }
+    }
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        auto cols = collectParenthesized(tokens, pos);
+        for (const auto& c : cols) {
+            if (c != ",") stmt->columnNames.push_back(c);
+        }
+    }
+    if (pos < tokens.size() && match(tokens, pos, "with")) {
+        ++pos;
+        if (pos + 1 < tokens.size() && match(tokens, pos, "check") && match(tokens, pos + 1, "option")) {
+            pos += 2;
+            if (pos < tokens.size()) stmt->checkOption = toLower(tokens[pos++]);
+        }
+    }
+    if (pos < tokens.size() && match(tokens, pos, "as")) ++pos;
+    if (pos < tokens.size()) {
+        std::string selectSql;
+        for (size_t i = pos; i < tokens.size(); ++i) {
+            if (!selectSql.empty()) selectSql += " ";
+            selectSql += tokens[i];
+        }
+        stmt->query = parseSelect(selectSql).stmt;
+        pos = tokens.size();
     }
     return stmt;
 }
 
 StmtPtr SQLParser::parseCreateDatabase(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<Stmt>(SqlCommand::CreateDatabase);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateDatabase);
+    stmt->objectType = "DATABASE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseCreateSchema(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<Stmt>(SqlCommand::CreateSchema);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateSchema);
+    stmt->objectType = "SCHEMA";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseCreateSequence(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<Stmt>(SqlCommand::CreateSequence);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateSequence);
+    stmt->objectType = "SEQUENCE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseCreateDomain(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<Stmt>(SqlCommand::CreateDomain);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateDomain);
+    stmt->objectType = "DOMAIN";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<Stmt>(SqlCommand::CreateType);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateType);
+    stmt->objectType = "TYPE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
     return stmt;
 }
 
@@ -3373,107 +3854,497 @@ StmtPtr SQLParser::parseCreateRole(const std::vector<std::string>& tokens, size_
 }
 
 StmtPtr SQLParser::parseCreateTablespace(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateTablespace);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateTablespace);
+    stmt->objectType = "TABLESPACE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateStatistics(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateStatistics);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateStatistics);
+    stmt->objectType = "STATISTICS";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreatePolicy(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreatePolicy);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreatePolicy);
+    stmt->objectType = "POLICY";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateRule(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateRule);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateRule);
+    stmt->objectType = "RULE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateEventTrigger(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateEventTrigger);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateEventTrigger);
+    stmt->objectType = "EVENT TRIGGER";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateExtension(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateExtension);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateExtension);
+    stmt->objectType = "EXTENSION";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreatePublication(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreatePublication);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreatePublication);
+    stmt->objectType = "PUBLICATION";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateSubscription(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateSubscription);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateSubscription);
+    stmt->objectType = "SUBSCRIPTION";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateAccessMethod(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateAccessMethod);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateAccessMethod);
+    stmt->objectType = "ACCESS METHOD";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateForeignDataWrapper(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateForeignDataWrapper);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateForeignDataWrapper);
+    stmt->objectType = "FOREIGN DATA WRAPPER";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateForeignTable(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateForeignTable);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateForeignTable);
+    stmt->objectType = "FOREIGN TABLE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateServer(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateServer);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateServer);
+    stmt->objectType = "SERVER";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateUserMapping(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateUserMapping);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateUserMapping);
+    stmt->objectType = "USER MAPPING";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateCast(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateCast);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateCast);
+    stmt->objectType = "CAST";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateCollation(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateCollation);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateCollation);
+    stmt->objectType = "COLLATION";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateConversion(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateConversion);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateConversion);
+    stmt->objectType = "CONVERSION";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateOperator(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateOperator);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateOperator);
+    stmt->objectType = "OPERATOR";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateOperatorClass(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateOperatorClass);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateOperatorClass);
+    stmt->objectType = "OPERATOR CLASS";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateOperatorFamily(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateOperatorFamily);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateOperatorFamily);
+    stmt->objectType = "OPERATOR FAMILY";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateAggregate(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateAggregate);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateAggregate);
+    stmt->objectType = "AGGREGATE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateTransform(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateTransform);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateTransform);
+    stmt->objectType = "TRANSFORM";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateLanguage(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateLanguage);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateLanguage);
+    stmt->objectType = "LANGUAGE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateTextSearchConfiguration(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateTextSearchConfiguration);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateTextSearchConfiguration);
+    stmt->objectType = "TEXT SEARCH CONFIGURATION";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateTextSearchDictionary(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateTextSearchDictionary);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateTextSearchDictionary);
+    stmt->objectType = "TEXT SEARCH DICTIONARY";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateTextSearchParser(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateTextSearchParser);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateTextSearchParser);
+    stmt->objectType = "TEXT SEARCH PARSER";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseCreateTextSearchTemplate(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::CreateTextSearchTemplate);
+    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreateTextSearchTemplate);
+    stmt->objectType = "TEXT SEARCH TEMPLATE";
+    if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
+        stmt->ifNotExists = true; pos += 3;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    return stmt;
 }
 
 // ============================================================================
@@ -3518,12 +4389,32 @@ StmtPtr SQLParser::parseDropIndex(const std::vector<std::string>& tokens, size_t
 StmtPtr SQLParser::parseDropView(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropView);
     stmt->objectType = "VIEW";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropMaterializedView(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropMaterializedView);
     stmt->objectType = "MATERIALIZED VIEW";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
@@ -3537,173 +4428,609 @@ StmtPtr SQLParser::parseDropDatabase(const std::vector<std::string>& tokens, siz
 StmtPtr SQLParser::parseDropSchema(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropSchema);
     stmt->objectType = "SCHEMA";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropSequence(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropSequence);
     stmt->objectType = "SEQUENCE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropDomain(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropDomain);
     stmt->objectType = "DOMAIN";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropType(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropType);
     stmt->objectType = "TYPE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropFunction(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropFunction);
     stmt->objectType = "FUNCTION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropProcedure(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropProcedure);
     stmt->objectType = "PROCEDURE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropRoutine(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropRoutine);
     stmt->objectType = "ROUTINE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropTrigger(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTrigger);
     stmt->objectType = "TRIGGER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropRole(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropRole);
     stmt->objectType = "ROLE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropUser(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<DropStmt>(SqlCommand::DropUser);
     stmt->objectType = "USER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
     return stmt;
 }
 
 StmtPtr SQLParser::parseDropTablespace(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropTablespace);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTablespace);
+    stmt->objectType = "TABLESPACE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropStatistics(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropStatistics);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropStatistics);
+    stmt->objectType = "STATISTICS";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropPolicy(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropPolicy);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropPolicy);
+    stmt->objectType = "POLICY";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropRule(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropRule);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropRule);
+    stmt->objectType = "RULE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropEventTrigger(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropEventTrigger);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropEventTrigger);
+    stmt->objectType = "EVENT TRIGGER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropExtension(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropExtension);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropExtension);
+    stmt->objectType = "EXTENSION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropPublication(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropPublication);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropPublication);
+    stmt->objectType = "PUBLICATION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropSubscription(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropSubscription);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropSubscription);
+    stmt->objectType = "SUBSCRIPTION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropAccessMethod(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropAccessMethod);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropAccessMethod);
+    stmt->objectType = "ACCESS METHOD";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropForeignDataWrapper(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropForeignDataWrapper);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropForeignDataWrapper);
+    stmt->objectType = "FOREIGN DATA WRAPPER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropForeignTable(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropForeignTable);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropForeignTable);
+    stmt->objectType = "FOREIGN TABLE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropServer(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropServer);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropServer);
+    stmt->objectType = "SERVER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropUserMapping(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropUserMapping);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropUserMapping);
+    stmt->objectType = "USER MAPPING";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropCast(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropCast);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropCast);
+    stmt->objectType = "CAST";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropCollation(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropCollation);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropCollation);
+    stmt->objectType = "COLLATION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropConversion(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropConversion);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropConversion);
+    stmt->objectType = "CONVERSION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropOperator(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropOperator);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropOperator);
+    stmt->objectType = "OPERATOR";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropOperatorClass(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropOperatorClass);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropOperatorClass);
+    stmt->objectType = "OPERATOR CLASS";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropOperatorFamily(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropOperatorFamily);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropOperatorFamily);
+    stmt->objectType = "OPERATOR FAMILY";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropAggregate(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropAggregate);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropAggregate);
+    stmt->objectType = "AGGREGATE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropTransform(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropTransform);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTransform);
+    stmt->objectType = "TRANSFORM";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropLanguage(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropLanguage);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropLanguage);
+    stmt->objectType = "LANGUAGE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropTextSearchConfiguration(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropTextSearchConfiguration);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTextSearchConfiguration);
+    stmt->objectType = "TEXT SEARCH CONFIGURATION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropTextSearchDictionary(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropTextSearchDictionary);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTextSearchDictionary);
+    stmt->objectType = "TEXT SEARCH DICTIONARY";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropTextSearchParser(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropTextSearchParser);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTextSearchParser);
+    stmt->objectType = "TEXT SEARCH PARSER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropTextSearchTemplate(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropTextSearchTemplate);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropTextSearchTemplate);
+    stmt->objectType = "TEXT SEARCH TEMPLATE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropOwned(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropOwned);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropOwned);
+    stmt->objectType = "OWNED";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 StmtPtr SQLParser::parseDropLargeObject(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<DropStmt>(SqlCommand::DropLargeObject);
+    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropLargeObject);
+    stmt->objectType = "LARGE OBJECT";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string w = toLower(tokens[pos]);
+        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (w == "restrict") { ++pos; continue; }
+        if (w == ",") { ++pos; continue; }
+        stmt->objectNames.push_back(tokens[pos++]);
+    }
+    return stmt;
 }
 
 // ============================================================================
@@ -3712,170 +5039,1274 @@ StmtPtr SQLParser::parseDropLargeObject(const std::vector<std::string>& tokens, 
 
 StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<AlterTableStmt>();
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && match(tokens, pos, "only")) {
+        stmt->only = true; ++pos;
+    }
     if (pos < tokens.size()) {
         stmt->tableName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                // schema.table; keep qualified name for now
+                stmt->tableName += "." + tokens[pos++];
+            }
+        }
+    }
+
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        AlterTableStmt::SubCmd sub;
+        std::string kw = toLower(tokens[pos]);
+        if (kw == "add" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
+            sub.action = AlterTableStmt::Action::AddColumn; pos += 2;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "if") {
+                pos += 3; // IF NOT EXISTS
+            }
+            if (pos < tokens.size()) sub.colDef.name = tokens[pos++];
+            if (pos < tokens.size()) sub.colDef.typeName = tokens[pos++];
+            // TODO: column constraints, type mods
+        } else if (kw == "add") {
+            sub.action = AlterTableStmt::Action::AddConstraint; ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "constraint") {
+                ++pos;
+                if (pos < tokens.size()) sub.constraint.name = tokens[pos++];
+            }
+            if (pos < tokens.size()) {
+                sub.constraint.type = toUpper(tokens[pos]); ++pos;
+                if (sub.constraint.type == "PRIMARY") { sub.constraint.type = "PRIMARY KEY"; ++pos; }
+                if (sub.constraint.type == "FOREIGN") { sub.constraint.type = "FOREIGN KEY"; ++pos; }
+            }
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                auto cols = collectParenthesized(tokens, pos);
+                for (const auto& c : cols) if (c != ",") sub.constraint.columns.push_back(c);
+            }
+            if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
+                ++pos;
+                if (pos < tokens.size()) sub.constraint.refTable = tokens[pos++];
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    auto refcols = collectParenthesized(tokens, pos);
+                    for (const auto& c : refcols) if (c != ",") sub.constraint.refColumns.push_back(c);
+                }
+            }
+        } else if (kw == "drop" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
+            sub.action = AlterTableStmt::Action::DropColumn; pos += 2;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "if") {
+                pos += 3; // IF EXISTS
+            }
+            if (pos < tokens.size()) sub.name = tokens[pos++];
+            if (pos < tokens.size() && toLower(tokens[pos]) == "cascade") { sub.options["cascade"] = "true"; ++pos; }
+        } else if (kw == "drop") {
+            sub.action = AlterTableStmt::Action::DropConstraint; ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "constraint") ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "if") {
+                pos += 2; // IF EXISTS
+            }
+            if (pos < tokens.size()) sub.name = tokens[pos++];
+            if (pos < tokens.size() && toLower(tokens[pos]) == "cascade") { sub.options["cascade"] = "true"; ++pos; }
+        } else if (kw == "alter" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
+            sub.action = AlterTableStmt::Action::AlterColumn; pos += 2;
+            if (pos < tokens.size()) sub.name = tokens[pos++];
+            if (pos < tokens.size() && toLower(tokens[pos]) == "set") {
+                ++pos;
+                if (pos < tokens.size() && toLower(tokens[pos]) == "default") {
+                    ++pos;
+                    sub.defaultValue = parseSimpleExpr(tokens, pos);
+                } else if (pos < tokens.size() && toLower(tokens[pos]) == "not") {
+                    pos += 2; // NOT NULL
+                    sub.setNotNull = true;
+                } else if (pos < tokens.size() && toLower(tokens[pos]) == "data") {
+                    pos += 2; // DATA TYPE
+                    if (pos < tokens.size()) sub.dataType = tokens[pos++];
+                }
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "drop") {
+                ++pos;
+                if (pos < tokens.size() && toLower(tokens[pos]) == "default") { sub.dropDefault = true; ++pos; }
+                else if (pos < tokens.size() && toLower(tokens[pos]) == "not") { sub.dropNotNull = true; pos += 2; }
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "type") {
+                ++pos;
+                if (pos < tokens.size()) sub.dataType = tokens[pos++];
+            }
+        } else if (kw == "rename") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "column") ++pos;
+            if (pos < tokens.size()) sub.name = tokens[pos++];
+            if (pos < tokens.size() && toLower(tokens[pos]) == "to") ++pos;
+            if (pos < tokens.size()) sub.newName = tokens[pos++];
+            sub.action = sub.name.empty() ? AlterTableStmt::Action::RenameTable : AlterTableStmt::Action::RenameColumn;
+        } else if (kw == "set") {
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "schema") {
+                sub.action = AlterTableStmt::Action::SetSchema; ++pos;
+                if (pos < tokens.size()) sub.newName = tokens[pos++];
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "tablespace") {
+                sub.action = AlterTableStmt::Action::SetTablespace; ++pos;
+                if (pos < tokens.size()) sub.newName = tokens[pos++];
+            } else if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "with" && tokens[pos + 1] == "(") {
+                sub.action = AlterTableStmt::Action::SetOptions; pos += 2;
+                auto opts = collectParenthesized(tokens, pos);
+                for (size_t i = 0; i < opts.size(); i += 2) {
+                    if (i + 1 < opts.size() && opts[i + 1] == "=") {
+                        if (i + 2 < opts.size()) { sub.options[opts[i]] = opts[i + 2]; i += 2; }
+                    } else if (i + 1 < opts.size()) {
+                        sub.options[opts[i]] = opts[i + 1];
+                    }
+                }
+            }
+        } else if (kw == "reset") {
+            sub.action = AlterTableStmt::Action::ResetOptions; ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "(") {
+                auto opts = collectParenthesized(tokens, pos);
+                for (const auto& o : opts) if (o != ",") sub.options[o] = "";
+            }
+        } else if (kw == "attach") {
+            sub.action = AlterTableStmt::Action::AttachPartition; pos += 2; // ATTACH PARTITION
+            if (pos < tokens.size()) sub.partitionSpec = tokens[pos++];
+        } else if (kw == "detach") {
+            sub.action = AlterTableStmt::Action::DetachPartition; pos += 2; // DETACH PARTITION
+            if (pos < tokens.size()) sub.partitionSpec = tokens[pos++];
+        } else {
+            // Unknown subcommand; skip to next comma or semicolon
+            while (pos < tokens.size() && tokens[pos] != ";" && tokens[pos] != ",") ++pos;
+        }
+        if (sub.action != AlterTableStmt::Action::AddColumn || !sub.colDef.name.empty() ||
+            sub.action != AlterTableStmt::Action::DropColumn || !sub.name.empty() ||
+            sub.action != AlterTableStmt::Action::AddConstraint || !sub.constraint.type.empty() ||
+            sub.action != AlterTableStmt::Action::AlterColumn || !sub.name.empty() ||
+            sub.action != AlterTableStmt::Action::RenameColumn || !sub.newName.empty() ||
+            sub.action == AlterTableStmt::Action::RenameTable ||
+            sub.action == AlterTableStmt::Action::SetSchema ||
+            sub.action == AlterTableStmt::Action::SetTablespace ||
+            sub.action == AlterTableStmt::Action::SetOptions ||
+            sub.action == AlterTableStmt::Action::ResetOptions ||
+            sub.action == AlterTableStmt::Action::AttachPartition ||
+            sub.action == AlterTableStmt::Action::DetachPartition) {
+            stmt->subCommands.push_back(std::move(sub));
+        }
+        if (pos < tokens.size() && tokens[pos] == ",") ++pos;
     }
     return stmt;
 }
 
 StmtPtr SQLParser::parseAlterIndex(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<AlterTableStmt>();
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterIndex);
+    stmt->objectType = "INDEX";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterView(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<AlterTableStmt>();
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterView);
+    stmt->objectType = "VIEW";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterMaterializedView(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<AlterTableStmt>();
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterMaterializedView);
+    stmt->objectType = "MATERIALIZED VIEW";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterDatabase(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterDatabase);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterDatabase);
+    stmt->objectType = "DATABASE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterSchema(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterSchema);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterSchema);
+    stmt->objectType = "SCHEMA";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterSequence(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterSequence);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterSequence);
+    stmt->objectType = "SEQUENCE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterDomain(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterDomain);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterDomain);
+    stmt->objectType = "DOMAIN";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterType(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterType);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterType);
+    stmt->objectType = "TYPE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterFunction(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterFunction);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterFunction);
+    stmt->objectType = "FUNCTION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterProcedure(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterProcedure);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterProcedure);
+    stmt->objectType = "PROCEDURE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterRoutine(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterRoutine);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterRoutine);
+    stmt->objectType = "ROUTINE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterTrigger(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterTrigger);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterTrigger);
+    stmt->objectType = "TRIGGER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterRole(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterRole);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterRole);
+    stmt->objectType = "ROLE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterUser(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterUser);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterUser);
+    stmt->objectType = "USER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterSystem(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterSystem);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterSystem);
+    stmt->objectType = "SYSTEM";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterTablespace(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterTablespace);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterTablespace);
+    stmt->objectType = "TABLESPACE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterStatistics(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterStatistics);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterStatistics);
+    stmt->objectType = "STATISTICS";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterPolicy(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterPolicy);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterPolicy);
+    stmt->objectType = "POLICY";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterRule(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterRule);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterRule);
+    stmt->objectType = "RULE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterEventTrigger(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterEventTrigger);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterEventTrigger);
+    stmt->objectType = "EVENT TRIGGER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterExtension(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterExtension);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterExtension);
+    stmt->objectType = "EXTENSION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterPublication(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterPublication);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterPublication);
+    stmt->objectType = "PUBLICATION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterSubscription(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterSubscription);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterSubscription);
+    stmt->objectType = "SUBSCRIPTION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterDefaultPrivileges(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterDefaultPrivileges);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterDefaultPrivileges);
+    stmt->objectType = "DEFAULT PRIVILEGES";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterForeignDataWrapper(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterForeignDataWrapper);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterForeignDataWrapper);
+    stmt->objectType = "FOREIGN DATA WRAPPER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterForeignTable(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterForeignTable);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterForeignTable);
+    stmt->objectType = "FOREIGN TABLE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterServer(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterServer);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterServer);
+    stmt->objectType = "SERVER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterUserMapping(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterUserMapping);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterUserMapping);
+    stmt->objectType = "USER MAPPING";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterTextSearchConfiguration(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterTextSearchConfiguration);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterTextSearchConfiguration);
+    stmt->objectType = "TEXT SEARCH CONFIGURATION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterTextSearchDictionary(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterTextSearchDictionary);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterTextSearchDictionary);
+    stmt->objectType = "TEXT SEARCH DICTIONARY";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterTextSearchParser(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterTextSearchParser);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterTextSearchParser);
+    stmt->objectType = "TEXT SEARCH PARSER";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterTextSearchTemplate(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterTextSearchTemplate);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterTextSearchTemplate);
+    stmt->objectType = "TEXT SEARCH TEMPLATE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterCollation(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterCollation);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterCollation);
+    stmt->objectType = "COLLATION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterConversion(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterConversion);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterConversion);
+    stmt->objectType = "CONVERSION";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterOperator(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterOperator);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterOperator);
+    stmt->objectType = "OPERATOR";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterOperatorClass(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterOperatorClass);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterOperatorClass);
+    stmt->objectType = "OPERATOR CLASS";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterOperatorFamily(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterOperatorFamily);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterOperatorFamily);
+    stmt->objectType = "OPERATOR FAMILY";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterAggregate(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterAggregate);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterAggregate);
+    stmt->objectType = "AGGREGATE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterLanguage(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterLanguage);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterLanguage);
+    stmt->objectType = "LANGUAGE";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 StmtPtr SQLParser::parseAlterLargeObject(const std::vector<std::string>& tokens, size_t& pos) {
-    return std::make_unique<Stmt>(SqlCommand::AlterLargeObject);
+    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterLargeObject);
+    stmt->objectType = "LARGE OBJECT";
+    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
+        stmt->ifExists = true; pos += 2;
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true; ++pos;
+    }
+    if (pos < tokens.size()) {
+        stmt->objectName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->schema = stmt->objectName;
+                stmt->objectName = tokens[pos++];
+            }
+        }
+    }
+    std::string rest;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        if (!rest.empty()) rest += " ";
+        rest += tokens[pos++];
+    }
+    stmt->subCommand = rest;
+    return stmt;
 }
 
 // ============================================================================
@@ -3913,6 +6344,7 @@ std::string FunctionCallExpr::toString() const {
     }
     s += ")";
     if (filter) s += " FILTER (WHERE " + filter->toString() + ")";
+    if (hasOver) s += " OVER(...)";
     return s;
 }
 

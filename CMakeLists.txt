@@ -14,7 +14,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/transaction
     ${CMAKE_SOURCE_DIR}/src/network
     ${CMAKE_SOURCE_DIR}/src/utils
-    ${CMAKE_SOURCE_DIR}/src/optimizer
+    ${CMAKE_SOURCE_DIR}/src/catalog
     ${CMAKE_SOURCE_DIR}/src/commands
     ${CMAKE_SOURCE_DIR}/src/interfaces
     ${CMAKE_SOURCE_DIR}/src/executor
@@ -43,6 +43,7 @@ set(DBMS_SOURCES
     src/transaction/TxnIdGenerator.cpp
     src/network/NetworkServer.cpp
     src/common/Config.cpp
+    src/common/GUC.cpp
     src/parser/parser.cpp
 )
 

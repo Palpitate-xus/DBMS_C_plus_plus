@@ -36,6 +36,7 @@ SOURCES=(
     src/transaction/TxnIdGenerator.cpp
     src/network/NetworkServer.cpp
     src/common/Config.cpp
+    src/common/GUC.cpp
     src/parser/parser.cpp
 )
 

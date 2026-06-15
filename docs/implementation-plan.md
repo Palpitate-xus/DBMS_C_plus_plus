@@ -69,6 +69,14 @@
 
 - **AST 框架**：`src/parser/ast.h` 建立了 `SqlCommand` 枚举（~130 个值）、`Stmt`/`Expr` 基类、所有 PG 命令的语句节点。
 - **Parser 框架**：`src/parser/parser.h/cpp` 建立了 `SQLParser::classify()`（替代字符串前缀匹配）、`parse()` 入口、完整词法分析器、CREATE/DROP/ALTER 全量子命令解析 stub。
+- **Phase 1 解析能力补全**：
+  - ✅ GUC 解析：`SET` / `SHOW` / `RESET` 解析为 `SetStmt`；GUC 注册表修复初始化与 `INT_MAX` 边界。
+  - ✅ DDL 解析增强：`CREATE INDEX`（含 `UNIQUE`、access method、`ASC/DESC`、`NULLS FIRST/LAST`、`WHERE`）、`CREATE VIEW`、`ALTER TABLE`（`ADD/DROP COLUMN`、`ADD CONSTRAINT`）完整解析。
+  - ✅ SELECT 语法扩展：`GROUP BY ROLLUP/CUBE/GROUPING SETS`、`ORDER BY ... NULLS FIRST/LAST`、`LIMIT ... WITH TIES`、`FETCH FIRST ... ROWS ONLY`。
+  - ✅ 表达式与函数调用：schema-qualified 函数名（`pg_catalog.now()`）、命名参数（`a => 1`）、窗口函数 `OVER (...)`；`WindowDef` 提升为顶层节点并附加到 `FunctionCallExpr`。
+  - ✅ `VALUES` 解析为独立 `Values` AST 节点。
+  - ✅ 词法分析器：新增 `=>` 多字符操作符与 `.` 单字符分隔符，支持 schema-qualified 名称与命名参数。
+  - ✅ 新增 `tests/parser_phase1_test.cpp` 覆盖上述全部解析特性，主构建与全量测试通过。
 - **命令路由迁移**（`execute()` 中的 `switch(parsedCmd)`）：
   - ✅ 简单 Utility：`VALUES`、`USE DATABASE`、`LISTEN`、`NOTIFY`、`UNLISTEN`、`DO`、`IMPORT FOREIGN SCHEMA`
   - ✅ 游标命令：`DECLARE`、`FETCH`、`MOVE`、`CLOSE`
@@ -87,7 +95,7 @@
   - ✅ 添加表达式解析辅助函数：`parseSimpleExpr`、`parseSelectItem`、`parseFromItem`、`collectParenthesized`、`collectExpression`、`parseExprList`
   - ✅ 修复编译问题：前向声明补齐、`DropRoutine`/`AlterTransform` 枚举缺失、`Refresh`→`RefreshMaterializedView` 重命名、`AlterSystem` 重复 case 清理、`isKeyword` 公开访问
   - ✅ 实现分层 operator precedence 解析器（OR→AND→NOT→IS→Comparison→BETWEEN/IN/LIKE→||→+/-→*//%→^→Unary→::→Postfix→Primary），支持 CASE、EXISTS、子查询、数组下标、类型 cast
-- **SELECT Grammar 补全（1.4 进行中）**：
+- **SELECT Grammar 补全（1.4 已完成）**：
   - ✅ CTE（WITH [RECURSIVE] ... AS (...)）
   - ✅ JOIN（INNER、LEFT [OUTER]、RIGHT [OUTER]、FULL [OUTER]、CROSS、NATURAL + ON / USING）
   - ✅ UNION / INTERSECT / EXCEPT [ALL / DISTINCT]（递归解析 RHS）
@@ -111,7 +119,7 @@
   - ✅ Free Space Map / Visibility Map：fork 文件管理，已集成到 insert/update/delete/vacuum 路径
   - ✅ CLOG / pg_xact：CommitLog 实现 2-bit 事务状态（IN_PROGRESS/COMMITTED/ABORTED/SUB_COMMITTED），按段文件持久化；StorageEngine commit/rollback 自动更新 CLOG；ReadView 使用 CLOG 判断事务状态
 
-> 未迁移到 switch/case 的命令（classify 暂不支持或非标准 PG 语法）：`DUMP`、`RESTORE`、`BACKUP DATABASE`、`RESTORE DATABASE`、`CLEAR PLAN CACHE`、`MERGE INTO`、`REPLACE INTO`、`INSERT INTO` 特定语法、`SELECT` 及复杂 DDL（CREATE/DROP/ALTER）。这些将在后续阶段逐步处理。
+> 未迁移到 switch/case 的命令（classify 暂不支持或非标准 PG 语法）：`DUMP`、`RESTORE`、`BACKUP DATABASE`、`RESTORE DATABASE`、`CLEAR PLAN CACHE`、`MERGE INTO`、`REPLACE INTO`、`INSERT INTO` 特定语法及复杂 DDL（CREATE/DROP/ALTER）执行逻辑。`SELECT` 等已可解析为 AST，执行仍保留在 `switch/case` 内，后续逐步提取为独立 handler。这些将在后续阶段逐步处理。
 
 ---
 

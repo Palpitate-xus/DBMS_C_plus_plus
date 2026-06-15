@@ -323,13 +323,34 @@ struct BinaryOpExpr : public Expr {
     }
 };
 
+// 窗口函数定义（ also used by FunctionCallExpr for OVER clauses）
+struct WindowDef {
+    std::string name;
+    std::vector<ExprPtr> partitionBy;
+    std::vector<std::pair<ExprPtr, bool>> orderBy;
+    std::string frameMode;  // ROWS, RANGE, GROUPS
+    ExprPtr frameStart;
+    ExprPtr frameEnd;
+    std::string frameExclusion; // CURRENT ROW, GROUP, TIES, NO OTHERS
+};
+
 // 函数调用
 struct FunctionCallExpr : public Expr {
+    std::string schema;          // schema-qualified function (pg_catalog.now())
     std::string funcName;
     std::vector<ExprPtr> args;
     bool distinct = false;       // COUNT(DISTINCT col)
     ExprPtr filter;              // FILTER (WHERE ...)
     std::string orderBy;         // 聚合中的 ORDER BY within aggregate
+
+    struct NamedArg {
+        std::string name;
+        ExprPtr value;
+    };
+    std::vector<NamedArg> namedArgs; // func(a => 1, b => 2)
+    WindowDef over;              // window specification for row_number() OVER (...)
+    bool hasOver = false;        // true if OVER clause was parsed
+
     FunctionCallExpr() { type = ExprType::FunctionCall; }
     std::string toString() const override;
 };
@@ -564,14 +585,35 @@ struct SelectStmt : public Stmt {
     std::unique_ptr<FromItem> fromClause;
     ExprPtr whereClause;
     std::vector<ExprPtr> groupBy;
+
+    // GROUP BY with ROLLUP/CUBE/GROUPING SETS support
+    struct GroupByElem {
+        enum class Kind { Plain, Rollup, Cube, GroupingSets };
+        Kind kind = Kind::Plain;
+        std::vector<ExprPtr> exprs;
+    };
+    std::vector<GroupByElem> groupByElems;
+
     ExprPtr having;
-    std::vector<std::pair<ExprPtr, bool>> orderBy; // expr, asc
-    bool nullsFirst = false;
+
+    struct OrderByElem {
+        ExprPtr expr;
+        bool asc = true;
+        bool nullsFirst = false;   // NULLS FIRST / LAST (per column)
+        std::string usingOp;       // ORDER BY col USING operator
+    };
+    std::vector<OrderByElem> orderBy;
+    bool nullsFirst = false;       // legacy single flag
     std::optional<size_t> limit;
     std::optional<size_t> offset;
+    bool withTies = false;         // WITH TIES
+    bool fetchFirst = false;       // FETCH FIRST / NEXT
     SetOp setOp = SetOp::None;
-    bool setOpAll = false;     // UNION ALL vs UNION
-    StmtPtr setOpRhs;          // 右侧 SELECT
+    bool setOpAll = false;         // UNION ALL vs UNION
+    StmtPtr setOpRhs;              // 右侧 SELECT
+
+    // VALUES rows (proper row structure, independent of selectList)
+    std::vector<std::vector<ExprPtr>> valuesRows;
 
     // Locking
     struct LockClause {
@@ -597,15 +639,6 @@ struct SelectStmt : public Stmt {
     std::vector<ExprPtr> distinctOn; // DISTINCT ON (expr, ...)
 
     // Window functions
-    struct WindowDef {
-        std::string name;
-        std::vector<ExprPtr> partitionBy;
-        std::vector<std::pair<ExprPtr, bool>> orderBy;
-        std::string frameMode;  // ROWS, RANGE, GROUPS
-        ExprPtr frameStart;
-        ExprPtr frameEnd;
-        std::string frameExclusion; // CURRENT ROW, GROUP, TIES, NO OTHERS
-    };
     std::vector<WindowDef> windowDefs;
 
     SelectStmt() : Stmt(SqlCommand::Select) {}
@@ -770,6 +803,22 @@ struct CreateIndexStmt : public Stmt {
 };
 
 // ============================================================================
+// Generic CREATE object statement for lightweight DDL stubs
+// ============================================================================
+
+struct CreateObjectStmt : public Stmt {
+    std::string objectType;    // DATABASE, SCHEMA, SEQUENCE, DOMAIN, TYPE, ...
+    std::string objectName;    // may be schema-qualified
+    std::string schema;        // extracted schema qualifier
+    bool ifNotExists = false;
+    bool replace = false;
+    std::map<std::string, std::string> options;
+
+    CreateObjectStmt(SqlCommand cmd) : Stmt(cmd) {}
+    std::string toString() const override { return "CREATE " + objectType; }
+};
+
+// ============================================================================
 // DROP 语句
 // ============================================================================
 
@@ -782,6 +831,22 @@ struct DropStmt : public Stmt {
 
     DropStmt(SqlCommand cmd = SqlCommand::DropTable) : Stmt(cmd) {}
     std::string toString() const override { return "DROP"; }
+};
+
+// ============================================================================
+// Generic ALTER object statement for lightweight DDL stubs
+// ============================================================================
+
+struct AlterObjectStmt : public Stmt {
+    std::string objectType;    // TABLE, INDEX, SCHEMA, SEQUENCE, ...
+    std::string objectName;    // may be schema-qualified
+    std::string schema;        // extracted schema qualifier
+    bool ifExists = false;
+    bool only = false;
+    std::string subCommand;    // raw remainder of statement for later analysis
+
+    AlterObjectStmt(SqlCommand cmd) : Stmt(cmd) {}
+    std::string toString() const override { return "ALTER " + objectType; }
 };
 
 // ============================================================================
