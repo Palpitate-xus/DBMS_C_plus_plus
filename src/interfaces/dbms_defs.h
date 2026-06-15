@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -65,11 +67,92 @@ enum class IsolationLevel {
 };
 
 struct Snapshot {
-    TxnId xmin;           // 所有小于 xid 的事务已提交/回滚
-    TxnId xmax;           // 所有大于等于 xid 的事务未开始或活跃
-    std::vector<TxnId> activeXids; // 活跃事务列表
-    TxnId curCid;         // 当前命令ID
+    uint32_t version = 1;            // 序列化格式版本
+    TxnId xmin = 0;                  // 所有小于 xid 的事务已提交/回滚
+    TxnId xmax = 0;                  // 所有大于等于 xid 的事务未开始或活跃
+    std::vector<TxnId> activeXids;   // 活跃事务列表
+    std::vector<TxnId> subxip;       // 子事务进行中列表
+    TxnId curCid = 0;                // 当前命令ID
+
+    // 二进制序列化（小端，稳定格式 v1）
+    std::string exportToBytes() const;
+
+    // 反序列化；失败返回 std::nullopt
+    static std::optional<Snapshot> importFromBytes(const std::string& bytes);
 };
+
+// Snapshot v1 二进制格式（小端）：
+// [0]   uint32 magic = 0x534E4150  // "SNAP"
+// [4]   uint32 version = 1
+// [8]   uint64 xmin
+// [16]  uint64 xmax
+// [24]  uint64 curCid
+// [32]  uint32 activeXids count (N)
+// [36]  uint32 subxip count (M)
+// [40]  N * uint64 activeXids
+// [40+N*8] M * uint64 subxip
+inline std::string Snapshot::exportToBytes() const {
+    std::string out;
+    out.reserve(40 + (activeXids.size() + subxip.size()) * sizeof(TxnId));
+
+    auto appendU32 = [&out](uint32_t v) {
+        out.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    };
+    auto appendU64 = [&out](uint64_t v) {
+        out.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    };
+
+    appendU32(0x534E4150u); // "SNAP"
+    appendU32(version);
+    appendU64(xmin);
+    appendU64(xmax);
+    appendU64(curCid);
+    appendU32(static_cast<uint32_t>(activeXids.size()));
+    appendU32(static_cast<uint32_t>(subxip.size()));
+    for (TxnId xid : activeXids) appendU64(xid);
+    for (TxnId xid : subxip) appendU64(xid);
+    return out;
+}
+
+inline std::optional<Snapshot> Snapshot::importFromBytes(const std::string& bytes) {
+    if (bytes.size() < 40) return std::nullopt;
+    size_t pos = 0;
+
+    auto readU32 = [&bytes, &pos]() -> uint32_t {
+        uint32_t v = 0;
+        std::memcpy(&v, bytes.data() + pos, sizeof(v));
+        pos += sizeof(v);
+        return v;
+    };
+    auto readU64 = [&bytes, &pos]() -> uint64_t {
+        uint64_t v = 0;
+        std::memcpy(&v, bytes.data() + pos, sizeof(v));
+        pos += sizeof(v);
+        return v;
+    };
+
+    uint32_t magic = readU32();
+    if (magic != 0x534E4150u) return std::nullopt;
+    uint32_t version = readU32();
+    if (version != 1) return std::nullopt;
+
+    Snapshot snap;
+    snap.version = version;
+    snap.xmin = readU64();
+    snap.xmax = readU64();
+    snap.curCid = readU64();
+    uint32_t activeCount = readU32();
+    uint32_t subCount = readU32();
+
+    size_t needed = static_cast<size_t>(activeCount + subCount) * sizeof(TxnId);
+    if (bytes.size() - pos < needed) return std::nullopt;
+
+    snap.activeXids.resize(activeCount);
+    for (uint32_t i = 0; i < activeCount; ++i) snap.activeXids[i] = readU64();
+    snap.subxip.resize(subCount);
+    for (uint32_t i = 0; i < subCount; ++i) snap.subxip[i] = readU64();
+    return snap;
+}
 
 // ============================================================================
 // 页常量

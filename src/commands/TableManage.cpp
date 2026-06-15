@@ -169,6 +169,7 @@ bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
     if (rowTxnId < upLimitId) return true;       // all older xids committed
     if (rowTxnId >= lowLimitId) return false;    // all newer xids not started
     if (activeTxnIds.count(rowTxnId)) return false; // still in progress
+    if (subTxnIds.count(rowTxnId)) return false; // subtransaction in progress
 
     // For xids in [upLimitId, lowLimitId) that are no longer active,
     // consult CLOG to distinguish committed vs aborted.
@@ -213,6 +214,8 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
         xminVisible = false;
     } else if (xmin == creatorTxnId) {
         xminVisible = true;
+    } else if (subTxnIds.count(xmin)) {
+        xminVisible = false; // subtransaction in progress
     } else if (xmin < upLimitId) {
         xminVisible = true;
     } else if (xmin >= lowLimitId) {
@@ -235,6 +238,8 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
     bool xmaxVisible = false; // true means row is still visible (delete not committed)
     if (xmax == creatorTxnId) {
         xmaxVisible = false; // current tx deleted it
+    } else if (subTxnIds.count(xmax)) {
+        xmaxVisible = true; // subtransaction in progress, delete not committed
     } else if (xmaxComm) {
         xmaxVisible = false;
     } else if (xmax < upLimitId) {
@@ -5690,6 +5695,8 @@ OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema
         std::ofstream out(tableListPath(dbname), std::ios::binary | std::ios::app);
         writeFixedString(out, tbl.tablename, MAX_TABLE_NAME_LEN);
     }
+    invalidateCatalogTableList(dbname);
+    invalidateCatalogSchema(dbname, tbl.tablename);
     // Create B+ tree index if table has primary key
     if (tbl.hasPrimaryKey()) {
         BPTree idx(indexPath(dbname, tbl.tablename));
@@ -5754,6 +5761,8 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
             }
         }
     }
+    invalidateCatalogTableList(dbname);
+    invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return OpResult::Success;
 }
@@ -5881,6 +5890,7 @@ OpResult StorageEngine::alterTableAddColumn(const std::string& dbname,
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
     }
+    invalidateCatalogSchema(dbname, tablename);
 
     // Migrate data: append default value for new column
     std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
@@ -5942,6 +5952,7 @@ OpResult StorageEngine::alterTableDropColumn(const std::string& dbname,
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
     }
+    invalidateCatalogSchema(dbname, tablename);
 
     // Migrate data: skip dropped column's data
     std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
@@ -6000,6 +6011,7 @@ OpResult StorageEngine::alterTableRenameColumn(const std::string& dbname,
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
     }
+    invalidateCatalogSchema(dbname, tablename);
 
     auto dbDir = dbPath(dbname);
 
@@ -6265,6 +6277,9 @@ OpResult StorageEngine::alterTableRenameTable(const std::string& dbname,
             writeFixedString(out, writeName, MAX_TABLE_NAME_LEN);
         }
     }
+    invalidateCatalogTableList(dbname);
+    invalidateCatalogSchema(dbname, oldName);
+    invalidateCatalogSchema(dbname, newName);
 
     // Update caches: remove old keys, keep new files on disk for lazy open
     std::string oldKey = dbname + "/" + oldName;
@@ -6772,12 +6787,29 @@ std::string StorageEngine::getColumnComment(const std::string& dbname,
 }
 
 std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname) const {
+    {
+        std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+        if (catalogSnapshot_) {
+            auto it = catalogSnapshot_->tableNames.find(dbname);
+            if (it != catalogSnapshot_->tableNames.end()) {
+                return it->second;
+            }
+        }
+    }
+
     std::vector<std::string> names;
     std::ifstream in(tableListPath(dbname), std::ios::binary);
     if (!in) return names;
     while (in) {
         std::string name = readFixedString(in, MAX_TABLE_NAME_LEN);
         if (!name.empty()) names.push_back(name);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+        if (catalogSnapshot_) {
+            catalogSnapshot_->tableNames[dbname] = names;
+        }
     }
     return names;
 }
@@ -6878,8 +6910,27 @@ std::vector<std::string> StorageEngine::getSequenceNames(const std::string& dbna
 
 TableSchema StorageEngine::getTableSchema(const std::string& dbname,
                                             const std::string& tablename) const {
+    {
+        std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+        if (catalogSnapshot_) {
+            auto key = std::make_pair(dbname, tablename);
+            auto it = catalogSnapshot_->schemas.find(key);
+            if (it != catalogSnapshot_->schemas.end()) {
+                return it->second;
+            }
+        }
+    }
+
     std::ifstream in(schemaPath(dbname, tablename), std::ios::binary);
-    return readSchema(in, tablename);
+    TableSchema tbl = readSchema(in, tablename);
+
+    {
+        std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+        if (catalogSnapshot_) {
+            catalogSnapshot_->schemas[std::make_pair(dbname, tablename)] = tbl;
+        }
+    }
+    return tbl;
 }
 
 int64_t StorageEngine::parseInt(const std::string& s) {
@@ -12959,7 +13010,70 @@ void StorageEngine::refreshReadView() {
     readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
     readView_.activeTxnIds = activeTransactions_;
     readView_.activeTxnIds.erase(currentTxnId_);
+    readView_.subTxnIds.clear();
+    readView_.subTxnIds.insert(txnSubTxnIds_.begin(), txnSubTxnIds_.end());
     readView_.commitLog = getCommitLog(txnDB_);
+}
+
+// ========================================================================
+// Snapshot export/import
+// ========================================================================
+std::string StorageEngine::exportSnapshot() const {
+    if (!inTransaction_) return "";
+    Snapshot snap;
+    snap.version = 1;
+    snap.xmin = readView_.upLimitId;
+    snap.xmax = readView_.lowLimitId;
+    snap.curCid = 0; // command id not tracked yet
+    snap.activeXids.assign(readView_.activeTxnIds.begin(), readView_.activeTxnIds.end());
+    snap.subxip.assign(readView_.subTxnIds.begin(), readView_.subTxnIds.end());
+    return snap.exportToBytes();
+}
+
+bool StorageEngine::importSnapshot(const std::string& bytes) {
+    if (!inTransaction_) return false;
+    auto snapOpt = Snapshot::importFromBytes(bytes);
+    if (!snapOpt) return false;
+    const Snapshot& snap = *snapOpt;
+    readView_.creatorTxnId = currentTxnId_;
+    readView_.upLimitId = snap.xmin;
+    readView_.lowLimitId = snap.xmax;
+    readView_.activeTxnIds.clear();
+    readView_.activeTxnIds.insert(snap.activeXids.begin(), snap.activeXids.end());
+    readView_.subTxnIds.clear();
+    readView_.subTxnIds.insert(snap.subxip.begin(), snap.subxip.end());
+    readView_.commitLog = getCommitLog(txnDB_);
+    return true;
+}
+
+// ========================================================================
+// Catalog snapshot: lazy cache for consistent schema/table list view
+// ========================================================================
+void StorageEngine::captureCatalogSnapshot() {
+    std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+    catalogSnapshot_.emplace();
+    catalogSnapshot_->schemas.clear();
+    catalogSnapshot_->tableNames.clear();
+}
+
+void StorageEngine::clearCatalogSnapshot() {
+    std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+    catalogSnapshot_.reset();
+}
+
+void StorageEngine::invalidateCatalogSchema(const std::string& dbname,
+                                            const std::string& tablename) {
+    std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+    if (catalogSnapshot_) {
+        catalogSnapshot_->schemas.erase(std::make_pair(dbname, tablename));
+    }
+}
+
+void StorageEngine::invalidateCatalogTableList(const std::string& dbname) {
+    std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+    if (catalogSnapshot_) {
+        catalogSnapshot_->tableNames.erase(dbname);
+    }
 }
 
 // ========================================================================
@@ -13388,8 +13502,13 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
         readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
         readView_.activeTxnIds = activeTransactions_;
         readView_.activeTxnIds.erase(currentTxnId_);
+        readView_.subTxnIds.clear();
+        readView_.subTxnIds.insert(txnSubTxnIds_.begin(), txnSubTxnIds_.end());
         readView_.commitLog = getCommitLog(dbname);
     }
+
+    // Capture catalog snapshot for consistent catalog view within transaction
+    captureCatalogSnapshot();
 
     txnLog_.clear();
     inTransaction_ = true;
@@ -13475,6 +13594,8 @@ OpResult StorageEngine::commitTransaction() {
     walAppend(walPath(txnDB_), "COMMIT " + std::to_string(currentTxnId_));
     txnLog_.clear();
     savepoints_.clear();
+    txnSubTxnIds_.clear();
+    clearCatalogSnapshot();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
@@ -13663,6 +13784,8 @@ OpResult StorageEngine::rollbackTransaction() {
 
     txnLog_.clear();
     savepoints_.clear();
+    txnSubTxnIds_.clear();
+    clearCatalogSnapshot();
     walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();

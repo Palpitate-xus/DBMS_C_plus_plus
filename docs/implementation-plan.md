@@ -153,6 +153,10 @@
 - **ctid 自引用链**：insert/update 完成后将新行 ctid 指向自身（self-ctid），为后续版本链遍历做准备。
 - **HOT update**：`PgPage`/`PageWrapper` 新增 `redirect` 与 LP_REDIRECT 支持；update 路径在“无索引列变化、无 PK、同页空间足够”时，将旧 line pointer 重定向到新插入版本，避免更新二级索引。
 - **测试覆盖**：新增 `tests/heap_tuple_header_test.cpp`（header 结构单元测试）、`tests/hot_update_test.cpp`（HOT update + 可见性 + rollback 集成测试）；`scripts/build_tests.sh` 支持按测试文件自定义源文件列表并批量运行。
+- **Snapshot 导出/导入**：`Snapshot` 扩展 `subxip` 与 `version`，新增稳定二进制序列化 `exportToBytes()` / `importFromBytes()`；`StorageEngine` 提供 `exportSnapshot()` / `importSnapshot()`，支持跨后端共享快照。
+- **subxip 支持**：`ReadView` 新增 `subTxnIds`，`isVisible()` 将子事务进行中 ID 视为活跃事务；为后续 savepoint 子事务 ID 预留 `txnSubTxnIds_`。
+- **Catalog Snapshot**：事务内对 `getTableSchema` / `getTableNames` 采用惰性缓存，保证事务中看到一致的 catalog 视图；提交/回滚后自动清空缓存。
+- **新增测试**：`tests/snapshot_export_import_test.cpp`（快照序列化与跨实例可见性）、`tests/subxip_visibility_test.cpp`（subxip 可见性规则）、`tests/catalog_snapshot_test.cpp`（DDL catalog 快照隔离）。
 
 ---
 

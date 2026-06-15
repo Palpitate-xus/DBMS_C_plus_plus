@@ -7,6 +7,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -727,6 +728,7 @@ public:
         uint64_t upLimitId = 0;
         uint64_t lowLimitId = 0;
         std::set<uint64_t> activeTxnIds;
+        std::set<uint64_t> subTxnIds;        // subtransaction IDs in progress
         const CommitLog* commitLog = nullptr; // for CLOG lookups
         bool isVisible(uint64_t rowTxnId) const;
         // PostgreSQL-style visibility using full HeapTupleHeader row buffer
@@ -861,6 +863,10 @@ public:
     const ReadView* getCurrentReadView() const {
         return inTransaction_ ? &readView_ : nullptr;
     }
+
+    // Snapshot export/import (for cross-backend snapshot sharing)
+    std::string exportSnapshot() const;
+    bool importSnapshot(const std::string& bytes);
 
     // Transaction isolation levels
     enum class IsolationLevel { ReadUncommitted = 0, ReadCommitted = 1, RepeatableRead = 2, Serializable = 3 };
@@ -1056,6 +1062,19 @@ private:
 
     // Savepoint support
     std::map<std::string, size_t> savepoints_; // name -> txnLog_ index
+    std::vector<uint64_t> txnSubTxnIds_;       // current transaction's subtransaction IDs (reserved)
+
+    // Catalog snapshot: consistent schema/table list view within a transaction
+    struct CatalogSnapshot {
+        std::map<std::pair<std::string, std::string>, TableSchema> schemas;
+        std::map<std::string, std::vector<std::string>> tableNames;
+    };
+    mutable std::optional<CatalogSnapshot> catalogSnapshot_;
+    mutable std::mutex catalogSnapshotMutex_;
+    void captureCatalogSnapshot();
+    void clearCatalogSnapshot();
+    void invalidateCatalogSchema(const std::string& dbname, const std::string& tablename);
+    void invalidateCatalogTableList(const std::string& dbname);
 
     // SSI (Serializable Snapshot Isolation) read/write sets
     mutable std::set<int64_t> txnReadRids_;    // RIDs read by current transaction
