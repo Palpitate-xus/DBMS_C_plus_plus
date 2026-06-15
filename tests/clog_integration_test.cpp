@@ -13,8 +13,8 @@ int main() {
     std::filesystem::remove_all(dbname + ".txn_backup");
 
     StorageEngine engine;
-    OpResult r = engine.createDatabase(dbname);
-    if (r != OpResult::Success) {
+    DBStatus r = engine.createDatabase(dbname);
+    if (r != DBStatus::OK) {
         std::cerr << "createDatabase failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
@@ -25,14 +25,14 @@ int main() {
     tbl.append(makeIntColumn("id", false, 0, true));
     tbl.append(makeVarCharColumn("name", false, 20, false));
     r = engine.createTable(dbname, tbl);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "createTable failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
 
     // Transaction 1: commit
     r = engine.beginTransaction(dbname);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "beginTransaction failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
@@ -41,34 +41,34 @@ int main() {
     vals["id"] = "1";
     vals["name"] = "alice";
     r = engine.insert(dbname, "t", vals);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "insert failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
 
     uint64_t txid1 = engine.currentTxnId();
     r = engine.commitTransaction();
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "commitTransaction failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
 
     // Transaction 2: rollback
     r = engine.beginTransaction(dbname);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "beginTransaction 2 failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
     vals["id"] = "2";
     vals["name"] = "bob";
     r = engine.insert(dbname, "t", vals);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "insert 2 failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
     uint64_t txid2 = engine.currentTxnId();
     r = engine.rollbackTransaction();
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "rollbackTransaction failed: " << static_cast<int>(r) << "\n";
         return 1;
     }

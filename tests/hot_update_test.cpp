@@ -27,8 +27,8 @@ int main() {
 
     {
         StorageEngine engine;
-        OpResult r = engine.createDatabase(dbname);
-    if (r != OpResult::Success) {
+        DBStatus r = engine.createDatabase(dbname);
+    if (r != DBStatus::OK) {
         std::cerr << "createDatabase failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
@@ -40,14 +40,14 @@ int main() {
     tbl.append(makeIntColumn("id", false, 0, false));
     tbl.append(makeVarCharColumn("payload", false, 50, false));
     r = engine.createTable(dbname, tbl);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "createTable failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
 
     // Insert initial row inside a transaction.
     r = engine.beginTransaction(dbname);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "beginTransaction failed\n";
         return 1;
     }
@@ -56,20 +56,20 @@ int main() {
     vals["id"] = "1";
     vals["payload"] = "original";
     r = engine.insert(dbname, "hot_t", vals);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "insert failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
 
     r = engine.commitTransaction();
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "commit failed\n";
         return 1;
     }
 
     // HOT update: change only non-indexed payload column inside a new transaction.
     r = engine.beginTransaction(dbname);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "beginTransaction 2 failed\n";
         return 1;
     }
@@ -77,7 +77,7 @@ int main() {
     std::map<std::string, std::string> updates;
     updates["payload"] = "hot_updated";
     r = engine.update(dbname, "hot_t", updates, {});
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "update failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
@@ -92,7 +92,7 @@ int main() {
     std::cout << "[HOT UPDATE TEST] in-transaction query sees updated value OK\n";
 
     r = engine.commitTransaction();
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "commit 2 failed\n";
         return 1;
     }
@@ -108,7 +108,7 @@ int main() {
 
     // Test rollback of an update: changes should not be visible after rollback.
     r = engine.beginTransaction(dbname);
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "beginTransaction 3 failed\n";
         return 1;
     }
@@ -116,7 +116,7 @@ int main() {
     updates.clear();
     updates["payload"] = "rolled_back";
     r = engine.update(dbname, "hot_t", updates, {});
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "update 2 failed: " << static_cast<int>(r) << "\n";
         return 1;
     }
@@ -128,7 +128,7 @@ int main() {
     }
 
     r = engine.rollbackTransaction();
-    if (r != OpResult::Success) {
+    if (r != DBStatus::OK) {
         std::cerr << "rollback failed\n";
         return 1;
     }

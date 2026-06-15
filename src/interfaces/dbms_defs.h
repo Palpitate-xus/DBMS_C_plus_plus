@@ -174,7 +174,17 @@ enum class DBStatus {
     IO_ERROR,
     CORRUPTED_DATA,
     INVALID_ARGUMENT,
-    INTERNAL_ERROR
+    INTERNAL_ERROR,
+    // Storage-engine specific codes (unified from the old DBStatus enum)
+    TABLE_NOT_FOUND,
+    DATABASE_NOT_FOUND,
+    TABLE_ALREADY_EXISTS,
+    INVALID_VALUE,
+    NULL_NOT_ALLOWED,
+    SYNTAX_ERROR,
+    DUPLICATE_KEY,
+    LOCK_CONFLICT,
+    SERIALIZATION_FAILURE
 };
 
 } // namespace dbms

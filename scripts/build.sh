@@ -20,7 +20,7 @@ fi
 SOURCES=(
     src/main.cpp
     src/commands/TableManage.cpp
-    src/optimizer/ExecutionPlan.cpp
+    src/executor/ExecutionPlan.cpp
     src/storage/BufferPool.cpp
     src/storage/PageAllocator.cpp
     src/storage/Page.cpp
@@ -61,7 +61,7 @@ INCLUDES=(
     -Isrc/transaction
     -Isrc/network
     -Isrc/utils
-    -Isrc/optimizer
+    -Isrc/executor
     -Isrc/commands
     -Isrc/interfaces
     -Isrc/parser

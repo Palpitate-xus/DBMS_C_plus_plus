@@ -6,18 +6,18 @@
 
 extern dbms::Config g_config;
 
-std::string dbms::sqlstateForOpResult(OpResult res) {
+std::string dbms::sqlstateForDBStatus(DBStatus res) {
     switch (res) {
-        case OpResult::Success: return "00000";
-        case OpResult::TableNotExist: return "42P01";
-        case OpResult::DatabaseNotExist: return "3D000";
-        case OpResult::TableAlreadyExist: return "42P07";
-        case OpResult::InvalidValue: return "22023";
-        case OpResult::NullNotAllowed: return "23502";
-        case OpResult::SyntaxError: return "42601";
-        case OpResult::DuplicateKey: return "23505";
-        case OpResult::LockConflict: return "55P03";
-        case OpResult::SerializationFailure: return "40001";
+        case DBStatus::OK: return "00000";
+        case DBStatus::TABLE_NOT_FOUND: return "42P01";
+        case DBStatus::DATABASE_NOT_FOUND: return "3D000";
+        case DBStatus::TABLE_ALREADY_EXISTS: return "42P07";
+        case DBStatus::INVALID_VALUE: return "22023";
+        case DBStatus::NULL_NOT_ALLOWED: return "23502";
+        case DBStatus::SYNTAX_ERROR: return "42601";
+        case DBStatus::DUPLICATE_KEY: return "23505";
+        case DBStatus::LOCK_CONFLICT: return "55P03";
+        case DBStatus::SERIALIZATION_FAILURE: return "40001";
     }
     return "XX000"; // internal_error
 }
@@ -978,17 +978,17 @@ std::vector<std::string> StorageEngine::getTargetPartitions(
     return result;
 }
 
-OpResult StorageEngine::attachPartition(const std::string& dbname,
+DBStatus StorageEngine::attachPartition(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& partitionName,
                                           const std::string& partitionSpec) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;  // table is not partitioned
+        return DBStatus::INVALID_VALUE;  // table is not partitioned
     }
 
     // Check partition name doesn't already exist
@@ -1007,7 +1007,7 @@ OpResult StorageEngine::attachPartition(const std::string& dbname,
     };
     if (nameExists()) {
         lockManager_.unlock(tablename);
-        return OpResult::TableAlreadyExist;
+        return DBStatus::TABLE_ALREADY_EXISTS;
     }
 
     // Parse partition spec based on partition type
@@ -1020,7 +1020,7 @@ OpResult StorageEngine::attachPartition(const std::string& dbname,
         size_t toPos = specLower.find(" to ");
         if (fromPos == std::string::npos || toPos == std::string::npos) {
             lockManager_.unlock(tablename);
-            return OpResult::SyntaxError;
+            return DBStatus::SYNTAX_ERROR;
         }
         size_t val1lp = partitionSpec.find('(', fromPos);
         size_t val1rp = partitionSpec.find(')', val1lp);
@@ -1029,7 +1029,7 @@ OpResult StorageEngine::attachPartition(const std::string& dbname,
         if (val1lp == std::string::npos || val1rp == std::string::npos ||
             val2lp == std::string::npos || val2rp == std::string::npos) {
             lockManager_.unlock(tablename);
-            return OpResult::SyntaxError;
+            return DBStatus::SYNTAX_ERROR;
         }
         std::string lowerBound = trim(partitionSpec.substr(val1lp + 1, val1rp - val1lp - 1));
         std::string upperBound = trim(partitionSpec.substr(val2lp + 1, val2rp - val2lp - 1));
@@ -1050,13 +1050,13 @@ OpResult StorageEngine::attachPartition(const std::string& dbname,
         size_t inPos = specLower.find(" in ");
         if (inPos == std::string::npos) {
             lockManager_.unlock(tablename);
-            return OpResult::SyntaxError;
+            return DBStatus::SYNTAX_ERROR;
         }
         size_t valLp = partitionSpec.find('(', inPos);
         size_t valRp = partitionSpec.find(')', valLp);
         if (valLp == std::string::npos || valRp == std::string::npos) {
             lockManager_.unlock(tablename);
-            return OpResult::SyntaxError;
+            return DBStatus::SYNTAX_ERROR;
         }
         std::string valsStr = partitionSpec.substr(valLp + 1, valRp - valLp - 1);
         std::vector<std::string> values;
@@ -1082,15 +1082,15 @@ OpResult StorageEngine::attachPartition(const std::string& dbname,
                     tbl.hashPartitions = idx + 1;
                 } else {
                     lockManager_.unlock(tablename);
-                    return OpResult::InvalidValue; // hash partitions must be attached in order
+                    return DBStatus::INVALID_VALUE; // hash partitions must be attached in order
                 }
             } catch (...) {
                 lockManager_.unlock(tablename);
-                return OpResult::SyntaxError;
+                return DBStatus::SYNTAX_ERROR;
             }
         } else {
             lockManager_.unlock(tablename);
-            return OpResult::SyntaxError;
+            return DBStatus::SYNTAX_ERROR;
         }
     }
 
@@ -1109,19 +1109,19 @@ OpResult StorageEngine::attachPartition(const std::string& dbname,
     }
 
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::detachPartition(const std::string& dbname,
+DBStatus StorageEngine::detachPartition(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& partitionName) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     bool found = false;
@@ -1149,7 +1149,7 @@ OpResult StorageEngine::detachPartition(const std::string& dbname,
 
     if (!found) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     // Rewrite schema
@@ -1162,7 +1162,7 @@ OpResult StorageEngine::detachPartition(const std::string& dbname,
     pageAllocators_.erase(dbname + "/" + tablename + "#" + partitionName);
 
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 std::filesystem::path StorageEngine::walPath(const std::string& dbname) const {
@@ -1182,27 +1182,27 @@ std::filesystem::path StorageEngine::viewsDir(const std::string& dbname) const {
     return dbPath(dbname) / ".views";
 }
 
-OpResult StorageEngine::createView(const std::string& dbname,
+DBStatus StorageEngine::createView(const std::string& dbname,
                                     const std::string& viewname,
                                     const std::string& sql) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto vdir = viewsDir(dbname);
     if (!std::filesystem::exists(vdir)) {
         std::filesystem::create_directories(vdir);
     }
     std::ofstream ofs(viewPath(dbname, viewname));
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     ofs << sql;
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropView(const std::string& dbname,
+DBStatus StorageEngine::dropView(const std::string& dbname,
                                   const std::string& viewname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = viewPath(dbname, viewname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::viewExists(const std::string& dbname,
@@ -1762,9 +1762,9 @@ std::vector<std::string> StorageEngine::getMaterializedViewNames(const std::stri
     return result;
 }
 
-OpResult StorageEngine::dropMaterializedView(const std::string& dbname,
+DBStatus StorageEngine::dropMaterializedView(const std::string& dbname,
                                               const std::string& viewname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     // Drop backing table
     std::string backingTable = materializedViewPrefix(viewname);
     if (tableExists(dbname, backingTable)) {
@@ -1775,7 +1775,7 @@ OpResult StorageEngine::dropMaterializedView(const std::string& dbname,
     if (std::filesystem::exists(path)) {
         std::filesystem::remove(path);
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 // ========================================================================
@@ -1791,17 +1791,17 @@ static std::filesystem::path procedurePath(const std::string& dbname,
     return std::filesystem::path(dbname) / ".procs" / (procname + ".proc");
 }
 
-OpResult StorageEngine::createProcedure(const std::string& dbname,
+DBStatus StorageEngine::createProcedure(const std::string& dbname,
                                          const std::string& procname,
                                          const std::vector<ProcParam>& params,
                                          const std::vector<std::string>& statements) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto pdir = proceduresDir(dbname);
     if (!std::filesystem::exists(pdir)) {
         std::filesystem::create_directories(pdir);
     }
     std::ofstream ofs(procedurePath(dbname, procname));
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     // Write params metadata line first
     if (!params.empty()) {
         ofs << "PARAMS:";
@@ -1814,16 +1814,16 @@ OpResult StorageEngine::createProcedure(const std::string& dbname,
     for (const auto& stmt : statements) {
         ofs << stmt << '\n';
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropProcedure(const std::string& dbname,
+DBStatus StorageEngine::dropProcedure(const std::string& dbname,
                                        const std::string& procname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = procedurePath(dbname, procname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::procedureExists(const std::string& dbname,
@@ -1903,22 +1903,22 @@ static std::filesystem::path schemaMarkerPath(const std::string& dbname,
     return std::filesystem::path(dbname) / (".schema_" + schemaname);
 }
 
-OpResult StorageEngine::createSchema(const std::string& dbname,
+DBStatus StorageEngine::createSchema(const std::string& dbname,
                                      const std::string& schemaname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = schemaMarkerPath(dbname, schemaname);
-    if (std::filesystem::exists(path)) return OpResult::Success; // already exists
+    if (std::filesystem::exists(path)) return DBStatus::OK; // already exists
     std::ofstream ofs(path);
-    if (!ofs) return OpResult::InvalidValue;
-    return OpResult::Success;
+    if (!ofs) return DBStatus::INVALID_VALUE;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropSchema(const std::string& dbname,
+DBStatus StorageEngine::dropSchema(const std::string& dbname,
                                    const std::string& schemaname,
                                    bool cascade) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = schemaMarkerPath(dbname, schemaname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     if (cascade) {
         std::string prefix = schemaname + "__";
         auto dbPath = std::filesystem::path(dbname);
@@ -1934,17 +1934,17 @@ OpResult StorageEngine::dropSchema(const std::string& dbname,
         }
     }
     std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::renameSchema(const std::string& dbname,
+DBStatus StorageEngine::renameSchema(const std::string& dbname,
                                      const std::string& oldname,
                                      const std::string& newname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto oldPath = schemaMarkerPath(dbname, oldname);
     auto newPath = schemaMarkerPath(dbname, newname);
-    if (!std::filesystem::exists(oldPath)) return OpResult::TableNotExist;
-    if (std::filesystem::exists(newPath)) return OpResult::InvalidValue;
+    if (!std::filesystem::exists(oldPath)) return DBStatus::TABLE_NOT_FOUND;
+    if (std::filesystem::exists(newPath)) return DBStatus::INVALID_VALUE;
     std::filesystem::rename(oldPath, newPath);
     // Rename all tables in the old schema
     std::string oldPrefix = oldname + "__";
@@ -1982,16 +1982,16 @@ OpResult StorageEngine::renameSchema(const std::string& dbname,
             }
         }
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableSetSchema(const std::string& dbname,
+DBStatus StorageEngine::alterTableSetSchema(const std::string& dbname,
                                             const std::string& tablename,
                                             const std::string& targetDbname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
-    if (!databaseExists(targetDbname)) return OpResult::DatabaseNotExist;
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
-    if (tableExists(targetDbname, tablename)) return OpResult::TableAlreadyExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!databaseExists(targetDbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (tableExists(targetDbname, tablename)) return DBStatus::TABLE_ALREADY_EXISTS;
 
     auto srcPath = std::filesystem::path(dbname);
     auto dstPath = std::filesystem::path(targetDbname);
@@ -2077,7 +2077,7 @@ OpResult StorageEngine::alterTableSetSchema(const std::string& dbname,
         }
     }
 
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::schemaExists(const std::string& dbname,
@@ -2134,49 +2134,49 @@ static std::filesystem::path udfPath(const std::string& dbname,
     return std::filesystem::path(dbname) / ".funcs" / (funcname + ".func");
 }
 
-OpResult StorageEngine::createUDF(const std::string& dbname,
+DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& funcname,
                                    const std::string& param,
                                    const std::string& expression) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto fdir = udfDir(dbname);
     if (!std::filesystem::exists(fdir)) {
         std::filesystem::create_directories(fdir);
     }
     std::ofstream ofs(udfPath(dbname, funcname));
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     ofs << param << "\n" << expression << "\n";
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::createUDF(const std::string& dbname,
+DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& funcname,
                                    const std::vector<std::string>& params,
                                    const std::vector<std::string>& types,
                                    const std::string& expression) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto fdir = udfDir(dbname);
     if (!std::filesystem::exists(fdir)) {
         std::filesystem::create_directories(fdir);
     }
     std::ofstream ofs(udfPath(dbname, funcname));
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     ofs << "PARAMS:";
     for (size_t i = 0; i < params.size(); ++i) {
         if (i > 0) ofs << ',';
         ofs << params[i] << ':' << (i < types.size() ? types[i] : "");
     }
     ofs << "\n" << expression << "\n";
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropUDF(const std::string& dbname,
+DBStatus StorageEngine::dropUDF(const std::string& dbname,
                                  const std::string& funcname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = udfPath(dbname, funcname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::udfExists(const std::string& dbname,
@@ -2249,28 +2249,28 @@ static std::filesystem::path tvfPath(const std::string& dbname,
     return std::filesystem::path(dbname) / ".tvf" / (funcname + ".tvf");
 }
 
-OpResult StorageEngine::createTVF(const std::string& dbname,
+DBStatus StorageEngine::createTVF(const std::string& dbname,
                                    const std::string& funcname,
                                    const std::string& param,
                                    const std::string& sql) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto tdir = tvfDir(dbname);
     if (!std::filesystem::exists(tdir)) {
         std::filesystem::create_directories(tdir);
     }
     std::ofstream ofs(tvfPath(dbname, funcname));
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     ofs << param << "\n" << sql << "\n";
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropTVF(const std::string& dbname,
+DBStatus StorageEngine::dropTVF(const std::string& dbname,
                                  const std::string& funcname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = tvfPath(dbname, funcname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::tvfExists(const std::string& dbname,
@@ -2825,47 +2825,47 @@ std::filesystem::path StorageEngine::tablespaceDir(const std::string& dbname,
     return dbPath(dbname);
 }
 
-OpResult StorageEngine::createTablespace(const std::string& dbname,
+DBStatus StorageEngine::createTablespace(const std::string& dbname,
                                           const std::string& tsName,
                                           const std::string& physicalPath) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (tsName.empty() || tsName == "pg_default" || tsName == "pg_global") {
-        return OpResult::InvalidValue; // reserved names
+        return DBStatus::INVALID_VALUE; // reserved names
     }
     auto tsDir = dbPath(dbname) / "pg_tblspc";
     if (!std::filesystem::exists(tsDir)) {
         std::filesystem::create_directories(tsDir);
     }
     auto tsPath = tsDir / (tsName + ".path");
-    if (std::filesystem::exists(tsPath)) return OpResult::TableAlreadyExist;
+    if (std::filesystem::exists(tsPath)) return DBStatus::TABLE_ALREADY_EXISTS;
 
     // Ensure physical directory exists
     if (!std::filesystem::exists(physicalPath)) {
         std::filesystem::create_directories(physicalPath);
     }
     std::ofstream ofs(tsPath);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     ofs << physicalPath << "\n";
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropTablespace(const std::string& dbname,
+DBStatus StorageEngine::dropTablespace(const std::string& dbname,
                                         const std::string& tsName) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (tsName.empty() || tsName == "pg_default" || tsName == "pg_global") {
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
     auto tsPath = dbPath(dbname) / "pg_tblspc" / (tsName + ".path");
-    if (!std::filesystem::exists(tsPath)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(tsPath)) return DBStatus::TABLE_NOT_FOUND;
 
     // Check if any table uses this tablespace
     auto tables = getTableNames(dbname);
     for (const auto& tname : tables) {
         TableSchema tbl = getTableSchema(dbname, tname);
-        if (tbl.tablespace == tsName) return OpResult::InvalidValue; // not empty
+        if (tbl.tablespace == tsName) return DBStatus::INVALID_VALUE; // not empty
     }
     std::filesystem::remove(tsPath);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 std::vector<std::string> StorageEngine::listTablespaces(const std::string& dbname) const {
@@ -3065,7 +3065,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         if (rv) {
             if (!rv->isVisible(data, len, fmtVer)) return;
         }
-        if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::Serializable) {
+        if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
             int64_t rid = this->encodeRid(pid, sid);
             this->txnReadRids_.insert(rid);
             std::lock_guard<std::mutex> lock(ssiMutex_);
@@ -3267,18 +3267,18 @@ HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
     return nullptr;
 }
 
-OpResult StorageEngine::createHashIndex(const std::string& dbname,
+DBStatus StorageEngine::createHashIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          bool /*concurrently*/) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     bool found = false;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { found = true; break; }
     }
-    if (!found) return OpResult::InvalidValue;
+    if (!found) return DBStatus::INVALID_VALUE;
 
     std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
     std::set<std::string> existing;
@@ -3287,7 +3287,7 @@ OpResult StorageEngine::createHashIndex(const std::string& dbname,
         std::string line;
         while (std::getline(in, line)) if (!line.empty()) existing.insert(line);
     }
-    if (existing.count(colname)) return OpResult::Success; // already exists
+    if (existing.count(colname)) return DBStatus::OK; // already exists
     existing.insert(colname);
     {
         std::ofstream out(meta, std::ios::trunc);
@@ -3296,7 +3296,7 @@ OpResult StorageEngine::createHashIndex(const std::string& dbname,
 
     // Build hash index from existing data
     HashIndex* hidx = getHashIndex(dbname, tablename, colname);
-    if (!hidx) return OpResult::Success;
+    if (!hidx) return DBStatus::OK;
     hidx->clear();
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -3311,10 +3311,10 @@ OpResult StorageEngine::createHashIndex(const std::string& dbname,
             }
         }
     });
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropHashIndex(const std::string& dbname,
+DBStatus StorageEngine::dropHashIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
     std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
@@ -3332,7 +3332,7 @@ OpResult StorageEngine::dropHashIndex(const std::string& dbname,
     std::string key = dbname + "." + tablename + "." + colname;
     hashIndexCache_.erase(key);
     std::filesystem::remove(hashIndexPath(dbname, tablename, colname));
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbname,
@@ -3797,21 +3797,21 @@ StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
     return trg;
 }
 
-OpResult StorageEngine::createTrigger(const std::string& dbname, const Trigger& trg) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+DBStatus StorageEngine::createTrigger(const std::string& dbname, const Trigger& trg) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto existing = getAllTriggers(dbname);
     for (const auto& t : existing) {
-        if (t.name == trg.name) return OpResult::Success; // already exists
+        if (t.name == trg.name) return DBStatus::OK; // already exists
     }
     existing.push_back(trg);
     std::ofstream out(triggerPath(dbname), std::ios::binary | std::ios::trunc);
     size_t count = existing.size();
     out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
     for (const auto& t : existing) writeTrigger(out, t);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropTrigger(const std::string& dbname, const std::string& trgName) {
+DBStatus StorageEngine::dropTrigger(const std::string& dbname, const std::string& trgName) {
     auto existing = getAllTriggers(dbname);
     bool found = false;
     {
@@ -3826,7 +3826,7 @@ OpResult StorageEngine::dropTrigger(const std::string& dbname, const std::string
             else found = true;
         }
     }
-    return found ? OpResult::Success : OpResult::TableNotExist;
+    return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
 }
 
 std::vector<StorageEngine::Trigger> StorageEngine::getTriggers(
@@ -3856,7 +3856,7 @@ std::vector<StorageEngine::Trigger> StorageEngine::getAllTriggers(const std::str
     return result;
 }
 
-OpResult StorageEngine::enableTrigger(const std::string& dbname, const std::string& trgName) {
+DBStatus StorageEngine::enableTrigger(const std::string& dbname, const std::string& trgName) {
     auto existing = getAllTriggers(dbname);
     bool found = false;
     {
@@ -3868,10 +3868,10 @@ OpResult StorageEngine::enableTrigger(const std::string& dbname, const std::stri
             writeTrigger(out, t);
         }
     }
-    return found ? OpResult::Success : OpResult::TableNotExist;
+    return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
 }
 
-OpResult StorageEngine::disableTrigger(const std::string& dbname, const std::string& trgName) {
+DBStatus StorageEngine::disableTrigger(const std::string& dbname, const std::string& trgName) {
     auto existing = getAllTriggers(dbname);
     bool found = false;
     {
@@ -3883,7 +3883,7 @@ OpResult StorageEngine::disableTrigger(const std::string& dbname, const std::str
             writeTrigger(out, t);
         }
     }
-    return found ? OpResult::Success : OpResult::TableNotExist;
+    return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
 }
 
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
@@ -3951,13 +3951,13 @@ static std::string evalExpr(const std::string& val, const std::string& exprFunc)
     return val;
 }
 
-OpResult StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
+DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
                                      const std::string& colname, bool ascending,
                                      const std::vector<std::string>& includeCols,
                                      const std::string& whereCondition,
                                      const std::string& expression,
                                      bool concurrently) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (concurrently) {
         lockManager_.lockShared(tablename);
     } else {
@@ -3976,7 +3976,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
         size_t rp = expression.find(')');
         if (lp == std::string::npos || rp == std::string::npos || rp <= lp + 1) {
             lockManager_.unlock(tablename);
-            return OpResult::InvalidValue;
+            return DBStatus::INVALID_VALUE;
         }
         exprFunc = expression.substr(0, lp);
         actualColname = expression.substr(lp + 1, rp - lp - 1);
@@ -3990,7 +3990,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
     }
     if (colIdx >= tbl.len) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     // Parse WHERE condition for partial index
@@ -4009,7 +4009,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
         bool currentDesc = isDescendingIndex(dbname, tablename, actualColname);
         if (currentDesc == !ascending) {
             lockManager_.unlock(tablename);
-            return OpResult::Success; // same direction, nothing to do
+            return DBStatus::OK; // same direction, nothing to do
         }
         dropIndex(dbname, tablename, actualColname);
     }
@@ -4017,7 +4017,7 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
     // Build index from existing data using page-based iteration
     BPTree* idx = getSecondaryIndex(dbname, tablename,
         isExpression ? expression : actualColname);
-    if (!idx) return OpResult::InvalidValue;
+    if (!idx) return DBStatus::INVALID_VALUE;
 
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -4055,12 +4055,12 @@ OpResult StorageEngine::createIndex(const std::string& dbname, const std::string
     }
     out << '\n';
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropIndex(const std::string& dbname, const std::string& tablename,
+DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& tablename,
                                    const std::string& colname) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
     std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
 
@@ -4104,17 +4104,17 @@ OpResult StorageEngine::dropIndex(const std::string& dbname, const std::string& 
     std::string key = dbname + "/" + tablename + "/" + colname;
     secondaryIndexCache_.erase(key);
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
+DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::vector<std::string>& colnames,
                                               const std::string& indexName,
                                               const std::vector<std::string>& includeCols,
                                               const std::string& whereCondition,
                                               bool concurrently) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (concurrently) {
         lockManager_.lockShared(tablename);
     } else {
@@ -4130,7 +4130,7 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
         }
         if (!found) {
             lockManager_.unlock(tablename);
-            return OpResult::InvalidValue;
+            return DBStatus::INVALID_VALUE;
         }
     }
 
@@ -4139,7 +4139,7 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
     for (const auto& ci : existingComp) {
         if (ci.name == indexName) {
             lockManager_.unlock(tablename);
-            return OpResult::Success;
+            return DBStatus::OK;
         }
     }
 
@@ -4153,7 +4153,7 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
     BPTree* idx = getCompositeIndexTree(dbname, tablename, indexName);
     if (!idx) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
@@ -4188,20 +4188,20 @@ OpResult StorageEngine::createCompositeIndex(const std::string& dbname,
     }
     out << '\n';
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropCompositeIndex(const std::string& dbname,
+DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
                                             const std::string& tablename,
                                             const std::string& indexName) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     // Verify the composite index actually exists
     auto compIdxs = getCompositeIndexes(dbname, tablename);
     bool found = false;
     for (const auto& ci : compIdxs) {
         if (ci.name == indexName) { found = true; break; }
     }
-    if (!found) return OpResult::TableNotExist;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::path p = dbPath(dbname) / (tablename + ".idx_" + indexName);
     std::filesystem::remove(p);
 
@@ -4244,12 +4244,12 @@ OpResult StorageEngine::dropCompositeIndex(const std::string& dbname,
     // Remove from cache
     std::string key = dbname + "/" + tablename + "/C/" + indexName;
     secondaryIndexCache_.erase(key);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::reindex(const std::string& dbname,
+DBStatus StorageEngine::reindex(const std::string& dbname,
                                  const std::string& tablename) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
 
     // 1. Rebuild primary key index
@@ -4264,7 +4264,7 @@ OpResult StorageEngine::reindex(const std::string& dbname,
     }
     std::filesystem::remove(pkPath);
     BPTree* pkIdx = getPKIndex(dbname, tablename);
-    if (!pkIdx) return OpResult::InvalidValue;
+    if (!pkIdx) return DBStatus::INVALID_VALUE;
     if (tbl.hasPrimaryKey()) {
         forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
@@ -4331,7 +4331,7 @@ OpResult StorageEngine::reindex(const std::string& dbname,
         });
     }
 
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 // ========================================================================
@@ -4361,16 +4361,16 @@ static std::vector<std::string> tokenizeText(const std::string& text) {
     return tokens;
 }
 
-OpResult StorageEngine::createFullTextIndex(const std::string& dbname,
+DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
                                              const std::string& tablename,
                                              const std::string& colname) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     std::map<std::string, std::set<int64_t>> inverted;
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
@@ -4386,7 +4386,7 @@ OpResult StorageEngine::createFullTextIndex(const std::string& dbname,
 
     auto path = fullTextIndexPath(dbname, tablename, colname);
     std::ofstream out(path);
-    if (!out) return OpResult::InvalidValue;
+    if (!out) return DBStatus::INVALID_VALUE;
     for (const auto& kv : inverted) {
         out << kv.first;
         for (int64_t rid : kv.second) {
@@ -4394,17 +4394,17 @@ OpResult StorageEngine::createFullTextIndex(const std::string& dbname,
         }
         out << '\n';
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropFullTextIndex(const std::string& dbname,
+DBStatus StorageEngine::dropFullTextIndex(const std::string& dbname,
                                            const std::string& tablename,
                                            const std::string& colname) {
     auto path = fullTextIndexPath(dbname, tablename, colname);
     if (std::filesystem::exists(path)) {
         std::filesystem::remove(path);
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::hasFullTextIndex(const std::string& dbname,
@@ -4535,16 +4535,16 @@ static std::vector<std::string> extractGinKeys(const std::string& value, const s
     return keys;
 }
 
-OpResult StorageEngine::createGinIndex(const std::string& dbname,
+DBStatus StorageEngine::createGinIndex(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& colname) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     std::map<std::string, std::set<int64_t>> inverted;
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
@@ -4560,7 +4560,7 @@ OpResult StorageEngine::createGinIndex(const std::string& dbname,
 
     auto path = ginIndexPath(dbname, tablename, colname);
     std::ofstream out(path);
-    if (!out) return OpResult::InvalidValue;
+    if (!out) return DBStatus::INVALID_VALUE;
     for (const auto& kv : inverted) {
         out << kv.first;
         for (int64_t rid : kv.second) {
@@ -4568,15 +4568,15 @@ OpResult StorageEngine::createGinIndex(const std::string& dbname,
         }
         out << '\n';
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropGinIndex(const std::string& dbname,
+DBStatus StorageEngine::dropGinIndex(const std::string& dbname,
                                       const std::string& tablename,
                                       const std::string& colname) {
     auto path = ginIndexPath(dbname, tablename, colname);
     if (std::filesystem::exists(path)) std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::hasGinIndex(const std::string& dbname,
@@ -4644,20 +4644,20 @@ static std::filesystem::path spGiSTIndexPath(const std::string& dbname,
     return std::filesystem::path(dbname) / (tablename + "_" + colname + ".spgist");
 }
 
-OpResult StorageEngine::createGiSTIndex(const std::string& dbname,
+DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     auto path = giSTIndexPath(dbname, tablename, colname);
     std::ofstream out(path);
-    if (!out) return OpResult::InvalidValue;
+    if (!out) return DBStatus::INVALID_VALUE;
 
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -4670,15 +4670,15 @@ OpResult StorageEngine::createGiSTIndex(const std::string& dbname,
         // For text, we store the value itself (prefix containment).
         out << rid << ' ' << val << ' ' << val << '\n';
     });
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropGiSTIndex(const std::string& dbname,
+DBStatus StorageEngine::dropGiSTIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
     auto path = giSTIndexPath(dbname, tablename, colname);
     if (std::filesystem::exists(path)) std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::hasGiSTIndex(const std::string& dbname,
@@ -4753,20 +4753,20 @@ std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string&
 // SP-GiST index (Space-Partitioned GiST) - quadtree for POINT type
 // ========================================================================
 
-OpResult StorageEngine::createSPGiSTIndex(const std::string& dbname,
+DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
                                            const std::string& tablename,
                                            const std::string& colname) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     auto path = spGiSTIndexPath(dbname, tablename, colname);
     std::ofstream out(path);
-    if (!out) return OpResult::InvalidValue;
+    if (!out) return DBStatus::INVALID_VALUE;
 
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -4775,16 +4775,16 @@ OpResult StorageEngine::createSPGiSTIndex(const std::string& dbname,
         int64_t rid = encodeRid(pageId, slotId);
         out << rid << ' ' << val << '\n';
     });
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropSPGiSTIndex(const std::string& dbname,
+DBStatus StorageEngine::dropSPGiSTIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
     auto path = spGiSTIndexPath(dbname, tablename, colname);
     if (std::filesystem::exists(path)) std::filesystem::remove(path);
     spGiSTCache_.erase(dbname + "/" + tablename + "/" + colname);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::hasSPGiSTIndex(const std::string& dbname,
@@ -4902,22 +4902,22 @@ static std::filesystem::path brinIndexPath(const std::string& dbname,
     return std::filesystem::path(dbname) / (tablename + "_" + colname + ".brin");
 }
 
-OpResult StorageEngine::createBrinIndex(const std::string& dbname,
+DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          size_t pagesPerRange) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (pagesPerRange == 0) pagesPerRange = 64;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return OpResult::InvalidValue;
+    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     auto path = brinIndexPath(dbname, tablename, colname);
     std::ofstream out(path);
-    if (!out) return OpResult::InvalidValue;
+    if (!out) return DBStatus::INVALID_VALUE;
 
     // If table is partitioned, scan partition files; otherwise scan main data file
     auto scanTable = [&](const std::string& actualTableName) {
@@ -4979,15 +4979,15 @@ OpResult StorageEngine::createBrinIndex(const std::string& dbname,
     };
 
     scanTable(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropBrinIndex(const std::string& dbname,
+DBStatus StorageEngine::dropBrinIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
     auto path = brinIndexPath(dbname, tablename, colname);
     if (std::filesystem::exists(path)) std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 bool StorageEngine::hasBrinIndex(const std::string& dbname,
@@ -5068,8 +5068,8 @@ bool StorageEngine::tableExists(const std::string& dbname,
     return std::filesystem::exists(schemaPath(dbname, tablename));
 }
 
-OpResult StorageEngine::createDatabase(const std::string& dbname, const std::string& charset) {
-    if (databaseExists(dbname)) return OpResult::TableAlreadyExist;
+DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::string& charset) {
+    if (databaseExists(dbname)) return DBStatus::TABLE_ALREADY_EXISTS;
     std::filesystem::create_directory(dbPath(dbname));
     {
         std::ofstream f(tableListPath(dbname), std::ios::binary);
@@ -5078,7 +5078,7 @@ OpResult StorageEngine::createDatabase(const std::string& dbname, const std::str
         std::ofstream f(dbPath(dbname) / ".charset");
         f << charset;
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 std::string StorageEngine::getDatabaseCharset(const std::string& dbname) const {
@@ -5090,10 +5090,10 @@ std::string StorageEngine::getDatabaseCharset(const std::string& dbname) const {
     return "utf8";
 }
 
-OpResult StorageEngine::dropDatabase(const std::string& dbname) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     std::filesystem::remove_all(dbPath(dbname));
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420004;  // "DB" + version 4 (added formatVersion)
@@ -5536,16 +5536,16 @@ std::map<std::string, std::string> StorageEngine::getStorageParams(
     return params;
 }
 
-OpResult StorageEngine::setStorageParams(
+DBStatus StorageEngine::setStorageParams(
     const std::string& dbname, const std::string& tablename,
     const std::map<std::string, std::string>& params) {
     auto pp = paramsPath(dbname, tablename);
     std::ofstream ofs(pp);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     for (const auto& kv : params) {
         ofs << kv.first << "=" << kv.second << "\n";
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 // ========================================================================
@@ -5654,9 +5654,9 @@ void StorageEngine::prepareToastValues(const std::string& dbname, const std::str
     }
 }
 
-OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
-    if (tableExists(dbname, tbl.tablename)) return OpResult::TableAlreadyExist;
+DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (tableExists(dbname, tbl.tablename)) return DBStatus::TABLE_ALREADY_EXISTS;
 
     TableSchema tblWithVersion = tbl;
     if (tblWithVersion.formatVersion == 0) {
@@ -5715,10 +5715,10 @@ OpResult StorageEngine::createTable(const std::string& dbname, const TableSchema
             createIndex(dbname, tbl.tablename, tbl.cols[i].dataName);
         }
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::createTable(const std::string& dbname,
+DBStatus StorageEngine::createTable(const std::string& dbname,
                                      const std::string& tablename,
                                      const TableSchema& tbl) {
     TableSchema t = tbl;
@@ -5726,9 +5726,9 @@ OpResult StorageEngine::createTable(const std::string& dbname,
     return createTable(dbname, t);
 }
 
-OpResult StorageEngine::dropTable(const std::string& dbname,
+DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     std::filesystem::remove(schemaPath(dbname, tablename));
@@ -5764,12 +5764,12 @@ OpResult StorageEngine::dropTable(const std::string& dbname,
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::truncateTable(const std::string& dbname,
+DBStatus StorageEngine::truncateTable(const std::string& dbname,
                                        const std::string& tablename) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -5861,25 +5861,25 @@ OpResult StorageEngine::truncateTable(const std::string& dbname,
     }
 
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableAddColumn(const std::string& dbname,
+DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
                                              const std::string& tablename,
                                              const Column& col) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == col.dataName) {
             lockManager_.unlock(tablename);
-            return OpResult::TableAlreadyExist;
+            return DBStatus::TABLE_ALREADY_EXISTS;
         }
     }
     if (tbl.len >= MAX_COLUMNS) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     size_t oldRowSize = tbl.rowSize();
@@ -5918,13 +5918,13 @@ OpResult StorageEngine::alterTableAddColumn(const std::string& dbname,
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::rename(tempPath, dataPath(dbname, tablename));
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableDropColumn(const std::string& dbname,
+DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -5934,7 +5934,7 @@ OpResult StorageEngine::alterTableDropColumn(const std::string& dbname,
     }
     if (dropIdx >= tbl.len) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     size_t oldRowSize = tbl.rowSize();
@@ -5978,15 +5978,15 @@ OpResult StorageEngine::alterTableDropColumn(const std::string& dbname,
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::rename(tempPath, dataPath(dbname, tablename));
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableRenameColumn(const std::string& dbname,
+DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
                                                 const std::string& tablename,
                                                 const std::string& oldName,
                                                 const std::string& newName) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
-    if (oldName == newName) return OpResult::Success;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (oldName == newName) return DBStatus::OK;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -5996,12 +5996,12 @@ OpResult StorageEngine::alterTableRenameColumn(const std::string& dbname,
     }
     if (colIdx >= tbl.len) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == newName) {
             lockManager_.unlock(tablename);
-            return OpResult::TableAlreadyExist;
+            return DBStatus::TABLE_ALREADY_EXISTS;
         }
     }
 
@@ -6175,14 +6175,14 @@ OpResult StorageEngine::alterTableRenameColumn(const std::string& dbname,
     }
 
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableRenameTable(const std::string& dbname,
+DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                                                const std::string& oldName,
                                                const std::string& newName) {
-    if (!tableExists(dbname, oldName)) return OpResult::TableNotExist;
-    if (tableExists(dbname, newName)) return OpResult::TableAlreadyExist;
+    if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
+    if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
     lockManager_.lockMetadata(oldName);
     lockManager_.lockMetadata(newName);
 
@@ -6379,14 +6379,14 @@ OpResult StorageEngine::alterTableRenameTable(const std::string& dbname,
 
     lockManager_.unlock(oldName);
     lockManager_.unlock(newName);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableSetDefault(const std::string& dbname,
+DBStatus StorageEngine::alterTableSetDefault(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName,
                                               const std::string& defaultValue) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -6396,7 +6396,7 @@ OpResult StorageEngine::alterTableSetDefault(const std::string& dbname,
     }
     if (colIdx >= tbl.len) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     tbl.cols[colIdx].defaultValue = defaultValue;
@@ -6405,13 +6405,13 @@ OpResult StorageEngine::alterTableSetDefault(const std::string& dbname,
         writeSchema(out, tbl);
     }
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableDropDefault(const std::string& dbname,
+DBStatus StorageEngine::alterTableDropDefault(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::string& colName) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -6421,7 +6421,7 @@ OpResult StorageEngine::alterTableDropDefault(const std::string& dbname,
     }
     if (colIdx >= tbl.len) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     tbl.cols[colIdx].defaultValue.clear();
@@ -6430,13 +6430,13 @@ OpResult StorageEngine::alterTableDropDefault(const std::string& dbname,
         writeSchema(out, tbl);
     }
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableSetNotNull(const std::string& dbname,
+DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -6446,7 +6446,7 @@ OpResult StorageEngine::alterTableSetNotNull(const std::string& dbname,
     }
     if (colIdx >= tbl.len) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     tbl.cols[colIdx].isNull = false;
@@ -6455,13 +6455,13 @@ OpResult StorageEngine::alterTableSetNotNull(const std::string& dbname,
         writeSchema(out, tbl);
     }
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableDropNotNull(const std::string& dbname,
+DBStatus StorageEngine::alterTableDropNotNull(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::string& colName) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -6471,7 +6471,7 @@ OpResult StorageEngine::alterTableDropNotNull(const std::string& dbname,
     }
     if (colIdx >= tbl.len) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     tbl.cols[colIdx].isNull = true;
@@ -6480,14 +6480,14 @@ OpResult StorageEngine::alterTableDropNotNull(const std::string& dbname,
         writeSchema(out, tbl);
     }
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
+DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
                                                         const std::string& tablename,
                                                         const std::string& name,
                                                         const std::string& expr) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -6501,13 +6501,13 @@ OpResult StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
     }
     if (targetCol >= tbl.len) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
     // Ensure constraint name is unique
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].checkConstraintName == name) {
             lockManager_.unlock(tablename);
-            return OpResult::TableAlreadyExist;
+            return DBStatus::TABLE_ALREADY_EXISTS;
         }
     }
 
@@ -6518,14 +6518,14 @@ OpResult StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
         writeSchema(out, tbl);
     }
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
+DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
                                                          const std::string& tablename,
                                                          const std::string& name,
                                                          const std::vector<std::string>& colNames) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -6541,14 +6541,14 @@ OpResult StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
         }
         if (!found) {
             lockManager_.unlock(tablename);
-            return OpResult::InvalidValue;
+            return DBStatus::INVALID_VALUE;
         }
     }
     // Check for duplicate constraint name
     for (const auto& n : tbl.uniqueConstraintNames) {
         if (n == name) {
             lockManager_.unlock(tablename);
-            return OpResult::TableAlreadyExist;
+            return DBStatus::TABLE_ALREADY_EXISTS;
         }
     }
 
@@ -6559,10 +6559,10 @@ OpResult StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
         writeSchema(out, tbl);
     }
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
+DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
                                                      const std::string& tablename,
                                                      const std::string& name,
                                                      const std::vector<std::string>& localCols,
@@ -6570,11 +6570,11 @@ OpResult StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
                                                      const std::vector<std::string>& refCols,
                                                      const std::string& onDelete,
                                                      const std::string& onUpdate) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!tableExists(dbname, refTable)) {
         // FK references a table in the same database
         if (!std::filesystem::exists(schemaPath(dbname, refTable))) {
-            return OpResult::TableNotExist;
+            return DBStatus::TABLE_NOT_FOUND;
         }
     }
     lockManager_.lockMetadata(tablename);
@@ -6582,7 +6582,7 @@ OpResult StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.fkLen >= MAX_COLUMNS) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
     // Verify local columns exist
     for (const auto& cname : localCols) {
@@ -6592,14 +6592,14 @@ OpResult StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
         }
         if (!found) {
             lockManager_.unlock(tablename);
-            return OpResult::InvalidValue;
+            return DBStatus::INVALID_VALUE;
         }
     }
     // Check for duplicate constraint name
     for (size_t i = 0; i < tbl.fkLen; ++i) {
         if (tbl.fks[i].name == name) {
             lockManager_.unlock(tablename);
-            return OpResult::TableAlreadyExist;
+            return DBStatus::TABLE_ALREADY_EXISTS;
         }
     }
 
@@ -6616,13 +6616,13 @@ OpResult StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
         writeSchema(out, tbl);
     }
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterTableDropConstraint(const std::string& dbname,
+DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
                                                   const std::string& tablename,
                                                   const std::string& name) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -6667,7 +6667,7 @@ OpResult StorageEngine::alterTableDropConstraint(const std::string& dbname,
 
     if (!found) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     {
@@ -6675,17 +6675,17 @@ OpResult StorageEngine::alterTableDropConstraint(const std::string& dbname,
         writeSchema(out, tbl);
     }
     lockManager_.unlock(tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 static std::filesystem::path commentsPath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".comments";
 }
 
-OpResult StorageEngine::commentOnTable(const std::string& dbname,
+DBStatus StorageEngine::commentOnTable(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& comment) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     auto path = commentsPath(dbname);
     std::vector<std::string> lines;
     {
@@ -6715,14 +6715,14 @@ OpResult StorageEngine::commentOnTable(const std::string& dbname,
     for (const auto& line : lines) {
         if (!line.empty()) out << line << '\n';
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::commentOnColumn(const std::string& dbname,
+DBStatus StorageEngine::commentOnColumn(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          const std::string& comment) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     auto path = commentsPath(dbname);
     std::vector<std::string> lines;
     {
@@ -6752,7 +6752,7 @@ OpResult StorageEngine::commentOnColumn(const std::string& dbname,
     for (const auto& line : lines) {
         if (!line.empty()) out << line << '\n';
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 std::string StorageEngine::getTableComment(const std::string& dbname,
@@ -6818,24 +6818,24 @@ static std::filesystem::path sequencePath(const std::string& dbname, const std::
     return std::filesystem::path(dbname) / (seqname + ".seq");
 }
 
-OpResult StorageEngine::createSequence(const std::string& dbname,
+DBStatus StorageEngine::createSequence(const std::string& dbname,
                                         const std::string& seqname,
                                         int64_t start, int64_t increment) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = sequencePath(dbname, seqname);
-    if (std::filesystem::exists(path)) return OpResult::TableAlreadyExist;
+    if (std::filesystem::exists(path)) return DBStatus::TABLE_ALREADY_EXISTS;
     std::ofstream ofs(path);
     ofs << start << " " << increment << "\n";
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterSequence(const std::string& dbname,
+DBStatus StorageEngine::alterSequence(const std::string& dbname,
                                        const std::string& seqname,
                                        bool hasRestart, int64_t restart,
                                        bool hasIncrement, int64_t increment) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = sequencePath(dbname, seqname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     int64_t current = 1;
     int64_t inc = 1;
     {
@@ -6846,15 +6846,15 @@ OpResult StorageEngine::alterSequence(const std::string& dbname,
     if (hasIncrement) inc = increment;
     std::ofstream ofs(path);
     ofs << current << " " << inc << "\n";
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropSequence(const std::string& dbname,
+DBStatus StorageEngine::dropSequence(const std::string& dbname,
                                       const std::string& seqname) {
     auto path = sequencePath(dbname, seqname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::remove(path);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 int64_t StorageEngine::nextval(const std::string& dbname,
@@ -7650,11 +7650,11 @@ static bool isValidJson(const std::string& s) {
     return i == s.size();
 }
 
-OpResult StorageEngine::insert(const std::string& dbname,
+DBStatus StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values) {
-    if (readOnly_) return OpResult::InvalidValue;
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (readOnly_) return DBStatus::INVALID_VALUE;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -7689,7 +7689,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 int64_t dummy;
                 if (idx->search(pkVal, dummy)) {
                     lockManager_.unlock(tablename);
-                    return OpResult::DuplicateKey;
+                    return DBStatus::DUPLICATE_KEY;
                 }
             }
         }
@@ -7717,7 +7717,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
         if (duplicate) {
             lockManager_.unlock(tablename);
-            return OpResult::DuplicateKey;
+            return DBStatus::DUPLICATE_KEY;
         }
     }
 
@@ -7743,7 +7743,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         });
         if (duplicate) {
             lockManager_.unlock(tablename);
-            return OpResult::DuplicateKey;
+            return DBStatus::DUPLICATE_KEY;
         }
     }
 
@@ -7754,63 +7754,63 @@ OpResult StorageEngine::insert(const std::string& dbname,
         std::string val = (it != actualValues.end()) ? it->second : "";
         if (!col.isNull && val.empty()) {
             lockManager_.unlock(tablename);
-            return OpResult::NullNotAllowed;
+            return DBStatus::NULL_NOT_ALLOWED;
         }
         if (!col.isVariableLength && col.dataType == "date" && !val.empty()) {
             Date d(val.c_str());
             if (d.year == 0) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") && !val.empty()) {
             int64_t ts = parseTimestampToSeconds(val);
             if (ts == 0) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && col.dataType == "time" && !val.empty()) {
             int32_t ts = parseTimeToSeconds(val);
             if (ts < 0) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && col.dataType == "float" && !val.empty()) {
             try { std::stof(val); } catch (...) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal") && !val.empty()) {
             try { std::stod(val); } catch (...) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && col.dataType == "boolean" && !val.empty()) {
             if (val != "1" && val != "0" && val != "true" && val != "false" && val != "TRUE" && val != "FALSE") {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
             if (col.isUnsigned && num < 0) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
     }
@@ -7843,7 +7843,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         for (const auto& cond : checkConds) {
             if (!evalConditionOnRow(cond, strippedRow, tbl)) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
         }
     }
@@ -7853,7 +7853,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         std::string pkVal = tbl.buildPKValue(actualValues);
         if (!pkVal.empty() && lockManager_.isGapLocked(tablename, pkVal)) {
             lockManager_.unlock(tablename);
-            return OpResult::LockConflict;
+            return DBStatus::LOCK_CONFLICT;
         }
     }
 
@@ -7872,7 +7872,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         if (hasNull) continue;
         if (!tableExists(dbname, fk.refTable)) {
             lockManager_.unlock(tablename);
-            return OpResult::TableNotExist;
+            return DBStatus::TABLE_NOT_FOUND;
         }
         TableSchema refTbl = getTableSchema(dbname, fk.refTable);
         if (fk.colNames.size() == 1) {
@@ -7883,7 +7883,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 int64_t dummy;
                 if (!refIdx->search(it->second, dummy)) {
                     lockManager_.unlock(tablename);
-                    return OpResult::InvalidValue;  // referenced key not found
+                    return DBStatus::INVALID_VALUE;  // referenced key not found
                 }
             }
         } else {
@@ -7913,7 +7913,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
             });
             if (!found) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;  // referenced key not found
+                return DBStatus::INVALID_VALUE;  // referenced key not found
             }
         }
     }
@@ -7922,7 +7922,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
     constexpr size_t MAX_ROW_SIZE = Page::PAGE_SIZE - sizeof(Page::Header) - sizeof(Page::Slot);
     if (rowBuffer.size() > MAX_ROW_SIZE) {
         lockManager_.unlock(tablename);
-        return OpResult::InvalidValue;
+        return DBStatus::INVALID_VALUE;
     }
 
     // Determine target partition for partitioned tables
@@ -7935,7 +7935,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
         if (targetPartition.empty()) {
             lockManager_.unlock(tablename);
-            return OpResult::InvalidValue;
+            return DBStatus::INVALID_VALUE;
         }
     }
     if (tbl.subPartitionType != TableSchema::PartitionType::None) {
@@ -7945,7 +7945,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
         }
         if (targetSubPartition.empty()) {
             lockManager_.unlock(tablename);
-            return OpResult::InvalidValue;
+            return DBStatus::INVALID_VALUE;
         }
     }
 
@@ -7956,14 +7956,14 @@ OpResult StorageEngine::insert(const std::string& dbname,
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition, targetSubPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
         if (!partPa->open()) {
             lockManager_.unlock(tablename);
-            return OpResult::InvalidValue;
+            return DBStatus::INVALID_VALUE;
         }
         pa = partPa.get();
     } else if (!targetPartition.empty()) {
         partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
         if (!partPa->open()) {
             lockManager_.unlock(tablename);
-            return OpResult::InvalidValue;
+            return DBStatus::INVALID_VALUE;
         }
         pa = partPa.get();
     } else {
@@ -8030,7 +8030,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
             pa->markDirty(pageId);
             size_t freePct = page.freeSpace() * 100 / pa->pageSize();
@@ -8173,7 +8173,7 @@ OpResult StorageEngine::insert(const std::string& dbname,
 
     recordModification(dbname, tablename, 1);
     maybeAutoAnalyze(dbname, tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
@@ -8511,11 +8511,11 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     return ids;
 }
 
-OpResult StorageEngine::remove(const std::string& dbname,
+DBStatus StorageEngine::remove(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::vector<std::string>& conditions) {
-    if (readOnly_) return OpResult::InvalidValue;
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (readOnly_) return DBStatus::INVALID_VALUE;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockIntentExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -8531,7 +8531,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
 
     if (toDelete.empty()) {
         lockManager_.unlock(tablename);
-        return OpResult::Success;
+        return DBStatus::OK;
     }
 
     // Acquire row-level exclusive locks on rows to be deleted
@@ -8626,7 +8626,7 @@ OpResult StorageEngine::remove(const std::string& dbname,
 
                 if (!restrictTables.empty()) {
                     lockManager_.unlock(tablename);
-                    return OpResult::InvalidValue;
+                    return DBStatus::INVALID_VALUE;
                 }
 
                 // Collect tables that need locks for cascade/setnull
@@ -8966,15 +8966,15 @@ OpResult StorageEngine::remove(const std::string& dbname,
     recordModification(dbname, tablename, toDelete.size());
     maybeAutoAnalyze(dbname, tablename);
 
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::update(const std::string& dbname,
+DBStatus StorageEngine::update(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& updates,
                                 const std::vector<std::string>& conditions) {
-    if (readOnly_) return OpResult::InvalidValue;
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (readOnly_) return DBStatus::INVALID_VALUE;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -8987,23 +8987,23 @@ OpResult StorageEngine::update(const std::string& dbname,
                 found = true;
                 const Column& col = tbl.cols[i];
                 if (!col.isNull && kv.second.empty()) {
-                    return OpResult::NullNotAllowed;
+                    return DBStatus::NULL_NOT_ALLOWED;
                 }
                 if (col.dataType == "date") {
                     Date d(kv.second.c_str());
-                    if (d.year == 0) return OpResult::InvalidValue;
+                    if (d.year == 0) return DBStatus::INVALID_VALUE;
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {
                         int64_t num = parseInt(kv.second);
-                        if (num == INF) return OpResult::InvalidValue;
-                        if (col.isUnsigned && num < 0) return OpResult::InvalidValue;
+                        if (num == INF) return DBStatus::INVALID_VALUE;
+                        if (col.isUnsigned && num < 0) return DBStatus::INVALID_VALUE;
                     }
                 }
                 colUpdates[i] = kv.second;
                 break;
             }
         }
-        if (!found) return OpResult::InvalidValue;
+        if (!found) return DBStatus::INVALID_VALUE;
     }
 
     lockManager_.lockIntentExclusive(tablename);
@@ -9022,7 +9022,7 @@ OpResult StorageEngine::update(const std::string& dbname,
 
     if (matchIds.empty()) {
         lockManager_.unlock(tablename);
-        return OpResult::Success;
+        return DBStatus::OK;
     }
 
     // Acquire row-level exclusive locks on rows to be updated
@@ -9094,7 +9094,7 @@ OpResult StorageEngine::update(const std::string& dbname,
             for (const auto& cond : checkConds) {
                 if (!evalConditionOnRow(cond, strippedNewRow, tbl)) {
                     lockManager_.unlock(tablename);
-                    return OpResult::InvalidValue;
+                    return DBStatus::INVALID_VALUE;
                 }
             }
         }
@@ -9187,7 +9187,7 @@ OpResult StorageEngine::update(const std::string& dbname,
 
             if (!restrictTables.empty()) {
                 lockManager_.unlock(tablename);
-                return OpResult::InvalidValue;
+                return DBStatus::INVALID_VALUE;
             }
 
             // Acquire locks on referenced tables in alphabetical order
@@ -9337,7 +9337,7 @@ OpResult StorageEngine::update(const std::string& dbname,
                     pa->unpinPage(pageId);
                     lockManager_.pageUnlock(dbname, tablename, pageId);
                     lockManager_.unlock(tablename);
-                    return OpResult::InvalidValue;
+                    return DBStatus::INVALID_VALUE;
                 }
             }
 
@@ -9534,7 +9534,7 @@ OpResult StorageEngine::update(const std::string& dbname,
 
     recordModification(dbname, tablename, matchIds.size());
     maybeAutoAnalyze(dbname, tablename);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 // ========================================================================
@@ -9875,7 +9875,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     // READ COMMITTED: refresh snapshot before each query
-    if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::ReadCommitted) {
+    if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::READ_COMMITTED) {
         refreshReadView();
     }
 
@@ -11212,7 +11212,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return result;
     lockManager_.lockShared(tablename);
 
-    if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::ReadCommitted) {
+    if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::READ_COMMITTED) {
         refreshReadView();
     }
 
@@ -13003,7 +13003,7 @@ void StorageEngine::recoverAllDatabases() {
 // ReadView refresh (for READ COMMITTED)
 // ========================================================================
 void StorageEngine::refreshReadView() {
-    if (!inTransaction_ || txnIsolationLevel_ != IsolationLevel::ReadCommitted) return;
+    if (!inTransaction_ || txnIsolationLevel_ != IsolationLevel::READ_COMMITTED) return;
     std::lock_guard<std::mutex> lock(globalTxnMutex_);
     readView_.creatorTxnId = currentTxnId_;
     readView_.upLimitId = activeTransactions_.empty() ? currentTxnId_ : *activeTransactions_.begin();
@@ -13413,7 +13413,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
 
 void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx) {
     txnLog_.push_back({TxnLogEntry::Op::Insert, tableName, rowIdx, ""});
-    if (txnIsolationLevel_ == IsolationLevel::Serializable) {
+    if (txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
         txnWrittenRids_.insert(rowIdx);
         std::lock_guard<std::mutex> lock(ssiMutex_);
         ssiWriteSets_[currentTxnId_].insert(rowIdx);
@@ -13423,7 +13423,7 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx) {
 void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
     txnLog_.push_back({TxnLogEntry::Op::Update, tableName, rowIdx, oldRowData});
-    if (txnIsolationLevel_ == IsolationLevel::Serializable) {
+    if (txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
         txnWrittenRids_.insert(rowIdx);
         std::lock_guard<std::mutex> lock(ssiMutex_);
         ssiWriteSets_[currentTxnId_].insert(rowIdx);
@@ -13433,7 +13433,7 @@ void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
 void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
     txnLog_.push_back({TxnLogEntry::Op::Delete, tableName, rowIdx, oldRowData});
-    if (txnIsolationLevel_ == IsolationLevel::Serializable) {
+    if (txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
         txnWrittenRids_.insert(rowIdx);
         std::lock_guard<std::mutex> lock(ssiMutex_);
         ssiWriteSets_[currentTxnId_].insert(rowIdx);
@@ -13444,9 +13444,9 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
 // Transaction support (Undo Log based rollback, no full-db snapshot)
 // ========================================================================
 
-OpResult StorageEngine::beginTransaction(const std::string& dbname) {
-    if (inTransaction_) return OpResult::Success;  // already in txn
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
+    if (inTransaction_) return DBStatus::OK;  // already in txn
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
     // Flush all dirty pages so the on-disk files are up-to-date before backup
     auto tblNames = getTableNames(dbname);
@@ -13495,7 +13495,7 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
     }
     txnReadRids_.clear();
     txnWrittenRids_.clear();
-    if (txnIsolationLevel_ != IsolationLevel::ReadUncommitted) {
+    if (txnIsolationLevel_ != IsolationLevel::READ_UNCOMMITTED) {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         readView_.creatorTxnId = currentTxnId_;
         readView_.upLimitId = activeTransactions_.empty() ? currentTxnId_ : *activeTransactions_.begin();
@@ -13516,14 +13516,14 @@ OpResult StorageEngine::beginTransaction(const std::string& dbname) {
     // Write WAL BEGIN marker
     walClear(walPath(dbname));
     walAppend(walPath(dbname), "BEGIN " + std::to_string(currentTxnId_));
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::commitTransaction() {
-    if (!inTransaction_) return OpResult::Success;
+DBStatus StorageEngine::commitTransaction() {
+    if (!inTransaction_) return DBStatus::OK;
 
     // SSI conflict detection for Serializable isolation
-    if (txnIsolationLevel_ == IsolationLevel::Serializable) {
+    if (txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
         std::lock_guard<std::mutex> lock(ssiMutex_);
         bool hasOutgoing = false, hasIncoming = false;
 
@@ -13565,7 +13565,7 @@ OpResult StorageEngine::commitTransaction() {
             txnReadRids_.clear();
             txnWrittenRids_.clear();
             rollbackTransaction();
-            return OpResult::SerializationFailure;
+            return DBStatus::SERIALIZATION_FAILURE;
         }
 
         // No conflict - clean up SSI data for committed transaction
@@ -13603,11 +13603,11 @@ OpResult StorageEngine::commitTransaction() {
     inTransaction_ = false;
     readOnly_ = false;
     txnDB_.clear();
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::rollbackTransaction() {
-    if (!inTransaction_) return OpResult::Success;
+DBStatus StorageEngine::rollbackTransaction() {
+    if (!inTransaction_) return DBStatus::OK;
 
     // Mark transaction as aborted in CLOG
     CommitLog* clog = getCommitLog(txnDB_);
@@ -13807,7 +13807,7 @@ OpResult StorageEngine::rollbackTransaction() {
     inTransaction_ = false;
     readOnly_ = false;
     txnDB_.clear();
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 // ========================================================================
@@ -13822,19 +13822,19 @@ static std::filesystem::path preparedPath(const std::string& xid) {
     return preparedDir() / xid;
 }
 
-OpResult StorageEngine::prepareTransaction(const std::string& xid) {
-    if (!inTransaction_) return OpResult::InvalidValue;
-    if (xid.empty()) return OpResult::InvalidValue;
+DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
+    if (!inTransaction_) return DBStatus::INVALID_VALUE;
+    if (xid.empty()) return DBStatus::INVALID_VALUE;
 
     std::filesystem::path pdir = preparedDir();
     if (!std::filesystem::exists(pdir)) {
         std::filesystem::create_directories(pdir);
     }
     std::filesystem::path pfile = preparedPath(xid);
-    if (std::filesystem::exists(pfile)) return OpResult::DuplicateKey;
+    if (std::filesystem::exists(pfile)) return DBStatus::DUPLICATE_KEY;
 
     std::ofstream ofs(pfile, std::ios::binary);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
 
     // Transaction metadata
     ofs << "TXN_ID " << currentTxnId_ << "\n";
@@ -13894,12 +13894,12 @@ OpResult StorageEngine::prepareTransaction(const std::string& xid) {
     inTransaction_ = false;
     readOnly_ = false;
     txnDB_.clear();
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::commitPrepared(const std::string& xid) {
+DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     std::filesystem::path pfile = preparedPath(xid);
-    if (!std::filesystem::exists(pfile)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(pfile)) return DBStatus::TABLE_NOT_FOUND;
 
     uint64_t savedTxnId = 0;
     std::string savedDB;
@@ -13911,7 +13911,7 @@ OpResult StorageEngine::commitPrepared(const std::string& xid) {
             else if (line.substr(0, 6) == "DBNAME") savedDB = line.substr(7);
         }
     }
-    if (savedTxnId == 0 || savedDB.empty()) return OpResult::InvalidValue;
+    if (savedTxnId == 0 || savedDB.empty()) return DBStatus::INVALID_VALUE;
 
     // WAL COMMIT PREPARED marker
     walAppend(walPath(savedDB), "COMMIT PREPARED " + std::to_string(savedTxnId) + " " + xid);
@@ -13934,16 +13934,16 @@ OpResult StorageEngine::commitPrepared(const std::string& xid) {
     txnDB_.clear();
 
     std::filesystem::remove(pfile);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::rollbackPrepared(const std::string& xid) {
+DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     std::filesystem::path pfile = preparedPath(xid);
-    if (!std::filesystem::exists(pfile)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(pfile)) return DBStatus::TABLE_NOT_FOUND;
 
     uint64_t savedTxnId = 0;
     std::string savedDB;
-    IsolationLevel savedIso = IsolationLevel::RepeatableRead;
+    IsolationLevel savedIso = IsolationLevel::REPEATABLE_READ;
     std::vector<TxnLogEntry> savedLog;
 
     {
@@ -13984,7 +13984,7 @@ OpResult StorageEngine::rollbackPrepared(const std::string& xid) {
         }
     }
 
-    if (savedTxnId == 0 || savedDB.empty()) return OpResult::InvalidValue;
+    if (savedTxnId == 0 || savedDB.empty()) return DBStatus::INVALID_VALUE;
 
     // Temporarily restore state and use normal rollback
     currentTxnId_ = savedTxnId;
@@ -13993,7 +13993,7 @@ OpResult StorageEngine::rollbackPrepared(const std::string& xid) {
     inTransaction_ = true;
     txnLog_ = std::move(savedLog);
 
-    OpResult res = rollbackTransaction();
+    DBStatus res = rollbackTransaction();
 
     // WAL ROLLBACK PREPARED marker
     walAppend(walPath(savedDB), "ROLLBACK PREPARED " + std::to_string(savedTxnId) + " " + xid);
@@ -14018,18 +14018,18 @@ std::vector<std::string> StorageEngine::listPreparedTransactions() const {
 // Savepoint support
 // ========================================================================
 
-OpResult StorageEngine::savepoint(const std::string& name) {
-    if (!inTransaction_) return OpResult::InvalidValue;
+DBStatus StorageEngine::savepoint(const std::string& name) {
+    if (!inTransaction_) return DBStatus::INVALID_VALUE;
     savepoints_[name] = txnLog_.size();
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
-    if (!inTransaction_) return OpResult::InvalidValue;
+DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
+    if (!inTransaction_) return DBStatus::INVALID_VALUE;
     auto it = savepoints_.find(name);
-    if (it == savepoints_.end()) return OpResult::InvalidValue;
+    if (it == savepoints_.end()) return DBStatus::INVALID_VALUE;
     size_t spIdx = it->second;
-    if (spIdx > txnLog_.size()) return OpResult::InvalidValue;
+    if (spIdx > txnLog_.size()) return DBStatus::INVALID_VALUE;
 
     // Undo entries from end back to savepoint
     for (size_t i = txnLog_.size(); i > spIdx; --i) {
@@ -14182,15 +14182,15 @@ OpResult StorageEngine::rollbackToSavepoint(const std::string& name) {
         if (sit->second > spIdx) sit = savepoints_.erase(sit);
         else ++sit;
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::releaseSavepoint(const std::string& name) {
-    if (!inTransaction_) return OpResult::InvalidValue;
+DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
+    if (!inTransaction_) return DBStatus::INVALID_VALUE;
     auto it = savepoints_.find(name);
-    if (it == savepoints_.end()) return OpResult::InvalidValue;
+    if (it == savepoints_.end()) return DBStatus::INVALID_VALUE;
     savepoints_.erase(it);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 // ========================================================================
@@ -14201,17 +14201,17 @@ std::filesystem::path StorageEngine::rlsPath(const std::string& dbname, const st
     return dbPath(dbname) / (tablename + ".rls");
 }
 
-OpResult StorageEngine::createPolicy(const std::string& dbname, const std::string& tablename,
+DBStatus StorageEngine::createPolicy(const std::string& dbname, const std::string& tablename,
                                       const RowPolicy& policy) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     auto rpath = rlsPath(dbname, tablename);
     auto policies = getPolicies(dbname, tablename);
     for (const auto& p : policies) {
-        if (p.name == policy.name) return OpResult::TableAlreadyExist;
+        if (p.name == policy.name) return DBStatus::TABLE_ALREADY_EXISTS;
     }
     policies.push_back(policy);
     std::ofstream ofs(rpath);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     for (const auto& p : policies) {
         ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
         ofs << " USING:" << escapeString(p.usingExpr);
@@ -14223,17 +14223,17 @@ OpResult StorageEngine::createPolicy(const std::string& dbname, const std::strin
         }
         ofs << "\n";
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterPolicy(const std::string& dbname, const std::string& tablename,
+DBStatus StorageEngine::alterPolicy(const std::string& dbname, const std::string& tablename,
                                      const std::string& policyName, const RowPolicy& policy) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     auto rpath = rlsPath(dbname, tablename);
     auto policies = getPolicies(dbname, tablename);
     bool found = false;
     for (const auto& p : policies) {
-        if (p.name == policy.name && policy.name != policyName) return OpResult::TableAlreadyExist;
+        if (p.name == policy.name && policy.name != policyName) return DBStatus::TABLE_ALREADY_EXISTS;
     }
     for (auto& p : policies) {
         if (p.name == policyName) {
@@ -14242,9 +14242,9 @@ OpResult StorageEngine::alterPolicy(const std::string& dbname, const std::string
             break;
         }
     }
-    if (!found) return OpResult::TableNotExist;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
     std::ofstream ofs(rpath);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     for (const auto& p : policies) {
         ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
         ofs << " USING:" << escapeString(p.usingExpr);
@@ -14256,12 +14256,12 @@ OpResult StorageEngine::alterPolicy(const std::string& dbname, const std::string
         }
         ofs << "\n";
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropPolicy(const std::string& dbname, const std::string& tablename,
+DBStatus StorageEngine::dropPolicy(const std::string& dbname, const std::string& tablename,
                                     const std::string& policyName) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     auto rpath = rlsPath(dbname, tablename);
     auto policies = getPolicies(dbname, tablename);
     bool found = false;
@@ -14273,9 +14273,9 @@ OpResult StorageEngine::dropPolicy(const std::string& dbname, const std::string&
             ++it;
         }
     }
-    if (!found) return OpResult::TableNotExist;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
     std::ofstream ofs(rpath);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     for (const auto& p : policies) {
         ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
         ofs << " USING:" << escapeString(p.usingExpr);
@@ -14287,7 +14287,7 @@ OpResult StorageEngine::dropPolicy(const std::string& dbname, const std::string&
         }
         ofs << "\n";
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 std::vector<StorageEngine::RowPolicy> StorageEngine::getPolicies(const std::string& dbname,
@@ -14351,25 +14351,25 @@ std::vector<StorageEngine::RowPolicy> StorageEngine::getApplicablePolicies(
     return result;
 }
 
-OpResult StorageEngine::enableRowLevelSecurity(const std::string& dbname, const std::string& tablename,
+DBStatus StorageEngine::enableRowLevelSecurity(const std::string& dbname, const std::string& tablename,
                                                   bool force) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     tbl.rowLevelSecurity = true;
     tbl.forceRowLevelSecurity = force;
     std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
     writeSchema(out, tbl);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::disableRowLevelSecurity(const std::string& dbname, const std::string& tablename) {
-    if (!tableExists(dbname, tablename)) return OpResult::TableNotExist;
+DBStatus StorageEngine::disableRowLevelSecurity(const std::string& dbname, const std::string& tablename) {
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     tbl.rowLevelSecurity = false;
     tbl.forceRowLevelSecurity = false;
     std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
     writeSchema(out, tbl);
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 // ========================================================================
@@ -14605,25 +14605,25 @@ static std::filesystem::path domainPath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".domains";
 }
 
-OpResult StorageEngine::createDomain(const std::string& dbname, const DomainInfo& info) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+DBStatus StorageEngine::createDomain(const std::string& dbname, const DomainInfo& info) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = domainPath(dbname);
     auto existing = getDomain(dbname, info.name);
-    if (!existing.name.empty()) return OpResult::TableAlreadyExist;
+    if (!existing.name.empty()) return DBStatus::TABLE_ALREADY_EXISTS;
     std::ofstream ofs(path, std::ios::app);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     ofs << info.name << "|" << info.baseType << "|" << info.defaultValue << "|"
         << info.checkExpr << "|" << info.constraintName << "\n";
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterDomain(const std::string& dbname, const std::string& name,
+DBStatus StorageEngine::alterDomain(const std::string& dbname, const std::string& name,
                                     const DomainInfo& info) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = domainPath(dbname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     if (info.name != name && !getDomain(dbname, info.name).name.empty()) {
-        return OpResult::TableAlreadyExist;
+        return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ifstream ifs(path);
     std::vector<DomainInfo> domains;
@@ -14652,20 +14652,20 @@ OpResult StorageEngine::alterDomain(const std::string& dbname, const std::string
             domains.push_back(current);
         }
     }
-    if (!found) return OpResult::TableNotExist;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
     std::ofstream ofs(path, std::ios::trunc);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     for (const auto& d : domains) {
         ofs << d.name << "|" << d.baseType << "|" << d.defaultValue << "|"
             << d.checkExpr << "|" << d.constraintName << "\n";
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropDomain(const std::string& dbname, const std::string& name) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+DBStatus StorageEngine::dropDomain(const std::string& dbname, const std::string& name) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = domainPath(dbname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::ifstream ifs(path);
     std::vector<std::string> lines;
     std::string line;
@@ -14678,10 +14678,10 @@ OpResult StorageEngine::dropDomain(const std::string& dbname, const std::string&
             lines.push_back(line);
         }
     }
-    if (!found) return OpResult::TableNotExist;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
     std::ofstream ofs(path, std::ios::trunc);
     for (const auto& l : lines) ofs << l << '\n';
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 StorageEngine::DomainInfo StorageEngine::getDomain(const std::string& dbname, const std::string& name) const {
@@ -14731,26 +14731,26 @@ static std::filesystem::path compositeTypePath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".types";
 }
 
-OpResult StorageEngine::createCompositeType(const std::string& dbname, const CompositeType& ct) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+DBStatus StorageEngine::createCompositeType(const std::string& dbname, const CompositeType& ct) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = compositeTypePath(dbname);
-    if (isCompositeType(dbname, ct.name)) return OpResult::TableAlreadyExist;
+    if (isCompositeType(dbname, ct.name)) return DBStatus::TABLE_ALREADY_EXISTS;
     std::ofstream ofs(path, std::ios::app);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     ofs << ct.name;
     for (const auto& f : ct.fields) {
         ofs << "|" << f.first << ":" << f.second;
     }
     ofs << '\n';
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::alterCompositeType(const std::string& dbname, const std::string& name,
+DBStatus StorageEngine::alterCompositeType(const std::string& dbname, const std::string& name,
                                            const CompositeType& ct) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = compositeTypePath(dbname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
-    if (ct.name != name && isCompositeType(dbname, ct.name)) return OpResult::TableAlreadyExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
+    if (ct.name != name && isCompositeType(dbname, ct.name)) return DBStatus::TABLE_ALREADY_EXISTS;
     std::ifstream ifs(path);
     std::vector<CompositeType> types;
     std::string line;
@@ -14777,21 +14777,21 @@ OpResult StorageEngine::alterCompositeType(const std::string& dbname, const std:
             types.push_back(current);
         }
     }
-    if (!found) return OpResult::TableNotExist;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
     std::ofstream ofs(path, std::ios::trunc);
-    if (!ofs) return OpResult::InvalidValue;
+    if (!ofs) return DBStatus::INVALID_VALUE;
     for (const auto& t : types) {
         ofs << t.name;
         for (const auto& f : t.fields) ofs << "|" << f.first << ":" << f.second;
         ofs << '\n';
     }
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
-OpResult StorageEngine::dropCompositeType(const std::string& dbname, const std::string& name) {
-    if (!databaseExists(dbname)) return OpResult::DatabaseNotExist;
+DBStatus StorageEngine::dropCompositeType(const std::string& dbname, const std::string& name) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = compositeTypePath(dbname);
-    if (!std::filesystem::exists(path)) return OpResult::TableNotExist;
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::ifstream ifs(path);
     std::vector<std::string> lines;
     std::string line;
@@ -14804,10 +14804,10 @@ OpResult StorageEngine::dropCompositeType(const std::string& dbname, const std::
             lines.push_back(line);
         }
     }
-    if (!found) return OpResult::TableNotExist;
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
     std::ofstream ofs(path, std::ios::trunc);
     for (const auto& l : lines) ofs << l << '\n';
-    return OpResult::Success;
+    return DBStatus::OK;
 }
 
 StorageEngine::CompositeType StorageEngine::getCompositeType(const std::string& dbname, const std::string& name) const {
@@ -15291,6 +15291,119 @@ std::vector<std::string> StorageEngine::getUserPermissions(
         if (u == username && t == tablename) result.push_back(p);
     }
     return result;
+}
+
+// ============================================================================
+// IStorageEngine interface overrides (Phase 0)
+// ============================================================================
+
+DBStatus StorageEngine::useDatabase(const std::string& dbName) {
+    // StorageEngine does not keep a global current database; transactions are
+    // started explicitly with a database name.  This is a no-op at the
+    // interface level.
+    (void)dbName;
+    return DBStatus::OK;
+}
+
+std::vector<std::string> StorageEngine::listDatabases() const {
+    return getDatabaseNames();
+}
+
+std::vector<std::string> StorageEngine::listTables(const std::string& dbName) const {
+    return getTableNames(dbName);
+}
+
+RowId StorageEngine::insert(const std::string& dbName,
+                            const std::string& tableName,
+                            const std::map<std::string, std::string>& values,
+                            TxnId txnId) {
+    (void)txnId;
+    DBStatus r = insert(dbName, tableName, values);
+    return (r == DBStatus::OK) ? 0 : INVALID_ROW_ID;
+}
+
+std::vector<std::map<std::string, std::string>> StorageEngine::query(
+    const std::string& dbName,
+    const std::string& tableName,
+    const Snapshot* snapshot) {
+    (void)dbName;
+    (void)tableName;
+    (void)snapshot;
+    // Interface query() is not yet wired to the legacy query() API.  The
+    // executor still uses StorageEngine::query(...).
+    return {};
+}
+
+size_t StorageEngine::update(const std::string& dbName,
+                             const std::string& tableName,
+                             const std::map<std::string, std::string>& newValues,
+                             const std::vector<RowId>& rowIds,
+                             TxnId txnId) {
+    (void)dbName;
+    (void)tableName;
+    (void)newValues;
+    (void)rowIds;
+    (void)txnId;
+    return 0;
+}
+
+size_t StorageEngine::remove(const std::string& dbName,
+                             const std::string& tableName,
+                             const std::vector<RowId>& rowIds,
+                             TxnId txnId) {
+    (void)dbName;
+    (void)tableName;
+    (void)rowIds;
+    (void)txnId;
+    return 0;
+}
+
+DBStatus StorageEngine::createIndex(const std::string& dbName,
+                                    const std::string& tableName,
+                                    const std::string& indexName,
+                                    const std::vector<std::string>& columns,
+                                    const std::string& indexType) {
+    (void)indexName;
+    if (columns.empty()) return DBStatus::INVALID_ARGUMENT;
+    // Map to the legacy single-column index API as a stub.
+    if (indexType == "hash" || indexType == "HASH") {
+        return createHashIndex(dbName, tableName, columns[0]);
+    }
+    return createIndex(dbName, tableName, columns[0], true, {}, "", "", false);
+}
+
+DBStatus StorageEngine::dropIndex(const std::string& dbName,
+                                  const std::string& indexName) {
+    (void)dbName;
+    (void)indexName;
+    // Legacy metadata indexes tables by (tableName, columnName), not by a
+    // standalone index name, so this interface variant is not yet supported.
+    return DBStatus::INTERNAL_ERROR;
+}
+
+TxnId StorageEngine::beginTransaction(IsolationLevel level) {
+    (void)level;
+    // The legacy beginTransaction requires a database name.  Interface callers
+    // that need a named database should use beginTransaction(dbname) directly.
+    return INVALID_TXN_ID;
+}
+
+DBStatus StorageEngine::commitTransaction(TxnId txnId) {
+    (void)txnId;
+    return commitTransaction();
+}
+
+DBStatus StorageEngine::rollbackTransaction(TxnId txnId) {
+    (void)txnId;
+    return rollbackTransaction();
+}
+
+DBStatus StorageEngine::checkpoint() {
+    return DBStatus::OK;
+}
+
+Lsn StorageEngine::getCurrentLsn() const {
+    return INVALID_LSN;
 }
 
 } // namespace dbms

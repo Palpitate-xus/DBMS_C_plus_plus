@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "DateType.h"
+#include "table_schema.h"
+#include "storage_engine.h"
 #include "BPTree.h"
 #include "BufferPool.h"
 #include "PageAllocator.h"
@@ -26,130 +28,72 @@
 
 namespace dbms {
 
-constexpr size_t MAX_COLUMNS = 30;
-constexpr size_t MAX_TABLE_NAME_LEN = 15;
-constexpr size_t MAX_TYPE_NAME_LEN = 12;
-constexpr size_t MAX_COL_NAME_LEN = 15;
-constexpr size_t DATE_SIZE = 12;
-constexpr size_t TIMESTAMP_SIZE = 8;
-constexpr int64_t INF = 0x8000000000000000LL;
-
 // MVCC header size per row
 constexpr size_t MVCC_TXID_SIZE = 8;      // uint64_t creatorTxnId
 constexpr size_t MVCC_ROLLBACK_SIZE = 8;  // uint64_t rollbackPtr (0 = no older version)
 constexpr size_t MVCC_HEADER_SIZE = MVCC_TXID_SIZE + MVCC_ROLLBACK_SIZE;
 
-struct Column {
-    bool isNull = false;
-    bool isPrimaryKey = false;
-    bool isVariableLength = false;  // true for VARCHAR, false for fixed-length types
-    bool isUnique = false;          // UNIQUE constraint
-    bool isAutoIncrement = false;   // AUTO_INCREMENT / SERIAL
-    bool isUnsigned = false;        // UNSIGNED for numeric types
-    bool isArray = false;           // true for array types (INT[], VARCHAR[])
-    std::string dataType;
-    std::string dataName;
-    size_t dsize = 0;  // For VARCHAR: max length; for fixed: actual bytes
-    std::string defaultValue;       // DEFAULT value
-    std::string checkExpr;          // CHECK constraint expression
-    std::string checkConstraintName; // Name of the CHECK constraint
-    bool deferrable = false;        // CHECK constraint is deferrable
-    bool initiallyDeferred = false; // Deferrable constraint initially deferred
-    std::string generatedExpr;      // GENERATED ALWAYS AS (expr)
-    std::vector<std::string> enumValues;  // ENUM('a','b','c') values
+// Result code for data operations (alias for the unified DBStatus)
+using OpResult = DBStatus;
 
-    void print() const;
-};
+// Backward-compatible constants for code that still uses OpResult::Xxx names
+constexpr DBStatus OP_SUCCESS = DBStatus::OK;
+constexpr DBStatus OP_TABLE_NOT_EXIST = DBStatus::TABLE_NOT_FOUND;
+constexpr DBStatus OP_DATABASE_NOT_EXIST = DBStatus::DATABASE_NOT_FOUND;
+constexpr DBStatus OP_TABLE_ALREADY_EXIST = DBStatus::TABLE_ALREADY_EXISTS;
+constexpr DBStatus OP_INVALID_VALUE = DBStatus::INVALID_VALUE;
+constexpr DBStatus OP_NULL_NOT_ALLOWED = DBStatus::NULL_NOT_ALLOWED;
+constexpr DBStatus OP_SYNTAX_ERROR = DBStatus::SYNTAX_ERROR;
+constexpr DBStatus OP_DUPLICATE_KEY = DBStatus::DUPLICATE_KEY;
+constexpr DBStatus OP_LOCK_CONFLICT = DBStatus::LOCK_CONFLICT;
+constexpr DBStatus OP_SERIALIZATION_FAILURE = DBStatus::SERIALIZATION_FAILURE;
 
-struct ForeignKey {
-    std::vector<std::string> colNames;     // local columns (composite FK)
-    std::vector<std::string> refCols;      // referenced columns
-    std::string refTable;                  // referenced table
-    std::string onDelete = "restrict";     // restrict | cascade | setnull
-    std::string onUpdate = "restrict";     // restrict | cascade | setnull
-    std::string name;                      // constraint name
+std::string sqlstateForDBStatus(DBStatus res);
 
-    // Back-compat helpers
-    bool isSingleColumn() const { return colNames.size() <= 1; }
-    std::string singleColName() const { return colNames.empty() ? "" : colNames[0]; }
-    std::string singleRefCol() const { return refCols.empty() ? "" : refCols[0]; }
-};
-
-struct TableSchema {
-    std::string tablename;
-    Column cols[MAX_COLUMNS];
-    size_t len = 0;
-    ForeignKey fks[MAX_COLUMNS];
-    size_t fkLen = 0;
-
-    // Composite primary key column indices (empty = use single-column isPrimaryKey)
-    std::vector<size_t> pkColIndices;
-    // Composite UNIQUE constraints: each inner vector is column indices
-    std::vector<std::vector<size_t>> uniqueConstraints;
-    std::vector<std::string> uniqueConstraintNames; // names parallel to uniqueConstraints
-
-    // Partitioning
-    enum class PartitionType { None, Range, List, Hash };
-    PartitionType partitionType = PartitionType::None;
-    std::string partitionKey;  // column name for partitioning
-    std::vector<std::pair<std::string, std::string>> rangePartitions;  // name -> upper bound
-    std::vector<std::pair<std::string, std::vector<std::string>>> listPartitions;  // name -> values
-    size_t hashPartitions = 0;  // number of hash partitions
-    std::string defaultPartitionName; // DEFAULT partition for LIST partitioning
-
-    // Subpartitioning (two-level partitioning)
-    PartitionType subPartitionType = PartitionType::None;
-    std::string subPartitionKey;  // column name for sub-partitioning
-    size_t subHashPartitions = 0; // number of hash sub-partitions
-
-    bool isUnlogged = false;    // UNLOGGED table: no WAL, truncated on crash
-    bool rowLevelSecurity = false; // ENABLE ROW LEVEL SECURITY
-    bool forceRowLevelSecurity = false; // FORCE ROW LEVEL SECURITY (applies to table owner too)
-    std::map<std::string, std::string> storageParams; // WITH (fillfactor=70, autovacuum_enabled=off)
-
-    // Storage format version: 0 = legacy 4KB, 1 = 4KB with MVCC, 2 = PostgreSQL 8KB
-    uint32_t formatVersion = 0;
-
-    // Tablespace: physical location for data files (default = "pg_default")
-    std::string tablespace = "pg_default";
-
-    void append(const Column& ncol);
-    void appendFK(const ForeignKey& fk);
-    void print() const;
-    size_t rowSize() const;
-
-    // PK helpers
-    bool hasPrimaryKey() const;
-    std::string buildPKValue(const std::string& rowBuffer) const;
-    std::string buildPKValue(const std::map<std::string, std::string>& values) const;
-
-    // Variable-length helpers
-    bool hasVariableLength() const;
-    size_t fixedDataSize() const;       // sum of dsize of all fixed-length columns
-    size_t varColCount() const;         // number of variable-length columns
-    size_t getVarColIndex(size_t colIdx) const;  // index among var columns
-    size_t getFixedColOffset(size_t colIdx) const; // offset within fixed data region
-};
-
-// Result code for data operations
-enum class OpResult {
-    Success = 0,
-    TableNotExist,
-    DatabaseNotExist,
-    TableAlreadyExist,
-    InvalidValue,
-    NullNotAllowed,
-    SyntaxError,
-    DuplicateKey,
-    LockConflict,
-    SerializationFailure,
-};
-
-std::string sqlstateForOpResult(OpResult res);
-
-class StorageEngine {
+class StorageEngine : public IStorageEngine {
 public:
     StorageEngine();
+
+    // ========================================================================
+    // IStorageEngine interface overrides (Phase 0)
+    // ========================================================================
+    // The following methods adapt the richer StorageEngine API to the
+    // IStorageEngine interface. Some are simple wrappers; row-level methods
+    // that require explicit TxnId/Snapshot are stubs that will be fleshed out
+    // when the executor/planner moves to the interface.
+    DBStatus useDatabase(const std::string& dbName) override;
+    std::vector<std::string> listDatabases() const override;
+    std::vector<std::string> listTables(
+        const std::string& dbName) const override;
+    RowId insert(const std::string& dbName,
+                 const std::string& tableName,
+                 const std::map<std::string, std::string>& values,
+                 TxnId txnId) override;
+    std::vector<std::map<std::string, std::string>> query(
+        const std::string& dbName,
+        const std::string& tableName,
+        const Snapshot* snapshot) override;
+    size_t update(const std::string& dbName,
+                  const std::string& tableName,
+                  const std::map<std::string, std::string>& newValues,
+                  const std::vector<RowId>& rowIds,
+                  TxnId txnId) override;
+    size_t remove(const std::string& dbName,
+                  const std::string& tableName,
+                  const std::vector<RowId>& rowIds,
+                  TxnId txnId) override;
+    DBStatus createIndex(const std::string& dbName,
+                         const std::string& tableName,
+                         const std::string& indexName,
+                         const std::vector<std::string>& columns,
+                         const std::string& indexType) override;
+    DBStatus dropIndex(const std::string& dbName,
+                       const std::string& indexName) override;
+    TxnId beginTransaction(IsolationLevel level) override;
+    DBStatus commitTransaction(TxnId txnId) override;
+    DBStatus rollbackTransaction(TxnId txnId) override;
+    DBStatus checkpoint() override;
+    Lsn getCurrentLsn() const override;
 
     // Page size for a given storage format version
     static size_t pageSizeForFormatVersion(uint32_t formatVersion) {
@@ -157,57 +101,57 @@ public:
     }
 
     // Database operations
-    OpResult createDatabase(const std::string& dbname, const std::string& charset = "utf8");
+    DBStatus createDatabase(const std::string& dbname, const std::string& charset = "utf8");
     std::string getDatabaseCharset(const std::string& dbname) const;
-    OpResult dropDatabase(const std::string& dbname);
+    DBStatus dropDatabase(const std::string& dbname);
     bool databaseExists(const std::string& dbname) const;
     std::vector<std::string> getDatabaseNames() const;
 
     // Table operations
-    OpResult createTable(const std::string& dbname, const TableSchema& tbl);
-    OpResult createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl);
-    OpResult dropTable(const std::string& dbname, const std::string& tablename);
-    OpResult truncateTable(const std::string& dbname, const std::string& tablename);
-    OpResult alterTableAddColumn(const std::string& dbname, const std::string& tablename,
+    DBStatus createTable(const std::string& dbname, const TableSchema& tbl);
+    DBStatus createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl);
+    DBStatus dropTable(const std::string& dbname, const std::string& tablename);
+    DBStatus truncateTable(const std::string& dbname, const std::string& tablename);
+    DBStatus alterTableAddColumn(const std::string& dbname, const std::string& tablename,
                                   const Column& col);
-    OpResult alterTableDropColumn(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableDropColumn(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName);
-    OpResult alterTableRenameColumn(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableRenameColumn(const std::string& dbname, const std::string& tablename,
                                      const std::string& oldName, const std::string& newName);
-    OpResult alterTableRenameTable(const std::string& dbname, const std::string& oldName,
+    DBStatus alterTableRenameTable(const std::string& dbname, const std::string& oldName,
                                     const std::string& newName);
-    OpResult alterTableSetDefault(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableSetDefault(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName, const std::string& defaultValue);
-    OpResult alterTableDropDefault(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableDropDefault(const std::string& dbname, const std::string& tablename,
                                     const std::string& colName);
-    OpResult alterTableSetNotNull(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableSetNotNull(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName);
-    OpResult alterTableDropNotNull(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableDropNotNull(const std::string& dbname, const std::string& tablename,
                                     const std::string& colName);
-    OpResult alterTableAddCheckConstraint(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableAddCheckConstraint(const std::string& dbname, const std::string& tablename,
                                            const std::string& name, const std::string& expr);
-    OpResult alterTableAddUniqueConstraint(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableAddUniqueConstraint(const std::string& dbname, const std::string& tablename,
                                             const std::string& name, const std::vector<std::string>& colNames);
-    OpResult alterTableAddFKConstraint(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableAddFKConstraint(const std::string& dbname, const std::string& tablename,
                                         const std::string& name, const std::vector<std::string>& localCols,
                                         const std::string& refTable, const std::vector<std::string>& refCols,
                                         const std::string& onDelete = "restrict", const std::string& onUpdate = "restrict");
-    OpResult alterTableDropConstraint(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableDropConstraint(const std::string& dbname, const std::string& tablename,
                                        const std::string& name);
-    OpResult commentOnTable(const std::string& dbname, const std::string& tablename,
+    DBStatus commentOnTable(const std::string& dbname, const std::string& tablename,
                              const std::string& comment);
-    OpResult commentOnColumn(const std::string& dbname, const std::string& tablename,
+    DBStatus commentOnColumn(const std::string& dbname, const std::string& tablename,
                               const std::string& colname, const std::string& comment);
     std::string getTableComment(const std::string& dbname, const std::string& tablename) const;
     std::string getColumnComment(const std::string& dbname, const std::string& tablename,
                                   const std::string& colname) const;
     // Sequence support
-    OpResult createSequence(const std::string& dbname, const std::string& seqname,
+    DBStatus createSequence(const std::string& dbname, const std::string& seqname,
                             int64_t start = 1, int64_t increment = 1);
-    OpResult alterSequence(const std::string& dbname, const std::string& seqname,
+    DBStatus alterSequence(const std::string& dbname, const std::string& seqname,
                             bool hasRestart, int64_t restart,
                             bool hasIncrement, int64_t increment);
-    OpResult dropSequence(const std::string& dbname, const std::string& seqname);
+    DBStatus dropSequence(const std::string& dbname, const std::string& seqname);
     int64_t nextval(const std::string& dbname, const std::string& seqname);
     int64_t currval(const std::string& dbname, const std::string& seqname);
     bool sequenceExists(const std::string& dbname, const std::string& seqname) const;
@@ -219,13 +163,13 @@ public:
     // Storage parameters (WITH clause)
     std::map<std::string, std::string> getStorageParams(const std::string& dbname,
                                                         const std::string& tablename) const;
-    OpResult setStorageParams(const std::string& dbname,
+    DBStatus setStorageParams(const std::string& dbname,
                               const std::string& tablename,
                               const std::map<std::string, std::string>& params);
 
     // View support
-    OpResult createView(const std::string& dbname, const std::string& viewname, const std::string& sql);
-    OpResult dropView(const std::string& dbname, const std::string& viewname);
+    DBStatus createView(const std::string& dbname, const std::string& viewname, const std::string& sql);
+    DBStatus dropView(const std::string& dbname, const std::string& viewname);
     bool viewExists(const std::string& dbname, const std::string& viewname) const;
     std::string getViewSQL(const std::string& dbname, const std::string& viewname) const;
     std::vector<std::string> getViewNames(const std::string& dbname) const;
@@ -242,7 +186,7 @@ public:
     bool isMaterializedView(const std::string& dbname, const std::string& viewname) const;
     std::string getMaterializedViewSQL(const std::string& dbname, const std::string& viewname) const;
     std::vector<std::string> getMaterializedViewNames(const std::string& dbname) const;
-    OpResult dropMaterializedView(const std::string& dbname, const std::string& viewname);
+    DBStatus dropMaterializedView(const std::string& dbname, const std::string& viewname);
 
     // Stored procedures
     struct ProcParam {
@@ -250,10 +194,10 @@ public:
         std::string mode; // "IN", "OUT", "INOUT"
         std::string type;
     };
-    OpResult createProcedure(const std::string& dbname, const std::string& procname,
+    DBStatus createProcedure(const std::string& dbname, const std::string& procname,
                              const std::vector<ProcParam>& params,
                              const std::vector<std::string>& statements);
-    OpResult dropProcedure(const std::string& dbname, const std::string& procname);
+    DBStatus dropProcedure(const std::string& dbname, const std::string& procname);
     bool procedureExists(const std::string& dbname, const std::string& procname) const;
     std::vector<std::string> getProcedureStatements(const std::string& dbname,
                                                      const std::string& procname) const;
@@ -262,9 +206,9 @@ public:
     std::vector<std::string> getProcedureNames(const std::string& dbname) const;
 
     // Schema management
-    OpResult createSchema(const std::string& dbname, const std::string& schemaname);
-    OpResult dropSchema(const std::string& dbname, const std::string& schemaname, bool cascade);
-    OpResult renameSchema(const std::string& dbname, const std::string& oldname,
+    DBStatus createSchema(const std::string& dbname, const std::string& schemaname);
+    DBStatus dropSchema(const std::string& dbname, const std::string& schemaname, bool cascade);
+    DBStatus renameSchema(const std::string& dbname, const std::string& oldname,
                           const std::string& newname);
     bool schemaExists(const std::string& dbname, const std::string& schemaname) const;
     std::vector<std::string> getSchemaNames(const std::string& dbname) const;
@@ -274,7 +218,7 @@ public:
     void resetSequence(const std::string& dbname, const std::string& tablename,
                        const std::string& colname, int64_t val = 1);
     // Move table to another database/schema
-    OpResult alterTableSetSchema(const std::string& dbname, const std::string& tablename,
+    DBStatus alterTableSetSchema(const std::string& dbname, const std::string& tablename,
                                  const std::string& targetDbname);
 
     // Domain support
@@ -285,10 +229,10 @@ public:
         std::string checkExpr;
         std::string constraintName;
     };
-    OpResult createDomain(const std::string& dbname, const DomainInfo& info);
-    OpResult alterDomain(const std::string& dbname, const std::string& name,
+    DBStatus createDomain(const std::string& dbname, const DomainInfo& info);
+    DBStatus alterDomain(const std::string& dbname, const std::string& name,
                          const DomainInfo& info);
-    OpResult dropDomain(const std::string& dbname, const std::string& name);
+    DBStatus dropDomain(const std::string& dbname, const std::string& name);
     DomainInfo getDomain(const std::string& dbname, const std::string& name) const;
     std::vector<std::string> getDomainNames(const std::string& dbname) const;
 
@@ -297,10 +241,10 @@ public:
         std::string name;
         std::vector<std::pair<std::string, std::string>> fields; // (fieldName, fieldType)
     };
-    OpResult createCompositeType(const std::string& dbname, const CompositeType& ct);
-    OpResult alterCompositeType(const std::string& dbname, const std::string& name,
+    DBStatus createCompositeType(const std::string& dbname, const CompositeType& ct);
+    DBStatus alterCompositeType(const std::string& dbname, const std::string& name,
                                 const CompositeType& ct);
-    OpResult dropCompositeType(const std::string& dbname, const std::string& name);
+    DBStatus dropCompositeType(const std::string& dbname, const std::string& name);
     CompositeType getCompositeType(const std::string& dbname, const std::string& name) const;
     std::vector<std::string> getCompositeTypeNames(const std::string& dbname) const;
     bool isCompositeType(const std::string& dbname, const std::string& name) const;
@@ -324,21 +268,21 @@ public:
         std::vector<std::string> paramNames; // multi-param support
         std::vector<std::string> paramTypes; // multi-param support
     };
-    OpResult createUDF(const std::string& dbname, const std::string& funcname,
+    DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::string& param, const std::string& expression);
-    OpResult createUDF(const std::string& dbname, const std::string& funcname,
+    DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::vector<std::string>& params,
                        const std::vector<std::string>& types,
                        const std::string& expression);
-    OpResult dropUDF(const std::string& dbname, const std::string& funcname);
+    DBStatus dropUDF(const std::string& dbname, const std::string& funcname);
     bool udfExists(const std::string& dbname, const std::string& funcname) const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)
-    OpResult createTVF(const std::string& dbname, const std::string& funcname,
+    DBStatus createTVF(const std::string& dbname, const std::string& funcname,
                        const std::string& param, const std::string& sql);
-    OpResult dropTVF(const std::string& dbname, const std::string& funcname);
+    DBStatus dropTVF(const std::string& dbname, const std::string& funcname);
     bool tvfExists(const std::string& dbname, const std::string& funcname) const;
     std::string getTVFSQL(const std::string& dbname, const std::string& funcname) const;
     std::string getTVFParam(const std::string& dbname, const std::string& funcname) const;
@@ -387,12 +331,12 @@ public:
                                      const std::string& colKey) const;
 
     // Data operations
-    OpResult insert(const std::string& dbname, const std::string& tablename,
+    DBStatus insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values);
-    OpResult update(const std::string& dbname, const std::string& tablename,
+    DBStatus update(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& updates,
                     const std::vector<std::string>& conditions);
-    OpResult remove(const std::string& dbname, const std::string& tablename,
+    DBStatus remove(const std::string& dbname, const std::string& tablename,
                     const std::vector<std::string>& conditions);
     struct OrderBySpec {
         std::string colName;
@@ -526,20 +470,20 @@ public:
     bool inTransaction() const { return inTransaction_; }
     bool isReadOnly() const { return readOnly_; }
     void setReadOnly(bool ro) { readOnly_ = ro; }
-    OpResult beginTransaction(const std::string& dbname);
-    OpResult commitTransaction();
-    OpResult rollbackTransaction();
+    DBStatus beginTransaction(const std::string& dbname);
+    DBStatus commitTransaction();
+    DBStatus rollbackTransaction();
 
     // Two-phase commit (PREPARE TRANSACTION / COMMIT PREPARED / ROLLBACK PREPARED)
-    OpResult prepareTransaction(const std::string& xid);
-    OpResult commitPrepared(const std::string& xid);
-    OpResult rollbackPrepared(const std::string& xid);
+    DBStatus prepareTransaction(const std::string& xid);
+    DBStatus commitPrepared(const std::string& xid);
+    DBStatus rollbackPrepared(const std::string& xid);
     std::vector<std::string> listPreparedTransactions() const;
 
     // Savepoint support
-    OpResult savepoint(const std::string& name);
-    OpResult rollbackToSavepoint(const std::string& name);
-    OpResult releaseSavepoint(const std::string& name);
+    DBStatus savepoint(const std::string& name);
+    DBStatus rollbackToSavepoint(const std::string& name);
+    DBStatus releaseSavepoint(const std::string& name);
 
     // WAL crash recovery
     void recoverAllDatabases();
@@ -582,13 +526,13 @@ public:
                                                  const std::string& tablename) const;
 
     // Secondary index (single-column B+ tree)
-    OpResult createIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus createIndex(const std::string& dbname, const std::string& tablename,
                          const std::string& colname, bool ascending = true,
                          const std::vector<std::string>& includeCols = {},
                          const std::string& whereCondition = "",
                          const std::string& expression = "",
                          bool concurrently = false);
-    OpResult dropIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus dropIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname);
     std::vector<std::string> getIndexedColumns(const std::string& dbname,
                                                 const std::string& tablename) const;
@@ -599,9 +543,9 @@ public:
                                                      const std::string& colname) const;
 
     // Hash index (single-column, O(1) equality lookup)
-    OpResult createHashIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus createHashIndex(const std::string& dbname, const std::string& tablename,
                               const std::string& colname, bool concurrently = false);
-    OpResult dropHashIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus dropHashIndex(const std::string& dbname, const std::string& tablename,
                             const std::string& colname);
     std::vector<std::string> getHashIndexedColumns(const std::string& dbname,
                                                     const std::string& tablename) const;
@@ -614,19 +558,19 @@ public:
         std::vector<std::string> columns;
         std::string whereCondition; // partial index WHERE clause
     };
-    OpResult createCompositeIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus createCompositeIndex(const std::string& dbname, const std::string& tablename,
                                   const std::vector<std::string>& colnames,
                                   const std::string& indexName,
                                   const std::vector<std::string>& includeCols = {},
                                   const std::string& whereCondition = "",
                                   bool concurrently = false);
-    OpResult dropCompositeIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus dropCompositeIndex(const std::string& dbname, const std::string& tablename,
                                 const std::string& indexName);
     std::vector<CompositeIndexInfo> getCompositeIndexes(const std::string& dbname,
                                                          const std::string& tablename) const;
 
     // Reindex: rebuild all indexes for a table
-    OpResult reindex(const std::string& dbname, const std::string& tablename);
+    DBStatus reindex(const std::string& dbname, const std::string& tablename);
     BPTree* getCompositeIndexTree(const std::string& dbname, const std::string& tablename,
                                   const std::string& indexName) const;
     // Build composite key from row buffer
@@ -634,9 +578,9 @@ public:
                                           const std::vector<std::string>& colNames);
 
     // Full-text index (simplified inverted index)
-    OpResult createFullTextIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus createFullTextIndex(const std::string& dbname, const std::string& tablename,
                                   const std::string& colname);
-    OpResult dropFullTextIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus dropFullTextIndex(const std::string& dbname, const std::string& tablename,
                                 const std::string& colname);
     bool hasFullTextIndex(const std::string& dbname, const std::string& tablename,
                           const std::string& colname) const;
@@ -646,9 +590,9 @@ public:
                                                         const std::string& tablename) const;
 
     // GIN index (Generalized Inverted Index): supports text/json/array multi-key queries
-    OpResult createGinIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus createGinIndex(const std::string& dbname, const std::string& tablename,
                              const std::string& colname);
-    OpResult dropGinIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus dropGinIndex(const std::string& dbname, const std::string& tablename,
                            const std::string& colname);
     bool hasGinIndex(const std::string& dbname, const std::string& tablename,
                       const std::string& colname) const;
@@ -658,9 +602,9 @@ public:
                                                    const std::string& tablename) const;
 
     // GiST index (Generalized Search Tree): simplified spatial/range index
-    OpResult createGiSTIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus createGiSTIndex(const std::string& dbname, const std::string& tablename,
                               const std::string& colname);
-    OpResult dropGiSTIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus dropGiSTIndex(const std::string& dbname, const std::string& tablename,
                             const std::string& colname);
     bool hasGiSTIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname) const;
@@ -676,9 +620,9 @@ public:
                                                     const std::string& tablename) const;
 
     // BRIN index (Block Range Index): per-block min/max summary for range queries
-    OpResult createBrinIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus createBrinIndex(const std::string& dbname, const std::string& tablename,
                               const std::string& colname, size_t pagesPerRange = 64);
-    OpResult dropBrinIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus dropBrinIndex(const std::string& dbname, const std::string& tablename,
                             const std::string& colname);
     bool hasBrinIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname) const;
@@ -690,9 +634,9 @@ public:
                                                     const std::string& tablename) const;
 
     // SP-GiST index (Space-Partitioned GiST): quadtree for POINT type
-    OpResult createSPGiSTIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus createSPGiSTIndex(const std::string& dbname, const std::string& tablename,
                                 const std::string& colname);
-    OpResult dropSPGiSTIndex(const std::string& dbname, const std::string& tablename,
+    DBStatus dropSPGiSTIndex(const std::string& dbname, const std::string& tablename,
                               const std::string& colname);
     bool hasSPGiSTIndex(const std::string& dbname, const std::string& tablename,
                          const std::string& colname) const;
@@ -785,19 +729,19 @@ public:
         std::string withCheckExpr; // WITH CHECK expression (for INSERT/UPDATE)
         std::vector<std::string> roles; // empty = PUBLIC
     };
-    OpResult createPolicy(const std::string& dbname, const std::string& tablename,
+    DBStatus createPolicy(const std::string& dbname, const std::string& tablename,
                           const RowPolicy& policy);
-    OpResult alterPolicy(const std::string& dbname, const std::string& tablename,
+    DBStatus alterPolicy(const std::string& dbname, const std::string& tablename,
                          const std::string& policyName, const RowPolicy& policy);
-    OpResult dropPolicy(const std::string& dbname, const std::string& tablename,
+    DBStatus dropPolicy(const std::string& dbname, const std::string& tablename,
                         const std::string& policyName);
     std::vector<RowPolicy> getPolicies(const std::string& dbname, const std::string& tablename) const;
     std::vector<RowPolicy> getApplicablePolicies(const std::string& dbname, const std::string& tablename,
                                                   const std::string& cmd,
                                                   const std::string& username) const;
-    OpResult enableRowLevelSecurity(const std::string& dbname, const std::string& tablename,
+    DBStatus enableRowLevelSecurity(const std::string& dbname, const std::string& tablename,
                                      bool force = false);
-    OpResult disableRowLevelSecurity(const std::string& dbname, const std::string& tablename);
+    DBStatus disableRowLevelSecurity(const std::string& dbname, const std::string& tablename);
 
     // RLS current user (thread-local, for transparent policy application inside engine)
     static void setRLSUser(const std::string& user) { rlsCurrentUser_ = user; }
@@ -809,10 +753,10 @@ public:
                                                   const std::vector<Condition>& conds) const;
 
     // Declarative partition management (ATTACH/DETACH PARTITION)
-    OpResult attachPartition(const std::string& dbname, const std::string& tablename,
+    DBStatus attachPartition(const std::string& dbname, const std::string& tablename,
                               const std::string& partitionName,
                               const std::string& partitionSpec);
-    OpResult detachPartition(const std::string& dbname, const std::string& tablename,
+    DBStatus detachPartition(const std::string& dbname, const std::string& tablename,
                               const std::string& partitionName);
 
     // Lock manager access
@@ -830,10 +774,10 @@ public:
         bool forEachRow = true;  // true = FOR EACH ROW, false = FOR EACH STATEMENT
         bool enabled = true;     // true = ENABLED, false = DISABLED
     };
-    OpResult createTrigger(const std::string& dbname, const Trigger& trg);
-    OpResult dropTrigger(const std::string& dbname, const std::string& trgName);
-    OpResult enableTrigger(const std::string& dbname, const std::string& trgName);
-    OpResult disableTrigger(const std::string& dbname, const std::string& trgName);
+    DBStatus createTrigger(const std::string& dbname, const Trigger& trg);
+    DBStatus dropTrigger(const std::string& dbname, const std::string& trgName);
+    DBStatus enableTrigger(const std::string& dbname, const std::string& trgName);
+    DBStatus disableTrigger(const std::string& dbname, const std::string& trgName);
     std::vector<Trigger> getTriggers(const std::string& dbname, const std::string& tablename,
                                       const std::string& timing, const std::string& event) const;
     std::vector<Trigger> getAllTriggers(const std::string& dbname) const;
@@ -868,8 +812,7 @@ public:
     std::string exportSnapshot() const;
     bool importSnapshot(const std::string& bytes);
 
-    // Transaction isolation levels
-    enum class IsolationLevel { ReadUncommitted = 0, ReadCommitted = 1, RepeatableRead = 2, Serializable = 3 };
+    // Transaction isolation levels (unified with dbms::IsolationLevel in dbms_defs.h)
     void setIsolationLevel(IsolationLevel level) { txnIsolationLevel_ = level; }
     IsolationLevel getIsolationLevel() const { return txnIsolationLevel_; }
     void refreshReadView();  // For READ COMMITTED: re-snapshot before each query
@@ -959,9 +902,9 @@ public:
     // "pg_default" returns dbPath(dbname); others read from dbname/pg_tblspc/<name>.path
     std::filesystem::path tablespaceDir(const std::string& dbname, const std::string& tablespaceName) const;
     // Create a new tablespace pointing to an absolute directory
-    OpResult createTablespace(const std::string& dbname, const std::string& tsName, const std::string& physicalPath);
+    DBStatus createTablespace(const std::string& dbname, const std::string& tsName, const std::string& physicalPath);
     // Drop a user-defined tablespace (must be empty)
-    OpResult dropTablespace(const std::string& dbname, const std::string& tsName);
+    DBStatus dropTablespace(const std::string& dbname, const std::string& tsName);
     // List all tablespaces
     std::vector<std::string> listTablespaces(const std::string& dbname) const;
 
@@ -1048,7 +991,7 @@ private:
     std::string txnDB_;
     uint64_t currentTxnId_ = 0;
     ReadView readView_;
-    IsolationLevel txnIsolationLevel_ = IsolationLevel::RepeatableRead;
+    IsolationLevel txnIsolationLevel_ = IsolationLevel::REPEATABLE_READ;
     struct TxnLogEntry {
         enum class Op { Insert, Update, Delete } op;
         std::string tableName;

@@ -77,8 +77,8 @@ int main() {
         StorageEngine engine2;
         StorageEngine engine3;
 
-        OpResult r = engine1.createDatabase(dbname);
-        if (r != OpResult::Success) {
+        DBStatus r = engine1.createDatabase(dbname);
+        if (r != DBStatus::OK) {
             std::cerr << "createDatabase failed: " << static_cast<int>(r) << "\n";
             return 1;
         }
@@ -88,13 +88,13 @@ int main() {
         tbl.append(makeIntColumn("id", false, 0, true));
         tbl.append(makeVarCharColumn("name", false, 20, false));
         r = engine1.createTable(dbname, tbl);
-        if (r != OpResult::Success) {
+        if (r != DBStatus::OK) {
             std::cerr << "createTable failed: " << static_cast<int>(r) << "\n";
             return 1;
         }
 
         r = engine1.beginTransaction(dbname);
-        if (r != OpResult::Success) {
+        if (r != DBStatus::OK) {
             std::cerr << "beginTransaction failed: " << static_cast<int>(r) << "\n";
             return 1;
         }
@@ -103,7 +103,7 @@ int main() {
         vals["id"] = "1";
         vals["name"] = "alice";
         r = engine1.insert(dbname, "t", vals);
-        if (r != OpResult::Success) {
+        if (r != DBStatus::OK) {
             std::cerr << "insert failed: " << static_cast<int>(r) << "\n";
             return 1;
         }
@@ -117,7 +117,7 @@ int main() {
 
         // Engine2 imports the snapshot and should not see engine1's uncommitted row
         r = engine2.beginTransaction(dbname);
-        if (r != OpResult::Success) {
+        if (r != DBStatus::OK) {
             std::cerr << "engine2 begin failed: " << static_cast<int>(r) << "\n";
             return 1;
         }
@@ -141,7 +141,7 @@ int main() {
 
         // Engine3 with fresh snapshot sees committed row
         r = engine3.beginTransaction(dbname);
-        assert(r == OpResult::Success);
+        assert(r == DBStatus::OK);
         rows = engine3.query(dbname, "t", {}, {"id", "name"});
         assert(rowContains(rows, "alice"));
         engine3.commitTransaction();

@@ -1,17 +1,16 @@
 #pragma once
 
 #include "dbms_defs.h"
+#include "table_schema.h"
 #include <functional>
 #include <map>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
 namespace dbms {
 
-// 前向声明
-struct TableSchema;
+// 前向声明（storage_engine.h 自身不使用，但保留给 future extensions）
 struct Column;
 struct ReadView;
 
@@ -33,7 +32,8 @@ public:
     // ------------------------------------------------------------------------
     // 数据库生命周期
     // ------------------------------------------------------------------------
-    virtual DBStatus createDatabase(const std::string& dbName) = 0;
+    virtual DBStatus createDatabase(const std::string& dbName,
+                                     const std::string& charset = "utf8") = 0;
     virtual DBStatus dropDatabase(const std::string& dbName) = 0;
     virtual DBStatus useDatabase(const std::string& dbName) = 0;
     virtual std::vector<std::string> listDatabases() const = 0;
@@ -46,7 +46,7 @@ public:
                                   const TableSchema& schema) = 0;
     virtual DBStatus dropTable(const std::string& dbName,
                                 const std::string& tableName) = 0;
-    virtual std::optional<TableSchema> getTableSchema(
+    virtual TableSchema getTableSchema(
         const std::string& dbName,
         const std::string& tableName) const = 0;
     virtual std::vector<std::string> listTables(

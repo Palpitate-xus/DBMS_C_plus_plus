@@ -18,7 +18,7 @@ fi
 # 共享源文件列表（与 build.sh 一致，但不含 src/main.cpp）
 SOURCES=(
     src/commands/TableManage.cpp
-    src/optimizer/ExecutionPlan.cpp
+    src/executor/ExecutionPlan.cpp
     src/storage/BufferPool.cpp
     src/storage/PageAllocator.cpp
     src/storage/Page.cpp
@@ -57,7 +57,7 @@ INCLUDES=(
     -Isrc/transaction
     -Isrc/network
     -Isrc/utils
-    -Isrc/optimizer
+    -Isrc/executor
     -Isrc/commands
     -Isrc/interfaces
     -Isrc/parser

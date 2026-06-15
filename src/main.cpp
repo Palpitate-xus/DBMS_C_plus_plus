@@ -57,7 +57,7 @@ using dbms::makeUuidColumn;
 using dbms::makeTimeColumn;
 using dbms::makeDateTimeColumn;
 using dbms::makeIntervalColumn;
-using dbms::OpResult;
+using dbms::DBStatus;
 using dbms::StorageEngine;
 using dbms::TableSchema;
 
@@ -1025,16 +1025,16 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
     bool readOnly = false;
     if (!rest.empty()) {
         if (rest.find("read uncommitted") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
+            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_UNCOMMITTED);
             s.isolationLevel = 0;
         } else if (rest.find("read committed") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
+            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_COMMITTED);
             s.isolationLevel = 1;
         } else if (rest.find("repeatable read") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+            g_engine.setIsolationLevel(dbms::IsolationLevel::REPEATABLE_READ);
             s.isolationLevel = 2;
         } else if (rest.find("serializable") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            g_engine.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
             s.isolationLevel = 3;
         }
         if (rest.find("read only") != string::npos) {
@@ -1042,7 +1042,7 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
         }
     }
     auto res = g_engine.beginTransaction(s.currentDB);
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Begin transaction failed" << endl;
         return true;
     }
@@ -1060,7 +1060,7 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
 static bool handleCommitTransaction(const string& sql, Session& s) {
     (void)sql;
     auto res = g_engine.commitTransaction();
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Commit failed" << endl;
         return true;
     }
@@ -1076,10 +1076,10 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
         return true;
     }
     auto res = g_engine.commitPrepared(xid);
-    if (res == OpResult::Success) {
+    if (res == DBStatus::OK) {
         cout << "COMMIT PREPARED " << xid << endl;
         log(s.username, "commit prepared " + xid, getTime());
-    } else if (res == OpResult::TableNotExist) {
+    } else if (res == DBStatus::TABLE_NOT_FOUND) {
         cout << "Prepared transaction not found" << endl;
     } else {
         cout << "COMMIT PREPARED failed" << endl;
@@ -1090,7 +1090,7 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
 static bool handleRollbackTransaction(const string& sql, Session& s) {
     (void)sql;
     auto res = g_engine.rollbackTransaction();
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Rollback failed" << endl;
         return true;
     }
@@ -1106,10 +1106,10 @@ static bool handleRollbackPrepared(const string& sql, Session& s) {
         return true;
     }
     auto res = g_engine.rollbackPrepared(xid);
-    if (res == OpResult::Success) {
+    if (res == DBStatus::OK) {
         cout << "ROLLBACK PREPARED " << xid << endl;
         log(s.username, "rollback prepared " + xid, getTime());
-    } else if (res == OpResult::TableNotExist) {
+    } else if (res == DBStatus::TABLE_NOT_FOUND) {
         cout << "Prepared transaction not found" << endl;
     } else {
         cout << "ROLLBACK PREPARED failed" << endl;
@@ -1129,7 +1129,7 @@ static bool handleSavepoint(const string& sql, Session& s) {
         return true;
     }
     auto res = g_engine.savepoint(name);
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Savepoint failed" << endl;
         return true;
     }
@@ -1150,7 +1150,7 @@ static bool handleReleaseSavepoint(const string& sql, Session& s) {
         return true;
     }
     auto res = g_engine.releaseSavepoint(name);
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Savepoint not found" << endl;
         return true;
     }
@@ -1172,7 +1172,7 @@ static bool handleRollbackToSavepoint(const string& sql, Session& s) {
         return true;
     }
     auto res = g_engine.rollbackToSavepoint(name);
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Savepoint not found" << endl;
         return true;
     }
@@ -1204,7 +1204,7 @@ static bool handleResetCommand(const string& sql, Session& s) {
     // RESET parameter | RESET ALL
     auto resetIsolation = [&]() {
         s.isolationLevel = 2;
-        g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+        g_engine.setIsolationLevel(dbms::IsolationLevel::REPEATABLE_READ);
     };
     string rest = (sql == "reset all") ? "all" : trim(sql.substr(6));
     if (rest == "all") {
@@ -1369,19 +1369,19 @@ static bool handleSetCommand(const string& sql, Session& s) {
         }
         string rest = trim(rawRest);
         if (rest.find("read uncommitted") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadUncommitted);
+            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_UNCOMMITTED);
             s.isolationLevel = 0;
             cout << "Isolation level set to READ UNCOMMITTED" << endl;
         } else if (rest.find("read committed") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::ReadCommitted);
+            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_COMMITTED);
             s.isolationLevel = 1;
             cout << "Isolation level set to READ COMMITTED" << endl;
         } else if (rest.find("repeatable read") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::RepeatableRead);
+            g_engine.setIsolationLevel(dbms::IsolationLevel::REPEATABLE_READ);
             s.isolationLevel = 2;
             cout << "Isolation level set to REPEATABLE READ" << endl;
         } else if (rest.find("serializable") != string::npos) {
-            g_engine.setIsolationLevel(dbms::StorageEngine::IsolationLevel::Serializable);
+            g_engine.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
             s.isolationLevel = 3;
             cout << "Isolation level set to SERIALIZABLE" << endl;
         } else {
@@ -1510,7 +1510,7 @@ static bool handleCommentOn(const string& sql, Session& s, const string& rawSql)
         string tname = resolveTableName(s, trim(afterTable.substr(0, isPos)));
         string comment = extractComment(rawSql);
         auto res = g_engine.commentOnTable(s.currentDB, tname, comment);
-        if (res == OpResult::TableNotExist) {
+        if (res == DBStatus::TABLE_NOT_FOUND) {
             cout << "Table not found" << endl;
             return true;
         }
@@ -1534,7 +1534,7 @@ static bool handleCommentOn(const string& sql, Session& s, const string& rawSql)
         string cname = trim(qual.substr(dotPos + 1));
         string comment = extractComment(rawSql);
         auto res = g_engine.commentOnColumn(s.currentDB, tname, cname, comment);
-        if (res == OpResult::TableNotExist) {
+        if (res == DBStatus::TABLE_NOT_FOUND) {
             cout << "Table not found" << endl;
             return true;
         }
@@ -1720,7 +1720,7 @@ static bool handleRefreshMaterializedView(const string& sql, Session& s) {
                 values[cname] = val;
             }
             auto res = g_engine.insert(s.currentDB, backingTable, values);
-            if (res == OpResult::Success) ++inserted;
+            if (res == DBStatus::OK) ++inserted;
         }
         cout << "Materialized view " << viewname << " refreshed (" << inserted << " rows)" << endl;
         return false;
@@ -1836,7 +1836,7 @@ static bool handleTruncate(const string& sql, Session& s) {
     }
     tname = resolveTableName(s, tname);
     auto res = g_engine.truncateTable(s.currentDB, tname);
-    if (res == OpResult::TableNotExist) {
+    if (res == DBStatus::TABLE_NOT_FOUND) {
         cout << "Table not exist" << endl;
         return true;
     }
@@ -1878,7 +1878,7 @@ static bool handleReindex(const string& sql, Session& s) {
             return true;
         }
         auto res = g_engine.reindex(s.currentDB, tname);
-        if (res != OpResult::Success) {
+        if (res != DBStatus::OK) {
             cout << "Reindex failed" << endl;
             return true;
         }
@@ -2025,7 +2025,7 @@ static bool handleCopy(const string& sql, Session& s) {
                 values[tbl.cols[i].dataName] = trim(fields[i]);
             }
             auto res = g_engine.insert(s.currentDB, tname, values);
-            if (res == OpResult::Success) imported++;
+            if (res == DBStatus::OK) imported++;
             else skipped++;
         }
         cout << "COPY " << imported << " rows imported, " << skipped << " skipped" << endl;
@@ -2094,12 +2094,12 @@ static bool handlePrepare(const string& sql, Session& s) {
             return true;
         }
         auto res = g_engine.prepareTransaction(xid);
-        if (res == OpResult::Success) {
+        if (res == DBStatus::OK) {
             cout << "PREPARE TRANSACTION " << xid << endl;
             log(s.username, "prepare transaction " + xid, getTime());
-        } else if (res == OpResult::InvalidValue) {
+        } else if (res == DBStatus::INVALID_VALUE) {
             cout << "No active transaction" << endl;
-        } else if (res == OpResult::DuplicateKey) {
+        } else if (res == DBStatus::DUPLICATE_KEY) {
             cout << "Transaction ID already exists" << endl;
         } else {
             cout << "PREPARE TRANSACTION failed" << endl;
@@ -5297,7 +5297,7 @@ static std::string createTempTableFromRows(Session& s,
         tmpTbl.append(col);
     }
     auto res = g_engine.createTable(s.currentDB, tmpTbl);
-    if (res != OpResult::Success) return "";
+    if (res != DBStatus::OK) return "";
     s.tempTables.insert(tmpName);
 
     for (const auto& row : rows) {
@@ -6482,15 +6482,15 @@ static bool handleAlterDomain(const string& sql, Session& s) {
     }
 
     auto res = g_engine.alterDomain(s.currentDB, domainName, info);
-    if (res == OpResult::TableAlreadyExist) {
+    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         cout << "Domain " << info.name << " already exists" << endl;
         return true;
     }
-    if (res == OpResult::TableNotExist) {
+    if (res == DBStatus::TABLE_NOT_FOUND) {
         cout << "Domain " << domainName << " not exist" << endl;
         return true;
     }
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Alter domain failed" << endl;
         return true;
     }
@@ -6622,15 +6622,15 @@ static bool handleAlterType(const string& sql, Session& s) {
     }
 
     auto res = g_engine.alterCompositeType(s.currentDB, typeName, ct);
-    if (res == OpResult::TableAlreadyExist) {
+    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         cout << "Type " << ct.name << " already exists" << endl;
         return true;
     }
-    if (res == OpResult::TableNotExist) {
+    if (res == DBStatus::TABLE_NOT_FOUND) {
         cout << "Type " << typeName << " not exist" << endl;
         return true;
     }
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Alter type failed" << endl;
         return true;
     }
@@ -6715,11 +6715,11 @@ static bool handleAlterPolicy(const string& sql, Session& s) {
         }
     }
     auto res = g_engine.alterPolicy(s.currentDB, tableName, policyName, updated);
-    if (res == OpResult::TableAlreadyExist) {
+    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         cout << "Policy " << updated.name << " already exists" << endl;
         return true;
     }
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Alter policy failed" << endl;
         return true;
     }
@@ -6742,9 +6742,9 @@ static bool handleDropPolicy(const string& sql, Session& s) {
     string pname = trim(rest.substr(0, onPos));
     string tname = resolveTableName(s, trim(rest.substr(onPos + 4)));
     auto res = g_engine.dropPolicy(s.currentDB, tname, pname);
-    if (res == OpResult::Success) {
+    if (res == DBStatus::OK) {
         cout << "Policy " << pname << " dropped from " << tname << endl;
-    } else if (res == OpResult::TableNotExist) {
+    } else if (res == DBStatus::TABLE_NOT_FOUND) {
         cout << "Table or policy not found" << endl;
     } else {
         cout << "Drop policy failed" << endl;
@@ -6766,7 +6766,7 @@ static bool handleDropDatabaseGlobal(const string& sql, Session& s) {
         return true;
     }
     auto res = g_engine.dropDatabase(dbname);
-    if (res == OpResult::DatabaseNotExist) {
+    if (res == DBStatus::DATABASE_NOT_FOUND) {
         if (ifExists) {
             cout << "Database " << dbname << " does not exist, skipping" << endl;
             return false;
@@ -7521,7 +7521,7 @@ static bool handleAlterSequence(const string& sql, Session& s) {
     auto res = g_engine.alterSequence(s.currentDB, seqName,
                                       hasRestart, restart,
                                       hasIncrement, increment);
-    if (res != OpResult::Success) {
+    if (res != DBStatus::OK) {
         cout << "Alter sequence failed" << endl;
         return true;
     }
@@ -8393,7 +8393,7 @@ bool execute(const string& rawSql, Session& s) {
             info.checkExpr = checkExpr;
             info.constraintName = constraintName;
             auto res = g_engine.createDomain(s.currentDB, info);
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Domain " << dname << " already exists" << endl;
                 return true;
             }
@@ -8437,7 +8437,7 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             auto res = g_engine.createCompositeType(s.currentDB, ct);
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Type " << tname << " already exists" << endl;
                 return true;
             }
@@ -8470,14 +8470,14 @@ bool execute(const string& rawSql, Session& s) {
                 charset = trim(rest.substr(csPos + csOffset));
             }
             auto res = g_engine.createDatabase(dbname, charset);
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Failed:Database " << dbname << " already exists" << endl;
                 log(s.username, "create database error", getTime());
             } else {
                 cout << "Create Database succeeded (charset=" << charset << ")" << endl;
                 log(s.username, "create database succeeded", getTime());
             }
-            return res != OpResult::Success;
+            return res != DBStatus::OK;
         }
 
         if (sql.substr(7, 9) == "temporary") {
@@ -8500,7 +8500,7 @@ bool execute(const string& rawSql, Session& s) {
             TableSchema tbl = parseTableColumns(sql, 17 + 5 + 1 + sp + 1, s.currentDB);
             tbl.tablename = tmpName;
             auto res = g_engine.createTable(s.currentDB, tbl);
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Temporary table " << origName << " already exists" << endl;
                 return true;
             }
@@ -8634,7 +8634,7 @@ bool execute(const string& rawSql, Session& s) {
                     }
 
                     auto res = g_engine.createTable(s.currentDB, newTbl);
-                    if (res == OpResult::TableAlreadyExist) {
+                    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                         cout << "Table " << newTname << " already exists" << endl;
                         return true;
                     }
@@ -8689,12 +8689,12 @@ bool execute(const string& rawSql, Session& s) {
                 newTbl.hashPartitions = 0;
                 newTbl.defaultPartitionName.clear();
                 auto res = g_engine.createTable(s.currentDB, newTbl);
-                if (res == OpResult::TableAlreadyExist) {
+                if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                     cout << "Table " << pname << " already exists" << endl;
                     return true;
                 }
                 res = g_engine.attachPartition(s.currentDB, parentName, pname, spec);
-                if (res != OpResult::Success) {
+                if (res != DBStatus::OK) {
                     g_engine.dropTable(s.currentDB, pname);
                     cout << "Failed to attach partition" << endl;
                     return true;
@@ -8918,7 +8918,7 @@ bool execute(const string& rawSql, Session& s) {
             }
 
             auto res = g_engine.createTable(s.currentDB, tbl);
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Table " << tname << " already exists" << endl;
                 log(s.username, "table already exists", getTime());
                 return true;
@@ -9045,7 +9045,7 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "SQL syntax error: no columns specified" << endl;
                 return true;
             }
-            OpResult res;
+            DBStatus res;
             if (colnames.size() == 1) {
                 if (isHash) {
                     res = g_engine.createHashIndex(s.currentDB, tname, colnames[0], isConcurrently);
@@ -9060,7 +9060,7 @@ bool execute(const string& rawSql, Session& s) {
                 // Expression indexes not supported for composite (simplified)
                 res = g_engine.createCompositeIndex(s.currentDB, tname, colnames, idxName, includeCols, whereCondition, isConcurrently);
             }
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Create index failed" << endl;
                 return true;
             }
@@ -9089,7 +9089,7 @@ bool execute(const string& rawSql, Session& s) {
             string tname = resolveTableName(s, trim(afterOn.substr(0, lp)));
             string colname = trim(afterOn.substr(lp + 1, rp - lp - 1));
             auto res = g_engine.createFullTextIndex(s.currentDB, tname, colname);
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Create fulltext index failed" << endl;
                 return true;
             }
@@ -9124,7 +9124,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             string tname = resolveTableName(s, trim(afterOn.substr(0, lp)));
             string colname = trim(afterOn.substr(lp + 1, rp - lp - 1));
-            OpResult res;
+            DBStatus res;
             if (isGin) {
                 res = g_engine.createGinIndex(s.currentDB, tname, colname);
             } else if (isGist) {
@@ -9134,7 +9134,7 @@ bool execute(const string& rawSql, Session& s) {
             } else {
                 res = g_engine.createBrinIndex(s.currentDB, tname, colname);
             }
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Create index failed" << endl;
                 return true;
             }
@@ -9251,7 +9251,7 @@ bool execute(const string& rawSql, Session& s) {
             trg.whenCondition = whenCondition;
             trg.forEachRow = forEachRow;
             auto res = g_engine.createTrigger(s.currentDB, trg);
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Create trigger failed" << endl;
                 return true;
             }
@@ -9278,7 +9278,7 @@ bool execute(const string& rawSql, Session& s) {
                 try { increment = std::stoll(numStr); } catch (...) {}
             }
             auto res = g_engine.createSequence(s.currentDB, seqName, start, increment);
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Sequence " << seqName << " already exists" << endl;
                 return true;
             }
@@ -9352,7 +9352,7 @@ bool execute(const string& rawSql, Session& s) {
                 g_engine.dropView(s.currentDB, viewname);
             }
             auto res = g_engine.createView(s.currentDB, viewname, storeSql);
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "View " << viewname << " already exists" << endl;
                 return true;
             }
@@ -9483,7 +9483,7 @@ bool execute(const string& rawSql, Session& s) {
                 g_engine.dropTable(s.currentDB, backingTable);
             }
             auto res = g_engine.createTable(s.currentDB, tbl);
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Failed to create materialized view backing table" << endl;
                 return true;
             }
@@ -9521,7 +9521,7 @@ bool execute(const string& rawSql, Session& s) {
             if (!checkDB(s)) return true;
             string schemaname = trim(sql.substr(14));
             auto res = g_engine.createSchema(s.currentDB, schemaname);
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Create schema failed" << endl;
                 return true;
             }
@@ -9620,7 +9620,7 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             auto res = g_engine.createProcedure(s.currentDB, procname, params, stmts);
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Create procedure failed" << endl;
                 return true;
             }
@@ -9677,20 +9677,20 @@ bool execute(const string& rawSql, Session& s) {
             if (isTVF) {
                 string singleParam = params.empty() ? "" : params[0];
                 auto res = g_engine.createTVF(s.currentDB, funcname, singleParam, body);
-                if (res != OpResult::Success) {
+                if (res != DBStatus::OK) {
                     cout << "Create table-valued function failed" << endl;
                     return true;
                 }
                 cout << "Table-valued function " << funcname << " created" << endl;
             } else {
-                OpResult res;
+                DBStatus res;
                 if (params.size() <= 1) {
                     string singleParam = params.empty() ? "" : params[0];
                     res = g_engine.createUDF(s.currentDB, funcname, singleParam, body);
                 } else {
                     res = g_engine.createUDF(s.currentDB, funcname, params, types, body);
                 }
-                if (res != OpResult::Success) {
+                if (res != DBStatus::OK) {
                     cout << "Create function failed" << endl;
                     return true;
                 }
@@ -9845,11 +9845,11 @@ bool execute(const string& rawSql, Session& s) {
             string oldName = tokens[1];
             string newName = tokens[4];
             auto res = g_engine.renameSchema(s.currentDB, oldName, newName);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Schema " << oldName << " not exist" << endl;
                 return true;
             }
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Rename schema failed" << endl;
                 return true;
             }
@@ -9883,7 +9883,7 @@ bool execute(const string& rawSql, Session& s) {
                 string checkOpt = g_engine.getViewCheckOption(s.currentDB, actualVname);
                 g_engine.dropView(s.currentDB, actualVname);
                 auto res = g_engine.createView(s.currentDB, newName, viewSql);
-                if (res != OpResult::Success) {
+                if (res != DBStatus::OK) {
                     // Restore old view
                     g_engine.createView(s.currentDB, actualVname, viewSql);
                     cout << "Rename view failed" << endl;
@@ -9901,7 +9901,7 @@ bool execute(const string& rawSql, Session& s) {
                 string viewSql = g_engine.getViewSQL(s.currentDB, actualVname);
                 g_engine.dropView(s.currentDB, actualVname);
                 auto res = g_engine.createView(targetDb, actualVname, viewSql);
-                if (res != OpResult::Success) {
+                if (res != DBStatus::OK) {
                     g_engine.createView(s.currentDB, actualVname, viewSql);
                     cout << "Set schema failed" << endl;
                     return true;
@@ -10095,7 +10095,7 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             auto res = g_engine.alterTableAddColumn(s.currentDB, tname, col);
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Column already exists" << endl;
                 return true;
             }
@@ -10108,7 +10108,7 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             auto res = g_engine.alterTableDropColumn(s.currentDB, tname, tokens[4]);
-            if (res == OpResult::InvalidValue) {
+            if (res == DBStatus::INVALID_VALUE) {
                 cout << "Column not found" << endl;
                 return true;
             }
@@ -10121,11 +10121,11 @@ bool execute(const string& rawSql, Session& s) {
                 string oldName = tokens[4];
                 string newName = tokens[6];
                 auto res = g_engine.alterTableRenameColumn(s.currentDB, tname, oldName, newName);
-                if (res == OpResult::InvalidValue) {
+                if (res == DBStatus::INVALID_VALUE) {
                     cout << "Column not found" << endl;
                     return true;
                 }
-                if (res == OpResult::TableAlreadyExist) {
+                if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                     cout << "Column name already exists" << endl;
                     return true;
                 }
@@ -10136,7 +10136,7 @@ bool execute(const string& rawSql, Session& s) {
                 // alter table tname rename to new_table_name
                 string newTname = tokens[4];
                 auto res = g_engine.alterTableRenameTable(s.currentDB, tname, newTname);
-                if (res == OpResult::TableAlreadyExist) {
+                if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                     cout << "Table name already exists" << endl;
                     return true;
                 }
@@ -10148,11 +10148,11 @@ bool execute(const string& rawSql, Session& s) {
                 string oldName = tokens[3];
                 string newName = tokens[5];
                 auto res = g_engine.alterTableRenameColumn(s.currentDB, tname, oldName, newName);
-                if (res == OpResult::InvalidValue) {
+                if (res == DBStatus::INVALID_VALUE) {
                     cout << "Column not found" << endl;
                     return true;
                 }
-                if (res == OpResult::TableAlreadyExist) {
+                if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                     cout << "Column name already exists" << endl;
                     return true;
                 }
@@ -10172,7 +10172,7 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
                 auto res = g_engine.alterTableSetDefault(s.currentDB, tname, cname, defVal);
-                if (res == OpResult::InvalidValue) {
+                if (res == DBStatus::INVALID_VALUE) {
                     cout << "Column not found" << endl;
                     return true;
                 }
@@ -10181,7 +10181,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             if (tokens.size() >= 7 && tokens[5] == "drop" && tokens[6] == "default") {
                 auto res = g_engine.alterTableDropDefault(s.currentDB, tname, cname);
-                if (res == OpResult::InvalidValue) {
+                if (res == DBStatus::INVALID_VALUE) {
                     cout << "Column not found" << endl;
                     return true;
                 }
@@ -10190,7 +10190,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             if (tokens.size() >= 8 && tokens[5] == "set" && tokens[6] == "not" && tokens[7] == "null") {
                 auto res = g_engine.alterTableSetNotNull(s.currentDB, tname, cname);
-                if (res == OpResult::InvalidValue) {
+                if (res == DBStatus::INVALID_VALUE) {
                     cout << "Column not found" << endl;
                     return true;
                 }
@@ -10199,7 +10199,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             if (tokens.size() >= 8 && tokens[5] == "drop" && tokens[6] == "not" && tokens[7] == "null") {
                 auto res = g_engine.alterTableDropNotNull(s.currentDB, tname, cname);
-                if (res == OpResult::InvalidValue) {
+                if (res == DBStatus::INVALID_VALUE) {
                     cout << "Column not found" << endl;
                     return true;
                 }
@@ -10235,15 +10235,15 @@ bool execute(const string& rawSql, Session& s) {
                 if (lp != string::npos && rp != string::npos) {
                     string expr = trim(sql.substr(lp + 1, rp - lp - 1));
                     auto res = g_engine.alterTableAddCheckConstraint(s.currentDB, tname, constrName, expr);
-                    if (res == OpResult::TableNotExist) {
+                    if (res == DBStatus::TABLE_NOT_FOUND) {
                         cout << "Table not found" << endl;
                         return true;
                     }
-                    if (res == OpResult::InvalidValue) {
+                    if (res == DBStatus::INVALID_VALUE) {
                         cout << "Invalid check constraint: no referenced column found" << endl;
                         return true;
                     }
-                    if (res == OpResult::TableAlreadyExist) {
+                    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                         cout << "Constraint name already exists" << endl;
                         return true;
                     }
@@ -10271,15 +10271,15 @@ bool execute(const string& rawSql, Session& s) {
                         if (!c.empty()) cols.push_back(c);
                     }
                     auto res = g_engine.alterTableAddUniqueConstraint(s.currentDB, tname, constrName, cols);
-                    if (res == OpResult::TableNotExist) {
+                    if (res == DBStatus::TABLE_NOT_FOUND) {
                         cout << "Table not found" << endl;
                         return true;
                     }
-                    if (res == OpResult::InvalidValue) {
+                    if (res == DBStatus::INVALID_VALUE) {
                         cout << "Column not found" << endl;
                         return true;
                     }
-                    if (res == OpResult::TableAlreadyExist) {
+                    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                         cout << "Constraint name already exists" << endl;
                         return true;
                     }
@@ -10348,15 +10348,15 @@ bool execute(const string& rawSql, Session& s) {
                     auto res = g_engine.alterTableAddFKConstraint(s.currentDB, tname, constrName,
                                                                   localCols, refTable, refCols,
                                                                   onDelete, onUpdate);
-                    if (res == OpResult::InvalidValue) {
+                    if (res == DBStatus::INVALID_VALUE) {
                         cout << "Invalid foreign key definition" << endl;
                         return true;
                     }
-                    if (res == OpResult::TableNotExist) {
+                    if (res == DBStatus::TABLE_NOT_FOUND) {
                         cout << "Referenced table not found" << endl;
                         return true;
                     }
-                    if (res == OpResult::TableAlreadyExist) {
+                    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                         cout << "Constraint name already exists" << endl;
                         return true;
                     }
@@ -10380,11 +10380,11 @@ bool execute(const string& rawSql, Session& s) {
             string constrName = tokens[4];
             auto res = g_engine.alterTableDropConstraint(s.currentDB, tname, constrName);
             bool droppedMeta = removeConstraintCompat(s.currentDB, tname, constrName);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Table not found" << endl;
                 return true;
             }
-            if (res == OpResult::InvalidValue && !droppedMeta) {
+            if (res == DBStatus::INVALID_VALUE && !droppedMeta) {
                 cout << "Constraint not found" << endl;
                 return true;
             }
@@ -10397,7 +10397,7 @@ bool execute(const string& rawSql, Session& s) {
             sql.find("force row level security") != string::npos) {
             if (sql.find("disable") != string::npos) {
                 auto res = g_engine.disableRowLevelSecurity(s.currentDB, tname);
-                if (res == OpResult::Success) {
+                if (res == DBStatus::OK) {
                     cout << "Row level security disabled on " << tname << endl;
                 } else {
                     cout << "Table not found" << endl;
@@ -10405,7 +10405,7 @@ bool execute(const string& rawSql, Session& s) {
             } else {
                 bool force = (sql.find("force") != string::npos);
                 auto res = g_engine.enableRowLevelSecurity(s.currentDB, tname, force);
-                if (res == OpResult::Success) {
+                if (res == DBStatus::OK) {
                     cout << "Row level security " << (force ? "forced" : "enabled") << " on " << tname << endl;
                 } else {
                     cout << "Table not found" << endl;
@@ -10431,13 +10431,13 @@ bool execute(const string& rawSql, Session& s) {
                 spec = trim(afterAttach.substr(sp + 1));
             }
             auto res = g_engine.attachPartition(s.currentDB, tname, pname, spec);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Table not found" << endl;
-            } else if (res == OpResult::InvalidValue) {
+            } else if (res == DBStatus::INVALID_VALUE) {
                 cout << "Table is not partitioned or invalid partition specification" << endl;
-            } else if (res == OpResult::TableAlreadyExist) {
+            } else if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Partition " << pname << " already exists" << endl;
-            } else if (res == OpResult::SyntaxError) {
+            } else if (res == DBStatus::SYNTAX_ERROR) {
                 cout << "SQL syntax error: invalid partition specification" << endl;
             } else {
                 cout << "Partition " << pname << " attached to " << tname << endl;
@@ -10450,9 +10450,9 @@ bool execute(const string& rawSql, Session& s) {
             string afterDetach = trim(sql.substr(detachPos + 16)); // after "detach partition"
             string pname = afterDetach;
             auto res = g_engine.detachPartition(s.currentDB, tname, pname);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Table not found" << endl;
-            } else if (res == OpResult::InvalidValue) {
+            } else if (res == DBStatus::INVALID_VALUE) {
                 cout << "Partition " << pname << " not found or table is not partitioned" << endl;
             } else {
                 cout << "Partition " << pname << " detached from " << tname << endl;
@@ -10466,7 +10466,7 @@ bool execute(const string& rawSql, Session& s) {
             string trigName = trim(sql.substr(trigPos + 8));
             auto res = enable ? g_engine.enableTrigger(s.currentDB, trigName)
                               : g_engine.disableTrigger(s.currentDB, trigName);
-            if (res == OpResult::Success) {
+            if (res == DBStatus::OK) {
                 cout << "Trigger " << trigName << (enable ? " enabled" : " disabled") << endl;
             } else {
                 cout << "Trigger not found" << endl;
@@ -10478,15 +10478,15 @@ bool execute(const string& rawSql, Session& s) {
             size_t schemaPos = sql.find("set schema");
             string targetDb = trim(sql.substr(schemaPos + 10));
             auto res = g_engine.alterTableSetSchema(s.currentDB, tname, targetDb);
-            if (res == OpResult::DatabaseNotExist) {
+            if (res == DBStatus::DATABASE_NOT_FOUND) {
                 cout << "Target database not found" << endl;
                 return true;
             }
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Table not found" << endl;
                 return true;
             }
-            if (res == OpResult::TableAlreadyExist) {
+            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Table already exists in target database" << endl;
                 return true;
             }
@@ -10645,7 +10645,7 @@ bool execute(const string& rawSql, Session& s) {
                 }
                 if (!values.empty()) {
                     auto res = g_engine.insert(s.currentDB, targetName, values);
-                    if (res == dbms::OpResult::Success) inserted++;
+                    if (res == dbms::DBStatus::OK) inserted++;
                 }
             }
         }
@@ -10881,7 +10881,7 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
                 auto res = g_engine.insert(s.currentDB, resolvedName, values);
-                if (res == dbms::OpResult::Success) ++inserted;
+                if (res == dbms::DBStatus::OK) ++inserted;
             });
             cout << inserted << " rows inserted" << endl;
             return false;
@@ -11034,7 +11034,7 @@ bool execute(const string& rawSql, Session& s) {
             }
 
             auto res = g_engine.insert(s.currentDB, resolvedName, values);
-            if (res == OpResult::DuplicateKey) {
+            if (res == DBStatus::DUPLICATE_KEY) {
                 if (isReplace) {
                     // REPLACE INTO: delete conflicting row(s), then re-insert
                     TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
@@ -11069,7 +11069,7 @@ bool execute(const string& rawSql, Session& s) {
                     }
                     // Re-insert after deletion
                     res = g_engine.insert(s.currentDB, resolvedName, values);
-                    if (res == OpResult::Success) {
+                    if (res == DBStatus::OK) {
                         ++inserted;
                         if (!returningCols.empty() || returningAll) {
                             vector<string> whereConds;
@@ -11097,7 +11097,7 @@ bool execute(const string& rawSql, Session& s) {
                 vector<string> whereConds;
                 if (!condVal.empty()) whereConds.push_back("=" + conflictCol + " " + condVal);
                 auto ures = g_engine.update(s.currentDB, resolvedName, upsertUpdates, whereConds);
-                if (ures != OpResult::Success) {
+                if (ures != DBStatus::OK) {
                     cout << "UPSERT update failed" << endl;
                     return true;
                 }
@@ -11110,7 +11110,7 @@ bool execute(const string& rawSql, Session& s) {
                 }
                 continue;
             }
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Invalid data, please check" << endl;
                 return true;
             }
@@ -11272,7 +11272,7 @@ bool execute(const string& rawSql, Session& s) {
                 string pkVal = cols[pkIdx];
                 vector<string> pkCond = {"=" + pkCol + " " + pkVal};
                 auto res = g_engine.remove(s.currentDB, resolvedTarget, pkCond);
-                if (res == OpResult::Success) deletedCount++;
+                if (res == DBStatus::OK) deletedCount++;
             }
             cout << "Delete done (" << deletedCount << " row(s))" << endl;
             return false;
@@ -11352,7 +11352,7 @@ bool execute(const string& rawSql, Session& s) {
                         for (auto& r : rr) returnedRows.push_back(r);
                     }
                     auto res = g_engine.remove(s.currentDB, resolvedName, pkCond);
-                    if (res == OpResult::Success) ++deletedCount;
+                    if (res == DBStatus::OK) ++deletedCount;
                 }
                 cout << "Delete done (" << deletedCount << " row(s))" << endl;
                 for (auto& row : returnedRows) cout << row << endl;
@@ -11368,7 +11368,7 @@ bool execute(const string& rawSql, Session& s) {
                 returnedRows = rr;
             }
             auto res = g_engine.remove(s.currentDB, resolvedName, {});
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
             }
@@ -11418,7 +11418,7 @@ bool execute(const string& rawSql, Session& s) {
                         for (auto& r : rr) returnedRows.push_back(r);
                     }
                     auto res = g_engine.remove(s.currentDB, resolvedName, pkCond);
-                    if (res == OpResult::Success) ++deletedCount;
+                    if (res == DBStatus::OK) ++deletedCount;
                 }
             }
             cout << "Delete done (" << deletedCount << " row(s))" << endl;
@@ -11439,7 +11439,7 @@ bool execute(const string& rawSql, Session& s) {
         }
         for (const auto& g : groups) {
             auto res = g_engine.remove(s.currentDB, resolvedName, g);
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Delete failed: foreign key constraint violation or other error" << endl;
                 return true;
             }
@@ -11623,7 +11623,7 @@ bool execute(const string& rawSql, Session& s) {
                 string pkVal = cols[pkIdx];
                 vector<string> pkCond = {"=" + pkCol + " " + pkVal};
                 auto res = g_engine.update(s.currentDB, resolvedTarget, updates, pkCond);
-                if (res == OpResult::Success) updatedCount++;
+                if (res == DBStatus::OK) updatedCount++;
             }
             cout << "Update done (" << updatedCount << " row(s))" << endl;
             return false;
@@ -11736,7 +11736,7 @@ bool execute(const string& rawSql, Session& s) {
                         cerr << "DEBUG pkCond='" << pkCond[0] << "'" << endl;
                         auto res = g_engine.update(s.currentDB, resolvedName, updates, pkCond);
                         cerr << "DEBUG update res=" << static_cast<int>(res) << endl;
-                        if (res == OpResult::Success) {
+                        if (res == DBStatus::OK) {
                             ++updatedCount;
                             if (!returningCols.empty() || returningAll) {
                                 auto rr = g_engine.query(s.currentDB, resolvedName, pkCond,
@@ -11755,7 +11755,7 @@ bool execute(const string& rawSql, Session& s) {
 
             for (const auto& g : groups) {
                 auto res = g_engine.update(s.currentDB, resolvedName, updates, g);
-                if (res != OpResult::Success) {
+                if (res != DBStatus::OK) {
                     cout << "Update failed" << endl;
                     return true;
                 }
@@ -11792,7 +11792,7 @@ bool execute(const string& rawSql, Session& s) {
                     string pkVal = cols[pkIdx];
                     vector<string> pkCond = {"=" + pkCol + " " + pkVal};
                     auto res = g_engine.update(s.currentDB, resolvedName, updates, pkCond);
-                    if (res == OpResult::Success) {
+                    if (res == DBStatus::OK) {
                         ++updatedCount;
                         if (!returningCols.empty() || returningAll) {
                             auto rr = g_engine.query(s.currentDB, resolvedName, pkCond,
@@ -11808,7 +11808,7 @@ bool execute(const string& rawSql, Session& s) {
                 return false;
             }
             auto res = g_engine.update(s.currentDB, resolvedName, updates, {});
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Update failed" << endl;
                 return true;
             }
@@ -12103,7 +12103,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             string tmpName = tempTablePrefix(origName);
             auto res = g_engine.dropTable(s.currentDB, tmpName);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Temporary table " << origName << " not exist" << endl;
                 return true;
             }
@@ -12116,7 +12116,7 @@ bool execute(const string& rawSql, Session& s) {
             if (s.tempTables.count(name)) {
                 string tmpName = tempTablePrefix(name);
                 auto res = g_engine.dropTable(s.currentDB, tmpName);
-                if (res != OpResult::Success) {
+                if (res != DBStatus::OK) {
                     cout << "Table " << name << " not exist" << endl;
                     return true;
                 }
@@ -12140,7 +12140,7 @@ bool execute(const string& rawSql, Session& s) {
                 }
             }
             auto res = g_engine.dropTable(s.currentDB, name);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Table " << name << " not exist" << endl;
                 return true;
             }
@@ -12149,7 +12149,7 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (op == "domain") {
             auto res = g_engine.dropDomain(s.currentDB, name);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Domain " << name << " not exist" << endl;
                 return true;
             }
@@ -12158,7 +12158,7 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (op == "type") {
             auto res = g_engine.dropCompositeType(s.currentDB, name);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Type " << name << " not exist" << endl;
                 return true;
             }
@@ -12167,7 +12167,7 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (op == "sequence") {
             auto res = g_engine.dropSequence(s.currentDB, name);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Sequence " << name << " not exist" << endl;
                 return true;
             }
@@ -12210,7 +12210,7 @@ bool execute(const string& rawSql, Session& s) {
             bool cascade = false;
             if (tokens.size() >= 3 && tokens[2] == "cascade") cascade = true;
             auto res = g_engine.dropSchema(s.currentDB, name, cascade);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Schema " << name << " not exist" << endl;
                 return true;
             }
@@ -12219,7 +12219,7 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (op == "database") {
             auto res = g_engine.dropDatabase(name);
-            if (res == OpResult::DatabaseNotExist) {
+            if (res == DBStatus::DATABASE_NOT_FOUND) {
                 cout << "Database " << name << " not exist" << endl;
                 return true;
             }
@@ -12283,13 +12283,13 @@ bool execute(const string& rawSql, Session& s) {
             }
             // Try composite index, single-column index, hash index
             auto res = g_engine.dropCompositeIndex(s.currentDB, tname, name);
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 res = g_engine.dropIndex(s.currentDB, tname, name);
             }
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 res = g_engine.dropHashIndex(s.currentDB, tname, name);
             }
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Drop index failed" << endl;
                 return true;
             }
@@ -12341,7 +12341,7 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (op == "view") {
             auto res = g_engine.dropView(s.currentDB, name);
-            if (res == OpResult::TableNotExist) {
+            if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "View " << name << " not exist" << endl;
                 return true;
             }
@@ -12364,7 +12364,7 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (op == "trigger") {
             auto res = g_engine.dropTrigger(s.currentDB, name);
-            if (res != OpResult::Success) {
+            if (res != DBStatus::OK) {
                 cout << "Trigger " << name << " not exist" << endl;
                 return true;
             }
@@ -13490,11 +13490,11 @@ bool execute(const string& rawSql, Session& s) {
 
         dbms::StorageEngine::RowPolicy policy{pname, cmd, usingExpr, withCheckExpr, roles};
         auto res = g_engine.createPolicy(s.currentDB, tname, policy);
-        if (res == OpResult::Success) {
+        if (res == DBStatus::OK) {
             cout << "Policy " << pname << " created on " << tname << endl;
-        } else if (res == OpResult::TableNotExist) {
+        } else if (res == DBStatus::TABLE_NOT_FOUND) {
             cout << "Table not found" << endl;
-        } else if (res == OpResult::TableAlreadyExist) {
+        } else if (res == DBStatus::TABLE_ALREADY_EXISTS) {
             cout << "Policy already exists" << endl;
         } else {
             cout << "Create policy failed" << endl;
@@ -13656,7 +13656,7 @@ bool execute(const string& rawSql, Session& s) {
                 values[tbl.cols[i].dataName] = trim(fields[i]);
             }
             auto res = g_engine.insert(s.currentDB, tname, values);
-            if (res == OpResult::Success) imported++;
+            if (res == DBStatus::OK) imported++;
             else skipped++;
         }
         cout << "Imported " << imported << " rows, skipped " << skipped << endl;
