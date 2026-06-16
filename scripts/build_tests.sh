@@ -38,6 +38,10 @@ SOURCES=(
     src/common/Config.cpp
     src/common/GUC.cpp
     src/parser/parser.cpp
+    src/catalog/catalog.cpp
+    src/catalog/oid.cpp
+    src/catalog/systables.cpp
+    src/catalog/migrate.cpp
 )
 
 if [ "$HAS_OPENSSL" -eq 1 ]; then

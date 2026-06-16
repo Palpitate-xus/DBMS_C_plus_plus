@@ -143,6 +143,10 @@ public:
     // 生成删除计划（不实际执行删除）
     DropPlan planDrop(Oid classid, Oid objid, DropBehavior behavior) const;
 
+    // 执行 CASCADE / RESTRICT 删除（按 classid + objid）
+    bool dropObject(Oid classid, Oid objid, DropBehavior behavior,
+                    std::string* error = nullptr);
+
     // =====================================================================
     // pg_authid / pg_auth_members — 角色与用户
     // =====================================================================
@@ -216,6 +220,26 @@ private:
     static std::string classNameKey(Oid nspOid, const std::string& relname);
 
     // 在已持有 mutex_ 的情况下使用，避免公共接口死锁
+    const PgNamespaceRow* findNamespaceUnlocked(Oid oid) const;
+    const PgClassRow*     findClassUnlocked(Oid oid) const;
+    const PgTypeRow*      findTypeUnlocked(Oid oid) const;
+    const PgProcRow*      findProcUnlocked(Oid oid) const;
+    const PgAuthIdRow*    findAuthIdUnlocked(Oid oid) const;
+
+    std::vector<PgDependRow> findDependsUnlocked(Oid classid, Oid objid, int32_t objsubid = 0) const;
+    std::vector<PgDependRow> findRefsUnlocked(Oid refclassid, Oid refobjid, int32_t refobjsubid = 0) const;
+    std::vector<PgDependRow> findAllDependentsUnlocked(Oid refclassid, Oid refobjid) const;
+
+    bool dropAttributesUnlocked(Oid relOid);
+    bool dropClassUnlocked(Oid oid);
+    bool dropNamespaceUnlocked(Oid oid);
+    bool dropProcUnlocked(Oid oid);
+    bool dropTypeUnlocked(Oid oid);
+
+    void removeDependRecordsUnlocked(Oid classid, Oid objid);
+    DropPlan planDropUnlocked(Oid classid, Oid objid, DropBehavior behavior) const;
+    bool executeDropPlanUnlocked(const DropPlan& plan);
+
     const PgTypeRow* findTypeByNameUnlocked(const std::string& name, Oid nspOid) const;
     const PgProcRow* findProcByNameUnlocked(const std::string& name, Oid nspOid) const;
     void setDescriptionUnlocked(Oid objoid, Oid classoid, int32_t objsubid,

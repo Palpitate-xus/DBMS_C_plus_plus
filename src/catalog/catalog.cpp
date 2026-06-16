@@ -1,4 +1,5 @@
 #include "catalog.h"
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -90,6 +91,7 @@ static std::vector<std::string> splitByComma(const std::string& s) {
 
 CatalogManager::CatalogManager(const std::string& dbPath)
     : dbPath_(dbPath) {
+    std::filesystem::create_directories(dbPath_);
     oidGen_ = std::make_unique<OidGenerator>(oidPath(dbPath));
     loadAll();
 }
@@ -116,8 +118,7 @@ Oid CatalogManager::createNamespace(const std::string& nspname, Oid owner) {
     return oid;
 }
 
-const PgNamespaceRow* CatalogManager::findNamespace(Oid oid) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+const PgNamespaceRow* CatalogManager::findNamespaceUnlocked(Oid oid) const {
     auto it = nsByOid_.find(oid);
     if (it != nsByOid_.end() && it->second < namespaces_.size()) {
         return &namespaces_[it->second];
@@ -125,28 +126,28 @@ const PgNamespaceRow* CatalogManager::findNamespace(Oid oid) const {
     return nullptr;
 }
 
+const PgNamespaceRow* CatalogManager::findNamespace(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return findNamespaceUnlocked(oid);
+}
+
 const PgNamespaceRow* CatalogManager::findNamespaceByName(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = nsByName_.find(name);
     if (it != nsByName_.end()) {
-        auto jt = nsByOid_.find(it->second);
-        if (jt != nsByOid_.end() && jt->second < namespaces_.size()) {
-            return &namespaces_[jt->second];
-        }
+        return findNamespaceUnlocked(it->second);
     }
     return nullptr;
 }
 
-bool CatalogManager::dropNamespace(Oid oid) {
-    std::lock_guard<std::mutex> lock(mutex_);
+bool CatalogManager::dropNamespaceUnlocked(Oid oid) {
     auto it = nsByOid_.find(oid);
     if (it == nsByOid_.end() || it->second >= namespaces_.size()) return false;
-    // Check dependencies
-    auto deps = findAllDependents(PgClassOid_Namespace, oid);
+    auto deps = findAllDependentsUnlocked(PgClassOid_Namespace, oid);
     if (!deps.empty()) return false;
-    // Mark as dropped by swapping with last and updating index
     size_t idx = it->second;
     nsByName_.erase(namespaces_[idx].nspname);
+    removeDependRecordsUnlocked(PgClassOid_Namespace, oid);
     if (idx + 1 < namespaces_.size()) {
         namespaces_[idx] = std::move(namespaces_.back());
         nsByOid_[namespaces_[idx].oid] = idx;
@@ -154,6 +155,11 @@ bool CatalogManager::dropNamespace(Oid oid) {
     namespaces_.pop_back();
     nsByOid_.erase(oid);
     return true;
+}
+
+bool CatalogManager::dropNamespace(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dropNamespaceUnlocked(oid);
 }
 
 // ============================================================================
@@ -169,21 +175,20 @@ Oid CatalogManager::createTempNamespace(uint64_t sessionId) {
 
 bool CatalogManager::dropTempNamespace(uint64_t sessionId) {
     std::string name = "pg_temp_" + std::to_string(sessionId);
-    auto ns = findNamespaceByName(name);
-    if (!ns) return false;
-
     std::lock_guard<std::mutex> lock(mutex_);
-    // Drop all objects in this temp namespace
+    auto it = nsByName_.find(name);
+    if (it == nsByName_.end()) return false;
+    Oid nspOid = it->second;
     std::vector<Oid> objectsToDrop;
     for (const auto& c : classes_) {
-        if (c.relnamespace == ns->oid) {
+        if (c.relnamespace == nspOid) {
             objectsToDrop.push_back(c.oid);
         }
     }
     for (Oid oid : objectsToDrop) {
-        dropClass(oid);
+        dropClassUnlocked(oid);
     }
-    return dropNamespace(ns->oid);
+    return dropNamespaceUnlocked(nspOid);
 }
 
 const PgNamespaceRow* CatalogManager::findTempNamespace(uint64_t sessionId) const {
@@ -199,7 +204,6 @@ void CatalogManager::dropAllTempNamespaces() {
         }
     }
     for (Oid oid : tempNsOids) {
-        // Drop all objects in the temp namespace first
         std::vector<Oid> objectsToDrop;
         for (const auto& c : classes_) {
             if (c.relnamespace == oid) {
@@ -207,15 +211,23 @@ void CatalogManager::dropAllTempNamespaces() {
             }
         }
         for (Oid objOid : objectsToDrop) {
-            dropClass(objOid);
+            dropClassUnlocked(objOid);
         }
-        dropNamespace(oid);
+        dropNamespaceUnlocked(oid);
     }
 }
 
 // ============================================================================
 // pg_class
 // ============================================================================
+
+const PgClassRow* CatalogManager::findClassUnlocked(Oid oid) const {
+    auto it = classByOid_.find(oid);
+    if (it != classByOid_.end() && it->second < classes_.size()) {
+        return &classes_[it->second];
+    }
+    return nullptr;
+}
 
 Oid CatalogManager::createClass(const PgClassRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -226,16 +238,24 @@ Oid CatalogManager::createClass(const PgClassRow& row) {
     classes_.push_back(r);
     classByOid_[oid] = idx;
     classByName_[classNameKey(r.relnamespace, r.relname)] = idx;
+    // 表/视图/索引/函数/类型均依赖其所属 schema
+    if (r.relnamespace != INVALID_OID) {
+        PgDependRow dep;
+        dep.classid = PgClassOid_Class;
+        dep.objid = oid;
+        dep.objsubid = 0;
+        dep.refclassid = PgClassOid_Namespace;
+        dep.refobjid = r.relnamespace;
+        dep.refobjsubid = 0;
+        dep.deptype = 'n';
+        depends_.push_back(dep);
+    }
     return oid;
 }
 
 const PgClassRow* CatalogManager::findClass(Oid oid) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = classByOid_.find(oid);
-    if (it != classByOid_.end() && it->second < classes_.size()) {
-        return &classes_[it->second];
-    }
-    return nullptr;
+    return findClassUnlocked(oid);
 }
 
 const PgClassRow* CatalogManager::findClassByName(const std::string& name, Oid nspOid) const {
@@ -252,7 +272,6 @@ bool CatalogManager::updateClass(Oid oid, const PgClassRow& row) {
     auto it = classByOid_.find(oid);
     if (it == classByOid_.end() || it->second >= classes_.size()) return false;
     size_t idx = it->second;
-    // 移除旧的名称索引键
     classByName_.erase(classNameKey(classes_[idx].relnamespace, classes_[idx].relname));
     classes_[idx] = row;
     classes_[idx].oid = oid;
@@ -260,12 +279,12 @@ bool CatalogManager::updateClass(Oid oid, const PgClassRow& row) {
     return true;
 }
 
-bool CatalogManager::dropClass(Oid oid) {
-    std::lock_guard<std::mutex> lock(mutex_);
+bool CatalogManager::dropClassUnlocked(Oid oid) {
     auto it = classByOid_.find(oid);
     if (it == classByOid_.end() || it->second >= classes_.size()) return false;
     size_t idx = it->second;
     classByName_.erase(classNameKey(classes_[idx].relnamespace, classes_[idx].relname));
+    removeDependRecordsUnlocked(PgClassOid_Class, oid);
     if (idx + 1 < classes_.size()) {
         classes_[idx] = std::move(classes_.back());
         classByOid_[classes_[idx].oid] = idx;
@@ -273,9 +292,13 @@ bool CatalogManager::dropClass(Oid oid) {
     }
     classes_.pop_back();
     classByOid_.erase(oid);
-    // Also drop attributes
-    dropAttributes(oid);
+    dropAttributesUnlocked(oid);
     return true;
+}
+
+bool CatalogManager::dropClass(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dropClassUnlocked(oid);
 }
 
 // ============================================================================
@@ -343,6 +366,15 @@ const PgAttributeRow* CatalogManager::resolveAttribute(
 // pg_attribute
 // ============================================================================
 
+bool CatalogManager::dropAttributesUnlocked(Oid relOid) {
+    auto it = std::remove_if(attributes_.begin(), attributes_.end(),
+                             [relOid](const PgAttributeRow& a) {
+                                 return a.attrelid == relOid;
+                             });
+    attributes_.erase(it, attributes_.end());
+    return true;
+}
+
 void CatalogManager::addAttribute(const PgAttributeRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
     attributes_.push_back(row);
@@ -378,17 +410,20 @@ const PgAttributeRow* CatalogManager::findAttribute(Oid relOid, const std::strin
 
 bool CatalogManager::dropAttributes(Oid relOid) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = std::remove_if(attributes_.begin(), attributes_.end(),
-                             [relOid](const PgAttributeRow& a) {
-                                 return a.attrelid == relOid;
-                             });
-    attributes_.erase(it, attributes_.end());
-    return true;
+    return dropAttributesUnlocked(relOid);
 }
 
 // ============================================================================
 // pg_type
 // ============================================================================
+
+const PgTypeRow* CatalogManager::findTypeUnlocked(Oid oid) const {
+    auto it = typeByOid_.find(oid);
+    if (it != typeByOid_.end() && it->second < types_.size()) {
+        return &types_[it->second];
+    }
+    return nullptr;
+}
 
 Oid CatalogManager::createType(const PgTypeRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -398,33 +433,35 @@ Oid CatalogManager::createType(const PgTypeRow& row) {
     size_t idx = types_.size();
     types_.push_back(r);
     typeByOid_[oid] = idx;
+    if (r.typnamespace != INVALID_OID) {
+        PgDependRow dep;
+        dep.classid = PgClassOid_Type;
+        dep.objid = oid;
+        dep.objsubid = 0;
+        dep.refclassid = PgClassOid_Namespace;
+        dep.refobjid = r.typnamespace;
+        dep.refobjsubid = 0;
+        dep.deptype = 'n';
+        depends_.push_back(dep);
+    }
     return oid;
 }
 
 const PgTypeRow* CatalogManager::findType(Oid oid) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = typeByOid_.find(oid);
-    if (it != typeByOid_.end() && it->second < types_.size()) {
-        return &types_[it->second];
-    }
-    return nullptr;
+    return findTypeUnlocked(oid);
 }
 
 const PgTypeRow* CatalogManager::findTypeByName(const std::string& name, Oid nspOid) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& t : types_) {
-        if (t.typname == name && t.typnamespace == nspOid) {
-            return &t;
-        }
-    }
-    return nullptr;
+    return findTypeByNameUnlocked(name, nspOid);
 }
 
-bool CatalogManager::dropType(Oid oid) {
-    std::lock_guard<std::mutex> lock(mutex_);
+bool CatalogManager::dropTypeUnlocked(Oid oid) {
     auto it = typeByOid_.find(oid);
     if (it == typeByOid_.end() || it->second >= types_.size()) return false;
     size_t idx = it->second;
+    removeDependRecordsUnlocked(PgClassOid_Type, oid);
     if (idx + 1 < types_.size()) {
         types_[idx] = std::move(types_.back());
         typeByOid_[types_[idx].oid] = idx;
@@ -434,9 +471,22 @@ bool CatalogManager::dropType(Oid oid) {
     return true;
 }
 
+bool CatalogManager::dropType(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dropTypeUnlocked(oid);
+}
+
 // ============================================================================
 // pg_proc
 // ============================================================================
+
+const PgProcRow* CatalogManager::findProcUnlocked(Oid oid) const {
+    auto it = procByOid_.find(oid);
+    if (it != procByOid_.end() && it->second < procs_.size()) {
+        return &procs_[it->second];
+    }
+    return nullptr;
+}
 
 Oid CatalogManager::createProc(const PgProcRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -446,16 +496,23 @@ Oid CatalogManager::createProc(const PgProcRow& row) {
     size_t idx = procs_.size();
     procs_.push_back(r);
     procByOid_[oid] = idx;
+    if (r.pronamespace != INVALID_OID) {
+        PgDependRow dep;
+        dep.classid = PgClassOid_Proc;
+        dep.objid = oid;
+        dep.objsubid = 0;
+        dep.refclassid = PgClassOid_Namespace;
+        dep.refobjid = r.pronamespace;
+        dep.refobjsubid = 0;
+        dep.deptype = 'n';
+        depends_.push_back(dep);
+    }
     return oid;
 }
 
 const PgProcRow* CatalogManager::findProc(Oid oid) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = procByOid_.find(oid);
-    if (it != procByOid_.end() && it->second < procs_.size()) {
-        return &procs_[it->second];
-    }
-    return nullptr;
+    return findProcUnlocked(oid);
 }
 
 std::vector<const PgProcRow*> CatalogManager::findProcsByName(const std::string& name, Oid nspOid) const {
@@ -487,11 +544,11 @@ const PgProcRow* CatalogManager::findProcByNameUnlocked(const std::string& name,
     return nullptr;
 }
 
-bool CatalogManager::dropProc(Oid oid) {
-    std::lock_guard<std::mutex> lock(mutex_);
+bool CatalogManager::dropProcUnlocked(Oid oid) {
     auto it = procByOid_.find(oid);
     if (it == procByOid_.end() || it->second >= procs_.size()) return false;
     size_t idx = it->second;
+    removeDependRecordsUnlocked(PgClassOid_Proc, oid);
     if (idx + 1 < procs_.size()) {
         procs_[idx] = std::move(procs_.back());
         procByOid_[procs_[idx].oid] = idx;
@@ -501,9 +558,22 @@ bool CatalogManager::dropProc(Oid oid) {
     return true;
 }
 
+bool CatalogManager::dropProc(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dropProcUnlocked(oid);
+}
+
 // ============================================================================
 // pg_authid
 // ============================================================================
+
+const PgAuthIdRow* CatalogManager::findAuthIdUnlocked(Oid oid) const {
+    auto it = authIdByOid_.find(oid);
+    if (it != authIdByOid_.end() && it->second < authIds_.size()) {
+        return &authIds_[it->second];
+    }
+    return nullptr;
+}
 
 Oid CatalogManager::createAuthId(const PgAuthIdRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -519,18 +589,14 @@ Oid CatalogManager::createAuthId(const PgAuthIdRow& row) {
 
 const PgAuthIdRow* CatalogManager::findAuthId(Oid oid) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = authIdByOid_.find(oid);
-    if (it != authIdByOid_.end() && it->second < authIds_.size()) {
-        return &authIds_[it->second];
-    }
-    return nullptr;
+    return findAuthIdUnlocked(oid);
 }
 
 const PgAuthIdRow* CatalogManager::findAuthIdByName(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = authIdByName_.find(name);
     if (it != authIdByName_.end()) {
-        return findAuthId(it->second);
+        return findAuthIdUnlocked(it->second);
     }
     return nullptr;
 }
@@ -552,7 +618,6 @@ bool CatalogManager::dropAuthId(Oid oid) {
     if (it == authIdByOid_.end() || it->second >= authIds_.size()) return false;
     size_t idx = it->second;
     authIdByName_.erase(authIds_[idx].rolname);
-    // Remove all memberships involving this role
     auto amIt = std::remove_if(authMembers_.begin(), authMembers_.end(),
                                [oid](const PgAuthMembersRow& m) {
                                    return m.roleid == oid || m.member == oid || m.grantor == oid;
@@ -631,8 +696,7 @@ void CatalogManager::addDepend(const PgDependRow& row) {
     depends_.push_back(row);
 }
 
-std::vector<PgDependRow> CatalogManager::findDepends(Oid classid, Oid objid, int32_t objsubid) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+std::vector<PgDependRow> CatalogManager::findDependsUnlocked(Oid classid, Oid objid, int32_t objsubid) const {
     std::vector<PgDependRow> result;
     for (const auto& d : depends_) {
         if (d.classid == classid && d.objid == objid &&
@@ -643,8 +707,12 @@ std::vector<PgDependRow> CatalogManager::findDepends(Oid classid, Oid objid, int
     return result;
 }
 
-std::vector<PgDependRow> CatalogManager::findRefs(Oid refclassid, Oid refobjid, int32_t refobjsubid) const {
+std::vector<PgDependRow> CatalogManager::findDepends(Oid classid, Oid objid, int32_t objsubid) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return findDependsUnlocked(classid, objid, objsubid);
+}
+
+std::vector<PgDependRow> CatalogManager::findRefsUnlocked(Oid refclassid, Oid refobjid, int32_t refobjsubid) const {
     std::vector<PgDependRow> result;
     for (const auto& d : depends_) {
         if (d.refclassid == refclassid && d.refobjid == refobjid &&
@@ -655,8 +723,27 @@ std::vector<PgDependRow> CatalogManager::findRefs(Oid refclassid, Oid refobjid, 
     return result;
 }
 
+std::vector<PgDependRow> CatalogManager::findRefs(Oid refclassid, Oid refobjid, int32_t refobjsubid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return findRefsUnlocked(refclassid, refobjid, refobjsubid);
+}
+
+std::vector<PgDependRow> CatalogManager::findAllDependentsUnlocked(Oid refclassid, Oid refobjid) const {
+    return findRefsUnlocked(refclassid, refobjid, -1);
+}
+
 std::vector<PgDependRow> CatalogManager::findAllDependents(Oid refclassid, Oid refobjid) const {
-    return findRefs(refclassid, refobjid, -1);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return findAllDependentsUnlocked(refclassid, refobjid);
+}
+
+void CatalogManager::removeDependRecordsUnlocked(Oid classid, Oid objid) {
+    auto it = std::remove_if(depends_.begin(), depends_.end(),
+                             [classid, objid](const PgDependRow& d) {
+                                 return (d.classid == classid && d.objid == objid) ||
+                                        (d.refclassid == classid && d.refobjid == objid);
+                             });
+    depends_.erase(it, depends_.end());
 }
 
 bool CatalogManager::removeDepend(Oid classid, Oid objid, int32_t objsubid,
@@ -786,9 +873,8 @@ bool CatalogManager::setComment(const std::string& objType,
 // 依赖追踪：CASCADE / RESTRICT 删除计划
 // ============================================================================
 
-CatalogManager::DropPlan CatalogManager::planDrop(Oid classid, Oid objid,
-                                                   DropBehavior behavior) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+CatalogManager::DropPlan CatalogManager::planDropUnlocked(Oid classid, Oid objid,
+                                                           DropBehavior behavior) const {
     DropPlan plan;
 
     std::vector<std::pair<Oid, Oid>> toDrop;       // 后序遍历结果
@@ -801,13 +887,12 @@ CatalogManager::DropPlan CatalogManager::planDrop(Oid classid, Oid objid,
         if (inStack.count(key)) return true; // 循环依赖理论上不应发生
         inStack.insert(key);
 
-        auto deps = findRefs(cid, oid, -1);
+        auto deps = findRefsUnlocked(cid, oid, -1);
         for (const auto& d : deps) {
             if (d.deptype == 'p') {
                 plan.error = "cannot drop object because it is required by the database system";
                 return false;
             }
-            auto depKey = std::make_pair(d.classid, d.objid);
             if (!dfs(d.classid, d.objid)) return false;
         }
 
@@ -826,6 +911,46 @@ CatalogManager::DropPlan CatalogManager::planDrop(Oid classid, Oid objid,
 
     plan.objectsToDrop = std::move(toDrop);
     return plan;
+}
+
+CatalogManager::DropPlan CatalogManager::planDrop(Oid classid, Oid objid,
+                                                   DropBehavior behavior) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return planDropUnlocked(classid, objid, behavior);
+}
+
+bool CatalogManager::executeDropPlanUnlocked(const DropPlan& plan) {
+    for (const auto& obj : plan.objectsToDrop) {
+        Oid classid = obj.first;
+        Oid objid = obj.second;
+        bool ok = false;
+        if (classid == PgClassOid_Namespace) {
+            ok = dropNamespaceUnlocked(objid);
+        } else if (classid == PgClassOid_Class) {
+            ok = dropClassUnlocked(objid);
+        } else if (classid == PgClassOid_Type) {
+            ok = dropTypeUnlocked(objid);
+        } else if (classid == PgClassOid_Proc) {
+            ok = dropProcUnlocked(objid);
+        }
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool CatalogManager::dropObject(Oid classid, Oid objid, DropBehavior behavior,
+                                std::string* error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DropPlan plan = planDropUnlocked(classid, objid, behavior);
+    if (!plan.ok()) {
+        if (error) *error = plan.error;
+        return false;
+    }
+    if (!executeDropPlanUnlocked(plan)) {
+        if (error) *error = "drop execution failed";
+        return false;
+    }
+    return true;
 }
 
 // ============================================================================
