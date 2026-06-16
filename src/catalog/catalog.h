@@ -166,6 +166,12 @@ public:
     std::string getDescription(Oid objoid, Oid classoid, int32_t objsubid) const;
     bool removeDescription(Oid objoid, Oid classoid, int32_t objsubid);
 
+    // 按对象类型 + 名称设置注释（支持 SCHEMA / TYPE / FUNCTION / PROCEDURE）
+    bool setComment(const std::string& objType,
+                    const std::string& qualifiedName,
+                    const std::string& comment,
+                    const std::vector<std::string>& searchPath = {});
+
     // =====================================================================
     // Bootstrap: 初始化标准 schema / 类型
     // =====================================================================
@@ -208,6 +214,12 @@ private:
     std::string catalogFilePath(const std::string& tablename) const;
     void rebuildIndexes();
     static std::string classNameKey(Oid nspOid, const std::string& relname);
+
+    // 在已持有 mutex_ 的情况下使用，避免公共接口死锁
+    const PgTypeRow* findTypeByNameUnlocked(const std::string& name, Oid nspOid) const;
+    const PgProcRow* findProcByNameUnlocked(const std::string& name, Oid nspOid) const;
+    void setDescriptionUnlocked(Oid objoid, Oid classoid, int32_t objsubid,
+                                const std::string& description);
 };
 
 } // namespace dbms

@@ -3012,8 +3012,81 @@ ParseResult SQLParser::parseCopy(const std::string& sql) {
 
 ParseResult SQLParser::parseComment(const std::string& sql) {
     ParseResult r;
+    auto stmt = std::make_unique<CommentStmt>();
+    std::string lsql = toLower(trim(sql));
+    if (!lsql.empty() && lsql.back() == ';') lsql.pop_back();
+
+    size_t onPos = lsql.find(" on ");
+    if (onPos == std::string::npos) {
+        r.success = false;
+        return r;
+    }
+
+    std::string rest = trim(lsql.substr(onPos + 4));
+    size_t isPos = rest.find(" is ");
+    std::string beforeIs = (isPos == std::string::npos) ? rest : trim(rest.substr(0, isPos));
+    std::string afterIs = (isPos == std::string::npos) ? "" : trim(rest.substr(isPos + 4));
+
+    if (!afterIs.empty() && afterIs.size() >= 2 &&
+        ((afterIs.front() == '\'' && afterIs.back() == '\'') ||
+         (afterIs.front() == '"' && afterIs.back() == '"'))) {
+        stmt->comment = afterIs.substr(1, afterIs.size() - 2);
+    } else if (afterIs == "null") {
+        stmt->comment.clear();
+    } else {
+        stmt->comment = afterIs;
+    }
+
+    auto startsWith = [&](const std::string& prefix) -> bool {
+        return beforeIs.size() >= prefix.size() &&
+               toLower(beforeIs.substr(0, prefix.size())) == prefix;
+    };
+
+    if (startsWith("materialized view ")) {
+        stmt->objectType = "MATERIALIZED VIEW";
+        stmt->objectName = trim(beforeIs.substr(18));
+    } else if (startsWith("table ")) {
+        stmt->objectType = "TABLE";
+        stmt->objectName = trim(beforeIs.substr(6));
+    } else if (startsWith("column ")) {
+        stmt->objectType = "COLUMN";
+        stmt->objectName = trim(beforeIs.substr(7));
+    } else if (startsWith("schema ")) {
+        stmt->objectType = "SCHEMA";
+        stmt->objectName = trim(beforeIs.substr(7));
+    } else if (startsWith("index ")) {
+        stmt->objectType = "INDEX";
+        stmt->objectName = trim(beforeIs.substr(6));
+    } else if (startsWith("view ")) {
+        stmt->objectType = "VIEW";
+        stmt->objectName = trim(beforeIs.substr(5));
+    } else if (startsWith("function ")) {
+        stmt->objectType = "FUNCTION";
+        stmt->objectName = trim(beforeIs.substr(9));
+    } else if (startsWith("procedure ")) {
+        stmt->objectType = "PROCEDURE";
+        stmt->objectName = trim(beforeIs.substr(10));
+    } else if (startsWith("sequence ")) {
+        stmt->objectType = "SEQUENCE";
+        stmt->objectName = trim(beforeIs.substr(9));
+    } else if (startsWith("type ")) {
+        stmt->objectType = "TYPE";
+        stmt->objectName = trim(beforeIs.substr(5));
+    } else {
+        stmt->objectType = "UNKNOWN";
+        stmt->objectName = beforeIs;
+    }
+
+    if (stmt->objectType == "COLUMN") {
+        size_t dot = stmt->objectName.rfind('.');
+        if (dot != std::string::npos) {
+            stmt->columnName = trim(stmt->objectName.substr(dot + 1));
+            stmt->objectName = trim(stmt->objectName.substr(0, dot));
+        }
+    }
+
     r.success = true;
-    r.stmt = std::make_unique<CommentStmt>();
+    r.stmt = std::move(stmt);
     return r;
 }
 

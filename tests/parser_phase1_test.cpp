@@ -217,6 +217,27 @@ int main() {
         std::cout << "[PARSER P1] VALUES OK\n";
     }
 
+    // 14. COMMENT ON 多种对象类型
+    {
+        auto r1 = parser.parse("COMMENT ON SCHEMA public IS 'schema note'");
+        assert(r1.success);
+        auto* c1 = dynamic_cast<const CommentStmt*>(r1.stmt.get());
+        assert(c1 && c1->objectType == "SCHEMA" && c1->objectName == "public" &&
+               c1->comment == "schema note");
+
+        auto r2 = parser.parse("COMMENT ON COLUMN t.id IS NULL");
+        assert(r2.success);
+        auto* c2 = dynamic_cast<const CommentStmt*>(r2.stmt.get());
+        assert(c2 && c2->objectType == "COLUMN" && c2->objectName == "t" &&
+               c2->columnName == "id" && c2->comment.empty());
+
+        auto r3 = parser.parse("COMMENT ON MATERIALIZED VIEW mv IS 'mv note'");
+        assert(r3.success);
+        auto* c3 = dynamic_cast<const CommentStmt*>(r3.stmt.get());
+        assert(c3 && c3->objectType == "MATERIALIZED VIEW" && c3->objectName == "mv");
+        std::cout << "[PARSER P1] COMMENT ON OK\n";
+    }
+
     std::cout << "[PARSER P1] all passed\n";
     return 0;
 }

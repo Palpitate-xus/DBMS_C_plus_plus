@@ -60,6 +60,13 @@ static std::string trimString(const std::string& s) {
     return s.substr(a, b - a);
 }
 
+static std::string toLowerString(const std::string& s) {
+    std::string r = s;
+    std::transform(r.begin(), r.end(), r.begin(),
+                   [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    return r;
+}
+
 static std::vector<std::string> splitByComma(const std::string& s) {
     std::vector<std::string> parts;
     std::string cur;
@@ -122,7 +129,10 @@ const PgNamespaceRow* CatalogManager::findNamespaceByName(const std::string& nam
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = nsByName_.find(name);
     if (it != nsByName_.end()) {
-        return findNamespace(it->second);
+        auto jt = nsByOid_.find(it->second);
+        if (jt != nsByOid_.end() && jt->second < namespaces_.size()) {
+            return &namespaces_[jt->second];
+        }
     }
     return nullptr;
 }
@@ -459,6 +469,24 @@ std::vector<const PgProcRow*> CatalogManager::findProcsByName(const std::string&
     return result;
 }
 
+const PgTypeRow* CatalogManager::findTypeByNameUnlocked(const std::string& name, Oid nspOid) const {
+    for (const auto& t : types_) {
+        if (t.typname == name && t.typnamespace == nspOid) {
+            return &t;
+        }
+    }
+    return nullptr;
+}
+
+const PgProcRow* CatalogManager::findProcByNameUnlocked(const std::string& name, Oid nspOid) const {
+    for (const auto& p : procs_) {
+        if (p.proname == name && p.pronamespace == nspOid) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
 bool CatalogManager::dropProc(Oid oid) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = procByOid_.find(oid);
@@ -651,10 +679,8 @@ bool CatalogManager::removeDepend(Oid classid, Oid objid, int32_t objsubid,
 // pg_description — COMMENT ON
 // ============================================================================
 
-void CatalogManager::setDescription(Oid objoid, Oid classoid, int32_t objsubid,
-                                    const std::string& description) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    // Update existing or append new
+void CatalogManager::setDescriptionUnlocked(Oid objoid, Oid classoid, int32_t objsubid,
+                                            const std::string& description) {
     for (auto& d : descriptions_) {
         if (d.objoid == objoid && d.classoid == classoid && d.objsubid == objsubid) {
             d.description = description;
@@ -667,6 +693,12 @@ void CatalogManager::setDescription(Oid objoid, Oid classoid, int32_t objsubid,
     r.objsubid = objsubid;
     r.description = description;
     descriptions_.push_back(r);
+}
+
+void CatalogManager::setDescription(Oid objoid, Oid classoid, int32_t objsubid,
+                                    const std::string& description) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    setDescriptionUnlocked(objoid, classoid, objsubid, description);
 }
 
 std::string CatalogManager::getDescription(Oid objoid, Oid classoid, int32_t objsubid) const {
@@ -689,6 +721,65 @@ bool CatalogManager::removeDescription(Oid objoid, Oid classoid, int32_t objsubi
     if (it == descriptions_.end()) return false;
     descriptions_.erase(it, descriptions_.end());
     return true;
+}
+
+bool CatalogManager::setComment(const std::string& objType,
+                                const std::string& qualifiedName,
+                                const std::string& comment,
+                                const std::vector<std::string>& searchPath) {
+    QualifiedName qn;
+    if (!parseQualifiedName(qualifiedName, qn)) return false;
+    std::string type = toLowerString(objType);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (type == "schema") {
+        auto it = nsByName_.find(qn.name);
+        if (it == nsByName_.end()) return false;
+        setDescriptionUnlocked(it->second, PgClassOid_Namespace, 0, comment);
+        return true;
+    }
+
+    if (type == "type") {
+        const PgTypeRow* t = nullptr;
+        if (!qn.schema.empty()) {
+            auto nsIt = nsByName_.find(qn.schema);
+            if (nsIt == nsByName_.end()) return false;
+            t = findTypeByNameUnlocked(qn.name, nsIt->second);
+        } else {
+            for (const auto& nsp : searchPath.empty() ? std::vector<std::string>{"public"} : searchPath) {
+                auto nsIt = nsByName_.find(nsp);
+                if (nsIt == nsByName_.end()) continue;
+                t = findTypeByNameUnlocked(qn.name, nsIt->second);
+                if (t) break;
+            }
+        }
+        if (!t) return false;
+        setDescriptionUnlocked(t->oid, PgClassOid_Type, 0, comment);
+        return true;
+    }
+
+    if (type == "function" || type == "procedure") {
+        const PgProcRow* p = nullptr;
+        if (!qn.schema.empty()) {
+            auto nsIt = nsByName_.find(qn.schema);
+            if (nsIt == nsByName_.end()) return false;
+            p = findProcByNameUnlocked(qn.name, nsIt->second);
+        } else {
+            for (const auto& nsp : searchPath.empty() ? std::vector<std::string>{"public"} : searchPath) {
+                auto nsIt = nsByName_.find(nsp);
+                if (nsIt == nsByName_.end()) continue;
+                p = findProcByNameUnlocked(qn.name, nsIt->second);
+                if (p) break;
+            }
+        }
+        if (!p) return false;
+        setDescriptionUnlocked(p->oid, PgClassOid_Proc, 0, comment);
+        return true;
+    }
+
+    // TABLE / COLUMN / INDEX / VIEW / SEQUENCE 等不在 CatalogManager 中解析，
+    // 由 StorageEngine 现有路径处理。
+    return false;
 }
 
 // ============================================================================
