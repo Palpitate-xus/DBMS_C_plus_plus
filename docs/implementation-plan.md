@@ -131,13 +131,18 @@
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
 | 2.1 实现 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_namespace`、`pg_depend` | 16.2, 4.1, 4.2 | 架构级 |
-| 2.2 实现 OID 分配与回收机制 | 2.19, 4.1 | — |
+| ✅ 2.2 实现 OID 分配与回收机制 | 2.19, 4.1 | 空闲列表持久化到 `.oid_counter.free`，优先复用 |
 | 2.3 实现真正 Schema / `search_path` 解析 | 4.3, 1.1.25 | — |
 | 2.4 实现依赖追踪与 `CASCADE/RESTRICT` 精确规则 | 4.2, 1.1.37 | — |
 | 2.5 将现有表/列/索引/函数元数据迁移到系统表 | — | 数据迁移 |
 | 2.6 实现临时 schema 与会话隔离 | 4.7 | — |
 | 2.7 实现 `pg_authid` / `pg_auth_members` 替代 `user.dat`/`role.dat` | 11.1, 1.1.24 | — |
 | 2.8 补全 `COMMENT ON` 对象类型全集 | 1.1.13 | — |
+
+### Phase 2 已完成内容（截至当前 commit）
+
+- **OID 分配与回收**：`OidGenerator` 支持单调递增分配、批量预留、空闲列表回收；删除对象的 OID 优先复用，空闲列表持久化到 `.oid_counter.free`。
+- **新增测试**：`tests/oid_test.cpp` 覆盖顺序分配、批量分配、回收复用、持久化恢复。
 
 ---
 

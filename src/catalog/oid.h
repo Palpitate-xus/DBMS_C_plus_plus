@@ -3,6 +3,7 @@
 #include "dbms_defs.h"
 #include <atomic>
 #include <mutex>
+#include <set>
 #include <string>
 
 namespace dbms {
@@ -19,19 +20,22 @@ namespace dbms {
 //   1. 从 10000 开始单调递增
 //   2. 持久化到单个计数器文件
 //   3. 支持预留批量 OID（减少文件 IO）
+//   4. 被删除对象的 OID 进入空闲列表，优先复用（降低单调增长压力）
 // ============================================================================
 
 class OidGenerator {
 public:
     static constexpr Oid kFirstUserOid = 10000;
+    static constexpr Oid kInvalidOid = 0;
 
     // 初始化（从持久化文件加载当前值）
     explicit OidGenerator(const std::string& persistPath);
 
-    // 分配单个 OID
+    // 分配单个 OID（优先从空闲列表复用）
     Oid allocate();
 
     // 批量预留 OID（返回起始 OID，连续 count 个）
+    // 批量分配不尝试复用空闲列表，以保证连续性。
     Oid allocateBatch(uint32_t count);
 
     // 获取下一个将分配的 OID（不分配）
@@ -43,10 +47,23 @@ public:
     // 设置下一个 OID（用于恢复或测试）
     void setNext(Oid next);
 
+    // 回收 OID（删除对象时调用）
+    void deallocate(Oid oid);
+
+    // 当前可复用的 OID 数量
+    size_t freeCount() const;
+
 private:
     std::atomic<Oid> nextOid_{kFirstUserOid};
     std::string persistPath_;
     mutable std::mutex mutex_;
+
+    // 空闲 OID 集合，升序排列，优先复用最小值
+    std::set<Oid> freeList_;
+    std::string freeListPath_;
+
+    void loadFreeList();
+    void persistFreeList();
 };
 
 } // namespace dbms
