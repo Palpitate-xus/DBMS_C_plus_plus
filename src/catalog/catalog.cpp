@@ -53,6 +53,30 @@ static std::string oidPath(const std::string& dbPath) {
     return dbPath + "/.oid_counter";
 }
 
+static std::string trimString(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+static std::vector<std::string> splitByComma(const std::string& s) {
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : s) {
+        if (c == ',') {
+            parts.push_back(trimString(cur));
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty() || parts.empty()) {
+        parts.push_back(trimString(cur));
+    }
+    return parts;
+}
+
 // ============================================================================
 // 构造函数 / 析构函数
 // ============================================================================
@@ -191,6 +215,7 @@ Oid CatalogManager::createClass(const PgClassRow& row) {
     size_t idx = classes_.size();
     classes_.push_back(r);
     classByOid_[oid] = idx;
+    classByName_[classNameKey(r.relnamespace, r.relname)] = idx;
     return oid;
 }
 
@@ -205,10 +230,9 @@ const PgClassRow* CatalogManager::findClass(Oid oid) const {
 
 const PgClassRow* CatalogManager::findClassByName(const std::string& name, Oid nspOid) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& c : classes_) {
-        if (c.relname == name && c.relnamespace == nspOid) {
-            return &c;
-        }
+    auto it = classByName_.find(classNameKey(nspOid, name));
+    if (it != classByName_.end() && it->second < classes_.size()) {
+        return &classes_[it->second];
     }
     return nullptr;
 }
@@ -217,8 +241,12 @@ bool CatalogManager::updateClass(Oid oid, const PgClassRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = classByOid_.find(oid);
     if (it == classByOid_.end() || it->second >= classes_.size()) return false;
-    classes_[it->second] = row;
-    classes_[it->second].oid = oid;
+    size_t idx = it->second;
+    // 移除旧的名称索引键
+    classByName_.erase(classNameKey(classes_[idx].relnamespace, classes_[idx].relname));
+    classes_[idx] = row;
+    classes_[idx].oid = oid;
+    classByName_[classNameKey(classes_[idx].relnamespace, classes_[idx].relname)] = idx;
     return true;
 }
 
@@ -227,15 +255,78 @@ bool CatalogManager::dropClass(Oid oid) {
     auto it = classByOid_.find(oid);
     if (it == classByOid_.end() || it->second >= classes_.size()) return false;
     size_t idx = it->second;
+    classByName_.erase(classNameKey(classes_[idx].relnamespace, classes_[idx].relname));
     if (idx + 1 < classes_.size()) {
         classes_[idx] = std::move(classes_.back());
         classByOid_[classes_[idx].oid] = idx;
+        classByName_[classNameKey(classes_[idx].relnamespace, classes_[idx].relname)] = idx;
     }
     classes_.pop_back();
     classByOid_.erase(oid);
     // Also drop attributes
     dropAttributes(oid);
     return true;
+}
+
+// ============================================================================
+// 名称解析（search_path）
+// ============================================================================
+
+std::string CatalogManager::classNameKey(Oid nspOid, const std::string& relname) {
+    return std::to_string(nspOid) + "." + relname;
+}
+
+bool CatalogManager::parseQualifiedName(const std::string& input, QualifiedName& out) {
+    out.schema.clear();
+    out.name = input;
+    size_t dot = input.rfind('.');
+    if (dot == std::string::npos) return true;
+    if (dot == 0 || dot + 1 >= input.size()) return false;
+    out.schema = input.substr(0, dot);
+    out.name = input.substr(dot + 1);
+    return true;
+}
+
+std::vector<std::string> CatalogManager::parseSearchPath(const std::string& searchPathStr) {
+    if (searchPathStr.empty()) return { "public" };
+    return splitByComma(searchPathStr);
+}
+
+const PgClassRow* CatalogManager::resolveRelation(
+        const std::string& name,
+        const std::vector<std::string>& searchPath) const {
+    QualifiedName qn;
+    if (!parseQualifiedName(name, qn)) return nullptr;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!qn.schema.empty()) {
+        auto nsIt = nsByName_.find(qn.schema);
+        if (nsIt == nsByName_.end()) return nullptr;
+        auto it = classByName_.find(classNameKey(nsIt->second, qn.name));
+        if (it != classByName_.end() && it->second < classes_.size()) {
+            return &classes_[it->second];
+        }
+        return nullptr;
+    }
+
+    for (const auto& nspname : searchPath) {
+        auto nsIt = nsByName_.find(nspname);
+        if (nsIt == nsByName_.end()) continue;
+        auto it = classByName_.find(classNameKey(nsIt->second, qn.name));
+        if (it != classByName_.end() && it->second < classes_.size()) {
+            return &classes_[it->second];
+        }
+    }
+    return nullptr;
+}
+
+const PgAttributeRow* CatalogManager::resolveAttribute(
+        const std::string& tableName,
+        const std::string& colName,
+        const std::vector<std::string>& searchPath) const {
+    auto rel = resolveRelation(tableName, searchPath);
+    if (!rel) return nullptr;
+    return findAttribute(rel->oid, colName);
 }
 
 // ============================================================================
@@ -1071,8 +1162,10 @@ void CatalogManager::rebuildIndexes() {
     }
 
     classByOid_.clear();
+    classByName_.clear();
     for (size_t i = 0; i < classes_.size(); ++i) {
         classByOid_[classes_[i].oid] = i;
+        classByName_[classNameKey(classes_[i].relnamespace, classes_[i].relname)] = i;
     }
 
     typeByOid_.clear();

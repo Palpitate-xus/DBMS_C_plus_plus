@@ -132,7 +132,7 @@
 |--------|-----------|------|
 | 2.1 实现 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_namespace`、`pg_depend` | 16.2, 4.1, 4.2 | 架构级 |
 | ✅ 2.2 实现 OID 分配与回收机制 | 2.19, 4.1 | 空闲列表持久化到 `.oid_counter.free`，优先复用 |
-| 2.3 实现真正 Schema / `search_path` 解析 | 4.3, 1.1.25 | — |
+| ✅ 2.3 实现真正 Schema / `search_path` 解析 | 4.3, 1.1.25 | 支持 schema-qualified / search_path 关系与列解析 |
 | 2.4 实现依赖追踪与 `CASCADE/RESTRICT` 精确规则 | 4.2, 1.1.37 | — |
 | 2.5 将现有表/列/索引/函数元数据迁移到系统表 | — | 数据迁移 |
 | 2.6 实现临时 schema 与会话隔离 | 4.7 | — |
@@ -142,7 +142,8 @@
 ### Phase 2 已完成内容（截至当前 commit）
 
 - **OID 分配与回收**：`OidGenerator` 支持单调递增分配、批量预留、空闲列表回收；删除对象的 OID 优先复用，空闲列表持久化到 `.oid_counter.free`。
-- **新增测试**：`tests/oid_test.cpp` 覆盖顺序分配、批量分配、回收复用、持久化恢复。
+- **Schema / search_path 名称解析**：`CatalogManager` 支持 `schema.rel` / `rel` 关系名解析与 `schema.table.col` / `table.col` 列解析，按 `search_path` 顺序匹配；新增 `pg_class` 复合名称索引。
+- **新增测试**：`tests/oid_test.cpp` 覆盖 OID 分配/回收/持久化；`tests/catalog_resolve_test.cpp` 覆盖 search_path 解析。
 
 ---
 

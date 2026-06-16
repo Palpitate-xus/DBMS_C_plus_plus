@@ -46,6 +46,30 @@ public:
     bool dropNamespace(Oid oid);
 
     // =====================================================================
+    // 名称解析（search_path）
+    // =====================================================================
+    struct QualifiedName {
+        std::string schema; // 为空表示未限定
+        std::string name;
+    };
+
+    // 解析 schema.name 或 name；返回是否成功
+    static bool parseQualifiedName(const std::string& input, QualifiedName& out);
+
+    // 将 "public, pg_catalog" 风格的 search_path 拆分为列表
+    static std::vector<std::string> parseSearchPath(const std::string& searchPathStr);
+
+    // 按 search_path 解析关系名（表/视图/索引/序列等）
+    // name 可为 "rel" 或 "schema.rel"；searchPath 为空时仅尝试 public schema
+    const PgClassRow* resolveRelation(const std::string& name,
+                                      const std::vector<std::string>& searchPath) const;
+
+    // 按 search_path 解析列：table.col 或 schema.table.col
+    const PgAttributeRow* resolveAttribute(const std::string& tableName,
+                                           const std::string& colName,
+                                           const std::vector<std::string>& searchPath) const;
+
+    // =====================================================================
     // 临时 schema（会话隔离）
     // =====================================================================
     Oid createTempNamespace(uint64_t sessionId);
@@ -178,10 +202,12 @@ private:
     // 名称索引
     std::unordered_map<std::string, Oid> nsByName_;   // nspname -> oid
     std::unordered_map<std::string, Oid> authIdByName_; // rolname -> oid
+    std::unordered_map<std::string, size_t> classByName_; // nspOid+relname -> idx
 
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;
     void rebuildIndexes();
+    static std::string classNameKey(Oid nspOid, const std::string& relname);
 };
 
 } // namespace dbms
