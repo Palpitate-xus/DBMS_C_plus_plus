@@ -147,10 +147,7 @@ MigrateResult migrateDatabaseToCatalog(
                 attr.attgenerated = 's'; // STORED
             }
 
-            cat.addAttribute(attr);
-            result.attributesCreated++;
-
-            // Create type if unknown
+            // Create type if unknown before adding the attribute
             if (attr.atttypid == INVALID_OID) {
                 PgTypeRow typ;
                 typ.typname = col.dataType;
@@ -159,13 +156,12 @@ MigrateResult migrateDatabaseToCatalog(
                 typ.typtype = 'b';
                 typ.typcategory = 'U';
                 Oid typeOid = cat.createType(typ);
-
-                // Update attribute with new type OID
-                // (simplification: we don't update after add; in real PG this would
-                //  be done in a single transaction)
                 attr.atttypid = typeOid;
                 result.typesCreated++;
             }
+
+            cat.addAttribute(attr);
+            result.attributesCreated++;
         }
 
         // 4. Create pg_depend for foreign keys
