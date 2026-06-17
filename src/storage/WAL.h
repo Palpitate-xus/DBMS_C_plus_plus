@@ -20,8 +20,9 @@ namespace dbms {
 //   <walDir>/000000010000000000000000
 //   <walDir>/000000010000000000000001
 //   ...
+// where the leading 8 hex digits are the timeline ID (TLI).
 //
-// Each record has a fixed 24-byte header followed by payload data.
+// Each record has a fixed 28-byte header followed by payload data.
 // Records are aligned to MAXALIGN (8) bytes.
 //
 // Record header (28 bytes):
@@ -123,6 +124,23 @@ public:
     // Get the LSN where the next record will be written.
     Lsn currentWriteLsn() const { return currentLsn_; }
 
+    // Timeline ID (TLI). Default is 1. Used in segment file names.
+    uint32_t timelineId() const { return timelineId_; }
+    bool setTimeline(uint32_t tli);
+
+    // Archive status helpers. PostgreSQL keeps .ready / .done files in
+    // pg_wal/archive_status/ to track which segments need archiving / have been
+    // archived. These methods mimic that behaviour.
+    bool markSegmentReadyForArchive(uint32_t segNo);
+    bool markSegmentArchived(uint32_t segNo);
+    bool isSegmentArchived(uint32_t segNo) const;
+    std::vector<uint32_t> pendingArchiveSegments() const;
+    bool archiveSegment(uint32_t segNo, const std::filesystem::path& archiveDir);
+    bool archivePendingSegments(const std::filesystem::path& archiveDir);
+
+    // Mark all complete segments strictly before lsn as ready for archiving.
+    bool markSegmentsReadyBefore(Lsn lsn);
+
     // Find the LSN of the latest checkpoint record, if any.
     std::optional<Lsn> findLastCheckpointLsn() const;
 
@@ -138,10 +156,14 @@ public:
     // Validate that the WAL directory is usable.
     bool isOpen() const { return open_; }
 
+    // Path to a specific segment file (useful for tests / archiving).
+    std::filesystem::path segmentPath(uint32_t segNo) const;
+
 private:
     std::filesystem::path walDir_;
     bool open_ = false;
     Lsn currentLsn_ = 0;
+    uint32_t timelineId_ = 1;
 
     static constexpr uint64_t kSegmentSize = 16 * 1024 * 1024; // 16 MiB
 
@@ -151,7 +173,14 @@ private:
     uint32_t segmentOffset(Lsn lsn) const {
         return static_cast<uint32_t>(lsn % kSegmentSize);
     }
-    std::filesystem::path segmentPath(uint32_t segNo) const;
+
+    std::filesystem::path timelinePath() const { return walDir_ / "timeline"; }
+    bool loadTimeline();
+    bool persistTimeline();
+
+    std::filesystem::path archiveStatusDir() const { return walDir_ / "archive_status"; }
+    std::filesystem::path readyPath(uint32_t segNo) const;
+    std::filesystem::path donePath(uint32_t segNo) const;
 
     void advanceCurrentLsn(uint32_t len);
 

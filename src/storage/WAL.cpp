@@ -37,6 +37,13 @@ bool WALManager::ensureOpen() {
     std::error_code ec;
     std::filesystem::create_directories(walDir_, ec);
     if (ec) return false;
+    std::filesystem::create_directories(archiveStatusDir(), ec);
+
+    // Load or infer timeline ID.
+    loadTimeline();
+    if (!std::filesystem::exists(timelinePath())) {
+        persistTimeline();
+    }
 
     // Scan existing segments to find current LSN (end of last segment)
     currentLsn_ = 0;
@@ -47,9 +54,11 @@ bool WALManager::ensureOpen() {
         if (name.size() != 24) continue;
         try {
             // Segment filename: TLI(8) + log(8) + seg(8) hex
+            uint32_t tli = static_cast<uint32_t>(
+                std::stoull(name.substr(0, 8), nullptr, 16));
             uint32_t segNo = static_cast<uint32_t>(
                 std::stoull(name.substr(16, 8), nullptr, 16));
-            if (segNo >= maxSeg) {
+            if (tli == timelineId_ && segNo >= maxSeg) {
                 maxSeg = segNo;
                 found = true;
             }
@@ -66,8 +75,147 @@ bool WALManager::ensureOpen() {
 
 std::filesystem::path WALManager::segmentPath(uint32_t segNo) const {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%08X%08X%08X", 1u, 0u, segNo);
+    std::snprintf(buf, sizeof(buf), "%08X%08X%08X", timelineId_, 0u, segNo);
     return walDir_ / buf;
+}
+
+bool WALManager::loadTimeline() {
+    auto path = timelinePath();
+    if (!std::filesystem::exists(path)) {
+        timelineId_ = 1;
+        return true;
+    }
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) return false;
+    uint32_t tli = 1;
+    ifs.read(reinterpret_cast<char*>(&tli), sizeof(tli));
+    if (ifs.gcount() == sizeof(tli) && tli != 0) {
+        timelineId_ = tli;
+        return true;
+    }
+    // Fallback: infer from segment filenames.
+    for (const auto& entry : std::filesystem::directory_iterator(walDir_)) {
+        std::string name = entry.path().filename().string();
+        if (name.size() == 24) {
+            try {
+                uint32_t tli = static_cast<uint32_t>(
+                    std::stoull(name.substr(0, 8), nullptr, 16));
+                if (tli != 0) {
+                    timelineId_ = tli;
+                    return true;
+                }
+            } catch (...) {}
+        }
+    }
+    timelineId_ = 1;
+    return true;
+}
+
+bool WALManager::persistTimeline() {
+    auto path = timelinePath();
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) return false;
+    uint32_t tli = timelineId_;
+    ofs.write(reinterpret_cast<const char*>(&tli), sizeof(tli));
+    return ofs.good();
+}
+
+bool WALManager::setTimeline(uint32_t tli) {
+    if (tli == 0) return false;
+    if (!ensureOpen()) return false;
+    timelineId_ = tli;
+    return persistTimeline();
+}
+
+std::filesystem::path WALManager::readyPath(uint32_t segNo) const {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%08X%08X%08X.ready", timelineId_, 0u, segNo);
+    return archiveStatusDir() / buf;
+}
+
+std::filesystem::path WALManager::donePath(uint32_t segNo) const {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%08X%08X%08X.done", timelineId_, 0u, segNo);
+    return archiveStatusDir() / buf;
+}
+
+bool WALManager::markSegmentReadyForArchive(uint32_t segNo) {
+    if (!ensureOpen()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(archiveStatusDir(), ec);
+    std::ofstream ofs(readyPath(segNo), std::ios::binary);
+    return ofs.good();
+}
+
+bool WALManager::markSegmentArchived(uint32_t segNo) {
+    if (!ensureOpen()) return false;
+    std::error_code ec;
+    std::filesystem::remove(readyPath(segNo), ec);
+    std::ofstream ofs(donePath(segNo), std::ios::binary);
+    return ofs.good();
+}
+
+bool WALManager::isSegmentArchived(uint32_t segNo) const {
+    return std::filesystem::exists(donePath(segNo));
+}
+
+std::vector<uint32_t> WALManager::pendingArchiveSegments() const {
+    std::vector<uint32_t> result;
+    if (!open_) return result;
+    if (!std::filesystem::exists(archiveStatusDir())) return result;
+    for (const auto& entry : std::filesystem::directory_iterator(archiveStatusDir())) {
+        std::string name = entry.path().filename().string();
+        // Segment filename is 24 hex chars; .ready suffix makes it 30.
+        if (name.size() != 30 || name.substr(24, 6) != ".ready") continue;
+        try {
+            uint32_t tli = static_cast<uint32_t>(
+                std::stoull(name.substr(0, 8), nullptr, 16));
+            if (tli != timelineId_) continue;
+            uint32_t segNo = static_cast<uint32_t>(
+                std::stoull(name.substr(16, 8), nullptr, 16));
+            if (!isSegmentArchived(segNo)) {
+                result.push_back(segNo);
+            }
+        } catch (...) {}
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
+bool WALManager::archiveSegment(uint32_t segNo, const std::filesystem::path& archiveDir) {
+    if (!ensureOpen()) return false;
+    auto src = segmentPath(segNo);
+    if (!std::filesystem::exists(src)) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(archiveDir, ec);
+    if (ec) return false;
+    auto dst = archiveDir / src.filename();
+    try {
+        std::filesystem::copy_file(src, dst,
+            std::filesystem::copy_options::overwrite_existing);
+    } catch (...) {
+        return false;
+    }
+    return markSegmentArchived(segNo);
+}
+
+bool WALManager::archivePendingSegments(const std::filesystem::path& archiveDir) {
+    auto pending = pendingArchiveSegments();
+    bool ok = true;
+    for (uint32_t segNo : pending) {
+        if (!archiveSegment(segNo, archiveDir)) ok = false;
+    }
+    return ok;
+}
+
+bool WALManager::markSegmentsReadyBefore(Lsn lsn) {
+    if (!ensureOpen() || lsn == INVALID_LSN) return false;
+    uint32_t endSeg = segmentNumber(lsn);
+    for (uint32_t seg = 0; seg < endSeg; ++seg) {
+        if (!markSegmentReadyForArchive(seg)) return false;
+    }
+    return true;
 }
 
 void WALManager::advanceCurrentLsn(uint32_t len) {
@@ -183,8 +331,14 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
     h->xl_crc = computeCrc(record.data(), record.size());
 
     Lsn recLsn = currentLsn_;
+    uint32_t prevSeg = segmentNumber(recLsn);
     if (!appendBytes(record.data(), record.size())) return INVALID_LSN;
     advanceCurrentLsn(totalLen);
+    uint32_t newSeg = segmentNumber(currentLsn_);
+    if (newSeg != prevSeg) {
+        // The previous segment is now complete; mark it ready for archiving.
+        markSegmentReadyForArchive(prevSeg);
+    }
     return recLsn;
 }
 
@@ -251,6 +405,7 @@ void WALManager::reset() {
         std::filesystem::remove_all(entry.path(), ec);
     }
     currentLsn_ = 0;
+    timelineId_ = 1;
 }
 
 // ============================================================================

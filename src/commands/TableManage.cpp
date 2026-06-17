@@ -847,6 +847,95 @@ Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK) {
 StorageEngine::StorageEngine() {
     recoverAllDatabases();
     migrateAllDataFiles();
+    lastBackgroundCheckpoint_ = std::chrono::steady_clock::now();
+    startBackgroundWorker();
+}
+
+StorageEngine::~StorageEngine() {
+    stopBackgroundWorker();
+}
+
+// ========================================================================
+// Background workers (walwriter / bgwriter / checkpointer)
+// ========================================================================
+
+void StorageEngine::setBackgroundIntervals(uint32_t loopDelayMs,
+                                           uint32_t checkpointIntervalMs) {
+    std::lock_guard<std::mutex> lock(backgroundMutex_);
+    backgroundLoopDelayMs_ = loopDelayMs;
+    backgroundCheckpointIntervalMs_ = checkpointIntervalMs;
+}
+
+void StorageEngine::wakeBackgroundWorker() {
+    backgroundCv_.notify_one();
+}
+
+void StorageEngine::startBackgroundWorker() {
+    std::lock_guard<std::mutex> lock(backgroundMutex_);
+    if (backgroundThread_.joinable()) return;
+    backgroundStop_ = false;
+    backgroundThread_ = std::thread(&StorageEngine::backgroundWorkerLoop, this);
+}
+
+void StorageEngine::stopBackgroundWorker() {
+    {
+        std::lock_guard<std::mutex> lock(backgroundMutex_);
+        backgroundStop_ = true;
+    }
+    backgroundCv_.notify_all();
+    if (backgroundThread_.joinable()) {
+        backgroundThread_.join();
+    }
+}
+
+void StorageEngine::backgroundWorkerLoop() {
+    while (true) {
+        std::unique_lock<std::mutex> lock(backgroundMutex_);
+        auto delay = std::chrono::milliseconds(backgroundLoopDelayMs_);
+        backgroundCv_.wait_for(lock, delay, [this] { return backgroundStop_.load(); });
+        if (backgroundStop_.load()) break;
+        lock.unlock();
+
+        backgroundWalFlush();
+        backgroundBufferFlush();
+        backgroundCheckpoint();
+    }
+}
+
+void StorageEngine::backgroundWalFlush() {
+    // walwriter: fsync all WAL managers up to their current write LSN.
+    for (auto& kv : walManagers_) {
+        WALManager* wal = kv.second.get();
+        if (wal) {
+            wal->XLogFlush(wal->currentWriteLsn());
+        }
+    }
+}
+
+void StorageEngine::backgroundBufferFlush() {
+    // bgwriter: write out dirty pages from each buffer pool.
+    for (auto& kv : pageAllocators_) {
+        PageAllocator* pa = kv.second.get();
+        if (pa && pa->bufferPool()) {
+            pa->bufferPool()->flush();
+        }
+    }
+}
+
+void StorageEngine::backgroundCheckpoint() {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - lastBackgroundCheckpoint_).count();
+    if (elapsed < static_cast<int64_t>(backgroundCheckpointIntervalMs_)) {
+        return;
+    }
+    lastBackgroundCheckpoint_ = now;
+
+    // checkpointer: run checkpoint for every known database.
+    auto dbs = listDatabases();
+    for (const auto& dbname : dbs) {
+        checkpoint(dbname);
+    }
 }
 
 // ========================================================================
@@ -2700,6 +2789,13 @@ std::vector<StorageEngine::BufferCacheEntry> StorageEngine::getBufferCacheEntrie
         }
     }
     return result;
+}
+
+uint32_t StorageEngine::tableNumPages(const std::string& dbname,
+                                      const std::string& tablename) const {
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    if (!pa) return 0;
+    return pa->numPages();
 }
 
 size_t StorageEngine::getTableRowCount(const std::string& dbname,
@@ -5524,6 +5620,28 @@ DBStatus StorageEngine::setStorageParams(
     return DBStatus::OK;
 }
 
+static uint8_t getFillFactor(const TableSchema& tbl) {
+    auto it = tbl.storageParams.find("fillfactor");
+    if (it == tbl.storageParams.end()) return 100;
+    try {
+        int ff = std::stoi(it->second);
+        if (ff < 10) ff = 10;
+        if (ff > 100) ff = 100;
+        return static_cast<uint8_t>(ff);
+    } catch (...) {
+        return 100;
+    }
+}
+
+static bool pageFitsWithFillfactor(const PageWrapper& page, size_t rowSize,
+                                    size_t pageSize, uint8_t fillfactor) {
+    if (fillfactor >= 100) return true;
+    size_t reserve = pageSize * (100 - fillfactor) / 100;
+    size_t free = page.freeSpace();
+    // Need enough free space for the row plus the fillfactor reserve.
+    return free >= rowSize + reserve;
+}
+
 // ========================================================================
 // TOAST (The Oversized-Attribute Storage Technique)
 // ========================================================================
@@ -6899,6 +7017,7 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
 
     std::ifstream in(schemaPath(dbname, tablename), std::ios::binary);
     TableSchema tbl = readSchema(in, tablename);
+    tbl.storageParams = getStorageParams(dbname, tablename);
 
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
@@ -7952,6 +8071,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         bool inserted = false;
         size_t actualRowSize = rowBuffer.size();
         uint8_t minPercent = static_cast<uint8_t>(std::min(size_t(100), actualRowSize * 100 / pa->pageSize() + 1));
+        uint8_t fillfactor = getFillFactor(tbl);
 
         // Try FSM first for fast page lookup
         if (numPages > 1) {
@@ -7961,7 +8081,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 lockManager_.pageLockExclusive(dbname, tablename, candidate);
                 char* buf = pa->fetchPage(candidate);
                 PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-                if (page.canFit(actualRowSize)) {
+                if (page.canFit(actualRowSize) &&
+                    pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
                     walPageImage(dbname, tablename, candidate, buf, pa->pageSize(), true);
                     if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                         pageId = candidate;
@@ -7982,7 +8103,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             lockManager_.pageLockExclusive(dbname, tablename, pid);
             char* buf = pa->fetchPage(pid);
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-            if (page.canFit(actualRowSize)) {
+            if (page.canFit(actualRowSize) &&
+                pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
                 walPageImage(dbname, tablename, pid, buf, pa->pageSize(), true);
                 if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                     pageId = pid;
@@ -13279,6 +13401,13 @@ void StorageEngine::checkpoint(const std::string& dbname) {
             wal->XLogFlush(checkpointLsn);
         }
         lastCheckpointLsns_[dbname] = checkpointLsn;
+
+        // Mark all fully-written segments before the checkpoint as ready for
+        // archiving. The current segment still contains the checkpoint record
+        // and is kept for recovery.
+        if (checkpointLsn != INVALID_LSN) {
+            wal->markSegmentsReadyBefore(checkpointLsn);
+        }
     }
 
     // Persist checkpoint LSN for fast recovery startup.
@@ -13305,22 +13434,13 @@ void StorageEngine::checkpoint(const std::string& dbname) {
 // ========================================================================
 
 void StorageEngine::archiveWal(const std::string& dbname) {
-    auto wpath = walPath(dbname);
-    if (!std::filesystem::exists(wpath)) return;
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return;
     auto archiveDir = walArchiveDir(dbname);
-    if (!std::filesystem::exists(archiveDir)) {
-        std::filesystem::create_directories(archiveDir);
-    }
-    // Copy WAL to archive with timestamp suffix
-    auto now = std::chrono::system_clock::now();
-    auto time_t_now = std::chrono::system_clock::to_time_t(now);
-    std::tm tm = *std::localtime(&time_t_now);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
-    auto dest = archiveDir / ("wal_" + oss.str());
-    try {
-        std::filesystem::copy_file(wpath, dest, std::filesystem::copy_options::overwrite_existing);
-    } catch (...) {}
+    std::error_code ec;
+    std::filesystem::create_directories(archiveDir, ec);
+    // Archive all segments that are marked .ready but not yet .done.
+    wal->archivePendingSegments(archiveDir);
 }
 
 // ========================================================================

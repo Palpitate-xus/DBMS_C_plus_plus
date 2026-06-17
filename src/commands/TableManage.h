@@ -12,6 +12,12 @@
 #include <string>
 #include <vector>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
 #include "DateType.h"
 #include "table_schema.h"
 #include "storage_engine.h"
@@ -54,6 +60,7 @@ std::string sqlstateForDBStatus(DBStatus res);
 class StorageEngine : public IStorageEngine {
 public:
     StorageEngine();
+    ~StorageEngine();
 
     // ========================================================================
     // IStorageEngine interface overrides (Phase 0)
@@ -305,6 +312,14 @@ public:
         int pinCount;
     };
     std::vector<BufferCacheEntry> getBufferCacheEntries() const;
+
+    // Storage size helpers
+    uint32_t tableNumPages(const std::string& dbname,
+                           const std::string& tablename) const;
+
+    // Background workers (walwriter / bgwriter / checkpointer)
+    void setBackgroundIntervals(uint32_t loopDelayMs, uint32_t checkpointIntervalMs);
+    void wakeBackgroundWorker();
 
     // Statistics
     struct ColumnStats {
@@ -1064,6 +1079,22 @@ private:
 
     // Row-Level Security: per-thread current user (for transparent RLS application)
     inline static thread_local std::string rlsCurrentUser_;
+
+private:
+    void startBackgroundWorker();
+    void stopBackgroundWorker();
+    void backgroundWorkerLoop();
+    void backgroundWalFlush();
+    void backgroundBufferFlush();
+    void backgroundCheckpoint();
+
+    std::thread backgroundThread_;
+    std::atomic<bool> backgroundStop_{false};
+    std::mutex backgroundMutex_;
+    std::condition_variable backgroundCv_;
+    uint32_t backgroundLoopDelayMs_ = 200;
+    uint32_t backgroundCheckpointIntervalMs_ = 300000; // 5 minutes
+    std::chrono::steady_clock::time_point lastBackgroundCheckpoint_;
 };
 
 // Column type constructors

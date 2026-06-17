@@ -185,7 +185,19 @@
   - 采用 page-image WAL：insert/update/delete 在修改前写 before-image（undo），修改后写 after-image（redo）并更新页面 LSN 与 checksum。
   - `StorageEngine` 集成 WAL：事务 commit 写 XACT_COMMIT 并 flush；rollback 先按 before-image 回滚再写 XACT_ABORT；`checkpoint()` 写 CHECKPOINT 记录并持久化 checkpoint LSN。
   - 崩溃恢复 `recoverAllDatabases()`：两趟扫描——第一趟收集已提交/已中止事务并更新 CLOG，第二趟按提交状态应用 after-image（redo）或 before-image（undo）。
-  - 新增测试：`tests/wal_basic_test.cpp`、`tests/wal_full_page_write_test.cpp`、`tests/checkpoint_test.cpp`、`tests/redo_crash_recovery_test.cpp`。
+  - **Timeline 与归档状态**：WALManager 支持 timeline ID（`setTimeline` / `timelineId`），持久化到 `pg_wal/timeline`；`pg_wal/archive_status/` 下维护 `.ready` / `.done` 文件，`checkpoint()` 自动将已完成 segment 标记为 `.ready`，`archivePendingSegments()` 按 segment 归档到 `wal_archive`。
+  - 新增测试：`tests/wal_basic_test.cpp`、`tests/wal_full_page_write_test.cpp`、`tests/checkpoint_test.cpp`、`tests/redo_crash_recovery_test.cpp`、`tests/wal_timeline_archive_test.cpp`。
+
+- **后台进程（3.4）**：
+  - `StorageEngine` 启动一个后台工作线程，周期性执行 walwriter（fsync 所有 WAL 到当前 LSN）、bgwriter（刷出脏页）、checkpointer（按 `checkpoint_interval` 对所有数据库写 checkpoint）。
+  - 提供 `setBackgroundIntervals()` / `wakeBackgroundWorker()` 供测试与调优。
+  - 新增测试：`tests/background_worker_test.cpp`。
+
+- **存储参数执行（3.14）**：
+  - `getTableSchema()` 自动合并 `.params` 文件中的 storage parameters。
+  - 实现 `fillfactor` 语义：insert 时若插入后页面已用空间会超过 fillfactor 限制，则跳过当前页并分配到新页。
+  - 新增 `StorageEngine::tableNumPages()` 辅助方法。
+  - 新增测试：`tests/fillfactor_test.cpp`。
 
 - **HeapTupleHeader**：新增 `src/storage/HeapTupleHeader.h`，实现 PostgreSQL 风格行头（t_xmin/t_xmax/t_ctid/t_infomask/t_infomask2/t_hoff、null bitmap、hint bits、ctid 读写、对齐计算）。formatVersion ≥ 2 的表启用新 header，formatVersion 0/1 保持旧 16 字节 [creatorTxnId:8][rollbackPtr:8] 兼容。
 - **Row header 抽象**：`src/commands/TableManage.cpp` 新增 `usesHeapTupleHeader`、`buildHeapTupleHeader`、`stripRowHeader`、`replaceRowData` 等辅助函数；`TableSchema::rowSize()` 按 formatVersion 动态计算 header 大小；insert/update/delete/rollback 均按 header 类型处理。
