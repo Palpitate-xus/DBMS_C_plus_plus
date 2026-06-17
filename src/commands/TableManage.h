@@ -23,6 +23,7 @@
 #include "PageWrapper.h"
 #include "CommitLog.h"
 #include "LockManager.h"
+#include "WAL.h"
 #include "HashIndex.h"
 #include "SPGiSTIndex.h"
 
@@ -933,6 +934,34 @@ private:
     // CommitLog (pg_xact)
     mutable std::unordered_map<std::string, std::unique_ptr<CommitLog>> commitLogs_;
     void closeAllCommitLogs();
+
+    // WAL manager per database
+    mutable std::unordered_map<std::string, std::unique_ptr<WALManager>> walManagers_;
+    WALManager* getWAL(const std::string& dbname) const;
+    void closeAllWALs();
+
+    // Per-database checkpoint LSN. Pages with pd_lsn <= this value trigger
+    // a full-page write on their next modification.
+    mutable std::map<std::string, Lsn> lastCheckpointLsns_;
+
+    // Helpers to emit WAL records for heap operations.
+    // These are no-ops for legacy formatVersion 0/1 tables.
+    Lsn walPageImage(const std::string& dbname, const std::string& tablename,
+                     uint32_t pageId, const char* pageBuf, size_t pageSize,
+                     bool beforeImage);
+    Lsn walXactCommit(const std::string& dbname, uint64_t xid);
+    Lsn walXactAbort(const std::string& dbname, uint64_t xid);
+    Lsn walCheckpoint(const std::string& dbname, uint64_t nextXid);
+
+    // Mark a page as dirty and update its pd_lsn after a WAL record was written.
+    void markPageDirtyAndLsn(PageAllocator* pa, uint32_t pageId, Lsn lsn, uint32_t formatVersion);
+
+    // Redo a single WAL record.
+    bool redoPageImage(const std::string& dbname, const std::string& tablename,
+                       uint32_t pageId, const char* pageData, size_t pageLen,
+                       Lsn recordLsn, bool force);
+    bool redoXactCommit(uint64_t xid);
+    bool redoXactAbort(uint64_t xid);
 
     // B+ Tree primary key index
     std::filesystem::path indexPath(const std::string& dbname, const std::string& tablename) const;

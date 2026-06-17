@@ -73,6 +73,7 @@ namespace dbms {
 // Forward declarations for row-header helpers used by TableSchema::rowSize().
 static bool usesHeapTupleHeader(uint32_t formatVersion);
 static size_t rowHeaderSize(uint32_t formatVersion, size_t natts);
+static void setPageLsnAndChecksum(char* buf, Lsn lsn);
 
 // Global active transaction tracking
 std::mutex StorageEngine::globalTxnMutex_;
@@ -1166,7 +1167,7 @@ DBStatus StorageEngine::detachPartition(const std::string& dbname,
 }
 
 std::filesystem::path StorageEngine::walPath(const std::string& dbname) const {
-    return dbPath(dbname) / "wal.log";
+    return dbPath(dbname) / "pg_wal";
 }
 
 std::filesystem::path StorageEngine::checkpointPath(const std::string& dbname) const {
@@ -2773,31 +2774,6 @@ static void syncFile(const std::filesystem::path& path) {
         ::fsync(fd);
         ::close(fd);
     }
-}
-
-static void walAppend(const std::filesystem::path& walFile, const std::string& line) {
-    std::ofstream ofs(walFile, std::ios::out | std::ios::app);
-    if (ofs) {
-        ofs << line << '\n';
-        ofs.flush();
-        ofs.close();
-        syncFile(walFile);
-    }
-}
-
-static std::vector<std::string> walReadAll(const std::filesystem::path& walFile) {
-    std::vector<std::string> lines;
-    std::ifstream ifs(walFile);
-    if (!ifs) return lines;
-    std::string line;
-    while (std::getline(ifs, line)) {
-        if (!line.empty()) lines.push_back(line);
-    }
-    return lines;
-}
-
-static void walClear(const std::filesystem::path& walFile) {
-    std::filesystem::remove(walFile);
 }
 
 std::filesystem::path StorageEngine::indexPath(const std::string& dbname,
@@ -7986,6 +7962,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 char* buf = pa->fetchPage(candidate);
                 PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
                 if (page.canFit(actualRowSize)) {
+                    walPageImage(dbname, tablename, candidate, buf, pa->pageSize(), true);
                     if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                         pageId = candidate;
                         inserted = true;
@@ -8006,6 +7983,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             char* buf = pa->fetchPage(pid);
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             if (page.canFit(actualRowSize)) {
+                walPageImage(dbname, tablename, pid, buf, pa->pageSize(), true);
                 if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                     pageId = pid;
                     inserted = true;
@@ -8026,6 +8004,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             lockManager_.pageLockExclusive(dbname, tablename, pageId);
             char* buf = pa->fetchPage(pageId);
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
+            walPageImage(dbname, tablename, pageId, buf, pa->pageSize(), true);
             if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
                 pa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
@@ -8058,6 +8037,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 setRowCtid(mutableRow.data(), mutableRow.size(), tbl.formatVersion, selfCtid);
                 page.update(slotId, mutableRow.data(), mutableRow.size());
                 pa->markDirty(pageId);
+                Lsn lsn = walPageImage(dbname, tablename, pageId, buf, pa->pageSize(), false);
+                if (lsn != INVALID_LSN) {
+                    setPageLsnAndChecksum(buf, lsn);
+                    pa->markDirty(pageId);
+                }
             }
             pa->unpinPage(pageId);
         }
@@ -8796,6 +8780,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         char* pageBuf = pa->fetchPage(pageId);
         if (pageBuf) {
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+            walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
             // Mark row as deleted by setting xmax for PostgreSQL-style tuples.
             if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
                 const char* data = nullptr;
@@ -8808,6 +8793,11 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             }
             page.remove(slotId);
             pa->markDirty(pageId);
+            Lsn lsn = walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
+            if (lsn != INVALID_LSN) {
+                setPageLsnAndChecksum(pageBuf, lsn);
+                pa->markDirty(pageId);
+            }
             size_t freePct = page.freeSpace() * 100 / pa->pageSize();
             getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
             getVM(dbname, tablename)->setAllVisible(pageId, false);
@@ -9273,6 +9263,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
         if (pageBuf) {
             lockManager_.pageLockExclusive(dbname, tablename, pageId);
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+            walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
             // Mark old row as updated (xmax) for PostgreSQL-style tuples.
             if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
                 const char* oldData = nullptr;
@@ -9354,6 +9345,11 @@ DBStatus StorageEngine::update(const std::string& dbname,
             }
 
             pa->markDirty(pageId);
+            Lsn lsn = walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
+            if (lsn != INVALID_LSN) {
+                setPageLsnAndChecksum(pageBuf, lsn);
+                pa->markDirty(pageId);
+            }
             size_t freePct = page.freeSpace() * 100 / pa->pageSize();
             getFSM(dbname, tablename)->setFreePercent(pageId, static_cast<uint8_t>(freePct));
             getVM(dbname, tablename)->setAllVisible(pageId, false);
@@ -12923,7 +12919,156 @@ std::vector<std::string> StorageEngine::crossJoin(
 }
 
 // ========================================================================
-// WAL crash recovery
+// WAL helpers
+// ========================================================================
+
+WALManager* StorageEngine::getWAL(const std::string& dbname) const {
+    auto it = walManagers_.find(dbname);
+    if (it != walManagers_.end()) return it->second.get();
+    auto wal = std::make_unique<WALManager>(walPath(dbname));
+    if (!wal->ensureOpen()) return nullptr;
+    WALManager* ptr = wal.get();
+    walManagers_[dbname] = std::move(wal);
+    return ptr;
+}
+
+void StorageEngine::closeAllWALs() {
+    walManagers_.clear();
+}
+
+static std::vector<char> encodeHeapPayload(const std::string& tableName, uint32_t pageId, uint16_t slotId) {
+    std::vector<char> payload;
+    uint32_t nameLen = static_cast<uint32_t>(tableName.size());
+    payload.reserve(sizeof(uint32_t) + nameLen + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint16_t));
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&nameLen),
+                   reinterpret_cast<const char*>(&nameLen) + sizeof(nameLen));
+    payload.insert(payload.end(), tableName.begin(), tableName.end());
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&pageId),
+                   reinterpret_cast<const char*>(&pageId) + sizeof(pageId));
+    uint32_t forkNum = 0;
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&forkNum),
+                   reinterpret_cast<const char*>(&forkNum) + sizeof(forkNum));
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&slotId),
+                   reinterpret_cast<const char*>(&slotId) + sizeof(slotId));
+    return payload;
+}
+
+Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& tablename,
+                                uint32_t pageId, const char* pageBuf, size_t pageSize,
+                                bool beforeImage) {
+    if (!usesHeapTupleHeader(getTableSchema(dbname, tablename).formatVersion)) {
+        return INVALID_LSN;
+    }
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return INVALID_LSN;
+    std::vector<char> payload = encodeHeapPayload(tablename, pageId, 0);
+    uint32_t pageLen = static_cast<uint32_t>(pageSize);
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&pageLen),
+                   reinterpret_cast<const char*>(&pageLen) + sizeof(pageLen));
+    payload.insert(payload.end(), pageBuf, pageBuf + pageSize);
+    uint8_t info = beforeImage ? XLOG_HEAP_PAGE_BEFORE : XLOG_HEAP_PAGE_AFTER;
+    return wal->XLogInsert(RM_HEAP_ID, info,
+                           inTransaction_ ? currentTxnId_ : 0, payload);
+}
+
+static void setPageLsnAndChecksum(char* buf, Lsn lsn) {
+    if (!buf) return;
+    std::memcpy(buf, &lsn, sizeof(lsn));
+    PgPage pg(buf);
+    pg.writeChecksum();
+}
+
+Lsn StorageEngine::walXactCommit(const std::string& dbname, uint64_t xid) {
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return INVALID_LSN;
+    std::vector<char> payload;
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&xid),
+                   reinterpret_cast<const char*>(&xid) + sizeof(xid));
+    return wal->XLogInsert(RM_XACT_ID, XLOG_XACT_COMMIT, xid, payload);
+}
+
+Lsn StorageEngine::walXactAbort(const std::string& dbname, uint64_t xid) {
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return INVALID_LSN;
+    std::vector<char> payload;
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&xid),
+                   reinterpret_cast<const char*>(&xid) + sizeof(xid));
+    return wal->XLogInsert(RM_XACT_ID, XLOG_XACT_ABORT, xid, payload);
+}
+
+Lsn StorageEngine::walCheckpoint(const std::string& dbname, uint64_t nextXid) {
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return INVALID_LSN;
+    std::vector<char> payload;
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&nextXid),
+                   reinterpret_cast<const char*>(&nextXid) + sizeof(nextXid));
+    uint64_t timestamp = static_cast<uint64_t>(std::time(nullptr));
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&timestamp),
+                   reinterpret_cast<const char*>(&timestamp) + sizeof(timestamp));
+    return wal->XLogInsert(RM_CHECKPOINT_ID, XLOG_CHECKPOINT_SHUTDOWN,
+                           inTransaction_ ? currentTxnId_ : 0, payload);
+}
+
+void StorageEngine::markPageDirtyAndLsn(PageAllocator* pa, uint32_t pageId, Lsn lsn,
+                                        uint32_t formatVersion) {
+    if (!pa || lsn == INVALID_LSN) return;
+    pa->markDirty(pageId);
+    if (!usesHeapTupleHeader(formatVersion)) return;
+    char* buf = pa->fetchPage(pageId);
+    if (!buf) return;
+    std::memcpy(buf, &lsn, sizeof(lsn));
+    PgPage pg(buf);
+    pg.writeChecksum();
+    pa->markDirty(pageId);
+    pa->unpinPage(pageId);
+}
+
+bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& tablename,
+                                  uint32_t pageId, const char* pageData, size_t pageLen,
+                                  Lsn recordLsn, bool force) {
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    if (!pa) return false;
+    if (pa->pageSize() != pageLen) return false;
+
+    // Skip if page already has a newer or equal LSN, unless forced (undo).
+    if (!force && pageId < pa->numPages()) {
+        char* buf = pa->fetchPage(pageId);
+        if (buf) {
+            Lsn currentLsn = 0;
+            std::memcpy(&currentLsn, buf, sizeof(currentLsn));
+            pa->unpinPage(pageId);
+            if (currentLsn >= recordLsn) return true;
+        }
+    }
+
+    // Ensure the page exists.
+    while (pageId >= pa->numPages()) {
+        pa->allocPage();
+    }
+
+    // Write the page image directly through the buffer pool.
+    char* buf = pa->fetchPage(pageId);
+    if (!buf) return false;
+    std::memcpy(buf, pageData, pageLen);
+    pa->markDirty(pageId);
+    pa->unpinPage(pageId);
+    return true;
+}
+
+bool StorageEngine::redoXactCommit(uint64_t xid) {
+    CommitLog* clog = getCommitLog("");
+    (void)clog; (void)xid;
+    return true;
+}
+
+bool StorageEngine::redoXactAbort(uint64_t xid) {
+    CommitLog* clog = getCommitLog("");
+    (void)clog; (void)xid;
+    return true;
+}
+
+// ========================================================================
+// WAL crash recovery (page-image redo)
 // ========================================================================
 
 void StorageEngine::recoverAllDatabases() {
@@ -12937,51 +13082,88 @@ void StorageEngine::recoverAllDatabases() {
         // Skip non-database directories (simple heuristic: must have tlist.lst)
         try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
 
-        std::filesystem::path walFile = walPath(dbname);
-        if (!std::filesystem::exists(walFile)) continue;
+        WALManager* wal = getWAL(dbname);
+        if (!wal) continue;
+        if (wal->currentWriteLsn() == 0) continue; // no WAL
 
-        auto lines = walReadAll(walFile);
-        if (lines.empty()) {
-            walClear(walFile);
-            continue;
+        auto checkpointLsnOpt = wal->findLastCheckpointLsn();
+        Lsn redoLsn = checkpointLsnOpt.value_or(0);
+
+        // Pass 1: collect committed transaction IDs and update CLOG.
+        std::set<uint64_t> committedXids;
+        {
+            Lsn lsn = redoLsn;
+            while (true) {
+                auto recOpt = wal->ReadRecord(lsn);
+                if (!recOpt) break;
+                const XLogRecord& rec = *recOpt;
+                uint8_t rmid = rec.rmid();
+                uint8_t info = rec.info();
+                if (rmid == RM_XACT_ID && info == XLOG_XACT_COMMIT) {
+                    if (rec.data.size() >= sizeof(uint64_t)) {
+                        uint64_t xid = 0;
+                        std::memcpy(&xid, rec.data.data(), sizeof(xid));
+                        committedXids.insert(xid);
+                        CommitLog* clog = getCommitLog(dbname);
+                        if (clog) clog->setStatus(xid, CommitLog::Status::Committed);
+                    }
+                } else if (rmid == RM_XACT_ID && info == XLOG_XACT_ABORT) {
+                    if (rec.data.size() >= sizeof(uint64_t)) {
+                        uint64_t xid = 0;
+                        std::memcpy(&xid, rec.data.data(), sizeof(xid));
+                        CommitLog* clog = getCommitLog(dbname);
+                        if (clog) clog->setStatus(xid, CommitLog::Status::Aborted);
+                    }
+                } else if (rmid == RM_CHECKPOINT_ID) {
+                    lastCheckpointLsns_[dbname] = lsn;
+                }
+                lsn += rec.header.xl_tot_len;
+            }
         }
 
-        bool hasCommit = false;
-        bool hasRollback = false;
-        for (const auto& l : lines) {
-            if (l.size() >= 6 && l.substr(0, 6) == "COMMIT") hasCommit = true;
-            if (l.size() >= 8 && l.substr(0, 8) == "ROLLBACK") hasRollback = true;
+        // Pass 2: replay page images belonging to committed or non-transactional ops.
+        {
+            Lsn lsn = redoLsn;
+            while (true) {
+                auto recOpt = wal->ReadRecord(lsn);
+                if (!recOpt) break;
+                const XLogRecord& rec = *recOpt;
+                uint8_t rmid = rec.rmid();
+                uint8_t info = rec.info();
+                uint64_t recXid = rec.header.xl_xid;
+                bool shouldApply = false;
+                if (rmid == RM_HEAP_ID) {
+                    if (info == XLOG_HEAP_PAGE_AFTER) {
+                        shouldApply = (recXid == 0 || committedXids.count(recXid));
+                    } else if (info == XLOG_HEAP_PAGE_BEFORE) {
+                        shouldApply = (recXid != 0 && !committedXids.count(recXid));
+                    }
+                }
+                if (shouldApply) {
+                    bool force = (info == XLOG_HEAP_PAGE_BEFORE);
+                    RedoApplyRecord(rec,
+                        [&, force](const std::string& tableName, uint32_t blockNum, uint32_t forkNum,
+                            const char* pageData, size_t pageLen) {
+                            (void)forkNum;
+                            return redoPageImage(dbname, tableName, blockNum, pageData, pageLen, lsn, force);
+                        },
+                        [](const std::string&, uint32_t, uint32_t, uint16_t, const char*, size_t) { return true; },
+                        [](const std::string&, uint32_t, uint32_t, uint16_t, uint64_t) { return true; },
+                        [](const std::string&, uint32_t, uint32_t, uint16_t,
+                           uint32_t, uint32_t, uint16_t, const char*, size_t) { return true; });
+                }
+                lsn += rec.header.xl_tot_len;
+            }
         }
 
-        std::filesystem::path backup = dbPath(dbname);
-        backup += ".txn_backup";
-
-        if (hasCommit) {
-            // Transaction was committed: WAL is just cleanup
-            if (std::filesystem::exists(backup)) {
-                std::filesystem::remove_all(backup);
+        // Flush recovered pages.
+        for (const auto& [key, pa] : pageAllocators_) {
+            if (key.rfind(dbname + "/", 0) == 0) {
+                pa->flush();
             }
-            walClear(walFile);
-        } else if (hasRollback) {
-            // Transaction was rolled back: cleanup
-            if (std::filesystem::exists(backup)) {
-                std::filesystem::remove_all(backup);
-            }
-            walClear(walFile);
-        } else {
-            // Incomplete transaction: restore from backup
-            std::cerr << "[WAL RECOVERY] Incomplete transaction in " << dbname
-                      << ". Restoring from backup..." << std::endl;
-            if (std::filesystem::exists(backup)) {
-                std::filesystem::path db = dbPath(dbname);
-                std::filesystem::remove_all(db);
-                std::filesystem::rename(backup, db);
-            }
-            walClear(walFile);
-            // Clear stale index cache entries for this db
-            pkIndexCache_.clear();
         }
-        // After any recovery action, truncate UNLOGGED tables (PG semantics)
+
+        // Truncate UNLOGGED tables (PG semantics)
         try {
             auto tnames = getTableNames(dbname);
             for (const auto& tn : tnames) {
@@ -12991,7 +13173,6 @@ void StorageEngine::recoverAllDatabases() {
                     std::filesystem::path idxPath = dbPath(dbname) / (tn + ".idx");
                     if (std::filesystem::exists(dtPath)) std::filesystem::remove(dtPath);
                     if (std::filesystem::exists(idxPath)) std::filesystem::remove(idxPath);
-                    // Recreate empty data file
                     std::ofstream(dtPath, std::ios::binary).close();
                 }
             }
@@ -13089,7 +13270,18 @@ void StorageEngine::checkpoint(const std::string& dbname) {
         if (pa) pa->flush();
     }
 
-    // Write checkpoint record
+    WALManager* wal = getWAL(dbname);
+    Lsn checkpointLsn = INVALID_LSN;
+    if (wal) {
+        uint64_t nextXid = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        checkpointLsn = walCheckpoint(dbname, nextXid);
+        if (checkpointLsn != INVALID_LSN) {
+            wal->XLogFlush(checkpointLsn);
+        }
+        lastCheckpointLsns_[dbname] = checkpointLsn;
+    }
+
+    // Persist checkpoint LSN for fast recovery startup.
     auto cpPath = checkpointPath(dbname);
     {
         std::ofstream cp(cpPath, std::ios::binary);
@@ -13097,14 +13289,15 @@ void StorageEngine::checkpoint(const std::string& dbname) {
         uint64_t maxTxId = TxnIdGenerator::instance().maxCommittedTxId();
         cp.write(reinterpret_cast<const char*>(&timestamp), sizeof(uint64_t));
         cp.write(reinterpret_cast<const char*>(&maxTxId), sizeof(uint64_t));
-        cp.close();
+        uint64_t ckptLsnU64 = checkpointLsn;
+        cp.write(reinterpret_cast<const char*>(&ckptLsnU64), sizeof(uint64_t));
     }
     syncFile(cpPath);
 
     // Archive WAL before truncation
     archiveWal(dbname);
-    // Truncate WAL after checkpoint
-    walClear(walPath(dbname));
+    // TODO: truncate WAL segments entirely before the checkpoint while keeping
+    // the checkpoint record. For now we keep WAL to simplify recovery.
 }
 
 // ========================================================================
@@ -13513,9 +13706,6 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     txnLog_.clear();
     inTransaction_ = true;
     txnDB_ = dbname;
-    // Write WAL BEGIN marker
-    walClear(walPath(dbname));
-    walAppend(walPath(dbname), "BEGIN " + std::to_string(currentTxnId_));
     return DBStatus::OK;
 }
 
@@ -13590,13 +13780,19 @@ DBStatus StorageEngine::commitTransaction() {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.erase(currentTxnId_);
     }
-    // Write WAL COMMIT marker
-    walAppend(walPath(txnDB_), "COMMIT " + std::to_string(currentTxnId_));
+    // Write WAL COMMIT marker and flush WAL before clearing state.
+    WALManager* wal = getWAL(txnDB_);
+    if (wal) {
+        Lsn commitLsn = walXactCommit(txnDB_, currentTxnId_);
+        if (commitLsn != INVALID_LSN) {
+            wal->XLogFlush(commitLsn);
+        }
+    }
+
     txnLog_.clear();
     savepoints_.clear();
     txnSubTxnIds_.clear();
     clearCatalogSnapshot();
-    walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
     currentTxnId_ = 0;
@@ -13618,7 +13814,6 @@ DBStatus StorageEngine::rollbackTransaction() {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.erase(currentTxnId_);
     }
-    walAppend(walPath(txnDB_), "ROLLBACK " + std::to_string(currentTxnId_));
 
     // Replay txnLog in reverse order to undo changes
     for (auto it = txnLog_.rbegin(); it != txnLog_.rend(); ++it) {
@@ -13782,11 +13977,16 @@ DBStatus StorageEngine::rollbackTransaction() {
         }
     }
 
+    // Write WAL ABORT marker after undo.
+    WALManager* wal = getWAL(txnDB_);
+    if (wal) {
+        walXactAbort(txnDB_, currentTxnId_);
+    }
+
     txnLog_.clear();
     savepoints_.clear();
     txnSubTxnIds_.clear();
     clearCatalogSnapshot();
-    walClear(walPath(txnDB_));
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
 
@@ -13864,9 +14064,6 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     }
     ofs.close();
 
-    // WAL PREPARE marker
-    walAppend(walPath(txnDB_), "PREPARE " + std::to_string(currentTxnId_) + " " + xid);
-
     // Remove from active set (prepared txns are not active for ReadView)
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
@@ -13876,7 +14073,6 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     // Clear transaction state but KEEP locks (2PC semantics)
     txnLog_.clear();
     savepoints_.clear();
-    walClear(walPath(txnDB_));
 
     {
         std::lock_guard<std::mutex> lock(ssiMutex_);
@@ -13914,7 +14110,11 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     if (savedTxnId == 0 || savedDB.empty()) return DBStatus::INVALID_VALUE;
 
     // WAL COMMIT PREPARED marker
-    walAppend(walPath(savedDB), "COMMIT PREPARED " + std::to_string(savedTxnId) + " " + xid);
+    WALManager* wal = getWAL(savedDB);
+    if (wal) {
+        Lsn commitLsn = walXactCommit(savedDB, savedTxnId);
+        if (commitLsn != INVALID_LSN) wal->XLogFlush(commitLsn);
+    }
 
     // Normal commit logic
     TxnIdGenerator::instance().notifyCommit(savedTxnId);
@@ -13925,7 +14125,6 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
 
     txnLog_.clear();
     savepoints_.clear();
-    walClear(walPath(savedDB));
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
     currentTxnId_ = 0;
@@ -13994,9 +14193,6 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     txnLog_ = std::move(savedLog);
 
     DBStatus res = rollbackTransaction();
-
-    // WAL ROLLBACK PREPARED marker
-    walAppend(walPath(savedDB), "ROLLBACK PREPARED " + std::to_string(savedTxnId) + " " + xid);
 
     std::filesystem::remove(pfile);
     return res;
