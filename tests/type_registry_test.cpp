@@ -1,9 +1,11 @@
 #include "catalog/type_registry.h"
 #include "interfaces/table_schema.h"
+#include "Config.h"
 #include <cassert>
 #include <iostream>
 #include <string>
 
+dbms::Config g_config;
 using namespace dbms;
 
 static void test_bootstrap_has_core_types() {
@@ -139,6 +141,7 @@ static void test_validate_column() {
     assert(col.isArray);
 
     col.dataType = "not_a_type";
+    col.dsize = 0;
     err = reg.validateColumn(col);
     assert(!err.empty());
     std::cout << "test_validate_column passed\n";

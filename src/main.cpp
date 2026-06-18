@@ -2062,7 +2062,7 @@ static bool handleCopy(const string& sql, Session& s) {
             std::string row(data, len);
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (i > 0) csvOut << ",";
-                string val = dbms::StorageEngine::extractColumnValue(row, tbl, i);
+                string val = dbms::StorageEngine::extractColumnValueStatic(row, tbl, i);
                 bool needQuote = (val.find(',') != string::npos || val.find('"') != string::npos || val.find('\n') != string::npos);
                 if (needQuote) {
                     csvOut << '"';
@@ -10608,7 +10608,7 @@ bool execute(const string& rawSql, Session& s) {
             map<string, string> row;
             string rowStr(data, len);
             for (size_t i = 0; i < sourceTbl.len; ++i) {
-                row[sourceTbl.cols[i].dataName] = dbms::StorageEngine::extractColumnValue(rowStr, sourceTbl, i);
+                row[sourceTbl.cols[i].dataName] = dbms::StorageEngine::extractColumnValueStatic(rowStr, sourceTbl, i);
             }
             sourceRows.push_back(std::move(row));
         });
@@ -10877,7 +10877,7 @@ bool execute(const string& rawSql, Session& s) {
                         if (srcTbl.cols[j].dataName == selectCols[i]) { colIdx = j; break; }
                     }
                     if (colIdx < srcTbl.len) {
-                        values[cols[i]] = dbms::StorageEngine::extractColumnValue(row, srcTbl, colIdx);
+                        values[cols[i]] = dbms::StorageEngine::extractColumnValueStatic(row, srcTbl, colIdx);
                     }
                 }
                 auto res = g_engine.insert(s.currentDB, resolvedName, values);
@@ -11875,7 +11875,7 @@ bool execute(const string& rawSql, Session& s) {
                 out << ") VALUES (";
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (i > 0) out << ", ";
-                    string val = dbms::StorageEngine::extractColumnValue(row, tbl, i);
+                    string val = dbms::StorageEngine::extractColumnValueStatic(row, tbl, i);
                     if (val.empty()) {
                         out << "NULL";
                     } else {

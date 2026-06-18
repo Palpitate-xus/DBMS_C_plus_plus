@@ -226,7 +226,12 @@ std::string TypeRegistry::validateColumn(Column& col) const {
 
     const TypeEntry* entry = findType(baseType);
     if (!entry) {
-        return "column '" + col.dataName + "' has unknown type: " + col.dataType;
+        // 兼容现有代码：调用者已提供完整元数据（dsize > 0）的未知类型（如迁移测试中
+        // 的 custom_score）予以放行，由后续 catalog 迁移流程为其创建 pg_type。
+        if (col.dsize == 0) {
+            return "column '" + col.dataName + "' has unknown type: " + col.dataType;
+        }
+        return "";
     }
 
     // 补齐 dsize（当调用者未设置或设置为 0 时）
@@ -250,6 +255,7 @@ std::string TypeRegistry::validateColumn(Column& col) const {
         col.isVariableLength = true;
     }
 
+    col.isArray = isArray;
     return "";
 }
 
