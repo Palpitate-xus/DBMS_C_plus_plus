@@ -43,7 +43,8 @@ public:
     // ------------------------------------------------------------------------
     virtual DBStatus createTable(const std::string& dbName,
                                   const std::string& tableName,
-                                  const TableSchema& schema) = 0;
+                                  const TableSchema& schema,
+                                  std::string* error = nullptr) = 0;
     virtual DBStatus dropTable(const std::string& dbName,
                                 const std::string& tableName) = 0;
     virtual TableSchema getTableSchema(

@@ -43,6 +43,7 @@ SOURCES=(
     src/catalog/oid.cpp
     src/catalog/systables.cpp
     src/catalog/migrate.cpp
+    src/catalog/type_registry.cpp
 )
 
 if [ "$HAS_OPENSSL" -eq 1 ]; then

@@ -2,6 +2,7 @@
 #include "TxnIdGenerator.h"
 #include "Config.h"
 #include "HeapTupleHeader.h"
+#include "type_registry.h"
 #include <cmath>
 
 extern dbms::Config g_config;
@@ -5924,11 +5925,26 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
     return result;
 }
 
-DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl) {
-    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (tableExists(dbname, tbl.tablename)) return DBStatus::TABLE_ALREADY_EXISTS;
+DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl, std::string* error) {
+    if (!databaseExists(dbname)) {
+        if (error) *error = "database not found";
+        return DBStatus::DATABASE_NOT_FOUND;
+    }
+    if (tableExists(dbname, tbl.tablename)) {
+        if (error) *error = "table already exists";
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
 
+    // Wave 0: 通过 TypeRegistry 校验并补齐每列类型元数据
     TableSchema tblWithVersion = tbl;
+    for (size_t i = 0; i < tblWithVersion.len; ++i) {
+        std::string typeErr = TypeRegistry::instance().validateColumn(tblWithVersion.cols[i]);
+        if (!typeErr.empty()) {
+            if (error) *error = typeErr;
+            return DBStatus::INVALID_ARGUMENT;
+        }
+    }
+
     if (tblWithVersion.formatVersion == 0) {
         tblWithVersion.formatVersion = 2;  // Default to PostgreSQL 8KB format
     }
@@ -6007,10 +6023,11 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
 
 DBStatus StorageEngine::createTable(const std::string& dbname,
                                      const std::string& tablename,
-                                     const TableSchema& tbl) {
+                                     const TableSchema& tbl,
+                                     std::string* error) {
     TableSchema t = tbl;
     t.tablename = tablename;
-    return createTable(dbname, t);
+    return createTable(dbname, t, error);
 }
 
 DBStatus StorageEngine::dropTable(const std::string& dbname,

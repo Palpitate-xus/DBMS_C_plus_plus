@@ -116,8 +116,8 @@ public:
     std::vector<std::string> getDatabaseNames() const;
 
     // Table operations
-    DBStatus createTable(const std::string& dbname, const TableSchema& tbl);
-    DBStatus createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl);
+    DBStatus createTable(const std::string& dbname, const TableSchema& tbl, std::string* error = nullptr);
+    DBStatus createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl, std::string* error = nullptr) override;
     DBStatus dropTable(const std::string& dbname, const std::string& tablename);
     DBStatus truncateTable(const std::string& dbname, const std::string& tablename);
     DBStatus alterTableAddColumn(const std::string& dbname, const std::string& tablename,

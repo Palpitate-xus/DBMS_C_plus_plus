@@ -41,6 +41,7 @@ SOURCES=(
     src/common/Config.cpp
     src/common/GUC.cpp
     src/parser/parser.cpp
+    src/catalog/type_registry.cpp
 )
 
 # 选择 TLS 实现
