@@ -674,9 +674,11 @@ public:
     static int64_t parseInt(const std::string& s);
     static bool stringToBuffer(const std::string& src, char* dst, size_t len);
     // extractColumnValue with optional dbname for TOAST resolution
-    static std::string extractColumnValue(const std::string& rowBuffer,
-                                           const TableSchema& tbl, size_t colIdx,
-                                           const std::string& dbname = "");
+    static std::string extractColumnValueStatic(const std::string& rowBuffer,
+                                                 const TableSchema& tbl, size_t colIdx);
+    std::string extractColumnValue(const std::string& rowBuffer,
+                                   const TableSchema& tbl, size_t colIdx,
+                                   const std::string& dbname = "");
 
     // RID encode/decode (public for external use)
     static int64_t encodeRid(uint32_t pageId, uint16_t slotId);
@@ -888,6 +890,7 @@ public:
 
     // TOAST (The Oversized-Attribute Storage Technique) for large values
     static constexpr size_t TOAST_THRESHOLD_BASE = 1000; // bytes for 4KB pages
+    static constexpr size_t TOAST_CHUNK_SIZE = 2048;     // chunk size for proper TOAST relation
     static constexpr const char* TOAST_PREFIX = "__TOAST__";
     // Dynamic threshold: larger pages can hold larger inline values
     static size_t toastThreshold(uint32_t formatVersion) {
@@ -896,9 +899,11 @@ public:
     }
     static std::filesystem::path toastDir(const std::string& dbname, const std::string& tablename);
     static std::filesystem::path toastMetaPath(const std::string& dbname, const std::string& tablename);
+    static std::filesystem::path toastDataPath(const std::string& dbname, const std::string& tablename);
+    static std::filesystem::path toastIndexPath(const std::string& dbname, const std::string& tablename);
     uint64_t allocToastId(const std::string& dbname, const std::string& tablename);
     void writeToast(const std::string& dbname, const std::string& tablename, uint64_t toastId, const std::string& data);
-    static std::string readToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
+    std::string readToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
     void deleteToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
     void deleteRowToast(const std::string& dbname, const std::string& tablename, int64_t rid);
     // Parse toast ID from marker string __TOAST__<id>
@@ -910,6 +915,10 @@ public:
 
     // VACUUM orphaned TOAST files: remove toast entries no longer referenced by any row
     size_t vacuumToast(const std::string& dbname, const std::string& tablename);
+
+    // Resolve TOAST markers in a row buffer back to their actual values.
+    std::string resolveToastValues(const std::string& dbname, const std::string& tablename,
+                                   const std::string& rowBuffer, const TableSchema& tbl);
 
     // ========================================================================
     // Tablespace management
@@ -982,6 +991,13 @@ private:
     std::filesystem::path indexPath(const std::string& dbname, const std::string& tablename) const;
     mutable std::map<std::string, std::unique_ptr<BPTree>> pkIndexCache_;
     void closeAllIndexes();
+
+    // TOAST relation + index caches
+    mutable std::map<std::string, std::unique_ptr<PageAllocator>> toastPageAllocators_;
+    mutable std::map<std::string, std::unique_ptr<BPTree>> toastIndexes_;
+    PageAllocator* getToastPageAllocator(const std::string& dbname, const std::string& tablename) const;
+    BPTree* getToastIndex(const std::string& dbname, const std::string& tablename) const;
+    void closeAllToast();
 
     // Secondary index helpers
     std::filesystem::path secondaryIndexPath(const std::string& dbname,

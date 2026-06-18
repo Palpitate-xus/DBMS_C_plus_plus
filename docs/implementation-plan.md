@@ -199,6 +199,14 @@
   - 新增 `StorageEngine::tableNumPages()` 辅助方法。
   - 新增测试：`tests/fillfactor_test.cpp`。
 
+- **TOAST（3.11）**：
+  - 实现真正的 TOAST 关系：每个带变长列的表创建 `<tablename>.toast.dt`（heap relation）和 `<tablename>.toast.idx`（B+ tree index）。
+  - 大值按 `TOAST_CHUNK_SIZE`（2KB）分块存储；每块行格式为 `[toastId:8][chunkSeq:4][chunkData]`。
+  - 索引键为 `T<toastId>:<chunkSeq>`，值为主表 RID；read/delete 按 chunk_seq 顺序通过索引定位块。
+  - `createTable`/`dropTable` 自动创建/删除 TOAST 关系与索引；`deleteRowToast` 删除所有块。
+  - `query` 与 `TableScanOp`/`IndexScanOp` 在返回行前调用 `resolveToastValues()` 将 `__TOAST__<id>` 标记替换回原始值。
+  - 新增测试：`tests/toast_test.cpp`。
+
 - **HeapTupleHeader**：新增 `src/storage/HeapTupleHeader.h`，实现 PostgreSQL 风格行头（t_xmin/t_xmax/t_ctid/t_infomask/t_infomask2/t_hoff、null bitmap、hint bits、ctid 读写、对齐计算）。formatVersion ≥ 2 的表启用新 header，formatVersion 0/1 保持旧 16 字节 [creatorTxnId:8][rollbackPtr:8] 兼容。
 - **Row header 抽象**：`src/commands/TableManage.cpp` 新增 `usesHeapTupleHeader`、`buildHeapTupleHeader`、`stripRowHeader`、`replaceRowData` 等辅助函数；`TableSchema::rowSize()` 按 formatVersion 动态计算 header 大小；insert/update/delete/rollback 均按 header 类型处理。
 - **xmin/xmax 可见性**：`ReadView::isVisible()` 新增 HeapTupleHeader 重载，结合 hint bits 与 CLOG 判断事务状态；`forEachRow`/`readRowByRid` 按 t_hoff 剥离 header 后返回数据。

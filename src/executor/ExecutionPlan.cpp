@@ -19,7 +19,7 @@ static std::string formatRow(const std::string& rowBuffer, const TableSchema& tb
         const Column& col = tbl.cols[i];
         if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
             continue;
-        std::string val = StorageEngine::extractColumnValue(rowBuffer, tbl, i);
+        std::string val = StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
         if (val.empty() && !col.isNull) rowStr += "NULL ";
         else rowStr += val + ' ';
     }
@@ -58,7 +58,7 @@ static bool evalCondRaw(const StorageEngine::Condition& cond,
     for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci) {}
     if (ci >= tbl.len) return false;
 
-    std::string val = StorageEngine::extractColumnValue(rowBuffer, tbl, ci);
+    std::string val = StorageEngine::extractColumnValueStatic(rowBuffer, tbl, ci);
     const Column& col = tbl.cols[ci];
     if (col.dataType == "char" || col.isVariableLength) {
         if (cond.op == "<"  && !(val <  cond.value)) return false;
@@ -129,8 +129,9 @@ bool TableScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     engine_->forEachRow(dbname_, tablename_,
         [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
-            rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId),
-                               std::string(data, len));
+            std::string row(data, len);
+            row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+            rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
         });
     pos_ = 0;
     return true;
@@ -198,7 +199,7 @@ bool IndexScanOp::next(std::string& outRow) {
         }
     });
     if (!ok) { ++pos_; return next(outRow); }
-    outRow = std::move(row);
+    outRow = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
     ++pos_;
     return true;
 }
@@ -390,7 +391,7 @@ bool SortOp::open() {
         std::vector<std::pair<std::string, Item>> items;
         const Column& scol = tbl_.cols[sortIdx];
         for (auto& r : buffer_) {
-            std::string val = StorageEngine::extractColumnValue(r, tbl_, sortIdx);
+            std::string val = StorageEngine::extractColumnValueStatic(r, tbl_, sortIdx);
             Item it{"", 0, {}, 0.0};
             if (scol.dataType == "char" || scol.isVariableLength) {
                 it.s = val;
@@ -574,7 +575,7 @@ static std::string extractJoinKey(const std::string& row, const TableSchema& tbl
         if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
     }
     if (colIdx >= tbl.len) return "";
-    return StorageEngine::extractColumnValue(row, tbl, colIdx);
+    return StorageEngine::extractColumnValueStatic(row, tbl, colIdx);
 }
 
 // ========================================================================

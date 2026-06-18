@@ -3682,9 +3682,8 @@ BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
     return nullptr;
 }
 
-std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
-                                               const TableSchema& tbl, size_t colIdx,
-                                               const std::string& dbname) {
+std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
+                                                     const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
     const Column& col = tbl.cols[colIdx];
 
@@ -3698,13 +3697,7 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         std::memcpy(&dataOffset, rowBuffer.data() + arrPos, sizeof(uint16_t));
         std::memcpy(&dataLen, rowBuffer.data() + arrPos + 2, sizeof(uint16_t));
         if (dataOffset + dataLen > rowBuffer.size()) return "";
-        std::string val = rowBuffer.substr(dataOffset, dataLen);
-        // TOAST: if value is a toast marker, read from external storage
-        uint64_t toastId = 0;
-        if (!dbname.empty() && parseToastMarker(val, toastId)) {
-            return readToast(dbname, tbl.tablename, toastId);
-        }
-        return val;
+        return rowBuffer.substr(dataOffset, dataLen);
     }
 
     // Fixed-length column
@@ -3793,6 +3786,19 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
     }
 }
 
+std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
+                                               const TableSchema& tbl, size_t colIdx,
+                                               const std::string& dbname) {
+    std::string val = extractColumnValueStatic(rowBuffer, tbl, colIdx);
+    if (!dbname.empty() && tbl.cols[colIdx].isVariableLength) {
+        uint64_t toastId = 0;
+        if (parseToastMarker(val, toastId)) {
+            return readToast(dbname, tbl.tablename, toastId);
+        }
+    }
+    return val;
+}
+
 std::string StorageEngine::buildCompositeKey(const std::string& rowBuffer,
                                                const TableSchema& tbl,
                                                const std::vector<std::string>& colNames) {
@@ -3804,7 +3810,7 @@ std::string StorageEngine::buildCompositeKey(const std::string& rowBuffer,
         }
         if (colIdx < tbl.len) {
             if (!key.empty()) key += '\x01';
-            key += extractColumnValue(rowBuffer, tbl, colIdx);
+            key += extractColumnValueStatic(rowBuffer, tbl, colIdx);
         }
     }
     return key;
@@ -3969,7 +3975,7 @@ std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
     std::string key;
     if (!pkColIndices.empty()) {
         for (size_t idx : pkColIndices) {
-            if (idx < len) key += StorageEngine::extractColumnValue(rowBuffer, *this, idx) + "\x01";
+            if (idx < len) key += StorageEngine::extractColumnValueStatic(rowBuffer, *this, idx) + "\x01";
         }
     } else {
         // Collect all columns marked as primary key (composite PK support)
@@ -3977,7 +3983,7 @@ std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
         for (size_t i = 0; i < len; ++i) {
             if (cols[i].isPrimaryKey) {
                 if (!first) key += "\x01";
-                key += StorageEngine::extractColumnValue(rowBuffer, *this, i);
+                key += StorageEngine::extractColumnValueStatic(rowBuffer, *this, i);
                 first = false;
             }
         }
@@ -5656,6 +5662,48 @@ std::filesystem::path StorageEngine::toastMetaPath(const std::string& dbname,
     return std::filesystem::path(dbname) / (tablename + ".toastmeta");
 }
 
+std::filesystem::path StorageEngine::toastDataPath(const std::string& dbname,
+                                                   const std::string& tablename) {
+    return std::filesystem::path(dbname) / (tablename + ".toast.dt");
+}
+
+std::filesystem::path StorageEngine::toastIndexPath(const std::string& dbname,
+                                                    const std::string& tablename) {
+    return std::filesystem::path(dbname) / (tablename + ".toast.idx");
+}
+
+PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
+                                                    const std::string& tablename) const {
+    std::string key = dbname + ":" + tablename;
+    auto it = toastPageAllocators_.find(key);
+    if (it != toastPageAllocators_.end()) return it->second.get();
+    auto pa = std::make_unique<PageAllocator>(toastDataPath(dbname, tablename).string(),
+                                              /*rowSize=*/0, // variable-length rows
+                                              /*pageSize=*/8192,
+                                              /*formatVersion=*/0); // legacy, no heap header
+    pa->open();
+    PageAllocator* ptr = pa.get();
+    toastPageAllocators_[key] = std::move(pa);
+    return ptr;
+}
+
+BPTree* StorageEngine::getToastIndex(const std::string& dbname,
+                                     const std::string& tablename) const {
+    std::string key = dbname + ":" + tablename;
+    auto it = toastIndexes_.find(key);
+    if (it != toastIndexes_.end()) return it->second.get();
+    auto idx = std::make_unique<BPTree>(toastIndexPath(dbname, tablename).string());
+    idx->open();
+    BPTree* ptr = idx.get();
+    toastIndexes_[key] = std::move(idx);
+    return ptr;
+}
+
+void StorageEngine::closeAllToast() {
+    toastPageAllocators_.clear();
+    toastIndexes_.clear();
+}
+
 uint64_t StorageEngine::allocToastId(const std::string& dbname, const std::string& tablename) {
     auto metaPath = toastMetaPath(dbname, tablename);
     uint64_t nextId = 1;
@@ -5670,36 +5718,133 @@ uint64_t StorageEngine::allocToastId(const std::string& dbname, const std::strin
     return allocated;
 }
 
+static std::string toastIndexKey(uint64_t toastId, uint32_t seq) {
+    return "T" + std::to_string(toastId) + ":" + std::to_string(seq);
+}
+
 void StorageEngine::writeToast(const std::string& dbname, const std::string& tablename,
                                 uint64_t toastId, const std::string& data) {
-    auto tdir = toastDir(dbname, tablename);
-    if (!std::filesystem::exists(tdir)) {
-        std::filesystem::create_directories(tdir);
+    PageAllocator* pa = getToastPageAllocator(dbname, tablename);
+    BPTree* idx = getToastIndex(dbname, tablename);
+    if (!pa || !idx) return;
+
+    size_t offset = 0;
+    uint32_t seq = 0;
+    const size_t chunkSize = TOAST_CHUNK_SIZE;
+    while (offset < data.size()) {
+        size_t len = std::min(chunkSize, data.size() - offset);
+        std::string row;
+        row.reserve(sizeof(uint64_t) + sizeof(uint32_t) + len);
+        row.append(reinterpret_cast<const char*>(&toastId), sizeof(toastId));
+        row.append(reinterpret_cast<const char*>(&seq), sizeof(seq));
+        row.append(data.data() + offset, len);
+
+        bool inserted = false;
+        uint32_t numPages = pa->numPages();
+        uint16_t slotId = 0;
+        for (uint32_t pid = (numPages == 0 ? 0 : 1); pid < numPages && !inserted; ++pid) {
+            lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
+            char* buf = pa->fetchPage(pid);
+            PageWrapper page(buf, pa->pageSize(), 0);
+            if (page.canFit(row.size())) {
+                if (page.insert(row.data(), row.size(), slotId)) {
+                    pa->markDirty(pid);
+                    int64_t rid = encodeRid(pid, slotId);
+                    idx->insert(toastIndexKey(toastId, seq), rid);
+                    inserted = true;
+                }
+            }
+            pa->unpinPage(pid);
+            lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+        }
+        if (!inserted) {
+            uint32_t pid = pa->allocPage();
+            lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
+            char* buf = pa->fetchPage(pid);
+            PageWrapper page(buf, pa->pageSize(), 0);
+            if (page.insert(row.data(), row.size(), slotId)) {
+                pa->markDirty(pid);
+                int64_t rid = encodeRid(pid, slotId);
+                idx->insert(toastIndexKey(toastId, seq), rid);
+            }
+            pa->unpinPage(pid);
+            lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+        }
+
+        offset += len;
+        ++seq;
     }
-    auto path = tdir / (std::to_string(toastId) + ".dat");
-    std::ofstream ofs(path, std::ios::binary);
-    if (!ofs) return;
-    uint32_t len = static_cast<uint32_t>(data.size());
-    ofs.write(reinterpret_cast<const char*>(&len), sizeof(len));
-    ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
 }
 
 std::string StorageEngine::readToast(const std::string& dbname, const std::string& tablename,
                                       uint64_t toastId) {
-    auto path = toastDir(dbname, tablename) / (std::to_string(toastId) + ".dat");
-    std::ifstream ifs(path, std::ios::binary);
-    if (!ifs) return "";
-    uint32_t len = 0;
-    ifs.read(reinterpret_cast<char*>(&len), sizeof(len));
-    std::string data(len, '\0');
-    ifs.read(data.data(), static_cast<std::streamsize>(len));
-    return data;
+    PageAllocator* pa = getToastPageAllocator(dbname, tablename);
+    BPTree* idx = getToastIndex(dbname, tablename);
+    if (!pa || !idx) return "";
+
+    std::string result;
+    for (uint32_t seq = 0;; ++seq) {
+        int64_t rid = -1;
+        if (!idx->search(toastIndexKey(toastId, seq), rid)) break;
+        uint32_t pid = 0;
+        uint16_t slotId = 0;
+        decodeRid(rid, pid, slotId);
+
+        lockManager_.pageLockShared(dbname, tablename + ".toast", pid);
+        char* buf = pa->fetchPage(pid);
+        if (!buf) {
+            lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+            break;
+        }
+        PageWrapper page(buf, pa->pageSize(), 0);
+        const char* row = nullptr;
+        size_t rowLen = 0;
+        if (!page.read(slotId, row, rowLen) || rowLen < sizeof(uint64_t) + sizeof(uint32_t)) {
+            pa->unpinPage(pid);
+            lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+            break;
+        }
+        uint64_t storedToastId = 0;
+        uint32_t storedSeq = 0;
+        std::memcpy(&storedToastId, row, sizeof(storedToastId));
+        std::memcpy(&storedSeq, row + sizeof(storedToastId), sizeof(storedSeq));
+        if (storedToastId != toastId || storedSeq != seq) {
+            pa->unpinPage(pid);
+            lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+            break;
+        }
+        result.append(row + sizeof(storedToastId) + sizeof(storedSeq),
+                      rowLen - sizeof(storedToastId) - sizeof(storedSeq));
+        pa->unpinPage(pid);
+        lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+    }
+    return result;
 }
 
 void StorageEngine::deleteToast(const std::string& dbname, const std::string& tablename,
                                  uint64_t toastId) {
-    auto path = toastDir(dbname, tablename) / (std::to_string(toastId) + ".dat");
-    if (std::filesystem::exists(path)) std::filesystem::remove(path);
+    PageAllocator* pa = getToastPageAllocator(dbname, tablename);
+    BPTree* idx = getToastIndex(dbname, tablename);
+    if (!pa || !idx) return;
+
+    for (uint32_t seq = 0;; ++seq) {
+        std::string key = toastIndexKey(toastId, seq);
+        int64_t rid = -1;
+        if (!idx->search(key, rid)) break;
+        idx->remove(key);
+        uint32_t pid = 0;
+        uint16_t slotId = 0;
+        decodeRid(rid, pid, slotId);
+        lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
+        char* buf = pa->fetchPage(pid);
+        if (buf) {
+            PageWrapper page(buf, pa->pageSize(), 0);
+            page.remove(slotId);
+            pa->markDirty(pid);
+        }
+        pa->unpinPage(pid);
+        lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+    }
 }
 
 bool StorageEngine::parseToastMarker(const std::string& val, uint64_t& toastId) {
@@ -5748,6 +5893,37 @@ void StorageEngine::prepareToastValues(const std::string& dbname, const std::str
     }
 }
 
+std::string StorageEngine::resolveToastValues(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& rowBuffer,
+                                              const TableSchema& tbl) {
+    std::string result = rowBuffer;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (!tbl.cols[i].isVariableLength) continue;
+        std::string val = extractColumnValueStatic(result, tbl, i);
+        uint64_t toastId = 0;
+        if (parseToastMarker(val, toastId)) {
+            std::string resolved = readToast(dbname, tablename, toastId);
+            if (!resolved.empty()) {
+                // Replace the marker in the row buffer with the resolved value.
+                size_t varIdx = tbl.getVarColIndex(i);
+                size_t fixedSize = tbl.fixedDataSize();
+                size_t arrPos = fixedSize + varIdx * 4;
+                uint16_t dataOffset = 0;
+                std::memcpy(&dataOffset, result.data() + arrPos, sizeof(uint16_t));
+                std::string marker = result.substr(dataOffset, val.size());
+                if (marker == val) {
+                    result.replace(dataOffset, val.size(), resolved);
+                    // Update length in var offset array.
+                    uint16_t newLen = static_cast<uint16_t>(resolved.size());
+                    std::memcpy(result.data() + arrPos + 2, &newLen, sizeof(uint16_t));
+                }
+            }
+        }
+    }
+    return result;
+}
+
 DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (tableExists(dbname, tbl.tablename)) return DBStatus::TABLE_ALREADY_EXISTS;
@@ -5791,6 +5967,23 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     }
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, tbl.tablename);
+    // Create TOAST relation and index if table has variable-length columns
+    bool hasVarLen = false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].isVariableLength) { hasVarLen = true; break; }
+    }
+    if (hasVarLen) {
+        auto toastPa = std::make_unique<PageAllocator>(
+            toastDataPath(dbname, tblWithVersion.tablename).string(),
+            /*rowSize=*/0, /*pageSize=*/8192, /*formatVersion=*/0);
+        toastPa->open(); toastPa->close();
+        BPTree toastIdx(toastIndexPath(dbname, tblWithVersion.tablename).string());
+        toastIdx.open();
+        toastIdx.close();
+        // Ensure toast metadata file exists.
+        allocToastId(dbname, tblWithVersion.tablename);
+    }
+
     // Create B+ tree index if table has primary key
     if (tbl.hasPrimaryKey()) {
         BPTree idx(indexPath(dbname, tbl.tablename));
@@ -5831,12 +6024,14 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(fsmPath(dbname, tablename));
     std::filesystem::remove(vmPath(dbname, tablename));
     removeSeq(dbname, tablename);
-    // Remove TOAST data
+    // Remove TOAST data (legacy directory + proper relation/index)
     auto tdir = toastDir(dbname, tablename);
     if (std::filesystem::exists(tdir)) {
         std::filesystem::remove_all(tdir);
     }
     std::filesystem::remove(toastMetaPath(dbname, tablename));
+    std::filesystem::remove(toastDataPath(dbname, tablename));
+    std::filesystem::remove(toastIndexPath(dbname, tablename));
 
     // Remove from cache
     std::string key = dbname + "/" + tablename;
@@ -5845,6 +6040,8 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     fsmCache_.erase(key);
     vmCache_.erase(key);
     secondaryIndexCache_.erase(key);
+    toastPageAllocators_.erase(key);
+    toastIndexes_.erase(key);
 
     auto names = getTableNames(dbname);
     {
@@ -7078,10 +7275,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             size_t s2i = findCol(parts[2]);
             size_t e2i = findCol(parts[3]);
             if (s1i < tbl.len && e1i < tbl.len && s2i < tbl.len && e2i < tbl.len) {
-                std::string s1 = extractColumnValue(rowBuffer, tbl, s1i);
-                std::string e1 = extractColumnValue(rowBuffer, tbl, e1i);
-                std::string s2 = extractColumnValue(rowBuffer, tbl, s2i);
-                std::string e2 = extractColumnValue(rowBuffer, tbl, e2i);
+                std::string s1 = extractColumnValueStatic(rowBuffer, tbl, s1i);
+                std::string e1 = extractColumnValueStatic(rowBuffer, tbl, e1i);
+                std::string s2 = extractColumnValueStatic(rowBuffer, tbl, s2i);
+                std::string e2 = extractColumnValueStatic(rowBuffer, tbl, e2i);
                 return (s1 < e2) && (s2 < e1);
             }
         }
@@ -7092,7 +7289,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci) {}
     if (ci >= tbl.len) return false;
 
-    std::string val = extractColumnValue(rowBuffer, tbl, ci);
+    std::string val = extractColumnValueStatic(rowBuffer, tbl, ci);
     const Column& col = tbl.cols[ci];
     if (cond.op == "isnull") return val.empty();
     if (cond.op == "isnotnull") return !val.empty();
@@ -10033,6 +10230,12 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         }
     }
 
+    // Resolve TOAST markers in matched rows so downstream formatting sees
+    // actual values instead of __TOAST__ markers.
+    for (auto& mr : matchRows) {
+        mr.second = resolveToastValues(dbname, tablename, mr.second, tbl);
+    }
+
     // Row-level locks within transaction
     if (inTransaction_) {
         std::vector<std::pair<int64_t, std::string>> lockedRows;
@@ -10314,8 +10517,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (arg.size() >= 2 && ((arg.front() == '\'' && arg.back() == '\'') || (arg.front() == '"' && arg.back() == '"')))
             return arg.substr(1, arg.size() - 2);
         for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == arg)
-                return StorageEngine::extractColumnValue(rowBuffer, tbl, i);
+            if (tbl.cols[i].dataName == arg) {
+                if (engine && !dbname.empty())
+                    return engine->extractColumnValue(rowBuffer, tbl, i, dbname);
+                return StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
+            }
         }
         return arg;
     };
@@ -11154,7 +11360,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             // Correlated subquery: replace outer column refs with their literal values
             for (size_t i = 0; i < tbl.len; ++i) {
                 const std::string& colName = tbl.cols[i].dataName;
-                std::string colVal = StorageEngine::extractColumnValue(rowBuffer, tbl, i);
+                std::string colVal;
+                if (engine && !dbname.empty())
+                    colVal = engine->extractColumnValue(rowBuffer, tbl, i, dbname);
+                else
+                    colVal = StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
                 // Quote string-type values
                 bool needQuote = (tbl.cols[i].dataType == "char" ||
                                   tbl.cols[i].dataType == "varchar" ||
