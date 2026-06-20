@@ -355,6 +355,40 @@ struct FunctionCallExpr : public Expr {
     std::string toString() const override;
 };
 
+// CAST(expr AS type)
+struct CastExpr : public Expr {
+    ExprPtr operand;
+    std::string typeName;
+    std::vector<std::string> typeMods;
+    CastExpr() { type = ExprType::CastExpr; }
+    std::string toString() const override {
+        return "CAST(" + (operand ? operand->toString() : "?") + " AS " + typeName + ")";
+    }
+};
+
+// CASE [expr] WHEN ... THEN ... ELSE ... END
+struct CaseExpr : public Expr {
+    ExprPtr switchExpr;                     // 简单 CASE 的判别式；搜索 CASE 为空
+    std::vector<std::pair<ExprPtr, ExprPtr>> whenClauses; // (condition, result)
+    ExprPtr elseExpr;
+    CaseExpr() { type = ExprType::CaseExpr; }
+    std::string toString() const override { return "CASE"; }
+};
+
+// ARRAY[expr, ...]
+struct ArrayExpr : public Expr {
+    std::vector<ExprPtr> elements;
+    ArrayExpr() { type = ExprType::ArrayExpr; }
+    std::string toString() const override { return "ARRAY[...]"; }
+};
+
+// ROW(expr, ...)
+struct RowExpr : public Expr {
+    std::vector<ExprPtr> elements;
+    RowExpr() { type = ExprType::RowExpr; }
+    std::string toString() const override { return "ROW(...)"; }
+};
+
 // ============================================================================
 // 语句节点基类
 // ============================================================================

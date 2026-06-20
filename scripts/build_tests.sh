@@ -44,6 +44,7 @@ SOURCES=(
     src/catalog/systables.cpp
     src/catalog/migrate.cpp
     src/catalog/type_registry.cpp
+    src/expression/ExprEvaluator.cpp
 )
 
 if [ "$HAS_OPENSSL" -eq 1 ]; then
@@ -69,6 +70,7 @@ INCLUDES=(
     -Isrc/interfaces
     -Isrc/parser
     -Isrc/catalog
+    -Isrc/expression
 )
 
 CXXFLAGS="-std=c++17 -O2 -pthread -Wall -Wextra ${TLS_DEFS}"

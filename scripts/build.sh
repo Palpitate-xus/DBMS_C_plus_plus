@@ -42,6 +42,7 @@ SOURCES=(
     src/common/GUC.cpp
     src/parser/parser.cpp
     src/catalog/type_registry.cpp
+    src/expression/ExprEvaluator.cpp
 )
 
 # 选择 TLS 实现
@@ -69,6 +70,7 @@ INCLUDES=(
     -Isrc/interfaces
     -Isrc/parser
     -Isrc/catalog
+    -Isrc/expression
 )
 
 # 编译选项

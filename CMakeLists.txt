@@ -19,6 +19,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/interfaces
     ${CMAKE_SOURCE_DIR}/src/executor
     ${CMAKE_SOURCE_DIR}/src/parser
+    ${CMAKE_SOURCE_DIR}/src/expression
 )
 
 # 源文件列表 (TLSWrapper 在下方根据 OpenSSL 可用性条件添加)
@@ -46,6 +47,7 @@ set(DBMS_SOURCES
     src/common/GUC.cpp
     src/parser/parser.cpp
     src/catalog/type_registry.cpp
+    src/expression/ExprEvaluator.cpp
 )
 
 add_executable(dbms_main ${DBMS_SOURCES})
