@@ -13358,6 +13358,21 @@ Lsn StorageEngine::walCheckpoint(const std::string& dbname, uint64_t nextXid) {
                            inTransaction_ ? currentTxnId_ : 0, payload);
 }
 
+Lsn StorageEngine::walCatalogChange(const std::string& dbname, uint8_t info,
+                                    const std::string& objType,
+                                    const std::string& objName) {
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return INVALID_LSN;
+    std::vector<char> payload;
+    uint8_t typeLen = static_cast<uint8_t>(std::min<size_t>(objType.size(), 255));
+    uint8_t nameLen = static_cast<uint8_t>(std::min<size_t>(objName.size(), 255));
+    payload.push_back(typeLen);
+    payload.insert(payload.end(), objType.data(), objType.data() + typeLen);
+    payload.push_back(nameLen);
+    payload.insert(payload.end(), objName.data(), objName.data() + nameLen);
+    return wal->XLogInsert(RM_CATALOG_ID, info, inTransaction_ ? currentTxnId_ : 0, payload);
+}
+
 void StorageEngine::markPageDirtyAndLsn(PageAllocator* pa, uint32_t pageId, Lsn lsn,
                                         uint32_t formatVersion) {
     if (!pa || lsn == INVALID_LSN) return;

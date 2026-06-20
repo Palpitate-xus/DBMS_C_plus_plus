@@ -43,6 +43,7 @@ constexpr uint8_t RM_HEAP_ID     = 10;
 constexpr uint8_t RM_XACT_ID     = 11;
 constexpr uint8_t RM_SMGR_ID     = 12;
 constexpr uint8_t RM_CHECKPOINT_ID = 13;
+constexpr uint8_t RM_CATALOG_ID    = 14; // DDL catalog changes
 
 // XACT info flags
 constexpr uint8_t XLOG_XACT_COMMIT  = 0x00;
@@ -65,6 +66,11 @@ constexpr uint8_t XLOG_SMGR_TRUNCATE   = 0x01;
 // CHECKPOINT info flags
 constexpr uint8_t XLOG_CHECKPOINT_SHUTDOWN = 0x00;
 constexpr uint8_t XLOG_CHECKPOINT_ONLINE   = 0x01;
+
+// CATALOG info flags
+constexpr uint8_t XLOG_CATALOG_CREATE = 0x00;
+constexpr uint8_t XLOG_CATALOG_DROP   = 0x01;
+constexpr uint8_t XLOG_CATALOG_UPDATE = 0x02;
 
 #pragma pack(push, 1)
 struct XLogRecHeader {

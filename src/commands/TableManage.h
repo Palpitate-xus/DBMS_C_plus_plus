@@ -841,6 +841,13 @@ public:
     // CommitLog access (lazy init)
     CommitLog* getCommitLog(const std::string& dbname) const;
 
+    // DDL / catalog WAL record (Phase 4 Wave 0.4 skeleton)
+    Lsn walCatalogChange(const std::string& dbname, uint8_t info,
+                         const std::string& objType, const std::string& objName);
+
+    // Test/debug access to per-database WAL manager.
+    WALManager* getWAL(const std::string& dbname) const;
+
 private:
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path paramsPath(const std::string& dbname, const std::string& tablename) const;
@@ -961,7 +968,6 @@ private:
 
     // WAL manager per database
     mutable std::unordered_map<std::string, std::unique_ptr<WALManager>> walManagers_;
-    WALManager* getWAL(const std::string& dbname) const;
     void closeAllWALs();
 
     // Per-database checkpoint LSN. Pages with pd_lsn <= this value trigger

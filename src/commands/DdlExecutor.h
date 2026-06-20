@@ -19,6 +19,7 @@
 
 #include "parser/ast.h"
 #include "commands/TableManage.h"
+#include "commands/DdlTransaction.h"
 #include "Session.h"
 #include <string>
 

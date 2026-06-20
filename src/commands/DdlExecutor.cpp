@@ -3,6 +3,7 @@
 // ============================================================================
 
 #include "commands/DdlExecutor.h"
+#include "commands/DdlTransaction.h"
 #include "parser/parser.h"
 #include "common/logs.h"
 #include "permissions.h"
@@ -158,7 +159,13 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     std::string name = stmt->objectName;
     if (name.empty()) {
         std::cout << "SQL syntax error: CREATE SCHEMA name" << std::endl;
@@ -169,6 +176,8 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
         std::cout << "CREATE SCHEMA failed" << std::endl;
         return true;
     }
+    txn.recordCreate(DdlObjectKind::Schema, name);
+    txn.commit();
     std::cout << "CREATE SCHEMA succeeded" << std::endl;
     return false;
 }
@@ -177,17 +186,25 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP SCHEMA name" << std::endl;
         return true;
     }
     std::string name = stmt->objectNames.front();
+    txn.recordDrop(DdlObjectKind::Schema, name);
     DBStatus res = g_engine.dropSchema(s.currentDB, name, stmt->cascade);
     if (res != DBStatus::OK) {
         std::cout << "DROP SCHEMA failed" << std::endl;
         return true;
     }
+    txn.commit();
     std::cout << "DROP SCHEMA succeeded" << std::endl;
     return false;
 }
@@ -338,7 +355,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
 
     std::string tname = resolveTableName(s, stmt->tableName);
     if (g_engine.tableExists(s.currentDB, tname) || g_engine.viewExists(s.currentDB, tname)) {
@@ -403,6 +425,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         return true;
     }
     g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname, s.username);
+    txn.recordCreate(DdlObjectKind::Table, tname);
+    txn.commit();
     std::cout << "CREATE TABLE succeeded" << std::endl;
     return false;
 }
@@ -411,7 +435,13 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP TABLE name" << std::endl;
         return true;
@@ -425,11 +455,13 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cout << "Table " << tname << " not found" << std::endl;
         return true;
     }
+    txn.recordDrop(DdlObjectKind::Table, tname);
     DBStatus res = g_engine.dropTable(s.currentDB, tname);
     if (res != DBStatus::OK) {
         std::cout << "DROP TABLE failed" << std::endl;
         return true;
     }
+    txn.commit();
     std::cout << "DROP TABLE succeeded" << std::endl;
     return false;
 }
@@ -442,7 +474,12 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
 
     std::string tname = resolveTableName(s, stmt->tableName);
     if (!g_engine.tableExists(s.currentDB, tname)) {
@@ -491,6 +528,9 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         std::cout << "CREATE INDEX failed" << std::endl;
         return true;
     }
+    std::string idxName = stmt->indexName.empty() ? (tname + "_idx") : stmt->indexName;
+    txn.recordCreate(DdlObjectKind::Index, idxName, tname);
+    txn.commit();
     std::cout << "CREATE INDEX succeeded" << std::endl;
     return false;
 }
@@ -503,7 +543,13 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     std::string seqname = stmt->objectName;
     int64_t start = 1, increment = 1;
     auto it = stmt->options.find("start");
@@ -515,6 +561,8 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         std::cout << "CREATE SEQUENCE failed" << std::endl;
         return true;
     }
+    txn.recordCreate(DdlObjectKind::Sequence, seqname);
+    txn.commit();
     std::cout << "CREATE SEQUENCE succeeded" << std::endl;
     return false;
 }
@@ -523,17 +571,25 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP SEQUENCE name" << std::endl;
         return true;
     }
     std::string seqname = stmt->objectNames.front();
+    txn.recordDrop(DdlObjectKind::Sequence, seqname);
     DBStatus res = g_engine.dropSequence(s.currentDB, seqname);
     if (res != DBStatus::OK) {
         std::cout << "DROP SEQUENCE failed" << std::endl;
         return true;
     }
+    txn.commit();
     std::cout << "DROP SEQUENCE succeeded" << std::endl;
     return false;
 }
@@ -546,7 +602,13 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     StorageEngine::DomainInfo info;
     info.name = stmt->objectName;
     auto it = stmt->options.find("base_type");
@@ -562,6 +624,8 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
         std::cout << "Domain " << info.name << " already exists" << std::endl;
         return true;
     }
+    txn.recordCreate(DdlObjectKind::Domain, info.name);
+    txn.commit();
     std::cout << "CREATE DOMAIN succeeded" << std::endl;
     return false;
 }
@@ -570,16 +634,25 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP DOMAIN name" << std::endl;
         return true;
     }
-    DBStatus res = g_engine.dropDomain(s.currentDB, stmt->objectNames.front());
+    std::string name = stmt->objectNames.front();
+    txn.recordDrop(DdlObjectKind::Domain, name);
+    DBStatus res = g_engine.dropDomain(s.currentDB, name);
     if (res != DBStatus::OK) {
         std::cout << "DROP DOMAIN failed" << std::endl;
         return true;
     }
+    txn.commit();
     std::cout << "DROP DOMAIN succeeded" << std::endl;
     return false;
 }
@@ -592,7 +665,13 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     StorageEngine::CompositeType ct;
     ct.name = stmt->objectName;
     auto it = stmt->options.find("fields");
@@ -616,6 +695,8 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
         std::cout << "CREATE TYPE failed" << std::endl;
         return true;
     }
+    txn.recordCreate(DdlObjectKind::Type, ct.name);
+    txn.commit();
     std::cout << "CREATE TYPE succeeded" << std::endl;
     return false;
 }
@@ -624,16 +705,25 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP TYPE name" << std::endl;
         return true;
     }
-    DBStatus res = g_engine.dropCompositeType(s.currentDB, stmt->objectNames.front());
+    std::string name = stmt->objectNames.front();
+    txn.recordDrop(DdlObjectKind::Type, name);
+    DBStatus res = g_engine.dropCompositeType(s.currentDB, name);
     if (res != DBStatus::OK) {
         std::cout << "DROP TYPE failed" << std::endl;
         return true;
     }
+    txn.commit();
     std::cout << "DROP TYPE succeeded" << std::endl;
     return false;
 }
@@ -646,7 +736,12 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    checkAndImplicitCommit(s);
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
 
     std::string objType = toLower(stmt->objectType);
     if (objType == "table") {
@@ -655,6 +750,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
             std::cout << "COMMENT ON TABLE failed" << std::endl;
             return true;
         }
+        txn.recordUpdate(DdlObjectKind::Table, stmt->objectName);
     } else if (objType == "column") {
         std::string tname = stmt->objectName;
         std::string cname = stmt->columnName;
@@ -667,10 +763,12 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
             std::cout << "COMMENT ON COLUMN failed" << std::endl;
             return true;
         }
+        txn.recordUpdate(DdlObjectKind::Table, tname, cname);
     } else {
         std::cout << "COMMENT ON " << objType << " not yet supported via AST bridge" << std::endl;
         return true;
     }
+    txn.commit();
     std::cout << "COMMENT succeeded" << std::endl;
     return false;
 }
