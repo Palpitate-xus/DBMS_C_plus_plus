@@ -48,6 +48,7 @@ set(DBMS_SOURCES
     src/parser/parser.cpp
     src/catalog/type_registry.cpp
     src/expression/ExprEvaluator.cpp
+    src/commands/DdlExecutor.cpp
 )
 
 add_executable(dbms_main ${DBMS_SOURCES})

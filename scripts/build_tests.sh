@@ -45,6 +45,7 @@ SOURCES=(
     src/catalog/migrate.cpp
     src/catalog/type_registry.cpp
     src/expression/ExprEvaluator.cpp
+    src/commands/DdlExecutor.cpp
 )
 
 if [ "$HAS_OPENSSL" -eq 1 ]; then

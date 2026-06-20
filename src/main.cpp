@@ -19,6 +19,7 @@
 #include "Session.h"
 #include "Config.h"
 #include "parser/parser.h"
+#include "commands/DdlExecutor.h"
 
 using namespace std;
 using dbms::Column;
@@ -768,10 +769,10 @@ static bool executeValuesStatement(const string& sql) {
 // ========================================================================
 // Forward declarations for command handlers (defined later in the file)
 // ========================================================================
-static bool checkAdmin(const Session& s);
-static bool checkDB(const Session& s);
+bool checkAdmin(const Session& s);
+bool checkDB(const Session& s);
 bool execute(const std::string& rawSql, Session& s);
-static string resolveTableName(Session& s, const string& name);
+string resolveTableName(Session& s, const string& name);
 static vector<string> splitConds(const string& s);
 static string normalizeConditionStr(string s);
 static string modifyLogic(const string& logic);
@@ -2498,9 +2499,9 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
 // ========================================================================
 // Temporary table helpers
 // ========================================================================
-static string tempTablePrefix(const string& name) { return "__tmp_" + name; }
+string tempTablePrefix(const string& name) { return "__tmp_" + name; }
 
-static string resolveTableName(Session& s, const string& name) {
+string resolveTableName(Session& s, const string& name) {
     if (s.tempTables.count(name)) return tempTablePrefix(name);
     // Materialized views redirect to backing table
     if (g_engine.isMaterializedView(s.currentDB, name)) {
@@ -3057,8 +3058,8 @@ struct CatalogObjectInfo {
     string options;
 };
 
-static bool checkAdmin(const Session& s);
-static bool checkDB(const Session& s);
+bool checkAdmin(const Session& s);
+bool checkDB(const Session& s);
 bool execute(const std::string& rawSql, Session& s);
 
 static std::filesystem::path compatObjectCatalogPath(const string& dbname) {
@@ -5982,7 +5983,7 @@ static std::string expandSubqueries(std::string sql, Session& s) {
 // ========================================================================
 // SQL execution
 // ========================================================================
-static bool checkAdmin(const Session& s) {
+bool checkAdmin(const Session& s) {
     if (s.permission == 0 && !userIsAdminViaRole(s.username)) {
         cout << "permission denied" << endl;
         log(s.username, "permission denied", getTime());
@@ -5997,7 +5998,7 @@ static bool authenticatedUserIsAdmin(const Session& s) {
     return authPerm == 1 || userIsAdminViaRole(authUser);
 }
 
-static bool checkDB(const Session& s);
+bool checkDB(const Session& s);
 
 static bool setSessionAuthorization(Session& s, const string& targetRaw) {
     string target = stripQuotes(trim(targetRaw));
@@ -7665,7 +7666,7 @@ static bool checkInsertColumnPermission(Session& s, const string& tname,
     return true;
 }
 
-static bool checkDB(const Session& s) {
+bool checkDB(const Session& s) {
     if (s.currentDB == "information_schema") return true;
     if (!g_engine.databaseExists(s.currentDB)) {
         cout << "Invalid Database name:" << s.currentDB << endl;
@@ -8235,6 +8236,41 @@ bool execute(const string& rawSql, Session& s) {
 
         default:
             break;
+    }
+
+    // Phase 4 Wave 0.3: DDL AST bridge — try AST-driven execution before legacy string dispatch
+    {
+        bool isDdl = false;
+        switch (parsedCmd) {
+            case dbms::SqlCommand::CreateTable:
+            case dbms::SqlCommand::DropTable:
+            case dbms::SqlCommand::CreateIndex:
+            case dbms::SqlCommand::CreateSequence:
+            case dbms::SqlCommand::DropSequence:
+            case dbms::SqlCommand::CreateDomain:
+            case dbms::SqlCommand::DropDomain:
+            case dbms::SqlCommand::CreateType:
+            case dbms::SqlCommand::DropType:
+            case dbms::SqlCommand::CreateDatabase:
+            case dbms::SqlCommand::DropDatabase:
+            case dbms::SqlCommand::CreateSchema:
+            case dbms::SqlCommand::DropSchema:
+            case dbms::SqlCommand::Comment:
+                isDdl = true;
+                break;
+            default:
+                break;
+        }
+        if (isDdl) {
+            dbms::SQLParser parser;
+            dbms::ParseResult r = parser.parse(sql);
+            if (r.success && r.stmt) {
+                dbms::DdlExecutor ddlExec;
+                if (ddlExec.execute(r.stmt, s)) {
+                    return true;
+                }
+            }
+        }
     }
 
     if (sql.substr(0, 6) == "create") {
