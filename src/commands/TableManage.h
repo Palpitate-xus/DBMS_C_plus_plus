@@ -1155,5 +1155,16 @@ Column makeTstzRangeColumn(const std::string& name, bool isNull, bool isPK = fal
 Column makeDateRangeColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTsVectorColumn(const std::string& name, bool isNull, bool isPK = false);
 Column makeTsQueryColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeLineColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeLsegColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeBoxColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makePathColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makePolygonColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeCircleColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeMacAddrColumn(const std::string& name, bool isNull, bool isPK = false);
+Column makeMacAddr8Column(const std::string& name, bool isNull, bool isPK = false);
+Column makeBitColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
+Column makeVarBitColumn(const std::string& name, bool isNull, size_t length, bool isPK = false);
+Column makeJsonPathColumn(const std::string& name, bool isNull, bool isPK = false);
 
 } // namespace dbms

@@ -730,6 +730,121 @@ Column makeTsQueryColumn(const std::string& name, bool isNull, bool isPK) {
     return c;
 }
 
+Column makeLineColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "line";
+    c.dsize = 64; // "{A,B,C}" representation
+    return c;
+}
+
+Column makeLsegColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "lseg";
+    c.dsize = 32; // two points
+    return c;
+}
+
+Column makeBoxColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "box";
+    c.dsize = 32; // two points: high, low
+    return c;
+}
+
+Column makePathColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "path";
+    c.dsize = 1024;
+    return c;
+}
+
+Column makePolygonColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "polygon";
+    c.dsize = 4096;
+    return c;
+}
+
+Column makeCircleColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "circle";
+    c.dsize = 24; // center point (16) + radius (8)
+    return c;
+}
+
+Column makeMacAddrColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "macaddr";
+    c.dsize = 6;
+    return c;
+}
+
+Column makeMacAddr8Column(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "macaddr8";
+    c.dsize = 8;
+    return c;
+}
+
+Column makeBitColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "bit";
+    c.dsize = (length == 0 ? 1 : (length + 7) / 8);
+    return c;
+}
+
+Column makeVarBitColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "bit varying";
+    c.dsize = (length == 0 ? 65535 : (length + 7) / 8);
+    return c;
+}
+
+Column makeJsonPathColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
+    c.dataType = "jsonpath";
+    c.dsize = 65535;
+    return c;
+}
+
 Column makeFloatColumn(const std::string& name, bool isNull, bool isPK) {
     Column c;
     c.dataName = name;

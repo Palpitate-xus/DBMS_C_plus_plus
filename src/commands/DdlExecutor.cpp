@@ -307,6 +307,30 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
         col = makeTsVectorColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "tsquery") {
         col = makeTsQueryColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "line") {
+        col = makeLineColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "lseg") {
+        col = makeLsegColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "box") {
+        col = makeBoxColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "path") {
+        col = makePathColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "polygon") {
+        col = makePolygonColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "circle") {
+        col = makeCircleColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "macaddr") {
+        col = makeMacAddrColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "macaddr8") {
+        col = makeMacAddr8Column(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "bit") {
+        size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 1;
+        col = makeBitColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
+    } else if (baseType == "bit varying" || baseType == "varbit") {
+        size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 0;
+        col = makeVarBitColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
+    } else if (baseType == "jsonpath") {
+        col = makeJsonPathColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else {
         // Unknown type: fall back to varchar so the table can still be created
         col = makeVarCharColumn(cd.name, cd.isNull, 255, cd.isPrimaryKey);
