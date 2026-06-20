@@ -175,9 +175,11 @@
 | 3.13 实现 data page checksums | 10.10 | — |
 | 3.14 实现 storage parameters（fillfactor / autovacuum / toast …） | 10.11, 4.4 | — |
 
-### Phase 3 已完成内容（截至当前 commit）
+### Phase 3 已完成内容（已关闭）
 
-- **WAL 基础设施（3.4~3.6）**：
+Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；存储引擎 / WAL / MVCC / Buffer Manager 基础已稳定，可进入 Phase 4。
+
+- **WAL 基础设施（3.4~3.6）**：“
   - 新增 `src/storage/WAL.h` / `WAL.cpp`，实现 PostgreSQL 风格的 WAL 管理器。
   - LSN 为 64-bit 字节偏移；segment 文件 16 MiB，命名为 `<TLI hex><log hex><seg hex>`（24 字符）。
   - WAL 记录头 28 字节（xl_prev / xl_tot_len / xl_info / xl_xid / xl_crc），记录按 MAXALIGN（8）对齐。
@@ -221,6 +223,8 @@
 ---
 
 ## Phase 4：类型系统 / 约束 / DDL 完整化
+
+**状态**：Phase 4 已启动，Wave 0 基础设施建设中（TypeRegistry 已完成，表达式求值器 / DDL AST 桥接 / DDL 事务化骨架进行中）。
 
 **目标**：在 Catalog 和存储稳定后，补全类型、约束、DDL 语义，使 `CREATE`/`ALTER` 全量命令与 PG 等价。  
 **前置**：Phase 2（Catalog）、Phase 3（存储/MVCC）。
