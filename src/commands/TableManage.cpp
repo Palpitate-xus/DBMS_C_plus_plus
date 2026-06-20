@@ -4,6 +4,7 @@
 #include "HeapTupleHeader.h"
 #include "type_registry.h"
 #include <cmath>
+#include <unordered_map>
 
 extern dbms::Config g_config;
 
@@ -11888,6 +11889,9 @@ std::vector<std::string> StorageEngine::aggregate(
         bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
         bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
         bool isStat = isVar || isStddev;
+        bool isModeMedian = (func == "mode" || func == "median");
+        std::vector<std::string> orderedVals;
+        std::unordered_map<std::string, int64_t> freqMap;
         // Welford's online algorithm for variance
         double wMean = 0.0, wM2 = 0.0;
         size_t wCount = 0;
@@ -11960,6 +11964,13 @@ std::vector<std::string> StorageEngine::aggregate(
                 } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
+                if (isModeMedian) {
+                    if (!val.empty()) {
+                        orderedVals.push_back(val);
+                        ++freqMap[val];
+                    }
+                    continue;
+                }
                 if (isInt) {
                     int64_t num = val.empty() ? INF : parseInt(val);
                     if (num == INF) continue;
@@ -12069,6 +12080,40 @@ std::vector<std::string> StorageEngine::aggregate(
                 rowResult += oss.str() + ' ';
             }
         }
+        else if (isModeMedian) {
+            if (orderedVals.empty()) {
+                rowResult += "NULL ";
+            } else if (func == "mode") {
+                std::string best;
+                int64_t bestCount = -1;
+                for (const auto& kv : freqMap) {
+                    if (kv.second > bestCount || (kv.second == bestCount && kv.first < best)) {
+                        bestCount = kv.second;
+                        best = kv.first;
+                    }
+                }
+                rowResult += best + ' ';
+            } else { // median
+                std::sort(orderedVals.begin(), orderedVals.end());
+                size_t mid = orderedVals.size() / 2;
+                if (orderedVals.size() % 2 == 1) {
+                    rowResult += orderedVals[mid] + ' ';
+                } else {
+                    // average of two middle values if numeric, otherwise lower middle
+                    bool numeric = !orderedVals.empty() && std::all_of(orderedVals.begin(), orderedVals.end(),
+                        [](const std::string& v) { return !v.empty() && (std::isdigit(static_cast<unsigned char>(v[0])) || v[0] == '-' || v[0] == '+'); });
+                    if (numeric) {
+                        double a = std::stod(orderedVals[mid - 1]);
+                        double b = std::stod(orderedVals[mid]);
+                        std::ostringstream oss;
+                        oss << ((a + b) / 2.0);
+                        rowResult += oss.str() + ' ';
+                    } else {
+                        rowResult += orderedVals[mid - 1] + ' ';
+                    }
+                }
+            }
+        }
     }
     if (!rowResult.empty()) result.push_back(rowResult);
     lockManager_.unlock(tablename);
@@ -12141,6 +12186,11 @@ std::vector<std::string> StorageEngine::groupAggregate(
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
         bool isArrayAgg = (func == "array_agg");
+        bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
+        bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
+        bool isModeMedian = (func == "mode" || func == "median");
+        std::vector<std::string> orderedVals;
+        std::unordered_map<std::string, int64_t> freqMap;
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false;
         if (func != "count" || actualColName != "*") {
@@ -12164,6 +12214,9 @@ std::vector<std::string> StorageEngine::groupAggregate(
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
         // jsonAggFirst removed (unused)
+
+        double wMean = 0.0, wM2 = 0.0;
+        size_t wCount = 0;
 
         if (isDistinctCount) {
             std::set<std::string> distinctVals;
@@ -12213,6 +12266,13 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 } else {
                 if (colIdx >= tbl.len) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
+                if (isModeMedian) {
+                    if (!val.empty()) {
+                        orderedVals.push_back(val);
+                        ++freqMap[val];
+                    }
+                    continue;
+                }
                 if (isInt) {
                     int64_t num = val.empty() ? INF : parseInt(val);
                     if (num == INF) continue;
@@ -12410,6 +12470,11 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
         bool isArrayAgg = (func == "array_agg");
+        bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
+        bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
+        bool isModeMedian = (func == "mode" || func == "median");
+        std::vector<std::string> orderedVals;
+        std::unordered_map<std::string, int64_t> freqMap;
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false;
         if (func != "count" || actualColName != "*") {
@@ -12432,6 +12497,9 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
+
+        double wMean = 0.0, wM2 = 0.0;
+        size_t wCount = 0;
 
         if (isDistinctCount) {
             std::set<std::string> distinctVals;

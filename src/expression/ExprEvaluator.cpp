@@ -631,6 +631,178 @@ void ExprEvaluator::registerBuiltins() {
         // Return current timestamp as string; Wave 0 uses a fixed reference
         return ExprValue("timestamp", "2026-06-20 12:00:00", false);
     };
+
+    // ------------------------------------------------------------------------
+    // Math functions
+    // ------------------------------------------------------------------------
+    auto unaryMath = [](const std::vector<ExprValue>& a, double (*fn)(double),
+                        const std::string& outType = "double precision") {
+        if (a.empty() || a[0].isNull) return ExprValue(outType, "", true);
+        return ExprValue(outType, std::to_string(fn(a[0].asDouble())), false);
+    };
+    functions_["sin"]   = [&](const auto& a) { return unaryMath(a, std::sin); };
+    functions_["cos"]   = [&](const auto& a) { return unaryMath(a, std::cos); };
+    functions_["tan"]   = [&](const auto& a) { return unaryMath(a, std::tan); };
+    functions_["asin"]  = [&](const auto& a) { return unaryMath(a, std::asin); };
+    functions_["acos"]  = [&](const auto& a) { return unaryMath(a, std::acos); };
+    functions_["atan"]  = [&](const auto& a) { return unaryMath(a, std::atan); };
+    functions_["exp"]   = [&](const auto& a) { return unaryMath(a, std::exp); };
+    functions_["ln"]    = [&](const auto& a) { return unaryMath(a, std::log); };
+    functions_["log"]   = [&](const auto& a) { return unaryMath(a, std::log10); };
+    functions_["sqrt"]  = [&](const auto& a) { return unaryMath(a, std::sqrt); };
+    functions_["cbrt"]  = [&](const auto& a) { return unaryMath(a, std::cbrt); };
+    functions_["ceil"]  = [&](const auto& a) { return unaryMath(a, std::ceil); };
+    functions_["floor"] = [&](const auto& a) { return unaryMath(a, std::floor); };
+    functions_["trunc"] = [&](const auto& a) { return unaryMath(a, std::trunc); };
+
+    functions_["atan2"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("double precision", "", true);
+        return ExprValue("double precision",
+                         std::to_string(std::atan2(a[0].asDouble(), a[1].asDouble())), false);
+    };
+    functions_["power"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("double precision", "", true);
+        return ExprValue("double precision",
+                         std::to_string(std::pow(a[0].asDouble(), a[1].asDouble())), false);
+    };
+    functions_["mod"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("integer", "", true);
+        int64_t b = a[1].asInt();
+        if (b == 0) return ExprValue("integer", "", true);
+        return ExprValue("integer", std::to_string(a[0].asInt() % b), false);
+    };
+    functions_["sign"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        double v = a[0].asDouble();
+        return ExprValue("integer", std::to_string(v > 0 ? 1 : (v < 0 ? -1 : 0)), false);
+    };
+    functions_["pi"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("double precision", std::to_string(std::atan(1.0) * 4.0), false);
+    };
+    functions_["random"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("double precision", std::to_string(static_cast<double>(std::rand()) / RAND_MAX), false);
+    };
+
+    // ------------------------------------------------------------------------
+    // String functions
+    // ------------------------------------------------------------------------
+    functions_["concat"] = [](const std::vector<ExprValue>& a) {
+        std::string s;
+        for (const auto& v : a) {
+            if (v.isNull) return ExprValue("text", "", true);
+            s += v.value;
+        }
+        return ExprValue("text", s, false);
+    };
+    functions_["trim"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        size_t b = 0, e = s.size();
+        while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+        while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+        return ExprValue("text", s.substr(b, e - b), false);
+    };
+    functions_["ltrim"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        size_t b = 0;
+        while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+        return ExprValue("text", s.substr(b), false);
+    };
+    functions_["rtrim"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        if (s.empty()) return ExprValue("text", s, false);
+        size_t e = s.size();
+        while (e > 0 && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+        return ExprValue("text", s.substr(0, e), false);
+    };
+    functions_["replace"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("text", "", true);
+        std::string s = a[0].value;
+        const std::string& from = a[1].value;
+        const std::string& to = a[2].value;
+        if (from.empty()) return ExprValue("text", s, false);
+        size_t pos = 0;
+        while ((pos = s.find(from, pos)) != std::string::npos) {
+            s.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+        return ExprValue("text", s, false);
+    };
+    functions_["position"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("integer", "", true);
+        size_t pos = a[1].value.find(a[0].value);
+        return ExprValue("integer", std::to_string(pos == std::string::npos ? 0 : static_cast<int64_t>(pos + 1)), false);
+    };
+    functions_["left"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        int64_t n = a[1].asInt();
+        if (n <= 0) return ExprValue("text", "", false);
+        return ExprValue("text", a[0].value.substr(0, static_cast<size_t>(n)), false);
+    };
+    functions_["right"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        int64_t n = a[1].asInt();
+        const std::string& s = a[0].value;
+        if (n <= 0) return ExprValue("text", "", false);
+        size_t start = static_cast<size_t>(n) > s.size() ? 0 : s.size() - static_cast<size_t>(n);
+        return ExprValue("text", s.substr(start), false);
+    };
+    functions_["repeat"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        int64_t n = a[1].asInt();
+        if (n <= 0) return ExprValue("text", "", false);
+        std::string s;
+        s.reserve(a[0].value.size() * static_cast<size_t>(n));
+        for (int64_t i = 0; i < n; ++i) s += a[0].value;
+        return ExprValue("text", s, false);
+    };
+    functions_["reverse"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        std::string s = a[0].value;
+        std::reverse(s.begin(), s.end());
+        return ExprValue("text", s, false);
+    };
+    functions_["ascii"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull || a[0].value.empty()) return ExprValue("integer", "", true);
+        return ExprValue("integer", std::to_string(static_cast<int>(static_cast<unsigned char>(a[0].value[0]))), false);
+    };
+    functions_["chr"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        int v = static_cast<int>(a[0].asInt());
+        if (v < 0 || v > 255) return ExprValue("text", "", true);
+        return ExprValue("text", std::string(1, static_cast<char>(v)), false);
+    };
+
+    // ------------------------------------------------------------------------
+    // Date/time functions
+    // ------------------------------------------------------------------------
+    functions_["current_date"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("date", "2026-06-20", false);
+    };
+    functions_["extract"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("integer", "", true);
+        std::string field = toLower(a[0].value);
+        const std::string& src = a[1].value;
+        int64_t result = 0;
+        if (field == "year") {
+            result = src.size() >= 4 ? std::stoll(src.substr(0, 4)) : 0;
+        } else if (field == "month") {
+            result = src.size() >= 7 ? std::stoll(src.substr(5, 2)) : 0;
+        } else if (field == "day") {
+            result = src.size() >= 10 ? std::stoll(src.substr(8, 2)) : 0;
+        } else {
+            return ExprValue("integer", "", true);
+        }
+        return ExprValue("integer", std::to_string(result), false);
+    };
 }
 
 } // namespace dbms
