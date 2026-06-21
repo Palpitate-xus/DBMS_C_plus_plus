@@ -35,6 +35,7 @@ set(DBMS_SOURCES
     src/storage/FreeSpaceMap.cpp
     src/storage/VisibilityMap.cpp
     src/storage/CommitLog.cpp
+    src/storage/WAL.cpp
     src/access/BPTree.cpp
     src/access/HashIndex.cpp
     src/access/SPGiSTIndex.cpp
@@ -46,6 +47,10 @@ set(DBMS_SOURCES
     src/common/Config.cpp
     src/common/GUC.cpp
     src/parser/parser.cpp
+    src/catalog/catalog.cpp
+    src/catalog/oid.cpp
+    src/catalog/systables.cpp
+    src/catalog/migrate.cpp
     src/catalog/type_registry.cpp
     src/expression/ExprEvaluator.cpp
     src/commands/DdlExecutor.cpp
