@@ -8,6 +8,7 @@
 #include "common/logs.h"
 #include "permissions.h"
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -93,6 +94,62 @@ bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
     ParseResult r = parser.parse(sql);
     if (!r.success || !r.stmt) return false;
     return execute(r.stmt, s);
+}
+
+// ----------------------------------------------------------------------------
+// DDL AST bridge helper (used by main.cpp::execute)
+// ----------------------------------------------------------------------------
+
+static bool isCreateTableAsSelect(const std::string& sql) {
+    // SQL is expected to be lowercased by main.cpp::execute(), but be defensive.
+    std::string lc;
+    lc.reserve(sql.size());
+    for (unsigned char c : sql) lc.push_back(static_cast<char>(std::tolower(c)));
+    size_t tablePos = lc.find("table");
+    if (tablePos == std::string::npos) return false;
+    return lc.find(" as select", tablePos + 5) != std::string::npos;
+}
+
+bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
+                  Session& s, bool& handled) {
+    handled = false;
+    switch (parsedCmd) {
+        case dbms::SqlCommand::CreateTable:
+        case dbms::SqlCommand::DropTable:
+        case dbms::SqlCommand::CreateIndex:
+        case dbms::SqlCommand::CreateSequence:
+        case dbms::SqlCommand::DropSequence:
+        case dbms::SqlCommand::CreateDomain:
+        case dbms::SqlCommand::DropDomain:
+        case dbms::SqlCommand::CreateType:
+        case dbms::SqlCommand::DropType:
+        case dbms::SqlCommand::CreateDatabase:
+        case dbms::SqlCommand::DropDatabase:
+        case dbms::SqlCommand::CreateSchema:
+        case dbms::SqlCommand::DropSchema:
+        case dbms::SqlCommand::Comment:
+            handled = true;
+            break;
+        default:
+            return false;
+    }
+
+    // CTAS is parsed as a plain CreateTableStmt without a SELECT clause.
+    // Let legacy inline CTAS handle it until parser/DdlExecutor support it.
+    if (parsedCmd == dbms::SqlCommand::CreateTable && isCreateTableAsSelect(sql)) {
+        handled = false;
+        return false;
+    }
+
+    dbms::SQLParser parser;
+    dbms::ParseResult r = parser.parse(sql);
+    if (!r.success || !r.stmt) {
+        // Parse failed: treat as not handled so legacy string dispatch can try.
+        handled = false;
+        return false;
+    }
+    dbms::DdlExecutor ddlExec;
+    return ddlExec.execute(r.stmt, s); // false=success, true=error
 }
 
 // ----------------------------------------------------------------------------

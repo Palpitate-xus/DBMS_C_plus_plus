@@ -8238,38 +8238,14 @@ bool execute(const string& rawSql, Session& s) {
             break;
     }
 
-    // Phase 4 Wave 0.3: DDL AST bridge — try AST-driven execution before legacy string dispatch
+    // Phase 4 Wave 0.3: DDL AST bridge — try AST-driven execution before legacy string dispatch.
+    // tryDdlBridge returns on both success and error; if it did not handle the command,
+    // execution falls through to the legacy string dispatch below.
     {
-        bool isDdl = false;
-        switch (parsedCmd) {
-            case dbms::SqlCommand::CreateTable:
-            case dbms::SqlCommand::DropTable:
-            case dbms::SqlCommand::CreateIndex:
-            case dbms::SqlCommand::CreateSequence:
-            case dbms::SqlCommand::DropSequence:
-            case dbms::SqlCommand::CreateDomain:
-            case dbms::SqlCommand::DropDomain:
-            case dbms::SqlCommand::CreateType:
-            case dbms::SqlCommand::DropType:
-            case dbms::SqlCommand::CreateDatabase:
-            case dbms::SqlCommand::DropDatabase:
-            case dbms::SqlCommand::CreateSchema:
-            case dbms::SqlCommand::DropSchema:
-            case dbms::SqlCommand::Comment:
-                isDdl = true;
-                break;
-            default:
-                break;
-        }
-        if (isDdl) {
-            dbms::SQLParser parser;
-            dbms::ParseResult r = parser.parse(sql);
-            if (r.success && r.stmt) {
-                dbms::DdlExecutor ddlExec;
-                if (ddlExec.execute(r.stmt, s)) {
-                    return true;
-                }
-            }
+        bool handled = false;
+        bool err = dbms::tryDdlBridge(sql, parsedCmd, s, handled);
+        if (handled) {
+            return err;
         }
     }
 
