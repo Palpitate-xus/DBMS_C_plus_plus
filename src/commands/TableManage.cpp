@@ -3,6 +3,7 @@
 #include "Config.h"
 #include "HeapTupleHeader.h"
 #include "type_registry.h"
+#include "catalog/CatalogService.h"
 #include <cmath>
 #include <unordered_map>
 
@@ -964,11 +965,13 @@ Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK) {
 StorageEngine::StorageEngine() {
     recoverAllDatabases();
     migrateAllDataFiles();
+    catalogService_ = std::make_unique<CatalogService>(*this);
     lastBackgroundCheckpoint_ = std::chrono::steady_clock::now();
     startBackgroundWorker();
 }
 
 StorageEngine::~StorageEngine() {
+    if (catalogService_) catalogService_->persistAll();
     stopBackgroundWorker();
 }
 
@@ -13462,6 +13465,13 @@ WALManager* StorageEngine::getWAL(const std::string& dbname) const {
     WALManager* ptr = wal.get();
     walManagers_[dbname] = std::move(wal);
     return ptr;
+}
+
+CatalogService& StorageEngine::catalogService() {
+    if (!catalogService_) {
+        catalogService_ = std::make_unique<CatalogService>(*this);
+    }
+    return *catalogService_;
 }
 
 void StorageEngine::closeAllWALs() {
