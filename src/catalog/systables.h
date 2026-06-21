@@ -235,4 +235,12 @@ struct PgDescriptionRow {
     std::string toString() const;
 };
 
+// ============================================================================
+// 常用工具函数
+// ============================================================================
+
+// Map a canonical/alias type name to its standard PostgreSQL bootstrap OID.
+// Returns INVALID_OID if the name is not a known built-in type.
+Oid mapBuiltinTypeNameToOid(const std::string& typeName);
+
 } // namespace dbms
