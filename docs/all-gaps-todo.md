@@ -15,6 +15,7 @@
 |------|------|
 | 2026-06-10 | 初始生成，基于 gap-analysis 逐条提取全部 gap |
 | 2026-06-21 | 大范围同步实现现状：Phase 1（Parser/AST）、Phase 2（Catalog/OID）、Phase 3（WAL/MVCC/Buffer/Cluster）、Phase 4 Wave 0~2（TypeRegistry/ExprEvaluator/DDL AST 桥/DDL 事务骨架/函数/聚合/窗口骨架）已落地，逐章更新状态标记与"已完成进展"小节。详见各章末尾与下文总览。 |
+| 2026-06-21（修正） | 经运行时核对，**Phase 1/2 为"模块+测试已写、未接入主程序 `execute()` 运行时"**：DML 全部走字符串分发（AST 未被消费）；`CatalogManager` 在 main.cpp 从未构造、`migrateDatabaseToCatalog` 无调用者、`planDrop` 无 DROP 处理器接入、核心系统表不可查、`resolveTableName` 仍用 `schema__table` 编码。据此下调 §1/§4/§16/§17 相关表述，16.1 由 ✅ 改 🔄，4.1/4.2 维持 🔄 但注明未接入运行时。Phase 3（WAL/MVCC/Buffer）为真实接入运行时。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -29,7 +30,7 @@
 | SQL 命令 | 约 65 条 | 约 55 条 | 约 45 条 ❌ | DDL 已可解析为 AST 并经 DdlExecutor 执行（TABLE/INDEX/VIEW/SEQUENCE/DOMAIN/TYPE/DB/SCHEMA/COMMENT） |
 | 数据类型 | 约 10 种 | 约 35 种 | 约 3 种 ❌ | TypeRegistry 统一注册 40+ 类型与别名/修饰符校验；多数类型仍"字符串存储+注册校验"，未达 PG I/O 语义 |
 | 表达式/函数 | 基础子集 | 中量 | 大量 | ExprEvaluator 支持 cast/case/coalesce/between/in/like/funcall/子查询；内置函数子集 |
-| DDL 对象模型 | 基础 ✅ | 简化→中量 | 架构级基本到位 | pg_class/attribute/type/proc/depend/namespace + OID 分配/回收 + 依赖 CASCADE/RESTRICT 已实现 |
+| DDL 对象模型 | 基础 | 简化→中量（模块+测试） | 架构级未接入运行时 | pg_class/attribute/type/proc/depend/namespace + OID/依赖 CASCADE/RESTRICT 模块已写并有测试，但 **CatalogManager 未在 main.cpp 构造、DROP 未接 planDrop**，运行时仍走文件+`schema__table` |
 | 约束 | 6 类 | 5 类 | 1 类 ❌ | DEFERRABLE/GENERATED STORED/EXCLUDE 元数据已登记；延迟队列、EXCLUDE 执行检查仍 ⚠️ |
 | DQL/查询 | 大量 | 中量 | 大量 | SELECT 已解析为 AST（CTE/JOIN/SET OPS）；执行仍走旧 switch/case |
 | 优化器/执行器 | 简化 | 中量 | 大量 ❌ | `src/optimizer/` 仍为空；Path/RelOptInfo 框架未建（Phase 5 未启动） |
@@ -47,7 +48,7 @@
 
 ### 1.1 有实现但与 PostgreSQL 不等价的命令
 
-> **已完成进展（2026-06-21）**：Phase 1 已建立真实 SQL Parser（`src/parser/parser.{h,cpp}`）与 AST 框架（`src/parser/ast.h`，`SqlCommand` 枚举 ~130 值），`execute()` 不再纯字符串前缀匹配，改为 `classify()` → `parse()` → AST 路由。DDL 命令经 `DdlExecutor`（`src/commands/DdlExecutor.{h,cpp}`）执行 CREATE/DROP/ALTER TABLE、INDEX、VIEW、SEQUENCE、DOMAIN、TYPE、DATABASE、SCHEMA、COMMENT ON。多数 ⚠️ 命令的**解析**已补全（`CREATE INDEX`/`ALTER TABLE`/`SELECT` 全量子命令、CTE/JOIN/SET OPS、GUC 等），下表差距主要指**执行语义与 PG 不等价**。故保留 ⚠️ 的条目多表示"能解析/能跑基础路径，但未达 PG 完整语义"。
+> **已完成进展（2026-06-21，含运行时核对）**：Phase 1 已建立真实 SQL Parser（`src/parser/parser.{h,cpp}`，~6400 行）与 AST 框架（`src/parser/ast.h`，`SqlCommand` 枚举 ~130 值，含 Select/Insert/Update/Delete/Merge/CreateTable/AlterTable 等 Stmt 节点）。但**运行时集成是部分的**：`main.cpp::execute()` 用 `classify(sql)` 得枚举后做 switch，简单命令仍用 `sql.substr(...)` 字符串切片处理；**DML（SELECT/INSERT/UPDATE/DELETE/MERGE）全部 fall through 到旧字符串分发**（`substr(0,6)=="select"` 等），解析出的 DML AST **未被任何执行器消费**。DDL 经 `DdlExecutor` 走 AST，但仅覆盖 CreateTable/DropTable/CreateIndex/Create+Drop Sequence/Domain/Type/Database/Schema/Comment，**缺 AlterTable/DropIndex/View/MView/Trigger/Policy/Function/Procedure**；DdlExecutor 直接调旧 `g_engine.*` API，不经 CatalogManager/TypeRegistry。多数 ⚠️ 命令的**解析**已补全（`CREATE INDEX`/`ALTER TABLE`/`SELECT` 全量子命令、CTE/JOIN/SET OPS、GUC 等），下表差距主要指**执行语义与 PG 不等价**。故保留 ⚠️ 的条目多表示"能解析/能跑基础路径，但未达 PG 完整语义"。
 
 | # | 命令 | 差距描述 | 状态 |
 |---|------|---------|------|
@@ -178,7 +179,7 @@
 
 ## 4. DDL 和对象模型差距
 
-> **已完成进展（2026-06-21）**：Phase 2 全部子任务已关闭。`CatalogManager`（`src/catalog/catalog.{h,cpp}`）以内存缓存 + 按 OID/名称索引 + CSV 持久化承载 `pg_namespace`/`pg_class`/`pg_attribute`/`pg_type`/`pg_proc`/`pg_depend`/`pg_authid`/`pg_auth_members`/`pg_description` 系统表行格式；OID 分配器（单调递增/批量预留/空闲回收，持久化 `.oid_counter.free`）；`planDrop` 拓扑排序 + pin 保护 + 循环检测 + RESTRICT/CASCADE 执行；`migrateDatabaseToCatalog` 将既有 `.stc` 元数据迁入系统表；临时 schema（`pg_temp_<sessionId>`）+ 嵌套锁死锁修复。4.1/4.2 由 ❌ 上调为 🔄（对象图已建，距 PG 几百个系统表/视图仍有量级差距）。Phase 4 Wave 4.3 DDL AST 桥（`DdlExecutor`）已让 CREATE/DROP/ALTER 从 AST 直接驱动。
+> **已完成进展（2026-06-21，含运行时核对）**：⚠️ **Phase 2 模块与单元测试已写，但尚未接入主程序运行时**。`CatalogManager`（`src/catalog/catalog.{h,cpp}`）以内存缓存 + 按 OID/名称索引 + CSV 持久化承载 `pg_namespace`/`pg_class`/`pg_attribute`/`pg_type`/`pg_proc`/`pg_depend`/`pg_authid`/`pg_auth_members`/`pg_description` 系统表行格式；OID 分配器（单调递增/批量预留/空闲回收，持久化 `.oid_counter.free`）；`planDrop` 拓扑排序 + pin 保护 + 循环检测 + RESTRICT/CASCADE；`migrateDatabaseToCatalog` 迁移工具；临时 schema + 嵌套锁死锁修复——**以上均有测试覆盖，但运行时未生效**：`CatalogManager` 在 `main.cpp` 中从未被构造（仅测试/README 使用），`migrateDatabaseToCatalog` 无任何调用者，`planDrop` 仅被 catalog 内部 `dropObject` 调用而**无 DROP 命令处理器接入**。`pg_class`/`pg_attribute`/`pg_type`/`pg_proc`/`pg_depend` **不可查询**（只有 pg_database/pg_tables/pg_indexes/pg_settings/pg_roles/pg_namespace 是 main.cpp ~14208 的硬编码虚拟表）。`resolveTableName`（main.cpp:2504）仍用 `schema__table` 字符串拼接，未走 CatalogManager 的 search_path。`TypeRegistry::instance()` 全程序仅被调用 1 次（TableManage.cpp:6057 建表列校验）。故 4.1/4.2 仍标 🔄（**框架已写+有测试，未接入运行时**），4.3 标 ⚠️（运行时表名解析仍是 `schema__table` 编码，非真正 search_path）。后续真正"完成 Phase 2"的关键是把 CatalogManager 接入建表/删表/表名解析执行路径。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
@@ -402,8 +403,8 @@
 
 | # | 差距 | 影响范围 | 难度 | 状态 |
 |---|------|---------|------|------|
-| 16.1 | **Parser/AST** — 当前 `execute()` 是巨大字符串分发器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 | ✅ 框架已建：`src/parser/` 递归下降 Parser + AST + `classify()`，DDL 经 `DdlExecutor`；DML/UTILITY 仍在 `execute()` 内逐步提取 |
-| 16.2 | **Catalog/OID** — 没有完整 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等对象图 | DDL、权限、依赖、对象寻址 | 极高 | 🔄 核心系统表对象图 + OID 分配/回收 + 依赖 CASCADE/RESTRICT 已建（Phase 2）；量级对齐 PG 几百个 catalog 仍需持续 |
+| 16.1 | **Parser/AST** — 当前 `execute()` 是巨大字符串分发器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 | 🔄 框架已建：`src/parser/` 递归下降 Parser + AST + `classify()`，DDL 子集经 `DdlExecutor`；但 DML 全部仍走字符串分发，AST 未被执行器消费 |
+| 16.2 | **Catalog/OID** — 没有完整 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等对象图 | DDL、权限、依赖、对象寻址 | 极高 | 🔄 模块+测试已写（系统表对象图/OID/依赖 CASCADE/RESTRICT），但 **CatalogManager 未在 main.cpp 构造、DROP 未接 planDrop、系统表不可查**，运行时仍用文件+`schema__table` |
 | 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 | ✅ 已是 redo log：LSN/segment/full-page/redo/timeline/archive + 两趟扫描崩溃恢复（Phase 3.4~3.6）；PITR/复制仍 ❌ |
 | 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 | 🔄 `HeapTupleHeader`(xmin/xmax/ctid) + HOT + CLOG 可见性已实现（Phase 3.7/3.8）；多版本边界/vacuum 回收仍需深化 |
 | 16.5 | **DDL 事务化** — 多处 DDL 隐式提交，与 PG 事务语义不一致 | 数据一致性、回滚、并发 | 高 | 🔄 Wave 0.4 骨架（`DdlTransaction` + `XLOG_CATALOG_*` WAL）；全量移除隐式提交待 Phase 4.39 Wave 5 |
@@ -421,15 +422,15 @@
 
 > **进度（2026-06-21）**：Phase 0~3 已完成；Phase 4 进行中（Wave 0~2 已落地，Wave 3 约束进行中，Wave 4~6 待办）；Phase 5~10 未启动。详见 `docs/implementation-plan.md` 与 `docs/phase4-plan.md`。
 
-### Phase 1：Parser 与 AST ✅ 框架完成
-- 引入真正 SQL parser 或至少分层 AST，替代 `execute()` 超大字符串分支 — **已完成**（`src/parser/`）
+### Phase 1：Parser 与 AST 🔄 框架完成，DML 未接入执行
+- 引入真正 SQL parser 或至少分层 AST，替代 `execute()` 超大字符串分支 — **框架已完成**（`src/parser/`，~6400 行）
 - 实现完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function — **解析层完成，执行期 cast/重载仍 ⚠️**
-- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 已 AST 驱动（DdlExecutor）；DML 逐步迁移中**
+- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 子集经 DdlExecutor 走 AST；DML（SELECT/INSERT/UPDATE/DELETE/MERGE）仍全部走字符串分发，AST 未被消费**
 
-### Phase 2：Catalog 体系 ✅ 完成
-- 建立对象 OID、namespace、owner、ACL、dependency 体系 — **核心完成，ACL/owner 待深化**
-- 实现 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等系统表 — **已完成**
-- 所有 DROP/ALTER 行为改为基于 catalog 的依赖追踪 — **DROP 已完成，ALTER rewrite 路径待补**
+### Phase 2：Catalog 体系 🔄 模块+测试完成，未接入运行时
+- 建立对象 OID、namespace、owner、ACL、dependency 体系 — **模块+测试完成，但 CatalogManager 未在 main.cpp 构造，运行时未生效；ACL/owner 待深化**
+- 实现 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等系统表 — **对象图已写并有测试，但不可查询（仅 pg_database/pg_tables 等硬编码虚拟表可查）**
+- 所有 DROP/ALTER 行为改为基于 catalog 的依赖追踪 — **planDrop 框架已写，但无 DROP 命令处理器接入；ALTER rewrite 路径待补**
 
 ### Phase 3：事务/WAL/MVCC ✅ 完成
 - 实现真实 WAL record/LSN/redo、tuple xmin/xmax、多版本链和崩溃恢复 — **已完成**
