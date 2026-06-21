@@ -34,9 +34,42 @@ static void test_bootstrap_and_cache() {
     std::cout << "[CATALOG-SVC] bootstrap and cache OK" << std::endl;
 }
 
+static void test_migration_of_existing_db() {
+    std::string db = "catalog_service_t2";
+    cleanup(db);
+
+    dbms::StorageEngine engine;
+    assert(engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    // Create a table using the legacy StorageEngine path (produces a .stc file).
+    dbms::TableSchema tbl;
+    tbl.tablename = "legacy_tbl";
+    dbms::Column col;
+    col.dataName = "id";
+    col.dataType = "integer";
+    col.dsize = 4;
+    tbl.append(col);
+    assert(engine.createTable(db, tbl) == dbms::DBStatus::OK);
+
+    // Now access the catalog for the first time: it should migrate the .stc table.
+    dbms::CatalogManager& cat = engine.catalogService().get(db);
+    const auto* nsPublic = cat.findNamespaceByName("public");
+    assert(nsPublic != nullptr);
+    const auto* cls = cat.findClassByName("legacy_tbl", nsPublic->oid);
+    assert(cls != nullptr);
+    assert(cls->relnatts == 1);
+
+    // Marker should exist now; re-get should not re-migrate.
+    assert(fs::exists(fs::path(db) / "pg_catalog" / ".migrated"));
+
+    cleanup(db);
+    std::cout << "[CATALOG-SVC] migration of existing DB OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_bootstrap_and_cache();
+    test_migration_of_existing_db();
     std::cout << "[CATALOG-SVC] all passed" << std::endl;
     return 0;
 }
