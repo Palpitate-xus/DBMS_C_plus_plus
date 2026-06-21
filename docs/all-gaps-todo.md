@@ -5,32 +5,49 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 规则：每条 gap 均需**原汁原味实现**，对标 PostgreSQL 18 语义与行为，禁止投机取巧
 
+> **状态符号**：❌ 缺失　|　⚠️ 部分实现　|　✅ 已完成（语义对齐 PG）　|　🔄 有骨架/在途（已落地框架但未达 PG 完整语义）
+
+---
+
+## 更新记录
+
+| 日期 | 摘要 |
+|------|------|
+| 2026-06-10 | 初始生成，基于 gap-analysis 逐条提取全部 gap |
+| 2026-06-21 | 大范围同步实现现状：Phase 1（Parser/AST）、Phase 2（Catalog/OID）、Phase 3（WAL/MVCC/Buffer/Cluster）、Phase 4 Wave 0~2（TypeRegistry/ExprEvaluator/DDL AST 桥/DDL 事务骨架/函数/聚合/窗口骨架）已落地，逐章更新状态标记与"已完成进展"小节。详见各章末尾与下文总览。 |
+
+> 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
+
 ---
 
 ## 总览
 
-| 维度 | 已完整实现 | ⚠️ 部分实现 | ❌ 缺失 | 备注 |
+> 以下为 **2026-06-21** 重新核对后的维度汇总。完成度较 2026-06-10 版本显著上升：Parser/AST、Catalog/OID/依赖、WAL redo/LSN、MVCC 版本链、Buffer/Cluster/forks、TypeRegistry、表达式求值器、DDL AST 桥接已落地为真实代码（含测试），但仍多数未达 PG **完整语义**，故多为 ⚠️ 而非 ✅。
+
+| 维度 | ✅ 已完整 | ⚠️ 部分实现 | ❌/🔄 缺失或骨架 | 备注 |
 |------|-----------|-------------|--------|------|
-| SQL 命令 | 约 60 条 | 约 55 条 | 约 50 条 | 含 DDL/DML/DQL/TCL/DCL |
-| 数据类型 | 约 25 种 | 约 15 种 | 约 8 种 | 含伪类型/范围/复合 |
-| 表达式/函数 | 基础子集 | 中量 | 大量 | PG 函数库数百个 |
-| DDL 对象模型 | 基础文件 | 简化 | 架构级 | Catalog/OID/依赖/Schema |
-| 约束 | 6 类 | 4 类 | 3 类 | 含延迟/排他/断言 |
-| DQL/查询 | 大量 | 中量 | 大量 | 含语法树/CTE/锁 |
-| 优化器/执行器 | 简化 | 中量 | 大量 | 含并行/JIT/AIO |
-| 索引 | 6 种 | 简化 | 大量 | AM API/并发/维护 |
-| 事务/MVCC | 基础 | 简化 | 大量 | xmin/xmax/SSI/子事务 |
-| 存储/WAL | 基础 | 简化 | 大量 | forks/redo/PITR |
-| 安全/权限 | 基础 | 简化 | 大量 | SCRAM/ACL/RLS |
-| 复制/HA | 0 | 0 | 全部 | 流复制/逻辑复制/PITR |
-| 监控/诊断 | 子集 | 子集 | 大量 | pg_stat_*/等待事件 |
-| 扩展/生态 | 0 | 0 | 全部 | EXTENSION/FDW/PL |
+| SQL 命令 | 约 65 条 | 约 55 条 | 约 45 条 ❌ | DDL 已可解析为 AST 并经 DdlExecutor 执行（TABLE/INDEX/VIEW/SEQUENCE/DOMAIN/TYPE/DB/SCHEMA/COMMENT） |
+| 数据类型 | 约 10 种 | 约 35 种 | 约 3 种 ❌ | TypeRegistry 统一注册 40+ 类型与别名/修饰符校验；多数类型仍"字符串存储+注册校验"，未达 PG I/O 语义 |
+| 表达式/函数 | 基础子集 | 中量 | 大量 | ExprEvaluator 支持 cast/case/coalesce/between/in/like/funcall/子查询；内置函数子集 |
+| DDL 对象模型 | 基础 ✅ | 简化→中量 | 架构级基本到位 | pg_class/attribute/type/proc/depend/namespace + OID 分配/回收 + 依赖 CASCADE/RESTRICT 已实现 |
+| 约束 | 6 类 | 5 类 | 1 类 ❌ | DEFERRABLE/GENERATED STORED/EXCLUDE 元数据已登记；延迟队列、EXCLUDE 执行检查仍 ⚠️ |
+| DQL/查询 | 大量 | 中量 | 大量 | SELECT 已解析为 AST（CTE/JOIN/SET OPS）；执行仍走旧 switch/case |
+| 优化器/执行器 | 简化 | 中量 | 大量 ❌ | `src/optimizer/` 仍为空；Path/RelOptInfo 框架未建（Phase 5 未启动） |
+| 索引 | 6 种 | 简化 | 大量 ❌ | IIndexAM 适配器已统一；AM API/opclass/concurrent/维护仍 ❌ |
+| 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI/完整子事务仍 ❌ |
+| 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、BufferPool(clock sweep/pin)、ClusterLayout、TOAST、checksum 已实现；PITR/真实 freeze 仍 ❌ |
+| 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；pg_hba/SCRAM/wire protocol 仍 ❌ |
+| 复制/HA | 0 | WAL archive 1 项 | 全部 ❌ | `src/replication/` 仅有 README；流复制/逻辑复制/PITR 全缺 |
+| 监控/诊断 | 子集 | 子集 | 大量 ❌ | pg_stat_activity/locks/statements 风格子集；pg_stat_io/wait events 缺 |
+| 扩展/生态 | 0 | 0 | 全部 ❌ | EXTENSION/FDW/PL 全缺；event trigger/rule 仅 parser classify stub |
 
 ---
 
 ## 1. SQL 命令覆盖差距
 
 ### 1.1 有实现但与 PostgreSQL 不等价的命令
+
+> **已完成进展（2026-06-21）**：Phase 1 已建立真实 SQL Parser（`src/parser/parser.{h,cpp}`）与 AST 框架（`src/parser/ast.h`，`SqlCommand` 枚举 ~130 值），`execute()` 不再纯字符串前缀匹配，改为 `classify()` → `parse()` → AST 路由。DDL 命令经 `DdlExecutor`（`src/commands/DdlExecutor.{h,cpp}`）执行 CREATE/DROP/ALTER TABLE、INDEX、VIEW、SEQUENCE、DOMAIN、TYPE、DATABASE、SCHEMA、COMMENT ON。多数 ⚠️ 命令的**解析**已补全（`CREATE INDEX`/`ALTER TABLE`/`SELECT` 全量子命令、CTE/JOIN/SET OPS、GUC 等），下表差距主要指**执行语义与 PG 不等价**。故保留 ⚠️ 的条目多表示"能解析/能跑基础路径，但未达 PG 完整语义"。
 
 | # | 命令 | 差距描述 | 状态 |
 |---|------|---------|------|
@@ -112,6 +129,8 @@
 
 ## 2. 数据类型差距
 
+> **已完成进展（2026-06-21）**：Phase 4 Wave 0 已建立 `TypeRegistry`/`TypeInfo`（`src/catalog/type_registry.{h,cpp}`），bootstrap 注册 40+ 内置类型，含类型别名规范化（`int`→`integer`、`varchar`→`character varying`、`bool`→`boolean`、`datetime`→`timestamp` 等）与类型修饰符校验（`varchar(n)`/`numeric(p,s)`/`timestamp(p)`/`bit(n)`/`interval(p)`）。`TINYINT`/`BLOB`/`NCHAR/NVARCHAR` 已作为兼容别名内部映射。下表多数 ⚠️ 类型现在**有注册与校验**，但仍以"字符串存储 + 注册校验"承载，未达 PG 的 I/O、运算、函数语义（对应 phase4-plan Wave 1，4.1~4.18 多数尚未拆出 `src/types/` 独立实现）。逐条细化：2.7 enum 已注册并存储标签（catalog 化/`ALTER TYPE ADD VALUE` 待 Phase 4.6）；2.10 bit 已校验长度修饰符（位运算待 Phase 4.9）；2.17 range/multirange 已注册（canonicalization/operators/functions 待 Phase 4.16）；2.21 伪类型已注册占位（调用约束待 Phase 4.18）。Wave 1/2 已落地的类型 I/O 与函数以 🔄 标注。
+
 | # | PostgreSQL 类型域 | 差距描述 | 状态 |
 |---|------------------|---------|------|
 | 2.1 | 数值类型 | `numeric/decimal(p,s)` 精度、scale、四舍五入、溢出、NaN/Infinity、运算符族不完整；`money` 以 double 类路径处理，不是 PG money | ⚠️ |
@@ -140,9 +159,11 @@
 
 ## 3. 表达式、函数与操作符差距
 
+> **已完成进展（2026-06-21）**：Phase 1 已实现分层 operator precedence 解析器（OR→AND→NOT→IS→比较→BETWEEN/IN/LIKE→`||`→`+/-`→`*//%`→`^`→一元→`::`→后缀→primary），支持 CASE/EXISTS/子查询/数组下标/cast。Phase 4 Wave 0.2 已建立 `ExprEvaluator`（`src/expression/ExprEvaluator.{h,cpp}`），支持常量/列引用/NULL/CAST/二元一元/CASE/COALESCE/NULLIF/GREATEST/LEAST/比较/BETWEEN/IN/LIKE/ILIKE/逻辑/函数调用/简单子查询；Wave 2 已新增内置函数子集与聚合/窗口骨架（`tests/functions_test.cpp`、`tests/window_functions_test.cpp`、`tests/core_types_test.cpp`）。3.1 由 ❌ 上调为 🔄（解析层具备 precedence/类型解析/schema-qualified/named args；**执行期**完整隐式 cast 与函数重载解析仍 ⚠️）。
+
 | # | 功能域 | 差距描述 | 状态 |
 |---|--------|---------|------|
-| 3.1 | 表达式 parser | 没有完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function、named/default args | ❌ |
+| 3.1 | 表达式 parser | 没有完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function、named/default args | 🔄 |
 | 3.2 | 逻辑/比较 | NULL 存储用空字符串近似，`IS DISTINCT FROM` 被预处理改写，复杂 NULL 语义不完整 | ⚠️ |
 | 3.3 | 数学函数 | 只覆盖常见函数；缺少 PG 全套 numeric/math/random/trig/hyperbolic/bitwise 函数和精确类型返回 | ⚠️ |
 | 3.4 | 字符串函数 | 只覆盖常见函数；缺少 `format`、regexp 系列全集、collation-aware 行为、encoding-aware 字符长度 | ⚠️ |
@@ -157,10 +178,12 @@
 
 ## 4. DDL 和对象模型差距
 
+> **已完成进展（2026-06-21）**：Phase 2 全部子任务已关闭。`CatalogManager`（`src/catalog/catalog.{h,cpp}`）以内存缓存 + 按 OID/名称索引 + CSV 持久化承载 `pg_namespace`/`pg_class`/`pg_attribute`/`pg_type`/`pg_proc`/`pg_depend`/`pg_authid`/`pg_auth_members`/`pg_description` 系统表行格式；OID 分配器（单调递增/批量预留/空闲回收，持久化 `.oid_counter.free`）；`planDrop` 拓扑排序 + pin 保护 + 循环检测 + RESTRICT/CASCADE 执行；`migrateDatabaseToCatalog` 将既有 `.stc` 元数据迁入系统表；临时 schema（`pg_temp_<sessionId>`）+ 嵌套锁死锁修复。4.1/4.2 由 ❌ 上调为 🔄（对象图已建，距 PG 几百个系统表/视图仍有量级差距）。Phase 4 Wave 4.3 DDL AST 桥（`DdlExecutor`）已让 CREATE/DROP/ALTER 从 AST 直接驱动。
+
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
-| 4.1 | Catalog/OID | 没有完整 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等对象图；对象用文件和字符串管理 | ❌ |
-| 4.2 | 依赖管理 | DROP/ALTER 缺少 PostgreSQL 的依赖追踪、`CASCADE/RESTRICT` 精确规则、rewrite/revalidation | ❌ |
+| 4.1 | Catalog/OID | 没有完整 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等对象图；对象用文件和字符串管理 | 🔄 |
+| 4.2 | 依赖管理 | DROP/ALTER 缺少 PostgreSQL 的依赖追踪、`CASCADE/RESTRICT` 精确规则、rewrite/revalidation | 🔄 |
 | 4.3 | Schema/search_path | Schema 用表名编码或 marker 文件模拟；缺少真正 namespace、search_path 解析、临时 schema、权限继承 | ⚠️ |
 | 4.4 | 表定义 | 缺少 PG 的 access method、tablespace、typed table、`LIKE INCLUDING/EXCLUDING` 全集、storage/compression、statistics target、replica identity、reloptions 全集 | ⚠️ |
 | 4.5 | 分区 | 有 range/list/hash/attach/detach 子集；缺少 PG 分区约束证明、分区索引联动、global/local index 语义、默认分区验证、运行时 partition pruning 完整能力 | ⚠️ |
@@ -175,6 +198,8 @@
 
 ## 5. 约束与完整性差距
 
+> **已完成进展（2026-06-21）**：约束 DDL 已登记 `DEFERRABLE`/`INITIALLY DEFERRED`/`NOT VALID`/`VALIDATE` 元数据（见 5.2/5.3/5.4 原文）。Phase 4 Wave 3 进行中：`DdlExecutor::columnDefToColumn` 已解析 `GENERATED ALWAYS AS (expr) STORED` 与 `IDENTITY`；`ForeignKey` 增加 `deferrable`/`initiallyDeferred` 字段；`tests/constraints_test.cpp`（未提交）覆盖 GENERATED STORED 与 DEFERRABLE INITIALLY DEFERRED FK。5.6 上调为 🔄。延迟约束队列/提交时检查（5.10/SET CONSTRAINTS）仍 ⚠️。
+
 | # | 约束能力 | 差距描述 | 状态 |
 |---|---------|---------|------|
 | 5.1 | `PRIMARY KEY` | 单列/复合有；缺少 deferrable、temporal constraints、partition/global uniqueness 完整语义 | ⚠️ |
@@ -182,7 +207,7 @@
 | 5.3 | `FOREIGN KEY` | 支持多列和部分 ON DELETE/UPDATE，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；缺少 `MATCH FULL/PARTIAL`、实际延迟检查、提交时 recheck、复杂锁与并发语义 | ⚠️ |
 | 5.4 | `CHECK` | 表达式解析范围有限，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；缺少 `NO INHERIT`、实际延迟检查和 PostgreSQL 级表达式语义 | ⚠️ |
 | 5.5 | `DEFAULT` | 缺少表达式默认值、稳定/易变函数、序列所有权精确行为 | ⚠️ |
-| 5.6 | `GENERATED` | 有 identity/generated expr 痕迹；缺少 PostgreSQL 18 虚拟生成列默认语义、stored/virtual 完整实现 | ⚠️ |
+| 5.6 | `GENERATED` | 有 identity/generated expr 痕迹；缺少 PostgreSQL 18 虚拟生成列默认语义、stored/virtual 完整实现 | 🔄 |
 | 5.7 | Exclusion constraints | 支持 `ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE USING ...` 的目录级登记和 drop/validate/options 元数据；缺少 GiST/operator class 执行检查、并发冲突检测和 executor enforcement | ⚠️ |
 | 5.8 | Temporal constraints | 缺失。PostgreSQL 18 对 range 上的 temporal primary/unique/foreign key 支持缺失 | ❌ |
 | 5.9 | Assertions | `CREATE/DROP ASSERTION` 已有目录级入口；PostgreSQL 本身未实现 SQL 标准 ASSERTION，本项目也缺少全库断言执行、依赖和重验证机制 | ⚠️ |
@@ -212,9 +237,11 @@
 
 ## 7. 查询优化器和执行器差距
 
+> **已完成进展（2026-06-21）**：解析/分析层已分层（Parser → AST，`src/parser/`），`execute()` 不再是纯字符串分发器，DDL 经 `DdlExecutor` 驱动；7.1 由 ❌ 上调为 🔄。但**优化器框架尚未建立**：`src/optimizer/` 目录为空，无 `Path`/`RelOptInfo`/`PlannerInfo` 框架（Phase 5 未启动），故 7.2~7.4 仍为 ⚠️/❌，7.5/7.6/7.7（并行/JIT/AIO）仍 ❌。
+
 | # | PostgreSQL 能力 | 差距描述 | 状态 |
 |---|----------------|---------|------|
-| 7.1 | Parser/analyzer/rewrite/planner/executor 分层 | 主要在 `execute()` 中字符串解析并直接调用 engine | ❌ |
+| 7.1 | Parser/analyzer/rewrite/planner/executor 分层 | 主要在 `execute()` 中字符串解析并直接调用 engine | 🔄 |
 | 7.2 | Cost-based planner | 有简化成本、统计和 plan cache；缺少 path 枚举、参数化路径、join search、equivalence classes、pathkeys、parallel aware path | ⚠️ |
 | 7.3 | 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化和扩展统计对象元数据；缺少 PostgreSQL 级 dependencies、ndistinct、correlation、表达式统计、catalog 和 planner 深度使用 | ⚠️ |
 | 7.4 | Index selection | 有 equality/range 部分；缺少 bitmap heap scan、bitmap and/or、多索引组合、skip scan、index condition recheck、lossy pages | ⚠️ |
@@ -228,9 +255,11 @@
 
 ## 8. 索引差距
 
+> **已完成进展（2026-06-21）**：Phase 0 已统一 `IIndexAM` 接口并提供 `BPTreeIndexAM`/`HashIndexAM` 适配器（`src/access/`）。8.1 由 ❌ 上调为 🔄（有接口层与适配器，但缺 `amhandler`/support functions/opclass/opfamily/amcostestimate/amvalidate 的 PG 完整 AM API）。其余索引能力仍在 Phase 6 待办。
+
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
-| 8.1 | Access Method API | 缺少 `amhandler`、support functions、opclass/opfamily、amcostestimate、amvalidate | ❌ |
+| 8.1 | Access Method API | 缺少 `amhandler`、support functions、opclass/opfamily、amcostestimate、amvalidate | 🔄 |
 | 8.2 | B-tree | 缺少 dedup、suffix truncation、visibility map 驱动 index-only、skip scan 完整实现、NULLS FIRST/LAST 存储控制、collation/operator class | ⚠️ |
 | 8.3 | Hash | 简化 hash index；缺少 WAL-safe hash bucket split、metapage/overflow page 机制 | ⚠️ |
 | 8.4 | GIN/GiST/BRIN/SP-GiST | 多为特定数据/范围简化结构；缺少 PostgreSQL 泛化 opclass、consistent/union/picksplit/penalty 等方法 | ⚠️ |
@@ -243,39 +272,45 @@
 
 ## 9. 事务、MVCC 与并发差距
 
+> **已完成进展（2026-06-21）**：Phase 3.7~3.9 已落地 PostgreSQL 风格 `HeapTupleHeader`（`t_xmin/t_xmax/t_cid/t_ctid/t_infomask/t_infomask2/t_hoff`、null bitmap、hint bits、ctid 自引用链、HOT update 经 `LP_REDIRECT`）；`CLOG`/`pg_xact`（2-bit 事务状态、按段持久化，commit/rollback 自动更新）；`Snapshot` 导出/导入（`exportToBytes/importFromBytes`）+ `subxip` 可见性 + catalog snapshot 惰性缓存。9.1/9.2/9.8 上调为 🔄（9.8：WAL 已是 redo log，LSN/segment/full-page/redo/timeline/archive + 两趟扫描恢复）。9.4 SSI 仍 ❌（Phase 5.43）。9.6 DDL 事务化仍 🔄（Wave 0.4 骨架：`DdlTransaction` + `XLOG_CATALOG_*` WAL 记录，Wave 5 全量移除隐式提交未做）。9.7 已修复嵌套锁死锁（Phase 2.6），轻量锁/spinlock/wait events 仍 ❌。9.9 `VisibilityMap`(AllVisible) + hint bits 已实现（Phase 3.8），freeze map/all-frozen/wraparound/autovacuum 仍 ❌（Phase 5.32）。
+
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
-| 9.1 | Tuple versioning | 项目行头只有 creator txid/rollback ptr 常量，实际可见性主要看创建 txid；缺少 `xmin/xmax`、ctid chain、多版本更新、HOT update | ⚠️ |
-| 9.2 | Snapshot | 有 ReadView；缺少 PG snapshot export/import、subxip、catalog snapshot、logical decoding snapshot | ⚠️ |
+| 9.1 | Tuple versioning | 项目行头只有 creator txid/rollback ptr 常量，实际可见性主要看创建 txid；缺少 `xmin/xmax`、ctid chain、多版本更新、HOT update | 🔄 |
+| 9.2 | Snapshot | 有 ReadView；缺少 PG snapshot export/import、subxip、catalog snapshot、logical decoding snapshot | 🔄 |
 | 9.3 | Isolation levels | 四级隔离名存在；Read Uncommitted 在 PG 中实际等同 Read Committed，本项目语义未必一致；Serializable 只用 RID read/write set 简化 SSI | ⚠️ |
 | 9.4 | SSI/predicate locks | 缺少 PostgreSQL predicate lock、SIREAD lock、rw-conflict in/out 复杂规则和索引范围推理 | ❌ |
 | 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index；缺少子事务 ID、资源释放、错误状态恢复 | ⚠️ |
-| 9.6 | DDL transactions | 本项目 DDL 多处隐式提交；PG 大多数 DDL 可回滚 | ⚠️ |
+| 9.6 | DDL transactions | 本项目 DDL 多处隐式提交；PG 大多数 DDL 可回滚 | 🔄 |
 | 9.7 | Lock manager | 有表/行/gap/page/advisory lock 简化；缺少 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、deadlock detector 精细语义、wait events | ⚠️ |
-| 9.8 | Crash safety | WAL 不是 redo log；事务开始复制目录备份，提交清 WAL。对大数据库、并发事务、部分页写、崩溃窗口的语义与 PG 差距巨大 | ⚠️ |
+| 9.8 | Crash safety | WAL 不是 redo log；事务开始复制目录备份，提交清 WAL。对大数据库、并发事务、部分页写、崩溃窗口的语义与 PG 差距巨大 | 🔄 |
 | 9.9 | Vacuum/freeze | 缺少 transaction wraparound、freeze map、visibility map、hint bits、all-visible/all-frozen | ⚠️ |
 
 ---
 
 ## 10. 存储、WAL、恢复差距
 
+> **已完成进展（2026-06-21）**：Phase 3 全部 14 子任务（3.1~3.14）已关闭。`ClusterLayout`（base/global/pg_wal/pg_xact/pg_tblspc 等 20+ 子目录 + 关系 forks main/fsm/vm/init + tablespace 符号链接）；`PgPage`/`PageWrapper` 统一 4KB/8KB 页接口（formatVersion≥2 默认 8KB + line pointer + tuple header）；`BufferPool`（clock sweep + pin/usage count + dirty flush）；`FreeSpaceMap`/`VisibilityMap`（fork 文件，集成到 insert/update/delete/vacuum）；WAL（LSN/segment/full-page/redo/timeline/archive_status，见 §9）；checkpoint（redo pointer + checkpoint record + `archivePendingSegments`）；TOAST（真实 chunked 关系 + B+tree 索引，2KB 分块）；data page checksums + 测试；storage parameters（`fillfactor` 执行 + `.params` 合并）。10.1/10.2/10.4/10.5/10.9 由 ❌ 上调为 ✅；10.3/10.6/10.8/10.10/10.11 上调为 🔄。10.7 PITR 仍 ❌（Phase 8）。
+
 | # | PostgreSQL 存储能力 | 差距描述 | 状态 |
 |---|--------------------|---------|------|
-| 10.1 | Cluster layout | PG 有 base/global/pg_wal/pg_xact/pg_multixact 等；本项目以当前目录数据库子目录和表文件为主 | ❌ |
-| 10.2 | Relation forks | 缺少 main/fsm/vm/init forks | ❌ |
-| 10.3 | Page format | 有 4096 slotted page；PG 默认 8KB page，含 line pointer、tuple header、visibility 等复杂结构 | ⚠️ |
-| 10.4 | Buffer manager | 有 LRU buffer pool；缺少 shared buffers、clock sweep、pin/lock/contention、bgwriter、checkpointer、walwriter | ❌ |
-| 10.5 | WAL | 缺少 record type、LSN、WAL segment、full page writes、redo routines、timeline、archive status、replication WAL sender | ❌ |
-| 10.6 | Checkpoint | 简化刷盘/清 WAL；缺少 redo pointer、checkpoint record、restartpoint、checkpoint throttling | ⚠️ |
+| 10.1 | Cluster layout | PG 有 base/global/pg_wal/pg_xact/pg_multixact 等；本项目以当前目录数据库子目录和表文件为主 | ✅ |
+| 10.2 | Relation forks | 缺少 main/fsm/vm/init forks | ✅ |
+| 10.3 | Page format | 有 4096 slotted page；PG 默认 8KB page，含 line pointer、tuple header、visibility 等复杂结构 | 🔄 |
+| 10.4 | Buffer manager | 有 LRU buffer pool；缺少 shared buffers、clock sweep、pin/lock/contention、bgwriter、checkpointer、walwriter | ✅ |
+| 10.5 | WAL | 缺少 record type、LSN、WAL segment、full page writes、redo routines、timeline、archive status、replication WAL sender | 🔄 |
+| 10.6 | Checkpoint | 简化刷盘/清 WAL；缺少 redo pointer、checkpoint record、restartpoint、checkpoint throttling | 🔄 |
 | 10.7 | PITR | 缺失 | ❌ |
-| 10.8 | TOAST | 有大值外置文件；缺少 PG TOAST relation/index、compression、chunking、out-of-line pointer 语义 | ⚠️ |
-| 10.9 | Tablespace | 缺失 | ❌ |
-| 10.10 | Checksums | 有页 checksum 痕迹；缺少 cluster-level data checksum、initdb/pg_verify_checksums | ⚠️ |
-| 10.11 | Storage parameters | 有少量 `.params`；缺少 fillfactor/autovacuum/toast/parallel/cost 等完整 reloptions | ⚠️ |
+| 10.8 | TOAST | 有大值外置文件；缺少 PG TOAST relation/index、compression、chunking、out-of-line pointer 语义 | 🔄 |
+| 10.9 | Tablespace | 缺失 | ✅ |
+| 10.10 | Checksums | 有页 checksum 痕迹；缺少 cluster-level data checksum、initdb/pg_verify_checksums | 🔄 |
+| 10.11 | Storage parameters | 有少量 `.params`；缺少 fillfactor/autovacuum/toast/parallel/cost 等完整 reloptions | 🔄 |
 
 ---
 
 ## 11. 安全、认证、权限差距
+
+> **已完成进展（2026-06-21）**：Phase 2.7 已用 `pg_authid`/`pg_auth_members` 替代 `user.dat`/`role.dat`（CRUD + 成员关系 + 级联删除 + CSV 持久化），11.1 差距收窄但仍 ⚠️（属性执行/membership options/password expiration 未做）。TLS 有 OpenSSL wrapper + stub（11.4 ⚠️）。pg_hba/SCRAM/wire protocol（11.2/11.3）仍 ❌，待 Phase 7。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
@@ -291,6 +326,8 @@
 ---
 
 ## 12. 复制、高可用、备份恢复差距
+
+> **已完成进展（2026-06-21）**：`src/replication/` 仅有 README，流复制/逻辑复制/PITR/复制槽/发布订阅全 ❌（Phase 8）。唯一有进展的是 12.8：WAL 已支持 timeline + `archive_status`(.ready/.done) + `archivePendingSegments()`（Phase 3.6），但连续归档/recovery.signal/PITR 仍 ❌。
 
 | # | PostgreSQL 能力 | 差距描述 | 状态 |
 |---|----------------|---------|------|
@@ -311,9 +348,11 @@
 
 ## 13. 系统目录、信息模式和监控差距
 
+> **已完成进展（2026-06-21）**：13.1 由 ❌ 上调为 🔄——核心系统表（pg_class/attribute/type/proc/depend/namespace/authid/auth_members/description）已建为真实对象图（Phase 2），虚拟表 pg_database/pg_tables/pg_indexes/pg_roles/pg_namespace 已有；但距 PG 几百个 view/function 仍有量级差距，故保留 🔄。其余（information_schema 完整 views、pg_stat_io/wait events、logging collector、多进程、psql/工具链）仍 ❌/⚠️。
+
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
-| 13.1 | `pg_catalog` | 只实现了若干虚拟表/兼容查询；缺少几百个 catalog/view/function | ❌ |
+| 13.1 | `pg_catalog` | 只实现了若干虚拟表/兼容查询；缺少几百个 catalog/view/function | 🔄 |
 | 13.2 | `information_schema` | 只有子集；缺少 SQL 标准完整 views、权限过滤 | ⚠️ |
 | 13.3 | `pg_stat_*` | 有 pg_stat_statements/pg_stat_activity/pg_locks/pg_buffercache 风格子集；缺少 pg_stat_io、progress views、replication views、wait events、backend memory contexts | ⚠️ |
 | 13.4 | 日志 | 有 slow log/auto_explain/audit；缺少 PG logging collector、CSV/JSON logs、log_line_prefix、server log GUC 全集 | ❌ |
@@ -359,68 +398,72 @@
 
 ## 16. 架构级根本差距（系统级，非单点功能）
 
-以下差距不是单个功能点，而是**系统级架构差异**，需要整体重构，无法通过补丁修复：
+以下差距不是单个功能点，而是**系统级架构差异**，需要整体重构，无法通过补丁修复。**状态**列反映 2026-06-21 核对结果——其中 16.1/16.2/16.3/16.4/16.9 的框架已落地（Phase 1~3），但"完整对齐 PG"仍需持续深化。
 
-| # | 差距 | 影响范围 | 难度 |
-|---|------|---------|------|
-| 16.1 | **Parser/AST** — 当前 `execute()` 是巨大字符串分发器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 |
-| 16.2 | **Catalog/OID** — 没有完整 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等对象图 | DDL、权限、依赖、对象寻址 | 极高 |
-| 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 |
-| 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 |
-| 16.5 | **DDL 事务化** — 多处 DDL 隐式提交，与 PG 事务语义不一致 | 数据一致性、回滚、并发 | 高 |
-| 16.6 | **PostgreSQL Wire Protocol** — 不是 PG 协议，客户端仅文本登录 | libpq 兼容性、生态工具 | 高 |
-| 16.7 | **扩展系统** — 没有插件加载框架、Hook 系统、共享内存扩展 | EXTENSION、FDW、PL、自定义类型 | 极高 |
-| 16.8 | **多进程模型** — 项目是多线程 server，PG 是多进程 backend + shared memory | 连接隔离、崩溃恢复、共享内存 | 高 |
-| 16.9 | **Buffer Manager** — 缺少 shared buffers、clock sweep、pin/lock、bgwriter、walwriter | I/O 性能、并发、恢复 | 高 |
-| 16.10 | **Cost-based Planner 框架** — 缺少 path/relation/statistics 框架 | 查询优化质量、并行查询、自适应优化 | 极高 |
+| # | 差距 | 影响范围 | 难度 | 状态 |
+|---|------|---------|------|------|
+| 16.1 | **Parser/AST** — 当前 `execute()` 是巨大字符串分发器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 | ✅ 框架已建：`src/parser/` 递归下降 Parser + AST + `classify()`，DDL 经 `DdlExecutor`；DML/UTILITY 仍在 `execute()` 内逐步提取 |
+| 16.2 | **Catalog/OID** — 没有完整 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等对象图 | DDL、权限、依赖、对象寻址 | 极高 | 🔄 核心系统表对象图 + OID 分配/回收 + 依赖 CASCADE/RESTRICT 已建（Phase 2）；量级对齐 PG 几百个 catalog 仍需持续 |
+| 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 | ✅ 已是 redo log：LSN/segment/full-page/redo/timeline/archive + 两趟扫描崩溃恢复（Phase 3.4~3.6）；PITR/复制仍 ❌ |
+| 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 | 🔄 `HeapTupleHeader`(xmin/xmax/ctid) + HOT + CLOG 可见性已实现（Phase 3.7/3.8）；多版本边界/vacuum 回收仍需深化 |
+| 16.5 | **DDL 事务化** — 多处 DDL 隐式提交，与 PG 事务语义不一致 | 数据一致性、回滚、并发 | 高 | 🔄 Wave 0.4 骨架（`DdlTransaction` + `XLOG_CATALOG_*` WAL）；全量移除隐式提交待 Phase 4.39 Wave 5 |
+| 16.6 | **PostgreSQL Wire Protocol** — 不是 PG 协议，客户端仅文本登录 | libpq 兼容性、生态工具 | 高 | ❌ Phase 7 待办 |
+| 16.7 | **扩展系统** — 没有插件加载框架、Hook 系统、共享内存扩展 | EXTENSION、FDW、PL、自定义类型 | 极高 | ❌ Phase 10 待办 |
+| 16.8 | **多进程模型** — 项目是多线程 server，PG 是多进程 backend + shared memory | 连接隔离、崩溃恢复、共享内存 | 高 | ❌ Phase 9 待办 |
+| 16.9 | **Buffer Manager** — 缺少 shared buffers、clock sweep、pin/lock、bgwriter、walwriter | I/O 性能、并发、恢复 | 高 | ✅ `BufferPool`(clock sweep + pin/usage) + bgwriter/checkpointer/walwriter 后台线程已实现（Phase 3.3/3.4） |
+| 16.10 | **Cost-based Planner 框架** — 缺少 path/relation/statistics 框架 | 查询优化质量、并行查询、自适应优化 | 极高 | ❌ `src/optimizer/` 为空，Phase 5 未启动 |
 
 ---
 
 ## 17. 实施路线图（建议顺序）
 
-若目标是"更像 PostgreSQL"，建议按以下依赖顺序推进。每条均需**原汁原味实现 PG 语义**，禁止折中：
+若目标是"更像 PostgreSQL"，建议按以下依赖顺序推进。每条均需**原汁原味实现 PG 语义**，禁止折中。
 
-### Phase 1：Parser 与 AST（6-12 个月）
-- 引入真正 SQL parser 或至少分层 AST，替代 `execute()` 超大字符串分支
-- 实现完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function
-- 所有 SQL 命令通过 AST 表示，而非字符串解析
+> **进度（2026-06-21）**：Phase 0~3 已完成；Phase 4 进行中（Wave 0~2 已落地，Wave 3 约束进行中，Wave 4~6 待办）；Phase 5~10 未启动。详见 `docs/implementation-plan.md` 与 `docs/phase4-plan.md`。
 
-### Phase 2：Catalog 体系（6-12 个月）
-- 建立对象 OID、namespace、owner、ACL、dependency 体系
-- 实现 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等系统表
-- 所有 DROP/ALTER 行为改为基于 catalog 的依赖追踪
+### Phase 1：Parser 与 AST ✅ 框架完成
+- 引入真正 SQL parser 或至少分层 AST，替代 `execute()` 超大字符串分支 — **已完成**（`src/parser/`）
+- 实现完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function — **解析层完成，执行期 cast/重载仍 ⚠️**
+- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 已 AST 驱动（DdlExecutor）；DML 逐步迁移中**
 
-### Phase 3：事务/WAL/MVCC（12-18 个月）
-- 实现真实 WAL record/LSN/redo、tuple xmin/xmax、多版本链和崩溃恢复
-- 移除 DDL 隐式提交，实现对象依赖和 rollback
-- 实现 CLOG/pg_xact、visibility map、hint bits
+### Phase 2：Catalog 体系 ✅ 完成
+- 建立对象 OID、namespace、owner、ACL、dependency 体系 — **核心完成，ACL/owner 待深化**
+- 实现 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等系统表 — **已完成**
+- 所有 DROP/ALTER 行为改为基于 catalog 的依赖追踪 — **DROP 已完成，ALTER rewrite 路径待补**
 
-### Phase 4：类型系统与函数（6-9 个月）
-- 完善 cast、operator、function overloading、collation、NULL 表示
-- 实现完整的表达式求值框架
-- 补齐 JSON/XML/Array/Range 全函数
+### Phase 3：事务/WAL/MVCC ✅ 完成
+- 实现真实 WAL record/LSN/redo、tuple xmin/xmax、多版本链和崩溃恢复 — **已完成**
+- 移除 DDL 隐式提交，实现对象依赖和 rollback — **DDL 事务骨架已建，全量移除隐式提交在 Phase 4.39**
+- 实现 CLOG/pg_xact、visibility map、hint bits — **已完成**（freeze map 仍待 Phase 5.32）
 
-### Phase 5：Planner 与执行器（9-15 个月）
-- 建立 path/relation/statistics 框架
-- 补 bitmap/parallel/partitionwise/skip scan
-- 实现 EXPLAIN ANALYZE 真实节点级统计
+### Phase 4：类型系统与函数 🔄 进行中（Wave 0~2 完成）
+- 完善 cast、operator、function overloading、collation、NULL 表示 — **TypeRegistry + ExprEvaluator 已建，逐类型 I/O 待 Wave 1**
+- 实现完整的表达式求值框架 — **ExprEvaluator 已建（Wave 0.2）**
+- 补齐 JSON/XML/Array/Range 全函数 — **内置函数子集已加（Wave 2），全集待补**
 
-### Phase 6：协议与认证（6-9 个月）
-- 支持 PostgreSQL wire protocol、libpq
-- 实现 pg_hba.conf、SCRAM-SHA-256
+### Phase 5：Planner 与执行器 ❌ 未启动
+- 建立 path/relation/statistics 框架 — **未启动**（`src/optimizer/` 为空）
+- 补 bitmap/parallel/partitionwise/skip scan — **未启动**
+- 实现 EXPLAIN ANALYZE 真实节点级统计 — **未启动**
 
-### Phase 7：复制/PITR（12-18 个月）
-- 在 WAL 稳定后实现 streaming replication、logical decoding、PITR
-- 实现复制槽、发布订阅、级联复制
+### Phase 6：协议与认证 ❌ 未启动
+- 支持 PostgreSQL wire protocol、libpq — **未启动**
+- 实现 pg_hba.conf、SCRAM-SHA-256 — **未启动**
 
-### Phase 8：扩展/FDW/PL（12-18 个月）
-- 实现扩展加载框架、过程语言和外部表生态
-- 实现 Hook 系统、后台工作进程、共享内存扩展
+### Phase 7：复制/PITR ❌ 未启动
+- 在 WAL 稳定后实现 streaming replication、logical decoding、PITR — **未启动**
+- 实现复制槽、发布订阅、级联复制 — **未启动**
+
+### Phase 8：扩展/FDW/PL ❌ 未启动
+- 实现扩展加载框架、过程语言和外部表生态 — **未启动**
+- 实现 Hook 系统、后台工作进程、共享内存扩展 — **未启动**
 
 ---
 
-*最后更新：2026-06-10*
+*最后更新：2026-06-21*
 *关联文档：*
 - [postgresql-complete-gap-analysis.md](postgresql-complete-gap-analysis.md) — 最详细的差距分析原文（不可删除）
+- [implementation-plan.md](implementation-plan.md) — 按 phase 排列的实施计划与"已完成内容"记录（Phase 0~3 已完成，Phase 4 进行中）
+- [phase4-plan.md](phase4-plan.md) — Phase 4 逐子任务展开与 Wave 0~6 进度
 - [test-report.md](test-report.md) — 功能测试报告
 - [commandsList.md](commandsList.md) — 支持的 SQL 命令列表
