@@ -279,7 +279,7 @@ void TypeRegistry::registerNumericTypes() {
                  {"bool"});
 
     registerType({"smallint", 2, 's', 'p', TypeCategory::Numeric, false, -1, 0, true},
-                 {"int2"});
+                 {"int2", "tinyint"});
     registerType({"integer", 4, 'i', 'p', TypeCategory::Numeric, false, -1, 0, true},
                  {"int", "int4"});
     registerType({"bigint", 8, 'd', 'p', TypeCategory::Numeric, false, -1, 0, true},
@@ -309,29 +309,26 @@ void TypeRegistry::registerNumericTypes() {
 
 void TypeRegistry::registerStringTypes() {
     registerType({"character", -1, 'c', 'p', TypeCategory::String, true, 1, 1005, false},
-                 {"char"});
+                 {"char", "nchar"});
     registerType({"character varying", -1, 'c', 'p', TypeCategory::String, true, -1, 65535, false},
-                 {"varchar"});
+                 {"varchar", "nvarchar"});
     registerType({"text", -1, 'c', 'x', TypeCategory::String, false, -1, 65535, false});
-
-    registerType({"nchar", -1, 'c', 'p', TypeCategory::String, true, 1, 4000, false});
-    registerType({"nvarchar", -1, 'c', 'p', TypeCategory::String, true, -1, 4000, false});
 }
 
 void TypeRegistry::registerBinaryTypes() {
-    registerType({"bytea", -1, 'i', 'x', TypeCategory::Binary, false, -1, 65535, false});
+    registerType({"bytea", -1, 'i', 'x', TypeCategory::Binary, false, -1, 65535, false},
+                 {"blob"});
     registerType({"binary", -1, 'i', 'p', TypeCategory::Binary, true, 1, 1005, false});
     registerType({"varbinary", -1, 'i', 'p', TypeCategory::Binary, true, -1, 65535, false});
-    registerType({"blob", -1, 'i', 'x', TypeCategory::Binary, false, -1, 65535, false});
 }
 
 void TypeRegistry::registerDateTimeTypes() {
     registerType({"date", 12, 'i', 'p', TypeCategory::DateTime, false, -1, 0, false});
     registerType({"time", 4, 'i', 'p', TypeCategory::DateTime, true, -1, 0, false});
     registerType({"timetz", 4, 'i', 'p', TypeCategory::DateTime, true, -1, 0, false});
-    registerType({"timestamp", 8, 'd', 'p', TypeCategory::DateTime, true, -1, 0, false});
+    registerType({"timestamp", 8, 'd', 'p', TypeCategory::DateTime, true, -1, 0, false},
+                 {"datetime"});
     registerType({"timestamptz", 8, 'd', 'p', TypeCategory::DateTime, true, -1, 0, false});
-    registerType({"datetime", 8, 'd', 'p', TypeCategory::DateTime, false, -1, 0, false});
     registerType({"interval", -1, 'd', 'p', TypeCategory::DateTime, true, -1, 64, false});
 }
 

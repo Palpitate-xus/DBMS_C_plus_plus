@@ -387,10 +387,11 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
     if (baseType == "int" || baseType == "integer") baseType = "int4";
     else if (baseType == "bigint") baseType = "int8";
     else if (baseType == "smallint") baseType = "int2";
+    else if (baseType == "tinyint") baseType = "smallint";
     else if (baseType == "real") baseType = "float4";
     else if (baseType == "double" || baseType == "double precision") baseType = "float8";
-    else if (baseType == "varchar" || baseType == "character varying") baseType = "varchar";
-    else if (baseType == "char" || baseType == "character") baseType = "char";
+    else if (baseType == "varchar" || baseType == "character varying" || baseType == "nvarchar") baseType = "varchar";
+    else if (baseType == "char" || baseType == "character" || baseType == "nchar") baseType = "char";
     else if (baseType == "bool") baseType = "boolean";
     else if (baseType == "datetime") baseType = "timestamp";
 
@@ -403,7 +404,7 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
     }
 
     if (baseType == "int2" || baseType == "smallint") {
-        col = makeIntColumn(cd.name, cd.isNull, 1, cd.isPrimaryKey);
+        col = makeIntColumn(cd.name, cd.isNull, 0, cd.isPrimaryKey);
     } else if (baseType == "int4" || baseType == "integer" || baseType == "int") {
         col = makeIntColumn(cd.name, cd.isNull, 2, cd.isPrimaryKey);
     } else if (baseType == "int8" || baseType == "bigint") {
