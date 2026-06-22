@@ -140,12 +140,37 @@ static void test_comment_on() {
     std::cout << "[DDL] comment OK" << std::endl;
 }
 
+static void test_drop_database_evicts_catalog() {
+    std::string db = "ddl_bridge_t5";
+    cleanup(db);
+
+    Session s;
+    setupSession(s, "");
+    dbms::DdlExecutor ddl;
+
+    bool err = ddl.executeSql("CREATE DATABASE " + db, s);
+    assert(!err);
+
+    // Touch the catalog so it is cached for this database.
+    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
+    assert(cat.findNamespaceByName("public") != nullptr);
+    assert(g_engine.catalogService().has(db));
+
+    err = ddl.executeSql("DROP DATABASE " + db, s);
+    assert(!err);
+    assert(!g_engine.catalogService().has(db));
+
+    cleanup(db);
+    std::cout << "[DDL] DROP DATABASE evicts catalog OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_drop_table();
     test_create_table_registers_in_catalog();
     test_create_index_sequence();
     test_create_database_schema();
+    test_drop_database_evicts_catalog();
     test_comment_on();
     std::cout << "[DDL] all passed" << std::endl;
     return 0;
