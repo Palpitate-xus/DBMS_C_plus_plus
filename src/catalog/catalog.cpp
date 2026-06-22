@@ -162,6 +162,11 @@ bool CatalogManager::dropNamespace(Oid oid) {
     return dropNamespaceUnlocked(oid);
 }
 
+std::vector<PgNamespaceRow> CatalogManager::listNamespaces() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return namespaces_;
+}
+
 // ============================================================================
 // 临时 schema（会话隔离）
 // ============================================================================
@@ -299,6 +304,11 @@ bool CatalogManager::dropClassUnlocked(Oid oid) {
 bool CatalogManager::dropClass(Oid oid) {
     std::lock_guard<std::mutex> lock(mutex_);
     return dropClassUnlocked(oid);
+}
+
+std::vector<PgClassRow> CatalogManager::listClasses() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return classes_;
 }
 
 // ============================================================================
@@ -474,6 +484,11 @@ bool CatalogManager::dropTypeUnlocked(Oid oid) {
 bool CatalogManager::dropType(Oid oid) {
     std::lock_guard<std::mutex> lock(mutex_);
     return dropTypeUnlocked(oid);
+}
+
+std::vector<PgTypeRow> CatalogManager::listTypes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return types_;
 }
 
 // ============================================================================
