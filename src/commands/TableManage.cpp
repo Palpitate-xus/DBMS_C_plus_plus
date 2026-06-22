@@ -3,6 +3,7 @@
 #include "Config.h"
 #include "HeapTupleHeader.h"
 #include "type_registry.h"
+#include "types/numeric.h"
 #include "catalog/CatalogService.h"
 #include <cmath>
 #include <unordered_map>
@@ -903,8 +904,8 @@ Column makeDecimalColumn(const std::string& name, bool isNull, int precision, in
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
-    c.dataType = "decimal";
-    c.dsize = 8;  // stored as double internally
+    c.dataType = "numeric";
+    c.dsize = 8;  // currently stored as double; will migrate to variable-length decimal later
     return c;
 }
 
@@ -3851,7 +3852,7 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         std::ostringstream oss;
         oss << val;
         return oss.str();
-    } else if (col.dataType == "double" || col.dataType == "decimal") {
+    } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
         double val = 0.0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(double));
         if (val == 0.0) return "";
@@ -7504,6 +7505,21 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && (num > cmp))  return false;
         if (cond.op == ">=" && (num < cmp))  return false;
         if (cond.op == "!=" && num == cmp)   return false;
+    } else if (col.dataType == "numeric") {
+        try {
+            Numeric num = val.empty() ? Numeric(0) : Numeric(val);
+            Numeric cmp(cond.value);
+            if (cond.op == "isnull") return false;
+            if (cond.op == "isnotnull") return true;
+            if (cond.op == "<"  && !(num < cmp))  return false;
+            if (cond.op == ">"  && !(num > cmp))  return false;
+            if (cond.op == "="  && num != cmp)    return false;
+            if (cond.op == "<=" && (num > cmp))   return false;
+            if (cond.op == ">=" && (num < cmp))   return false;
+            if (cond.op == "!=" && num == cmp)    return false;
+        } catch (...) {
+            return false;
+        }
     } else if (col.dataType == "double" || col.dataType == "decimal") {
         double num = 0.0, cmp = 0.0;
         try {
@@ -7832,7 +7848,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 } else if (col.dataType == "float") {
                     float num = val.empty() ? 0.0f : std::stof(val);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(float));
-                } else if (col.dataType == "double" || col.dataType == "decimal") {
+                } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
                     double num = val.empty() ? 0.0 : std::stod(val);
                     std::memcpy(&fixedData[fixedOff], &num, sizeof(double));
                 } else if (col.dataType == "boolean") {
@@ -8211,7 +8227,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
-        if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal") && !val.empty()) {
+        if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") && !val.empty()) {
             try { std::stod(val); } catch (...) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
@@ -8230,7 +8246,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "numeric" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
