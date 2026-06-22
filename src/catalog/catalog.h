@@ -44,6 +44,7 @@ public:
     const PgNamespaceRow* findNamespace(Oid oid) const;
     const PgNamespaceRow* findNamespaceByName(const std::string& name) const;
     bool dropNamespace(Oid oid);
+    std::vector<PgNamespaceRow> listNamespaces() const;
 
     // =====================================================================
     // 名称解析（search_path）
@@ -85,6 +86,7 @@ public:
     const PgClassRow* findClassByName(const std::string& name, Oid nspOid) const;
     bool updateClass(Oid oid, const PgClassRow& row);
     bool dropClass(Oid oid);
+    std::vector<PgClassRow> listClasses() const;
 
     // =====================================================================
     // pg_attribute
@@ -102,6 +104,7 @@ public:
     const PgTypeRow* findType(Oid oid) const;
     const PgTypeRow* findTypeByName(const std::string& name, Oid nspOid) const;
     bool dropType(Oid oid);
+    std::vector<PgTypeRow> listTypes() const;
 
     // =====================================================================
     // pg_proc

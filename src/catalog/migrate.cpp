@@ -1,50 +1,8 @@
 #include "migrate.h"
 #include <filesystem>
 #include <fstream>
-#include <unordered_map>
 
 namespace dbms {
-
-// ============================================================================
-// 类型名称 -> 标准 PG OID 映射（bootstrap 类型）
-// ============================================================================
-
-static std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
-    {"bool", 16}, {"boolean", 16},
-    {"bytea", 17},
-    {"char", 18},
-    {"name", 19},
-    {"bigint", 20}, {"int8", 20},
-    {"smallint", 21}, {"int2", 21},
-    {"integer", 23}, {"int", 23}, {"int4", 23},
-    {"regproc", 24},
-    {"text", 25},
-    {"oid", 26},
-    {"tid", 27},
-    {"xid", 28},
-    {"cid", 29},
-    {"oidvector", 30},
-    {"real", 700}, {"float4", 700},
-    {"double precision", 701}, {"float8", 701}, {"float", 701},
-    {"bpchar", 1042}, {"char", 1042},
-    {"varchar", 1043}, {"character varying", 1043},
-    {"date", 1082},
-    {"time", 1083},
-    {"timestamp", 1114}, {"timestamp without time zone", 1114},
-    {"timestamptz", 1184}, {"timestamp with time zone", 1184},
-    {"interval", 1186},
-    {"timetz", 1266}, {"time with time zone", 1266},
-    {"numeric", 1700}, {"decimal", 1700},
-    {"uuid", 2950},
-    {"jsonb", 3802},
-};
-
-static Oid mapTypeNameToOid(const std::string& typeName) {
-    auto it = kBuiltinTypeMap.find(typeName);
-    if (it != kBuiltinTypeMap.end()) return it->second;
-    // Unknown type: return 0 (caller should create a new type entry)
-    return INVALID_OID;
-}
 
 // ============================================================================
 // 表名解析：支持 schema__table 和 plain_table 两种格式
@@ -131,7 +89,7 @@ MigrateResult migrateDatabaseToCatalog(
             attr.attrelid = classOid;
             attr.attnum = static_cast<int16_t>(i + 1); // 1-based
             attr.attname = col.dataName;
-            attr.atttypid = mapTypeNameToOid(col.dataType);
+            attr.atttypid = mapBuiltinTypeNameToOid(col.dataType);
             attr.attlen = static_cast<int16_t>(col.dsize);
             attr.atttypmod = -1;
             attr.attnotnull = !col.isNull;

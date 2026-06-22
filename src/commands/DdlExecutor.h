@@ -29,8 +29,8 @@ class DdlExecutor {
 public:
     DdlExecutor() = default;
 
-    // 若该命令已被本执行器处理，返回 true；否则返回 false，调用方应回退到
-    // 原有的字符串分发逻辑。
+    // 执行已解析的 DDL AST。返回值语义与 main.cpp::execute() 一致：
+    //   false = 成功，true = 错误。
     bool execute(const StmtPtr& stmt, Session& s);
 
     // 便捷入口：解析并执行 SQL。
@@ -62,5 +62,13 @@ private:
     // 事务隐式提交（PG 语义；后续 Wave 5 移除）
     static void checkAndImplicitCommit(Session& s);
 };
+
+// DDL AST bridge 入口。由 main.cpp::execute() 在字符串分发前调用。
+//   - handled 出参：true 表示 sql 属于 bridge 覆盖的 DDL 类型（14 种），并已执行。
+//   - 返回值：false=成功，true=错误（与 main.cpp::execute() 一致）。
+//   - CTAS (CREATE TABLE ... AS SELECT ...) 因 parser 暂不捕获 SELECT 子句，
+//     这里设置 handled=false，让调用方回退到原有内联 CTAS 路径。
+bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
+                  Session& s, bool& handled);
 
 } // namespace dbms

@@ -5,9 +5,12 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DdlTransaction.h"
 #include "parser/parser.h"
+#include "catalog/CatalogService.h"
+#include "catalog/systables.h"
 #include "common/logs.h"
 #include "permissions.h"
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -47,6 +50,77 @@ std::string stripQuotes(const std::string& s) {
 }
 
 } // anonymous namespace
+
+// ----------------------------------------------------------------------------
+// Catalog registration helpers
+// ----------------------------------------------------------------------------
+
+static Oid ensureTypeInCatalog(CatalogManager& cat, Oid nspOid, const Column& col) {
+    Oid typid = mapBuiltinTypeNameToOid(col.dataType);
+    if (typid != INVALID_OID) return typid;
+
+    PgTypeRow typ;
+    typ.typname = col.dataType;
+    typ.typnamespace = nspOid;
+    typ.typlen = col.isVariableLength ? static_cast<int16_t>(-1) : static_cast<int16_t>(col.dsize);
+    typ.typtype = 'b';
+    typ.typcategory = 'U';
+    return cat.createType(typ);
+}
+
+static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
+                                   const std::string& logicalSchema,
+                                   const std::string& logicalName) {
+    Oid nspOid = INVALID_OID;
+    const auto* ns = cat.findNamespaceByName(logicalSchema);
+    if (!ns) {
+        // Defensive: CREATE TABLE should only reference an existing schema,
+        // but create it if missing to keep catalog consistent.
+        nspOid = cat.createNamespace(logicalSchema, 10); // owner=10 (bootstrap)
+    } else {
+        nspOid = ns->oid;
+    }
+
+    PgClassRow cls;
+    cls.relname = logicalName;
+    cls.relnamespace = nspOid;
+    cls.relkind = 'r';
+    cls.relnatts = static_cast<int16_t>(tbl.len);
+    cls.relpersistence = tbl.isUnlogged ? 'u' : 'p';
+    Oid classOid = cat.createClass(cls);
+
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        PgAttributeRow attr;
+        attr.attrelid = classOid;
+        attr.attnum = static_cast<int16_t>(i + 1);
+        attr.attname = col.dataName;
+        attr.atttypid = ensureTypeInCatalog(cat, nspOid, col);
+        attr.attlen = static_cast<int16_t>(col.dsize);
+        attr.atttypmod = -1;
+        attr.attnotnull = !col.isNull;
+        attr.atthasdef = !col.defaultValue.empty();
+        attr.attstorage = col.isVariableLength ? 'x' : 'p';
+        attr.attislocal = true;
+        attr.attisdropped = false;
+        if (col.isAutoIncrement) attr.attidentity = 'd';
+        if (!col.generatedExpr.empty()) attr.attgenerated = 's';
+        cat.addAttribute(attr);
+    }
+
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        const ForeignKey& fk = tbl.fks[i];
+        PgDependRow dep;
+        dep.classid = PgClassOid_Class;
+        dep.objid = classOid;
+        dep.objsubid = 0;
+        dep.refclassid = PgClassOid_Class;
+        dep.refobjid = INVALID_OID; // FK target OID resolution deferred
+        dep.refobjsubid = 0;
+        dep.deptype = 'n';
+        cat.addDepend(dep);
+    }
+}
 
 // ----------------------------------------------------------------------------
 // Public entry points
@@ -96,6 +170,62 @@ bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
 }
 
 // ----------------------------------------------------------------------------
+// DDL AST bridge helper (used by main.cpp::execute)
+// ----------------------------------------------------------------------------
+
+static bool isCreateTableAsSelect(const std::string& sql) {
+    // SQL is expected to be lowercased by main.cpp::execute(), but be defensive.
+    std::string lc;
+    lc.reserve(sql.size());
+    for (unsigned char c : sql) lc.push_back(static_cast<char>(std::tolower(c)));
+    size_t tablePos = lc.find("table");
+    if (tablePos == std::string::npos) return false;
+    return lc.find(" as select", tablePos + 5) != std::string::npos;
+}
+
+bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
+                  Session& s, bool& handled) {
+    handled = false;
+    switch (parsedCmd) {
+        case dbms::SqlCommand::CreateTable:
+        case dbms::SqlCommand::DropTable:
+        case dbms::SqlCommand::CreateIndex:
+        case dbms::SqlCommand::CreateSequence:
+        case dbms::SqlCommand::DropSequence:
+        case dbms::SqlCommand::CreateDomain:
+        case dbms::SqlCommand::DropDomain:
+        case dbms::SqlCommand::CreateType:
+        case dbms::SqlCommand::DropType:
+        case dbms::SqlCommand::CreateDatabase:
+        case dbms::SqlCommand::DropDatabase:
+        case dbms::SqlCommand::CreateSchema:
+        case dbms::SqlCommand::DropSchema:
+        case dbms::SqlCommand::Comment:
+            handled = true;
+            break;
+        default:
+            return false;
+    }
+
+    // CTAS is parsed as a plain CreateTableStmt without a SELECT clause.
+    // Let legacy inline CTAS handle it until parser/DdlExecutor support it.
+    if (parsedCmd == dbms::SqlCommand::CreateTable && isCreateTableAsSelect(sql)) {
+        handled = false;
+        return false;
+    }
+
+    dbms::SQLParser parser;
+    dbms::ParseResult r = parser.parse(sql);
+    if (!r.success || !r.stmt) {
+        // Parse failed: treat as not handled so legacy string dispatch can try.
+        handled = false;
+        return false;
+    }
+    dbms::DdlExecutor ddlExec;
+    return ddlExec.execute(r.stmt, s); // false=success, true=error
+}
+
+// ----------------------------------------------------------------------------
 // Transaction helpers
 // ----------------------------------------------------------------------------
 
@@ -142,6 +272,10 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
     }
     std::string dbname = stmt->objectNames.front();
     if (dbname == s.currentDB) s.currentDB.clear();
+
+    // Persist and drop the in-memory catalog before removing the directory.
+    g_engine.catalogService().evict(dbname);
+
     DBStatus res = g_engine.dropDatabase(dbname);
     if (res == DBStatus::NOT_FOUND) {
         std::cout << "Database not found" << std::endl;
@@ -176,6 +310,14 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
         std::cout << "CREATE SCHEMA failed" << std::endl;
         return true;
     }
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        cat.createNamespace(name, INVALID_OID);
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog schema registration failed: " << e.what() << std::endl;
+    }
+
     txn.recordCreate(DdlObjectKind::Schema, name);
     txn.commit();
     std::cout << "CREATE SCHEMA succeeded" << std::endl;
@@ -199,6 +341,24 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     }
     std::string name = stmt->objectNames.front();
     txn.recordDrop(DdlObjectKind::Schema, name);
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        const auto* ns = cat.findNamespaceByName(name);
+        if (ns) {
+            auto behavior = stmt->cascade ? CatalogManager::DropBehavior::Cascade
+                                          : CatalogManager::DropBehavior::Restrict;
+            std::string err;
+            bool ok = cat.dropObject(PgClassOid_Namespace, ns->oid, behavior, &err);
+            if (!ok) {
+                std::cout << "ERROR: " << err << std::endl;
+                return true;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog schema drop failed: " << e.what() << std::endl;
+    }
+
     DBStatus res = g_engine.dropSchema(s.currentDB, name, stmt->cascade);
     if (res != DBStatus::OK) {
         std::cout << "DROP SCHEMA failed" << std::endl;
@@ -449,6 +609,21 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         return true;
     }
     g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname, s.username);
+
+    // Register the table in the catalog (best-effort; storage is the authority).
+    try {
+        CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        CatalogManager::QualifiedName qn;
+        if (!CatalogManager::parseQualifiedName(stmt->tableName, qn)) {
+            qn.schema = "";
+            qn.name = stmt->tableName;
+        }
+        if (qn.schema.empty()) qn.schema = "public";
+        registerTableInCatalog(cat, tbl, qn.schema, qn.name);
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog registration failed: " << e.what() << std::endl;
+    }
+
     txn.recordCreate(DdlObjectKind::Table, tname);
     txn.commit();
     std::cout << "CREATE TABLE succeeded" << std::endl;
@@ -479,6 +654,31 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cout << "Table " << tname << " not found" << std::endl;
         return true;
     }
+
+    // Catalog-side CASCADE/RESTRICT check.
+    try {
+        CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        auto qn = CatalogService::logicalName(tname);
+        std::string logicalName = qn.schema.empty() ? qn.name : (qn.schema + "." + qn.name);
+        const PgClassRow* cls = cat.resolveRelation(logicalName, {"public"});
+        if (cls) {
+            auto behavior = stmt->cascade
+                                ? CatalogManager::DropBehavior::Cascade
+                                : CatalogManager::DropBehavior::Restrict;
+            std::string err;
+            bool ok = cat.dropObject(PgClassOid_Class, cls->oid, behavior, &err);
+            if (!ok) {
+                std::cout << "ERROR: " << err << std::endl;
+                return true;
+            }
+        } else {
+            std::cout << "NOTICE: table \"" << tname
+                      << "\" has no catalog entry; falling back to storage drop" << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog drop check failed: " << e.what() << std::endl;
+    }
+
     txn.recordDrop(DdlObjectKind::Table, tname);
     DBStatus res = g_engine.dropTable(s.currentDB, tname);
     if (res != DBStatus::OK) {
@@ -553,6 +753,37 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
     std::string idxName = stmt->indexName.empty() ? (tname + "_idx") : stmt->indexName;
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        auto qn = CatalogService::logicalName(tname);
+        const auto* ns = cat.findNamespaceByName(qn.schema.empty() ? "public" : qn.schema);
+        const auto* tbl = (ns ? cat.resolveRelation(qn.name, {qn.schema.empty() ? "public" : qn.schema}) : nullptr);
+        if (ns && tbl) {
+            PgClassRow idx;
+            idx.relname = idxName;
+            idx.relnamespace = ns->oid;
+            idx.relkind = 'i';
+            idx.relnatts = static_cast<int16_t>(colnames.size());
+            Oid idxOid = cat.createClass(idx);
+
+            PgDependRow dep;
+            dep.classid = PgClassOid_Class;
+            dep.objid = idxOid;
+            dep.objsubid = 0;
+            dep.refclassid = PgClassOid_Class;
+            dep.refobjid = tbl->oid;
+            dep.refobjsubid = 0;
+            dep.deptype = 'a';
+            cat.addDepend(dep);
+        } else {
+            std::cerr << "WARNING: table " << tname
+                      << " has no catalog entry; index not registered" << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog index registration failed: " << e.what() << std::endl;
+    }
+
     txn.recordCreate(DdlObjectKind::Index, idxName, tname);
     txn.commit();
     std::cout << "CREATE INDEX succeeded" << std::endl;
@@ -585,6 +816,22 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         std::cout << "CREATE SEQUENCE failed" << std::endl;
         return true;
     }
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        const auto* nsPublic = cat.findNamespaceByName("public");
+        if (nsPublic) {
+            PgClassRow seq;
+            seq.relname = seqname;
+            seq.relnamespace = nsPublic->oid;
+            seq.relkind = 'S';
+            seq.relnatts = 0;
+            cat.createClass(seq);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog sequence registration failed: " << e.what() << std::endl;
+    }
+
     txn.recordCreate(DdlObjectKind::Sequence, seqname);
     txn.commit();
     std::cout << "CREATE SEQUENCE succeeded" << std::endl;
@@ -608,6 +855,24 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
     }
     std::string seqname = stmt->objectNames.front();
     txn.recordDrop(DdlObjectKind::Sequence, seqname);
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        const auto* seq = cat.resolveRelation(seqname, {"public"});
+        if (seq) {
+            auto behavior = stmt->cascade ? CatalogManager::DropBehavior::Cascade
+                                          : CatalogManager::DropBehavior::Restrict;
+            std::string err;
+            bool ok = cat.dropObject(PgClassOid_Class, seq->oid, behavior, &err);
+            if (!ok) {
+                std::cout << "ERROR: " << err << std::endl;
+                return true;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog sequence drop failed: " << e.what() << std::endl;
+    }
+
     DBStatus res = g_engine.dropSequence(s.currentDB, seqname);
     if (res != DBStatus::OK) {
         std::cout << "DROP SEQUENCE failed" << std::endl;

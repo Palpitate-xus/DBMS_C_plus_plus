@@ -35,6 +35,8 @@
 
 namespace dbms {
 
+class CatalogService;
+
 // MVCC header size per row
 constexpr size_t MVCC_TXID_SIZE = 8;      // uint64_t creatorTxnId
 constexpr size_t MVCC_ROLLBACK_SIZE = 8;  // uint64_t rollbackPtr (0 = no older version)
@@ -848,6 +850,9 @@ public:
     // Test/debug access to per-database WAL manager.
     WALManager* getWAL(const std::string& dbname) const;
 
+    // Catalog service: per-database CatalogManager cache (Phase 2 wiring).
+    CatalogService& catalogService();
+
 private:
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path paramsPath(const std::string& dbname, const std::string& tablename) const;
@@ -969,6 +974,9 @@ private:
     // WAL manager per database
     mutable std::unordered_map<std::string, std::unique_ptr<WALManager>> walManagers_;
     void closeAllWALs();
+
+    // Catalog service (Phase 2 wiring): per-database CatalogManager cache.
+    std::unique_ptr<CatalogService> catalogService_;
 
     // Per-database checkpoint LSN. Pages with pd_lsn <= this value trigger
     // a full-page write on their next modification.

@@ -20,6 +20,7 @@
 #include "Config.h"
 #include "parser/parser.h"
 #include "commands/DdlExecutor.h"
+#include "catalog/CatalogService.h"
 
 using namespace std;
 using dbms::Column;
@@ -8238,38 +8239,14 @@ bool execute(const string& rawSql, Session& s) {
             break;
     }
 
-    // Phase 4 Wave 0.3: DDL AST bridge — try AST-driven execution before legacy string dispatch
+    // Phase 4 Wave 0.3: DDL AST bridge — try AST-driven execution before legacy string dispatch.
+    // tryDdlBridge returns on both success and error; if it did not handle the command,
+    // execution falls through to the legacy string dispatch below.
     {
-        bool isDdl = false;
-        switch (parsedCmd) {
-            case dbms::SqlCommand::CreateTable:
-            case dbms::SqlCommand::DropTable:
-            case dbms::SqlCommand::CreateIndex:
-            case dbms::SqlCommand::CreateSequence:
-            case dbms::SqlCommand::DropSequence:
-            case dbms::SqlCommand::CreateDomain:
-            case dbms::SqlCommand::DropDomain:
-            case dbms::SqlCommand::CreateType:
-            case dbms::SqlCommand::DropType:
-            case dbms::SqlCommand::CreateDatabase:
-            case dbms::SqlCommand::DropDatabase:
-            case dbms::SqlCommand::CreateSchema:
-            case dbms::SqlCommand::DropSchema:
-            case dbms::SqlCommand::Comment:
-                isDdl = true;
-                break;
-            default:
-                break;
-        }
-        if (isDdl) {
-            dbms::SQLParser parser;
-            dbms::ParseResult r = parser.parse(sql);
-            if (r.success && r.stmt) {
-                dbms::DdlExecutor ddlExec;
-                if (ddlExec.execute(r.stmt, s)) {
-                    return true;
-                }
-            }
+        bool handled = false;
+        bool err = dbms::tryDdlBridge(sql, parsedCmd, s, handled);
+        if (handled) {
+            return err;
         }
     }
 
@@ -14205,7 +14182,7 @@ bool execute(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
@@ -14354,12 +14331,41 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
             } else if (tname == "pg_namespace") {
-                cout << "nspname nspowner " << endl;
-                cout << "public admin " << endl;
-                if (queryDb != "information_schema" && queryDb != "pg_catalog") {
-                    auto schemas = g_engine.getSchemaNames(queryDb);
-                    for (const auto& sn : schemas) {
-                        cout << sn << " admin " << endl;
+                cout << "oid nspname nspowner " << endl;
+                if (!queryDb.empty()) {
+                    try {
+                        for (const auto& ns : g_engine.catalogService().get(queryDb).listNamespaces()) {
+                            cout << ns.oid << " " << ns.nspname << " " << ns.nspowner << " " << endl;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "WARNING: pg_namespace lookup failed: " << e.what() << std::endl;
+                    }
+                }
+            } else if (tname == "pg_class") {
+                cout << "oid relname relnamespace relkind relnatts relpersistence relowner " << endl;
+                if (!queryDb.empty()) {
+                    try {
+                        for (const auto& cls : g_engine.catalogService().get(queryDb).listClasses()) {
+                            cout << cls.oid << " " << cls.relname << " "
+                                 << cls.relnamespace << " " << cls.relkind << " "
+                                 << cls.relnatts << " " << cls.relpersistence << " "
+                                 << cls.relowner << " " << endl;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "WARNING: pg_class lookup failed: " << e.what() << std::endl;
+                    }
+                }
+            } else if (tname == "pg_type") {
+                cout << "oid typname typnamespace typtype typlen " << endl;
+                if (!queryDb.empty()) {
+                    try {
+                        for (const auto& typ : g_engine.catalogService().get(queryDb).listTypes()) {
+                            cout << typ.oid << " " << typ.typname << " "
+                                 << typ.typnamespace << " " << typ.typtype << " "
+                                 << typ.typlen << " " << endl;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "WARNING: pg_type lookup failed: " << e.what() << std::endl;
                     }
                 }
             }
