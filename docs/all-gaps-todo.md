@@ -48,7 +48,7 @@
 
 ### 1.1 有实现但与 PostgreSQL 不等价的命令
 
-> **已完成进展（2026-06-21，含运行时核对）**：Phase 1 已建立真实 SQL Parser（`src/parser/parser.{h,cpp}`，~6400 行）与 AST 框架（`src/parser/ast.h`，`SqlCommand` 枚举 ~130 值，含 Select/Insert/Update/Delete/Merge/CreateTable/AlterTable 等 Stmt 节点）。但**运行时集成是部分的**：`main.cpp::execute()` 用 `classify(sql)` 得枚举后做 switch，简单命令仍用 `sql.substr(...)` 字符串切片处理；**DML（SELECT/INSERT/UPDATE/DELETE/MERGE）全部 fall through 到旧字符串分发**（`substr(0,6)=="select"` 等），解析出的 DML AST **未被任何执行器消费**。DDL 经 `DdlExecutor` 走 AST，但仅覆盖 CreateTable/DropTable/CreateIndex/Create+Drop Sequence/Domain/Type/Database/Schema/Comment，**缺 AlterTable/DropIndex/View/MView/Trigger/Policy/Function/Procedure**；DdlExecutor 直接调旧 `g_engine.*` API，不经 CatalogManager/TypeRegistry。多数 ⚠️ 命令的**解析**已补全（`CREATE INDEX`/`ALTER TABLE`/`SELECT` 全量子命令、CTE/JOIN/SET OPS、GUC 等），下表差距主要指**执行语义与 PG 不等价**。故保留 ⚠️ 的条目多表示"能解析/能跑基础路径，但未达 PG 完整语义"。
+> **已完成进展（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并迁移旧 `.stc` 数据库；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。**DML（SELECT/INSERT/UPDATE/DELETE/MERGE）仍走旧字符串分发，AST 未被消费**——已明确延期为独立后续任务。DDL 中仍缺 `ALTER TABLE`/`DROP INDEX`/视图/物化视图/触发器/策略/函数/过程的目录集成。
 
 | # | 命令 | 差距描述 | 状态 |
 |---|------|---------|------|

@@ -23,7 +23,7 @@ tmpidx/
 drop_cascade_t*/
 ddl_bridge_t*/
 pgcat_view_t*/
-catalog_service_t*/
+runtime_wiring_t*/
 *.tmp
 build/
 build-*/
