@@ -13858,6 +13858,11 @@ void StorageEngine::checkpoint(const std::string& dbname) {
     }
     syncFile(cpPath);
 
+    // Persist catalog metadata so it matches the checkpoint.
+    if (catalogService_) {
+        catalogService_->persistAll();
+    }
+
     // Archive WAL before truncation
     archiveWal(dbname);
     // TODO: truncate WAL segments entirely before the checkpoint while keeping

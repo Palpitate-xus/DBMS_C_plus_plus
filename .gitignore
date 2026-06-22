@@ -23,7 +23,7 @@ tmpidx/
 drop_cascade_t*/
 ddl_bridge_t*/
 pgcat_view_t*/
-background_worker_db/
+catalog_service_t*/
 *.tmp
 build/
 build-*/
