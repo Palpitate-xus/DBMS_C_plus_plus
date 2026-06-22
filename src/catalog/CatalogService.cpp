@@ -87,4 +87,17 @@ bool CatalogService::has(const std::string& dbname) const {
     return cache_.find(dbname) != cache_.end();
 }
 
+CatalogManager::QualifiedName CatalogService::logicalName(const std::string& physical) {
+    CatalogManager::QualifiedName qn;
+    qn.schema.clear();
+    qn.name = physical;
+
+    size_t pos = physical.find("__");
+    if (pos != std::string::npos && pos > 0 && pos + 2 < physical.size()) {
+        qn.schema = physical.substr(0, pos);
+        qn.name = physical.substr(pos + 2);
+    }
+    return qn;
+}
+
 } // namespace dbms

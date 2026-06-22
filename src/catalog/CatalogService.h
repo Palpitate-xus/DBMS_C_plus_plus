@@ -47,6 +47,11 @@ public:
     // Test/debug: is `dbname` currently cached?
     bool has(const std::string& dbname) const;
 
+    // Convert a physical storage name (schema__table or plain_table) to a
+    // logical qualified name. This is the inverse of main.cpp's
+    // resolveTableName() for schema-qualified names.
+    static CatalogManager::QualifiedName logicalName(const std::string& physical);
+
 private:
     const StorageEngine& engine_;
     mutable std::mutex mutex_;
