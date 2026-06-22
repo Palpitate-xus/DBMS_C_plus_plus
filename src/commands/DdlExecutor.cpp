@@ -624,6 +624,31 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cout << "Table " << tname << " not found" << std::endl;
         return true;
     }
+
+    // Catalog-side CASCADE/RESTRICT check.
+    try {
+        CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        auto qn = CatalogService::logicalName(tname);
+        std::string logicalName = qn.schema.empty() ? qn.name : (qn.schema + "." + qn.name);
+        const PgClassRow* cls = cat.resolveRelation(logicalName, {"public"});
+        if (cls) {
+            auto behavior = stmt->cascade
+                                ? CatalogManager::DropBehavior::Cascade
+                                : CatalogManager::DropBehavior::Restrict;
+            std::string err;
+            bool ok = cat.dropObject(PgClassOid_Class, cls->oid, behavior, &err);
+            if (!ok) {
+                std::cout << "ERROR: " << err << std::endl;
+                return true;
+            }
+        } else {
+            std::cout << "NOTICE: table \"" << tname
+                      << "\" has no catalog entry; falling back to storage drop" << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog drop check failed: " << e.what() << std::endl;
+    }
+
     txn.recordDrop(DdlObjectKind::Table, tname);
     DBStatus res = g_engine.dropTable(s.currentDB, tname);
     if (res != DBStatus::OK) {

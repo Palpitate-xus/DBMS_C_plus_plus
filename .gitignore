@@ -20,6 +20,9 @@ round_test*/
 testoverdb/
 tmpidx/
 [0-9]*/
+drop_cascade_t*/
+ddl_bridge_t*/
+pgcat_view_t*/
 *.tmp
 build/
 build-*/
