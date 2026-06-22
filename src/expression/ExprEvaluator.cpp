@@ -1,5 +1,6 @@
 #include "ExprEvaluator.h"
 #include "common/DateType.h"
+#include "types/numeric.h"
 
 #include <algorithm>
 #include <cctype>
@@ -17,6 +18,19 @@ namespace dbms {
 static std::string toLower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+static bool isNumericTypeName(const std::string& s) {
+    std::string t = toLower(s);
+    return t == "numeric" || t == "decimal";
+}
+
+static std::optional<Numeric> tryParseNumeric(const std::string& s) {
+    try {
+        return Numeric(s);
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 bool ExprValue::asBool() const {
@@ -174,6 +188,10 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     if (op == "-") {
         if (v.isNull) return v;
         if (v.value.empty()) return ExprValue(v.typeName, "0", false);
+        if (isNumericTypeName(v.typeName)) {
+            auto n = tryParseNumeric(v.value);
+            if (n) return ExprValue("numeric", (-(*n)).toString(), false);
+        }
         if (v.value[0] == '-') return ExprValue(v.typeName, v.value.substr(1), false);
         return ExprValue(v.typeName, "-" + v.value, false);
     }
@@ -222,6 +240,15 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
 
     std::string ta = toLower(a.typeName);
     std::string tb = toLower(b.typeName);
+
+    // Exact numeric comparison for explicit numeric/decimal types.
+    if (isNumericTypeName(a.typeName) || isNumericTypeName(b.typeName)) {
+        auto na = tryParseNumeric(a.value);
+        auto nb = tryParseNumeric(b.value);
+        if (na && nb) {
+            return (*na > *nb) - (*na < *nb);
+        }
+    }
 
     // Numeric comparison
     bool numA = looksLikeNumber(a.value);
@@ -284,6 +311,21 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
     if (l.isNull || r.isNull) return ExprValue(l.typeName, "", true);
+
+    // Exact arithmetic for explicit numeric/decimal types.
+    if (isNumericTypeName(l.typeName) || isNumericTypeName(r.typeName)) {
+        auto nl = tryParseNumeric(l.value);
+        auto nr = tryParseNumeric(r.value);
+        if (nl && nr) {
+            Numeric res;
+            if (op == "+") res = *nl + *nr;
+            else if (op == "-") res = *nl - *nr;
+            else if (op == "*") res = *nl * *nr;
+            else if (op == "/") res = *nl / *nr;
+            else return ExprValue("numeric", "", true);
+            return ExprValue("numeric", res.toString(), false);
+        }
+    }
 
     bool floatResult = l.value.find('.') != std::string::npos ||
                        r.value.find('.') != std::string::npos ||
@@ -487,7 +529,9 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return ExprValue("double precision", oss.str(), false);
     }
     if (target == "numeric" || target == "decimal") {
-        return ExprValue("numeric", std::to_string(v.asDouble()), false);
+        auto n = tryParseNumeric(v.value);
+        if (n) return ExprValue("numeric", n->toString(), false);
+        return ExprValue("numeric", "", true);
     }
     if (target == "text" || target.find("char") != std::string::npos || target == "varchar") {
         return ExprValue(targetTypeName, v.value, false);
@@ -588,6 +632,10 @@ ExprValue ExprEvaluator::evalRowExpr(const RowExpr*, const RowContext&) const {
 void ExprEvaluator::registerBuiltins() {
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (isNumericTypeName(a[0].typeName)) {
+            auto n = tryParseNumeric(a[0].value);
+            if (n) return ExprValue("numeric", (n->sign() < 0 ? -(*n) : *n).toString(), false);
+        }
         double v = std::abs(a[0].asDouble());
         return ExprValue("numeric", std::to_string(v), false);
     };
@@ -617,6 +665,13 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["round"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (isNumericTypeName(a[0].typeName)) {
+            auto n = tryParseNumeric(a[0].value);
+            if (n) {
+                int p = (a.size() >= 2) ? static_cast<int>(a[1].asInt()) : 0;
+                return ExprValue("numeric", n->withScale(p).toString(), false);
+            }
+        }
         double v = a[0].asDouble();
         if (a.size() >= 2) {
             int p = static_cast<int>(a[1].asInt());

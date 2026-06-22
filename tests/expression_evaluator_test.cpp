@@ -1,4 +1,4 @@
-// test_sources: src/expression/ExprEvaluator.cpp src/parser/parser.cpp src/catalog/type_registry.cpp src/common/Config.cpp
+// test_sources: src/expression/ExprEvaluator.cpp src/parser/parser.cpp src/catalog/type_registry.cpp src/common/Config.cpp src/types/numeric.cpp
 #include "expression/ExprEvaluator.h"
 #include "parser/ast.h"
 #include "catalog/type_registry.h"
@@ -210,6 +210,64 @@ static void test_cast() {
     std::cout << "[EXPR] cast OK" << std::endl;
 }
 
+static void test_numeric() {
+    ExprEvaluator eval;
+    auto makeNumLit = [](const std::string& s) {
+        auto e = std::make_unique<LiteralExpr>();
+        e->value = s;
+        e->typeName = "numeric";
+        return e;
+    };
+
+    // Addition preserves scale.
+    {
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "+";
+        bin->left = makeNumLit("1.23");
+        bin->right = makeNumLit("2.77");
+        ExprValue v = eval.eval(bin.get(), {});
+        assert(v.typeName == "numeric");
+        assert(v.value == "4.00");
+    }
+
+    // Comparison uses exact decimal semantics.
+    {
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = "=";
+        bin->left = makeNumLit("0.1");
+        bin->right = makeNumLit("0.10");
+        assert(eval.eval(bin.get(), {}).asBool());
+    }
+
+    // Cast to numeric.
+    {
+        auto cast = std::make_unique<CastExpr>();
+        cast->operand = makeNumLit("'123.4500'");
+        cast->typeName = "numeric";
+        ExprValue v = eval.eval(cast.get(), {});
+        assert(v.value == "123.4500");
+    }
+
+    // abs and round.
+    {
+        auto f = std::make_unique<FunctionCallExpr>();
+        f->funcName = "abs";
+        f->args.push_back(makeNumLit("-5.5"));
+        ExprValue v = eval.eval(f.get(), {});
+        assert(v.value == "5.5");
+    }
+    {
+        auto f = std::make_unique<FunctionCallExpr>();
+        f->funcName = "round";
+        f->args.push_back(makeNumLit("3.14159"));
+        f->args.push_back(makeNumLit("2"));
+        ExprValue v = eval.eval(f.get(), {});
+        assert(v.value == "3.14");
+    }
+
+    std::cout << "[EXPR] numeric OK" << std::endl;
+}
+
 static void test_case() {
     ExprEvaluator eval;
     auto makeLit = [](const std::string& s) {
@@ -280,6 +338,7 @@ int main() {
     test_null();
     test_like();
     test_cast();
+    test_numeric();
     test_case();
     test_functions();
     std::cout << "[EXPR] all passed" << std::endl;
