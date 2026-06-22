@@ -50,6 +50,7 @@ SOURCES=(
     src/expression/ExprEvaluator.cpp
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
+    src/types/numeric.cpp
 )
 
 # 选择 TLS 实现

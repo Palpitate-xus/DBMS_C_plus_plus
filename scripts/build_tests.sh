@@ -48,6 +48,7 @@ SOURCES=(
     src/expression/ExprEvaluator.cpp
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
+    src/types/numeric.cpp
 )
 
 if [ "$HAS_OPENSSL" -eq 1 ]; then

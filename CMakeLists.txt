@@ -56,6 +56,7 @@ set(DBMS_SOURCES
     src/expression/ExprEvaluator.cpp
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
+    src/types/numeric.cpp
 )
 
 add_executable(dbms_main ${DBMS_SOURCES})
