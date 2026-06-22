@@ -88,12 +88,29 @@ static void test_create_index_sequence() {
     bool err = ddl.executeSql("CREATE INDEX idx_a ON idx_tbl (a)", s);
     assert(!err);
 
+    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
+    const auto* nsPublic = cat.findNamespaceByName("public");
+    assert(nsPublic != nullptr);
+    const auto* idx = cat.findClassByName("idx_a", nsPublic->oid);
+    assert(idx != nullptr);
+    assert(idx->relkind == 'i');
+
     err = ddl.executeSql("CREATE SEQUENCE seq1 START 10 INCREMENT 2", s);
     assert(!err);
     assert(g_engine.sequenceExists(db, "seq1"));
 
+    const auto* seq = cat.findClassByName("seq1", nsPublic->oid);
+    assert(seq != nullptr);
+    assert(seq->relkind == 'S');
+
     err = ddl.executeSql("DROP SEQUENCE seq1", s);
     assert(!err);
+    assert(cat.findClassByName("seq1", nsPublic->oid) == nullptr);
+
+    // Dropping the table with CASCADE should remove the dependent index.
+    err = ddl.executeSql("DROP TABLE idx_tbl CASCADE", s);
+    assert(!err);
+    assert(cat.findClassByName("idx_a", nsPublic->oid) == nullptr);
 
     cleanup(db);
     std::cout << "[DDL] index/sequence OK" << std::endl;
@@ -115,6 +132,14 @@ static void test_create_database_schema() {
     err = ddl.executeSql("CREATE SCHEMA myschema", s);
     assert(!err);
     assert(g_engine.schemaExists(db, "myschema"));
+
+    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
+    assert(cat.findNamespaceByName("myschema") != nullptr);
+
+    err = ddl.executeSql("DROP SCHEMA myschema RESTRICT", s);
+    assert(!err);
+    assert(!g_engine.schemaExists(db, "myschema"));
+    assert(cat.findNamespaceByName("myschema") == nullptr);
 
     cleanup(db);
     std::cout << "[DDL] database/schema OK" << std::endl;

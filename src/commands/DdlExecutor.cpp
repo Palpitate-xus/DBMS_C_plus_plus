@@ -310,6 +310,14 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
         std::cout << "CREATE SCHEMA failed" << std::endl;
         return true;
     }
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        cat.createNamespace(name, INVALID_OID);
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog schema registration failed: " << e.what() << std::endl;
+    }
+
     txn.recordCreate(DdlObjectKind::Schema, name);
     txn.commit();
     std::cout << "CREATE SCHEMA succeeded" << std::endl;
@@ -333,6 +341,24 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     }
     std::string name = stmt->objectNames.front();
     txn.recordDrop(DdlObjectKind::Schema, name);
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        const auto* ns = cat.findNamespaceByName(name);
+        if (ns) {
+            auto behavior = stmt->cascade ? CatalogManager::DropBehavior::Cascade
+                                          : CatalogManager::DropBehavior::Restrict;
+            std::string err;
+            bool ok = cat.dropObject(PgClassOid_Namespace, ns->oid, behavior, &err);
+            if (!ok) {
+                std::cout << "ERROR: " << err << std::endl;
+                return true;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog schema drop failed: " << e.what() << std::endl;
+    }
+
     DBStatus res = g_engine.dropSchema(s.currentDB, name, stmt->cascade);
     if (res != DBStatus::OK) {
         std::cout << "DROP SCHEMA failed" << std::endl;
@@ -727,6 +753,37 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
     std::string idxName = stmt->indexName.empty() ? (tname + "_idx") : stmt->indexName;
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        auto qn = CatalogService::logicalName(tname);
+        const auto* ns = cat.findNamespaceByName(qn.schema.empty() ? "public" : qn.schema);
+        const auto* tbl = (ns ? cat.resolveRelation(qn.name, {qn.schema.empty() ? "public" : qn.schema}) : nullptr);
+        if (ns && tbl) {
+            PgClassRow idx;
+            idx.relname = idxName;
+            idx.relnamespace = ns->oid;
+            idx.relkind = 'i';
+            idx.relnatts = static_cast<int16_t>(colnames.size());
+            Oid idxOid = cat.createClass(idx);
+
+            PgDependRow dep;
+            dep.classid = PgClassOid_Class;
+            dep.objid = idxOid;
+            dep.objsubid = 0;
+            dep.refclassid = PgClassOid_Class;
+            dep.refobjid = tbl->oid;
+            dep.refobjsubid = 0;
+            dep.deptype = 'a';
+            cat.addDepend(dep);
+        } else {
+            std::cerr << "WARNING: table " << tname
+                      << " has no catalog entry; index not registered" << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog index registration failed: " << e.what() << std::endl;
+    }
+
     txn.recordCreate(DdlObjectKind::Index, idxName, tname);
     txn.commit();
     std::cout << "CREATE INDEX succeeded" << std::endl;
@@ -759,6 +816,22 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         std::cout << "CREATE SEQUENCE failed" << std::endl;
         return true;
     }
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        const auto* nsPublic = cat.findNamespaceByName("public");
+        if (nsPublic) {
+            PgClassRow seq;
+            seq.relname = seqname;
+            seq.relnamespace = nsPublic->oid;
+            seq.relkind = 'S';
+            seq.relnatts = 0;
+            cat.createClass(seq);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog sequence registration failed: " << e.what() << std::endl;
+    }
+
     txn.recordCreate(DdlObjectKind::Sequence, seqname);
     txn.commit();
     std::cout << "CREATE SEQUENCE succeeded" << std::endl;
@@ -782,6 +855,24 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
     }
     std::string seqname = stmt->objectNames.front();
     txn.recordDrop(DdlObjectKind::Sequence, seqname);
+
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        const auto* seq = cat.resolveRelation(seqname, {"public"});
+        if (seq) {
+            auto behavior = stmt->cascade ? CatalogManager::DropBehavior::Cascade
+                                          : CatalogManager::DropBehavior::Restrict;
+            std::string err;
+            bool ok = cat.dropObject(PgClassOid_Class, seq->oid, behavior, &err);
+            if (!ok) {
+                std::cout << "ERROR: " << err << std::endl;
+                return true;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog sequence drop failed: " << e.what() << std::endl;
+    }
+
     DBStatus res = g_engine.dropSequence(s.currentDB, seqname);
     if (res != DBStatus::OK) {
         std::cout << "DROP SEQUENCE failed" << std::endl;
