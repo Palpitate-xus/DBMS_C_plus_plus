@@ -4,6 +4,7 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "catalog/CatalogService.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -48,6 +49,30 @@ static void test_create_drop_table() {
 
     cleanup(db);
     std::cout << "[DDL] create/drop table OK" << std::endl;
+}
+
+static void test_create_table_registers_in_catalog() {
+    std::string db = "ddl_bridge_t1_cat";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    bool err = ddl.executeSql("CREATE TABLE cat_t1 (id INT, name VARCHAR(100))", s);
+    assert(!err);
+
+    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
+    const auto* nsPublic = cat.findNamespaceByName("public");
+    assert(nsPublic != nullptr);
+    const auto* cls = cat.findClassByName("cat_t1", nsPublic->oid);
+    assert(cls != nullptr);
+    assert(cls->relnatts == 2);
+    assert(cls->relkind == 'r');
+
+    cleanup(db);
+    std::cout << "[DDL] CREATE TABLE registers in catalog OK" << std::endl;
 }
 
 static void test_create_index_sequence() {
@@ -118,6 +143,7 @@ static void test_comment_on() {
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_drop_table();
+    test_create_table_registers_in_catalog();
     test_create_index_sequence();
     test_create_database_schema();
     test_comment_on();

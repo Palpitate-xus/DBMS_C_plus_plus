@@ -5,6 +5,8 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DdlTransaction.h"
 #include "parser/parser.h"
+#include "catalog/CatalogService.h"
+#include "catalog/systables.h"
 #include "common/logs.h"
 #include "permissions.h"
 #include <algorithm>
@@ -48,6 +50,77 @@ std::string stripQuotes(const std::string& s) {
 }
 
 } // anonymous namespace
+
+// ----------------------------------------------------------------------------
+// Catalog registration helpers
+// ----------------------------------------------------------------------------
+
+static Oid ensureTypeInCatalog(CatalogManager& cat, Oid nspOid, const Column& col) {
+    Oid typid = mapBuiltinTypeNameToOid(col.dataType);
+    if (typid != INVALID_OID) return typid;
+
+    PgTypeRow typ;
+    typ.typname = col.dataType;
+    typ.typnamespace = nspOid;
+    typ.typlen = col.isVariableLength ? static_cast<int16_t>(-1) : static_cast<int16_t>(col.dsize);
+    typ.typtype = 'b';
+    typ.typcategory = 'U';
+    return cat.createType(typ);
+}
+
+static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
+                                   const std::string& logicalSchema,
+                                   const std::string& logicalName) {
+    Oid nspOid = INVALID_OID;
+    const auto* ns = cat.findNamespaceByName(logicalSchema);
+    if (!ns) {
+        // Defensive: CREATE TABLE should only reference an existing schema,
+        // but create it if missing to keep catalog consistent.
+        nspOid = cat.createNamespace(logicalSchema, 10); // owner=10 (bootstrap)
+    } else {
+        nspOid = ns->oid;
+    }
+
+    PgClassRow cls;
+    cls.relname = logicalName;
+    cls.relnamespace = nspOid;
+    cls.relkind = 'r';
+    cls.relnatts = static_cast<int16_t>(tbl.len);
+    cls.relpersistence = tbl.isUnlogged ? 'u' : 'p';
+    Oid classOid = cat.createClass(cls);
+
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        PgAttributeRow attr;
+        attr.attrelid = classOid;
+        attr.attnum = static_cast<int16_t>(i + 1);
+        attr.attname = col.dataName;
+        attr.atttypid = ensureTypeInCatalog(cat, nspOid, col);
+        attr.attlen = static_cast<int16_t>(col.dsize);
+        attr.atttypmod = -1;
+        attr.attnotnull = !col.isNull;
+        attr.atthasdef = !col.defaultValue.empty();
+        attr.attstorage = col.isVariableLength ? 'x' : 'p';
+        attr.attislocal = true;
+        attr.attisdropped = false;
+        if (col.isAutoIncrement) attr.attidentity = 'd';
+        if (!col.generatedExpr.empty()) attr.attgenerated = 's';
+        cat.addAttribute(attr);
+    }
+
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        const ForeignKey& fk = tbl.fks[i];
+        PgDependRow dep;
+        dep.classid = PgClassOid_Class;
+        dep.objid = classOid;
+        dep.objsubid = 0;
+        dep.refclassid = PgClassOid_Class;
+        dep.refobjid = INVALID_OID; // FK target OID resolution deferred
+        dep.refobjsubid = 0;
+        dep.deptype = 'n';
+        cat.addDepend(dep);
+    }
+}
 
 // ----------------------------------------------------------------------------
 // Public entry points
@@ -506,6 +579,21 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         return true;
     }
     g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname, s.username);
+
+    // Register the table in the catalog (best-effort; storage is the authority).
+    try {
+        CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        CatalogManager::QualifiedName qn;
+        if (!CatalogManager::parseQualifiedName(stmt->tableName, qn)) {
+            qn.schema = "";
+            qn.name = stmt->tableName;
+        }
+        if (qn.schema.empty()) qn.schema = "public";
+        registerTableInCatalog(cat, tbl, qn.schema, qn.name);
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: catalog registration failed: " << e.what() << std::endl;
+    }
+
     txn.recordCreate(DdlObjectKind::Table, tname);
     txn.commit();
     std::cout << "CREATE TABLE succeeded" << std::endl;
