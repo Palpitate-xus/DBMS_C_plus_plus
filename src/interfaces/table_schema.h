@@ -32,6 +32,7 @@ struct Column {
     bool deferrable = false;        // CHECK constraint is deferrable
     bool initiallyDeferred = false; // Deferrable constraint initially deferred
     std::string generatedExpr;      // GENERATED ALWAYS AS (expr)
+    std::string collation;          // COLLATE (e.g. "C", "POSIX", "en_US.utf8")
     std::vector<std::string> enumValues;  // ENUM('a','b','c') values
 
     void print() const;

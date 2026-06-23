@@ -4,6 +4,7 @@
 #include "HeapTupleHeader.h"
 #include "type_registry.h"
 #include "types/numeric.h"
+#include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include <cmath>
 #include <unordered_map>
@@ -5448,6 +5449,20 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t tsLen = static_cast<uint16_t>(tbl.tablespace.size());
     out.write(reinterpret_cast<const char*>(&tsLen), 2);
     if (tsLen > 0) out.write(tbl.tablespace.data(), tsLen);
+    // Column collations (backward-compatible tail append): count + (cidx, name-len, name)
+    int32_t collCount = 0;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (!tbl.cols[i].collation.empty()) collCount++;
+    }
+    out.write(reinterpret_cast<const char*>(&collCount), 4);
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].collation.empty()) continue;
+        int32_t cidx = static_cast<int32_t>(i);
+        out.write(reinterpret_cast<const char*>(&cidx), 4);
+        uint16_t clLen = static_cast<uint16_t>(tbl.cols[i].collation.size());
+        out.write(reinterpret_cast<const char*>(&clLen), 2);
+        out.write(tbl.cols[i].collation.data(), clLen);
+    }
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -5710,6 +5725,25 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             std::string ts(tsLen, '\0');
             in.read(ts.data(), tsLen);
             if (in) tbl.tablespace = std::move(ts);
+        }
+    }
+    // Column collations (backward-compatible tail append; ignore if EOF)
+    int32_t collCount = 0;
+    in.read(reinterpret_cast<char*>(&collCount), 4);
+    if (in && collCount > 0 && collCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+        for (int32_t i = 0; i < collCount; ++i) {
+            int32_t cidx = 0;
+            in.read(reinterpret_cast<char*>(&cidx), 4);
+            if (!in) break;
+            uint16_t clLen = 0;
+            in.read(reinterpret_cast<char*>(&clLen), 2);
+            if (!in) break;
+            std::string cname(clLen, '\0');
+            in.read(cname.data(), clLen);
+            if (!in) break;
+            if (cidx >= 0 && cidx < static_cast<int32_t>(tbl.len)) {
+                tbl.cols[cidx].collation = std::move(cname);
+            }
         }
     }
 
@@ -7437,12 +7471,17 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     if (valIsNull || condIsNull) return false;
 
     if (col.dataType == "char" || col.dataType == "uuid" || col.isVariableLength) {
-        if (cond.op == "<"  && !(val <  cond.value)) return false;
-        if (cond.op == ">"  && !(val >  cond.value)) return false;
-        if (cond.op == "="  && val != cond.value)    return false;
-        if (cond.op == "<=" && (val >  cond.value))   return false;
-        if (cond.op == ">=" && (val <  cond.value))   return false;
-        if (cond.op == "!=" && val == cond.value)    return false;
+        // Apply the column's collation for equality/comparison operators.
+        const std::string& coll = col.collation;
+        auto scmp = [&](const std::string& a, const std::string& b) {
+            return coll.empty() ? a.compare(b) : collation::compare(a, b, coll);
+        };
+        if (cond.op == "<"  && !(scmp(val, cond.value) < 0))     return false;
+        if (cond.op == ">"  && !(scmp(val, cond.value) > 0))     return false;
+        if (cond.op == "="  && scmp(val, cond.value) != 0)        return false;
+        if (cond.op == "<=" && (scmp(val, cond.value) > 0))      return false;
+        if (cond.op == ">=" && (scmp(val, cond.value) < 0))      return false;
+        if (cond.op == "!=" && scmp(val, cond.value) == 0)        return false;
         if (cond.op == "like" && !likeMatch(val, cond.value)) return false;
         if (cond.op == "regexp" && !regexMatch(val, cond.value)) return false;
         if (cond.op == "contains") {
@@ -8730,6 +8769,17 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     std::set<int64_t> ids;
     TableSchema tbl = getTableSchema(dbname, tablename);
 
+    // Helper: a column with a non-binary collation cannot use binary indexes
+    // for equality/range lookup because the index keys are stored binary.
+    auto columnNeedsCollation = [&](const std::string& colName) -> bool {
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == colName) {
+                return !tbl.cols[i].collation.empty() && !collation::isBinary(tbl.cols[i].collation);
+            }
+        }
+        return false;
+    };
+
     // Try full-text index for CONTAINS conditions
     for (const auto& c : conds) {
         if (c.op == "contains") {
@@ -8761,6 +8811,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     // Try B+ tree PK index for = conditions
     for (const auto& c : conds) {
         if (c.op == "=") {
+            // Non-binary collation requires collation-aware comparison; skip binary indexes.
+            if (columnNeedsCollation(c.colName)) continue;
             bool hasPK = false;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].isPrimaryKey && tbl.cols[i].dataName == c.colName) {
@@ -8878,6 +8930,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
 
     // Try GiST index for range conditions (overlap/containment)
     for (const auto& c : conds) {
+        if (columnNeedsCollation(c.colName)) continue;
         if (hasGiSTIndex(dbname, tablename, c.colName)) {
             if (c.op == "=") {
                 // GiST overlap with [val, val] is equivalent to equality for scalars

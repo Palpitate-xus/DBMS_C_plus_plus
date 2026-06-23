@@ -504,6 +504,8 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
     if (!cd.checkNames.empty()) {
         col.checkConstraintName = cd.checkNames.front();
     }
+    // COLLATE determined after the storage type is assigned above.
+    if (!cd.collation.empty()) col.collation = cd.collation;
     return col;
 }
 

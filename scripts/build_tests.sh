@@ -45,6 +45,7 @@ SOURCES=(
     src/catalog/migrate.cpp
     src/catalog/CatalogService.cpp
     src/catalog/type_registry.cpp
+    src/catalog/collation.cpp
     src/expression/ExprEvaluator.cpp
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
