@@ -35,6 +35,7 @@
 | 2026-06-25 | Phase 4 Wave 4.38（补全）MATERIALIZED VIEW 列序 + WITH [NO] DATA + REFRESH 修复：`executeCreateMaterializedView` 按源表 schema 顺序映射（修复反序投影错位）并支持 `WITH NO DATA`；`CreateViewStmt::withData` + `parseCreateView` 剥离尾部 `WITH [NO] DATA`；重写 `REFRESH MATERIALIZED VIEW`（从 backing schema 推导列、修复 `SELECT *`→`["*"]` 与投影错位 bug，支持 `CONCURRENTLY` 与 `WITH NO DATA`）；`tests/matview_test.cpp` 新增反序投影 + WITH NO DATA 回归 + 二进制端到端验证。全部 54 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.8 `macaddr` / `macaddr8` 校验与规范化：改为真正的定长二进制存储（6/8 字节），新增 `normalizeMacAddr`/`formatMacAddr` 辅助；`buildRowBuffer` 两条编码路径 + `extractColumnValueStatic` 解码；INSERT/UPDATE 校验拒绝坏值/错误长度（`INVALID_VALUE`），合法输入规范化为小写冒号格式；`main.cpp` 内联路径从 `isPgStringBackedType` 移除 macaddr，统一改用定长工厂，消除与 `DdlExecutor` 路径的表示不一致；新增 `tests/macaddr_test.cpp`（5 种输入规范化/坏值拒绝/macaddr8/UPDATE/变长共存）+ 二进制端到端验证。全部 55 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.9 `bit` / `bit varying` 长度约束与校验：统一为字符串化 `0/1` 变长存储（`dsize` 携带声明位长 n），消除 `DdlExecutor`（原定长打包、无编解码、损坏）与内联（无长度）两路径不一致；新增 `normalizeBitString`（去 `B'...'` 包裹、校验 `0/1`、`bit(n)` 精确 / `bit varying(n)` ≤ n）；INSERT/UPDATE 拒绝坏字符/错误长度并规范化；修复 parser 多词类型名（`bit varying`/`character varying`/`double precision`，此前 `BIT VARYING(8)` 丢弃 `VARYING(8)`）；更新 `tests/core_types_test.cpp` dsize 断言 + 新增 `tests/bit_test.cpp` + 二进制端到端验证。全部 56 个测试通过。 |
+| 2026-06-25 | Phase 4 Wave 4.7 几何类型校验与规范化：统一 `line`/`lseg`/`box`/`path`/`polygon`/`circle` 为字符串化规范文本变长存储（`point` 保持二进制），修复 `lseg`/`box`/`circle` 原定长无编解码（无法插入）损坏状态；在 `TypeRegistry` 将这四种几何类型 `typlen` 改为 -1 以免 `validateColumn` 强制改回定长；新增 `normalizeGeometry`/`extractGeoNumbers`（校验字符集与坐标数、box 角点重排、path 开/闭、line 拒绝 A=B=0、circle 拒绝负半径）；INSERT/UPDATE 拒绝非法字面量并规范化；新增 `tests/geometric_test.cpp` + 二进制端到端验证。全部 57 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -160,7 +161,7 @@
 | 2.5 | 日期时间 | 缺少 PG time zone 规则库、infinity、BC 日期、精度、interval 字段限定、复杂输入输出。`datetime` 是非 PG 类型 | ⚠️ |
 | 2.6 | 布尔 | SQL 三值逻辑、类型转换、函数/聚合边界仍简化 | ⚠️ |
 | 2.7 | ENUM | `CREATE TYPE ... AS ENUM` 落地，列定义支持 enum 值校验；`ALTER TYPE ADD VALUE [IF NOT EXISTS] [BEFORE/AFTER]` 与 `RENAME VALUE` 已支持（`updateEnumType` 持久化）；仍缺 catalog `pg_enum` ordinal 排序语义与索引集成 | ⚠️ |
-| 2.8 | 几何类型 | 只明确支持 `point` 和少量空间比较；缺少 `line`、`lseg`、`box`、`path`、`polygon`、`circle` 及完整函数/操作符 | ⚠️ |
+| 2.8 | 几何类型 | `point` 为打包二进制；`line`/`lseg`/`box`/`path`/`polygon`/`circle` 已统一为字符串化规范文本存储 + 结构校验（坐标数/字符集/括号）+ 规范化（去空白、box 角点重排、path 开/闭）（`tests/geometric_test.cpp`）；仍缺几何运算符与完整函数集 | ⚠️ |
 | 2.9 | 网络类型 | 有 `inet/cidr` IPv4/IPv6 路径；`macaddr/macaddr8` 已实现定长二进制存储 + 输入规范化（冒号/连字符/点/裸十六进制）+ 校验（坏值/错误长度拒绝）+ 小写冒号规范输出（`tests/macaddr_test.cpp`）；仍缺 PG 全套 MAC 网络函数 | ⚠️ |
 | 2.10 | bit string | `bit` / `bit varying` 已统一为字符串化 `0/1` 存储 + 长度约束（`bit(n)` 精确、`bit varying(n)` ≤ n）+ `0/1` 校验 + `B'...'` 去包裹（`tests/bit_test.cpp`）；仍缺位运算操作符与位串函数 | ⚠️ |
 | 2.11 | 全文搜索类型 | `tsvector`、`tsquery` 已可作为字符串型列存取；文本搜索配置/词典/parser/template 有目录级 DDL，但缺少 PG parser、ranking、operator 和 GIN opclass 语义 | ⚠️ |

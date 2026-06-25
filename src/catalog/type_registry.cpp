@@ -333,13 +333,16 @@ void TypeRegistry::registerDateTimeTypes() {
 }
 
 void TypeRegistry::registerGeometricTypes() {
+    // point keeps packed-binary storage (typlen 16); the other geometric types
+    // are stored as canonical PG text (typlen -1, variable-length) so the
+    // engine validates/canonicalizes the literal rather than packing bytes.
     registerType({"point", 16, 'd', 'p', TypeCategory::Geometric, false, -1, 0, false});
-    registerType({"line", 32, 'd', 'p', TypeCategory::Geometric, false, -1, 0, false});
-    registerType({"lseg", 32, 'd', 'p', TypeCategory::Geometric, false, -1, 0, false});
-    registerType({"box", 32, 'd', 'p', TypeCategory::Geometric, false, -1, 0, false});
+    registerType({"line", -1, 'd', 'p', TypeCategory::Geometric, false, -1, 96, false});
+    registerType({"lseg", -1, 'd', 'p', TypeCategory::Geometric, false, -1, 128, false});
+    registerType({"box", -1, 'd', 'p', TypeCategory::Geometric, false, -1, 128, false});
     registerType({"path", -1, 'd', 'p', TypeCategory::Geometric, false, -1, 4096, false});
     registerType({"polygon", -1, 'd', 'p', TypeCategory::Geometric, false, -1, 4096, false});
-    registerType({"circle", 24, 'd', 'p', TypeCategory::Geometric, false, -1, 0, false});
+    registerType({"circle", -1, 'd', 'p', TypeCategory::Geometric, false, -1, 96, false});
 }
 
 void TypeRegistry::registerNetworkTypes() {

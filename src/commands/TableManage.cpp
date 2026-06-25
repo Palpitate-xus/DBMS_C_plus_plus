@@ -772,7 +772,7 @@ Column makeLineColumn(const std::string& name, bool isNull, bool isPK) {
     c.isPrimaryKey = isPK;
     c.isVariableLength = true;
     c.dataType = "line";
-    c.dsize = 64; // "{A,B,C}" representation
+    c.dsize = 96; // "{A,B,C}" representation
     return c;
 }
 
@@ -781,8 +781,9 @@ Column makeLsegColumn(const std::string& name, bool isNull, bool isPK) {
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
     c.dataType = "lseg";
-    c.dsize = 32; // two points
+    c.dsize = 128; // "[(x1,y1),(x2,y2)]" text form
     return c;
 }
 
@@ -791,8 +792,9 @@ Column makeBoxColumn(const std::string& name, bool isNull, bool isPK) {
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
     c.dataType = "box";
-    c.dsize = 32; // two points: high, low
+    c.dsize = 128; // "(x1,y1),(x2,y2)" text form
     return c;
 }
 
@@ -823,8 +825,9 @@ Column makeCircleColumn(const std::string& name, bool isNull, bool isPK) {
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
     c.dataType = "circle";
-    c.dsize = 24; // center point (16) + radius (8)
+    c.dsize = 96; // "<(x,y),r>" text form
     return c;
 }
 
@@ -3954,6 +3957,105 @@ static bool normalizeBitString(const std::string& in, const std::string& dataTyp
         if (!unlimited && s.size() > declaredLen) return false;
     }
     out = s;
+    return true;
+}
+
+// ========================================================================
+// Geometric types (line / lseg / box / path / polygon / circle)
+// Stored as the canonical PG text form (variable-length). `point` is handled
+// separately as packed binary. Validation extracts coordinate numbers, checks
+// the count/structure per type, and re-emits the canonical bracketed form.
+// ========================================================================
+static bool isGeometricTextType(const std::string& dt) {
+    return dt == "line" || dt == "lseg" || dt == "box" ||
+           dt == "path" || dt == "polygon" || dt == "circle";
+}
+
+static std::string geoFmtNum(double v) {
+    std::ostringstream oss;
+    oss << v;
+    return oss.str();
+}
+
+static std::string geoFmtPoint(double x, double y) {
+    return "(" + geoFmtNum(x) + "," + geoFmtNum(y) + ")";
+}
+
+// Extract numeric coordinates from a geometric literal. Only digits, signs,
+// decimal points, exponent markers, commas, whitespace and the bracket
+// characters ()[]{}<> are permitted; anything else fails. `opener` receives the
+// first bracket character (used to distinguish open vs closed paths).
+static bool extractGeoNumbers(const std::string& in, std::vector<double>& nums,
+                              std::string& opener) {
+    opener.clear();
+    for (size_t j = 0; j < in.size(); ++j) {
+        if (std::isspace(static_cast<unsigned char>(in[j]))) continue;
+        if (in[j] == '[' || in[j] == '(' || in[j] == '{' || in[j] == '<')
+            opener = std::string(1, in[j]);
+        break;
+    }
+    size_t i = 0;
+    while (i < in.size()) {
+        char c = in[i];
+        if (std::isspace(static_cast<unsigned char>(c)) || c == ',' ||
+            c == '(' || c == ')' || c == '[' || c == ']' ||
+            c == '{' || c == '}' || c == '<' || c == '>') { ++i; continue; }
+        if (c == '-' || c == '+' || c == '.' || std::isdigit(static_cast<unsigned char>(c))) {
+            size_t start = i;
+            ++i;
+            while (i < in.size() &&
+                   (std::isdigit(static_cast<unsigned char>(in[i])) || in[i] == '.' ||
+                    in[i] == 'e' || in[i] == 'E' ||
+                    ((in[i] == '-' || in[i] == '+') && (in[i-1] == 'e' || in[i-1] == 'E'))))
+                ++i;
+            try {
+                size_t consumed = 0;
+                double v = std::stod(in.substr(start, i - start), &consumed);
+                if (consumed == 0) return false;
+                nums.push_back(v);
+            } catch (...) { return false; }
+        } else {
+            return false;  // disallowed character
+        }
+    }
+    return true;
+}
+
+static bool normalizeGeometry(const std::string& in, const std::string& type, std::string& out) {
+    std::vector<double> n;
+    std::string opener;
+    if (!extractGeoNumbers(in, n, opener)) return false;
+    if (type == "line") {
+        if (n.size() != 3) return false;
+        if (n[0] == 0 && n[1] == 0) return false;  // A and B cannot both be zero
+        out = "{" + geoFmtNum(n[0]) + "," + geoFmtNum(n[1]) + "," + geoFmtNum(n[2]) + "}";
+    } else if (type == "lseg") {
+        if (n.size() != 4) return false;
+        out = "[" + geoFmtPoint(n[0], n[1]) + "," + geoFmtPoint(n[2], n[3]) + "]";
+    } else if (type == "box") {
+        if (n.size() != 4) return false;
+        // PG stores (high-right, low-left) corners.
+        double hx = std::max(n[0], n[2]), hy = std::max(n[1], n[3]);
+        double lx = std::min(n[0], n[2]), ly = std::min(n[1], n[3]);
+        out = geoFmtPoint(hx, hy) + "," + geoFmtPoint(lx, ly);
+    } else if (type == "circle") {
+        if (n.size() != 3) return false;
+        if (n[2] < 0) return false;  // radius must be non-negative
+        out = "<" + geoFmtPoint(n[0], n[1]) + "," + geoFmtNum(n[2]) + ">";
+    } else if (type == "path" || type == "polygon") {
+        if (n.size() < 2 || n.size() % 2 != 0) return false;
+        std::string body;
+        for (size_t k = 0; k < n.size(); k += 2) {
+            if (!body.empty()) body += ",";
+            body += geoFmtPoint(n[k], n[k + 1]);
+        }
+        if (type == "path" && opener == "[")
+            out = "[" + body + "]";          // open path
+        else
+            out = "(" + body + ")";          // closed path / polygon
+    } else {
+        return false;
+    }
     return true;
 }
 
@@ -8654,6 +8756,16 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             actualValues[col.dataName] = canon;
         }
+        // Validate / canonicalize geometric types (line/lseg/box/path/polygon/
+        // circle); point is packed binary and handled elsewhere.
+        if (isGeometricTextType(col.dataType) && !val.empty()) {
+            std::string canon;
+            if (!normalizeGeometry(val, col.dataType, canon)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualValues[col.dataName] = canon;
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -9903,6 +10015,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     if (!kv.second.empty()) {
                         std::string canon;
                         if (!normalizeBitString(kv.second, col.dataType, col.dsize, canon))
+                            return DBStatus::INVALID_VALUE;
+                        storeVal = canon;
+                    }
+                } else if (isGeometricTextType(col.dataType)) {
+                    if (!kv.second.empty()) {
+                        std::string canon;
+                        if (!normalizeGeometry(kv.second, col.dataType, canon))
                             return DBStatus::INVALID_VALUE;
                         storeVal = canon;
                     }
