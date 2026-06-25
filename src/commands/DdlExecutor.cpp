@@ -175,16 +175,6 @@ bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
 // DDL AST bridge helper (used by main.cpp::execute)
 // ----------------------------------------------------------------------------
 
-static bool isCreateTableAsSelect(const std::string& sql) {
-    // SQL is expected to be lowercased by main.cpp::execute(), but be defensive.
-    std::string lc;
-    lc.reserve(sql.size());
-    for (unsigned char c : sql) lc.push_back(static_cast<char>(std::tolower(c)));
-    size_t tablePos = lc.find("table");
-    if (tablePos == std::string::npos) return false;
-    return lc.find(" as select", tablePos + 5) != std::string::npos;
-}
-
 bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                   Session& s, bool& handled) {
     handled = false;
@@ -207,13 +197,6 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
             break;
         default:
             return false;
-    }
-
-    // CTAS is parsed as a plain CreateTableStmt without a SELECT clause.
-    // Let legacy inline CTAS handle it until parser/DdlExecutor support it.
-    if (parsedCmd == dbms::SqlCommand::CreateTable && isCreateTableAsSelect(sql)) {
-        handled = false;
-        return false;
     }
 
     dbms::SQLParser parser;
@@ -592,6 +575,156 @@ void DdlExecutor::recordConstraintCompat(const std::string& dbname,
     ofs << "\n";
 }
 
+// ----------------------------------------------------------------------------
+// CREATE TABLE AS SELECT helper
+// ----------------------------------------------------------------------------
+static std::vector<std::string> splitSelectColumns(const std::string& cols) {
+    std::vector<std::string> result;
+    std::string item;
+    int depth = 0;
+    for (char c : cols) {
+        if (c == '(') ++depth;
+        else if (c == ')') --depth;
+        if (c == ',' && depth == 0) {
+            result.push_back(toLower(trim(item)));
+            item.clear();
+        } else {
+            item += c;
+        }
+    }
+    if (!trim(item).empty()) result.push_back(toLower(trim(item)));
+    return result;
+}
+
+static bool parseSimpleSelect(const std::string& selectSql,
+                              std::vector<std::string>& colNames,
+                              std::string& srcTable,
+                              std::vector<std::string>& conditions) {
+    std::string sql = toLower(selectSql);
+    size_t selectPos = sql.find("select");
+    if (selectPos == std::string::npos) return false;
+    size_t fromPos = sql.find(" from ");
+    if (fromPos == std::string::npos) return false;
+
+    std::string cols = trim(selectSql.substr(selectPos + 6, fromPos - selectPos - 6));
+    if (cols == "*") {
+        colNames.clear();
+        colNames.push_back("*");
+    } else {
+        colNames = splitSelectColumns(cols);
+    }
+
+    std::string rest = trim(selectSql.substr(fromPos + 6));
+    size_t wherePos = rest.find(' ');
+    if (wherePos == std::string::npos) {
+        srcTable = rest;
+    } else {
+        srcTable = rest.substr(0, wherePos);
+        std::string afterTable = trim(rest.substr(wherePos));
+        if (afterTable.size() > 6 && toLower(afterTable.substr(0, 6)) == "where ") {
+            std::string condStr = trim(afterTable.substr(6));
+            // Simple AND-split equality conditions: col = val
+            size_t andPos = 0;
+            while (andPos < condStr.size()) {
+                size_t nextAnd = condStr.find(" AND ", andPos);
+                std::string single = (nextAnd == std::string::npos)
+                    ? trim(condStr.substr(andPos))
+                    : trim(condStr.substr(andPos, nextAnd - andPos));
+                if (!single.empty()) {
+                    size_t eqPos = single.find('=');
+                    if (eqPos != std::string::npos) {
+                        std::string cname = trim(single.substr(0, eqPos));
+                        std::string val = trim(single.substr(eqPos + 1));
+                        conditions.push_back("=" + cname + " " + val);
+                    }
+                }
+                if (nextAnd == std::string::npos) break;
+                andPos = nextAnd + 5;
+            }
+        }
+    }
+    return true;
+}
+
+static dbms::Column makeColumnFromSource(const dbms::Column& src, const std::string& name) {
+    dbms::Column col = src;
+    col.dataName = name;
+    return col;
+}
+
+static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
+                                 const std::string& tname) {
+    if (stmt->asSelect.empty()) return false; // not CTAS
+
+    std::vector<std::string> selectCols;
+    std::string srcTable;
+    std::vector<std::string> conditions;
+    if (!parseSimpleSelect(stmt->asSelect, selectCols, srcTable, conditions)) {
+        std::cout << "CTAS: unable to parse SELECT clause" << std::endl;
+        return true;
+    }
+
+    srcTable = resolveTableName(s, srcTable);
+    if (!g_engine.tableExists(s.currentDB, srcTable)) {
+        std::cout << "CTAS: source table not found" << std::endl;
+        return true;
+    }
+
+    dbms::TableSchema srcTbl = g_engine.getTableSchema(s.currentDB, srcTable);
+    dbms::TableSchema newTbl;
+    newTbl.tablename = tname;
+
+    std::set<std::string> queryCols;
+    if (selectCols.size() == 1 && selectCols[0] == "*") {
+        for (size_t i = 0; i < srcTbl.len; ++i) {
+            newTbl.append(makeColumnFromSource(srcTbl.cols[i], srcTbl.cols[i].dataName));
+            queryCols.insert(srcTbl.cols[i].dataName);
+        }
+    } else {
+        for (const auto& cname : selectCols) {
+            bool found = false;
+            for (size_t i = 0; i < srcTbl.len; ++i) {
+                if (toLower(srcTbl.cols[i].dataName) == cname) {
+                    newTbl.append(makeColumnFromSource(srcTbl.cols[i], srcTbl.cols[i].dataName));
+                    queryCols.insert(srcTbl.cols[i].dataName);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                std::cout << "CTAS: column '" << cname << "' not found in source" << std::endl;
+                return true;
+            }
+        }
+    }
+
+    DBStatus res = g_engine.createTable(s.currentDB, newTbl);
+    if (res != DBStatus::OK) {
+        std::cout << "CTAS: create table failed" << std::endl;
+        return true;
+    }
+
+    auto rows = g_engine.query(s.currentDB, srcTable, conditions, queryCols, {});
+    size_t inserted = 0;
+    for (const auto& row : rows) {
+        std::map<std::string, std::string> values;
+        std::istringstream iss(row);
+        std::string val;
+        size_t idx = 0;
+        std::vector<std::string> orderedCols(queryCols.begin(), queryCols.end());
+        while (iss >> val && idx < orderedCols.size()) {
+            if (val == "NULL") val = "";
+            values[orderedCols[idx]] = val;
+            ++idx;
+        }
+        if (idx != orderedCols.size()) continue;
+        if (g_engine.insert(s.currentDB, tname, values) == DBStatus::OK) ++inserted;
+    }
+
+    std::cout << "CREATE TABLE AS succeeded: " << inserted << " rows" << std::endl;
+    return false;
+}
+
 bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
@@ -611,6 +744,22 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
         std::cout << "Table " << tname << " already exists" << std::endl;
         return true;
+    }
+
+    // CREATE TABLE ... AS SELECT ...
+    if (!stmt->asSelect.empty()) {
+        bool err = executeCreateTableAs(stmt, s, tname);
+        if (!err) {
+            try {
+                dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+                registerTableInCatalog(cat, g_engine.getTableSchema(s.currentDB, tname), tname, s.currentDB);
+            } catch (const std::exception& e) {
+                std::cerr << "WARNING: CTAS catalog registration failed: " << e.what() << std::endl;
+            }
+            txn.recordCreate(DdlObjectKind::Table, tname);
+            txn.commit();
+        }
+        return err;
     }
 
     TableSchema tbl;

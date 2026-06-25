@@ -803,6 +803,7 @@ struct CreateTableStmt : public Stmt {
     std::string ofType;                        // OF type_name
     std::vector<std::pair<std::string, ColumnDef>> likeTables; // LIKE table [INCLUDING ...]
     std::vector<SelectItem> partitionBy;       // PARTITION BY ...
+    std::string asSelect;                      // CREATE TABLE ... AS SELECT ...
 
     CreateTableStmt() : Stmt(SqlCommand::CreateTable) {}
     std::string toString() const override { return "CREATE TABLE"; }

@@ -3345,6 +3345,17 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
         }
     }
 
+    // CREATE TABLE ... AS SELECT ...
+    if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as" && toLower(tokens[pos + 1]) == "select") {
+        pos += 2;
+        std::string selectSql = "SELECT";
+        while (pos < tokens.size() && tokens[pos] != ";") {
+            selectSql += " " + tokens[pos++];
+        }
+        stmt->asSelect = selectSql;
+        return stmt;
+    }
+
     // Parse column/constraint list if present
     if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos; // skip '('
