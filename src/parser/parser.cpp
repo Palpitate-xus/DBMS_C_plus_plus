@@ -3535,6 +3535,35 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     static_cast<LiteralExpr*>(tc.checkExpr.get())->value = expr;
                     stmt->constraints.push_back(std::move(tc));
                 }
+            } else if (ltok == "like") {
+                // LIKE source_table [ { INCLUDING | EXCLUDING } option ] ...
+                ++pos;
+                CreateTableStmt::LikeClause lc;
+                if (pos < tokens.size()) {
+                    lc.tableName = tokens[pos++];
+                    if (pos < tokens.size() && tokens[pos] == ".") {
+                        ++pos;
+                        if (pos < tokens.size()) lc.tableName += "." + tokens[pos++];
+                    }
+                }
+                while (pos < tokens.size() &&
+                       (toLower(tokens[pos]) == "including" || toLower(tokens[pos]) == "excluding")) {
+                    bool incl = (toLower(tokens[pos]) == "including");
+                    ++pos;
+                    if (pos < tokens.size()) {
+                        std::string opt = toLower(tokens[pos++]);
+                        if (opt == "all") lc.includingAll = incl;
+                        else if (opt == "defaults") lc.includingDefaults = incl;
+                        else if (opt == "constraints") lc.includingConstraints = incl;
+                        else if (opt == "indexes") lc.includingIndexes = incl;
+                        else if (opt == "identity") lc.includingIdentity = incl;
+                        // storage / comments / generated / statistics: accepted but ignored
+                    }
+                }
+                if (!lc.tableName.empty()) {
+                    stmt->likeClauses.push_back(lc);
+                    stmt->likeTables.emplace_back(lc.tableName, ColumnDef());
+                }
             } else {
                 // Column definition
                 ColumnDef col;
@@ -3720,9 +3749,27 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
         } else if (kw == "like") {
             ++pos;
             if (pos < tokens.size()) {
-                ColumnDef likeDef;
-                likeDef.name = tokens[pos++];
-                stmt->likeTables.emplace_back(likeDef.name, ColumnDef());
+                CreateTableStmt::LikeClause lc;
+                lc.tableName = tokens[pos++];
+                if (pos < tokens.size() && tokens[pos] == ".") {
+                    ++pos;
+                    if (pos < tokens.size()) lc.tableName += "." + tokens[pos++];
+                }
+                while (pos < tokens.size() &&
+                       (toLower(tokens[pos]) == "including" || toLower(tokens[pos]) == "excluding")) {
+                    bool incl = (toLower(tokens[pos]) == "including");
+                    ++pos;
+                    if (pos < tokens.size()) {
+                        std::string opt = toLower(tokens[pos++]);
+                        if (opt == "all") lc.includingAll = incl;
+                        else if (opt == "defaults") lc.includingDefaults = incl;
+                        else if (opt == "constraints") lc.includingConstraints = incl;
+                        else if (opt == "indexes") lc.includingIndexes = incl;
+                        else if (opt == "identity") lc.includingIdentity = incl;
+                    }
+                }
+                stmt->likeClauses.push_back(lc);
+                stmt->likeTables.emplace_back(lc.tableName, ColumnDef());
             }
         } else {
             ++pos;

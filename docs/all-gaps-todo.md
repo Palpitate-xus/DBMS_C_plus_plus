@@ -27,6 +27,7 @@
 | 2026-06-25 | Phase 4 Wave 4.35/4.36 CREATE FUNCTION / CREATE PROCEDURE 基本落地：`parseCreateFunction` 解析参数/RETURNS/RETURNS TABLE/AS body/LANGUAGE 等；`parseCreateProcedure` 解析参数与 AS body；`DdlExecutor` 调用 `createUDF`/`createTVF`/`createProcedure`；`tryDdlBridge` 接管并移除 `main.cpp` legacy 处理；新增 `tests/function_procedure_test.cpp`。PL 运行时、权限/依赖、OUT 参数、重载仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.37 CREATE POLICY 迁移到 DdlExecutor：新增 `CreatePolicyStmt`，`parseCreatePolicy` 解析 `ON table / FOR cmd / TO roles / USING / WITH CHECK`；`executeCreatePolicy` 校验表并写入 RLS policy；`tryDdlBridge` 接管并移除 `main.cpp` legacy 处理；新增 `tests/policy_test.cpp`。行级强制执行、role 解析、ALTER POLICY 仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.30（部分）CREATE TYPE 复合类型修复：修复经 DDL 桥的 `CREATE TYPE name AS (field type, ...)` 因 `parseCreateType` 未捕获字段而失败的回归；字段以 `;` 分隔保留 `numeric(10,2)` 等含逗号修饰符；执行器同步改用 `;` 切分；移除 `main.cpp` 死代码；新增 `tests/create_type_test.cpp`。range/base/shell 仍待后续。 |
+| 2026-06-25 | Phase 4 Wave 4.26（部分）CREATE TABLE (LIKE ...)：新增 `CreateTableStmt::LikeClause` 与 `parseCreateTable` 的括号内/外 `LIKE source [{INCLUDING|EXCLUDING} option]` 解析；`executeCreateTable` 复制源表列（默认列定义+NOT NULL，按 INCLUDING 复制 DEFAULTS/CONSTRAINTS/INDEXES(单列 PK/UNIQUE)/IDENTITY），源表缺失报错；新增 `tests/create_table_like_test.cpp`。复合索引复制、OF type、access method、identity 完整语义仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -90,7 +91,7 @@
 | 1.1.25 | `CREATE SCHEMA` | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义 | ⚠️ |
 | 1.1.26 | `CREATE SEQUENCE` | 有 nextval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics | ⚠️ |
 | 1.1.27 | `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 有扩展统计对象元数据；缺少 `pg_statistic_ext` catalog、表达式统计、dependencies/ndistinct/mcv 精确算法和 planner 深度使用 | ⚠️ |
-| 1.1.28 | `CREATE TABLE` | 可建表、分区、临时/unlogged、继承等部分；缺少大量表选项、`LIKE INCLUDING` 全集、typed table、`OF type`、access method、tablespace、identity/生成列完整语义 | ⚠️ |
+| 1.1.28 | `CREATE TABLE` | 可建表、分区、临时/unlogged、继承等部分；`LIKE source [INCLUDING ...]` 已落地（复制列定义/NOT NULL，按 INCLUDING 复制 DEFAULTS/CONSTRAINTS/INDEXES(单列 PK/UNIQUE)/IDENTITY）；仍缺复合 PK/UNIQUE 与索引结构复制、typed table、`OF type`、access method、tablespace、identity/生成列完整语义 | ⚠️ |
 | 1.1.29 | `CREATE TABLE AS` | 有 CTAS 路径；缺少 PG 选项、`WITH [NO] DATA`、tablespace/access method、精确类型推断 | ⚠️ |
 | 1.1.30 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 已支持表空间对象元数据；缺少物理存储路由、权限、依赖检查和 `pg_tblspc` 符号链接语义 | ⚠️ |
 | 1.1.31 | `CREATE TRIGGER` | 支持 before/after/instead of、row/statement、`WHEN`、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime | ⚠️ |

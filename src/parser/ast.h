@@ -802,6 +802,16 @@ struct CreateTableStmt : public Stmt {
     std::string accessMethod;
     std::string ofType;                        // OF type_name
     std::vector<std::pair<std::string, ColumnDef>> likeTables; // LIKE table [INCLUDING ...]
+    // LIKE source [INCLUDING|EXCLUDING option ...] — richer capture of options.
+    struct LikeClause {
+        std::string tableName;
+        bool includingAll = false;
+        bool includingDefaults = false;
+        bool includingConstraints = false;
+        bool includingIndexes = false;
+        bool includingIdentity = false;
+    };
+    std::vector<LikeClause> likeClauses;
     std::vector<SelectItem> partitionBy;       // PARTITION BY ...
     std::string asSelect;                      // CREATE TABLE ... AS SELECT ...
 

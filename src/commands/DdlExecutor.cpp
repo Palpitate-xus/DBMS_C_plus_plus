@@ -810,6 +810,32 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     tbl.tablespace = stmt->tablespace.empty() ? "pg_default" : stmt->tablespace;
     tbl.storageParams = stmt->options;
 
+    // CREATE TABLE ... (LIKE source [INCLUDING ...]) — copy source columns first.
+    // Plain LIKE copies column definitions + NOT NULL + collation only. DEFAULTS,
+    // CHECK constraints, identity and PK/UNIQUE are copied only with the matching
+    // INCLUDING option (or INCLUDING ALL).
+    for (const auto& lc : stmt->likeClauses) {
+        std::string src = resolveTableName(s, lc.tableName);
+        if (!g_engine.tableExists(s.currentDB, src)) {
+            std::cout << "LIKE source table " << lc.tableName << " not found" << std::endl;
+            return true;
+        }
+        bool inclDefaults = lc.includingAll || lc.includingDefaults;
+        bool inclConstraints = lc.includingAll || lc.includingConstraints;
+        bool inclIndexes = lc.includingAll || lc.includingIndexes;
+        bool inclIdentity = lc.includingAll || lc.includingIdentity;
+        TableSchema srcSchema = g_engine.getTableSchema(s.currentDB, src);
+        for (size_t i = 0; i < srcSchema.len && tbl.len < MAX_COLUMNS; ++i) {
+            Column c = srcSchema.cols[i];
+            if (!inclDefaults) c.defaultValue.clear();
+            if (!inclConstraints) { c.checkExpr.clear(); c.checkConstraintName.clear(); }
+            if (!inclIdentity) c.isAutoIncrement = false;
+            if (!inclIndexes) { c.isPrimaryKey = false; c.isUnique = false; }
+            tbl.append(c);
+            if (inclIndexes && c.isPrimaryKey) tbl.pkColIndices.push_back(tbl.len - 1);
+        }
+    }
+
     for (const auto& cd : stmt->columns) {
         tbl.append(columnDefToColumn(cd, s.currentDB));
     }
