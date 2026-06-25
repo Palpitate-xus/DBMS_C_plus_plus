@@ -137,6 +137,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreateIndex(dynamic_cast<const CreateIndexStmt*>(stmt.get()), s);
         case SqlCommand::CreateSequence:
             return executeCreateSequence(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
+        case SqlCommand::AlterSequence:
+            return executeAlterSequence(dynamic_cast<const AlterObjectStmt*>(stmt.get()), s);
         case SqlCommand::DropSequence:
             return executeDropSequence(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateDomain:
@@ -643,6 +645,29 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     return false;
 }
 
+// Drop any sequence files owned by the named table.
+static void dropOwnedSequences(const std::string& dbname,
+                               const std::string& logicalTableName) {
+    auto dir = std::filesystem::path(dbname);
+    if (!std::filesystem::exists(dir)) return;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string fname = entry.path().filename().string();
+        if (fname.size() <= 4 || fname.substr(fname.size() - 4) != ".seq") continue;
+        std::string seqname = fname.substr(0, fname.size() - 4);
+        std::ifstream ifs(entry.path());
+        if (!ifs) continue;
+        std::vector<std::string> tokens;
+        std::string tok;
+        while (ifs >> tok) tokens.push_back(tok);
+        if (tokens.size() >= 10) {
+            if (tokens[8] == logicalTableName) {
+                std::filesystem::remove(entry.path());
+            }
+        }
+    }
+}
+
 bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
@@ -683,6 +708,9 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
             if (!ok) {
                 std::cout << "ERROR: " << err << std::endl;
                 return true;
+            }
+            if (stmt->cascade) {
+                dropOwnedSequences(s.currentDB, logicalName);
             }
         } else {
             std::cout << "NOTICE: table \"" << tname
@@ -819,12 +847,62 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     }
 
     std::string seqname = stmt->objectName;
-    int64_t start = 1, increment = 1;
-    auto it = stmt->options.find("start");
-    if (it != stmt->options.end()) try { start = std::stoll(it->second); } catch (...) {}
-    it = stmt->options.find("increment");
-    if (it != stmt->options.end()) try { increment = std::stoll(it->second); } catch (...) {}
-    DBStatus res = g_engine.createSequence(s.currentDB, seqname, start, increment);
+    dbms::SequenceInfo info;
+    auto opt = stmt->options.find("start");
+    if (opt != stmt->options.end()) {
+        try { info.start = std::stoll(opt->second); info.startSpecified = true; } catch (...) {}
+    }
+    opt = stmt->options.find("increment");
+    if (opt != stmt->options.end()) {
+        try { info.increment = std::stoll(opt->second); info.incrementSpecified = true; } catch (...) {}
+    }
+    opt = stmt->options.find("minvalue");
+    if (opt != stmt->options.end()) {
+        try { info.minValue = std::stoll(opt->second); info.hasMinValue = true; } catch (...) {}
+    }
+    opt = stmt->options.find("maxvalue");
+    if (opt != stmt->options.end()) {
+        try { info.maxValue = std::stoll(opt->second); info.hasMaxValue = true; } catch (...) {}
+    }
+    opt = stmt->options.find("cache");
+    if (opt != stmt->options.end()) {
+        try { info.cache = std::stoll(opt->second); info.cacheSpecified = true; } catch (...) {}
+    }
+    opt = stmt->options.find("cycle");
+    if (opt != stmt->options.end()) {
+        info.cycleSpecified = true;
+        info.cycle = (opt->second == "yes");
+    }
+    opt = stmt->options.find("nominvalue");
+    if (opt != stmt->options.end()) info.noMinValue = true;
+    opt = stmt->options.find("nomaxvalue");
+    if (opt != stmt->options.end()) info.noMaxValue = true;
+    opt = stmt->options.find("ownedby");
+    if (opt != stmt->options.end()) {
+        info.ownedBySpecified = true;
+        std::string owner = opt->second;
+        if (owner == "none") {
+            info.ownedByTable.clear();
+            info.ownedByColumn.clear();
+        } else {
+            size_t first = owner.find('.');
+            size_t last = owner.rfind('.');
+            if (first != std::string::npos && last != first) {
+                // schema.table.column or table.column with schema
+                std::string schemaPart = owner.substr(0, first);
+                std::string tablePart = owner.substr(first + 1, last - first - 1);
+                info.ownedByTable = (schemaPart == "public") ? tablePart : owner.substr(0, last);
+                info.ownedByColumn = owner.substr(last + 1);
+            } else if (first != std::string::npos) {
+                info.ownedByTable = owner.substr(0, first);
+                info.ownedByColumn = owner.substr(first + 1);
+            } else {
+                info.ownedByTable = owner;
+            }
+        }
+    }
+
+    DBStatus res = g_engine.createSequence(s.currentDB, seqname, info);
     if (res != DBStatus::OK) {
         std::cout << "CREATE SEQUENCE failed" << std::endl;
         return true;
@@ -839,7 +917,23 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             seq.relnamespace = nsPublic->oid;
             seq.relkind = 'S';
             seq.relnatts = 0;
-            cat.createClass(seq);
+            dbms::Oid seqOid = cat.createClass(seq);
+
+            if (!info.ownedByTable.empty()) {
+                // Register dependency: sequence -> owning table (so DROP TABLE CASCADE drops seq).
+                auto tableRel = cat.resolveRelation(info.ownedByTable, {"public"});
+                if (tableRel) {
+                    PgDependRow dep;
+                    dep.classid = dbms::PgClassOid_Class;
+                    dep.objid = seqOid;
+                    dep.objsubid = 0;
+                    dep.refclassid = dbms::PgClassOid_Class;
+                    dep.refobjid = tableRel->oid;
+                    dep.refobjsubid = 0;
+                    dep.deptype = 'a';
+                    cat.addDepend(dep);
+                }
+            }
         }
     } catch (const std::exception& e) {
         std::cerr << "WARNING: catalog sequence registration failed: " << e.what() << std::endl;
@@ -848,6 +942,153 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     txn.recordCreate(DdlObjectKind::Sequence, seqname);
     txn.commit();
     std::cout << "CREATE SEQUENCE succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    std::string seqname = stmt->objectName;
+    dbms::SequenceInfo info;
+
+    // Parse subCommand (lowercase space-separated tokens saved by parser).
+    std::string rest = stmt->subCommand;
+    std::vector<std::string> tokens;
+    {
+        std::istringstream iss(rest);
+        std::string tok;
+        while (iss >> tok) tokens.push_back(tok);
+    }
+
+    auto lower = [](const std::string& str) {
+        std::string r = str;
+        for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return r;
+    };
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        std::string tok = lower(tokens[i]);
+        if (tok == "restart") {
+            info.startSpecified = true;
+            if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "with") {
+                if (i + 2 < tokens.size()) {
+                    try { info.start = std::stoll(tokens[i + 2]); } catch (...) {}
+                    i += 2;
+                } else ++i;
+            } else if (i + 1 < tokens.size()) {
+                try { info.start = std::stoll(tokens[i + 1]); } catch (...) {}
+                ++i;
+            }
+        } else if (tok == "increment") {
+            info.incrementSpecified = true;
+            if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "by") {
+                if (i + 2 < tokens.size()) {
+                    try { info.increment = std::stoll(tokens[i + 2]); } catch (...) {}
+                    i += 2;
+                } else ++i;
+            } else if (i + 1 < tokens.size()) {
+                try { info.increment = std::stoll(tokens[i + 1]); } catch (...) {}
+                ++i;
+            }
+        } else if (tok == "minvalue" && i + 1 < tokens.size()) {
+            info.hasMinValue = true;
+            try { info.minValue = std::stoll(tokens[i + 1]); } catch (...) {}
+            ++i;
+        } else if (tok == "maxvalue" && i + 1 < tokens.size()) {
+            info.hasMaxValue = true;
+            try { info.maxValue = std::stoll(tokens[i + 1]); } catch (...) {}
+            ++i;
+        } else if (tok == "cache" && i + 1 < tokens.size()) {
+            info.cacheSpecified = true;
+            try { info.cache = std::stoll(tokens[i + 1]); } catch (...) {}
+            ++i;
+        } else if (tok == "no" && i + 1 < tokens.size()) {
+            std::string next = lower(tokens[i + 1]);
+            if (next == "minvalue") { info.noMinValue = true; ++i; }
+            else if (next == "maxvalue") { info.noMaxValue = true; ++i; }
+            else if (next == "cycle") { info.cycleSpecified = true; info.cycle = false; ++i; }
+        } else if (tok == "cycle") {
+            info.cycleSpecified = true;
+            info.cycle = true;
+        } else if (tok == "owned" && i + 1 < tokens.size() && lower(tokens[i + 1]) == "by") {
+            info.ownedBySpecified = true;
+            if (i + 2 < tokens.size()) {
+                std::string owner = tokens[i + 2];
+                if (lower(owner) == "none") {
+                    info.ownedByTable.clear();
+                    info.ownedByColumn.clear();
+                } else if (i + 4 < tokens.size() && tokens[i + 3] == "." && i + 6 < tokens.size() && tokens[i + 5] == ".") {
+                    // schema.table.column
+                    std::string schemaPart = owner;
+                    std::string tablePart = tokens[i + 4];
+                    info.ownedByTable = (schemaPart == "public") ? tablePart : owner + "." + tablePart;
+                    info.ownedByColumn = tokens[i + 6];
+                    i += 4;
+                } else if (i + 4 < tokens.size() && tokens[i + 3] == ".") {
+                    // table.column
+                    info.ownedByTable = owner;
+                    info.ownedByColumn = tokens[i + 4];
+                    i += 2;
+                } else {
+                    info.ownedByTable = owner;
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    DBStatus res = g_engine.alterSequence(s.currentDB, seqname, info);
+    if (res != DBStatus::OK) {
+        std::cout << "ALTER SEQUENCE failed" << std::endl;
+        return true;
+    }
+
+    // Update catalog dependency for OWNED BY changes.
+    if (info.ownedBySpecified) {
+        try {
+            dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+            auto seqRel = cat.resolveRelation(seqname, {"public"});
+            if (seqRel) {
+                // Remove old auto-dependencies for this sequence.
+                auto oldDeps = cat.findDepends(dbms::PgClassOid_Class, seqRel->oid, 0);
+                for (const auto& d : oldDeps) {
+                    if (d.deptype == 'a') {
+                        cat.removeDepend(d.classid, d.objid, d.objsubid,
+                                         d.refclassid, d.refobjid, d.refobjsubid);
+                    }
+                }
+                if (!info.ownedByTable.empty()) {
+                    auto tableRel = cat.resolveRelation(info.ownedByTable, {"public"});
+                    if (tableRel) {
+                        PgDependRow dep;
+                        dep.classid = dbms::PgClassOid_Class;
+                        dep.objid = seqRel->oid;
+                        dep.objsubid = 0;
+                        dep.refclassid = dbms::PgClassOid_Class;
+                        dep.refobjid = tableRel->oid;
+                        dep.refobjsubid = 0;
+                        dep.deptype = 'a';
+                        cat.addDepend(dep);
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "WARNING: catalog alter sequence failed: " << e.what() << std::endl;
+        }
+    }
+
+    txn.commit();
+    std::cout << "ALTER SEQUENCE succeeded" << std::endl;
     return false;
 }
 

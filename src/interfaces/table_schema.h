@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -36,6 +37,39 @@ struct Column {
     std::vector<std::string> enumValues;  // ENUM('a','b','c') values
 
     void print() const;
+};
+
+struct SequenceInfo {
+    int64_t start = 1;
+    int64_t increment = 1;
+    int64_t minValue = 1;
+    int64_t maxValue = std::numeric_limits<int64_t>::max();
+    int64_t cache = 1;
+    bool cycle = false;
+    bool hasMinValue = false;   // user explicitly wrote MINVALUE
+    bool hasMaxValue = false;   // user explicitly wrote MAXVALUE
+    bool noMinValue = false;    // user wrote NO MINVALUE
+    bool noMaxValue = false;    // user wrote NO MAXVALUE
+    std::string ownedByTable;   // OWNED BY table.column
+    std::string ownedByColumn;
+
+    // Explicit-set flags (used by ALTER SEQUENCE to know what changed).
+    bool startSpecified = false;
+    bool incrementSpecified = false;
+    bool cacheSpecified = false;
+    bool cycleSpecified = false;  // true when CYCLE or NO CYCLE was written
+    bool ownedBySpecified = false; // true when OWNED BY was written
+
+    // Compute PG-compatible defaults based on increment direction.
+    void applyDefaults() {
+        if (increment > 0) {
+            if (!hasMinValue && !noMinValue) minValue = 1;
+            if (!hasMaxValue && !noMaxValue) maxValue = std::numeric_limits<int64_t>::max();
+        } else if (increment < 0) {
+            if (!hasMaxValue && !noMaxValue) maxValue = -1;
+            if (!hasMinValue && !noMinValue) minValue = -std::numeric_limits<int64_t>::max();
+        }
+    }
 };
 
 struct ForeignKey {

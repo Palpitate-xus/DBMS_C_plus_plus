@@ -3890,6 +3890,68 @@ StmtPtr SQLParser::parseCreateSequence(const std::vector<std::string>& tokens, s
             }
         }
     }
+
+    auto lower = [&](const std::string& s) { return toLower(s); };
+    auto peek = [&](size_t offset) -> std::string {
+        if (pos + offset < tokens.size()) return lower(tokens[pos + offset]);
+        return "";
+    };
+    auto numericOption = [&](const std::string& key, size_t skip) {
+        if (pos + skip < tokens.size()) {
+            try {
+                stmt->options[key] = tokens[pos + skip];
+                pos += skip + 1;
+            } catch (...) {
+                ++pos;
+            }
+        } else {
+            ++pos;
+        }
+    };
+
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string tok = lower(tokens[pos]);
+        if (tok == "start") {
+            if (peek(1) == "with") numericOption("start", 2);
+            else numericOption("start", 1);
+        } else if (tok == "increment") {
+            if (peek(1) == "by") numericOption("increment", 2);
+            else numericOption("increment", 1);
+        } else if (tok == "minvalue") {
+            numericOption("minvalue", 1);
+        } else if (tok == "maxvalue") {
+            numericOption("maxvalue", 1);
+        } else if (tok == "cache") {
+            numericOption("cache", 1);
+        } else if (tok == "no") {
+            if (peek(1) == "minvalue") { stmt->options["nominvalue"] = "1"; pos += 2; }
+            else if (peek(1) == "maxvalue") { stmt->options["nomaxvalue"] = "1"; pos += 2; }
+            else if (peek(1) == "cycle") { stmt->options["cycle"] = "no"; pos += 2; }
+            else ++pos;
+        } else if (tok == "cycle") {
+            stmt->options["cycle"] = "yes"; ++pos;
+        } else if (tok == "owned") {
+            if (peek(1) == "by") {
+                if (pos + 2 < tokens.size()) {
+                    std::string owner = tokens[pos + 2];
+                    if (toLower(owner) == "none") {
+                        stmt->options["ownedby"] = "none";
+                        pos += 3;
+                    } else if (pos + 4 < tokens.size() && tokens[pos + 3] == ".") {
+                        stmt->options["ownedby"] = owner + "." + tokens[pos + 4];
+                        pos += 5;
+                    } else {
+                        stmt->options["ownedby"] = owner;
+                        pos += 3;
+                    }
+                } else {
+                    pos += 2;
+                }
+            } else ++pos;
+        } else {
+            ++pos;
+        }
+    }
     return stmt;
 }
 

@@ -158,12 +158,18 @@ public:
     // Sequence support
     DBStatus createSequence(const std::string& dbname, const std::string& seqname,
                             int64_t start = 1, int64_t increment = 1);
+    DBStatus createSequence(const std::string& dbname, const std::string& seqname,
+                            const dbms::SequenceInfo& info);
     DBStatus alterSequence(const std::string& dbname, const std::string& seqname,
                             bool hasRestart, int64_t restart,
                             bool hasIncrement, int64_t increment);
+    DBStatus alterSequence(const std::string& dbname, const std::string& seqname,
+                            const dbms::SequenceInfo& info);
     DBStatus dropSequence(const std::string& dbname, const std::string& seqname);
     int64_t nextval(const std::string& dbname, const std::string& seqname);
     int64_t currval(const std::string& dbname, const std::string& seqname);
+    int64_t lastval() const;
+    int64_t setval(const std::string& dbname, const std::string& seqname, int64_t value, bool isCalled = true);
     bool sequenceExists(const std::string& dbname, const std::string& seqname) const;
     std::vector<std::string> getSequenceNames(const std::string& dbname) const;
     bool tableExists(const std::string& dbname, const std::string& tablename) const;
@@ -1125,6 +1131,11 @@ private:
     uint32_t backgroundLoopDelayMs_ = 200;
     uint32_t backgroundCheckpointIntervalMs_ = 300000; // 5 minutes
     std::chrono::steady_clock::time_point lastBackgroundCheckpoint_;
+
+    // Sequence session state for lastval()
+    mutable std::string lastvalDb_;
+    mutable std::string lastvalSeq_;
+    mutable int64_t lastvalValue_ = 0;
 };
 
 // Column type constructors

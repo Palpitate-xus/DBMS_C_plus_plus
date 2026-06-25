@@ -8,6 +8,8 @@
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
 #include <cmath>
+#include <limits>
+#include <mutex>
 #include <unordered_map>
 
 extern dbms::Config g_config;
@@ -7305,18 +7307,96 @@ std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname)
     return names;
 }
 
+static std::mutex g_sequenceMutex;
+
 static std::filesystem::path sequencePath(const std::string& dbname, const std::string& seqname) {
     return std::filesystem::path(dbname) / (seqname + ".seq");
+}
+
+// New sequence file format (space-separated):
+// start increment min max cache cycle nextValue lastAllocated ownedTable ownedColumn
+static bool readSequenceFile(const std::filesystem::path& path,
+                             dbms::SequenceInfo& info,
+                             int64_t& nextValue,
+                             int64_t& lastAllocated) {
+    std::ifstream ifs(path);
+    if (!ifs) return false;
+    int64_t start = 1, increment = 1;
+    if (!(ifs >> start >> increment)) return false;
+    std::streampos after2 = ifs.tellg();
+    int64_t minV, maxV, cache, cycleFlag, nextV, lastAlloc;
+    if (ifs >> minV >> maxV >> cache >> cycleFlag >> nextV >> lastAlloc) {
+        std::string ownedTable, ownedCol;
+        ifs >> ownedTable;
+        ifs >> ownedCol;
+        info = dbms::SequenceInfo{};
+        info.start = start;
+        info.increment = increment;
+        info.minValue = minV;
+        info.maxValue = maxV;
+        info.cache = cache;
+        info.cycle = (cycleFlag != 0);
+        info.ownedByTable = ownedTable;
+        info.ownedByColumn = ownedCol;
+        nextValue = nextV;
+        lastAllocated = lastAlloc;
+    } else {
+        // Backward compatibility: old format was "<current> <increment>"
+        ifs.clear();
+        ifs.seekg(after2);
+        info = dbms::SequenceInfo{};
+        info.start = start;
+        info.increment = increment;
+        info.applyDefaults();
+        nextValue = start;
+        lastAllocated = start - increment; // force allocation on first nextval
+    }
+    return true;
+}
+
+static void writeSequenceFile(const std::filesystem::path& path,
+                              const dbms::SequenceInfo& info,
+                              int64_t nextValue,
+                              int64_t lastAllocated) {
+    std::ofstream ofs(path);
+    ofs << info.start << " "
+        << info.increment << " "
+        << info.minValue << " "
+        << info.maxValue << " "
+        << info.cache << " "
+        << (info.cycle ? 1 : 0) << " "
+        << nextValue << " "
+        << lastAllocated << " "
+        << info.ownedByTable << " "
+        << info.ownedByColumn << "\n";
 }
 
 DBStatus StorageEngine::createSequence(const std::string& dbname,
                                         const std::string& seqname,
                                         int64_t start, int64_t increment) {
+    dbms::SequenceInfo info;
+    info.start = start;
+    info.increment = increment;
+    info.applyDefaults();
+    return createSequence(dbname, seqname, info);
+}
+
+DBStatus StorageEngine::createSequence(const std::string& dbname,
+                                        const std::string& seqname,
+                                        const dbms::SequenceInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = sequencePath(dbname, seqname);
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
     if (std::filesystem::exists(path)) return DBStatus::TABLE_ALREADY_EXISTS;
-    std::ofstream ofs(path);
-    ofs << start << " " << increment << "\n";
+    if (info.increment == 0) return DBStatus::INVALID_VALUE;
+    dbms::SequenceInfo applied = info;
+    applied.applyDefaults();
+    if (applied.minValue > applied.start || applied.start > applied.maxValue)
+        return DBStatus::INVALID_VALUE;
+    if (applied.cache < 1) return DBStatus::INVALID_VALUE;
+    int64_t nextValue = applied.start;
+    int64_t lastAllocated = applied.start - applied.increment;
+    writeSequenceFile(path, applied, nextValue, lastAllocated);
     return DBStatus::OK;
 }
 
@@ -7324,25 +7404,66 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
                                        const std::string& seqname,
                                        bool hasRestart, int64_t restart,
                                        bool hasIncrement, int64_t increment) {
+    dbms::SequenceInfo info;
+    if (hasRestart) { info.start = restart; info.startSpecified = true; }
+    if (hasIncrement) { info.increment = increment; info.incrementSpecified = true; }
+    return alterSequence(dbname, seqname, info);
+}
+
+DBStatus StorageEngine::alterSequence(const std::string& dbname,
+                                       const std::string& seqname,
+                                       const dbms::SequenceInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = sequencePath(dbname, seqname);
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    int64_t current = 1;
-    int64_t inc = 1;
-    {
-        std::ifstream ifs(path);
-        if (ifs) ifs >> current >> inc;
+    dbms::SequenceInfo old;
+    int64_t nextValue, lastAllocated;
+    if (!readSequenceFile(path, old, nextValue, lastAllocated))
+        return DBStatus::INVALID_VALUE;
+
+    dbms::SequenceInfo merged = old;
+    if (info.startSpecified) {
+        merged.start = info.start;
+        nextValue = info.start;
+        lastAllocated = info.start - merged.increment;
     }
-    if (hasRestart) current = restart;
-    if (hasIncrement) inc = increment;
-    std::ofstream ofs(path);
-    ofs << current << " " << inc << "\n";
+    if (info.incrementSpecified) {
+        merged.increment = info.increment;
+        // Recompute defaults for the new direction.
+        merged.hasMinValue = false; merged.noMinValue = false;
+        merged.hasMaxValue = false; merged.noMaxValue = false;
+        merged.applyDefaults();
+        lastAllocated = nextValue - merged.increment;
+    }
+    if (info.hasMinValue) { merged.minValue = info.minValue; merged.hasMinValue = true; merged.noMinValue = false; }
+    if (info.noMinValue) { merged.noMinValue = true; merged.hasMinValue = false; }
+    if (info.hasMaxValue) { merged.maxValue = info.maxValue; merged.hasMaxValue = true; merged.noMaxValue = false; }
+    if (info.noMaxValue) { merged.noMaxValue = true; merged.hasMaxValue = false; }
+    if (info.cacheSpecified) merged.cache = info.cache;
+    if (info.cycleSpecified) merged.cycle = info.cycle;
+    if (info.ownedBySpecified) {
+        merged.ownedByTable = info.ownedByTable;
+        merged.ownedByColumn = info.ownedByColumn;
+    }
+
+    merged.applyDefaults();
+    if (merged.minValue > merged.maxValue) return DBStatus::INVALID_VALUE;
+    if (nextValue < merged.minValue || nextValue > merged.maxValue) {
+        // PG adjusts nextValue to be within bounds when ALTER changes bounds.
+        if (merged.increment > 0) nextValue = merged.minValue;
+        else nextValue = merged.maxValue;
+        lastAllocated = nextValue - merged.increment;
+    }
+    if (merged.cache < 1) return DBStatus::INVALID_VALUE;
+    writeSequenceFile(path, merged, nextValue, lastAllocated);
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::dropSequence(const std::string& dbname,
                                       const std::string& seqname) {
     auto path = sequencePath(dbname, seqname);
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::remove(path);
     return DBStatus::OK;
@@ -7351,27 +7472,82 @@ DBStatus StorageEngine::dropSequence(const std::string& dbname,
 int64_t StorageEngine::nextval(const std::string& dbname,
                                 const std::string& seqname) {
     auto path = sequencePath(dbname, seqname);
-    int64_t val = 1, inc = 1;
-    {
-        std::ifstream ifs(path);
-        if (ifs) ifs >> val >> inc;
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    dbms::SequenceInfo info;
+    int64_t nextValue, lastAllocated;
+    if (!readSequenceFile(path, info, nextValue, lastAllocated)) return 0;
+
+    auto allocateBatch = [&](int64_t from) {
+        // Allocate 'cache' values starting from 'from' in the direction of increment.
+        int64_t end = from + (info.cache - 1) * info.increment;
+        if (info.increment > 0) {
+            if (end > info.maxValue) end = info.maxValue;
+        } else {
+            if (end < info.minValue) end = info.minValue;
+        }
+        return end;
+    };
+
+    auto needAllocation = [&]() {
+        if (info.increment > 0) return nextValue > lastAllocated;
+        return nextValue < lastAllocated;
+    };
+
+    if (needAllocation()) {
+        lastAllocated = allocateBatch(nextValue);
     }
-    int64_t result = val;
-    val += inc;
-    std::ofstream ofs(path);
-    ofs << val << " " << inc << "\n";
+
+    int64_t result = nextValue;
+    nextValue += info.increment;
+
+    bool exhausted = (info.increment > 0) ? (nextValue > info.maxValue) : (nextValue < info.minValue);
+    if (exhausted) {
+        if (info.cycle) {
+            nextValue = (info.increment > 0) ? info.minValue : info.maxValue;
+            lastAllocated = nextValue - info.increment; // force allocation next call
+        } else {
+            // Leave nextValue at boundary + increment so subsequent calls stay at boundary.
+            // PG would error, but for simplicity keep returning the boundary value.
+            nextValue -= info.increment;
+            result = nextValue;
+        }
+    }
+
+    writeSequenceFile(path, info, nextValue, lastAllocated);
+    lastvalDb_ = dbname;
+    lastvalSeq_ = seqname;
+    lastvalValue_ = result;
     return result;
 }
 
 int64_t StorageEngine::currval(const std::string& dbname,
                                 const std::string& seqname) {
     auto path = sequencePath(dbname, seqname);
-    int64_t val = 1, inc = 1;
-    {
-        std::ifstream ifs(path);
-        if (ifs) ifs >> val >> inc;
-    }
-    return val;
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    dbms::SequenceInfo info;
+    int64_t nextValue, lastAllocated;
+    if (!readSequenceFile(path, info, nextValue, lastAllocated)) return 0;
+    return nextValue - info.increment;
+}
+
+int64_t StorageEngine::lastval() const {
+    return lastvalValue_;
+}
+
+int64_t StorageEngine::setval(const std::string& dbname,
+                               const std::string& seqname,
+                               int64_t value, bool isCalled) {
+    auto path = sequencePath(dbname, seqname);
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    dbms::SequenceInfo info;
+    int64_t nextValue, lastAllocated;
+    if (!readSequenceFile(path, info, nextValue, lastAllocated)) return 0;
+    if (value < info.minValue) value = info.minValue;
+    if (value > info.maxValue) value = info.maxValue;
+    nextValue = isCalled ? value + info.increment : value;
+    lastAllocated = nextValue - info.increment;
+    writeSequenceFile(path, info, nextValue, lastAllocated);
+    return value;
 }
 
 bool StorageEngine::sequenceExists(const std::string& dbname,
