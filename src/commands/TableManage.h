@@ -360,6 +360,14 @@ public:
     void analyzeTable(const std::string& dbname, const std::string& tablename);
     void analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
                             const std::vector<std::string>& colnames);
+    // Functional dependency degrees for CREATE STATISTICS (dependencies kind).
+    // Returns map keyed "left=>right" → degree in [0,1] for every ordered pair of
+    // the given columns. degree(a=>b) = (rows consistent with a determining b) /
+    // rowCount, i.e. sum over a-groups of the most frequent b-count, divided by
+    // total rows (PostgreSQL's pg_dependencies degree).
+    std::map<std::string, double> computeFunctionalDependencies(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& colnames) const;
     size_t getTableRowCount(const std::string& dbname, const std::string& tablename) const;
     ColumnStats getColumnStats(const std::string& dbname, const std::string& tablename,
                                 const std::string& colname) const;

@@ -92,7 +92,7 @@
 | 1.1.24 | `CREATE ROLE` / `CREATE USER` | 用户在 `user.dat`，角色在 `role.dat`；缺少 PG 角色属性执行、成员继承、admin option、系统 catalog | ⚠️ |
 | 1.1.25 | `CREATE SCHEMA` | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义 | ⚠️ |
 | 1.1.26 | `CREATE SEQUENCE` | 有 nextval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics | ⚠️ |
-| 1.1.27 | `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 有扩展统计对象元数据；缺少 `pg_statistic_ext` catalog、表达式统计、dependencies/ndistinct/mcv 精确算法和 planner 深度使用 | ⚠️ |
+| 1.1.27 | `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 有扩展统计对象元数据；`dependencies` kind 已落地（`computeFunctionalDependencies` 计算各有序列对函数依赖强度并随 CREATE STATISTICS 输出）；仍缺 `pg_statistic_ext` catalog、表达式统计、ndistinct/mcv 精确算法和 planner 深度使用 | ⚠️ |
 | 1.1.28 | `CREATE TABLE` | 可建表、分区、临时/unlogged、继承等部分；`LIKE source [INCLUDING ...]` 已落地（复制列定义/NOT NULL，按 INCLUDING 复制 DEFAULTS/CONSTRAINTS/INDEXES(单列 PK/UNIQUE)/IDENTITY）；仍缺复合 PK/UNIQUE 与索引结构复制、typed table、`OF type`、access method、tablespace、identity/生成列完整语义 | ⚠️ |
 | 1.1.29 | `CREATE TABLE AS` | 有 CTAS 路径；缺少 PG 选项、`WITH [NO] DATA`、tablespace/access method、精确类型推断 | ⚠️ |
 | 1.1.30 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 已支持表空间对象元数据；缺少物理存储路由、权限、依赖检查和 `pg_tblspc` 符号链接语义 | ⚠️ |
@@ -258,7 +258,7 @@
 |---|----------------|---------|------|
 | 7.1 | Parser/analyzer/rewrite/planner/executor 分层 | 主要在 `execute()` 中字符串解析并直接调用 engine | 🔄 |
 | 7.2 | Cost-based planner | 有简化成本、统计和 plan cache；缺少 path 枚举、参数化路径、join search、equivalence classes、pathkeys、parallel aware path | ⚠️ |
-| 7.3 | 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化和扩展统计对象元数据；缺少 PostgreSQL 级 dependencies、ndistinct、correlation、表达式统计、catalog 和 planner 深度使用 | ⚠️ |
+| 7.3 | 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化、扩展统计对象元数据与函数依赖（dependencies）强度计算；缺少 PostgreSQL 级 ndistinct、correlation、表达式统计、catalog 和 planner 深度使用 | ⚠️ |
 | 7.4 | Index selection | 有 equality/range 部分；缺少 bitmap heap scan、bitmap and/or、多索引组合、skip scan、index condition recheck、lossy pages | ⚠️ |
 | 7.5 | Parallel query | 缺失：无 Gather/Gather Merge、parallel scan/join/aggregate、worker lifecycle | ❌ |
 | 7.6 | JIT | 缺失 LLVM JIT | ❌ |

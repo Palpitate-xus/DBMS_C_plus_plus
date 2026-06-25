@@ -2899,6 +2899,58 @@ void StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::str
     }
 }
 
+std::map<std::string, double> StorageEngine::computeFunctionalDependencies(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& colnames) const {
+    std::map<std::string, double> result;
+    if (!tableExists(dbname, tablename) || colnames.size() < 2) return result;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    std::map<std::string, size_t> colIdx;
+    for (size_t i = 0; i < tbl.len; ++i) colIdx[tbl.cols[i].dataName] = i;
+    for (const auto& c : colnames) {
+        if (colIdx.find(c) == colIdx.end()) return result;
+    }
+
+    // Collect the projected values for each requested column, row by row.
+    std::vector<std::vector<std::string>> rows; // rows[r][k] = value of colnames[k]
+    const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
+        [&](uint32_t, uint16_t, const char* data, size_t len) {
+            std::string row(data, len);
+            std::vector<std::string> vals;
+            vals.reserve(colnames.size());
+            for (const auto& c : colnames) {
+                vals.push_back(const_cast<StorageEngine*>(this)->extractColumnValue(
+                    row, tbl, colIdx[c]));
+            }
+            rows.push_back(std::move(vals));
+        });
+
+    size_t rowCount = rows.size();
+    if (rowCount == 0) return result;
+
+    // For each ordered pair (a -> b): group rows by a-value, and within each group
+    // count how often the majority b-value occurs; degree = sum / rowCount.
+    for (size_t ai = 0; ai < colnames.size(); ++ai) {
+        for (size_t bi = 0; bi < colnames.size(); ++bi) {
+            if (ai == bi) continue;
+            std::map<std::string, std::map<std::string, size_t>> groups;
+            for (const auto& r : rows) {
+                groups[r[ai]][r[bi]]++;
+            }
+            size_t consistent = 0;
+            for (const auto& g : groups) {
+                size_t best = 0;
+                for (const auto& bv : g.second) best = std::max(best, bv.second);
+                consistent += best;
+            }
+            double degree = static_cast<double>(consistent) / static_cast<double>(rowCount);
+            result[colnames[ai] + "=>" + colnames[bi]] = degree;
+        }
+    }
+    return result;
+}
+
 StorageEngine::BufferPoolStats StorageEngine::getBufferPoolStats() const {
     BufferPoolStats stats;
     // Page allocators (table data files)

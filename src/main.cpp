@@ -7102,6 +7102,18 @@ static bool handleCreateStatistics(const string& sql, Session& s) {
         return true;
     }
     if (columns.size() >= 2) g_engine.analyzeMultiColumn(s.currentDB, tableName, columns);
+    // dependencies kind: compute and report functional dependency degrees.
+    bool wantsDeps = false;
+    for (const auto& k : kinds) {
+        if (toLower(k) == "dependencies") { wantsDeps = true; break; }
+    }
+    if (wantsDeps && columns.size() >= 2) {
+        auto deps = g_engine.computeFunctionalDependencies(s.currentDB, tableName, columns);
+        for (const auto& d : deps) {
+            cout << "  dependency " << d.first << " degree "
+                 << std::fixed << std::setprecision(6) << d.second << endl;
+        }
+    }
     cout << "Statistics " << name << " created" << endl;
     return false;
 }
