@@ -840,6 +840,42 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         tbl.append(columnDefToColumn(cd, s.currentDB));
     }
 
+    // CREATE TABLE name OF composite_type — derive columns from the type's fields.
+    if (!stmt->ofType.empty()) {
+        StorageEngine::CompositeType ct = g_engine.getCompositeType(s.currentDB, stmt->ofType);
+        if (ct.name.empty()) {
+            ct = g_engine.getCompositeType(s.currentDB, toLower(stmt->ofType));
+        }
+        if (ct.name.empty()) {
+            std::cout << "OF type " << stmt->ofType << " not found" << std::endl;
+            return true;
+        }
+        for (const auto& f : ct.fields) {
+            if (tbl.len >= MAX_COLUMNS) break;
+            ColumnDef cd;
+            cd.name = f.first;
+            cd.isNull = true;
+            // Parse a stored field type string like "varchar(50)" / "numeric(10,2)" / "int".
+            const std::string& ts = f.second;
+            size_t lp = ts.find('(');
+            if (lp != std::string::npos) {
+                cd.typeName = trim(ts.substr(0, lp));
+                size_t rp = ts.find(')', lp);
+                std::string mods = ts.substr(lp + 1,
+                    (rp == std::string::npos ? ts.size() : rp) - lp - 1);
+                std::stringstream ms(mods);
+                std::string m;
+                while (std::getline(ms, m, ',')) {
+                    m = trim(m);
+                    if (!m.empty()) cd.typeMods.push_back(m);
+                }
+            } else {
+                cd.typeName = trim(ts);
+            }
+            tbl.append(columnDefToColumn(cd, s.currentDB));
+        }
+    }
+
     // Table-level constraints
     for (const auto& tc : stmt->constraints) {
         std::string t = toLower(tc.type);
