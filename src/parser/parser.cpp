@@ -2311,8 +2311,13 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
     if (match(tokens, pos, "temp") || match(tokens, pos, "temporary")) ++pos;
     if (match(tokens, pos, "materialized")) {
         ++pos;
+        if (match(tokens, pos, "view")) ++pos;
         auto stmt = parseCreateView(tokens, pos);
-        if (stmt) static_cast<CreateViewStmt*>(stmt.get())->materialized = true;
+        if (stmt) {
+            auto* mvs = static_cast<CreateViewStmt*>(stmt.get());
+            mvs->materialized = true;
+            mvs->command = SqlCommand::CreateMaterializedView;
+        }
         r.success = true;
         r.stmt = std::move(stmt);
         return r;

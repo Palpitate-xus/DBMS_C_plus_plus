@@ -108,6 +108,7 @@ std::string DdlTransaction::kindString(DdlObjectKind kind) const {
         case DdlObjectKind::Domain:     return "domain";
         case DdlObjectKind::Type:       return "type";
         case DdlObjectKind::View:       return "view";
+        case DdlObjectKind::MaterializedView: return "materialized_view";
         case DdlObjectKind::Function:   return "function";
         case DdlObjectKind::Procedure:  return "procedure";
     }

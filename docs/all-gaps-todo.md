@@ -22,6 +22,7 @@
 | 2026-06-25 | Phase 4 Wave 4.31 CREATE TABLE AS 落地：`CreateTableStmt::asSelect` + `parseCreateTable` 识别 `AS SELECT`；`tryDdlBridge` 移除 CTAS 回退；`DdlExecutor` 实现简单 CTAS（SELECT * / columns / WHERE）并按源表列类型建表；新增 `tests/ctas_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.6 CREATE TYPE ... AS ENUM 落地：`StorageEngine` 新增 `.enums` 持久化与 `createEnumType`/`getEnumType` 等接口；`parseCreateType` 解析 enum 标签；`DdlExecutor` 注册 enum 类型；INSERT/UPDATE 校验 enum 值；新增 `tests/enum_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.28 CREATE VIEW 部分落地：`CreateViewStmt::selectSql` + `parseCreateView` 保留原始 SELECT；`classify` 识别 `CREATE OR REPLACE VIEW`；`DdlExecutor::executeCreateView` 处理基本创建/OR REPLACE/WITH CHECK OPTION/单表可更新检测；移除 `main.cpp` legacy CREATE VIEW；新增 `tests/view_test.cpp`。 |
+| 2026-06-25 | Phase 4 Wave 4.38 CREATE MATERIALIZED VIEW 基本落地：`DdlExecutor` 实现 `CREATE MATERIALIZED VIEW ... AS SELECT`（`__mv_<name>` backing 表 + `.mview` 元数据），支持 `SELECT * / 列 / WHERE`；修复 parser 将 `CREATE MATERIALIZED VIEW` 错判为普通 VIEW 的问题；新增 `tests/matview_test.cpp`。`WITH [NO] DATA`、`REFRESH [CONCURRENTLY]`、依赖追踪仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -78,7 +79,7 @@
 | 1.1.18 | `CREATE DOMAIN` | 支持 base/default/check；缺少多约束、全表 revalidation、依赖/权限/类型系统深度集成 | ⚠️ |
 | 1.1.19 | `CREATE FUNCTION` | 简单表达式/表值函数；缺少 language、volatility、strict、parallel、cost、rows、security definer、leakproof、set config、polymorphic、C/SQL/PL 函数 | ⚠️ |
 | 1.1.20 | `CREATE INDEX` | 支持 btree/hash/GIN/GiST/BRIN/SP-GiST 风格、include/where/expression/concurrently；缺少 operator class/family、collation、NULLS sort、storage params、parallel build、真正 concurrent algorithm、AM API | ⚠️ |
-| 1.1.21 | `CREATE MATERIALIZED VIEW` | 用 backing table 保存结果；缺少 `WITH [NO] DATA`、唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
+| 1.1.21 | `CREATE MATERIALIZED VIEW` | 基本 CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果，`.mview` 保存 SQL；仍缺少 `WITH [NO] DATA`、唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
 | 1.1.22 | `CREATE POLICY` | 有 RLS policy 文件；`WITH CHECK` 评估在源码注释中明确为 best-effort/简化 | ⚠️ |
 | 1.1.23 | `CREATE PROCEDURE` | 多条 SQL 字符串顺序执行；缺少语言运行时、事务控制规则、异常、变量、权限属性 | ⚠️ |
 | 1.1.24 | `CREATE ROLE` / `CREATE USER` | 用户在 `user.dat`，角色在 `role.dat`；缺少 PG 角色属性执行、成员继承、admin option、系统 catalog | ⚠️ |

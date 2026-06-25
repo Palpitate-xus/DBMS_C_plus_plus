@@ -151,6 +151,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropType(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateView:
             return executeCreateView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
+        case SqlCommand::CreateMaterializedView:
+            return executeCreateMaterializedView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
         case SqlCommand::CreateDatabase:
             return executeCreateDatabase(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
         case SqlCommand::DropDatabase:
@@ -191,6 +193,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateType:
         case dbms::SqlCommand::DropType:
         case dbms::SqlCommand::CreateView:
+        case dbms::SqlCommand::CreateMaterializedView:
         case dbms::SqlCommand::CreateDatabase:
         case dbms::SqlCommand::DropDatabase:
         case dbms::SqlCommand::CreateSchema:
@@ -641,11 +644,28 @@ static bool parseSimpleSelect(const std::string& selectSql,
                     ? trim(condStr.substr(andPos))
                     : trim(condStr.substr(andPos, nextAnd - andPos));
                 if (!single.empty()) {
-                    size_t eqPos = single.find('=');
-                    if (eqPos != std::string::npos) {
-                        std::string cname = trim(single.substr(0, eqPos));
-                        std::string val = trim(single.substr(eqPos + 1));
-                        conditions.push_back("=" + cname + " " + val);
+                    // Simple AND-split conditions: col op val (op = < > <= >= <> =)
+                    size_t opPos = std::string::npos;
+                    std::string op;
+                    for (size_t i = 0; i + 1 < single.size(); ++i) {
+                        char c = single[i];
+                        if (c == '=' || c == '<' || c == '>' || c == '!') {
+                            opPos = i;
+                            if (i + 1 < single.size() &&
+                                ((c == '<' && single[i + 1] == '>') ||
+                                 (c == '<' && single[i + 1] == '=') ||
+                                 (c == '>' && single[i + 1] == '='))) {
+                                op = single.substr(i, 2);
+                            } else {
+                                op = std::string(1, c);
+                            }
+                            break;
+                        }
+                    }
+                    if (!op.empty()) {
+                        std::string cname = trim(single.substr(0, opPos));
+                        std::string val = trim(single.substr(opPos + op.size()));
+                        conditions.push_back(op + cname + " " + val);
                     }
                 }
                 if (nextAnd == std::string::npos) break;
@@ -1564,6 +1584,132 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
               << (baseTable.empty() ? "" : " (updatable)")
               << (checkOption.empty() ? "" : " [with check option " + checkOption + "]")
               << std::endl;
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// CREATE MATERIALIZED VIEW
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    std::string viewname = stmt->viewName;
+    std::string selectSql = stmt->selectSql;
+    if (selectSql.empty()) {
+        std::cout << "CREATE MATERIALIZED VIEW requires AS SELECT" << std::endl;
+        return true;
+    }
+
+    std::vector<std::string> selectCols;
+    std::string srcTable;
+    std::vector<std::string> conditions;
+    if (!parseSimpleSelect(selectSql, selectCols, srcTable, conditions)) {
+        std::cout << "CREATE MATERIALIZED VIEW: unable to parse SELECT clause" << std::endl;
+        return true;
+    }
+
+    srcTable = resolveTableName(s, srcTable);
+    if (!g_engine.tableExists(s.currentDB, srcTable)) {
+        std::cout << "CREATE MATERIALIZED VIEW: source table not found" << std::endl;
+        return true;
+    }
+
+    dbms::TableSchema srcTbl = g_engine.getTableSchema(s.currentDB, srcTable);
+    std::vector<std::string> colNames;
+    std::set<std::string> queryCols;
+
+    if (selectCols.size() == 1 && selectCols[0] == "*") {
+        for (size_t i = 0; i < srcTbl.len; ++i) {
+            colNames.push_back(srcTbl.cols[i].dataName);
+            queryCols.insert(srcTbl.cols[i].dataName);
+        }
+    } else {
+        for (const auto& cname : selectCols) {
+            bool found = false;
+            for (size_t i = 0; i < srcTbl.len; ++i) {
+                if (toLower(srcTbl.cols[i].dataName) == cname) {
+                    colNames.push_back(srcTbl.cols[i].dataName);
+                    queryCols.insert(srcTbl.cols[i].dataName);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                std::cout << "CREATE MATERIALIZED VIEW: column '" << cname << "' not found" << std::endl;
+                return true;
+            }
+        }
+    }
+
+    if (colNames.empty()) {
+        std::cout << "CREATE MATERIALIZED VIEW: no columns in SELECT" << std::endl;
+        return true;
+    }
+
+    std::string backingTable = dbms::StorageEngine::materializedViewPrefix(viewname);
+    dbms::TableSchema tbl;
+    tbl.tablename = backingTable;
+    for (const auto& cname : colNames) {
+        dbms::Column col;
+        col.dataName = cname;
+        col.dataType = "varchar";
+        col.isVariableLength = true;
+        col.dsize = 255;
+        col.isNull = true;
+        tbl.append(col);
+    }
+
+    if (g_engine.tableExists(s.currentDB, backingTable)) {
+        g_engine.dropTable(s.currentDB, backingTable);
+    }
+    DBStatus res = g_engine.createTable(s.currentDB, tbl);
+    if (res != DBStatus::OK) {
+        std::cout << "CREATE MATERIALIZED VIEW: failed to create backing table" << std::endl;
+        return true;
+    }
+
+    auto rows = g_engine.query(s.currentDB, srcTable, conditions, queryCols, {});
+    size_t inserted = 0;
+    for (const auto& row : rows) {
+        std::map<std::string, std::string> values;
+        std::istringstream iss(row);
+        std::string val;
+        size_t idx = 0;
+        while (iss >> val && idx < colNames.size()) {
+            values[colNames[idx]] = val;
+            ++idx;
+        }
+        if (idx != colNames.size()) continue;
+        if (g_engine.insert(s.currentDB, backingTable, values) == DBStatus::OK) ++inserted;
+    }
+
+    // Save SQL to .mview file
+    auto mviewDir = g_engine.viewsDir(s.currentDB);
+    if (!std::filesystem::exists(mviewDir)) {
+        std::filesystem::create_directories(mviewDir);
+    }
+    auto mviewPath = mviewDir / (viewname + ".mview");
+    {
+        std::ofstream ofs(mviewPath);
+        if (!ofs) {
+            std::cout << "CREATE MATERIALIZED VIEW: failed to save metadata" << std::endl;
+            return true;
+        }
+        ofs << selectSql;
+    }
+
+    txn.recordCreate(DdlObjectKind::MaterializedView, viewname);
+    txn.commit();
+    std::cout << "CREATE MATERIALIZED VIEW succeeded: " << inserted << " rows" << std::endl;
     return false;
 }
 

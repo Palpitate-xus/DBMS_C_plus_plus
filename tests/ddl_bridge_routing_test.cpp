@@ -69,7 +69,7 @@ static void test_bridge_falls_back_for_unhandled() {
     std::cout << "[DDL-ROUTE] bridge falls back for unhandled DDL OK" << std::endl;
 }
 
-static void test_bridge_falls_back_for_ctas() {
+static void test_bridge_handles_ctas() {
     std::string db = "ddl_route_t3";
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
@@ -77,7 +77,7 @@ static void test_bridge_falls_back_for_ctas() {
     Session s;
     setupSession(s, db);
 
-    // First create a source table so the legacy CTAS path has something to select.
+    // First create a source table.
     std::string src = "create table src (id int)";
     dbms::SqlCommand srcCmd = dbms::SQLParser::classify(src);
     bool handled = false;
@@ -87,19 +87,20 @@ static void test_bridge_falls_back_for_ctas() {
     std::string sql = "create table ctas_dst as select * from src";
     dbms::SqlCommand cmd = dbms::SQLParser::classify(sql);
     err = dbms::tryDdlBridge(sql, cmd, s, handled);
-    // CTAS is intentionally left on legacy inline path.
-    assert(!handled);
+    // CTAS is now handled by the DDL AST bridge.
+    assert(handled);
     assert(!err);
+    assert(g_engine.tableExists(db, "ctas_dst"));
 
     cleanup(db);
-    std::cout << "[DDL-ROUTE] bridge falls back for CTAS OK" << std::endl;
+    std::cout << "[DDL-ROUTE] bridge handles CTAS OK" << std::endl;
 }
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_bridge_handles_create_table();
     test_bridge_falls_back_for_unhandled();
-    test_bridge_falls_back_for_ctas();
+    test_bridge_handles_ctas();
     std::cout << "[DDL-ROUTE] all passed" << std::endl;
     return 0;
 }

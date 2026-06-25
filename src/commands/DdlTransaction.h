@@ -30,6 +30,7 @@ enum class DdlObjectKind {
     Domain,
     Type,
     View,
+    MaterializedView,
     Function,
     Procedure
 };
