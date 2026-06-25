@@ -6,6 +6,14 @@
 
 namespace dbms {
 
+static std::string stripQuotes(const std::string& s) {
+    if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') ||
+                          (s.front() == '"' && s.back() == '"'))) {
+        return s.substr(1, s.size() - 2);
+    }
+    return s;
+}
+
 // ============================================================================
 // Forward declarations for internal helper functions
 // ============================================================================
@@ -4112,16 +4120,154 @@ StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_
 
 StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateFunctionStmt>();
-    if (pos < tokens.size()) {
-        stmt->funcName = tokens[pos++];
+    if (pos >= tokens.size()) return stmt;
+    stmt->funcName = tokens[pos++];
+
+    // Optional parameter list: (name type [, ...])
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            if (tokens[pos] == ",") { ++pos; continue; }
+            std::string pname = tokens[pos++];
+            std::string ptype;
+            // Collect type tokens until comma or closing paren, handling typemods like varchar(20).
+            int depth = 0;
+            while (pos < tokens.size() && (tokens[pos] != "," || depth > 0) &&
+                   (tokens[pos] != ")" || depth > 0)) {
+                if (tokens[pos] == "(") ++depth;
+                else if (tokens[pos] == ")") --depth;
+                if (!ptype.empty()) ptype += " ";
+                ptype += tokens[pos++];
+            }
+            if (!pname.empty()) stmt->params.emplace_back(pname, ptype);
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
     }
+
+    // RETURNS / RETURNS TABLE (...)
+    if (match(tokens, pos, "returns")) {
+        ++pos;
+        if (match(tokens, pos, "table")) {
+            stmt->returnType = "table";
+            ++pos;
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                // Skip table column list for now.
+                int depth = 1;
+                ++pos;
+                while (pos < tokens.size() && depth > 0) {
+                    if (tokens[pos] == "(") ++depth;
+                    else if (tokens[pos] == ")") --depth;
+                    if (depth > 0) ++pos;
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            }
+        } else {
+            std::string rtype;
+            while (pos < tokens.size() && !match(tokens, pos, "as") &&
+                   !match(tokens, pos, "language") && !match(tokens, pos, "immutable") &&
+                   !match(tokens, pos, "stable") && !match(tokens, pos, "volatile")) {
+                if (!rtype.empty()) rtype += " ";
+                rtype += tokens[pos++];
+            }
+            stmt->returnType = rtype;
+        }
+    }
+
+    // Volatility / strict / security definer / parallel / cost / rows / SET options
+    while (pos < tokens.size()) {
+        if (match(tokens, pos, "immutable")) { stmt->immutable = true; stmt->volatile_ = false; ++pos; }
+        else if (match(tokens, pos, "stable")) { stmt->stable = true; stmt->volatile_ = false; ++pos; }
+        else if (match(tokens, pos, "volatile")) { stmt->volatile_ = true; ++pos; }
+        else if (match(tokens, pos, "strict") || (match(tokens, pos, "returns") && pos + 1 < tokens.size() && match(tokens, pos + 1, "null") && match(tokens, pos + 2, "on") && match(tokens, pos + 3, "null"))) {
+            // Simplified: STRICT keyword only
+            stmt->strict = true; ++pos;
+        }
+        else if (match(tokens, pos, "security") && pos + 1 < tokens.size() && match(tokens, pos + 1, "definer")) {
+            stmt->securityDefiner = true; pos += 2;
+        }
+        else if (match(tokens, pos, "leakproof")) { stmt->leakproof = true; ++pos; }
+        else if (match(tokens, pos, "parallel") && pos + 1 < tokens.size()) {
+            ++pos;
+            if (match(tokens, pos, "safe")) { stmt->parallelSafe = true; ++pos; }
+            else if (match(tokens, pos, "restricted")) { stmt->parallelRestricted = true; ++pos; }
+            else if (match(tokens, pos, "unsafe")) { stmt->parallelUnsafe = true; ++pos; }
+        }
+        else if (match(tokens, pos, "cost") && pos + 1 < tokens.size()) {
+            ++pos;
+            try { stmt->cost = std::stod(tokens[pos]); } catch (...) {}
+            ++pos;
+        }
+        else if (match(tokens, pos, "rows") && pos + 1 < tokens.size()) {
+            ++pos;
+            try { stmt->rows = std::stod(tokens[pos]); } catch (...) {}
+            ++pos;
+        }
+        else if (match(tokens, pos, "set") && pos + 2 < tokens.size()) {
+            ++pos;
+            std::string item = tokens[pos++];
+            if (pos < tokens.size() && tokens[pos] == "=") ++pos;
+            if (pos < tokens.size()) item += "=" + tokens[pos++];
+            stmt->setItems.push_back(item);
+        }
+        else {
+            break;
+        }
+    }
+
+    // AS body
+    if (match(tokens, pos, "as")) {
+        ++pos;
+        if (pos < tokens.size()) {
+            stmt->body = stripQuotes(tokens[pos]);
+            ++pos;
+        }
+    }
+
+    // LANGUAGE lang
+    if (match(tokens, pos, "language") && pos + 1 < tokens.size()) {
+        stmt->language = toLower(tokens[pos + 1]);
+        pos += 2;
+    }
+
     return stmt;
 }
 
 StmtPtr SQLParser::parseCreateProcedure(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateFunctionStmt>(true);
-    if (pos < tokens.size()) {
-        stmt->funcName = tokens[pos++];
+    if (pos >= tokens.size()) return stmt;
+    stmt->funcName = tokens[pos++];
+
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            if (tokens[pos] == ",") { ++pos; continue; }
+            std::string pname = tokens[pos++];
+            std::string ptype;
+            int depth = 0;
+            while (pos < tokens.size() && (tokens[pos] != "," || depth > 0) &&
+                   (tokens[pos] != ")" || depth > 0)) {
+                if (tokens[pos] == "(") ++depth;
+                else if (tokens[pos] == ")") --depth;
+                if (!ptype.empty()) ptype += " ";
+                ptype += tokens[pos++];
+            }
+            if (!pname.empty()) stmt->params.emplace_back(pname, ptype);
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+    }
+
+    if (match(tokens, pos, "as")) {
+        ++pos;
+        if (pos < tokens.size()) {
+            stmt->body = stripQuotes(tokens[pos]);
+            ++pos;
+        }
+    }
+    if (match(tokens, pos, "language") && pos + 1 < tokens.size()) {
+        stmt->language = toLower(tokens[pos + 1]);
+        pos += 2;
     }
     return stmt;
 }

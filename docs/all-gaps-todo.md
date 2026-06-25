@@ -24,6 +24,7 @@
 | 2026-06-25 | Phase 4 Wave 4.28 CREATE VIEW 部分落地：`CreateViewStmt::selectSql` + `parseCreateView` 保留原始 SELECT；`classify` 识别 `CREATE OR REPLACE VIEW`；`DdlExecutor::executeCreateView` 处理基本创建/OR REPLACE/WITH CHECK OPTION/单表可更新检测；移除 `main.cpp` legacy CREATE VIEW；新增 `tests/view_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.38 CREATE MATERIALIZED VIEW 基本落地：`DdlExecutor` 实现 `CREATE MATERIALIZED VIEW ... AS SELECT`（`__mv_<name>` backing 表 + `.mview` 元数据），支持 `SELECT * / 列 / WHERE`；修复 parser 将 `CREATE MATERIALIZED VIEW` 错判为普通 VIEW 的问题；新增 `tests/matview_test.cpp`。`WITH [NO] DATA`、`REFRESH [CONCURRENTLY]`、依赖追踪仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.29 CREATE TRIGGER 基本落地：`parseCreateTrigger` 解析 `BEFORE/AFTER/INSTEAD OF`、`INSERT/UPDATE/DELETE/TRUNCATE`、`ON table`、`FOR EACH ROW/STATEMENT`、`WHEN (condition)`、`EXECUTE FUNCTION ...`/action SQL；`DdlExecutor::executeCreateTrigger` 调用 `StorageEngine::createTrigger`；`tryDdlBridge` 接管 `CreateTrigger` 并移除 `main.cpp` legacy 处理；新增 `tests/trigger_test.cpp`。transition tables、constraint triggers、deferred triggers、event triggers 仍待后续。 |
+| 2026-06-25 | Phase 4 Wave 4.35/4.36 CREATE FUNCTION / CREATE PROCEDURE 基本落地：`parseCreateFunction` 解析参数/RETURNS/RETURNS TABLE/AS body/LANGUAGE 等；`parseCreateProcedure` 解析参数与 AS body；`DdlExecutor` 调用 `createUDF`/`createTVF`/`createProcedure`；`tryDdlBridge` 接管并移除 `main.cpp` legacy 处理；新增 `tests/function_procedure_test.cpp`。PL 运行时、权限/依赖、OUT 参数、重载仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -78,11 +79,11 @@
 | 1.1.16 | `COPY` | 文件 CSV 导入导出；缺少 `STDIN/STDOUT` 协议、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH`、encoding/options 完整矩阵和权限模型 | ⚠️ |
 | 1.1.17 | `CREATE DATABASE` | 创建目录；缺少 template、owner、locale/collation provider、encoding、tablespace、OID/catalog 语义 | ⚠️ |
 | 1.1.18 | `CREATE DOMAIN` | 支持 base/default/check；缺少多约束、全表 revalidation、依赖/权限/类型系统深度集成 | ⚠️ |
-| 1.1.19 | `CREATE FUNCTION` | 简单表达式/表值函数；缺少 language、volatility、strict、parallel、cost、rows、security definer、leakproof、set config、polymorphic、C/SQL/PL 函数 | ⚠️ |
+| 1.1.19 | `CREATE FUNCTION` | 基本 UDF/TVF 已落地，`DdlExecutor` 接管创建；解析层已记录 language/volatility/strict/parallel/cost/rows/security definer/leakproof/SET，但尚未真正影响执行；缺少 PL/pgSQL/C/内部函数、多态、重载、依赖权限 | ⚠️ |
 | 1.1.20 | `CREATE INDEX` | 支持 btree/hash/GIN/GiST/BRIN/SP-GiST 风格、include/where/expression/concurrently；缺少 operator class/family、collation、NULLS sort、storage params、parallel build、真正 concurrent algorithm、AM API | ⚠️ |
 | 1.1.21 | `CREATE MATERIALIZED VIEW` | 基本 CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果，`.mview` 保存 SQL；仍缺少 `WITH [NO] DATA`、唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
 | 1.1.22 | `CREATE POLICY` | 有 RLS policy 文件；`WITH CHECK` 评估在源码注释中明确为 best-effort/简化 | ⚠️ |
-| 1.1.23 | `CREATE PROCEDURE` | 多条 SQL 字符串顺序执行；缺少语言运行时、事务控制规则、异常、变量、权限属性 | ⚠️ |
+| 1.1.23 | `CREATE PROCEDURE` | 基本创建已落地，`DdlExecutor` 按分号切分 body 并调用 `createProcedure`；仍缺少语言运行时、事务控制规则、异常、变量、权限属性 | ⚠️ |
 | 1.1.24 | `CREATE ROLE` / `CREATE USER` | 用户在 `user.dat`，角色在 `role.dat`；缺少 PG 角色属性执行、成员继承、admin option、系统 catalog | ⚠️ |
 | 1.1.25 | `CREATE SCHEMA` | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义 | ⚠️ |
 | 1.1.26 | `CREATE SEQUENCE` | 有 nextval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics | ⚠️ |

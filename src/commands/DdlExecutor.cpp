@@ -153,6 +153,10 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreateView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
         case SqlCommand::CreateTrigger:
             return executeCreateTrigger(dynamic_cast<const CreateTriggerStmt*>(stmt.get()), s);
+        case SqlCommand::CreateFunction:
+            return executeCreateFunction(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
+        case SqlCommand::CreateProcedure:
+            return executeCreateProcedure(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
         case SqlCommand::CreateMaterializedView:
             return executeCreateMaterializedView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
         case SqlCommand::CreateDatabase:
@@ -196,6 +200,8 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropType:
         case dbms::SqlCommand::CreateView:
         case dbms::SqlCommand::CreateTrigger:
+        case dbms::SqlCommand::CreateFunction:
+        case dbms::SqlCommand::CreateProcedure:
         case dbms::SqlCommand::CreateMaterializedView:
         case dbms::SqlCommand::CreateDatabase:
         case dbms::SqlCommand::DropDatabase:
@@ -1768,6 +1774,111 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
     txn.recordCreate(DdlObjectKind::Trigger, stmt->triggerName, tname);
     txn.commit();
     std::cout << "CREATE TRIGGER succeeded" << std::endl;
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// CREATE FUNCTION / PROCEDURE
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    if (stmt->funcName.empty()) {
+        std::cout << "SQL syntax error: CREATE FUNCTION name" << std::endl;
+        return true;
+    }
+    if (stmt->body.empty()) {
+        std::cout << "SQL syntax error: FUNCTION requires AS body" << std::endl;
+        return true;
+    }
+
+    DBStatus res;
+    if (toLower(stmt->returnType) == "table") {
+        std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
+        res = g_engine.createTVF(s.currentDB, stmt->funcName, singleParam, stmt->body);
+    } else {
+        if (stmt->params.size() <= 1) {
+            std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
+            res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam, stmt->body);
+        } else {
+            std::vector<std::string> params;
+            std::vector<std::string> types;
+            for (const auto& p : stmt->params) {
+                params.push_back(p.first);
+                types.push_back(p.second);
+            }
+            res = g_engine.createUDF(s.currentDB, stmt->funcName, params, types, stmt->body);
+        }
+    }
+
+    if (res != DBStatus::OK) {
+        std::cout << "CREATE FUNCTION failed" << std::endl;
+        return true;
+    }
+
+    txn.recordCreate(DdlObjectKind::Function, stmt->funcName);
+    txn.commit();
+    std::cout << "CREATE FUNCTION succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    if (stmt->funcName.empty()) {
+        std::cout << "SQL syntax error: CREATE PROCEDURE name" << std::endl;
+        return true;
+    }
+
+    std::vector<dbms::StorageEngine::ProcParam> params;
+    for (const auto& p : stmt->params) {
+        dbms::StorageEngine::ProcParam pp;
+        pp.mode = "IN";
+        pp.name = p.first;
+        pp.type = p.second;
+        params.push_back(pp);
+    }
+
+    std::vector<std::string> stmts;
+    size_t start = 0;
+    while (start < stmt->body.size()) {
+        size_t sc = stmt->body.find(';', start);
+        std::string part = trim(stmt->body.substr(start, sc == std::string::npos ? std::string::npos : sc - start));
+        if (!part.empty()) stmts.push_back(part);
+        if (sc == std::string::npos) break;
+        start = sc + 1;
+    }
+    if (stmts.empty()) {
+        std::cout << "SQL syntax error: PROCEDURE body is empty" << std::endl;
+        return true;
+    }
+
+    DBStatus res = g_engine.createProcedure(s.currentDB, stmt->funcName, params, stmts);
+    if (res != DBStatus::OK) {
+        std::cout << "CREATE PROCEDURE failed" << std::endl;
+        return true;
+    }
+
+    txn.recordCreate(DdlObjectKind::Procedure, stmt->funcName);
+    txn.commit();
+    std::cout << "CREATE PROCEDURE succeeded" << std::endl;
     return false;
 }
 
