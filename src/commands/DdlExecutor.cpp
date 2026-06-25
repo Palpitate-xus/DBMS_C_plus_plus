@@ -1480,7 +1480,9 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
     if (it != stmt->options.end()) {
         std::stringstream ss(it->second);
         std::string item;
-        while (std::getline(ss, item, ',')) {
+        // Fields are ';'-separated so that type modifiers like numeric(10,2)
+        // (which contain commas) are preserved intact.
+        while (std::getline(ss, item, ';')) {
             item = trim(item);
             size_t sp = item.find(' ');
             if (sp != std::string::npos) {

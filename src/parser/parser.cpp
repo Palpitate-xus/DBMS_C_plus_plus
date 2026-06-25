@@ -4115,6 +4115,40 @@ StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_
             stmt->options["enum_labels"] = labels;
         }
     }
+    // CREATE TYPE name AS ( field type [, ...] )  -- composite (ROW) type
+    else if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as" && tokens[pos + 1] == "(") {
+        pos += 2; // consume 'as' and '('
+        stmt->options["type_kind"] = "composite";
+        // Reconstruct a "name type" string per field; fields separated by ';'
+        // so that type modifiers containing commas (e.g. numeric(10,2)) survive.
+        auto appendTok = [](std::string& out, const std::string& tok) {
+            bool noSpaceBefore = (tok == "(" || tok == ")" || tok == ",");
+            bool prevNoSpaceAfter = !out.empty() && (out.back() == '(' || out.back() == ',');
+            if (!out.empty() && !noSpaceBefore && !prevNoSpaceAfter) out += " ";
+            out += tok;
+        };
+        std::string fields;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            if (tokens[pos] == ",") { ++pos; continue; }
+            std::string fname = tokens[pos++];
+            std::string ftype;
+            int depth = 0;
+            while (pos < tokens.size() &&
+                   (depth > 0 || (tokens[pos] != "," && tokens[pos] != ")"))) {
+                const std::string& t = tokens[pos];
+                if (t == "(") ++depth;
+                else if (t == ")") --depth;
+                appendTok(ftype, t);
+                ++pos;
+            }
+            if (!fname.empty() && !ftype.empty()) {
+                if (!fields.empty()) fields += ";";
+                fields += fname + " " + ftype;
+            }
+        }
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+        stmt->options["fields"] = fields;
+    }
     return stmt;
 }
 

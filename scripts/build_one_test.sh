@@ -30,11 +30,12 @@ done
 echo "[inc] compiling tests/$test_name.cpp"
 g++ "${CXXFLAGS[@]}" "${INC[@]}" -c "tests/$test_name.cpp" -o "build/obj/$test_name.o"
 
-# 链接：所有非 *_test.o 的对象 + 本测试对象
+# 链接：所有非 *_test.o 的对象 + 本测试对象（排除 main.o，测试自带 main 与桩）
 link=()
 for o in build/obj/*.o; do
     case "$o" in
         *_test.o) ;;
+        */main.o) ;;
         *) link+=("$o");;
     esac
 done

@@ -25,6 +25,8 @@
 | 2026-06-25 | Phase 4 Wave 4.38 CREATE MATERIALIZED VIEW 基本落地：`DdlExecutor` 实现 `CREATE MATERIALIZED VIEW ... AS SELECT`（`__mv_<name>` backing 表 + `.mview` 元数据），支持 `SELECT * / 列 / WHERE`；修复 parser 将 `CREATE MATERIALIZED VIEW` 错判为普通 VIEW 的问题；新增 `tests/matview_test.cpp`。`WITH [NO] DATA`、`REFRESH [CONCURRENTLY]`、依赖追踪仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.29 CREATE TRIGGER 基本落地：`parseCreateTrigger` 解析 `BEFORE/AFTER/INSTEAD OF`、`INSERT/UPDATE/DELETE/TRUNCATE`、`ON table`、`FOR EACH ROW/STATEMENT`、`WHEN (condition)`、`EXECUTE FUNCTION ...`/action SQL；`DdlExecutor::executeCreateTrigger` 调用 `StorageEngine::createTrigger`；`tryDdlBridge` 接管 `CreateTrigger` 并移除 `main.cpp` legacy 处理；新增 `tests/trigger_test.cpp`。transition tables、constraint triggers、deferred triggers、event triggers 仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.35/4.36 CREATE FUNCTION / CREATE PROCEDURE 基本落地：`parseCreateFunction` 解析参数/RETURNS/RETURNS TABLE/AS body/LANGUAGE 等；`parseCreateProcedure` 解析参数与 AS body；`DdlExecutor` 调用 `createUDF`/`createTVF`/`createProcedure`；`tryDdlBridge` 接管并移除 `main.cpp` legacy 处理；新增 `tests/function_procedure_test.cpp`。PL 运行时、权限/依赖、OUT 参数、重载仍待后续。 |
+| 2026-06-25 | Phase 4 Wave 4.37 CREATE POLICY 迁移到 DdlExecutor：新增 `CreatePolicyStmt`，`parseCreatePolicy` 解析 `ON table / FOR cmd / TO roles / USING / WITH CHECK`；`executeCreatePolicy` 校验表并写入 RLS policy；`tryDdlBridge` 接管并移除 `main.cpp` legacy 处理；新增 `tests/policy_test.cpp`。行级强制执行、role 解析、ALTER POLICY 仍待后续。 |
+| 2026-06-25 | Phase 4 Wave 4.30（部分）CREATE TYPE 复合类型修复：修复经 DDL 桥的 `CREATE TYPE name AS (field type, ...)` 因 `parseCreateType` 未捕获字段而失败的回归；字段以 `;` 分隔保留 `numeric(10,2)` 等含逗号修饰符；执行器同步改用 `;` 切分；移除 `main.cpp` 死代码；新增 `tests/create_type_test.cpp`。range/base/shell 仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -92,7 +94,7 @@
 | 1.1.29 | `CREATE TABLE AS` | 有 CTAS 路径；缺少 PG 选项、`WITH [NO] DATA`、tablespace/access method、精确类型推断 | ⚠️ |
 | 1.1.30 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 已支持表空间对象元数据；缺少物理存储路由、权限、依赖检查和 `pg_tblspc` 符号链接语义 | ⚠️ |
 | 1.1.31 | `CREATE TRIGGER` | 支持 before/after/instead of、row/statement、`WHEN`、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime | ⚠️ |
-| 1.1.32 | `CREATE TYPE` | 主要支持 composite type；缺少 PG 的 enum/range/base/shell 类型创建语义 | ⚠️ |
+| 1.1.32 | `CREATE TYPE` | 支持 composite type（`AS (field type, ...)`，经 DDL 桥正确解析含修饰符字段）与 enum（`AS ENUM`）；缺少 PG 的 range/base/shell 类型创建语义 | ⚠️ |
 | 1.1.33 | `CREATE VIEW` | 支持保存 SQL 和简单 updatable view；缺少 recursive view、security_barrier、security_invoker、check option 完整性 | ⚠️ |
 | 1.1.34 | `DEALLOCATE` / `PREPARE` / `EXECUTE` | 使用字符串 `?` 替换；缺少服务器端类型推断、binary params、plan invalidation、generic/custom plan、portal | ⚠️ |
 | 1.1.35 | `DELETE` | 支持 WHERE/USING/LIMIT/RETURNING 部分；缺少 PG 全语义、CTE/`ONLY`/inheritance/RETURNING OLD/NEW 复杂表达式 | ⚠️ |
