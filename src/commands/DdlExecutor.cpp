@@ -1763,18 +1763,27 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     }
 
     auto rows = g_engine.query(s.currentDB, srcTable, conditions, queryCols, {});
+    // query() emits values in SOURCE schema order (filtered to queryCols); map
+    // them in that same order so values line up with the right columns.
+    std::vector<std::string> orderedCols;
+    for (size_t i = 0; i < srcTbl.len; ++i) {
+        if (queryCols.count(srcTbl.cols[i].dataName))
+            orderedCols.push_back(srcTbl.cols[i].dataName);
+    }
     size_t inserted = 0;
-    for (const auto& row : rows) {
-        std::map<std::string, std::string> values;
-        std::istringstream iss(row);
-        std::string val;
-        size_t idx = 0;
-        while (iss >> val && idx < colNames.size()) {
-            values[colNames[idx]] = val;
-            ++idx;
+    if (stmt->withData) {
+        for (const auto& row : rows) {
+            std::map<std::string, std::string> values;
+            std::istringstream iss(row);
+            std::string val;
+            size_t idx = 0;
+            while (iss >> val && idx < orderedCols.size()) {
+                values[orderedCols[idx]] = val;
+                ++idx;
+            }
+            if (idx != orderedCols.size()) continue;
+            if (g_engine.insert(s.currentDB, backingTable, values) == DBStatus::OK) ++inserted;
         }
-        if (idx != colNames.size()) continue;
-        if (g_engine.insert(s.currentDB, backingTable, values) == DBStatus::OK) ++inserted;
     }
 
     // Save SQL to .mview file

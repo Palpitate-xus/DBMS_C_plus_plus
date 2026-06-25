@@ -103,11 +103,69 @@ static void test_create_matview_where() {
     std::cout << "[MATVIEW] CREATE WHERE OK" << std::endl;
 }
 
+static void test_create_matview_reversed_projection() {
+    std::string db = "matview_rev";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    // Columns id,name,age: selecting "age, id" reverses schema order, which the
+    // old set-order mapping got wrong (values landed in the wrong columns).
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, name VARCHAR(20), age INT)", s));
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"name", "alice"}, {"age", "30"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"name", "bob"}, {"age", "25"}}) == dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql("CREATE MATERIALIZED VIEW mv AS SELECT age, id FROM t", s));
+    std::string backing = dbms::StorageEngine::materializedViewPrefix("mv");
+
+    // Backing has only age,id and rows mapped correctly: query in backing schema
+    // order. The backing schema column order follows the projection (age, id).
+    auto rows = g_engine.query(db, backing, {}, {}, {});
+    assert(rows.size() == 2);
+    std::set<std::string> got(rows.begin(), rows.end());
+    // age then id, each value with trailing space.
+    assert(got.count("30 1 "));
+    assert(got.count("25 2 "));
+
+    cleanup(db);
+    std::cout << "[MATVIEW] reversed projection mapping OK" << std::endl;
+}
+
+static void test_create_matview_with_no_data() {
+    std::string db = "matview_nodata";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, name VARCHAR(20))", s));
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"name", "alice"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"name", "bob"}}) == dbms::DBStatus::OK);
+
+    assert(!ddl.executeSql("CREATE MATERIALIZED VIEW mv AS SELECT * FROM t WITH NO DATA", s));
+    std::string backing = dbms::StorageEngine::materializedViewPrefix("mv");
+    assert(g_engine.tableExists(db, backing));         // structure created
+    auto schema = g_engine.getTableSchema(db, backing);
+    assert(schema.len == 2);                            // both columns present
+    auto rows = g_engine.query(db, backing, {}, {}, {});
+    assert(rows.empty());                               // but no rows
+
+    cleanup(db);
+    std::cout << "[MATVIEW] WITH NO DATA OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_matview_select_star();
     test_create_matview_select_columns();
     test_create_matview_where();
+    test_create_matview_reversed_projection();
+    test_create_matview_with_no_data();
     std::cout << "[MATVIEW] all passed" << std::endl;
     return 0;
 }

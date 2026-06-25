@@ -32,6 +32,7 @@
 | 2026-06-25 | Phase 4 Wave 4.26（部分）CREATE TABLE (LIKE ...)：新增 `CreateTableStmt::LikeClause` 与 `parseCreateTable` 的括号内/外 `LIKE source [{INCLUDING|EXCLUDING} option]` 解析；`executeCreateTable` 复制源表列（默认列定义+NOT NULL，按 INCLUDING 复制 DEFAULTS/CONSTRAINTS/INDEXES(单列 PK/UNIQUE)/IDENTITY），源表缺失报错；新增 `tests/create_table_like_test.cpp`。复合索引复制、OF type、access method、identity 完整语义仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.32 CREATE STATISTICS dependencies 算法：新增 `StorageEngine::computeFunctionalDependencies`（按列对分组取众数计数 / 总行数得函数依赖强度 0~1）；`handleCreateStatistics` 在 `dependencies` kind 输出 `dependency a=>b degree N.NNNNNN`；新增 `tests/functional_deps_test.cpp` + 二进制端到端验证。pg_statistic_ext catalog、ndistinct/mcv、planner 消费仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.31（补全）CREATE TABLE AS 列序修复 + WITH [NO] DATA：修复 `executeCreateTableAs` 按 `std::set` 字母序映射列、与 `query` 的 schema 顺序输出错位（导致 `SELECT *` 在非字母序列上复制 0 行）的 bug，改按源表 schema 顺序对齐；`CreateTableStmt::withData` + `parseCreateTable` 剥离尾部 `WITH [NO] DATA`；CTAS 复制时丢弃 PK/identity/default/CHECK；重写 `tests/ctas_test.cpp` 含 `(id,name,age)` 列序回归与 WITH NO DATA。全部 54 个测试通过。 |
+| 2026-06-25 | Phase 4 Wave 4.38（补全）MATERIALIZED VIEW 列序 + WITH [NO] DATA + REFRESH 修复：`executeCreateMaterializedView` 按源表 schema 顺序映射（修复反序投影错位）并支持 `WITH NO DATA`；`CreateViewStmt::withData` + `parseCreateView` 剥离尾部 `WITH [NO] DATA`；重写 `REFRESH MATERIALIZED VIEW`（从 backing schema 推导列、修复 `SELECT *`→`["*"]` 与投影错位 bug，支持 `CONCURRENTLY` 与 `WITH NO DATA`）；`tests/matview_test.cpp` 新增反序投影 + WITH NO DATA 回归 + 二进制端到端验证。全部 54 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -88,7 +89,7 @@
 | 1.1.18 | `CREATE DOMAIN` | 支持 base/default/check；缺少多约束、全表 revalidation、依赖/权限/类型系统深度集成 | ⚠️ |
 | 1.1.19 | `CREATE FUNCTION` | 基本 UDF/TVF 已落地，`DdlExecutor` 接管创建；解析层已记录 language/volatility/strict/parallel/cost/rows/security definer/leakproof/SET，但尚未真正影响执行；缺少 PL/pgSQL/C/内部函数、多态、重载、依赖权限 | ⚠️ |
 | 1.1.20 | `CREATE INDEX` | 支持 btree/hash/GIN/GiST/BRIN/SP-GiST 风格、include/where/expression/concurrently；缺少 operator class/family、collation、NULLS sort、storage params、parallel build、真正 concurrent algorithm、AM API | ⚠️ |
-| 1.1.21 | `CREATE MATERIALIZED VIEW` | 基本 CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果，`.mview` 保存 SQL；仍缺少 `WITH [NO] DATA`、唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
+| 1.1.21 | `CREATE MATERIALIZED VIEW` | CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果（列序映射已修复），支持 `WITH [NO] DATA`，`.mview` 保存 SQL；仍缺唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
 | 1.1.22 | `CREATE POLICY` | 已迁移到 `DdlExecutor`：`parseCreatePolicy` 完整解析 `ON table / FOR cmd / TO roles / USING / WITH CHECK`，`executeCreatePolicy` 校验表存在并写入 RLS policy 文件；仍缺少 `WITH CHECK`/`USING` 在 DML 路径的真实行级强制、role 解析、`ALTER POLICY`、PERMISSIVE/RESTRICTIVE | ⚠️ |
 | 1.1.23 | `CREATE PROCEDURE` | 基本创建已落地，`DdlExecutor` 按分号切分 body 并调用 `createProcedure`；仍缺少语言运行时、事务控制规则、异常、变量、权限属性 | ⚠️ |
 | 1.1.24 | `CREATE ROLE` / `CREATE USER` | 用户在 `user.dat`，角色在 `role.dat`；缺少 PG 角色属性执行、成员继承、admin option、系统 catalog | ⚠️ |
@@ -113,7 +114,7 @@
 | 1.1.43 | `LOCK` | 支持 share/exclusive；缺少 PG 全锁模式、`NOWAIT`、`ONLY`、锁队列/冲突矩阵 | ⚠️ |
 | 1.1.44 | `MERGE` | 支持 `MATCHED UPDATE` / `NOT MATCHED INSERT` 的窄路径；缺少 BY SOURCE、DELETE、DO NOTHING、多个 WHEN、RETURNING OLD/NEW、复杂 source query | ⚠️ |
 | 1.1.45 | `MOVE` | 已支持内存游标的位置移动；缺少 PostgreSQL portal、holdable/scrollable cursor、事务生命周期和精确边界语义 | ⚠️ |
-| 1.1.46 | `REFRESH MATERIALIZED VIEW` | 重跑 SELECT，`CONCURRENTLY` 只是入口标志；缺少 PG 并发刷新条件和锁语义 | ⚠️ |
+| 1.1.46 | `REFRESH MATERIALIZED VIEW` | 从 backing 表 schema 推导视图列、按源表 schema 顺序重跑 SELECT（修复 `SELECT *` 解析为 `["*"]` 与投影错位 bug）；支持 `CONCURRENTLY`（同步刷新）与 `WITH NO DATA`（清空）；缺少 PG 真正并发刷新条件和锁语义 | ⚠️ |
 | 1.1.47 | `REINDEX` | 基本 `REINDEX TABLE`；缺少 index/schema/database/system、`CONCURRENTLY`、tablespace、verbose | ⚠️ |
 | 1.1.48 | `RESET` | 支持 `RESET ROLE`/`RESET ALL` 等；缺少完整 GUC 语义 | ⚠️ |
 | 1.1.49 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 基于 txn log index；缺少 PG 子事务资源/锁/错误状态完整语义 | ⚠️ |

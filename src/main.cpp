@@ -12139,6 +12139,21 @@ bool execute(const string& rawSql, Session& s) {
             if (vPos != string::npos) {
                 viewname = trim(viewname.substr(vPos + 5));
             }
+            // Optional CONCURRENTLY (we always refresh synchronously).
+            if (toLower(viewname).substr(0, 13) == "concurrently ") {
+                viewname = trim(viewname.substr(13));
+            }
+            // Optional trailing WITH [NO] DATA.
+            bool refreshWithData = true;
+            {
+                string lv = toLower(viewname);
+                if (lv.size() >= 12 && lv.substr(lv.size() - 12) == "with no data") {
+                    refreshWithData = false;
+                    viewname = trim(viewname.substr(0, viewname.size() - 12));
+                } else if (lv.size() >= 9 && lv.substr(lv.size() - 9) == "with data") {
+                    viewname = trim(viewname.substr(0, viewname.size() - 9));
+                }
+            }
             if (!g_engine.isMaterializedView(s.currentDB, viewname)) {
                 cout << "Materialized view " << viewname << " not exist" << endl;
                 return true;
@@ -12148,39 +12163,14 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Materialized view SQL not found" << endl;
                 return true;
             }
-            // Parse and re-execute the query
+            // Parse and re-execute the query. Column resolution is derived from
+            // the backing table schema below (robust for SELECT * and aliases),
+            // so here we only need the source table + WHERE conditions.
             string lsql = toLower(viewSql);
             size_t fromPos = lsql.find(" from ");
             if (fromPos == string::npos) {
                 cout << "Invalid materialized view SQL" << endl;
                 return true;
-            }
-            string colsPart = trim(viewSql.substr(6, fromPos - 6));
-            vector<string> colNames;
-            size_t cp = 0;
-            while (cp < colsPart.size()) {
-                size_t comma = colsPart.find(',', cp);
-                string c = trim(colsPart.substr(cp, comma - cp));
-                size_t aliasPos = toLower(c).find(" as ");
-                if (aliasPos != string::npos) {
-                    c = trim(c.substr(aliasPos + 4));
-                } else {
-                    size_t sp = c.find(' ');
-                    if (sp != string::npos) {
-                        string before = trim(c.substr(0, sp));
-                        string after = trim(c.substr(sp + 1));
-                        if (after != "" && after.find_first_of("+-*/=<>")) {
-                            c = after;
-                        } else {
-                            c = before;
-                        }
-                    }
-                }
-                size_t dotPos = c.find('.');
-                if (dotPos != string::npos) c = c.substr(dotPos + 1);
-                colNames.push_back(c);
-                if (comma == string::npos) break;
-                cp = comma + 1;
             }
             string inner = trim(viewSql.substr(fromPos + 5));
             size_t wPos = toLower(inner).find(" where ");
@@ -12204,21 +12194,39 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
             }
-            auto results = g_engine.query(s.currentDB, tname, conds, {}, {}, false, false);
-            // Clear backing table and re-insert
             string backingTable = dbms::StorageEngine::materializedViewPrefix(viewname);
+            // Derive the view's columns from the backing table schema (created
+            // with the correct projected source column names) and map query
+            // output (source schema order) to those columns.
+            TableSchema backingSchema = g_engine.getTableSchema(s.currentDB, backingTable);
+            set<string> queryCols;
+            for (size_t i = 0; i < backingSchema.len; ++i)
+                queryCols.insert(backingSchema.cols[i].dataName);
+            TableSchema srcSchema = g_engine.getTableSchema(s.currentDB, tname);
+            vector<string> orderedCols;
+            for (size_t i = 0; i < srcSchema.len; ++i)
+                if (queryCols.count(srcSchema.cols[i].dataName))
+                    orderedCols.push_back(srcSchema.cols[i].dataName);
+
+            // Clear backing table and (unless WITH NO DATA) re-populate.
             g_engine.remove(s.currentDB, backingTable, {});
-            for (const auto& row : results) {
-                stringstream ss(row);
-                map<string, string> values;
-                for (const auto& cname : colNames) {
+            size_t refreshed = 0;
+            if (refreshWithData) {
+                auto results = g_engine.query(s.currentDB, tname, conds, queryCols, {}, false, false);
+                for (const auto& row : results) {
+                    stringstream ss(row);
+                    map<string, string> values;
                     string val;
-                    ss >> val;
-                    values[cname] = val;
+                    size_t idx = 0;
+                    while (ss >> val && idx < orderedCols.size()) {
+                        values[orderedCols[idx]] = val;
+                        ++idx;
+                    }
+                    if (idx != orderedCols.size()) continue;
+                    if (g_engine.insert(s.currentDB, backingTable, values) == DBStatus::OK) ++refreshed;
                 }
-                g_engine.insert(s.currentDB, backingTable, values);
             }
-            cout << "Materialized view " << viewname << " refreshed (" << results.size() << " rows)" << endl;
+            cout << "Materialized view " << viewname << " refreshed (" << refreshed << " rows)" << endl;
             return false;
         }
         cout << "SQL syntax error: REFRESH MATERIALIZED VIEW viewname" << endl;

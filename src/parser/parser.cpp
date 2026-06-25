@@ -3914,10 +3914,23 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
     }
     if (pos < tokens.size() && match(tokens, pos, "as")) {
         ++pos;
+        std::vector<std::string> sel;
+        for (size_t i = pos; i < tokens.size(); ++i) sel.push_back(tokens[i]);
+        // Strip trailing WITH [NO] DATA (materialized views); default WITH DATA.
+        if (sel.size() >= 2 && toLower(sel.back()) == "data") {
+            if (sel.size() >= 3 && toLower(sel[sel.size() - 3]) == "with" &&
+                toLower(sel[sel.size() - 2]) == "no") {
+                stmt->withData = false;
+                sel.resize(sel.size() - 3);
+            } else if (toLower(sel[sel.size() - 2]) == "with") {
+                stmt->withData = true;
+                sel.resize(sel.size() - 2);
+            }
+        }
         std::string selectSql;
-        for (size_t i = pos; i < tokens.size(); ++i) {
+        for (const auto& t : sel) {
             if (!selectSql.empty()) selectSql += " ";
-            selectSql += tokens[i];
+            selectSql += t;
         }
         stmt->selectSql = selectSql;
         stmt->query = parseSelect(selectSql).stmt;
