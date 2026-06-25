@@ -28,6 +28,7 @@
 | 2026-06-25 | Phase 4 Wave 4.37 CREATE POLICY 迁移到 DdlExecutor：新增 `CreatePolicyStmt`，`parseCreatePolicy` 解析 `ON table / FOR cmd / TO roles / USING / WITH CHECK`；`executeCreatePolicy` 校验表并写入 RLS policy；`tryDdlBridge` 接管并移除 `main.cpp` legacy 处理；新增 `tests/policy_test.cpp`。行级强制执行、role 解析、ALTER POLICY 仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.30（部分）CREATE TYPE 复合类型修复：修复经 DDL 桥的 `CREATE TYPE name AS (field type, ...)` 因 `parseCreateType` 未捕获字段而失败的回归；字段以 `;` 分隔保留 `numeric(10,2)` 等含逗号修饰符；执行器同步改用 `;` 切分；移除 `main.cpp` 死代码；新增 `tests/create_type_test.cpp`。range/base/shell 仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.26（部分）CREATE TABLE OF type：`executeCreateTable` 消费 `ofType`，按复合类型字段派生表列（解析字段类型字符串建列），缺失类型报错；新增 `tests/create_table_of_test.cpp`。typed table 强绑定与 OF 附加约束仍待后续。 |
+| 2026-06-25 | Phase 4 ALTER TYPE ... ADD/RENAME VALUE（enum）：新增 `StorageEngine::updateEnumType` 重写 `.enums` 标签集合；`handleAlterType` 识别 enum 并支持 `ADD VALUE [IF NOT EXISTS] 'x' [BEFORE/AFTER 'y']` 与 `RENAME VALUE 'a' TO 'b'`；新增 `tests/enum_alter_test.cpp` + 二进制端到端验证。pg_enum ordinal 排序与索引集成仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.26（部分）CREATE TABLE (LIKE ...)：新增 `CreateTableStmt::LikeClause` 与 `parseCreateTable` 的括号内/外 `LIKE source [{INCLUDING|EXCLUDING} option]` 解析；`executeCreateTable` 复制源表列（默认列定义+NOT NULL，按 INCLUDING 复制 DEFAULTS/CONSTRAINTS/INDEXES(单列 PK/UNIQUE)/IDENTITY），源表缺失报错；新增 `tests/create_table_like_test.cpp`。复合索引复制、OF type、access method、identity 完整语义仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
@@ -153,7 +154,7 @@
 | 2.4 | 二进制 | PG 主要是 `bytea`，输入输出、escape/hex、函数操作不同 | ⚠️ |
 | 2.5 | 日期时间 | 缺少 PG time zone 规则库、infinity、BC 日期、精度、interval 字段限定、复杂输入输出。`datetime` 是非 PG 类型 | ⚠️ |
 | 2.6 | 布尔 | SQL 三值逻辑、类型转换、函数/聚合边界仍简化 | ⚠️ |
-| 2.7 | ENUM | 列定义里有 enum values；缺少 `CREATE TYPE ... AS ENUM` 的 catalog、排序、`ALTER TYPE ADD VALUE` | ⚠️ |
+| 2.7 | ENUM | `CREATE TYPE ... AS ENUM` 落地，列定义支持 enum 值校验；`ALTER TYPE ADD VALUE [IF NOT EXISTS] [BEFORE/AFTER]` 与 `RENAME VALUE` 已支持（`updateEnumType` 持久化）；仍缺 catalog `pg_enum` ordinal 排序语义与索引集成 | ⚠️ |
 | 2.8 | 几何类型 | 只明确支持 `point` 和少量空间比较；缺少 `line`、`lseg`、`box`、`path`、`polygon`、`circle` 及完整函数/操作符 | ⚠️ |
 | 2.9 | 网络类型 | 有 `inet/cidr` IPv4/IPv6 路径；`macaddr/macaddr8` 已可作为字符串型列存取；缺少 MAC 地址校验和 PG 全套网络函数 | ⚠️ |
 | 2.10 | bit string | `bit` / `bit varying` 已不再按 bool 解析，可作为字符串型列存取；缺少长度约束和位运算 | ⚠️ |

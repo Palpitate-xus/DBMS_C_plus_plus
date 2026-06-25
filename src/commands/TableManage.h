@@ -272,6 +272,8 @@ public:
     };
     DBStatus createEnumType(const std::string& dbname, const EnumType& et);
     DBStatus dropEnumType(const std::string& dbname, const std::string& name);
+    // Replace an existing enum type's label set (used by ALTER TYPE ... ADD/RENAME VALUE).
+    DBStatus updateEnumType(const std::string& dbname, const EnumType& et);
     EnumType getEnumType(const std::string& dbname, const std::string& name) const;
     std::vector<std::string> getEnumTypeNames(const std::string& dbname) const;
 

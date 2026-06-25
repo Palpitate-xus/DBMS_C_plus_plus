@@ -6500,6 +6500,106 @@ static bool handleAlterDomain(const string& sql, Session& s) {
     return false;
 }
 
+static bool handleAlterEnumValue(dbms::StorageEngine::EnumType et, const string& action,
+                                 const string& typeName, Session& s) {
+    auto unquote = [](string v) -> string {
+        v = trim(v);
+        if (v.size() >= 2 && v.front() == '\'' && v.back() == '\'') return v.substr(1, v.size() - 2);
+        return v;
+    };
+    // Extract a leading label which may be quoted ('x') or bare; advances `clause`.
+    auto takeLabel = [&](string& clause) -> string {
+        clause = trim(clause);
+        if (!clause.empty() && clause.front() == '\'') {
+            size_t end = clause.find('\'', 1);
+            if (end == string::npos) { string all = clause.substr(1); clause.clear(); return all; }
+            string lbl = clause.substr(1, end - 1);
+            clause = trim(clause.substr(end + 1));
+            return lbl;
+        }
+        size_t sp = clause.find(' ');
+        string lbl = (sp == string::npos) ? clause : clause.substr(0, sp);
+        clause = (sp == string::npos) ? "" : trim(clause.substr(sp));
+        return lbl;
+    };
+
+    if (startsWithKeyword(action, "add value")) {
+        string clause = trim(action.substr(9));
+        bool ifNotExists = false;
+        if (startsWithKeyword(clause, "if not exists")) {
+            ifNotExists = true;
+            clause = trim(clause.substr(13));
+        }
+        string newLabel = takeLabel(clause);
+        if (newLabel.empty()) {
+            cout << "SQL syntax error: ALTER TYPE name ADD VALUE 'label'" << endl;
+            return true;
+        }
+        int mode = 0; // 0 append, 1 before, 2 after
+        string anchor;
+        if (startsWithKeyword(clause, "before")) { mode = 1; anchor = unquote(trim(clause.substr(6))); }
+        else if (startsWithKeyword(clause, "after")) { mode = 2; anchor = unquote(trim(clause.substr(5))); }
+
+        for (const auto& l : et.labels) {
+            if (l == newLabel) {
+                if (ifNotExists) {
+                    cout << "Enum value " << newLabel << " already exists, skipping" << endl;
+                    return false;
+                }
+                cout << "Enum value " << newLabel << " already exists" << endl;
+                return true;
+            }
+        }
+        if (mode == 0 || anchor.empty()) {
+            et.labels.push_back(newLabel);
+        } else {
+            auto it = std::find(et.labels.begin(), et.labels.end(), anchor);
+            if (it == et.labels.end()) {
+                cout << "Enum anchor value " << anchor << " not found" << endl;
+                return true;
+            }
+            if (mode == 2) ++it;
+            et.labels.insert(it, newLabel);
+        }
+        if (g_engine.updateEnumType(s.currentDB, et) != DBStatus::OK) {
+            cout << "Alter type add value failed" << endl;
+            return true;
+        }
+        cout << "Type " << typeName << " value " << newLabel << " added" << endl;
+        return false;
+    }
+
+    if (startsWithKeyword(action, "rename value")) {
+        string clause = trim(action.substr(12));
+        string oldLabel = takeLabel(clause);
+        if (startsWithKeyword(clause, "to")) clause = trim(clause.substr(2));
+        string newLabel = takeLabel(clause);
+        if (oldLabel.empty() || newLabel.empty()) {
+            cout << "SQL syntax error: ALTER TYPE name RENAME VALUE 'old' TO 'new'" << endl;
+            return true;
+        }
+        auto it = std::find(et.labels.begin(), et.labels.end(), oldLabel);
+        if (it == et.labels.end()) {
+            cout << "Enum value " << oldLabel << " not found" << endl;
+            return true;
+        }
+        if (std::find(et.labels.begin(), et.labels.end(), newLabel) != et.labels.end()) {
+            cout << "Enum value " << newLabel << " already exists" << endl;
+            return true;
+        }
+        *it = newLabel;
+        if (g_engine.updateEnumType(s.currentDB, et) != DBStatus::OK) {
+            cout << "Alter type rename value failed" << endl;
+            return true;
+        }
+        cout << "Type " << typeName << " value " << oldLabel << " renamed to " << newLabel << endl;
+        return false;
+    }
+
+    cout << "SQL syntax error: unsupported ALTER TYPE action on enum " << typeName << endl;
+    return true;
+}
+
 static bool handleAlterType(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -6512,6 +6612,11 @@ static bool handleAlterType(const string& sql, Session& s) {
     string action = trim(rest.substr(typeName.size()));
     auto ct = g_engine.getCompositeType(s.currentDB, typeName);
     if (ct.name.empty()) {
+        // Not a composite type — it may be an enum (ALTER TYPE ... ADD/RENAME VALUE).
+        auto et = g_engine.getEnumType(s.currentDB, typeName);
+        if (!et.name.empty()) {
+            return handleAlterEnumValue(et, action, typeName, s);
+        }
         return handleAlterCompatObject(sql, s);
     }
 

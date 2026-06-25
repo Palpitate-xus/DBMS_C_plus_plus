@@ -15956,6 +15956,32 @@ DBStatus StorageEngine::dropEnumType(const std::string& dbname, const std::strin
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType& et) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    auto path = enumPath(dbname);
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
+    std::ifstream ifs(path);
+    std::vector<std::string> lines;
+    std::string line;
+    bool found = false;
+    while (std::getline(ifs, line)) {
+        size_t sp = line.find('|');
+        std::string lname = (sp == std::string::npos) ? line : line.substr(0, sp);
+        if (lname == et.name) {
+            found = true;
+            std::string rebuilt = et.name;
+            for (const auto& label : et.labels) rebuilt += "|" + label;
+            lines.push_back(rebuilt);
+        } else {
+            lines.push_back(line);
+        }
+    }
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
+    std::ofstream ofs(path, std::ios::trunc);
+    for (const auto& l : lines) ofs << l << '\n';
+    return DBStatus::OK;
+}
+
 StorageEngine::EnumType StorageEngine::getEnumType(const std::string& dbname,
                                                     const std::string& name) const {
     EnumType result;
