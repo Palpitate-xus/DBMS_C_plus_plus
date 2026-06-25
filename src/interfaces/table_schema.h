@@ -35,6 +35,7 @@ struct Column {
     std::string generatedExpr;      // GENERATED ALWAYS AS (expr)
     std::string collation;          // COLLATE (e.g. "C", "POSIX", "en_US.utf8")
     std::vector<std::string> enumValues;  // ENUM('a','b','c') values
+    std::string domainName;         // If type is a DOMAIN, the domain name
 
     void print() const;
 };

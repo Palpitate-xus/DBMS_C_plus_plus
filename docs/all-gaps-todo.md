@@ -18,6 +18,7 @@
 | 2026-06-21（修正） | 经运行时核对，**Phase 1/2 为"模块+测试已写、未接入主程序 `execute()` 运行时"**：DML 全部走字符串分发（AST 未被消费）；`CatalogManager` 在 main.cpp 从未构造、`migrateDatabaseToCatalog` 无调用者、`planDrop` 无 DROP 处理器接入、核心系统表不可查、`resolveTableName` 仍用 `schema__table` 编码。据此下调 §1/§4/§16/§17 相关表述，16.1 由 ✅ 改 🔄，4.1/4.2 维持 🔄 但注明未接入运行时。Phase 3（WAL/MVCC/Buffer）为真实接入运行时。 |
 | 2026-06-25 | Phase 4 Wave 3 约束/默认值/生成列落地：DEFAULT 表达式（含字面量与复杂表达式）、GENERATED ALWAYS AS (expr) STORED、GENERATED/BY DEFAULT AS IDENTITY、CHECK 约束在 INSERT/UPDATE 路径通过 `ExprHelper` + `ExprEvaluator` 真正执行；新增 `src/expression/expr_helper.h/.cpp` 与 `tests/constraint_expr_test.cpp`；修复 parser 将数字/字符串字面量误当列引用、DDL 桥工厂函数覆盖 `Column` 导致元数据丢失、IDENTITY 大小写解析等问题。`docs/implementation-plan.md` 同步更新 Phase 4 Wave 3 完成状态。 |
 | 2026-06-25 | Phase 4 Wave 4.33 SEQUENCE 完整语义落地：扩展 `SequenceInfo`/`StorageEngine` 序列文件格式，支持 START/INCREMENT/MINVALUE/MAXVALUE/CACHE/CYCLE/OWNED BY；`parseCreateSequence` 解析全部选项并新增 `parseAlterSequence`/`DdlExecutor::executeAlterSequence`；`DROP TABLE CASCADE` 删除被拥有序列；新增 `tests/sequence_full_test.cpp`。 |
+| 2026-06-25 | Phase 4 Wave 4.34 DOMAIN 约束执行落地：`Column` 新增 `domainName`，`columnDefToColumn` 识别 domain 并解析为 base type；domain DEFAULT 继承、domain CHECK（含 `VALUE` 伪变量重写为列名）与列级 CHECK 合并并在 INSERT/UPDATE 通过 `ExprHelper` 执行；补全 `parseCreateDomain` 解析 AS/DEFAULT/CONSTRAINT/CHECK；新增 `tests/domain_full_test.cpp`。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 

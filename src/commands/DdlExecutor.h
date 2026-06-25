@@ -54,7 +54,7 @@ private:
     bool executeComment(const CommentStmt* stmt, Session& s);
 
     // 辅助：AST -> StorageEngine 结构转换
-    static Column columnDefToColumn(const ColumnDef& cd);
+    static Column columnDefToColumn(const ColumnDef& cd, const std::string& dbname = "");
     static ForeignKey tableConstraintToForeignKey(const TableConstraint& tc);
     static void recordConstraintCompat(const std::string& dbname,
                                        const std::string& tablename,

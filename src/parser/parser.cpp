@@ -3971,6 +3971,76 @@ StmtPtr SQLParser::parseCreateDomain(const std::vector<std::string>& tokens, siz
             }
         }
     }
+
+    // AS base_type
+    if (pos < tokens.size() && toLower(tokens[pos]) == "as") {
+        ++pos;
+        if (pos < tokens.size()) {
+            stmt->options["base_type"] = tokens[pos++];
+            // Capture optional type modifiers like numeric(10,2)
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                std::string mods = "(";
+                ++pos;
+                while (pos < tokens.size() && tokens[pos] != ")") {
+                    mods += tokens[pos++];
+                    if (pos < tokens.size() && tokens[pos] == ",") {
+                        mods += ",";
+                        ++pos;
+                    }
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") {
+                    mods += ")";
+                    ++pos;
+                }
+                stmt->options["base_type"] += mods;
+            }
+        }
+    }
+
+    auto lower = [&](const std::string& s) { return toLower(s); };
+    std::string constraintName;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string tok = lower(tokens[pos]);
+        if (tok == "default") {
+            ++pos;
+            std::string expr;
+            while (pos < tokens.size() && tokens[pos] != ";" &&
+                   lower(tokens[pos]) != "constraint" && lower(tokens[pos]) != "check") {
+                if (!expr.empty()) expr += " ";
+                expr += tokens[pos++];
+            }
+            stmt->options["default"] = expr;
+        } else if (tok == "constraint") {
+            ++pos;
+            if (pos < tokens.size()) {
+                constraintName = tokens[pos++];
+            }
+        } else if (tok == "check") {
+            if (pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+                pos += 2; // skip check (
+                std::string expr;
+                int depth = 1;
+                while (pos < tokens.size() && depth > 0) {
+                    if (tokens[pos] == "(") ++depth;
+                    else if (tokens[pos] == ")") --depth;
+                    if (depth > 0) {
+                        if (!expr.empty()) expr += " ";
+                        expr += tokens[pos];
+                    }
+                    ++pos;
+                }
+                stmt->options["check"] = expr;
+                if (!constraintName.empty()) {
+                    stmt->options["constraint_name"] = constraintName;
+                    constraintName.clear();
+                }
+            } else {
+                ++pos;
+            }
+        } else {
+            ++pos;
+        }
+    }
     return stmt;
 }
 

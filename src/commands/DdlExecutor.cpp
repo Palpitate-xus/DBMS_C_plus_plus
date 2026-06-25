@@ -375,7 +375,7 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
 // CREATE / DROP TABLE
 // ----------------------------------------------------------------------------
 
-Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
+Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbname) {
     Column col;
     col.dataName = cd.name;
     col.isNull = cd.isNull;
@@ -388,6 +388,19 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
     col.generatedExpr = cd.generatedExpr;
 
     std::string baseType = toLower(cd.typeName);
+    std::string domainName;
+    std::string domainCheck;
+    if (!dbname.empty()) {
+        auto dom = g_engine.getDomain(dbname, baseType);
+        if (!dom.name.empty()) {
+            domainName = baseType;
+            domainCheck = dom.checkExpr;
+            if (col.defaultValue.empty() && !dom.defaultValue.empty()) {
+                col.defaultValue = dom.defaultValue;
+            }
+            baseType = toLower(dom.baseType);
+        }
+    }
     // Normalize common aliases
     if (baseType == "int" || baseType == "integer") baseType = "int4";
     else if (baseType == "bigint") baseType = "int8";
@@ -508,6 +521,35 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
     col.isAutoIncrement = cd.isGeneratedIdentity;
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;
+    if (!domainName.empty()) {
+        col.domainName = domainName;
+        // Re-apply domain default if column has no explicit default.
+        if (col.defaultValue.empty()) {
+            auto dom = g_engine.getDomain(dbname, domainName);
+            if (!dom.defaultValue.empty()) col.defaultValue = dom.defaultValue;
+        }
+        // Merge domain check with column check. PG domain checks use VALUE pseudo-variable.
+        if (!domainCheck.empty()) {
+            std::string rewritten = domainCheck;
+            // Replace case-insensitive VALUE with the actual column name.
+            for (size_t i = 0; i + 5 <= rewritten.size(); ) {
+                bool isValue = true;
+                for (int j = 0; j < 5; ++j) {
+                    if (std::tolower(static_cast<unsigned char>(rewritten[i + j])) != "value"[j]) {
+                        isValue = false; break;
+                    }
+                }
+                if (isValue) {
+                    rewritten.replace(i, 5, cd.name);
+                    i += cd.name.size();
+                } else {
+                    ++i;
+                }
+            }
+            if (!col.checkExpr.empty()) col.checkExpr = "(" + col.checkExpr + ") AND (" + rewritten + ")";
+            else col.checkExpr = rewritten;
+        }
+    }
 
     // Apply check constraints from column definition
     if (!cd.checkExprs.empty()) {
@@ -578,7 +620,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     tbl.storageParams = stmt->options;
 
     for (const auto& cd : stmt->columns) {
-        tbl.append(columnDefToColumn(cd));
+        tbl.append(columnDefToColumn(cd, s.currentDB));
     }
 
     // Table-level constraints
