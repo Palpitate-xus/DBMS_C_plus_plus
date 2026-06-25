@@ -3887,6 +3887,42 @@ BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
     return nullptr;
 }
 
+// ========================================================================
+// MAC address (macaddr / macaddr8) helpers
+// Storage: fixed 6 bytes (macaddr) or 8 bytes (macaddr8), raw network order.
+// Input accepts PostgreSQL formats: colon, hyphen, dot, or bare hex; the
+// separators only group hex digits, so we strip them all and require exactly
+// 2*numBytes hex digits. Canonical output is lowercase colon-separated.
+// ========================================================================
+static bool normalizeMacAddr(const std::string& in, int numBytes, uint8_t* out) {
+    std::string hex;
+    hex.reserve(static_cast<size_t>(numBytes) * 2);
+    for (char ch : in) {
+        if (ch == ':' || ch == '-' || ch == '.' || ch == ' ') continue;
+        if (!std::isxdigit(static_cast<unsigned char>(ch))) return false;
+        hex += ch;
+    }
+    if (hex.size() != static_cast<size_t>(numBytes) * 2) return false;
+    auto hexVal = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return c - 'a' + 10;
+    };
+    for (int i = 0; i < numBytes; ++i) {
+        out[i] = static_cast<uint8_t>((hexVal(hex[i * 2]) << 4) | hexVal(hex[i * 2 + 1]));
+    }
+    return true;
+}
+
+static std::string formatMacAddr(const uint8_t* bytes, int numBytes) {
+    std::ostringstream oss;
+    for (int i = 0; i < numBytes; ++i) {
+        if (i > 0) oss << ':';
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(bytes[i]);
+    }
+    return oss.str();
+}
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -3979,6 +4015,19 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
             addrStr = "unknown";
         }
         return addrStr;
+    } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
+        int n = (col.dataType == "macaddr8") ? 8 : 6;
+        // All-zero bytes are the unset/NULL sentinel (consistent with the
+        // engine's zero-means-empty convention for fixed-width types).
+        bool allZero = true;
+        for (int i = 0; i < n; ++i) {
+            if (rowBuffer[offset + i] != 0) { allZero = false; break; }
+        }
+        if (allZero) return "";
+        uint8_t bytes[8] = {0};
+        for (int i = 0; i < n; ++i)
+            bytes[i] = static_cast<uint8_t>(rowBuffer[offset + i]);
+        return formatMacAddr(bytes, n);
     } else if (col.dataType == "boolean") {
         int8_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(int8_t));
@@ -8093,6 +8142,11 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 rowBuffer[offset + 2] = static_cast<char>(col.dataType == "cidr" ? 1 : 0);
                 rowBuffer[offset + 3] = 0;  // reserved
                 std::memcpy(&rowBuffer[offset + 4], addr, 16);
+            } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
+                int n = (col.dataType == "macaddr8") ? 8 : 6;
+                uint8_t bytes[8] = {0};
+                if (!val.empty()) normalizeMacAddr(val, n, bytes);
+                std::memcpy(&rowBuffer[offset], bytes, n);
             } else if (col.dataType == "boolean") {
                 int8_t bval = val.empty() ? INT8_MIN :
                     (val == "1" || val == "true" || val == "TRUE") ? 1 :
@@ -8177,6 +8231,11 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     fixedData[fixedOff + 2] = static_cast<char>(col.dataType == "cidr" ? 1 : 0);
                     fixedData[fixedOff + 3] = 0;
                     std::memcpy(&fixedData[fixedOff + 4], addr, 16);
+                } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
+                    int n = (col.dataType == "macaddr8") ? 8 : 6;
+                    uint8_t bytes[8] = {0};
+                    if (!val.empty()) normalizeMacAddr(val, n, bytes);
+                    std::memcpy(&fixedData[fixedOff], bytes, n);
                 } else {
                     int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
                     std::memcpy(&fixedData[fixedOff], &num, col.dsize);
@@ -8543,6 +8602,14 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
+        if (!col.isVariableLength && (col.dataType == "macaddr" || col.dataType == "macaddr8") && !val.empty()) {
+            int n = (col.dataType == "macaddr8") ? 8 : 6;
+            uint8_t bytes[8];
+            if (!normalizeMacAddr(val, n, bytes)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -8561,7 +8628,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
-        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "numeric" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && !val.empty()) {
+        if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "numeric" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && col.dataType != "macaddr" && col.dataType != "macaddr8" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
                 lockManager_.unlock(tablename);
@@ -9781,6 +9848,12 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 if (col.dataType == "date") {
                     Date d(kv.second.c_str());
                     if (d.year == 0) return DBStatus::INVALID_VALUE;
+                } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
+                    if (!kv.second.empty()) {
+                        int n = (col.dataType == "macaddr8") ? 8 : 6;
+                        uint8_t bytes[8];
+                        if (!normalizeMacAddr(kv.second, n, bytes)) return DBStatus::INVALID_VALUE;
+                    }
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {
                         int64_t num = parseInt(kv.second);

@@ -53,6 +53,8 @@ using dbms::makeDoubleColumn;
 using dbms::makePointColumn;
 using dbms::makeINetColumn;
 using dbms::makeCidrColumn;
+using dbms::makeMacAddrColumn;
+using dbms::makeMacAddr8Column;
 using dbms::makeDecimalColumn;
 using dbms::makeBooleanColumn;
 using dbms::makeUuidColumn;
@@ -3719,8 +3721,8 @@ static bool isPgStringBackedType(const string& typeName) {
     static const set<string> exact = {
         "int4range", "int8range", "numrange", "tsrange", "tstzrange", "daterange",
         "int4multirange", "int8multirange", "nummultirange", "tsmultirange",
-        "tstzmultirange", "datemultirange", "tsvector", "tsquery", "macaddr",
-        "macaddr8", "oid", "regclass", "regcollation", "regconfig", "regdictionary",
+        "tstzmultirange", "datemultirange", "tsvector", "tsquery",
+        "oid", "regclass", "regcollation", "regconfig", "regdictionary",
         "regnamespace", "regoper", "regoperator", "regproc", "regprocedure",
         "regrole", "regtype", "xid", "cid", "tid", "record", "anyelement",
         "anyarray", "anynonarray", "anyenum", "anyrange", "anymultirange",
@@ -4752,6 +4754,12 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                 colCreated = true;
             } else if (ctype.substr(0, 8) == "interval") {
                 col = makeIntervalColumn(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype == "macaddr8") {
+                col = makeMacAddr8Column(cname, isNull, isPK);
+                colCreated = true;
+            } else if (ctype == "macaddr") {
+                col = makeMacAddrColumn(cname, isNull, isPK);
                 colCreated = true;
             } else if (isPgStringBackedType(ctype)) {
                 col = makePgStringBackedColumn(cname, ctype, isNull, isPK);
@@ -9710,6 +9718,10 @@ bool execute(const string& rawSql, Session& s) {
             Column col;
             if (typeName.substr(0, 8) == "interval") {
                 col = makeIntervalColumn(cname, isNull);
+            } else if (typeName == "macaddr8") {
+                col = makeMacAddr8Column(cname, isNull);
+            } else if (typeName == "macaddr") {
+                col = makeMacAddrColumn(cname, isNull);
             } else if (isPgStringBackedType(typeName)) {
                 col = makePgStringBackedColumn(cname, typeName, isNull, false);
             } else if (typeName.substr(0, 3) == "int") {
