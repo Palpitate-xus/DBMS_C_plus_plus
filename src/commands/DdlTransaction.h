@@ -32,7 +32,8 @@ enum class DdlObjectKind {
     View,
     MaterializedView,
     Function,
-    Procedure
+    Procedure,
+    Trigger
 };
 
 class DdlTransaction {

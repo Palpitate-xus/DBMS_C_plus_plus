@@ -4128,9 +4128,125 @@ StmtPtr SQLParser::parseCreateProcedure(const std::vector<std::string>& tokens, 
 
 StmtPtr SQLParser::parseCreateTrigger(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateTriggerStmt>();
-    if (pos < tokens.size()) {
-        stmt->triggerName = tokens[pos++];
+    if (pos >= tokens.size()) return stmt;
+    stmt->triggerName = tokens[pos++];
+
+    // Timing: BEFORE / AFTER / INSTEAD OF
+    if (match(tokens, pos, "before")) {
+        stmt->timing = "before";
+        ++pos;
+    } else if (match(tokens, pos, "after")) {
+        stmt->timing = "after";
+        ++pos;
+    } else if (match(tokens, pos, "instead") && match(tokens, pos + 1, "of")) {
+        stmt->timing = "instead of";
+        pos += 2;
     }
+
+    // Event: INSERT / UPDATE [OF cols] / DELETE / TRUNCATE
+    if (match(tokens, pos, "insert")) {
+        stmt->events.push_back("insert");
+        ++pos;
+    } else if (match(tokens, pos, "update")) {
+        stmt->events.push_back("update");
+        ++pos;
+        if (match(tokens, pos, "of")) {
+            ++pos;
+            while (pos < tokens.size() && !match(tokens, pos, "on") &&
+                   !match(tokens, pos, "for") && !match(tokens, pos, "when") &&
+                   tokens[pos] != "(") {
+                if (tokens[pos] != ",") stmt->events.push_back(tokens[pos]);
+                ++pos;
+            }
+        }
+    } else if (match(tokens, pos, "delete")) {
+        stmt->events.push_back("delete");
+        ++pos;
+    } else if (match(tokens, pos, "truncate")) {
+        stmt->events.push_back("truncate");
+        ++pos;
+    }
+
+    // ON tableName
+    if (match(tokens, pos, "on")) ++pos;
+    if (pos < tokens.size()) {
+        stmt->tableName = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size()) stmt->tableName += "." + tokens[pos++];
+        }
+    }
+
+    // FOR EACH ROW / STATEMENT
+    if (match(tokens, pos, "for") && match(tokens, pos + 1, "each")) {
+        pos += 2;
+        if (match(tokens, pos, "row")) {
+            stmt->forEachRow = true;
+            ++pos;
+        } else if (match(tokens, pos, "statement")) {
+            stmt->forEachRow = false;
+            ++pos;
+        }
+    }
+
+    // WHEN (condition)
+    if (match(tokens, pos, "when") && pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+        pos += 2;
+        std::string cond;
+        int depth = 1;
+        while (pos < tokens.size() && depth > 0) {
+            if (tokens[pos] == "(") ++depth;
+            else if (tokens[pos] == ")") --depth;
+            if (depth > 0) {
+                if (!cond.empty()) cond += " ";
+                cond += tokens[pos];
+            }
+            ++pos;
+        }
+        if (!cond.empty()) {
+            auto lit = std::make_unique<LiteralExpr>();
+            lit->value = cond;
+            lit->typeName = "varchar";
+            stmt->whenCondition = std::move(lit);
+        }
+    }
+
+    // EXECUTE FUNCTION/PROCEDURE name(args) OR remaining tokens as action SQL
+    if (match(tokens, pos, "execute")) {
+        ++pos;
+        if (match(tokens, pos, "function") || match(tokens, pos, "procedure")) ++pos;
+        if (pos < tokens.size()) {
+            stmt->functionName = tokens[pos];
+            // If next token is '(', consume args as raw string for now.
+            if (pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+                pos += 2;
+                std::string args;
+                int depth = 1;
+                while (pos < tokens.size() && depth > 0) {
+                    if (tokens[pos] == "(") ++depth;
+                    else if (tokens[pos] == ")") --depth;
+                    if (depth > 0) {
+                        if (!args.empty()) args += " ";
+                        args += tokens[pos];
+                    }
+                    ++pos;
+                }
+                // Store raw args as action for compatibility with the legacy trigger engine.
+                stmt->action = stmt->functionName + "(" + args + ")";
+            } else {
+                ++pos;
+            }
+        }
+    } else {
+        // Remaining tokens form the action SQL (legacy style).
+        std::string action;
+        while (pos < tokens.size()) {
+            if (!action.empty()) action += " ";
+            action += tokens[pos++];
+        }
+        stmt->action = action;
+    }
+
     return stmt;
 }
 

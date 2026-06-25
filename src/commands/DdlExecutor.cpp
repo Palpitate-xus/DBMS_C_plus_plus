@@ -151,6 +151,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropType(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateView:
             return executeCreateView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
+        case SqlCommand::CreateTrigger:
+            return executeCreateTrigger(dynamic_cast<const CreateTriggerStmt*>(stmt.get()), s);
         case SqlCommand::CreateMaterializedView:
             return executeCreateMaterializedView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
         case SqlCommand::CreateDatabase:
@@ -193,6 +195,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateType:
         case dbms::SqlCommand::DropType:
         case dbms::SqlCommand::CreateView:
+        case dbms::SqlCommand::CreateTrigger:
         case dbms::SqlCommand::CreateMaterializedView:
         case dbms::SqlCommand::CreateDatabase:
         case dbms::SqlCommand::DropDatabase:
@@ -1710,6 +1713,61 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     txn.recordCreate(DdlObjectKind::MaterializedView, viewname);
     txn.commit();
     std::cout << "CREATE MATERIALIZED VIEW succeeded: " << inserted << " rows" << std::endl;
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// CREATE TRIGGER
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    if (stmt->triggerName.empty()) {
+        std::cout << "SQL syntax error: CREATE TRIGGER name" << std::endl;
+        return true;
+    }
+    if (stmt->events.empty()) {
+        std::cout << "SQL syntax error: CREATE TRIGGER event missing" << std::endl;
+        return true;
+    }
+    if (stmt->tableName.empty()) {
+        std::cout << "SQL syntax error: CREATE TRIGGER requires ON table" << std::endl;
+        return true;
+    }
+
+    std::string tname = resolveTableName(s, stmt->tableName);
+    if (!g_engine.tableExists(s.currentDB, tname)) {
+        std::cout << "Table " << tname << " not found" << std::endl;
+        return true;
+    }
+
+    dbms::StorageEngine::Trigger trg;
+    trg.name = stmt->triggerName;
+    trg.timing = toLower(stmt->timing);
+    trg.event = toLower(stmt->events.front());
+    trg.tableName = tname;
+    trg.action = stmt->action;
+    if (stmt->whenCondition) trg.whenCondition = stmt->whenCondition->toString();
+    trg.forEachRow = stmt->forEachRow;
+
+    DBStatus res = g_engine.createTrigger(s.currentDB, trg);
+    if (res != DBStatus::OK) {
+        std::cout << "CREATE TRIGGER failed" << std::endl;
+        return true;
+    }
+
+    txn.recordCreate(DdlObjectKind::Trigger, stmt->triggerName, tname);
+    txn.commit();
+    std::cout << "CREATE TRIGGER succeeded" << std::endl;
     return false;
 }
 

@@ -1133,6 +1133,7 @@ struct CreateTriggerStmt : public Stmt {
     bool deferrable = false;
     bool initiallyDeferred = false;
     ExprPtr whenCondition;
+    std::string action;        // raw action SQL (legacy/simple triggers)
     std::string functionName;
     std::vector<ExprPtr> functionArgs;
     std::vector<std::string> transitionTableNames; // OLD TABLE, NEW TABLE

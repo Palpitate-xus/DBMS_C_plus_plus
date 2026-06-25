@@ -23,6 +23,7 @@
 | 2026-06-25 | Phase 4 Wave 4.6 CREATE TYPE ... AS ENUM 落地：`StorageEngine` 新增 `.enums` 持久化与 `createEnumType`/`getEnumType` 等接口；`parseCreateType` 解析 enum 标签；`DdlExecutor` 注册 enum 类型；INSERT/UPDATE 校验 enum 值；新增 `tests/enum_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.28 CREATE VIEW 部分落地：`CreateViewStmt::selectSql` + `parseCreateView` 保留原始 SELECT；`classify` 识别 `CREATE OR REPLACE VIEW`；`DdlExecutor::executeCreateView` 处理基本创建/OR REPLACE/WITH CHECK OPTION/单表可更新检测；移除 `main.cpp` legacy CREATE VIEW；新增 `tests/view_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.38 CREATE MATERIALIZED VIEW 基本落地：`DdlExecutor` 实现 `CREATE MATERIALIZED VIEW ... AS SELECT`（`__mv_<name>` backing 表 + `.mview` 元数据），支持 `SELECT * / 列 / WHERE`；修复 parser 将 `CREATE MATERIALIZED VIEW` 错判为普通 VIEW 的问题；新增 `tests/matview_test.cpp`。`WITH [NO] DATA`、`REFRESH [CONCURRENTLY]`、依赖追踪仍待后续。 |
+| 2026-06-25 | Phase 4 Wave 4.29 CREATE TRIGGER 基本落地：`parseCreateTrigger` 解析 `BEFORE/AFTER/INSTEAD OF`、`INSERT/UPDATE/DELETE/TRUNCATE`、`ON table`、`FOR EACH ROW/STATEMENT`、`WHEN (condition)`、`EXECUTE FUNCTION ...`/action SQL；`DdlExecutor::executeCreateTrigger` 调用 `StorageEngine::createTrigger`；`tryDdlBridge` 接管 `CreateTrigger` 并移除 `main.cpp` legacy 处理；新增 `tests/trigger_test.cpp`。transition tables、constraint triggers、deferred triggers、event triggers 仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 

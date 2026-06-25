@@ -48,6 +48,7 @@ private:
     bool executeCreateType(const CreateObjectStmt* stmt, Session& s);
     bool executeDropType(const DropStmt* stmt, Session& s);
     bool executeCreateView(const CreateViewStmt* stmt, Session& s);
+    bool executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s);
     bool executeCreateMaterializedView(const CreateViewStmt* stmt, Session& s);
     bool executeCreateDatabase(const CreateObjectStmt* stmt, Session& s);
     bool executeDropDatabase(const DropStmt* stmt, Session& s);
