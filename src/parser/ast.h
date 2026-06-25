@@ -1143,6 +1143,23 @@ struct CreateTriggerStmt : public Stmt {
 };
 
 // ============================================================================
+// CREATE POLICY 语句
+// ============================================================================
+
+struct CreatePolicyStmt : public Stmt {
+    std::string policyName;
+    std::string tableName;
+    std::string command = "ALL"; // ALL, SELECT, INSERT, UPDATE, DELETE
+    std::vector<std::string> roles;
+    std::string usingExpr;
+    std::string withCheckExpr;
+    bool ifNotExists = false;
+
+    CreatePolicyStmt() : Stmt(SqlCommand::CreatePolicy) {}
+    std::string toString() const override { return "CREATE POLICY"; }
+};
+
+// ============================================================================
 // CREATE ROLE / USER 语句
 // ============================================================================
 

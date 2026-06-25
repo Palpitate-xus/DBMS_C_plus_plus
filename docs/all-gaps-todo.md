@@ -82,7 +82,7 @@
 | 1.1.19 | `CREATE FUNCTION` | 基本 UDF/TVF 已落地，`DdlExecutor` 接管创建；解析层已记录 language/volatility/strict/parallel/cost/rows/security definer/leakproof/SET，但尚未真正影响执行；缺少 PL/pgSQL/C/内部函数、多态、重载、依赖权限 | ⚠️ |
 | 1.1.20 | `CREATE INDEX` | 支持 btree/hash/GIN/GiST/BRIN/SP-GiST 风格、include/where/expression/concurrently；缺少 operator class/family、collation、NULLS sort、storage params、parallel build、真正 concurrent algorithm、AM API | ⚠️ |
 | 1.1.21 | `CREATE MATERIALIZED VIEW` | 基本 CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果，`.mview` 保存 SQL；仍缺少 `WITH [NO] DATA`、唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
-| 1.1.22 | `CREATE POLICY` | 有 RLS policy 文件；`WITH CHECK` 评估在源码注释中明确为 best-effort/简化 | ⚠️ |
+| 1.1.22 | `CREATE POLICY` | 已迁移到 `DdlExecutor`：`parseCreatePolicy` 完整解析 `ON table / FOR cmd / TO roles / USING / WITH CHECK`，`executeCreatePolicy` 校验表存在并写入 RLS policy 文件；仍缺少 `WITH CHECK`/`USING` 在 DML 路径的真实行级强制、role 解析、`ALTER POLICY`、PERMISSIVE/RESTRICTIVE | ⚠️ |
 | 1.1.23 | `CREATE PROCEDURE` | 基本创建已落地，`DdlExecutor` 按分号切分 body 并调用 `createProcedure`；仍缺少语言运行时、事务控制规则、异常、变量、权限属性 | ⚠️ |
 | 1.1.24 | `CREATE ROLE` / `CREATE USER` | 用户在 `user.dat`，角色在 `role.dat`；缺少 PG 角色属性执行、成员继承、admin option、系统 catalog | ⚠️ |
 | 1.1.25 | `CREATE SCHEMA` | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义 | ⚠️ |

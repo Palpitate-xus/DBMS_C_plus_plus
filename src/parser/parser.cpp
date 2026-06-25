@@ -4443,21 +4443,88 @@ StmtPtr SQLParser::parseCreateStatistics(const std::vector<std::string>& tokens,
 }
 
 StmtPtr SQLParser::parseCreatePolicy(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<CreateObjectStmt>(SqlCommand::CreatePolicy);
-    stmt->objectType = "POLICY";
+    auto stmt = std::make_unique<CreatePolicyStmt>();
     if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
         stmt->ifNotExists = true; pos += 3;
     }
     if (pos < tokens.size()) {
-        stmt->objectName = tokens[pos++];
+        stmt->policyName = tokens[pos++];
+    }
+    if (match(tokens, pos, "on") && pos + 1 < tokens.size()) {
+        ++pos;
+        stmt->tableName = tokens[pos++];
         if (pos < tokens.size() && tokens[pos] == ".") {
             ++pos;
-            if (pos < tokens.size()) {
-                stmt->schema = stmt->objectName;
-                stmt->objectName = tokens[pos++];
-            }
+            if (pos < tokens.size()) stmt->tableName += "." + tokens[pos++];
         }
     }
+
+    // [FOR cmd]
+    if (match(tokens, pos, "for") && pos + 1 < tokens.size()) {
+        ++pos;
+        stmt->command = toUpper(tokens[pos++]);
+    }
+
+    // [TO role, ...]
+    if (match(tokens, pos, "to")) {
+        ++pos;
+        while (pos < tokens.size() && !match(tokens, pos, "using") && !match(tokens, pos, "with")) {
+            if (tokens[pos] != ",") stmt->roles.push_back(tokens[pos]);
+            ++pos;
+        }
+    }
+
+    // USING [(]expr[)]
+    if (match(tokens, pos, "using")) {
+        ++pos;
+        std::string expr;
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            ++pos;
+            int depth = 1;
+            while (pos < tokens.size() && depth > 0) {
+                if (tokens[pos] == "(") ++depth;
+                else if (tokens[pos] == ")") --depth;
+                if (depth > 0) {
+                    if (!expr.empty()) expr += " ";
+                    expr += tokens[pos];
+                }
+                ++pos;
+            }
+        } else {
+            while (pos < tokens.size() && !match(tokens, pos, "with")) {
+                if (!expr.empty()) expr += " ";
+                expr += tokens[pos++];
+            }
+        }
+        stmt->usingExpr = stripQuotes(expr);
+    }
+
+    // WITH CHECK [(]expr[)]
+    if (match(tokens, pos, "with")) {
+        if (pos + 1 < tokens.size() && match(tokens, pos + 1, "check")) pos += 2;
+        else ++pos;
+        std::string expr;
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            ++pos;
+            int depth = 1;
+            while (pos < tokens.size() && depth > 0) {
+                if (tokens[pos] == "(") ++depth;
+                else if (tokens[pos] == ")") --depth;
+                if (depth > 0) {
+                    if (!expr.empty()) expr += " ";
+                    expr += tokens[pos];
+                }
+                ++pos;
+            }
+        } else {
+            while (pos < tokens.size()) {
+                if (!expr.empty()) expr += " ";
+                expr += tokens[pos++];
+            }
+        }
+        stmt->withCheckExpr = stripQuotes(expr);
+    }
+
     return stmt;
 }
 

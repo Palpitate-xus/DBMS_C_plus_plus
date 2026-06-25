@@ -112,6 +112,7 @@ std::string DdlTransaction::kindString(DdlObjectKind kind) const {
         case DdlObjectKind::Function:   return "function";
         case DdlObjectKind::Procedure:  return "procedure";
         case DdlObjectKind::Trigger:    return "trigger";
+        case DdlObjectKind::Policy:     return "policy";
     }
     return "object";
 }

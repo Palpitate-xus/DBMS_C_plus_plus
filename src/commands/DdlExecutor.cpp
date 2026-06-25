@@ -157,6 +157,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreateFunction(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
         case SqlCommand::CreateProcedure:
             return executeCreateProcedure(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
+        case SqlCommand::CreatePolicy:
+            return executeCreatePolicy(dynamic_cast<const CreatePolicyStmt*>(stmt.get()), s);
         case SqlCommand::CreateMaterializedView:
             return executeCreateMaterializedView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
         case SqlCommand::CreateDatabase:
@@ -202,6 +204,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateTrigger:
         case dbms::SqlCommand::CreateFunction:
         case dbms::SqlCommand::CreateProcedure:
+        case dbms::SqlCommand::CreatePolicy:
         case dbms::SqlCommand::CreateMaterializedView:
         case dbms::SqlCommand::CreateDatabase:
         case dbms::SqlCommand::DropDatabase:
@@ -1879,6 +1882,59 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
     txn.recordCreate(DdlObjectKind::Procedure, stmt->funcName);
     txn.commit();
     std::cout << "CREATE PROCEDURE succeeded" << std::endl;
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// CREATE POLICY
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeCreatePolicy(const CreatePolicyStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    if (stmt->policyName.empty()) {
+        std::cout << "SQL syntax error: CREATE POLICY name" << std::endl;
+        return true;
+    }
+    if (stmt->tableName.empty()) {
+        std::cout << "SQL syntax error: CREATE POLICY requires ON table" << std::endl;
+        return true;
+    }
+
+    std::string tname = resolveTableName(s, stmt->tableName);
+    if (!g_engine.tableExists(s.currentDB, tname)) {
+        std::cout << "Table " << tname << " not found" << std::endl;
+        return true;
+    }
+
+    dbms::StorageEngine::RowPolicy policy;
+    policy.name = stmt->policyName;
+    policy.cmd = stmt->command.empty() ? "ALL" : stmt->command;
+    policy.usingExpr = stmt->usingExpr;
+    policy.withCheckExpr = stmt->withCheckExpr;
+    policy.roles = stmt->roles;
+
+    DBStatus res = g_engine.createPolicy(s.currentDB, tname, policy);
+    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
+        std::cout << "Policy " << stmt->policyName << " already exists" << std::endl;
+        return true;
+    }
+    if (res != DBStatus::OK) {
+        std::cout << "CREATE POLICY failed" << std::endl;
+        return true;
+    }
+
+    txn.recordCreate(DdlObjectKind::Policy, stmt->policyName, tname);
+    txn.commit();
+    std::cout << "CREATE POLICY succeeded" << std::endl;
     return false;
 }
 
