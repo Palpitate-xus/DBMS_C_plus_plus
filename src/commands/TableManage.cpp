@@ -849,23 +849,29 @@ Column makeMacAddr8Column(const std::string& name, bool isNull, bool isPK) {
 }
 
 Column makeBitColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
+    // bit(n) is stored as the literal '0'/'1' string (variable-length); dsize
+    // carries the declared bit length n for exact-length enforcement. length 0
+    // (no modifier, fallback path) means "no length constraint".
     Column c;
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
     c.dataType = "bit";
-    c.dsize = (length == 0 ? 1 : (length + 7) / 8);
+    c.dsize = (length == 0 ? 65535 : length);
     return c;
 }
 
 Column makeVarBitColumn(const std::string& name, bool isNull, size_t length, bool isPK) {
+    // bit varying(n) stored as the '0'/'1' string; dsize is the max bit length,
+    // 65535 meaning unlimited.
     Column c;
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
     c.isVariableLength = true;
     c.dataType = "bit varying";
-    c.dsize = (length == 0 ? 65535 : (length + 7) / 8);
+    c.dsize = (length == 0 ? 65535 : length);
     return c;
 }
 
@@ -3921,6 +3927,34 @@ static std::string formatMacAddr(const uint8_t* bytes, int numBytes) {
         oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(bytes[i]);
     }
     return oss.str();
+}
+
+// ========================================================================
+// Bit string (bit / bit varying) helper
+// Storage: the literal '0'/'1' string (variable-length). `declaredLen` carries
+// the declared bit length n (Column::dsize); 0 or 65535 means "no constraint /
+// unlimited". For "bit" the value must be exactly n bits; for "bit varying" at
+// most n bits. Accepts an optional B'...'/b'...' wrapper or plain quotes and
+// writes the canonical bare 0/1 string to `out`.
+// ========================================================================
+static bool normalizeBitString(const std::string& in, const std::string& dataType,
+                               size_t declaredLen, std::string& out) {
+    std::string s = in;
+    if (s.size() >= 3 && (s[0] == 'B' || s[0] == 'b') && s[1] == '\'' && s.back() == '\'')
+        s = s.substr(2, s.size() - 3);
+    else if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'')
+        s = s.substr(1, s.size() - 2);
+    for (char ch : s) {
+        if (ch != '0' && ch != '1') return false;
+    }
+    bool unlimited = (declaredLen == 0 || declaredLen == 65535);
+    if (dataType == "bit") {
+        if (!unlimited && s.size() != declaredLen) return false;
+    } else {  // bit varying
+        if (!unlimited && s.size() > declaredLen) return false;
+    }
+    out = s;
+    return true;
 }
 
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
@@ -8610,6 +8644,16 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
+        // Validate / canonicalize bit and bit varying values (stored as the
+        // literal '0'/'1' string; enforce length and strip any B'...' wrapper).
+        if ((col.dataType == "bit" || col.dataType == "bit varying") && !val.empty()) {
+            std::string canon;
+            if (!normalizeBitString(val, col.dataType, col.dsize, canon)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualValues[col.dataName] = canon;
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -9845,6 +9889,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 if (!col.isNull && kv.second.empty()) {
                     return DBStatus::NULL_NOT_ALLOWED;
                 }
+                std::string storeVal = kv.second;
                 if (col.dataType == "date") {
                     Date d(kv.second.c_str());
                     if (d.year == 0) return DBStatus::INVALID_VALUE;
@@ -9854,6 +9899,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
                         uint8_t bytes[8];
                         if (!normalizeMacAddr(kv.second, n, bytes)) return DBStatus::INVALID_VALUE;
                     }
+                } else if (col.dataType == "bit" || col.dataType == "bit varying") {
+                    if (!kv.second.empty()) {
+                        std::string canon;
+                        if (!normalizeBitString(kv.second, col.dataType, col.dsize, canon))
+                            return DBStatus::INVALID_VALUE;
+                        storeVal = canon;
+                    }
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {
                         int64_t num = parseInt(kv.second);
@@ -9861,7 +9913,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                         if (col.isUnsigned && num < 0) return DBStatus::INVALID_VALUE;
                     }
                 }
-                colUpdates[i] = kv.second;
+                colUpdates[i] = storeVal;
                 break;
             }
         }

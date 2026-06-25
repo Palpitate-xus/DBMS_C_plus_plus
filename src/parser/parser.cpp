@@ -3583,6 +3583,16 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 col.name = tokens[pos++];
                 if (pos < tokens.size()) {
                     col.typeName = tokens[pos++];
+                    // Multi-word type names: "bit varying", "character varying",
+                    // "double precision" — fold the second word in before (n).
+                    if (pos < tokens.size()) {
+                        std::string t0 = toLower(col.typeName);
+                        std::string t1 = toLower(tokens[pos]);
+                        if (((t0 == "bit" || t0 == "character") && t1 == "varying") ||
+                            (t0 == "double" && t1 == "precision")) {
+                            col.typeName += " " + tokens[pos++];
+                        }
+                    }
                     // Type may have parameters: VARCHAR(255), NUMERIC(10,2)
                     if (pos < tokens.size() && tokens[pos] == "(") {
                         ++pos; // skip '('

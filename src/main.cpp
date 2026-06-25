@@ -55,6 +55,8 @@ using dbms::makeINetColumn;
 using dbms::makeCidrColumn;
 using dbms::makeMacAddrColumn;
 using dbms::makeMacAddr8Column;
+using dbms::makeBitColumn;
+using dbms::makeVarBitColumn;
 using dbms::makeDecimalColumn;
 using dbms::makeBooleanColumn;
 using dbms::makeUuidColumn;
@@ -4783,9 +4785,11 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                 col = makeBooleanColumn(cname, isNull, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 3) == "bit") {
-                string bitType = (ctype == "bit" && parts.size() >= 3 && parts[2] == "varying")
-                    ? "bit varying" : "bit";
-                col = makePgStringBackedColumn(cname, bitType, isNull, isPK);
+                bool isVarbit = (ctype == "bit" && parts.size() >= 3 && parts[2] == "varying")
+                    || ctype.substr(0, 11) == "bit varying" || ctype.substr(0, 6) == "varbit";
+                // Fallback path carries no length modifier → unlimited (0).
+                col = isVarbit ? makeVarBitColumn(cname, isNull, 0, isPK)
+                               : makeBitColumn(cname, isNull, 0, isPK);
                 colCreated = true;
             } else if (ctype.substr(0, 4) == "uuid") {
                 col = makeUuidColumn(cname, isNull, isPK);
@@ -9737,7 +9741,9 @@ bool execute(const string& rawSql, Session& s) {
             } else if (typeName.substr(0, 4) == "bool") {
                 col = makeBooleanColumn(cname, isNull);
             } else if (typeName.substr(0, 3) == "bit") {
-                col = makePgStringBackedColumn(cname, typeName.substr(0, 11) == "bit varying" ? "bit varying" : "bit", isNull, false);
+                bool isVarbit = typeName.substr(0, 11) == "bit varying" || typeName.substr(0, 6) == "varbit";
+                col = isVarbit ? makeVarBitColumn(cname, isNull, 0, false)
+                               : makeBitColumn(cname, isNull, 0, false);
             } else if (typeName.substr(0, 4) == "uuid") {
                 col = makeUuidColumn(cname, isNull);
             } else if (typeName.substr(0, 4) == "date") {

@@ -34,6 +34,7 @@
 | 2026-06-25 | Phase 4 Wave 4.31（补全）CREATE TABLE AS 列序修复 + WITH [NO] DATA：修复 `executeCreateTableAs` 按 `std::set` 字母序映射列、与 `query` 的 schema 顺序输出错位（导致 `SELECT *` 在非字母序列上复制 0 行）的 bug，改按源表 schema 顺序对齐；`CreateTableStmt::withData` + `parseCreateTable` 剥离尾部 `WITH [NO] DATA`；CTAS 复制时丢弃 PK/identity/default/CHECK；重写 `tests/ctas_test.cpp` 含 `(id,name,age)` 列序回归与 WITH NO DATA。全部 54 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.38（补全）MATERIALIZED VIEW 列序 + WITH [NO] DATA + REFRESH 修复：`executeCreateMaterializedView` 按源表 schema 顺序映射（修复反序投影错位）并支持 `WITH NO DATA`；`CreateViewStmt::withData` + `parseCreateView` 剥离尾部 `WITH [NO] DATA`；重写 `REFRESH MATERIALIZED VIEW`（从 backing schema 推导列、修复 `SELECT *`→`["*"]` 与投影错位 bug，支持 `CONCURRENTLY` 与 `WITH NO DATA`）；`tests/matview_test.cpp` 新增反序投影 + WITH NO DATA 回归 + 二进制端到端验证。全部 54 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.8 `macaddr` / `macaddr8` 校验与规范化：改为真正的定长二进制存储（6/8 字节），新增 `normalizeMacAddr`/`formatMacAddr` 辅助；`buildRowBuffer` 两条编码路径 + `extractColumnValueStatic` 解码；INSERT/UPDATE 校验拒绝坏值/错误长度（`INVALID_VALUE`），合法输入规范化为小写冒号格式；`main.cpp` 内联路径从 `isPgStringBackedType` 移除 macaddr，统一改用定长工厂，消除与 `DdlExecutor` 路径的表示不一致；新增 `tests/macaddr_test.cpp`（5 种输入规范化/坏值拒绝/macaddr8/UPDATE/变长共存）+ 二进制端到端验证。全部 55 个测试通过。 |
+| 2026-06-25 | Phase 4 Wave 4.9 `bit` / `bit varying` 长度约束与校验：统一为字符串化 `0/1` 变长存储（`dsize` 携带声明位长 n），消除 `DdlExecutor`（原定长打包、无编解码、损坏）与内联（无长度）两路径不一致；新增 `normalizeBitString`（去 `B'...'` 包裹、校验 `0/1`、`bit(n)` 精确 / `bit varying(n)` ≤ n）；INSERT/UPDATE 拒绝坏字符/错误长度并规范化；修复 parser 多词类型名（`bit varying`/`character varying`/`double precision`，此前 `BIT VARYING(8)` 丢弃 `VARYING(8)`）；更新 `tests/core_types_test.cpp` dsize 断言 + 新增 `tests/bit_test.cpp` + 二进制端到端验证。全部 56 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -161,7 +162,7 @@
 | 2.7 | ENUM | `CREATE TYPE ... AS ENUM` 落地，列定义支持 enum 值校验；`ALTER TYPE ADD VALUE [IF NOT EXISTS] [BEFORE/AFTER]` 与 `RENAME VALUE` 已支持（`updateEnumType` 持久化）；仍缺 catalog `pg_enum` ordinal 排序语义与索引集成 | ⚠️ |
 | 2.8 | 几何类型 | 只明确支持 `point` 和少量空间比较；缺少 `line`、`lseg`、`box`、`path`、`polygon`、`circle` 及完整函数/操作符 | ⚠️ |
 | 2.9 | 网络类型 | 有 `inet/cidr` IPv4/IPv6 路径；`macaddr/macaddr8` 已实现定长二进制存储 + 输入规范化（冒号/连字符/点/裸十六进制）+ 校验（坏值/错误长度拒绝）+ 小写冒号规范输出（`tests/macaddr_test.cpp`）；仍缺 PG 全套 MAC 网络函数 | ⚠️ |
-| 2.10 | bit string | `bit` / `bit varying` 已不再按 bool 解析，可作为字符串型列存取；缺少长度约束和位运算 | ⚠️ |
+| 2.10 | bit string | `bit` / `bit varying` 已统一为字符串化 `0/1` 存储 + 长度约束（`bit(n)` 精确、`bit varying(n)` ≤ n）+ `0/1` 校验 + `B'...'` 去包裹（`tests/bit_test.cpp`）；仍缺位运算操作符与位串函数 | ⚠️ |
 | 2.11 | 全文搜索类型 | `tsvector`、`tsquery` 已可作为字符串型列存取；文本搜索配置/词典/parser/template 有目录级 DDL，但缺少 PG parser、ranking、operator 和 GIN opclass 语义 | ⚠️ |
 | 2.12 | UUID | 有 uuid 列；缺少 PG 18 `uuidv7()`、uuid 函数、输入严格性与扩展生态 | ⚠️ |
 | 2.13 | XML | 有 xml 列；缺少 XML 类型函数、XPath、XMLTABLE、schema/encoding 语义 | ⚠️ |

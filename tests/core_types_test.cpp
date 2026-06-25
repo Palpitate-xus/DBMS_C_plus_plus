@@ -84,9 +84,10 @@ static void test_bit_and_jsonpath() {
 
     dbms::TableSchema tbl = g_engine.getTableSchema(db, "bit_tbl");
     const dbms::Column* c = findCol(tbl, "fixed");
-    assert(c && c->dataType == "bit" && c->dsize == 1);
+    // Stored as the '0'/'1' string; dsize carries the declared bit length n.
+    assert(c && c->dataType == "bit" && c->dsize == 8);
     c = findCol(tbl, "varying");
-    assert(c && c->dataType == "bit varying" && c->dsize == 4);
+    assert(c && c->dataType == "bit varying" && c->dsize == 32);
     c = findCol(tbl, "jp");
     assert(c && c->dataType == "jsonpath");
 
