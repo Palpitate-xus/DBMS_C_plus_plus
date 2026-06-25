@@ -3933,6 +3933,29 @@ static std::string formatMacAddr(const uint8_t* bytes, int numBytes) {
 }
 
 // ========================================================================
+// UUID helper
+// Stored as the canonical 36-char text "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
+// Accepts optional surrounding braces and any hyphen placement (PostgreSQL is
+// lenient); requires exactly 32 hex digits. Emits lowercase 8-4-4-4-12.
+// ========================================================================
+static bool normalizeUuid(const std::string& in, std::string& out) {
+    std::string s = in;
+    if (s.size() >= 2 && s.front() == '{' && s.back() == '}')
+        s = s.substr(1, s.size() - 2);
+    std::string hex;
+    hex.reserve(32);
+    for (char ch : s) {
+        if (ch == '-') continue;
+        if (!std::isxdigit(static_cast<unsigned char>(ch))) return false;
+        hex += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (hex.size() != 32) return false;
+    out = hex.substr(0, 8) + "-" + hex.substr(8, 4) + "-" + hex.substr(12, 4) +
+          "-" + hex.substr(16, 4) + "-" + hex.substr(20, 12);
+    return true;
+}
+
+// ========================================================================
 // Bit string (bit / bit varying) helper
 // Storage: the literal '0'/'1' string (variable-length). `declaredLen` carries
 // the declared bit length n (Column::dsize); 0 or 65535 means "no constraint /
@@ -8766,6 +8789,15 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             actualValues[col.dataName] = canon;
         }
+        // Validate / canonicalize UUID (32 hex digits → lowercase 8-4-4-4-12).
+        if (col.dataType == "uuid" && !val.empty()) {
+            std::string canon;
+            if (!normalizeUuid(val, canon)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualValues[col.dataName] = canon;
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -10022,6 +10054,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     if (!kv.second.empty()) {
                         std::string canon;
                         if (!normalizeGeometry(kv.second, col.dataType, canon))
+                            return DBStatus::INVALID_VALUE;
+                        storeVal = canon;
+                    }
+                } else if (col.dataType == "uuid") {
+                    if (!kv.second.empty()) {
+                        std::string canon;
+                        if (!normalizeUuid(kv.second, canon))
                             return DBStatus::INVALID_VALUE;
                         storeVal = canon;
                     }

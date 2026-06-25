@@ -36,6 +36,7 @@
 | 2026-06-25 | Phase 4 Wave 4.8 `macaddr` / `macaddr8` 校验与规范化：改为真正的定长二进制存储（6/8 字节），新增 `normalizeMacAddr`/`formatMacAddr` 辅助；`buildRowBuffer` 两条编码路径 + `extractColumnValueStatic` 解码；INSERT/UPDATE 校验拒绝坏值/错误长度（`INVALID_VALUE`），合法输入规范化为小写冒号格式；`main.cpp` 内联路径从 `isPgStringBackedType` 移除 macaddr，统一改用定长工厂，消除与 `DdlExecutor` 路径的表示不一致；新增 `tests/macaddr_test.cpp`（5 种输入规范化/坏值拒绝/macaddr8/UPDATE/变长共存）+ 二进制端到端验证。全部 55 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.9 `bit` / `bit varying` 长度约束与校验：统一为字符串化 `0/1` 变长存储（`dsize` 携带声明位长 n），消除 `DdlExecutor`（原定长打包、无编解码、损坏）与内联（无长度）两路径不一致；新增 `normalizeBitString`（去 `B'...'` 包裹、校验 `0/1`、`bit(n)` 精确 / `bit varying(n)` ≤ n）；INSERT/UPDATE 拒绝坏字符/错误长度并规范化；修复 parser 多词类型名（`bit varying`/`character varying`/`double precision`，此前 `BIT VARYING(8)` 丢弃 `VARYING(8)`）；更新 `tests/core_types_test.cpp` dsize 断言 + 新增 `tests/bit_test.cpp` + 二进制端到端验证。全部 56 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.7 几何类型校验与规范化：统一 `line`/`lseg`/`box`/`path`/`polygon`/`circle` 为字符串化规范文本变长存储（`point` 保持二进制），修复 `lseg`/`box`/`circle` 原定长无编解码（无法插入）损坏状态；在 `TypeRegistry` 将这四种几何类型 `typlen` 改为 -1 以免 `validateColumn` 强制改回定长；新增 `normalizeGeometry`/`extractGeoNumbers`（校验字符集与坐标数、box 角点重排、path 开/闭、line 拒绝 A=B=0、circle 拒绝负半径）；INSERT/UPDATE 拒绝非法字面量并规范化；新增 `tests/geometric_test.cpp` + 二进制端到端验证。全部 57 个测试通过。 |
+| 2026-06-25 | Phase 4 Wave 4.11 UUID 输入严格校验与规范化：新增 `normalizeUuid`（去花括号、忽略连字符、要求 32 位十六进制、输出小写 8-4-4-4-12）；INSERT 校验拒绝非法 UUID 并规范化，修复 UPDATE 路径此前对 uuid 列走整数回退导致 `INVALID_VALUE` 的 bug（新增 uuid 分支校验+规范化）；新增 `tests/uuid_test.cpp`（连字符/无连字符/花括号/大写四种输入规范化、坏字符/长度拒绝、UPDATE）+ 二进制端到端验证。全部 58 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -165,7 +166,7 @@
 | 2.9 | 网络类型 | 有 `inet/cidr` IPv4/IPv6 路径；`macaddr/macaddr8` 已实现定长二进制存储 + 输入规范化（冒号/连字符/点/裸十六进制）+ 校验（坏值/错误长度拒绝）+ 小写冒号规范输出（`tests/macaddr_test.cpp`）；仍缺 PG 全套 MAC 网络函数 | ⚠️ |
 | 2.10 | bit string | `bit` / `bit varying` 已统一为字符串化 `0/1` 存储 + 长度约束（`bit(n)` 精确、`bit varying(n)` ≤ n）+ `0/1` 校验 + `B'...'` 去包裹（`tests/bit_test.cpp`）；仍缺位运算操作符与位串函数 | ⚠️ |
 | 2.11 | 全文搜索类型 | `tsvector`、`tsquery` 已可作为字符串型列存取；文本搜索配置/词典/parser/template 有目录级 DDL，但缺少 PG parser、ranking、operator 和 GIN opclass 语义 | ⚠️ |
-| 2.12 | UUID | 有 uuid 列；缺少 PG 18 `uuidv7()`、uuid 函数、输入严格性与扩展生态 | ⚠️ |
+| 2.12 | UUID | 有 uuid 列，已实现输入严格校验（32 位十六进制、连字符任意/无、可带花括号、混合大小写）+ 规范化为小写 8-4-4-4-12（`tests/uuid_test.cpp`）；仍缺 PG 18 `uuidv7()`、uuid 函数与扩展生态 | ⚠️ |
 | 2.13 | XML | 有 xml 列；缺少 XML 类型函数、XPath、XMLTABLE、schema/encoding 语义 | ⚠️ |
 | 2.14 | JSON/JSONB | 有 JSON 校验和少量函数；缺少 jsonpath、SQL/JSON query functions、`JSON_TABLE`、完整操作符、GIN opclass | ⚠️ |
 | 2.15 | 数组 | 有 `INT[]`/`VARCHAR[]` 痕迹和 array_get/contains 简化；缺少多维数组、切片、unnest/array functions、ANY/ALL 完整语义 | ⚠️ |
