@@ -20,6 +20,7 @@
 | 2026-06-25 | Phase 4 Wave 4.33 SEQUENCE 完整语义落地：扩展 `SequenceInfo`/`StorageEngine` 序列文件格式，支持 START/INCREMENT/MINVALUE/MAXVALUE/CACHE/CYCLE/OWNED BY；`parseCreateSequence` 解析全部选项并新增 `parseAlterSequence`/`DdlExecutor::executeAlterSequence`；`DROP TABLE CASCADE` 删除被拥有序列；新增 `tests/sequence_full_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.34 DOMAIN 约束执行落地：`Column` 新增 `domainName`，`columnDefToColumn` 识别 domain 并解析为 base type；domain DEFAULT 继承、domain CHECK（含 `VALUE` 伪变量重写为列名）与列级 CHECK 合并并在 INSERT/UPDATE 通过 `ExprHelper` 执行；补全 `parseCreateDomain` 解析 AS/DEFAULT/CONSTRAINT/CHECK；新增 `tests/domain_full_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.31 CREATE TABLE AS 落地：`CreateTableStmt::asSelect` + `parseCreateTable` 识别 `AS SELECT`；`tryDdlBridge` 移除 CTAS 回退；`DdlExecutor` 实现简单 CTAS（SELECT * / columns / WHERE）并按源表列类型建表；新增 `tests/ctas_test.cpp`。 |
+| 2026-06-25 | Phase 4 Wave 4.6 CREATE TYPE ... AS ENUM 落地：`StorageEngine` 新增 `.enums` 持久化与 `createEnumType`/`getEnumType` 等接口；`parseCreateType` 解析 enum 标签；`DdlExecutor` 注册 enum 类型；INSERT/UPDATE 校验 enum 值；新增 `tests/enum_test.cpp`。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 

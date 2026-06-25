@@ -265,6 +265,16 @@ public:
     std::vector<std::string> getCompositeTypeNames(const std::string& dbname) const;
     bool isCompositeType(const std::string& dbname, const std::string& name) const;
 
+    // Enum types
+    struct EnumType {
+        std::string name;
+        std::vector<std::string> labels;
+    };
+    DBStatus createEnumType(const std::string& dbname, const EnumType& et);
+    DBStatus dropEnumType(const std::string& dbname, const std::string& name);
+    EnumType getEnumType(const std::string& dbname, const std::string& name) const;
+    std::vector<std::string> getEnumTypeNames(const std::string& dbname) const;
+
     // Table inheritance: get all direct child table names for a parent table
     std::vector<std::string> getInheritedChildren(const std::string& dbname,
                                                    const std::string& parentName) const;

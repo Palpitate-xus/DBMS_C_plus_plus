@@ -8498,6 +8498,17 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
+        // Validate ENUM columns
+        if (!col.enumValues.empty() && !val.empty()) {
+            bool valid = false;
+            for (const auto& label : col.enumValues) {
+                if (label == val) { valid = true; break; }
+            }
+            if (!valid) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
         if (!col.isVariableLength && col.dataType != "char" && col.dataType != "binary" && col.dataType != "date" && col.dataType != "timestamp" && col.dataType != "timestamptz" && col.dataType != "datetime" && col.dataType != "time" && col.dataType != "float" && col.dataType != "double" && col.dataType != "decimal" && col.dataType != "numeric" && col.dataType != "boolean" && col.dataType != "uuid" && col.dataType != "point" && col.dataType != "inet" && col.dataType != "cidr" && !val.empty()) {
             int64_t num = parseInt(val);
             if (num == INF) {
@@ -9800,6 +9811,20 @@ DBStatus StorageEngine::update(const std::string& dbname,
         }
         for (const auto& kv : colUpdates) {
             rowValues[tbl.cols[kv.first].dataName] = kv.second;
+        }
+        // Validate ENUM columns in updates
+        for (const auto& kv : colUpdates) {
+            const Column& col = tbl.cols[kv.first];
+            if (!col.enumValues.empty() && !kv.second.empty()) {
+                bool valid = false;
+                for (const auto& label : col.enumValues) {
+                    if (label == kv.second) { valid = true; break; }
+                }
+                if (!valid) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+            }
         }
         // TOAST: delete old toast entries, create new ones for large values
         deleteRowToast(dbname, tablename, rid);
@@ -15886,6 +15911,89 @@ std::vector<std::string> StorageEngine::getCompositeTypeNames(const std::string&
 
 bool StorageEngine::isCompositeType(const std::string& dbname, const std::string& name) const {
     return !getCompositeType(dbname, name).name.empty();
+}
+
+// ========================================================================
+// Enum type support
+// ========================================================================
+static std::filesystem::path enumPath(const std::string& dbname) {
+    return std::filesystem::path(dbname) / ".enums";
+}
+
+DBStatus StorageEngine::createEnumType(const std::string& dbname, const EnumType& et) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    auto existing = getEnumType(dbname, et.name);
+    if (!existing.name.empty()) return DBStatus::TABLE_ALREADY_EXISTS;
+    std::ofstream ofs(enumPath(dbname), std::ios::app);
+    if (!ofs) return DBStatus::INVALID_VALUE;
+    ofs << et.name;
+    for (const auto& label : et.labels) {
+        ofs << "|" << label;
+    }
+    ofs << "\n";
+    return DBStatus::OK;
+}
+
+DBStatus StorageEngine::dropEnumType(const std::string& dbname, const std::string& name) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    auto path = enumPath(dbname);
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
+    std::ifstream ifs(path);
+    std::vector<std::string> lines;
+    std::string line;
+    bool found = false;
+    while (std::getline(ifs, line)) {
+        size_t sp = line.find('|');
+        if (sp != std::string::npos && line.substr(0, sp) == name) {
+            found = true;
+        } else {
+            lines.push_back(line);
+        }
+    }
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
+    std::ofstream ofs(path, std::ios::trunc);
+    for (const auto& l : lines) ofs << l << '\n';
+    return DBStatus::OK;
+}
+
+StorageEngine::EnumType StorageEngine::getEnumType(const std::string& dbname,
+                                                    const std::string& name) const {
+    EnumType result;
+    auto path = enumPath(dbname);
+    if (!std::filesystem::exists(path)) return result;
+    std::ifstream ifs(path);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        size_t sp = line.find('|');
+        if (sp == std::string::npos || line.substr(0, sp) != name) continue;
+        result.name = name;
+        size_t pos = sp + 1;
+        while (pos < line.size()) {
+            size_t next = line.find('|', pos);
+            if (next == std::string::npos) {
+                result.labels.push_back(line.substr(pos));
+                break;
+            } else {
+                result.labels.push_back(line.substr(pos, next - pos));
+                pos = next + 1;
+            }
+        }
+        break;
+    }
+    return result;
+}
+
+std::vector<std::string> StorageEngine::getEnumTypeNames(const std::string& dbname) const {
+    std::vector<std::string> result;
+    auto path = enumPath(dbname);
+    if (!std::filesystem::exists(path)) return result;
+    std::ifstream ifs(path);
+    std::string line;
+    while (std::getline(ifs, line)) {
+        size_t sp = line.find('|');
+        if (sp != std::string::npos) result.push_back(line.substr(0, sp));
+    }
+    return result;
 }
 
 std::vector<std::string> StorageEngine::getInheritedChildren(const std::string& dbname,

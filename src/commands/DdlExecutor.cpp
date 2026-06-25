@@ -373,6 +373,7 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
     std::string baseType = toLower(cd.typeName);
     std::string domainName;
     std::string domainCheck;
+    std::vector<std::string> enumValues;
     if (!dbname.empty()) {
         auto dom = g_engine.getDomain(dbname, baseType);
         if (!dom.name.empty()) {
@@ -382,6 +383,11 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
                 col.defaultValue = dom.defaultValue;
             }
             baseType = toLower(dom.baseType);
+        }
+        auto et = g_engine.getEnumType(dbname, baseType);
+        if (!et.name.empty()) {
+            enumValues = et.labels;
+            baseType = "varchar"; // store enum values as strings
         }
     }
     // Normalize common aliases
@@ -504,6 +510,7 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
     col.isAutoIncrement = cd.isGeneratedIdentity;
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;
+    col.enumValues = enumValues;
     if (!domainName.empty()) {
         col.domainName = domainName;
         // Re-apply domain default if column has no explicit default.
@@ -1406,6 +1413,32 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
         return true;
     }
 
+    std::string typeKind = stmt->options.count("type_kind") ? stmt->options.at("type_kind") : "";
+    if (typeKind == "enum") {
+        StorageEngine::EnumType et;
+        et.name = stmt->objectName;
+        std::string labels = stmt->options.count("enum_labels") ? stmt->options.at("enum_labels") : "";
+        std::stringstream ss(labels);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            if (!item.empty()) et.labels.push_back(item);
+        }
+        if (et.labels.empty()) {
+            std::cout << "CREATE TYPE AS ENUM requires at least one label" << std::endl;
+            return true;
+        }
+        DBStatus res = g_engine.createEnumType(s.currentDB, et);
+        if (res != DBStatus::OK) {
+            std::cout << "CREATE TYPE AS ENUM failed" << std::endl;
+            return true;
+        }
+        txn.recordCreate(DdlObjectKind::Type, et.name);
+        txn.commit();
+        std::cout << "CREATE TYPE AS ENUM succeeded" << std::endl;
+        return false;
+    }
+
+    // Composite type (existing behavior)
     StorageEngine::CompositeType ct;
     ct.name = stmt->objectName;
     auto it = stmt->options.find("fields");
