@@ -382,6 +382,9 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
     col.isArray = cd.isArray;
     col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
 
+    col.isAutoIncrement = cd.isGeneratedIdentity;
+    col.generatedExpr = cd.generatedExpr;
+
     std::string baseType = toLower(cd.typeName);
     // Normalize common aliases
     if (baseType == "int" || baseType == "integer") baseType = "int4";
@@ -496,6 +499,13 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd) {
         // Unknown type: fall back to varchar so the table can still be created
         col = makeVarCharColumn(cd.name, cd.isNull, 255, cd.isPrimaryKey);
     }
+
+    // Factory functions replace the whole Column; restore metadata they don't set.
+    col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
+    col.generatedExpr = cd.generatedExpr;
+    col.isAutoIncrement = cd.isGeneratedIdentity;
+    col.isUnique = cd.isUnique;
+    col.isArray = cd.isArray;
 
     // Apply check constraints from column definition
     if (!cd.checkExprs.empty()) {

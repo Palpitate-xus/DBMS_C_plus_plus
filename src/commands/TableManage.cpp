@@ -6,6 +6,7 @@
 #include "types/numeric.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
+#include "expression/expr_helper.h"
 #include <cmath>
 #include <unordered_map>
 
@@ -270,6 +271,34 @@ static std::string trim(const std::string& s) {
     size_t b = s.size();
     while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
     return s.substr(a, b - a);
+}
+
+// Build a column-name -> data-type map from a TableSchema for expression eval.
+static std::map<std::string, std::string> buildTypeHints(const dbms::TableSchema& tbl) {
+    std::map<std::string, std::string> hints;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        hints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+    }
+    return hints;
+}
+
+// Evaluate a SQL expression string against a row value map using ExprHelper.
+static std::string evalExpressionSql(
+    const std::string& exprSql,
+    const std::map<std::string, std::string>& row,
+    const std::map<std::string, std::string>& typeHints,
+    bool* ok = nullptr) {
+    if (exprSql.empty()) {
+        if (ok) *ok = false;
+        return "";
+    }
+    auto res = dbms::ExprHelper::evalString(exprSql, row, typeHints);
+    if (!res.ok) {
+        if (ok) *ok = false;
+        return "";
+    }
+    if (ok) *ok = true;
+    return res.isNull ? "" : res.value;
 }
 
 // SQL LIKE pattern matching (% = any sequence, _ = single char), case-insensitive
@@ -8144,11 +8173,19 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
     // Apply DEFAULT values
     std::map<std::string, std::string> actualValues = values;
+    auto typeHints = buildTypeHints(tbl);
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
         if ((it == actualValues.end() || it->second.empty()) && !col.defaultValue.empty()) {
-            actualValues[col.dataName] = col.defaultValue;
+            bool ok = false;
+            std::string computed = evalExpressionSql(col.defaultValue, actualValues, typeHints, &ok);
+            if (ok) {
+                actualValues[col.dataName] = computed;
+            } else {
+                // Fall back to raw string for simple literal defaults.
+                actualValues[col.dataName] = col.defaultValue;
+            }
         }
     }
 
@@ -8304,8 +8341,9 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         if (col.generatedExpr.empty()) continue;
         auto it = actualValues.find(col.dataName);
         if (it != actualValues.end() && !it->second.empty()) continue; // user provided value
-        std::string computed = evaluateGeneratedExpr(col.generatedExpr, actualValues);
-        if (!computed.empty()) {
+        bool ok = false;
+        std::string computed = evalExpressionSql(col.generatedExpr, actualValues, typeHints, &ok);
+        if (ok) {
             actualValues[col.dataName] = computed;
         }
     }
@@ -8316,18 +8354,16 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // Build row buffer
     uint64_t creatorTxnId = inTransaction_ ? currentTxnId_ : 0;
     std::string rowBuffer = buildRowBuffer(tbl, actualValues, creatorTxnId);
+    std::string strippedRow = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
 
     // Check CHECK constraints before writing
-    std::string strippedRow = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (col.checkExpr.empty()) continue;
-        auto checkConds = parseCheckConditions(col.checkExpr);
-        for (const auto& cond : checkConds) {
-            if (!evalConditionOnRow(cond, strippedRow, tbl)) {
-                lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
-            }
+        std::string err;
+        if (!dbms::ExprHelper::evalBool(col.checkExpr, actualValues, typeHints, &err)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
         }
     }
 
@@ -9601,15 +9637,14 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
         // Check CHECK constraints before writing
         std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
+        auto updateTypeHints = buildTypeHints(tbl);
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (col.checkExpr.empty()) continue;
-            auto checkConds = parseCheckConditions(col.checkExpr);
-            for (const auto& cond : checkConds) {
-                if (!evalConditionOnRow(cond, strippedNewRow, tbl)) {
-                    lockManager_.unlock(tablename);
-                    return DBStatus::INVALID_VALUE;
-                }
+            std::string err;
+            if (!dbms::ExprHelper::evalBool(col.checkExpr, rowValues, updateTypeHints, &err)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
             }
         }
 

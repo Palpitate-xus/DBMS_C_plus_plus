@@ -47,6 +47,7 @@ SOURCES=(
     src/catalog/type_registry.cpp
     src/catalog/collation.cpp
     src/expression/ExprEvaluator.cpp
+    src/expression/expr_helper.cpp
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
     src/types/numeric.cpp

@@ -769,6 +769,8 @@ struct ColumnDef {
     std::vector<ExprPtr> checkExprs;
     std::vector<std::string> checkNames;
     std::string collation;
+    std::string generatedExpr;                 // GENERATED ALWAYS AS (expr) 的表达式体
+    bool isGeneratedIdentity = false;          // GENERATED ... AS IDENTITY
     std::vector<std::string> constraints;      // GENERATED, IDENTITY 等
     bool isArray = false;
 };
