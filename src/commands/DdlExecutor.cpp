@@ -149,6 +149,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreateType(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
         case SqlCommand::DropType:
             return executeDropType(dynamic_cast<const DropStmt*>(stmt.get()), s);
+        case SqlCommand::CreateView:
+            return executeCreateView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
         case SqlCommand::CreateDatabase:
             return executeCreateDatabase(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
         case SqlCommand::DropDatabase:
@@ -188,6 +190,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropDomain:
         case dbms::SqlCommand::CreateType:
         case dbms::SqlCommand::DropType:
+        case dbms::SqlCommand::CreateView:
         case dbms::SqlCommand::CreateDatabase:
         case dbms::SqlCommand::DropDatabase:
         case dbms::SqlCommand::CreateSchema:
@@ -1492,6 +1495,75 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     }
     txn.commit();
     std::cout << "DROP TYPE succeeded" << std::endl;
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// CREATE VIEW
+// ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    std::string viewname = stmt->viewName;
+    std::string viewSql = stmt->selectSql;
+    if (viewSql.empty()) {
+        std::cout << "CREATE VIEW requires AS SELECT" << std::endl;
+        return true;
+    }
+
+    // Detect base table for simple updatable views.
+    std::string baseTable;
+    std::string lview = toLower(viewSql);
+    if (lview.substr(0, 6) == "select") {
+        size_t fromPos = lview.find(" from ");
+        if (fromPos != std::string::npos) {
+            size_t wherePos = lview.find(" where ", fromPos);
+            size_t orderPos = lview.find(" order by ", fromPos);
+            size_t groupPos = lview.find(" group by ", fromPos);
+            size_t endPos = std::min(wherePos != std::string::npos ? wherePos : viewSql.size(),
+                                     std::min(orderPos != std::string::npos ? orderPos : viewSql.size(),
+                                              groupPos != std::string::npos ? groupPos : viewSql.size()));
+            std::string tablePart = trim(viewSql.substr(fromPos + 6, endPos - fromPos - 6));
+            if (tablePart.find(' ') == std::string::npos && tablePart.find(',') == std::string::npos) {
+                baseTable = tablePart;
+            }
+        }
+    }
+
+    std::string checkOption = stmt->checkOption;
+    std::string storeSql = viewSql;
+    if (!baseTable.empty()) storeSql += "\nBASE_TABLE:" + baseTable + "\n";
+    if (!checkOption.empty()) storeSql += "WITH_CHECK_OPTION:" + checkOption + "\n";
+
+    if (stmt->replace && g_engine.viewExists(s.currentDB, viewname)) {
+        g_engine.dropView(s.currentDB, viewname);
+    }
+
+    DBStatus res = g_engine.createView(s.currentDB, viewname, storeSql);
+    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
+        std::cout << "View " << viewname << " already exists" << std::endl;
+        return true;
+    }
+    if (res != DBStatus::OK) {
+        std::cout << "CREATE VIEW failed" << std::endl;
+        return true;
+    }
+
+    txn.recordCreate(DdlObjectKind::View, viewname);
+    txn.commit();
+    std::cout << "CREATE VIEW succeeded"
+              << (baseTable.empty() ? "" : " (updatable)")
+              << (checkOption.empty() ? "" : " [with check option " + checkOption + "]")
+              << std::endl;
     return false;
 }
 

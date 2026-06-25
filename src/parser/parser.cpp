@@ -255,6 +255,11 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     if (lsql.substr(0, 6) == "create") {
         size_t pos = 6;
         while (pos < lsql.size() && std::isspace(static_cast<unsigned char>(lsql[pos]))) ++pos;
+        // Skip OR REPLACE
+        if (lsql.substr(pos, 10) == "or replace") {
+            pos += 10;
+            while (pos < lsql.size() && std::isspace(static_cast<unsigned char>(lsql[pos]))) ++pos;
+        }
         std::string rest = lsql.substr(pos);
         if (rest.substr(0, 9) == "database ") return SqlCommand::CreateDatabase;
         if (rest.substr(0, 7) == "schema ") return SqlCommand::CreateSchema;
@@ -3834,13 +3839,14 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
             if (pos < tokens.size()) stmt->checkOption = toLower(tokens[pos++]);
         }
     }
-    if (pos < tokens.size() && match(tokens, pos, "as")) ++pos;
-    if (pos < tokens.size()) {
+    if (pos < tokens.size() && match(tokens, pos, "as")) {
+        ++pos;
         std::string selectSql;
         for (size_t i = pos; i < tokens.size(); ++i) {
             if (!selectSql.empty()) selectSql += " ";
             selectSql += tokens[i];
         }
+        stmt->selectSql = selectSql;
         stmt->query = parseSelect(selectSql).stmt;
         pos = tokens.size();
     }

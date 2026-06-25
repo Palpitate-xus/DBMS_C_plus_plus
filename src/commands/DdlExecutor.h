@@ -47,6 +47,7 @@ private:
     bool executeDropDomain(const DropStmt* stmt, Session& s);
     bool executeCreateType(const CreateObjectStmt* stmt, Session& s);
     bool executeDropType(const DropStmt* stmt, Session& s);
+    bool executeCreateView(const CreateViewStmt* stmt, Session& s);
     bool executeCreateDatabase(const CreateObjectStmt* stmt, Session& s);
     bool executeDropDatabase(const DropStmt* stmt, Session& s);
     bool executeCreateSchema(const CreateObjectStmt* stmt, Session& s);

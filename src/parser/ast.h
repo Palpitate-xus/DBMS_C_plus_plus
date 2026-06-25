@@ -1033,6 +1033,7 @@ struct CreateViewStmt : public Stmt {
     std::string viewName;
     std::vector<std::string> columnNames; // 显式列名（可选）
     StmtPtr query;                        // SELECT 语句
+    std::string selectSql;                // 原始 SELECT 文本（用于执行）
     bool replace = false;                 // CREATE OR REPLACE
     bool temp = false;
     bool recursive = false;               // 递归视图
