@@ -38,6 +38,7 @@
 | 2026-06-25 | Phase 4 Wave 4.7 几何类型校验与规范化：统一 `line`/`lseg`/`box`/`path`/`polygon`/`circle` 为字符串化规范文本变长存储（`point` 保持二进制），修复 `lseg`/`box`/`circle` 原定长无编解码（无法插入）损坏状态；在 `TypeRegistry` 将这四种几何类型 `typlen` 改为 -1 以免 `validateColumn` 强制改回定长；新增 `normalizeGeometry`/`extractGeoNumbers`（校验字符集与坐标数、box 角点重排、path 开/闭、line 拒绝 A=B=0、circle 拒绝负半径）；INSERT/UPDATE 拒绝非法字面量并规范化；新增 `tests/geometric_test.cpp` + 二进制端到端验证。全部 57 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.11 UUID 输入严格校验与规范化：新增 `normalizeUuid`（去花括号、忽略连字符、要求 32 位十六进制、输出小写 8-4-4-4-12）；INSERT 校验拒绝非法 UUID 并规范化，修复 UPDATE 路径此前对 uuid 列走整数回退导致 `INVALID_VALUE` 的 bug（新增 uuid 分支校验+规范化）；新增 `tests/uuid_test.cpp`（连字符/无连字符/花括号/大写四种输入规范化、坏字符/长度拒绝、UPDATE）+ 二进制端到端验证。全部 58 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.4 bytea 输入输出 escape/hex：新增 `normalizeBytea`（解析 `\xDEADBEEF` 十六进制与 escape 格式 `\\`/`\ooo` 八进制及字面字节，输出规范小写 `\xhh..`）；INSERT/UPDATE 校验拒绝非法 bytea（奇数十六进制位/非法转义 → `INVALID_VALUE`）并规范化；新增 `tests/bytea_test.cpp`（hex 大写规范化/空载荷/奇数位拒绝、escape 字面/八进制/双反斜杠、UPDATE）+ 二进制端到端验证。全部 59 个测试通过。 |
+| 2026-06-25 | Phase 4 Wave 4.8b inet/cidr 严格地址校验 + IPv6 存储：新增 `parseInetAddr`/`parseIPv6Groups`（严格 IPv4 八位组 0-255、IPv6 含 `::` 零压缩、前缀范围 0-32/0-128），替换原仅 IPv4 且 `sscanf` 不校验越界八位组、IPv6 静默丢弃为 family 0 的编码逻辑（两条 `buildRowBuffer` 路径）；INSERT 校验拒绝非法地址，修复 UPDATE 路径此前 inet/cidr 走整数回退被拒的 bug；新增 `tests/inet_test.cpp`（IPv4/IPv6 往返、越界/格式错误拒绝、UPDATE）+ 二进制端到端验证。另：将 `tests/background_worker_test.cpp` 的固定 500ms 睡眠改为轮询重试（消除批量负载下 checkpoint 计时假阳性）。全部 60 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -164,7 +165,7 @@
 | 2.6 | 布尔 | SQL 三值逻辑、类型转换、函数/聚合边界仍简化 | ⚠️ |
 | 2.7 | ENUM | `CREATE TYPE ... AS ENUM` 落地，列定义支持 enum 值校验；`ALTER TYPE ADD VALUE [IF NOT EXISTS] [BEFORE/AFTER]` 与 `RENAME VALUE` 已支持（`updateEnumType` 持久化）；仍缺 catalog `pg_enum` ordinal 排序语义与索引集成 | ⚠️ |
 | 2.8 | 几何类型 | `point` 为打包二进制；`line`/`lseg`/`box`/`path`/`polygon`/`circle` 已统一为字符串化规范文本存储 + 结构校验（坐标数/字符集/括号）+ 规范化（去空白、box 角点重排、path 开/闭）（`tests/geometric_test.cpp`）；仍缺几何运算符与完整函数集 | ⚠️ |
-| 2.9 | 网络类型 | 有 `inet/cidr` IPv4/IPv6 路径；`macaddr/macaddr8` 已实现定长二进制存储 + 输入规范化（冒号/连字符/点/裸十六进制）+ 校验（坏值/错误长度拒绝）+ 小写冒号规范输出（`tests/macaddr_test.cpp`）；仍缺 PG 全套 MAC 网络函数 | ⚠️ |
+| 2.9 | 网络类型 | `inet/cidr` 已实现严格 IPv4/IPv6 解析（拒绝坏八位组/组、越界前缀）且 IPv6 现可真正存储（`tests/inet_test.cpp`）；`macaddr/macaddr8` 已实现定长二进制存储 + 输入规范化 + 校验 + 小写冒号规范输出（`tests/macaddr_test.cpp`）；仍缺 PG 全套网络函数（`host`/`masklen`/`network`/`abbrev` 等） | ⚠️ |
 | 2.10 | bit string | `bit` / `bit varying` 已统一为字符串化 `0/1` 存储 + 长度约束（`bit(n)` 精确、`bit varying(n)` ≤ n）+ `0/1` 校验 + `B'...'` 去包裹（`tests/bit_test.cpp`）；仍缺位运算操作符与位串函数 | ⚠️ |
 | 2.11 | 全文搜索类型 | `tsvector`、`tsquery` 已可作为字符串型列存取；文本搜索配置/词典/parser/template 有目录级 DDL，但缺少 PG parser、ranking、operator 和 GIN opclass 语义 | ⚠️ |
 | 2.12 | UUID | 有 uuid 列，已实现输入严格校验（32 位十六进制、连字符任意/无、可带花括号、混合大小写）+ 规范化为小写 8-4-4-4-12（`tests/uuid_test.cpp`）；仍缺 PG 18 `uuidv7()`、uuid 函数与扩展生态 | ⚠️ |

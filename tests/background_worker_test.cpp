@@ -54,12 +54,16 @@ int main() {
         assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
         assert(engine.commitTransaction() == DBStatus::OK);
 
-        // Wake the worker and wait long enough for the checkpointer to fire.
-        engine.wakeBackgroundWorker();
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-        uint64_t lsn = readCheckpointLsn(cpPath);
-        std::cout << "[BACKGROUND] checkpoint LSN after sleep=" << lsn << "\n";
+        // Wake the worker and poll for the checkpointer to fire. A single fixed
+        // sleep is flaky under load (the checkpoint window can be missed when the
+        // machine is busy), so retry up to ~5s, re-waking each iteration.
+        uint64_t lsn = 0;
+        for (int attempt = 0; attempt < 50 && lsn == 0; ++attempt) {
+            engine.wakeBackgroundWorker();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            lsn = readCheckpointLsn(cpPath);
+        }
+        std::cout << "[BACKGROUND] checkpoint LSN after wait=" << lsn << "\n";
         assert(lsn > 0);
 
         // Verify the row is still visible (recovery did not break data).

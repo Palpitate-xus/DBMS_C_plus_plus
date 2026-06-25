@@ -4002,6 +4002,109 @@ static bool normalizeBytea(const std::string& in, std::string& out) {
 }
 
 // ========================================================================
+// inet / cidr address parser
+// Parses a dotted-quad IPv4 or an IPv6 address (with :: zero compression) plus
+// an optional /prefix into family (2=IPv4, 3=IPv6), prefix length and a 16-byte
+// address buffer. Returns false on any malformed octet/group or out-of-range
+// prefix. Mirrors the on-disk layout used by buildRowBuffer/extractColumnValue.
+// ========================================================================
+static bool parseIPv6Groups(const std::string& s, uint8_t addr[16]) {
+    auto hexVal = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return c - 'a' + 10;
+    };
+    auto parseGroups = [&](const std::string& part, std::vector<uint16_t>& out) -> bool {
+        if (part.empty()) return true;
+        std::vector<std::string> groups;
+        std::string tok;
+        for (char c : part) {
+            if (c == ':') { groups.push_back(tok); tok.clear(); }
+            else tok.push_back(c);
+        }
+        groups.push_back(tok);
+        for (const auto& g : groups) {
+            if (g.empty() || g.size() > 4) return false;
+            uint16_t v = 0;
+            for (char c : g) {
+                if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+                v = static_cast<uint16_t>((v << 4) | hexVal(c));
+            }
+            out.push_back(v);
+        }
+        return true;
+    };
+    std::vector<uint16_t> full;
+    size_t dc = s.find("::");
+    if (dc != std::string::npos) {
+        std::string left = s.substr(0, dc);
+        std::string right = s.substr(dc + 2);
+        if (right.find("::") != std::string::npos) return false;  // only one ::
+        std::vector<uint16_t> head, tail;
+        if (!parseGroups(left, head)) return false;
+        if (!parseGroups(right, tail)) return false;
+        if (head.size() + tail.size() > 7) return false;  // :: must cover >=1 group
+        int zeros = 8 - static_cast<int>(head.size()) - static_cast<int>(tail.size());
+        for (auto v : head) full.push_back(v);
+        for (int i = 0; i < zeros; ++i) full.push_back(0);
+        for (auto v : tail) full.push_back(v);
+    } else {
+        if (!parseGroups(s, full)) return false;
+    }
+    if (full.size() != 8) return false;
+    for (int i = 0; i < 8; ++i) {
+        addr[i * 2] = static_cast<uint8_t>(full[i] >> 8);
+        addr[i * 2 + 1] = static_cast<uint8_t>(full[i] & 0xff);
+    }
+    return true;
+}
+
+static bool parseInetAddr(const std::string& in, uint8_t& family,
+                          uint8_t& prefix, uint8_t addr[16]) {
+    std::memset(addr, 0, 16);
+    std::string s = in;
+    int prefixVal = -1;
+    size_t slash = s.find('/');
+    if (slash != std::string::npos) {
+        std::string p = s.substr(slash + 1);
+        if (p.empty()) return false;
+        for (char c : p) if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+        try { prefixVal = std::stoi(p); } catch (...) { return false; }
+        s = s.substr(0, slash);
+    }
+    if (s.empty()) return false;
+
+    if (s.find(':') != std::string::npos) {
+        family = 3;  // IPv6
+        if (prefixVal < 0) prefixVal = 128;
+        if (prefixVal > 128) return false;
+        prefix = static_cast<uint8_t>(prefixVal);
+        return parseIPv6Groups(s, addr);
+    }
+    // IPv4 dotted-quad
+    family = 2;
+    std::vector<std::string> octs;
+    std::string tok;
+    for (char c : s) {
+        if (c == '.') { octs.push_back(tok); tok.clear(); }
+        else tok.push_back(c);
+    }
+    octs.push_back(tok);
+    if (octs.size() != 4) return false;
+    for (int k = 0; k < 4; ++k) {
+        if (octs[k].empty() || octs[k].size() > 3) return false;
+        for (char c : octs[k]) if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+        int v = std::stoi(octs[k]);
+        if (v > 255) return false;
+        addr[k] = static_cast<uint8_t>(v);
+    }
+    if (prefixVal < 0) prefixVal = 32;
+    if (prefixVal > 32) return false;
+    prefix = static_cast<uint8_t>(prefixVal);
+    return true;
+}
+
+// ========================================================================
 // Bit string (bit / bit varying) helper
 // Storage: the literal '0'/'1' string (variable-length). `declaredLen` carries
 // the declared bit length n (Column::dsize); 0 or 65535 means "no constraint /
@@ -8320,27 +8423,11 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 std::memcpy(&rowBuffer[offset], &x, sizeof(double));
                 std::memcpy(&rowBuffer[offset + sizeof(double)], &y, sizeof(double));
             } else if (col.dataType == "inet" || col.dataType == "cidr") {
-                // Parse IPv4 address with optional prefix: "192.168.1.1" or "192.168.1.0/24"
+                // Parse IPv4 dotted-quad or IPv6 (with ::) plus optional /prefix.
                 uint8_t family = 0, prefix = 32;
                 uint8_t addr[16] = {0};
                 if (!val.empty()) {
-                    std::string addrPart = val;
-                    // Extract prefix if present
-                    size_t slash = addrPart.find('/');
-                    if (slash != std::string::npos) {
-                        try { prefix = static_cast<uint8_t>(std::stoi(addrPart.substr(slash + 1))); }
-                        catch (...) { prefix = 32; }
-                        addrPart = addrPart.substr(0, slash);
-                    }
-                    // Parse IPv4 dotted-decimal
-                    int a = 0, b = 0, c = 0, d = 0;
-                    if (sscanf(addrPart.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
-                        family = 2;  // IPv4
-                        addr[0] = static_cast<uint8_t>(a);
-                        addr[1] = static_cast<uint8_t>(b);
-                        addr[2] = static_cast<uint8_t>(c);
-                        addr[3] = static_cast<uint8_t>(d);
-                    }
+                    parseInetAddr(val, family, prefix, addr);  // validated at INSERT
                 }
                 rowBuffer[offset] = static_cast<char>(family);
                 rowBuffer[offset + 1] = static_cast<char>(prefix);
@@ -8415,21 +8502,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     uint8_t family = 0, prefix = 32;
                     uint8_t addr[16] = {0};
                     if (!val.empty()) {
-                        std::string addrPart = val;
-                        size_t slash = addrPart.find('/');
-                        if (slash != std::string::npos) {
-                            try { prefix = static_cast<uint8_t>(std::stoi(addrPart.substr(slash + 1))); }
-                            catch (...) { prefix = 32; }
-                            addrPart = addrPart.substr(0, slash);
-                        }
-                        int a = 0, b = 0, c = 0, d = 0;
-                        if (sscanf(addrPart.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
-                            family = 2;
-                            addr[0] = static_cast<uint8_t>(a);
-                            addr[1] = static_cast<uint8_t>(b);
-                            addr[2] = static_cast<uint8_t>(c);
-                            addr[3] = static_cast<uint8_t>(d);
-                        }
+                        parseInetAddr(val, family, prefix, addr);  // validated at INSERT
                     }
                     fixedData[fixedOff] = static_cast<char>(family);
                     fixedData[fixedOff + 1] = static_cast<char>(prefix);
@@ -8852,6 +8925,14 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
+        }
+        // Validate inet/cidr address (strict IPv4/IPv6 + prefix range).
+        if ((col.dataType == "inet" || col.dataType == "cidr") && !val.empty()) {
+            uint8_t family = 0, prefix = 0, addr[16];
+            if (!parseInetAddr(val, family, prefix, addr)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
         }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
@@ -10125,6 +10206,12 @@ DBStatus StorageEngine::update(const std::string& dbname,
                         if (!normalizeBytea(kv.second, canon))
                             return DBStatus::INVALID_VALUE;
                         storeVal = canon;
+                    }
+                } else if (col.dataType == "inet" || col.dataType == "cidr") {
+                    if (!kv.second.empty()) {
+                        uint8_t family = 0, prefix = 0, addr[16];
+                        if (!parseInetAddr(kv.second, family, prefix, addr))
+                            return DBStatus::INVALID_VALUE;
                     }
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {
