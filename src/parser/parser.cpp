@@ -3366,10 +3366,23 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
     // CREATE TABLE ... AS SELECT ...
     if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as" && toLower(tokens[pos + 1]) == "select") {
         pos += 2;
-        std::string selectSql = "SELECT";
+        std::vector<std::string> sel;
         while (pos < tokens.size() && tokens[pos] != ";") {
-            selectSql += " " + tokens[pos++];
+            sel.push_back(tokens[pos++]);
         }
+        // Strip trailing WITH [NO] DATA clause (default: WITH DATA).
+        if (sel.size() >= 2 && toLower(sel.back()) == "data") {
+            if (sel.size() >= 3 && toLower(sel[sel.size() - 3]) == "with" &&
+                toLower(sel[sel.size() - 2]) == "no") {
+                stmt->withData = false;
+                sel.resize(sel.size() - 3);
+            } else if (toLower(sel[sel.size() - 2]) == "with") {
+                stmt->withData = true;
+                sel.resize(sel.size() - 2);
+            }
+        }
+        std::string selectSql = "SELECT";
+        for (const auto& t : sel) selectSql += " " + t;
         stmt->asSelect = selectSql;
         return stmt;
     }

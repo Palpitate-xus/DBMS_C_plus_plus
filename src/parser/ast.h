@@ -814,6 +814,7 @@ struct CreateTableStmt : public Stmt {
     std::vector<LikeClause> likeClauses;
     std::vector<SelectItem> partitionBy;       // PARTITION BY ...
     std::string asSelect;                      // CREATE TABLE ... AS SELECT ...
+    bool withData = true;                      // CTAS WITH [NO] DATA (default WITH DATA)
 
     CreateTableStmt() : Stmt(SqlCommand::CreateTable) {}
     std::string toString() const override { return "CREATE TABLE"; }

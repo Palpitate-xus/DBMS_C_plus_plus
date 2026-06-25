@@ -30,6 +30,8 @@
 | 2026-06-25 | Phase 4 Wave 4.26（部分）CREATE TABLE OF type：`executeCreateTable` 消费 `ofType`，按复合类型字段派生表列（解析字段类型字符串建列），缺失类型报错；新增 `tests/create_table_of_test.cpp`。typed table 强绑定与 OF 附加约束仍待后续。 |
 | 2026-06-25 | Phase 4 ALTER TYPE ... ADD/RENAME VALUE（enum）：新增 `StorageEngine::updateEnumType` 重写 `.enums` 标签集合；`handleAlterType` 识别 enum 并支持 `ADD VALUE [IF NOT EXISTS] 'x' [BEFORE/AFTER 'y']` 与 `RENAME VALUE 'a' TO 'b'`；新增 `tests/enum_alter_test.cpp` + 二进制端到端验证。pg_enum ordinal 排序与索引集成仍待后续。 |
 | 2026-06-25 | Phase 4 Wave 4.26（部分）CREATE TABLE (LIKE ...)：新增 `CreateTableStmt::LikeClause` 与 `parseCreateTable` 的括号内/外 `LIKE source [{INCLUDING|EXCLUDING} option]` 解析；`executeCreateTable` 复制源表列（默认列定义+NOT NULL，按 INCLUDING 复制 DEFAULTS/CONSTRAINTS/INDEXES(单列 PK/UNIQUE)/IDENTITY），源表缺失报错；新增 `tests/create_table_like_test.cpp`。复合索引复制、OF type、access method、identity 完整语义仍待后续。 |
+| 2026-06-25 | Phase 4 Wave 4.32 CREATE STATISTICS dependencies 算法：新增 `StorageEngine::computeFunctionalDependencies`（按列对分组取众数计数 / 总行数得函数依赖强度 0~1）；`handleCreateStatistics` 在 `dependencies` kind 输出 `dependency a=>b degree N.NNNNNN`；新增 `tests/functional_deps_test.cpp` + 二进制端到端验证。pg_statistic_ext catalog、ndistinct/mcv、planner 消费仍待后续。 |
+| 2026-06-25 | Phase 4 Wave 4.31（补全）CREATE TABLE AS 列序修复 + WITH [NO] DATA：修复 `executeCreateTableAs` 按 `std::set` 字母序映射列、与 `query` 的 schema 顺序输出错位（导致 `SELECT *` 在非字母序列上复制 0 行）的 bug，改按源表 schema 顺序对齐；`CreateTableStmt::withData` + `parseCreateTable` 剥离尾部 `WITH [NO] DATA`；CTAS 复制时丢弃 PK/identity/default/CHECK；重写 `tests/ctas_test.cpp` 含 `(id,name,age)` 列序回归与 WITH NO DATA。全部 54 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -94,7 +96,7 @@
 | 1.1.26 | `CREATE SEQUENCE` | 有 nextval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics | ⚠️ |
 | 1.1.27 | `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 有扩展统计对象元数据；`dependencies` kind 已落地（`computeFunctionalDependencies` 计算各有序列对函数依赖强度并随 CREATE STATISTICS 输出）；仍缺 `pg_statistic_ext` catalog、表达式统计、ndistinct/mcv 精确算法和 planner 深度使用 | ⚠️ |
 | 1.1.28 | `CREATE TABLE` | 可建表、分区、临时/unlogged、继承等部分；`LIKE source [INCLUDING ...]` 已落地（复制列定义/NOT NULL，按 INCLUDING 复制 DEFAULTS/CONSTRAINTS/INDEXES(单列 PK/UNIQUE)/IDENTITY）；仍缺复合 PK/UNIQUE 与索引结构复制、typed table、`OF type`、access method、tablespace、identity/生成列完整语义 | ⚠️ |
-| 1.1.29 | `CREATE TABLE AS` | 有 CTAS 路径；缺少 PG 选项、`WITH [NO] DATA`、tablespace/access method、精确类型推断 | ⚠️ |
+| 1.1.29 | `CREATE TABLE AS` | 有 CTAS 路径，按源表列精确建表（类型/长度），列序映射已修复，支持 `WITH [NO] DATA`、`SELECT *`/投影/WHERE；缺少 tablespace/access method、表达式列类型推断、含空格 varchar 值的精确复制 | ⚠️ |
 | 1.1.30 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 已支持表空间对象元数据；缺少物理存储路由、权限、依赖检查和 `pg_tblspc` 符号链接语义 | ⚠️ |
 | 1.1.31 | `CREATE TRIGGER` | 支持 before/after/instead of、row/statement、`WHEN`、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime | ⚠️ |
 | 1.1.32 | `CREATE TYPE` | 支持 composite type（`AS (field type, ...)`，经 DDL 桥正确解析含修饰符字段）与 enum（`AS ENUM`）；缺少 PG 的 range/base/shell 类型创建语义 | ⚠️ |

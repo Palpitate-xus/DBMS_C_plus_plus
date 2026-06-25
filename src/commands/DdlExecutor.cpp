@@ -747,20 +747,29 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
     }
 
     auto rows = g_engine.query(s.currentDB, srcTable, conditions, queryCols, {});
+    // StorageEngine::query emits values in SOURCE SCHEMA order (filtered to
+    // queryCols), NOT in the alphabetical order of the queryCols set. Build the
+    // value->column mapping in that same schema order so columns line up.
+    std::vector<std::string> orderedCols;
+    for (size_t i = 0; i < srcTbl.len; ++i) {
+        if (queryCols.count(srcTbl.cols[i].dataName))
+            orderedCols.push_back(srcTbl.cols[i].dataName);
+    }
     size_t inserted = 0;
-    for (const auto& row : rows) {
-        std::map<std::string, std::string> values;
-        std::istringstream iss(row);
-        std::string val;
-        size_t idx = 0;
-        std::vector<std::string> orderedCols(queryCols.begin(), queryCols.end());
-        while (iss >> val && idx < orderedCols.size()) {
-            if (val == "NULL") val = "";
-            values[orderedCols[idx]] = val;
-            ++idx;
+    if (stmt->withData) {
+        for (const auto& row : rows) {
+            std::map<std::string, std::string> values;
+            std::istringstream iss(row);
+            std::string val;
+            size_t idx = 0;
+            while (iss >> val && idx < orderedCols.size()) {
+                if (val == "NULL") val = "";
+                values[orderedCols[idx]] = val;
+                ++idx;
+            }
+            if (idx != orderedCols.size()) continue;
+            if (g_engine.insert(s.currentDB, tname, values) == DBStatus::OK) ++inserted;
         }
-        if (idx != orderedCols.size()) continue;
-        if (g_engine.insert(s.currentDB, tname, values) == DBStatus::OK) ++inserted;
     }
 
     std::cout << "CREATE TABLE AS succeeded: " << inserted << " rows" << std::endl;
