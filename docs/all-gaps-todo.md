@@ -39,6 +39,7 @@
 | 2026-06-25 | Phase 4 Wave 4.11 UUID 输入严格校验与规范化：新增 `normalizeUuid`（去花括号、忽略连字符、要求 32 位十六进制、输出小写 8-4-4-4-12）；INSERT 校验拒绝非法 UUID 并规范化，修复 UPDATE 路径此前对 uuid 列走整数回退导致 `INVALID_VALUE` 的 bug（新增 uuid 分支校验+规范化）；新增 `tests/uuid_test.cpp`（连字符/无连字符/花括号/大写四种输入规范化、坏字符/长度拒绝、UPDATE）+ 二进制端到端验证。全部 58 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.4 bytea 输入输出 escape/hex：新增 `normalizeBytea`（解析 `\xDEADBEEF` 十六进制与 escape 格式 `\\`/`\ooo` 八进制及字面字节，输出规范小写 `\xhh..`）；INSERT/UPDATE 校验拒绝非法 bytea（奇数十六进制位/非法转义 → `INVALID_VALUE`）并规范化；新增 `tests/bytea_test.cpp`（hex 大写规范化/空载荷/奇数位拒绝、escape 字面/八进制/双反斜杠、UPDATE）+ 二进制端到端验证。全部 59 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.8b inet/cidr 严格地址校验 + IPv6 存储：新增 `parseInetAddr`/`parseIPv6Groups`（严格 IPv4 八位组 0-255、IPv6 含 `::` 零压缩、前缀范围 0-32/0-128），替换原仅 IPv4 且 `sscanf` 不校验越界八位组、IPv6 静默丢弃为 family 0 的编码逻辑（两条 `buildRowBuffer` 路径）；INSERT 校验拒绝非法地址，修复 UPDATE 路径此前 inet/cidr 走整数回退被拒的 bug；新增 `tests/inet_test.cpp`（IPv4/IPv6 往返、越界/格式错误拒绝、UPDATE）+ 二进制端到端验证。另：将 `tests/background_worker_test.cpp` 的固定 500ms 睡眠改为轮询重试（消除批量负载下 checkpoint 计时假阳性）。全部 60 个测试通过。 |
+| 2026-06-25 | Phase 4 Wave 4.16 范围类型校验与 canonicalization：新增 `normalizeRange`（解析 `empty` 与 `[/(` 下界 `,` 上界 `]/)` 文法、按元素类型解析边界、强制下界 ≤ 上界、离散整数范围折叠为 `[)`、无限边界规范化为排他括号、退化范围折叠为 `empty`、引号保护含逗号/空格的边界）；INSERT/UPDATE 拒绝非法范围并规范化；新增 `tests/range_test.cpp`（int4range 离散折叠、无限边界、numrange/daterange、非法/下界>上界拒绝、UPDATE）+ 二进制端到端验证。全部 61 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -173,7 +174,7 @@
 | 2.14 | JSON/JSONB | 有 JSON 校验和少量函数；缺少 jsonpath、SQL/JSON query functions、`JSON_TABLE`、完整操作符、GIN opclass | ⚠️ |
 | 2.15 | 数组 | 有 `INT[]`/`VARCHAR[]` 痕迹和 array_get/contains 简化；缺少多维数组、切片、unnest/array functions、ANY/ALL 完整语义 | ⚠️ |
 | 2.16 | Composite | `CREATE TYPE AS (...)` 存字段，并可通过 `ALTER TYPE` 更新 composite 名称和属性；缺少 row constructor、字段访问、嵌套、函数参数/返回、catalog 语义 | ⚠️ |
-| 2.17 | Range/Multirange | `int4range`、`int8range`、`numrange`、`tsrange`、`tstzrange`、`daterange` 及 multirange 名称已可作为字符串型列存取；缺少范围 canonicalization、约束、operators、函数和 GiST/SP-GiST opclass | ⚠️ |
+| 2.17 | Range/Multirange | `int4range`/`int8range`/`numrange`/`tsrange`/`tstzrange`/`daterange` 已实现字面量校验（语法/边界排序/空范围）、离散整数范围 `[)` canonicalization、无限边界规范化为排他、`empty` 折叠（`tests/range_test.cpp`）；仍缺 multirange 字面量、范围 operators/函数、daterange 离散折叠、GiST/SP-GiST opclass | ⚠️ |
 | 2.18 | Domain | 有 base/default/check 文件并可通过 `ALTER DOMAIN` 更新 rename/default/单 check constraint；缺少多 constraint validation、依赖、权限、数组自动类型 | ⚠️ |
 | 2.19 | Object Identifier | `oid`、`regclass`、`regproc`、`regtype`、`xid`、`cid` 等名称已可作为字符串型列存取；缺少 OID catalog 绑定、别名解析、依赖和系统函数语义 | ⚠️ |
 | 2.20 | `pg_lsn` | 有列类型，但没有真实 WAL LSN 系统，因而不能承担 PG `pg_lsn` 语义 | ⚠️ |

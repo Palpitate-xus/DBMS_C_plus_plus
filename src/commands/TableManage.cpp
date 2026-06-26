@@ -4231,6 +4231,95 @@ static bool normalizeGeometry(const std::string& in, const std::string& type, st
     return true;
 }
 
+// ========================================================================
+// Range types (int4range / int8range / numrange / tsrange / tstzrange /
+// daterange). Stored as canonical PG text. Validates the literal grammar
+// (`empty` or `[/(` lower `,` upper `]/)` with optional infinite bounds),
+// parses bounds per element type, enforces lower <= upper, and canonicalizes:
+// infinite bounds become exclusive; discrete integer ranges fold to `[)` form;
+// degenerate ranges become `empty`.
+// ========================================================================
+static bool isRangeType(const std::string& dt) {
+    return dt == "int4range" || dt == "int8range" || dt == "numrange" ||
+           dt == "tsrange" || dt == "tstzrange" || dt == "daterange";
+}
+
+static bool normalizeRange(const std::string& in, const std::string& type, std::string& out) {
+    std::string s = trim(in);
+    if (s.size() == 5) {
+        std::string lc;
+        for (char c : s) lc += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lc == "empty") { out = "empty"; return true; }
+    }
+    if (s.size() < 3) return false;
+    char lb = s.front(), ub = s.back();
+    if ((lb != '[' && lb != '(') || (ub != ']' && ub != ')')) return false;
+    std::string body = s.substr(1, s.size() - 2);
+
+    // Split at the top-level comma (quotes protect commas inside bounds).
+    size_t commaPos = std::string::npos;
+    bool inq = false;
+    for (size_t i = 0; i < body.size(); ++i) {
+        if (body[i] == '"') inq = !inq;
+        else if (!inq && body[i] == ',') { commaPos = i; break; }
+    }
+    if (commaPos == std::string::npos) return false;
+    auto unq = [](std::string v) -> std::string {
+        v = trim(v);
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+        return v;
+    };
+    std::string lo = unq(body.substr(0, commaPos));
+    std::string hi = unq(body.substr(commaPos + 1));
+    bool loInf = lo.empty(), hiInf = hi.empty();
+
+    double loV = 0, hiV = 0;
+    int64_t loI = 0, hiI = 0;
+    bool discrete = (type == "int4range" || type == "int8range");
+    auto parseBound = [&](const std::string& b, double& dv, int64_t& iv) -> bool {
+        if (discrete) {
+            try { size_t p = 0; long long v = std::stoll(b, &p); if (p != b.size()) return false;
+                  iv = v; dv = static_cast<double>(v); return true; }
+            catch (...) { return false; }
+        } else if (type == "numrange") {
+            try { size_t p = 0; double v = std::stod(b, &p); if (p != b.size()) return false;
+                  dv = v; return true; }
+            catch (...) { return false; }
+        } else if (type == "daterange") {
+            Date d(b.c_str()); if (d.year == 0) return false; dv = static_cast<double>(d.convert()); return true;
+        }
+        int64_t v = parseTimestampToSeconds(b); if (v == 0) return false; dv = static_cast<double>(v); return true;
+    };
+    if (!loInf && !parseBound(lo, loV, loI)) return false;
+    if (!hiInf && !parseBound(hi, hiV, hiI)) return false;
+
+    // Discrete integer ranges canonicalize to inclusive-lower / exclusive-upper.
+    if (discrete) {
+        if (!loInf) { if (lb == '(') loI += 1; lb = '['; loV = static_cast<double>(loI); }
+        if (!hiInf) { if (ub == ']') hiI += 1; ub = ')'; hiV = static_cast<double>(hiI); }
+    }
+    if (loInf) lb = '(';   // infinite bounds are always exclusive
+    if (hiInf) ub = ')';
+
+    if (!loInf && !hiInf) {
+        if (loV > hiV) return false;  // lower must not exceed upper
+        if (loV == hiV) {
+            bool bothInclusive = (lb == '[' && ub == ']');
+            if (!bothInclusive) { out = "empty"; return true; }
+        }
+    }
+
+    auto emit = [](const std::string& b) -> std::string {
+        if (b.empty()) return "";
+        if (b.find_first_of(" ,") != std::string::npos) return "\"" + b + "\"";
+        return b;
+    };
+    std::string loStr = loInf ? "" : (discrete ? std::to_string(loI) : emit(lo));
+    std::string hiStr = hiInf ? "" : (discrete ? std::to_string(hiI) : emit(hi));
+    out = std::string(1, lb) + loStr + "," + hiStr + std::string(1, ub);
+    return true;
+}
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -8934,6 +9023,16 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
+        // Validate / canonicalize range types (grammar, bound ordering,
+        // discrete [) folding, empty detection).
+        if (isRangeType(col.dataType) && !val.empty()) {
+            std::string canon;
+            if (!normalizeRange(val, col.dataType, canon)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualValues[col.dataName] = canon;
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -10212,6 +10311,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
                         uint8_t family = 0, prefix = 0, addr[16];
                         if (!parseInetAddr(kv.second, family, prefix, addr))
                             return DBStatus::INVALID_VALUE;
+                    }
+                } else if (isRangeType(col.dataType)) {
+                    if (!kv.second.empty()) {
+                        std::string canon;
+                        if (!normalizeRange(kv.second, col.dataType, canon))
+                            return DBStatus::INVALID_VALUE;
+                        storeVal = canon;
                     }
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {
