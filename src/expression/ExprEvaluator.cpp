@@ -852,6 +852,83 @@ static std::string arrayElemQuote(const std::string& v) {
     return out;
 }
 
+// JSON value text -> normalized type name ('object'/'array'/'string'/'number'/
+// 'boolean'/'null'); empty string for unrecognized input.
+static std::string jsonTypeOf(const std::string& s) {
+    std::string t = trimStr(s);
+    if (t.empty()) return "";
+    char c = t[0];
+    if (c == '{') return "object";
+    if (c == '[') return "array";
+    if (c == '"') return "string";
+    if (c == 't' || c == 'f') return "boolean";
+    if (c == 'n') return "null";
+    if (c == '-' || (c >= '0' && c <= '9')) return "number";
+    return "";
+}
+
+// Split a JSON array/object body into top-level element strings, respecting
+// nested {}/[] and "" quoting. open/close are the delimiter braces.
+static bool jsonTopLevelSplit(const std::string& s, char open, char close,
+                              std::vector<std::string>& out) {
+    out.clear();
+    std::string t = trimStr(s);
+    if (t.size() < 2 || t.front() != open || t.back() != close) return false;
+    std::string inner = t.substr(1, t.size() - 2);
+    if (trimStr(inner).empty()) return true;
+    int depth = 0;
+    bool inQ = false;
+    std::string cur;
+    for (size_t i = 0; i < inner.size(); ++i) {
+        char c = inner[i];
+        if (inQ) {
+            cur.push_back(c);
+            if (c == '\\' && i + 1 < inner.size()) cur.push_back(inner[++i]);
+            else if (c == '"') inQ = false;
+        } else if (c == '"') {
+            inQ = true; cur.push_back(c);
+        } else if (c == '{' || c == '[') {
+            ++depth; cur.push_back(c);
+        } else if (c == '}' || c == ']') {
+            --depth; cur.push_back(c);
+        } else if (c == ',' && depth == 0) {
+            out.push_back(trimStr(cur)); cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    out.push_back(trimStr(cur));
+    return true;
+}
+
+static std::string jsonQuoteStr(const std::string& v) {
+    std::string out = "\"";
+    for (char c : v) {
+        if (c == '"' || c == '\\') out.push_back('\\');
+        out.push_back(c);
+    }
+    out += "\"";
+    return out;
+}
+
+// Render an ExprValue as a compact JSON value.
+static std::string toJsonValue(const ExprValue& v) {
+    if (v.isNull) return "null";
+    std::string t = v.typeName;
+    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (t == "boolean" || t == "bool") {
+        std::string lv = v.value;
+        for (char& c : lv) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return (lv == "t" || lv == "true" || lv == "1") ? "true" : "false";
+    }
+    bool numeric = (t.find("int") != std::string::npos) || t == "numeric" || t == "decimal" ||
+                   t.find("double") != std::string::npos || t == "real" || t == "float" ||
+                   t == "smallint" || t == "bigint";
+    if (numeric && !v.value.empty()) return v.value;
+    if (t == "json" || t == "jsonb") return v.value;  // already JSON
+    return jsonQuoteStr(v.value);
+}
+
 void ExprEvaluator::registerBuiltins() {
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
@@ -1616,6 +1693,66 @@ void ExprEvaluator::registerBuiltins() {
         out += "}";
         return ExprValue("ARRAY", out, false);
     };
+
+    // ------------------------------------------------------------------------
+    // JSON functions (operate on JSON value text)
+    // ------------------------------------------------------------------------
+    auto jsonTypeofFn = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        std::string t = jsonTypeOf(a[0].value);
+        if (t.empty()) return ExprValue("text", "", true);
+        return ExprValue("text", t, false);
+    };
+    functions_["json_typeof"] = jsonTypeofFn;
+    functions_["jsonb_typeof"] = jsonTypeofFn;
+
+    auto jsonArrayLenFn = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        std::vector<std::string> elems;
+        if (!jsonTopLevelSplit(a[0].value, '[', ']', elems))
+            return ExprValue("integer", "", true);  // not a JSON array
+        return ExprValue("integer", std::to_string(elems.size()), false);
+    };
+    functions_["json_array_length"] = jsonArrayLenFn;
+    functions_["jsonb_array_length"] = jsonArrayLenFn;
+
+    // json_build_array(VARIADIC) -> compact JSON array
+    auto jsonBuildArrayFn = [](const std::vector<ExprValue>& a) {
+        std::string out = "[";
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (i) out += ",";
+            out += toJsonValue(a[i]);
+        }
+        out += "]";
+        return ExprValue("json", out, false);
+    };
+    functions_["json_build_array"] = jsonBuildArrayFn;
+    functions_["jsonb_build_array"] = jsonBuildArrayFn;
+
+    // json_build_object(k1, v1, ...) -> compact JSON object (keys coerced to text)
+    auto jsonBuildObjectFn = [](const std::vector<ExprValue>& a) {
+        std::string out = "{";
+        bool first = true;
+        for (size_t i = 0; i + 1 < a.size(); i += 2) {
+            if (!first) out += ",";
+            out += jsonQuoteStr(a[i].isNull ? "" : a[i].value);
+            out += ":";
+            out += toJsonValue(a[i + 1]);
+            first = false;
+        }
+        out += "}";
+        return ExprValue("json", out, false);
+    };
+    functions_["json_build_object"] = jsonBuildObjectFn;
+    functions_["jsonb_build_object"] = jsonBuildObjectFn;
+
+    // to_json / to_jsonb -> JSON representation of the argument
+    auto toJsonFn = [](const std::vector<ExprValue>& a) {
+        if (a.empty()) return ExprValue("json", "null", false);
+        return ExprValue("json", toJsonValue(a[0]), false);
+    };
+    functions_["to_json"] = toJsonFn;
+    functions_["to_jsonb"] = toJsonFn;
 
     // ------------------------------------------------------------------------
     // Date/time functions
