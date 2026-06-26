@@ -9864,6 +9864,22 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         if (op == "rename") {
+            if (tokens.size() >= 7 && tokens[3] == "constraint" && tokens[5] == "to") {
+                // alter table tname rename constraint old_name to new_name
+                string oldName = tokens[4];
+                string newName = tokens[6];
+                auto res = g_engine.alterTableRenameConstraint(s.currentDB, tname, oldName, newName);
+                if (res == DBStatus::INVALID_VALUE) {
+                    cout << "Constraint not found" << endl;
+                    return true;
+                }
+                if (res == DBStatus::TABLE_ALREADY_EXISTS) {
+                    cout << "Constraint name already exists" << endl;
+                    return true;
+                }
+                cout << "Constraint renamed" << endl;
+                return false;
+            }
             if (tokens.size() >= 5 && tokens[3] == "column" && tokens[5] == "to") {
                 // alter table tname rename column old_name to new_name
                 string oldName = tokens[4];

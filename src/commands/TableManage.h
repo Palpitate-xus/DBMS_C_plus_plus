@@ -130,6 +130,8 @@ public:
                                      const std::string& oldName, const std::string& newName);
     DBStatus alterTableRenameTable(const std::string& dbname, const std::string& oldName,
                                     const std::string& newName);
+    DBStatus alterTableRenameConstraint(const std::string& dbname, const std::string& tablename,
+                                         const std::string& oldName, const std::string& newName);
     DBStatus alterTableSetDefault(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName, const std::string& defaultValue);
     DBStatus alterTableDropDefault(const std::string& dbname, const std::string& tablename,

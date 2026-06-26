@@ -8408,6 +8408,64 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
+                                                    const std::string& tablename,
+                                                    const std::string& oldName,
+                                                    const std::string& newName) {
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (oldName == newName) return DBStatus::OK;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    // Reject if the new name already names a constraint.
+    auto nameInUse = [&](const std::string& n) {
+        for (size_t i = 0; i < tbl.len; ++i)
+            if (tbl.cols[i].checkConstraintName == n) return true;
+        for (const auto& un : tbl.uniqueConstraintNames)
+            if (un == n) return true;
+        for (size_t i = 0; i < tbl.fkLen; ++i)
+            if (tbl.fks[i].name == n) return true;
+        return false;
+    };
+    if (nameInUse(newName)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::TABLE_ALREADY_EXISTS;
+    }
+
+    bool found = false;
+    for (size_t i = 0; i < tbl.len && !found; ++i) {
+        if (tbl.cols[i].checkConstraintName == oldName) {
+            tbl.cols[i].checkConstraintName = newName;
+            found = true;
+        }
+    }
+    for (size_t i = 0; i < tbl.uniqueConstraintNames.size() && !found; ++i) {
+        if (tbl.uniqueConstraintNames[i] == oldName) {
+            tbl.uniqueConstraintNames[i] = newName;
+            found = true;
+        }
+    }
+    for (size_t i = 0; i < tbl.fkLen && !found; ++i) {
+        if (tbl.fks[i].name == oldName) {
+            tbl.fks[i].name = newName;
+            found = true;
+        }
+    }
+    if (!found) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    invalidateCatalogSchema(dbname, tablename);
+    lockManager_.unlock(tablename);
+    return DBStatus::OK;
+}
+
 static std::filesystem::path commentsPath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".comments";
 }
