@@ -8185,6 +8185,98 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
+                                                const std::string& tablename,
+                                                const std::string& name,
+                                                const std::vector<std::string>& colNames) {
+    (void)name;  // PK constraint name is not separately persisted
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+
+    // A table may have at most one primary key.
+    bool hasPk = !tbl.pkColIndices.empty();
+    for (size_t i = 0; i < tbl.len && !hasPk; ++i)
+        if (tbl.cols[i].isPrimaryKey) hasPk = true;
+    if (hasPk) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;  // multiple primary keys not allowed
+    }
+
+    // Resolve the named columns to indices.
+    std::vector<size_t> colIndices;
+    for (const auto& cname : colNames) {
+        bool found = false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == cname) { colIndices.push_back(i); found = true; break; }
+        }
+        if (!found) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    if (colIndices.empty()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
+    // Validate existing data: every PK column must be non-NULL and the tuple of
+    // PK columns must be unique across all rows.
+    std::set<std::string> seen;
+    bool violation = false;
+    forEachRow(dbname, tablename,
+               [&](uint32_t, uint16_t, const char* data, size_t len) {
+                   if (violation) return;
+                   std::string row(data, len);
+                   std::string key;
+                   for (size_t ci : colIndices) {
+                       std::string v = extractColumnValue(row, tbl, ci);
+                       if (v.empty()) { violation = true; return; }  // NULL in PK column
+                       key += v;
+                       key += '\x01';
+                   }
+                   if (!seen.insert(key).second) violation = true;  // duplicate key
+               });
+    if (violation) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;  // existing data violates the primary key
+    }
+
+    // Record the primary key: composite indices plus per-column flags.
+    tbl.pkColIndices = colIndices;
+    for (size_t ci : colIndices) {
+        tbl.cols[ci].isPrimaryKey = true;
+        tbl.cols[ci].isNull = false;  // PK columns are implicitly NOT NULL
+    }
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+
+    // Build the physical PK index and populate it from existing rows so that
+    // insert-time uniqueness enforcement (which consults this index) works.
+    {
+        std::string pkKey = dbname + "/" + tablename;
+        auto cit = pkIndexCache_.find(pkKey);
+        if (cit != pkIndexCache_.end()) { cit->second->close(); pkIndexCache_.erase(cit); }
+        std::filesystem::remove(indexPath(dbname, tablename));
+        BPTree* pkIdx = getPKIndex(dbname, tablename);
+        if (pkIdx) {
+            forEachRow(dbname, tablename,
+                       [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+                           std::string row(data, len);
+                           std::string pkVal = tbl.buildPKValue(row);
+                           if (!pkVal.empty()) pkIdx->insert(pkVal, encodeRid(pageId, slotId));
+                       });
+        }
+    }
+    invalidateCatalogSchema(dbname, tablename);
+    lockManager_.unlock(tablename);
+    return DBStatus::OK;
+}
+
+
 DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
                                                      const std::string& tablename,
                                                      const std::string& name,

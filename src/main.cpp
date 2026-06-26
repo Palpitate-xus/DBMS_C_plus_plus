@@ -10004,6 +10004,39 @@ bool execute(const string& rawSql, Session& s) {
                     return false;
                 }
             }
+            // PRIMARY KEY constraint
+            size_t pkPos = findTopLevelKeyword(sql, "primary key");
+            if (pkPos != string::npos) {
+                size_t lp = sql.find('(', pkPos);
+                size_t rp = sql.find(')', lp);
+                if (lp != string::npos && rp != string::npos) {
+                    string colsStr = trim(sql.substr(lp + 1, rp - lp - 1));
+                    vector<string> cols;
+                    stringstream css(colsStr);
+                    string c;
+                    while (getline(css, c, ',')) {
+                        c = trim(c);
+                        if (!c.empty()) cols.push_back(c);
+                    }
+                    auto res = g_engine.alterTableAddPrimaryKey(s.currentDB, tname, constrName, cols);
+                    if (res == DBStatus::TABLE_NOT_FOUND) {
+                        cout << "Table not found" << endl;
+                        return true;
+                    }
+                    if (res == DBStatus::INVALID_VALUE) {
+                        cout << "Cannot add primary key: column not found, "
+                                "duplicate/NULL values, or table already has a primary key" << endl;
+                        return true;
+                    }
+                    ConstraintCompatFlags flags = parseConstraintFlags(sql, "primary key");
+                    if (!recordConstraintCompat(s.currentDB, tname, constrName, "primary key", sql, s.username, flags)) {
+                        cout << "Constraint metadata save failed" << endl;
+                        return true;
+                    }
+                    cout << "Primary key added" << endl;
+                    return false;
+                }
+            }
             // UNIQUE constraint
             size_t uniquePos = findTopLevelKeyword(sql, "unique");
             if (uniquePos != string::npos) {

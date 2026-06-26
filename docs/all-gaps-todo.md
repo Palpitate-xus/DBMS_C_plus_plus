@@ -55,6 +55,7 @@
 | 2026-06-26 | Phase 4 Wave 4.19g 正则函数：基于 `std::regex`（ECMAScript）新增 `regexp_replace`（g/i 标志、PG `\1`/`\&` 反向引用转 `$1`/`$&`）、`regexp_match`（捕获组数组/无组整段/无匹配 NULL）、`regexp_split_to_array`、`regexp_count(start)`、`regexp_substr(start,N)`；附 `buildRegex`/`translateReplacement`。新增 `tests/regexp_functions_test.cpp`（经 RowContext 列引用注入，避免字面量层改写反斜杠）。全部 74 个测试通过。POSIX 精确语义/集合返回变体/`regexp_instr`/命名捕获仍待后续。 |
 | 2026-06-26 | Phase 4 Wave 4.19h 范围函数：`lower`/`upper` 按参数 typeName 含 `range` 重载为范围下/上界提取（无限/empty→NULL），非范围参数保持字符串大小写折叠；新增 `isempty`/`lower_inc`/`upper_inc`/`lower_inf`/`upper_inf`，基于 `parseRangeLiteral`/`typeIsRange`。新增 `tests/range_functions_test.cpp`（边界/无限/empty、文本 lower/upper 保留、五谓词）。全部 75 个测试通过。range 运算符/`range_merge`/multirange 仍待后续。 |
 | 2026-06-26 | Phase 4 Wave 4.19i format() 与空值合并：新增 `format(fmtstr,...)`（`%s`/`%I`/`%L`/`%%`，%L NULL→NULL、%s NULL→空串）；抽出 `sqlQuoteIdent`/`sqlQuoteLiteral` 供 quote_ident/quote_literal/format 共用；新增 `nvl`/`ifnull`（2 参空值合并）。新增 `tests/format_functions_test.cpp`。全部 76 个测试通过。`format` 位置参数/宽度修饰、`to_char`/`to_number` 仍待后续。 |
+| 2026-06-26 | Phase 4 Wave 4.27a ALTER TABLE ADD PRIMARY KEY：新增 `StorageEngine::alterTableAddPrimaryKey`（列名解析、拒绝重复 PK/未知列、扫描既有行校验非 NULL+元组唯一、写入 pkColIndices/isPrimaryKey、重建物理 PK B+ 树索引并回填）；`main.cpp` ADD CONSTRAINT 新增 `PRIMARY KEY (cols)` 分支（UNIQUE 前检测）。新增 `tests/alter_add_pk_test.cpp`（成功+强制、重复/NULL/已有 PK/未知列/缺表拒绝、复合 PK）+ 二进制端到端验证。全部 77 个测试通过。ALTER COLUMN TYPE/IF EXISTS 守卫/OWNER TO 等子命令仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -94,7 +95,7 @@
 | 1.1.1 | `ALTER DEFAULT PRIVILEGES` | 只解析 `GRANT` 路径；缺少完整 `REVOKE`、对象类型、角色继承、schema/default ACL 语义 | ⚠️ |
 | 1.1.2 | `ALTER SCHEMA` | 主要支持 `RENAME TO`；缺少 owner、权限、依赖重写 | ⚠️ |
 | 1.1.3 | `ALTER SYSTEM` | 只写项目 `dbms.conf` 中有限参数；不是 PG GUC 体系 | ⚠️ |
-| 1.1.4 | `ALTER TABLE` | 仍缺 PG 全量子命令、`IF EXISTS`、`ONLY`、`INHERIT`、`OWNER`、`TABLESPACE`、`REPLICA IDENTITY`、统计目标、触发器状态全集和真正延迟约束队列 | ⚠️ |
+| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP/RENAME COLUMN、SET/DROP DEFAULT/NOT NULL、ADD CONSTRAINT(CHECK/UNIQUE/FK/PRIMARY KEY，PK 含既有数据校验+索引重建)、DROP CONSTRAINT、TRIGGER/RLS/SET SCHEMA/分区；仍缺 ALTER COLUMN TYPE、`IF EXISTS`、`ONLY`、`INHERIT`、`OWNER`、`TABLESPACE`、`REPLICA IDENTITY`、统计目标、真正延迟约束队列 | ⚠️ |
 | 1.1.5 | `ALTER USER` / `ALTER ROLE` | 缺少真实 superuser/createdb/replication/bypassrls 权限位、连接限制、valid until、配置参数执行语义 | ⚠️ |
 | 1.1.6 | `ALTER VIEW` | 缺少 owner、options、column default、安全屏障、security invoker | ⚠️ |
 | 1.1.7 | `ANALYZE` | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、`VERBOSE` 输出、系统统计视图集成 | ⚠️ |

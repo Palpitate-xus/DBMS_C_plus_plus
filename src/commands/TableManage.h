@@ -142,6 +142,8 @@ public:
                                            const std::string& name, const std::string& expr);
     DBStatus alterTableAddUniqueConstraint(const std::string& dbname, const std::string& tablename,
                                             const std::string& name, const std::vector<std::string>& colNames);
+    DBStatus alterTableAddPrimaryKey(const std::string& dbname, const std::string& tablename,
+                                      const std::string& name, const std::vector<std::string>& colNames);
     DBStatus alterTableAddFKConstraint(const std::string& dbname, const std::string& tablename,
                                         const std::string& name, const std::vector<std::string>& localCols,
                                         const std::string& refTable, const std::vector<std::string>& refCols,
