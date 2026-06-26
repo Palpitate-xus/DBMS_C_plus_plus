@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <iterator>
+#include <regex>
 #include <sstream>
 
 namespace dbms {
@@ -929,6 +931,46 @@ static std::string toJsonValue(const ExprValue& v) {
     return jsonQuoteStr(v.value);
 }
 
+// Build a std::regex from a PostgreSQL-style pattern + flags ('i' case-insensitive,
+// 'g' handled by the caller). Uses ECMAScript syntax (close to POSIX ERE for
+// common patterns). Sets ok=false on a malformed pattern.
+static std::regex buildRegex(const std::string& pattern, const std::string& flags, bool& ok) {
+    auto f = std::regex::ECMAScript;
+    for (char c : flags) {
+        if (c == 'i') f |= std::regex::icase;
+        else if (c == 'm') f |= std::regex::multiline;
+    }
+    ok = true;
+    try {
+        return std::regex(pattern, f);
+    } catch (...) {
+        ok = false;
+        return std::regex();
+    }
+}
+
+// Translate a PostgreSQL replacement string (\1..\9 backrefs, \& whole match,
+// \\ literal backslash) into the std::regex_replace ($1, $&) form, escaping any
+// literal '$'.
+static std::string translateReplacement(const std::string& repl) {
+    std::string out;
+    for (size_t i = 0; i < repl.size(); ++i) {
+        char c = repl[i];
+        if (c == '\\' && i + 1 < repl.size()) {
+            char n = repl[i + 1];
+            if (n >= '0' && n <= '9') { out.push_back('$'); out.push_back(n); ++i; }
+            else if (n == '&') { out += "$&"; ++i; }
+            else if (n == '\\') { out.push_back('\\'); ++i; }
+            else { out.push_back(n); ++i; }
+        } else if (c == '$') {
+            out += "$$";  // escape literal $ for std::regex_replace
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
 void ExprEvaluator::registerBuiltins() {
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
@@ -1753,6 +1795,122 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["to_json"] = toJsonFn;
     functions_["to_jsonb"] = toJsonFn;
+
+    // ------------------------------------------------------------------------
+    // Regular expression functions (std::regex, ECMAScript dialect)
+    // ------------------------------------------------------------------------
+    // regexp_replace(source, pattern, replacement [, flags]) — 'g' = replace all
+    functions_["regexp_replace"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("text", "", true);
+        std::string flags = (a.size() >= 4 && !a[3].isNull) ? a[3].value : "";
+        bool ok;
+        std::regex re = buildRegex(a[1].value, flags, ok);
+        if (!ok) return ExprValue("text", "", true);
+        std::string repl = translateReplacement(a[2].value);
+        auto fmtFlags = (flags.find('g') != std::string::npos)
+                            ? std::regex_constants::format_default
+                            : std::regex_constants::format_first_only;
+        try {
+            return ExprValue("text", std::regex_replace(a[0].value, re, repl, fmtFlags), false);
+        } catch (...) {
+            return ExprValue("text", "", true);
+        }
+    };
+    // regexp_match(string, pattern [, flags]) — capture groups of first match as
+    // a text array; whole match if the pattern has no groups; NULL if no match
+    functions_["regexp_match"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("ARRAY", "", true);
+        std::string flags = (a.size() >= 3 && !a[2].isNull) ? a[2].value : "";
+        bool ok;
+        std::regex re = buildRegex(a[1].value, flags, ok);
+        if (!ok) return ExprValue("ARRAY", "", true);
+        std::smatch m;
+        if (!std::regex_search(a[0].value, m, re)) return ExprValue("ARRAY", "", true);  // NULL
+        std::string out = "{";
+        if (m.size() <= 1) {
+            out += arrayElemQuote(m[0].str());
+        } else {
+            for (size_t i = 1; i < m.size(); ++i) {
+                if (i > 1) out += ",";
+                out += m[i].matched ? arrayElemQuote(m[i].str()) : "NULL";
+            }
+        }
+        out += "}";
+        return ExprValue("ARRAY", out, false);
+    };
+    // regexp_split_to_array(string, pattern [, flags]) -> array of the parts
+    functions_["regexp_split_to_array"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("ARRAY", "", true);
+        std::string flags = (a.size() >= 3 && !a[2].isNull) ? a[2].value : "";
+        bool ok;
+        std::regex re = buildRegex(a[1].value, flags, ok);
+        if (!ok) return ExprValue("ARRAY", "", true);
+        const std::string& s = a[0].value;
+        std::string out = "{";
+        bool first = true;
+        try {
+            std::sregex_token_iterator it(s.begin(), s.end(), re, -1), end;
+            for (; it != end; ++it) {
+                if (!first) out += ",";
+                out += arrayElemQuote(*it);
+                first = false;
+            }
+        } catch (...) {
+            return ExprValue("ARRAY", "", true);
+        }
+        out += "}";
+        return ExprValue("ARRAY", out, false);
+    };
+    // regexp_count(string, pattern [, start [, flags]]) -> number of matches
+    functions_["regexp_count"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("integer", "", true);
+        std::string flags = (a.size() >= 4 && !a[3].isNull) ? a[3].value : "";
+        bool ok;
+        std::regex re = buildRegex(a[1].value, flags, ok);
+        if (!ok) return ExprValue("integer", "", true);
+        const std::string& s = a[0].value;
+        size_t start = 0;
+        if (a.size() >= 3 && !a[2].isNull) {
+            int64_t st = a[2].asInt();
+            if (st > 1) start = std::min(static_cast<size_t>(st - 1), s.size());
+        }
+        std::string sub = s.substr(start);
+        try {
+            auto b = std::sregex_iterator(sub.begin(), sub.end(), re);
+            auto e = std::sregex_iterator();
+            return ExprValue("integer", std::to_string(std::distance(b, e)), false);
+        } catch (...) {
+            return ExprValue("integer", "", true);
+        }
+    };
+    // regexp_substr(string, pattern [, start [, N [, flags]]]) -> N-th match substring
+    functions_["regexp_substr"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        std::string flags = (a.size() >= 5 && !a[4].isNull) ? a[4].value : "";
+        bool ok;
+        std::regex re = buildRegex(a[1].value, flags, ok);
+        if (!ok) return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        size_t start = 0;
+        if (a.size() >= 3 && !a[2].isNull) {
+            int64_t st = a[2].asInt();
+            if (st > 1) start = std::min(static_cast<size_t>(st - 1), s.size());
+        }
+        int64_t which = (a.size() >= 4 && !a[3].isNull) ? a[3].asInt() : 1;
+        if (which < 1) which = 1;
+        std::string sub = s.substr(start);
+        try {
+            auto it = std::sregex_iterator(sub.begin(), sub.end(), re);
+            auto e = std::sregex_iterator();
+            int64_t idx = 1;
+            for (; it != e; ++it, ++idx)
+                if (idx == which) return ExprValue("text", it->str(), false);
+        } catch (...) {
+            return ExprValue("text", "", true);
+        }
+        return ExprValue("text", "", true);  // no match -> NULL
+    };
 
     // ------------------------------------------------------------------------
     // Date/time functions
