@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -1167,22 +1168,152 @@ void ExprEvaluator::registerBuiltins() {
     functions_["current_date"] = [](const std::vector<ExprValue>&) {
         return ExprValue("date", "2026-06-20", false);
     };
-    functions_["extract"] = [](const std::vector<ExprValue>& a) {
+    // Reference "current" timestamps — fixed within a session like now(), so
+    // expression evaluation stays deterministic.
+    functions_["current_timestamp"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("timestamp with time zone", "2026-06-20 12:00:00", false);
+    };
+    functions_["localtimestamp"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("timestamp", "2026-06-20 12:00:00", false);
+    };
+    functions_["transaction_timestamp"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("timestamp with time zone", "2026-06-20 12:00:00", false);
+    };
+    functions_["statement_timestamp"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("timestamp with time zone", "2026-06-20 12:00:00", false);
+    };
+    functions_["clock_timestamp"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("timestamp with time zone", "2026-06-20 12:00:00", false);
+    };
+    functions_["current_time"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("time with time zone", "12:00:00", false);
+    };
+    functions_["localtime"] = [](const std::vector<ExprValue>&) {
+        return ExprValue("time", "12:00:00", false);
+    };
+
+    // Shared field extractor for extract() / date_part(); src is an ISO date or
+    // timestamp 'YYYY-MM-DD[ HH:MM:SS]'.
+    auto extractImpl = [](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
-            return ExprValue("integer", "", true);
+            return ExprValue("numeric", "", true);
         std::string field = toLower(a[0].value);
         const std::string& src = a[1].value;
-        int64_t result = 0;
-        if (field == "year") {
-            result = src.size() >= 4 ? std::stoll(src.substr(0, 4)) : 0;
-        } else if (field == "month") {
-            result = src.size() >= 7 ? std::stoll(src.substr(5, 2)) : 0;
-        } else if (field == "day") {
-            result = src.size() >= 10 ? std::stoll(src.substr(8, 2)) : 0;
+        auto num = [&](size_t off, size_t len) -> int {
+            if (src.size() < off + len) return 0;
+            int v = 0;
+            for (size_t i = off; i < off + len; ++i) {
+                char c = src[i];
+                if (c < '0' || c > '9') return 0;
+                v = v * 10 + (c - '0');
+            }
+            return v;
+        };
+        int y = num(0, 4), mo = num(5, 2), d = num(8, 2);
+        int h = num(11, 2), mi = num(14, 2), se = num(17, 2);
+        int64_t r = 0;
+        if (field == "year") r = y;
+        else if (field == "month") r = mo;
+        else if (field == "day") r = d;
+        else if (field == "hour") r = h;
+        else if (field == "minute") r = mi;
+        else if (field == "second") r = se;
+        else if (field == "quarter") r = mo > 0 ? (mo - 1) / 3 + 1 : 0;
+        else if (field == "decade") r = y / 10;
+        else if (field == "century") r = y > 0 ? (y - 1) / 100 + 1 : 0;
+        else if (field == "millennium") r = y > 0 ? (y - 1) / 1000 + 1 : 0;
+        else if (field == "dow" || field == "isodow") {
+            // Sakamoto's algorithm: w = 0 (Sunday) .. 6 (Saturday)
+            static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+            int yy = y - (mo < 3 ? 1 : 0);
+            int w = (yy + yy / 4 - yy / 100 + yy / 400 + t[(mo > 0 ? mo : 1) - 1] + d) % 7;
+            if (field == "isodow") r = (w == 0) ? 7 : w;  // 1=Mon .. 7=Sun
+            else r = w;                                    // 0=Sun .. 6=Sat
+        } else if (field == "doy") {
+            Date cur(y, mo, d), jan1(y, 1, 1);
+            r = (cur.year != 0 && jan1.year != 0) ? cur.convert() - jan1.convert() + 1 : 0;
+        } else if (field == "epoch") {
+            // Seconds since 1970-01-01 00:00:00.
+            r = parseTimestampToSeconds(src) - parseTimestampToSeconds("1970-01-01 00:00:00");
         } else {
-            return ExprValue("integer", "", true);
+            return ExprValue("numeric", "", true);
         }
-        return ExprValue("integer", std::to_string(result), false);
+        return ExprValue("numeric", std::to_string(r), false);
+    };
+    functions_["extract"] = extractImpl;
+    functions_["date_part"] = extractImpl;
+
+    // make_date(y, m, d) -> 'YYYY-MM-DD'
+    functions_["make_date"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("date", "", true);
+        int y = static_cast<int>(a[0].asInt());
+        int m = static_cast<int>(a[1].asInt());
+        int d = static_cast<int>(a[2].asInt());
+        if (m < 1 || m > 12 || d < 1 || d > 31) return ExprValue("date", "", true);
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
+        return ExprValue("date", buf, false);
+    };
+    // make_time(h, m, s) -> 'HH:MM:SS'
+    functions_["make_time"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("time", "", true);
+        int h = static_cast<int>(a[0].asInt());
+        int m = static_cast<int>(a[1].asInt());
+        int s = static_cast<int>(a[2].asDouble());
+        if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59)
+            return ExprValue("time", "", true);
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
+        return ExprValue("time", buf, false);
+    };
+    // make_timestamp(y, m, d, h, mi, s) -> 'YYYY-MM-DD HH:MM:SS'
+    functions_["make_timestamp"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 6) return ExprValue("timestamp", "", true);
+        for (int i = 0; i < 6; ++i) if (a[i].isNull) return ExprValue("timestamp", "", true);
+        int y = static_cast<int>(a[0].asInt());
+        int mo = static_cast<int>(a[1].asInt());
+        int d = static_cast<int>(a[2].asInt());
+        int h = static_cast<int>(a[3].asInt());
+        int mi = static_cast<int>(a[4].asInt());
+        int s = static_cast<int>(a[5].asDouble());
+        if (mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 ||
+            mi < 0 || mi > 59 || s < 0 || s > 59)
+            return ExprValue("timestamp", "", true);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, s);
+        return ExprValue("timestamp", buf, false);
+    };
+    // date_trunc(field, source) -> truncate timestamp to the given precision
+    functions_["date_trunc"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("timestamp", "", true);
+        std::string field = toLower(a[0].value);
+        const std::string& src = a[1].value;
+        auto num = [&](size_t off, size_t len) -> int {
+            if (src.size() < off + len) return 0;
+            int v = 0;
+            for (size_t i = off; i < off + len; ++i) {
+                char c = src[i];
+                if (c < '0' || c > '9') return 0;
+                v = v * 10 + (c - '0');
+            }
+            return v;
+        };
+        int y = num(0, 4), mo = num(5, 2), d = num(8, 2);
+        int h = num(11, 2), mi = num(14, 2), se = num(17, 2);
+        if (field == "year") { mo = 1; d = 1; h = mi = se = 0; }
+        else if (field == "quarter") { mo = mo > 0 ? (mo - 1) / 3 * 3 + 1 : 1; d = 1; h = mi = se = 0; }
+        else if (field == "month") { d = 1; h = mi = se = 0; }
+        else if (field == "day") { h = mi = se = 0; }
+        else if (field == "hour") { mi = se = 0; }
+        else if (field == "minute") { se = 0; }
+        else if (field == "second") { /* keep */ }
+        else return ExprValue("timestamp", "", true);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, se);
+        return ExprValue("timestamp", buf, false);
     };
 }
 
