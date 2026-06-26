@@ -4443,6 +4443,94 @@ static bool normalizeArray(const std::string& in, const std::string& elemType, s
     return true;
 }
 
+// ========================================================================
+// XML well-formedness check (CONTENT form: fragments / text allowed).
+// Validates balanced, properly-nested element tags with quoted attribute
+// values, and properly-closed comments, CDATA, processing instructions and
+// declarations. Not a full XML 1.0 validator (no DTD/entity validation), but
+// rejects mismatched/unclosed tags, unquoted attributes and stray '<'.
+// ========================================================================
+static bool isWellFormedXml(const std::string& s) {
+    std::vector<std::string> stack;
+    size_t i = 0, n = s.size();
+    auto isNameStart = [](char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_' || c == ':'; };
+    auto isNameChar = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == ':' || c == '-' || c == '.';
+    };
+    while (i < n) {
+        if (s[i] != '<') { ++i; continue; }  // text content
+        if (i + 1 >= n) return false;          // lone '<'
+        char c1 = s[i + 1];
+        if (c1 == '!') {
+            if (s.compare(i, 4, "<!--") == 0) {
+                size_t e = s.find("-->", i + 4);
+                if (e == std::string::npos) return false;
+                i = e + 3;
+            } else if (s.compare(i, 9, "<![CDATA[") == 0) {
+                size_t e = s.find("]]>", i + 9);
+                if (e == std::string::npos) return false;
+                i = e + 3;
+            } else {
+                // <!DOCTYPE ...> etc.; find the matching '>', honoring [ ] subset.
+                size_t j = i + 2; int br = 0; bool closed = false;
+                while (j < n) {
+                    if (s[j] == '[') br++;
+                    else if (s[j] == ']') br--;
+                    else if (s[j] == '>' && br <= 0) { closed = true; ++j; break; }
+                    ++j;
+                }
+                if (!closed) return false;
+                i = j;
+            }
+            continue;
+        }
+        if (c1 == '?') {
+            size_t e = s.find("?>", i + 2);
+            if (e == std::string::npos) return false;
+            i = e + 2;
+            continue;
+        }
+        if (c1 == '/') {  // closing tag
+            size_t j = i + 2;
+            std::string name;
+            if (j < n && isNameStart(s[j])) { name += s[j]; ++j; while (j < n && isNameChar(s[j])) { name += s[j]; ++j; } }
+            else return false;
+            while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
+            if (j >= n || s[j] != '>') return false;
+            ++j;
+            if (stack.empty() || stack.back() != name) return false;
+            stack.pop_back();
+            i = j;
+            continue;
+        }
+        // opening (or self-closing) tag
+        size_t j = i + 1;
+        std::string name;
+        if (j < n && isNameStart(s[j])) { name += s[j]; ++j; while (j < n && isNameChar(s[j])) { name += s[j]; ++j; } }
+        else return false;
+        bool done = false;
+        while (!done) {
+            while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
+            if (j >= n) return false;
+            if (s[j] == '>') { ++j; stack.push_back(name); done = true; break; }
+            if (s[j] == '/') { ++j; if (j >= n || s[j] != '>') return false; ++j; done = true; break; }  // self-closing
+            if (!isNameStart(s[j])) return false;                       // attribute name
+            ++j; while (j < n && isNameChar(s[j])) ++j;
+            while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
+            if (j >= n || s[j] != '=') return false;
+            ++j;
+            while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
+            if (j >= n || (s[j] != '"' && s[j] != '\'')) return false;  // value must be quoted
+            char q = s[j]; ++j;
+            while (j < n && s[j] != q) ++j;
+            if (j >= n) return false;
+            ++j;
+        }
+        i = j;
+    }
+    return stack.empty();
+}
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -9166,6 +9254,13 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             actualValues[col.dataName] = canon;
         }
+        // Validate XML well-formedness (stored verbatim, no canonicalization).
+        if (col.dataType == "xml" && !col.isArray && !val.empty()) {
+            if (!isWellFormedXml(val)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -10459,6 +10554,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                             return DBStatus::INVALID_VALUE;
                         storeVal = canon;
                     }
+                } else if (col.dataType == "xml") {
+                    if (!kv.second.empty() && !isWellFormedXml(kv.second))
+                        return DBStatus::INVALID_VALUE;
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {
                         int64_t num = parseInt(kv.second);
