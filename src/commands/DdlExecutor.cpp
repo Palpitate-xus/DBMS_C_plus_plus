@@ -517,6 +517,11 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
         col = makeVarBitColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
     } else if (baseType == "jsonpath") {
         col = makeJsonPathColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (!dbname.empty() && g_engine.isCompositeType(dbname, baseType)) {
+        // Column of a composite type: store the row literal as text and keep the
+        // composite type name as dataType so INSERT/UPDATE can validate fields.
+        col = makeVarCharColumn(cd.name, cd.isNull, 1024, cd.isPrimaryKey);
+        col.dataType = baseType;
     } else {
         // Unknown type: fall back to varchar so the table can still be created
         col = makeVarCharColumn(cd.name, cd.isNull, 255, cd.isPrimaryKey);

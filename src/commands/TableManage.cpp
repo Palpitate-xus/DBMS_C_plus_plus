@@ -4885,6 +4885,73 @@ static bool normalizeInterval(const std::string& in, std::string& out) {
     return true;
 }
 
+// ========================================================================
+// Composite-type row literal: "(v1,v2,...)". Validates the field count against
+// the composite type definition, checks numeric fields parse, and re-emits the
+// canonical form (whitespace trimmed, fields quoted only where required). An
+// empty field is treated as NULL.
+// ========================================================================
+static bool normalizeComposite(const std::string& in, const StorageEngine::CompositeType& ct,
+                               std::string& out) {
+    std::string s = trim(in);
+    if (s.size() < 2 || s.front() != '(' || s.back() != ')') return false;
+    std::string body = s.substr(1, s.size() - 2);
+
+    std::vector<std::string> vals;
+    std::string cur;
+    bool inq = false;
+    for (size_t i = 0; i < body.size(); ++i) {
+        char c = body[i];
+        if (inq) {
+            if (c == '"') {
+                if (i + 1 < body.size() && body[i + 1] == '"') { cur += '"'; ++i; }
+                else inq = false;
+            } else if (c == '\\' && i + 1 < body.size()) { cur += body[i + 1]; ++i; }
+            else cur += c;
+        } else {
+            if (c == '"') inq = true;
+            else if (c == ',') { vals.push_back(cur); cur.clear(); }
+            else cur += c;
+        }
+    }
+    vals.push_back(cur);
+    if (inq) return false;
+    if (vals.size() != ct.fields.size()) return false;
+
+    std::string result = "(";
+    for (size_t k = 0; k < vals.size(); ++k) {
+        std::string v = trim(vals[k]);
+        std::string ftype = toLowerUtf8(ct.fields[k].second);
+        size_t par = ftype.find('(');
+        if (par != std::string::npos) ftype = ftype.substr(0, par);
+        ftype = trim(ftype);
+        if (!v.empty()) {
+            bool ok = true;
+            if (ftype == "int" || ftype == "integer" || ftype == "int2" || ftype == "int4" ||
+                ftype == "int8" || ftype == "smallint" || ftype == "bigint") {
+                try { size_t p = 0; std::stoll(v, &p); ok = (p == v.size()); } catch (...) { ok = false; }
+            } else if (ftype == "numeric" || ftype == "decimal" || ftype == "real" ||
+                       ftype == "float" || ftype == "float4" || ftype == "float8" ||
+                       ftype == "double" || ftype == "double precision") {
+                try { size_t p = 0; std::stod(v, &p); ok = (p == v.size()); } catch (...) { ok = false; }
+            }
+            if (!ok) return false;
+        }
+        if (k) result += ",";
+        bool needQuote = !v.empty() && v.find_first_of(",()\"\\") != std::string::npos;
+        if (needQuote) {
+            result += '"';
+            for (char c : v) { if (c == '"') result += "\"\""; else result += c; }
+            result += '"';
+        } else {
+            result += v;
+        }
+    }
+    result += ")";
+    out = result;
+    return true;
+}
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -9646,6 +9713,20 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             actualValues[col.dataName] = canon;
         }
+        // Validate / canonicalize composite-type row literals. Guard with a cheap
+        // in-memory registry check so only non-builtin columns hit the catalog.
+        if (!col.isArray && !val.empty() &&
+            TypeRegistry::instance().findType(col.dataType) == nullptr) {
+            CompositeType ct = getCompositeType(dbname, col.dataType);
+            if (!ct.name.empty()) {
+                std::string canon;
+                if (!normalizeComposite(val, ct, canon)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+                actualValues[col.dataName] = canon;
+            }
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -10959,6 +11040,14 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     if (!kv.second.empty()) {
                         std::string canon;
                         if (!normalizeInterval(kv.second, canon))
+                            return DBStatus::INVALID_VALUE;
+                        storeVal = canon;
+                    }
+                } else if (!col.isArray && TypeRegistry::instance().findType(col.dataType) == nullptr) {
+                    CompositeType ct = getCompositeType(dbname, col.dataType);
+                    if (!ct.name.empty() && !kv.second.empty()) {
+                        std::string canon;
+                        if (!normalizeComposite(kv.second, ct, canon))
                             return DBStatus::INVALID_VALUE;
                         storeVal = canon;
                     }
