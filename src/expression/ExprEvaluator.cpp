@@ -971,6 +971,63 @@ static std::string translateReplacement(const std::string& repl) {
     return out;
 }
 
+// Parsed pieces of a range literal: 'empty' or '[lo,hi)' style.
+struct RangeParts {
+    bool valid = false;
+    bool empty = false;
+    bool loInc = false, hiInc = false;   // inclusive bound flags
+    bool loInf = false, hiInf = false;   // unbounded (infinite) flags
+    std::string lo, hi;                  // bound text (unquoted), empty if infinite
+};
+
+static RangeParts parseRangeLiteral(const std::string& text) {
+    RangeParts r;
+    std::string s = trimStr(text);
+    std::string low = s;
+    for (char& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (low == "empty") { r.valid = true; r.empty = true; return r; }
+    if (s.size() < 3) return r;  // need at least "[,]"
+    char f = s.front(), b = s.back();
+    if ((f != '[' && f != '(') || (b != ']' && b != ')')) return r;
+    r.loInc = (f == '[');
+    r.hiInc = (b == ']');
+    std::string inner = s.substr(1, s.size() - 2);
+    // Split at the top-level comma, honoring double quotes.
+    bool inQ = false;
+    size_t comma = std::string::npos;
+    for (size_t i = 0; i < inner.size(); ++i) {
+        char c = inner[i];
+        if (inQ) { if (c == '\\' && i + 1 < inner.size()) ++i; else if (c == '"') inQ = false; }
+        else if (c == '"') inQ = true;
+        else if (c == ',') { comma = i; break; }
+    }
+    if (comma == std::string::npos) return r;
+    auto unq = [](std::string v) {
+        v = trimStr(v);
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+            std::string o;
+            for (size_t i = 1; i + 1 < v.size(); ++i) {
+                if (v[i] == '\\' && i + 2 < v.size()) o.push_back(v[++i]);
+                else o.push_back(v[i]);
+            }
+            return o;
+        }
+        return v;
+    };
+    r.lo = unq(inner.substr(0, comma));
+    r.hi = unq(inner.substr(comma + 1));
+    r.loInf = r.lo.empty();
+    r.hiInf = r.hi.empty();
+    r.valid = true;
+    return r;
+}
+
+static bool typeIsRange(const std::string& typeName) {
+    std::string t = typeName;
+    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return t.find("range") != std::string::npos;
+}
+
 void ExprEvaluator::registerBuiltins() {
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
@@ -987,10 +1044,22 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["lower"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        // Overload: lower(anyrange) returns the lower bound (NULL if unbounded).
+        if (typeIsRange(a[0].typeName)) {
+            RangeParts r = parseRangeLiteral(a[0].value);
+            if (!r.valid || r.empty || r.loInf) return ExprValue(a[0].typeName, "", true);
+            return ExprValue("numeric", r.lo, false);
+        }
         return ExprValue("text", toLower(a[0].value), false);
     };
     functions_["upper"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        // Overload: upper(anyrange) returns the upper bound (NULL if unbounded).
+        if (typeIsRange(a[0].typeName)) {
+            RangeParts r = parseRangeLiteral(a[0].value);
+            if (!r.valid || r.empty || r.hiInf) return ExprValue(a[0].typeName, "", true);
+            return ExprValue("numeric", r.hi, false);
+        }
         std::string s = a[0].value;
         for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return ExprValue("text", s, false);
@@ -1910,6 +1979,42 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("text", "", true);
         }
         return ExprValue("text", "", true);  // no match -> NULL
+    };
+
+    // ------------------------------------------------------------------------
+    // Range functions (operate on range literal text '[lo,hi)' / 'empty')
+    // ------------------------------------------------------------------------
+    functions_["isempty"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
+        RangeParts r = parseRangeLiteral(a[0].value);
+        if (!r.valid) return ExprValue("boolean", "", true);
+        return ExprValue("boolean", r.empty ? "t" : "f", false);
+    };
+    functions_["lower_inc"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
+        RangeParts r = parseRangeLiteral(a[0].value);
+        if (!r.valid) return ExprValue("boolean", "", true);
+        bool inc = !r.empty && !r.loInf && r.loInc;
+        return ExprValue("boolean", inc ? "t" : "f", false);
+    };
+    functions_["upper_inc"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
+        RangeParts r = parseRangeLiteral(a[0].value);
+        if (!r.valid) return ExprValue("boolean", "", true);
+        bool inc = !r.empty && !r.hiInf && r.hiInc;
+        return ExprValue("boolean", inc ? "t" : "f", false);
+    };
+    functions_["lower_inf"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
+        RangeParts r = parseRangeLiteral(a[0].value);
+        if (!r.valid) return ExprValue("boolean", "", true);
+        return ExprValue("boolean", (!r.empty && r.loInf) ? "t" : "f", false);
+    };
+    functions_["upper_inf"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
+        RangeParts r = parseRangeLiteral(a[0].value);
+        if (!r.valid) return ExprValue("boolean", "", true);
+        return ExprValue("boolean", (!r.empty && r.hiInf) ? "t" : "f", false);
     };
 
     // ------------------------------------------------------------------------
