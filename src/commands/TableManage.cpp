@@ -4695,6 +4695,59 @@ static bool isValidTsQuery(const std::string& in) {
     return v.p == toks.size();
 }
 
+// ========================================================================
+// jsonpath structural validation. Not a full SQL/JSON path grammar parser;
+// a pragmatic structural check (low false-rejection risk): optional strict/lax
+// mode, balanced () and [], no empty [] subscripts, no ".." or trailing ".",
+// a valid starting token, and no unterminated string. Stored verbatim.
+// ========================================================================
+static bool isValidJsonPath(const std::string& in) {
+    std::string s = trim(in);
+    auto startsWord = [&](const char* w) {
+        size_t l = std::strlen(w);
+        return s.size() >= l && s.compare(0, l, w) == 0 &&
+               (s.size() == l || std::isspace(static_cast<unsigned char>(s[l])));
+    };
+    if (startsWord("strict") || startsWord("lax")) {
+        size_t sp = s.find_first_of(" \t");
+        s = (sp == std::string::npos) ? "" : trim(s.substr(sp));
+    }
+    if (s.empty()) return false;
+
+    // First significant char must begin a primary, not a dangling operator/accessor.
+    char f = s[0];
+    if (std::strchr(".,)]?&|*/%<>=", f) != nullptr) return false;
+
+    int paren = 0, brack = 0;
+    bool inStr = false; char q = 0;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (inStr) {
+            if (c == '\\' && i + 1 < s.size()) { ++i; continue; }
+            if (c == q) inStr = false;
+            continue;
+        }
+        if (c == '"' || c == '\'') { inStr = true; q = c; continue; }
+        if (c == '(') { ++paren; continue; }
+        if (c == ')') { if (--paren < 0) return false; continue; }
+        if (c == '[') {
+            ++brack;
+            size_t j = i + 1;
+            while (j < s.size() && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
+            if (j < s.size() && s[j] == ']') return false;  // empty subscript
+            continue;
+        }
+        if (c == ']') { if (--brack < 0) return false; continue; }
+        if (c == '.') {
+            if (i + 1 >= s.size()) return false;            // trailing dot
+            if (s[i + 1] == '.') return false;              // ".."
+            continue;
+        }
+    }
+    if (inStr) return false;                                 // unterminated string
+    return paren == 0 && brack == 0;
+}
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -9440,6 +9493,13 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
+        // Validate jsonpath structure (stored verbatim).
+        if (col.dataType == "jsonpath" && !col.isArray && !val.empty()) {
+            if (!isValidJsonPath(val)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -10745,6 +10805,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     }
                 } else if (col.dataType == "tsquery") {
                     if (!kv.second.empty() && !isValidTsQuery(kv.second))
+                        return DBStatus::INVALID_VALUE;
+                } else if (col.dataType == "jsonpath") {
+                    if (!kv.second.empty() && !isValidJsonPath(kv.second))
                         return DBStatus::INVALID_VALUE;
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {

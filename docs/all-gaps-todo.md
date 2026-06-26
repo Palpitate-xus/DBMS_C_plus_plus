@@ -43,6 +43,7 @@
 | 2026-06-25 | Phase 4 Wave 4.14 数组识别修复 + 字面量校验：修复 `TypeRegistry::validateColumn` 仅按 `dataType` 的 `[]` 后缀判定 isArray、覆盖了工厂/parser 已设的数组标志，导致 `INT[]` 被降级为定长标量（`{1,2,3}` 插入被拒）的 bug——改为同时尊重既有 `col.isArray`；新增 `normalizeArray`/`ArrayParser`（递归解析括号结构、矩形多维校验、数值元素类型校验、NULL 元素、按需加引号、空白规范化）；INSERT/UPDATE 拒绝非法数组并规范化；新增 `tests/array_test.cpp`（列识别回归、整型数组校验、多维矩形、文本数组引号、UPDATE）+ 二进制端到端验证。全部 62 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.12 XML well-formedness 校验：新增 `isWellFormedXml`（栈式扫描，校验标签平衡/嵌套、引号属性值、自闭合标签，正确跳过注释 `<!-- -->`/CDATA/PI `<? ?>`/`<!DOCTYPE>`，拒绝失配/未闭合标签、未引用属性、游离 `<`、未终止注释）；CONTENT 形式（允许片段/纯文本）；INSERT/UPDATE 校验拒绝非良构 XML；新增 `tests/xml_test.cpp`（良构接受、各类非法拒绝、UPDATE）+ 二进制端到端验证。全部 63 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.10 全文搜索类型 tsvector/tsquery：新增 `normalizeTsVector`（解析 `lexeme[:poslist]` 条目、按 PG 的长度优先再字节序排序 lexeme、去重并合并位置、位置排序去重、默认权重 D 省略、单引号化输出）与 `isValidTsQuery`+`TsQueryValidator`（词法分析 + 递归下降校验布尔文法 `! > <-> > & > |`、括号、`<N>` 距离、lexeme `:权重/*` 标志）；INSERT/UPDATE 校验拒绝非法 tsvector/tsquery，tsvector 规范化、tsquery 原样存储；新增 `tests/tsearch_test.cpp` + 二进制端到端验证。全部 64 个测试通过。 |
+| 2026-06-25 | Phase 4 Wave 4.13 jsonpath 结构化语法校验：新增 `isValidJsonPath`（务实结构校验，低误拒：可选 `strict`/`lax` mode、`()`/`[]` 平衡、拒绝空 `[]` 下标/`..`/尾随 `.`/非法起始 token/未终止字符串）；INSERT/UPDATE 校验拒绝非法 jsonpath，原样存储；新增 `tests/jsonpath_test.cpp`（含 `$.a.b`/`$[*]`/`lax`/`? (@..)`/`.**` 等合法接受、各类非法拒绝、UPDATE）+ 二进制端到端验证（注：二进制 SQL 预处理会把字面量中的 `[*]` 下标改写为 `array_get(...)`，为既有 string-based 处理遗留行为，与本校验正交）。全部 65 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -174,7 +175,7 @@
 | 2.11 | 全文搜索类型 | `tsvector` 已实现字面量解析 + canonicalization（lexeme 长度优先排序、去重、位置合并/排序、默认权重 D 省略、单引号化）；`tsquery` 已实现布尔文法校验（`! > <-> > & > |`、括号、lexeme `:权重/*` 标志）（`tests/tsearch_test.cpp`）；仍缺文本搜索配置/词典/parser、ranking、operator 和 GIN opclass 语义 | ⚠️ |
 | 2.12 | UUID | 有 uuid 列，已实现输入严格校验（32 位十六进制、连字符任意/无、可带花括号、混合大小写）+ 规范化为小写 8-4-4-4-12（`tests/uuid_test.cpp`）；仍缺 PG 18 `uuidv7()`、uuid 函数与扩展生态 | ⚠️ |
 | 2.13 | XML | 有 xml 列，已实现 well-formedness 校验（CONTENT 形式：标签平衡/嵌套、引号属性、自闭合、注释/CDATA/PI/声明、拒绝失配/未闭合/未引用属性/游离 `<`）（`tests/xml_test.cpp`）；仍缺 XML 函数、XPath、XMLTABLE、schema/encoding 语义 | ⚠️ |
-| 2.14 | JSON/JSONB | 有 JSON 校验和少量函数；缺少 jsonpath、SQL/JSON query functions、`JSON_TABLE`、完整操作符、GIN opclass | ⚠️ |
+| 2.14 | JSON/JSONB | 有 JSON 校验和少量函数；`jsonpath` 列已实现结构化语法校验（mode 前缀、`()`/`[]` 平衡、空下标/`..`/尾随 `.`/未终止字符串拒绝）（`tests/jsonpath_test.cpp`）；仍缺 jsonpath 求值、SQL/JSON query functions、`JSON_TABLE`、完整操作符、GIN opclass | ⚠️ |
 | 2.15 | 数组 | 修复数组列被 `validateColumn` 误降级为标量的 bug（`INT[]`/`VARCHAR[]` 现正确识别为变长数组）；已实现数组字面量校验（括号结构、矩形多维、数值元素类型、NULL 元素、引号/空白规范化）（`tests/array_test.cpp`）；仍缺切片、`unnest`/array functions、ANY/ALL 完整语义 | ⚠️ |
 | 2.16 | Composite | `CREATE TYPE AS (...)` 存字段，并可通过 `ALTER TYPE` 更新 composite 名称和属性；缺少 row constructor、字段访问、嵌套、函数参数/返回、catalog 语义 | ⚠️ |
 | 2.17 | Range/Multirange | `int4range`/`int8range`/`numrange`/`tsrange`/`tstzrange`/`daterange` 已实现字面量校验（语法/边界排序/空范围）、离散整数范围 `[)` canonicalization、无限边界规范化为排他、`empty` 折叠（`tests/range_test.cpp`）；仍缺 multirange 字面量、范围 operators/函数、daterange 离散折叠、GiST/SP-GiST opclass | ⚠️ |
