@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -630,6 +631,151 @@ ExprValue ExprEvaluator::evalRowExpr(const RowExpr*, const RowContext&) const {
 // Built-in scalar functions
 // ----------------------------------------------------------------------------
 
+// MD5 (RFC 1321) — compact self-contained implementation returning lowercase hex.
+static std::string md5Hex(const std::string& msg) {
+    static const uint32_t K[64] = {
+        0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+        0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+        0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+        0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+        0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+        0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+        0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+        0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391};
+    static const int S[64] = {
+        7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+        5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+        4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+        6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21};
+    auto rotl = [](uint32_t x, int c) { return (x << c) | (x >> (32 - c)); };
+
+    std::vector<uint8_t> data(msg.begin(), msg.end());
+    uint64_t bitlen = static_cast<uint64_t>(data.size()) * 8;
+    data.push_back(0x80);
+    while (data.size() % 64 != 56) data.push_back(0);
+    for (int i = 0; i < 8; ++i) data.push_back(static_cast<uint8_t>(bitlen >> (8 * i)));
+
+    uint32_t a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+    for (size_t off = 0; off < data.size(); off += 64) {
+        uint32_t M[16];
+        for (int i = 0; i < 16; ++i) {
+            M[i] = static_cast<uint32_t>(data[off + i * 4]) |
+                   (static_cast<uint32_t>(data[off + i * 4 + 1]) << 8) |
+                   (static_cast<uint32_t>(data[off + i * 4 + 2]) << 16) |
+                   (static_cast<uint32_t>(data[off + i * 4 + 3]) << 24);
+        }
+        uint32_t A = a0, B = b0, C = c0, D = d0;
+        for (int i = 0; i < 64; ++i) {
+            uint32_t F; int g;
+            if (i < 16)      { F = (B & C) | (~B & D); g = i; }
+            else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+            else if (i < 48) { F = B ^ C ^ D;         g = (3 * i + 5) % 16; }
+            else             { F = C ^ (B | ~D);      g = (7 * i) % 16; }
+            F = F + A + K[i] + M[g];
+            A = D; D = C; C = B;
+            B = B + rotl(F, S[i]);
+        }
+        a0 += A; b0 += B; c0 += C; d0 += D;
+    }
+    uint32_t vals[4] = {a0, b0, c0, d0};
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            uint8_t byte = static_cast<uint8_t>(vals[i] >> (8 * j));
+            out.push_back(hex[byte >> 4]);
+            out.push_back(hex[byte & 0xF]);
+        }
+    return out;
+}
+
+// Base64 encode/decode over raw byte strings.
+static std::string base64Encode(const std::string& in) {
+    static const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    size_t i = 0;
+    while (i + 2 < in.size()) {
+        uint32_t n = (static_cast<uint8_t>(in[i]) << 16) |
+                     (static_cast<uint8_t>(in[i + 1]) << 8) |
+                     static_cast<uint8_t>(in[i + 2]);
+        out.push_back(tbl[(n >> 18) & 63]);
+        out.push_back(tbl[(n >> 12) & 63]);
+        out.push_back(tbl[(n >> 6) & 63]);
+        out.push_back(tbl[n & 63]);
+        i += 3;
+    }
+    size_t rem = in.size() - i;
+    if (rem == 1) {
+        uint32_t n = static_cast<uint8_t>(in[i]) << 16;
+        out.push_back(tbl[(n >> 18) & 63]);
+        out.push_back(tbl[(n >> 12) & 63]);
+        out += "==";
+    } else if (rem == 2) {
+        uint32_t n = (static_cast<uint8_t>(in[i]) << 16) | (static_cast<uint8_t>(in[i + 1]) << 8);
+        out.push_back(tbl[(n >> 18) & 63]);
+        out.push_back(tbl[(n >> 12) & 63]);
+        out.push_back(tbl[(n >> 6) & 63]);
+        out.push_back('=');
+    }
+    return out;
+}
+
+static bool base64Decode(const std::string& in, std::string& out) {
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    out.clear();
+    int buf = 0, bits = 0;
+    for (char c : in) {
+        if (c == '=' ) break;
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        int v = val(c);
+        if (v < 0) return false;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<char>((buf >> bits) & 0xFF));
+        }
+    }
+    return true;
+}
+
+static std::string hexEncode(const std::string& in) {
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    out.reserve(in.size() * 2);
+    for (unsigned char c : in) {
+        out.push_back(hex[c >> 4]);
+        out.push_back(hex[c & 0xF]);
+    }
+    return out;
+}
+
+static bool hexDecode(const std::string& in, std::string& out) {
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    out.clear();
+    std::string clean;
+    for (char c : in) if (!std::isspace(static_cast<unsigned char>(c))) clean.push_back(c);
+    if (clean.size() % 2 != 0) return false;
+    for (size_t i = 0; i < clean.size(); i += 2) {
+        int hi = nib(clean[i]), lo = nib(clean[i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out.push_back(static_cast<char>((hi << 4) | lo));
+    }
+    return true;
+}
+
 void ExprEvaluator::registerBuiltins() {
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
@@ -1160,6 +1306,66 @@ void ExprEvaluator::registerBuiltins() {
         }
         out += "\"";
         return ExprValue("text", out, false);
+    };
+    // md5(text) — 32-char lowercase hex digest
+    functions_["md5"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        return ExprValue("text", md5Hex(a[0].value), false);
+    };
+    // encode(data, format) — format is 'hex', 'base64', or 'escape'
+    functions_["encode"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        std::string fmt = toLower(a[1].value);
+        const std::string& data = a[0].value;
+        if (fmt == "hex") return ExprValue("text", hexEncode(data), false);
+        if (fmt == "base64") return ExprValue("text", base64Encode(data), false);
+        if (fmt == "escape") {
+            std::string out;
+            for (unsigned char c : data) {
+                if (c == '\\') out += "\\\\";
+                else if (c < 0x20 || c > 0x7e) {
+                    char buf[5];
+                    std::snprintf(buf, sizeof(buf), "\\%03o", c);
+                    out += buf;
+                } else out.push_back(static_cast<char>(c));
+            }
+            return ExprValue("text", out, false);
+        }
+        return ExprValue("text", "", true);  // unknown format
+    };
+    // decode(text, format) — inverse of encode, returns the raw bytes as text
+    functions_["decode"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bytea", "", true);
+        std::string fmt = toLower(a[1].value);
+        const std::string& text = a[0].value;
+        std::string out;
+        if (fmt == "hex") {
+            if (!hexDecode(text, out)) return ExprValue("bytea", "", true);
+            return ExprValue("bytea", out, false);
+        }
+        if (fmt == "base64") {
+            if (!base64Decode(text, out)) return ExprValue("bytea", "", true);
+            return ExprValue("bytea", out, false);
+        }
+        if (fmt == "escape") {
+            for (size_t i = 0; i < text.size(); ++i) {
+                if (text[i] == '\\' && i + 1 < text.size()) {
+                    if (text[i + 1] == '\\') { out.push_back('\\'); i += 1; }
+                    else if (i + 3 < text.size()) {
+                        int v = 0; bool ok = true;
+                        for (int k = 1; k <= 3; ++k) {
+                            char c = text[i + k];
+                            if (c < '0' || c > '7') { ok = false; break; }
+                            v = v * 8 + (c - '0');
+                        }
+                        if (ok) { out.push_back(static_cast<char>(v)); i += 3; }
+                        else out.push_back(text[i]);
+                    } else out.push_back(text[i]);
+                } else out.push_back(text[i]);
+            }
+            return ExprValue("bytea", out, false);
+        }
+        return ExprValue("bytea", "", true);
     };
 
     // ------------------------------------------------------------------------
