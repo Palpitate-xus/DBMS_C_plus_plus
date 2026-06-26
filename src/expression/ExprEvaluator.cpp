@@ -1028,6 +1028,31 @@ static bool typeIsRange(const std::string& typeName) {
     return t.find("range") != std::string::npos;
 }
 
+// SQL identifier quoting (quote_ident / format %I): only quote when not a simple
+// lower-case identifier; double embedded quotes.
+static std::string sqlQuoteIdent(const std::string& s) {
+    bool simple = !s.empty();
+    for (size_t i = 0; i < s.size() && simple; ++i) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        bool ok = (c == '_') || std::islower(c) || (std::isdigit(c) && i > 0);
+        if (!ok) simple = false;
+    }
+    if (simple) return s;
+    std::string out = "\"";
+    for (char c : s) { if (c == '"') out += "\"\""; else out.push_back(c); }
+    out += "\"";
+    return out;
+}
+
+// SQL string-literal quoting (quote_literal / format %L): single-quote, doubling
+// embedded quotes.
+static std::string sqlQuoteLiteral(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) { if (c == '\'') out += "''"; else out.push_back(c); }
+    out += "'";
+    return out;
+}
+
 void ExprEvaluator::registerBuiltins() {
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
@@ -1544,32 +1569,43 @@ void ExprEvaluator::registerBuiltins() {
     // quote_literal — single-quote a value, doubling embedded quotes
     functions_["quote_literal"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        std::string out = "'";
-        for (char c : a[0].value) {
-            if (c == '\'') out += "''";
-            else out.push_back(c);
-        }
-        out += "'";
-        return ExprValue("text", out, false);
+        return ExprValue("text", sqlQuoteLiteral(a[0].value), false);
     };
     // quote_ident — double-quote an identifier when it is not a simple lower-case name
     functions_["quote_ident"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        const std::string& s = a[0].value;
-        bool simple = !s.empty();
-        for (size_t i = 0; i < s.size() && simple; ++i) {
-            unsigned char c = static_cast<unsigned char>(s[i]);
-            bool ok = (c == '_') || (std::islower(c)) || (std::isdigit(c) && i > 0);
-            if (!ok) simple = false;
+        return ExprValue("text", sqlQuoteIdent(a[0].value), false);
+    };
+    // format(fmtstr, args...) — %s (string), %I (identifier), %L (literal), %% (percent)
+    functions_["format"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        const std::string& fmt = a[0].value;
+        size_t argi = 1;
+        std::string out;
+        for (size_t i = 0; i < fmt.size(); ++i) {
+            if (fmt[i] != '%' || i + 1 >= fmt.size()) { out.push_back(fmt[i]); continue; }
+            char spec = fmt[i + 1];
+            if (spec == '%') { out.push_back('%'); ++i; continue; }
+            if (spec == 's' || spec == 'I' || spec == 'L') {
+                ++i;
+                ExprValue arg = (argi < a.size()) ? a[argi++] : ExprValue("text", "", true);
+                if (spec == 's') out += arg.isNull ? "" : arg.value;
+                else if (spec == 'I') out += sqlQuoteIdent(arg.isNull ? "" : arg.value);
+                else /* L */ out += arg.isNull ? "NULL" : sqlQuoteLiteral(arg.value);
+            } else {
+                out.push_back('%');  // unknown spec: keep the percent literally
+            }
         }
-        if (simple) return ExprValue("text", s, false);
-        std::string out = "\"";
-        for (char c : s) {
-            if (c == '"') out += "\"\"";
-            else out.push_back(c);
-        }
-        out += "\"";
         return ExprValue("text", out, false);
+    };
+    // nvl / ifnull — 2-arg null-coalescing (Oracle/MySQL compatibility)
+    functions_["nvl"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2) return ExprValue("unknown", "", true);
+        return a[0].isNull ? a[1] : a[0];
+    };
+    functions_["ifnull"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2) return ExprValue("unknown", "", true);
+        return a[0].isNull ? a[1] : a[0];
     };
     // md5(text) — 32-char lowercase hex digest
     functions_["md5"] = [](const std::vector<ExprValue>& a) {
