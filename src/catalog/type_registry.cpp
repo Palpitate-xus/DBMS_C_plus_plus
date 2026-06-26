@@ -223,6 +223,10 @@ std::string TypeRegistry::validateColumn(Column& col) const {
         isArray = true;
         baseType = baseType.substr(0, baseType.size() - 2);
     }
+    // Honor an array flag the column factory/parser already set: array columns
+    // store the element type in dataType (no "[]" suffix), so the suffix check
+    // alone would wrongly clear isArray and revert them to fixed-width scalars.
+    if (col.isArray) isArray = true;
 
     const TypeEntry* entry = findType(baseType);
     if (!entry) {

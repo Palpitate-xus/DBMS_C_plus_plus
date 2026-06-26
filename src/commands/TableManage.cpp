@@ -4320,6 +4320,129 @@ static bool normalizeRange(const std::string& in, const std::string& type, std::
     return true;
 }
 
+// ========================================================================
+// Array literals ({1,2,3}, {{1,2},{3,4}}, {"a,b","c"}, NULL elements).
+// Stored as canonical PG text. Validates brace structure, that siblings are
+// uniformly scalars or equal-length sub-arrays (rectangular dimensions), and
+// that scalar elements parse for numeric element types; re-emits with
+// insignificant whitespace removed and elements quoted only where required.
+// ========================================================================
+static bool arrayElemIsNumeric(const std::string& t) {
+    return t == "int" || t == "integer" || t == "int2" || t == "int4" || t == "int8" ||
+           t == "smallint" || t == "bigint" || t == "tinyint" || t == "long" ||
+           t == "serial" || t == "bigserial" || t == "smallserial";
+}
+static bool arrayElemIsFloat(const std::string& t) {
+    return t == "numeric" || t == "decimal" || t == "float" || t == "float4" ||
+           t == "float8" || t == "double" || t == "real";
+}
+static bool validateArrayScalar(const std::string& tok, const std::string& elemType) {
+    if (arrayElemIsNumeric(elemType)) {
+        try { size_t p = 0; std::stoll(tok, &p); return p == tok.size(); } catch (...) { return false; }
+    }
+    if (arrayElemIsFloat(elemType)) {
+        try { size_t p = 0; std::stod(tok, &p); return p == tok.size(); } catch (...) { return false; }
+    }
+    return true;  // text-like element types accept any contents
+}
+
+struct ArrayParser {
+    const std::string& s;
+    const std::string& elemType;
+    size_t i = 0;
+    bool ok = true;
+    explicit ArrayParser(const std::string& str, const std::string& et) : s(str), elemType(et) {}
+    void skipWs() { while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i; }
+
+    // Returns nesting depth (0 = scalar, >=1 = array) and, for arrays, the child
+    // element count via `count`. Appends canonical text to `out`.
+    int parseValue(std::string& out, size_t& count) {
+        skipWs();
+        if (i >= s.size()) { ok = false; return -1; }
+        if (s[i] == '{') return parseArray(out, count);
+        return parseScalar(out);
+    }
+    int parseScalar(std::string& out) {
+        skipWs();
+        std::string tok;
+        bool quoted = false;
+        if (i < s.size() && s[i] == '"') {
+            quoted = true; ++i;
+            while (i < s.size() && s[i] != '"') {
+                if (s[i] == '\\' && i + 1 < s.size()) { tok += s[i + 1]; i += 2; }
+                else { tok += s[i]; ++i; }
+            }
+            if (i >= s.size()) { ok = false; return -1; }
+            ++i;  // closing quote
+        } else {
+            while (i < s.size() && s[i] != ',' && s[i] != '}' && s[i] != '{') { tok += s[i]; ++i; }
+            tok = trim(tok);
+        }
+        if (!quoted) {
+            std::string up;
+            for (char c : tok) up += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            if (up == "NULL") { out += "NULL"; return 0; }
+            if (tok.empty()) { ok = false; return -1; }  // bare empty element is invalid
+        }
+        if (!validateArrayScalar(tok, elemType)) { ok = false; return -1; }
+        bool needQuote = quoted || tok.empty() ||
+                         tok.find_first_of(" ,{}\"\\") != std::string::npos;
+        if (needQuote) {
+            std::string q = "\"";
+            for (char c : tok) { if (c == '"' || c == '\\') q += '\\'; q += c; }
+            q += "\"";
+            out += q;
+        } else {
+            out += tok;
+        }
+        return 0;
+    }
+    int parseArray(std::string& out, size_t& count) {
+        skipWs();
+        if (i >= s.size() || s[i] != '{') { ok = false; return -1; }
+        ++i;
+        out += '{';
+        count = 0;
+        skipWs();
+        if (i < s.size() && s[i] == '}') { ++i; out += '}'; return 1; }  // empty array
+        int childDepth = -2;
+        size_t childCount = 0;  // for rectangular check among sibling sub-arrays
+        while (true) {
+            std::string child;
+            size_t cc = 0;
+            int d = parseValue(child, cc);
+            if (!ok) return -1;
+            if (childDepth == -2) { childDepth = d; childCount = cc; }
+            else {
+                if (d != childDepth) { ok = false; return -1; }       // mixed scalar/array
+                if (d >= 1 && cc != childCount) { ok = false; return -1; }  // ragged dims
+            }
+            out += child;
+            ++count;
+            skipWs();
+            if (i >= s.size()) { ok = false; return -1; }
+            if (s[i] == ',') { ++i; out += ','; continue; }
+            if (s[i] == '}') { ++i; out += '}'; break; }
+            ok = false; return -1;
+        }
+        return childDepth + 1;
+    }
+};
+
+static bool normalizeArray(const std::string& in, const std::string& elemType, std::string& out) {
+    ArrayParser p(in, elemType);
+    std::string result;
+    size_t count = 0;
+    p.skipWs();
+    if (p.i >= in.size() || in[p.i] != '{') return false;  // must be an array literal
+    p.parseValue(result, count);
+    if (!p.ok) return false;
+    p.skipWs();
+    if (p.i != in.size()) return false;  // trailing garbage
+    out = result;
+    return true;
+}
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -9033,6 +9156,16 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
             actualValues[col.dataName] = canon;
         }
+        // Validate / canonicalize array literals (brace structure, rectangular
+        // dimensions, per-element type for numeric element types).
+        if (col.isArray && !val.empty()) {
+            std::string canon;
+            if (!normalizeArray(val, col.dataType, canon)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualValues[col.dataName] = canon;
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -10316,6 +10449,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     if (!kv.second.empty()) {
                         std::string canon;
                         if (!normalizeRange(kv.second, col.dataType, canon))
+                            return DBStatus::INVALID_VALUE;
+                        storeVal = canon;
+                    }
+                } else if (col.isArray) {
+                    if (!kv.second.empty()) {
+                        std::string canon;
+                        if (!normalizeArray(kv.second, col.dataType, canon))
                             return DBStatus::INVALID_VALUE;
                         storeVal = canon;
                     }
