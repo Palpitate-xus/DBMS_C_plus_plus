@@ -372,6 +372,17 @@ public:
     std::map<std::string, double> computeFunctionalDependencies(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& colnames) const;
+    // ndistinct: distinct value counts per column and for the full column group
+    // (pg_ndistinct flavor). Keys are single column names plus a comma-joined
+    // group key for the whole set.
+    std::map<std::string, int64_t> computeNDistinct(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& colnames) const;
+    // mcv: most-common combinations of the column group with their counts,
+    // sorted by frequency descending, truncated to topN.
+    std::vector<std::pair<std::string, int64_t>> computeMCVCombinations(
+        const std::string& dbname, const std::string& tablename,
+        const std::vector<std::string>& colnames, size_t topN) const;
     size_t getTableRowCount(const std::string& dbname, const std::string& tablename) const;
     ColumnStats getColumnStats(const std::string& dbname, const std::string& tablename,
                                 const std::string& colname) const;

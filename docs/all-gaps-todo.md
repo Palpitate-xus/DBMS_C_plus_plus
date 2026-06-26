@@ -59,6 +59,7 @@
 | 2026-06-26 | Phase 4 Wave 4.27b ALTER TABLE DROP PRIMARY KEY：`alterTableDropConstraint` 在 CHECK/UNIQUE/FK 未命中且表有 PK 时删除主键（清 pkColIndices/isPrimaryKey、移除物理 PK 索引，保留隐式 NOT NULL），并对所有 DROP CONSTRAINT 路径补 `invalidateCatalogSchema`；经既有 main.cpp DROP CONSTRAINT 路径直达。`tests/alter_add_pk_test.cpp` 新增 drop PK 用例（删前重复被拒→删→放行→再删 INVALID_VALUE）。全部 77 个测试通过。命名 PK 精确匹配/`IF EXISTS`/CASCADE 仍待后续。 |
 | 2026-06-26 | Phase 4 Wave 4.27c ALTER TABLE RENAME CONSTRAINT：新增 `StorageEngine::alterTableRenameConstraint`（CHECK/UNIQUE/FK 改名，重名→TABLE_ALREADY_EXISTS、未找到→INVALID_VALUE、缺表→TABLE_NOT_FOUND）；`main.cpp` RENAME 新增 `rename constraint old to new` 分支。新增 `tests/alter_rename_constraint_test.cpp`。全部 78 个测试通过。PK 约束改名仍待后续。 |
 | 2026-06-26 | Phase 4 Wave 4.27d ALTER COLUMN SET NOT NULL 数据校验：`alterTableSetNotNull` 置位前扫描既有行，列存在 NULL（空串约定）则拒绝（保持可空），符合 PG；set/drop NOT NULL 均补 `invalidateCatalogSchema`。新增 `tests/alter_set_not_null_test.cpp`。全部 79 个测试通过。窄 int NULL 检测/NOT VALID 两阶段仍待后续。 |
+| 2026-06-26 | Phase 4 Wave 4.32b CREATE STATISTICS ndistinct/mcv：新增 `StorageEngine::computeNDistinct`（每列+全组合 distinct 计数）与 `computeMCVCombinations`（最常见组合 top-N）；`handleCreateStatistics` 对 ndistinct/mcv kind 输出结果（此前仅 dependencies）。新增 `tests/statistics_ndistinct_mcv_test.cpp`。全部 80 个测试通过。pg_statistic_ext catalog/planner 消费仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 

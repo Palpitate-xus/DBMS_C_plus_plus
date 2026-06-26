@@ -7126,6 +7126,26 @@ static bool handleCreateStatistics(const string& sql, Session& s) {
                  << std::fixed << std::setprecision(6) << d.second << endl;
         }
     }
+    // ndistinct kind: report per-column and full-group distinct counts.
+    bool wantsND = false, wantsMCV = false;
+    for (const auto& k : kinds) {
+        string lk = toLower(k);
+        if (lk == "ndistinct") wantsND = true;
+        else if (lk == "mcv") wantsMCV = true;
+    }
+    if (wantsND && columns.size() >= 2) {
+        auto nd = g_engine.computeNDistinct(s.currentDB, tableName, columns);
+        for (const auto& d : nd) {
+            cout << "  ndistinct " << d.first << " = " << d.second << endl;
+        }
+    }
+    // mcv kind: report the most common value combinations of the column group.
+    if (wantsMCV) {
+        auto mcv = g_engine.computeMCVCombinations(s.currentDB, tableName, columns, 5);
+        for (const auto& m : mcv) {
+            cout << "  mcv " << m.first << " : " << m.second << endl;
+        }
+    }
     cout << "Statistics " << name << " created" << endl;
     return false;
 }

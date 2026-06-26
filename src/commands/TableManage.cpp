@@ -2960,6 +2960,88 @@ std::map<std::string, double> StorageEngine::computeFunctionalDependencies(
     return result;
 }
 
+std::map<std::string, int64_t> StorageEngine::computeNDistinct(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& colnames) const {
+    std::map<std::string, int64_t> result;
+    if (!tableExists(dbname, tablename) || colnames.size() < 2) return result;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    std::map<std::string, size_t> colIdx;
+    for (size_t i = 0; i < tbl.len; ++i) colIdx[tbl.cols[i].dataName] = i;
+    for (const auto& c : colnames)
+        if (colIdx.find(c) == colIdx.end()) return result;
+
+    std::vector<std::vector<std::string>> rows;
+    const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
+        [&](uint32_t, uint16_t, const char* data, size_t len) {
+            std::string row(data, len);
+            std::vector<std::string> vals;
+            vals.reserve(colnames.size());
+            for (const auto& c : colnames)
+                vals.push_back(const_cast<StorageEngine*>(this)->extractColumnValue(
+                    row, tbl, colIdx[c]));
+            rows.push_back(std::move(vals));
+        });
+    if (rows.empty()) return result;
+
+    // Per-column distinct counts.
+    for (size_t k = 0; k < colnames.size(); ++k) {
+        std::set<std::string> s;
+        for (const auto& r : rows) s.insert(r[k]);
+        result[colnames[k]] = static_cast<int64_t>(s.size());
+    }
+    // Full-group distinct combination count.
+    std::set<std::string> combos;
+    for (const auto& r : rows) {
+        std::string key;
+        for (const auto& v : r) { key += v; key += '\x01'; }
+        combos.insert(key);
+    }
+    std::string groupKey;
+    for (size_t k = 0; k < colnames.size(); ++k) {
+        if (k) groupKey += ", ";
+        groupKey += colnames[k];
+    }
+    result[groupKey] = static_cast<int64_t>(combos.size());
+    return result;
+}
+
+std::vector<std::pair<std::string, int64_t>> StorageEngine::computeMCVCombinations(
+    const std::string& dbname, const std::string& tablename,
+    const std::vector<std::string>& colnames, size_t topN) const {
+    std::vector<std::pair<std::string, int64_t>> result;
+    if (!tableExists(dbname, tablename) || colnames.empty()) return result;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    std::map<std::string, size_t> colIdx;
+    for (size_t i = 0; i < tbl.len; ++i) colIdx[tbl.cols[i].dataName] = i;
+    for (const auto& c : colnames)
+        if (colIdx.find(c) == colIdx.end()) return result;
+
+    std::map<std::string, int64_t> counts;
+    const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
+        [&](uint32_t, uint16_t, const char* data, size_t len) {
+            std::string row(data, len);
+            std::string disp = "(";
+            for (size_t k = 0; k < colnames.size(); ++k) {
+                if (k) disp += ", ";
+                disp += const_cast<StorageEngine*>(this)->extractColumnValue(
+                    row, tbl, colIdx[colnames[k]]);
+            }
+            disp += ")";
+            counts[disp]++;
+        });
+
+    result.assign(counts.begin(), counts.end());
+    std::sort(result.begin(), result.end(),
+              [](const std::pair<std::string, int64_t>& a,
+                 const std::pair<std::string, int64_t>& b) {
+                  if (a.second != b.second) return a.second > b.second;
+                  return a.first < b.first;
+              });
+    if (result.size() > topN) result.resize(topN);
+    return result;
+}
+
 StorageEngine::BufferPoolStats StorageEngine::getBufferPoolStats() const {
     BufferPoolStats stats;
     // Page allocators (table data files)
