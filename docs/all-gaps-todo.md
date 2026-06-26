@@ -46,6 +46,7 @@
 | 2026-06-25 | Phase 4 Wave 4.13 jsonpath 结构化语法校验：新增 `isValidJsonPath`（务实结构校验，低误拒：可选 `strict`/`lax` mode、`()`/`[]` 平衡、拒绝空 `[]` 下标/`..`/尾随 `.`/非法起始 token/未终止字符串）；INSERT/UPDATE 校验拒绝非法 jsonpath，原样存储；新增 `tests/jsonpath_test.cpp`（含 `$.a.b`/`$[*]`/`lax`/`? (@..)`/`.**` 等合法接受、各类非法拒绝、UPDATE）+ 二进制端到端验证（注：二进制 SQL 预处理会把字面量中的 `[*]` 下标改写为 `array_get(...)`，为既有 string-based 处理遗留行为，与本校验正交）。全部 65 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.5 interval 多格式输入 + canonicalization：新增 `parseInterval`/`formatInterval`/`normalizeInterval`（解析 verbose 单位 year/mon/week/day/hour/min/sec 及缩写、`HH:MM:SS` 时间、`Y-M` 年月简写、裸数=秒、尾随 `ago` 取反，分数字段按 PG 规则向下级联：月=30天、天=24时），规范化输出 PG postgres 风格 `[N years] [N mons] [N days] [HH:MM:SS]`（年月拆分、复数化、时间符号）；INSERT/UPDATE 校验拒绝非法 interval（未知单位/无数字单位/垃圾）并规范化；新增 `tests/interval_test.cpp` + 二进制端到端验证。另：将 `background_worker_test` checkpoint 轮询窗口从 5s 增至 ~20s（消除重 CPU 竞争下偶发假阳性）。全部 66 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.15 composite 类型列识别 + row 字面量校验：`columnDefToColumn` 识别 composite 类型列（`g_engine.isCompositeType`）并以变长文本存储、保留 composite 类型名为 dataType（此前退回 varchar、无字段信息）；新增 `normalizeComposite`（解析 `(v1,v2,...)`、尊重引号、按字段数与数值字段类型校验、规范化输出，空字段=NULL，仅必要时加引号）；INSERT/UPDATE 用廉价的 `TypeRegistry::findType==nullptr` 守卫（避免对内建列做目录文件读）再查 composite 定义并校验；新增 `tests/composite_test.cpp`（列识别、空白规范化、NULL 字段、含逗号字段引号、字段数错误/数值字段非法/缺括号拒绝、UPDATE）+ 二进制端到端验证。全部 67 个测试通过。 |
+| 2026-06-26 | Phase 4 Wave 4.19a 字符串函数集扩充：`ExprEvaluator::registerBuiltins` 新增 `char_length`/`character_length`/`octet_length`/`bit_length`、`substr`（PG 1-based、非正起点裁剪）、`lpad`/`rpad`、`btrim`、`split_part`（1-based、负数从尾）、`strpos`、`initcap`、`to_hex`、`concat_ws`（跳过 NULL）、`starts_with`、`translate`、`overlay`（函数形态）、`quote_literal`/`quote_ident`；并为 `trim`/`ltrim`/`rtrim` 增加可选字符集参数（PG 语义）。新增 `tests/string_functions_test.cpp`（长度族/substr 边界/pad/带字符集 trim/split_part/strpos/initcap/to_hex/concat_ws-NULL/starts_with/translate/overlay/quote/NULL 传播）。全部 68 个测试通过。regexp/format/md5/encode-decode/to_char 等仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -197,7 +198,7 @@
 | 3.1 | 表达式 parser | 没有完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function、named/default args | 🔄 |
 | 3.2 | 逻辑/比较 | NULL 存储用空字符串近似，`IS DISTINCT FROM` 被预处理改写，复杂 NULL 语义不完整 | ⚠️ |
 | 3.3 | 数学函数 | 只覆盖常见函数；缺少 PG 全套 numeric/math/random/trig/hyperbolic/bitwise 函数和精确类型返回 | ⚠️ |
-| 3.4 | 字符串函数 | 只覆盖常见函数；缺少 `format`、regexp 系列全集、collation-aware 行为、encoding-aware 字符长度 | ⚠️ |
+| 3.4 | 字符串函数 | 已覆盖常见 + 扩充集（length 族/substr/lpad/rpad/btrim/split_part/strpos/initcap/to_hex/concat_ws/starts_with/translate/overlay/quote_*，trim 家族支持字符集参数）；仍缺 `format`、regexp 系列全集、`md5`/`encode`/`decode`、collation-aware 行为、encoding-aware 字符长度 | ⚠️ |
 | 3.5 | 日期时间函数 | 支持 current/now/extract/date_trunc 等部分；缺少 time zone database、`date_bin`、justify 系列、precision、interval field 复杂行为 | ⚠️ |
 | 3.6 | JSON/XML/Array/Range | 均为小子集；缺少 PostgreSQL 18 SQL/JSON、JSON_TABLE、XMLTABLE、array/range/multirange 全函数 | ⚠️ |
 | 3.7 | 聚合函数 | 有 count/sum/avg/min/max、部分 string/json/array 聚合痕迹；缺少 ordered-set/hypothetical-set、percentile、统计回归聚合、parallel aggregate | ⚠️ |

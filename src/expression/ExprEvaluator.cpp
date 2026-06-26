@@ -755,24 +755,27 @@ void ExprEvaluator::registerBuiltins() {
     functions_["trim"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
         const std::string& s = a[0].value;
+        std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
         size_t b = 0, e = s.size();
-        while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
-        while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+        while (b < e && chars.find(s[b]) != std::string::npos) ++b;
+        while (e > b && chars.find(s[e - 1]) != std::string::npos) --e;
         return ExprValue("text", s.substr(b, e - b), false);
     };
     functions_["ltrim"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
         const std::string& s = a[0].value;
+        std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
         size_t b = 0;
-        while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+        while (b < s.size() && chars.find(s[b]) != std::string::npos) ++b;
         return ExprValue("text", s.substr(b), false);
     };
     functions_["rtrim"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
         const std::string& s = a[0].value;
+        std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
         if (s.empty()) return ExprValue("text", s, false);
         size_t e = s.size();
-        while (e > 0 && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+        while (e > 0 && chars.find(s[e - 1]) != std::string::npos) --e;
         return ExprValue("text", s.substr(0, e), false);
     };
     functions_["replace"] = [](const std::vector<ExprValue>& a) {
@@ -833,6 +836,229 @@ void ExprEvaluator::registerBuiltins() {
         int v = static_cast<int>(a[0].asInt());
         if (v < 0 || v > 255) return ExprValue("text", "", true);
         return ExprValue("text", std::string(1, static_cast<char>(v)), false);
+    };
+    // substr — PostgreSQL alias of substring(str, from[, len])
+    functions_["substr"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        std::string s = a[0].value;
+        if (a.size() < 2) return ExprValue("text", s, false);
+        int64_t from = a[1].asInt();
+        int64_t len = (a.size() >= 3) ? a[2].asInt() : -1;
+        // PG semantics: 1-based; clamp a non-positive start, adjusting length.
+        int64_t end = (len >= 0) ? from + len : static_cast<int64_t>(s.size()) + 1;
+        int64_t start = from < 1 ? 1 : from;
+        if (end < start) end = start;
+        if (start > static_cast<int64_t>(s.size())) return ExprValue("text", "", false);
+        size_t b = static_cast<size_t>(start - 1);
+        size_t e = std::min(static_cast<size_t>(end - 1), s.size());
+        return ExprValue("text", s.substr(b, e - b), false);
+    };
+    // char_length / character_length — character count (bytes for our ASCII storage)
+    functions_["char_length"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        return ExprValue("integer", std::to_string(a[0].value.size()), false);
+    };
+    functions_["character_length"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        return ExprValue("integer", std::to_string(a[0].value.size()), false);
+    };
+    functions_["octet_length"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        return ExprValue("integer", std::to_string(a[0].value.size()), false);
+    };
+    functions_["bit_length"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        return ExprValue("integer", std::to_string(a[0].value.size() * 8), false);
+    };
+    // lpad / rpad — pad (or truncate) a string to a target length with a fill string
+    functions_["lpad"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        int64_t len = a[1].asInt();
+        std::string fill = (a.size() >= 3 && !a[2].isNull) ? a[2].value : " ";
+        if (len <= 0) return ExprValue("text", "", false);
+        if (static_cast<int64_t>(s.size()) >= len)
+            return ExprValue("text", s.substr(0, static_cast<size_t>(len)), false);
+        if (fill.empty()) return ExprValue("text", s, false);
+        std::string pad;
+        while (static_cast<int64_t>(pad.size() + s.size()) < len) pad += fill;
+        pad = pad.substr(0, static_cast<size_t>(len) - s.size());
+        return ExprValue("text", pad + s, false);
+    };
+    functions_["rpad"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        int64_t len = a[1].asInt();
+        std::string fill = (a.size() >= 3 && !a[2].isNull) ? a[2].value : " ";
+        if (len <= 0) return ExprValue("text", "", false);
+        if (static_cast<int64_t>(s.size()) >= len)
+            return ExprValue("text", s.substr(0, static_cast<size_t>(len)), false);
+        if (fill.empty()) return ExprValue("text", s, false);
+        std::string out = s;
+        size_t fi = 0;
+        while (static_cast<int64_t>(out.size()) < len) {
+            out += fill[fi % fill.size()];
+            ++fi;
+        }
+        return ExprValue("text", out, false);
+    };
+    // btrim(str[, chars]) — trim matching characters (default whitespace) from both ends
+    functions_["btrim"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
+        size_t b = 0, e = s.size();
+        while (b < e && chars.find(s[b]) != std::string::npos) ++b;
+        while (e > b && chars.find(s[e - 1]) != std::string::npos) --e;
+        return ExprValue("text", s.substr(b, e - b), false);
+    };
+    // split_part(str, delim, n) — n-th field (1-based; negative counts from the end)
+    functions_["split_part"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        const std::string& delim = a[1].value;
+        int64_t n = a[2].asInt();
+        std::vector<std::string> parts;
+        if (delim.empty()) {
+            parts.push_back(s);
+        } else {
+            size_t pos = 0, next;
+            while ((next = s.find(delim, pos)) != std::string::npos) {
+                parts.push_back(s.substr(pos, next - pos));
+                pos = next + delim.size();
+            }
+            parts.push_back(s.substr(pos));
+        }
+        int64_t idx;
+        if (n > 0) idx = n - 1;
+        else if (n < 0) idx = static_cast<int64_t>(parts.size()) + n;
+        else return ExprValue("text", "", false);
+        if (idx < 0 || idx >= static_cast<int64_t>(parts.size()))
+            return ExprValue("text", "", false);
+        return ExprValue("text", parts[static_cast<size_t>(idx)], false);
+    };
+    // strpos(string, substring) — 1-based position of first match, 0 if absent
+    functions_["strpos"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("integer", "", true);
+        size_t pos = a[0].value.find(a[1].value);
+        return ExprValue("integer",
+                         std::to_string(pos == std::string::npos ? 0 : static_cast<int64_t>(pos + 1)),
+                         false);
+    };
+    // initcap — capitalize the first letter of each word, lowercase the rest
+    functions_["initcap"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        std::string s = a[0].value;
+        bool startWord = true;
+        for (char& c : s) {
+            unsigned char uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc)) {
+                c = startWord ? static_cast<char>(std::toupper(uc))
+                              : static_cast<char>(std::tolower(uc));
+                startWord = false;
+            } else {
+                startWord = true;
+            }
+        }
+        return ExprValue("text", s, false);
+    };
+    // to_hex(int) — hexadecimal text of a (non-negative interpreted) integer
+    functions_["to_hex"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        uint64_t v = static_cast<uint64_t>(a[0].asInt());
+        if (v == 0) return ExprValue("text", "0", false);
+        std::string out;
+        const char* digits = "0123456789abcdef";
+        while (v) { out.push_back(digits[v & 0xF]); v >>= 4; }
+        std::reverse(out.begin(), out.end());
+        return ExprValue("text", out, false);
+    };
+    // concat_ws(sep, ...) — join the non-NULL arguments with a separator
+    functions_["concat_ws"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        const std::string& sep = a[0].value;
+        std::string out;
+        bool first = true;
+        for (size_t i = 1; i < a.size(); ++i) {
+            if (a[i].isNull) continue;
+            if (!first) out += sep;
+            out += a[i].value;
+            first = false;
+        }
+        return ExprValue("text", out, false);
+    };
+    // starts_with(str, prefix) — boolean prefix test
+    functions_["starts_with"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("boolean", "", true);
+        const std::string& s = a[0].value;
+        const std::string& p = a[1].value;
+        bool r = s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+        return ExprValue("boolean", r ? "t" : "f", false);
+    };
+    // translate(str, from, to) — map each "from" char to the matching "to" char,
+    // deleting chars whose "from" index has no "to" counterpart
+    functions_["translate"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        const std::string& from = a[1].value;
+        const std::string& to = a[2].value;
+        std::string out;
+        for (char c : s) {
+            size_t idx = from.find(c);
+            if (idx == std::string::npos) out.push_back(c);
+            else if (idx < to.size()) out.push_back(to[idx]);
+            // else: char is deleted
+        }
+        return ExprValue("text", out, false);
+    };
+    // overlay(string, newsub, start[, count]) — replace count chars at 1-based start
+    functions_["overlay"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
+            return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        const std::string& repl = a[1].value;
+        int64_t start = a[2].asInt();
+        int64_t count = (a.size() >= 4 && !a[3].isNull)
+                            ? a[3].asInt()
+                            : static_cast<int64_t>(repl.size());
+        if (start < 1) start = 1;
+        if (count < 0) count = 0;
+        size_t b = std::min(static_cast<size_t>(start - 1), s.size());
+        size_t removed = std::min(static_cast<size_t>(count), s.size() - b);
+        std::string out = s.substr(0, b) + repl + s.substr(b + removed);
+        return ExprValue("text", out, false);
+    };
+    // quote_literal — single-quote a value, doubling embedded quotes
+    functions_["quote_literal"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        std::string out = "'";
+        for (char c : a[0].value) {
+            if (c == '\'') out += "''";
+            else out.push_back(c);
+        }
+        out += "'";
+        return ExprValue("text", out, false);
+    };
+    // quote_ident — double-quote an identifier when it is not a simple lower-case name
+    functions_["quote_ident"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        const std::string& s = a[0].value;
+        bool simple = !s.empty();
+        for (size_t i = 0; i < s.size() && simple; ++i) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
+            bool ok = (c == '_') || (std::islower(c)) || (std::isdigit(c) && i > 0);
+            if (!ok) simple = false;
+        }
+        if (simple) return ExprValue("text", s, false);
+        std::string out = "\"";
+        for (char c : s) {
+            if (c == '"') out += "\"\"";
+            else out.push_back(c);
+        }
+        out += "\"";
+        return ExprValue("text", out, false);
     };
 
     // ------------------------------------------------------------------------
