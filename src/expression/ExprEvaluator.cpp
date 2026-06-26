@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <sstream>
 
@@ -776,6 +777,81 @@ static bool hexDecode(const std::string& in, std::string& out) {
     return true;
 }
 
+static std::string trimStr(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+// Split a PostgreSQL array literal '{a,b,...}' into its top-level element
+// tokens (raw text, quotes preserved), respecting nested {} and "" quoting.
+// Returns false if the text is not a brace-delimited array.
+static bool parseArrayElements(const std::string& text, std::vector<std::string>& out) {
+    out.clear();
+    std::string s = trimStr(text);
+    if (s.size() < 2 || s.front() != '{' || s.back() != '}') return false;
+    std::string inner = s.substr(1, s.size() - 2);
+    if (trimStr(inner).empty()) return true;  // empty array
+    int depth = 0;
+    bool inQ = false;
+    std::string cur;
+    for (size_t i = 0; i < inner.size(); ++i) {
+        char c = inner[i];
+        if (inQ) {
+            cur.push_back(c);
+            if (c == '\\' && i + 1 < inner.size()) { cur.push_back(inner[++i]); }
+            else if (c == '"') inQ = false;
+        } else if (c == '"') {
+            inQ = true; cur.push_back(c);
+        } else if (c == '{') {
+            ++depth; cur.push_back(c);
+        } else if (c == '}') {
+            --depth; cur.push_back(c);
+        } else if (c == ',' && depth == 0) {
+            out.push_back(trimStr(cur)); cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    out.push_back(trimStr(cur));
+    return true;
+}
+
+// Strip surrounding double-quotes from an array element token and unescape.
+static std::string arrayElemUnquote(const std::string& tok) {
+    if (tok.size() >= 2 && tok.front() == '"' && tok.back() == '"') {
+        std::string out;
+        for (size_t i = 1; i + 1 < tok.size(); ++i) {
+            if (tok[i] == '\\' && i + 2 < tok.size()) { out.push_back(tok[++i]); }
+            else out.push_back(tok[i]);
+        }
+        return out;
+    }
+    return tok;
+}
+
+// Quote an array element token if it needs quoting (contains delimiters, braces,
+// quotes, leading/trailing space, or is empty / looks like NULL).
+static std::string arrayElemQuote(const std::string& v) {
+    bool needQuote = v.empty();
+    std::string low;
+    for (char c : v) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (low == "null") needQuote = true;
+    for (char c : v) {
+        if (c == ',' || c == '{' || c == '}' || c == '"' || c == '\\' ||
+            std::isspace(static_cast<unsigned char>(c))) { needQuote = true; break; }
+    }
+    if (!needQuote) return v;
+    std::string out = "\"";
+    for (char c : v) {
+        if (c == '"' || c == '\\') out.push_back('\\');
+        out.push_back(c);
+    }
+    out += "\"";
+    return out;
+}
+
 void ExprEvaluator::registerBuiltins() {
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
@@ -1366,6 +1442,179 @@ void ExprEvaluator::registerBuiltins() {
             return ExprValue("bytea", out, false);
         }
         return ExprValue("bytea", "", true);
+    };
+
+    // ------------------------------------------------------------------------
+    // Array functions (operate on the '{...}' array literal text)
+    // ------------------------------------------------------------------------
+    // array_length(arr, dim) — element count along dimension 1 (or 2); NULL if empty/unknown dim
+    functions_["array_length"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        int dim = (a.size() >= 2 && !a[1].isNull) ? static_cast<int>(a[1].asInt()) : 1;
+        std::vector<std::string> elems;
+        if (!parseArrayElements(a[0].value, elems) || elems.empty())
+            return ExprValue("integer", "", true);
+        if (dim == 1) return ExprValue("integer", std::to_string(elems.size()), false);
+        if (dim == 2) {
+            std::vector<std::string> sub;
+            if (!parseArrayElements(elems[0], sub) || sub.empty())
+                return ExprValue("integer", "", true);
+            return ExprValue("integer", std::to_string(sub.size()), false);
+        }
+        return ExprValue("integer", "", true);
+    };
+    // cardinality(arr) — total number of elements across all dimensions
+    functions_["cardinality"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        std::vector<std::string> elems;
+        if (!parseArrayElements(a[0].value, elems)) return ExprValue("integer", "", true);
+        // Count leaves recursively.
+        std::function<int64_t(const std::vector<std::string>&)> count =
+            [&](const std::vector<std::string>& es) -> int64_t {
+            int64_t n = 0;
+            for (const auto& e : es) {
+                std::vector<std::string> sub;
+                if (parseArrayElements(e, sub)) n += count(sub);
+                else n += 1;
+            }
+            return n;
+        };
+        return ExprValue("integer", std::to_string(count(elems)), false);
+    };
+    // array_ndims(arr) — number of dimensions (leading '{' count)
+    functions_["array_ndims"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        std::string s = a[0].value;
+        size_t b = 0;
+        while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+        int n = 0;
+        while (b < s.size() && s[b] == '{') { ++n; ++b; }
+        if (n == 0) return ExprValue("integer", "", true);
+        return ExprValue("integer", std::to_string(n), false);
+    };
+    // array_lower(arr, dim) — PG arrays default to lower bound 1
+    functions_["array_lower"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        std::vector<std::string> elems;
+        if (!parseArrayElements(a[0].value, elems) || elems.empty())
+            return ExprValue("integer", "", true);
+        return ExprValue("integer", "1", false);
+    };
+    // array_upper(arr, dim) — upper bound == length for the default lower bound 1
+    functions_["array_upper"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        int dim = (a.size() >= 2 && !a[1].isNull) ? static_cast<int>(a[1].asInt()) : 1;
+        std::vector<std::string> elems;
+        if (!parseArrayElements(a[0].value, elems) || elems.empty())
+            return ExprValue("integer", "", true);
+        if (dim == 1) return ExprValue("integer", std::to_string(elems.size()), false);
+        if (dim == 2) {
+            std::vector<std::string> sub;
+            if (!parseArrayElements(elems[0], sub) || sub.empty())
+                return ExprValue("integer", "", true);
+            return ExprValue("integer", std::to_string(sub.size()), false);
+        }
+        return ExprValue("integer", "", true);
+    };
+    // array_append(arr, elem) — append element, returning the new array literal
+    functions_["array_append"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull) return ExprValue("ARRAY", "", true);
+        std::vector<std::string> elems;
+        if (!parseArrayElements(a[0].value, elems)) return ExprValue("ARRAY", "", true);
+        elems.push_back(a[1].isNull ? "NULL" : arrayElemQuote(a[1].value));
+        std::string out = "{";
+        for (size_t i = 0; i < elems.size(); ++i) { if (i) out += ","; out += elems[i]; }
+        out += "}";
+        return ExprValue("ARRAY", out, false);
+    };
+    // array_prepend(elem, arr) — prepend element
+    functions_["array_prepend"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[1].isNull) return ExprValue("ARRAY", "", true);
+        std::vector<std::string> elems;
+        if (!parseArrayElements(a[1].value, elems)) return ExprValue("ARRAY", "", true);
+        elems.insert(elems.begin(), a[0].isNull ? "NULL" : arrayElemQuote(a[0].value));
+        std::string out = "{";
+        for (size_t i = 0; i < elems.size(); ++i) { if (i) out += ","; out += elems[i]; }
+        out += "}";
+        return ExprValue("ARRAY", out, false);
+    };
+    // array_cat(a, b) — concatenate two arrays
+    functions_["array_cat"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2) return ExprValue("ARRAY", "", true);
+        std::vector<std::string> ea, eb;
+        if (a[0].isNull && !a[1].isNull) return ExprValue("ARRAY", a[1].value, false);
+        if (a[1].isNull && !a[0].isNull) return ExprValue("ARRAY", a[0].value, false);
+        if (!parseArrayElements(a[0].value, ea) || !parseArrayElements(a[1].value, eb))
+            return ExprValue("ARRAY", "", true);
+        ea.insert(ea.end(), eb.begin(), eb.end());
+        std::string out = "{";
+        for (size_t i = 0; i < ea.size(); ++i) { if (i) out += ","; out += ea[i]; }
+        out += "}";
+        return ExprValue("ARRAY", out, false);
+    };
+    // array_position(arr, elem) — 1-based index of first matching element, NULL if absent
+    functions_["array_position"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull) return ExprValue("integer", "", true);
+        std::vector<std::string> elems;
+        if (!parseArrayElements(a[0].value, elems)) return ExprValue("integer", "", true);
+        for (size_t i = 0; i < elems.size(); ++i) {
+            std::string v = arrayElemUnquote(elems[i]);
+            if (!a[1].isNull && v == a[1].value)
+                return ExprValue("integer", std::to_string(i + 1), false);
+        }
+        return ExprValue("integer", "", true);
+    };
+    // array_to_string(arr, delim [, null_string]) — join non-NULL elements
+    functions_["array_to_string"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        std::vector<std::string> elems;
+        if (!parseArrayElements(a[0].value, elems)) return ExprValue("text", "", true);
+        const std::string& delim = a[1].value;
+        bool hasNullStr = (a.size() >= 3 && !a[2].isNull);
+        std::string nullStr = hasNullStr ? a[2].value : "";
+        std::string out;
+        bool first = true;
+        for (const auto& e : elems) {
+            std::string low;
+            for (char c : e) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            bool isNull = (low == "null");
+            if (isNull && !hasNullStr) continue;  // omit NULLs when no null_string given
+            if (!first) out += delim;
+            out += isNull ? nullStr : arrayElemUnquote(e);
+            first = false;
+        }
+        return ExprValue("text", out, false);
+    };
+    // string_to_array(str, delim [, null_string]) — split into an array literal
+    functions_["string_to_array"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull) return ExprValue("ARRAY", "", true);
+        const std::string& s = a[0].value;
+        bool hasNullStr = (a.size() >= 3 && !a[2].isNull);
+        std::string nullStr = hasNullStr ? a[2].value : "";
+        std::vector<std::string> parts;
+        if (a[1].isNull) {
+            // NULL delimiter: split into individual characters.
+            for (char c : s) parts.push_back(std::string(1, c));
+        } else {
+            const std::string& delim = a[1].value;
+            if (delim.empty()) { parts.push_back(s); }
+            else {
+                size_t pos = 0, next;
+                while ((next = s.find(delim, pos)) != std::string::npos) {
+                    parts.push_back(s.substr(pos, next - pos));
+                    pos = next + delim.size();
+                }
+                parts.push_back(s.substr(pos));
+            }
+        }
+        std::string out = "{";
+        for (size_t i = 0; i < parts.size(); ++i) {
+            if (i) out += ",";
+            if (hasNullStr && parts[i] == nullStr) out += "NULL";
+            else out += arrayElemQuote(parts[i]);
+        }
+        out += "}";
+        return ExprValue("ARRAY", out, false);
     };
 
     // ------------------------------------------------------------------------
