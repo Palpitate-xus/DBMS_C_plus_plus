@@ -8072,11 +8072,26 @@ DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
+    // Reject if any existing row has NULL in this column (PostgreSQL behavior).
+    // NULL detection uses the empty-string convention (reliable for
+    // variable-length / 8-byte columns; best-effort for narrow fixed ints).
+    bool hasNull = false;
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        if (hasNull) return;
+        std::string row(data, len);
+        if (extractColumnValue(row, tbl, colIdx).empty()) hasNull = true;
+    });
+    if (hasNull) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
     tbl.cols[colIdx].isNull = false;
     {
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
     }
+    invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -8102,6 +8117,7 @@ DBStatus StorageEngine::alterTableDropNotNull(const std::string& dbname,
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
     }
+    invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
