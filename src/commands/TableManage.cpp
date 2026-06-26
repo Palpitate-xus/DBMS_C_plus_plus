@@ -4748,6 +4748,143 @@ static bool isValidJsonPath(const std::string& in) {
     return paren == 0 && brack == 0;
 }
 
+// ========================================================================
+// interval input parsing + canonicalization to PostgreSQL "postgres" style:
+//   [N year[s]] [N mon[s]] [N day[s]] [[-]HH:MM:SS[.ffff]]
+// Supports the verbose form (number+unit pairs: year/mon/week/day/hour/min/sec
+// and common abbreviations), HH:MM:SS time, the SQL year-month shorthand
+// "Y-M", a bare number (seconds), and a trailing "ago" (negates all). Fractional
+// field values cascade down (PG: 1 month = 30 days, 1 day = 24 h). ISO 8601 and
+// mixed-sign edge cases are out of scope.
+// ========================================================================
+static bool parseInterval(const std::string& in, long long& months, long long& days, double& seconds) {
+    double monthsD = 0, daysD = 0, secondsD = 0;
+    bool any = false, ago = false;
+    size_t i = 0, n = in.size();
+    auto skipWs = [&]() { while (i < n && std::isspace(static_cast<unsigned char>(in[i]))) ++i; };
+    auto readWord = [&]() -> std::string {
+        std::string w;
+        while (i < n && std::isalpha(static_cast<unsigned char>(in[i]))) { w += static_cast<char>(std::tolower(static_cast<unsigned char>(in[i]))); ++i; }
+        return w;
+    };
+    while (true) {
+        skipWs();
+        if (i >= n) break;
+        char c = in[i];
+        if (std::isalpha(static_cast<unsigned char>(c))) {
+            std::string w = readWord();
+            if (w == "ago") { ago = true; continue; }
+            return false;  // unit word with no preceding number
+        }
+        if (c != '-' && c != '+' && c != '.' && !std::isdigit(static_cast<unsigned char>(c))) return false;
+        // parse a signed decimal number
+        size_t start = i;
+        if (c == '-' || c == '+') ++i;
+        bool sawDigit = false;
+        while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) { ++i; sawDigit = true; }
+        if (i < n && in[i] == '.') { ++i; while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) { ++i; sawDigit = true; } }
+        if (!sawDigit) return false;
+        double value = std::stod(in.substr(start, i - start));
+
+        if (i < n && in[i] == ':') {
+            // time: value is HH; parse :MM[:SS[.f]]
+            ++i;
+            size_t ms = i; while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) ++i;
+            if (i == ms) return false;
+            double mm = std::stod(in.substr(ms, i - ms));
+            double ss = 0;
+            if (i < n && in[i] == ':') {
+                ++i; size_t ss0 = i;
+                while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) ++i;
+                if (i < n && in[i] == '.') { ++i; while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) ++i; }
+                if (i == ss0) return false;
+                ss = std::stod(in.substr(ss0, i - ss0));
+            }
+            double sign = (value < 0 || (in[start] == '-')) ? -1.0 : 1.0;
+            double absH = std::fabs(value);
+            secondsD += sign * (absH * 3600 + mm * 60 + ss);
+            any = true;
+            continue;
+        }
+        if (i < n && in[i] == '-' && i + 1 < n && std::isdigit(static_cast<unsigned char>(in[i + 1]))) {
+            // SQL year-month shorthand: Y-M
+            ++i; size_t m0 = i;
+            while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) ++i;
+            double mo = std::stod(in.substr(m0, i - m0));
+            monthsD += value * 12 + mo;
+            any = true;
+            continue;
+        }
+        // number + unit
+        while (i < n && (in[i] == ' ' || in[i] == '\t')) ++i;
+        std::string unit = readWord();
+        if (unit.empty()) { secondsD += value; any = true; continue; }  // bare number = seconds
+        if (unit == "year" || unit == "years" || unit == "y" || unit == "yr" || unit == "yrs") monthsD += value * 12;
+        else if (unit == "month" || unit == "months" || unit == "mon" || unit == "mons") monthsD += value;
+        else if (unit == "week" || unit == "weeks" || unit == "w") daysD += value * 7;
+        else if (unit == "day" || unit == "days" || unit == "d") daysD += value;
+        else if (unit == "hour" || unit == "hours" || unit == "h" || unit == "hr" || unit == "hrs") secondsD += value * 3600;
+        else if (unit == "minute" || unit == "minutes" || unit == "min" || unit == "mins") secondsD += value * 60;
+        else if (unit == "second" || unit == "seconds" || unit == "sec" || unit == "secs" || unit == "s") secondsD += value;
+        else return false;  // unknown unit
+        any = true;
+    }
+    if (!any) return false;
+    if (ago) { monthsD = -monthsD; daysD = -daysD; secondsD = -secondsD; }
+    // Cascade fractional parts downward (PG: month=30d, day=24h).
+    double im = std::trunc(monthsD);
+    daysD += (monthsD - im) * 30;
+    double id = std::trunc(daysD);
+    secondsD += (daysD - id) * 86400;
+    months = static_cast<long long>(im);
+    days = static_cast<long long>(id);
+    seconds = secondsD;
+    return true;
+}
+
+static std::string formatInterval(long long months, long long days, double seconds) {
+    std::vector<std::string> parts;
+    long long years = months / 12, mons = months % 12;
+    auto plural = [](long long v, const char* unit) {
+        return std::to_string(v) + " " + unit + (std::llabs(v) == 1 ? "" : "s");
+    };
+    if (years != 0) parts.push_back(plural(years, "year"));
+    if (mons != 0) parts.push_back(plural(mons, "mon"));
+    if (days != 0) parts.push_back(plural(days, "day"));
+    bool haveTime = std::fabs(seconds) >= 1e-9;
+    if (haveTime || parts.empty()) {
+        bool neg = seconds < 0;
+        double a = std::fabs(seconds);
+        long long whole = static_cast<long long>(a + 1e-9);
+        double frac = a - whole;
+        long long hh = whole / 3600, mm = (whole % 3600) / 60, ss = whole % 60;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%s%02lld:%02lld:%02lld", neg ? "-" : "", hh, mm, ss);
+        std::string t = buf;
+        if (frac > 1e-9) {
+            char fb[32];
+            std::snprintf(fb, sizeof(fb), "%.6f", frac);
+            std::string fs = fb;            // "0.500000"
+            size_t dot = fs.find('.');
+            fs = fs.substr(dot);            // ".500000"
+            while (fs.size() > 1 && fs.back() == '0') fs.pop_back();
+            t += fs;
+        }
+        parts.push_back(t);
+    }
+    std::string out;
+    for (size_t k = 0; k < parts.size(); ++k) { if (k) out += " "; out += parts[k]; }
+    return out;
+}
+
+static bool normalizeInterval(const std::string& in, std::string& out) {
+    long long months = 0, days = 0;
+    double seconds = 0;
+    if (!parseInterval(in, months, days, seconds)) return false;
+    out = formatInterval(months, days, seconds);
+    return true;
+}
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -9500,6 +9637,15 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
+        // Validate / canonicalize interval to PG postgres style.
+        if (col.dataType == "interval" && !col.isArray && !val.empty()) {
+            std::string canon;
+            if (!normalizeInterval(val, canon)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualValues[col.dataName] = canon;
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -10809,6 +10955,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 } else if (col.dataType == "jsonpath") {
                     if (!kv.second.empty() && !isValidJsonPath(kv.second))
                         return DBStatus::INVALID_VALUE;
+                } else if (col.dataType == "interval") {
+                    if (!kv.second.empty()) {
+                        std::string canon;
+                        if (!normalizeInterval(kv.second, canon))
+                            return DBStatus::INVALID_VALUE;
+                        storeVal = canon;
+                    }
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {
                         int64_t num = parseInt(kv.second);

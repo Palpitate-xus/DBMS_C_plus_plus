@@ -44,6 +44,7 @@
 | 2026-06-25 | Phase 4 Wave 4.12 XML well-formedness 校验：新增 `isWellFormedXml`（栈式扫描，校验标签平衡/嵌套、引号属性值、自闭合标签，正确跳过注释 `<!-- -->`/CDATA/PI `<? ?>`/`<!DOCTYPE>`，拒绝失配/未闭合标签、未引用属性、游离 `<`、未终止注释）；CONTENT 形式（允许片段/纯文本）；INSERT/UPDATE 校验拒绝非良构 XML；新增 `tests/xml_test.cpp`（良构接受、各类非法拒绝、UPDATE）+ 二进制端到端验证。全部 63 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.10 全文搜索类型 tsvector/tsquery：新增 `normalizeTsVector`（解析 `lexeme[:poslist]` 条目、按 PG 的长度优先再字节序排序 lexeme、去重并合并位置、位置排序去重、默认权重 D 省略、单引号化输出）与 `isValidTsQuery`+`TsQueryValidator`（词法分析 + 递归下降校验布尔文法 `! > <-> > & > |`、括号、`<N>` 距离、lexeme `:权重/*` 标志）；INSERT/UPDATE 校验拒绝非法 tsvector/tsquery，tsvector 规范化、tsquery 原样存储；新增 `tests/tsearch_test.cpp` + 二进制端到端验证。全部 64 个测试通过。 |
 | 2026-06-25 | Phase 4 Wave 4.13 jsonpath 结构化语法校验：新增 `isValidJsonPath`（务实结构校验，低误拒：可选 `strict`/`lax` mode、`()`/`[]` 平衡、拒绝空 `[]` 下标/`..`/尾随 `.`/非法起始 token/未终止字符串）；INSERT/UPDATE 校验拒绝非法 jsonpath，原样存储；新增 `tests/jsonpath_test.cpp`（含 `$.a.b`/`$[*]`/`lax`/`? (@..)`/`.**` 等合法接受、各类非法拒绝、UPDATE）+ 二进制端到端验证（注：二进制 SQL 预处理会把字面量中的 `[*]` 下标改写为 `array_get(...)`，为既有 string-based 处理遗留行为，与本校验正交）。全部 65 个测试通过。 |
+| 2026-06-25 | Phase 4 Wave 4.5 interval 多格式输入 + canonicalization：新增 `parseInterval`/`formatInterval`/`normalizeInterval`（解析 verbose 单位 year/mon/week/day/hour/min/sec 及缩写、`HH:MM:SS` 时间、`Y-M` 年月简写、裸数=秒、尾随 `ago` 取反，分数字段按 PG 规则向下级联：月=30天、天=24时），规范化输出 PG postgres 风格 `[N years] [N mons] [N days] [HH:MM:SS]`（年月拆分、复数化、时间符号）；INSERT/UPDATE 校验拒绝非法 interval（未知单位/无数字单位/垃圾）并规范化；新增 `tests/interval_test.cpp` + 二进制端到端验证。另：将 `background_worker_test` checkpoint 轮询窗口从 5s 增至 ~20s（消除重 CPU 竞争下偶发假阳性）。全部 66 个测试通过。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
@@ -166,7 +167,7 @@
 | 2.2 | 整数类型 | PG 无 tinyint；类型大小、溢出、隐式转换、序列联动与 PG 不完全一致 | ⚠️ |
 | 2.3 | 字符/文本 | 缺少 collation provider、ICU、排序规则、编码转换、正则/LIKE 全语义；标识符和列名长度限制明显不同 | ⚠️ |
 | 2.4 | 二进制 | `bytea`（dataType `blob`）已实现 hex（`\xDEADBEEF`）与 escape（字面字节 + `\\`/`\ooo` 八进制）输入解析、规范化为小写 `\xhh..` 输出、非法输入拒绝（`tests/bytea_test.cpp`）；仍缺 bytea 函数/操作符集 | ⚠️ |
-| 2.5 | 日期时间 | 缺少 PG time zone 规则库、infinity、BC 日期、精度、interval 字段限定、复杂输入输出。`datetime` 是非 PG 类型 | ⚠️ |
+| 2.5 | 日期时间 | `interval` 已实现多格式输入解析（verbose 单位/`HH:MM:SS`/`Y-M` 简写/裸秒/`ago`、分数级联）+ 规范化为 PG postgres 风格输出（`tests/interval_test.cpp`）；仍缺 PG time zone 规则库、infinity、BC 日期、精度、interval 字段限定（`INTERVAL DAY TO SECOND` 等）、ISO 8601 输入。`datetime` 是非 PG 类型 | ⚠️ |
 | 2.6 | 布尔 | SQL 三值逻辑、类型转换、函数/聚合边界仍简化 | ⚠️ |
 | 2.7 | ENUM | `CREATE TYPE ... AS ENUM` 落地，列定义支持 enum 值校验；`ALTER TYPE ADD VALUE [IF NOT EXISTS] [BEFORE/AFTER]` 与 `RENAME VALUE` 已支持（`updateEnumType` 持久化）；仍缺 catalog `pg_enum` ordinal 排序语义与索引集成 | ⚠️ |
 | 2.8 | 几何类型 | `point` 为打包二进制；`line`/`lseg`/`box`/`path`/`polygon`/`circle` 已统一为字符串化规范文本存储 + 结构校验（坐标数/字符集/括号）+ 规范化（去空白、box 角点重排、path 开/闭）（`tests/geometric_test.cpp`）；仍缺几何运算符与完整函数集 | ⚠️ |
