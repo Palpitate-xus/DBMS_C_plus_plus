@@ -60,6 +60,7 @@
 | 2026-06-26 | Phase 4 Wave 4.27c ALTER TABLE RENAME CONSTRAINT：新增 `StorageEngine::alterTableRenameConstraint`（CHECK/UNIQUE/FK 改名，重名→TABLE_ALREADY_EXISTS、未找到→INVALID_VALUE、缺表→TABLE_NOT_FOUND）；`main.cpp` RENAME 新增 `rename constraint old to new` 分支。新增 `tests/alter_rename_constraint_test.cpp`。全部 78 个测试通过。PK 约束改名仍待后续。 |
 | 2026-06-26 | Phase 4 Wave 4.27d ALTER COLUMN SET NOT NULL 数据校验：`alterTableSetNotNull` 置位前扫描既有行，列存在 NULL（空串约定）则拒绝（保持可空），符合 PG；set/drop NOT NULL 均补 `invalidateCatalogSchema`。新增 `tests/alter_set_not_null_test.cpp`。全部 79 个测试通过。窄 int NULL 检测/NOT VALID 两阶段仍待后续。 |
 | 2026-06-26 | Phase 4 Wave 4.32b CREATE STATISTICS ndistinct/mcv：新增 `StorageEngine::computeNDistinct`（每列+全组合 distinct 计数）与 `computeMCVCombinations`（最常见组合 top-N）；`handleCreateStatistics` 对 ndistinct/mcv kind 输出结果（此前仅 dependencies）。新增 `tests/statistics_ndistinct_mcv_test.cpp`。全部 80 个测试通过。pg_statistic_ext catalog/planner 消费仍待后续。 |
+| 2026-06-26 | Phase 4 Wave 4.19j JSON 路径访问器：新增 `json_extract_path`/`jsonb_extract_path`（按 key/下标导航，失败→NULL）与 `json_extract_path_text`/`jsonb_extract_path_text`（字符串去引号、JSON null→SQL NULL）；附 `jsonStep`（对象顶层冒号分割+数组整数下标）。新增 `tests/json_path_test.cpp`。全部 81 个测试通过。`->`/`->>`/`#>` 运算符、集合返回访问器仍待后续。 |
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 

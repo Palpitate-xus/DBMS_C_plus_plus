@@ -931,6 +931,45 @@ static std::string toJsonValue(const ExprValue& v) {
     return jsonQuoteStr(v.value);
 }
 
+// Navigate one level into a JSON value: by key for an object member, or by
+// integer index for an array element. Returns false if the step does not apply.
+static bool jsonStep(const std::string& cur, const std::string& key, std::string& out) {
+    std::string t = trimStr(cur);
+    if (t.empty()) return false;
+    if (t.front() == '{') {
+        std::vector<std::string> members;
+        if (!jsonTopLevelSplit(t, '{', '}', members)) return false;
+        for (const auto& m : members) {
+            // Split "key": value at the first top-level colon (honoring quotes).
+            bool inQ = false;
+            size_t colon = std::string::npos;
+            for (size_t i = 0; i < m.size(); ++i) {
+                char c = m[i];
+                if (inQ) { if (c == '\\' && i + 1 < m.size()) ++i; else if (c == '"') inQ = false; }
+                else if (c == '"') inQ = true;
+                else if (c == ':') { colon = i; break; }
+            }
+            if (colon == std::string::npos) continue;
+            std::string k = trimStr(m.substr(0, colon));
+            std::string ku = (k.size() >= 2 && k.front() == '"' && k.back() == '"')
+                                 ? k.substr(1, k.size() - 2) : k;
+            if (ku == key) { out = trimStr(m.substr(colon + 1)); return true; }
+        }
+        return false;
+    }
+    if (t.front() == '[') {
+        std::vector<std::string> elems;
+        if (!jsonTopLevelSplit(t, '[', ']', elems)) return false;
+        long idx = 0;
+        try { size_t pos = 0; idx = std::stol(key, &pos); if (pos != key.size()) return false; }
+        catch (...) { return false; }
+        if (idx < 0 || idx >= static_cast<long>(elems.size())) return false;
+        out = elems[static_cast<size_t>(idx)];
+        return true;
+    }
+    return false;
+}
+
 // Build a std::regex from a PostgreSQL-style pattern + flags ('i' case-insensitive,
 // 'g' handled by the caller). Uses ECMAScript syntax (close to POSIX ERE for
 // common patterns). Sets ok=false on a malformed pattern.
@@ -1900,6 +1939,48 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["to_json"] = toJsonFn;
     functions_["to_jsonb"] = toJsonFn;
+
+    // json_extract_path(json, key, ...) -> the JSON sub-value at the key/index
+    // path, or NULL if any step does not resolve.
+    auto jsonExtractFn = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("json", "", true);
+        std::string cur = a[0].value;
+        for (size_t i = 1; i < a.size(); ++i) {
+            if (a[i].isNull) return ExprValue("json", "", true);
+            std::string next;
+            if (!jsonStep(cur, a[i].value, next)) return ExprValue("json", "", true);
+            cur = next;
+        }
+        return ExprValue("json", cur, false);
+    };
+    functions_["json_extract_path"] = jsonExtractFn;
+    functions_["jsonb_extract_path"] = jsonExtractFn;
+
+    // json_extract_path_text(json, key, ...) -> the resolved value as text
+    // (JSON strings are unquoted; JSON null becomes SQL NULL).
+    auto jsonExtractTextFn = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
+        std::string cur = a[0].value;
+        for (size_t i = 1; i < a.size(); ++i) {
+            if (a[i].isNull) return ExprValue("text", "", true);
+            std::string next;
+            if (!jsonStep(cur, a[i].value, next)) return ExprValue("text", "", true);
+            cur = next;
+        }
+        std::string t = trimStr(cur);
+        if (t == "null") return ExprValue("text", "", true);
+        if (t.size() >= 2 && t.front() == '"' && t.back() == '"') {
+            std::string o;
+            for (size_t i = 1; i + 1 < t.size(); ++i) {
+                if (t[i] == '\\' && i + 2 < t.size()) o.push_back(t[++i]);
+                else o.push_back(t[i]);
+            }
+            return ExprValue("text", o, false);
+        }
+        return ExprValue("text", t, false);
+    };
+    functions_["json_extract_path_text"] = jsonExtractTextFn;
+    functions_["jsonb_extract_path_text"] = jsonExtractTextFn;
 
     // ------------------------------------------------------------------------
     // Regular expression functions (std::regex, ECMAScript dialect)
