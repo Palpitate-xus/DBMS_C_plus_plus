@@ -703,12 +703,32 @@ void ExprEvaluator::registerBuiltins() {
     functions_["atan"]  = [&](const auto& a) { return unaryMath(a, std::atan); };
     functions_["exp"]   = [&](const auto& a) { return unaryMath(a, std::exp); };
     functions_["ln"]    = [&](const auto& a) { return unaryMath(a, std::log); };
-    functions_["log"]   = [&](const auto& a) { return unaryMath(a, std::log10); };
+    functions_["log"]   = [](const std::vector<ExprValue>& a) {
+        // log(x) = base-10 log; log(b, x) = base-b log.
+        if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
+        if (a.size() >= 2) {
+            if (a[1].isNull) return ExprValue("double precision", "", true);
+            double b = a[0].asDouble(), x = a[1].asDouble();
+            return ExprValue("double precision", std::to_string(std::log(x) / std::log(b)), false);
+        }
+        return ExprValue("double precision", std::to_string(std::log10(a[0].asDouble())), false);
+    };
+    functions_["log10"] = [&](const auto& a) { return unaryMath(a, std::log10); };
     functions_["sqrt"]  = [&](const auto& a) { return unaryMath(a, std::sqrt); };
     functions_["cbrt"]  = [&](const auto& a) { return unaryMath(a, std::cbrt); };
     functions_["ceil"]  = [&](const auto& a) { return unaryMath(a, std::ceil); };
     functions_["floor"] = [&](const auto& a) { return unaryMath(a, std::floor); };
-    functions_["trunc"] = [&](const auto& a) { return unaryMath(a, std::trunc); };
+    functions_["trunc"] = [](const std::vector<ExprValue>& a) {
+        // trunc(x) truncates toward zero; trunc(x, n) keeps n decimal places.
+        if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
+        double v = a[0].asDouble();
+        if (a.size() >= 2 && !a[1].isNull) {
+            int n = static_cast<int>(a[1].asInt());
+            double mult = std::pow(10.0, n);
+            return ExprValue("numeric", std::to_string(std::trunc(v * mult) / mult), false);
+        }
+        return ExprValue("double precision", std::to_string(std::trunc(v)), false);
+    };
 
     functions_["atan2"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
@@ -739,6 +759,86 @@ void ExprEvaluator::registerBuiltins() {
     };
     functions_["random"] = [](const std::vector<ExprValue>&) {
         return ExprValue("double precision", std::to_string(static_cast<double>(std::rand()) / RAND_MAX), false);
+    };
+    // pow — alias of power; ceiling — alias of ceil
+    functions_["pow"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull)
+            return ExprValue("double precision", "", true);
+        return ExprValue("double precision",
+                         std::to_string(std::pow(a[0].asDouble(), a[1].asDouble())), false);
+    };
+    functions_["ceiling"] = [&](const auto& a) { return unaryMath(a, std::ceil); };
+    // degrees / radians
+    functions_["degrees"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
+        return ExprValue("double precision",
+                         std::to_string(a[0].asDouble() * 180.0 / (std::atan(1.0) * 4.0)), false);
+    };
+    functions_["radians"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
+        return ExprValue("double precision",
+                         std::to_string(a[0].asDouble() * (std::atan(1.0) * 4.0) / 180.0), false);
+    };
+    // cot — cotangent
+    functions_["cot"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
+        return ExprValue("double precision", std::to_string(1.0 / std::tan(a[0].asDouble())), false);
+    };
+    // Hyperbolic functions
+    functions_["sinh"]  = [&](const auto& a) { return unaryMath(a, std::sinh); };
+    functions_["cosh"]  = [&](const auto& a) { return unaryMath(a, std::cosh); };
+    functions_["tanh"]  = [&](const auto& a) { return unaryMath(a, std::tanh); };
+    functions_["asinh"] = [&](const auto& a) { return unaryMath(a, std::asinh); };
+    functions_["acosh"] = [&](const auto& a) { return unaryMath(a, std::acosh); };
+    functions_["atanh"] = [&](const auto& a) { return unaryMath(a, std::atanh); };
+    // gcd / lcm — integer greatest common divisor / least common multiple
+    functions_["gcd"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bigint", "", true);
+        int64_t x = std::llabs(a[0].asInt()), y = std::llabs(a[1].asInt());
+        while (y) { int64_t t = x % y; x = y; y = t; }
+        return ExprValue("bigint", std::to_string(x), false);
+    };
+    functions_["lcm"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("bigint", "", true);
+        int64_t x = std::llabs(a[0].asInt()), y = std::llabs(a[1].asInt());
+        if (x == 0 || y == 0) return ExprValue("bigint", "0", false);
+        int64_t g = x, b = y;
+        while (b) { int64_t t = g % b; g = b; b = t; }
+        return ExprValue("bigint", std::to_string(x / g * y), false);
+    };
+    // div(y, x) — integer quotient of y / x, truncated toward zero
+    functions_["div"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("numeric", "", true);
+        int64_t x = a[1].asInt();
+        if (x == 0) return ExprValue("numeric", "", true);
+        return ExprValue("numeric", std::to_string(a[0].asInt() / x), false);
+    };
+    // factorial(n) — n! for small non-negative n
+    functions_["factorial"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        int64_t n = a[0].asInt();
+        if (n < 0) return ExprValue("numeric", "", true);
+        int64_t r = 1;
+        for (int64_t i = 2; i <= n; ++i) r *= i;
+        return ExprValue("numeric", std::to_string(r), false);
+    };
+    // width_bucket(operand, low, high, count) — histogram bucket index (1..count)
+    functions_["width_bucket"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 4 || a[0].isNull || a[1].isNull || a[2].isNull || a[3].isNull)
+            return ExprValue("integer", "", true);
+        double v = a[0].asDouble(), lo = a[1].asDouble(), hi = a[2].asDouble();
+        int64_t count = a[3].asInt();
+        if (count <= 0 || lo == hi) return ExprValue("integer", "", true);
+        bool reversed = lo > hi;
+        if (reversed) std::swap(lo, hi);
+        int64_t bucket;
+        if (v < lo) bucket = reversed ? count + 1 : 0;
+        else if (v >= hi) bucket = reversed ? 0 : count + 1;
+        else {
+            int64_t b = static_cast<int64_t>((v - lo) / (hi - lo) * static_cast<double>(count)) + 1;
+            bucket = reversed ? count - b + 1 : b;
+        }
+        return ExprValue("integer", std::to_string(bucket), false);
     };
 
     // ------------------------------------------------------------------------
