@@ -8380,6 +8380,20 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
         }
     }
 
+    // Drop the primary key. The PK constraint name is not persisted separately,
+    // so when no CHECK/UNIQUE/FK matched and the table has a primary key, treat
+    // the named constraint as the primary key. Per PostgreSQL, the implicit
+    // NOT NULL on the former PK columns is retained.
+    if (!found && tbl.hasPrimaryKey()) {
+        tbl.pkColIndices.clear();
+        for (size_t i = 0; i < tbl.len; ++i) tbl.cols[i].isPrimaryKey = false;
+        std::string pkKey = dbname + "/" + tablename;
+        auto cit = pkIndexCache_.find(pkKey);
+        if (cit != pkIndexCache_.end()) { cit->second->close(); pkIndexCache_.erase(cit); }
+        std::filesystem::remove(indexPath(dbname, tablename));
+        found = true;
+    }
+
     if (!found) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
@@ -8389,6 +8403,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
     }
+    invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }

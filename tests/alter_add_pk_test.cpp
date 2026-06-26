@@ -139,6 +139,34 @@ static void test_add_pk_composite() {
     std::cout << "[ADDPK] composite PK OK" << std::endl;
 }
 
+static void test_drop_pk() {
+    std::string db = "droppk";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(20))", s));
+
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"name", "a"}}) == dbms::DBStatus::OK);
+    // PK enforced before drop.
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"name", "dup"}}) != dbms::DBStatus::OK);
+
+    // Drop the PK (constraint name is not persisted; any name drops it).
+    assert(g_engine.alterTableDropConstraint(db, "t", "t_pkey") == dbms::DBStatus::OK);
+    dbms::TableSchema tbl = g_engine.getTableSchema(db, "t");
+    assert(tbl.pkColIndices.empty());
+    assert(!colIsPk(tbl, "id"));
+
+    // After the drop, a duplicate id is now allowed.
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"name", "dup"}}) == dbms::DBStatus::OK);
+
+    // Dropping again (no PK, no matching constraint) -> INVALID_VALUE.
+    assert(g_engine.alterTableDropConstraint(db, "t", "nope") == dbms::DBStatus::INVALID_VALUE);
+
+    cleanup(db);
+    std::cout << "[ADDPK] drop PK OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_add_pk_success();
@@ -146,6 +174,7 @@ int main() {
     test_add_pk_null_data();
     test_add_pk_rejections();
     test_add_pk_composite();
+    test_drop_pk();
     std::cout << "[ADDPK] all passed" << std::endl;
     return 0;
 }
