@@ -4531,6 +4531,170 @@ static bool isWellFormedXml(const std::string& s) {
     return stack.empty();
 }
 
+// ========================================================================
+// Full-text search types.
+// tsvector: parse `lexeme[:poslist]` entries (quoted or bare), validate, and
+//   canonicalize — lexemes sorted (length-first then bytewise, as PG does),
+//   deduplicated with merged positions, positions sorted/deduped, default
+//   weight D omitted, lexemes single-quoted on output.
+// tsquery: validate the boolean grammar (! > <-> > & > |, parentheses, quoted
+//   or bare lexemes with optional :weight/* flags); stored verbatim.
+// ========================================================================
+static bool normalizeTsVector(const std::string& in, std::string& out) {
+    std::map<std::string, std::set<std::pair<int, char>>> positions;
+    std::map<std::string, bool> present;  // lexeme seen (even without positions)
+    size_t i = 0, n = in.size();
+    auto skipWs = [&]() { while (i < n && std::isspace(static_cast<unsigned char>(in[i]))) ++i; };
+    while (true) {
+        skipWs();
+        if (i >= n) break;
+        std::string lex;
+        if (in[i] == '\'') {
+            ++i;
+            bool closed = false;
+            while (i < n) {
+                if (in[i] == '\'') {
+                    if (i + 1 < n && in[i + 1] == '\'') { lex += '\''; i += 2; }
+                    else { ++i; closed = true; break; }
+                } else if (in[i] == '\\' && i + 1 < n) { lex += in[i + 1]; i += 2; }
+                else { lex += in[i]; ++i; }
+            }
+            if (!closed) return false;
+        } else {
+            while (i < n && !std::isspace(static_cast<unsigned char>(in[i])) && in[i] != ':') {
+                if (in[i] == '\\' && i + 1 < n) { lex += in[i + 1]; i += 2; }
+                else { lex += in[i]; ++i; }
+            }
+        }
+        if (lex.empty()) return false;
+        present[lex];  // ensure key exists
+        if (i < n && in[i] == ':') {
+            ++i;
+            while (true) {
+                if (i >= n || !std::isdigit(static_cast<unsigned char>(in[i]))) return false;
+                int p = 0;
+                while (i < n && std::isdigit(static_cast<unsigned char>(in[i]))) { p = p * 10 + (in[i] - '0'); ++i; }
+                if (p <= 0) return false;
+                char w = 'D';
+                if (i < n && in[i] >= 'A' && in[i] <= 'D') { w = in[i]; ++i; }
+                positions[lex].insert({p, w});
+                if (i < n && in[i] == ',') { ++i; continue; }
+                break;
+            }
+        }
+        if (i < n && !std::isspace(static_cast<unsigned char>(in[i]))) return false;  // junk after entry
+    }
+    std::vector<std::string> keys;
+    for (auto& kv : present) keys.push_back(kv.first);
+    std::sort(keys.begin(), keys.end(), [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return a.size() < b.size();
+        return a < b;
+    });
+    std::string result;
+    for (const auto& k : keys) {
+        if (!result.empty()) result += ' ';
+        result += '\'';
+        for (char c : k) { if (c == '\'') result += "''"; else if (c == '\\') result += "\\\\"; else result += c; }
+        result += '\'';
+        auto it = positions.find(k);
+        if (it != positions.end() && !it->second.empty()) {
+            result += ':';
+            bool first = true;
+            for (const auto& pw : it->second) {
+                if (!first) result += ',';
+                first = false;
+                result += std::to_string(pw.first);
+                if (pw.second != 'D') result += pw.second;
+            }
+        }
+    }
+    out = result;
+    return true;
+}
+
+struct TsQueryValidator {
+    const std::vector<int>& toks;
+    size_t p = 0;
+    explicit TsQueryValidator(const std::vector<int>& t) : toks(t) {}
+    enum { LEX, AND, OR, NOT, PHRASE, LP, RP };
+    bool primary() {
+        if (p < toks.size() && toks[p] == LP) {
+            ++p;
+            if (!orExpr()) return false;
+            if (p >= toks.size() || toks[p] != RP) return false;
+            ++p; return true;
+        }
+        if (p < toks.size() && toks[p] == LEX) { ++p; return true; }
+        return false;
+    }
+    bool notExpr() {
+        if (p < toks.size() && toks[p] == NOT) { ++p; return notExpr(); }
+        return primary();
+    }
+    bool phraseExpr() {
+        if (!notExpr()) return false;
+        while (p < toks.size() && toks[p] == PHRASE) { ++p; if (!notExpr()) return false; }
+        return true;
+    }
+    bool andExpr() {
+        if (!phraseExpr()) return false;
+        while (p < toks.size() && toks[p] == AND) { ++p; if (!phraseExpr()) return false; }
+        return true;
+    }
+    bool orExpr() {
+        if (!andExpr()) return false;
+        while (p < toks.size() && toks[p] == OR) { ++p; if (!andExpr()) return false; }
+        return true;
+    }
+};
+
+static bool isValidTsQuery(const std::string& in) {
+    enum { LEX, AND, OR, NOT, PHRASE, LP, RP };
+    std::vector<int> toks;
+    size_t i = 0, n = in.size();
+    auto skipWs = [&]() { while (i < n && std::isspace(static_cast<unsigned char>(in[i]))) ++i; };
+    while (true) {
+        skipWs();
+        if (i >= n) break;
+        char c = in[i];
+        if (c == '(') { toks.push_back(LP); ++i; }
+        else if (c == ')') { toks.push_back(RP); ++i; }
+        else if (c == '&') { toks.push_back(AND); ++i; }
+        else if (c == '|') { toks.push_back(OR); ++i; }
+        else if (c == '!') { toks.push_back(NOT); ++i; }
+        else if (c == '<') {
+            if (i + 2 < n && in[i + 1] == '-' && in[i + 2] == '>') { toks.push_back(PHRASE); i += 3; }
+            else {
+                size_t j = i + 1;
+                if (j >= n || !std::isdigit(static_cast<unsigned char>(in[j]))) return false;
+                while (j < n && std::isdigit(static_cast<unsigned char>(in[j]))) ++j;
+                if (j >= n || in[j] != '>') return false;
+                toks.push_back(PHRASE); i = j + 1;
+            }
+        } else if (c == '\'') {
+            ++i; bool closed = false;
+            while (i < n) {
+                if (in[i] == '\'') { if (i + 1 < n && in[i + 1] == '\'') i += 2; else { ++i; closed = true; break; } }
+                else if (in[i] == '\\' && i + 1 < n) i += 2;
+                else ++i;
+            }
+            if (!closed) return false;
+            if (i < n && in[i] == ':') { ++i; while (i < n && (std::isalnum(static_cast<unsigned char>(in[i])) || in[i] == '*')) ++i; }
+            toks.push_back(LEX);
+        } else if (std::isalnum(static_cast<unsigned char>(c)) || static_cast<unsigned char>(c) >= 128) {
+            while (i < n && (std::isalnum(static_cast<unsigned char>(in[i])) || in[i] == '_' || static_cast<unsigned char>(in[i]) >= 128)) ++i;
+            if (i < n && in[i] == ':') { ++i; while (i < n && (std::isalnum(static_cast<unsigned char>(in[i])) || in[i] == '*')) ++i; }
+            toks.push_back(LEX);
+        } else {
+            return false;
+        }
+    }
+    if (toks.empty()) return false;
+    TsQueryValidator v(toks);
+    if (!v.orExpr()) return false;
+    return v.p == toks.size();
+}
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -9261,6 +9425,21 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
+        // Validate / canonicalize tsvector; validate tsquery (verbatim).
+        if (col.dataType == "tsvector" && !col.isArray && !val.empty()) {
+            std::string canon;
+            if (!normalizeTsVector(val, canon)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            actualValues[col.dataName] = canon;
+        }
+        if (col.dataType == "tsquery" && !col.isArray && !val.empty()) {
+            if (!isValidTsQuery(val)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val)) {
@@ -10556,6 +10735,16 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     }
                 } else if (col.dataType == "xml") {
                     if (!kv.second.empty() && !isWellFormedXml(kv.second))
+                        return DBStatus::INVALID_VALUE;
+                } else if (col.dataType == "tsvector") {
+                    if (!kv.second.empty()) {
+                        std::string canon;
+                        if (!normalizeTsVector(kv.second, canon))
+                            return DBStatus::INVALID_VALUE;
+                        storeVal = canon;
+                    }
+                } else if (col.dataType == "tsquery") {
+                    if (!kv.second.empty() && !isValidTsQuery(kv.second))
                         return DBStatus::INVALID_VALUE;
                 } else if (!col.isVariableLength && col.dataType != "char") {
                     if (!kv.second.empty()) {
