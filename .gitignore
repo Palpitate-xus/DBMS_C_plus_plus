@@ -6,6 +6,10 @@ dbms_main
 dbms.log
 slow_queries.txt
 user.dat
+permissions.dat
+role.dat
+audit.log
+auto_explain.log
 .txnid
 *.txn_backup
 *.archive
