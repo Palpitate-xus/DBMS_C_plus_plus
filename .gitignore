@@ -8,6 +8,7 @@ slow_queries.txt
 user.dat
 .txnid
 *.txn_backup
+*.archive
 testdb/
 testdb*
 cttest/
