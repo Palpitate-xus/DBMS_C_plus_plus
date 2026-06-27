@@ -7686,6 +7686,158 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     return DBStatus::OK;
 }
 
+// Best-effort check that a previously-extracted column value (as text) can be
+// represented in `targetType`. Empty = NULL = always convertible. Numeric and
+// boolean targets are validated strictly; other targets accept any text.
+static bool valueConvertibleToType(const std::string& raw, const std::string& targetType) {
+    // Trim surrounding whitespace.
+    size_t b = 0, e = raw.size();
+    while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
+    while (e > b && (raw[e - 1] == ' ' || raw[e - 1] == '\t')) --e;
+    std::string v = raw.substr(b, e - b);
+    if (v.empty()) return true;  // NULL converts to anything
+
+    auto isIntType = [](const std::string& t) {
+        return t == "int" || t == "integer" || t == "smallint" || t == "tinyint" ||
+               t == "bigint" || t == "long" ||
+               t == "int unsigned" || t == "smallint unsigned" ||
+               t == "tinyint unsigned" || t == "bigint unsigned";
+    };
+    if (isIntType(targetType)) {
+        size_t idx = 0;
+        try { (void)std::stoll(v, &idx); } catch (...) { return false; }
+        return idx == v.size();
+    }
+    if (targetType == "float" || targetType == "double" || targetType == "decimal" ||
+        targetType == "numeric" || targetType == "money") {
+        size_t idx = 0;
+        try { (void)std::stod(v, &idx); } catch (...) { return false; }
+        return idx == v.size();
+    }
+    if (targetType == "boolean") {
+        std::string lv;
+        for (char c : v) lv += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return lv == "true" || lv == "false" || lv == "t" || lv == "f" ||
+               lv == "1" || lv == "0" || lv == "yes" || lv == "no" ||
+               lv == "y" || lv == "n";
+    }
+    // Other targets (char/varchar/text/date/timestamp/...) accept any text;
+    // insert() re-encodes per the new type on a best-effort basis.
+    return true;
+}
+
+DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
+                                                  const std::string& tablename,
+                                                  const std::string& colName,
+                                                  const Column& newCol) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    lockManager_.lockExclusive(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t colIdx = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
+    }
+    if (colIdx >= tbl.len) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
+    // 1. Collect all live rows BEFORE mutating the schema.
+    std::vector<std::map<std::string, std::string>> rows;
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        std::string row(data, len);
+        std::map<std::string, std::string> values;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+        }
+        rows.push_back(std::move(values));
+    });
+
+    // 2. Pre-validate convertibility — abort before touching any files if a
+    //    value cannot be represented in the new type (no data loss on failure).
+    for (const auto& values : rows) {
+        auto it = values.find(colName);
+        if (it != values.end() && !valueConvertibleToType(it->second, newCol.dataType)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+
+    // 3. Swap the column's type fields; preserve its name + constraints.
+    Column updated = tbl.cols[colIdx];
+    updated.dataType = newCol.dataType;
+    updated.dsize = newCol.dsize;
+    updated.isVariableLength = newCol.isVariableLength;
+    updated.isArray = newCol.isArray;
+    updated.isUnsigned = newCol.isUnsigned;
+    updated.enumValues = newCol.enumValues;
+    tbl.cols[colIdx] = updated;
+
+    std::string key = dbname + "/" + tablename;
+    // Evict caches so new files are created with the new row layout.
+    pageAllocators_.erase(key);
+    pkIndexCache_.erase(key);
+    secondaryIndexCache_.erase(key);
+    hashIndexCache_.erase(key);
+
+    // Remove old data file + fork files + per-column index data. Index META
+    // files (tablename.secidx / tablename.hashidx) are NOT removed — they have a
+    // dot prefix, do not match the tablename_ underscore prefix, and drive index
+    // rebuild during re-insert below (mirrors vacuumFull exactly).
+    std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::remove(fsmPath(dbname, tablename));
+    std::filesystem::remove(vmPath(dbname, tablename));
+    std::filesystem::remove(indexPath(dbname, tablename));  // PK index
+    auto indexedCols = getIndexedColumns(dbname, tablename);
+    for (const auto& cn : indexedCols) {
+        std::filesystem::remove(secondaryIndexPath(dbname, tablename, cn));
+        std::filesystem::remove(hashIndexPath(dbname, tablename, cn));
+    }
+    std::filesystem::path dbDir = dbPath(dbname);
+    for (const auto& entry : std::filesystem::directory_iterator(dbDir)) {
+        std::string fname = entry.path().filename().string();
+        if (fname.size() > tablename.size() + 1 &&
+            fname.substr(0, tablename.size() + 1) == tablename + "_") {
+            auto endsWith = [](const std::string& s, const std::string& suffix) {
+                return s.size() >= suffix.size() &&
+                       s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+            };
+            if (endsWith(fname, ".idx") || endsWith(fname, ".hidx") ||
+                endsWith(fname, ".fti")) {
+                std::filesystem::remove(entry.path());
+            }
+        }
+    }
+
+    // 4. Persist the new schema.
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    invalidateCatalogSchema(dbname, tablename);
+
+    // 5. Re-create the empty data file with the NEW row size.
+    {
+        auto pa = std::make_unique<PageAllocator>(
+            dataPath(dbname, tablename).string(), tbl.rowSize(),
+            pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
+        pa->open();
+        pageAllocators_[key] = std::move(pa);
+    }
+
+    lockManager_.unlock(tablename);
+
+    // 6. Re-insert all rows: re-encodes the target column under its new type and
+    //    rebuilds PK + secondary indexes from the surviving meta files.
+    for (const auto& values : rows) {
+        insert(dbname, tablename, values);
+    }
+
+    return DBStatus::OK;
+}
+
 DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
                                                 const std::string& tablename,
                                                 const std::string& oldName,

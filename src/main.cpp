@@ -3748,6 +3748,136 @@ static Column makePgStringBackedColumn(const string& cname,
     return col;
 }
 
+// Build a Column from a type-name spec (as used by ALTER TABLE ADD COLUMN /
+// ALTER COLUMN TYPE). Mirrors the inline type dispatch historically duplicated
+// in the ADD COLUMN handler. Returns true on success; false for an unknown type
+// (caller reports "Unknown data type"). `typeName` should be lowercased/trimmed.
+static bool buildColumnFromTypeSpec(const string& cname, const string& typeName,
+                                    bool isNull, Column& col) {
+    if (typeName.substr(0, 8) == "interval") {
+        col = makeIntervalColumn(cname, isNull);
+    } else if (typeName == "macaddr8") {
+        col = makeMacAddr8Column(cname, isNull);
+    } else if (typeName == "macaddr") {
+        col = makeMacAddrColumn(cname, isNull);
+    } else if (isPgStringBackedType(typeName)) {
+        col = makePgStringBackedColumn(cname, typeName, isNull, false);
+    } else if (typeName.substr(0, 3) == "int") {
+        col = makeIntColumn(cname, isNull, 2);
+    } else if (typeName.substr(0, 4) == "tiny") {
+        col = makeIntColumn(cname, isNull, 1);
+    } else if (typeName.substr(0, 8) == "smallint") {
+        col = makeIntColumn(cname, isNull, 0);
+    } else if (typeName.substr(0, 6) == "bigint") {
+        col = makeIntColumn(cname, isNull, 3);
+    } else if (typeName.substr(0, 4) == "long") {
+        col = makeIntColumn(cname, isNull, 3);
+    } else if (typeName.substr(0, 4) == "bool") {
+        col = makeBooleanColumn(cname, isNull);
+    } else if (typeName.substr(0, 3) == "bit") {
+        bool isVarbit = typeName.substr(0, 11) == "bit varying" || typeName.substr(0, 6) == "varbit";
+        col = isVarbit ? makeVarBitColumn(cname, isNull, 0, false)
+                       : makeBitColumn(cname, isNull, 0, false);
+    } else if (typeName.substr(0, 4) == "uuid") {
+        col = makeUuidColumn(cname, isNull);
+    } else if (typeName.substr(0, 4) == "date") {
+        col = makeDateColumn(cname, isNull);
+    } else if (typeName.substr(0, 12) == "timestamptz") {
+        col = makeTimestamptzColumn(cname, isNull);
+    } else if (typeName.substr(0, 9) == "timestamp") {
+        col = makeTimestampColumn(cname, isNull);
+    } else if (typeName.substr(0, 4) == "time") {
+        col = makeTimeColumn(cname, isNull);
+    } else if (typeName.substr(0, 8) == "datetime") {
+        col = makeDateTimeColumn(cname, isNull);
+    } else if (typeName.substr(0, 4) == "char") {
+        size_t len = 0;
+        for (size_t i = 4; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
+            len = len * 10 + (typeName[i] - '0');
+        if (len == 0) len = 1;
+        col = makeStringColumn(cname, isNull, len);
+    } else if (typeName.substr(0, 7) == "varchar") {
+        size_t len = 0;
+        size_t start = 7;
+        if (start < typeName.size() && typeName[start] == '(') ++start;
+        for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
+            len = len * 10 + (typeName[i] - '0');
+        if (len == 0) len = 1;
+        col = makeVarCharColumn(cname, isNull, len);
+    } else if (typeName.substr(0, 8) == "nvarchar") {
+        size_t len = 0;
+        size_t start = 8;
+        if (start < typeName.size() && typeName[start] == '(') ++start;
+        for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
+            len = len * 10 + (typeName[i] - '0');
+        if (len == 0) len = 1;
+        col = makeNVarCharColumn(cname, isNull, len);
+    } else if (typeName.substr(0, 5) == "nchar") {
+        size_t len = 0;
+        size_t start = 5;
+        if (start < typeName.size() && typeName[start] == '(') ++start;
+        for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
+            len = len * 10 + (typeName[i] - '0');
+        if (len == 0) len = 1;
+        col = makeNCharColumn(cname, isNull, len);
+    } else if (typeName.substr(0, 7) == "binary(") {
+        size_t lp = typeName.find('(');
+        size_t rp = typeName.find(')');
+        size_t len = 0;
+        if (lp != string::npos && rp != string::npos && rp > lp) {
+            try { len = stoul(typeName.substr(lp + 1, rp - lp - 1)); } catch (...) {}
+        }
+        if (len == 0) len = 1;
+        col = makeBinaryColumn(cname, isNull, len);
+    } else if (typeName.substr(0, 9) == "varbinary") {
+        size_t lp = typeName.find('(');
+        size_t rp = typeName.find(')');
+        size_t len = 0;
+        if (lp != string::npos && rp != string::npos && rp > lp) {
+            try { len = stoul(typeName.substr(lp + 1, rp - lp - 1)); } catch (...) {}
+        }
+        if (len == 0) len = 1;
+        col = makeVarBinaryColumn(cname, isNull, len);
+    } else if (typeName.substr(0, 4) == "blob") {
+        col = makeBlobColumn(cname, isNull);
+    } else if (typeName.substr(0, 4) == "text") {
+        col = makeTextColumn(cname, isNull);
+    } else if (typeName.substr(0, 5) == "jsonb") {
+        col = makeJsonbColumn(cname, isNull);
+    } else if (typeName.substr(0, 4) == "json") {
+        col = makeJsonColumn(cname, isNull);
+    } else if (typeName.substr(0, 3) == "xml") {
+        col = makeXmlColumn(cname, isNull);
+    } else if (typeName.substr(0, 6) == "pg_lsn") {
+        col = makePgLsnColumn(cname, isNull);
+    } else if (typeName.substr(0, 9) == "int4range") {
+        col = makeInt4RangeColumn(cname, isNull);
+    } else if (typeName.substr(0, 9) == "int8range") {
+        col = makeInt8RangeColumn(cname, isNull);
+    } else if (typeName.substr(0, 8) == "numrange") {
+        col = makeNumRangeColumn(cname, isNull);
+    } else if (typeName.substr(0, 7) == "tsrange") {
+        col = makeTsRangeColumn(cname, isNull);
+    } else if (typeName.substr(0, 8) == "tstzrang") {
+        col = makeTstzRangeColumn(cname, isNull);
+    } else if (typeName.substr(0, 9) == "daterange") {
+        col = makeDateRangeColumn(cname, isNull);
+    } else if (typeName.substr(0, 8) == "tsvector") {
+        col = makeTsVectorColumn(cname, isNull);
+    } else if (typeName.substr(0, 7) == "tsquery") {
+        col = makeTsQueryColumn(cname, isNull);
+    } else if (typeName.substr(0, 5) == "float") {
+        col = makeFloatColumn(cname, isNull);
+    } else if (typeName.substr(0, 6) == "double" || typeName.substr(0, 5) == "money") {
+        col = makeDoubleColumn(cname, isNull);
+    } else if (typeName.substr(0, 7) == "decimal" || typeName.substr(0, 7) == "numeric") {
+        col = makeDecimalColumn(cname, isNull, 10, 0);
+    } else {
+        return false;
+    }
+    return true;
+}
+
 static bool handleLoadSharedLibrary(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -9740,125 +9870,7 @@ bool execute(const string& rawSql, Session& s) {
             bool isNull = (nullFlag != "0");
 
             Column col;
-            if (typeName.substr(0, 8) == "interval") {
-                col = makeIntervalColumn(cname, isNull);
-            } else if (typeName == "macaddr8") {
-                col = makeMacAddr8Column(cname, isNull);
-            } else if (typeName == "macaddr") {
-                col = makeMacAddrColumn(cname, isNull);
-            } else if (isPgStringBackedType(typeName)) {
-                col = makePgStringBackedColumn(cname, typeName, isNull, false);
-            } else if (typeName.substr(0, 3) == "int") {
-                col = makeIntColumn(cname, isNull, 2);
-            } else if (typeName.substr(0, 4) == "tiny") {
-                col = makeIntColumn(cname, isNull, 1);
-            } else if (typeName.substr(0, 8) == "smallint") {
-                col = makeIntColumn(cname, isNull, 0);
-            } else if (typeName.substr(0, 6) == "bigint") {
-                col = makeIntColumn(cname, isNull, 3);
-            } else if (typeName.substr(0, 4) == "long") {
-                col = makeIntColumn(cname, isNull, 3);
-            } else if (typeName.substr(0, 4) == "bool") {
-                col = makeBooleanColumn(cname, isNull);
-            } else if (typeName.substr(0, 3) == "bit") {
-                bool isVarbit = typeName.substr(0, 11) == "bit varying" || typeName.substr(0, 6) == "varbit";
-                col = isVarbit ? makeVarBitColumn(cname, isNull, 0, false)
-                               : makeBitColumn(cname, isNull, 0, false);
-            } else if (typeName.substr(0, 4) == "uuid") {
-                col = makeUuidColumn(cname, isNull);
-            } else if (typeName.substr(0, 4) == "date") {
-                col = makeDateColumn(cname, isNull);
-            } else if (typeName.substr(0, 12) == "timestamptz") {
-                col = makeTimestamptzColumn(cname, isNull);
-            } else if (typeName.substr(0, 9) == "timestamp") {
-                col = makeTimestampColumn(cname, isNull);
-            } else if (typeName.substr(0, 4) == "time") {
-                col = makeTimeColumn(cname, isNull);
-            } else if (typeName.substr(0, 8) == "datetime") {
-                col = makeDateTimeColumn(cname, isNull);
-            } else if (typeName.substr(0, 4) == "char") {
-                size_t len = 0;
-                for (size_t i = 4; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
-                    len = len * 10 + (typeName[i] - '0');
-                if (len == 0) len = 1;
-                col = makeStringColumn(cname, isNull, len);
-            } else if (typeName.substr(0, 7) == "varchar") {
-                size_t len = 0;
-                size_t start = 7;
-                if (start < typeName.size() && typeName[start] == '(') ++start;
-                for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
-                    len = len * 10 + (typeName[i] - '0');
-                if (len == 0) len = 1;
-                col = makeVarCharColumn(cname, isNull, len);
-            } else if (typeName.substr(0, 7) == "nvarchar") {
-                size_t len = 0;
-                size_t start = 7;
-                if (start < typeName.size() && typeName[start] == '(') ++start;
-                for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
-                    len = len * 10 + (typeName[i] - '0');
-                if (len == 0) len = 1;
-                col = makeNVarCharColumn(cname, isNull, len);
-            } else if (typeName.substr(0, 5) == "nchar") {
-                size_t len = 0;
-                size_t start = 5;
-                if (start < typeName.size() && typeName[start] == '(') ++start;
-                for (size_t i = start; i < typeName.size() && isdigit(static_cast<unsigned char>(typeName[i])); ++i)
-                    len = len * 10 + (typeName[i] - '0');
-                if (len == 0) len = 1;
-                col = makeNCharColumn(cname, isNull, len);
-            } else if (typeName.substr(0, 7) == "binary(") {
-                size_t lp = typeName.find('(');
-                size_t rp = typeName.find(')');
-                size_t len = 0;
-                if (lp != string::npos && rp != string::npos && rp > lp) {
-                    try { len = stoul(typeName.substr(lp + 1, rp - lp - 1)); } catch (...) {}
-                }
-                if (len == 0) len = 1;
-                col = makeBinaryColumn(cname, isNull, len);
-            } else if (typeName.substr(0, 9) == "varbinary") {
-                size_t lp = typeName.find('(');
-                size_t rp = typeName.find(')');
-                size_t len = 0;
-                if (lp != string::npos && rp != string::npos && rp > lp) {
-                    try { len = stoul(typeName.substr(lp + 1, rp - lp - 1)); } catch (...) {}
-                }
-                if (len == 0) len = 1;
-                col = makeVarBinaryColumn(cname, isNull, len);
-            } else if (typeName.substr(0, 4) == "blob") {
-                col = makeBlobColumn(cname, isNull);
-            } else if (typeName.substr(0, 4) == "text") {
-                col = makeTextColumn(cname, isNull);
-            } else if (typeName.substr(0, 5) == "jsonb") {
-                col = makeJsonbColumn(cname, isNull);
-            } else if (typeName.substr(0, 4) == "json") {
-                col = makeJsonColumn(cname, isNull);
-            } else if (typeName.substr(0, 3) == "xml") {
-                col = makeXmlColumn(cname, isNull);
-            } else if (typeName.substr(0, 6) == "pg_lsn") {
-                col = makePgLsnColumn(cname, isNull);
-            } else if (typeName.substr(0, 9) == "int4range") {
-                col = makeInt4RangeColumn(cname, isNull);
-            } else if (typeName.substr(0, 9) == "int8range") {
-                col = makeInt8RangeColumn(cname, isNull);
-            } else if (typeName.substr(0, 8) == "numrange") {
-                col = makeNumRangeColumn(cname, isNull);
-            } else if (typeName.substr(0, 7) == "tsrange") {
-                col = makeTsRangeColumn(cname, isNull);
-            } else if (typeName.substr(0, 8) == "tstzrang") {
-                col = makeTstzRangeColumn(cname, isNull);
-            } else if (typeName.substr(0, 9) == "daterange") {
-                col = makeDateRangeColumn(cname, isNull);
-            } else if (typeName.substr(0, 8) == "tsvector") {
-                col = makeTsVectorColumn(cname, isNull);
-            } else if (typeName.substr(0, 7) == "tsquery") {
-                col = makeTsQueryColumn(cname, isNull);
-            } else if (typeName.substr(0, 5) == "float") {
-                col = makeFloatColumn(cname, isNull);
-            } else if (typeName.substr(0, 6) == "double" || typeName.substr(0, 5) == "money") {
-                col = makeDoubleColumn(cname, isNull);
-            } else if (typeName.substr(0, 7) == "decimal") {
-                col = makeDecimalColumn(cname, isNull, 10, 0);
-            } else {
+            if (!buildColumnFromTypeSpec(cname, typeName, isNull, col)) {
                 cout << "Unknown data type" << endl;
                 return true;
             }
@@ -9946,6 +9958,53 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (op == "alter" && tokens.size() >= 5 && tokens[3] == "column") {
             string cname = tokens[4];
+            // ALTER COLUMN c [SET DATA] TYPE newtype [USING expr]
+            // Reconstruct the type spec from tokens: tighten parens (varchar ( 100 )
+            // -> varchar(100)), keep multi-word types (double precision), stop at USING.
+            size_t typeStart = 0;
+            if (tokens[5] == "type") {
+                typeStart = 6;
+            } else if (tokens.size() >= 8 && tokens[5] == "set" &&
+                       tokens[6] == "data" && tokens[7] == "type") {
+                typeStart = 8;
+            }
+            if (typeStart != 0) {
+                string typeName;
+                for (size_t i = typeStart; i < tokens.size(); ++i) {
+                    const string& t = tokens[i];
+                    if (t == "using") break;
+                    if (t == "(") { typeName += "("; }
+                    else if (t == ")") { typeName += ")"; }
+                    else {
+                        if (!typeName.empty() && typeName.back() != '(') typeName += " ";
+                        typeName += t;
+                    }
+                }
+                if (typeName.empty()) {
+                    cout << "SQL syntax error" << endl;
+                    return true;
+                }
+                if (!g_engine.tableExists(s.currentDB, tname)) {
+                    cout << "Table not found" << endl;
+                    return true;
+                }
+                Column newCol;
+                if (!buildColumnFromTypeSpec(cname, typeName, true, newCol)) {
+                    cout << "Unknown data type" << endl;
+                    return true;
+                }
+                auto res = g_engine.alterTableAlterColumnType(s.currentDB, tname, cname, newCol);
+                if (res == DBStatus::INVALID_VALUE) {
+                    cout << "Column not found or values not convertible to new type" << endl;
+                    return true;
+                }
+                if (res != DBStatus::OK) {
+                    cout << "Alter column type failed" << endl;
+                    return true;
+                }
+                cout << "Column type changed" << endl;
+                return false;
+            }
             if (tokens.size() >= 7 && tokens[5] == "set" && tokens[6] == "default") {
                 // alter table t alter column c set default value
                 string defVal = (tokens.size() >= 8) ? tokens[7] : "";

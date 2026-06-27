@@ -140,6 +140,11 @@ public:
                                    const std::string& colName);
     DBStatus alterTableDropNotNull(const std::string& dbname, const std::string& tablename,
                                     const std::string& colName);
+    // ALTER COLUMN ... TYPE: rewrite the table under a new type for one column,
+    // re-encoding each row's value. Pre-validates convertibility and aborts
+    // (INVALID_VALUE) before touching any files if a value cannot be represented.
+    DBStatus alterTableAlterColumnType(const std::string& dbname, const std::string& tablename,
+                                        const std::string& colName, const Column& newCol);
     DBStatus alterTableAddCheckConstraint(const std::string& dbname, const std::string& tablename,
                                            const std::string& name, const std::string& expr);
     DBStatus alterTableAddUniqueConstraint(const std::string& dbname, const std::string& tablename,
