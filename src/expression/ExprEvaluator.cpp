@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <iterator>
@@ -1089,6 +1090,164 @@ static std::string sqlQuoteLiteral(const std::string& s) {
     std::string out = "'";
     for (char c : s) { if (c == '\'') out += "''"; else out.push_back(c); }
     out += "'";
+    return out;
+}
+
+// to_char(date/timestamp, fmt): format an ISO 'YYYY-MM-DD[ HH:MM:SS]' (or a
+// time-only 'HH:MM:SS') value per a PostgreSQL-style template. Supported tokens
+// (case-insensitive match; letter tokens honour the casing of the template):
+//   YYYY YYY YY Y · MM · MON Mon mon · MONTH Month month · DD · DDD · D ·
+//   DAY Day day · DY Dy dy · HH HH12 HH24 · MI · SS · AM PM am pm · Q · WW
+// Double-quoted runs are emitted verbatim; any other char passes through.
+// Note: month/day names are NOT blank-padded to a fixed width (PostgreSQL pads
+// MONTH/DAY to 9 chars by default); the natural-width form is returned.
+static std::string formatDateTime(const std::string& src, const std::string& fmt) {
+    auto num = [&](size_t off, size_t len) -> int {
+        if (src.size() < off + len) return 0;
+        int v = 0;
+        for (size_t i = off; i < off + len; ++i) {
+            char c = src[i];
+            if (c < '0' || c > '9') return 0;
+            v = v * 10 + (c - '0');
+        }
+        return v;
+    };
+    bool hasDate = src.size() >= 10 && src[4] == '-' && src[7] == '-';
+    int y, mo, d, h, mi, se;
+    if (hasDate) {
+        y = num(0, 4); mo = num(5, 2); d = num(8, 2);
+        h = num(11, 2); mi = num(14, 2); se = num(17, 2);
+    } else {
+        // Time-only 'HH:MM:SS'.
+        y = mo = d = 0;
+        h = num(0, 2); mi = num(3, 2); se = num(6, 2);
+    }
+
+    static const char* MON_FULL[] = {"January", "February", "March", "April",
+        "May", "June", "July", "August", "September", "October", "November", "December"};
+    static const char* MON_ABBR[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    static const char* DAY_FULL[] = {"Sunday", "Monday", "Tuesday", "Wednesday",
+        "Thursday", "Friday", "Saturday"};
+    static const char* DAY_ABBR[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+
+    // Sakamoto's day-of-week: 0=Sunday .. 6=Saturday.
+    auto dow = [&]() -> int {
+        static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+        int yy = y - (mo < 3 ? 1 : 0);
+        int w = (yy + yy / 4 - yy / 100 + yy / 400 + t[(mo > 0 ? mo : 1) - 1] + d) % 7;
+        return (w < 0) ? w + 7 : w;
+    };
+    auto doy = [&]() -> int {
+        Date cur(y, mo, d), jan1(y, 1, 1);
+        return (cur.year != 0 && jan1.year != 0)
+                   ? static_cast<int>(cur.convert() - jan1.convert() + 1) : 0;
+    };
+    // Casing style derived from a matched token: 1=UPPER, 2=Capitalized, 3=lower.
+    auto styleOf = [&](size_t pos, size_t len) -> int {
+        bool allUpper = true, allLower = true;
+        for (size_t i = pos; i < pos + len && i < fmt.size(); ++i) {
+            unsigned char c = static_cast<unsigned char>(fmt[i]);
+            if (std::isalpha(c)) {
+                if (std::islower(c)) allUpper = false;
+                if (std::isupper(c)) allLower = false;
+            }
+        }
+        if (allUpper) return 1;
+        if (allLower) return 3;
+        return 2;
+    };
+    auto recase = [](std::string s, int style) {
+        if (style == 1)
+            for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        else if (style == 3)
+            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        else if (style == 2)
+            for (size_t i = 0; i < s.size(); ++i)
+                s[i] = static_cast<char>(i == 0 ? std::toupper(static_cast<unsigned char>(s[i]))
+                                                : std::tolower(static_cast<unsigned char>(s[i])));
+        return s;
+    };
+    auto matches = [&](size_t pos, const char* kw) -> bool {
+        size_t n = std::strlen(kw);
+        if (pos + n > fmt.size()) return false;
+        for (size_t i = 0; i < n; ++i)
+            if (std::tolower(static_cast<unsigned char>(fmt[pos + i])) !=
+                std::tolower(static_cast<unsigned char>(kw[i])))
+                return false;
+        return true;
+    };
+    auto hh12 = [&]() { int x = h % 12; return x == 0 ? 12 : x; };
+
+    char buf[16];
+    std::string out;
+    size_t i = 0;
+    while (i < fmt.size()) {
+        char c = fmt[i];
+        if (c == '"') {  // quoted literal run
+            ++i;
+            while (i < fmt.size() && fmt[i] != '"') out.push_back(fmt[i++]);
+            if (i < fmt.size()) ++i;  // skip closing quote
+            continue;
+        }
+        // Longest token first so HH24 beats HH, MONTH beats MON beats MM, etc.
+        if (matches(i, "HH24")) { std::snprintf(buf, sizeof buf, "%02d", h); out += buf; i += 4; continue; }
+        if (matches(i, "HH12")) { std::snprintf(buf, sizeof buf, "%02d", hh12()); out += buf; i += 4; continue; }
+        if (matches(i, "YYYY")) { std::snprintf(buf, sizeof buf, "%04d", y); out += buf; i += 4; continue; }
+        if (matches(i, "MONTH")) { out += recase(MON_FULL[(mo >= 1 && mo <= 12) ? mo - 1 : 0], styleOf(i, 5)); i += 5; continue; }
+        if (matches(i, "MON")) { out += recase(MON_ABBR[(mo >= 1 && mo <= 12) ? mo - 1 : 0], styleOf(i, 3)); i += 3; continue; }
+        if (matches(i, "DAY")) { out += recase(DAY_FULL[dow()], styleOf(i, 3)); i += 3; continue; }
+        if (matches(i, "DDD")) { std::snprintf(buf, sizeof buf, "%03d", doy()); out += buf; i += 3; continue; }
+        if (matches(i, "YYY")) { std::snprintf(buf, sizeof buf, "%03d", y % 1000); out += buf; i += 3; continue; }
+        if (matches(i, "DY")) { out += recase(DAY_ABBR[dow()], styleOf(i, 2)); i += 2; continue; }
+        if (matches(i, "YY")) { std::snprintf(buf, sizeof buf, "%02d", y % 100); out += buf; i += 2; continue; }
+        if (matches(i, "MM")) { std::snprintf(buf, sizeof buf, "%02d", mo); out += buf; i += 2; continue; }
+        if (matches(i, "DD")) { std::snprintf(buf, sizeof buf, "%02d", d); out += buf; i += 2; continue; }
+        if (matches(i, "HH")) { std::snprintf(buf, sizeof buf, "%02d", hh12()); out += buf; i += 2; continue; }
+        if (matches(i, "MI")) { std::snprintf(buf, sizeof buf, "%02d", mi); out += buf; i += 2; continue; }
+        if (matches(i, "SS")) { std::snprintf(buf, sizeof buf, "%02d", se); out += buf; i += 2; continue; }
+        if (matches(i, "AM") || matches(i, "PM")) { out += recase(h >= 12 ? "PM" : "AM", styleOf(i, 2)); i += 2; continue; }
+        if (matches(i, "WW")) { std::snprintf(buf, sizeof buf, "%02d", (doy() - 1) / 7 + 1); out += buf; i += 2; continue; }
+        if (c == 'Q' || c == 'q') { std::snprintf(buf, sizeof buf, "%d", mo > 0 ? (mo - 1) / 3 + 1 : 0); out += buf; ++i; continue; }
+        if (c == 'D' || c == 'd') { std::snprintf(buf, sizeof buf, "%d", dow() + 1); out += buf; ++i; continue; }
+        if (c == 'Y' || c == 'y') { std::snprintf(buf, sizeof buf, "%d", y % 10); out += buf; ++i; continue; }
+        out.push_back(c);
+        ++i;
+    }
+    return out;
+}
+
+// to_char(numeric, fmt): minimal number formatter supporting '9'/'0' digit
+// placeholders, a '.' decimal point, and a leading 'FM' (fill mode: suppress
+// the leading sign-position blank). '0' placeholders zero-pad the integer part.
+// Grouping ('G'/','), currency, and sign templates are not implemented.
+static std::string formatNumeric(double val, const std::string& fmtIn) {
+    std::string fmt = fmtIn;
+    bool fm = false;
+    if (fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
+        (fmt[1] == 'M' || fmt[1] == 'm')) { fm = true; fmt = fmt.substr(2); }
+    size_t dot = fmt.find('.');
+    int fracDigits = 0;
+    if (dot != std::string::npos)
+        for (size_t i = dot + 1; i < fmt.size(); ++i)
+            if (fmt[i] == '9' || fmt[i] == '0') ++fracDigits;
+    int intPlaces = 0; bool zeroPad = false;
+    size_t intEnd = (dot == std::string::npos) ? fmt.size() : dot;
+    for (size_t i = 0; i < intEnd; ++i) {
+        if (fmt[i] == '9') ++intPlaces;
+        else if (fmt[i] == '0') { ++intPlaces; zeroPad = true; }
+    }
+    bool neg = val < 0;
+    char numbuf[64];
+    std::snprintf(numbuf, sizeof numbuf, "%.*f", fracDigits, neg ? -val : val);
+    std::string s = numbuf, ip = s, fp;
+    size_t sp = s.find('.');
+    if (sp != std::string::npos) { ip = s.substr(0, sp); fp = s.substr(sp + 1); }
+    if (zeroPad && static_cast<int>(ip.size()) < intPlaces)
+        ip = std::string(intPlaces - ip.size(), '0') + ip;
+    std::string out = neg ? "-" : (fm ? "" : " ");
+    out += ip;
+    if (fracDigits > 0) out += "." + fp;
     return out;
 }
 
@@ -2286,6 +2445,27 @@ void ExprEvaluator::registerBuiltins() {
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", y, mo, d, h, mi, se);
         return ExprValue("timestamp", buf, false);
+    };
+    // to_char(value, fmt): format a date/timestamp/time or number as text. The
+    // input is treated as temporal when its declared type is date/time/timestamp
+    // or its value looks like 'YYYY-MM-DD...' / 'HH:MM:SS'; otherwise numeric.
+    functions_["to_char"] = [](const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        const std::string& v = a[0].value;
+        const std::string& fmt = a[1].value;
+        std::string tn = toLower(a[0].typeName);
+        bool temporal = tn.find("date") != std::string::npos ||
+                        tn.find("timestamp") != std::string::npos ||
+                        tn.find("time") != std::string::npos;
+        if (!temporal) {
+            bool looksDate = v.size() >= 10 && v[4] == '-' && v[7] == '-' &&
+                             std::isdigit(static_cast<unsigned char>(v[0]));
+            bool looksTime = v.size() >= 5 && v[2] == ':' &&
+                             std::isdigit(static_cast<unsigned char>(v[0]));
+            temporal = looksDate || looksTime;
+        }
+        if (temporal) return ExprValue("text", formatDateTime(v, fmt), false);
+        return ExprValue("text", formatNumeric(a[0].asDouble(), fmt), false);
     };
 }
 
