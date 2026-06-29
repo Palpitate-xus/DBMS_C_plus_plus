@@ -4232,6 +4232,10 @@ StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_
         if (pos < tokens.size() && tokens[pos] == ")") ++pos;
         stmt->options["fields"] = fields;
     }
+    // CREATE TYPE name  -- shell type (no AS clause)
+    if (!stmt->options.count("type_kind") && pos >= tokens.size()) {
+        stmt->options["type_kind"] = "shell";
+    }
     return stmt;
 }
 

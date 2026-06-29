@@ -49,6 +49,54 @@ std::string stripQuotes(const std::string& s) {
     return s;
 }
 
+// ---- Shell type sidecar catalog (CREATE TYPE name) ----
+// Stored in {db}/.shell_types as one type name per line.
+static std::filesystem::path shellTypesPath(const std::string& dbname) {
+    return g_engine.dbPath(dbname) / ".shell_types";
+}
+
+static std::vector<std::string> loadShellTypes(const std::string& dbname) {
+    std::vector<std::string> names;
+    std::ifstream in(shellTypesPath(dbname));
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (!line.empty()) names.push_back(line);
+    }
+    return names;
+}
+
+static bool shellTypeExists(const std::string& dbname, const std::string& name) {
+    for (const auto& n : loadShellTypes(dbname))
+        if (toLower(n) == toLower(name)) return true;
+    return false;
+}
+
+static bool recordShellType(const std::string& dbname, const std::string& name) {
+    if (shellTypeExists(dbname, name)) return true;
+    std::ofstream out(shellTypesPath(dbname), std::ios::app);
+    if (!out) return false;
+    out << name << "\n";
+    return true;
+}
+
+static bool removeShellType(const std::string& dbname, const std::string& name) {
+    auto names = loadShellTypes(dbname);
+    bool removed = false;
+    {
+        std::ofstream out(shellTypesPath(dbname), std::ios::trunc);
+        if (!out) return false;
+        for (const auto& n : names) {
+            if (toLower(n) == toLower(name)) {
+                removed = true;
+                continue;
+            }
+            out << n << "\n";
+        }
+    }
+    return removed;
+}
+
 } // anonymous namespace
 
 // ----------------------------------------------------------------------------
@@ -1549,6 +1597,18 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
         return false;
     }
 
+    // Shell type (CREATE TYPE name)
+    if (typeKind == "shell") {
+        if (!recordShellType(s.currentDB, stmt->objectName)) {
+            std::cout << "CREATE TYPE failed" << std::endl;
+            return true;
+        }
+        txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
+        txn.commit();
+        std::cout << "CREATE TYPE succeeded" << std::endl;
+        return false;
+    }
+
     // Composite type (existing behavior)
     StorageEngine::CompositeType ct;
     ct.name = stmt->objectName;
@@ -1600,6 +1660,13 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     txn.recordDrop(DdlObjectKind::Type, name);
     DBStatus res = g_engine.dropCompositeType(s.currentDB, name);
     if (res != DBStatus::OK) {
+        res = g_engine.dropEnumType(s.currentDB, name);
+    }
+    bool droppedShell = false;
+    if (res != DBStatus::OK) {
+        droppedShell = removeShellType(s.currentDB, name);
+    }
+    if (res != DBStatus::OK && !droppedShell) {
         std::cout << "DROP TYPE failed" << std::endl;
         return true;
     }
