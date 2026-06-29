@@ -4232,8 +4232,51 @@ StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_
         if (pos < tokens.size() && tokens[pos] == ")") ++pos;
         stmt->options["fields"] = fields;
     }
-    // CREATE TYPE name  -- shell type (no AS clause)
-    if (!stmt->options.count("type_kind") && pos >= tokens.size()) {
+    // CREATE TYPE name AS RANGE (subtype = subtype_name, ...)
+    if (!stmt->options.count("type_kind") && pos + 2 < tokens.size() &&
+        toLower(tokens[pos]) == "as" && toLower(tokens[pos + 1]) == "range" && tokens[pos + 2] == "(") {
+        pos += 3;
+        stmt->options["type_kind"] = "range";
+        auto parseKv = [&](const std::string& stopTok) {
+            while (pos < tokens.size() && tokens[pos] != stopTok) {
+                if (tokens[pos] == ",") { ++pos; continue; }
+                std::string k = toLower(tokens[pos++]);
+                if (pos < tokens.size() && tokens[pos] == "=") ++pos;
+                std::string v;
+                while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != stopTok) {
+                    if (!v.empty()) v += " ";
+                    v += tokens[pos++];
+                }
+                if (!k.empty()) stmt->options["range_" + k] = trim(v);
+                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            }
+            if (pos < tokens.size() && tokens[pos] == stopTok) ++pos;
+        };
+        parseKv(")");
+    }
+    // CREATE TYPE name (INPUT=..., OUTPUT=..., ...) -- base type shell
+    else if (!stmt->options.count("type_kind") && pos < tokens.size() && tokens[pos] == "(") {
+        ++pos;
+        stmt->options["type_kind"] = "base";
+        auto parseKv = [&](const std::string& stopTok) {
+            while (pos < tokens.size() && tokens[pos] != stopTok) {
+                if (tokens[pos] == ",") { ++pos; continue; }
+                std::string k = toLower(tokens[pos++]);
+                if (pos < tokens.size() && tokens[pos] == "=") ++pos;
+                std::string v;
+                while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != stopTok) {
+                    if (!v.empty()) v += " ";
+                    v += tokens[pos++];
+                }
+                if (!k.empty()) stmt->options["base_" + k] = trim(v);
+                if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            }
+            if (pos < tokens.size() && tokens[pos] == stopTok) ++pos;
+        };
+        parseKv(")");
+    }
+    // CREATE TYPE name  -- shell type (no AS clause, no parentheses)
+    else if (!stmt->options.count("type_kind") && pos >= tokens.size()) {
         stmt->options["type_kind"] = "shell";
     }
     return stmt;

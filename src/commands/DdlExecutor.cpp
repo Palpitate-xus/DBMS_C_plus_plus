@@ -97,6 +97,99 @@ static bool removeShellType(const std::string& dbname, const std::string& name) 
     return removed;
 }
 
+// ---- Range / base type metadata sidecar (CREATE TYPE AS RANGE / CREATE TYPE name (...)) ----
+// Format: kind|name|key=value;key=value...
+struct UdtMeta {
+    std::string kind;  // "range" or "base"
+    std::string name;
+    std::map<std::string, std::string> attrs;
+};
+
+static std::filesystem::path udtMetaPath(const std::string& dbname) {
+    return g_engine.dbPath(dbname) / ".udt_meta";
+}
+
+static std::vector<UdtMeta> loadUdtMeta(const std::string& dbname) {
+    std::vector<UdtMeta> out;
+    std::ifstream in(udtMetaPath(dbname));
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+        size_t k1 = line.find('|');
+        size_t k2 = line.find('|', k1 + 1);
+        if (k1 == std::string::npos || k2 == std::string::npos) continue;
+        UdtMeta m;
+        m.kind = line.substr(0, k1);
+        m.name = line.substr(k1 + 1, k2 - k1 - 1);
+        std::string rest = line.substr(k2 + 1);
+        std::stringstream ss(rest);
+        std::string kv;
+        while (std::getline(ss, kv, ';')) {
+            kv = trim(kv);
+            if (kv.empty()) continue;
+            size_t eq = kv.find('=');
+            if (eq == std::string::npos) continue;
+            m.attrs[trim(kv.substr(0, eq))] = trim(kv.substr(eq + 1));
+        }
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+static bool saveUdtMeta(const std::string& dbname, const std::vector<UdtMeta>& metas) {
+    std::ofstream out(udtMetaPath(dbname), std::ios::trunc);
+    if (!out) return false;
+    for (const auto& m : metas) {
+        out << m.kind << "|" << m.name << "|";
+        bool first = true;
+        for (const auto& kv : m.attrs) {
+            if (!first) out << ";";
+            first = false;
+            out << kv.first << "=" << kv.second;
+        }
+        out << "\n";
+    }
+    return true;
+}
+
+static bool udtMetaExists(const std::string& dbname, const std::string& name,
+                          const std::string& kind = "") {
+    for (const auto& m : loadUdtMeta(dbname)) {
+        if (toLower(m.name) == toLower(name) && (kind.empty() || toLower(m.kind) == toLower(kind)))
+            return true;
+    }
+    return false;
+}
+
+static bool recordUdtMeta(const std::string& dbname, const UdtMeta& meta) {
+    auto metas = loadUdtMeta(dbname);
+    for (auto& m : metas) {
+        if (toLower(m.name) == toLower(meta.name)) { m = meta; return saveUdtMeta(dbname, metas); }
+    }
+    metas.push_back(meta);
+    return saveUdtMeta(dbname, metas);
+}
+
+static bool removeUdtMeta(const std::string& dbname, const std::string& name) {
+    auto metas = loadUdtMeta(dbname);
+    bool removed = false;
+    std::vector<UdtMeta> kept;
+    for (const auto& m : metas) {
+        if (toLower(m.name) == toLower(name)) { removed = true; continue; }
+        kept.push_back(m);
+    }
+    if (!removed) return false;
+    return saveUdtMeta(dbname, kept);
+}
+
+static bool anyTypeExists(const std::string& dbname, const std::string& name) {
+    return g_engine.isCompositeType(dbname, name) ||
+           !g_engine.getEnumType(dbname, name).name.empty() ||
+           shellTypeExists(dbname, name) ||
+           udtMetaExists(dbname, name);
+}
+
 } // anonymous namespace
 
 // ----------------------------------------------------------------------------
@@ -1599,7 +1692,67 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
 
     // Shell type (CREATE TYPE name)
     if (typeKind == "shell") {
+        if (anyTypeExists(s.currentDB, stmt->objectName)) {
+            std::cout << "Type " << stmt->objectName << " already exists" << std::endl;
+            return true;
+        }
         if (!recordShellType(s.currentDB, stmt->objectName)) {
+            std::cout << "CREATE TYPE failed" << std::endl;
+            return true;
+        }
+        txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
+        txn.commit();
+        std::cout << "CREATE TYPE succeeded" << std::endl;
+        return false;
+    }
+
+    // Range type (CREATE TYPE name AS RANGE (...))
+    if (typeKind == "range") {
+        if (anyTypeExists(s.currentDB, stmt->objectName)) {
+            std::cout << "Type " << stmt->objectName << " already exists" << std::endl;
+            return true;
+        }
+        UdtMeta meta;
+        meta.kind = "range";
+        meta.name = stmt->objectName;
+        for (const auto& kv : stmt->options) {
+            if (kv.first.substr(0, 6) == "range_") {
+                meta.attrs[kv.first.substr(6)] = kv.second;
+            }
+        }
+        if (meta.attrs.count("subtype") == 0) {
+            std::cout << "CREATE TYPE AS RANGE requires a subtype" << std::endl;
+            return true;
+        }
+        if (!recordUdtMeta(s.currentDB, meta)) {
+            std::cout << "CREATE TYPE failed" << std::endl;
+            return true;
+        }
+        txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
+        txn.commit();
+        std::cout << "CREATE TYPE AS RANGE succeeded" << std::endl;
+        return false;
+    }
+
+    // Base type (CREATE TYPE name (INPUT=..., OUTPUT=..., ...))
+    if (typeKind == "base") {
+        if (anyTypeExists(s.currentDB, stmt->objectName)) {
+            std::cout << "Type " << stmt->objectName << " already exists" << std::endl;
+            return true;
+        }
+        UdtMeta meta;
+        meta.kind = "base";
+        meta.name = stmt->objectName;
+        for (const auto& kv : stmt->options) {
+            if (kv.first.substr(0, 5) == "base_") {
+                meta.attrs[kv.first.substr(5)] = kv.second;
+            }
+        }
+        if (meta.attrs.count("input") == 0 || meta.attrs.count("output") == 0) {
+            std::cout << "CREATE TYPE base requires INPUT and OUTPUT functions" << std::endl;
+            return true;
+        }
+        if (!recordUdtMeta(s.currentDB, meta)) {
             std::cout << "CREATE TYPE failed" << std::endl;
             return true;
         }
@@ -1662,11 +1815,15 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     if (res != DBStatus::OK) {
         res = g_engine.dropEnumType(s.currentDB, name);
     }
-    bool droppedShell = false;
+    bool droppedMeta = false;
     if (res != DBStatus::OK) {
+        droppedMeta = removeUdtMeta(s.currentDB, name);
+    }
+    bool droppedShell = false;
+    if (res != DBStatus::OK && !droppedMeta) {
         droppedShell = removeShellType(s.currentDB, name);
     }
-    if (res != DBStatus::OK && !droppedShell) {
+    if (res != DBStatus::OK && !droppedMeta && !droppedShell) {
         std::cout << "DROP TYPE failed" << std::endl;
         return true;
     }
