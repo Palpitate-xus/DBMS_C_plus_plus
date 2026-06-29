@@ -2384,9 +2384,11 @@ struct WindowFunc {
     int frameStartOffset = -1; // -1 = unbounded preceding, N = N preceding
     int frameEndOffset = 0;    // 0 = current row, N = N following, -1 = unbounded following
     bool hasFrame = false;
+    // Frame exclusion: "", "current row", "group", "ties", "no others"
+    string frameExclusion;
 };
 
-static bool parseWindowFunc(const string& item, WindowFunc& wf) {
+static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string, string>& namedWindows = {}) {
     string low = toLower(item);
     size_t overPos = low.find("over");
     if (overPos == string::npos) return false;
@@ -2406,8 +2408,16 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
 
     size_t overLp = overPart.find('(');
     size_t overRp = overPart.rfind(')');
-    if (overLp == string::npos || overRp == string::npos) return false;
-    string overContent = trim(overPart.substr(overLp + 1, overRp - overLp - 1));
+    string overContent;
+    if (overLp != string::npos && overRp != string::npos) {
+        overContent = trim(overPart.substr(overLp + 1, overRp - overLp - 1));
+    } else {
+        // Named window reference: OVER name
+        string wname = toLower(trim(overPart));
+        auto it = namedWindows.find(wname);
+        if (it == namedWindows.end()) return false;
+        overContent = it->second;
+    }
 
     string lowContent = toLower(overContent);
     size_t partPos = lowContent.find("partition by");
@@ -2484,6 +2494,16 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf) {
                         }
                         if (!numStr.empty()) wf.frameEndOffset = std::stoi(numStr);
                     }
+                }
+                // Parse EXCLUDE clause: EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
+                size_t exclPos = lfs.find("exclude");
+                if (exclPos != string::npos) {
+                    string exclRest = lfs.substr(exclPos + 7);
+                    exclRest = trim(exclRest);
+                    if (exclRest.find("current row") == 0) wf.frameExclusion = "current row";
+                    else if (exclRest.find("group") == 0) wf.frameExclusion = "group";
+                    else if (exclRest.find("ties") == 0) wf.frameExclusion = "ties";
+                    else if (exclRest.find("no others") == 0) wf.frameExclusion = "no others";
                 }
             }
         }
@@ -13957,6 +13977,11 @@ bool execute(const string& rawSql, Session& s) {
         size_t orderPos = findTopLevelKeyword(sql, "order by", fromPos);
         size_t limitPos = findTopLevelKeyword(sql, "limit", fromPos);
         size_t offsetPos = findTopLevelKeyword(sql, "offset", fromPos);
+        size_t windowPos = findTopLevelKeyword(sql, "window", fromPos);
+        // Standard SQL clause order: ... HAVING WINDOW ORDER BY LIMIT OFFSET
+        // Reject WINDOW if it appears after ORDER BY or LIMIT (non-standard)
+        if (windowPos != string::npos && orderPos != string::npos && windowPos > orderPos) windowPos = string::npos;
+        if (windowPos != string::npos && limitPos != string::npos && windowPos > limitPos) windowPos = string::npos;
 
         auto parseLimitOffset = [&](size_t& limitVal, size_t& offsetVal) {
             limitVal = 0; offsetVal = 0;
@@ -14208,6 +14233,7 @@ bool execute(const string& rawSql, Session& s) {
         size_t tnameEnd = (wherePos != string::npos) ? wherePos
                          : (groupPos != string::npos) ? groupPos
                          : (havingPos != string::npos) ? havingPos
+                         : (windowPos != string::npos) ? windowPos
                          : (orderPos != string::npos) ? orderPos
                          : (limitPos != string::npos) ? limitPos
                          : (offsetPos != string::npos) ? offsetPos : sql.size();
@@ -14706,6 +14732,40 @@ bool execute(const string& rawSql, Session& s) {
             }
         }
 
+        // Parse WINDOW clause: WINDOW w1 AS (...), w2 AS (w1 ORDER BY ...)
+        map<string, string> namedWindows; // name → OVER clause content
+        if (windowPos != string::npos) {
+            size_t windowEnd = (orderPos != string::npos) ? orderPos
+                             : (limitPos != string::npos) ? limitPos
+                             : (offsetPos != string::npos) ? offsetPos : sql.size();
+            // WINDOW clause ends before ORDER BY / LIMIT / OFFSET
+            string windowRest = trim(sql.substr(windowPos + 6, windowEnd - windowPos - 6));
+            // Split by comma, but respect parentheses
+            size_t depth = 0, start = 0;
+            vector<string> windowDefs;
+            for (size_t i = 0; i < windowRest.size(); ++i) {
+                if (windowRest[i] == '(') depth++;
+                else if (windowRest[i] == ')') depth--;
+                else if (windowRest[i] == ',' && depth == 0) {
+                    windowDefs.push_back(trim(windowRest.substr(start, i - start)));
+                    start = i + 1;
+                }
+            }
+            windowDefs.push_back(trim(windowRest.substr(start)));
+            for (const auto& wd : windowDefs) {
+                // Format: "name AS (PARTITION BY ... ORDER BY ...)"
+                size_t asPos = toLower(wd).find(" as ");
+                if (asPos == string::npos) continue;
+                string wname = trim(wd.substr(0, asPos));
+                string wbody = trim(wd.substr(asPos + 4));
+                // Remove outer parentheses
+                if (!wbody.empty() && wbody.front() == '(' && wbody.back() == ')') {
+                    wbody = wbody.substr(1, wbody.size() - 2);
+                }
+                namedWindows[toLower(wname)] = wbody;
+            }
+        }
+
         TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
         set<string> selectCols;
         bool selectAll = (columns == "*");
@@ -14735,7 +14795,7 @@ bool execute(const string& rawSql, Session& s) {
                     continue;
                 }
                 WindowFunc wf;
-                if (parseWindowFunc(item, wf)) {
+                if (parseWindowFunc(item, wf, namedWindows)) {
                     windowFuncs.push_back(wf);
                     hasWindow = true;
                     exprTypes.push_back(2);
@@ -14879,6 +14939,7 @@ bool execute(const string& rawSql, Session& s) {
         if (wherePos != string::npos) {
             size_t condEnd = (groupPos != string::npos) ? groupPos
                            : (havingPos != string::npos) ? havingPos
+                           : (windowPos != string::npos) ? windowPos
                            : (orderPos != string::npos) ? orderPos
                            : (limitPos != string::npos) ? limitPos
                            : (offsetPos != string::npos) ? offsetPos : sql.size();
@@ -15204,8 +15265,48 @@ bool execute(const string& rawSql, Session& s) {
                         int64_t sum = 0, count = 0;
                         bool hasMax = false, hasMin = false;
                         int64_t maxVal = 0, minVal = 0;
+                        // Determine peer group boundaries for GROUP/TIES exclusion
+                        size_t peerStart = fStart, peerEnd = fStart;
+                        if (!wf.frameExclusion.empty() && wf.frameExclusion != "current row" && wf.frameExclusion != "no others") {
+                            // Find peer group of current row within frame
+                            for (size_t fj = fStart; fj < fEnd; ++fj) {
+                                if (effIdxs[fj] == ri) {
+                                    // Expand backwards: peers share partition and ORDER BY value
+                                    peerStart = fj;
+                                    while (peerStart > fStart) {
+                                        size_t prevIdx = effIdxs[peerStart - 1];
+                                        if (!samePartition(prevIdx, ri, wf)) break;
+                                        auto itA = rows[prevIdx].find(wf.orderByCol);
+                                        auto itB = rows[ri].find(wf.orderByCol);
+                                        if (itA == rows[prevIdx].end() || itB == rows[ri].end()) break;
+                                        if (itA->second != itB->second) break;
+                                        --peerStart;
+                                    }
+                                    // Expand forwards
+                                    peerEnd = fj + 1;
+                                    while (peerEnd < fEnd) {
+                                        size_t nextIdx = effIdxs[peerEnd];
+                                        if (!samePartition(nextIdx, ri, wf)) break;
+                                        auto itA = rows[nextIdx].find(wf.orderByCol);
+                                        auto itB = rows[ri].find(wf.orderByCol);
+                                        if (itA == rows[nextIdx].end() || itB == rows[ri].end()) break;
+                                        if (itA->second != itB->second) break;
+                                        ++peerEnd;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         for (size_t fj = fStart; fj < fEnd; ++fj) {
                             size_t rj = effIdxs[fj];
+                            // Apply frame exclusion
+                            if (wf.frameExclusion == "current row") {
+                                if (rj == ri) continue;
+                            } else if (wf.frameExclusion == "group") {
+                                if (fj >= peerStart && fj < peerEnd) continue;
+                            } else if (wf.frameExclusion == "ties") {
+                                if (fj >= peerStart && fj < peerEnd && rj != ri) continue;
+                            }
                             if (wf.name == "count") {
                                 count++;
                                 continue;
