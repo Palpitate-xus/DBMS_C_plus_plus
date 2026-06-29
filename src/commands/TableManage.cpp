@@ -13951,6 +13951,20 @@ std::vector<std::string> StorageEngine::aggregate(
         bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
         bool isStat = isVar || isStddev;
         bool isModeMedian = (func == "mode" || func == "median");
+        bool isPercentile = (func == "percentile_cont" || func == "percentile_disc");
+        double pctFraction = 0.5;
+        std::string pctColName = colName;
+        if (isPercentile) {
+            auto comma = colName.find(',');
+            if (comma != std::string::npos) {
+                pctFraction = std::stod(colName.substr(0, comma));
+                pctColName = colName.substr(comma + 1);
+            }
+        }
+        bool isBoolAnd = (func == "bool_and" || func == "every");
+        bool isBoolOr = (func == "bool_or");
+        bool boolResult = isBoolAnd ? true : false;
+        bool boolSeen = false;
         std::vector<std::string> orderedVals;
         std::unordered_map<std::string, int64_t> freqMap;
         // Welford's online algorithm for variance
@@ -13958,8 +13972,9 @@ std::vector<std::string> StorageEngine::aggregate(
         size_t wCount = 0;
 
         if (func != "count" || actualColName != "*") {
+            std::string lookupCol = isPercentile ? pctColName : actualColName;
             for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == actualColName) {
+                if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
                     isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
@@ -14030,6 +14045,17 @@ std::vector<std::string> StorageEngine::aggregate(
                         orderedVals.push_back(val);
                         ++freqMap[val];
                     }
+                    continue;
+                }
+                if (isPercentile) {
+                    if (!val.empty()) orderedVals.push_back(val);
+                    continue;
+                }
+                if (isBoolAnd || isBoolOr) {
+                    if (val.empty()) continue;
+                    boolSeen = true;
+                    if (isBoolAnd && val == "false") boolResult = false;
+                    if (isBoolOr && val == "true") boolResult = true;
                     continue;
                 }
                 if (isInt) {
@@ -14175,6 +14201,53 @@ std::vector<std::string> StorageEngine::aggregate(
                 }
             }
         }
+        else if (isPercentile) {
+            if (orderedVals.empty()) {
+                rowResult += "NULL ";
+            } else {
+                // Sort and compute percentile
+                std::sort(orderedVals.begin(), orderedVals.end(),
+                    [](const std::string& a, const std::string& b) {
+                        bool aNum = !a.empty() && (std::isdigit(static_cast<unsigned char>(a[0])) || a[0] == '-' || a[0] == '+');
+                        bool bNum = !b.empty() && (std::isdigit(static_cast<unsigned char>(b[0])) || b[0] == '-' || b[0] == '+');
+                        if (aNum && bNum) return std::stod(a) < std::stod(b);
+                        return a < b;
+                    });
+                size_t n = orderedVals.size();
+                if (func == "percentile_disc") {
+                    // Discrete: return value at ceil(fraction * n) - 1
+                    size_t idx = static_cast<size_t>(std::ceil(pctFraction * n));
+                    if (idx > 0) idx--;
+                    rowResult += orderedVals[idx] + ' ';
+                } else {
+                    // Continuous: interpolate
+                    double idx = pctFraction * (n - 1);
+                    size_t lo = static_cast<size_t>(std::floor(idx));
+                    size_t hi = static_cast<size_t>(std::ceil(idx));
+                    if (lo == hi || hi >= n) {
+                        rowResult += orderedVals[lo] + ' ';
+                    } else {
+                        // Interpolate if numeric, otherwise use lower
+                        bool numeric = !orderedVals[lo].empty() && !orderedVals[hi].empty() &&
+                            (std::isdigit(static_cast<unsigned char>(orderedVals[lo][0])) || orderedVals[lo][0] == '-' || orderedVals[lo][0] == '+') &&
+                            (std::isdigit(static_cast<unsigned char>(orderedVals[hi][0])) || orderedVals[hi][0] == '-' || orderedVals[hi][0] == '+');
+                        if (numeric) {
+                            double a = std::stod(orderedVals[lo]);
+                            double b = std::stod(orderedVals[hi]);
+                            double frac = idx - lo;
+                            std::ostringstream oss;
+                            oss << (a + frac * (b - a));
+                            rowResult += oss.str() + ' ';
+                        } else {
+                            rowResult += orderedVals[lo] + ' ';
+                        }
+                    }
+                }
+            }
+        }
+        else if (isBoolAnd || isBoolOr) {
+            rowResult += (boolSeen ? (boolResult ? "true " : "false ") : "NULL ");
+        }
     }
     if (!rowResult.empty()) result.push_back(rowResult);
     lockManager_.unlock(tablename);
@@ -14250,13 +14323,28 @@ std::vector<std::string> StorageEngine::groupAggregate(
         bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
         bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
         bool isModeMedian = (func == "mode" || func == "median");
+        bool isPercentile = (func == "percentile_cont" || func == "percentile_disc");
+        double pctFraction = 0.5;
+        std::string pctColName = colName;
+        if (isPercentile) {
+            auto comma = colName.find(',');
+            if (comma != std::string::npos) {
+                pctFraction = std::stod(colName.substr(0, comma));
+                pctColName = colName.substr(comma + 1);
+            }
+        }
+        bool isBoolAnd = (func == "bool_and" || func == "every");
+        bool isBoolOr = (func == "bool_or");
+        bool boolResult = isBoolAnd ? true : false;
+        bool boolSeen = false;
         std::vector<std::string> orderedVals;
         std::unordered_map<std::string, int64_t> freqMap;
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false;
         if (func != "count" || actualColName != "*") {
+            std::string lookupCol = isPercentile ? pctColName : actualColName;
             for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == actualColName) {
+                if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
                     isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
@@ -14334,6 +14422,17 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     }
                     continue;
                 }
+                if (isPercentile) {
+                    if (!val.empty()) orderedVals.push_back(val);
+                    continue;
+                }
+                if (isBoolAnd || isBoolOr) {
+                    if (val.empty()) continue;
+                    boolSeen = true;
+                    if (isBoolAnd && val == "false") boolResult = false;
+                    if (isBoolOr && val == "true") boolResult = true;
+                    continue;
+                }
                 if (isInt) {
                     int64_t num = val.empty() ? INF : parseInt(val);
                     if (num == INF) continue;
@@ -14403,6 +14502,40 @@ std::vector<std::string> StorageEngine::groupAggregate(
             if (isDate) return str(minDate);
             return minStr;
         }
+        if (isPercentile) {
+            if (orderedVals.empty()) return "NULL";
+            std::sort(orderedVals.begin(), orderedVals.end(),
+                [](const std::string& a, const std::string& b) {
+                    bool aNum = !a.empty() && (std::isdigit(static_cast<unsigned char>(a[0])) || a[0] == '-' || a[0] == '+');
+                    bool bNum = !b.empty() && (std::isdigit(static_cast<unsigned char>(b[0])) || b[0] == '-' || b[0] == '+');
+                    if (aNum && bNum) return std::stod(a) < std::stod(b);
+                    return a < b;
+                });
+            size_t n = orderedVals.size();
+            if (func == "percentile_disc") {
+                size_t idx = static_cast<size_t>(std::ceil(pctFraction * n));
+                if (idx > 0) idx--;
+                return orderedVals[idx];
+            } else {
+                double idx = pctFraction * (n - 1);
+                size_t lo = static_cast<size_t>(std::floor(idx));
+                size_t hi = static_cast<size_t>(std::ceil(idx));
+                if (lo == hi || hi >= n) return orderedVals[lo];
+                bool numeric = !orderedVals[lo].empty() && !orderedVals[hi].empty() &&
+                    (std::isdigit(static_cast<unsigned char>(orderedVals[lo][0])) || orderedVals[lo][0] == '-' || orderedVals[lo][0] == '+') &&
+                    (std::isdigit(static_cast<unsigned char>(orderedVals[hi][0])) || orderedVals[hi][0] == '-' || orderedVals[hi][0] == '+');
+                if (numeric) {
+                    double a = std::stod(orderedVals[lo]);
+                    double b = std::stod(orderedVals[hi]);
+                    double frac = idx - lo;
+                    std::ostringstream oss;
+                    oss << (a + frac * (b - a));
+                    return oss.str();
+                }
+                return orderedVals[lo];
+            }
+        }
+        if (isBoolAnd || isBoolOr) return boolSeen ? (boolResult ? "true" : "false") : "NULL";
         return "";
     };
 
@@ -14534,13 +14667,28 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
         bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
         bool isModeMedian = (func == "mode" || func == "median");
+        bool isPercentile = (func == "percentile_cont" || func == "percentile_disc");
+        double pctFraction = 0.5;
+        std::string pctColName = colName;
+        if (isPercentile) {
+            auto comma = colName.find(',');
+            if (comma != std::string::npos) {
+                pctFraction = std::stod(colName.substr(0, comma));
+                pctColName = colName.substr(comma + 1);
+            }
+        }
+        bool isBoolAnd = (func == "bool_and" || func == "every");
+        bool isBoolOr = (func == "bool_or");
+        bool boolResult = isBoolAnd ? true : false;
+        bool boolSeen = false;
         std::vector<std::string> orderedVals;
         std::unordered_map<std::string, int64_t> freqMap;
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false;
         if (func != "count" || actualColName != "*") {
+            std::string lookupCol = isPercentile ? pctColName : actualColName;
             for (size_t i = 0; i < tbl.len; ++i) {
-                if (tbl.cols[i].dataName == actualColName) {
+                if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
                     isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
                     isDate = (tbl.cols[i].dataType == "date");
@@ -14669,6 +14817,40 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
             if (isDate) return str(minDate);
             return minStr;
         }
+        if (isPercentile) {
+            if (orderedVals.empty()) return "NULL";
+            std::sort(orderedVals.begin(), orderedVals.end(),
+                [](const std::string& a, const std::string& b) {
+                    bool aNum = !a.empty() && (std::isdigit(static_cast<unsigned char>(a[0])) || a[0] == '-' || a[0] == '+');
+                    bool bNum = !b.empty() && (std::isdigit(static_cast<unsigned char>(b[0])) || b[0] == '-' || b[0] == '+');
+                    if (aNum && bNum) return std::stod(a) < std::stod(b);
+                    return a < b;
+                });
+            size_t n = orderedVals.size();
+            if (func == "percentile_disc") {
+                size_t idx = static_cast<size_t>(std::ceil(pctFraction * n));
+                if (idx > 0) idx--;
+                return orderedVals[idx];
+            } else {
+                double idx = pctFraction * (n - 1);
+                size_t lo = static_cast<size_t>(std::floor(idx));
+                size_t hi = static_cast<size_t>(std::ceil(idx));
+                if (lo == hi || hi >= n) return orderedVals[lo];
+                bool numeric = !orderedVals[lo].empty() && !orderedVals[hi].empty() &&
+                    (std::isdigit(static_cast<unsigned char>(orderedVals[lo][0])) || orderedVals[lo][0] == '-' || orderedVals[lo][0] == '+') &&
+                    (std::isdigit(static_cast<unsigned char>(orderedVals[hi][0])) || orderedVals[hi][0] == '-' || orderedVals[hi][0] == '+');
+                if (numeric) {
+                    double a = std::stod(orderedVals[lo]);
+                    double b = std::stod(orderedVals[hi]);
+                    double frac = idx - lo;
+                    std::ostringstream oss;
+                    oss << (a + frac * (b - a));
+                    return oss.str();
+                }
+                return orderedVals[lo];
+            }
+        }
+        if (isBoolAnd || isBoolOr) return boolSeen ? (boolResult ? "true" : "false") : "NULL";
         return "";
     };
 
