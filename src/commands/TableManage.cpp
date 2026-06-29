@@ -8290,6 +8290,22 @@ DBStatus StorageEngine::alterTableDropDefault(const std::string& dbname,
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::alterTableSetLogged(const std::string& dbname,
+                                             const std::string& tablename,
+                                             bool logged) {
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    lockManager_.lockMetadata(tablename);
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    tbl.isUnlogged = !logged;
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    invalidateCatalogSchema(dbname, tablename);
+    lockManager_.unlock(tablename);
+    return DBStatus::OK;
+}
+
 DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {

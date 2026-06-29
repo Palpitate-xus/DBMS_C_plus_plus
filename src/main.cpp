@@ -3115,6 +3115,68 @@ struct CompatObjectPrefix {
     string kind;
 };
 
+// ---- Table-level option metadata (OWNER TO / CLUSTER ON / REPLICA IDENTITY) ----
+// Stored as a "table_options" compat object: owner in the owner field, the rest
+// as semicolon-separated key=value pairs in the options field. No schema-format
+// change — purely a sidecar alongside the existing compat-object catalog.
+static CatalogObjectInfo getTableOptionsObj(const string& dbname, const string& tableName) {
+    auto objects = loadCompatObjects(dbname);
+    auto it = objects.find(compatObjectKey("table_options", tableName));
+    if (it != objects.end()) return it->second;
+    CatalogObjectInfo obj;
+    obj.kind = "table_options";
+    obj.name = tableName;
+    return obj;
+}
+
+static bool saveTableOptionsObj(const string& dbname, const CatalogObjectInfo& obj) {
+    auto objects = loadCompatObjects(dbname);
+    objects[compatObjectKey("table_options", obj.name)] = obj;
+    return saveCompatObjects(dbname, objects);
+}
+
+static map<string, string> parseTableOptionsString(const string& opts) {
+    map<string, string> m;
+    stringstream ss(opts);
+    string kv;
+    while (getline(ss, kv, ';')) {
+        kv = trim(kv);
+        if (kv.empty()) continue;
+        size_t eq = kv.find('=');
+        if (eq == string::npos) continue;
+        m[trim(kv.substr(0, eq))] = trim(kv.substr(eq + 1));
+    }
+    return m;
+}
+
+static string buildTableOptionsString(const map<string, string>& m) {
+    string out;
+    for (const auto& kv : m) {
+        if (kv.second.empty()) continue;
+        if (!out.empty()) out += ";";
+        out += kv.first + "=" + kv.second;
+    }
+    return out;
+}
+
+// Set (value non-empty) or clear (value empty) one option key. Returns false on
+// persistence failure.
+static bool setTableOption(const string& dbname, const string& tableName,
+                           const string& key, const string& value) {
+    auto obj = getTableOptionsObj(dbname, tableName);
+    auto m = parseTableOptionsString(obj.options);
+    if (value.empty()) m.erase(key); else m[key] = value;
+    obj.options = buildTableOptionsString(m);
+    return saveTableOptionsObj(dbname, obj);
+}
+
+static bool setTableOwner(const string& dbname, const string& tableName, const string& owner) {
+    auto obj = getTableOptionsObj(dbname, tableName);
+    obj.owner = owner;
+    return saveTableOptionsObj(dbname, obj);
+}
+
+
 static const vector<CompatObjectPrefix>& compatCreatePrefixes() {
     static const vector<CompatObjectPrefix> prefixes = {
         {"text search configuration", "text_search_configuration"},
@@ -10367,6 +10429,141 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Table " << tname << " moved to database " << targetDb << endl;
+            return false;
+        }
+        // ALTER TABLE ... OWNER TO newowner  (metadata sidecar)
+        if (op == "owner" && tokens.size() >= 5 && tokens[3] == "to") {
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            string newOwner = tokens[4];
+            if (!setTableOwner(s.currentDB, tname, newOwner)) {
+                cout << "Owner metadata save failed" << endl;
+                return true;
+            }
+            cout << "Table owner changed to " << newOwner << endl;
+            return false;
+        }
+        // ALTER TABLE ... SET LOGGED | SET UNLOGGED  (flips real isUnlogged flag)
+        if (sql.find("set logged") != string::npos || sql.find("set unlogged") != string::npos) {
+            bool logged = (sql.find("set unlogged") == string::npos);
+            auto res = g_engine.alterTableSetLogged(s.currentDB, tname, logged);
+            if (res == DBStatus::TABLE_NOT_FOUND) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            cout << "Table set " << (logged ? "logged" : "unlogged") << endl;
+            return false;
+        }
+        // ALTER TABLE ... SET WITHOUT CLUSTER  (clear cluster marker; check before CLUSTER ON)
+        if (sql.find("set without cluster") != string::npos) {
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            setTableOption(s.currentDB, tname, "cluster", "");
+            cout << "Cluster marker removed" << endl;
+            return false;
+        }
+        // ALTER TABLE ... CLUSTER ON indexname  (metadata sidecar)
+        if (sql.find("cluster on") != string::npos) {
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            string idx = trim(sql.substr(sql.find("cluster on") + 10));
+            if (idx.empty()) {
+                cout << "SQL syntax error: CLUSTER ON requires an index name" << endl;
+                return true;
+            }
+            setTableOption(s.currentDB, tname, "cluster", idx);
+            cout << "Table clustered on " << idx << endl;
+            return false;
+        }
+        // ALTER TABLE ... REPLICA IDENTITY {DEFAULT|FULL|NOTHING|USING INDEX name}
+        if (sql.find("replica identity") != string::npos) {
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            string after = trim(sql.substr(sql.find("replica identity") + 16));
+            string mode;
+            if (after.substr(0, 5) == "using") {
+                size_t ip = after.find("index");
+                string idx = (ip != string::npos) ? trim(after.substr(ip + 5)) : "";
+                mode = idx.empty() ? "default" : ("index:" + idx);
+            } else if (after.substr(0, 4) == "full") {
+                mode = "full";
+            } else if (after.substr(0, 7) == "nothing") {
+                mode = "nothing";
+            } else {
+                mode = "default";
+            }
+            setTableOption(s.currentDB, tname, "replica_identity", mode);
+            cout << "Replica identity set to " << mode << endl;
+            return false;
+        }
+        // ALTER TABLE ... SET TABLESPACE name  (deferred: see note)
+        if (sql.find("set tablespace") != string::npos) {
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            // Physical relocation is intentionally not applied: the engine routes
+            // data files inconsistently (getPageAllocator via tablespaceDir vs
+            // dataPath via the db dir), so silently changing the tablespace field
+            // would orphan existing data. Acknowledge without relocating.
+            cout << "Note: SET TABLESPACE relocation not supported yet; no change applied" << endl;
+            return false;
+        }
+        // ALTER TABLE ... SET (param = value [, ...])  (storage parameters)
+        if (op == "set" && sql.find('(') != string::npos) {
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            size_t lp = sql.find('('), rp = sql.rfind(')');
+            if (lp == string::npos || rp == string::npos || rp <= lp) {
+                cout << "SQL syntax error: SET (param = value)" << endl;
+                return true;
+            }
+            string body = sql.substr(lp + 1, rp - lp - 1);
+            auto params = g_engine.getStorageParams(s.currentDB, tname);
+            stringstream pss(body);
+            string item;
+            while (getline(pss, item, ',')) {
+                size_t eq = item.find('=');
+                if (eq == string::npos) continue;
+                string k = trim(item.substr(0, eq));
+                string v = trim(item.substr(eq + 1));
+                if (!k.empty()) params[k] = v;
+            }
+            g_engine.setStorageParams(s.currentDB, tname, params);
+            cout << "Storage parameters set" << endl;
+            return false;
+        }
+        // ALTER TABLE ... RESET (param [, ...])  (remove storage parameters)
+        if (op == "reset" && sql.find('(') != string::npos) {
+            if (!g_engine.tableExists(s.currentDB, tname)) {
+                cout << "Table not found" << endl;
+                return true;
+            }
+            size_t lp = sql.find('('), rp = sql.rfind(')');
+            if (lp == string::npos || rp == string::npos || rp <= lp) {
+                cout << "SQL syntax error: RESET (param)" << endl;
+                return true;
+            }
+            string body = sql.substr(lp + 1, rp - lp - 1);
+            auto params = g_engine.getStorageParams(s.currentDB, tname);
+            stringstream pss(body);
+            string item;
+            while (getline(pss, item, ',')) {
+                string k = trim(item);
+                if (!k.empty()) params.erase(k);
+            }
+            g_engine.setStorageParams(s.currentDB, tname, params);
+            cout << "Storage parameters reset" << endl;
             return false;
         }
         cout << "SQL syntax error" << endl;

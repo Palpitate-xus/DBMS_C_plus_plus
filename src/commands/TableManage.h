@@ -145,6 +145,10 @@ public:
     // (INVALID_VALUE) before touching any files if a value cannot be represented.
     DBStatus alterTableAlterColumnType(const std::string& dbname, const std::string& tablename,
                                         const std::string& colName, const Column& newCol);
+    // ALTER TABLE ... SET LOGGED | SET UNLOGGED: flip the table's WAL persistence
+    // flag (metadata; existing data is kept). logged=true -> LOGGED.
+    DBStatus alterTableSetLogged(const std::string& dbname, const std::string& tablename,
+                                  bool logged);
     DBStatus alterTableAddCheckConstraint(const std::string& dbname, const std::string& tablename,
                                            const std::string& name, const std::string& expr);
     DBStatus alterTableAddUniqueConstraint(const std::string& dbname, const std::string& tablename,
