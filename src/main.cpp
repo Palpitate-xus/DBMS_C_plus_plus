@@ -3647,6 +3647,14 @@ static ConstraintCompatFlags mergeConstraintFlagsFromSql(const string& sql,
     return flags;
 }
 
+static bool columnExists(const string& dbname, const string& tablename, const string& cname) {
+    if (!g_engine.tableExists(dbname, tablename)) return false;
+    TableSchema tbl = g_engine.getTableSchema(dbname, tablename);
+    for (size_t i = 0; i < tbl.len; ++i)
+        if (tbl.cols[i].dataName == cname) return true;
+    return false;
+}
+
 static bool tableConstraintExists(const string& dbname,
                                   const string& tableName,
                                   const string& constraintName) {
@@ -9912,19 +9920,32 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Constraint " << constrName << " options updated" << endl;
             return false;
         }
-        if (op == "add" && tokens.size() >= 4 && tokens[3] == "column") {
-            // alter table tname add column colname:type [0|1]
-            if (tokens.size() < 5) {
+        if (op == "add" && tokens.size() >= 4 && (tokens[3] == "column" || tokens[3] == "if")) {
+            // alter table tname add [column] [if not exists] colname:type [0|1]
+            size_t pos = 4;
+            bool ifNotExists = false;
+            if (tokens[3] == "if") {
+                ifNotExists = true;
+            } else if (tokens.size() >= 8 && tokens[3] == "column" &&
+                       tokens[4] == "if" && tokens[5] == "not" && tokens[6] == "exists") {
+                ifNotExists = true;
+                pos = 7;
+            }
+            if (pos >= tokens.size()) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            string colDef = tokens[4];
+            string colDef = tokens[pos];
             size_t colon = colDef.find(':');
             if (colon == string::npos) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
             string cname = colDef.substr(0, colon);
+            if (ifNotExists && columnExists(s.currentDB, tname, cname)) {
+                cout << "Column " << cname << " already exists, skipping" << endl;
+                return false;
+            }
             string ctype = colDef.substr(colon + 1);
             size_t sp = ctype.find(' ');
             string typeName = (sp == string::npos) ? ctype : trim(ctype.substr(0, sp));
@@ -9938,6 +9959,10 @@ bool execute(const string& rawSql, Session& s) {
             }
             auto res = g_engine.alterTableAddColumn(s.currentDB, tname, col);
             if (res == DBStatus::TABLE_ALREADY_EXISTS) {
+                if (ifNotExists) {
+                    cout << "Column " << cname << " already exists, skipping" << endl;
+                    return false;
+                }
                 cout << "Column already exists" << endl;
                 return true;
             }
@@ -9945,11 +9970,23 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         if (op == "drop" && tokens.size() >= 4 && tokens[3] == "column") {
-            if (tokens.size() < 5) {
+            // alter table tname drop column [if exists] colname
+            size_t pos = 4;
+            bool ifExists = false;
+            if (tokens.size() >= 6 && tokens[4] == "if" && tokens[5] == "exists") {
+                ifExists = true;
+                pos = 6;
+            }
+            if (pos >= tokens.size()) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            auto res = g_engine.alterTableDropColumn(s.currentDB, tname, tokens[4]);
+            string cname = tokens[pos];
+            if (ifExists && !columnExists(s.currentDB, tname, cname)) {
+                cout << "Column " << cname << " does not exist, skipping" << endl;
+                return false;
+            }
+            auto res = g_engine.alterTableDropColumn(s.currentDB, tname, cname);
             if (res == DBStatus::INVALID_VALUE) {
                 cout << "Column not found" << endl;
                 return true;
@@ -9958,10 +9995,26 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         if (op == "rename") {
-            if (tokens.size() >= 7 && tokens[3] == "constraint" && tokens[5] == "to") {
-                // alter table tname rename constraint old_name to new_name
-                string oldName = tokens[4];
-                string newName = tokens[6];
+            if (tokens.size() >= 7 && tokens[3] == "constraint" &&
+                (tokens[5] == "to" ||
+                 (tokens.size() >= 9 && tokens[4] == "if" && tokens[5] == "exists" && tokens[7] == "to"))) {
+                // alter table tname rename constraint [if exists] old_name to new_name
+                size_t pos = 4;
+                bool ifExists = false;
+                if (tokens.size() >= 9 && tokens[4] == "if" && tokens[5] == "exists") {
+                    ifExists = true;
+                    pos = 6;
+                }
+                if (pos + 2 >= tokens.size() || tokens[pos + 1] != "to") {
+                    cout << "SQL syntax error" << endl;
+                    return true;
+                }
+                string oldName = tokens[pos];
+                string newName = tokens[pos + 2];
+                if (ifExists && !knownConstraintExists(s.currentDB, tname, oldName)) {
+                    cout << "Constraint " << oldName << " does not exist, skipping" << endl;
+                    return false;
+                }
                 auto res = g_engine.alterTableRenameConstraint(s.currentDB, tname, oldName, newName);
                 if (res == DBStatus::INVALID_VALUE) {
                     cout << "Constraint not found" << endl;
@@ -9974,10 +10027,26 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Constraint renamed" << endl;
                 return false;
             }
-            if (tokens.size() >= 5 && tokens[3] == "column" && tokens[5] == "to") {
-                // alter table tname rename column old_name to new_name
-                string oldName = tokens[4];
-                string newName = tokens[6];
+            if (tokens.size() >= 5 && tokens[3] == "column" &&
+                (tokens[5] == "to" ||
+                 (tokens.size() >= 9 && tokens[4] == "if" && tokens[5] == "exists" && tokens[7] == "to"))) {
+                // alter table tname rename column [if exists] old_name to new_name
+                size_t pos = 4;
+                bool ifExists = false;
+                if (tokens.size() >= 9 && tokens[4] == "if" && tokens[5] == "exists") {
+                    ifExists = true;
+                    pos = 6;
+                }
+                if (pos + 2 >= tokens.size() || tokens[pos + 1] != "to") {
+                    cout << "SQL syntax error" << endl;
+                    return true;
+                }
+                string oldName = tokens[pos];
+                string newName = tokens[pos + 2];
+                if (ifExists && !columnExists(s.currentDB, tname, oldName)) {
+                    cout << "Column " << oldName << " does not exist, skipping" << endl;
+                    return false;
+                }
                 auto res = g_engine.alterTableRenameColumn(s.currentDB, tname, oldName, newName);
                 if (res == DBStatus::INVALID_VALUE) {
                     cout << "Column not found" << endl;
@@ -10001,10 +10070,24 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Table renamed" << endl;
                 return false;
             }
-            // PostgreSQL shorthand: alter table tname rename old_name to new_name (for column)
+            // PostgreSQL shorthand: alter table tname rename [column] [if exists] old_name to new_name (for column)
             if (tokens.size() >= 5 && tokens[4] == "to") {
-                string oldName = tokens[3];
-                string newName = tokens[5];
+                size_t pos = 3;
+                bool ifExists = false;
+                if (tokens.size() >= 6 && tokens[3] == "if" && tokens[4] == "exists") {
+                    ifExists = true;
+                    pos = 5;
+                }
+                if (pos + 2 >= tokens.size() || tokens[pos + 1] != "to") {
+                    cout << "SQL syntax error" << endl;
+                    return true;
+                }
+                string oldName = tokens[pos];
+                string newName = tokens[pos + 2];
+                if (ifExists && !columnExists(s.currentDB, tname, oldName)) {
+                    cout << "Column " << oldName << " does not exist, skipping" << endl;
+                    return false;
+                }
                 auto res = g_engine.alterTableRenameColumn(s.currentDB, tname, oldName, newName);
                 if (res == DBStatus::INVALID_VALUE) {
                     cout << "Column not found" << endl;
@@ -10311,11 +10394,22 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         if (op == "drop" && tokens.size() >= 4 && tokens[3] == "constraint") {
-            if (tokens.size() < 5) {
+            // alter table tname drop constraint [if exists] constrName
+            size_t pos = 4;
+            bool ifExists = false;
+            if (tokens.size() >= 6 && tokens[4] == "if" && tokens[5] == "exists") {
+                ifExists = true;
+                pos = 6;
+            }
+            if (pos >= tokens.size()) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            string constrName = tokens[4];
+            string constrName = tokens[pos];
+            if (ifExists && !knownConstraintExists(s.currentDB, tname, constrName)) {
+                cout << "Constraint " << constrName << " does not exist, skipping" << endl;
+                return false;
+            }
             auto res = g_engine.alterTableDropConstraint(s.currentDB, tname, constrName);
             bool droppedMeta = removeConstraintCompat(s.currentDB, tname, constrName);
             if (res == DBStatus::TABLE_NOT_FOUND) {
