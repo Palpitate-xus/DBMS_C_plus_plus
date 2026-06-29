@@ -68,7 +68,8 @@ std::string canonicalTypeName(const std::string& storageType) {
 ExprEvalResult ExprHelper::evalString(
     const std::string& exprSql,
     const std::map<std::string, std::string>& row,
-    const std::map<std::string, std::string>& typeHints) {
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB) {
 
     ExprEvalResult res;
     if (exprSql.empty()) {
@@ -102,6 +103,7 @@ ExprEvalResult ExprHelper::evalString(
     }
 
     ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
     ExprValue v = evaluator.eval(select->selectList[0].expr.get(), ctx);
 
     res.ok = true;
@@ -114,9 +116,10 @@ bool ExprHelper::evalBool(
     const std::string& exprSql,
     const std::map<std::string, std::string>& row,
     const std::map<std::string, std::string>& typeHints,
-    std::string* error) {
+    std::string* error,
+    const std::string& currentDB) {
 
-    ExprEvalResult r = evalString(exprSql, row, typeHints);
+    ExprEvalResult r = evalString(exprSql, row, typeHints, currentDB);
     if (!r.ok) {
         if (error) *error = r.error;
         return false;

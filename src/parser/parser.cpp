@@ -3629,8 +3629,19 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     } else if (ckw == "default") {
                         ++pos;
                         std::string defVal;
-                        // Collect default value (may be literal, expression, or function call)
-                        while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ")") {
+                        // Collect default value (literal, expression, or function call).
+                        // Respect parenthesis depth so that DEFAULT nextval('s') or
+                        // DEFAULT (expr) does not terminate early at an inner ')'.
+                        int depth = 0;
+                        while (pos < tokens.size()) {
+                            if (tokens[pos] == "(") {
+                                ++depth;
+                            } else if (tokens[pos] == ")") {
+                                if (depth == 0) break;
+                                --depth;
+                            } else if (tokens[pos] == "," && depth == 0) {
+                                break;
+                            }
                             if (!defVal.empty() && defVal.back() != '(') defVal += " ";
                             defVal += tokens[pos++];
                         }

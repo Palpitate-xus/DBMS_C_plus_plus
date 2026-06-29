@@ -8147,6 +8147,7 @@ bool execute(const string& rawSql, Session& s) {
         return true;
     }
     g_engine.setRLSUser(s.username);
+    dbms::setCurrentSession(&s);
     string sql = sqlProcessor(rawSql);
     // Handle pg_cancel_backend / pg_terminate_backend
     {

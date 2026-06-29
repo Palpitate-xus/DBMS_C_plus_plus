@@ -7,6 +7,7 @@
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
+#include "utils/Session.h"
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -91,6 +92,12 @@ std::map<uint64_t, std::set<int64_t>> StorageEngine::ssiReadSets_;
 std::map<uint64_t, std::set<int64_t>> StorageEngine::ssiWriteSets_;
 std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiOutEdges_;
 std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiInEdges_;
+
+// Thread-local session pointer for sequence builtins to update currval state.
+thread_local Session* g_currentSession = nullptr;
+
+void setCurrentSession(Session* s) { g_currentSession = s; }
+Session* currentSession() { return g_currentSession; }
 
 // ========================================================================
 // Row-Level Security helpers
@@ -289,12 +296,13 @@ static std::string evalExpressionSql(
     const std::string& exprSql,
     const std::map<std::string, std::string>& row,
     const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB,
     bool* ok = nullptr) {
     if (exprSql.empty()) {
         if (ok) *ok = false;
         return "";
     }
-    auto res = dbms::ExprHelper::evalString(exprSql, row, typeHints);
+    auto res = dbms::ExprHelper::evalString(exprSql, row, typeHints, currentDB);
     if (!res.ok) {
         if (ok) *ok = false;
         return "";
@@ -9078,6 +9086,9 @@ int64_t StorageEngine::nextval(const std::string& dbname,
     lastvalDb_ = dbname;
     lastvalSeq_ = seqname;
     lastvalValue_ = result;
+    if (g_currentSession) {
+        g_currentSession->sequenceLastValues[seqname] = result;
+    }
     return result;
 }
 
@@ -9896,7 +9907,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         auto it = actualValues.find(col.dataName);
         if ((it == actualValues.end() || it->second.empty()) && !col.defaultValue.empty()) {
             bool ok = false;
-            std::string computed = evalExpressionSql(col.defaultValue, actualValues, typeHints, &ok);
+            std::string computed = evalExpressionSql(col.defaultValue, actualValues, typeHints, dbname, &ok);
             if (ok) {
                 actualValues[col.dataName] = computed;
             } else {
@@ -10196,7 +10207,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         auto it = actualValues.find(col.dataName);
         if (it != actualValues.end() && !it->second.empty()) continue; // user provided value
         bool ok = false;
-        std::string computed = evalExpressionSql(col.generatedExpr, actualValues, typeHints, &ok);
+        std::string computed = evalExpressionSql(col.generatedExpr, actualValues, typeHints, dbname, &ok);
         if (ok) {
             actualValues[col.dataName] = computed;
         }
@@ -10215,7 +10226,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         const Column& col = tbl.cols[i];
         if (col.checkExpr.empty()) continue;
         std::string err;
-        if (!dbms::ExprHelper::evalBool(col.checkExpr, actualValues, typeHints, &err)) {
+        if (!dbms::ExprHelper::evalBool(col.checkExpr, actualValues, typeHints, &err, dbname)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -11596,7 +11607,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
             const Column& col = tbl.cols[i];
             if (col.checkExpr.empty()) continue;
             std::string err;
-            if (!dbms::ExprHelper::evalBool(col.checkExpr, rowValues, updateTypeHints, &err)) {
+            if (!dbms::ExprHelper::evalBool(col.checkExpr, rowValues, updateTypeHints, &err, dbname)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }

@@ -33,6 +33,9 @@
 #include "HashIndex.h"
 #include "SPGiSTIndex.h"
 
+// Forward declaration for session-local sequence-state threading.
+struct Session;
+
 namespace dbms {
 
 class CatalogService;
@@ -58,6 +61,11 @@ constexpr DBStatus OP_LOCK_CONFLICT = DBStatus::LOCK_CONFLICT;
 constexpr DBStatus OP_SERIALIZATION_FAILURE = DBStatus::SERIALIZATION_FAILURE;
 
 std::string sqlstateForDBStatus(DBStatus res);
+
+// Thread-local session pointer used by sequence builtins to update
+// session-local currval state during DEFAULT expression evaluation.
+void setCurrentSession(Session* s);
+Session* currentSession();
 
 class StorageEngine : public IStorageEngine {
 public:

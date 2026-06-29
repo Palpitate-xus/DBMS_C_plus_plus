@@ -1,4 +1,5 @@
 #include "ExprEvaluator.h"
+#include "commands/TableManage.h"
 #include "common/DateType.h"
 #include "types/numeric.h"
 
@@ -14,6 +15,9 @@
 #include <iterator>
 #include <regex>
 #include <sstream>
+
+// Global engine reference used by sequence builtins.
+extern dbms::StorageEngine g_engine;
 
 namespace dbms {
 
@@ -2466,6 +2470,36 @@ void ExprEvaluator::registerBuiltins() {
         }
         if (temporal) return ExprValue("text", formatDateTime(v, fmt), false);
         return ExprValue("text", formatNumeric(a[0].asDouble(), fmt), false);
+    };
+
+    // ------------------------------------------------------------------------
+    // Sequence functions (delegate to the global StorageEngine)
+    // ------------------------------------------------------------------------
+    auto seqNameArg = [](const std::vector<ExprValue>& a) -> std::string {
+        if (a.empty() || a[0].isNull) return "";
+        std::string s = a[0].value;
+        // Strip surrounding quotes if present.
+        if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
+            s = s.substr(1, s.size() - 2);
+        }
+        return s;
+    };
+    functions_["nextval"] = [this, seqNameArg](const std::vector<ExprValue>& a) -> ExprValue {
+        std::string seq = seqNameArg(a);
+        if (seq.empty() || currentDB_.empty()) return ExprValue("bigint", "", true);
+        int64_t v = g_engine.nextval(currentDB_, seq);
+        return ExprValue("bigint", std::to_string(v), false);
+    };
+    functions_["currval"] = [this, seqNameArg](const std::vector<ExprValue>& a) -> ExprValue {
+        std::string seq = seqNameArg(a);
+        if (seq.empty() || currentDB_.empty()) return ExprValue("bigint", "", true);
+        int64_t v = g_engine.currval(currentDB_, seq);
+        return ExprValue("bigint", std::to_string(v), false);
+    };
+    functions_["lastval"] = [this](const std::vector<ExprValue>&) -> ExprValue {
+        if (currentDB_.empty()) return ExprValue("bigint", "", true);
+        int64_t v = g_engine.lastval();
+        return ExprValue("bigint", std::to_string(v), false);
     };
 }
 

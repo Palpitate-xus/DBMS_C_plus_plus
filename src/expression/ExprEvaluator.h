@@ -26,6 +26,9 @@
 
 namespace dbms {
 
+// Forward declaration so sequence builtins can delegate to the engine.
+class StorageEngine;
+
 // ----------------------------------------------------------------------------
 // 表达式求值结果
 // ----------------------------------------------------------------------------
@@ -86,8 +89,12 @@ public:
     void registerFunction(const std::string& name, ScalarFunction fn);
     bool hasFunction(const std::string& name) const;
 
+    // 设置当前数据库，供 nextval/currval/lastval 等内置函数使用
+    void setCurrentDB(const std::string& db) { currentDB_ = db; }
+
 private:
     std::map<std::string, ScalarFunction, std::less<>> functions_;
+    std::string currentDB_;
 
     void registerBuiltins();
 
