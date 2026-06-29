@@ -87,13 +87,16 @@ public:
 
     // 注册 / 查找标量函数
     void registerFunction(const std::string& name, ScalarFunction fn);
+    void registerFunction(const std::string& name, ScalarFunction fn, char volatility);
     bool hasFunction(const std::string& name) const;
+    char volatility(const std::string& name) const;
 
     // 设置当前数据库，供 nextval/currval/lastval 等内置函数使用
     void setCurrentDB(const std::string& db) { currentDB_ = db; }
 
 private:
     std::map<std::string, ScalarFunction, std::less<>> functions_;
+    std::map<std::string, char, std::less<>> volatility_;
     std::string currentDB_;
 
     void registerBuiltins();

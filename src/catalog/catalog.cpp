@@ -1130,7 +1130,8 @@ void CatalogManager::persistAll() {
             out << r.prokind << ',';
             writeOid(out, r.prorettype); out << ',';
             out << r.pronargs << ',';
-            writeString(out, r.prosrc);
+            writeString(out, r.prosrc); out << ',';
+            out << r.provolatile;
             out << '\n';
         }
     }
@@ -1299,6 +1300,12 @@ void CatalogManager::loadAll() {
             iss >> r.prorettype; iss.ignore(1);
             iss >> r.pronargs; iss.ignore(1);
             r.prosrc = readString(iss);
+            if (iss.peek() == ',') {
+                iss.ignore(1);
+                iss >> r.provolatile;
+            } else {
+                r.provolatile = 'v';
+            }
             procs_.push_back(r);
         }
     }

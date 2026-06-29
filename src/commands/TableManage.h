@@ -316,13 +316,16 @@ public:
         std::string expression;
         std::vector<std::string> paramNames; // multi-param support
         std::vector<std::string> paramTypes; // multi-param support
+        char provolatile = 'v'; // i=immutable, s=stable, v=volatile
     };
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
-                       const std::string& param, const std::string& expression);
+                       const std::string& param, const std::string& expression,
+                       char provolatile = 'v');
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::vector<std::string>& params,
                        const std::vector<std::string>& types,
-                       const std::string& expression);
+                       const std::string& expression,
+                       char provolatile = 'v');
     DBStatus dropUDF(const std::string& dbname, const std::string& funcname);
     bool udfExists(const std::string& dbname, const std::string& funcname) const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;

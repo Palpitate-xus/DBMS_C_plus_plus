@@ -2,6 +2,7 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "expression/ExprEvaluator.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -92,10 +93,48 @@ static void test_create_procedure() {
     std::cout << "[PROCEDURE] basic OK" << std::endl;
 }
 
+static void test_create_function_volatility() {
+    std::string db = "func_volatile";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE FUNCTION immutable_add1(x int) RETURNS int IMMUTABLE AS 'x + 1' LANGUAGE sql", s));
+    auto info_i = g_engine.getUDF(db, "immutable_add1");
+    assert(info_i.provolatile == 'i');
+
+    assert(!ddl.executeSql("CREATE FUNCTION stable_add1(x int) RETURNS int STABLE AS 'x + 1' LANGUAGE sql", s));
+    auto info_s = g_engine.getUDF(db, "stable_add1");
+    assert(info_s.provolatile == 's');
+
+    assert(!ddl.executeSql("CREATE FUNCTION volatile_add1(x int) RETURNS int AS 'x + 1' LANGUAGE sql", s));
+    auto info_v = g_engine.getUDF(db, "volatile_add1");
+    assert(info_v.provolatile == 'v');
+
+    cleanup(db);
+    std::cout << "[FUNCTION] volatility persistence OK" << std::endl;
+}
+
+static void test_builtin_volatility() {
+    dbms::ExprEvaluator eval;
+    assert(eval.volatility("abs") == 'i');
+    assert(eval.volatility("length") == 'i');
+    assert(eval.volatility("now") == 's');
+    assert(eval.volatility("random") == 'v');
+    assert(eval.volatility("nextval") == 'v');
+    assert(eval.volatility("unknown_func") == 'v');
+    std::cout << "[FUNCTION] builtin volatility OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_function_single_param();
     test_create_function_multi_param();
+    test_create_function_volatility();
+    test_builtin_volatility();
     test_create_tvf();
     test_create_procedure();
     std::cout << "[FUNCTION/PROCEDURE] all passed" << std::endl;

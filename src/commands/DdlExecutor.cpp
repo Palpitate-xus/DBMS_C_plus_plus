@@ -2116,13 +2116,18 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     }
 
     DBStatus res;
+    char provolatile = 'v';
+    if (stmt->immutable) provolatile = 'i';
+    else if (stmt->stable) provolatile = 's';
+    else if (stmt->volatile_) provolatile = 'v';
+
     if (toLower(stmt->returnType) == "table") {
         std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
         res = g_engine.createTVF(s.currentDB, stmt->funcName, singleParam, stmt->body);
     } else {
         if (stmt->params.size() <= 1) {
             std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
-            res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam, stmt->body);
+            res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam, stmt->body, provolatile);
         } else {
             std::vector<std::string> params;
             std::vector<std::string> types;
@@ -2130,7 +2135,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
                 params.push_back(p.first);
                 types.push_back(p.second);
             }
-            res = g_engine.createUDF(s.currentDB, stmt->funcName, params, types, stmt->body);
+            res = g_engine.createUDF(s.currentDB, stmt->funcName, params, types, stmt->body, provolatile);
         }
     }
 

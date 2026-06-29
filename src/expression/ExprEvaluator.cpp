@@ -567,11 +567,24 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
 // ----------------------------------------------------------------------------
 
 void ExprEvaluator::registerFunction(const std::string& name, ScalarFunction fn) {
-    functions_[toLower(name)] = std::move(fn);
+    std::string n = toLower(name);
+    functions_[n] = std::move(fn);
+    volatility_[n] = 'v';
+}
+
+void ExprEvaluator::registerFunction(const std::string& name, ScalarFunction fn, char volatility) {
+    std::string n = toLower(name);
+    functions_[n] = std::move(fn);
+    volatility_[n] = volatility;
 }
 
 bool ExprEvaluator::hasFunction(const std::string& name) const {
     return functions_.find(toLower(name)) != functions_.end();
+}
+
+char ExprEvaluator::volatility(const std::string& name) const {
+    auto it = volatility_.find(toLower(name));
+    return it != volatility_.end() ? it->second : 'v';
 }
 
 ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const {
@@ -2501,6 +2514,37 @@ void ExprEvaluator::registerBuiltins() {
         int64_t v = g_engine.lastval();
         return ExprValue("bigint", std::to_string(v), false);
     };
+
+    // Volatility metadata for builtins (safe default is 'v' set by registerFunction).
+    volatility_["abs"] = 'i';
+    volatility_["length"] = 'i';
+    volatility_["lower"] = 'i';
+    volatility_["upper"] = 'i';
+    volatility_["substring"] = 'i';
+    volatility_["round"] = 'i';
+    volatility_["sin"] = 'i';
+    volatility_["cos"] = 'i';
+    volatility_["tan"] = 'i';
+    volatility_["asin"] = 'i';
+    volatility_["acos"] = 'i';
+    volatility_["atan"] = 'i';
+    volatility_["exp"] = 'i';
+    volatility_["ln"] = 'i';
+    volatility_["log"] = 'i';
+    volatility_["log10"] = 'i';
+    volatility_["sqrt"] = 'i';
+    volatility_["cbrt"] = 'i';
+    volatility_["ceil"] = 'i';
+    volatility_["floor"] = 'i';
+    volatility_["trunc"] = 'i';
+    volatility_["atan2"] = 'i';
+    volatility_["now"] = 's';
+    volatility_["current_user"] = 's';
+    volatility_["session_user"] = 's';
+    volatility_["nextval"] = 'v';
+    volatility_["currval"] = 'v';
+    volatility_["lastval"] = 'v';
+    volatility_["random"] = 'v';
 }
 
 } // namespace dbms

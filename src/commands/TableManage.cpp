@@ -2397,7 +2397,8 @@ static std::filesystem::path udfPath(const std::string& dbname,
 DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& funcname,
                                    const std::string& param,
-                                   const std::string& expression) {
+                                   const std::string& expression,
+                                   char provolatile) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto fdir = udfDir(dbname);
     if (!std::filesystem::exists(fdir)) {
@@ -2405,7 +2406,7 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
     }
     std::ofstream ofs(udfPath(dbname, funcname));
     if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << param << "\n" << expression << "\n";
+    ofs << param << "\n" << expression << "\n" << provolatile << "\n";
     return DBStatus::OK;
 }
 
@@ -2413,7 +2414,8 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& funcname,
                                    const std::vector<std::string>& params,
                                    const std::vector<std::string>& types,
-                                   const std::string& expression) {
+                                   const std::string& expression,
+                                   char provolatile) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto fdir = udfDir(dbname);
     if (!std::filesystem::exists(fdir)) {
@@ -2426,7 +2428,7 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
         if (i > 0) ofs << ',';
         ofs << params[i] << ':' << (i < types.size() ? types[i] : "");
     }
-    ofs << "\n" << expression << "\n";
+    ofs << "\n" << expression << "\n" << provolatile << "\n";
     return DBStatus::OK;
 }
 
@@ -2477,6 +2479,12 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
         }
     }
     std::getline(ifs, info.expression);
+    std::string volLine;
+    if (std::getline(ifs, volLine) && !volLine.empty()) {
+        info.provolatile = volLine[0];
+    } else {
+        info.provolatile = 'v';
+    }
     info.name = funcname;
     return info;
 }

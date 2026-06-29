@@ -66,9 +66,13 @@ else
 fi
 
 mkdir -p build/obj
+
+# Conservative header dependency check: if any src header changed, rebuild all project objects.
+NEWEST_HEADER=$(print -rl src/**/*.(h|hpp)(N.om[1]) 2>/dev/null || true)
+
 for src in "${PROJECT_SOURCES[@]}"; do
     obj="build/obj/$(basename "$src" .cpp).o"
-    if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
+    if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || { [ -n "$NEWEST_HEADER" ] && [ "$NEWEST_HEADER" -nt "$obj" ]; }; then
         if ! g++ "${CXXFLAGS[@]}" -Wall -Wextra "${TLS_DEFS[@]}" "${INC[@]}" -c "$src" -o "$obj" 2>/tmp/project_obj.err; then
             echo "COMPILE-FAIL project object $src"; exit 1
         fi
@@ -76,7 +80,7 @@ for src in "${PROJECT_SOURCES[@]}"; do
 done
 
 # Ensure shared test stubs (weak globals referenced by project objects) are available.
-if [ ! -f build/obj/test_stubs.o ] || [ tests/test_stubs.cpp -nt build/obj/test_stubs.o ]; then
+if [ ! -f build/obj/test_stubs.o ] || [ tests/test_stubs.cpp -nt build/obj/test_stubs.o ] || { [ -n "$NEWEST_HEADER" ] && [ "$NEWEST_HEADER" -nt build/obj/test_stubs.o ]; }; then
     if ! g++ "${CXXFLAGS[@]}" -Wall -Wextra "${TLS_DEFS[@]}" "${INC[@]}" -c tests/test_stubs.cpp -o build/obj/test_stubs.o 2>/tmp/test_stubs.err; then
         echo "COMPILE-FAIL test_stubs.cpp"; exit 1
     fi
