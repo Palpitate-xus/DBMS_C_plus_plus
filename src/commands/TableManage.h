@@ -884,6 +884,19 @@ public:
         return true; // no evaluator = always true
     }
 
+    // Exclusion constraint support
+    struct ExclusionConstraint {
+        std::string name;
+        std::string tableName;
+        std::string accessMethod;                    // btree, gist, etc.
+        std::vector<std::pair<std::string, std::string>> elements; // {column/expr, operator}
+        std::string wherePredicate;                  // optional WHERE predicate
+    };
+    DBStatus createExclusionConstraint(const std::string& dbname, const ExclusionConstraint& ec);
+    DBStatus dropExclusionConstraint(const std::string& dbname, const std::string& name);
+    std::vector<ExclusionConstraint> getExclusionConstraints(const std::string& dbname,
+                                                              const std::string& tablename) const;
+
     // Current transaction ID (0 = not in a transaction)
     uint64_t currentTxnId() const { return currentTxnId_; }
     const ReadView* getCurrentReadView() const {
@@ -1101,6 +1114,14 @@ private:
     Trigger readTrigger(std::istream& in) const;
     TriggerExecutor triggerExecutor_;
     WhenConditionEvaluator whenEvaluator_;
+
+    // Exclusion constraint helpers
+    std::filesystem::path exclusionPath(const std::string& dbname) const;
+    void writeExclusion(std::ostream& out, const ExclusionConstraint& ec) const;
+    ExclusionConstraint readExclusion(std::istream& in) const;
+    bool checkExclusionConflict(const std::string& dbname, const std::string& tablename,
+                                const ExclusionConstraint& ec, const std::string& newRowBuffer,
+                                int64_t excludeRid = -1) const;
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,

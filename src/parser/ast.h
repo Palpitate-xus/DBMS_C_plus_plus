@@ -787,6 +787,10 @@ struct TableConstraint {
     ExprPtr checkExpr;
     bool deferrable = false;
     bool initiallyDeferred = false;
+    // EXCLUDE-specific fields
+    std::string accessMethod;                  // btree, gist, etc.
+    std::vector<std::pair<std::string, std::string>> excludeElements; // {column/expr, operator}
+    std::string excludeWhere;                  // WHERE predicate
 };
 
 struct CreateTableStmt : public Stmt {

@@ -1109,6 +1109,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 }
             }
             recordConstraintCompat(s.currentDB, tname, tc);
+        } else if (t == "exclude") {
+            // Defer creation until the table exists; collect for later.
         }
     }
 
@@ -1116,6 +1118,21 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (res != DBStatus::OK) {
         std::cout << "CREATE TABLE failed" << std::endl;
         return true;
+    }
+
+    // Create exclusion constraints now that the table exists.
+    for (const auto& tc : stmt->constraints) {
+        if (toLower(tc.type) != "exclude") continue;
+        StorageEngine::ExclusionConstraint ec;
+        ec.name = tc.name;
+        ec.tableName = tname;
+        ec.accessMethod = tc.accessMethod.empty() ? "btree" : tc.accessMethod;
+        for (const auto& e : tc.excludeElements) {
+            ec.elements.push_back({e.first, toLower(e.second)});
+        }
+        ec.wherePredicate = tc.excludeWhere;
+        g_engine.createExclusionConstraint(s.currentDB, ec);
+        recordConstraintCompat(s.currentDB, tname, tc);
     }
     g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname, s.username);
 

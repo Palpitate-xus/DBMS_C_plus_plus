@@ -3708,6 +3708,77 @@ static bool knownConstraintExists(const string& dbname,
            constraintCompatExists(dbname, tableName, constraintName);
 }
 
+// Parse a simple ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE clause from the
+// raw SQL string.  Supports: EXCLUDE [USING method] (elem WITH op [, ...])
+// [WHERE (predicate)].  Returns true if at least one element was parsed.
+static bool parseExclusionConstraintSql(const string& sql,
+                                        string& accessMethod,
+                                        vector<pair<string, string>>& elements,
+                                        string& wherePredicate) {
+    accessMethod = "btree";
+    elements.clear();
+    wherePredicate.clear();
+    string lsql = toLower(sql);
+    size_t excludePos = findTopLevelKeyword(sql, "exclude");
+    if (excludePos == string::npos) return false;
+    size_t pos = excludePos + 7;
+    while (pos < sql.size() && isspace(static_cast<unsigned char>(sql[pos]))) ++pos;
+    if (pos + 5 < sql.size() && lsql.substr(pos, 5) == "using") {
+        pos += 5;
+        while (pos < sql.size() && isspace(static_cast<unsigned char>(sql[pos]))) ++pos;
+        size_t start = pos;
+        while (pos < sql.size() && !isspace(static_cast<unsigned char>(sql[pos])) && sql[pos] != '(') ++pos;
+        accessMethod = lsql.substr(start, pos - start);
+        while (pos < sql.size() && isspace(static_cast<unsigned char>(sql[pos]))) ++pos;
+    }
+    if (pos >= sql.size() || sql[pos] != '(') return false;
+    size_t parenStart = pos;
+    int depth = 0;
+    size_t parenEnd = string::npos;
+    for (size_t i = pos; i < sql.size(); ++i) {
+        if (sql[i] == '(') ++depth;
+        else if (sql[i] == ')') {
+            --depth;
+            if (depth == 0) { parenEnd = i; break; }
+        }
+    }
+    if (parenEnd == string::npos) return false;
+    string inner = trim(sql.substr(parenStart + 1, parenEnd - parenStart - 1));
+    vector<string> parts;
+    string cur;
+    depth = 0;
+    for (char c : inner) {
+        if (c == '(') ++depth;
+        else if (c == ')') --depth;
+        if (c == ',' && depth == 0) {
+            parts.push_back(trim(cur));
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) parts.push_back(trim(cur));
+    for (const string& part : parts) {
+        size_t withPos = findTopLevelKeyword(part, "with");
+        if (withPos == string::npos) continue;
+        string elem = trim(part.substr(0, withPos));
+        string op = trim(part.substr(withPos + 4));
+        if (elem.size() >= 2 && elem.front() == '(' && elem.back() == ')') {
+            elem = trim(elem.substr(1, elem.size() - 2));
+        }
+        elements.push_back({elem, toLower(op)});
+    }
+    size_t wherePos = findTopLevelKeyword(sql, "where", parenEnd + 1);
+    if (wherePos != string::npos) {
+        size_t lp = sql.find('(', wherePos);
+        size_t rp = sql.find(')', lp);
+        if (lp != string::npos && rp != string::npos) {
+            wherePredicate = trim(sql.substr(lp + 1, rp - lp - 1));
+        }
+    }
+    return !elements.empty();
+}
+
 static bool recordConstraintCompat(const string& dbname,
                                    const string& tableName,
                                    const string& constraintName,
@@ -10228,6 +10299,24 @@ bool execute(const string& rawSql, Session& s) {
             }
             size_t excludePos = findTopLevelKeyword(sql, "exclude");
             if (excludePos != string::npos) {
+                string accessMethod;
+                vector<pair<string, string>> elements;
+                string wherePredicate;
+                if (!parseExclusionConstraintSql(sql, accessMethod, elements, wherePredicate)) {
+                    cout << "Invalid EXCLUDE constraint syntax" << endl;
+                    return true;
+                }
+                StorageEngine::ExclusionConstraint ec;
+                ec.name = constrName;
+                ec.tableName = tname;
+                ec.accessMethod = accessMethod.empty() ? "btree" : accessMethod;
+                ec.elements = std::move(elements);
+                ec.wherePredicate = wherePredicate;
+                DBStatus res = g_engine.createExclusionConstraint(s.currentDB, ec);
+                if (res != DBStatus::OK) {
+                    cout << "Exclusion constraint creation failed" << endl;
+                    return true;
+                }
                 ConstraintCompatFlags flags = parseConstraintFlags(sql, "exclusion");
                 if (!recordExclusionConstraintCompat(s.currentDB, tname, constrName, sql, s.username, flags)) {
                     cout << "Constraint metadata save failed" << endl;
@@ -10433,6 +10522,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             auto res = g_engine.alterTableDropConstraint(s.currentDB, tname, constrName);
             bool droppedMeta = removeConstraintCompat(s.currentDB, tname, constrName);
+            g_engine.dropExclusionConstraint(s.currentDB, constrName);
             if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Table not found" << endl;
                 return true;

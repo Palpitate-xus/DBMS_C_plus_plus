@@ -5368,6 +5368,224 @@ DBStatus StorageEngine::disableTrigger(const std::string& dbname, const std::str
     return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
 }
 
+// ========================================================================
+// Exclusion constraint support
+// ========================================================================
+std::filesystem::path StorageEngine::exclusionPath(const std::string& dbname) const {
+    return dbPath(dbname) / ".exclusions";
+}
+
+void StorageEngine::writeExclusion(std::ostream& out, const ExclusionConstraint& ec) const {
+    auto writeStr = [&](const std::string& s) {
+        size_t n = s.size();
+        out.write(reinterpret_cast<const char*>(&n), sizeof(size_t));
+        out.write(s.data(), static_cast<std::streamsize>(n));
+    };
+    writeStr(ec.name);
+    writeStr(ec.tableName);
+    writeStr(ec.accessMethod);
+    writeStr(ec.wherePredicate);
+    size_t count = ec.elements.size();
+    out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+    for (const auto& e : ec.elements) {
+        writeStr(e.first);
+        writeStr(e.second);
+    }
+}
+
+StorageEngine::ExclusionConstraint StorageEngine::readExclusion(std::istream& in) const {
+    ExclusionConstraint ec;
+    auto readStr = [&](std::string& s) {
+        size_t n = 0;
+        in.read(reinterpret_cast<char*>(&n), sizeof(size_t));
+        if (!in || n > 100000) return;
+        s.resize(n);
+        in.read(s.data(), static_cast<std::streamsize>(n));
+    };
+    readStr(ec.name);
+    readStr(ec.tableName);
+    readStr(ec.accessMethod);
+    readStr(ec.wherePredicate);
+    size_t count = 0;
+    in.read(reinterpret_cast<char*>(&count), sizeof(size_t));
+    if (!in || count > 1000) return ec;
+    for (size_t i = 0; i < count && in; ++i) {
+        std::string col, op;
+        readStr(col);
+        readStr(op);
+        if (!col.empty()) ec.elements.push_back({col, op});
+    }
+    return ec;
+}
+
+DBStatus StorageEngine::createExclusionConstraint(const std::string& dbname, const ExclusionConstraint& ec) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    auto existing = getExclusionConstraints(dbname, "");
+    for (const auto& e : existing) {
+        if (e.name == ec.name) return DBStatus::OK; // already exists
+    }
+    existing.push_back(ec);
+    std::ofstream out(exclusionPath(dbname), std::ios::binary | std::ios::trunc);
+    size_t count = existing.size();
+    out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+    for (const auto& e : existing) writeExclusion(out, e);
+    return DBStatus::OK;
+}
+
+DBStatus StorageEngine::dropExclusionConstraint(const std::string& dbname, const std::string& name) {
+    auto existing = getExclusionConstraints(dbname, "");
+    bool found = false;
+    {
+        std::ofstream out(exclusionPath(dbname), std::ios::binary | std::ios::trunc);
+        size_t count = 0;
+        for (const auto& e : existing) {
+            if (e.name != name) ++count;
+        }
+        out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
+        for (const auto& e : existing) {
+            if (e.name != name) writeExclusion(out, e);
+            else found = true;
+        }
+    }
+    return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
+}
+
+std::vector<StorageEngine::ExclusionConstraint> StorageEngine::getExclusionConstraints(
+    const std::string& dbname, const std::string& tablename) const {
+    std::vector<ExclusionConstraint> result;
+    std::ifstream in(exclusionPath(dbname), std::ios::binary);
+    if (!in) return result;
+    size_t count = 0;
+    in.read(reinterpret_cast<char*>(&count), sizeof(size_t));
+    if (!in || count > 10000) return result;
+    for (size_t i = 0; i < count && in; ++i) {
+        ExclusionConstraint ec = readExclusion(in);
+        if (!ec.name.empty() && (tablename.empty() || ec.tableName == tablename)) {
+            result.push_back(std::move(ec));
+        }
+    }
+    return result;
+}
+
+// Parse canonicalized int4range bounds (e.g. [1,5) or empty).
+static bool parseInt4RangeBounds(const std::string& s, int64_t& lo, int64_t& hi,
+                                  bool& loInc, bool& hiInc, bool& empty) {
+    empty = false;
+    std::string t = trim(s);
+    if (t.size() == 5) {
+        std::string lc;
+        for (char c : t) lc += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lc == "empty") { empty = true; return true; }
+    }
+    if (t.size() < 3) return false;
+    char lb = t.front(), ub = t.back();
+    if ((lb != '[' && lb != '(') || (ub != ']' && ub != ')')) return false;
+    std::string body = t.substr(1, t.size() - 2);
+    size_t comma = body.find(',');
+    if (comma == std::string::npos) return false;
+    std::string loStr = trim(body.substr(0, comma));
+    std::string hiStr = trim(body.substr(comma + 1));
+    loInc = (lb == '[');
+    hiInc = (ub == ']');
+    if (loStr.empty()) lo = INT64_MIN; else {
+        try { lo = std::stoll(loStr); } catch (...) { return false; }
+    }
+    if (hiStr.empty()) hi = INT64_MAX; else {
+        try { hi = std::stoll(hiStr); } catch (...) { return false; }
+    }
+    return true;
+}
+
+static bool rangesOverlap(const std::string& a, const std::string& b) {
+    int64_t loA, hiA, loB, hiB;
+    bool loIncA, hiIncA, loIncB, hiIncB, emptyA, emptyB;
+    if (!parseInt4RangeBounds(a, loA, hiA, loIncA, hiIncA, emptyA)) return false;
+    if (!parseInt4RangeBounds(b, loB, hiB, loIncB, hiIncB, emptyB)) return false;
+    if (emptyA || emptyB) return false;
+    if (hiA < loB) return false;
+    if (hiA == loB && !(hiIncA && loIncB)) return false;
+    if (hiB < loA) return false;
+    if (hiB == loA && !(hiIncB && loIncA)) return false;
+    return true;
+}
+
+bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std::string& tablename,
+                                            const ExclusionConstraint& ec, const std::string& newRowBuffer,
+                                            int64_t excludeRid) const {
+    if (ec.elements.empty()) return false;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    std::map<std::string, std::string> newValues;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        newValues[tbl.cols[i].dataName] = extractColumnValueStatic(newRowBuffer, tbl, i);
+    }
+    // If the new row doesn't satisfy the partial predicate, no conflict.
+    if (!ec.wherePredicate.empty()) {
+        std::string err;
+        if (!dbms::ExprHelper::evalBool(ec.wherePredicate, newValues, buildTypeHints(tbl), &err, dbname)) {
+            return false;
+        }
+    }
+    std::vector<size_t> colIdxs;
+    for (const auto& elem : ec.elements) {
+        size_t idx = tbl.len;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == elem.first) { idx = i; break; }
+        }
+        if (idx >= tbl.len) return false;
+        colIdxs.push_back(idx);
+    }
+
+    bool conflict = false;
+    const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+        if (conflict) return;
+        int64_t rid = static_cast<int64_t>(encodeRid(pid, sid));
+        if (rid == excludeRid) return;
+        std::string row(data, len);
+        std::map<std::string, std::string> oldValues;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            oldValues[tbl.cols[i].dataName] = extractColumnValueStatic(row, tbl, i);
+        }
+        if (!ec.wherePredicate.empty()) {
+            std::string err;
+            if (!dbms::ExprHelper::evalBool(ec.wherePredicate, oldValues, buildTypeHints(tbl), &err, dbname)) {
+                return;
+            }
+        }
+        bool allMatch = true;
+        for (size_t ei = 0; ei < ec.elements.size(); ++ei) {
+            const auto& elem = ec.elements[ei];
+            size_t ci = colIdxs[ei];
+            std::string newVal = newValues[tbl.cols[ci].dataName];
+            std::string oldVal = oldValues[tbl.cols[ci].dataName];
+            if (newVal.empty() || oldVal.empty()) { allMatch = false; break; }
+            const std::string& op = elem.second;
+            if (op == "=" || op == "==") {
+                if (newVal != oldVal) { allMatch = false; break; }
+            } else if (op == "<>" || op == "!=") {
+                if (newVal == oldVal) { allMatch = false; break; }
+            } else if (op == "<") {
+                try { if (!(std::stoll(newVal) < std::stoll(oldVal))) { allMatch = false; break; } }
+                catch (...) { allMatch = false; break; }
+            } else if (op == ">") {
+                try { if (!(std::stoll(newVal) > std::stoll(oldVal))) { allMatch = false; break; } }
+                catch (...) { allMatch = false; break; }
+            } else if (op == "<=") {
+                try { if (!(std::stoll(newVal) <= std::stoll(oldVal))) { allMatch = false; break; } }
+                catch (...) { allMatch = false; break; }
+            } else if (op == ">=") {
+                try { if (!(std::stoll(newVal) >= std::stoll(oldVal))) { allMatch = false; break; } }
+                catch (...) { allMatch = false; break; }
+            } else if (op == "&&") {
+                if (!rangesOverlap(newVal, oldVal)) { allMatch = false; break; }
+            } else {
+                allMatch = false; break;
+            }
+        }
+        if (allMatch) conflict = true;
+    });
+    return conflict;
+}
+
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
 bool TableSchema::hasPrimaryKey() const {
     if (!pkColIndices.empty()) return true;
@@ -7496,6 +7714,14 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(toastMetaPath(dbname, tablename));
     std::filesystem::remove(toastDataPath(dbname, tablename));
     std::filesystem::remove(toastIndexPath(dbname, tablename));
+
+    // Drop exclusion constraints defined for this table.
+    {
+        auto ecs = getExclusionConstraints(dbname, tablename);
+        for (const auto& ec : ecs) {
+            dropExclusionConstraint(dbname, ec.name);
+        }
+    }
 
     // Remove from cache
     std::string key = dbname + "/" + tablename;
@@ -10290,6 +10516,15 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
+    // Check EXCLUDE constraints before writing
+    auto excludeConstraints = getExclusionConstraints(dbname, tablename);
+    for (const auto& ec : excludeConstraints) {
+        if (checkExclusionConflict(dbname, tablename, ec, strippedRow)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+
     // Check gap lock conflict (if any transaction holds a gap lock covering PK)
     if (tbl.hasPrimaryKey()) {
         std::string pkVal = tbl.buildPKValue(actualValues);
@@ -11682,6 +11917,15 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (col.checkExpr.empty()) continue;
             std::string err;
             if (!dbms::ExprHelper::evalBool(col.checkExpr, rowValues, updateTypeHints, &err, dbname)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
+
+        // Check EXCLUDE constraints before writing (exclude the row being updated).
+        auto excludeConstraints = getExclusionConstraints(dbname, tablename);
+        for (const auto& ec : excludeConstraints) {
+            if (checkExclusionConflict(dbname, tablename, ec, strippedNewRow, rid)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }

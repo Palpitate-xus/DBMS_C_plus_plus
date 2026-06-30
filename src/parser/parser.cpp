@@ -3344,6 +3344,53 @@ static std::vector<std::string> collectParenthesized(const std::vector<std::stri
     return inner;
 }
 
+// Parse an EXCLUDE constraint clause after the EXCLUDE keyword:
+//   [ USING method ] ( elem WITH operator [, ...] ) [ WHERE ( predicate ) ]
+static TableConstraint parseExcludeConstraint(const std::vector<std::string>& tokens, size_t& pos) {
+    TableConstraint tc;
+    tc.type = "EXCLUDE";
+    if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "using") {
+        ++pos;
+        if (pos < tokens.size()) tc.accessMethod = SQLParser::toLower(tokens[pos++]);
+    }
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos; // skip '('
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            std::string elem;
+            if (tokens[pos] == "(") {
+                // Expression element: collect raw tokens until matching ')'.
+                int depth = 0;
+                while (pos < tokens.size() && !(depth == 0 && tokens[pos] == ")")) {
+                    if (tokens[pos] == "(") ++depth;
+                    else if (tokens[pos] == ")") --depth;
+                    if (!elem.empty() && elem.back() != '(') elem += " ";
+                    elem += tokens[pos++];
+                }
+                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            } else {
+                elem = tokens[pos++];
+            }
+            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "with") ++pos;
+            std::string op;
+            if (pos < tokens.size()) op = tokens[pos++];
+            tc.excludeElements.push_back({elem, op});
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+        }
+        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+    }
+    if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "where") {
+        ++pos;
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            auto predTokens = collectParenthesized(tokens, pos);
+            for (const auto& t : predTokens) {
+                if (!tc.excludeWhere.empty() && tc.excludeWhere.back() != '(') tc.excludeWhere += " ";
+                tc.excludeWhere += t;
+            }
+        }
+    }
+    return tc;
+}
+
 // ============================================================================
 // CREATE 子命令解析（Phase 1.2 逐步完善）
 // ============================================================================
@@ -3479,6 +3526,11 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                             static_cast<LiteralExpr*>(tc.checkExpr.get())->value = expr;
                             stmt->constraints.push_back(std::move(tc));
                         }
+                    } else if (ctype == "exclude") {
+                        ++pos;
+                        TableConstraint tc = parseExcludeConstraint(tokens, pos);
+                        tc.name = cname;
+                        stmt->constraints.push_back(std::move(tc));
                     } else {
                         // Unknown constraint, skip until comma or )
                         while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ")") ++pos;
@@ -3548,6 +3600,10 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     static_cast<LiteralExpr*>(tc.checkExpr.get())->value = expr;
                     stmt->constraints.push_back(std::move(tc));
                 }
+            } else if (ltok == "exclude") {
+                ++pos;
+                TableConstraint tc = parseExcludeConstraint(tokens, pos);
+                stmt->constraints.push_back(std::move(tc));
             } else if (ltok == "like") {
                 // LIKE source_table [ { INCLUDING | EXCLUDING } option ] ...
                 ++pos;
@@ -5882,8 +5938,12 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 sub.constraint.type = toUpper(tokens[pos]); ++pos;
                 if (sub.constraint.type == "PRIMARY") { sub.constraint.type = "PRIMARY KEY"; ++pos; }
                 if (sub.constraint.type == "FOREIGN") { sub.constraint.type = "FOREIGN KEY"; ++pos; }
+                if (sub.constraint.type == "EXCLUDE") {
+                    sub.constraint = parseExcludeConstraint(tokens, pos);
+                    sub.constraint.type = "EXCLUDE";
+                }
             }
-            if (pos < tokens.size() && tokens[pos] == "(") {
+            if (sub.constraint.type != "EXCLUDE" && pos < tokens.size() && tokens[pos] == "(") {
                 auto cols = collectParenthesized(tokens, pos);
                 for (const auto& c : cols) if (c != ",") sub.constraint.columns.push_back(c);
             }
