@@ -245,7 +245,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
         attr.attislocal = true;
         attr.attisdropped = false;
         if (col.isAutoIncrement) attr.attidentity = 'd';
-        if (!col.generatedExpr.empty()) attr.attgenerated = 's';
+        if (!col.generatedExpr.empty()) attr.attgenerated = col.generatedKind == 'v' ? 'v' : 's';
         cat.addAttribute(attr);
     }
 
@@ -528,6 +528,7 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
 
     col.isAutoIncrement = cd.isGeneratedIdentity;
     col.generatedExpr = cd.generatedExpr;
+    col.generatedKind = cd.generatedKind;
 
     std::string baseType = toLower(cd.typeName);
     std::string domainName;
@@ -671,6 +672,7 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
     // Factory functions replace the whole Column; restore metadata they don't set.
     col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
     col.generatedExpr = cd.generatedExpr;
+    col.generatedKind = cd.generatedKind;
     col.isAutoIncrement = cd.isGeneratedIdentity;
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;

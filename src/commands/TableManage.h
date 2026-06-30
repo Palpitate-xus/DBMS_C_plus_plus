@@ -741,7 +741,8 @@ public:
                                                  const TableSchema& tbl, size_t colIdx);
     std::string extractColumnValue(const std::string& rowBuffer,
                                    const TableSchema& tbl, size_t colIdx,
-                                   const std::string& dbname = "");
+                                   const std::string& dbname = "",
+                                   bool computeVirtual = false);
 
     // RID encode/decode (public for external use)
     static int64_t encodeRid(uint32_t pageId, uint16_t slotId);

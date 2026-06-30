@@ -3677,7 +3677,19 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                                         expr += t;
                                     }
                                     col.generatedExpr = expr;
-                                    col.constraints.push_back("GENERATED ALWAYS AS (" + expr + ") STORED");
+                                    col.generatedKind = 's'; // default to STORED if not specified
+                                    if (pos < tokens.size()) {
+                                        std::string gkw = toLower(tokens[pos]);
+                                        if (gkw == "stored") {
+                                            col.generatedKind = 's';
+                                            ++pos;
+                                        } else if (gkw == "virtual") {
+                                            col.generatedKind = 'v';
+                                            ++pos;
+                                        }
+                                    }
+                                    col.constraints.push_back("GENERATED ALWAYS AS (" + expr + ") " +
+                                                              (col.generatedKind == 'v' ? "VIRTUAL" : "STORED"));
                                 }
                             }
                         } else if (pos < tokens.size() && toLower(tokens[pos]) == "by") {

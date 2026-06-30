@@ -5169,9 +5169,32 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
 
 std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
                                                const TableSchema& tbl, size_t colIdx,
-                                               const std::string& dbname) {
+                                               const std::string& dbname,
+                                               bool computeVirtual) {
+    if (colIdx >= tbl.len) return "";
+    const Column& col = tbl.cols[colIdx];
+
+    // Compute VIRTUAL generated columns on demand at query time.
+    if (computeVirtual && !dbname.empty() && col.generatedKind == 'v' && !col.generatedExpr.empty()) {
+        std::map<std::string, std::string> rowValues;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            rowValues[tbl.cols[i].dataName] = extractColumnValueStatic(rowBuffer, tbl, i);
+        }
+        // Compute all VIRTUAL columns in column order so later columns can reference earlier ones.
+        auto typeHints = buildTypeHints(tbl);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const Column& vc = tbl.cols[i];
+            if (vc.generatedKind != 'v' || vc.generatedExpr.empty()) continue;
+            bool ok = false;
+            std::string computed = evalExpressionSql(vc.generatedExpr, rowValues, typeHints, dbname, &ok);
+            if (ok) rowValues[vc.dataName] = computed;
+        }
+        auto it = rowValues.find(col.dataName);
+        if (it != rowValues.end()) return it->second;
+    }
+
     std::string val = extractColumnValueStatic(rowBuffer, tbl, colIdx);
-    if (!dbname.empty() && tbl.cols[colIdx].isVariableLength) {
+    if (!dbname.empty() && col.isVariableLength) {
         uint64_t toastId = 0;
         if (parseToastMarker(val, toastId)) {
             return readToast(dbname, tbl.tablename, toastId);
@@ -6555,7 +6578,7 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     return DBStatus::OK;
 }
 
-constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420004;  // "DB" + version 4 (added formatVersion)
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420005;  // "DB" + version 5 (added generatedKind for generated columns)
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -6581,6 +6604,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             uint16_t genLen = static_cast<uint16_t>(tbl.cols[i].generatedExpr.size());
             out.write(reinterpret_cast<const char*>(&genLen), 2);
             out.write(tbl.cols[i].generatedExpr.data(), genLen);
+            // New in version 5: persist whether the generated column is STORED or VIRTUAL.
+            uint8_t genKind = tbl.cols[i].generatedKind == 'v' ? 'v' : 's';
+            out.write(reinterpret_cast<const char*>(&genKind), 1);
         }
         // Write enum values
         uint16_t enumCount = static_cast<uint16_t>(tbl.cols[i].enumValues.size());
@@ -6731,10 +6757,11 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return tbl;
 
-    bool hasVersionHeader = (firstInt >= 0x44420001 && firstInt <= 0x44420004);
+    bool hasVersionHeader = (firstInt >= 0x44420001 && firstInt <= 0x44420005);
     bool hasArray = (firstInt >= 0x44420002);
     bool hasOnUpdate = (firstInt >= 0x44420003);
     bool hasFormatVersion = (firstInt >= 0x44420004);
+    bool hasGeneratedKind = (firstInt >= 0x44420005);
     int32_t len = 0;
     if (hasVersionHeader) {
         in.read(reinterpret_cast<char*>(&len), 4);
@@ -6779,6 +6806,13 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 std::string genExpr(genLen, '\0');
                 in.read(genExpr.data(), genLen);
                 tbl.cols[i].generatedExpr = genExpr;
+            }
+            if (hasGeneratedKind) {
+                uint8_t genKind = 's';
+                in.read(reinterpret_cast<char*>(&genKind), 1);
+                if (in) tbl.cols[i].generatedKind = static_cast<char>(genKind);
+            } else {
+                tbl.cols[i].generatedKind = 's';
             }
         }
         // Read enum values (backward-compatible: may not exist in old files)
@@ -9910,6 +9944,17 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // Apply DEFAULT values
     std::map<std::string, std::string> actualValues = values;
     auto typeHints = buildTypeHints(tbl);
+
+    // Reject user-supplied values for GENERATED ALWAYS columns.
+    for (const auto& kv : values) {
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == kv.first && !tbl.cols[i].generatedExpr.empty() && !kv.second.empty()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
+    }
+
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
@@ -10208,12 +10253,17 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
-    // Compute generated columns
+    // Compute generated columns (STORED only; VIRTUAL are computed at query time).
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (col.generatedExpr.empty()) continue;
+        if (col.generatedKind == 'v') continue;
         auto it = actualValues.find(col.dataName);
-        if (it != actualValues.end() && !it->second.empty()) continue; // user provided value
+        if (it != actualValues.end() && !it->second.empty()) {
+            // GENERATED ALWAYS AS ... STORED does not accept user-supplied values.
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
         bool ok = false;
         std::string computed = evalExpressionSql(col.generatedExpr, actualValues, typeHints, dbname, &ok);
         if (ok) {
@@ -11409,6 +11459,10 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (tbl.cols[i].dataName == kv.first) {
                 found = true;
                 const Column& col = tbl.cols[i];
+                // GENERATED ALWAYS AS ... columns cannot be directly updated.
+                if (!col.generatedExpr.empty()) {
+                    return DBStatus::INVALID_VALUE;
+                }
                 if (!col.isNull && kv.second.empty()) {
                     return DBStatus::NULL_NOT_ALLOWED;
                 }
@@ -11584,6 +11638,19 @@ DBStatus StorageEngine::update(const std::string& dbname,
         for (const auto& kv : colUpdates) {
             rowValues[tbl.cols[kv.first].dataName] = kv.second;
         }
+        // Compute type hints for generated column / check evaluation
+        auto updateTypeHints = buildTypeHints(tbl);
+
+        // Recompute STORED generated columns after updates (VIRTUAL are query-time only).
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const Column& col = tbl.cols[i];
+            if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
+            bool ok = false;
+            std::string computed = evalExpressionSql(col.generatedExpr, rowValues, updateTypeHints, dbname, &ok);
+            if (ok) {
+                rowValues[col.dataName] = computed;
+            }
+        }
         // Validate ENUM columns in updates
         for (const auto& kv : colUpdates) {
             const Column& col = tbl.cols[kv.first];
@@ -11610,7 +11677,6 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
         // Check CHECK constraints before writing
         std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
-        auto updateTypeHints = buildTypeHints(tbl);
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (col.checkExpr.empty()) continue;
@@ -12679,7 +12745,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                 std::string key;
                 for (size_t idx : distinctIdxs) {
                     if (!key.empty()) key += "\x01";
-                    key += extractColumnValue(mr.second, tbl, idx);
+                    key += extractColumnValue(mr.second, tbl, idx, dbname, true);
                 }
                 if (seen.insert(key).second) deduped.push_back(std::move(mr));
             }
@@ -12693,7 +12759,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             const Column& col = tbl.cols[i];
             if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
                 continue;
-            std::string val = extractColumnValue(mr.second, tbl, i);
+            std::string val = extractColumnValue(mr.second, tbl, i, dbname, true);
             // Apply session timezone for TIMESTAMPTZ columns
             if (timezoneOffsetMinutes != 0 && col.dataType == "timestamptz" && !val.empty()) {
                 // Read raw seconds directly from row buffer (extractColumnValue already formats it)
@@ -12732,7 +12798,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == arg) {
                 if (engine && !dbname.empty())
-                    return engine->extractColumnValue(rowBuffer, tbl, i, dbname);
+                    return engine->extractColumnValue(rowBuffer, tbl, i, dbname, true);
                 return StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
             }
         }
