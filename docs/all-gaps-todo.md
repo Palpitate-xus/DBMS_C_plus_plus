@@ -17,6 +17,7 @@
 | 2026-06-21 | 大范围同步实现现状：Phase 1（Parser/AST）、Phase 2（Catalog/OID）、Phase 3（WAL/MVCC/Buffer/Cluster）、Phase 4 Wave 0~2（TypeRegistry/ExprEvaluator/DDL AST 桥/DDL 事务骨架/函数/聚合/窗口骨架）已落地，逐章更新状态标记与"已完成进展"小节。详见各章末尾与下文总览。 |
 | 2026-06-21（修正） | 经运行时核对，**Phase 1/2 为"模块+测试已写、未接入主程序 `execute()` 运行时"**：DML 全部走字符串分发（AST 未被消费）；`CatalogManager` 在 main.cpp 从未构造、`migrateDatabaseToCatalog` 无调用者、`planDrop` 无 DROP 处理器接入、核心系统表不可查、`resolveTableName` 仍用 `schema__table` 编码。据此下调 §1/§4/§16/§17 相关表述，16.1 由 ✅ 改 🔄，4.1/4.2 维持 🔄 但注明未接入运行时。Phase 3（WAL/MVCC/Buffer）为真实接入运行时。 |
 | 2026-06-25 | Phase 4 Wave 3 约束/默认值/生成列落地：DEFAULT 表达式（含字面量与复杂表达式）、GENERATED ALWAYS AS (expr) STORED、GENERATED/BY DEFAULT AS IDENTITY、CHECK 约束在 INSERT/UPDATE 路径通过 `ExprHelper` + `ExprEvaluator` 真正执行；新增 `src/expression/expr_helper.h/.cpp` 与 `tests/constraint_expr_test.cpp`；修复 parser 将数字/字符串字面量误当列引用、DDL 桥工厂函数覆盖 `Column` 导致元数据丢失、IDENTITY 大小写解析等问题。`docs/implementation-plan.md` 同步更新 Phase 4 Wave 3 完成状态。 |
+| 2026-06-30 | Phase 4 Wave 4.22 DEFAULT 表达式、函数 volatility、序列所有权落地：`DEFAULT nextval('seq')` 通过 `ExprEvaluator` 内置 `nextval`/`currval`/`lastval` 端到端可用；volatility 从 `CREATE FUNCTION IMMUTABLE/STABLE/VOLATILE` 持久化到 UDF 元数据与 `pg_proc.provolatile`，`ExprEvaluator` 内置函数分类 volatility；CREATE TABLE 时扫描 `DEFAULT nextval('seq')` 自动注册序列到表的 `pg_depend` 依赖，`DROP SEQUENCE RESTRICT` 拒绝存在依赖，`DROP SEQUENCE CASCADE` 清除依赖列的 default。新增/扩展 `tests/default_sequence_test.cpp` 与 `tests/function_procedure_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.33 SEQUENCE 完整语义落地：扩展 `SequenceInfo`/`StorageEngine` 序列文件格式，支持 START/INCREMENT/MINVALUE/MAXVALUE/CACHE/CYCLE/OWNED BY；`parseCreateSequence` 解析全部选项并新增 `parseAlterSequence`/`DdlExecutor::executeAlterSequence`；`DROP TABLE CASCADE` 删除被拥有序列；新增 `tests/sequence_full_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.34 DOMAIN 约束执行落地：`Column` 新增 `domainName`，`columnDefToColumn` 识别 domain 并解析为 base type；domain DEFAULT 继承、domain CHECK（含 `VALUE` 伪变量重写为列名）与列级 CHECK 合并并在 INSERT/UPDATE 通过 `ExprHelper` 执行；补全 `parseCreateDomain` 解析 AS/DEFAULT/CONSTRAINT/CHECK；新增 `tests/domain_full_test.cpp`。 |
 | 2026-06-25 | Phase 4 Wave 4.31 CREATE TABLE AS 落地：`CreateTableStmt::asSelect` + `parseCreateTable` 识别 `AS SELECT`；`tryDdlBridge` 移除 CTAS 回退；`DdlExecutor` 实现简单 CTAS（SELECT * / columns / WHERE）并按源表列类型建表；新增 `tests/ctas_test.cpp`。 |
@@ -123,7 +124,7 @@
 | 1.1.16 | `COPY` | 文件 CSV 导入导出；缺少 `STDIN/STDOUT` 协议、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH`、encoding/options 完整矩阵和权限模型 | ⚠️ |
 | 1.1.17 | `CREATE DATABASE` | 创建目录；缺少 template、owner、locale/collation provider、encoding、tablespace、OID/catalog 语义 | ⚠️ |
 | 1.1.18 | `CREATE DOMAIN` | 支持 base/default/check；缺少多约束、全表 revalidation、依赖/权限/类型系统深度集成 | ⚠️ |
-| 1.1.19 | `CREATE FUNCTION` | 基本 UDF/TVF 已落地，`DdlExecutor` 接管创建；解析层已记录 language/volatility/strict/parallel/cost/rows/security definer/leakproof/SET，但尚未真正影响执行；缺少 PL/pgSQL/C/内部函数、多态、重载、依赖权限 | ⚠️ |
+| 1.1.19 | `CREATE FUNCTION` | 基本 UDF/TVF 已落地，`DdlExecutor` 接管创建；volatility（IMMUTABLE/STABLE/VOLATILE）已持久化到 UDF 元数据与 `pg_proc.provolatile`，`ExprEvaluator` 内置函数已分类 volatility；解析层已记录 language/strict/parallel/cost/rows/security definer/leakproof/SET，但尚未真正影响执行；缺少 PL/pgSQL/C/内部函数、多态、重载、依赖权限 | ⚠️ |
 | 1.1.20 | `CREATE INDEX` | 支持 btree/hash/GIN/GiST/BRIN/SP-GiST 风格、include/where/expression/concurrently；缺少 operator class/family、collation、NULLS sort、storage params、parallel build、真正 concurrent algorithm、AM API | ⚠️ |
 | 1.1.21 | `CREATE MATERIALIZED VIEW` | CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果（列序映射已修复），支持 `WITH [NO] DATA`，`.mview` 保存 SQL；仍缺唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
 | 1.1.22 | `CREATE POLICY` | 已迁移到 `DdlExecutor`：`parseCreatePolicy` 完整解析 `ON table / FOR cmd / TO roles / USING / WITH CHECK`，`executeCreatePolicy` 校验表存在并写入 RLS policy 文件；仍缺少 `WITH CHECK`/`USING` 在 DML 路径的真实行级强制、role 解析、`ALTER POLICY`、PERMISSIVE/RESTRICTIVE | ⚠️ |
@@ -260,7 +261,7 @@
 | 5.2 | `UNIQUE` | 有单列/复合，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；NULL 语义、实际延迟检查、partial unique、expression unique 与 PG 不等价 | ⚠️ |
 | 5.3 | `FOREIGN KEY` | 支持多列和部分 ON DELETE/UPDATE，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；缺少 `MATCH FULL/PARTIAL`、实际延迟检查、提交时 recheck、复杂锁与并发语义 | ⚠️ |
 | 5.4 | `CHECK` | 表达式解析范围有限，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；缺少 `NO INHERIT`、实际延迟检查和 PostgreSQL 级表达式语义 | ⚠️ |
-| 5.5 | `DEFAULT` | 缺少表达式默认值、稳定/易变函数、序列所有权精确行为 | ⚠️ |
+| 5.5 | `DEFAULT` | 表达式默认值已接入 INSERT 执行路径；`DEFAULT nextval('seq')` 可获取序列值；函数 volatility 已持久化；`DEFAULT nextval('seq')` 自动建立序列到表的依赖，`DROP SEQUENCE RESTRICT/CASCADE` 正确处理依赖。仍缺：planner 级 volatility 优化、`DEFAULT VALUES` 语法、复杂表达式与类型转换的 PG 级语义 | ⚠️ |
 | 5.6 | `GENERATED` | 有 identity/generated expr 痕迹；缺少 PostgreSQL 18 虚拟生成列默认语义、stored/virtual 完整实现 | 🔄 |
 | 5.7 | Exclusion constraints | 支持 `ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE USING ...` 的目录级登记和 drop/validate/options 元数据；缺少 GiST/operator class 执行检查、并发冲突检测和 executor enforcement | ⚠️ |
 | 5.8 | Temporal constraints | 缺失。PostgreSQL 18 对 range 上的 temporal primary/unique/foreign key 支持缺失 | ❌ |
