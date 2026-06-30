@@ -76,9 +76,40 @@ static void test_default_expression_with_parens() {
     std::cout << "[DEFAULT_SEQUENCE] parenthesized default OK" << std::endl;
 }
 
+static void test_drop_sequence_default_dependency() {
+    std::string db = "seq_drop_dep";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::setCurrentSession(&s);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE SEQUENCE s2", s));
+    assert(!ddl.executeSql("CREATE TABLE t3 (id INT DEFAULT nextval('s2'), name VARCHAR(20))", s));
+
+    // RESTRICT must fail because a column depends on the sequence.
+    assert(ddl.executeSql("DROP SEQUENCE s2 RESTRICT", s));
+
+    // CASCADE succeeds and clears the default.
+    assert(!ddl.executeSql("DROP SEQUENCE s2 CASCADE", s));
+
+    // Subsequent insert without id leaves it NULL/empty.
+    assert(g_engine.insert(db, "t3", {{"name", "y"}}) == dbms::DBStatus::OK);
+    auto rows = g_engine.query(db, "t3", {}, {"id", "name"});
+    assert(rows.size() == 1);
+    // Default was dropped; id falls back to storage null sentinel (displayed as 0).
+    assert(trimRight(rows[0]) == "0 y");
+
+    cleanup(db);
+    std::cout << "[DEFAULT_SEQUENCE] DROP SEQUENCE dependency OK" << std::endl;
+}
+
 int main() {
     test_default_nextval();
     test_default_expression_with_parens();
+    test_drop_sequence_default_dependency();
     std::cout << "[DEFAULT_SEQUENCE] All tests passed" << std::endl;
     return 0;
 }

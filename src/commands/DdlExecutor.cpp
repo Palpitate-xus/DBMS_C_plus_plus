@@ -922,6 +922,48 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
     return false;
 }
 
+// Extract the sequence name from a DEFAULT expression that calls nextval('seqname'),
+// allowing optional whitespace and an optional schema qualifier. Returns empty string
+// if the expression is not a simple nextval literal call.
+static std::string extractNextvalSequence(const std::string& expr) {
+    std::string lower;
+    lower.reserve(expr.size());
+    for (char c : expr) lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    size_t pos = lower.find("nextval");
+    if (pos == std::string::npos) return "";
+    pos += 7;
+    while (pos < lower.size() && std::isspace(static_cast<unsigned char>(lower[pos]))) ++pos;
+    if (pos >= lower.size() || lower[pos] != '(') return "";
+    ++pos;
+    while (pos < lower.size() && std::isspace(static_cast<unsigned char>(lower[pos]))) ++pos;
+    if (pos >= lower.size() || expr[pos] != '\'') return "";
+    ++pos;
+    size_t end = expr.find('\'', pos);
+    if (end == std::string::npos) return "";
+    return expr.substr(pos, end - pos);
+}
+
+// Find all (table, column) pairs in the database whose default expression
+// references nextval('seqname') (or schema-qualified variant).
+static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
+    const std::string& dbname, const std::string& seqname) {
+    std::vector<std::pair<std::string, std::string>> deps;
+    for (const auto& tname : g_engine.getTableNames(dbname)) {
+        dbms::TableSchema tbl = g_engine.getTableSchema(dbname, tname);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            std::string seq = extractNextvalSequence(tbl.cols[i].defaultValue);
+            // Support both bare sequence name and schema-qualified name.
+            std::string bareSeq = seq;
+            size_t dot = seq.find('.');
+            if (dot != std::string::npos) bareSeq = seq.substr(dot + 1);
+            if (bareSeq == seqname || seq == seqname) {
+                deps.emplace_back(tname, tbl.cols[i].dataName);
+            }
+        }
+    }
+    return deps;
+}
+
 bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
@@ -1087,6 +1129,36 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         registerTableInCatalog(cat, tbl, qn.schema, qn.name);
     } catch (const std::exception& e) {
         std::cerr << "WARNING: catalog registration failed: " << e.what() << std::endl;
+    }
+
+    // Register sequence ownership for columns with DEFAULT nextval('seqname').
+    try {
+        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        const auto* nsPublic = cat.findNamespaceByName("public");
+        auto tableRel = cat.resolveRelation(tname, {"public"});
+        if (nsPublic && tableRel) {
+            for (size_t i = 0; i < tbl.len; ++i) {
+                std::string seq = extractNextvalSequence(tbl.cols[i].defaultValue);
+                if (seq.empty()) continue;
+                // Use bare sequence name for catalog lookup.
+                std::string bareSeq = seq;
+                size_t dot = bareSeq.rfind('.');
+                if (dot != std::string::npos) bareSeq = bareSeq.substr(dot + 1);
+                auto seqRel = cat.resolveRelation(bareSeq, {"public"});
+                if (!seqRel) continue;
+                PgDependRow dep;
+                dep.classid = dbms::PgClassOid_Class;
+                dep.objid = seqRel->oid;
+                dep.objsubid = 0;
+                dep.refclassid = dbms::PgClassOid_Class;
+                dep.refobjid = tableRel->oid;
+                dep.refobjsubid = 0;
+                dep.deptype = 'a';
+                cat.addDepend(dep);
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "WARNING: sequence ownership registration failed: " << e.what() << std::endl;
     }
 
     txn.recordCreate(DdlObjectKind::Table, tname);
@@ -1558,6 +1630,24 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string seqname = stmt->objectNames.front();
+
+    // Check for columns depending on this sequence via DEFAULT nextval.
+    auto defaultDeps = findDefaultNextvalDeps(s.currentDB, seqname);
+    if (!defaultDeps.empty()) {
+        if (!stmt->cascade) {
+            std::cout << "ERROR: cannot drop sequence " << seqname
+                     << " because other objects depend on it" << std::endl;
+            return true;
+        }
+        for (const auto& dep : defaultDeps) {
+            DBStatus clearRes = g_engine.alterTableDropDefault(s.currentDB, dep.first, dep.second);
+            if (clearRes != DBStatus::OK) {
+                std::cout << "ERROR: failed to clear default on " << dep.first << "." << dep.second << std::endl;
+                return true;
+            }
+        }
+    }
+
     txn.recordDrop(DdlObjectKind::Sequence, seqname);
 
     try {
