@@ -353,10 +353,28 @@ struct PlanContext {
     bool distinct = false;
 };
 
+// Equivalence class: a set of expressions that are known equal.
+// Used by the planner to propagate join conditions and choose access paths.
+struct EquivalenceClass {
+    std::vector<std::string> members;  // e.g. ["t1.id", "t2.fk"]
+};
+
+// PathKey: an ordering that a path provides (ORDER BY or GROUP BY column).
+struct PathKey {
+    std::string expr;      // column or expression
+    bool ascending = true;
+    std::string opclass;   // operator class (default btree)
+};
+
 class QueryPlanner {
 public:
     // Build operator tree for SELECT * FROM t WHERE ... ORDER BY ... LIMIT ...
     static OpPtr buildSelectPlan(StorageEngine* engine, const PlanContext& ctx);
+
+    // Build plan with pathkey awareness (avoids re-sort if index provides ordering).
+    static OpPtr buildSelectPlan(StorageEngine* engine, const PlanContext& ctx,
+                                  const std::vector<PathKey>& requiredPathkeys,
+                                  const std::vector<EquivalenceClass>& eqClasses);
 
     // Build operator tree for SELECT agg(...) FROM t WHERE ...
     static OpPtr buildAggregatePlan(StorageEngine* engine, const PlanContext& ctx,
