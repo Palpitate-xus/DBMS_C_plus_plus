@@ -9057,6 +9057,24 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& tablespace) {
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    lockManager_.lockMetadata(tablename);
+
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    tbl.tablespace = tablespace;
+
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    invalidateCatalogSchema(dbname, tablename);
+    lockManager_.unlock(tablename);
+    return DBStatus::OK;
+}
+
 static std::filesystem::path commentsPath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".comments";
 }

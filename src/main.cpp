@@ -10811,17 +10811,34 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Replica identity set to " << mode << endl;
             return false;
         }
-        // ALTER TABLE ... SET TABLESPACE name  (deferred: see note)
+        // ALTER TABLE ... SET TABLESPACE name
         if (sql.find("set tablespace") != string::npos) {
             if (!g_engine.tableExists(s.currentDB, tname)) {
                 cout << "Table not found" << endl;
                 return true;
             }
-            // Physical relocation is intentionally not applied: the engine routes
-            // data files inconsistently (getPageAllocator via tablespaceDir vs
-            // dataPath via the db dir), so silently changing the tablespace field
-            // would orphan existing data. Acknowledge without relocating.
-            cout << "Note: SET TABLESPACE relocation not supported yet; no change applied" << endl;
+            // Extract tablespace name from the SQL (after "set tablespace")
+            size_t tsPos = sql.find("set tablespace");
+            std::string rest = trim(sql.substr(tsPos + 14));
+            // Stop at next keyword or semicolon
+            std::string tsName;
+            size_t spacePos = rest.find(' ');
+            size_t semiPos = rest.find(';');
+            if (semiPos != std::string::npos && (spacePos == std::string::npos || semiPos < spacePos))
+                tsName = rest.substr(0, semiPos);
+            else if (spacePos != std::string::npos)
+                tsName = rest.substr(0, spacePos);
+            else
+                tsName = rest;
+            if (!tsName.empty() && tsName.back() == ';') tsName.pop_back();
+            if (!tsName.empty()) {
+                // Update the tablespace in the table schema binary
+                g_engine.alterTableTablespace(s.currentDB, tname, tsName);
+                cout << "Tablespace changed to " << tsName << endl;
+            } else {
+                cout << "SQL syntax error: SET TABLESPACE requires a name" << endl;
+                return true;
+            }
             return false;
         }
         // ALTER TABLE ... SET (param = value [, ...])  (storage parameters)
