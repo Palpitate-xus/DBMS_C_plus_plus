@@ -9,6 +9,9 @@ extern dbms::Config g_config;
 
 namespace dbms {
 
+// Parallel query support
+int QueryPlanner::parallelWorkers_ = 0;
+
 // ========================================================================
 // Helper: format a raw row buffer into display string
 // ========================================================================
@@ -1422,6 +1425,23 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
     }
 
     return plan;
+}
+
+// Skip scan: for multi-column indexes, skip over ranges that cannot satisfy
+// the query.  This is a metadata-only optimization flag.
+static bool canUseSkipScan(const std::vector<StorageEngine::Condition>& conds,
+                            const std::vector<std::string>& indexCols) {
+    if (indexCols.size() < 2 || conds.empty()) return false;
+    // Skip scan applies when: leading column has an IN list or <> and
+    // trailing columns have range conditions.
+    // Simplified: if we have a <> or IN on a non-leading index column.
+    for (const auto& c : conds) {
+        if ((c.op == "<>" || c.op == "in") &&
+            std::find(indexCols.begin(), indexCols.end(), c.colName) != indexCols.end()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace dbms

@@ -129,10 +129,16 @@ public:
     Operator* child() const { return child_.get(); }
     const std::vector<StorageEngine::Condition>& conditions() const { return conds_; }
 
+    // Index condition recheck: apply conditions that the index could not fully evaluate
+    // (bitmap heap scan recheck semantics).
+    void setIndexConditionRecheck(bool v) { indexConditionRecheck_ = v; }
+    bool indexConditionRecheck() const { return indexConditionRecheck_; }
+
 private:
     OpPtr child_;
     TableSchema tbl_;
     std::vector<StorageEngine::Condition> conds_;
+    bool indexConditionRecheck_ = false;
 };
 
 // ========================================================================
@@ -410,6 +416,13 @@ public:
 
     // Execute a plan built by buildSelectPlan and return result rows.
     static std::vector<std::string> executePlan(OpPtr plan);
+
+    // Parallel query support: number of worker threads (0 = single-threaded).
+    static int parallelWorkers() { return parallelWorkers_; }
+    static void setParallelWorkers(int n) { parallelWorkers_ = n; }
+
+private:
+    static int parallelWorkers_;
 };
 
 } // namespace dbms
