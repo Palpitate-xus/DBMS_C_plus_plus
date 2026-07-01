@@ -33,6 +33,8 @@ SOURCES=(
     src/access/BPTree.cpp
     src/access/HashIndex.cpp
     src/access/SPGiSTIndex.cpp
+    src/access/GinIndex.cpp
+    src/access/BrinIndex.cpp
     src/access/BPTreeIndexAM.cpp
     src/access/HashIndexAM.cpp
     src/transaction/LockManager.cpp
