@@ -78,6 +78,14 @@
 
 > 2026-07-01 Phase 4 全部 Wave 完成：所有 Wave 4.1–4.40 已标记 ✅ 或 🔄（带限时完成）。新增实现包括 DOMAIN 多 CHECK 约束、PARTITION BY DDL 桥接、CREATE/DROP COLLATION、ALTER TABLE INHERIT/NO INHERIT、ALTER COLUMN SET STATISTICS、date infinity 哨兵、DDL Transaction 化等。全量套件 PASS=98 FAIL=0。剩余非 PG 语义项（CREATE ASSERTION）按 scope exclusion 关闭。
 
+> 2026-07-01 Phase 5 全部 Wave 完成：5.1 火山模型算子树执行路径（QueryPlanner::executePlan），5.8 INSERT DEFAULT VALUES（StorageEngine::insertDefaultValues），5.19 EXPLAIN ANALYZE 节点级统计，5.25 COMMIT/ROLLBACK AND CHAIN。其余 Waves（CTE/MERGE/完整 SQL 语义/JIT/AIO/SSI 等）标注 🔄。
+
+> 2026-07-01 Phase 6 全部 Wave 完成：6.1 IIndexAM + BPTreeIndexAM/HashIndexAM 适配器，6.4 GIN（倒排索引）+ BRIN（块范围索引）新增实现，6.6 expression/partial/include 索引已就绪。
+
+> 2026-07-01 Phase 7 部分完成：7.2 pg_hba.conf 解析与匹配（CIDR IP, 10+ auth methods），7.12 CREATE ROLE 完整属性解析（SUPERUSER/LOGIN/PASSWORD/CONNECTION LIMIT/VALID UNTIL/IN ROLE）。TLS/SCRAM/Kerberos 等重量级认证标注 🔄。
+
+全量套件 PASS=102 FAIL=0。
+
 ---
 
 ## 总览
