@@ -76,15 +76,31 @@
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
-> 2026-07-01 Phase 4 全部 Wave 完成：所有 Wave 4.1–4.40 已标记 ✅ 或 🔄（带限时完成）。新增实现包括 DOMAIN 多 CHECK 约束、PARTITION BY DDL 桥接、CREATE/DROP COLLATION、ALTER TABLE INHERIT/NO INHERIT、ALTER COLUMN SET STATISTICS、date infinity 哨兵、DDL Transaction 化等。全量套件 PASS=98 FAIL=0。剩余非 PG 语义项（CREATE ASSERTION）按 scope exclusion 关闭。
+> 2026-07-01 Phase 4–7 进展详情：
 
-> 2026-07-01 Phase 5 全部 Wave 完成：5.1 火山模型算子树执行路径（QueryPlanner::executePlan），5.8 INSERT DEFAULT VALUES（StorageEngine::insertDefaultValues），5.19 EXPLAIN ANALYZE 节点级统计，5.25 COMMIT/ROLLBACK AND CHAIN。其余 Waves（CTE/MERGE/完整 SQL 语义/JIT/AIO/SSI 等）标注 🔄。
+> **Phase 4（类型系统/约束/DDL 完整化）**：全部 40 Wave ✅/🔄
+> - ✅ 4.1 numeric/decimal, 4.2 类型别名, 4.3 CREATE/DROP COLLATION (DDL+元数据), 4.4 bytea, 4.5 date infinity, 4.6 ENUM, 4.7 几何类型, 4.8 macaddr, 4.9 bit, 4.10 tsearch, 4.11 uuid, 4.12 XML, 4.13 jsonpath, 4.14 array, 4.15 composite, 4.16 range, 4.17 domain multi-CHECK (本次), 4.18 pseudo types, 4.22 DEFAULT, 4.23 GENERATED, 4.24 EXCLUDE, 4.25 SET CONSTRAINTS (本次), 4.26 CREATE TABLE options + PARTITION BY (本次), 4.28 VIEW, 4.29 TRIGGER, 4.30 CREATE TYPE, 4.31 CTAS, 4.32 STATISTICS algorithms, 4.33 SEQUENCE, 4.34 DOMAIN, 4.35 FUNCTION, 4.36 PROCEDURE, 4.37 POLICY, 4.38 MATVIEW, 4.39 DDL 事务化, 4.40 ASSERTION=scope exclusion
+> - 🔄 4.19-4.21 函数/聚合/窗口（核心集就绪，缺高级特性）, 4.27 ALTER TABLE（本次新增 INHERIT/STATISTICS，缺 ONLY/延迟约束队列）
 
-> 2026-07-01 Phase 6 全部 Wave 完成：6.1 IIndexAM + BPTreeIndexAM/HashIndexAM 适配器，6.4 GIN（倒排索引）+ BRIN（块范围索引）新增实现，6.6 expression/partial/include 索引已就绪。
+> **Phase 5（Planner/执行器/DQL/DML）**：核心完成，高级标注 🔄
+> - ✅ 5.1 火山模型算子树（12 个 Operator + QueryPlanner::buildSelectPlan + executePlan）
+> - ✅ 5.8 INSERT DEFAULT VALUES（StorageEngine::insertDefaultValues + main.cpp 路径）
+> - ✅ 5.19 EXPLAIN ANALYZE 改为通过算子树执行并返回实际 rows + 时间
+> - ✅ 5.25 COMMIT/ROLLBACK AND [NO] CHAIN
+> - 🔄 5.2-5.7, 5.9-5.18, 5.20-5.24, 5.26-5.43（CTE/MERGE/JOIN/子查询/并行/JIT/AIO/SSI 等）
 
-> 2026-07-01 Phase 7 部分完成：7.2 pg_hba.conf 解析与匹配（CIDR IP, 10+ auth methods），7.12 CREATE ROLE 完整属性解析（SUPERUSER/LOGIN/PASSWORD/CONNECTION LIMIT/VALID UNTIL/IN ROLE）。TLS/SCRAM/Kerberos 等重量级认证标注 🔄。
+> **Phase 6（索引 AM/生态）**：核心完成，高级标注 🔄
+> - ✅ 6.1 IIndexAM 接口 + BPTreeIndexAM + HashIndexAM 适配器
+> - ✅ 6.4 GIN 倒排索引（term→RowId 倒排表，AND/OR/JSON 包含）+ BRIN 块范围索引（min/max 摘要）
+> - ✅ 6.6 expression/partial/include 索引
+> - 🔄 6.2 B-tree dedup, 6.3 Hash WAL-safe, 6.5 CONCURRENTLY, 6.7 index maintenance, 6.8 partitioned index, 6.9 opclass/collation
 
-全量套件 PASS=102 FAIL=0。
+> **Phase 7（安全/认证/Wire Protocol）**：基础完成，高级标注 🔄
+> - ✅ 7.2 pg_hba.conf 解析（10+ auth methods: trust/md5/scram-sha-256/password/ident/peer/cert/pam/ldap/radius/reject）+ CIDR IP 匹配
+> - ✅ 7.12 CREATE ROLE 完整属性（SUPERUSER/CREATEROLE/CREATEDB/LOGIN/INHERIT/REPLICATION/BYPASSRLS/CONNECTION LIMIT/PASSWORD/VALID UNTIL/IN ROLE）
+> - 🔄 7.1 Wire Protocol, 7.3 SCRAM-SHA-256, 7.4 OAuth/Kerberos, 7.5 TLS, 7.6 ACL, 7.7-7.11 roles/privileges
+
+全量套件 **PASS=102 FAIL=0**。
 
 ---
 
