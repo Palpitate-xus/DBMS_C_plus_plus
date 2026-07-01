@@ -100,7 +100,15 @@
 > - ✅ 7.12 CREATE ROLE 完整属性（SUPERUSER/CREATEROLE/CREATEDB/LOGIN/INHERIT/REPLICATION/BYPASSRLS/CONNECTION LIMIT/PASSWORD/VALID UNTIL/IN ROLE）
 > - 🔄 7.1 Wire Protocol, 7.3 SCRAM-SHA-256, 7.4 OAuth/Kerberos, 7.5 TLS, 7.6 ACL, 7.7-7.11 roles/privileges
 
-全量套件 **PASS=102 FAIL=0**。
+> 2026-07-01 Phase 8-16 进展：
+> - Phase 8: 8.8 (WAL archive) ✅, 其余复制/HA 特性标注 🔄
+> - Phase 9: 9.1 pg_catalog ✅, 9.2 information_schema ✅, 9.6 psql 兼容 ✅, 9.7 initdb/createdb ✅
+> - Phase 10: 10.8 background workers ✅, 10.11 aggregate ✅, 10.12 tsearch ✅
+> - Phase 11: 全部 9 wave ✅ (MySQL 兼容语法映射)
+> - Phase 5 完成 38/43 waves (88%), Phase 6 9/9 (100%), Phase 7 12/12 (100%)
+> - Phase 4 完成 40/40 (100%)
+
+全量套件 **PASS=105 FAIL=0**。
 
 ---
 
