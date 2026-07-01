@@ -1,9 +1,12 @@
 // ============================================================================
 // ALTER TABLE SET STATISTICS test — Phase 4 Wave 4.27
+// Tests parser for ALTER TABLE ... ALTER COLUMN ... SET STATISTICS n
+// and verifies option persistence through the engine's storage params.
 // ============================================================================
 
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
+#include "parser/parser.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
 #include <cassert>
@@ -24,59 +27,81 @@ static void setupSession(Session& s, const std::string& db) {
     s.currentDB = db;
 }
 
-static void test_set_statistics_basic() {
-    std::string db = "alter_stats";
-    cleanup(db);
-    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
-    Session s; setupSession(s, db);
-    dbms::DdlExecutor ddl;
+// Verify parser correctly parses SET STATISTICS.
+static void test_statistics_parser() {
+    dbms::SQLParser parser;
 
-    assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50))", s));
+    auto r = parser.parse("ALTER TABLE t ALTER COLUMN name SET STATISTICS 500");
+    assert(r.success);
+    assert(r.stmt);
+    auto* alter = dynamic_cast<dbms::AlterTableStmt*>(r.stmt.get());
+    assert(alter);
+    assert(alter->tableName == "t");
+    assert(alter->subCommands.size() == 1);
+    assert(alter->subCommands[0].action == dbms::AlterTableStmt::Action::SetStatistics);
+    assert(alter->subCommands[0].name == "name");
+    assert(alter->subCommands[0].statisticsTarget == 500);
 
-    // Execute ALTER TABLE via legacy path (main.cpp)
-    // Use engine directly since we can't call main.cpp from test
-    std::map<std::string, std::string> params;
-    params["column_statistics:name"] = "500";
-    g_engine.setStorageParams(db, "t", params);
-
-    auto opts = g_engine.getStorageParams(db, "t");
-    assert(opts["column_statistics:name"] == "500");
-
-    cleanup(db);
-    std::cout << "[ALTER_STATS] SET STATISTICS basic OK" << std::endl;
+    cleanup("parser_stats_tmp");
+    std::cout << "[ALTER_STATS] parser OK" << std::endl;
 }
 
-static void test_set_statistics_overwrite() {
-    std::string db = "alter_stats2";
+// Verify statistics target persists through engine storage params.
+static void test_statistics_persistence() {
+    std::string db = "stats_persist";
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
     dbms::DdlExecutor ddl;
 
-    assert(!ddl.executeSql("CREATE TABLE t (id INT, val INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50), val INT)", s));
 
-    std::map<std::string, std::string> params;
-    params["column_statistics:val"] = "100";
-    g_engine.setStorageParams(db, "t", params);
+    // Simulate main.cpp SET STATISTICS path (each SET replaces storage params)
+    {
+        std::map<std::string, std::string> params;
+        params["column_statistics:name"] = "500";
+        g_engine.setStorageParams(db, "t", params);
+    }
 
-    auto opts = g_engine.getStorageParams(db, "t");
-    assert(opts["column_statistics:val"] == "100");
+    {
+        auto opts = g_engine.getStorageParams(db, "t");
+        assert(opts["column_statistics:name"] == "500");
+    }
 
-    // Overwrite
-    params["column_statistics:val"] = "200";
-    g_engine.setStorageParams(db, "t", params);
+    // Overwrite: replace the previous value
+    {
+        std::map<std::string, std::string> params;
+        params["column_statistics:name"] = "200";
+        g_engine.setStorageParams(db, "t", params);
+    }
 
-    opts = g_engine.getStorageParams(db, "t");
-    assert(opts["column_statistics:val"] == "200");
+    {
+        auto opts = g_engine.getStorageParams(db, "t");
+        assert(opts["column_statistics:name"] == "200");
+    }
+
+    // Two columns together
+    {
+        std::map<std::string, std::string> params;
+        params["column_statistics:name"] = "200";
+        params["column_statistics:val"] = "1000";
+        g_engine.setStorageParams(db, "t", params);
+    }
+
+    {
+        auto opts = g_engine.getStorageParams(db, "t");
+        assert(opts["column_statistics:name"] == "200");
+        assert(opts["column_statistics:val"] == "1000");
+    }
 
     cleanup(db);
-    std::cout << "[ALTER_STATS] SET STATISTICS overwrite OK" << std::endl;
+    std::cout << "[ALTER_STATS] persistence OK" << std::endl;
 }
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
-    test_set_statistics_basic();
-    test_set_statistics_overwrite();
+    test_statistics_parser();
+    test_statistics_persistence();
     std::cout << "[ALTER_STATS] all passed" << std::endl;
     return 0;
 }
