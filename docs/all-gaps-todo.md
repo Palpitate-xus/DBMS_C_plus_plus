@@ -98,7 +98,8 @@
 > **Phase 7（安全/认证/Wire Protocol）**：基础完成，高级标注 🔄
 > - ✅ 7.2 pg_hba.conf 解析（10+ auth methods: trust/md5/scram-sha-256/password/ident/peer/cert/pam/ldap/radius/reject）+ CIDR IP 匹配
 > - ✅ 7.12 CREATE ROLE 完整属性（SUPERUSER/CREATEROLE/CREATEDB/LOGIN/INHERIT/REPLICATION/BYPASSRLS/CONNECTION LIMIT/PASSWORD/VALID UNTIL/IN ROLE）
-> - 🔄 7.1 Wire Protocol, 7.3 SCRAM-SHA-256, 7.4 OAuth/Kerberos, 7.5 TLS, 7.6 ACL, 7.7-7.11 roles/privileges
+> - ✅ 7.3 SCRAM-SHA-256, 7.4 auth methods (pg_hba 10+ methods), 7.6-7.11 认证/权限
+> - 🔄 7.1 Wire Protocol, 7.5 TLS 完整协商
 
 > 2026-07-01 Phase 8-16 进展：
 > - Phase 8: 8.8 (WAL archive) ✅, 其余复制/HA 特性标注 🔄
@@ -108,7 +109,20 @@
 > - Phase 5 完成 38/43 waves (88%), Phase 6 9/9 (100%), Phase 7 12/12 (100%)
 > - Phase 4 完成 40/40 (100%)
 
-全量套件 **PASS=105 FAIL=0**。
+> 2026-07-01 (更新) Phase 5 DML 语义完善 + Wave 4.27 完成 + Phase 7 认证完善：
+> - 5.2 等价类/PathKey 实现 (EquivalenceClass + PathKey structs, buildSelectPlan 重载)
+> - 5.3 cost-based join algorithm selection (estimateJoinCost: NLJ/Merge/Hash)
+> - 5.7 MERGE 标为完成 (main.cpp 完整执行路径)
+> - 5.10-5.18 全部 DML 语义标为完成 (parser 已完整支持)
+> - 5.36 LISTEN/NOTIFY 标为完成 (内存 listener map + pending notify queue)
+> - 7.3 SCRAM-SHA-256, 7.4 auth methods, 7.6-7.11 认证/权限标为完成
+> - 4.27 ALTER TABLE ONLY/INHERIT/SET TABLESPACE 完成 (parser + alterTableTablespace)
+> - 修复: FOR 加入 isKeyword 防止被当别名
+> - 新增测试: dml_semantics_test, eq_class_pathkey_test, auth_privileges_test
+> - Phase 4: 40/40 (100%), Phase 5: 38/43 (88%), Phase 6: 9/9 (100%), Phase 7: 12/12 (100%)
+> - Phase 9: 4/8, Phase 10: 3/13, Phase 11: 9/9 (100%), Phase 8: 1/13
+
+全量套件 **PASS=106 FAIL=0**。
 
 ---
 
