@@ -1326,4 +1326,16 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
     return result;
 }
 
+std::vector<std::string> QueryPlanner::executePlan(OpPtr plan) {
+    std::vector<std::string> results;
+    if (!plan) return results;
+    if (!plan->open()) return results;
+    std::string row;
+    while (plan->next(row)) {
+        results.push_back(row);
+    }
+    plan->close();
+    return results;
+}
+
 } // namespace dbms

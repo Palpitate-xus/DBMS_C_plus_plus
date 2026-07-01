@@ -389,6 +389,9 @@ public:
     static std::string explainJson(OpPtr& plan, StorageEngine* engine,
                                    const std::string& dbname,
                                    const ExplainOptions& opts);
+
+    // Execute a plan built by buildSelectPlan and return result rows.
+    static std::vector<std::string> executePlan(OpPtr plan);
 };
 
 } // namespace dbms

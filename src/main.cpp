@@ -1070,8 +1070,18 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
         cout << "Commit failed" << endl;
         return true;
     }
-    cout << "Transaction committed" << endl;
-    log(s.username, "commit transaction", getTime());
+    // COMMIT AND [NO] CHAIN: if AND CHAIN, immediately start a new transaction.
+    if (sql.size() >= 16 && sql.substr(7, 9) == "and chain") {
+        g_engine.beginTransaction(s.currentDB);
+        cout << "Transaction committed (and chain)" << endl;
+        log(s.username, "commit and chain", getTime());
+    } else if (sql.size() >= 18 && sql.substr(7, 11) == "and no chain") {
+        cout << "Transaction committed (and no chain)" << endl;
+        log(s.username, "commit and no chain", getTime());
+    } else {
+        cout << "Transaction committed" << endl;
+        log(s.username, "commit transaction", getTime());
+    }
     return false;
 }
 
@@ -1100,8 +1110,18 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
         cout << "Rollback failed" << endl;
         return true;
     }
-    cout << "Transaction rolled back" << endl;
-    log(s.username, "rollback transaction", getTime());
+    // ROLLBACK AND [NO] CHAIN
+    if (sql.size() >= 19 && sql.substr(9, 10) == "and no chain") {
+        cout << "Transaction rolled back (and no chain)" << endl;
+        log(s.username, "rollback and no chain", getTime());
+    } else if (sql.size() >= 17 && sql.substr(9, 8) == "and chain") {
+        g_engine.beginTransaction(s.currentDB);
+        cout << "Transaction rolled back (and chain)" << endl;
+        log(s.username, "rollback and chain", getTime());
+    } else {
+        cout << "Transaction rolled back" << endl;
+        log(s.username, "rollback transaction", getTime());
+    }
     return false;
 }
 
@@ -2370,11 +2390,15 @@ static bool handleExplain(const string& sql, Session& s) {
     if (cacheHit) cout << "\n[plan cache hit]";
 
     if (opts.analyze) {
+        // Rebuild plan for actual execution (the cached one was used for display).
+        auto execPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
         auto execStart = std::chrono::steady_clock::now();
         size_t actualRows = 0;
-        auto answers = g_engine.query(s.currentDB, tname, conds, selectCols,
-            {dbms::StorageEngine::OrderBySpec{orderByCol, orderByAsc}}, false);
-        actualRows = answers.size();
+        std::string row;
+        if (execPlan->open()) {
+            while (execPlan->next(row)) ++actualRows;
+            execPlan->close();
+        }
         auto execEnd = std::chrono::steady_clock::now();
         double execMs = std::chrono::duration<double, std::milli>(execEnd - execStart).count();
         cout << "\n--- ANALYZE ---\n";
@@ -5576,11 +5600,20 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
         }
     }
 
+    // Execute via volcano operator tree (Phase 5.1).
     std::vector<std::string> answers;
-    if (conds.empty()) {
-        answers = g_engine.query(s.currentDB, tname, {}, selectCols, orderBy);
-    } else {
-        answers = g_engine.query(s.currentDB, tname, conds, selectCols, orderBy);
+    {
+        dbms::PlanContext ctx;
+        ctx.dbname = s.currentDB;
+        ctx.tablename = tname;
+        ctx.conds = dbms::StorageEngine::parseConditions(conds);
+        ctx.selectCols = selectCols;
+        if (!orderBy.empty()) {
+            ctx.orderByCol = orderBy[0].colName;
+            ctx.orderByAsc = orderBy[0].ascending;
+        }
+        auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+        answers = dbms::QueryPlanner::executePlan(std::move(plan));
     }
 
     size_t limitVal = 0, offsetVal = 0;
@@ -11111,7 +11144,19 @@ bool execute(const string& rawSql, Session& s) {
         size_t valuesPos = sql.find("values");
         size_t selectPosCheck = sql.find("select", 12);
         bool isSelectInsert = (selectPosCheck != string::npos && (valuesPos == string::npos || selectPosCheck < valuesPos));
+        // INSERT INTO t DEFAULT VALUES
         if (valuesPos == string::npos && !isSelectInsert) {
+            size_t defaultPos = sql.find("default");
+            if (defaultPos != string::npos) {
+                // Verify table has all defaults / nullable columns
+                TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
+                auto res = g_engine.insertDefaultValues(s.currentDB, resolvedName, tbl);
+                if (res == dbms::DBStatus::OK)
+                    cout << "INSERT 0 1 (DEFAULT VALUES)" << endl;
+                else
+                    cout << "INSERT DEFAULT VALUES failed" << endl;
+                return res == dbms::DBStatus::OK ? false : true;
+            }
             cout << "SQL syntax error" << endl;
             return true;
         }

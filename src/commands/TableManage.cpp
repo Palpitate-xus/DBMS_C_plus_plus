@@ -11275,6 +11275,45 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     return ids;
 }
 
+DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
+                                             const std::string& tablename,
+                                             const TableSchema& tbl) {
+    if (readOnly_) return DBStatus::INVALID_VALUE;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+
+    // Build row with DEFAULT values or NULL for each column.
+    // Note: we do NOT take the lock here because insert() will do it.
+    std::map<std::string, std::string> actualValues;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const Column& col = tbl.cols[i];
+        if (!col.generatedExpr.empty()) {
+            continue;  // GENERATED ALWAYS columns are computed at insert time
+        }
+        if (col.isPrimaryKey && col.isAutoIncrement) {
+            actualValues[col.dataName] = "auto";
+        } else if (!col.defaultValue.empty()) {
+            actualValues[col.dataName] = col.defaultValue;
+        } else if (!col.isNull) {
+            std::string t = toLowerUtf8(col.dataType);
+            if (t == "int4" || t == "int8" || t == "int2" || t == "float4" || t == "float8")
+                actualValues[col.dataName] = "0";
+            else if (t == "boolean")
+                actualValues[col.dataName] = "false";
+            else if (t == "date")
+                actualValues[col.dataName] = "1970-01-01";
+            else if (t == "time" || t == "timetz")
+                actualValues[col.dataName] = "00:00:00";
+            else if (t == "timestamp" || t == "timestamptz")
+                actualValues[col.dataName] = "1970-01-01 00:00:00";
+            else
+                actualValues[col.dataName] = "";
+        }
+        // nullable without default → stays NULL (omitted)
+    }
+
+    return insert(dbname, tablename, actualValues);
+}
+
 DBStatus StorageEngine::remove(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::vector<std::string>& conditions) {
