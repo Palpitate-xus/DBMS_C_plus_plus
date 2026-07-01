@@ -229,7 +229,7 @@ bool SQLParser::isKeyword(const std::string& s) {
         "default", "generated", "always", "identity", "serial",
         "primary", "key", "unique", "foreign", "references", "check",
         "exclude", "constraint", "deferrable", "initially", "immediate",
-        "not", "no", "inherit", "force", "row", "level", "security",
+        "not", "no", "inherit", "force", "for", "row", "level", "security",
         "enable", "disable", "replica", "identity", "always", "full",
         "replica", "nothing", "default", "user", "system",
     };
