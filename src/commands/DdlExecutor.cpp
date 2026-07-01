@@ -1075,6 +1075,16 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
     }
 
+    // PARTITION BY (col) — wire partition metadata from AST to engine.
+    if (!stmt->partitionBy.empty()) {
+        auto* colRef = dynamic_cast<ColumnRefExpr*>(stmt->partitionBy[0].expr.get());
+        if (colRef) tbl.partitionKey = colRef->column;
+        std::string pt = toLower(stmt->partitionType);
+        if (pt == "range") tbl.partitionType = TableSchema::PartitionType::Range;
+        else if (pt == "list") tbl.partitionType = TableSchema::PartitionType::List;
+        else if (pt == "hash") tbl.partitionType = TableSchema::PartitionType::Hash;
+    }
+
     // Table-level constraints
     for (const auto& tc : stmt->constraints) {
         std::string t = toLower(tc.type);

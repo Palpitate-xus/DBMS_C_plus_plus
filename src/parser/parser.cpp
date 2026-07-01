@@ -3832,6 +3832,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
             if (pos < tokens.size() && toLower(tokens[pos]) == "by") {
                 ++pos;
                 std::string ptype = toLower(tokens[pos++]); // range, list, hash
+                stmt->partitionType = ptype;
                 if (pos < tokens.size() && tokens[pos] == "(") {
                     auto pcols = collectParenthesized(tokens, pos);
                     for (const auto& c : pcols) {
