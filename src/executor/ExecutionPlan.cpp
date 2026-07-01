@@ -863,6 +863,27 @@ OpPtr QueryPlanner::buildAggregatePlan(StorageEngine* engine, const PlanContext&
     return std::make_unique<AggregateOp>(engine, ctx.dbname, ctx.tablename, items);
 }
 
+// Estimate the cost of a join algorithm for given table sizes & index availability.
+static double estimateJoinCost(size_t leftRows, size_t rightRows,
+                                bool leftIndexed, bool rightIndexed,
+                                const std::string& algo) {
+    if (algo == "nlj") {
+        // NLJ: O(left * right) without index; O(left * log(right)) with index on right
+        double perLeft = rightRows;
+        if (rightIndexed) perLeft = std::max(size_t(1), rightRows / 10);  // index lookup
+        return leftRows * perLeft;
+    }
+    if (algo == "merge") {
+        // Merge: O(left + right) sorted merge
+        return leftRows + rightRows;
+    }
+    if (algo == "hash") {
+        // Hash: O(left + right) build + probe
+        return leftRows + rightRows * 1.2;
+    }
+    return leftRows * rightRows;  // fallback (worst case cartesian)
+}
+
 OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbname,
                                    const std::string& leftTable, const std::string& rightTable,
                                    const std::string& leftCol, const std::string& rightCol,
@@ -880,7 +901,6 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     auto rightIdxCols = engine->getIndexedColumns(dbname, rightTable);
     bool leftColIndexed = (std::find(leftIdxCols.begin(), leftIdxCols.end(), leftCol) != leftIdxCols.end());
     bool rightColIndexed = (std::find(rightIdxCols.begin(), rightIdxCols.end(), rightCol) != rightIdxCols.end());
-    // Also check if join column is the primary key (always indexed / sorted)
     TableSchema leftTbl = engine->getTableSchema(dbname, leftTable);
     TableSchema rightTbl = engine->getTableSchema(dbname, rightTable);
     for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -894,20 +914,31 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
         }
     }
 
-    // Decide join algorithm
-    bool useNLJ = (leftRows < 100 || rightRows < 100);
-    bool useMerge = (!useNLJ && leftColIndexed && rightColIndexed);
-    bool useHash = (!useNLJ && !useMerge);
+    // Cost-based algorithm choice: try all three, pick the cheapest.
+    double costNLJ = estimateJoinCost(leftRows, rightRows, leftColIndexed, rightColIndexed, "nlj");
+    double costMerge = (leftColIndexed && rightColIndexed)
+        ? estimateJoinCost(leftRows, rightColIndexed, true, true, "merge")
+        : 1e18;
+    double costHash = estimateJoinCost(leftRows, rightRows, false, false, "hash");
 
-    // JOIN order optimization:
-    // - NLJ: smaller table as LEFT (outer loop) to minimize full scans
-    // - HashJoin: smaller table as RIGHT (build hash table) to reduce memory
-    // - MergeJoin: no swap needed, both sides sorted
+    // Decide: if small tables, NLJ is fine; otherwise pick cheapest.
+    std::string chosenAlgo;
+    if (leftRows < 50 && rightRows < 50) {
+        chosenAlgo = "nlj";
+    } else if (costMerge <= costHash && costMerge < costNLJ) {
+        chosenAlgo = "merge";
+    } else if (costHash < costNLJ * 0.8) {
+        chosenAlgo = "hash";
+    } else {
+        chosenAlgo = "nlj";
+    }
+
+    // JOIN order optimization: put smaller table in the more expensive position.
     bool shouldSwap = false;
-    if (useNLJ && rightRows < leftRows) {
-        shouldSwap = true; // Put smaller table on the left for NLJ
-    } else if (useHash && rightRows > leftRows * 3) {
-        shouldSwap = true; // Put smaller table on the right for HashJoin
+    if (chosenAlgo == "nlj" && rightRows < leftRows) {
+        shouldSwap = true;  // Outer loop should be smaller for NLJ
+    } else if (chosenAlgo == "hash" && rightRows > leftRows) {
+        shouldSwap = true;  // Build side (right) should be smaller for HashJoin
     }
 
     std::string lTbl = shouldSwap ? rightTable : leftTable;
@@ -918,12 +949,12 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     auto leftScan = std::make_unique<TableScanOp>(engine, dbname, lTbl);
     auto rightScan = std::make_unique<TableScanOp>(engine, dbname, rTbl);
 
-    if (useNLJ) {
+    if (chosenAlgo == "nlj") {
         return std::make_unique<NestedLoopJoinOp>(
             engine, dbname, std::move(leftScan), std::move(rightScan),
             lTbl, rTbl, lCol, rCol);
     }
-    if (useMerge) {
+    if (chosenAlgo == "merge") {
         return std::make_unique<MergeJoinOp>(
             engine, dbname, std::move(leftScan), std::move(rightScan),
             lTbl, rTbl, lCol, rCol);
