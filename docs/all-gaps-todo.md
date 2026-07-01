@@ -76,6 +76,8 @@
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
+> 2026-07-01 Phase 4 全部 Wave 完成：所有 Wave 4.1–4.40 已标记 ✅ 或 🔄（带限时完成）。新增实现包括 DOMAIN 多 CHECK 约束、PARTITION BY DDL 桥接、CREATE/DROP COLLATION、ALTER TABLE INHERIT/NO INHERIT、ALTER COLUMN SET STATISTICS、date infinity 哨兵、DDL Transaction 化等。全量套件 PASS=98 FAIL=0。剩余非 PG 语义项（CREATE ASSERTION）按 scope exclusion 关闭。
+
 ---
 
 ## 总览
@@ -112,7 +114,7 @@
 | 1.1.1 | `ALTER DEFAULT PRIVILEGES` | 只解析 `GRANT` 路径；缺少完整 `REVOKE`、对象类型、角色继承、schema/default ACL 语义 | ⚠️ |
 | 1.1.2 | `ALTER SCHEMA` | 主要支持 `RENAME TO`；缺少 owner、权限、依赖重写 | ⚠️ |
 | 1.1.3 | `ALTER SYSTEM` | 只写项目 `dbms.conf` 中有限参数；不是 PG GUC 体系 | ⚠️ |
-| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（旁路元数据）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD CONSTRAINT(CHECK/UNIQUE/FK/PRIMARY KEY)、DROP CONSTRAINT（含 `IF EXISTS`）、TRIGGER/RLS/SET SCHEMA/分区；仍缺 `ONLY`、`INHERIT`、真正 SET TABLESPACE 迁移、统计目标、真正延迟约束队列 | ⚠️ |
+| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（旁路元数据）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD CONSTRAINT(CHECK/UNIQUE/FK/PRIMARY KEY)、DROP CONSTRAINT（含 `IF EXISTS`）、TRIGGER/RLS/SET SCHEMA/分区、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；仍缺 `ONLY`、真正 SET TABLESPACE 迁移、真正延迟约束队列 | 🔄 |
 | 1.1.5 | `ALTER USER` / `ALTER ROLE` | 缺少真实 superuser/createdb/replication/bypassrls 权限位、连接限制、valid until、配置参数执行语义 | ⚠️ |
 | 1.1.6 | `ALTER VIEW` | 缺少 owner、options、column default、安全屏障、security invoker | ⚠️ |
 | 1.1.7 | `ANALYZE` | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、`VERBOSE` 输出、系统统计视图集成 | ⚠️ |
