@@ -923,6 +923,7 @@ struct AlterTableStmt : public Stmt {
         ClusterOn, SetWithoutCluster,
         SetAccessMethod,
         SetReplicaIdentity,
+        SetStatistics,
     };
 
     struct SubCmd {
@@ -939,6 +940,7 @@ struct AlterTableStmt : public Stmt {
         std::string partitionSpec;
         std::map<std::string, std::string> options;
         std::string replicaIdentity;
+        int statisticsTarget = -1;
     };
     std::vector<SubCmd> subCommands;
 

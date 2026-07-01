@@ -6019,6 +6019,13 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 } else if (pos < tokens.size() && toLower(tokens[pos]) == "data") {
                     pos += 2; // DATA TYPE
                     if (pos < tokens.size()) sub.dataType = tokens[pos++];
+                } else if (pos < tokens.size() && toLower(tokens[pos]) == "statistics") {
+                    ++pos;
+                    sub.action = AlterTableStmt::Action::SetStatistics;
+                    if (pos < tokens.size()) {
+                        try { sub.statisticsTarget = std::stoi(tokens[pos]); } catch (...) {}
+                        ++pos;
+                    }
                 }
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "drop") {
                 ++pos;

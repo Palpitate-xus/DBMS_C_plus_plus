@@ -10308,6 +10308,25 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Not null constraint dropped" << endl;
                 return false;
             }
+            if (tokens.size() >= 8 && tokens[5] == "set" && tokens[6] == "statistics") {
+                // alter table t alter column c set statistics n
+                string target = tokens[7];
+                int n = 0;
+                try { n = std::stoi(target); } catch (...) {
+                    cout << "Invalid statistics target" << endl;
+                    return true;
+                }
+                if (n < 0 || n > 10000) {
+                    cout << "Invalid statistics target" << endl;
+                    return true;
+                }
+                // Store as table option: column_statistics:cname=n
+                std::map<std::string, std::string> params;
+                params["column_statistics:" + cname] = target;
+                g_engine.setStorageParams(s.currentDB, tname, params);
+                cout << "Statistics target set" << endl;
+                return false;
+            }
         }
         if (op == "add" && tokens.size() >= 5 && tokens[3] == "constraint") {
             string constrName = tokens[4];
