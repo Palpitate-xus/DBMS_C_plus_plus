@@ -175,6 +175,11 @@ inline std::string formatTimeSeconds(int32_t secs) {
 // Timestamp helpers: store as int64_t seconds since Date epoch
 // ========================================================================
 inline int64_t parseTimestampToSeconds(const std::string& s) {
+    // Support PostgreSQL infinity / -infinity sentinels.
+    std::string lower = s;
+    for (auto& c : lower) c = std::tolower(static_cast<unsigned char>(c));
+    if (lower == "infinity") return INT64_MAX;
+    if (lower == "-infinity") return INT64_MIN;
     int y = 0, m = 0, d = 0, h = 0, mn = 0, sec = 0;
     int tzOffsetMinutes = 0;  // +08:00 => +480, -05:00 => -300
     auto sp = s.find(' ');

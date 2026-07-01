@@ -34,7 +34,8 @@ enum class DdlObjectKind {
     Function,
     Procedure,
     Trigger,
-    Policy
+    Policy,
+    Collation
 };
 
 class DdlTransaction {

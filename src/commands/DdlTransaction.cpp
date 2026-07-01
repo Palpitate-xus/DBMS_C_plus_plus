@@ -113,6 +113,7 @@ std::string DdlTransaction::kindString(DdlObjectKind kind) const {
         case DdlObjectKind::Procedure:  return "procedure";
         case DdlObjectKind::Trigger:    return "trigger";
         case DdlObjectKind::Policy:     return "policy";
+        case DdlObjectKind::Collation:  return "collation";
     }
     return "object";
 }
@@ -142,6 +143,9 @@ bool DdlTransaction::undoCreate(const RecordedOp& op) {
             break;
         case DdlObjectKind::Type:
             engine_.dropCompositeType(db, op.name);
+            break;
+        case DdlObjectKind::Collation:
+            // Collation removal: handled explicitly via dropCollation call.
             break;
         default:
             // View / Function / Procedure 暂不支持自动撤销

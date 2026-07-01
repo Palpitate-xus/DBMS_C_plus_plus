@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <set>
+#include <sstream>
 
 namespace dbms {
 
@@ -5031,6 +5032,31 @@ StmtPtr SQLParser::parseCreateCollation(const std::vector<std::string>& tokens, 
             }
         }
     }
+    // Parse optional FROM / provider locale specification
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string kw = toLower(tokens[pos]);
+        if (kw == "from" && pos + 1 < tokens.size()) {
+            ++pos;
+            std::string rest;
+            while (pos < tokens.size() && tokens[pos] != ";") {
+                if (!rest.empty()) rest += " ";
+                rest += tokens[pos++];
+            }
+            // Try to extract provider= and locale= from the rest
+            std::istringstream iss(rest);
+            std::string tok;
+            while (iss >> tok) {
+                std::string lower = toLower(tok);
+                if (lower.substr(0, 8) == "provider" && lower.size() > 9 && lower[8] == '=') {
+                    stmt->options["provider"] = lower.substr(9);
+                } else if (lower.substr(0, 6) == "locale" && lower.size() > 7 && lower[6] == '=') {
+                    stmt->options["locale"] = lower.substr(7);
+                }
+            }
+        } else {
+            ++pos;
+        }
+    }
     return stmt;
 }
 
@@ -6073,6 +6099,12 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
         } else if (kw == "detach") {
             sub.action = AlterTableStmt::Action::DetachPartition; pos += 2; // DETACH PARTITION
             if (pos < tokens.size()) sub.partitionSpec = tokens[pos++];
+        } else if (kw == "inherit") {
+            sub.action = AlterTableStmt::Action::Inherit; ++pos;
+            if (pos < tokens.size()) sub.parentTable = tokens[pos++];
+        } else if (kw == "no" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "inherit") {
+            sub.action = AlterTableStmt::Action::NoInherit; pos += 2;
+            if (pos < tokens.size()) sub.parentTable = tokens[pos++];
         } else {
             // Unknown subcommand; skip to next comma or semicolon
             while (pos < tokens.size() && tokens[pos] != ";" && tokens[pos] != ",") ++pos;

@@ -10017,6 +10017,34 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Constraint " << constrName << " validated" << endl;
             return false;
         }
+        if (op == "inherit" && tokens.size() >= 4) {
+            // alter table child inherit parent
+            string parent = tokens[3];
+            // Store parent list in inherits file
+            std::filesystem::path inhPath = std::filesystem::path(s.currentDB) / ("." + tname + ".inherits");
+            std::ofstream ofs(inhPath, std::ios::app);
+            if (ofs) { ofs << parent << "\n"; }
+            cout << "Inherited from " << parent << endl;
+            return false;
+        }
+        if (op == "no" && tokens.size() >= 5 && tokens[3] == "inherit") {
+            // alter table child no inherit parent
+            string parent = tokens[4];
+            std::filesystem::path inhPath = std::filesystem::path(s.currentDB) / ("." + tname + ".inherits");
+            if (std::filesystem::exists(inhPath)) {
+                std::ifstream ifs(inhPath);
+                std::vector<std::string> parents;
+                std::string line;
+                while (std::getline(ifs, line)) {
+                    if (!line.empty() && trim(line) != parent) parents.push_back(line);
+                }
+                ifs.close();
+                std::ofstream ofs(inhPath, std::ios::trunc);
+                for (auto& p : parents) ofs << p << "\n";
+            }
+            cout << "No longer inherits from " << parent << endl;
+            return false;
+        }
         if (op == "alter" && tokens.size() >= 5 && tokens[3] == "constraint") {
             string constrName = tokens[4];
             if (!g_engine.tableExists(s.currentDB, tname)) {

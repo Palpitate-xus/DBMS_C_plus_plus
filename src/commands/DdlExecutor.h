@@ -45,6 +45,8 @@ private:
     bool executeDropSequence(const DropStmt* stmt, Session& s);
     bool executeCreateDomain(const CreateObjectStmt* stmt, Session& s);
     bool executeDropDomain(const DropStmt* stmt, Session& s);
+    bool executeCreateCollation(const CreateObjectStmt* stmt, Session& s);
+    bool executeDropCollation(const DropStmt* stmt, Session& s);
     bool executeCreateType(const CreateObjectStmt* stmt, Session& s);
     bool executeDropType(const DropStmt* stmt, Session& s);
     bool executeCreateView(const CreateViewStmt* stmt, Session& s);

@@ -924,6 +924,8 @@ struct AlterTableStmt : public Stmt {
         SetAccessMethod,
         SetReplicaIdentity,
         SetStatistics,
+        Inherit,
+        NoInherit,
     };
 
     struct SubCmd {
@@ -941,6 +943,7 @@ struct AlterTableStmt : public Stmt {
         std::map<std::string, std::string> options;
         std::string replicaIdentity;
         int statisticsTarget = -1;
+        std::string parentTable;  // for INHERIT / NO INHERIT
     };
     std::vector<SubCmd> subCommands;
 

@@ -302,6 +302,10 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreatePolicy(dynamic_cast<const CreatePolicyStmt*>(stmt.get()), s);
         case SqlCommand::CreateMaterializedView:
             return executeCreateMaterializedView(dynamic_cast<const CreateViewStmt*>(stmt.get()), s);
+        case SqlCommand::CreateCollation:
+            return executeCreateCollation(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
+        case SqlCommand::DropCollation:
+            return executeDropCollation(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateDatabase:
             return executeCreateDatabase(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
         case SqlCommand::DropDatabase:
@@ -351,6 +355,8 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropDatabase:
         case dbms::SqlCommand::CreateSchema:
         case dbms::SqlCommand::DropSchema:
+        case dbms::SqlCommand::CreateCollation:
+        case dbms::SqlCommand::DropCollation:
         case dbms::SqlCommand::Comment:
             handled = true;
             break;
@@ -1741,6 +1747,80 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     txn.recordCreate(DdlObjectKind::Domain, info.name);
     txn.commit();
     std::cout << "CREATE DOMAIN succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeCreateCollation(const CreateObjectStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    // Store collation metadata: name|provider|locale
+    std::string cname = resolveTableName(s, stmt->objectName);
+    auto itProvider = stmt->options.find("provider");
+    auto itLocale = stmt->options.find("locale");
+    std::string provider = (itProvider != stmt->options.end()) ? itProvider->second : "libc";
+    std::string locale = (itLocale != stmt->options.end()) ? itLocale->second : "C";
+
+    std::filesystem::path colPath = std::filesystem::path(s.currentDB) / ".collations";
+    // Check for duplicates
+    if (std::filesystem::exists(colPath)) {
+        std::ifstream ifs(colPath);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (!line.empty() && line.substr(0, line.find('|')) == cname) {
+                std::cout << "Collation " << cname << " already exists" << std::endl;
+                return true;
+            }
+        }
+    }
+
+    std::ofstream ofs(colPath, std::ios::app);
+    if (!ofs) return true;
+    ofs << cname << "|" << provider << "|" << locale << "\n";
+
+    txn.recordCreate(DdlObjectKind::Collation, cname);
+    txn.commit();
+    std::cout << "CREATE COLLATION succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeDropCollation(const DropStmt* stmt, Session& s) {
+    if (!stmt) return false;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+
+    if (stmt->objectNames.empty()) {
+        std::cout << "SQL syntax error: DROP COLLATION name" << std::endl;
+        return true;
+    }
+    std::string cname = resolveTableName(s, stmt->objectNames[0]);
+    std::filesystem::path colPath = std::filesystem::path(s.currentDB) / ".collations";
+    if (!std::filesystem::exists(colPath)) {
+        std::cout << "Collation " << cname << " not found" << std::endl;
+        return true;
+    }
+    std::ifstream ifs(colPath);
+    std::vector<std::string> lines;
+    std::string line;
+    bool found = false;
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.substr(0, line.find('|')) == cname) { found = true; continue; }
+        lines.push_back(line);
+    }
+    if (!found) {
+        std::cout << "Collation " << cname << " not found" << std::endl;
+        return true;
+    }
+    std::ofstream ofs(colPath, std::ios::trunc);
+    for (auto& l : lines) ofs << l << "\n";
+    std::cout << "DROP COLLATION succeeded" << std::endl;
     return false;
 }
 
