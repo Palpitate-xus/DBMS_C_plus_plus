@@ -1200,6 +1200,7 @@ struct CreateRoleStmt : public Stmt {
     std::string password;
     bool encryptedPassword = true;
     std::string validUntil;
+    std::string memberOf;      // IN ROLE clause
     std::vector<std::pair<std::string, bool>> inRole;     // (roleName, adminOption)
     std::vector<std::pair<std::string, bool>> roleMembers; // (roleName, adminOption)
     std::vector<std::string> setItems;

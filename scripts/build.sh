@@ -54,6 +54,7 @@ SOURCES=(
     src/expression/expr_helper.cpp
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
+    src/utils/pg_hba.cpp
     src/types/numeric.cpp
 )
 

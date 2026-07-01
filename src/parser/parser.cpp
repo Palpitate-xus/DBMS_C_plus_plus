@@ -2359,7 +2359,7 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
         } else if (kw == "trigger") {
             r.stmt = parseCreateTrigger(tokens, pos);
         } else if (kw == "role" || kw == "user") {
-            r.stmt = parseCreateRole(tokens, pos);
+            r.stmt = parseCreateRole(tokens, pos, /*isUser=*/(kw == "user"));
         } else if (kw == "tablespace") {
             r.stmt = parseCreateTablespace(tokens, pos);
         } else if (kw == "statistics") {
@@ -4675,10 +4675,57 @@ StmtPtr SQLParser::parseCreateTrigger(const std::vector<std::string>& tokens, si
     return stmt;
 }
 
-StmtPtr SQLParser::parseCreateRole(const std::vector<std::string>& tokens, size_t& pos) {
+StmtPtr SQLParser::parseCreateRole(const std::vector<std::string>& tokens, size_t& pos, bool isUser) {
     auto stmt = std::make_unique<CreateRoleStmt>();
+    stmt->isUser = isUser;
+    // roleName is at current pos (kw "role"/"user" already consumed by caller).
     if (pos < tokens.size()) {
         stmt->roleName = tokens[pos++];
+    }
+    // Parse optional WITH and role attributes.
+    if (pos < tokens.size() && toLower(tokens[pos]) == "with") ++pos;
+    while (pos < tokens.size() && tokens[pos] != ";") {
+        std::string kw = toLower(tokens[pos]);
+        if (kw == "superuser") { stmt->superuser = true; ++pos; }
+        else if (kw == "nosuperuser") { stmt->superuser = false; ++pos; }
+        else if (kw == "createdb") { stmt->createdb = true; ++pos; }
+        else if (kw == "nocreatedb") { stmt->createdb = false; ++pos; }
+        else if (kw == "createrole") { stmt->createrole = true; ++pos; }
+        else if (kw == "nocreaterole") { stmt->createrole = false; ++pos; }
+        else if (kw == "inherit") { stmt->inherit = true; ++pos; }
+        else if (kw == "noinherit") { stmt->inherit = false; ++pos; }
+        else if (kw == "login") { stmt->login = true; ++pos; }
+        else if (kw == "nologin") { stmt->login = false; ++pos; }
+        else if (kw == "replication") { stmt->replication = true; ++pos; }
+        else if (kw == "noreplication") { stmt->replication = false; ++pos; }
+        else if (kw == "bypassrls") { stmt->bypassrls = true; ++pos; }
+        else if (kw == "nobypassrls") { stmt->bypassrls = false; ++pos; }
+        else if (kw == "connection" && pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "limit") {
+            try { stmt->connectionLimit = std::stoi(tokens[pos + 2]); } catch (...) {}
+            pos += 3;
+        } else if (kw == "password") {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->password = stripQuotes(tokens[pos]);
+                ++pos;
+            }
+        } else if (kw == "valid" && pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "until") {
+            stmt->validUntil = stripQuotes(tokens[pos + 2]);
+            pos += 3;
+        } else if (kw == "in" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "role") {
+            pos += 2;
+            while (pos < tokens.size() && tokens[pos] != ";" &&
+                   toLower(tokens[pos]) != "login" && toLower(tokens[pos]) != "nologin" &&
+                   toLower(tokens[pos]) != "superuser" && toLower(tokens[pos]) != "nosuperuser" &&
+                   toLower(tokens[pos]) != "connection" && toLower(tokens[pos]) != "password" &&
+                   toLower(tokens[pos]) != "valid") {
+                stmt->inRole.push_back({tokens[pos], false});
+                if (pos + 1 < tokens.size() && tokens[pos + 1] == ",") pos += 2;
+                else ++pos;
+            }
+        } else {
+            ++pos;  // skip unknown
+        }
     }
     return stmt;
 }

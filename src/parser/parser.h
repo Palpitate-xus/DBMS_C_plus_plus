@@ -106,7 +106,7 @@ private:
     StmtPtr parseCreateFunction(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseCreateProcedure(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseCreateTrigger(const std::vector<std::string>& tokens, size_t& pos);
-    StmtPtr parseCreateRole(const std::vector<std::string>& tokens, size_t& pos);
+    StmtPtr parseCreateRole(const std::vector<std::string>& tokens, size_t& pos, bool isUser = false);
     StmtPtr parseCreateTablespace(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseCreateStatistics(const std::vector<std::string>& tokens, size_t& pos);
     StmtPtr parseCreatePolicy(const std::vector<std::string>& tokens, size_t& pos);
