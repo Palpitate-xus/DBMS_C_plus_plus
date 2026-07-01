@@ -897,6 +897,10 @@ public:
     std::vector<ExclusionConstraint> getExclusionConstraints(const std::string& dbname,
                                                               const std::string& tablename) const;
 
+    // Deferred constraint support (SET CONSTRAINTS / DEFERRABLE)
+    void setConstraintMode(const std::vector<std::string>& names, bool deferred);
+    bool isConstraintDeferred(const std::string& name, bool defaultDeferred = false) const;
+
     // Current transaction ID (0 = not in a transaction)
     uint64_t currentTxnId() const { return currentTxnId_; }
     const ReadView* getCurrentReadView() const {
@@ -1122,6 +1126,18 @@ private:
     bool checkExclusionConflict(const std::string& dbname, const std::string& tablename,
                                 const ExclusionConstraint& ec, const std::string& newRowBuffer,
                                 int64_t excludeRid = -1) const;
+
+    // Deferred constraint helpers
+    struct DeferredCheck {
+        std::string dbname;
+        std::string tablename;
+        int64_t rid;
+        std::string constraintName;
+        size_t colIdx;
+    };
+    mutable std::map<std::string, bool> constraintMode_; // name -> deferred?
+    mutable std::map<uint64_t, std::vector<DeferredCheck>> deferredChecks_;
+    bool runDeferredCheck(const DeferredCheck& dc) const;
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,

@@ -1106,6 +1106,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 if (tbl.cols[0].checkExpr.empty()) {
                     tbl.cols[0].checkExpr = tc.checkExpr ? tc.checkExpr->toString() : "";
                     tbl.cols[0].checkConstraintName = tc.name;
+                    tbl.cols[0].deferrable = tc.deferrable;
+                    tbl.cols[0].initiallyDeferred = tc.initiallyDeferred;
                 }
             }
             recordConstraintCompat(s.currentDB, tname, tc);

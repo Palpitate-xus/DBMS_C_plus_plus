@@ -127,7 +127,9 @@ bool PgPage::remove(OffsetNumber linePtr) {
     if (linePtr > n) return false;
 
     ItemIdData* id = itemId(linePtr);
-    if (getLpFlags(id) != LP_NORMAL) return false;
+    if (getLpFlags(id) != LP_NORMAL) {
+        return false;
+    }
 
     setLpFlags(id, LP_UNUSED);
     setLpOff(id, 0);

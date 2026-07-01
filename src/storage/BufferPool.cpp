@@ -1,6 +1,5 @@
 #include "BufferPool.h"
 
-#include <iostream>
 #include <unistd.h>
 
 namespace dbms {
@@ -46,6 +45,30 @@ void BufferPool::close() {
     pageMap_.clear();
 }
 
+void BufferPool::invalidatePage(uint32_t pageId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = pageMap_.find(pageId);
+    if (it != pageMap_.end()) {
+        size_t idx = it->second;
+        frames_[idx].pageId = static_cast<uint32_t>(-1);
+        frames_[idx].dirty = false;
+        frames_[idx].pinCount = 0;
+        frames_[idx].usageCount = 0;
+        pageMap_.erase(it);
+    }
+}
+
+void BufferPool::invalidateAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& frame : frames_) {
+        frame.pageId = static_cast<uint32_t>(-1);
+        frame.dirty = false;
+        frame.pinCount = 0;
+        frame.usageCount = 0;
+    }
+    pageMap_.clear();
+}
+
 bool BufferPool::readFromDisk(uint32_t pageId, char* buf) {
     if (fd_ < 0) return false;
     off_t offset = static_cast<off_t>(pageId) * pageSize_;
@@ -59,7 +82,9 @@ bool BufferPool::readFromDisk(uint32_t pageId, char* buf) {
 }
 
 bool BufferPool::writeToDisk(uint32_t pageId, const char* buf) {
-    if (fd_ < 0) return false;
+    if (fd_ < 0) {
+        return false;
+    }
     off_t offset = static_cast<off_t>(pageId) * pageSize_;
     ssize_t n = ::pwrite(fd_, buf, pageSize_, offset);
     return n == static_cast<ssize_t>(pageSize_);

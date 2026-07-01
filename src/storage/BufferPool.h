@@ -33,6 +33,10 @@ public:
     void close();
     bool isOpen() const { return fd_ >= 0; }
 
+    // Invalidate cached page(s) so the next fetchPage reads from disk.
+    void invalidatePage(uint32_t pageId);
+    void invalidateAll();
+
     // Read a page. Returns pointer to cached page data.
     // The page is pinned until unpinPage is called.
     char* fetchPage(uint32_t pageId);

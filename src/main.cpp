@@ -1352,14 +1352,36 @@ static bool handleSetCommand(const string& sql, Session& s) {
         bool immediate = false;
         if (rest.size() >= 8 && rest.substr(rest.size() - 8) == "deferred") {
             deferred = true;
+            rest = trim(rest.substr(0, rest.size() - 8));
         } else if (rest.size() >= 9 && rest.substr(rest.size() - 9) == "immediate") {
             immediate = true;
+            rest = trim(rest.substr(0, rest.size() - 9));
         }
         if (!deferred && !immediate) {
             cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
             return true;
         }
+        if (rest.empty()) {
+            cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
+            return true;
+        }
+        std::vector<string> names;
+        if (rest == "all") {
+            names.push_back("all");
+        } else {
+            std::stringstream ss(rest);
+            string item;
+            while (getline(ss, item, ',')) {
+                string name = trim(item);
+                if (!name.empty()) names.push_back(name);
+            }
+        }
+        if (names.empty()) {
+            cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
+            return true;
+        }
         s.constraintsDeferred = deferred;
+        g_engine.setConstraintMode(names, deferred);
         cout << "SET CONSTRAINTS" << endl;
         return false;
     }

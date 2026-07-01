@@ -3274,7 +3274,9 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
                                                 const std::string& tablename) const {
     std::string key = dbname + "/" + tablename;
     auto it = pageAllocators_.find(key);
-    if (it != pageAllocators_.end()) return it->second.get();
+    if (it != pageAllocators_.end()) {
+        return it->second.get();
+    }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     // Route data file according to tablespace
@@ -5586,6 +5588,39 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
     return conflict;
 }
 
+// ========================================================================
+// Deferred constraint support (SET CONSTRAINTS / DEFERRABLE)
+// ========================================================================
+void StorageEngine::setConstraintMode(const std::vector<std::string>& names, bool deferred) {
+    for (const auto& name : names) {
+        constraintMode_[name] = deferred;
+    }
+}
+
+bool StorageEngine::isConstraintDeferred(const std::string& name, bool defaultDeferred) const {
+    auto it = constraintMode_.find(name);
+    if (it != constraintMode_.end()) return it->second;
+    auto allIt = constraintMode_.find("all");
+    if (allIt != constraintMode_.end()) return allIt->second;
+    return defaultDeferred;
+}
+
+bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
+    TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
+    if (dc.colIdx >= tbl.len) return true;
+    const Column& col = tbl.cols[dc.colIdx];
+    if (col.checkExpr.empty()) return true;
+    PageAllocator* pa = getPageAllocator(dc.dbname, dc.tablename);
+    std::string row;
+    if (!readRowByRid(pa, dc.rid, row, tbl)) return true;
+    std::map<std::string, std::string> rowValues;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        rowValues[tbl.cols[i].dataName] = extractColumnValueStatic(row, tbl, i);
+    }
+    std::string err;
+    return dbms::ExprHelper::evalBool(col.checkExpr, rowValues, buildTypeHints(tbl), &err, dc.dbname);
+}
+
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
 bool TableSchema::hasPrimaryKey() const {
     if (!pkColIndices.empty()) return true;
@@ -6796,7 +6831,7 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     return DBStatus::OK;
 }
 
-constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420005;  // "DB" + version 5 (added generatedKind for generated columns)
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420006;  // "DB" + version 6 (added check constraint deferrability)
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -6817,6 +6852,10 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             uint16_t checkLen = static_cast<uint16_t>(tbl.cols[i].checkExpr.size());
             out.write(reinterpret_cast<const char*>(&checkLen), 2);
             out.write(tbl.cols[i].checkExpr.data(), checkLen);
+            // New in version 6: persist CHECK constraint name and deferrability.
+            writeFixedString(out, tbl.cols[i].checkConstraintName, MAX_COL_NAME_LEN);
+            uint8_t deferFlags = (tbl.cols[i].deferrable ? 1 : 0) | (tbl.cols[i].initiallyDeferred ? 2 : 0);
+            out.write(reinterpret_cast<const char*>(&deferFlags), 1);
         }
         if (!tbl.cols[i].generatedExpr.empty()) {
             uint16_t genLen = static_cast<uint16_t>(tbl.cols[i].generatedExpr.size());
@@ -6975,11 +7014,12 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return tbl;
 
-    bool hasVersionHeader = (firstInt >= 0x44420001 && firstInt <= 0x44420005);
+    bool hasVersionHeader = (firstInt >= 0x44420001 && firstInt <= 0x44420006);
     bool hasArray = (firstInt >= 0x44420002);
     bool hasOnUpdate = (firstInt >= 0x44420003);
     bool hasFormatVersion = (firstInt >= 0x44420004);
     bool hasGeneratedKind = (firstInt >= 0x44420005);
+    bool hasCheckDeferrability = (firstInt >= 0x44420006);
     int32_t len = 0;
     if (hasVersionHeader) {
         in.read(reinterpret_cast<char*>(&len), 4);
@@ -7015,6 +7055,15 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 std::string checkExpr(checkLen, '\0');
                 in.read(checkExpr.data(), checkLen);
                 tbl.cols[i].checkExpr = checkExpr;
+            }
+            if (hasCheckDeferrability) {
+                tbl.cols[i].checkConstraintName = readFixedString(in, MAX_COL_NAME_LEN);
+                uint8_t deferFlags = 0;
+                in.read(reinterpret_cast<char*>(&deferFlags), 1);
+                if (in) {
+                    tbl.cols[i].deferrable = (deferFlags & 1) != 0;
+                    tbl.cols[i].initiallyDeferred = (deferFlags & 2) != 0;
+                }
             }
         }
         if (hasGenerated) {
@@ -10505,10 +10554,16 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     std::string rowBuffer = buildRowBuffer(tbl, actualValues, creatorTxnId);
     std::string strippedRow = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
 
-    // Check CHECK constraints before writing
+    // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
+    std::vector<size_t> deferredCheckCols;
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (col.checkExpr.empty()) continue;
+        bool deferred = col.deferrable && isConstraintDeferred(col.checkConstraintName, col.initiallyDeferred);
+        if (deferred) {
+            deferredCheckCols.push_back(i);
+            continue;
+        }
         std::string err;
         if (!dbms::ExprHelper::evalBool(col.checkExpr, actualValues, typeHints, &err, dbname)) {
             lockManager_.unlock(tablename);
@@ -10725,6 +10780,13 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     }
 
     int64_t rid = encodeRid(pageId, slotId);
+
+    // Queue deferred CHECK constraints for commit-time validation.
+    if (inTransaction_ && !deferredCheckCols.empty()) {
+        for (size_t ci : deferredCheckCols) {
+            deferredChecks_[currentTxnId_].push_back({dbname, tablename, rid, tbl.cols[ci].checkConstraintName, ci});
+        }
+    }
 
     // For PostgreSQL-style tuples, set ctid to point to self after insertion.
     if (usesHeapTupleHeader(tbl.formatVersion)) {
@@ -11905,20 +11967,33 @@ DBStatus StorageEngine::update(const std::string& dbname,
         prepareToastValues(dbname, tablename, tbl, rowValues);
         uint64_t updateTxnId = inTransaction_ ? currentTxnId_ : 0;
         std::string newRow = buildRowBuffer(tbl, rowValues, updateTxnId);
+        std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
 
         // Write back via PageAllocator
         uint32_t pageId; uint16_t slotId;
         decodeRid(rid, pageId, slotId);
 
-        // Check CHECK constraints before writing
-        std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
+        // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
+        std::vector<size_t> deferredCheckCols;
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (col.checkExpr.empty()) continue;
+            bool deferred = col.deferrable && isConstraintDeferred(col.checkConstraintName, col.initiallyDeferred);
+            if (deferred) {
+                deferredCheckCols.push_back(i);
+                continue;
+            }
             std::string err;
             if (!dbms::ExprHelper::evalBool(col.checkExpr, rowValues, updateTypeHints, &err, dbname)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        }
+        if (inTransaction_ && !deferredCheckCols.empty()) {
+            for (size_t ci : deferredCheckCols) {
+                deferredChecks_[currentTxnId_].push_back({dbname, tablename, rid, tbl.cols[ci].checkConstraintName, ci});
             }
         }
 
@@ -16767,7 +16842,12 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
 // ========================================================================
 
 DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
-    if (inTransaction_) return DBStatus::OK;  // already in txn
+    if (inTransaction_) {
+        // Commit existing transaction before starting a new one.
+        // This matches PostgreSQL's implicit-commit-on-DDL behavior and
+        // prevents txnDB_ from pointing to a stale database.
+        commitTransaction();
+    }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
     // Flush all dirty pages so the on-disk files are up-to-date before backup
@@ -16898,6 +16978,20 @@ DBStatus StorageEngine::commitTransaction() {
         txnWrittenRids_.clear();
     }
 
+    // Run deferred CHECK constraints queued for this transaction before committing.
+    {
+        auto it = deferredChecks_.find(currentTxnId_);
+        if (it != deferredChecks_.end()) {
+            for (const auto& dc : it->second) {
+                if (!runDeferredCheck(dc)) {
+                    rollbackTransaction();
+                    return DBStatus::INVALID_VALUE;
+                }
+            }
+            deferredChecks_.erase(it);
+        }
+    }
+
     // Update CLOG before clearing state
     CommitLog* clog = getCommitLog(txnDB_);
     if (clog) clog->setStatus(currentTxnId_, CommitLog::Status::Committed);
@@ -16924,6 +17018,8 @@ DBStatus StorageEngine::commitTransaction() {
     clearCatalogSnapshot();
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
+    constraintMode_.clear();
+    deferredChecks_.erase(currentTxnId_);
     currentTxnId_ = 0;
     inTransaction_ = false;
     readOnly_ = false;
@@ -16953,36 +17049,43 @@ DBStatus StorageEngine::rollbackTransaction() {
             // Undo INSERT: remove the row
             uint32_t pageId; uint16_t slotId;
             decodeRid(it->rowIdx, pageId, slotId);
+            // Read row data before removing so index entries can be cleaned up.
+            std::string pkVal;
+            std::map<std::string, std::string> secIdxVals;
+            {
+                std::string row;
+                if (readRowByRid(pa, it->rowIdx, row, tbl)) {
+                    pkVal = extractPKValue(row, tbl);
+                    auto indexedCols = getIndexedColumns(txnDB_, it->tableName);
+                    for (const auto& colname : indexedCols) {
+                        size_t colIdx = tbl.len;
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                        }
+                        if (colIdx < tbl.len) {
+                            secIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
+                        }
+                    }
+                }
+            }
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
                 page.remove(slotId);
                 pa->markDirty(pageId);
+                pa->flush();
                 pa->unpinPage(pageId);
             }
             // Remove from PK index
             BPTree* pkIdx = getPKIndex(txnDB_, it->tableName);
-            if (pkIdx) {
-                std::string row;
-                if (readRowByRid(pa, it->rowIdx, row, tbl)) {
-                    std::string pkVal = extractPKValue(row, tbl);
-                    if (!pkVal.empty()) pkIdx->remove(pkVal);
-                }
+            if (pkIdx && !pkVal.empty()) {
+                pkIdx->remove(pkVal);
             }
             // Remove from secondary indexes
-            auto indexedCols = getIndexedColumns(txnDB_, it->tableName);
-            for (const auto& colname : indexedCols) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
-                }
-                if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(txnDB_, it->tableName, colname);
-                if (!secIdx) continue;
-                std::string row;
-                if (readRowByRid(pa, it->rowIdx, row, tbl)) {
-                    std::string val = extractColumnValue(row, tbl, colIdx);
-                    if (!val.empty()) secIdx->remove(val);
+            for (const auto& kv : secIdxVals) {
+                BPTree* secIdx = getSecondaryIndex(txnDB_, it->tableName, kv.first);
+                if (secIdx && !kv.second.empty()) {
+                    secIdx->remove(kv.second);
                 }
             }
         } else if (it->op == TxnLogEntry::Op::Update) {
@@ -17112,6 +17215,7 @@ DBStatus StorageEngine::rollbackTransaction() {
         walXactAbort(txnDB_, currentTxnId_);
     }
 
+    deferredChecks_.erase(currentTxnId_);
     txnLog_.clear();
     savepoints_.clear();
     txnSubTxnIds_.clear();
@@ -17136,6 +17240,8 @@ DBStatus StorageEngine::rollbackTransaction() {
     inTransaction_ = false;
     readOnly_ = false;
     txnDB_.clear();
+    constraintMode_.clear();
+    deferredChecks_.clear();
     return DBStatus::OK;
 }
 

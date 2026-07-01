@@ -3391,6 +3391,27 @@ static TableConstraint parseExcludeConstraint(const std::vector<std::string>& to
     return tc;
 }
 
+static void parseConstraintDeferrability(const std::vector<std::string>& tokens, size_t& pos, TableConstraint& tc) {
+    if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "not" &&
+        SQLParser::toLower(tokens[pos + 1]) == "deferrable") {
+        pos += 2;
+        tc.deferrable = false;
+        tc.initiallyDeferred = false;
+    } else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "deferrable") {
+        ++pos;
+        tc.deferrable = true;
+        if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "initially") {
+            if (SQLParser::toLower(tokens[pos + 1]) == "deferred") {
+                pos += 2;
+                tc.initiallyDeferred = true;
+            } else if (SQLParser::toLower(tokens[pos + 1]) == "immediate") {
+                pos += 2;
+                tc.initiallyDeferred = false;
+            }
+        }
+    }
+}
+
 // ============================================================================
 // CREATE 子命令解析（Phase 1.2 逐步完善）
 // ============================================================================
@@ -3524,6 +3545,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                             }
                             tc.checkExpr = std::make_unique<LiteralExpr>();
                             static_cast<LiteralExpr*>(tc.checkExpr.get())->value = expr;
+                            parseConstraintDeferrability(tokens, pos, tc);
                             stmt->constraints.push_back(std::move(tc));
                         }
                     } else if (ctype == "exclude") {
@@ -3598,6 +3620,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     }
                     tc.checkExpr = std::make_unique<LiteralExpr>();
                     static_cast<LiteralExpr*>(tc.checkExpr.get())->value = expr;
+                    parseConstraintDeferrability(tokens, pos, tc);
                     stmt->constraints.push_back(std::move(tc));
                 }
             } else if (ltok == "exclude") {

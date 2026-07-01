@@ -87,7 +87,7 @@
 | 数据类型 | 约 10 种 | 约 35 种 | 约 3 种 ❌ | TypeRegistry 统一注册 40+ 类型与别名/修饰符校验；多数类型仍"字符串存储+注册校验"，未达 PG I/O 语义 |
 | 表达式/函数 | 基础子集 | 中量 | 大量 | ExprEvaluator 支持 cast/case/coalesce/between/in/like/funcall/子查询；内置函数子集 |
 | DDL 对象模型 | 基础 | 简化→中量（模块+测试） | 架构级未接入运行时 | pg_class/attribute/type/proc/depend/namespace + OID/依赖 CASCADE/RESTRICT 模块已写并有测试，但 **CatalogManager 未在 main.cpp 构造、DROP 未接 planDrop**，运行时仍走文件+`schema__table` |
-| 约束 | 6 类 | 5 类 | 1 类 ❌ | DEFAULT/GENERATED STORED/IDENTITY/CHECK 已接入 INSERT/UPDATE 执行路径（ExprHelper + ExprEvaluator）；DEFERRABLE 延迟队列、EXCLUDE 执行检查仍 ⚠️ |
+| 约束 | 6 类 | 5 类 | 1 类 ❌ | DEFAULT/GENERATED STORED/IDENTITY/CHECK 已接入 INSERT/UPDATE 执行路径（ExprHelper + ExprEvaluator）；DEFERRABLE 延迟队列+提交时检查已实现；EXCLUDE 执行检查已实现；constraint trigger 仍 ⚠️ |
 | DQL/查询 | 大量 | 中量 | 大量 | SELECT 已解析为 AST（CTE/JOIN/SET OPS）；执行仍走旧 switch/case |
 | 优化器/执行器 | 简化 | 中量 | 大量 ❌ | `src/optimizer/` 仍为空；Path/RelOptInfo 框架未建（Phase 5 未启动） |
 | 索引 | 6 种 | 简化 | 大量 ❌ | IIndexAM 适配器已统一；AM API/opclass/concurrent/维护仍 ❌ |
@@ -160,7 +160,7 @@
 | 1.1.50 | `SECURITY LABEL` | 保存 label 文件；缺少 provider、对象类型全集、SELinux/sepgsql 集成 | ⚠️ |
 | 1.1.51 | `SELECT` | 支持大量子集；复杂 grammar、类型推断、表达式、函数、子查询、锁、并行、planner/rewrite 差距最大 | ⚠️ |
 | 1.1.52 | `SET` / `SHOW` | 项目参数和少量 session 状态；不是 PG GUC 全体系 | ⚠️ |
-| 1.1.53 | `SET CONSTRAINTS` | 已解析 `IMMEDIATE`/`DEFERRED` 并记录会话标志；缺少 deferrable 约束队列、提交时检查和约束触发器语义 | ⚠️ |
+| 1.1.53 | `SET CONSTRAINTS` | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟队列在 commit 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效，per-transaction 自动清除；仍缺 constraint trigger 语义 | ⚠️ |
 | 1.1.54 | `SET ROLE` | 只改 Session 字段；缺少权限检查、role stack、session authorization 联动 | ⚠️ |
 | 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 权限矩阵和会话安全上下文完整语义 | ⚠️ |
 | 1.1.56 | `SET TRANSACTION` | 隔离级别/只读部分；缺少 deferrable、当前事务时序限制完整语义 | ⚠️ |
@@ -255,20 +255,20 @@
 
 ## 5. 约束与完整性差距
 
-> **已完成进展（2026-06-21）**：约束 DDL 已登记 `DEFERRABLE`/`INITIALLY DEFERRED`/`NOT VALID`/`VALIDATE` 元数据（见 5.2/5.3/5.4 原文）。Phase 4 Wave 3 进行中：`DdlExecutor::columnDefToColumn` 已解析 `GENERATED ALWAYS AS (expr) STORED` 与 `IDENTITY`；`ForeignKey` 增加 `deferrable`/`initiallyDeferred` 字段；`tests/constraints_test.cpp`（未提交）覆盖 GENERATED STORED 与 DEFERRABLE INITIALLY DEFERRED FK。5.6 上调为 🔄。延迟约束队列/提交时检查（5.10/SET CONSTRAINTS）仍 ⚠️。
+> **已完成进展（2026-07-01）**：约束 DDL 已登记 `DEFERRABLE`/`INITIALLY DEFERRED`/`NOT VALID`/`VALIDATE` 元数据（见 5.2/5.3/5.4 原文）。Phase 4 Wave 3 进行中：`DdlExecutor::columnDefToColumn` 已解析 `GENERATED ALWAYS AS (expr) STORED` 与 `IDENTITY`；`ForeignKey` 增加 `deferrable`/`initiallyDeferred` 字段；`tests/constraints_test.cpp`（未提交）覆盖 GENERATED STORED 与 DEFERRABLE INITIALLY DEFERRED FK。5.6 上调为 🔄。**Wave 4.25 已完成**：CHECK 约束 `DEFERRABLE INITIALLY DEFERRED` 延迟队列+提交时检查已实现，`SET CONSTRAINTS` per-transaction 生效，`beginTransaction` 事务管理修复。延迟约束队列/提交时检查（5.10/SET CONSTRAINTS）已上线。constraint trigger 仍 ⚠️。
 
 | # | 约束能力 | 差距描述 | 状态 |
 |---|---------|---------|------|
 | 5.1 | `PRIMARY KEY` | 单列/复合有；缺少 deferrable、temporal constraints、partition/global uniqueness 完整语义 | ⚠️ |
 | 5.2 | `UNIQUE` | 有单列/复合，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；NULL 语义、实际延迟检查、partial unique、expression unique 与 PG 不等价 | ⚠️ |
 | 5.3 | `FOREIGN KEY` | 支持多列和部分 ON DELETE/UPDATE，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；缺少 `MATCH FULL/PARTIAL`、实际延迟检查、提交时 recheck、复杂锁与并发语义 | ⚠️ |
-| 5.4 | `CHECK` | 表达式解析范围有限，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；缺少 `NO INHERIT`、实际延迟检查和 PostgreSQL 级表达式语义 | ⚠️ |
+| 5.4 | `CHECK` | 表达式解析范围有限，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；`DEFERRABLE INITIALLY DEFERRED` CHECK 约束已实现延迟队列与提交时检查；仍缺 `NO INHERIT`、PostgreSQL 级表达式语义 | ⚠️ |
 | 5.5 | `DEFAULT` | 表达式默认值已接入 INSERT 执行路径；`DEFAULT nextval('seq')` 可获取序列值；函数 volatility 已持久化；`DEFAULT nextval('seq')` 自动建立序列到表的依赖，`DROP SEQUENCE RESTRICT/CASCADE` 正确处理依赖。仍缺：planner 级 volatility 优化、`DEFAULT VALUES` 语法、复杂表达式与类型转换的 PG 级语义 | ⚠️ |
 | 5.6 | `GENERATED` | `GENERATED ALWAYS AS (expr) STORED` 已接入 INSERT/UPDATE 执行路径并持久化；`GENERATED ALWAYS AS (expr) VIRTUAL` 已在 SELECT 投影与标量函数参数中实现查询时实时计算；schema 二进制格式 `0x44420005` 持久化 `generatedKind`；新增 `tests/generated_columns_test.cpp`。仍缺：WHERE/DISTINCT/索引/内部约束比较中 VIRTUAL 列的实时计算、planner 级优化、PG18 默认 virtual 语义兼容 | ⚠️ |
 | 5.7 | Exclusion constraints | 解析 `EXCLUDE [USING method] (elem WITH op [, ...]) [WHERE (pred)]` 已落地；`StorageEngine` 以 `.exclusions` 文件持久化约束并在 INSERT/UPDATE 执行全表冲突检查，支持 `=` 等值排斥与 `&&` int4range 重叠排斥；CREATE TABLE 由 `DdlExecutor` 创建约束，ALTER TABLE ADD/DROP CONSTRAINT 由 `main.cpp` 桥接，`DROP TABLE` 自动清理所属约束；新增 `tests/exclude_test.cpp`。仍缺：GiST 索引加速、多元素/表达式元素/其他操作符 | ⚠️ |
 | 5.8 | Temporal constraints | 缺失。PostgreSQL 18 对 range 上的 temporal primary/unique/foreign key 支持缺失 | ❌ |
 | 5.9 | Assertions | `CREATE/DROP ASSERTION` 已有目录级入口；PostgreSQL 本身未实现 SQL 标准 ASSERTION，本项目也缺少全库断言执行、依赖和重验证机制 | ⚠️ |
-| 5.10 | `SET CONSTRAINTS` | 已记录会话 immediate/deferred 标志，约束 DDL 也登记 deferrable/not-valid/validated 元数据；仍无延迟约束队列、提交时检查和 constraint trigger 语义 | ⚠️ |
+| 5.10 | `SET CONSTRAINTS` | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟队列在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效，`NOT DEFERRABLE` 不受 `SET ALL DEFERRED` 影响；schema `0x44420006` 持久化约束名与延迟标志；`constraintMode_` per-transaction 自动清除。仍缺：constraint trigger 语义、`SET CONSTRAINTS` SQL 层完整解析 | ⚠️ |
 
 ---
 
