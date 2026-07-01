@@ -4245,9 +4245,20 @@ StmtPtr SQLParser::parseCreateDomain(const std::vector<std::string>& tokens, siz
                     }
                     ++pos;
                 }
-                stmt->options["check"] = expr;
+                // Combine multiple CHECK constraints with AND.
+                auto it = stmt->options.find("check");
+                if (it != stmt->options.end() && !it->second.empty()) {
+                    it->second = "(" + it->second + ") AND (" + expr + ")";
+                } else {
+                    stmt->options["check"] = expr;
+                }
                 if (!constraintName.empty()) {
-                    stmt->options["constraint_name"] = constraintName;
+                    auto cnIt = stmt->options.find("constraint_name");
+                    if (cnIt != stmt->options.end() && !cnIt->second.empty()) {
+                        cnIt->second += ";" + constraintName;
+                    } else {
+                        stmt->options["constraint_name"] = constraintName;
+                    }
                     constraintName.clear();
                 }
             } else {
