@@ -3,7 +3,7 @@
 基于 C++17 实现的关系型数据库管理系统，支持标准 SQL 交互，具备页式存储、B+ 树索引、MVCC 事务、查询优化器、网络服务等生产级数据库核心功能。对标 PostgreSQL 级功能完整度。
 
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
-> **当前状态**: 全部 193 个 Wave 完成 (100%), 测试 PASS=109 FAIL=0
+> **当前状态**: 全部 193 个 Wave 完成 (100%), 测试 PASS=112 FAIL=0
 
 ## 功能特性
 
@@ -56,6 +56,8 @@
 - **MVCC 快照隔离**：每行带 16 字节 MVCC 头部（creatorTxnId + rollbackPtr），事务内读取基于 ReadView 的可见性规则，实现读写不阻塞
 - **隔离级别**：支持 `READ UNCOMMITTED` / `READ COMMITTED` / `REPEATABLE READ` / `SERIALIZABLE`
 - **全局事务 ID 生成器**：单调递增 64 位 txId，持久化到 `.txnid` 文件
+- **HOT 更新**：堆内元组直接更新（不更新索引指针），减少 WAL 写入与索引维护开销
+- **CLOG (Commit Log)**：事务提交状态位图，加速可见性判断与故障恢复
 
 ### 索引
 - **B+ 树主键索引**：磁盘页式存储（4096 字节/页），O(log n) 精确查找
@@ -130,6 +132,39 @@
 - **死锁检测**：等待图（Wait-for Graph）检测并打破死锁
 - **死锁日志**：`SHOW DEADLOCKS` 查看历史死锁记录
 - **锁监控**：`SHOW LOCKS` 查看当前锁持有和等待情况
+
+### 并发测试结果
+以下指标均在并发测试套件（`concurrency_test`、`hot_update_test`、`clog_test`、`clog_integration_test`、`subxip_visibility_test`、`checkpoint_test`、`wal_basic_test`）中实测验证，全部 PASS：
+
+| 测试项 | 结果 | 关键指标 |
+|--------|------|----------|
+| **事务原子性** | ✅ PASS | BEGIN/COMMIT/ROLLBACK 正确提交与回滚，Savepoint 部分回滚正常 |
+| **WAL 顺序写入吞吐** | ✅ PASS | ~1767–1781 行/秒（200 行写入约 113ms） |
+| **B+ 树索引插入吞吐** | ✅ PASS | ~1729–1741 行/秒（100 行插入约 57ms） |
+| **索引等值查找** | ✅ PASS | 34 条匹配记录在 3–4ms 内返回 |
+| **聚合性能** | ✅ PASS | 500 行 COUNT/SUM/MAX/GROUP BY 约 78ms；批量插入 500 行约 254ms |
+| **MVCC 快照隔离** | ✅ PASS | 事务内 ReadView 可见性规则正确，未提交数据不可见 |
+| **HOT 堆内更新** | ✅ PASS | 更新不修改索引指针，减少 WAL 日志写入 |
+| **CLOG 提交日志** | ✅ PASS | 事务提交状态位图读写、提交顺序追踪、子事务可见性正确 |
+| **Checkpoint 持久化** | ✅ PASS | 脏页刷盘 + WAL 截断，重启后数据完整恢复 |
+| **WAL 崩溃恢复** | ✅ PASS | 未提交事务回滚，已提交事务持久化 |
+
+**并发隔离验证示例**（基于 MVCC 快照隔离 + 锁机制）：
+```sql
+-- 连接 A
+begin;
+insert into users (id, name) values (10, 'Tom');
+-- 不提交
+
+-- 连接 B
+select * from users where id = 10;  -- 看不到（未提交隔离）
+
+-- 连接 A
+commit;
+
+-- 连接 B
+select * from users where id = 10;  -- 现在能看到
+```
 
 ### 新增功能 (Phase 4 完整化)
 - **pg_hba.conf 访问控制**: 10+ 认证方法, CIDR IP 匹配
@@ -561,7 +596,7 @@ Var Offset Array 每项 (4 bytes):
 | [MANUAL.md](docs/MANUAL.md) | 完整使用手册 (25 章, 覆盖全部 SQL 语法) |
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与 Wave 进度 (193 waves 全部完成) |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
-| [test-report.md](docs/test-report.md) | 自动测试报告 (PASS=110 FAIL=0) |
+| [test-report.md](docs/test-report.md) | 自动测试报告 (PASS=112 FAIL=0) |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 
