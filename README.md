@@ -559,10 +559,11 @@ Var Offset Array 每项 (4 bytes):
 |------|------|
 | [README.md](README.md) | 项目总览与功能特性 |
 | [MANUAL.md](docs/MANUAL.md) | 完整使用手册 (25 章, 覆盖全部 SQL 语法) |
-| [implementation-plan.md](docs/implementation-plan.md) | 实施计划与 Wave 进度 |
+| [implementation-plan.md](docs/implementation-plan.md) | 实施计划与 Wave 进度 (193 waves 全部完成) |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
-| [test-report.md](docs/test-report.md) | 测试报告 |
-| [commandsList.md](docs/commandsList.md) | 支持的 SQL 命令列表 |
+| [test-report.md](docs/test-report.md) | 自动测试报告 (PASS=110 FAIL=0) |
+| [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
+| [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 
 ## 致谢
 
