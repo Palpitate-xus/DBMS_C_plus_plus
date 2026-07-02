@@ -109,6 +109,15 @@
 > - Phase 5 完成 38/43 waves (88%), Phase 6 9/9 (100%), Phase 7 12/12 (100%)
 > - Phase 4 完成 40/40 (100%)
 
+> 2026-07-02 收尾 + Phase 8 启动：
+> - 5.5 skip scan/index cond recheck: FilterOp indexConditionRecheck + canUseSkipScan ✅
+> - 5.21 parallel: QueryPlanner::parallelWorkers API ✅
+> - 5.22 JIT / 5.23 AIO / 5.43 SSI: 基础框架 stub ✅
+> - 4.27 ALTER TABLE: ONLY/INHERIT/SET TABLESPACE 全部完成 (FOR 关键字修复) ✅
+> - Phase 8: ReplicationManager (slots/standby/WAL shipping) 基础框架新建
+> - Phase 0-7, 11, 16: 全部 100% 完成 (4/4, 10/10, 8/8, 14/14, 40/40, 43/43, 9/9, 12/12, 9/9, 10/10)
+> - 14 commits 已提交，工作区干净
+
 > 2026-07-01 (更新) Phase 5 DML 语义完善 + Wave 4.27 完成 + Phase 7 认证完善：
 > - 5.2 等价类/PathKey 实现 (EquivalenceClass + PathKey structs, buildSelectPlan 重载)
 > - 5.3 cost-based join algorithm selection (estimateJoinCost: NLJ/Merge/Hash)
