@@ -5,7 +5,7 @@
 # ============================================================
 
 # ---- Builder stage ----
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:26.10 AS builder
 
 # Avoid interactive prompts during apt install
 ENV DEBIAN_FRONTEND=noninteractive
@@ -21,13 +21,14 @@ WORKDIR /app
 
 # Copy source tree
 COPY src/ src/
-COPY scripts/build.sh CMakeLists.txt ./
+COPY scripts/ scripts/
+COPY CMakeLists.txt ./
 
 # Build the binary (build.sh detects OpenSSL automatically)
 RUN chmod +x scripts/build.sh && scripts/build.sh
 
 # ---- Runtime stage ----
-FROM ubuntu:24.04 AS runtime
+FROM ubuntu:26.10 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 

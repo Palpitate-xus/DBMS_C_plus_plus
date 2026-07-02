@@ -30,7 +30,6 @@ slow_query.log
 
 # Docs (not needed in image)
 docs/
-scripts/
 
 # Git
 .git/
