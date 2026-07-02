@@ -17,9 +17,10 @@ services:
     image: dbms-c-plus-plus:latest
     container_name: dbms_server
     # Run in TCP server mode (remove for interactive use)
-    command: ["./dbms_main", "--server", "9999"]
+    # Port configurable via DBMS_PORT env var (default 9999)
+    command: ["./dbms_main", "--server", "${DBMS_PORT:-9999}"]
     ports:
-      - "9999:9999"
+      - "${DBMS_PORT:-9999}:${DBMS_PORT:-9999}"
     volumes:
       # Persist database files outside the container
       - dbms_data:/data
