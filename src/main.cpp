@@ -15171,6 +15171,47 @@ bool execute(const string& rawSql, Session& s) {
             condTokens = tokenize(condStr);
         }
 
+        // Helper: execute a single-table SELECT via the volcano operator tree.
+        // Returns true if the volcano path was used (results placed in `answers`).
+        // Returns false when the query has features the volcano path doesn't yet
+        // support (inheritance, FOR UPDATE, DISTINCT ON, NOWAIT/SKIP LOCKED, etc.),
+        // in which case the caller falls back to g_engine.query().
+        auto executeVolcanoSelect = [&](const std::string& tblName,
+                                         const std::set<std::string>& projCols,
+                                         const std::vector<std::string>& conds,
+                                         const StorageEngine::OrderBySpec* orderBy,
+                                         bool distinct,
+                                         std::vector<std::string>& outAnswers) -> bool {
+            // Fall back when the volcano path cannot yet handle the query.
+            if (forUpdate || noWait || skipLocked) return false;
+            if (!distinctOnCols.empty()) return false;
+            // Inheritance: volcano path only scans one table.
+            if (tblName != "information_schema" && tblName != "pg_catalog") {
+                std::string db = queryDb;
+                if (!g_engine.tableExists(db, tblName)) db = s.currentDB;
+                if (g_engine.tableExists(db, tblName)) {
+                    auto children = g_engine.getInheritedChildren(db, tblName);
+                    if (!children.empty()) return false;
+                }
+            }
+
+            dbms::PlanContext ctx;
+            ctx.dbname = queryDb;
+            ctx.tablename = tblName;
+            ctx.selectCols = projCols;
+            if (orderBy) {
+                ctx.orderByCol = orderBy->colName;
+                ctx.orderByAsc = orderBy->ascending;
+            }
+            ctx.distinct = distinct;
+            // Parse conditions: conds is a vector of "col op value" strings.
+            ctx.conds = dbms::StorageEngine::parseConditions(conds);
+
+            auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+            outAnswers = dbms::QueryPlanner::executePlan(std::move(plan));
+            return true;
+        };
+
         vector<string> answers;
         if (!groupByCols.empty()) {
             if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
@@ -15781,54 +15822,93 @@ bool execute(const string& rawSql, Session& s) {
                 cout << tbl.cols[i].dataName << ' ';
             }
             cout << '\n';
+
+            // Determine the first simple ORDER BY spec (if any) that the volcano
+            // path can consume (only plain column ORDER BY without NULLS / expr).
+            const StorageEngine::OrderBySpec* firstOrderBy = nullptr;
+            for (const auto& sp : orderBySpecs) {
+                if (!sp.isExpression) { firstOrderBy = &sp; break; }
+            }
+            bool useDistinct = isDistinct && distinctOnCols.empty();
+
+            // Try volcano operator-tree execution for the base table.
+            // Falls back to g_engine.query() when unsupported features are present.
+            bool volcanoUsed = false;
             if (condTokens.empty()) {
-                answers = g_engine.query(queryDb, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                volcanoUsed = executeVolcanoSelect(tname, selectCols, {},
+                                                    firstOrderBy, useDistinct, answers);
             } else {
-                condTokens.insert(condTokens.begin(), "(");
-                condTokens.push_back(")");
-                for (auto& t : condTokens) t = modifyLogic(t);
-                auto groups = breakDownConditions(condTokens);
+                // Make a local copy since modifyLogic mutates tokens.
+                vector<string> condCopy = condTokens;
+                condCopy.insert(condCopy.begin(), "(");
+                condCopy.push_back(")");
+                for (auto& t : condCopy) t = modifyLogic(t);
+                auto groups = breakDownConditions(condCopy);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(queryDb, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                    vector<string> part;
+                    bool ok = executeVolcanoSelect(tname, selectCols, g,
+                                                    firstOrderBy, useDistinct, part);
+                    if (!ok) { volcanoUsed = false; break; }
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
+                    volcanoUsed = true;
                 }
             }
-            // Inheritance: UNION rows from child tables
-            if (queryDb != "information_schema" && queryDb != "pg_catalog") {
-                auto children = g_engine.getInheritedChildren(queryDb, tname);
-                if (!children.empty()) {
-                    set<string> childSelectCols = selectCols;
-                    if (selectAll) {
-                        for (size_t i = 0; i < tbl.len; ++i) childSelectCols.insert(tbl.cols[i].dataName);
+
+            if (!volcanoUsed) {
+                // Fallback: use StorageEngine::query directly.
+                answers.clear();
+                if (condTokens.empty()) {
+                    answers = g_engine.query(queryDb, tname, {}, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                } else {
+                    condTokens.insert(condTokens.begin(), "(");
+                    condTokens.push_back(")");
+                    for (auto& t : condTokens) t = modifyLogic(t);
+                    auto groups = breakDownConditions(condTokens);
+                    set<string> seen;
+                    for (const auto& g : groups) {
+                        auto part = g_engine.query(queryDb, tname, g, selectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                        for (const auto& row : part) {
+                            if (seen.insert(row).second) answers.push_back(row);
+                        }
                     }
-                    for (const auto& childName : children) {
-                        if (!g_engine.tableExists(queryDb, childName)) continue;
-                        if (condTokens.empty()) {
-                            auto childRows = g_engine.query(queryDb, childName, {}, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
-                            for (const auto& row : childRows) answers.push_back(row);
-                        } else {
-                            // Re-tokenize conditions for each child (they were modified above)
-                            size_t condEnd = (groupPos != string::npos) ? groupPos
-                                           : (havingPos != string::npos) ? havingPos
-                                           : (orderPos != string::npos) ? orderPos
-                                           : (limitPos != string::npos) ? limitPos
-                                           : (offsetPos != string::npos) ? offsetPos : sql.size();
-                            string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
-                            whereClause = expandSubqueries(whereClause, s);
-                            string condStr = normalizeConditionStr(whereClause);
-                            auto childCondTokens = tokenize(condStr);
-                            childCondTokens.insert(childCondTokens.begin(), "(");
-                            childCondTokens.push_back(")");
-                            for (auto& t : childCondTokens) t = modifyLogic(t);
-                            auto childGroups = breakDownConditions(childCondTokens);
-                            set<string> childSeen;
-                            for (const auto& g : childGroups) {
-                                auto part = g_engine.query(queryDb, childName, g, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
-                                for (const auto& row : part) {
-                                    if (childSeen.insert(row).second) answers.push_back(row);
+                }
+                // Inheritance: UNION rows from child tables
+                if (queryDb != "information_schema" && queryDb != "pg_catalog") {
+                    auto children = g_engine.getInheritedChildren(queryDb, tname);
+                    if (!children.empty()) {
+                        set<string> childSelectCols = selectCols;
+                        if (selectAll) {
+                            for (size_t i = 0; i < tbl.len; ++i) childSelectCols.insert(tbl.cols[i].dataName);
+                        }
+                        for (const auto& childName : children) {
+                            if (!g_engine.tableExists(queryDb, childName)) continue;
+                            if (condTokens.empty()) {
+                                auto childRows = g_engine.query(queryDb, childName, {}, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                                for (const auto& row : childRows) answers.push_back(row);
+                            } else {
+                                // Re-tokenize conditions for each child (they were modified above)
+                                size_t condEnd = (groupPos != string::npos) ? groupPos
+                                               : (havingPos != string::npos) ? havingPos
+                                               : (orderPos != string::npos) ? orderPos
+                                               : (limitPos != string::npos) ? limitPos
+                                               : (offsetPos != string::npos) ? offsetPos : sql.size();
+                                string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
+                                whereClause = expandSubqueries(whereClause, s);
+                                string condStr = normalizeConditionStr(whereClause);
+                                auto childCondTokens = tokenize(condStr);
+                                childCondTokens.insert(childCondTokens.begin(), "(");
+                                childCondTokens.push_back(")");
+                                for (auto& t : childCondTokens) t = modifyLogic(t);
+                                auto childGroups = breakDownConditions(childCondTokens);
+                                set<string> childSeen;
+                                for (const auto& g : childGroups) {
+                                    auto part = g_engine.query(queryDb, childName, g, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                                    for (const auto& row : part) {
+                                        if (childSeen.insert(row).second) answers.push_back(row);
+                                    }
                                 }
                             }
                         }

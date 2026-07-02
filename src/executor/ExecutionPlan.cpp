@@ -846,8 +846,9 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         root = std::make_unique<DistinctOp>(std::move(root));
     }
 
-    // Add Project if specific columns selected
-    if (!ctx.selectCols.empty()) {
+    // Always add a Project so the output is formatted text (not raw binary).
+    // When selectCols is empty, Project emits all columns (SELECT * semantics).
+    {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<ProjectOp>(std::move(root), tbl, ctx.selectCols);
     }
