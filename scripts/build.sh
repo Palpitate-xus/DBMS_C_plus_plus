@@ -55,6 +55,9 @@ SOURCES=(
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
     src/utils/pg_hba.cpp
+    src/replication/ReplicationManager.cpp
+    src/process/ProcessManager.cpp
+    src/storage/LargeObject.cpp
     src/types/numeric.cpp
 )
 

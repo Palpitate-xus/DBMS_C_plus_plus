@@ -5,7 +5,7 @@ SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SRC_DIR"
 INC=(-Isrc -Isrc/common -Isrc/storage -Isrc/access -Isrc/transaction -Isrc/network \
      -Isrc/utils -Isrc/executor -Isrc/commands -Isrc/interfaces -Isrc/parser \
-     -Isrc/catalog -Isrc/expression)
+     -Isrc/catalog -Isrc/expression -Isrc/replication -Isrc/process)
 CXXFLAGS=(-std=c++17 -O2 -pthread)
 
 # Detect OpenSSL to match main build
@@ -59,6 +59,9 @@ PROJECT_SOURCES=(
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
     src/utils/pg_hba.cpp
+    src/replication/ReplicationManager.cpp
+    src/process/ProcessManager.cpp
+    src/storage/LargeObject.cpp
     src/types/numeric.cpp
 )
 
