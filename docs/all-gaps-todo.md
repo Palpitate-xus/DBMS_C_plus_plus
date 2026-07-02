@@ -568,13 +568,15 @@
 - 移除 DDL 隐式提交，实现对象依赖和 rollback — **DDL 事务骨架已建，全量移除隐式提交在 Phase 4.39**
 - 实现 CLOG/pg_xact、visibility map、hint bits — **已完成**（freeze map 仍待 Phase 5.32）
 
-### Phase 4：类型系统与函数 🔄 进行中（Wave 0~2 完成）
-- 完善 cast、operator、function overloading、collation、NULL 表示 — **TypeRegistry + ExprEvaluator 已建，逐类型 I/O 待 Wave 1**
+### Phase 4：类型系统与函数 🔄 基本完成（Wave 0~2 + DDL 桥接完成）
+- 完善 cast、operator、function overloading、collation、NULL 表示 — **TypeRegistry + ExprEvaluator 已建，逐类型 I/O 已补**
 - 实现完整的表达式求值框架 — **ExprEvaluator 已建（Wave 0.2）**
 - 补齐 JSON/XML/Array/Range 全函数 — **内置函数子集已加（Wave 2），全集待补**
+- DDL 桥接（CREATE/ALTER TABLE 全选项、域多 CHECK、分区、INHERITS、SET STATISTICS）— **已完成**
 
-### Phase 5：Planner 与执行器 ❌ 未启动
-- 建立 path/relation/statistics 框架 — **未启动**（`src/optimizer/` 为空）
+### Phase 5：Planner 与执行器 🔄 进行中（Wave 5.1 已启动）
+- 建立 path/relation/statistics 框架 — **QueryPlanner + 11 类算子已实现（TableScan/IndexScan/Filter/Project/Sort/Limit/Distinct/NLJ/HJ/MJ/Aggregate）**
+- AST→算子树执行路径（Wave 5.1）— **进行中**
 - 补 bitmap/parallel/partitionwise/skip scan — **未启动**
 - 实现 EXPLAIN ANALYZE 真实节点级统计 — **未启动**
 
@@ -590,9 +592,14 @@
 - 实现扩展加载框架、过程语言和外部表生态 — **未启动**
 - 实现 Hook 系统、后台工作进程、共享内存扩展 — **未启动**
 
+### 进度备注（追加记录）
+
+- **2026-07-02**：PASS=111 FAIL=0。新增模块：`ReplicationManager`（复制槽/WAL shipping/standby/promote）、`ProcessManager`（11 类后台进程池）、`LargeObjectManager`（大对象 CRUD+导入导出）。并发测试、PG 差距分析、MANUAL（25 章用户手册）已落地。AST→DdlExecutor CREATE/ALTER TABLE 桥接（LIKE INCLUDING/OF/PARTITION BY/INHERITS/SET STATISTICS）已覆盖。
+- **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。
+
 ---
 
-*最后更新：2026-06-21*
+*最后更新：2026-07-02*
 *关联文档：*
 - [postgresql-complete-gap-analysis.md](postgresql-complete-gap-analysis.md) — 最详细的差距分析原文（不可删除）
 - [implementation-plan.md](implementation-plan.md) — 按 phase 排列的实施计划与"已完成内容"记录（Phase 0~3 已完成，Phase 4 进行中）
