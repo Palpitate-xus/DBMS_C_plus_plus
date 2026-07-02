@@ -1,0 +1,36 @@
+# ============================================================
+# DBMS_C_plus_plus — Docker Compose deployment
+#
+# Usage:
+#   docker-compose up -d          # start server on port 9999
+#   docker-compose logs -f        # follow logs
+#   docker-compose down           # stop
+#
+#   nc localhost 9999             # connect with netcat
+# ============================================================
+
+services:
+  dbms:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dbms-c-plus-plus:latest
+    container_name: dbms_server
+    # Run in TCP server mode (remove for interactive use)
+    command: ["./dbms_main", "--server", "9999"]
+    ports:
+      - "9999:9999"
+    volumes:
+      # Persist database files outside the container
+      - dbms_data:/data
+    restart: unless-stopped
+    # Resource limits (adjust to taste)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+volumes:
+  dbms_data:
+    driver: local

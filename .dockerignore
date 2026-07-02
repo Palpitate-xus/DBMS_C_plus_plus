@@ -1,0 +1,37 @@
+# Build artifacts
+build/
+build/obj/
+*.o
+
+# Databases created by tests / runtime
+__t_*/
+*.dt
+*.idx
+*.stc
+*.secidx
+*.hashidx
+*.wal
+checkpoints/
+.txnid
+tlist.lst
+.stats
+.permissions
+
+# User data / logs
+user.dat
+role.dat
+dbms.log
+slow_query.log
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# Docs (not needed in image)
+docs/
+scripts/
+
+# Git
+.git/
+.gitignore
