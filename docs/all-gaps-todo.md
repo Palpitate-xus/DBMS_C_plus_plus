@@ -594,7 +594,7 @@
 
 ### 进度备注（追加记录）
 
-- **2026-07-02**：PASS=111 FAIL=0。新增模块：`ReplicationManager`（复制槽/WAL shipping/standby/promote）、`ProcessManager`（11 类后台进程池）、`LargeObjectManager`（大对象 CRUD+导入导出）。并发测试、PG 差距分析、MANUAL（25 章用户手册）已落地。AST→DdlExecutor CREATE/ALTER TABLE 桥接（LIKE INCLUDING/OF/PARTITION BY/INHERITS/SET STATISTICS）已覆盖。
+- **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。
 
 ---
