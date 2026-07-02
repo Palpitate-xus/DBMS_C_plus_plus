@@ -1,3 +1,4 @@
+#include "test_utils.h"
 #include "catalog/CatalogService.h"
 #include "commands/TableManage.h"
 #include "Session.h"
@@ -86,11 +87,15 @@ static void test_checkpoint_persists_catalog() {
     // Checkpoint should persist the catalog (among other things).
     engine.checkpoint(db);
 
-    // Evict and reload from disk.
+    // Evict and reload from disk — the namespace system table should survive.
     engine.catalogService().evict(db);
     dbms::CatalogManager& cat2 = engine.catalogService().get(db);
 
-    const auto* cls2 = cat2.findClassByName("checkpoint_tbl", nsPublic->oid);
+    // After reload, the public namespace must be found.
+    const auto* ns2 = cat2.findNamespaceByName("public");
+    assert(ns2 != nullptr);
+    // The class we created should be visible (checkpoint persists catalog).
+    const auto* cls2 = cat2.findClassByName("checkpoint_tbl", ns2->oid);
     assert(cls2 != nullptr);
     assert(cls2->relnatts == 3);
 
@@ -99,6 +104,7 @@ static void test_checkpoint_persists_catalog() {
 }
 
 int main() {
+    cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
     test_bootstrap_and_cache();
     test_migration_of_existing_db();

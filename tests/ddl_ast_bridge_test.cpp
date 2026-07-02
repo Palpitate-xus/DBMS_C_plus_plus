@@ -189,6 +189,7 @@ static void test_drop_database_evicts_catalog() {
 }
 
 int main() {
+    cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
     test_create_drop_table();
     test_create_table_registers_in_catalog();

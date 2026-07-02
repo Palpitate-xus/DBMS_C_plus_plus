@@ -28,11 +28,11 @@ static bool hasClass(dbms::CatalogManager& cat, const std::string& name) {
 }
 
 static void test_runtime_wiring_smoke() {
-    std::string db = testDbPath("runtime_wiring_t1");
+    std::string db = testDbPath("rw_test");
     cleanup(db);
 
     Session s;
-    setupSession(s, "");
+    setupSession(s, db);
     dbms::DdlExecutor ddl;
 
     bool err = ddl.executeSql("CREATE DATABASE " + db, s);
@@ -72,6 +72,7 @@ static void test_runtime_wiring_smoke() {
 }
 
 int main() {
+    cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
     test_runtime_wiring_smoke();
     std::cout << "[RUNTIME-WIRING] all passed" << std::endl;

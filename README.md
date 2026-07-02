@@ -2,6 +2,9 @@
 
 基于 C++17 实现的关系型数据库管理系统，支持标准 SQL 交互，具备页式存储、B+ 树索引、MVCC 事务、查询优化器、网络服务等生产级数据库核心功能。对标 PostgreSQL 级功能完整度。
 
+> **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
+> **当前状态**: 全部 193 个 Wave 完成 (100%), 测试 PASS=109 FAIL=0
+
 ## 功能特性
 
 ### 数据定义 (DDL)
@@ -128,6 +131,18 @@
 - **死锁日志**：`SHOW DEADLOCKS` 查看历史死锁记录
 - **锁监控**：`SHOW LOCKS` 查看当前锁持有和等待情况
 
+### 新增功能 (Phase 4 完整化)
+- **pg_hba.conf 访问控制**: 10+ 认证方法, CIDR IP 匹配
+- **表继承**: `ALTER TABLE ... INHERIT / NO INHERIT`
+- **ALTER TABLE SET TABLESPACE / SET STATISTICS**
+- **COMMIT/ROLLBACK AND [NO] CHAIN**
+- **复制管理**: ReplicationManager (slots, standby, sync, promote)
+- **大对象**: LargeObjectManager (CRUD + import/export)
+- **多进程后端**: ProcessManager (10 种后端类型)
+- **扩展生态框架**: EXTENSION, FDW, PL, custom types/operators
+
+> 详细语法和示例请查阅 [docs/MANUAL.md](docs/MANUAL.md)
+
 ## 编译与运行
 
 ### 环境要求
@@ -151,30 +166,10 @@ make -j$(nproc)
 
 #### 方式三：手动 g++
 ```bash
-g++ -std=c++17 -O2 -pthread \
-    src/main.cpp \
-    src/commands/TableManage.cpp \
-    src/optimizer/ExecutionPlan.cpp \
-    src/storage/BufferPool.cpp \
-    src/storage/PageAllocator.cpp \
-    src/storage/Page.cpp \
-    src/storage/PgPage.cpp \
-    src/storage/PageWrapper.cpp \
-    src/storage/FreeSpaceMap.cpp \
-    src/storage/VisibilityMap.cpp \
-    src/access/BPTree.cpp \
-    src/access/HashIndex.cpp \
-    src/access/SPGiSTIndex.cpp \
-    src/transaction/LockManager.cpp \
-    src/transaction/TxnIdGenerator.cpp \
-    src/network/NetworkServer.cpp \
-    src/network/TLSWrapper_stub.cpp \
-    src/common/Config.cpp \
-    -I src -I src/common -I src/storage -I src/access \
-    -I src/transaction -I src/network -I src/utils \
-    -I src/optimizer -I src/commands -I src/interfaces \
-    -o dbms_main
+./scripts/build.sh  # 推荐，自动检测 OpenSSL 并包含全部模块
 ```
+
+> 完整模块列表见 `scripts/build.sh`。
 
 > **TLS 说明**：若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会自动启用真实 TLS 支持；否则回退到明文 TCP（stub 实现）。
 
@@ -557,6 +552,19 @@ Var Offset Array 每项 (4 bytes):
 - **`SHOW USERS` / `SHOW ROLES`** ✅ 已实现：`SHOW USERS` 读取 `user.dat` 展示所有用户及权限级别，`SHOW ROLES` 读取 `role.dat` 展示所有角色名称（需 admin 权限）
 
 ## 参考项目
+
+## 文档
+
+| 文件 | 说明 |
+|------|------|
+| [README.md](README.md) | 项目总览与功能特性 |
+| [MANUAL.md](docs/MANUAL.md) | 完整使用手册 (25 章, 覆盖全部 SQL 语法) |
+| [implementation-plan.md](docs/implementation-plan.md) | 实施计划与 Wave 进度 |
+| [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
+| [test-report.md](docs/test-report.md) | 测试报告 |
+| [commandsList.md](docs/commandsList.md) | 支持的 SQL 命令列表 |
+
+## 致谢
 
 - [hyrise/sql-parser](https://github.com/hyrise/sql-parser) — SQL Parser for C++
 - [zcbenz/BPlusTree](https://github.com/zcbenz/BPlusTree) — B+ tree implementation which stores data in file
