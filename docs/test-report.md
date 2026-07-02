@@ -1,9 +1,8 @@
 # DBMS 功能测试报告
 
-> 测试日期：2026-06-04
-> 测试版本：master (POINT 类型 + ALTER VIEW 实现后)
-> 测试依据：[commandsList.md](commandsList.md)
-> 测试方式：交互式 CLI 逐条验证
+> 最后更新：2026-07-02
+> 自动测试套件：PASS=109 FAIL=0 (scripts/run_all_tests_fast.sh)
+> 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
 
