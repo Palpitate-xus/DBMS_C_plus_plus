@@ -13,6 +13,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
@@ -43,7 +44,7 @@ static std::string aggResult(const std::string& db, const std::string& tbl,
 
 // ----- Test 1: bool_or with mixed true/false → true -----
 static void test_bool_or_mixed() {
-    std::string db = "agg_bool_or";
+    std::string db = testDbPath("agg_bool_or");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -60,7 +61,7 @@ static void test_bool_or_mixed() {
 
 // ----- Test 2: bool_and with mixed true/false → false -----
 static void test_bool_and_mixed() {
-    std::string db = "agg_bool_and";
+    std::string db = testDbPath("agg_bool_and");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -77,7 +78,7 @@ static void test_bool_and_mixed() {
 
 // ----- Test 3: bool_and all true → true -----
 static void test_bool_and_all_true() {
-    std::string db = "agg_bat";
+    std::string db = testDbPath("agg_bat");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -93,7 +94,7 @@ static void test_bool_and_all_true() {
 
 // ----- Test 4: bool_or all false → false -----
 static void test_bool_or_all_false() {
-    std::string db = "agg_bof";
+    std::string db = testDbPath("agg_bof");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -109,7 +110,7 @@ static void test_bool_or_all_false() {
 
 // ----- Test 5: EVERY is synonym for bool_and -----
 static void test_every_synonym() {
-    std::string db = "agg_every";
+    std::string db = testDbPath("agg_every");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -125,7 +126,7 @@ static void test_every_synonym() {
 
 // ----- Test 6: empty table → NULL -----
 static void test_empty_table_null() {
-    std::string db = "agg_empty";
+    std::string db = testDbPath("agg_empty");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -140,7 +141,7 @@ static void test_empty_table_null() {
 
 // ----- Test 7: integer column — "1" matches "true", "0" matches "false" -----
 static void test_int_as_bool() {
-    std::string db = "agg_intbool";
+    std::string db = testDbPath("agg_intbool");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

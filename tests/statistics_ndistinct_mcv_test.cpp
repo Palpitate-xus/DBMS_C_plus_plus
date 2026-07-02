@@ -13,11 +13,12 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -34,7 +35,7 @@ static void seed(const std::string& db) {
 }
 
 static void test_ndistinct() {
-    std::string db = "stat_nd";
+    std::string db = testDbPath("stat_nd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -56,7 +57,7 @@ static void test_ndistinct() {
 }
 
 static void test_mcv() {
-    std::string db = "stat_mcv";
+    std::string db = testDbPath("stat_mcv");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -80,7 +81,7 @@ static void test_mcv() {
 }
 
 static void test_guards() {
-    std::string db = "stat_guard";
+    std::string db = testDbPath("stat_guard");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

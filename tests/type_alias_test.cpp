@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -41,7 +40,7 @@ static void test_registry_aliases() {
 }
 
 static void test_ddl_alias_columns() {
-    std::string db = "type_alias_t1";
+    std::string db = testDbPath("type_alias_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

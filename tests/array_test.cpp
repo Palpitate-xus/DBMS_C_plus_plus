@@ -15,14 +15,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -42,7 +41,7 @@ static std::string fetchOne(const std::string& db, const std::string& tbl,
 
 // Array columns are now recognized (regression: they were created as scalars).
 static void test_array_recognized() {
-    std::string db = "arr_reg";
+    std::string db = testDbPath("arr_reg");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -62,7 +61,7 @@ static void test_array_recognized() {
 
 // Integer-array literal validation and whitespace canonicalization.
 static void test_int_array() {
-    std::string db = "arr_int";
+    std::string db = testDbPath("arr_int");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -92,7 +91,7 @@ static void test_int_array() {
 
 // Multidimensional arrays must be rectangular.
 static void test_multidim() {
-    std::string db = "arr_md";
+    std::string db = testDbPath("arr_md");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -112,7 +111,7 @@ static void test_multidim() {
 
 // Text arrays accept any element and quote those needing it.
 static void test_text_array() {
-    std::string db = "arr_txt";
+    std::string db = testDbPath("arr_txt");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -130,7 +129,7 @@ static void test_text_array() {
 }
 
 static void test_array_update() {
-    std::string db = "arr_upd";
+    std::string db = testDbPath("arr_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

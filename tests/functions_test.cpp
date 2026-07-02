@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
@@ -32,9 +33,7 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -75,7 +74,7 @@ static void test_scalar_functions() {
 }
 
 static void test_aggregates() {
-    std::string db = "functions_t1";
+    std::string db = testDbPath("functions_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

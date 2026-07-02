@@ -14,14 +14,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -31,7 +30,7 @@ static void setupSession(Session& s, const std::string& db) {
 
 // Verify parser correctly parses ALTER TABLE ... INHERIT / NO INHERIT.
 static void test_inherit_parser() {
-    std::string db = "inh_parse";
+    std::string db = testDbPath("inh_parse");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -68,7 +67,7 @@ static void test_inherit_parser() {
 
 // Verify INHERIT creates the .<table>.inherits file (via main.cpp execution path).
 static void test_inherit_execution() {
-    std::string db = "inh_exec";
+    std::string db = testDbPath("inh_exec");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

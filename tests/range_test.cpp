@@ -14,14 +14,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -41,7 +40,7 @@ static std::string fetchOne(const std::string& db, const std::string& tbl,
 
 // Discrete integer ranges fold to canonical [) form.
 static void test_int_range_canonical() {
-    std::string db = "range_int";
+    std::string db = testDbPath("range_int");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -72,7 +71,7 @@ static void test_int_range_canonical() {
 
 // Infinite bounds become exclusive; both-infinite allowed.
 static void test_infinite_bounds() {
-    std::string db = "range_inf";
+    std::string db = testDbPath("range_inf");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -92,7 +91,7 @@ static void test_infinite_bounds() {
 
 // Continuous ranges keep bound inclusivity; numrange / daterange.
 static void test_num_date_range() {
-    std::string db = "range_nd";
+    std::string db = testDbPath("range_nd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -113,7 +112,7 @@ static void test_num_date_range() {
 
 // Malformed literals and lower>upper are rejected.
 static void test_range_invalid() {
-    std::string db = "range_bad";
+    std::string db = testDbPath("range_bad");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -139,7 +138,7 @@ static void test_range_invalid() {
 }
 
 static void test_range_update() {
-    std::string db = "range_upd";
+    std::string db = testDbPath("range_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

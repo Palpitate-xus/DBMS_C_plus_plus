@@ -2,6 +2,7 @@
 // Phase 8-10 tests: Replication, Process Manager, Large Objects
 // ============================================================================
 
+#include "test_utils.h"
 #include "replication/ReplicationManager.h"
 #include "process/ProcessManager.h"
 #include "storage/LargeObject.h"
@@ -81,8 +82,8 @@ static void test_process_manager() {
 
 // === Phase 10: Large Object ===
 static void test_large_object() {
-    std::string dbPath = "/tmp/lo_test_db";
-    std::filesystem::remove_all(dbPath);
+    std::string dbPath = testDbPath("lo_test_db");
+    cleanupTestDb("lo_test_db");
 
     dbms::LargeObjectManager loMgr(dbPath);
 

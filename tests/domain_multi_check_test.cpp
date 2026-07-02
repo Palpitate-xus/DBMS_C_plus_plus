@@ -11,14 +11,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -28,7 +27,7 @@ static void setupSession(Session& s, const std::string& db) {
 
 // Domain with two CHECK constraints: value must be positive AND < 1000.
 static void test_domain_multi_check() {
-    std::string db = "dom_multi_chk";
+    std::string db = testDbPath("dom_multi_chk");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -56,7 +55,7 @@ static void test_domain_multi_check() {
 
 // Domain with three CHECK constraints.
 static void test_domain_three_checks() {
-    std::string db = "dom_three_chk";
+    std::string db = testDbPath("dom_three_chk");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -84,7 +83,7 @@ static void test_domain_three_checks() {
 
 // Domain with single CHECK still works (regression).
 static void test_domain_single_check() {
-    std::string db = "dom_single_chk";
+    std::string db = testDbPath("dom_single_chk");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -26,7 +25,7 @@ static std::string trimRight(const std::string& s) {
 }
 
 static void test_stored_generated() {
-    std::string db = "gen_col_stored";
+    std::string db = testDbPath("gen_col_stored");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -61,7 +60,7 @@ static void test_stored_generated() {
 }
 
 static void test_virtual_generated() {
-    std::string db = "gen_col_virtual";
+    std::string db = testDbPath("gen_col_virtual");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -97,7 +96,7 @@ static void test_virtual_generated() {
 }
 
 static void test_virtual_scalar_function() {
-    std::string db = "gen_col_virtual_func";
+    std::string db = testDbPath("gen_col_virtual_func");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

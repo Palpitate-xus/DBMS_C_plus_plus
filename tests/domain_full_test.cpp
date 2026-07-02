@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -26,7 +25,7 @@ static std::string trimRight(const std::string& s) {
 }
 
 static void test_domain_check() {
-    std::string db = "domain_check";
+    std::string db = testDbPath("domain_check");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -54,7 +53,7 @@ static void test_domain_check() {
 }
 
 static void test_domain_default() {
-    std::string db = "domain_default";
+    std::string db = testDbPath("domain_default");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -80,7 +79,7 @@ static void test_domain_default() {
 }
 
 static void test_domain_update() {
-    std::string db = "domain_update";
+    std::string db = testDbPath("domain_update");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

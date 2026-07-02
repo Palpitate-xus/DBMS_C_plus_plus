@@ -13,14 +13,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -29,7 +28,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_rollback_create() {
-    std::string db = "ddl_txn_t1";
+    std::string db = testDbPath("ddl_txn_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -56,7 +55,7 @@ static void test_rollback_create() {
 }
 
 static void test_commit_survives() {
-    std::string db = "ddl_txn_t2";
+    std::string db = testDbPath("ddl_txn_t2");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -80,7 +79,7 @@ static void test_commit_survives() {
 }
 
 static void test_wal_catalog_record() {
-    std::string db = "ddl_txn_t3";
+    std::string db = testDbPath("ddl_txn_t3");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -113,7 +112,7 @@ static void test_wal_catalog_record() {
 }
 
 static void test_executor_uses_transaction() {
-    std::string db = "ddl_txn_t4";
+    std::string db = testDbPath("ddl_txn_t4");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

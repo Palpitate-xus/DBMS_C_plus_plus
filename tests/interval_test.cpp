@@ -13,14 +13,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -50,7 +49,7 @@ static void check(const std::string& db, dbms::DdlExecutor&, Session&, int& id,
 }
 
 static void test_interval_canonical() {
-    std::string db = "iv_ok";
+    std::string db = testDbPath("iv_ok");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -80,7 +79,7 @@ static void test_interval_canonical() {
 }
 
 static void test_interval_invalid() {
-    std::string db = "iv_bad";
+    std::string db = testDbPath("iv_bad");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -101,7 +100,7 @@ static void test_interval_invalid() {
 }
 
 static void test_interval_update() {
-    std::string db = "iv_upd";
+    std::string db = testDbPath("iv_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

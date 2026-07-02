@@ -6,11 +6,12 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser"; s.permission = 1; s.currentDB = db;
 }
@@ -72,7 +73,7 @@ static void test_for_update_parser() {
 
 // 5.10 UPDATE FROM engine support
 static void test_update_from_engine() {
-    std::string db = "dml_upd";
+    std::string db = testDbPath("dml_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

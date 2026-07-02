@@ -14,11 +14,12 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -33,7 +34,7 @@ static bool colIsPk(const dbms::TableSchema& tbl, const std::string& col) {
 }
 
 static void test_add_pk_success() {
-    std::string db = "addpk_ok";
+    std::string db = testDbPath("addpk_ok");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -58,7 +59,7 @@ static void test_add_pk_success() {
 }
 
 static void test_add_pk_duplicate_data() {
-    std::string db = "addpk_dup";
+    std::string db = testDbPath("addpk_dup");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -79,7 +80,7 @@ static void test_add_pk_duplicate_data() {
 }
 
 static void test_add_pk_null_data() {
-    std::string db = "addpk_null";
+    std::string db = testDbPath("addpk_null");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -98,7 +99,7 @@ static void test_add_pk_null_data() {
 }
 
 static void test_add_pk_rejections() {
-    std::string db = "addpk_rej";
+    std::string db = testDbPath("addpk_rej");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -120,7 +121,7 @@ static void test_add_pk_rejections() {
 }
 
 static void test_add_pk_composite() {
-    std::string db = "addpk_comp";
+    std::string db = testDbPath("addpk_comp");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -140,7 +141,7 @@ static void test_add_pk_composite() {
 }
 
 static void test_drop_pk() {
-    std::string db = "droppk";
+    std::string db = testDbPath("droppk");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

@@ -6,14 +6,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -22,7 +21,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_sequence_basic() {
-    std::string db = "seq_basic";
+    std::string db = testDbPath("seq_basic");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -43,7 +42,7 @@ static void test_sequence_basic() {
 }
 
 static void test_sequence_min_max_cycle() {
-    std::string db = "seq_cycle";
+    std::string db = testDbPath("seq_cycle");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -65,7 +64,7 @@ static void test_sequence_min_max_cycle() {
 }
 
 static void test_sequence_cache() {
-    std::string db = "seq_cache";
+    std::string db = testDbPath("seq_cache");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -86,7 +85,7 @@ static void test_sequence_cache() {
 }
 
 static void test_sequence_alter() {
-    std::string db = "seq_alter";
+    std::string db = testDbPath("seq_alter");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -108,7 +107,7 @@ static void test_sequence_alter() {
 }
 
 static void test_sequence_owned_by_drop_table() {
-    std::string db = "seq_owned";
+    std::string db = testDbPath("seq_owned");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -135,7 +134,7 @@ static void test_sequence_owned_by_drop_table() {
 }
 
 static void test_sequence_identity_still_works() {
-    std::string db = "seq_identity";
+    std::string db = testDbPath("seq_identity");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

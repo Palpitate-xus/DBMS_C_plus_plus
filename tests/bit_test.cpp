@@ -13,14 +13,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -40,7 +39,7 @@ static std::string fetchOne(const std::string& db, const std::string& tbl,
 
 // bit(n) requires exactly n bits; only 0/1 allowed; B'...' wrapper stripped.
 static void test_bit_fixed() {
-    std::string db = "bit_fixed";
+    std::string db = testDbPath("bit_fixed");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -72,7 +71,7 @@ static void test_bit_fixed() {
 
 // bit varying(n) permits up to n bits.
 static void test_bit_varying() {
-    std::string db = "bit_var";
+    std::string db = testDbPath("bit_var");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -100,7 +99,7 @@ static void test_bit_varying() {
 
 // VARBIT alias and the unconstrained varbit form.
 static void test_varbit_alias() {
-    std::string db = "bit_alias";
+    std::string db = testDbPath("bit_alias");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -130,7 +129,7 @@ static void test_varbit_alias() {
 
 // UPDATE enforces the same rules and canonicalizes.
 static void test_bit_update() {
-    std::string db = "bit_upd";
+    std::string db = testDbPath("bit_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

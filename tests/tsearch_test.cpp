@@ -14,14 +14,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -40,7 +39,7 @@ static std::string fetchOne(const std::string& db, const std::string& tbl,
 }
 
 static void test_tsvector_canonical() {
-    std::string db = "tsv";
+    std::string db = testDbPath("tsv");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -69,7 +68,7 @@ static void test_tsvector_canonical() {
 }
 
 static void test_tsquery_valid() {
-    std::string db = "tsq";
+    std::string db = testDbPath("tsq");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -94,7 +93,7 @@ static void test_tsquery_valid() {
 }
 
 static void test_ts_update() {
-    std::string db = "ts_upd";
+    std::string db = testDbPath("ts_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

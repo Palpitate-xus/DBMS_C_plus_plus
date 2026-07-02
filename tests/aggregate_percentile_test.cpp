@@ -14,6 +14,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
@@ -42,7 +43,7 @@ static std::string aggResult(const std::string& db, const std::string& tbl,
 
 // ----- Test 1: percentile_cont(0.5) = median of {10,20,30,40,50} = 30 -----
 static void test_pct_cont_odd() {
-    std::string db = "pct_cont_odd";
+    std::string db = testDbPath("pct_cont_odd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -59,7 +60,7 @@ static void test_pct_cont_odd() {
 
 // ----- Test 2: percentile_cont(0.5) = median of {10,20,30,40} = 25 (interpolated) -----
 static void test_pct_cont_even() {
-    std::string db = "pct_cont_even";
+    std::string db = testDbPath("pct_cont_even");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -76,7 +77,7 @@ static void test_pct_cont_even() {
 
 // ----- Test 3: percentile_disc(0.5) = discrete median of {10,20,30,40} = 20 -----
 static void test_pct_disc_even() {
-    std::string db = "pct_disc_even";
+    std::string db = testDbPath("pct_disc_even");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -93,7 +94,7 @@ static void test_pct_disc_even() {
 
 // ----- Test 4: percentile_cont(0.25) = Q1 of {10,20,30,40,50} -----
 static void test_pct_cont_q1() {
-    std::string db = "pct_cont_q1";
+    std::string db = testDbPath("pct_cont_q1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -110,7 +111,7 @@ static void test_pct_cont_q1() {
 
 // ----- Test 5: percentile_cont(1.0) = max -----
 static void test_pct_cont_max() {
-    std::string db = "pct_cont_max";
+    std::string db = testDbPath("pct_cont_max");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -127,7 +128,7 @@ static void test_pct_cont_max() {
 
 // ----- Test 6: empty table → NULL -----
 static void test_pct_empty() {
-    std::string db = "pct_empty";
+    std::string db = testDbPath("pct_empty");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -142,7 +143,7 @@ static void test_pct_empty() {
 
 // ----- Test 7: single row -----
 static void test_pct_single() {
-    std::string db = "pct_single";
+    std::string db = testDbPath("pct_single");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

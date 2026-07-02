@@ -13,14 +13,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -39,7 +38,7 @@ static std::string fetchOne(const std::string& db, const std::string& tbl,
 }
 
 static void test_uuid_input_formats() {
-    std::string db = "uuid_fmt";
+    std::string db = testDbPath("uuid_fmt");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -60,7 +59,7 @@ static void test_uuid_input_formats() {
 }
 
 static void test_uuid_invalid() {
-    std::string db = "uuid_bad";
+    std::string db = testDbPath("uuid_bad");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -82,7 +81,7 @@ static void test_uuid_invalid() {
 }
 
 static void test_uuid_update() {
-    std::string db = "uuid_upd";
+    std::string db = testDbPath("uuid_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

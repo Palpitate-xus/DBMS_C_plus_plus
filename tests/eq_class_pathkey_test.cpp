@@ -6,17 +6,18 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser"; s.permission = 1; s.currentDB = db;
 }
 
 static void test_pathkey_with_indexed_order() {
-    std::string db = "eq_pk_test";
+    std::string db = testDbPath("eq_pk_test");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

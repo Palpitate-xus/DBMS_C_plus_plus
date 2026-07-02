@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -26,7 +25,7 @@ static std::string trimRight(const std::string& s) {
 }
 
 static void test_exclude_equality() {
-    std::string db = "exclude_eq_t";
+    std::string db = testDbPath("exclude_eq_t");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -52,7 +51,7 @@ static void test_exclude_equality() {
 }
 
 static void test_exclude_range_overlap() {
-    std::string db = "exclude_range_t";
+    std::string db = testDbPath("exclude_range_t");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -76,7 +75,7 @@ static void test_exclude_range_overlap() {
 }
 
 static void test_exclude_drop_table_cleanup() {
-    std::string db = "exclude_drop_t";
+    std::string db = testDbPath("exclude_drop_t");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

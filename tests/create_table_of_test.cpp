@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -27,7 +26,7 @@ static const dbms::Column* findCol(const dbms::TableSchema& t, const std::string
 }
 
 static void test_of_type_basic() {
-    std::string db = "of_basic";
+    std::string db = testDbPath("of_basic");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -47,7 +46,7 @@ static void test_of_type_basic() {
 }
 
 static void test_of_type_numeric() {
-    std::string db = "of_numeric";
+    std::string db = testDbPath("of_numeric");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -64,7 +63,7 @@ static void test_of_type_numeric() {
 }
 
 static void test_of_type_missing() {
-    std::string db = "of_missing";
+    std::string db = testDbPath("of_missing");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

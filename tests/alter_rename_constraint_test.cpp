@@ -12,11 +12,12 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -39,7 +40,7 @@ static bool hasFkName(const dbms::TableSchema& tbl, const std::string& n) {
 }
 
 static void test_rename_check_unique() {
-    std::string db = "rencon";
+    std::string db = testDbPath("rencon");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -68,7 +69,7 @@ static void test_rename_check_unique() {
 }
 
 static void test_rename_fk() {
-    std::string db = "rencon_fk";
+    std::string db = testDbPath("rencon_fk");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -87,7 +88,7 @@ static void test_rename_fk() {
 }
 
 static void test_rename_rejections() {
-    std::string db = "rencon_rej";
+    std::string db = testDbPath("rencon_rej");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

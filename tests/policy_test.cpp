@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -21,7 +20,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_create_policy_all() {
-    std::string db = "policy_all";
+    std::string db = testDbPath("policy_all");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -43,7 +42,7 @@ static void test_create_policy_all() {
 }
 
 static void test_create_policy_using_and_check() {
-    std::string db = "policy_check";
+    std::string db = testDbPath("policy_check");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -65,7 +64,7 @@ static void test_create_policy_using_and_check() {
 }
 
 static void test_create_policy_insert() {
-    std::string db = "policy_insert";
+    std::string db = testDbPath("policy_insert");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

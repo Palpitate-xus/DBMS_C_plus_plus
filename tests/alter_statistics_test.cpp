@@ -12,14 +12,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -42,13 +41,13 @@ static void test_statistics_parser() {
     assert(alter->subCommands[0].name == "name");
     assert(alter->subCommands[0].statisticsTarget == 500);
 
-    cleanup("parser_stats_tmp");
+    cleanupTestDb("parser_stats_tmp");
     std::cout << "[ALTER_STATS] parser OK" << std::endl;
 }
 
 // Verify statistics target persists through engine storage params.
 static void test_statistics_persistence() {
-    std::string db = "stats_persist";
+    std::string db = testDbPath("stats_persist");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

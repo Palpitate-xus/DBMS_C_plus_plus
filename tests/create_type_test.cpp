@@ -4,14 +4,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -20,7 +19,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_composite_basic() {
-    std::string db = "ctype_basic";
+    std::string db = testDbPath("ctype_basic");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -43,7 +42,7 @@ static void test_composite_basic() {
 }
 
 static void test_composite_numeric_modifier() {
-    std::string db = "ctype_numeric";
+    std::string db = testDbPath("ctype_numeric");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -66,7 +65,7 @@ static void test_composite_numeric_modifier() {
 }
 
 static void test_composite_multiword_type() {
-    std::string db = "ctype_multiword";
+    std::string db = testDbPath("ctype_multiword");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -86,7 +85,7 @@ static void test_composite_multiword_type() {
 }
 
 static void test_drop_composite() {
-    std::string db = "ctype_drop";
+    std::string db = testDbPath("ctype_drop");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

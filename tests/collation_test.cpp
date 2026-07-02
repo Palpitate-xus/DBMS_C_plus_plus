@@ -7,14 +7,13 @@
 #include <filesystem>
 #include <iostream>
 #include <set>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -52,7 +51,7 @@ static void test_collation_provider() {
 }
 
 static void test_collate_persists_and_applies() {
-    std::string db = "collation_t1";
+    std::string db = testDbPath("collation_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -87,7 +86,7 @@ static void test_collate_persists_and_applies() {
 }
 
 static void test_collate_all_operators() {
-    std::string db = "collation_t2";
+    std::string db = testDbPath("collation_t2");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -129,7 +128,7 @@ static void test_collate_all_operators() {
 }
 
 static void test_collate_mixed_columns() {
-    std::string db = "collation_t3";
+    std::string db = testDbPath("collation_t3");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -172,7 +171,7 @@ static void test_collate_binary_collations() {
     assert(!isBinary("reverse"));
     assert(!isBinary("en_US.utf8"));
 
-    std::string db = "collation_t4";
+    std::string db = testDbPath("collation_t4");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -210,7 +209,7 @@ static void test_collate_binary_collations() {
 }
 
 static void test_collate_with_index() {
-    std::string db = "collation_t5";
+    std::string db = testDbPath("collation_t5");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -243,7 +242,7 @@ static void test_collate_with_index() {
 }
 
 static void test_collate_schema_persistence() {
-    std::string db = "collation_t6";
+    std::string db = testDbPath("collation_t6");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

@@ -13,14 +13,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -39,7 +38,7 @@ static std::string fetchOne(const std::string& db, const std::string& tbl,
 }
 
 static void test_inet_ipv4() {
-    std::string db = "inet_v4";
+    std::string db = testDbPath("inet_v4");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -60,7 +59,7 @@ static void test_inet_ipv4() {
 }
 
 static void test_inet_ipv6() {
-    std::string db = "inet_v6";
+    std::string db = testDbPath("inet_v6");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -80,7 +79,7 @@ static void test_inet_ipv6() {
 }
 
 static void test_inet_invalid() {
-    std::string db = "inet_bad";
+    std::string db = testDbPath("inet_bad");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -109,7 +108,7 @@ static void test_inet_invalid() {
 }
 
 static void test_inet_update() {
-    std::string db = "inet_upd";
+    std::string db = testDbPath("inet_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

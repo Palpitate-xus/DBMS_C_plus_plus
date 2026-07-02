@@ -6,14 +6,13 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -24,7 +23,7 @@ static void setupSession(Session& s, const std::string& db) {
 static bool approx(double a, double b) { return std::fabs(a - b) < 1e-9; }
 
 static void test_dependencies() {
-    std::string db = "fdeps";
+    std::string db = testDbPath("fdeps");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -60,7 +59,7 @@ static void test_dependencies() {
 }
 
 static void test_dependencies_guards() {
-    std::string db = "fdeps_guard";
+    std::string db = testDbPath("fdeps_guard");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

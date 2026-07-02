@@ -16,11 +16,12 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -58,7 +59,7 @@ static size_t rowCount(const std::string& db, const std::string& tbl) {
 
 // Widening int -> bigint: data preserved, schema type updated.
 static void test_widen_int_to_bigint() {
-    std::string db = "act_widen";
+    std::string db = testDbPath("act_widen");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -81,7 +82,7 @@ static void test_widen_int_to_bigint() {
 
 // int -> varchar: numbers re-encoded as text, value text preserved.
 static void test_int_to_varchar() {
-    std::string db = "act_i2v";
+    std::string db = testDbPath("act_i2v");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -104,7 +105,7 @@ static void test_int_to_varchar() {
 
 // varchar holding numeric strings -> int: succeeds, values preserved.
 static void test_varchar_to_int_ok() {
-    std::string db = "act_v2i_ok";
+    std::string db = testDbPath("act_v2i_ok");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -125,7 +126,7 @@ static void test_varchar_to_int_ok() {
 
 // varchar holding non-numeric text -> int: rejected, data + type unchanged.
 static void test_varchar_to_int_rejected() {
-    std::string db = "act_v2i_rej";
+    std::string db = testDbPath("act_v2i_rej");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -150,7 +151,7 @@ static void test_varchar_to_int_rejected() {
 // rewrite. (Note: the INF NULL sentinel only survives in 8-byte integers, so a
 // VARCHAR source column is used here to exercise faithful NULL round-tripping.)
 static void test_unknown_col_and_null() {
-    std::string db = "act_misc";
+    std::string db = testDbPath("act_misc");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -175,7 +176,7 @@ static void test_unknown_col_and_null() {
 // A secondary index on an unrelated column survives the rewrite (row count and
 // lookups stay intact).
 static void test_index_survives_rewrite() {
-    std::string db = "act_idx";
+    std::string db = testDbPath("act_idx");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

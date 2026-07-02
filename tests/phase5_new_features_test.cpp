@@ -7,17 +7,18 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser"; s.permission = 1; s.currentDB = db;
 }
 
 static void test_insert_default_values() {
-    std::string db = "p5_dv";
+    std::string db = testDbPath("p5_dv");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -56,7 +57,7 @@ static void test_rollback_and_chain_parser() {
 
 static void test_explain_analyze_timing() {
     // Verify that QueryPlanner::executePlan returns rows (used by EXPLAIN ANALYZE)
-    std::string db = "p5_ea";
+    std::string db = testDbPath("p5_ea");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

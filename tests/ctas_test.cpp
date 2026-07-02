@@ -7,14 +7,13 @@
 #include <filesystem>
 #include <iostream>
 #include <set>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -51,7 +50,7 @@ static void seed(const std::string& db, dbms::DdlExecutor& ddl, Session& s) {
 }
 
 static void test_ctas_star() {
-    std::string db = "ctas_star";
+    std::string db = testDbPath("ctas_star");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -87,7 +86,7 @@ static void test_ctas_star() {
 }
 
 static void test_ctas_with_no_data() {
-    std::string db = "ctas_nodata";
+    std::string db = testDbPath("ctas_nodata");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -104,7 +103,7 @@ static void test_ctas_with_no_data() {
 }
 
 static void test_ctas_with_data_explicit() {
-    std::string db = "ctas_withdata";
+    std::string db = testDbPath("ctas_withdata");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -119,7 +118,7 @@ static void test_ctas_with_data_explicit() {
 }
 
 static void test_ctas_projection() {
-    std::string db = "ctas_proj";
+    std::string db = testDbPath("ctas_proj");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -141,7 +140,7 @@ static void test_ctas_projection() {
 }
 
 static void test_ctas_no_data_with_projection() {
-    std::string db = "ctas_proj_nodata";
+    std::string db = testDbPath("ctas_proj_nodata");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

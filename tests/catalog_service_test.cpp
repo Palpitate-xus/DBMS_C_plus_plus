@@ -5,15 +5,14 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void test_bootstrap_and_cache() {
-    std::string db = "catalog_service_t1";
+    std::string db = testDbPath("catalog_service_t1");
     cleanup(db);
 
     dbms::StorageEngine engine;
@@ -35,7 +34,7 @@ static void test_bootstrap_and_cache() {
 }
 
 static void test_migration_of_existing_db() {
-    std::string db = "catalog_service_t2";
+    std::string db = testDbPath("catalog_service_t2");
     cleanup(db);
 
     dbms::StorageEngine engine;
@@ -67,7 +66,7 @@ static void test_migration_of_existing_db() {
 }
 
 static void test_checkpoint_persists_catalog() {
-    std::string db = "catalog_service_t3";
+    std::string db = testDbPath("catalog_service_t3");
     cleanup(db);
 
     dbms::StorageEngine engine;

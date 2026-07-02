@@ -4,22 +4,21 @@
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 using dbms::DBStatus;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static bool hasLabel(const dbms::StorageEngine::EnumType& et, const std::string& l) {
     return std::find(et.labels.begin(), et.labels.end(), l) != et.labels.end();
 }
 
 static void test_update_append() {
-    std::string db = "enumalter_append";
+    std::string db = testDbPath("enumalter_append");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
 
@@ -42,7 +41,7 @@ static void test_update_append() {
 }
 
 static void test_update_insert_before() {
-    std::string db = "enumalter_before";
+    std::string db = testDbPath("enumalter_before");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
 
@@ -66,7 +65,7 @@ static void test_update_insert_before() {
 }
 
 static void test_update_rename() {
-    std::string db = "enumalter_rename";
+    std::string db = testDbPath("enumalter_rename");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
 
@@ -87,7 +86,7 @@ static void test_update_rename() {
 }
 
 static void test_update_missing_type() {
-    std::string db = "enumalter_missing";
+    std::string db = testDbPath("enumalter_missing");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
 
@@ -101,7 +100,7 @@ static void test_update_missing_type() {
 }
 
 static void test_update_preserves_others() {
-    std::string db = "enumalter_others";
+    std::string db = testDbPath("enumalter_others");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
 

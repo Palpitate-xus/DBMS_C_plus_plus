@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -21,7 +20,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_create_trigger_before_insert() {
-    std::string db = "trigger_basic";
+    std::string db = testDbPath("trigger_basic");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -42,7 +41,7 @@ static void test_create_trigger_before_insert() {
 }
 
 static void test_create_trigger_after_update() {
-    std::string db = "trigger_update";
+    std::string db = testDbPath("trigger_update");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -62,7 +61,7 @@ static void test_create_trigger_after_update() {
 }
 
 static void test_create_trigger_when() {
-    std::string db = "trigger_when";
+    std::string db = testDbPath("trigger_when");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -82,7 +81,7 @@ static void test_create_trigger_when() {
 }
 
 static void test_create_trigger_statement_level() {
-    std::string db = "trigger_stmt";
+    std::string db = testDbPath("trigger_stmt");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

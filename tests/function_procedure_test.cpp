@@ -6,14 +6,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -22,7 +21,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_create_function_single_param() {
-    std::string db = "func_single";
+    std::string db = testDbPath("func_single");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -40,7 +39,7 @@ static void test_create_function_single_param() {
 }
 
 static void test_create_function_multi_param() {
-    std::string db = "func_multi";
+    std::string db = testDbPath("func_multi");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -58,7 +57,7 @@ static void test_create_function_multi_param() {
 }
 
 static void test_create_tvf() {
-    std::string db = "func_tvf";
+    std::string db = testDbPath("func_tvf");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -76,7 +75,7 @@ static void test_create_tvf() {
 }
 
 static void test_create_procedure() {
-    std::string db = "proc_basic";
+    std::string db = testDbPath("proc_basic");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -94,7 +93,7 @@ static void test_create_procedure() {
 }
 
 static void test_create_function_volatility() {
-    std::string db = "func_volatile";
+    std::string db = testDbPath("func_volatile");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

@@ -8,14 +8,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -24,7 +23,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_bridge_handles_create_table() {
-    std::string db = "ddl_route_t1";
+    std::string db = testDbPath("ddl_route_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -50,7 +49,7 @@ static void test_bridge_handles_create_table() {
 }
 
 static void test_bridge_falls_back_for_unhandled() {
-    std::string db = "ddl_route_t2";
+    std::string db = testDbPath("ddl_route_t2");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -70,7 +69,7 @@ static void test_bridge_falls_back_for_unhandled() {
 }
 
 static void test_bridge_handles_ctas() {
-    std::string db = "ddl_route_t3";
+    std::string db = testDbPath("ddl_route_t3");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -26,7 +25,7 @@ static std::string trimRight(const std::string& s) {
 }
 
 static void test_enum_basic() {
-    std::string db = "enum_basic";
+    std::string db = testDbPath("enum_basic");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -52,7 +51,7 @@ static void test_enum_basic() {
 }
 
 static void test_enum_update() {
-    std::string db = "enum_update";
+    std::string db = testDbPath("enum_update");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

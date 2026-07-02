@@ -20,11 +20,12 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -81,7 +82,7 @@ static bool udtMetaContains(const std::string& db, const std::string& kind, cons
 }
 
 static void test_drop_enum_type() {
-    std::string db = "ct_drop_enum";
+    std::string db = testDbPath("ct_drop_enum");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -99,7 +100,7 @@ static void test_drop_enum_type() {
 }
 
 static void test_shell_type_create_drop() {
-    std::string db = "ct_shell";
+    std::string db = testDbPath("ct_shell");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -116,7 +117,7 @@ static void test_shell_type_create_drop() {
 }
 
 static void test_range_type_create_drop() {
-    std::string db = "ct_range";
+    std::string db = testDbPath("ct_range");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -136,7 +137,7 @@ static void test_range_type_create_drop() {
 }
 
 static void test_base_type_create_drop() {
-    std::string db = "ct_base";
+    std::string db = testDbPath("ct_base");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -153,7 +154,7 @@ static void test_base_type_create_drop() {
 }
 
 static void test_drop_composite_still_works() {
-    std::string db = "ct_drop_comp";
+    std::string db = testDbPath("ct_drop_comp");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

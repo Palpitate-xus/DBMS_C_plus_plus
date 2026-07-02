@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -21,7 +20,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_create_view() {
-    std::string db = "view_basic";
+    std::string db = testDbPath("view_basic");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -43,7 +42,7 @@ static void test_create_view() {
 }
 
 static void test_create_or_replace_view() {
-    std::string db = "view_replace";
+    std::string db = testDbPath("view_replace");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -66,7 +65,7 @@ static void test_create_or_replace_view() {
 }
 
 static void test_view_with_check_option() {
-    std::string db = "view_wco";
+    std::string db = testDbPath("view_wco");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

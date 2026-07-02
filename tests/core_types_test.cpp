@@ -9,14 +9,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -32,7 +31,7 @@ static const dbms::Column* findCol(const dbms::TableSchema& tbl, const std::stri
 }
 
 static void test_geometric_network_types() {
-    std::string db = "core_types_t1";
+    std::string db = testDbPath("core_types_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -70,7 +69,7 @@ static void test_geometric_network_types() {
 }
 
 static void test_bit_and_jsonpath() {
-    std::string db = "core_types_t2";
+    std::string db = testDbPath("core_types_t2");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

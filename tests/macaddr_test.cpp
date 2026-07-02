@@ -12,14 +12,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -41,7 +40,7 @@ static std::string fetchOne(const std::string& db, const std::string& tbl,
 // macaddr accepts colon / hyphen / dot / bare-hex forms; all canonicalize to
 // lowercase colon-separated output.
 static void test_macaddr_input_formats() {
-    std::string db = "macaddr_fmt";
+    std::string db = testDbPath("macaddr_fmt");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -70,7 +69,7 @@ static void test_macaddr_input_formats() {
 
 // Malformed input (bad hex digit, wrong length) is rejected at INSERT.
 static void test_macaddr_invalid() {
-    std::string db = "macaddr_bad";
+    std::string db = testDbPath("macaddr_bad");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -96,7 +95,7 @@ static void test_macaddr_invalid() {
 
 // macaddr8 stores 8 bytes and round-trips canonical form.
 static void test_macaddr8() {
-    std::string db = "macaddr8_t";
+    std::string db = testDbPath("macaddr8_t");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -117,7 +116,7 @@ static void test_macaddr8() {
 
 // UPDATE normalizes valid input and rejects malformed input.
 static void test_macaddr_update() {
-    std::string db = "macaddr_upd";
+    std::string db = testDbPath("macaddr_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -143,7 +142,7 @@ static void test_macaddr_update() {
 // A table mixing a variable-length column with macaddr exercises the
 // mixed (fixedData) buildRowBuffer encode path.
 static void test_macaddr_with_varlen() {
-    std::string db = "macaddr_var";
+    std::string db = testDbPath("macaddr_var");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

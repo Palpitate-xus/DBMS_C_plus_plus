@@ -5,7 +5,8 @@ SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SRC_DIR"
 INC=(-Isrc -Isrc/common -Isrc/storage -Isrc/access -Isrc/transaction -Isrc/network \
      -Isrc/utils -Isrc/executor -Isrc/commands -Isrc/interfaces -Isrc/parser \
-     -Isrc/catalog -Isrc/expression -Isrc/replication -Isrc/process)
+     -Isrc/catalog -Isrc/expression -Isrc/replication -Isrc/process \
+     -Isrc/commands -Isrc/interfaces -Itests)
 CXXFLAGS=(-std=c++17 -O2 -pthread)
 
 # Detect OpenSSL to match main build

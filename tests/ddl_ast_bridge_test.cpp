@@ -9,15 +9,14 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 // Stubs for main.cpp helpers referenced by DdlExecutor (provided by tests/test_stubs.cpp)
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -26,7 +25,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_create_drop_table() {
-    std::string db = "ddl_bridge_t1";
+    std::string db = testDbPath("ddl_bridge_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -52,7 +51,7 @@ static void test_create_drop_table() {
 }
 
 static void test_create_table_registers_in_catalog() {
-    std::string db = "ddl_bridge_t1_cat";
+    std::string db = testDbPath("ddl_bridge_t1_cat");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -76,7 +75,7 @@ static void test_create_table_registers_in_catalog() {
 }
 
 static void test_create_index_sequence() {
-    std::string db = "ddl_bridge_t2";
+    std::string db = testDbPath("ddl_bridge_t2");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -117,7 +116,7 @@ static void test_create_index_sequence() {
 }
 
 static void test_create_database_schema() {
-    std::string db = "ddl_bridge_t3";
+    std::string db = testDbPath("ddl_bridge_t3");
     cleanup(db);
 
     Session s;
@@ -146,7 +145,7 @@ static void test_create_database_schema() {
 }
 
 static void test_comment_on() {
-    std::string db = "ddl_bridge_t4";
+    std::string db = testDbPath("ddl_bridge_t4");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -166,7 +165,7 @@ static void test_comment_on() {
 }
 
 static void test_drop_database_evicts_catalog() {
-    std::string db = "ddl_bridge_t5";
+    std::string db = testDbPath("ddl_bridge_t5");
     cleanup(db);
 
     Session s;

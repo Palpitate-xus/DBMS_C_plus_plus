@@ -14,14 +14,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -40,7 +39,7 @@ static std::string fetchOne(const std::string& db, const std::string& tbl,
 }
 
 static void test_line_lseg_circle() {
-    std::string db = "geo_a";
+    std::string db = testDbPath("geo_a");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -67,7 +66,7 @@ static void test_line_lseg_circle() {
 }
 
 static void test_box_corner_ordering() {
-    std::string db = "geo_box";
+    std::string db = testDbPath("geo_box");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -85,7 +84,7 @@ static void test_box_corner_ordering() {
 }
 
 static void test_path_polygon() {
-    std::string db = "geo_path";
+    std::string db = testDbPath("geo_path");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -112,7 +111,7 @@ static void test_path_polygon() {
 }
 
 static void test_geo_update() {
-    std::string db = "geo_upd";
+    std::string db = testDbPath("geo_upd");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -132,7 +131,7 @@ static void test_geo_update() {
 }
 
 static void test_point_still_works() {
-    std::string db = "geo_point";
+    std::string db = testDbPath("geo_point");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

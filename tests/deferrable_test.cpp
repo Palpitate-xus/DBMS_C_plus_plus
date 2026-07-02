@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -21,7 +20,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_immediate_check_still_fails_at_insert() {
-    std::string db = "deferrable_t1";
+    std::string db = testDbPath("deferrable_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -42,7 +41,7 @@ static void test_immediate_check_still_fails_at_insert() {
 }
 
 static void test_initially_deferred_check_blocks_commit() {
-    std::string db = "deferrable_t2";
+    std::string db = testDbPath("deferrable_t2");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -68,7 +67,7 @@ static void test_initially_deferred_check_blocks_commit() {
 }
 
 static void test_initially_deferred_check_allows_valid_commit() {
-    std::string db = "deferrable_t3";
+    std::string db = testDbPath("deferrable_t3");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -93,7 +92,7 @@ static void test_initially_deferred_check_allows_valid_commit() {
 }
 
 static void test_set_constraints_immediate_via_engine() {
-    std::string db = "deferrable_t4";
+    std::string db = testDbPath("deferrable_t4");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -117,7 +116,7 @@ static void test_set_constraints_immediate_via_engine() {
 }
 
 static void test_set_constraints_all_deferred_via_engine() {
-    std::string db = "deferrable_t5";
+    std::string db = testDbPath("deferrable_t5");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -141,7 +140,7 @@ static void test_set_constraints_all_deferred_via_engine() {
 }
 
 static void test_deferred_check_on_update() {
-    std::string db = "deferrable_t6";
+    std::string db = testDbPath("deferrable_t6");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

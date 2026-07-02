@@ -6,14 +6,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -56,7 +55,7 @@ static void test_expr_helper_basic() {
 }
 
 static void test_default_literal() {
-    std::string db = "constraints_t1";
+    std::string db = testDbPath("constraints_t1");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -76,7 +75,7 @@ static void test_default_literal() {
 }
 
 static void test_default_expression() {
-    std::string db = "constraints_t2";
+    std::string db = testDbPath("constraints_t2");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -96,7 +95,7 @@ static void test_default_expression() {
 }
 
 static void test_generated_column() {
-    std::string db = "constraints_t3";
+    std::string db = testDbPath("constraints_t3");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -117,7 +116,7 @@ static void test_generated_column() {
 }
 
 static void test_check_constraint_insert() {
-    std::string db = "constraints_t4";
+    std::string db = testDbPath("constraints_t4");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -139,7 +138,7 @@ static void test_check_constraint_insert() {
 }
 
 static void test_check_constraint_update() {
-    std::string db = "constraints_t5";
+    std::string db = testDbPath("constraints_t5");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -162,7 +161,7 @@ static void test_check_constraint_update() {
 }
 
 static void test_generated_identity() {
-    std::string db = "constraints_t6";
+    std::string db = testDbPath("constraints_t6");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

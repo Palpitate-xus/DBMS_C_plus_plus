@@ -5,14 +5,13 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -21,7 +20,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static void test_create_matview_select_star() {
-    std::string db = "matview_star";
+    std::string db = testDbPath("matview_star");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -48,7 +47,7 @@ static void test_create_matview_select_star() {
 }
 
 static void test_create_matview_select_columns() {
-    std::string db = "matview_cols";
+    std::string db = testDbPath("matview_cols");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -80,7 +79,7 @@ static void test_create_matview_select_columns() {
 }
 
 static void test_create_matview_where() {
-    std::string db = "matview_where";
+    std::string db = testDbPath("matview_where");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -104,7 +103,7 @@ static void test_create_matview_where() {
 }
 
 static void test_create_matview_reversed_projection() {
-    std::string db = "matview_rev";
+    std::string db = testDbPath("matview_rev");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -135,7 +134,7 @@ static void test_create_matview_reversed_projection() {
 }
 
 static void test_create_matview_with_no_data() {
-    std::string db = "matview_nodata";
+    std::string db = testDbPath("matview_nodata");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

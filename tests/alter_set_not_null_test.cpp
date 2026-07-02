@@ -13,11 +13,12 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -32,7 +33,7 @@ static bool colNotNull(const dbms::TableSchema& tbl, const std::string& col) {
 }
 
 static void test_set_not_null_ok() {
-    std::string db = "snn_ok";
+    std::string db = testDbPath("snn_ok");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -52,7 +53,7 @@ static void test_set_not_null_ok() {
 }
 
 static void test_set_not_null_rejected() {
-    std::string db = "snn_rej";
+    std::string db = testDbPath("snn_rej");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
@@ -72,7 +73,7 @@ static void test_set_not_null_rejected() {
 }
 
 static void test_drop_then_set() {
-    std::string db = "snn_cycle";
+    std::string db = testDbPath("snn_cycle");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);

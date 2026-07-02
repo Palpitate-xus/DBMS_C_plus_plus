@@ -5,14 +5,13 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) {
-    if (fs::exists(db)) fs::remove_all(db);
-}
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -27,7 +26,7 @@ static std::string trimRight(const std::string& s) {
 }
 
 static void test_default_nextval() {
-    std::string db = "seq_default";
+    std::string db = testDbPath("seq_default");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -56,7 +55,7 @@ static void test_default_nextval() {
 }
 
 static void test_default_expression_with_parens() {
-    std::string db = "seq_default_expr";
+    std::string db = testDbPath("seq_default_expr");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -77,7 +76,7 @@ static void test_default_expression_with_parens() {
 }
 
 static void test_drop_sequence_default_dependency() {
-    std::string db = "seq_drop_dep";
+    std::string db = testDbPath("seq_drop_dep");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 

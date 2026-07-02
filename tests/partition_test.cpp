@@ -18,11 +18,12 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
@@ -66,7 +67,7 @@ static size_t rowCount(const std::string& db, const std::string& tbl) {
 
 // Range-partitioned table: rows route to p1/p2/p3 based on year.
 static void test_range_partitioning() {
-    std::string db = "part_range";
+    std::string db = testDbPath("part_range");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -103,7 +104,7 @@ static void test_range_partitioning() {
 
 // List-partitioned table with a DEFAULT partition.
 static void test_list_partitioning() {
-    std::string db = "part_list";
+    std::string db = testDbPath("part_list");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -129,7 +130,7 @@ static void test_list_partitioning() {
 
 // Hash-partitioned table: rows distribute across p0/p1/p2/p3.
 static void test_hash_partitioning() {
-    std::string db = "part_hash";
+    std::string db = testDbPath("part_hash");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
@@ -156,7 +157,7 @@ static void test_hash_partitioning() {
 
 // Sub-partitioning: RANGE partition + HASH sub-partition on a second column.
 static void test_subpartitioning() {
-    std::string db = "part_sub";
+    std::string db = testDbPath("part_sub");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
