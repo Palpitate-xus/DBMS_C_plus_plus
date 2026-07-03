@@ -223,6 +223,35 @@ make -j$(nproc)
 nc localhost 9999
 ```
 
+### Docker 部署
+
+项目支持 Docker 多阶段构建与 Docker Compose 一键部署。
+
+```bash
+# 构建镜像
+docker build -t dbms-c-plus-plus:latest .
+
+# 交互式运行（开发调试）
+docker run -it --rm -v dbms_data:/data dbms-c-plus-plus:latest
+
+# 服务器模式
+docker run -d --name dbms_server -p 9999:9999 -v dbms_data:/data \
+    dbms-c-plus-plus:latest ./dbms_main --server 9999
+
+# Docker Compose 一键启动
+docker compose up -d
+
+# 自定义端口（默认 9999）
+DBMS_PORT=8888 docker compose up -d
+
+# 停止
+docker compose down
+```
+
+> **镜像**：基于 `ubuntu:26.10`，多阶段构建（g++15 + OpenSSL），最终镜像约 114MB。
+> **数据持久化**：数据库文件存储在 `/data` 目录，通过 Docker 卷（`dbms_data`）持久化，容器重启数据不丢失。
+> **TLS**：容器内未自动生成 TLS 证书时回退到明文 TCP，生产环境建议挂载证书或启用反向代理。
+
 ## SQL 语法示例
 
 ### 数据库操作
@@ -494,6 +523,9 @@ show deadlocks;
 ├── user.dat                 # 用户账号数据
 ├── dbms.log                 # 运行日志
 ├── slow_query.log           # 慢查询日志
+├── Dockerfile               # Docker 多阶段构建定义
+├── docker-compose.yml       # Docker Compose 一键部署配置
+├── .dockerignore            # Docker 构建排除规则
 └── docs/
     ├── commandsList.md      # SQL 命令完整参考手册（含示例和参数说明）
     └── feature-gap-analysis.md  # 功能差距分析
