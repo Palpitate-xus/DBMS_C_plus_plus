@@ -1,0 +1,445 @@
+# 功能缺失清单 (Feature Gaps)
+
+> 生成日期: 2026-07-03
+> 基于 `docs/postgresql-comparison.md` 代码验证结果整理
+> 本 DBMS 当前状态: 193 Wave 完成, PASS=112 FAIL=0, Phase 5.1 上线
+
+本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
+每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
+
+---
+
+## 总览
+
+| 优先级 | 数量 | 说明 |
+|--------|------|------|
+| P0 严重缺失 | 7  | 生产级必需，无此功能不可上线 |
+| P1 重要缺失 | 9  | 影响实用性，大多数应用需要 |
+| P2 次要缺失 | 8  | 易用性/运维/性能优化 |
+| P3 锦上添花 | 6  | 企业级/兼容性/生态 |
+
+---
+
+## P0 — 严重缺失 (生产级必需)
+
+### P0-1: 并行查询执行
+- **类别**: 性能 / 执行器
+- **现状**: `parallelWorkers_ = 0`，无实际多 worker 调度
+- **PG 参考**: `parallel_workers`, `parallel_leader_participation`, `Gather`/`GatherMerge` 节点
+- **影响**: 大表全表扫描、聚合、JOIN 无法利用多核，性能差距 10x+
+- **实现路径**:
+  1. 在 `QueryPlanner` 中增加 `ParallelSeqScanOp` / `ParallelHashJoinOp` 算子
+  2. 实现 `ThreadPool` 任务分发（`std::thread` work-stealing queue）
+  3. 实现 `Gather` / `GatherMerge` 合并算子
+  4. 增加 `max_parallel_workers_per_gather` GUC 参数
+- **预估工作量**: 2-3 周
+- **相关文件**: `src/executor/ExecutionPlan.cpp`, `src/common/GUC.cpp`
+
+### P0-2: JIT 编译 (LLVM)
+- **类别**: 性能 / 表达式求值
+- **现状**: `ExprEvaluator` 纯解释执行，无编译优化
+- **PG 参考**: `llvmjit_expr`, `llvmjit_deform`
+- **影响**: 复杂表达式、聚合计算性能差距 3-5x
+- **实现路径**:
+  1. 引入 LLVM C API 或 `libclangJIT` 依赖
+  2. 实现 `JITCompiler` 类：将 `Expr` 树翻译为 LLVM IR
+  3. 在 `FilterOp` / `ProjectOp` / `AggregateOp` 中热点路径使用 JIT
+  4. 增加 `jit` GUC 开关 + `jit_above_cost` 阈值
+- **预估工作量**: 3-4 周（依赖 LLVM 库）
+- **相关文件**: `src/expression/ExprEvaluator.cpp`
+
+### P0-3: GiST 索引
+- **类别**: 索引 / 全文搜索 / 几何
+- **现状**: 仅有 SP-GiST (Point quadtree)，无通用 GiST
+- **PG 参考**: `gist`, `tsvector` 全文搜索, `geometry` 最近邻
+- **影响**: 全文检索、地理空间查询、范围类型索引缺失
+- **实现路径**:
+  1. 实现 `GistIndex` 基类：统一接口 `consistent()`, `union()`, `compress()`, `decompress()`, `penalty()`, `picksplit()`
+  2. 实现内置 operator class: `gist_tr_ops` (tsvector), `gist_int4_ops` (int4 range)
+  3. 接入 `IndexScanOp` 路径
+  4. 实现 `@@` 全文搜索操作符 + `to_tsvector()` / `to_tsquery()` 函数
+- **预估工作量**: 2-3 周
+- **相关文件**: `src/access/GistIndex.cpp` (新建), `src/access/GistIndex.h` (新建)
+
+### P0-4: Gap Locks / Predicate Locks
+- **类别**: 并发控制 / 隔离性
+- **现状**: 仅有行级锁 + 表级锁，无 Gap/Predicate 锁
+- **PG 参考**: `gap_lock`, `predicate_lock`, `SIReadLock`
+- **影响**: 可串行化隔离级别无法实现，幻读风险
+- **实现路径**:
+  1. 在 `LockManager` 中增加 `GapLock` 结构：`(table, gapRange, mode)`
+  2. 实现 `PredicateLock(table, snapshot, predicate)` 用于 SSI
+  3. 在 `IndexScanOp` 遍历时获取 Gap 锁
+  4. 增加 `serializable` 隔离级别下的 predicate lock 检查
+- **预估工作量**: 1-2 周
+- **相关文件**: `src/transaction/LockManager.cpp`, `src/transaction/LockManager.h`
+
+### P0-5: SSI (Serializable Snapshot Isolation)
+- **类别**: 并发控制 / 隔离级别
+- **现状**: 隔离级别框架有，但 SERIALIZABLE 实际行为等同 REPEATABLE READ
+- **PG 参考**: `SERIALIZABLE` + `SIREAD` + `SERIALIZATION_FAILURE`
+- **影响**: 高并发下可能出现序列化异常
+- **实现路径**:
+  1. 实现 `SIReadLock` 跟踪事务读写集合
+  2. 在 `COMMIT` 时做序列化冲突检测 (rw-conflict graph)
+  3. 冲突时返回 `SERIALIZATION_FAILURE` 错误码
+  4. 增加 `serialization_failure_retries` GUC
+- **预估工作量**: 1-2 周
+- **相关文件**: `src/transaction/LockManager.cpp`, `src/commands/TableManage.cpp`
+
+### P0-6: Bitmap Index/Heap Scan
+- **类别**: 执行器 / 索引组合
+- **现状**: 仅有 IndexOnlyScan，无 Bitmap AND/OR 组合
+- **PG 参考**: `BitmapIndexScan`, `BitmapHeapScan`, `BitmapAnd`, `BitmapOr`
+- **影响**: 多索引 WHERE 条件性能差（如 `WHERE a=1 AND b=2` 有两个索引时）
+- **实现路径**:
+  1. 实现 `BitmapIndexScanOp`：输出位图而非行
+  2. 实现 `BitmapAndOp` / `BitmapOrOp`：位图组合
+  3. 实现 `BitmapHeapScanOp`：按位图取行
+  4. 在 `QueryPlanner` 中增加 bitmap path 生成
+- **预估工作量**: 1 周
+- **相关文件**: `src/executor/ExecutionPlan.cpp`
+
+### P0-7: BEFORE 行级触发器 + INSTEAD OF 视图触发器
+- **类别**: 触发器 / 数据完整性
+- **现状**: AFTER 触发器已工作，BEFORE 行级 + INSTEAD OF 视图触发器待补
+- **PG 参考**: `CREATE TRIGGER ... BEFORE INSERT ... FOR EACH ROW`
+- **影响**: 无法在写入前修改数据、无法通过视图更新多表
+- **实现路径**:
+  1. 在 `TableManage.cpp` insert/update/delete 路径中增加 BEFORE 行级触发器调用
+  2. 实现 `NEW`/`OLD` 行变量替换
+  3. 在视图 DML 路径中增加 INSTEAD OF 触发器调用
+  4. 增加 `TriggerExecutor` 对 BEFORE/INSTEAD OF 的支持
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/commands/TableManage.cpp`, `src/main.cpp`
+
+---
+
+## P1 — 重要缺失 (影响实用性)
+
+### P1-1: Window Function Executor
+- **类别**: 执行器 / 分析函数
+- **现状**: parser 就绪，executor 回退 legacy `g_engine.query()`
+- **PG 参考**: `WindowAgg` 节点, `row_number()`, `rank()`, `lag()`, `lead()` 等
+- **影响**: 报表、排名、移动平均等分析查询无法使用
+- **实现路径**:
+  1. 实现 `WindowOp` 算子：按 PARTITION BY 分组 + ORDER BY 排序
+  2. 实现内置 window function: `row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`, `percent_rank`, `cume_dist`
+  3. 在 `QueryPlanner` 中识别 window function 并插入 `WindowOp`
+  4. 增加 `WindowAgg` EXPLAIN 输出
+- **预估工作量**: 1-2 周
+- **相关文件**: `src/executor/ExecutionPlan.cpp`
+
+### P1-2: UNION/INTERSECT/EXCEPT Executor
+- **类别**: 执行器 / 集合操作
+- **现状**: parser 就绪，executor 回退 legacy
+- **PG 参考**: `Append` (UNION), `HashSetOp` (INTERSECT/EXCEPT)
+- **影响**: 集合操作查询无法走 volcano 路径
+- **实现路径**:
+  1. 实现 `UnionOp`：合并多个子计划输出
+  2. 实现 `IntersectOp` / `ExceptOp`：哈希集合操作
+  3. 在 `QueryPlanner` 中识别集合操作并构建对应算子树
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/executor/ExecutionPlan.cpp`
+
+### P1-3: GROUP BY ROLLUP/CUBE/GROUPING SETS Executor
+- **类别**: 执行器 / 分组扩展
+- **现状**: parser 就绪，executor 回退 legacy
+- **PG 参考**: `GroupAggregate` + `sortgroups`, `GROUPING()` 函数
+- **影响**: 多维分析报表查询无法使用
+- **实现路径**:
+  1. 扩展 `AggregateOp` 支持多个 grouping set
+  2. 实现 `GROUPING()` 内置函数
+  3. 在 `QueryPlanner` 中识别 ROLLUP/CUBE 语法
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/executor/ExecutionPlan.cpp`
+
+### P1-4: 关联子查询解嵌套 (Subquery Unnesting)
+- **类别**: 优化器 / 子查询
+- **现状**: 简单子查询走 volcano，关联子查询回退 legacy
+- **PG 参考**: `pull_up_subqueries`, `convert_EXISTS_to_join`
+- **影响**: 关联子查询性能差（O(n*m) 嵌套循环）
+- **实现路径**:
+  1. 在 `QueryPlanner` 中实现 `pull_up_subquery`：将 IN/EXISTS 转为 SEMI/ANTI JOIN
+  2. 实现 `SemiJoinOp` / `AntiJoinOp` 算子
+  3. 实现 `subquery_planner` 入口
+- **预估工作量**: 1-2 周
+- **相关文件**: `src/executor/ExecutionPlan.cpp`
+
+### P1-5: TOAST 压缩
+- **类别**: 存储 / 大字段
+- **现状**: 仅有 overflow page 线外存储，无压缩
+- **PG 参考**: `TOAST` + `lz4`/`pglz` 压缩策略
+- **影响**: 大字段（TEXT/BLOB/JSON）存储浪费空间
+- **实现路径**:
+  1. 引入 `lz4` 库（header-only 或系统包）
+  2. 在 `Page.cpp` 写入大字段时自动压缩
+  3. 实现 TOAST 策略：`PLAIN`, `EXTENDED` (压缩+线外), `EXTERNAL` (线外不压缩), `MAIN` (尽量内联)
+  4. 增加 `toast_tuple_target` GUC
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/storage/Page.cpp`, `src/storage/Page.h`
+
+### P1-6: 后台统计收集器 (Stats Collector)
+- **类别**: 可观测性 / 运行时统计
+- **现状**: `ANALYZE TABLE` 手动收集，无运行时统计
+- **PG 参考**: `pg_stat_database`, `pg_stat_user_tables`, `pg_stat_activity`
+- **影响**: 无法监控数据库运行状态、无法自动选择最优计划
+- **实现路径**:
+  1. 实现 `StatsCollector` 后台线程：定期收集表/索引/数据库级统计
+  2. 实现 `pg_stat_*` 内存结构 + `SHOW STATUS` 命令
+  3. 在 `QueryPlanner` 中使用运行时统计做成本估计
+  4. 增加 `stats_collector` GUC 开关
+- **预估工作量**: 1 周
+- **相关文件**: `src/process/ProcessManager.cpp` (新建 StatsCollector)
+
+### P1-7: PL/pgSQL 运行时
+- **类别**: 存储过程 / 扩展语言
+- **现状**: `CREATE PROCEDURE/FUNCTION` 仅 DDL 存储，无解释执行
+- **PG 参考**: `plpgsql` 解释器, `CALL proc()`
+- **影响**: 存储过程无法执行，业务逻辑无法下沉到数据库
+- **实现路径**:
+  1. 实现 `PlPgSqlInterpreter`：解析 PL/pgSQL AST
+  2. 支持基本语法: `IF/ELSE`, `LOOP`, `FOR`, `WHILE`, `EXECUTE`, `RETURN`
+  3. 支持变量声明与类型系统
+  4. 在 `CALL` 命令中调用解释器
+- **预估工作量**: 2-3 周
+- **相关文件**: `src/pl/plpgsql.cpp` (新建), `src/pl/plpgsql.h` (新建)
+
+### P1-8: 并行 Vacuum
+- **类别**: 存储 / 维护
+- **现状**: Autovacuum 已工作但单线程
+- **PG 参考**: `VACUUM (PARALLEL n)`
+- **影响**: 大表 VACUUM 慢，影响高负载下的维护窗口
+- **实现路径**:
+  1. 将 `VACUUM` 实现拆分为多个并行 worker
+  2. 每个 worker 负责一个 page range
+  3. 增加 `parallel_vacuum_workers` GUC
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/commands/TableManage.cpp`
+
+### P1-9: 自定义成本函数 (Custom Cost Functions)
+- **类别**: 优化器 / 扩展性
+- **现状**: 成本模型硬编码，无法扩展
+- **PG 参考**: `cost_seqscan`, `cost_index`, `cost_hashjoin` 等 hook
+- **影响**: 无法为自定义索引/算子调整成本
+- **实现路径**:
+  1. 定义 `CostFunction` 接口类
+  2. 在 `QueryPlanner` 中通过函数指针/hook 调用
+  3. 增加 `SET cost_seqscan = ...` GUC 参数
+- **预估工作量**: 2-3 天
+- **相关文件**: `src/executor/ExecutionPlan.cpp`
+
+---
+
+## P2 — 次要缺失 (易用性/运维)
+
+### P2-1: pg_stat_statements
+- **类别**: 可观测性 / SQL 统计
+- **现状**: 无 SQL 级统计
+- **PG 参考**: `pg_stat_statements` extension
+- **影响**: 无法识别慢查询热点、无法做 SQL 级优化
+- **实现路径**:
+  1. 实现 `SqlStats` 哈希表：key=normalized SQL, value=call_count/total_time/rows
+  2. 在 SQL 执行入口增加统计收集
+  3. 增加 `SHOW SQL_STATS` 命令
+  4. 增加 `pg_stat_statements.max` GUC
+- **预估工作量**: 2-3 天
+- **相关文件**: `src/common/Config.cpp`, `src/main.cpp`
+
+### P2-2: Bloom 索引
+- **类别**: 索引 / 多列等值
+- **现状**: 无 Bloom filter 索引
+- **PG 参考**: `bloom` access method
+- **影响**: 多列等值查询无法使用单一索引
+- **实现路径**:
+  1. 实现 `BloomIndex` 类：m 位数组 + k 个哈希函数
+  2. 接入 `IndexScanOp` 路径
+  3. 增加 `CREATE INDEX ... USING bloom` 语法
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/access/BloomIndex.cpp` (新建)
+
+### P2-3: 增量备份
+- **类别**: 运维 / 高可用
+- **现状**: 仅有全量 DUMP/BACKUP
+- **PG 参考**: `pg_basebackup` + WAL archiving
+- **影响**: 大库备份慢、无法做 PITR
+- **实现路径**:
+  1. 实现 WAL archiving：`archive_command` 配置
+  2. 实现 `pg_basebackup` 协议
+  3. 实现 PITR 恢复：`recovery_target_time`
+- **预估工作量**: 1-2 周
+- **相关文件**: `src/replication/ReplicationManager.cpp`
+
+### P2-4: 连接池 (PgBouncer 式)
+- **类别**: 网络 / 连接管理
+- **现状**: 每连接一个线程，无池化
+- **PG 参考**: `pgbouncer`, `pgpool-II`
+- **影响**: 高并发下线程数爆炸
+- **实现路径**:
+  1. 实现 `ConnectionPool`：session/transaction/statement 三级池化
+  2. 在 `NetworkServer` 中增加池化层
+  3. 增加 `pool_size`, `max_client_conn` GUC
+- **预估工作量**: 1 周
+- **相关文件**: `src/network/NetworkServer.cpp`
+
+### P2-5: Logical Decoding / 逻辑复制 Plugin
+- **类别**: 复制 / 生态
+- **现状**: 逻辑复制框架有，无 plugin 实现
+- **PG 参考**: `pgoutput`, `test_decoding`, `wal2json`
+- **影响**: 无法做 CDC、数据同步到外部系统
+- **实现路径**:
+  1. 实现 `LogicalDecoder` 接口：将 WAL 记录转为逻辑变更
+  2. 实现 `pgoutput` 协议
+  3. 实现 `CREATE PUBLICATION` / `CREATE SUBSCRIPTION`
+- **预估工作量**: 2-3 周
+- **相关文件**: `src/replication/ReplicationManager.cpp`
+
+### P2-6: 异步 I/O (io_uring)
+- **类别**: 性能 / I/O
+- **现状**: 同步 read/write
+- **PG 参考**: `io_uring` (PG18 实验性)
+- **影响**: I/O 密集型场景延迟高
+- **实现路径**:
+  1. 引入 `liburing` 库
+  2. 在 `BufferPool` 中实现异步预取
+  3. 在 `WALWriter` 中实现异步写入
+- **预估工作量**: 1 周
+- **相关文件**: `src/storage/BufferPool.cpp`, `src/storage/WAL.cpp`
+
+### P2-7: 安全标签 (SE-PostgreSQL)
+- **类别**: 安全 / MAC
+- **现状**: 无强制访问控制
+- **PG 参考**: `SECURITY LABEL`, SELinux 集成
+- **影响**: 无法满足高安全等级部署
+- **实现路径**:
+  1. 实现 `SecurityLabel` 结构：`(objtype, objname, label)`
+  2. 在 ACL 检查前增加 MAC 检查
+  3. 增加 `SECURITY LABEL ON ...` 命令
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/utils/permissions.h`
+
+### P2-8: TDE (透明数据加密)
+- **类别**: 安全 / 加密
+- **现状**: 数据文件明文存储
+- **PG 参考**: `pg_tde` extension
+- **影响**: 无法满足合规要求
+- **实现路径**:
+  1. 实现 `PageCrypto`：AES-256-GCM 页级加密
+  2. 在 `Page.cpp` 读写路径中加解密
+  3. 实现密钥管理：`pg_tde_keyring`
+- **预估工作量**: 1 周
+- **相关文件**: `src/storage/Page.cpp`
+
+---
+
+## P3 — 锦上添花 (企业级/生态)
+
+### P3-1: C 扩展加载 (fmgr)
+- **类别**: 扩展性
+- **现状**: 无法加载 `.so` 动态库
+- **PG 参考**: `CREATE FUNCTION ... LANGUAGE C`, `fmgr`
+- **影响**: 无法使用 C 扩展生态
+- **实现路径**:
+  1. 实现 `dlopen`/`dlsym` 包装
+  2. 实现 `PG_FUNCTION_INFO_V1` 宏兼容
+  3. 实现 `fmgr` 调用接口
+- **预估工作量**: 1-2 周
+
+### P3-2: Hook 系统
+- **类别**: 扩展性
+- **现状**: 无 plugin hook
+- **PG 参考**: `ProcessUtility_hook`, `ExecutorStart_hook`, `plpgsql_plugin`
+- **影响**: 无法做 APM、审计、查询重写等插件
+- **实现路径**:
+  1. 定义 `Hook` 模板类
+  2. 在关键路径插入 hook 点
+  3. 实现 hook 注册/注销 API
+- **预估工作量**: 1 周
+
+### P3-3: Background Worker API
+- **类别**: 扩展性
+- **现状**: 11 种后端类型框架有，无注册 API
+- **PG 参考**: `RegisterBackgroundWorker`, `BackgroundWorkerInitializeConnection`
+- **影响**: 无法开发自定义后台任务插件
+- **实现路径**:
+  1. 实现 `BackgroundWorker` 注册接口
+  2. 实现 shared memory 注册
+  3. 实现 worker 生命周期管理
+- **预估工作量**: 3-5 天
+
+### P3-4: pg_upgrade 工具
+- **类别**: 运维 / 升级
+- **现状**: 无跨版本升级工具
+- **PG 参考**: `pg_upgrade`
+- **影响**: 大版本升级需要导出/导入
+- **实现路径**:
+  1. 实现 `pg_upgrade` 二进制
+  2. 实现数据文件格式迁移
+  3. 实现 catalog 版本检查
+- **预估工作量**: 1-2 周
+
+### P3-5: 内置扩展 (pg_stat_statements, auto_explain 等)
+- **类别**: 生态
+- **现状**: 无内置扩展
+- **PG 参考**: `pg_stat_statements`, `auto_explain`, `pg_prewarm`
+- **影响**: 缺少常用运维工具
+- **实现路径**:
+  1. 实现 `CREATE EXTENSION` 运行时加载
+  2. 移植常用扩展为内置
+- **预估工作量**: 1-2 周
+
+### P3-6: 多租户 Schema 隔离
+- **类别**: 企业级
+- **现状**: Schema 支持基础，无行级租户隔离
+- **PG 参考**: `ROW LEVEL SECURITY` + `CURRENT_USER` 过滤
+- **影响**: SaaS 多租户场景需要应用层处理
+- **实现路径**:
+  1. 实现 `SET app.current_tenant = '...'` GUC
+  2. 自动为每个查询增加 tenant_id 过滤
+  3. 实现 `CREATE POLICY ... USING (tenant_id = current_tenant())`
+- **预估工作量**: 3-5 天
+
+---
+
+## 实施路线图建议
+
+### 第一优先级 (并发正确性 + 查询完整性) — 约 4 周
+1. P0-7 BEFORE 行级触发器 (3-5d)
+2. P0-6 Bitmap Scan (1w)
+3. P1-1 Window Function Executor (1-2w)
+4. P1-2 UNION/INTERSECT Executor (3-5d)
+5. P1-3 ROLLUP/CUBE Executor (3-5d)
+6. P0-4 Gap Locks (1-2w)
+
+### 第二优先级 (性能) — 约 4 周
+1. P0-1 并行查询 (2-3w)
+2. P0-2 JIT 编译 (3-4w)
+3. P0-3 GiST 索引 (2-3w)
+4. P2-6 异步 I/O (1w)
+
+### 第三优先级 (可观测性 + 运维) — 约 3 周
+1. P1-6 后台统计收集器 (1w)
+2. P2-1 pg_stat_statements (2-3d)
+3. P2-3 增量备份 (1-2w)
+4. P2-4 连接池 (1w)
+
+### 第四优先级 (生态 + 安全) — 约 4 周
+1. P1-7 PL/pgSQL 运行时 (2-3w)
+2. P3-1 C 扩展加载 (1-2w)
+3. P3-2 Hook 系统 (1w)
+4. P2-8 TDE 加密 (1w)
+
+---
+
+## 统计
+
+| 维度 | 数量 | 预估总工作量 |
+|------|------|-------------|
+| P0 严重缺失 | 7 | ~11-15 周 |
+| P1 重要缺失 | 9 | ~10-14 周 |
+| P2 次要缺失 | 8 | ~7-10 周 |
+| P3 锦上添花 | 6 | ~6-9 周 |
+| **合计** | **30** | **~34-48 周** |
+
+> 注: 工作量估算基于单人开发、熟悉 PostgreSQL 内部实现的前提。
+> 多人协作可并行推进多个 P0/P1 项，总时间可压缩至 20-25 周。
