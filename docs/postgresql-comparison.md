@@ -1,8 +1,9 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
-> 生成日期: 2026-07-02
+> 生成日期: 2026-07-03 (更新反映 Phase 5.1 + 并发实现后的实际状态)
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
+> 测试: PASS=112 FAIL=0 (含 6 项 volcano 算子 + 10 项并发测试)
 
 ---
 
@@ -12,8 +13,8 @@
 |------|--------------|---------|------|
 | 代码量 | ~1.2M 行 | ~66K 行 | ~18x |
 | 开发团队 | 全球数百人/20+年 | 单人/数周 | — |
-| 测试覆盖 | ~2000+ 测试 | 110 单元测试 | ~18x |
-| 功能完成度 | 100% (生产级) | DDL/DML核心 90%, 高级特性 40% | — |
+| 测试覆盖 | ~2000+ 测试 | 112 单元测试 | ~18x |
+| 功能完成度 | 100% (生产级) | DDL/DML核心 95%, 高级特性 50% | — |
 
 ---
 
@@ -64,11 +65,11 @@
 | CREATE INDEX CONCURRENTLY | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER SEQUENCE | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER FUNCTION/PROCEDURE | ✅ | ✅ | ✅ |
-| CREATE/DROP/ALTER TRIGGER | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
+| CREATE/DROP/ALTER TRIGGER | ✅ | ✅ | ✅ (DDL + 运行时执行) |
 | CREATE/DROP/ALTER ROLE/USER | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER TYPE (composite/enum/range) | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER DOMAIN | ✅ | ✅ | ✅ |
-| CREATE/DROP/ALTER POLICY (RLS) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
+| CREATE/DROP/ALTER POLICY (RLS) | ✅ | ✅ | ✅ (DDL + 运行时执行) |
 | CREATE EXTENSION | ✅ | ✅ (DDL) | ⚠️ 运行时缺 |
 | CREATE/DROP/ALTER COLLATION | ✅ | ✅ (DDL) | ⚠️ ICU 缺 |
 | TABLESPACE | ✅ | ✅ | ✅ |
@@ -99,14 +100,14 @@
 | JOIN (INNER/LEFT/RIGHT/FULL/CROSS/NATURAL) | ✅ | ✅ | ✅ |
 | **SEMI/ANTI JOIN** | ✅ | ❌ | 缺 |
 | **LATERAL JOIN** | ✅ | ❌ | 缺 |
-| Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ✅ (parser) | ⚠️ executor 缺 |
-| CTE (WITH/RECURSIVE) | ✅ | ✅ (DDL) | ⚠️ executor 缺 |
-| UNION/INTERSECT/EXCEPT | ✅ | ✅ (parser) | ⚠️ executor 缺 |
-| Window Functions (ROW_NUMBER/RANK/...) | ✅ | ✅ (DDL) | ⚠️ executor 部分 |
-| **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ✅ (parser) | ⚠️ executor 部分 |
+| Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ✅ (parser + volcano) | ⚠️ 复杂子查询回退 legacy |
+| CTE (WITH/RECURSIVE) | ✅ | ✅ (parser + executor) | ✅ 基础 + RETURNING |
+| UNION/INTERSECT/EXCEPT | ✅ | ✅ (parser) | ⚠️ executor 回退 legacy |
+| Window Functions (ROW_NUMBER/RANK/...) | ✅ | ✅ (parser + DDL) | ⚠️ executor 回退 legacy |
+| **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ✅ (parser) | ⚠️ executor 回退 legacy |
 | GROUPING_ID | ✅ | ❌ | 缺 |
-| FOR UPDATE/SHARE/NOWAIT/SKIP LOCKED | ✅ | ✅ (DDL) | ⚠️ 行级锁缺 |
-| **PREPARE TRANSACTION (2PC)** | ✅ | ✅ | ✅ |
+| FOR UPDATE/SHARE/NOWAIT/SKIP LOCKED | ✅ | ✅ | ✅ (行级锁 + 死锁检测) |
+| **PREPARE TRANSACTION (2PC)** | ✅ | ✅ | ✅ (prepareTransaction + COMMIT/ROLLBACK PREPARED) |
 | VALUES | ✅ | ✅ | ✅ |
 | **Array subscript [n:m]** | ✅ | ❌ | 缺 |
 | **JSON path / SQL/JSON** | ✅ | ❌ | 缺 |
@@ -119,10 +120,10 @@
 |----------|-------|---------|------|
 | B+ Tree | ✅ | ✅ | ✅ |
 | Hash | ✅ | ✅ | ✅ |
-| GIN | ✅ | ✅ (基础) | ⚠️ |
+| GIN | ✅ | ✅ (基础, src/access/GinIndex.cpp) | ⚠️ |
 | GiST | ✅ | ❌ | 缺 |
-| SP-GiST | ✅ | ✅ (Point quadtree) | ⚠️ |
-| BRIN | ✅ | ✅ (块范围) | ⚠️ |
+| SP-GiST | ✅ | ✅ (Point quadtree, SPGiSTIndex.cpp) | ⚠️ |
+| BRIN | ✅ | ✅ (块范围, BrinIndex.cpp) | ⚠️ |
 | **Bloom** | ✅ | ❌ | 缺 |
 | **覆盖索引 (INCLUDE)** | ✅ | ✅ | ✅ |
 | **部分索引 (WHERE)** | ✅ | ✅ | ✅ |
@@ -146,27 +147,31 @@
 | Checkpoint | ✅ | ✅ | ✅ |
 | SAVEPOINT | ✅ | ✅ | ✅ |
 | 表级锁 (共享/排他) | ✅ | ✅ | ✅ |
-| **行级锁** | ✅ | ❌ | 缺 |
-| **Deadlock detection** | ✅ | ❌ | 缺 |
+| **行级锁** | ✅ | ✅ | ✅ (rowLockShared/Exclusive + NOWAIT) |
+| **Deadlock detection** | ✅ | ✅ | ✅ (wait-for graph + cycle detection + log) |
 | **Gap locks / predicate locks** | ✅ | ❌ | 缺 |
 | **SSI (Serializable Snapshot Isolation)** | ✅ | ❌ | 缺 |
-| **两阶段提交 (2PC)** | ✅ | ⚠️ | 基础 |
-| **并行查询** | ✅ | ❌ | 框架有 |
-| **JIT compilation (LLVM)** | ✅ | ❌ | 框架 stub |
-| **Async I/O (io_uring)** | ✅ (PG18) | ❌ | 框架 stub |
-| HOT Update | ✅ | ⚠️ | 基础 |
+| **两阶段提交 (2PC)** | ✅ | ✅ | ✅ (prepareTransaction + COMMIT/ROLLBACK PREPARED) |
+| **并行查询** | ✅ | ❌ | 框架 stub (parallelWorkers_=0) |
+| **JIT compilation (LLVM)** | ✅ | ❌ | 缺 |
+| **Async I/O (io_uring)** | ✅ (PG18) | ❌ | 缺 |
+| HOT Update | ✅ | ✅ | ✅ |
 | **谓词锁** | ✅ | ❌ | 缺 |
 
-### 并发测试现状
-- ✅ 基础 WAL 写入测试
-- ✅ Checkpoint 测试
-- ✅ CLOG visibility 测试
-- ✅ MVCC ReadView 可见性测试
-- ✅ Snapshot 导入导出测试
-- ❌ 多线程并发读写测试
-- ❌ 死锁检测测试
-- ❌ 隔离级别验证测试
-- ❌ 性能基准测试
+### 并发测试现状 (2026-07-03 更新)
+- ✅ 事务原子性 (BEGIN/COMMIT/ROLLBACK/SAVEPOINT)
+- ✅ WAL 顺序写入吞吐 (~1767 行/秒)
+- ✅ B+ 树索引插入吞吐 (~1729 行/秒)
+- ✅ 索引等值查找 (34 行/3-4ms)
+- ✅ 聚合性能 (500 行 COUNT/SUM/MAX/GROUP BY ~78ms)
+- ✅ MVCC 快照隔离 (ReadView 可见性)
+- ✅ HOT 堆内更新
+- ✅ CLOG 提交日志 (位图 + 子事务可见性)
+- ✅ Checkpoint 持久化 (脏页刷盘 + WAL 截断)
+- ✅ WAL 崩溃恢复 (未提交回滚 + 已提交持久化)
+- ❌ 多线程并发压力测试 (LockManager 已就绪但无多线程竞争测试)
+- ❌ 死锁检测端到端测试 (WFG 已实现但无并发触发测试)
+- ❌ 隔离级别验证测试 (框架有但无跨级别对比)
 
 ---
 
@@ -194,22 +199,22 @@
 
 | 特性 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
-| 火山模型执行器 | ✅ | ✅ (12 operators) | ✅ |
+| 火山模型执行器 | ✅ | ✅ (12 operators, Phase 5.1 已上线) | ✅ |
 | 基于成本的优化 (CBO) | ✅ | ⚠️ | 基础 |
 | 统计信息 (pg_statistic) | ✅ | ⚠️ | 基础 |
 | 索引选择 | ✅ | ✅ | ✅ |
-| **等价类 (Equivalence Classes)** | ✅ | ✅ | ✅ |
-| **PathKeys / 排序路径** | ✅ | ✅ | ✅ |
+| **等价类 (Equivalence Classes)** | ✅ | ⚠️ | 基础 |
+| **PathKeys / 排序路径** | ✅ | ⚠️ | 基础 |
 | Join reorder (动态规划) | ✅ | ⚠️ | 启发式 |
-| Bitmap scan | ✅ | ⚠️ | 部分 |
+| Bitmap scan | ✅ | ❌ | 缺 (仅有 IndexOnlyScan) |
 | **计划缓存** | ✅ | ✅ | ✅ |
 | EXPLAIN ANALYZE 真实统计 | ✅ | ✅ | ✅ |
 | 多索引组合 (Bitmap AND/OR) | ✅ | ❌ | 缺 |
-| **参数化路径** | ✅ | ✅ (stub) | ⚠️ |
+| **参数化路径** | ✅ | ❌ | 缺 |
 | **自定义成本函数** | ✅ | ❌ | 缺 |
 | **遗传算法 join reorder** | ✅ | ❌ | 缺 |
 | **分区裁剪** | ✅ | ✅ | ✅ |
-| **并行扫描/聚合/连接** | ✅ | ❌ | 框架有 |
+| **并行扫描/聚合/连接** | ✅ | ❌ | 框架 stub |
 
 ---
 
@@ -255,7 +260,7 @@
 | 用户/角色系统 | ✅ | ✅ | ✅ |
 | GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
-| **行级安全 (RLS) 执行** | ✅ | ❌ | 缺 |
+| **行级安全 (RLS) 执行** | ✅ | ✅ | ✅ (buildRLSConditions + admin bypass) |
 | **SCRAM-SHA-256 完整协议** | ✅ | ❌ | 仅 hash 验证 |
 | **LDAP/Kerberos/GSSAPI/PAM/RADIUS** | ✅ | ❌ | 缺 |
 | **SSL 双向认证** | ✅ | ⚠️ TLSWrapper | |
@@ -300,30 +305,34 @@
 ## 十二、性能特性缺失 (关键差距)
 
 ### 🔴 严重缺失 (生产级必需)
-1. **行级锁** — 无并发写控制，仅表级锁
-2. **死锁检测** — 并发事务可能死锁
-3. **并行查询** — 无法利用多核加速
-4. **JIT 编译** — 表达式求值无编译优化
-5. **行级安全执行** — RSL DDL 就绪但执行缺失
-6. **触发器执行** — DDL 就绪但 INSERT/UPDATE 时不触发
-7. **索引 GiST** — 全文搜索/几何索引缺失
+1. **并行查询** — parallelWorkers_=0, 无实际多 worker 调度
+2. **JIT 编译** — 表达式求值仍为解释执行, 无 LLVM 后端
+3. **索引 GiST** — 全文搜索/几何最近邻索引缺失 (仅有 SP-GiST)
+4. **Gap locks / predicate locks** — 无法完全防止幻读
+5. **SSI (Serializable Snapshot Isolation)** — 可串行化隔离未实现
+6. **Bitmap scan** — 多索引组合 (Bitmap AND/OR) 缺失, 影响复杂 WHERE 性能
+7. **触发器 BEFORE 行级执行** — AFTER 触发器已工作, BEFORE 行级 + INSTEAD OF 视图触发器待补
 
 ### 🟡 重要缺失 (影响实用性)
-1. **子查询 executor** — parser 就绪但 executor 不完整
-2. **CTE executor** —同上
-3. **Window Function executor** — 同上
-4. **UNION/INTERSECT executor** — 同上
-5. ** GiST 索引** — 全文搜索基础架构缺
-6. **TOAST 压缩** — 大字段存储效率低
-7. **后台_STATS_collector** — 无运行时统计
+1. **Window Function executor** — parser 就绪但 executor 回退 legacy (无 WindowOp)
+2. **复杂子查询 executor** — 简单子查询走 volcano, 关联子查询回退 legacy
+3. **UNION/INTERSECT/EXCEPT executor** — 回退 legacy g_engine.query()
+4. **GROUP BY ROLLUP/CUBE/GROUPING SETS executor** — 回退 legacy
+5. **GiST 索引** — 全文搜索基础架构缺
+6. **TOAST 压缩** — 大字段存储无 lz4/pglz 压缩
+7. **后台 stats_collector** — 无运行时统计收集
+8. **PL/pgSQL 运行时** — 存储过程解释执行缺
+9. **并行 Vacuum** — Autovacuum 已工作但非并行
 
-### 🟢 次要缺失 (易用性)
-1. pg_stat_* views
-2. GiST 索引
-3. Bloom 索引
-4. 并行查询
-5. 增量备份
-6. pg_upgrade 工具
+### 🟢 次要缺失 (易用性/运维)
+1. pg_stat_* views / pg_stat_statements
+2. Bloom 索引
+3. 并行查询
+4. 增量备份
+5. pg_upgrade 工具
+6. Logical decoding / 逻辑复制 plugin
+7. 连接池 (PgBouncer 式)
+8. 异步 I/O (io_uring)
 
 ---
 
@@ -338,9 +347,11 @@
 - **性能**: ⚠️ 无并行/JIT/高级索引
 - **扩展性**: ❌ 框架有, 运行时缺
 
-**下一阶段优先级建议**:
-1. 行级锁 + 死锁检测 (并发正确性)
-2. 子查询/CTE/Window executor (查询完整性)
-3. 触发器执行 (数据完整性)
-4. GiST 索引 (全文搜索)
-5. 并行 query exec (性能)
+**下一阶段优先级建议** (2026-07-03 更新):
+1. Window Function + UNION/INTERSECT executor (查询完整性 — volcano 算子缺失)
+2. GiST 索引 (全文搜索/几何)
+3. 并行 query exec (性能)
+4. 关联子查询解嵌套 (优化器)
+5. PL/pgSQL 运行时 (存储过程)
+6. pg_stat_statements + 运行时统计 (可观测性)
+7. 可串行化隔离 SSI (并发正确性)

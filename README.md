@@ -3,6 +3,7 @@
 基于 C++17 实现的关系型数据库管理系统，支持标准 SQL 交互，具备页式存储、B+ 树索引、MVCC 事务、查询优化器、网络服务等生产级数据库核心功能。对标 PostgreSQL 级功能完整度。
 
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
+> **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
 > **当前状态**: 全部 193 个 Wave 完成 (100%), 测试 PASS=112 FAIL=0
 
 ## 功能特性
@@ -628,6 +629,7 @@ Var Offset Array 每项 (4 bytes):
 | [MANUAL.md](docs/MANUAL.md) | 完整使用手册 (25 章, 覆盖全部 SQL 语法) |
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与 Wave 进度 (193 waves 全部完成) |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
+| [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
 | [test-report.md](docs/test-report.md) | 自动测试报告 (PASS=112 FAIL=0) |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
