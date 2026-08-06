@@ -20,6 +20,8 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/executor
     ${CMAKE_SOURCE_DIR}/src/parser
     ${CMAKE_SOURCE_DIR}/src/expression
+    ${CMAKE_SOURCE_DIR}/src/replication
+    ${CMAKE_SOURCE_DIR}/src/process
 )
 
 # 源文件列表 (TLSWrapper 在下方根据 OpenSSL 可用性条件添加)
@@ -39,6 +41,8 @@ set(DBMS_SOURCES
     src/access/BPTree.cpp
     src/access/HashIndex.cpp
     src/access/SPGiSTIndex.cpp
+    src/access/GinIndex.cpp
+    src/access/BrinIndex.cpp
     src/access/BPTreeIndexAM.cpp
     src/access/HashIndexAM.cpp
     src/transaction/LockManager.cpp
@@ -58,6 +62,10 @@ set(DBMS_SOURCES
     src/expression/expr_helper.cpp
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
+    src/utils/pg_hba.cpp
+    src/replication/ReplicationManager.cpp
+    src/process/ProcessManager.cpp
+    src/storage/LargeObject.cpp
     src/types/numeric.cpp
 )
 
@@ -85,6 +93,7 @@ if(OpenSSL_FOUND)
     target_compile_definitions(dbms_main PRIVATE HAS_OPENSSL=1)
 else()
     message(STATUS "OpenSSL not found, using TLS stub (plain TCP)")
+    target_sources(dbms_main PRIVATE src/network/TLSWrapper_stub.cpp)
 endif()
 
 # 安装目标

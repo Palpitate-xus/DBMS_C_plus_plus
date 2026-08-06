@@ -9,7 +9,7 @@ BUILD_DIR="${SRC_DIR}/build"
 
 # 检测 OpenSSL
 HAS_OPENSSL=0
-if pkg-config --exists openssl 2>/dev/null || [ -f /usr/include/openssl/ssl.h ]; then
+if pkg-config --exists openssl 2>/dev/null; then
     HAS_OPENSSL=1
     echo "[build] OpenSSL detected, TLS support enabled"
 else

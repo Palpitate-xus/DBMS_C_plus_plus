@@ -1016,6 +1016,20 @@ StorageEngine::StorageEngine() {
     recoverAllDatabases();
     migrateAllDataFiles();
     catalogService_ = std::make_unique<CatalogService>(*this);
+    // Keep trigger WHEN semantics available for direct StorageEngine users
+    // (unit tests and embedded callers) as well as the interactive frontend.
+    // main.cpp installs a richer session-aware evaluator at startup, but the
+    // engine must not silently treat every WHEN clause as true when that
+    // callback has not been registered yet.
+    setWhenConditionEvaluator(
+        [](const std::string& condition,
+           const std::map<std::string, std::string>& newValues,
+           const std::map<std::string, std::string>& oldValues) -> bool {
+            std::map<std::string, std::string> values = oldValues;
+            values.insert(newValues.begin(), newValues.end());
+            std::string error;
+            return ExprHelper::evalBool(condition, values, {}, &error);
+        });
     lastBackgroundCheckpoint_ = std::chrono::steady_clock::now();
     startBackgroundWorker();
 }
@@ -10564,6 +10578,111 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
+    // Fire BEFORE INSERT triggers (row-level)
+    // BEFORE triggers execute before the actual write and can modify NEW column values
+    // via "SET col = val" or "NEW.col = val" assignments in the trigger action.
+    if (triggerExecutor_) {
+        auto beforeInsertTriggers = getTriggers(dbname, tablename, "before", "insert");
+        for (const auto& trg : beforeInsertTriggers) {
+            if (!trg.enabled) continue;
+            if (!trg.forEachRow) continue;  // statement-level BEFORE not yet supported
+            // Evaluate WHEN condition if present
+            if (!trg.whenCondition.empty() && whenEvaluator_) {
+                std::string cond = trg.whenCondition;
+                for (const auto& [col, val] : actualValues) {
+                    std::string placeholder = "NEW." + col;
+                    size_t pos = 0;
+                    while ((pos = cond.find(placeholder, pos)) != std::string::npos) {
+                        cond.replace(pos, placeholder.size(), val);
+                        pos += val.size();
+                    }
+                }
+                if (!whenEvaluator_(cond, actualValues, {})) continue;
+            }
+            std::string action = trg.action;
+            // Substitute NEW.column placeholders
+            for (const auto& [col, val] : actualValues) {
+                std::string placeholder = "NEW." + col;
+                size_t pos = 0;
+                while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                    action.replace(pos, placeholder.size(), val);
+                    pos += val.size();
+                }
+            }
+            // Substitute trigger diagnostic variables
+            {
+                auto replaceVar = [&](const std::string& var, const std::string& val) {
+                    size_t pos = 0;
+                    while ((pos = action.find(var, pos)) != std::string::npos) {
+                        action.replace(pos, var.size(), val);
+                        pos += val.size();
+                    }
+                };
+                replaceVar("tg_name", trg.name);
+                replaceVar("tg_when", trg.timing);
+                replaceVar("tg_level", trg.forEachRow ? "ROW" : "STATEMENT");
+                replaceVar("tg_op", "INSERT");
+                replaceVar("tg_relname", trg.tableName);
+            }
+            // Execute the trigger action
+            triggerExecutor_(action);
+            // Parse "SET col = val" assignments from action and apply to actualValues
+            {
+                size_t searchPos = 0;
+                while (searchPos < action.size()) {
+                    size_t eqPos = action.find('=', searchPos);
+                    if (eqPos == std::string::npos || eqPos == 0) break;
+                    // Find column name (skip "SET " or "NEW." prefix)
+                    size_t colEnd = eqPos;
+                    while (colEnd > 0 && (action[colEnd-1] == ' ' || action[colEnd-1] == '\t'))
+                        --colEnd;
+                    size_t colStart = colEnd;
+                    while (colStart > 0 && action[colStart-1] != ' ' && action[colStart-1] != ',')
+                        --colStart;
+                    std::string colName = action.substr(colStart, colEnd - colStart);
+                    // Trim
+                    while (!colName.empty() && (colName.back() == ' ' || colName.back() == '\t'))
+                        colName.pop_back();
+                    while (!colName.empty() && (colName.front() == ' ' || colName.front() == '\t'))
+                        colName.erase(colName.begin());
+                    if (colName.size() > 4 && colName.substr(0, 4) == "NEW.")
+                        colName.erase(0, 4);
+                    // Find value (after = until ; or end)
+                    size_t valStart = eqPos + 1;
+                    while (valStart < action.size() && (action[valStart] == ' ' || action[valStart] == '\t'))
+                        ++valStart;
+                    size_t valEnd = action.find(';', valStart);
+                    if (valEnd == std::string::npos) valEnd = action.size();
+                    while (valEnd > valStart && (action[valEnd-1] == ' ' || action[valEnd-1] == '\t'))
+                        --valEnd;
+                    std::string rawVal = action.substr(valStart, valEnd - valStart);
+                    std::string val = rawVal;
+                    bool evaluated = false;
+                    std::string evaluatedVal = evalExpressionSql(rawVal, actualValues,
+                                                                  typeHints, dbname, &evaluated);
+                    if (evaluated) {
+                        val = evaluatedVal;
+                    }
+                    // Strip surrounding quotes
+                    if (!evaluated && val.size() >= 2 &&
+                        ((val.front() == '\'' && val.back() == '\'') ||
+                         (val.front() == '"' && val.back() == '"'))) {
+                        val = val.substr(1, val.size() - 2);
+                    }
+                    if (!colName.empty()) {
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            if (tbl.cols[i].dataName == colName) {
+                                actualValues[colName] = val;
+                                break;
+                            }
+                        }
+                    }
+                    searchPos = valEnd + 1;
+                }
+            }
+        }
+    }
+
     // TOAST: offload large variable-length values to external storage
     prepareToastValues(dbname, tablename, tbl, actualValues);
 
@@ -11603,6 +11722,84 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         deleteRowToast(dbname, tablename, rid);
     }
 
+    // Fire BEFORE DELETE triggers (row-level)
+    // BEFORE DELETE triggers have access to OLD values (the row being deleted).
+    // They cannot modify the row (deletion is immutable) but can perform side effects
+    // such as logging to an audit table or raising an error to abort the delete.
+    if (triggerExecutor_) {
+        auto beforeDeleteTriggers = getTriggers(dbname, tablename, "before", "delete");
+        for (const auto& trg : beforeDeleteTriggers) {
+            if (!trg.enabled) continue;
+            if (trg.forEachRow) {
+                for (const auto& row : rowsToDelete) {
+                    if (row.empty()) continue;
+                    std::map<std::string, std::string> oldValues;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        oldValues[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+                    }
+                    // Evaluate WHEN condition if present
+                    if (!trg.whenCondition.empty() && whenEvaluator_) {
+                        std::string cond = trg.whenCondition;
+                        for (const auto& [col, val] : oldValues) {
+                            std::string placeholder = "OLD." + col;
+                            size_t pos = 0;
+                            while ((pos = cond.find(placeholder, pos)) != std::string::npos) {
+                                cond.replace(pos, placeholder.size(), val);
+                                pos += val.size();
+                            }
+                        }
+                        if (!whenEvaluator_(cond, {}, oldValues)) continue;
+                    }
+                    std::string action = trg.action;
+                    for (const auto& [col, val] : oldValues) {
+                        std::string placeholder = "OLD." + col;
+                        size_t pos = 0;
+                        while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                            action.replace(pos, placeholder.size(), val);
+                            pos += val.size();
+                        }
+                    }
+                    {
+                        auto replaceVar = [&](const std::string& var, const std::string& val) {
+                            size_t pos = 0;
+                            while ((pos = action.find(var, pos)) != std::string::npos) {
+                                action.replace(pos, var.size(), val);
+                                pos += val.size();
+                            }
+                        };
+                        replaceVar("tg_name", trg.name);
+                        replaceVar("tg_when", trg.timing);
+                        replaceVar("tg_level", trg.forEachRow ? "ROW" : "STATEMENT");
+                        replaceVar("tg_op", "DELETE");
+                        replaceVar("tg_relname", trg.tableName);
+                    }
+                    triggerExecutor_(action);
+                }
+            } else {
+                // Statement-level BEFORE DELETE
+                if (!trg.whenCondition.empty() && whenEvaluator_) {
+                    if (!whenEvaluator_(trg.whenCondition, {}, {})) continue;
+                }
+                std::string action = trg.action;
+                {
+                    auto replaceVar = [&](const std::string& var, const std::string& val) {
+                        size_t pos = 0;
+                        while ((pos = action.find(var, pos)) != std::string::npos) {
+                            action.replace(pos, var.size(), val);
+                            pos += val.size();
+                        }
+                    };
+                    replaceVar("tg_name", trg.name);
+                    replaceVar("tg_when", trg.timing);
+                    replaceVar("tg_level", "STATEMENT");
+                    replaceVar("tg_op", "DELETE");
+                    replaceVar("tg_relname", trg.tableName);
+                }
+                triggerExecutor_(action);
+            }
+        }
+    }
+
     // Delete rows via PageAllocator tombstones
     size_t delIdx = 0;
     for (int64_t rid : toDelete) {
@@ -12019,6 +12216,137 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 }
             }
         }
+        // Fire BEFORE UPDATE triggers (row-level)
+        // BEFORE UPDATE triggers have access to both OLD (current row) and NEW (pending update) values.
+        // They can modify NEW column values via "SET col = val" in the trigger action.
+        if (triggerExecutor_) {
+            auto beforeUpdateTriggers = getTriggers(dbname, tablename, "before", "update");
+            // Build OLD values map from the current row buffer
+            std::map<std::string, std::string> oldRowValues;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                oldRowValues[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+            }
+            for (const auto& trg : beforeUpdateTriggers) {
+                if (!trg.enabled) continue;
+                if (!trg.forEachRow) continue;
+                // Evaluate WHEN condition if present
+                if (!trg.whenCondition.empty() && whenEvaluator_) {
+                    std::string cond = trg.whenCondition;
+                    for (const auto& [col, val] : rowValues) {
+                        std::string placeholder = "NEW." + col;
+                        size_t pos = 0;
+                        while ((pos = cond.find(placeholder, pos)) != std::string::npos) {
+                            cond.replace(pos, placeholder.size(), val);
+                            pos += val.size();
+                        }
+                    }
+                    for (const auto& [col, val] : oldRowValues) {
+                        std::string placeholder = "OLD." + col;
+                        size_t pos = 0;
+                        while ((pos = cond.find(placeholder, pos)) != std::string::npos) {
+                            cond.replace(pos, placeholder.size(), val);
+                            pos += val.size();
+                        }
+                    }
+                    if (!whenEvaluator_(cond, rowValues, oldRowValues)) continue;
+                }
+                std::string action = trg.action;
+                // Substitute NEW.column and OLD.column placeholders
+                for (const auto& [col, val] : rowValues) {
+                    std::string placeholder = "NEW." + col;
+                    size_t pos = 0;
+                    while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                        action.replace(pos, placeholder.size(), val);
+                        pos += val.size();
+                    }
+                }
+                for (const auto& [col, val] : oldRowValues) {
+                    std::string placeholder = "OLD." + col;
+                    size_t pos = 0;
+                    while ((pos = action.find(placeholder, pos)) != std::string::npos) {
+                        action.replace(pos, placeholder.size(), val);
+                        pos += val.size();
+                    }
+                }
+                // Substitute trigger diagnostic variables
+                {
+                    auto replaceVar = [&](const std::string& var, const std::string& val) {
+                        size_t pos = 0;
+                        while ((pos = action.find(var, pos)) != std::string::npos) {
+                            action.replace(pos, var.size(), val);
+                            pos += val.size();
+                        }
+                    };
+                    replaceVar("tg_name", trg.name);
+                    replaceVar("tg_when", trg.timing);
+                    replaceVar("tg_level", trg.forEachRow ? "ROW" : "STATEMENT");
+                    replaceVar("tg_op", "UPDATE");
+                    replaceVar("tg_relname", trg.tableName);
+                }
+                triggerExecutor_(action);
+                // Parse "SET col = val" assignments and apply to rowValues
+                {
+                    size_t searchPos = 0;
+                    while (searchPos < action.size()) {
+                        size_t eqPos = action.find('=', searchPos);
+                        if (eqPos == std::string::npos || eqPos == 0) break;
+                        size_t colEnd = eqPos;
+                        while (colEnd > 0 && (action[colEnd-1] == ' ' || action[colEnd-1] == '\t'))
+                            --colEnd;
+                        size_t colStart = colEnd;
+                        while (colStart > 0 && action[colStart-1] != ' ' && action[colStart-1] != ',')
+                            --colStart;
+                        std::string colName = action.substr(colStart, colEnd - colStart);
+                        while (!colName.empty() && (colName.back() == ' ' || colName.back() == '\t'))
+                            colName.pop_back();
+                        while (!colName.empty() && (colName.front() == ' ' || colName.front() == '\t'))
+                            colName.erase(colName.begin());
+                        if (colName.size() > 4 && colName.substr(0, 4) == "NEW.")
+                            colName.erase(0, 4);
+                        size_t valStart = eqPos + 1;
+                        while (valStart < action.size() && (action[valStart] == ' ' || action[valStart] == '\t'))
+                            ++valStart;
+                        size_t valEnd = action.find(';', valStart);
+                        if (valEnd == std::string::npos) valEnd = action.size();
+                        while (valEnd > valStart && (action[valEnd-1] == ' ' || action[valEnd-1] == '\t'))
+                            --valEnd;
+                        std::string rawVal = action.substr(valStart, valEnd - valStart);
+                        std::string val = rawVal;
+                        bool evaluated = false;
+                        std::string evaluatedVal = evalExpressionSql(rawVal, rowValues,
+                                                                      updateTypeHints, dbname,
+                                                                      &evaluated);
+                        if (evaluated) {
+                            val = evaluatedVal;
+                        }
+                        if (!evaluated && val.size() >= 2 &&
+                            ((val.front() == '\'' && val.back() == '\'') ||
+                             (val.front() == '"' && val.back() == '"'))) {
+                            val = val.substr(1, val.size() - 2);
+                        }
+                        if (!colName.empty()) {
+                            for (size_t i = 0; i < tbl.len; ++i) {
+                                if (tbl.cols[i].dataName == colName) {
+                                    rowValues[colName] = val;
+                                    break;
+                                }
+                            }
+                        }
+                        searchPos = valEnd + 1;
+                    }
+                }
+            }
+            // Re-apply generated column computation after BEFORE trigger modifications
+            auto updateTypeHints2 = buildTypeHints(tbl);
+            for (size_t i = 0; i < tbl.len; ++i) {
+                const Column& col = tbl.cols[i];
+                if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
+                bool ok = false;
+                std::string computed = evalExpressionSql(col.generatedExpr, rowValues, updateTypeHints2, dbname, &ok);
+                if (ok) rowValues[col.dataName] = computed;
+            }
+        }
+
         // TOAST: delete old toast entries, create new ones for large values
         deleteRowToast(dbname, tablename, rid);
         prepareToastValues(dbname, tablename, tbl, rowValues);

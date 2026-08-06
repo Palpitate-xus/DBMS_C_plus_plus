@@ -11,7 +11,7 @@ CXXFLAGS=(-std=c++17 -O2 -pthread)
 
 # Detect OpenSSL to match main build
 HAS_OPENSSL=0
-if pkg-config --exists openssl 2>/dev/null || [ -f /usr/include/openssl/ssl.h ]; then
+if pkg-config --exists openssl 2>/dev/null; then
     HAS_OPENSSL=1
 fi
 
@@ -108,7 +108,14 @@ for tf in tests/*_test.cpp; do
     if ! g++ "${CXXFLAGS[@]}" "${INC[@]}" -c "$tf" -o "build/obj/$name.o" 2>"/tmp/${name}.cerr"; then
         echo "COMPILE-FAIL $name"; fail=$((fail+1)); failed+=("$name(compile)"); continue
     fi
-    if ! g++ "${CXXFLAGS[@]}" "build/obj/$name.o" "${link[@]}" "${TLS_LIBS[@]}" -o "build/$name" 2>"/tmp/${name}.lerr"; then
+    link_for_test=("${link[@]}")
+    if rg -q '(^|[[:space:]])(bool checkAdmin|bool checkDB|std::string resolveTableName|bool execute\(|void logSlowQuery|void recordSqlStat)' "$tf"; then
+        link_for_test=()
+        for obj in "${link[@]}"; do
+            [[ "$obj" == */test_stubs.o ]] || link_for_test+=("$obj")
+        done
+    fi
+    if ! g++ "${CXXFLAGS[@]}" "build/obj/$name.o" "${link_for_test[@]}" "${TLS_LIBS[@]}" -o "build/$name" 2>"/tmp/${name}.lerr"; then
         echo "LINK-FAIL $name"; fail=$((fail+1)); failed+=("$name(link)"); continue
     fi
     if ./build/$name >/dev/null 2>&1; then
@@ -119,4 +126,8 @@ for tf in tests/*_test.cpp; do
 done
 echo "=================================="
 echo "PASS=$pass FAIL=$fail"
-[[ $fail -gt 0 ]] && echo "FAILED: ${failed[@]}"
+if [[ $fail -gt 0 ]]; then
+    echo "FAILED: ${failed[@]}"
+    exit 1
+fi
+exit 0

@@ -8,7 +8,7 @@ BUILD_DIR="${SRC_DIR}/build"
 
 # 检测 OpenSSL（与主构建保持一致）
 HAS_OPENSSL=0
-if pkg-config --exists openssl 2>/dev/null || [ -f /usr/include/openssl/ssl.h ]; then
+if pkg-config --exists openssl 2>/dev/null; then
     HAS_OPENSSL=1
     echo "[test-build] OpenSSL detected, TLS support enabled"
 else
@@ -31,6 +31,8 @@ SOURCES=(
     src/access/BPTree.cpp
     src/access/HashIndex.cpp
     src/access/SPGiSTIndex.cpp
+    src/access/GinIndex.cpp
+    src/access/BrinIndex.cpp
     src/access/BPTreeIndexAM.cpp
     src/access/HashIndexAM.cpp
     src/transaction/LockManager.cpp
@@ -50,6 +52,10 @@ SOURCES=(
     src/expression/expr_helper.cpp
     src/commands/DdlExecutor.cpp
     src/commands/DdlTransaction.cpp
+    src/utils/pg_hba.cpp
+    src/replication/ReplicationManager.cpp
+    src/process/ProcessManager.cpp
+    src/storage/LargeObject.cpp
     src/types/numeric.cpp
 )
 
@@ -77,6 +83,8 @@ INCLUDES=(
     -Isrc/parser
     -Isrc/catalog
     -Isrc/expression
+    -Isrc/replication
+    -Isrc/process
 )
 
 CXXFLAGS="-std=c++17 -O2 -pthread -Wall -Wextra ${TLS_DEFS}"
@@ -91,6 +99,10 @@ for test_file in tests/*_test.cpp; do
     [ -e "$test_file" ] || continue
     name=$(basename "$test_file" .cpp)
     out="${BUILD_DIR}/${name}"
+    has_local_stubs=0
+    if rg -q '(^|[[:space:]])(bool checkAdmin|bool checkDB|std::string resolveTableName|bool execute\(|void logSlowQuery|void recordSqlStat)' "$test_file"; then
+        has_local_stubs=1
+    fi
 
     # 如果测试文件顶部有 # test_sources: src/... 注释，则使用自定义源文件列表
     if sed -n '1,5p' "$test_file" | grep -qE '^// test_sources:'; then
@@ -99,6 +111,8 @@ for test_file in tests/*_test.cpp; do
         for src in $custom_sources; do
             test_sources+=("$src")
         done
+    elif [ "$has_local_stubs" -eq 1 ]; then
+        test_sources=("${SOURCES[@]}")
     else
         test_sources=("${SOURCES[@]}" tests/test_stubs.cpp)
     fi

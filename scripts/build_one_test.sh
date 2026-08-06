@@ -39,6 +39,13 @@ for o in build/obj/*.o; do
         *) link+=("$o");;
     esac
 done
+if rg -q '(^|[[:space:]])(bool checkAdmin|bool checkDB|std::string resolveTableName|bool execute\(|void logSlowQuery|void recordSqlStat)' "tests/$test_name.cpp"; then
+    filtered_link=()
+    for o in "${link[@]}"; do
+        [[ "$o" == */test_stubs.o ]] || filtered_link+=("$o")
+    done
+    link=("${filtered_link[@]}")
+fi
 echo "[inc] linking build/$test_name"
 g++ "${CXXFLAGS[@]}" "${link[@]}" "build/obj/$test_name.o" -o "build/$test_name" -pthread
 
