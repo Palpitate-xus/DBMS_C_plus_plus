@@ -31,14 +31,19 @@ struct ProcessInfo {
     bool terminateRequested = false; // set by pg_terminate_backend
 };
 
-// Start a TCP server on the given port.
+// Start a TCP server on the given port. TLS is mandatory unless
+// allowPlaintext is explicitly set by the caller for local development.
 // Each client connection gets a dedicated thread.
 // Protocol (text, newline-delimited):
 //   Server -> Client: "login"
 //   Client -> Server: "username password"
 //   Server -> Client: "successfully login" or "wrong username or password"
 //   Then SQL commands are exchanged until client sends "exit".
-void startServer(int port);
+void startServer(int port, bool allowPlaintext = false);
+
+// Transport policy used by startup and unit tests. A server may listen only
+// when TLS is ready or plaintext was explicitly enabled.
+bool isServerTransportAllowed(bool tlsEnabled, bool allowPlaintext);
 
 // Get server connection statistics
 ServerStats& getServerStats();

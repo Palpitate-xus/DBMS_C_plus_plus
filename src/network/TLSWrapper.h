@@ -33,8 +33,9 @@ constexpr int SSL_ERROR_WANT_WRITE = 3;
 
 namespace dbms {
 
-// Secure socket wrapper: uses OpenSSL TLS when available,
-// falls back to plain socket I/O otherwise.
+// Secure socket wrapper: uses OpenSSL TLS when a context is supplied.
+// Plain socket I/O is retained only for the explicitly requested insecure
+// server mode; production startup must not silently select it.
 struct SecureSocket {
     int fd = -1;
     SSL* ssl = nullptr;
@@ -66,10 +67,6 @@ public:
     bool init(const std::string& certFile, const std::string& keyFile);
     bool enabled() const { return enabled_; }
     SSL_CTX* ctx() const { return ctx_; }
-
-    // Generate self-signed certificate if missing
-    static bool generateSelfSignedCert(const std::string& certPath,
-                                        const std::string& keyPath);
 
 private:
     SSL_CTX* ctx_ = nullptr;

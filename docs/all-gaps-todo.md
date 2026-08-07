@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：回归基线 PASS=115 FAIL=0；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：回归基线 PASS=116 FAIL=0；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -153,7 +153,7 @@
 - 根目录保持干净：所有测试数据自动隔离，不污染项目根目录
 - 修复: 61 个测试文件批量更新 include 和 cleanup 逻辑
 
-历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=115 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=116 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -447,14 +447,14 @@
 
 ## 11. 安全、认证、权限差距
 
-> **已完成进展（2026-06-21）**：Phase 2.7 已用 `pg_authid`/`pg_auth_members` 替代 `user.dat`/`role.dat`（CRUD + 成员关系 + 级联删除 + CSV 持久化），11.1 差距收窄但仍 ⚠️（属性执行/membership options/password expiration 未做）。TLS 有 OpenSSL wrapper + stub（11.4 ⚠️）。pg_hba/SCRAM/wire protocol（11.2/11.3）仍 ❌，待 Phase 7。
+> **已完成进展（2026-08-07）**：Phase 2.7 已用 `pg_authid`/`pg_auth_members` 替代 `user.dat`/`role.dat`（CRUD + 成员关系 + 级联删除 + CSV 持久化），11.1 差距收窄但仍 ⚠️（属性执行/membership options/password expiration 未做）。网络服务已改为 TLS 默认 fail-closed，缺失证书/私钥不会静默降级为明文；`--insecure` 仅用于本地开发。TLS 仍缺 PostgreSQL SSL 协商、客户端证书认证和 channel binding；pg_hba/SCRAM/wire protocol（11.2/11.3）仍 ❌，待 Phase 7。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 11.1 | 用户/角色 catalog | `user.dat` / `role.dat` / `.pg_role_attrs` 文件，非 `pg_authid`/`pg_auth_members`；角色属性目前主要可记录和审计，缺少 OID、属性执行语义、password expiration、membership options | ⚠️ |
 | 11.2 | 认证 | 支持 sha256/md5 哈希和 TLS 可选；缺少 `pg_hba.conf`、SCRAM-SHA-256、OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | ❌ |
 | 11.3 | 传输协议 | 不是 PostgreSQL wire protocol/libpq；客户端仅文本登录/SQL 行 | ❌ |
-| 11.4 | TLS | 有 OpenSSL wrapper 和 stub；缺少 PG SSL negotiation、client cert auth、channel binding | ⚠️ |
+| 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
 | 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
 | 11.6 | RLS | 有 policy 文件和透明条件追加；源码注释显示 `WITH CHECK` 复杂验证被简化允许，缺少 PG executor-integrated RLS | ⚠️ |
 | 11.7 | SECURITY DEFINER/INVOKER | 函数/过程缺少完整 security definer/invoker、search_path 安全规则 | ❌ |

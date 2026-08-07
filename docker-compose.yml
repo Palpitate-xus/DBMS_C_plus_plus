@@ -2,7 +2,8 @@
 # DBMS_C_plus_plus — Docker Compose deployment
 #
 # Usage:
-#   docker-compose up -d          # start server on port 9999
+#   mkdir -p deploy/tls           # place server.crt and server.key here
+#   docker-compose up -d          # start TLS-protected server on port 9999
 #   docker-compose logs -f        # follow logs
 #   docker-compose down           # stop
 #
@@ -19,11 +20,16 @@ services:
     # Run in TCP server mode (remove for interactive use)
     # Port configurable via DBMS_PORT env var (default 9999)
     command: ["./dbms_main", "--server", "${DBMS_PORT:-9999}"]
+    environment:
+      DBMS_TLS_CERT: /etc/dbms/tls/server.crt
+      DBMS_TLS_KEY: /etc/dbms/tls/server.key
     ports:
       - "${DBMS_PORT:-9999}:${DBMS_PORT:-9999}"
     volumes:
       # Persist database files outside the container
       - dbms_data:/data
+      # Production TLS material; keep the private key readable only by the host operator
+      - ./deploy/tls:/etc/dbms/tls:ro
     restart: unless-stopped
     # Resource limits (adjust to taste)
     deploy:

@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-08-07
 > 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=115 FAIL=0（`scripts/run_all_tests_fast.sh` 与 `scripts/build_tests.sh`）
+> 回归基线: PASS=116 FAIL=0（`scripts/run_all_tests_fast.sh` 与 `scripts/build_tests.sh`）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
@@ -865,8 +865,13 @@ SELECT JSONB_CONTAINS(DATA, '{"admin"}') FROM configs;
 ## 18. 网络服务
 
 ```bash
-# 启动服务端 (支持 TLS)
+# 生产服务端：证书和私钥必须预先准备好
+export DBMS_TLS_CERT=/etc/dbms/tls/server.crt
+export DBMS_TLS_KEY=/etc/dbms/tls/server.key
 ./dbms_main --server 9999
+
+# 仅限本地开发的明文模式（生产环境禁止）
+./dbms_main --server 9999 --insecure
 
 # 客户端连接
 nc localhost 9999
@@ -878,6 +883,8 @@ SHOW STATUS;
 SHOW LOCKS;
 SHOW DEADLOCKS;
 ```
+
+服务端默认 fail-closed：OpenSSL 不可用、证书/私钥缺失或 TLS 初始化失败时不会启动明文监听。证书路径也可以保留默认值 `server.crt` / `server.key`。
 
 ---
 
@@ -1017,7 +1024,7 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 
 ```bash
 ./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 运行全部 115 个测试
+./scripts/run_all_tests_fast.sh # 运行全部 116 个测试
 ./scripts/build_tests.sh        # 独立编译并运行每个 C++ 测试
 python3 tests/window_e2e_test.py # 窗口函数端到端测试（9 用例）
 ```

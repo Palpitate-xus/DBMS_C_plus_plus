@@ -35,7 +35,6 @@ void SecureSocket::close() {
 TLSServerContext::TLSServerContext() : ctx_(nullptr), enabled_(false) {}
 TLSServerContext::~TLSServerContext() {}
 bool TLSServerContext::init(const std::string&, const std::string&) { return false; }
-bool TLSServerContext::generateSelfSignedCert(const std::string&, const std::string&) { return false; }
 
 } // namespace dbms
 

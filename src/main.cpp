@@ -15937,10 +15937,20 @@ int main(int argc, char* argv[]) {
         g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
     }
 
-    // Server mode: ./dbms_main --server PORT
+    // Server mode: ./dbms_main --server PORT [--insecure]
     if (argc >= 3 && std::string(argv[1]) == "--server") {
         int port = std::stoi(argv[2]);
-        dbms::startServer(port);
+        bool allowPlaintext = false;
+        for (int i = 3; i < argc; ++i) {
+            if (std::string(argv[i]) == "--insecure") {
+                allowPlaintext = true;
+            } else {
+                std::cerr << "Unknown server option: " << argv[i]
+                          << " (supported: --insecure)" << std::endl;
+                return 2;
+            }
+        }
+        dbms::startServer(port, allowPlaintext);
         return 0;
     }
 

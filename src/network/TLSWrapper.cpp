@@ -2,8 +2,6 @@
 #include <cerrno>
 #include <cstring>
 #include <unistd.h>
-#include <filesystem>
-#include <iostream>
 
 namespace dbms {
 
@@ -129,17 +127,6 @@ bool TLSServerContext::init(const std::string& certFile, const std::string& keyF
     }
     enabled_ = true;
     return true;
-}
-
-bool TLSServerContext::generateSelfSignedCert(const std::string& certPath,
-                                               const std::string& keyPath) {
-    if (std::filesystem::exists(certPath) && std::filesystem::exists(keyPath)) return true;
-
-    std::string cmd = "openssl req -x509 -newkey rsa:2048 -keyout " + keyPath +
-                      " -out " + certPath +
-                      " -days 365 -nodes -subj /CN=localhost 2>/dev/null";
-    int ret = std::system(cmd.c_str());
-    return ret == 0 && std::filesystem::exists(certPath) && std::filesystem::exists(keyPath);
 }
 
 } // namespace dbms

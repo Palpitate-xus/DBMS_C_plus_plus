@@ -6,6 +6,8 @@
 
 #include <arpa/inet.h>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -53,6 +55,10 @@ uint64_t registerProcess(const std::string& user, const std::string& host, const
     info.connectTime = std::chrono::steady_clock::now();
     g_processList[pid] = std::move(info);
     return pid;
+}
+
+bool isServerTransportAllowed(bool tlsEnabled, bool allowPlaintext) {
+    return tlsEnabled || allowPlaintext;
 }
 
 void updateProcessInfo(uint64_t pid, const std::string& command,
@@ -227,23 +233,38 @@ static void handleClient(SecureSocket sock, std::string clientHost) {
     g_stats.activeConnections--;
 }
 
-void startServer(int port) {
-    // Initialize TLS context
+namespace {
+
+std::string environmentOr(const char* name, const char* fallback) {
+    const char* value = std::getenv(name);
+    return value && *value ? value : fallback;
+}
+
+} // namespace
+
+void startServer(int port, bool allowPlaintext) {
+    // TLS is fail-closed. Certificate paths are deployment configuration, not
+    // generated at runtime, so a fresh server cannot accidentally expose a
+    // private key or downgrade an authenticated connection to plaintext.
     TLSServerContext tlsCtx;
-    std::string certFile = "server.crt";
-    std::string keyFile = "server.key";
-    if (!std::filesystem::exists(certFile) || !std::filesystem::exists(keyFile)) {
-        std::cout << "Generating self-signed TLS certificate..." << std::endl;
-        if (!TLSServerContext::generateSelfSignedCert(certFile, keyFile)) {
-            std::cerr << "Warning: failed to generate TLS certificate, running without encryption" << std::endl;
-        }
-    }
+    std::string certFile = environmentOr("DBMS_TLS_CERT", "server.crt");
+    std::string keyFile = environmentOr("DBMS_TLS_KEY", "server.key");
     if (std::filesystem::exists(certFile) && std::filesystem::exists(keyFile)) {
         if (tlsCtx.init(certFile, keyFile)) {
             std::cout << "TLS encryption enabled (certificate: " << certFile << ")" << std::endl;
         } else {
-            std::cerr << "Warning: TLS initialization failed, running without encryption" << std::endl;
+            std::cerr << "TLS initialization failed; refusing to start" << std::endl;
         }
+    } else if (!allowPlaintext) {
+        std::cerr << "TLS certificate/key not found (DBMS_TLS_CERT=" << certFile
+                  << ", DBMS_TLS_KEY=" << keyFile
+                  << "); refusing to start without --insecure" << std::endl;
+        return;
+    }
+
+    if (!isServerTransportAllowed(tlsCtx.enabled(), allowPlaintext)) {
+        std::cerr << "TLS is unavailable; refusing to start without --insecure" << std::endl;
+        return;
     }
 
     int serverFd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -276,7 +297,7 @@ void startServer(int port) {
     if (tlsCtx.enabled()) {
         std::cout << " (TLS enabled)";
     } else {
-        std::cout << " (plaintext - no TLS)";
+        std::cout << " (INSECURE plaintext; explicitly enabled)";
     }
     std::cout << std::endl;
 
@@ -287,9 +308,13 @@ void startServer(int port) {
         if (clientFd < 0) continue;
 
         if (g_stats.activeConnections >= g_stats.maxConnections.load()) {
-            SecureSocket tmp(clientFd);
-            sendLine(tmp, "too many connections");
-            tmp.close();
+            if (tlsCtx.enabled()) {
+                SecureSocket tmp(clientFd, tlsCtx.ctx());
+                if (tmp.handshake()) sendLine(tmp, "too many connections");
+            } else {
+                SecureSocket tmp(clientFd);
+                sendLine(tmp, "too many connections");
+            }
             g_stats.rejectedConnections++;
             continue;
         }
@@ -303,7 +328,6 @@ void startServer(int port) {
                 if (!sock.handshake()) {
                     std::cerr << "TLS handshake failed" << std::endl;
                     sock.close();
-                    g_stats.activeConnections--;
                     return;
                 }
             }

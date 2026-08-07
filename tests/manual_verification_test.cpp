@@ -16,7 +16,17 @@
 extern dbms::StorageEngine g_engine;
 namespace fs = std::filesystem;
 
-static void cleanup(const std::string& db) { if (fs::exists(db)) fs::remove_all(db); }
+static void cleanup(const std::string& db) {
+    // Exercise the same lifecycle path as production callers. Removing a
+    // live database directory behind StorageEngine leaves background workers
+    // and file-backed caches with dangling paths and makes this end-to-end
+    // test nondeterministic.
+    if (g_engine.databaseExists(db)) {
+        assert(g_engine.dropDatabase(db) == dbms::DBStatus::OK);
+    } else if (fs::exists(db)) {
+        fs::remove_all(db);
+    }
+}
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser"; s.permission = 1; s.currentDB = db;
 }
@@ -63,8 +73,16 @@ static void test_ch4_table_ops() {
         "EMAIL VARCHAR(100) UNIQUE, "
         "AGE INT DEFAULT 0)", s));
 
+    // Keep a live row while changing the heap layout.  ADD COLUMN must
+    // preserve it through the page-format rewrite.
+    assert(g_engine.insert(db, "users", {{"ID", "1"}, {"NAME", "Alice"}, {"AGE", "25"}})
+           == dbms::DBStatus::OK);
+
     // 4.2 ALTER TABLE ADD COLUMN
     assert(!ddl.executeSql("ALTER TABLE users ADD COLUMN PHONE VARCHAR(20)", s));
+    auto migrated = g_engine.query(db, "users", {}, {"ID", "NAME", "PHONE"});
+    assert(migrated.size() == 1);
+    assert(migrated[0].find("1 Alice") != std::string::npos);
 
     // 4.3 ALTER TABLE DROP COLUMN
     assert(!ddl.executeSql("ALTER TABLE users DROP COLUMN PHONE", s));

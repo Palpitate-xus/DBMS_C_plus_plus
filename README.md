@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-07）**: 生产化重构进行中；回归基线 PASS=115 FAIL=0。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移。
+> **当前状态（2026-08-07）**: 生产化重构进行中；回归基线 PASS=116 FAIL=0。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移。
 
 ## 功能特性
 
@@ -111,7 +111,8 @@
 
 ### 网络服务
 - **TCP 服务器**：`./dbms_main --server PORT` 启动服务端
-- **TLS 加密**：自动检测/生成 TLS 证书，支持加密连接
+- **TLS 加密**：默认必须提供证书和私钥；证书缺失或 TLS 初始化失败时拒绝启动
+- **开发明文模式**：仅可通过显式 `./dbms_main --server PORT --insecure` 开启，不得用于生产环境
 - **多客户端**：每个连接独立线程，支持并发访问
 - **会话隔离**：每个客户端连接拥有独立的 Session（用户名、权限、当前数据库、预编译语句、临时表），多客户端互不干扰
 - **连接管理**：最大连接数限制（默认 64）
@@ -202,7 +203,7 @@ cmake --build build -j$(nproc)
 
 > 两个入口共同使用 [`cmake/dbms_sources.txt`](cmake/dbms_sources.txt)；新增或删除生产模块只修改这份清单，不再分别维护多个源文件列表。
 
-> **TLS 说明**：若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会自动启用真实 TLS 支持；否则回退到明文 TCP（stub 实现）。
+> **TLS 说明**：若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会编译真实 TLS；否则只保留离线构建所需的 stub，网络服务默认 fail-closed。生产部署必须使用真实 OpenSSL、证书和私钥。
 
 ### 交互式运行
 ```bash
@@ -213,7 +214,12 @@ cmake --build build -j$(nproc)
 ### 网络服务模式
 ```bash
 # 服务端
+export DBMS_TLS_CERT=/etc/dbms/tls/server.crt
+export DBMS_TLS_KEY=/etc/dbms/tls/server.key
 ./dbms_main --server 9999
+
+# 仅限本地开发：显式允许明文
+./dbms_main --server 9999 --insecure
 
 # 客户端（使用 netcat 或 telnet）
 nc localhost 9999
@@ -246,7 +252,7 @@ docker compose down
 
 > **镜像**：基于 `ubuntu:26.10`，多阶段构建（g++15 + OpenSSL），最终镜像约 114MB。
 > **数据持久化**：数据库文件存储在 `/data` 目录，通过 Docker 卷（`dbms_data`）持久化，容器重启数据不丢失。
-> **TLS**：容器内未自动生成 TLS 证书时回退到明文 TCP，生产环境建议挂载证书或启用反向代理。
+> **TLS**：容器不再自动生成证书，也不会在证书缺失时回退到明文；请挂载证书/私钥并通过 `DBMS_TLS_CERT`、`DBMS_TLS_KEY` 指定路径。仅本地调试可显式追加 `--insecure`。
 
 ## SQL 语法示例
 
@@ -627,7 +633,7 @@ Var Offset Array 每项 (4 bytes):
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与 Wave 进度 (193 waves 全部完成) |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=115 FAIL=0） |
+| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=116 FAIL=0） |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 

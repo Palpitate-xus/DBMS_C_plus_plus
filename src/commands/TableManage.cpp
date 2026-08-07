@@ -5008,7 +5008,8 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         if (!tbl.cols[i].isVariableLength) offset += tbl.cols[i].dsize;
     }
     if (offset + col.dsize > rowBuffer.size()) return "";
-    if (col.dataType == "char" || col.dataType == "uuid") {
+    if (col.dataType == "char" || col.dataType == "nchar" ||
+        col.dataType == "binary" || col.dataType == "uuid") {
         std::string val(col.dsize, '\0');
         std::memcpy(val.data(), rowBuffer.data() + offset, col.dsize);
         auto nul = val.find('\0');
@@ -5096,7 +5097,8 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         return val ? "true" : "false";
     } else {
         int64_t val = 0;
-        std::memcpy(&val, rowBuffer.data() + offset, col.dsize);
+        std::memcpy(&val, rowBuffer.data() + offset,
+                    std::min(col.dsize, sizeof(val)));
         return (val == INF) ? "" : transstr(val);
     }
 }
@@ -7827,10 +7829,17 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
 DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
                                              const std::string& tablename,
                                              const Column& col) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    lockManager_.lockExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    Column validatedCol = col;
+    std::string typeErr = TypeRegistry::instance().validateColumn(validatedCol);
+    if (!typeErr.empty()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == col.dataName) {
             lockManager_.unlock(tablename);
@@ -7842,50 +7851,205 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    size_t oldRowSize = tbl.rowSize();
-    tbl.append(col);
+    // Collect logical rows before changing the row layout.  The on-disk heap
+    // is page based and variable-length rows may reference TOAST, so a raw
+    // fixed-width file rewrite is neither safe nor format compatible.
+    std::vector<std::map<std::string, std::string>> rows;
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        std::string row(data, len);
+        std::map<std::string, std::string> values;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i, dbname);
+        }
+        rows.push_back(std::move(values));
+    });
 
-    // Rewrite schema
+    // ADD COLUMN without a default cannot satisfy NOT NULL for existing rows.
+    // Reject before touching schema or data so the DDL remains failure-safe.
+    if (!rows.empty() && !col.isNull && col.defaultValue.empty()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::NULL_NOT_ALLOWED;
+    }
+
+    // Snapshot every index family before removing physical files.  Metadata
+    // drives the regular B-tree rebuild; the specialized indexes are rebuilt
+    // explicitly after the new RIDs have been assigned.
+    const auto indexedCols = getIndexedColumns(dbname, tablename);
+    const auto hashCols = getHashIndexedColumns(dbname, tablename);
+    const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
+    const auto fullTextCols = getFullTextIndexedColumns(dbname, tablename);
+    const auto ginCols = getGinIndexedColumns(dbname, tablename);
+    const auto gistCols = getGiSTIndexedColumns(dbname, tablename);
+    const auto spgistCols = getSPGiSTIndexedColumns(dbname, tablename);
+    const auto brinCols = getBrinIndexedColumns(dbname, tablename);
+
+    tbl.append(validatedCol);
+    const std::string key = dbname + "/" + tablename;
+
+    // Evict all file-backed table caches before deleting their files.
+    pageAllocators_.erase(key);
+    fsmCache_.erase(key);
+    vmCache_.erase(key);
+    pkIndexCache_.erase(key);
+    for (auto it = secondaryIndexCache_.begin(); it != secondaryIndexCache_.end();) {
+        if (it->first.rfind(key + "/", 0) == 0) it = secondaryIndexCache_.erase(it);
+        else ++it;
+    }
+    for (const auto& cn : hashCols) {
+        hashIndexCache_.erase(dbname + "." + tablename + "." + cn);
+    }
+    {
+        std::lock_guard<std::mutex> guard(spGiSTMutex_);
+        for (const auto& cn : spgistCols) {
+            spGiSTCache_.erase(key + "/" + cn);
+        }
+    }
+    const std::string toastKey = dbname + ":" + tablename;
+    toastPageAllocators_.erase(toastKey);
+    toastIndexes_.erase(toastKey);
+
+    // Remove the old heap, forks, TOAST relation, and all physical indexes.
+    // Index metadata files are intentionally retained for regular rebuilds.
+    std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::remove(fsmPath(dbname, tablename));
+    std::filesystem::remove(vmPath(dbname, tablename));
+    std::filesystem::remove(indexPath(dbname, tablename));
+    for (const auto& cn : indexedCols) {
+        std::filesystem::remove(secondaryIndexPath(dbname, tablename, cn));
+    }
+    for (const auto& cn : hashCols) {
+        std::filesystem::remove(hashIndexPath(dbname, tablename, cn));
+    }
+    for (const auto& ci : compositeIndexes) {
+        std::filesystem::remove(dbPath(dbname) / (tablename + ".idx_" + ci.name));
+    }
+    for (const auto& cn : fullTextCols) std::filesystem::remove(fullTextIndexPath(dbname, tablename, cn));
+    for (const auto& cn : ginCols) std::filesystem::remove(ginIndexPath(dbname, tablename, cn));
+    for (const auto& cn : gistCols) std::filesystem::remove(giSTIndexPath(dbname, tablename, cn));
+    for (const auto& cn : spgistCols) std::filesystem::remove(spGiSTIndexPath(dbname, tablename, cn));
+    for (const auto& cn : brinCols) std::filesystem::remove(brinIndexPath(dbname, tablename, cn));
+
+    // Partitioned heaps are separate files.  They must be removed as well;
+    // INSERT will route the captured logical rows back to their partitions.
+    if (tbl.partitionType != TableSchema::PartitionType::None) {
+        std::vector<std::string> partitions;
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& p : tbl.rangePartitions) partitions.push_back(p.first);
+        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& p : tbl.listPartitions) partitions.push_back(p.first);
+            if (!tbl.defaultPartitionName.empty()) partitions.push_back(tbl.defaultPartitionName);
+        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < tbl.hashPartitions; ++i) partitions.push_back("p" + std::to_string(i));
+        }
+        for (const auto& p : partitions) {
+            std::filesystem::remove(partitionDataPath(dbname, tablename, p));
+            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
+                    std::filesystem::remove(partitionDataPath(dbname, tablename, p, "sp" + std::to_string(i)));
+                }
+            }
+        }
+    }
+
+    auto oldToastDir = toastDir(dbname, tablename);
+    if (std::filesystem::exists(oldToastDir)) std::filesystem::remove_all(oldToastDir);
+    std::filesystem::remove(toastMetaPath(dbname, tablename));
+    std::filesystem::remove(toastDataPath(dbname, tablename));
+    std::filesystem::remove(toastIndexPath(dbname, tablename));
+
     {
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
     }
     invalidateCatalogSchema(dbname, tablename);
 
-    // Migrate data: append default value for new column
-    std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
-    {
-        std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-        std::ofstream out(tempPath, std::ios::binary);
-        if (in) {
-            in.seekg(0, std::ios::end);
-            auto fileSize = static_cast<size_t>(in.tellg());
-            in.seekg(0, std::ios::beg);
-            size_t rowCount = (oldRowSize == 0) ? 0 : fileSize / oldRowSize;
-            std::string defaultVal(col.dsize, '\0');
-            if (col.dataType != "char") {
-                int64_t nullVal = INF;
-                std::memcpy(defaultVal.data(), &nullVal, col.dsize);
-            }
-            for (size_t i = 0; i < rowCount; ++i) {
-                std::string row(oldRowSize, '\0');
-                in.read(row.data(), static_cast<std::streamsize>(oldRowSize));
-                out.write(row.data(), static_cast<std::streamsize>(oldRowSize));
-                out.write(defaultVal.data(), static_cast<std::streamsize>(col.dsize));
+    // Re-create the current page-format heap(s) and TOAST relation.
+    const size_t pageSize = pageSizeForFormatVersion(tbl.formatVersion);
+    if (tbl.partitionType == TableSchema::PartitionType::None) {
+        auto pa = std::make_unique<PageAllocator>(
+            dataPath(dbname, tablename).string(), tbl.rowSize(), pageSize, tbl.formatVersion);
+        pa->open();
+        pageAllocators_[key] = std::move(pa);
+    } else {
+        std::vector<std::string> partitions;
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& p : tbl.rangePartitions) partitions.push_back(p.first);
+        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& p : tbl.listPartitions) partitions.push_back(p.first);
+            if (!tbl.defaultPartitionName.empty()) partitions.push_back(tbl.defaultPartitionName);
+        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < tbl.hashPartitions; ++i) partitions.push_back("p" + std::to_string(i));
+        }
+        for (const auto& p : partitions) {
+            auto pa = std::make_unique<PageAllocator>(
+                partitionDataPath(dbname, tablename, p).string(), tbl.rowSize(), pageSize, tbl.formatVersion);
+            pa->open();
+            pa->close();
+            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
+                    auto subPa = std::make_unique<PageAllocator>(
+                        partitionDataPath(dbname, tablename, p, "sp" + std::to_string(i)).string(),
+                        tbl.rowSize(), pageSize, tbl.formatVersion);
+                    subPa->open();
+                    subPa->close();
+                }
             }
         }
     }
-    std::filesystem::remove(dataPath(dbname, tablename));
-    std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    bool hasVarLen = false;
+    for (size_t i = 0; i < tbl.len; ++i) hasVarLen |= tbl.cols[i].isVariableLength;
+    if (hasVarLen) {
+        auto toastPa = std::make_unique<PageAllocator>(
+            toastDataPath(dbname, tablename).string(), 0, 8192, DATA_FILE_FORMAT_VERSION);
+        toastPa->open();
+        toastPa->close();
+        BPTree toastIdx(toastIndexPath(dbname, tablename));
+        toastIdx.open();
+        toastIdx.close();
+        allocToastId(dbname, tablename);
+    }
+
     lockManager_.unlock(tablename);
+
+    for (const auto& values : rows) {
+        DBStatus status = insert(dbname, tablename, values);
+        if (status != DBStatus::OK) return status;
+    }
+
+    DBStatus indexStatus = reindex(dbname, tablename);
+    if (indexStatus != DBStatus::OK) return indexStatus;
+
+    for (const auto& cn : hashCols) {
+        HashIndex* hidx = getHashIndex(dbname, tablename, cn);
+        if (!hidx) continue;
+        hidx->clear();
+        TableSchema rebuilt = getTableSchema(dbname, tablename);
+        size_t colIdx = rebuilt.len;
+        for (size_t i = 0; i < rebuilt.len; ++i) {
+            if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
+        }
+        if (colIdx >= rebuilt.len) continue;
+        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                           const char* data, size_t len) {
+            std::string row(data, len);
+            std::string value = extractColumnValue(row, rebuilt, colIdx, dbname);
+            if (!value.empty()) hidx->insert(value, encodeRid(pageId, slotId));
+        });
+    }
+    for (const auto& cn : fullTextCols) createFullTextIndex(dbname, tablename, cn);
+    for (const auto& cn : ginCols) createGinIndex(dbname, tablename, cn);
+    for (const auto& cn : gistCols) createGiSTIndex(dbname, tablename, cn);
+    for (const auto& cn : spgistCols) createSPGiSTIndex(dbname, tablename, cn);
+    for (const auto& cn : brinCols) createBrinIndex(dbname, tablename, cn);
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    lockManager_.lockExclusive(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t dropIdx = tbl.len;
@@ -7897,47 +8061,205 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    size_t oldRowSize = tbl.rowSize();
-    size_t dropSize = tbl.cols[dropIdx].dsize;
-    size_t prefixSize = 0;
-    for (size_t i = 0; i < dropIdx; ++i) prefixSize += tbl.cols[i].dsize;
-    size_t suffixSize = oldRowSize - prefixSize - dropSize;
+    if (tbl.len <= 1 || tbl.cols[dropIdx].isPrimaryKey || tbl.cols[dropIdx].isUnique) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
-    // Shift columns left
+    const auto indexedCols = getIndexedColumns(dbname, tablename);
+    const auto hashCols = getHashIndexedColumns(dbname, tablename);
+    const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
+    const auto fullTextCols = getFullTextIndexedColumns(dbname, tablename);
+    const auto ginCols = getGinIndexedColumns(dbname, tablename);
+    const auto gistCols = getGiSTIndexedColumns(dbname, tablename);
+    const auto spgistCols = getSPGiSTIndexedColumns(dbname, tablename);
+    const auto brinCols = getBrinIndexedColumns(dbname, tablename);
+    for (const auto& cn : indexedCols) {
+        if (cn == colName) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    for (const auto& cn : hashCols) {
+        if (cn == colName) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    for (const auto& ci : compositeIndexes) {
+        if (std::find(ci.columns.begin(), ci.columns.end(), colName) != ci.columns.end()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    if (std::find(fullTextCols.begin(), fullTextCols.end(), colName) != fullTextCols.end() ||
+        std::find(ginCols.begin(), ginCols.end(), colName) != ginCols.end() ||
+        std::find(gistCols.begin(), gistCols.end(), colName) != gistCols.end() ||
+        std::find(spgistCols.begin(), spgistCols.end(), colName) != spgistCols.end() ||
+        std::find(brinCols.begin(), brinCols.end(), colName) != brinCols.end()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        if (std::find(tbl.fks[i].colNames.begin(), tbl.fks[i].colNames.end(), colName) != tbl.fks[i].colNames.end()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+
+    // Read logical rows before changing the column map.  This preserves page
+    // headers, variable-length offsets, MVCC visibility, and TOAST values.
+    std::vector<std::map<std::string, std::string>> rows;
+    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        std::string row(data, len);
+        std::map<std::string, std::string> values;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (i != dropIdx) values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i, dbname);
+        }
+        rows.push_back(std::move(values));
+    });
+
     for (size_t i = dropIdx; i + 1 < tbl.len; ++i) tbl.cols[i] = tbl.cols[i + 1];
     tbl.len--;
 
-    // Rewrite schema
+    const std::string key = dbname + "/" + tablename;
+    pageAllocators_.erase(key);
+    fsmCache_.erase(key);
+    vmCache_.erase(key);
+    pkIndexCache_.erase(key);
+    for (auto it = secondaryIndexCache_.begin(); it != secondaryIndexCache_.end();) {
+        if (it->first.rfind(key + "/", 0) == 0) it = secondaryIndexCache_.erase(it);
+        else ++it;
+    }
+    for (const auto& cn : hashCols) hashIndexCache_.erase(dbname + "." + tablename + "." + cn);
+    {
+        std::lock_guard<std::mutex> guard(spGiSTMutex_);
+        for (const auto& cn : spgistCols) spGiSTCache_.erase(key + "/" + cn);
+    }
+    const std::string toastKey = dbname + ":" + tablename;
+    toastPageAllocators_.erase(toastKey);
+    toastIndexes_.erase(toastKey);
+
+    std::filesystem::remove(dataPath(dbname, tablename));
+    std::filesystem::remove(fsmPath(dbname, tablename));
+    std::filesystem::remove(vmPath(dbname, tablename));
+    std::filesystem::remove(indexPath(dbname, tablename));
+    for (const auto& cn : indexedCols) std::filesystem::remove(secondaryIndexPath(dbname, tablename, cn));
+    for (const auto& cn : hashCols) std::filesystem::remove(hashIndexPath(dbname, tablename, cn));
+    for (const auto& ci : compositeIndexes) std::filesystem::remove(dbPath(dbname) / (tablename + ".idx_" + ci.name));
+    for (const auto& cn : fullTextCols) std::filesystem::remove(fullTextIndexPath(dbname, tablename, cn));
+    for (const auto& cn : ginCols) std::filesystem::remove(ginIndexPath(dbname, tablename, cn));
+    for (const auto& cn : gistCols) std::filesystem::remove(giSTIndexPath(dbname, tablename, cn));
+    for (const auto& cn : spgistCols) std::filesystem::remove(spGiSTIndexPath(dbname, tablename, cn));
+    for (const auto& cn : brinCols) std::filesystem::remove(brinIndexPath(dbname, tablename, cn));
+
+    if (tbl.partitionType != TableSchema::PartitionType::None) {
+        std::vector<std::string> partitions;
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& p : tbl.rangePartitions) partitions.push_back(p.first);
+        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& p : tbl.listPartitions) partitions.push_back(p.first);
+            if (!tbl.defaultPartitionName.empty()) partitions.push_back(tbl.defaultPartitionName);
+        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < tbl.hashPartitions; ++i) partitions.push_back("p" + std::to_string(i));
+        }
+        for (const auto& p : partitions) {
+            std::filesystem::remove(partitionDataPath(dbname, tablename, p));
+            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
+                    std::filesystem::remove(partitionDataPath(dbname, tablename, p, "sp" + std::to_string(i)));
+                }
+            }
+        }
+    }
+    auto oldToastDir = toastDir(dbname, tablename);
+    if (std::filesystem::exists(oldToastDir)) std::filesystem::remove_all(oldToastDir);
+    std::filesystem::remove(toastMetaPath(dbname, tablename));
+    std::filesystem::remove(toastDataPath(dbname, tablename));
+    std::filesystem::remove(toastIndexPath(dbname, tablename));
+
     {
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
     }
     invalidateCatalogSchema(dbname, tablename);
 
-    // Migrate data: skip dropped column's data
-    std::string tempPath = dataPath(dbname, tablename).string() + ".tmp";
-    {
-        std::ifstream in(dataPath(dbname, tablename), std::ios::binary);
-        std::ofstream out(tempPath, std::ios::binary);
-        if (in) {
-            in.seekg(0, std::ios::end);
-            auto fileSize = static_cast<size_t>(in.tellg());
-            in.seekg(0, std::ios::beg);
-            size_t rowCount = (oldRowSize == 0) ? 0 : fileSize / oldRowSize;
-            for (size_t i = 0; i < rowCount; ++i) {
-                std::string prefix(prefixSize, '\0');
-                std::string suffix(suffixSize, '\0');
-                in.read(prefix.data(), static_cast<std::streamsize>(prefixSize));
-                in.seekg(static_cast<std::streamsize>(dropSize), std::ios::cur);
-                in.read(suffix.data(), static_cast<std::streamsize>(suffixSize));
-                out.write(prefix.data(), static_cast<std::streamsize>(prefixSize));
-                out.write(suffix.data(), static_cast<std::streamsize>(suffixSize));
+    const size_t pageSize = pageSizeForFormatVersion(tbl.formatVersion);
+    if (tbl.partitionType == TableSchema::PartitionType::None) {
+        auto pa = std::make_unique<PageAllocator>(
+            dataPath(dbname, tablename).string(), tbl.rowSize(), pageSize, tbl.formatVersion);
+        pa->open();
+        pageAllocators_[key] = std::move(pa);
+    } else {
+        std::vector<std::string> partitions;
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& p : tbl.rangePartitions) partitions.push_back(p.first);
+        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& p : tbl.listPartitions) partitions.push_back(p.first);
+            if (!tbl.defaultPartitionName.empty()) partitions.push_back(tbl.defaultPartitionName);
+        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < tbl.hashPartitions; ++i) partitions.push_back("p" + std::to_string(i));
+        }
+        for (const auto& p : partitions) {
+            auto pa = std::make_unique<PageAllocator>(
+                partitionDataPath(dbname, tablename, p).string(), tbl.rowSize(), pageSize, tbl.formatVersion);
+            pa->open();
+            pa->close();
+            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
+                    auto subPa = std::make_unique<PageAllocator>(
+                        partitionDataPath(dbname, tablename, p, "sp" + std::to_string(i)).string(),
+                        tbl.rowSize(), pageSize, tbl.formatVersion);
+                    subPa->open();
+                    subPa->close();
+                }
             }
         }
     }
-    std::filesystem::remove(dataPath(dbname, tablename));
-    std::filesystem::rename(tempPath, dataPath(dbname, tablename));
+    bool hasVarLen = false;
+    for (size_t i = 0; i < tbl.len; ++i) hasVarLen |= tbl.cols[i].isVariableLength;
+    if (hasVarLen) {
+        auto toastPa = std::make_unique<PageAllocator>(
+            toastDataPath(dbname, tablename).string(), 0, 8192, DATA_FILE_FORMAT_VERSION);
+        toastPa->open();
+        toastPa->close();
+        BPTree toastIdx(toastIndexPath(dbname, tablename));
+        toastIdx.open();
+        toastIdx.close();
+        allocToastId(dbname, tablename);
+    }
+
     lockManager_.unlock(tablename);
+
+    for (const auto& values : rows) {
+        DBStatus status = insert(dbname, tablename, values);
+        if (status != DBStatus::OK) return status;
+    }
+    DBStatus indexStatus = reindex(dbname, tablename);
+    if (indexStatus != DBStatus::OK) return indexStatus;
+    for (const auto& cn : hashCols) {
+        HashIndex* hidx = getHashIndex(dbname, tablename, cn);
+        if (!hidx) continue;
+        hidx->clear();
+        TableSchema rebuilt = getTableSchema(dbname, tablename);
+        size_t colIdx = rebuilt.len;
+        for (size_t i = 0; i < rebuilt.len; ++i) {
+            if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
+        }
+        if (colIdx >= rebuilt.len) continue;
+        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                           const char* data, size_t len) {
+            std::string row(data, len);
+            std::string value = extractColumnValue(row, rebuilt, colIdx, dbname);
+            if (!value.empty()) hidx->insert(value, encodeRid(pageId, slotId));
+        });
+    }
+    for (const auto& cn : fullTextCols) createFullTextIndex(dbname, tablename, cn);
+    for (const auto& cn : ginCols) createGinIndex(dbname, tablename, cn);
+    for (const auto& cn : gistCols) createGiSTIndex(dbname, tablename, cn);
+    for (const auto& cn : spgistCols) createSPGiSTIndex(dbname, tablename, cn);
+    for (const auto& cn : brinCols) createBrinIndex(dbname, tablename, cn);
     return DBStatus::OK;
 }
 
@@ -9764,7 +10086,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
-            if (col.dataType == "char" || col.dataType == "uuid") {
+            if (col.dataType == "char" || col.dataType == "nchar" ||
+                col.dataType == "binary" || col.dataType == "uuid") {
                 std::memset(&rowBuffer[offset], 0, col.dsize);
                 if (!val.empty()) {
                     size_t copyLen = std::min(val.size(), col.dsize);
@@ -9833,7 +10156,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 std::memcpy(&rowBuffer[offset], &bval, sizeof(int8_t));
             } else {
                 int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
-                std::memcpy(&rowBuffer[offset], &num, col.dsize);
+                std::memcpy(&rowBuffer[offset], &num,
+                            std::min(col.dsize, sizeof(num)));
             }
             offset += col.dsize;
         }
@@ -9854,7 +10178,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 if (val.size() > maxLen) val.resize(maxLen);
                 varDataList.push_back(val);
             } else {
-                if (col.dataType == "char") {
+                if (col.dataType == "char" || col.dataType == "nchar" ||
+                    col.dataType == "binary" || col.dataType == "uuid") {
                     std::memset(&fixedData[fixedOff], 0, col.dsize);
                     if (!val.empty()) {
                         size_t copyLen = std::min(val.size(), col.dsize);
@@ -9903,7 +10228,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     std::memcpy(&fixedData[fixedOff], bytes, n);
                 } else {
                     int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
-                    std::memcpy(&fixedData[fixedOff], &num, col.dsize);
+                    std::memcpy(&fixedData[fixedOff], &num,
+                                std::min(col.dsize, sizeof(num)));
                 }
                 fixedOff += col.dsize;
             }
