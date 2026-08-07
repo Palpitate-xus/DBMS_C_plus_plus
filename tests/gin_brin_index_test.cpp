@@ -1,6 +1,8 @@
 #include "access/GinIndex.h"
 #include "access/BrinIndex.h"
+#include "access/BPTree.h"
 #include <cassert>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include "test_utils.h"
@@ -113,12 +115,60 @@ static void test_brin_json_contains() {
     std::cout << "[GIN] JSON contains OK" << std::endl;
 }
 
+static void test_btree_split_and_range() {
+    std::string idx = "/tmp/btree_split_test.idx";
+    cleanup(idx);
+    {
+        dbms::BPTree tree(idx);
+        assert(tree.open());
+
+        // BP_KEY_LEN is 20 and the default leaf order is 100.  This crosses
+        // the root-leaf split boundary and keeps keys lexicographically
+        // ordered without relying on numeric-string ordering.
+        for (int i = 0; i < 250; ++i) {
+            char key[16];
+            std::snprintf(key, sizeof(key), "k%04d", i);
+            assert(tree.insert(key, i));
+        }
+
+        for (int i = 0; i < 250; ++i) {
+            char key[16];
+            std::snprintf(key, sizeof(key), "k%04d", i);
+            int64_t value = -1;
+            assert(tree.search(key, value));
+            assert(value == i);
+        }
+
+        auto range = tree.rangeScan("k0050", "k0100");
+        assert(range.size() == 51);
+        auto all = tree.allValues();
+        assert(all.size() == 250);
+        tree.close();
+    }
+    cleanup(idx);
+
+    // Duplicate secondary-index keys must remain discoverable when equal
+    // keys span more than one leaf page.
+    {
+        dbms::BPTree tree(idx);
+        assert(tree.open());
+        // Enough rows to force both leaf and internal-node splits.
+        for (int i = 0; i < 6000; ++i) assert(tree.insertMulti("same", i));
+        auto matches = tree.searchMulti("same");
+        assert(matches.size() == 6000);
+        tree.close();
+    }
+    cleanup(idx);
+    std::cout << "[BPTREE] root split/search/range OK" << std::endl;
+}
+
 int main() {
     test_gin_basic();
     test_gin_remove();
     test_gin_persistence();
     test_brin_basic();
     test_brin_json_contains();
+    test_btree_split_and_range();
     std::cout << "[GIN_BRIN] all passed" << std::endl;
     return 0;
 }

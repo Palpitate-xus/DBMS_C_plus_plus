@@ -126,7 +126,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 
 | 访问方法 | PG 18 | 本 DBMS | 状态 |
 |----------|-------|---------|------|
-| B+ Tree | ✅ | ✅ | ✅ |
+| B+ Tree | ✅ | ⚠️ | 基础文件 B+Tree 已覆盖跨叶/内部节点分裂、重复键和范围扫描；PG dedup、删除合并、opclass/collation、skip scan 和完整并发构建仍缺 |
 | Hash | ✅ | ✅ | ✅ |
 | GIN | ✅ | ✅ (基础, src/access/GinIndex.cpp) | ⚠️ |
 | GiST | ✅ | ❌ | 缺 |

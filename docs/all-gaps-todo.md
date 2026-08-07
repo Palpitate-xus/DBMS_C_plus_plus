@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | B+Tree 正确性补强：修复 root leaf 分裂传错 child、叶分裂丢弃中间键、重复键跨叶查找遗漏和范围扫描重复返回；新增 250 条跨叶唯一键、6000 条跨叶/内部节点重复键回归。PostgreSQL B-tree 的 dedup、删除合并、opclass/collation 和并发构建语义仍待后续。 |
 | 2026-08-07 | P0-6 Bitmap OR 补强：新增 `BitmapOrHeapScanOp`，每个 OR 分支先求等值索引候选 RID 交集，再 union 后统一 heap fetch 与原谓词重检；主查询路径不再按投影文本错误去重，新增 Volcano 与协议 OR 回归。范围/并行 bitmap 和真正 block bitmap 仍待后续。 |
 | 2026-08-07 | P0-5 SSI 正确性补强：SERIALIZABLE 扫描登记关系级 SIREAD 覆盖，即使谓词返回空集也保留读覆盖；提交时将关系级读写纳入 dangerous-structure 检测，并保留重叠事务的 SSI 历史，新增空谓词并发回归。关系级粒度是保守安全边界，页/索引 predicate lock 和完整 rw-conflict 图仍待后续。 |
 | 2026-08-07 | P0-6 Bitmap AND 首步：新增 `BitmapHeapScanOp`，对两个以上等值 B-tree/Hash/单列 PK 索引求候选 RID 交集，再进行 heap fetch 与 Filter recheck；`QueryPlanner` 已接入 path 选择，新增 Volcano 双索引回归。Bitmap OR、范围/并行 bitmap 和真正 block bitmap 仍待后续。 |
@@ -418,7 +419,7 @@
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 8.1 | Access Method API | 缺少 `amhandler`、support functions、opclass/opfamily、amcostestimate、amvalidate | 🔄 |
-| 8.2 | B-tree | 缺少 dedup、suffix truncation、visibility map 驱动 index-only、skip scan 完整实现、NULLS FIRST/LAST 存储控制、collation/operator class | ⚠️ |
+| 8.2 | B-tree | 基础文件 B+Tree 已修复跨叶/内部节点分裂、重复键查找和范围扫描；仍缺 dedup、suffix truncation、visibility map 驱动 index-only、skip scan 完整实现、NULLS FIRST/LAST 存储控制、collation/operator class | ⚠️ |
 | 8.3 | Hash | 简化 hash index；缺少 WAL-safe hash bucket split、metapage/overflow page 机制 | ⚠️ |
 | 8.4 | GIN/GiST/BRIN/SP-GiST | 多为特定数据/范围简化结构；缺少 PostgreSQL 泛化 opclass、consistent/union/picksplit/penalty 等方法 | ⚠️ |
 | 8.5 | Concurrent index | `concurrently` 多为标志或 sleep/yield 简化；缺少 PG 两阶段/三事务/invalid index catalog 状态/等待旧快照 | ⚠️ |

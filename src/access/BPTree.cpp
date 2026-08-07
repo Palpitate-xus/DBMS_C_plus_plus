@@ -212,15 +212,16 @@ bool BPTree::insert(const std::string& key, int64_t value) {
     Node root = readNode(header_.rootPage);
     if (root.numKeys == header_.order) {
         // Split root
+        const uint32_t oldRoot = header_.rootPage;
         uint32_t newRoot = allocPage();
         Node nr;
         nr.isLeaf = 0;
         nr.numKeys = 0;
-        nr.children.push_back(header_.rootPage);
+        nr.children.push_back(oldRoot);
         writeNode(newRoot, nr);
         header_.rootPage = newRoot;
         writeHeader();
-        splitChild(newRoot, 0, root.numKeys > 0 ? root.children[0] : 0);
+        splitChild(newRoot, 0, oldRoot);
         // Re-read root after split
     }
     return insertNonFull(header_.rootPage, key, value);
@@ -233,10 +234,12 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
     std::vector<int64_t> results;
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return results;
     Node node = readNode(header_.rootPage);
-    std::string k = normalizeKey(key);
     while (!node.isLeaf) {
         size_t i = 0;
-        while (i < node.numKeys && key >= node.keys[i]) ++i;
+        // Descend to the leftmost possible leaf for this key.  Equal keys
+        // may span multiple leaves after a split; using >= here would start
+        // at the rightmost equal separator and silently miss earlier rows.
+        while (i < node.numKeys && key > node.keys[i]) ++i;
         if (i >= node.children.size()) return results;
         node = readNode(node.children[i]);
     }
@@ -270,15 +273,16 @@ bool BPTree::insertMulti(const std::string& key, int64_t value) {
     }
     Node root = readNode(header_.rootPage);
     if (root.numKeys == header_.order) {
+        const uint32_t oldRoot = header_.rootPage;
         uint32_t newRoot = allocPage();
         Node nr;
         nr.isLeaf = 0;
         nr.numKeys = 0;
-        nr.children.push_back(header_.rootPage);
+        nr.children.push_back(oldRoot);
         writeNode(newRoot, nr);
         header_.rootPage = newRoot;
         writeHeader();
-        splitChild(newRoot, 0, root.numKeys > 0 ? root.children[0] : 0);
+        splitChild(newRoot, 0, oldRoot);
     }
     return insertNonFull(header_.rootPage, key, value);
 }
@@ -303,7 +307,7 @@ bool BPTree::insertNonFull(uint32_t pageNum, const std::string& key, int64_t val
     if (child.numKeys == header_.order) {
         splitChild(pageNum, static_cast<int>(i), childPage);
         node = readNode(pageNum);
-        if (key > node.keys[i]) ++i;
+        if (key >= node.keys[i]) ++i;
         childPage = node.children[i];
     }
     return insertNonFull(childPage, key, value);
@@ -317,12 +321,15 @@ void BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
     newNode.isLeaf = child.isLeaf;
 
     size_t mid = header_.order / 2;
-    // New node gets keys [mid+1, order-1]
-    for (size_t i = mid + 1; i < child.numKeys; ++i) {
+    // Leaf separators are the first key of the right leaf, so the median
+    // must remain in the right leaf. Internal separators are promoted and
+    // removed from both child key arrays.
+    const size_t rightBegin = child.isLeaf ? mid : mid + 1;
+    for (size_t i = rightBegin; i < child.numKeys; ++i) {
         newNode.keys.push_back(child.keys[i]);
     }
     if (child.isLeaf) {
-        for (size_t i = mid + 1; i < child.numKeys; ++i) {
+        for (size_t i = rightBegin; i < child.numKeys; ++i) {
             newNode.values.push_back(child.values[i]);
         }
         newNode.nextLeaf = child.nextLeaf;
@@ -332,7 +339,7 @@ void BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
             newNode.children.push_back(child.children[i]);
         }
     }
-    newNode.numKeys = child.numKeys - mid - 1;
+    newNode.numKeys = static_cast<uint16_t>(child.numKeys - rightBegin);
 
     // Move parent's keys and children to make room
     std::string midKey = child.keys[mid];
@@ -341,7 +348,7 @@ void BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
     parent.numKeys++;
 
     // Truncate child
-    child.numKeys = mid;
+    child.numKeys = static_cast<uint16_t>(mid);
     child.keys.resize(mid);
     if (child.isLeaf) {
         child.values.resize(mid);
@@ -407,9 +414,6 @@ void BPTree::collectRange(uint32_t pageNum, const std::string& startKey,
             if (node.keys[i] >= startKey && node.keys[i] <= endKey) {
                 out.push_back(node.values[i]);
             }
-        }
-        if (node.nextLeaf > 0) {
-            collectRange(node.nextLeaf, startKey, endKey, out);
         }
         return;
     }

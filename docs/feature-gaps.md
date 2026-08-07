@@ -102,7 +102,7 @@
   4. 增加范围条件、并行 bitmap 和真正 page/block bitmap 表示
   5. ✅ 在 `QueryPlanner` 中为 AND/OR 等值索引生成 bitmap path
 - **预估工作量**: 1 周
-- **验证**: `tests/volcano_select_phase51_test.cpp` 与 `tests/postgres_protocol_test.py` 覆盖双索引 AND/OR、heap recheck 和节点选型
+- **验证**: `tests/volcano_select_phase51_test.cpp` 与 `tests/postgres_protocol_test.py` 覆盖双索引 AND/OR、heap recheck 和节点选型；`tests/gin_brin_index_test.cpp` 覆盖 B+Tree 跨叶/内部节点分裂与范围扫描
 - **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`
 
 ### P0-7: INSTEAD OF 视图触发器

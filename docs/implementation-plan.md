@@ -683,7 +683,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 5.40 实现 `SET`/`SHOW`/`RESET` 完整 GUC 语义 | 1.1.52, 1.1.48 | handleSetCommand 已就绪 |
 | ✅ 5.41 实现 `SET ROLE` / `SET SESSION AUTHORIZATION` 完整语义 | 1.1.54, 1.1.55 | SET ROLE 已就绪 |
 | ✅ 5.42 实现 `SET TRANSACTION` deferrable 完整语义 | 1.1.56 | SET TRANSACTION 已就绪 |
-| 🔄 5.43 实现 SSI / predicate locks / SIREAD lock / rw-conflict | 9.4 | 已验证关系限定的行级 rw-conflict 写偏差回滚；predicate/SIREAD、空范围和完整 SSI 规则待实现 |
+| 🔄 5.43 实现 SSI / predicate locks / SIREAD lock / rw-conflict | 9.4 | 已验证关系限定的行级 rw-conflict、关系级 SIREAD 和空范围读覆盖；页/索引 predicate lock 与完整 SSI 规则待实现 |
 
 ---
 
@@ -694,15 +694,15 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| ✅ 6.1 实现 `amhandler`、support functions、opclass/opfamily、`amcostestimate`、`amvalidate` | 8.1, 16.7 | `IIndexAM` 接口 + `BPTreeIndexAM` + `HashIndexAM` 适配器已就绪 |
-| ✅ 6.2 补全 B-tree（dedup、suffix truncation、visibility map 驱动 index-only scan） | 8.2 | B+tree 基础实现已就绪 |
-| ✅ 6.3 补全 Hash（WAL-safe bucket split、metapage/overflow page） | 8.3 | 基础 Hash 索引已就绪 |
-| ✅ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | GIN（倒排索引，支持文本搜索/数组包含/JSONB）+ BRIN（块范围索引）已新建；SP-GiST（quadtree）已有 |
-| ✅ 6.5 实现 `CREATE INDEX CONCURRENTLY` | 8.5, 1.1.20 | createIndex concurrently=true uses lockShared (allows concurrent DML during build) |
-| ✅ 6.6 实现 expression/partial/include 索引的完整支持（dependency、immutable 检查） | 8.6 | expression index + partial index + include index 已就绪 |
-| ✅ 6.7 实现 index maintenance（page deletion、vacuum cleanup、`amcheck`、`REINDEX CONCURRENTLY`） | 8.7, 1.1.47 | REINDEX 基础已就绪 |
-| ✅ 6.8 实现 partitioned index attach/detach 和唯一约束跨分区规则 | 8.8, 4.5 | createIndex with partition routing; partitioned tables route queries to partitions; attach/detach via ALTER TABLE |
-| ✅ 6.9 补全 `CREATE INDEX` operator class/family、collation、NULLS sort、storage params、parallel build | 1.1.20 | 基础 CREATE INDEX 已就绪 |
+| 🔄 6.1 实现 `amhandler`、support functions、opclass/opfamily、`amcostestimate`、`amvalidate` | 8.1, 16.7 | `IIndexAM` 接口 + `BPTreeIndexAM` + `HashIndexAM` 适配器已就绪；PG 完整 AM API 仍缺 |
+| ⚠️ 6.2 补全 B-tree（dedup、suffix truncation、visibility map 驱动 index-only scan） | 8.2 | 基础 B+Tree 已覆盖跨叶/内部节点分裂、重复键和范围扫描；PG 高级 B-tree 能力仍缺 |
+| ⚠️ 6.3 补全 Hash（WAL-safe bucket split、metapage/overflow page） | 8.3 | 基础 Hash 索引已就绪，WAL-safe bucket split 等 PG 语义仍缺 |
+| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | GIN/BRIN/SP-GiST 有特定实现；泛化 opclass 和 GiST 完整访问方法仍缺 |
+| ⚠️ 6.5 实现 `CREATE INDEX CONCURRENTLY` | 8.5, 1.1.20 | 当前以共享锁/简化路径支持 concurrently；PG 两阶段/invalid catalog/旧快照等待语义仍缺 |
+| ⚠️ 6.6 实现 expression/partial/include 索引的完整支持（dependency、immutable 检查） | 8.6 | expression/partial/include 基础路径已就绪；dependency、immutable 检查和 predicate implication 仍缺 |
+| ⚠️ 6.7 实现 index maintenance（page deletion、vacuum cleanup、`amcheck`、`REINDEX CONCURRENTLY`） | 8.7, 1.1.47 | REINDEX 基础已就绪；page deletion、vacuum cleanup、amcheck 和并发重建仍缺 |
+| ⚠️ 6.8 实现 partitioned index attach/detach 和唯一约束跨分区规则 | 8.8, 4.5 | 有基础分区路由与 attach/detach 路径；PG 分区索引与跨分区唯一约束完整语义仍缺 |
+| ⚠️ 6.9 补全 `CREATE INDEX` operator class/family、collation、NULLS sort、storage params、parallel build | 1.1.20 | 基础 CREATE INDEX 已就绪；opclass/collation/NULLS sort/storage params/parallel build 仍缺 |
 
 ---
 

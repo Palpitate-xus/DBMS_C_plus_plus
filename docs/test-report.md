@@ -41,7 +41,7 @@
 | 认证与连接 | 2 | 2 | 0 | — |
 | DDL - 数据库 | 3 | 3 | 0 | — |
 | DDL - 表 | 14 | 14 | 0 | 含 CTAS / RENAME / POINT / INET/CIDR 类型 |
-| DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST 均通过 |
+| DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST 均通过；B+Tree 分裂/重复键/范围回归见 `gin_brin_index_test.cpp` |
 | DDL - 视图 | 5 | 5 | 0 | 含 ALTER VIEW RENAME TO / SET SCHEMA |
 | DDL - 触发器 | 2 | 2 | 0 | — |
 | DDL - 用户/角色 | 4 | 4 | 0 | — |
@@ -327,6 +327,8 @@ CREATE INDEX idx_name ON t1(name);
 ```
 
 **实际结果** ✅ `Index created`
+
+边界回归同时验证了 250 条跨叶唯一键、6000 条跨叶及内部节点重复键的精确查找，以及范围扫描不重复返回。
 
 ---
 
