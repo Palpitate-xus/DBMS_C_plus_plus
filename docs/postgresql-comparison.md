@@ -110,7 +110,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | **LATERAL JOIN** | ✅ | ❌ | 缺 |
 | Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ✅ (parser + volcano) | ⚠️ 复杂子查询回退 legacy |
 | CTE (WITH/RECURSIVE) | ✅ | ✅ (parser + executor) | ✅ 基础 + RETURNING |
-| UNION/INTERSECT/EXCEPT | ✅ | ✅ (parser) | ⚠️ executor 回退 legacy |
+| UNION/INTERSECT/EXCEPT | ✅ | ⚠️ 统一 legacy 集合执行（含 ALL） | ⚠️ 尚未进入 Volcano 计划树/结构化结果 |
 | Window Functions (ROW_NUMBER/RANK/...) | ✅ | ✅ (parser + DDL) | ⚠️ executor 回退 legacy |
 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ✅ (parser) | ⚠️ executor 回退 legacy |
 | GROUPING_ID | ✅ | ❌ | 缺 |
@@ -324,7 +324,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 ### 🟡 重要缺失 (影响实用性)
 1. **Window Function executor** — parser 就绪但 executor 回退 legacy (无 WindowOp)
 2. **复杂子查询 executor** — 简单子查询走 volcano, 关联子查询回退 legacy
-3. **UNION/INTERSECT/EXCEPT executor** — 回退 legacy g_engine.query()
+3. **UNION/INTERSECT/EXCEPT executor** — 已统一语义分支并覆盖 ALL；仍缺 Volcano `Append/HashSetOp` 与结构化结果边界
 4. **GROUP BY ROLLUP/CUBE/GROUPING SETS executor** — 回退 legacy
 5. **GiST 索引** — 全文搜索基础架构缺
 6. **TOAST 压缩** — 大字段存储无 lz4/pglz 压缩

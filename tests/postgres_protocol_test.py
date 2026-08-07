@@ -450,6 +450,35 @@ def main():
             sock, "SELECT n FROM protocol_numeric WHERE n = 12345.67"))
         assert numeric_rows == [[b"12345.67"]], numeric_rows
 
+        # Set operations use one shared execution path.  Exercise duplicate
+        # elimination, multiset ALL semantics, and INTERSECT precedence.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE set_left (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE set_right (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO set_left VALUES (1), (1), (2), (3)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO set_right VALUES (1), (2), (2), (4)"))
+        union_messages = simple_query(
+            sock, "SELECT id FROM set_left UNION SELECT id FROM set_right")
+        assert data_row_values(union_messages) == [
+                [b"1"], [b"2"], [b"3"], [b"4"]], union_messages
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM set_left UNION ALL SELECT id FROM set_right")) == [
+                [b"1"], [b"1"], [b"2"], [b"3"], [b"1"], [b"2"], [b"2"], [b"4"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM set_left INTERSECT SELECT id FROM set_right")) == [
+                [b"1"], [b"2"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM set_left INTERSECT ALL SELECT id FROM set_right")) == [
+                [b"1"], [b"2"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM set_left EXCEPT SELECT id FROM set_right")) == [[b"3"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM set_left EXCEPT ALL SELECT id FROM set_right")) == [
+                [b"1"], [b"3"]]
+
         # INSTEAD OF view triggers must be creatable on views and must route
         # each DML operation to the trigger action instead of the base-view
         # rewrite path.

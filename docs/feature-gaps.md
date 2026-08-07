@@ -129,15 +129,17 @@
 
 ### P1-2: UNION/INTERSECT/EXCEPT Executor
 - **类别**: 执行器 / 集合操作
-- **现状**: parser 就绪，executor 回退 legacy
+- **现状**: 已统一集合操作分支，支持顶层运算符优先级、错误传播以及 `UNION/INTERSECT/EXCEPT [ALL]` 的重复行语义；当前仍通过 legacy 输出边界执行，尚未进入 Volcano `Append/HashSetOp` 计划树
 - **PG 参考**: `Append` (UNION), `HashSetOp` (INTERSECT/EXCEPT)
-- **影响**: 集合操作查询无法走 volcano 路径
+- **影响**: 集合操作暂不能复用结构化执行器、类型合并和完整排序/分页作用域
 - **实现路径**:
-  1. 实现 `UnionOp`：合并多个子计划输出
-  2. 实现 `IntersectOp` / `ExceptOp`：哈希集合操作
-  3. 在 `QueryPlanner` 中识别集合操作并构建对应算子树
+  1. 将当前集合操作结果边界改为结构化行/列结果
+  2. 实现 `UnionOp`：合并多个子计划输出
+  3. 实现 `IntersectOp` / `ExceptOp`：哈希集合操作
+  4. 在 `QueryPlanner` 中识别集合操作并构建对应算子树
 - **预估工作量**: 3-5 天
-- **相关文件**: `src/executor/ExecutionPlan.cpp`
+- **验证**: `tests/postgres_protocol_test.py` 覆盖 UNION、UNION ALL、INTERSECT、INTERSECT ALL、EXCEPT、EXCEPT ALL
+- **相关文件**: `src/main.cpp`, `src/executor/ExecutionPlan.cpp`
 
 ### P1-3: GROUP BY ROLLUP/CUBE/GROUPING SETS Executor
 - **类别**: 执行器 / 分组扩展

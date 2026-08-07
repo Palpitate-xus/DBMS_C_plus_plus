@@ -24,7 +24,7 @@ ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权，
 | 能力 | 当前真实状态 | 证据/边界 |
 |------|--------------|-----------|
 | DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE 和 CREATE TRIGGER 已桥接；触发器 action runtime、RLS、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy/简化路径执行 |
-| 复杂查询执行 | 部分完成 | Volcano 基础算子已验证；复杂子查询、集合操作、窗口和 grouping 扩展仍有 legacy 回退 |
+| 复杂查询执行 | 部分完成 | Volcano 基础算子已验证；复杂子查询、集合操作的结构化计划、窗口和 grouping 扩展仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
 | PostgreSQL wire protocol / SCRAM | 部分完成 | 已有 Startup/SSLRequest/Query/Parse-Bind-Execute/Describe/Close framing、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果、基础 portal maxRows 分页、catalog SCRAM 和基础 pg_hba 运行时决策；数组等复杂类型 I/O、完整 RowDescription 类型映射、结构化结果、holdable/scrollable portal 和 libpq 全语义仍未完成 |

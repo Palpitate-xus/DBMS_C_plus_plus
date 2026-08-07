@@ -2724,6 +2724,177 @@ static bool executeInsteadOfTrigger(Session& s, const string& viewname,
     return true;
 }
 
+enum class SetOperationKind { Union, Intersect, Except };
+
+struct SetOperationSplit {
+    size_t position = string::npos;
+    size_t length = 0;
+    SetOperationKind kind = SetOperationKind::Union;
+    bool all = false;
+    bool lowPrecedence = false;
+};
+
+static bool sqlKeywordAt(const string& sql, size_t position, const string& keyword) {
+    if (position + keyword.size() > sql.size() ||
+        sql.compare(position, keyword.size(), keyword) != 0) return false;
+    const auto isIdentifier = [](char c) {
+        return isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
+    if (position > 0 && isIdentifier(sql[position - 1])) return false;
+    if (position + keyword.size() < sql.size() &&
+        isIdentifier(sql[position + keyword.size()])) return false;
+    return true;
+}
+
+static SetOperationSplit findTopLevelSetOperation(const string& sql) {
+    SetOperationSplit selected;
+    int depth = 0;
+    bool inQuote = false;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        const char c = sql[i];
+        if (c == '\'') {
+            if (inQuote && i + 1 < sql.size() && sql[i + 1] == '\'') {
+                ++i;
+                continue;
+            }
+            inQuote = !inQuote;
+            continue;
+        }
+        if (inQuote) continue;
+        if (c == '(') { ++depth; continue; }
+        if (c == ')') { if (depth > 0) --depth; continue; }
+        if (depth != 0) continue;
+
+        SetOperationKind kind;
+        string keyword;
+        bool lowPrecedence = false;
+        if (sqlKeywordAt(sql, i, "union")) {
+            kind = SetOperationKind::Union;
+            keyword = "union";
+            lowPrecedence = true;
+        } else if (sqlKeywordAt(sql, i, "except")) {
+            kind = SetOperationKind::Except;
+            keyword = "except";
+            lowPrecedence = true;
+        } else if (sqlKeywordAt(sql, i, "minus")) {
+            kind = SetOperationKind::Except;
+            keyword = "minus";
+            lowPrecedence = true;
+        } else if (sqlKeywordAt(sql, i, "intersect")) {
+            kind = SetOperationKind::Intersect;
+            keyword = "intersect";
+        } else {
+            continue;
+        }
+
+        size_t length = keyword.size();
+        size_t suffix = i + length;
+        while (suffix < sql.size() && isspace(static_cast<unsigned char>(sql[suffix]))) ++suffix;
+        bool all = false;
+        if (sqlKeywordAt(sql, suffix, "all")) {
+            all = true;
+            length = suffix + 3 - i;
+        } else if (sqlKeywordAt(sql, suffix, "distinct")) {
+            length = suffix + 8 - i;
+        }
+
+        // UNION/EXCEPT are lower precedence than INTERSECT. Choosing the
+        // rightmost operator at the selected precedence gives the required
+        // left associativity for chains such as A UNION B UNION C.
+        if (selected.position == string::npos ||
+            (lowPrecedence && !selected.lowPrecedence) ||
+            (lowPrecedence == selected.lowPrecedence && i > selected.position)) {
+            selected = {i, length, kind, all, lowPrecedence};
+        }
+        i += length - 1;
+    }
+    return selected;
+}
+
+static bool captureSetOperand(const string& sql, Session& s, vector<string>& lines) {
+    stringstream captured;
+    auto* oldBuffer = cout.rdbuf(captured.rdbuf());
+    bool failed = false;
+    try {
+        failed = execute(sql, s);
+    } catch (const exception& e) {
+        failed = true;
+        captured << "ERROR: " << e.what() << '\n';
+    } catch (...) {
+        failed = true;
+        captured << "ERROR: unhandled set-operation operand failure\n";
+    }
+    cout.rdbuf(oldBuffer);
+    string line;
+    while (getline(captured, line)) lines.push_back(line);
+    if (failed || (!lines.empty() && lines.front().rfind("ERROR:", 0) == 0)) {
+        for (const auto& output : lines) cout << output << endl;
+        return false;
+    }
+    return true;
+}
+
+static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
+    handled = false;
+    const SetOperationSplit split = findTopLevelSetOperation(sql);
+    if (split.position == string::npos) return false;
+    handled = true;
+
+    const string leftSql = trim(sql.substr(0, split.position));
+    const string rightSql = trim(sql.substr(split.position + split.length));
+    if (leftSql.empty() || rightSql.empty()) {
+        cout << "SQL syntax error: invalid set operation" << endl;
+        return true;
+    }
+
+    vector<string> leftLines;
+    vector<string> rightLines;
+    if (!captureSetOperand(leftSql, s, leftLines) ||
+        !captureSetOperand(rightSql, s, rightLines)) return true;
+
+    const string header = !leftLines.empty() ? leftLines.front()
+                       : !rightLines.empty() ? rightLines.front() : string();
+    if (header.empty()) return false;
+    vector<string> leftRows(leftLines.begin() + 1, leftLines.end());
+    vector<string> rightRows(rightLines.begin() + 1, rightLines.end());
+    cout << header << endl;
+
+    if (split.kind == SetOperationKind::Union) {
+        set<string> seen;
+        for (const auto& row : leftRows) {
+            if (split.all || seen.insert(row).second) cout << row << endl;
+        }
+        for (const auto& row : rightRows) {
+            if (split.all || seen.insert(row).second) cout << row << endl;
+        }
+        return false;
+    }
+
+    map<string, size_t> rightCounts;
+    for (const auto& row : rightRows) ++rightCounts[row];
+    set<string> emitted;
+    for (const auto& row : leftRows) {
+        auto rightIt = rightCounts.find(row);
+        const size_t available = rightIt == rightCounts.end() ? 0 : rightIt->second;
+        if (split.kind == SetOperationKind::Intersect) {
+            if (available == 0) continue;
+            if (split.all) {
+                cout << row << endl;
+                --rightIt->second;
+            } else if (emitted.insert(row).second) {
+                cout << row << endl;
+            }
+        } else {
+            if (available > 0) {
+                if (split.all) --rightIt->second;
+                continue;
+            }
+            if (split.all || emitted.insert(row).second) cout << row << endl;
+        }
+    }
+    return false;
+}
+
 // ========================================================================
 // Normalize condition string: remove spaces around operators so tokenize
 // keeps each condition as a single token (e.g. "score > 80" → "score>80")
@@ -12845,149 +13016,11 @@ bool execute(const string& rawSql, Session& s) {
         return true;
     }
 
-    // UNION / UNION ALL — skip matches inside parentheses (e.g., WITH clauses)
-    auto findSetOp = [&](const string& kw) -> size_t {
-        size_t p = sql.find(kw);
-        while (p != string::npos) {
-            int depth = 0;
-            for (size_t i = 0; i < p; ++i) {
-                if (sql[i] == '(') depth++;
-                else if (sql[i] == ')') depth--;
-            }
-            if (depth == 0) return p;
-            p = sql.find(kw, p + 1);
-        }
-        return string::npos;
-    };
-
-    size_t unionAllPos = findSetOp("union all");
-    size_t unionPos = findSetOp("union");
-    bool isUnionAll = false;
-    size_t actualUnionPos = string::npos;
-    if (unionAllPos != string::npos) {
-        isUnionAll = true;
-        actualUnionPos = unionAllPos;
-    } else if (unionPos != string::npos) {
-        actualUnionPos = unionPos;
-    }
-    if (actualUnionPos != string::npos) {
-        if (!checkDB(s)) return true;
-        string leftSql = trim(sql.substr(0, actualUnionPos));
-        string rightSql = trim(sql.substr(actualUnionPos + (isUnionAll ? 9 : 5)));
-        if (leftSql.empty() || rightSql.empty()) {
-            cout << "SQL syntax error: invalid UNION" << endl;
-            return true;
-        }
-        // Execute left query, capture output
-        auto* oldBuf = cout.rdbuf();
-        stringstream leftSs;
-        cout.rdbuf(leftSs.rdbuf());
-        execute(leftSql, s);
-        cout.rdbuf(oldBuf);
-        // Execute right query, capture output
-        stringstream rightSs;
-        cout.rdbuf(rightSs.rdbuf());
-        execute(rightSql, s);
-        cout.rdbuf(oldBuf);
-        // Parse outputs: first line is header, rest are data rows
-        vector<string> leftLines, rightLines;
-        string line;
-        while (getline(leftSs, line)) leftLines.push_back(line);
-        while (getline(rightSs, line)) rightLines.push_back(line);
-        // Print header from left query
-        if (!leftLines.empty()) {
-            cout << leftLines[0] << endl;
-        } else if (!rightLines.empty()) {
-            cout << rightLines[0] << endl;
-        }
-        // Merge data rows (skip headers)
-        set<string> seen;
-        for (size_t i = 1; i < leftLines.size(); ++i) {
-            if (isUnionAll || seen.insert(leftLines[i]).second) {
-                cout << leftLines[i] << endl;
-            }
-        }
-        for (size_t i = 1; i < rightLines.size(); ++i) {
-            if (isUnionAll || seen.insert(rightLines[i]).second) {
-                cout << rightLines[i] << endl;
-            }
-        }
-        return false;
-    }
-
-    // INTERSECT
-    size_t intersectPos = findSetOp("intersect");
-    if (intersectPos != string::npos) {
-        if (!checkDB(s)) return true;
-        string leftSql = trim(sql.substr(0, intersectPos));
-        string rightSql = trim(sql.substr(intersectPos + 9));
-        if (leftSql.empty() || rightSql.empty()) {
-            cout << "SQL syntax error: invalid INTERSECT" << endl;
-            return true;
-        }
-        auto* oldBuf = cout.rdbuf();
-        stringstream leftSs;
-        cout.rdbuf(leftSs.rdbuf());
-        execute(leftSql, s);
-        cout.rdbuf(oldBuf);
-        stringstream rightSs;
-        cout.rdbuf(rightSs.rdbuf());
-        execute(rightSql, s);
-        cout.rdbuf(oldBuf);
-        vector<string> leftLines, rightLines;
-        string line;
-        while (getline(leftSs, line)) leftLines.push_back(line);
-        while (getline(rightSs, line)) rightLines.push_back(line);
-        if (!leftLines.empty()) cout << leftLines[0] << endl;
-        else if (!rightLines.empty()) cout << rightLines[0] << endl;
-        set<string> rightSet;
-        for (size_t i = 1; i < rightLines.size(); ++i) rightSet.insert(rightLines[i]);
-        for (size_t i = 1; i < leftLines.size(); ++i) {
-            if (rightSet.find(leftLines[i]) != rightSet.end()) {
-                cout << leftLines[i] << endl;
-            }
-        }
-        return false;
-    }
-
-    // EXCEPT / MINUS
-    size_t exceptPos = findSetOp("except");
-    size_t minusPos = findSetOp("minus");
-    size_t actualExceptPos = string::npos;
-    if (exceptPos != string::npos) actualExceptPos = exceptPos;
-    else if (minusPos != string::npos) actualExceptPos = minusPos;
-    if (actualExceptPos != string::npos) {
-        if (!checkDB(s)) return true;
-        string leftSql = trim(sql.substr(0, actualExceptPos));
-        string rightSql = trim(sql.substr(actualExceptPos + (exceptPos != string::npos ? 6 : 5)));
-        if (leftSql.empty() || rightSql.empty()) {
-            cout << "SQL syntax error: invalid EXCEPT" << endl;
-            return true;
-        }
-        auto* oldBuf = cout.rdbuf();
-        stringstream leftSs;
-        cout.rdbuf(leftSs.rdbuf());
-        execute(leftSql, s);
-        cout.rdbuf(oldBuf);
-        stringstream rightSs;
-        cout.rdbuf(rightSs.rdbuf());
-        execute(rightSql, s);
-        cout.rdbuf(oldBuf);
-        vector<string> leftLines, rightLines;
-        string line;
-        while (getline(leftSs, line)) leftLines.push_back(line);
-        while (getline(rightSs, line)) rightLines.push_back(line);
-        if (!leftLines.empty()) cout << leftLines[0] << endl;
-        else if (!rightLines.empty()) cout << rightLines[0] << endl;
-        set<string> rightSet;
-        for (size_t i = 1; i < rightLines.size(); ++i) rightSet.insert(rightLines[i]);
-        for (size_t i = 1; i < leftLines.size(); ++i) {
-            if (rightSet.find(leftLines[i]) == rightSet.end()) {
-                cout << leftLines[i] << endl;
-            }
-        }
-        return false;
-    }
+    // Set operations share one execution path so errors, precedence and
+    // duplicate-row semantics are consistent across UNION/INTERSECT/EXCEPT.
+    bool setOperationHandled = false;
+    if (executeSetOperation(sql, s, setOperationHandled)) return true;
+    if (setOperationHandled) return false;
 
     // SHOW CONNECTIONS / SHOW STATUS
     if (sql.substr(0, 5) == "show ") {
