@@ -7,6 +7,7 @@
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
+#include "permissions.h"
 #include "utils/Session.h"
 #include <cmath>
 #include <limits>
@@ -19213,6 +19214,13 @@ static std::string joinColumns(const std::vector<std::string>& cols) {
 
 static constexpr const char* GRANT_OPTION_MARK = "__grant__";
 
+// PostgreSQL ACL entries can target the session role, any role inherited by
+// that session role, or PUBLIC. Keep this resolution in the storage ACL
+// implementation so table- and column-level checks use identical semantics.
+static bool aclGranteeMatches(const std::string& grantee, const std::string& username) {
+    return grantee == username || grantee == "public" || userHasRole(username, grantee);
+}
+
 static bool colsEmptyIgnoreGrant(const std::string& colsStr) {
     if (colsStr.empty()) return true;
     // colsStr may start with space
@@ -19391,7 +19399,7 @@ bool StorageEngine::hasPermission(const std::string& dbname, const std::string& 
         std::string u, t, p, cols;
         ss >> u >> t >> p;
         std::getline(ss, cols);
-        if (u != username) continue;
+        if (!aclGranteeMatches(u, username)) continue;
         if (t == tablename && (p == "all" || p == target)) {
             if (colsEmptyIgnoreGrant(cols)) return true;
         }
@@ -19414,7 +19422,7 @@ bool StorageEngine::hasGrantOption(const std::string& dbname, const std::string&
         ss >> u >> t >> p;
         std::getline(ss, cols);
         if (!cols.empty() && cols[0] == ' ') cols = cols.substr(1);
-        if (u != username) continue;
+        if (!aclGranteeMatches(u, username)) continue;
         if (t != tablename && t != "*") continue;
         if (p == "all" || p == target) {
             auto colList = parseColumns(cols);
@@ -19446,7 +19454,7 @@ bool StorageEngine::hasColumnPermission(const std::string& dbname, const std::st
             ss >> u >> t >> p;
             std::getline(ss, cols);
             if (!cols.empty() && cols[0] == ' ') cols = cols.substr(1);
-            if (u != username) continue;
+            if (!aclGranteeMatches(u, username)) continue;
             if (t == "*" && (p == "all" || p == target)) hasDbLevel = true;
             if (t != tablename) continue;
             if (p == "all") hasTableLevel = true;
@@ -19480,7 +19488,7 @@ std::vector<std::string> StorageEngine::getUserPermissions(
         std::stringstream ss(line);
         std::string u, t, p;
         ss >> u >> t >> p;
-        if (u == username && t == tablename) result.push_back(p);
+        if (t == tablename && aclGranteeMatches(u, username)) result.push_back(p);
     }
     return result;
 }

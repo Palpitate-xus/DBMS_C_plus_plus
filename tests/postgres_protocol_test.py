@@ -259,6 +259,8 @@ def main():
             sock, "GRANT analyst TO bob"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "GRANT SELECT ON t TO analyst"))
         messages = simple_query(sock, "SELECT id FROM t")
         assert messages[0][0] == b"T"
         assert any(kind == b"D" for kind, _ in messages)
@@ -324,6 +326,10 @@ def main():
         role_sock.settimeout(2)
         role_sock.connect(("127.0.0.1", port))
         startup(role_sock, "bob", "info", password="bObPass9!")
+        role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
+        assert role_rows == [[b"1"], [b"3"]], role_rows
+        denied_rows = simple_query(role_sock, "INSERT INTO t VALUES (99)")
+        assert any(kind == b"E" for kind, _ in denied_rows)
         role_sock.sendall(typed(b"X"))
         role_sock.close()
 

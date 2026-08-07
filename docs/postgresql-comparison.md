@@ -7,6 +7,8 @@
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态和文本整数参数绑定；这只补齐了错误状态机与参数路径的一部分，二进制参数/结果、完整 OID 类型映射、portal 分页和扩展消息仍与 PostgreSQL 有差距。
 
+ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` 的解析，并验证角色授权可以通过真实 PostgreSQL 协议生效；owner、完整 ACL 对象范围及 `GRANT OPTION` 生命周期仍未达到 PostgreSQL 语义。
+
 事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志和 SSI 冲突图仍是跨 backend 共享协调结构，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
 2026-08-07 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。

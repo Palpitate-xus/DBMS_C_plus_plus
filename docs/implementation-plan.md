@@ -13,6 +13,8 @@
 
 协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换；二进制参数/结果、完整 OID 类型映射和 portal 分页仍列为协议缺口。
 
+ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权，且协议回归验证授权读取与未授权写入均走真实网络路径；对象 owner、完整 `GRANT OPTION` 继承/回收以及 schema/database/function ACL 仍列为后续安全缺口。
+
 事务运行时补强了 backend 隔离：共享 `StorageEngine` 的事务执行上下文改为当前连接工作线程局部，避免事务 ID、快照、回滚日志、savepoint、隔离级别和 `lastval` 在连接之间泄漏；连接结束时回滚未完成事务并清理上下文；跨 backend 的锁管理和提交状态仍保持全局协调，后续继续补齐更完整的 session/statement 生命周期语义。
 
 ### 当前代码路径审计覆盖层
