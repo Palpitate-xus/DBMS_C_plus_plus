@@ -3,9 +3,8 @@
 // The partitioning machinery (CREATE TABLE ... PARTITION BY, PARTITION OF,
 // INSERT routing, ALTER TABLE ATTACH/DETACH PARTITION, sub-partitioning, and
 // full-table scan over all partitions) is already implemented in the engine.
-// This test exercises it end-to-end through the engine API by building
-// TableSchema directly, because the DDL AST bridge currently does not forward
-// partition metadata to StorageEngine::createTable.
+// This test exercises the lower-level TableSchema API; DDL-level wiring is
+// covered by create_table_options_test.cpp.
 // ============================================================================
 
 #include "commands/DdlExecutor.h"

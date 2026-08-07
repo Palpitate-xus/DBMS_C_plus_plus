@@ -819,6 +819,8 @@ struct CreateTableStmt : public Stmt {
     std::vector<LikeClause> likeClauses;
     std::vector<SelectItem> partitionBy;       // PARTITION BY ...
     std::string partitionType;                 // "range", "list", or "hash"
+    std::string partitionOf;                   // PARTITION OF parent_table
+    std::string partitionBoundSpec;            // FOR VALUES ... / DEFAULT
     std::string asSelect;                      // CREATE TABLE ... AS SELECT ...
     bool withData = true;                      // CTAS WITH [NO] DATA (default WITH DATA)
 

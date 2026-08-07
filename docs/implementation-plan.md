@@ -11,7 +11,7 @@
 
 | 能力 | 当前真实状态 | 证据/边界 |
 |------|--------------|-----------|
-| DDL AST bridge | 部分完成 | 核心 CREATE/DROP 与基础 ALTER TABLE 已桥接；RLS、触发器、分区、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy 路径执行 |
+| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF` 与基础 ALTER TABLE 已桥接；RLS、触发器、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy 路径执行 |
 | 复杂查询执行 | 部分完成 | Volcano 基础算子已验证；复杂子查询、集合操作、窗口和 grouping 扩展仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
@@ -281,7 +281,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 4.23 实现 `GENERATED` 虚拟/存储生成列完整语义 | 5.6 | `GENERATED ALWAYS AS (expr) STORED` 在 INSERT/UPDATE 时按当前行求值并持久化，拒绝用户直接写入；`GENERATED ALWAYS AS (expr) VIRTUAL` 不占用存储，在 SELECT 投影与标量函数参数中按当前行实时计算；schema 二进制格式 `0x44420005` 持久化 `generatedKind`。新增 `tests/generated_columns_test.cpp`。WHERE/DISTINCT/索引中 VIRTUAL 列的实时计算仍待后续 planner 阶段完善。 |
 | ✅ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 解析 `EXCLUDE [USING method] (elem WITH op [, ...]) [WHERE (pred)]`；`StorageEngine` 以 `.exclusions` 元数据文件持久化约束；INSERT/UPDATE 时扫描全表检查冲突。支持 `=`（等值排斥）与 `&&`（int4range 范围重叠排斥）。CREATE TABLE 通过 `DdlExecutor` 创建约束；ALTER TABLE ADD/DROP CONSTRAINT 通过 `main.cpp` legacy 路径桥接到 `StorageEngine`；`DROP TABLE` 自动清理所属 EXCLUDE 约束。新增 `tests/exclude_test.cpp`。GiST 索引加速、多元素/表达式元素/其他操作符仍待后续完善。 |
 | ✅ 4.25 实现 `SET CONSTRAINTS` 延迟队列、提交时检查 | 5.10, 1.1.53 | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟检查在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 映射生效，`NOT DEFERRABLE` 约束不受 `SET CONSTRAINTS ALL DEFERRED` 影响；schema 格式 `0x44420006` 持久化 `checkConstraintName`/`deferrable`/`initiallyDeferred`；`constraintMode_` 在事务结束时自动清除（per-transaction 语义）；`beginTransaction` 修复：已有事务时先 commit 再开新事务，防止 `txnDB_` 指向错误数据库。新增 `tests/deferrable_test.cpp`（6 个测试）。constraint trigger 语义仍待后续。 |
-| ✅ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY` 已有 DdlExecutor 支持并验证；`OF type` 已有 DdlExecutor 支持并验证；`GENERATED ALWAYS/BY DEFAULT AS IDENTITY` 映射到 `isAutoIncrement`；`PARTITION BY RANGE/LIST/HASH` 从 AST `partitionBy` 桥接到 `TableSchema::partitionKey`+`partitionType`（parser 新增 `partitionType` 字段存储分区类型关键词）；tablespace 存储在 schema 中。新增 `tests/create_table_options_test.cpp`（9 个测试）。`PARTITION OF` 子句解析与 `accessMethod` schema 持久化仍待后续。 |
+| ✅ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 已由 typed AST/DdlExecutor 桥接并验证；tablespace 存储在 schema 中。新增回归覆盖 10 个选项路径。`accessMethod` schema 持久化仍待后续。 |
 | ✅ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 已支持 ADD/DROP COLUMN、ALTER COLUMN TYPE、OWNER TO、SET LOGGED/UNLOGGED、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、RENAME COLUMN/CONSTRAINT、DROP CONSTRAINT、ALTER COLUMN SET/DROP DEFAULT/NOT NULL、ADD CONSTRAINT(CHECK/UNIQUE/FK/PRIMARY KEY)、ENABLE/DISABLE TRIGGER、ROW LEVEL SECURITY、SET SCHEMA、ATTACH/DETACH PARTITION、**ALTER COLUMN SET STATISTICS**、**ALTER TABLE ONLY**（parser+executor）、**INHERIT/NO INHERIT**、**SET TABLESPACE**（`alterTableTablespace` 更新 schema 元数据）。真正延迟约束队列待后续。 |
 | ✅ 4.28 补全 `CREATE/ALTER VIEW`（security barrier/invoker、recursive view、check option） | 1.1.6, 1.1.33, 4.9 | `CreateViewStmt` 新增 `selectSql` 保存原始 SELECT 文本；`DdlExecutor::executeCreateView` 落地：检测单表可更新视图、WITH CHECK OPTION、OR REPLACE；新增 `tests/view_test.cpp`。SECURITY BARRIER/INVOKER、递归视图仍待后续。 |
 | ✅ 4.29 补全 `CREATE TRIGGER`（transition tables、constraint triggers、deferred triggers、event triggers） | 1.1.31, 4.11 | `CreateTriggerStmt` 新增 `action` 字段；`parseCreateTrigger` 完整解析 BEFORE/AFTER/INSTEAD OF、事件、WHEN 条件；`DdlExecutor::executeCreateTrigger` 落地；新增 `tests/trigger_test.cpp`。transition tables、constraint triggers、deferred triggers、触发器动作真实执行仍待后续。 |
@@ -605,18 +605,18 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
   - ✅ 零引擎方法变更、零 schema 格式变更；二进制端到端验证所有组合（ADD IF NOT EXISTS 已存在/不存在、DROP IF EXISTS 存在/不存在、RENAME IF EXISTS 存在/不存在）。全量套件 PASS=84 FAIL=0。
   - 🔄 仍待后续：`IF EXISTS` 对 ADD CONSTRAINT、RENAME TABLE、ALTER COLUMN TYPE 等扩展；`ONLY`、`INHERIT`、真正的 SET TABLESPACE 迁移。
 - **Wave 4 DDL 完整化 — CREATE TABLE PARTITION BY 执行测试（4.26，本次完成）**：
-  - ✅ 分区执行机制（RANGE/LIST/HASH 分区、`PARTITION OF` 声明式子分区、INSERT 路由、ALTER TABLE ATTACH/DETACH PARTITION、RANGE+HASH 二级子分区、全表扫描合并所有分区）已在引擎实现，但此前无测试。新增 `tests/partition_test.cpp` 直接构造 `TableSchema` 并调用 `StorageEngine::createTable` 来覆盖这些路径（DDL AST 桥 `DdlExecutor::executeCreateTable` 未转发 `partitionBy`，本次未改动桥接）。
+  - ✅ 分区执行机制（RANGE/LIST/HASH 分区、`PARTITION OF` 声明式子分区、INSERT 路由、ALTER TABLE ATTACH/DETACH PARTITION、RANGE+HASH 二级子分区、全表扫描合并所有分区）已在引擎实现并有 API/DDL 回归覆盖；`CREATE TABLE ... PARTITION BY` 与 `PARTITION OF` 均经 typed AST/DdlExecutor 验证。
   - ✅ 测试覆盖：RANGE 三分区插入/全扫描/ATTACH 新分区/DETACH 分区；LIST 分区含 DEFAULT 分区；HASH 4 分区 + ATTACH p4；RANGE+HASH 二级子分区。
-  - 🔄 仍待后续：将 `partitionBy` 从 AST 桥接到 `StorageEngine::createTable`，使 `CREATE TABLE ... PARTITION BY` SQL 真正生效；当前 SQL 路径仍落在 `main.cpp` 的字符串解析分支。
-- **Wave 4 DDL 完整化 — CREATE TABLE 选项全面验证 + PARTITION BY 桥接（4.26，本次完成）**：
-  - ✅ `CreateTableStmt` 新增 `partitionType` 字段（`ast.h`），parser 在解析 `PARTITION BY range/list/hash(col)` 时存储分区类型关键词。
-  - ✅ `DdlExecutor::executeCreateTable` 新增 `PARTITION BY` 桥接逻辑：从 `stmt->partitionBy` 提取列名设置 `tbl.partitionKey`，从 `stmt->partitionType` 映射到 `TableSchema::PartitionType`。
-  - ✅ `CREATE TABLE ... PARTITION BY RANGE(col)` DDL 路径端到端验证：DDL 建表 → `attachPartition` 添加分区 → INSERT 路由到正确分区。
+  - 🔄 仍待后续：分区约束证明、默认分区完整校验、global/local index 联动，以及更完整的 partition pruning。
+- **Wave 4 DDL 完整化 — CREATE TABLE 选项全面验证 + 分区 typed bridge（4.26，本次完成）**：
+  - ✅ `CreateTableStmt` 保存 `partitionType`、`partitionOf` 和 partition bound；parser 将 `PARTITION BY` 与 `PARTITION OF` 交给 typed DDL 路径。
+  - ✅ `DdlExecutor::executeCreateTable` 负责 `PARTITION BY` 元数据桥接，以及 `PARTITION OF` 的父 schema 克隆、子表创建、bound attach 和 catalog 注册。
+  - ✅ `CREATE TABLE ... PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` SQL 路径端到端验证，包含 LIST DEFAULT 路由、错误父表和 malformed 语法拒绝。
   - ✅ LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY 已有 DdlExecutor 支持并验证。
   - ✅ GENERATED ALWAYS/BY DEFAULT AS IDENTITY → `isAutoIncrement` 映射验证。
   - ✅ TABLESPACE 存储到 schema 验证。
-  - ✅ 新增 `tests/create_table_options_test.cpp`（9 个测试），全量套件 PASS=94 FAIL=0。
-  - 🔄 仍待后续：`PARTITION OF` 子句解析（目前分区只能通过引擎 API `attachPartition` 添加）；`accessMethod` schema 持久化。
+  - ✅ 新增 `tests/create_table_options_test.cpp`（10 个测试路径），全量套件 PASS=114 FAIL=0。
+- 🔄 仍待后续：`accessMethod` schema 持久化、分区约束证明和完整 global/local index 语义。
 - **Wave 4 仍进行中**：CREATE TYPE（range/base/shell）、聚合/窗口函数完整集等。
 
 ---

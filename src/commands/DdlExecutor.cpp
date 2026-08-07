@@ -1328,6 +1328,67 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         return true;
     }
 
+    // CREATE TABLE child PARTITION OF parent ...
+    if (!stmt->partitionOf.empty()) {
+        std::string parent = resolveTableName(s, stmt->partitionOf);
+        if (!g_engine.tableExists(s.currentDB, parent)) {
+            std::cout << "Parent partitioned table " << stmt->partitionOf
+                      << " not found" << std::endl;
+            return true;
+        }
+        TableSchema parentSchema = g_engine.getTableSchema(s.currentDB, parent);
+        if (parentSchema.partitionType == TableSchema::PartitionType::None) {
+            std::cout << "Parent table " << stmt->partitionOf
+                      << " is not partitioned" << std::endl;
+            return true;
+        }
+
+        // A partition stores the parent's row layout but owns no partition
+        // routing metadata of its own. attachPartition records the bound on
+        // the parent and creates the parent's partition data fork.
+        TableSchema child = parentSchema;
+        child.tablename = tname;
+        child.partitionType = TableSchema::PartitionType::None;
+        child.partitionKey.clear();
+        child.rangePartitions.clear();
+        child.listPartitions.clear();
+        child.hashPartitions = 0;
+        child.defaultPartitionName.clear();
+        child.subPartitionType = TableSchema::PartitionType::None;
+        child.subPartitionKey.clear();
+        child.subHashPartitions = 0;
+
+        if (g_engine.createTable(s.currentDB, child) != DBStatus::OK) {
+            std::cout << "CREATE TABLE partition failed" << std::endl;
+            return true;
+        }
+        txn.recordCreate(DdlObjectKind::Table, tname);
+        DBStatus attach = g_engine.attachPartition(
+            s.currentDB, parent, tname, stmt->partitionBoundSpec);
+        if (attach != DBStatus::OK) {
+            txn.rollback();
+            std::cout << "CREATE TABLE partition attach failed" << std::endl;
+            return true;
+        }
+
+        try {
+            CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+            CatalogManager::QualifiedName qn;
+            if (!CatalogManager::parseQualifiedName(stmt->tableName, qn)) {
+                qn.schema = "";
+                qn.name = stmt->tableName;
+            }
+            if (qn.schema.empty()) qn.schema = "public";
+            registerTableInCatalog(cat, child, qn.schema, qn.name);
+        } catch (const std::exception& e) {
+            std::cerr << "WARNING: partition catalog registration failed: "
+                      << e.what() << std::endl;
+        }
+        g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname, s.username);
+        txn.commit();
+        return false;
+    }
+
     // CREATE TABLE ... AS SELECT ...
     if (!stmt->asSelect.empty()) {
         bool err = executeCreateTableAs(stmt, s, tname);

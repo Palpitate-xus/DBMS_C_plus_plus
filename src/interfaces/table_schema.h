@@ -108,7 +108,7 @@ struct TableSchema {
     std::vector<std::pair<std::string, std::string>> rangePartitions;  // name -> upper bound
     std::vector<std::pair<std::string, std::vector<std::string>>> listPartitions;  // name -> values
     size_t hashPartitions = 0;  // number of hash partitions
-    std::string defaultPartitionName; // DEFAULT partition for LIST partitioning
+    std::string defaultPartitionName; // DEFAULT partition for RANGE/LIST partitioning
 
     // Subpartitioning (two-level partitioning)
     PartitionType subPartitionType = PartitionType::None;

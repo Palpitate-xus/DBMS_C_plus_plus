@@ -3374,6 +3374,29 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
         }
     }
 
+    // CREATE TABLE child PARTITION OF parent FOR VALUES ...
+    // is a CREATE TABLE statement in PostgreSQL, so keep it in the typed DDL
+    // path instead of letting the legacy string dispatcher own the syntax.
+    if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "partition" &&
+        toLower(tokens[pos + 1]) == "of") {
+        pos += 2;
+        if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+        stmt->partitionOf = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
+            stmt->partitionOf += "." + tokens[pos++];
+        }
+        std::string bound;
+        while (pos < tokens.size() && tokens[pos] != ";") {
+            if (!bound.empty()) bound += ' ';
+            bound += tokens[pos++];
+        }
+        if (bound.empty()) return nullptr;
+        stmt->partitionBoundSpec = std::move(bound);
+        return stmt;
+    }
+
     // CREATE TABLE ... AS SELECT ...
     if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as" && toLower(tokens[pos + 1]) == "select") {
         pos += 2;

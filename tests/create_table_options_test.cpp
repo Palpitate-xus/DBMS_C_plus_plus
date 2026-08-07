@@ -1,7 +1,7 @@
 // ============================================================================
 // CREATE TABLE options test — Phase 4 Wave 4.26
 // Verifies LIKE INCLUDING (CONSTRAINTS, INDEXES, IDENTITY), identity columns,
-// and PARTITION BY wiring from DDL AST to the engine.
+// and declarative partitioning through the typed DDL path.
 // ============================================================================
 
 #include "commands/DdlExecutor.h"
@@ -161,11 +161,10 @@ static void test_partition_by_range_ddl() {
     assert(schema.partitionKey == "yr");
     assert(schema.partitionType == dbms::TableSchema::PartitionType::Range);
 
-    // Attach partitions via engine API (PARTITION OF not yet parsed).
-    assert(g_engine.attachPartition(db, "sales", "p2020",
-        "FOR VALUES FROM (2020) TO (2021)") == dbms::DBStatus::OK);
-    assert(g_engine.attachPartition(db, "sales", "p2025",
-        "FOR VALUES FROM (2025) TO (2026)") == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE TABLE p2020 PARTITION OF sales FOR VALUES FROM (2020) TO (2021)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE p2025 PARTITION OF sales FOR VALUES FROM (2025) TO (2026)", s));
 
     // Insert rows and verify routing.
     assert(g_engine.insert(db, "sales", {{"id", "1"}, {"yr", "2020"}}) == dbms::DBStatus::OK);
@@ -176,6 +175,24 @@ static void test_partition_by_range_ddl() {
 
     cleanup(db);
     std::cout << "[OPTS] PARTITION BY RANGE via DDL OK" << std::endl;
+}
+
+// PARTITION OF rejects a non-partitioned parent before creating a child.
+static void test_partition_of_validation() {
+    std::string db = testDbPath("opts_part_invalid");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE TABLE plain (id INT)", s));
+    assert(ddl.executeSql(
+        "CREATE TABLE child PARTITION OF plain FOR VALUES FROM (1) TO (2)", s));
+    assert(ddl.executeSql("CREATE TABLE malformed PARTITION OF", s));
+    assert(!g_engine.tableExists(db, "child"));
+    assert(!g_engine.tableExists(db, "malformed"));
+    cleanup(db);
+    std::cout << "[OPTS] PARTITION OF validation OK" << std::endl;
 }
 
 // PARTITION BY LIST through DDL.
@@ -193,17 +210,19 @@ static void test_partition_by_list_ddl() {
     assert(schema.partitionKey == "region");
     assert(schema.partitionType == dbms::TableSchema::PartitionType::List);
 
-    // Attach list partitions.
-    assert(g_engine.attachPartition(db, "events", "east",
-        "FOR VALUES IN ('NY', 'NJ')") == dbms::DBStatus::OK);
-    assert(g_engine.attachPartition(db, "events", "west",
-        "FOR VALUES IN ('CA', 'OR')") == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE TABLE east PARTITION OF events FOR VALUES IN ('NY', 'NJ')", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE west PARTITION OF events FOR VALUES IN ('CA', 'OR')", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE other PARTITION OF events DEFAULT", s));
 
     assert(g_engine.insert(db, "events", {{"id", "1"}, {"region", "NY"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "events", {{"id", "2"}, {"region", "CA"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "events", {{"id", "3"}, {"region", "TX"}}) == dbms::DBStatus::OK);
 
     auto rows = g_engine.query(db, "events", {}, {"id", "region"});
-    assert(rows.size() == 2);
+    assert(rows.size() == 3);
 
     cleanup(db);
     std::cout << "[OPTS] PARTITION BY LIST via DDL OK" << std::endl;
@@ -252,6 +271,7 @@ int main() {
     test_identity_always();
     test_identity_by_default();
     test_partition_by_range_ddl();
+    test_partition_of_validation();
     test_partition_by_list_ddl();
     test_partition_by_hash_ddl();
     test_tablespace_option();
