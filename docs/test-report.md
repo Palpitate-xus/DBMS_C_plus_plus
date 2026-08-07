@@ -871,7 +871,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
 - ✅ **INET/CIDR 网络类型**与网络运算符（`<<` / `>>` / `&&`）
 - ✅ 索引系统（B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST）
-- ✅ 视图与触发器（含 ALTER VIEW RENAME TO / SET SCHEMA）
+- ✅ 视图与触发器（含 ALTER VIEW RENAME TO / SET SCHEMA，以及简单单表视图多行 `INSTEAD OF` INSERT/UPDATE/DELETE 协议回归）
 - ✅ 事务控制（BEGIN/COMMIT/ROLLBACK/SAVEPOINT）
 - ✅ 权限管理（GRANT/REVOKE）
 - ✅ 分区管理（Range/List/Hash + ATTACH/DETACH）

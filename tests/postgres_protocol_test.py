@@ -471,18 +471,25 @@ def main():
             "FOR EACH ROW DELETE FROM view_trigger_base WHERE id = OLD.id")
         assert any(kind == b"C" for kind, _ in delete_trigger_ddl), delete_trigger_ddl
         insert_messages = simple_query(
-            sock, "INSERT INTO writable_view (id, name) VALUES (10, 'alice')")
+            sock, "INSERT INTO writable_view (id, name) VALUES "
+            "(10, 'alice'), (11, 'carol')")
         assert any(kind == b"C" for kind, _ in insert_messages), insert_messages
         view_rows = simple_query(sock, "SELECT name FROM view_trigger_base WHERE id = 10")
         assert data_row_values(view_rows) == [[b"alice"]], view_rows
+        assert data_row_values(simple_query(
+            sock, "SELECT name FROM view_trigger_base WHERE id = 11")) == [[b"carol"]]
         assert any(kind == b"C" for kind, _ in simple_query(
-            sock, "UPDATE writable_view SET name = 'bob' WHERE id = 10"))
+            sock, "UPDATE writable_view SET name = 'bob' WHERE id > 0"))
         assert data_row_values(simple_query(
             sock, "SELECT name FROM view_trigger_base WHERE id = 10")) == [[b"bob"]]
+        assert data_row_values(simple_query(
+            sock, "SELECT name FROM view_trigger_base WHERE id = 11")) == [[b"bob"]]
         assert any(kind == b"C" for kind, _ in simple_query(
-            sock, "DELETE FROM writable_view WHERE id = 10"))
+            sock, "DELETE FROM writable_view WHERE id > 0"))
         assert data_row_values(simple_query(
             sock, "SELECT id FROM view_trigger_base WHERE id = 10")) == []
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM view_trigger_base WHERE id = 11")) == []
 
         messages = simple_query(sock, "SELECT id FROM t")
         assert messages[0][0] == b"T"

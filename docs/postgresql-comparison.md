@@ -319,7 +319,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 4. **Gap locks / predicate locks** — 无法完全防止幻读
 5. **SSI (Serializable Snapshot Isolation)** — 已覆盖关系限定的行级写偏差回滚，但 predicate/SIREAD 和完整冲突规则仍未实现
 6. **Bitmap scan** — 多索引组合 (Bitmap AND/OR) 缺失, 影响复杂 WHERE 性能
-7. **INSTEAD OF 视图触发器** — 已支持视图上的行级 INSERT/UPDATE/DELETE action SQL，并覆盖协议 E2E；多行逐行触发、transition tables、完整函数/PL 运行时仍缺失
+7. **INSTEAD OF 视图触发器** — 已支持简单单表视图上的逐行 INSERT/UPDATE/DELETE action SQL，并覆盖多行协议 E2E；复杂视图映射、transition tables、完整函数/PL 运行时仍缺失
 
 ### 🟡 重要缺失 (影响实用性)
 1. **Window Function executor** — parser 就绪但 executor 回退 legacy (无 WindowOp)

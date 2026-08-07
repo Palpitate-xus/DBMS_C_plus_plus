@@ -782,6 +782,7 @@ string resolveTableName(Session& s, const string& name);
 static vector<string> splitConds(const string& s);
 static string normalizeConditionStr(string s);
 static string modifyLogic(const string& logic);
+static vector<vector<string>> breakDownConditions(const vector<string>& tokens);
 static bool setSessionAuthorization(Session& s, const string& targetRaw);
 static vector<string> splitValues(const string& s);
 static vector<string> parseCSVLine(const string& line);
@@ -2628,6 +2629,57 @@ static void replaceTriggerReference(string& sql, const string& prefix,
         sql.replace(pos, end + column.size() - pos, value);
         pos += value.size();
     }
+}
+
+static vector<map<string, string>> collectViewRows(Session& s,
+                                                    const string& viewname,
+                                                    const string& whereClause) {
+    vector<map<string, string>> rows;
+    const string baseTable = g_engine.getViewBaseTable(s.currentDB, viewname);
+    if (baseTable.empty() || !g_engine.tableExists(s.currentDB, baseTable)) return rows;
+
+    const TableSchema table = g_engine.getTableSchema(s.currentDB, baseTable);
+    vector<vector<dbms::StorageEngine::Condition>> groups;
+    const string normalizedWhere = trim(whereClause);
+    if (normalizedWhere.empty()) {
+        groups.push_back({});
+    } else {
+        vector<string> tokens = tokenize(normalizeConditionStr(normalizedWhere));
+        tokens.insert(tokens.begin(), "(");
+        tokens.push_back(")");
+        for (auto& token : tokens) token = modifyLogic(token);
+        for (const auto& group : breakDownConditions(tokens)) {
+            groups.push_back(dbms::StorageEngine::parseConditions(group));
+        }
+    }
+
+    g_engine.forEachRow(s.currentDB, baseTable,
+        [&](uint32_t, uint16_t, const char* data, size_t len) {
+            const string rowBuffer(data, len);
+            bool matches = false;
+            for (const auto& group : groups) {
+                bool groupMatches = true;
+                for (const auto& condition : group) {
+                    if (!dbms::StorageEngine::evalConditionOnRow(condition, rowBuffer, table)) {
+                        groupMatches = false;
+                        break;
+                    }
+                }
+                if (groupMatches) {
+                    matches = true;
+                    break;
+                }
+            }
+            if (!matches) return;
+
+            map<string, string> values;
+            for (size_t i = 0; i < table.len; ++i) {
+                values[table.cols[i].dataName] =
+                    dbms::StorageEngine::extractColumnValueStatic(rowBuffer, table, i);
+            }
+            rows.push_back(std::move(values));
+        });
+    return rows;
 }
 
 static bool executeInsteadOfTrigger(Session& s, const string& viewname,
@@ -10928,35 +10980,71 @@ bool execute(const string& rawSql, Session& s) {
         // Check for INSTEAD OF triggers on view (takes precedence over base table rewriting)
         if (!g_engine.tableExists(s.currentDB, resolvedName) &&
             g_engine.viewExists(s.currentDB, tname)) {
-            map<string, string> newValues;
-            // Parse VALUES to build NEW values
+            auto viewTriggers = g_engine.getTriggers(s.currentDB, tname, "instead of", "insert");
             size_t valuesPos = sql.find("values");
-            size_t valStart = (valuesPos != string::npos) ? sql.find('(', valuesPos) : string::npos;
-            size_t valEnd = (valStart != string::npos) ? findMatchingParen(sql, valStart) : string::npos;
-            if (valStart != string::npos && valEnd != string::npos) {
-                string valsStr = trim(sql.substr(valStart + 1, valEnd - valStart - 1));
-                vector<string> vals = splitValues(valsStr);
-                // Try to find column list (before VALUES)
-                size_t colStart = sql.find('(', 12);
-                if (colStart != string::npos && colStart < valStart) {
-                    size_t colEnd = sql.find(')', colStart);
-                    if (colEnd != string::npos && colEnd < valStart) {
-                        string colsStr = trim(sql.substr(colStart + 1, colEnd - colStart - 1));
-                        vector<string> cols = splitValues(colsStr);
-                        for (size_t i = 0; i < cols.size() && i < vals.size(); ++i) {
-                            newValues[trim(cols[i])] = trim(vals[i]);
+            if (!viewTriggers.empty() && valuesPos != string::npos) {
+                size_t firstValStart = sql.find('(', valuesPos);
+                size_t firstValEnd = (firstValStart != string::npos)
+                    ? findMatchingParen(sql, firstValStart) : string::npos;
+                if (firstValStart != string::npos && firstValEnd != string::npos) {
+                    vector<string> valueRows;
+                    valueRows.push_back(trim(sql.substr(firstValStart + 1,
+                                                         firstValEnd - firstValStart - 1)));
+                    size_t nextPos = firstValEnd + 1;
+                    while (nextPos < sql.size()) {
+                        while (nextPos < sql.size() &&
+                               isspace(static_cast<unsigned char>(sql[nextPos]))) ++nextPos;
+                        if (nextPos >= sql.size() || sql[nextPos] != ',') break;
+                        ++nextPos;
+                        while (nextPos < sql.size() &&
+                               isspace(static_cast<unsigned char>(sql[nextPos]))) ++nextPos;
+                        if (nextPos >= sql.size() || sql[nextPos] != '(') break;
+                        size_t rowEnd = findMatchingParen(sql, nextPos);
+                        if (rowEnd == string::npos) break;
+                        valueRows.push_back(trim(sql.substr(nextPos + 1,
+                                                            rowEnd - nextPos - 1)));
+                        nextPos = rowEnd + 1;
+                    }
+
+                    vector<string> columns;
+                    size_t colStart = sql.find('(', 12);
+                    if (colStart != string::npos && colStart < firstValStart) {
+                        size_t colEnd = sql.find(')', colStart);
+                        if (colEnd != string::npos && colEnd < firstValStart) {
+                            for (const auto& col : splitValues(
+                                     sql.substr(colStart + 1, colEnd - colStart - 1))) {
+                                columns.push_back(trim(col));
+                            }
+                        }
+                    } else {
+                        const string baseTable = g_engine.getViewBaseTable(s.currentDB, tname);
+                        TableSchema baseSchema = g_engine.getTableSchema(s.currentDB, baseTable);
+                        for (size_t i = 0; i < baseSchema.len; ++i) {
+                            columns.push_back(baseSchema.cols[i].dataName);
                         }
                     }
+
+                    bool triggerFailed = false;
+                    for (const auto& valueRow : valueRows) {
+                        vector<string> values = splitValues(valueRow);
+                        if (values.size() != columns.size()) {
+                            cout << "SQL syntax error: column count mismatch" << endl;
+                            return true;
+                        }
+                        map<string, string> newValues;
+                        for (size_t i = 0; i < columns.size(); ++i) {
+                            newValues[columns[i]] = trim(values[i]);
+                        }
+                        executeInsteadOfTrigger(s, tname, "insert", newValues, {}, &triggerFailed);
+                        if (triggerFailed) {
+                            cout << "INSTEAD OF INSERT trigger action failed" << endl;
+                            return true;
+                        }
+                    }
+                    cout << "INSTEAD OF INSERT trigger executed on view " << tname
+                         << " (" << valueRows.size() << " row(s))" << endl;
+                    return false;
                 }
-            }
-            bool triggerFailed = false;
-            if (executeInsteadOfTrigger(s, tname, "insert", newValues, {}, &triggerFailed)) {
-                if (triggerFailed) {
-                    cout << "INSTEAD OF INSERT trigger action failed" << endl;
-                    return true;
-                }
-                cout << "INSTEAD OF INSERT trigger executed on view " << tname << endl;
-                return false;
             }
         }
         // Check for updatable view
@@ -11429,30 +11517,22 @@ bool execute(const string& rawSql, Session& s) {
             string ioResolved = resolveTableName(s, ioTname);
             if (!g_engine.tableExists(s.currentDB, ioResolved) &&
                 g_engine.viewExists(s.currentDB, ioTname)) {
-                map<string, string> oldValues;
-                // Parse WHERE clause for OLD values
+                string whereClause;
                 if (wherePos != string::npos) {
-                    string whereClause = trim(delRest.substr(wherePos + 5));
-                    vector<string> conds = splitConds(normalizeConditionStr(whereClause));
-                    for (const auto& c : conds) {
-                        string mc = modifyLogic(c);
-                        if (!mc.empty() && mc[0] == '=') {
-                            size_t sp = mc.find(' ', 1);
-                            if (sp != string::npos) {
-                                string col = trim(mc.substr(1, sp - 1));
-                                string val = trim(mc.substr(sp + 1));
-                                oldValues[col] = val;
-                            }
-                        }
-                    }
+                    whereClause = trim(delRest.substr(wherePos + 5));
                 }
+                auto oldRows = collectViewRows(s, ioTname, whereClause);
                 bool triggerFailed = false;
-                if (executeInsteadOfTrigger(s, ioTname, "delete", {}, oldValues, &triggerFailed)) {
+                for (const auto& oldValues : oldRows) {
+                    executeInsteadOfTrigger(s, ioTname, "delete", {}, oldValues, &triggerFailed);
                     if (triggerFailed) {
                         cout << "INSTEAD OF DELETE trigger action failed" << endl;
                         return true;
                     }
-                    cout << "INSTEAD OF DELETE trigger executed on view " << ioTname << endl;
+                }
+                if (!g_engine.getTriggers(s.currentDB, ioTname, "instead of", "delete").empty()) {
+                    cout << "INSTEAD OF DELETE trigger executed on view " << ioTname
+                         << " (" << oldRows.size() << " row(s))" << endl;
                     return false;
                 }
             }
@@ -11744,36 +11824,32 @@ bool execute(const string& rawSql, Session& s) {
             string ioResolved = resolveTableName(s, tname);
             if (!g_engine.tableExists(s.currentDB, ioResolved) &&
                 g_engine.viewExists(s.currentDB, tname)) {
-                map<string, string> newValues;
-                map<string, string> oldValues;
-                // Parse SET clause for NEW values
-                auto updates = parseSetClause(sql, setPos + 3, sql.size());
-                for (const auto& kv : updates) newValues[kv.first] = kv.second;
-                // Parse WHERE clause for OLD values (simplified: just pass condition string)
                 size_t wherePos = findTopLevelKeyword(sql, "where", setPos);
+                size_t fromPos = findTopLevelKeyword(sql, "from", setPos);
+                size_t setEnd = sql.size();
+                if (wherePos != string::npos) setEnd = wherePos;
+                if (fromPos != string::npos && fromPos < setEnd) setEnd = fromPos;
+                auto updates = parseSetClause(sql, setPos + 3, setEnd);
+                string whereClause;
                 if (wherePos != string::npos) {
-                    string whereClause = trim(sql.substr(wherePos + 5));
-                    // Try to extract OLD values from WHERE conditions like "id = 1"
-                    vector<string> conds = splitConds(normalizeConditionStr(whereClause));
-                    for (const auto& c : conds) {
-                        string mc = modifyLogic(c);
-                        if (!mc.empty() && mc[0] == '=') {
-                            size_t sp = mc.find(' ', 1);
-                            if (sp != string::npos) {
-                                string col = trim(mc.substr(1, sp - 1));
-                                string val = trim(mc.substr(sp + 1));
-                                oldValues[col] = val;
-                            }
-                        }
-                    }
+                    size_t whereEnd = (fromPos != string::npos && fromPos > wherePos)
+                        ? fromPos : sql.size();
+                    whereClause = trim(sql.substr(wherePos + 5, whereEnd - wherePos - 5));
                 }
+                auto oldRows = collectViewRows(s, tname, whereClause);
                 bool triggerFailed = false;
-                if (executeInsteadOfTrigger(s, tname, "update", newValues, oldValues, &triggerFailed)) {
+                for (const auto& oldRow : oldRows) {
+                    map<string, string> newValues = oldRow;
+                    for (const auto& kv : updates) newValues[kv.first] = kv.second;
+                    executeInsteadOfTrigger(s, tname, "update", newValues, oldRow, &triggerFailed);
                     if (triggerFailed) {
                         cout << "INSTEAD OF UPDATE trigger action failed" << endl;
                         return true;
                     }
-                    cout << "INSTEAD OF UPDATE trigger executed on view " << tname << endl;
+                }
+                if (!g_engine.getTriggers(s.currentDB, tname, "instead of", "update").empty()) {
+                    cout << "INSTEAD OF UPDATE trigger executed on view " << tname
+                         << " (" << oldRows.size() << " row(s))" << endl;
                     return false;
                 }
             }
@@ -12017,9 +12093,7 @@ bool execute(const string& rawSql, Session& s) {
                         if (cols.size() <= pkIdx) continue;
                         string pkVal = cols[pkIdx];
                         vector<string> pkCond = {"=" + pkCol + " " + pkVal};
-                        cerr << "DEBUG pkCond='" << pkCond[0] << "'" << endl;
                         auto res = g_engine.update(s.currentDB, resolvedName, updates, pkCond);
-                        cerr << "DEBUG update res=" << static_cast<int>(res) << endl;
                         if (res == DBStatus::OK) {
                             ++updatedCount;
                             if (!returningCols.empty() || returningAll) {
