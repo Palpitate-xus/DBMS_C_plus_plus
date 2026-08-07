@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <map>
 
 extern dbms::Config g_config;
@@ -349,6 +350,100 @@ bool IndexOnlyScanOp::next(std::string& outRow) {
 
 void IndexOnlyScanOp::close() {
     rids_.clear();
+}
+
+// ========================================================================
+// BitmapHeapScanOp
+// ========================================================================
+
+BitmapHeapScanOp::BitmapHeapScanOp(
+    StorageEngine* engine, const std::string& dbname,
+    const std::string& tablename,
+    const std::vector<StorageEngine::Condition>& conds)
+    : engine_(engine), dbname_(dbname), tablename_(tablename), conds_(conds) {}
+
+bool BitmapHeapScanOp::open() {
+    tbl_ = engine_->getTableSchema(dbname_, tablename_);
+    rids_.clear();
+    rows_.clear();
+    pos_ = 0;
+
+    std::set<std::string> indexedColumns;
+    std::set<int64_t> matched;
+    bool initialized = false;
+    size_t indexedPredicates = 0;
+    const auto hashIndexedColumns = engine_->getHashIndexedColumns(dbname_, tablename_);
+
+    for (const auto& condition : conds_) {
+        if (condition.op != "=" || !indexedColumns.insert(condition.colName).second)
+            continue;
+
+        std::set<int64_t> candidates;
+        bool foundIndex = false;
+        bool isPrimaryKey = false;
+        for (size_t i = 0; i < tbl_.len; ++i) {
+            if (tbl_.cols[i].dataName == condition.colName && tbl_.cols[i].isPrimaryKey) {
+                isPrimaryKey = true;
+                break;
+            }
+        }
+        if (isPrimaryKey && tbl_.pkColIndices.size() == 1) {
+            if (auto* index = engine_->getPKIndex(dbname_, tablename_)) {
+                int64_t rid = 0;
+                foundIndex = true;
+                if (index->search(condition.value, rid)) candidates.insert(rid);
+            }
+        } else if (std::find(hashIndexedColumns.begin(), hashIndexedColumns.end(),
+                             condition.colName) != hashIndexedColumns.end()) {
+            if (auto* hash = engine_->getHashIndex(dbname_, tablename_, condition.colName)) {
+                foundIndex = true;
+                for (int64_t rid : hash->search(condition.value)) candidates.insert(rid);
+            }
+        } else if (auto* index = engine_->getSecondaryIndex(dbname_, tablename_, condition.colName)) {
+            foundIndex = true;
+            for (int64_t rid : index->searchMulti(condition.value)) candidates.insert(rid);
+        }
+        if (!foundIndex) continue;
+        ++indexedPredicates;
+
+        if (!initialized) {
+            matched = std::move(candidates);
+            initialized = true;
+        } else {
+            std::set<int64_t> intersection;
+            std::set_intersection(matched.begin(), matched.end(),
+                                  candidates.begin(), candidates.end(),
+                                  std::inserter(intersection, intersection.end()));
+            matched = std::move(intersection);
+        }
+    }
+
+    // The planner only builds this node for two or more usable indexes.  A
+    // false return is a defensive guard for direct callers, not a fallback
+    // mechanism inside an already-open plan.
+    if (indexedPredicates < 2 || !initialized) return false;
+    rids_.assign(matched.begin(), matched.end());
+
+    PageAllocator* allocator = engine_->getPageAllocator(dbname_, tablename_);
+    if (!allocator) return true;
+    for (int64_t rid : rids_) {
+        std::string row;
+        if (!engine_->readRowByRid(allocator, rid, row, tbl_)) continue;
+        rows_.push_back(engine_->resolveToastValues(dbname_, tablename_, row, tbl_));
+    }
+    return true;
+}
+
+bool BitmapHeapScanOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    return true;
+}
+
+void BitmapHeapScanOp::close() {
+    rids_.clear();
+    rows_.clear();
+    pos_ = 0;
 }
 
 // ========================================================================
@@ -852,12 +947,46 @@ void AggregateOp::close() {
 // QueryPlanner
 // ========================================================================
 
+static bool hasEqualityIndex(StorageEngine* engine, const PlanContext& ctx,
+                             const StorageEngine::Condition& condition) {
+    if (condition.op != "=") return false;
+    const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == condition.colName && table.cols[i].isPrimaryKey &&
+            table.pkColIndices.size() == 1)
+            return true;
+    }
+    const auto btreeColumns = engine->getIndexedColumns(ctx.dbname, ctx.tablename);
+    if (std::find(btreeColumns.begin(), btreeColumns.end(), condition.colName) != btreeColumns.end())
+        return true;
+    const auto hashColumns = engine->getHashIndexedColumns(ctx.dbname, ctx.tablename);
+    return std::find(hashColumns.begin(), hashColumns.end(), condition.colName) != hashColumns.end();
+}
+
+static bool canUseBitmapHeapScan(StorageEngine* engine, const PlanContext& ctx) {
+    const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    if (table.partitionType != TableSchema::PartitionType::None) return false;
+    std::set<std::string> seenColumns;
+    size_t indexedPredicates = 0;
+    for (const auto& condition : ctx.conds) {
+        if (!seenColumns.insert(condition.colName).second) continue;
+        if (hasEqualityIndex(engine, ctx, condition)) ++indexedPredicates;
+    }
+    return indexedPredicates >= 2;
+}
+
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ctx) {
     OpPtr root;
 
     // Choose between IndexScan, IndexOnlyScan, and TableScan
     std::vector<StorageEngine::Condition> remainingConds = ctx.conds;
-    if (!remainingConds.empty()) {
+    const bool useBitmap = canUseBitmapHeapScan(engine, ctx);
+    if (useBitmap) {
+        // Keep all predicates for FilterOp's heap recheck.  The bitmap node
+        // only narrows the candidate RID set; it is not a correctness filter.
+        root = std::make_unique<BitmapHeapScanOp>(
+            engine, ctx.dbname, ctx.tablename, ctx.conds);
+    } else if (!remainingConds.empty()) {
         for (const auto& c : remainingConds) {
             if (c.op == "=") {
                 // Check if column has primary key index

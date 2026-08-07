@@ -133,6 +133,30 @@ private:
     size_t pos_ = 0;
 };
 
+// BitmapHeapScan: intersect candidate RIDs from multiple equality indexes,
+// then fetch the heap rows once.  FilterOp remains above this node as the
+// visibility/condition recheck boundary.
+class BitmapHeapScanOp : public Operator {
+public:
+    BitmapHeapScanOp(StorageEngine* engine, const std::string& dbname,
+                     const std::string& tablename,
+                     const std::vector<StorageEngine::Condition>& conds);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+
+private:
+    StorageEngine* engine_;
+    std::string dbname_;
+    std::string tablename_;
+    std::vector<StorageEngine::Condition> conds_;
+    TableSchema tbl_;
+    std::vector<int64_t> rids_;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+};
+
 // ========================================================================
 // Filter: apply WHERE conditions
 // ========================================================================

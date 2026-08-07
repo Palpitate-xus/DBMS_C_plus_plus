@@ -210,6 +210,39 @@ static void test_like_filter() {
     std::cout << "[VOLCANO-5.1] LIKE filter OK" << std::endl;
 }
 
+// -------- Test 7: bitmap candidate intersection + heap recheck --------
+static void test_bitmap_and() {
+    std::string db = testDbPath("volc_bitmap");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, tenant INT, state INT)", s));
+    assert(!ddl.executeSql("CREATE INDEX ON t(tenant)", s));
+    assert(g_engine.createHashIndex(db, "t", "state") == dbms::DBStatus::OK);
+
+    insertRow(db, "t", {{"id", "1"}, {"tenant", "7"}, {"state", "1"}});
+    insertRow(db, "t", {{"id", "2"}, {"tenant", "7"}, {"state", "2"}});
+    insertRow(db, "t", {{"id", "3"}, {"tenant", "8"}, {"state", "1"}});
+
+    dbms::PlanContext ctx;
+    ctx.dbname = db; ctx.tablename = "t";
+    ctx.selectCols = {"id"};
+    ctx.conds = dbms::StorageEngine::parseConditions({"=tenant 7", "=state 1"});
+    auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    auto* project = dynamic_cast<dbms::ProjectOp*>(plan.get());
+    assert(project);
+    auto* filter = dynamic_cast<dbms::FilterOp*>(project->child());
+    assert(filter);
+    assert(dynamic_cast<dbms::BitmapHeapScanOp*>(filter->child()) != nullptr);
+    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    assert(rows.size() == 1);
+    assert(rows[0].find("1") != std::string::npos);
+
+    cleanup(db);
+    std::cout << "[VOLCANO-5.1] bitmap AND + heap recheck OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_full_scan();
@@ -218,6 +251,7 @@ int main() {
     test_distinct();
     test_projection();
     test_like_filter();
+    test_bitmap_and();
     std::cout << "[VOLCANO-5.1] all Phase 5.1 volcano SELECT tests passed" << std::endl;
     return 0;
 }

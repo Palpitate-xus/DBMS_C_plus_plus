@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | P0-6 Bitmap AND 首步：新增 `BitmapHeapScanOp`，对两个以上等值 B-tree/Hash/单列 PK 索引求候选 RID 交集，再进行 heap fetch 与 Filter recheck；`QueryPlanner` 已接入 path 选择，新增 Volcano 双索引回归。Bitmap OR、范围/并行 bitmap 和真正 block bitmap 仍待后续。 |
 | 2026-08-07 | SELECT 集合操作 parser 修复：按 PostgreSQL 规则将 INTERSECT 设为高于 UNION/EXCEPT 的优先级，并为同级链式操作增加左结合 AST 包装；新增 parser 回归覆盖 `A INTERSECT B UNION C`、`A UNION B INTERSECT C`、`A UNION B UNION C` 与 ALL 修饰符。 |
 | 2026-08-07 | 集合操作执行路径补强：统一 UNION/INTERSECT/EXCEPT 重复分支，修正顶层运算符优先级和子查询错误传播，支持 ALL 多重集语义；所有 operand 的组合统一由 Volcano `SetOperationOp` 执行，复杂 legacy producer 经 `MaterializedRowsOp` 接入，新增执行器与协议回归。AST 全量下推、类型合并和复杂 operand 结构化 producer 仍待后续。 |
 | 2026-08-07 | INSTEAD OF 视图触发器补强：允许在 view 上创建行级 INSERT/UPDATE/DELETE 触发器；简单单表视图 DML 按实际受影响行执行 action SQL，支持 `NEW`/`OLD`、`WHEN` 和动作失败传播；协议 E2E 覆盖多行 INSERT、UPDATE、DELETE。复杂视图映射、transition tables、完整 `EXECUTE FUNCTION`/PL runtime 仍待后续。 |
@@ -399,7 +400,7 @@
 | 7.1 | Parser/analyzer/rewrite/planner/executor 分层 | 主要在 `execute()` 中字符串解析并直接调用 engine | 🔄 |
 | 7.2 | Cost-based planner | 有简化成本、统计和 plan cache；缺少 path 枚举、参数化路径、join search、equivalence classes、pathkeys、parallel aware path | ⚠️ |
 | 7.3 | 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化、扩展统计对象元数据与函数依赖（dependencies）强度计算；缺少 PostgreSQL 级 ndistinct、correlation、表达式统计、catalog 和 planner 深度使用 | ⚠️ |
-| 7.4 | Index selection | 有 equality/range 部分；缺少 bitmap heap scan、bitmap and/or、多索引组合、skip scan、index condition recheck、lossy pages | ⚠️ |
+| 7.4 | Index selection | 已支持等值多索引 Bitmap AND、候选 RID 交集、heap fetch 和 Filter recheck；缺少 Bitmap OR、范围/并行 bitmap、skip scan、lossy pages | ⚠️ |
 | 7.5 | Parallel query | 缺失：无 Gather/Gather Merge、parallel scan/join/aggregate、worker lifecycle | ❌ |
 | 7.6 | JIT | 缺失 LLVM JIT | ❌ |
 | 7.7 | Async I/O | 缺失 PostgreSQL 18 AIO 子系统 | ❌ |

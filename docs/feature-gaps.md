@@ -91,16 +91,17 @@
 
 ### P0-6: Bitmap Index/Heap Scan
 - **类别**: 执行器 / 索引组合
-- **现状**: 仅有 IndexOnlyScan，无 Bitmap AND/OR 组合
+- **现状**: `BitmapHeapScanOp` 已接入 planner：对多个等值 B-tree/Hash/PK 索引求候选 RID 交集，再做 heap fetch 和 Filter 条件重检；Bitmap OR、范围 bitmap 和并行 bitmap 扫描仍缺
 - **PG 参考**: `BitmapIndexScan`, `BitmapHeapScan`, `BitmapAnd`, `BitmapOr`
 - **影响**: 多索引 WHERE 条件性能差（如 `WHERE a=1 AND b=2` 有两个索引时）
 - **实现路径**:
-  1. 实现 `BitmapIndexScanOp`：输出位图而非行
-  2. 实现 `BitmapAndOp` / `BitmapOrOp`：位图组合
-  3. 实现 `BitmapHeapScanOp`：按位图取行
-  4. 在 `QueryPlanner` 中增加 bitmap path 生成
+  1. ✅ 实现多等值索引候选 RID 集合
+  2. ✅ 在 `BitmapHeapScanOp` 中执行 Bitmap AND 和 heap fetch
+  3. 增加 Bitmap OR、范围条件和真正 page/block bitmap 表示
+  4. ✅ 在 `QueryPlanner` 中为两个以上可用等值索引生成 bitmap path
 - **预估工作量**: 1 周
-- **相关文件**: `src/executor/ExecutionPlan.cpp`
+- **验证**: `tests/volcano_select_phase51_test.cpp` 覆盖双索引 AND、heap recheck 和节点选型
+- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`
 
 ### P0-7: INSTEAD OF 视图触发器
 - **类别**: 触发器 / 数据完整性
