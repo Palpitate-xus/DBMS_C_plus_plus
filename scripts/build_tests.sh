@@ -109,13 +109,15 @@ for test_file in tests/*_test.cpp; do
     echo
 done
 
-echo "[test-build] Running tests/postgres_protocol_test.py ..."
-if python3 tests/postgres_protocol_test.py; then
-    echo "[test-build] postgres_protocol_test PASSED"
-else
-    echo "[test-build] postgres_protocol_test FAILED"
-    FAILED=1
-fi
+for e2e_test in "${DBMS_E2E_TESTS[@]}"; do
+    echo "[test-build] Running ${e2e_test} ..."
+    if python3 "${e2e_test}"; then
+        echo "[test-build] ${e2e_test} PASSED"
+    else
+        echo "[test-build] ${e2e_test} FAILED"
+        FAILED=1
+    fi
+done
 
 if [ "$FAILED" -ne 0 ]; then
     echo "[test-build] Some tests failed" >&2

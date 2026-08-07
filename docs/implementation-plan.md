@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前回归基线为 PASS=121 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E）。
+> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=122 FAIL=0（120 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -284,30 +284,30 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 4.13 实现 jsonpath、SQL/JSON query functions、`JSON_TABLE` | 2.14 | PG18；jsonpath 结构化语法校验已落地（`tests/jsonpath_test.cpp`）；求值/SQL-JSON 函数/JSON_TABLE 待补 |
 | ✅ 4.14 实现多维数组、切片、`unnest`、array functions、ANY/ALL | 2.15 | 修复数组列识别 + 字面量校验/矩形多维（`tests/array_test.cpp`）；切片/unnest/函数/ANY-ALL 待补 |
 | ✅ 4.15 实现 Composite type 的 row constructor、字段访问、嵌套 | 2.16 | composite 类型列识别 + row 字面量校验/规范化已落地（`tests/composite_test.cpp`）；作为函数参数/返回类型的 composite 支持已就绪。嵌套 row constructor 表达式、`.` 字段访问表达式仍待后续 planner 阶段。 |
-| ✅ 4.16 实现 Range/Multirange canonicalization、operators、GiST/SP-GiST | 2.17 | 范围字面量校验 + 离散 `[)` canonicalization（`tests/range_test.cpp`）；multirange/operators/GiST 待补 |
+| ⚠️ 4.16 实现 Range/Multirange canonicalization、operators、GiST/SP-GiST | 2.17 | 范围字面量校验 + 离散 `[)` canonicalization（`tests/range_test.cpp`）；multirange/operators/GiST 待补 |
 | ✅ 4.17 实现 Domain 多 constraint validation、依赖、数组自动类型 | 2.18, 1.1.18 | `parseCreateDomain` 支持多个 `CHECK` 子句，自动以 `AND` 组合；`CONSTRAINT name` 与无名约束均可正确拼接；domain CHECK 在 INSERT/UPDATE 时通过 `ExprHelper::evalBool` 验证。新增 `tests/domain_multi_check_test.cpp`（3 测试）。domain 依赖追踪、数组域仍待后续。 |
 | ✅ 4.18 实现伪类型 `record` / `anyelement` / `anyarray` 的函数调用约束 | 2.21 | 伪类型已在 `TypeRegistry` 中注册（`record`/`anyelement`/`anyarray` 为 pseudo category）；函数声明可使用这些类型作为参数/返回类型。函数重载解析、polymorphic 类型推断仍待后续。 |
-| ✅ 4.19 补全数学/字符串/日期时间/JSON/XML/Array/Range 函数全集 | 3.3~3.6 | 标量函数库已大幅扩充并经 SELECT 投影端到端可用：字符串（`tests/string_functions_test.cpp`）、数学（`tests/math_functions_test.cpp`）、日期时间（`tests/date_functions_test.cpp`）、编码/哈希 md5/encode/decode（`tests/encoding_functions_test.cpp`）、数组（`tests/array_functions_test.cpp`）、JSON（`tests/json_functions_test.cpp`）、正则（`tests/regexp_functions_test.cpp`）、范围（`tests/range_functions_test.cpp`）。XML 函数、JSON 路径求值、集合返回函数仍待后续。 |
-| ✅ 4.20 实现聚合函数完整集（ordered-set、percentile、统计回归） | 3.7 | bool_and/bool_or/every、percentile_cont/percentile_disc 已落地（`tests/aggregate_bool_test.cpp` + `tests/aggregate_percentile_test.cpp`）。ordered-set、统计回归仍待后续。 |
-| ✅ 4.21 实现窗口函数完整语义（frame exclusion、RANGE/GROUPS、命名窗口） | 3.8 | ROWS frame `EXCLUDE CURRENT ROW`/`GROUP`/`TIES`/`NO OTHERS`、命名窗口 `WINDOW w AS (...)` 复用（`tests/window_e2e_test.py`）。RANGE/GROUPS frame 仍待后续。 |
+| ⚠️ 4.19 补全数学/字符串/日期时间/JSON/XML/Array/Range 函数全集 | 3.3~3.6 | 标量函数库已大幅扩充并经 SELECT 投影端到端可用：字符串（`tests/string_functions_test.cpp`）、数学（`tests/math_functions_test.cpp`）、日期时间（`tests/date_functions_test.cpp`）、编码/哈希 md5/encode/decode（`tests/encoding_functions_test.cpp`）、数组（`tests/array_functions_test.cpp`）、JSON（`tests/json_functions_test.cpp`）、正则（`tests/regexp_functions_test.cpp`）、范围（`tests/range_functions_test.cpp`）。XML 函数、JSON 路径求值、集合返回函数仍待后续。 |
+| ⚠️ 4.20 实现聚合函数完整集（ordered-set、percentile、统计回归） | 3.7 | bool_and/bool_or/every、percentile_cont/percentile_disc 已落地（`tests/aggregate_bool_test.cpp` + `tests/aggregate_percentile_test.cpp`）；ordered-set、统计回归仍待后续。 |
+| ⚠️ 4.21 实现窗口函数完整语义（frame exclusion、RANGE/GROUPS、命名窗口） | 3.8 | 当前窗口执行仍在 `main.cpp` legacy 路径；已覆盖 ROWS frame exclusion、命名窗口和 9 个 E2E，但尚未接入 Volcano `WindowOp`，RANGE/GROUPS 复杂语义仍待后续。 |
 | ✅ 4.22 实现 `DEFAULT` 表达式默认值、稳定/易变函数、序列所有权 | 5.5 | `DEFAULT nextval('seq')` / `currval()` 经 `ExprEvaluator` 内置序列函数端到端可用；function volatility 从 `CREATE FUNCTION IMMUTABLE/STABLE/VOLATILE` 持久化到 UDF 元数据与 `pg_proc.provolatile`，内置函数分类 volatility；`DEFAULT nextval('seq')` 自动注册序列到表的 `pg_depend` 依赖，`DROP SEQUENCE RESTRICT/CASCADE` 正确处理依赖。planner 级 volatility 优化仍延期。 |
 | ✅ 4.23 实现 `GENERATED` 虚拟/存储生成列完整语义 | 5.6 | `GENERATED ALWAYS AS (expr) STORED` 在 INSERT/UPDATE 时按当前行求值并持久化，拒绝用户直接写入；`GENERATED ALWAYS AS (expr) VIRTUAL` 不占用存储，在 SELECT 投影与标量函数参数中按当前行实时计算；schema 二进制格式 `0x44420005` 持久化 `generatedKind`。新增 `tests/generated_columns_test.cpp`。WHERE/DISTINCT/索引中 VIRTUAL 列的实时计算仍待后续 planner 阶段完善。 |
-| ✅ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 解析 `EXCLUDE [USING method] (elem WITH op [, ...]) [WHERE (pred)]`；`StorageEngine` 以 `.exclusions` 元数据文件持久化约束；INSERT/UPDATE 时扫描全表检查冲突。支持 `=`（等值排斥）与 `&&`（int4range 范围重叠排斥）。CREATE TABLE 通过 `DdlExecutor` 创建约束；ALTER TABLE ADD/DROP CONSTRAINT 通过 `main.cpp` legacy 路径桥接到 `StorageEngine`；`DROP TABLE` 自动清理所属 EXCLUDE 约束。新增 `tests/exclude_test.cpp`。GiST 索引加速、多元素/表达式元素/其他操作符仍待后续完善。 |
+| ⚠️ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 已实现元数据持久化和 `=`/`&&` 的全表冲突检查，并有 `tests/exclude_test.cpp`；真实 GiST 加速、operator class、多元素/表达式元素和完整并发语义仍待后续。 |
 | ✅ 4.25 实现 `SET CONSTRAINTS` 延迟队列、提交时检查 | 5.10, 1.1.53 | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟检查在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 映射生效，`NOT DEFERRABLE` 约束不受 `SET CONSTRAINTS ALL DEFERRED` 影响；schema 格式 `0x44420006` 持久化 `checkConstraintName`/`deferrable`/`initiallyDeferred`；`constraintMode_` 在事务结束时自动清除（per-transaction 语义）；`beginTransaction` 修复：已有事务时先 commit 再开新事务，防止 `txnDB_` 指向错误数据库。新增 `tests/deferrable_test.cpp`（6 个测试）。constraint trigger 语义仍待后续。 |
-| ✅ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 已由 typed AST/DdlExecutor 桥接并验证；tablespace 存储在 schema 中。新增回归覆盖 10 个选项路径。`accessMethod` schema 持久化仍待后续。 |
-| ✅ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 已支持 ADD/DROP COLUMN、ALTER COLUMN TYPE、OWNER TO、SET LOGGED/UNLOGGED、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、RENAME COLUMN/CONSTRAINT、DROP CONSTRAINT、ALTER COLUMN SET/DROP DEFAULT/NOT NULL、ADD CONSTRAINT(CHECK/UNIQUE/FK/PRIMARY KEY)、ENABLE/DISABLE TRIGGER、ROW LEVEL SECURITY、SET SCHEMA、ATTACH/DETACH PARTITION、**ALTER COLUMN SET STATISTICS**、**ALTER TABLE ONLY**（parser+executor）、**INHERIT/NO INHERIT**、**SET TABLESPACE**（`alterTableTablespace` 更新 schema 元数据）。真正延迟约束队列待后续。 |
-| ✅ 4.28 补全 `CREATE/ALTER VIEW`（security barrier/invoker、recursive view、check option） | 1.1.6, 1.1.33, 4.9 | `CreateViewStmt` 新增 `selectSql` 保存原始 SELECT 文本；`DdlExecutor::executeCreateView` 落地：检测单表可更新视图、WITH CHECK OPTION、OR REPLACE；新增 `tests/view_test.cpp`。SECURITY BARRIER/INVOKER、递归视图仍待后续。 |
-| ✅ 4.29 补全 `CREATE TRIGGER`（transition tables、constraint triggers、deferred triggers、event triggers） | 1.1.31, 4.11 | `CreateTriggerStmt` 新增 `action` 字段；`parseCreateTrigger` 完整解析 BEFORE/AFTER/INSTEAD OF、事件、WHEN 条件；`DdlExecutor::executeCreateTrigger` 落地；新增 `tests/trigger_test.cpp`。transition tables、constraint triggers、deferred triggers、触发器动作真实执行仍待后续。 |
+| ⚠️ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 已由 typed AST/DdlExecutor 桥接并验证；tablespace 存储在 schema 中。新增回归覆盖 10 个选项路径。`accessMethod` schema 持久化仍待后续。 |
+| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、约束、分区和 tablespace 路径已接入，但 OWNER/CLUSTER/REPLICA、RLS、触发器和完整延迟约束语义仍有 legacy/简化路径。 |
+| ⚠️ 4.28 补全 `CREATE/ALTER VIEW`（security barrier/invoker、recursive view、check option） | 1.1.6, 1.1.33, 4.9 | 已支持基本单表可更新视图、WITH CHECK OPTION、OR REPLACE，并有 `tests/view_test.cpp`；SECURITY BARRIER/INVOKER、递归视图和复杂映射仍待后续。 |
+| ⚠️ 4.29 补全 `CREATE TRIGGER`（transition tables、constraint triggers、deferred triggers、event triggers） | 1.1.31, 4.11 | 已解析并执行基础 BEFORE/AFTER/INSTEAD OF、事件和 WHEN 条件，并有 `tests/trigger_test.cpp`；transition tables、constraint/deferred/event triggers 和完整函数运行时仍待后续。 |
 | ✅ 4.30 补全 `CREATE TYPE`（enum/range/base/shell） | 1.1.32 | enum/composite/range/base/shell 元数据注册 + DROP TYPE 全类型修复已落地；`ALTER TYPE ADD/RENAME VALUE` 已落地。作为列类型的完整运行时语义仍待后续。 |
 | ✅ 4.31 实现 `CREATE TABLE AS` 精确类型推断与 `WITH [NO] DATA` | 1.1.29 | CTAS 按源表列精确建表（类型/长度），列序映射已修复，支持 `WITH [NO] DATA`、`SELECT *`/投影/WHERE。tablespace/access method、表达式列类型推断仍待后续。 |
 | ✅ 4.32 实现 `CREATE STATISTICS` 及 dependencies/ndistinct/mcv 算法 | 1.1.27 | dependencies（函数依赖强度）、ndistinct（按列+全组合 distinct 计数）、mcv（最常见值组合 top-N）三种算法均已落地并在 `CREATE STATISTICS` 输出（`tests/functional_deps_test.cpp`、`tests/statistics_ndistinct_mcv_test.cpp`）；`pg_statistic_ext_data` catalog 落地与 planner 选择性估算消费待后续 Phase 7。 |
 | ✅ 4.33 实现 `CREATE SEQUENCE` 的 cache/cycle/min/max/ownership/transactional | 1.1.26 | 完整语义已落地。 |
 | ✅ 4.34 实现 `CREATE DOMAIN` 多约束与全表 revalidation | 1.1.18 | DOMAIN 约束执行已落地。 |
-| ✅ 4.35 实现 `CREATE FUNCTION` 完整语义（language/volatility/strict/parallel/cost/security definer） | 1.1.19 | `parseCreateFunction` 完整解析；`DdlExecutor::executeCreateFunction` 落地（标量 UDF + TVF）；新增 `tests/function_procedure_test.cpp`。PL/pgSQL 运行时、函数权限与依赖、OUT 参数、重载解析仍待后续。 |
-| ✅ 4.36 实现 `CREATE PROCEDURE` 语言运行时与事务控制 | 1.1.23 | `parseCreateProcedure` 解析；`DdlExecutor::executeCreateProcedure` 落地。PL/pgSQL 运行时、事务控制仍待后续。 |
-| ✅ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | `CreatePolicyStmt` AST 节点；`parseCreatePolicy` 完整解析；`DdlExecutor::executeCreatePolicy` 落地；新增 `tests/policy_test.cpp`。`WITH CHECK`/`USING` 表达式在 DML 路径上的真实行级强制执行、role 解析、`ALTER POLICY` 仍待后续。 |
-| ✅ 4.38 实现 `CREATE MATERIALIZED VIEW` `WITH [NO] DATA`、并发刷新 | 1.1.21, 4.10 | `DdlExecutor::executeCreateMaterializedView` 落地；列序修复、`WITH [NO] DATA`、`REFRESH MATERIALIZED VIEW [CONCURRENTLY]` 已实现；新增 `tests/matview_test.cpp`。唯一索引要求、真正的 CONCURRENTLY 锁语义、`pg_matview` 依赖追踪仍待后续。 |
-| ✅ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | DDL Transaction 化已通过 `DdlTransaction` RAII 包装 + `beginTransaction` 修复（已有事务时先 commit 再开新事务）。隐式提交问题已解决。完整 DDL 事务回滚仍待后续。 |
+| ⚠️ 4.35 实现 `CREATE FUNCTION` 完整语义（language/volatility/strict/parallel/cost/security definer） | 1.1.19 | 已支持基础标量 UDF/TVF、volatility 元数据和 `tests/function_procedure_test.cpp`；PL/pgSQL 运行时、函数权限与依赖、OUT 参数和重载解析仍待后续。 |
+| ⚠️ 4.36 实现 `CREATE PROCEDURE` 语言运行时与事务控制 | 1.1.23 | 已保存并解析基础 procedure 定义；PL/pgSQL 运行时和 PostgreSQL 事务控制语义仍待后续。 |
+| ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL 和基础 policy 测试已落地；完整 executor 行级强制、role 解析和 `ALTER POLICY` 仍待后续。 |
+| ⚠️ 4.38 实现 `CREATE MATERIALIZED VIEW` `WITH [NO] DATA`、并发刷新 | 1.1.21, 4.10 | 已支持基础创建、列序、`WITH [NO] DATA` 和刷新；唯一索引要求、真正的 CONCURRENTLY 锁语义和 `pg_matview` 依赖追踪仍待后续。 |
+| ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 和基础事务路径已落地；完整 DDL 回滚、跨对象依赖和 PostgreSQL 隐式提交边界仍待后续。 |
 | ✅ 4.40 实现 `CREATE ASSERTION` 执行（如决定支持） | 5.9 | PG 本身未实现。本项目暂不支持Assertion，标记为完成（scope exclusion）。 |
 
 ### Phase 4 已完成内容（截至当前 commit）
@@ -651,14 +651,14 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | parser 已支持 DEFAULT VALUES；本次新增 `StorageEngine::insertDefaultValues` + main.cpp 执行路径 |
 | ✅ 5.9 实现 `RETURNING` `OLD`/`NEW` aliases、trigger-modified rows 精确行为 | 6.12, 1.1.41 等 | 基础 RETURNING 已就绪 |
 | ✅ 5.10 实现 `UPDATE FROM` / `DELETE USING` 的语义安全实现（非文本拼接） | 6.11, 1.1.58, 1.1.35 | main.cpp UPDATE FROM multi-table + DELETE USING 已实现 |
-| ✅ 5.11 实现 Row locking 完整语义（`NO KEY UPDATE` / `KEY SHARE`、OF list） | 6.9 | SelectStmt::LockClause + parser: FOR UPDATE/SHARE/NO KEY UPDATE/KEY SHARE + OF/NOWAIT/SKIP LOCKED |
-| ✅ 5.12 实现 subquery 完整语义（关联子查询、row comparison、NULL 语义） | 6.5 | parseExpr 支持 subquery/IN/EXISTS/BETWEEN |
-| ✅ 5.13 实现 Join 完整语义（SEMI/ANTI、lateral 完整相关性、outer join predicate 推理） | 6.2 | INNER/LEFT/RIGHT/FULL/CROSS/NATURAL JOIN + ON/USING |
-| ✅ 5.14 实现 Set operations 完整语义（类型合并、collation、ALL/DISTINCT 作用域） | 6.3 | parseSelect 支持 UNION/INTERSECT/EXCEPT [ALL/DISTINCT] |
-| ✅ 5.15 实现 `GROUP BY` functionally dependent、`GROUPING_ID` 完整语义 | 6.7 | parseSelect 支持 GROUP BY + ROLLUP/CUBE/GROUPING SETS |
+| ⚠️ 5.11 实现 Row locking 完整语义（`NO KEY UPDATE` / `KEY SHARE`、OF list） | 6.9 | parser 已识别多种锁子句；当前执行器主要覆盖基础单表 FOR UPDATE/SHARE，JOIN/聚合/窗口和完整 OF/NOWAIT/SKIP LOCKED 语义仍缺。 |
+| ⚠️ 5.12 实现 subquery 完整语义（关联子查询、row comparison、NULL 语义） | 6.5 | parser/legacy 路径支持基础 subquery/IN/EXISTS/BETWEEN；关联子查询解嵌套、row comparison 和完整 NULL 语义仍缺。 |
+| ⚠️ 5.13 实现 Join 完整语义（SEMI/ANTI、lateral 完整相关性、outer join predicate 推理） | 6.2 | INNER/LEFT/RIGHT/FULL/CROSS/NATURAL JOIN 基础路径已存在；SEMI/ANTI、LATERAL 相关性、predicate 推理和结构化 Volcano join 仍缺。 |
+| ⚠️ 5.14 实现 Set operations 完整语义（类型合并、collation、ALL/DISTINCT 作用域） | 6.3 | UNION/INTERSECT/EXCEPT [ALL/DISTINCT] 已由 Volcano 组合；复杂 operand、类型合并、collation 和完整作用域仍缺。 |
+| ⚠️ 5.15 实现 `GROUP BY` functionally dependent、`GROUPING_ID` 完整语义 | 6.7 | 基础 GROUP BY/ROLLUP/CUBE/GROUPING SETS 已有 legacy 路径；结构化 executor、functional dependency 和 `GROUPING_ID` 仍缺。 |
 | ✅ 5.16 实现 `ORDER BY` USING operator、位置编号、collation provider | 6.6 | parseSelect 支持 ORDER BY ASC/DESC + NULLS FIRST/LAST |
 | ✅ 5.17 实现 `LIMIT/FETCH` `WITH TIES`、百分比 | 6.8 | parseSelect 支持 LIMIT/OFFSET/FETCH FIRST/ROWS ONLY/WITH TIES |
-| ✅ 5.18 实现 `FOR UPDATE` with JOIN/GROUP BY/aggregate/window/scalar functions | 6.9 | parseSelect 完整实现 (fix: FOR added to isKeyword to prevent alias capture) |
+| ⚠️ 5.18 实现 `FOR UPDATE` with JOIN/GROUP BY/aggregate/window/scalar functions | 6.9 | parser 已修复关键字识别，但源码仍明确拒绝 JOIN/GROUP BY/aggregate/window/scalar function 组合；仅基础路径可用。 |
 | ✅ 5.19 实现 EXPLAIN ANALYZE 真实节点级统计（时间/rows） | 7.9, 1.1.39 | 本次改为通过 volcano 算子树执行并测量实际 rows + 时间 |
 | ✅ 5.20 实现 plan invalidation（基于 catalog/dependency） | 7.8 | invalidateCatalogSchema on DDL; plan cache cleared on schema change |
 | ⚠️ 5.21 实现并行查询（Gather/Gather Merge、parallel scan/join/aggregate） | 7.5 | `ParallelTableScanOp` 已实现非分区 heap page-range scan、确定性 Gather 和 `max_parallel_workers_per_gather`；parallel join/aggregate/GatherMerge/worker pool 仍缺 |
@@ -667,12 +667,12 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 5.24 实现 `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` 子事务完整语义 | 1.1.49, 9.5 | 完整实现 |
 | ✅ 5.25 实现 `COMMIT`/`ROLLBACK` `AND [NO] CHAIN`、全局事务状态 | 1.1.14, 1.1.38, 1.1.8 | 本次新增 AND CHAIN/NO CHAIN 语法 |
 | ✅ 5.26 实现 `PREPARE TRANSACTION` / `COMMIT PREPARED` 完整语义 | 1.1.15 | 基础 two-phase commit 已就绪 |
-| ✅ 5.27 实现 `COPY` `STDIN/STDOUT`、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH` | 1.1.16 | 基础 COPY 已就绪 |
-| ✅ 5.28 实现 `ANALYZE` PG 采样算法、统计对象、表达式统计、系统统计视图集成 | 1.1.7 | 基础 ANALYZE 已就绪 |
-| ✅ 5.29 实现 `CALL` PL/pgSQL/SQL procedure 运行时 | 1.1.10 | 基础 CALL 已就绪，缺 PL 运行时 |
+| ⚠️ 5.27 实现 `COPY` `STDIN/STDOUT`、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH` | 1.1.16 | 当前仅基础 COPY/CSV 路径可用，binary/program/freeze/header 语义仍缺。 |
+| ⚠️ 5.28 实现 `ANALYZE` PG 采样算法、统计对象、表达式统计、系统统计视图集成 | 1.1.7 | 已有基础统计收集和部分统计对象；PG 采样算法、表达式统计和系统统计视图集成仍缺。 |
+| ⚠️ 5.29 实现 `CALL` PL/pgSQL/SQL procedure 运行时 | 1.1.10 | 基础定义路径存在，但 PL/pgSQL procedure runtime 尚未实现。 |
 | ✅ 5.30 实现 `DEALLOCATE`/`PREPARE`/`EXECUTE` 服务器端类型推断、binary params、plan cache | 1.1.34 | 基础 PREPARE/EXECUTE/DEALLOCATE 已就绪 |
-| ✅ 5.31 实现 `CURSOR` 可滚动/二进制/holdable/portal 语义 / `MOVE` | 1.1.12, 1.1.45 | DECLARE/FETCH/MOVE/CLOSE 已就绪 |
-| ✅ 5.32 实现 `VACUUM` freeze、visibility map、autovacuum launcher/workers、parallel vacuum | 1.1.59, 9.9 | 基础 VACUUM 已就绪 |
+| ⚠️ 5.31 实现 `CURSOR` 可滚动/二进制/holdable/portal 语义 / `MOVE` | 1.1.12, 1.1.45 | 基础 DECLARE/FETCH/MOVE/CLOSE 和 portal 分页已就绪；scrollable/holdable/binary 资源生命周期仍缺。 |
+| ⚠️ 5.32 实现 `VACUUM` freeze、visibility map、autovacuum launcher/workers、parallel vacuum | 1.1.59, 9.9 | 基础 VACUUM、visibility map 和后台维护已存在；真实 freeze、并行 vacuum 和完整 worker 生命周期仍缺。 |
 | ✅ 5.33 实现 `REINDEX` index/schema/database/system/`CONCURRENTLY` | 1.1.47 | 基础 REINDEX 已就绪 |
 | ✅ 5.34 实现 `TRUNCATE` `ONLY`/多表/foreign table/transactional details | 1.1.57 | 多表 TRUNCATE 已就绪 |
 | ✅ 5.35 实现 `LOCK` 全锁模式、`NOWAIT`、`ONLY`、锁队列/冲突矩阵 | 1.1.43 | 基础 LOCK 已就绪 |

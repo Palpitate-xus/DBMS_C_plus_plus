@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：回归基线 PASS=121 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：统一回归基线 PASS=122 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | 测试入口收敛：`build_tests.sh` 与 `run_all_tests_fast.sh` 通过 `build_common.sh` 统一执行协议和窗口函数两个 E2E；当前统一基线为 PASS=122 FAIL=0。 |
 | 2026-08-07 | P0-1 并行查询首步：新增 `ParallelTableScanOp`，对非分区 heap 按 page range 分片并确定性 Gather；加入 `max_parallel_workers_per_gather` 配置，事务内和分区表安全回退，新增并行/串行等价性与事务回归。parallel join/aggregate、GatherMerge 和长期 worker pool 仍待后续。 |
 | 2026-08-07 | B+Tree 正确性补强：修复 root leaf 分裂传错 child、叶分裂丢弃中间键、重复键跨叶查找遗漏和范围扫描重复返回；新增 250 条跨叶唯一键、6000 条跨叶/内部节点重复键回归。PostgreSQL B-tree 的 dedup、删除合并、opclass/collation 和并发构建语义仍待后续。 |
 | 2026-08-07 | P0-6 Bitmap OR 补强：新增 `BitmapOrHeapScanOp`，每个 OR 分支先求等值索引候选 RID 交集，再 union 后统一 heap fetch 与原谓词重检；主查询路径不再按投影文本错误去重，新增 Volcano 与协议 OR 回归。范围/并行 bitmap 和真正 block bitmap 仍待后续。 |
@@ -141,17 +142,17 @@
 > 2026-07-02 收尾 + Phase 8 启动：
 > - 5.5 skip scan/index cond recheck: FilterOp indexConditionRecheck + canUseSkipScan ✅
 > - 5.21 parallel: `ParallelTableScanOp` 已实现非分区 heap page-range scan、确定性 Gather 和 `max_parallel_workers_per_gather` 配置；parallel join/aggregate/GatherMerge 仍待实现 🔄
-> - 5.22 JIT / 5.23 AIO: 基础框架 stub；5.43 SSI: 已验证关系限定的行级写偏差回滚和空谓词关系级 SIREAD，页/索引 predicate lock 仍待实现
+> - 5.22 JIT / 5.23 AIO: 当前明确标记为缺失（不再以 stub 冒充实现）；5.43 SSI: 已验证关系限定的行级写偏差回滚和空谓词关系级 SIREAD，页/索引 predicate lock 仍待实现
 > - 4.27 ALTER TABLE: ONLY/INHERIT/SET TABLESPACE 全部完成 (FOR 关键字修复) ✅
 > - Phase 8: ReplicationManager (slots/standby/WAL shipping) 基础框架新建
-> - Phase 0-7, 11, 16: 全部 100% 完成 (4/4, 10/10, 8/8, 14/14, 40/40, 43/43, 9/9, 12/12, 9/9, 10/10)
+> - 历史 Wave 统计曾将 Phase 0-7、11、16 标为 100%；当前真实能力以本文件下方逐项状态和 `docs/feature-gaps.md` 为准。
 > - 14 commits 已提交，工作区干净
 
 > 2026-07-01 (更新) Phase 5 DML 语义完善 + Wave 4.27 完成 + Phase 7 认证完善：
 > - 5.2 等价类/PathKey 实现 (EquivalenceClass + PathKey structs, buildSelectPlan 重载)
 > - 5.3 cost-based join algorithm selection (estimateJoinCost: NLJ/Merge/Hash)
 > - 5.7 MERGE 标为完成 (main.cpp 完整执行路径)
-> - 5.10-5.18 全部 DML 语义标为完成 (parser 已完整支持)
+> - 5.10-5.18 的历史 parser/DML 标记不代表 executor 已达到 PostgreSQL 完整语义；当前仍有 legacy fallback 和组合语义缺口。
 > - 5.36 LISTEN/NOTIFY 标为完成 (内存 listener map + pending notify queue)
 > - 历史上曾将 7.3 SCRAM-SHA-256、7.4 auth methods、7.6-7.11 认证/权限标为完成；2026-08-07 审计后回退为“部分实现/待验收”
 > - 4.27 ALTER TABLE ONLY/INHERIT/SET TABLESPACE 完成 (parser + alterTableTablespace)
@@ -164,7 +165,7 @@
 - Phase 8: ReplicationManager (slots/standby/sync/cascade/logical-decoding/pub-sub/PITR/pg_basebackup/incremental/failover/promote/pg_dump-restore)
 - Phase 9: ProcessManager (multi-process backend pool model) + pg_upgrade
 - Phase 10: LargeObjectManager (create/read/write/truncate/drop/import/export) + FDW/PL/custom-types/operators/hooks stubs
-- Phase 0-16: ALL 193 waves marked ✅ (100%)
+- 历史 Wave 记录曾将 Phase 0-16 的 193 项标记为 ✅；当前审计已按真实运行时能力重新标记，不能把历史计划状态当作生产完成度。
 - 相关测试: replication_test (3 tests), phase8_10_test (7 tests)
 - 新增模块: src/replication/, src/process/, src/storage/LargeObject.{h,cpp}
 
@@ -176,7 +177,7 @@
 - 根目录保持干净：所有测试数据自动隔离，不污染项目根目录
 - 修复: 61 个测试文件批量更新 include 和 cleanup 逻辑
 
-历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=121 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=122 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 

@@ -2,7 +2,7 @@
 
 最后更新：2026-08-07
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，120 个 C++ 回归测试和 1 个协议 E2E 共 `PASS=121 FAIL=0`，窗口函数 E2E 为 `9/9`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，120 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=122 FAIL=0`，其中窗口函数 E2E 为 `9/9`。
 
 本轮已完成的基础收敛：
 
@@ -43,4 +43,4 @@
 
 仍不能称为生产就绪的主要原因包括：SSI 目前已增加关系级 SIREAD 以覆盖空范围读，但页/索引粒度 predicate lock 和完整 rw-conflict 规则仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding 和结构化执行结果，ACL、admin option、owner/依赖和完整角色继承语义仍不完整；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。后台 writer/checkpointer 与 DDL/database lifecycle 的文件缓存并发访问已加锁并纳入回归验证。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
 
-验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`、`python3 tests/window_e2e_test.py`、`python3 tests/postgres_protocol_test.py`；Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。
+验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`；两个 E2E 已由统一测试入口自动执行。Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。

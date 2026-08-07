@@ -66,12 +66,15 @@ for tf in tests/*_test.cpp; do
     fi
 done
 
-if python3 tests/postgres_protocol_test.py >/dev/null 2>&1; then
-    pass=$((pass+1))
-else
-    echo "RUN-FAIL postgres_protocol_test"
-    fail=$((fail+1)); failed+=("postgres_protocol_test")
-fi
+for e2e_test in "${DBMS_E2E_TESTS[@]}"; do
+    if python3 "${e2e_test}" >/dev/null 2>&1; then
+        pass=$((pass+1))
+    else
+        test_name=$(basename "${e2e_test}" .py)
+        echo "RUN-FAIL ${test_name}"
+        fail=$((fail+1)); failed+=("${test_name}")
+    fi
+done
 echo "=================================="
 echo "PASS=$pass FAIL=$fail"
 if [[ $fail -gt 0 ]]; then

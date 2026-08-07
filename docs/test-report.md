@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-07
-> 自动测试套件基线：PASS=121 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E）；窗口函数 E2E：9/9
+> 自动测试套件基线：PASS=122 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：9/9
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -12,10 +12,10 @@
 - Compiler: g++ -std=c++17 -O2 -pthread
 - 标准编译命令：`./scripts/build.sh`；批量回归：`./scripts/run_all_tests_fast.sh`；独立测试入口：`./scripts/build_tests.sh`
 - 本轮构建质量检查：主程序在 `-Wall -Wextra` 下无编译警告；修复 join cost 参数错误及 parser/测试中的未使用代码。
-- 窗口函数端到端测试：`python3 tests/window_e2e_test.py`（9 用例，使用隔离临时目录和临时管理员账号）
+- 窗口函数端到端测试：由统一回归入口执行 `tests/window_e2e_test.py`（9 用例，使用隔离临时目录和临时管理员账号）
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。
-- 独立入口 `./scripts/build_tests.sh` 缓存生产对象后逐个测试独立链接运行，结果 `All tests passed`。
+- 独立入口 `./scripts/build_tests.sh` 缓存生产对象后逐个测试独立链接运行，并自动执行两个 E2E，结果 `All tests passed`。
 - 新增数据库生命周期回归：`DROP DATABASE` 释放数据库级缓存后，同名重建不会继承旧 CLOG/WAL/page/index 状态。
 - 新增 typed `ALTER TABLE` 路由回归：验证 AST bridge 的 ADD COLUMN、DEFAULT、NOT NULL、RENAME COLUMN/TABLE，以及 `RENAME TO` 不再误判为列重命名。
 - 新增 schema 格式完整性回归：截断 schema 与错误 magic 均 fail-closed，不会返回可写的部分 schema。
@@ -41,7 +41,7 @@
 | 认证与连接 | 2 | 2 | 0 | — |
 | DDL - 数据库 | 3 | 3 | 0 | — |
 | DDL - 表 | 14 | 14 | 0 | 含 CTAS / RENAME / POINT / INET/CIDR 类型 |
-| DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST 均通过；B+Tree 分裂/重复键/范围回归见 `gin_brin_index_test.cpp` |
+| DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/BRIN/SP-GiST 基础路径通过；GiST 关键字目前仅走兼容 fallback，不宣称真实 GiST；B+Tree 分裂/重复键/范围回归见 `gin_brin_index_test.cpp` |
 | DDL - 视图 | 5 | 5 | 0 | 含 ALTER VIEW RENAME TO / SET SCHEMA |
 | DDL - 触发器 | 2 | 2 | 0 | — |
 | DDL - 用户/角色 | 4 | 4 | 0 | — |
@@ -365,14 +365,14 @@ CREATE GIN INDEX idx_gin ON t1(name);
 
 ---
 
-### 4.5 CREATE GiST INDEX
+### 4.5 CREATE GiST INDEX（兼容 fallback，非真实 GiST）
 
 **输入**
 ```sql
 CREATE GiST INDEX idx_gist ON t1(id);
 ```
 
-**实际结果** ✅ `Index created`
+**实际结果** ⚠️ 语句可被接受，但当前会落到通用 B-tree 风格路径；源码没有通用 `GistIndex`，因此不计为 GiST 实现。
 
 ---
 
@@ -871,12 +871,12 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景、120 个独立 C++ 回归测试和 PostgreSQL 协议 E2E 均通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景、120 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
 - ✅ **INET/CIDR 网络类型**与网络运算符（`<<` / `>>` / `&&`）
-- ✅ 索引系统（B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST）
+- ✅ 索引系统基础路径（B+Tree/Hash/FullText/GIN/BRIN/SP-GiST）；GiST 仍列为缺失
 - ✅ 视图与触发器（含 ALTER VIEW RENAME TO / SET SCHEMA，以及简单单表视图多行 `INSTEAD OF` INSERT/UPDATE/DELETE 协议回归）
 - ✅ 事务控制（BEGIN/COMMIT/ROLLBACK/SAVEPOINT）
 - ✅ 权限管理（GRANT/REVOKE）

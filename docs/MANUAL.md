@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-08-07
 > 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=121 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E）
+> 回归基线: PASS=122 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
@@ -1025,9 +1025,8 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 
 ```bash
 ./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 运行全部 120 个 C++ 测试及协议 E2E
-./scripts/build_tests.sh        # 独立编译并运行每个 C++ 测试
-python3 tests/window_e2e_test.py # 窗口函数端到端测试（9 用例）
+./scripts/run_all_tests_fast.sh # 运行统一回归：120 个 C++ 测试 + 2 个 E2E
+./scripts/build_tests.sh        # 独立编译并运行 C++ 测试 + 2 个 E2E
 ```
 
 上述 shell 入口共享 `scripts/build_common.sh` 的编译配置；`scripts/build_one_test.sh <test_name>` 可用于单测试增量编译，编译配置变化会自动使对象缓存失效。
