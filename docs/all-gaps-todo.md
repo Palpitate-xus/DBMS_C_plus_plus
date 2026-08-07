@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | PostgreSQL 协议错误状态机补强：扩展查询在 Parse/Bind/Execute 错误后按协议忽略消息直到 Sync，事务外错误返回正确的 `ReadyForQuery('I')`；新增协议 E2E 回归，验证错误恢复后连接可继续查询。完整类型/参数/扩展语义仍待后续。 |
 | 2026-08-07 | 构建入口收敛：新增 `scripts/build_common.sh`，统一四个 shell 入口的编译选项、include、TLS 检测、链接库和缓存配置指纹；快速回归、独立测试和增量单测入口均已验证。 |
 | 2026-08-07 | 构建质量收敛：清理 planner 的未使用 join cost 参数并修复 merge join cost 调用传错参数的问题；移除 parser 未使用参数名、测试中的死 helper 与多余 include。主构建、快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。 |
 | 2026-06-10 | 初始生成，基于 gap-analysis 逐条提取全部 gap |

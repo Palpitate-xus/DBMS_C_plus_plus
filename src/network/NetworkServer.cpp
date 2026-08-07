@@ -324,6 +324,19 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     return result;
 }
 
+bool isTransactionRecoveryCommand(const std::string& sql) {
+    const std::string keyword = firstSqlKeyword(sql);
+    return keyword == "commit" || keyword == "end" || keyword == "rollback";
+}
+
+QueryResult transactionAbortedResult() {
+    QueryResult result;
+    result.error = true;
+    result.sqlState = "25P02";
+    result.errorMessage = "current transaction is aborted, commands ignored until end of transaction block";
+    return result;
+}
+
 std::string messageCString(const PgFrontendMessage& message, size_t offset = 0) {
     std::string value;
     if (!PostgresProtocol::readCString(message.payload, offset, value)) return {};
@@ -552,15 +565,16 @@ bool establishClientTransport(int clientFd, TLSServerContext& tlsContext,
     return true;
 }
 
-void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result) {
+void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
+                     char transactionStatus) {
     if (result.error) {
         protocol.sendErrorResponse("ERROR", result.sqlState, trimText(result.errorMessage));
-        protocol.sendReadyForQuery('E');
+        protocol.sendReadyForQuery(transactionStatus);
         return;
     }
     if (result.commandTag.empty() && !result.resultSet) {
         protocol.sendEmptyQueryResponse();
-        protocol.sendReadyForQuery();
+        protocol.sendReadyForQuery(transactionStatus);
         return;
     }
     if (result.resultSet) {
@@ -579,7 +593,7 @@ void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result) {
         }
     }
     protocol.sendCommandComplete(result.commandTag);
-    protocol.sendReadyForQuery();
+    protocol.sendReadyForQuery(transactionStatus);
 }
 
 void handleClient(SecureSocket socket, std::string clientHost) {
@@ -698,10 +712,30 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     }
 
     std::map<std::string, std::string> portals;
+    bool transactionFailed = false;
+    bool extendedQueryError = false;
+    const auto readyStatus = [&]() -> char {
+        if (transactionFailed) return 'E';
+        return g_engine.inTransaction() ? 'T' : 'I';
+    };
+    const auto executeForProtocol = [&](const std::string& sql) -> QueryResult {
+        if (transactionFailed && !isTransactionRecoveryCommand(sql)) {
+            return transactionAbortedResult();
+        }
+        const bool wasInTransaction = g_engine.inTransaction();
+        QueryResult result = executeProtocolQuery(sql, session);
+        if (result.error && wasInTransaction) {
+            transactionFailed = true;
+        } else if (!result.error && isTransactionRecoveryCommand(sql)) {
+            transactionFailed = false;
+        }
+        return result;
+    };
     while (true) {
         PgFrontendMessage message;
         if (!protocol.readMessage(message, protocolError)) break;
         if (message.type == 'X') break;
+        if (extendedQueryError && message.type != 'S') continue;
         if (message.type == 'Q') {
             std::string sql = messageCString(message);
             if (sql.empty() && message.payload.size() != 1) {
@@ -710,10 +744,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             updateProcessInfo(pid, "Query", "executing", trimText(sql));
-            QueryResult result = executeProtocolQuery(sql, session);
+            QueryResult result = executeForProtocol(sql);
             updateProcessDb(pid, session.currentDB);
             updateProcessInfo(pid, "Idle", "", "");
-            sendQueryResult(protocol, result);
+            sendQueryResult(protocol, result, readyStatus());
             continue;
         }
         if (message.type == 'P') {
@@ -724,11 +758,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 !PostgresProtocol::readCString(message.payload, offset, sql) ||
                 offset + 2 > message.payload.size()) {
                 protocol.sendErrorResponse("ERROR", "08P01", "malformed Parse message");
+                extendedQueryError = true;
                 continue;
             }
             const uint16_t parameterCount = PostgresProtocol::readUInt16(message.payload, offset);
             if (parameterCount != 0) {
                 protocol.sendErrorResponse("ERROR", "0A000", "parameters are not yet supported");
+                extendedQueryError = true;
                 continue;
             }
             session.preparedStmts[statement] = sql;
@@ -743,6 +779,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 !PostgresProtocol::readCString(message.payload, offset, statement) ||
                 session.preparedStmts.find(statement) == session.preparedStmts.end()) {
                 protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
+                extendedQueryError = true;
                 continue;
             }
             portals[portal] = session.preparedStmts[statement];
@@ -754,15 +791,20 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string portal;
             if (!PostgresProtocol::readCString(message.payload, offset, portal)) {
                 protocol.sendErrorResponse("ERROR", "08P01", "malformed Execute message");
+                extendedQueryError = true;
                 continue;
             }
             auto portalIt = portals.find(portal);
             if (portalIt == portals.end()) {
                 protocol.sendErrorResponse("ERROR", "34000", "portal does not exist");
+                extendedQueryError = true;
                 continue;
             }
-            QueryResult result = executeProtocolQuery(portalIt->second, session);
-            if (result.error) protocol.sendErrorResponse("ERROR", result.sqlState, result.errorMessage);
+            QueryResult result = executeForProtocol(portalIt->second);
+            if (result.error) {
+                protocol.sendErrorResponse("ERROR", result.sqlState, result.errorMessage);
+                extendedQueryError = true;
+            }
             else if (result.resultSet) {
                 std::vector<PgColumnDescription> columns;
                 for (const auto& name : result.columns) columns.push_back(PgColumnDescription{name});
@@ -783,11 +825,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             continue;
         }
         if (message.type == 'S') {
-            protocol.sendReadyForQuery();
+            protocol.sendReadyForQuery(readyStatus());
+            extendedQueryError = false;
             continue;
         }
         if (message.type == 'H') continue;
         protocol.sendErrorResponse("ERROR", "08P01", "unsupported frontend message");
+        extendedQueryError = true;
     }
 
     unregisterProcess(pid);

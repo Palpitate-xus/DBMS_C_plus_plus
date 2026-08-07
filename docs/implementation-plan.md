@@ -9,6 +9,8 @@
 
 构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`。
 
+协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；完整参数绑定和类型化结果仍列为协议缺口。
+
 ### 当前代码路径审计覆盖层
 
 下表优先于后续历史 Wave 的 `✅` 标记；只有同时具备真实运行时路径和回归/故障验证，才可标记为已完成。

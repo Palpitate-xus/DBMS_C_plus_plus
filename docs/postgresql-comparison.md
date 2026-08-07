@@ -5,6 +5,8 @@
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线: PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
+协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复和事务外 `ReadyForQuery('I')` 状态；这只补齐了错误状态机的一部分，完整参数绑定、类型化结果和扩展消息仍与 PostgreSQL 有差距。
+
 2026-08-07 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
 
 ---

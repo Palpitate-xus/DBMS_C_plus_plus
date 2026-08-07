@@ -152,6 +152,24 @@ def extended_query(sock, sql):
     assert any(kind == b"C" for kind, _ in messages)
 
 
+def extended_query_error_recovery(sock):
+    # A Parse error puts the extended-query protocol into the ignore-until-Sync
+    # state. Bind/Execute sent before Sync must not run or emit completions.
+    parse = b"\0SELECT 1\0" + struct.pack("!H", 1) + struct.pack("!I", 23)
+    bind = b"\0\0" + struct.pack("!H", 0) + struct.pack("!H", 0) + struct.pack("!H", 0)
+    execute = b"\0" + struct.pack("!I", 0)
+    sock.sendall(typed(b"P", parse) + typed(b"B", bind) + typed(b"E", execute) + typed(b"S"))
+    messages = read_until_ready(sock)
+    assert sum(kind == b"E" for kind, _ in messages) == 1
+    assert not any(kind in (b"1", b"2", b"C", b"D") for kind, _ in messages)
+    assert messages[-1] == (b"Z", b"I")
+
+    # The connection is usable again after Sync.
+    messages = simple_query(sock, "SELECT id FROM t")
+    assert any(kind == b"D" for kind, _ in messages)
+    assert any(kind == b"C" for kind, _ in messages)
+
+
 def main():
     if not os.path.exists(DBMS_MAIN):
         raise SystemExit("run scripts/build.sh first")
@@ -204,6 +222,11 @@ def main():
         assert any(kind == b"D" for kind, _ in messages)
         assert any(kind == b"C" for kind, _ in messages)
         extended_query(sock, "SELECT id FROM t")
+        extended_query_error_recovery(sock)
+        error_messages = simple_query(sock, "SELECT * FROM protocol_missing_table")
+        assert any(kind == b"E" for kind, _ in error_messages)
+        assert error_messages[-1] == (b"Z", b"I")
+        assert any(kind == b"C" for kind, _ in simple_query(sock, "SELECT id FROM t"))
         sock.sendall(typed(b"X"))
         sock.close()
 
@@ -225,6 +248,7 @@ def main():
         plain_sock.sendall(typed(b"X"))
         plain_sock.close()
         print("[PG PROTOCOL] SSLRequest/plaintext negotiation OK")
+        print("[PG PROTOCOL] extended-query error recovery and ReadyForQuery status OK")
         print("[PG PROTOCOL] startup/auth/simple/extended query OK")
     finally:
         if process is not None:
