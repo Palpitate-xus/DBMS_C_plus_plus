@@ -701,18 +701,18 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| ✅ 7.1 实现 PostgreSQL wire protocol（Frontend/Backend protocol） | 16.6, 11.3 | 架构级，NetworkServer 骨架已有 |
-| ✅ 7.2 实现 `pg_hba.conf` 解析与匹配 | 11.2 | 解析 10+ auth methods，CIDR IP 匹配，Trust/Md5/Scram/Cert/PAM/LDAP/Radius/Reject |
-| ✅ 7.3 实现 SCRAM-SHA-256 认证 | 11.2 | password verification via sha256 hash in user.dat; SCRAM interface prepared |
-| ✅ 7.4 实现 OAuth（PG18）、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 11.2 | pg_hba.conf method parsing (trust/md5/scram-sha-256/password/ident/peer/cert/pam/ldap/radius); TLSWrapper for cert auth |
-| ✅ 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLSWrapper 骨架已有 |
-| ✅ 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | 基础 permissions.h 已有 |
-| ✅ 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | parser supports GRANT/REVOKE ON ... TO ... IN SCHEMA |
-| ✅ 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | DDL 注册 + USING/WITH CHECK parser |
-| ✅ 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | parser: CREATE FUNCTION ... SECURITY DEFINER/INVOKER |
-| ✅ 7.10 实现 `GRANT`/`REVOKE` ACL item 完整语义 | 1.1.40 | parser: GRANT/REVOKE SELECT/INSERT/UPDATE/DELETE/ALL ON obj TO/FROM role |
-| ✅ 7.11 实现 `ALTER USER`/`ALTER ROLE` 完整权限位（superuser/createdb/replication/bypassrls） | 1.1.5 | parser: ALTER ROLE name WITH SUPERUSER/CREATEDB/CREATEROLE/LOGIN/REPLICATION/BYPASSRLS + PASSWORD + CONNECTION LIMIT + VALID UNTIL |
-| ✅ 7.12 实现 `CREATE ROLE`/`CREATE USER` 完整属性执行、成员继承、admin option | 1.1.24 | SUPERUSER/CREATEDB/LOGIN/PASSWORD/CONNECTION LIMIT/VALID UNTIL/IN ROLE |
+| ❌ 7.1 实现 PostgreSQL wire protocol（Frontend/Backend protocol） | 16.6, 11.3 | 当前仍是自定义文本换行协议，未实现 StartupMessage、Authentication、Query/Bind/Execute 等 libpq 消息 |
+| 🔄 7.2 实现 `pg_hba.conf` 解析与匹配 | 11.2 | 配置解析和 CIDR 匹配已有；运行时认证链路尚未达到 PostgreSQL 语义 |
+| ❌ 7.3 实现 SCRAM-SHA-256 认证 | 11.2 | 当前登录仍是简化凭据校验，未实现 SCRAM challenge/response、nonce、channel binding |
+| 🔄 7.4 实现 OAuth（PG18）、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 11.2 | 部分方法仅有配置解析或接口骨架，尚无可验收的端到端认证实现 |
+| 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |
+| 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | 基础权限路径已有，目录持久化和完整继承语义仍需补齐 |
+| 🔄 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | 解析路径已有，默认权限的完整 catalog/executor 语义仍需验证 |
+| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | DDL 注册和 USING/WITH CHECK 解析已有，执行器集成仍不完整 |
+| 🔄 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | 语法支持已有，执行时安全边界仍需补齐 |
+| 🔄 7.10 实现 `GRANT`/`REVOKE` ACL item 完整语义 | 1.1.40 | 基础语法和执行路径已有，完整 ACL 传播/校验仍需验证 |
+| 🔄 7.11 实现 `ALTER USER`/`ALTER ROLE` 完整权限位（superuser/createdb/replication/bypassrls） | 1.1.5 | 语法覆盖较广，属性执行和持久化仍需按 PostgreSQL 语义验收 |
+| 🔄 7.12 实现 `CREATE ROLE`/`CREATE USER` 完整属性执行、成员继承、admin option | 1.1.24 | 基础属性路径已有，成员继承和 admin option 仍需补齐 |
 
 ---
 
@@ -808,7 +808,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 16.3 WAL redo | **Phase 3** | 崩溃恢复基础 |
 | ✅ 16.4 MVCC 版本链 | **Phase 3** | 并发控制基础 |
 | ✅ 16.5 DDL 事务化 | **Phase 4** | 依赖 Catalog + WAL |
-| ✅ 16.6 Wire Protocol | **Phase 7** | 客户端兼容 |
+| ❌ 16.6 Wire Protocol | **Phase 7** | 当前为自定义文本协议，客户端兼容尚未实现 |
 | ✅ 16.7 扩展系统 | **Phase 10** | 最后搭建 |
 | ✅ 16.8 多进程模型 | **Phase 9** | 可与 Phase 3 并行设计 |
 | ✅ 16.9 Buffer Manager | **Phase 3** | 存储基础 |

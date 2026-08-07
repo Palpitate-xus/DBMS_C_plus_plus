@@ -82,7 +82,9 @@
 
 > 2026-06-21 更新方法：核对 `src/`（parser/catalog/storage/expression/commands）、`tests/` 与 `docs/implementation-plan.md`、`docs/phase4-plan.md` 的实际代码与提交历史，将仍标 ❌/⚠️ 但代码中已有真实实现的条目上调；仍处于骨架或未开始的条目保留并标注 🔄/❌。未对齐 PG 完整语义的条目即便有实现仍标 ⚠️。
 
-> 2026-07-01 Phase 4–7 进展详情：
+> **状态校准（2026-08-07）**：本文件中的旧阶段统计包含“先标完成、后审计发现仅有骨架”的历史记录。当前验收以 `docs/production-status.md`、代码路径和可重复测试为准；以下历史条目不再代表 PostgreSQL 兼容性已完成。
+
+> 2026-07-01 Phase 4–7 进展详情（历史记录）：
 
 > **Phase 4（类型系统/约束/DDL 完整化）**：全部 40 Wave ✅/🔄
 > - ✅ 4.1 numeric/decimal, 4.2 类型别名, 4.3 CREATE/DROP COLLATION (DDL+元数据), 4.4 bytea, 4.5 date infinity, 4.6 ENUM, 4.7 几何类型, 4.8 macaddr, 4.9 bit, 4.10 tsearch, 4.11 uuid, 4.12 XML, 4.13 jsonpath, 4.14 array, 4.15 composite, 4.16 range, 4.17 domain multi-CHECK (本次), 4.18 pseudo types, 4.22 DEFAULT, 4.23 GENERATED, 4.24 EXCLUDE, 4.25 SET CONSTRAINTS (本次), 4.26 CREATE TABLE options + PARTITION BY (本次), 4.28 VIEW, 4.29 TRIGGER, 4.30 CREATE TYPE, 4.31 CTAS, 4.32 STATISTICS algorithms, 4.33 SEQUENCE, 4.34 DOMAIN, 4.35 FUNCTION, 4.36 PROCEDURE, 4.37 POLICY, 4.38 MATVIEW, 4.39 DDL 事务化, 4.40 ASSERTION=scope exclusion
@@ -101,11 +103,11 @@
 > - ✅ 6.6 expression/partial/include 索引
 > - 🔄 6.2 B-tree dedup, 6.3 Hash WAL-safe, 6.5 CONCURRENTLY, 6.7 index maintenance, 6.8 partitioned index, 6.9 opclass/collation
 
-> **Phase 7（安全/认证/Wire Protocol）**：基础完成，高级标注 🔄
+> **Phase 7（安全/认证/Wire Protocol）**：当前仅部分基础组件存在，wire protocol/SCRAM 仍未完成
 > - ✅ 7.2 pg_hba.conf 解析（10+ auth methods: trust/md5/scram-sha-256/password/ident/peer/cert/pam/ldap/radius/reject）+ CIDR IP 匹配
 > - ✅ 7.12 CREATE ROLE 完整属性（SUPERUSER/CREATEROLE/CREATEDB/LOGIN/INHERIT/REPLICATION/BYPASSRLS/CONNECTION LIMIT/PASSWORD/VALID UNTIL/IN ROLE）
-> - ✅ 7.3 SCRAM-SHA-256, 7.4 auth methods (pg_hba 10+ methods), 7.6-7.11 认证/权限
-> - 🔄 7.1 Wire Protocol, 7.5 TLS 完整协商
+> - ❌ 7.1 Wire Protocol, 7.3 SCRAM-SHA-256
+> - 🔄 7.4 auth methods, 7.5 TLS 完整协商, 7.6-7.11 认证/权限
 
 > 2026-07-01 Phase 8-16 进展：
 > - Phase 8: 8.8 (WAL archive) ✅, 其余复制/HA 特性标注 🔄
@@ -130,7 +132,7 @@
 > - 5.7 MERGE 标为完成 (main.cpp 完整执行路径)
 > - 5.10-5.18 全部 DML 语义标为完成 (parser 已完整支持)
 > - 5.36 LISTEN/NOTIFY 标为完成 (内存 listener map + pending notify queue)
-> - 7.3 SCRAM-SHA-256, 7.4 auth methods, 7.6-7.11 认证/权限标为完成
+> - 历史上曾将 7.3 SCRAM-SHA-256、7.4 auth methods、7.6-7.11 认证/权限标为完成；2026-08-07 审计后回退为“部分实现/待验收”
 > - 4.27 ALTER TABLE ONLY/INHERIT/SET TABLESPACE 完成 (parser + alterTableTablespace)
 > - 修复: FOR 加入 isKeyword 防止被当别名
 > - 新增测试: dml_semantics_test, eq_class_pathkey_test, auth_privileges_test

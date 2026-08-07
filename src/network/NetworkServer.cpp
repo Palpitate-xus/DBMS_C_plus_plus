@@ -61,6 +61,30 @@ bool isServerTransportAllowed(bool tlsEnabled, bool allowPlaintext) {
     return tlsEnabled || allowPlaintext;
 }
 
+bool tryReserveConnectionSlot() {
+    int active = g_stats.activeConnections.load(std::memory_order_relaxed);
+    const int maximum = g_stats.maxConnections.load(std::memory_order_relaxed);
+    while (active < maximum) {
+        if (g_stats.activeConnections.compare_exchange_weak(
+                active, active + 1, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void releaseConnectionSlot() {
+    int active = g_stats.activeConnections.load(std::memory_order_relaxed);
+    while (active > 0) {
+        if (g_stats.activeConnections.compare_exchange_weak(
+                active, active - 1, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) {
+            return;
+        }
+    }
+}
+
 void updateProcessInfo(uint64_t pid, const std::string& command,
                        const std::string& state, const std::string& info) {
     std::lock_guard<std::mutex> lock(g_processMutex);
@@ -137,7 +161,6 @@ static std::string recvLine(SecureSocket& sock) {
 }
 
 static void handleClient(SecureSocket sock, std::string clientHost) {
-    g_stats.activeConnections++;
     g_stats.totalConnections++;
 
     Session s;
@@ -152,7 +175,7 @@ static void handleClient(SecureSocket sock, std::string clientHost) {
     if (!login(username, password)) {
         sendLine(sock, "wrong username or password");
         sock.close();
-        g_stats.activeConnections--;
+        releaseConnectionSlot();
         return;
     }
 
@@ -230,7 +253,7 @@ static void handleClient(SecureSocket sock, std::string clientHost) {
 
     unregisterProcess(pid);
     sock.close();
-    g_stats.activeConnections--;
+    releaseConnectionSlot();
 }
 
 namespace {
@@ -307,7 +330,7 @@ void startServer(int port, bool allowPlaintext) {
         int clientFd = ::accept(serverFd, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
         if (clientFd < 0) continue;
 
-        if (g_stats.activeConnections >= g_stats.maxConnections.load()) {
+        if (!tryReserveConnectionSlot()) {
             if (tlsCtx.enabled()) {
                 SecureSocket tmp(clientFd, tlsCtx.ctx());
                 if (tmp.handshake()) sendLine(tmp, "too many connections");
@@ -328,6 +351,7 @@ void startServer(int port, bool allowPlaintext) {
                 if (!sock.handshake()) {
                     std::cerr << "TLS handshake failed" << std::endl;
                     sock.close();
+                    releaseConnectionSlot();
                     return;
                 }
             }

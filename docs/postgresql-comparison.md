@@ -256,11 +256,11 @@
 
 | 特性 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
-| pg_hba.conf | ✅ | ✅ | ✅ |
-| 用户/角色系统 | ✅ | ✅ | ✅ |
+| pg_hba.conf | ✅ | ⚠️ | 解析/CIDR 匹配存在，运行时认证链路未达到 PostgreSQL 语义 |
+| 用户/角色系统 | ✅ | ⚠️ | 基础 CRUD 存在，完整属性、成员继承和认证持久化仍待验收 |
 | GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
-| **行级安全 (RLS) 执行** | ✅ | ✅ | ✅ (buildRLSConditions + admin bypass) |
+| **行级安全 (RLS) 执行** | ✅ | ⚠️ | 已有基础 USING/WITH CHECK 路径，完整 executor 集成和安全边界仍待验收 |
 | **SCRAM-SHA-256 完整协议** | ✅ | ❌ | 仅 hash 验证 |
 | **LDAP/Kerberos/GSSAPI/PAM/RADIUS** | ✅ | ❌ | 缺 |
 | **SSL 双向认证** | ✅ | ⚠️ TLSWrapper；服务端默认 fail-closed，但缺少 PostgreSQL SSL 协商、客户端证书认证和 channel binding | |

@@ -45,6 +45,11 @@ void startServer(int port, bool allowPlaintext = false);
 // when TLS is ready or plaintext was explicitly enabled.
 bool isServerTransportAllowed(bool tlsEnabled, bool allowPlaintext);
 
+// Atomically reserve/release a connection slot so concurrent accepts cannot
+// exceed maxConnections.
+bool tryReserveConnectionSlot();
+void releaseConnectionSlot();
+
 // Get server connection statistics
 ServerStats& getServerStats();
 
