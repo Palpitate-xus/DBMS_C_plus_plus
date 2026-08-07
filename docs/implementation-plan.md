@@ -13,7 +13,7 @@
 |------|--------------|-----------|
 | DDL AST bridge | 部分完成 | 核心 CREATE/DROP 与基础 ALTER TABLE 已桥接；RLS、触发器、分区、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy 路径执行 |
 | 复杂查询执行 | 部分完成 | Volcano 基础算子已验证；复杂子查询、集合操作、窗口和 grouping 扩展仍有 legacy 回退 |
-| Serializable / SSI | 未完成 | 尚无完整 predicate/SIREAD lock 与 rw-conflict abort 验证 |
+| Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
 | PostgreSQL wire protocol / SCRAM | 未完成 | 当前 NetworkServer/TLS/认证为骨架或简化实现，不等价于 libpq 兼容协议 |
 | 复制、逻辑解码、PITR、pg_basebackup | 部分完成 | 有 WAL/归档/ReplicationManager 框架，但缺完整端到端故障切换与恢复证明 |
@@ -670,7 +670,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 5.40 实现 `SET`/`SHOW`/`RESET` 完整 GUC 语义 | 1.1.52, 1.1.48 | handleSetCommand 已就绪 |
 | ✅ 5.41 实现 `SET ROLE` / `SET SESSION AUTHORIZATION` 完整语义 | 1.1.54, 1.1.55 | SET ROLE 已就绪 |
 | ✅ 5.42 实现 `SET TRANSACTION` deferrable 完整语义 | 1.1.56 | SET TRANSACTION 已就绪 |
-| ✅ 5.43 实现 SSI / predicate locks / SIREAD lock / rw-conflict | 9.4 | LockManager shared/exclusive + ReadView snapshot tracking |
+| 🔄 5.43 实现 SSI / predicate locks / SIREAD lock / rw-conflict | 9.4 | 已验证关系限定的行级 rw-conflict 写偏差回滚；predicate/SIREAD、空范围和完整 SSI 规则待实现 |
 
 ---
 

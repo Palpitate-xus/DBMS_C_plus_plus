@@ -1155,16 +1155,19 @@ private:
     void invalidateCatalogTableList(const std::string& dbname);
 
     // SSI (Serializable Snapshot Isolation) read/write sets
-    mutable std::set<int64_t> txnReadRids_;    // RIDs read by current transaction
-    mutable std::set<int64_t> txnWrittenRids_; // RIDs written by current transaction
+    // Relation-qualified row identities.  A (page, slot) pair is only unique
+    // within one table; omitting the relation causes false SSI conflicts
+    // between unrelated tables.
+    mutable std::set<std::string> txnReadRids_;    // relation-qualified RIDs read by current transaction
+    mutable std::set<std::string> txnWrittenRids_; // relation-qualified RIDs written by current transaction
 
     // Global active transaction tracking (for ReadView)
     static std::mutex globalTxnMutex_;
     static std::set<uint64_t> activeTransactions_;
     // Global SSI conflict tracking: txId -> set of txIds that it has rw-conflict with
     static std::mutex ssiMutex_;
-    static std::map<uint64_t, std::set<int64_t>> ssiReadSets_;   // txId -> RIDs read
-    static std::map<uint64_t, std::set<int64_t>> ssiWriteSets_;  // txId -> RIDs written
+    static std::map<uint64_t, std::set<std::string>> ssiReadSets_;   // txId -> relation-qualified RIDs read
+    static std::map<uint64_t, std::set<std::string>> ssiWriteSets_;  // txId -> relation-qualified RIDs written
     static std::map<uint64_t, std::set<uint64_t>> ssiOutEdges_; // T1 -> {T2} means T1 read something written by T2
     static std::map<uint64_t, std::set<uint64_t>> ssiInEdges_;  // T2 -> {T1} means T1 read something written by T2
 

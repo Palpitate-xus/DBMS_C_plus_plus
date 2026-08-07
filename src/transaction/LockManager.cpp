@@ -434,7 +434,11 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
         auto& state = rowLocks_[key];
         // Already holding shared or exclusive lock on this row
         if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
-            state.sharedCount++;
+            // The underlying shared_mutex is acquired once per holder.  A
+            // repeated read in the same transaction is re-entrant and must
+            // not increment sharedCount without acquiring another mutex
+            // token; doing so makes unlockAll() unlock the same mutex more
+            // times than it was locked.
             return true;
         }
         if (!state.exclusive && state.holders.empty()) {
@@ -472,6 +476,31 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
         if (state.exclusive && state.holders.size() == 1 && state.holders[0] == self) {
             return true;
         }
+        // Upgrade our own shared row lock before acquiring the exclusive
+        // mutex.  Calling lock() while this thread still owns a shared lock
+        // self-deadlocks even when no other transaction is present.
+        if (!state.exclusive && state.sharedCount > 0 &&
+            state.holders.size() == 1 && state.holders[0] == self) {
+            state.mtx.unlock_shared();
+            state.sharedCount = 0;
+            state.holders.clear();
+            state.mtx.lock();
+            state.exclusive = true;
+            state.holders.push_back(self);
+            removeWaitEdges(self);
+            return true;
+        }
+        // With other readers present, an in-place upgrade would wait on a
+        // mutex still held by this thread.  Drop our shared token before
+        // entering the normal wait path; the statement/transaction will
+        // retain its snapshot and either acquire the exclusive lock or be
+        // rejected by deadlock detection.
+        auto selfHolder = std::find(state.holders.begin(), state.holders.end(), self);
+        if (!state.exclusive && selfHolder != state.holders.end()) {
+            state.mtx.unlock_shared();
+            state.sharedCount--;
+            state.holders.erase(selfHolder);
+        }
         if (state.sharedCount == 0 && !state.exclusive) {
             state.mtx.lock();
             state.exclusive = true;
@@ -503,7 +532,6 @@ bool LockManager::rowLockSharedNoWait(const std::string& table, int64_t rid) {
     std::lock_guard<std::mutex> guard(rowMutex_);
     auto& state = rowLocks_[key];
     if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
-        state.sharedCount++;
         return true;
     }
     if (!state.exclusive && state.holders.empty()) {
@@ -521,6 +549,16 @@ bool LockManager::rowLockExclusiveNoWait(const std::string& table, int64_t rid) 
     std::lock_guard<std::mutex> guard(rowMutex_);
     auto& state = rowLocks_[key];
     if (state.exclusive && state.holders.size() == 1 && state.holders[0] == self) {
+        return true;
+    }
+    if (!state.exclusive && state.sharedCount > 0 &&
+        state.holders.size() == 1 && state.holders[0] == self) {
+        state.mtx.unlock_shared();
+        state.sharedCount = 0;
+        state.holders.clear();
+        state.mtx.lock();
+        state.exclusive = true;
+        state.holders.push_back(self);
         return true;
     }
     if (state.sharedCount == 0 && !state.exclusive) {

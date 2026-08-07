@@ -150,7 +150,7 @@
 | **行级锁** | ✅ | ✅ | ✅ (rowLockShared/Exclusive + NOWAIT) |
 | **Deadlock detection** | ✅ | ✅ | ✅ (wait-for graph + cycle detection + log) |
 | **Gap locks / predicate locks** | ✅ | ❌ | 缺 |
-| **SSI (Serializable Snapshot Isolation)** | ✅ | ❌ | 缺 |
+| **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 已有关系限定的行级 rw-conflict/写偏差回滚；缺 predicate/SIREAD、空范围和完整 SSI 规则 |
 | **两阶段提交 (2PC)** | ✅ | ✅ | ✅ (prepareTransaction + COMMIT/ROLLBACK PREPARED) |
 | **并行查询** | ✅ | ❌ | 框架 stub (parallelWorkers_=0) |
 | **JIT compilation (LLVM)** | ✅ | ❌ | 缺 |
@@ -309,7 +309,7 @@
 2. **JIT 编译** — 表达式求值仍为解释执行, 无 LLVM 后端
 3. **索引 GiST** — 全文搜索/几何最近邻索引缺失 (仅有 SP-GiST)
 4. **Gap locks / predicate locks** — 无法完全防止幻读
-5. **SSI (Serializable Snapshot Isolation)** — 可串行化隔离未实现
+5. **SSI (Serializable Snapshot Isolation)** — 已覆盖关系限定的行级写偏差回滚，但 predicate/SIREAD 和完整冲突规则仍未实现
 6. **Bitmap scan** — 多索引组合 (Bitmap AND/OR) 缺失, 影响复杂 WHERE 性能
 7. **INSTEAD OF 视图触发器** — BEFORE 行级执行已接入，视图写入触发器待补
 

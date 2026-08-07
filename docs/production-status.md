@@ -23,6 +23,6 @@
 
 数据兼容边界：旧 schema、旧 4 KiB 数据页和旧行头不会被读取或迁移。升级前必须导出 SQL，或删除并重建数据目录。
 
-仍不能称为生产就绪的主要原因包括：真正的 SSI/可串行化冲突检测、并行执行、完整 wire protocol、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试仍不完整。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
+仍不能称为生产就绪的主要原因包括：SSI 目前已验证关系限定的行级写偏差回滚，但 predicate/SIREAD 锁、空范围读和完整 rw-conflict 规则仍不完整；并行执行、完整 wire protocol、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
 
 验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`、`python3 tests/window_e2e_test.py`；Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。

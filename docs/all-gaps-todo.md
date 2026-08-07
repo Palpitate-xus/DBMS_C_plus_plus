@@ -116,7 +116,7 @@
 > 2026-07-02 收尾 + Phase 8 启动：
 > - 5.5 skip scan/index cond recheck: FilterOp indexConditionRecheck + canUseSkipScan ✅
 > - 5.21 parallel: QueryPlanner::parallelWorkers API ✅
-> - 5.22 JIT / 5.23 AIO / 5.43 SSI: 基础框架 stub ✅
+> - 5.22 JIT / 5.23 AIO: 基础框架 stub；5.43 SSI: 已验证关系限定的行级写偏差回滚，predicate/SIREAD 仍待实现
 > - 4.27 ALTER TABLE: ONLY/INHERIT/SET TABLESPACE 全部完成 (FOR 关键字修复) ✅
 > - Phase 8: ReplicationManager (slots/standby/WAL shipping) 基础框架新建
 > - Phase 0-7, 11, 16: 全部 100% 完成 (4/4, 10/10, 8/8, 14/14, 40/40, 43/43, 9/9, 12/12, 9/9, 10/10)
@@ -169,7 +169,7 @@
 | DQL/查询 | 大量 | 中量 | 大量 | SELECT 已解析为 AST（CTE/JOIN/SET OPS）；执行仍走旧 switch/case |
 | 优化器/执行器 | 简化 | 中量 | 大量 ❌ | `src/optimizer/` 仍为空；Path/RelOptInfo 框架未建（Phase 5 未启动） |
 | 索引 | 6 种 | 简化 | 大量 ❌ | IIndexAM 适配器已统一；AM API/opclass/concurrent/维护仍 ❌ |
-| 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI/完整子事务仍 ❌ |
+| 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI 仅完成关系限定的行级写偏差检测，完整子事务仍 ❌ |
 | 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
 | 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；pg_hba/SCRAM/wire protocol 仍 ❌ |
 | 复制/HA | 0 | WAL archive 1 项 | 全部 ❌ | `src/replication/` 仅有 README；流复制/逻辑复制/PITR 全缺 |
@@ -407,14 +407,14 @@
 
 ## 9. 事务、MVCC 与并发差距
 
-> **已完成进展（2026-06-21）**：Phase 3.7~3.9 已落地 PostgreSQL 风格 `HeapTupleHeader`（`t_xmin/t_xmax/t_cid/t_ctid/t_infomask/t_infomask2/t_hoff`、null bitmap、hint bits、ctid 自引用链、HOT update 经 `LP_REDIRECT`）；`CLOG`/`pg_xact`（2-bit 事务状态、按段持久化，commit/rollback 自动更新）；`Snapshot` 导出/导入（`exportToBytes/importFromBytes`）+ `subxip` 可见性 + catalog snapshot 惰性缓存。9.1/9.2/9.8 上调为 🔄（9.8：WAL 已是 redo log，LSN/segment/full-page/redo/timeline/archive + 两趟扫描恢复）。9.4 SSI 仍 ❌（Phase 5.43）。9.6 DDL 事务化仍 🔄（Wave 0.4 骨架：`DdlTransaction` + `XLOG_CATALOG_*` WAL 记录，Wave 5 全量移除隐式提交未做）。9.7 已修复嵌套锁死锁（Phase 2.6），轻量锁/spinlock/wait events 仍 ❌。9.9 `VisibilityMap`(AllVisible) + hint bits 已实现（Phase 3.8），freeze map/all-frozen/wraparound/autovacuum 仍 ❌（Phase 5.32）。
+> **已完成进展（2026-06-21）**：Phase 3.7~3.9 已落地 PostgreSQL 风格 `HeapTupleHeader`（`t_xmin/t_xmax/t_cid/t_ctid/t_infomask/t_infomask2/t_hoff`、null bitmap、hint bits、ctid 自引用链、HOT update 经 `LP_REDIRECT`）；`CLOG`/`pg_xact`（2-bit 事务状态、按段持久化，commit/rollback 自动更新）；`Snapshot` 导出/导入（`exportToBytes/importFromBytes`）+ `subxip` 可见性 + catalog snapshot 惰性缓存。9.1/9.2/9.8 上调为 🔄（9.8：WAL 已是 redo log，LSN/segment/full-page/redo/timeline/archive + 两趟扫描恢复）。9.4 已验证关系限定的行级 SSI 写偏差回滚，但 predicate/SIREAD、空范围和完整 rw-conflict 规则仍 ❌。9.6 DDL 事务化仍 🔄（Wave 0.4 骨架：`DdlTransaction` + `XLOG_CATALOG_*` WAL 记录，Wave 5 全量移除隐式提交未做）。9.7 已修复嵌套锁死锁（Phase 2.6），轻量锁/spinlock/wait events 仍 ❌。9.9 `VisibilityMap`(AllVisible) + hint bits 已实现（Phase 3.8），freeze map/all-frozen/wraparound/autovacuum 仍 ❌（Phase 5.32）。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 9.1 | Tuple versioning | 项目行头只有 creator txid/rollback ptr 常量，实际可见性主要看创建 txid；缺少 `xmin/xmax`、ctid chain、多版本更新、HOT update | 🔄 |
 | 9.2 | Snapshot | 有 ReadView；缺少 PG snapshot export/import、subxip、catalog snapshot、logical decoding snapshot | 🔄 |
-| 9.3 | Isolation levels | 四级隔离名存在；Read Uncommitted 在 PG 中实际等同 Read Committed，本项目语义未必一致；Serializable 只用 RID read/write set 简化 SSI | ⚠️ |
-| 9.4 | SSI/predicate locks | 缺少 PostgreSQL predicate lock、SIREAD lock、rw-conflict in/out 复杂规则和索引范围推理 | ❌ |
+| 9.3 | Isolation levels | 四级隔离名存在；Read Uncommitted 在 PG 中实际等同 Read Committed，本项目语义未必一致；Serializable 已覆盖关系限定的行级写偏差回滚，但仍是简化 SSI | ⚠️ |
+| 9.4 | SSI/predicate locks | 已有关系限定的行级 rw-conflict in/out 与写偏差回滚测试；仍缺 PostgreSQL predicate/SIREAD lock、空范围读和索引范围推理 | ⚠️ |
 | 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index；缺少子事务 ID、资源释放、错误状态恢复 | ⚠️ |
 | 9.6 | DDL transactions | 本项目 DDL 多处隐式提交；PG 大多数 DDL 可回滚 | 🔄 |
 | 9.7 | Lock manager | 有表/行/gap/page/advisory lock 简化；缺少 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、deadlock detector 精细语义、wait events | ⚠️ |
