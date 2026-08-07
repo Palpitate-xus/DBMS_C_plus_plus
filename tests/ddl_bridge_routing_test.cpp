@@ -68,6 +68,20 @@ static void test_bridge_falls_back_for_unhandled() {
     std::cout << "[DDL-ROUTE] bridge falls back for unhandled DDL OK" << std::endl;
 }
 
+static void test_bridge_fails_closed_on_parse_error() {
+    Session s;
+    setupSession(s, "");
+
+    // The caller normally supplies classify(sql); use an explicit bridge-owned
+    // command here to exercise the parse-error contract independently.
+    bool handled = false;
+    bool err = dbms::tryDdlBridge("", dbms::SqlCommand::CreateTable, s, handled);
+    assert(handled);
+    assert(err);
+
+    std::cout << "[DDL-ROUTE] parse errors fail closed" << std::endl;
+}
+
 static void test_bridge_handles_ctas() {
     std::string db = testDbPath("ddl_route_t3");
     cleanup(db);
@@ -99,6 +113,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_bridge_handles_create_table();
     test_bridge_falls_back_for_unhandled();
+    test_bridge_fails_closed_on_parse_error();
     test_bridge_handles_ctas();
     std::cout << "[DDL-ROUTE] all passed" << std::endl;
     return 0;

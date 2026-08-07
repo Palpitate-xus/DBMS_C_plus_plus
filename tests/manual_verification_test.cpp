@@ -315,8 +315,9 @@ static void test_ch9_views() {
     // 物化视图
     assert(!ddl.executeSql("CREATE MATERIALIZED VIEW mv AS SELECT ID, VAL FROM base", s));
 
-    // REFRESH
-    assert(!ddl.executeSql("REFRESH MATERIALIZED VIEW mv", s));
+    // REFRESH is a utility command owned by the main command router, not the
+    // DDL AST executor. The direct DdlExecutor API must reject it explicitly.
+    assert(ddl.executeSql("REFRESH MATERIALIZED VIEW mv", s));
 
     // WITH NO DATA
     assert(!ddl.executeSql("CREATE MATERIALIZED VIEW mv_empty AS SELECT * FROM base WITH NO DATA", s));

@@ -323,7 +323,12 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
 bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
     SQLParser parser;
     ParseResult r = parser.parse(sql);
-    if (!r.success || !r.stmt) return false;
+    if (!r.success || !r.stmt) {
+        std::cout << "SQL syntax error";
+        if (!r.error.empty()) std::cout << ": " << r.error;
+        std::cout << std::endl;
+        return true;
+    }
     return execute(r.stmt, s);
 }
 
@@ -366,9 +371,13 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     dbms::SQLParser parser;
     dbms::ParseResult r = parser.parse(sql);
     if (!r.success || !r.stmt) {
-        // Parse failed: treat as not handled so legacy string dispatch can try.
-        handled = false;
-        return false;
+        // A bridge-owned command must fail closed. Falling back after a parse
+        // error can execute a different legacy interpretation.
+        handled = true;
+        std::cout << "SQL syntax error";
+        if (!r.error.empty()) std::cout << ": " << r.error;
+        std::cout << std::endl;
+        return true;
     }
     dbms::DdlExecutor ddlExec;
     return ddlExec.execute(r.stmt, s); // false=success, true=error

@@ -12,7 +12,8 @@
 //   - CREATE / DROP TYPE (composite)
 //   - COMMENT ON TABLE / COLUMN
 //
-// 未覆盖命令返回 false，由 main.cpp 回退到原有字符串处理分支。
+// 未覆盖命令由 main.cpp 显式回退到尚未迁移的路径；本 executor 自身不会
+// 把解析失败或未识别的语句伪装成成功。
 // ============================================================================
 
 #pragma once
@@ -73,10 +74,9 @@ private:
 };
 
 // DDL AST bridge 入口。由 main.cpp::execute() 在字符串分发前调用。
-//   - handled 出参：true 表示 sql 属于 bridge 覆盖的 DDL 类型（14 种），并已执行。
+//   - handled 出参：true 表示 sql 属于 bridge 覆盖的 DDL 类型，并已执行或明确报错。
 //   - 返回值：false=成功，true=错误（与 main.cpp::execute() 一致）。
-//   - CTAS (CREATE TABLE ... AS SELECT ...) 因 parser 暂不捕获 SELECT 子句，
-//     这里设置 handled=false，让调用方回退到原有内联 CTAS 路径。
+//   - CTAS (CREATE TABLE ... AS SELECT ...) 由当前 AST executor 处理。
 bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                   Session& s, bool& handled);
 
