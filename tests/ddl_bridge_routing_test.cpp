@@ -4,6 +4,8 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "catalog/CatalogService.h"
+#include "permissions.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -150,6 +152,46 @@ static void test_bridge_handles_typed_alter_table() {
     std::cout << "[DDL-ROUTE] typed ALTER TABLE bridge OK" << std::endl;
 }
 
+static void test_bridge_handles_catalog_auth_ddl() {
+    Session s;
+    setupSession(s, "");
+    const std::string userName = "route_auth_user";
+    const std::string roleName = "route_auth_role";
+    const std::string renamedRole = "route_auth_role_renamed";
+    dropRole(userName);
+    dropRole(roleName);
+    dropRole(renamedRole);
+
+    auto run = [&](const std::string& sql) {
+        bool handled = false;
+        const auto cmd = dbms::SQLParser::classify(sql);
+        const bool err = dbms::tryDdlBridge(sql, cmd, s, handled);
+        assert(handled);
+        assert(!err);
+    };
+
+    run("CREATE USER Route_Auth_User WITH PASSWORD 'MiXeD-Case-9!' LOGIN");
+    auto account = authCatalog().getAuthIdByName(userName);
+    assert(account && account->rolcanlogin);
+    assert(verifyUserPassword(userName, "MiXeD-Case-9!"));
+
+    run("ALTER USER Route_Auth_User WITH NOLOGIN PASSWORD 'SeCoNd-Secret-8!'");
+    account = authCatalog().getAuthIdByName(userName);
+    assert(account && !account->rolcanlogin);
+    run("ALTER USER Route_Auth_User WITH LOGIN");
+    assert(verifyUserPassword(userName, "SeCoNd-Secret-8!"));
+
+    run("CREATE ROLE Route_Auth_Role");
+    run("ALTER ROLE Route_Auth_Role RENAME TO Route_Auth_Role_Renamed");
+    assert(!roleExists(roleName));
+    assert(roleExists(renamedRole));
+    run("DROP ROLE Route_Auth_Role_Renamed");
+    run("DROP USER Route_Auth_User");
+    assert(!roleExists(userName));
+
+    std::cout << "[DDL-ROUTE] catalog auth DDL and literal case preservation OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_bridge_handles_create_table();
@@ -157,6 +199,7 @@ int main() {
     test_bridge_fails_closed_on_parse_error();
     test_bridge_handles_ctas();
     test_bridge_handles_typed_alter_table();
+    test_bridge_handles_catalog_auth_ddl();
     std::cout << "[DDL-ROUTE] all passed" << std::endl;
     return 0;
 }

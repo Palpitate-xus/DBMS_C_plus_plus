@@ -194,7 +194,7 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE ROLE analyst"))
         assert any(kind == b"C" for kind, _ in simple_query(
-            sock, "CREATE USER bob WITH PASSWORD 'bobpass'"))
+            sock, "CREATE USER bob WITH PASSWORD 'bObPass9!'"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT analyst TO bob"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
@@ -210,7 +210,7 @@ def main():
         role_sock = socket.socket()
         role_sock.settimeout(2)
         role_sock.connect(("127.0.0.1", port))
-        startup(role_sock, "bob", "info", password="bobpass")
+        startup(role_sock, "bob", "info", password="bObPass9!")
         role_sock.sendall(typed(b"X"))
         role_sock.close()
 

@@ -8582,7 +8582,7 @@ bool execute(const string& rawSql, Session& s) {
     // execution falls through to the legacy string dispatch below.
     {
         bool handled = false;
-        bool err = dbms::tryDdlBridge(sql, parsedCmd, s, handled);
+        bool err = dbms::tryDdlBridge(sql, parsedCmd, s, handled, rawSql);
         if (handled) {
             return err;
         }

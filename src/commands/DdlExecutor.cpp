@@ -50,6 +50,14 @@ std::string stripQuotes(const std::string& s) {
     return s;
 }
 
+std::string canonicalRoleName(const std::string& raw) {
+    const std::string value = trim(raw);
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        return stripQuotes(value);
+    }
+    return toLower(stripQuotes(value));
+}
+
 // ---- Shell type sidecar catalog (CREATE TYPE name) ----
 // Stored in {db}/.shell_types as one type name per line.
 static std::filesystem::path shellTypesPath(const std::string& dbname) {
@@ -316,6 +324,12 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreateSchema(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
         case SqlCommand::CreateRole:
             return executeCreateRole(dynamic_cast<const CreateRoleStmt*>(stmt.get()), s);
+        case SqlCommand::AlterRole:
+        case SqlCommand::AlterUser:
+            return executeAlterRole(dynamic_cast<const AlterObjectStmt*>(stmt.get()), s);
+        case SqlCommand::DropRole:
+        case SqlCommand::DropUser:
+            return executeDropRole(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::DropSchema:
             return executeDropSchema(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::Comment:
@@ -342,7 +356,7 @@ bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
-                  Session& s, bool& handled) {
+                  Session& s, bool& handled, const std::string& rawSql) {
     handled = false;
     switch (parsedCmd) {
         case dbms::SqlCommand::CreateTable:
@@ -369,6 +383,10 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropCollation:
         case dbms::SqlCommand::CreateRole:
         case dbms::SqlCommand::CreateUser:
+        case dbms::SqlCommand::AlterRole:
+        case dbms::SqlCommand::AlterUser:
+        case dbms::SqlCommand::DropRole:
+        case dbms::SqlCommand::DropUser:
         case dbms::SqlCommand::Comment:
             handled = true;
             break;
@@ -376,8 +394,17 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
             return false;
     }
 
+    // The main dispatcher normalizes SQL before routing. Authentication DDL
+    // must receive the original statement so password literals retain case.
+    const bool authDdl = parsedCmd == dbms::SqlCommand::CreateRole ||
+                         parsedCmd == dbms::SqlCommand::CreateUser ||
+                         parsedCmd == dbms::SqlCommand::AlterRole ||
+                         parsedCmd == dbms::SqlCommand::AlterUser ||
+                         parsedCmd == dbms::SqlCommand::DropRole ||
+                         parsedCmd == dbms::SqlCommand::DropUser;
+    const std::string& parseInput = authDdl && !rawSql.empty() ? rawSql : sql;
     dbms::SQLParser parser;
-    dbms::ParseResult r = parser.parse(sql);
+    dbms::ParseResult r = parser.parse(parseInput);
     if (!r.success || !r.stmt) {
         // A bridge-owned command must fail closed. Falling back after a parse
         // error can execute a different legacy interpretation.
@@ -785,13 +812,18 @@ bool DdlExecutor::executeCreateRole(const CreateRoleStmt* stmt, Session& s) {
         return true;
     }
     if (!checkAdmin(s)) return true;
-    if (roleExists(stmt->roleName)) {
-        std::cout << "ERROR: role \"" << stmt->roleName << "\" already exists" << std::endl;
+    const std::string roleName = canonicalRoleName(stmt->roleName);
+    if (roleName.empty()) {
+        std::cout << "SQL syntax error: role name is required" << std::endl;
+        return true;
+    }
+    if (roleExists(roleName)) {
+        std::cout << "ERROR: role \"" << roleName << "\" already exists" << std::endl;
         return true;
     }
 
     dbms::PgAuthIdRow row;
-    row.rolname = stmt->roleName;
+    row.rolname = roleName;
     row.rolsuper = stmt->superuser;
     row.rolinherit = stmt->inherit;
     row.rolcreaterole = stmt->createrole;
@@ -810,17 +842,19 @@ bool DdlExecutor::executeCreateRole(const CreateRoleStmt* stmt, Session& s) {
 
     for (const auto& membership : stmt->inRole) {
         // IN ROLE means the new role is a member of each existing role.
-        if (grantRoleToUser(membership.first, stmt->roleName) != 0) {
-            dropRole(stmt->roleName);
-            std::cout << "ERROR: role \"" << membership.first << "\" does not exist"
+        const std::string parentRole = canonicalRoleName(membership.first);
+        if (grantRoleToUser(parentRole, roleName) != 0) {
+            dropRole(roleName);
+            std::cout << "ERROR: role \"" << parentRole << "\" does not exist"
                       << std::endl;
             return true;
         }
     }
     for (const auto& membership : stmt->roleMembers) {
-        if (grantRoleToUser(stmt->roleName, membership.first) != 0) {
-            dropRole(stmt->roleName);
-            std::cout << "ERROR: role member \"" << membership.first << "\" does not exist"
+        const std::string member = canonicalRoleName(membership.first);
+        if (grantRoleToUser(roleName, member) != 0) {
+            dropRole(roleName);
+            std::cout << "ERROR: role member \"" << member << "\" does not exist"
                       << std::endl;
             return true;
         }
@@ -828,6 +862,124 @@ bool DdlExecutor::executeCreateRole(const CreateRoleStmt* stmt, Session& s) {
     persistAuthCatalog();
     std::cout << (stmt->isUser ? "CREATE USER" : (stmt->isGroup ? "CREATE GROUP" : "CREATE ROLE"))
               << " succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeAlterRole(const AlterObjectStmt* stmt, Session& s) {
+    if (!stmt || stmt->objectName.empty()) {
+        std::cout << "SQL syntax error: role name is required" << std::endl;
+        return true;
+    }
+    if (!checkAdmin(s)) return true;
+
+    const std::string roleName = canonicalRoleName(stmt->objectName);
+    const auto current = authCatalog().getAuthIdByName(roleName);
+    if (!current) {
+        if (stmt->ifExists) {
+            std::cout << "NOTICE: role \"" << roleName << "\" does not exist, skipping"
+                      << std::endl;
+            return false;
+        }
+        std::cout << "ERROR: role \"" << roleName << "\" does not exist" << std::endl;
+        return true;
+    }
+
+    auto updated = *current;
+    const auto tokens = SQLParser::tokenize(stmt->subCommand);
+    bool changed = false;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const std::string option = toLower(tokens[i]);
+        if (option == "with") continue;
+        if (option == "rename" && i + 2 < tokens.size() &&
+            toLower(tokens[i + 1]) == "to") {
+            const std::string newName = canonicalRoleName(tokens[i + 2]);
+            if (newName.empty() || authCatalog().getAuthIdByName(newName)) {
+                std::cout << "ERROR: role \"" << newName << "\" already exists" << std::endl;
+                return true;
+            }
+            updated.rolname = newName;
+            i += 2;
+            changed = true;
+            continue;
+        }
+        if (option == "superuser") updated.rolsuper = true;
+        else if (option == "nosuperuser") updated.rolsuper = false;
+        else if (option == "createdb") updated.rolcreatedb = true;
+        else if (option == "nocreatedb") updated.rolcreatedb = false;
+        else if (option == "createrole") updated.rolcreaterole = true;
+        else if (option == "nocreaterole") updated.rolcreaterole = false;
+        else if (option == "inherit") updated.rolinherit = true;
+        else if (option == "noinherit") updated.rolinherit = false;
+        else if (option == "login") updated.rolcanlogin = true;
+        else if (option == "nologin") updated.rolcanlogin = false;
+        else if (option == "replication") updated.rolreplication = true;
+        else if (option == "noreplication") updated.rolreplication = false;
+        else if (option == "bypassrls") updated.rolbypassrls = true;
+        else if (option == "nobypassrls") updated.rolbypassrls = false;
+        else if (option == "connection" && i + 2 < tokens.size() &&
+                 toLower(tokens[i + 1]) == "limit") {
+            try {
+                updated.rolconnlimit = std::stoi(tokens[i + 2]);
+            } catch (...) {
+                std::cout << "ERROR: invalid connection limit" << std::endl;
+                return true;
+            }
+            if (updated.rolconnlimit < -1) {
+                std::cout << "ERROR: connection limit must be -1 or greater" << std::endl;
+                return true;
+            }
+            i += 2;
+        } else if (option == "password" && i + 1 < tokens.size()) {
+            const std::string password = stripQuotes(tokens[++i]);
+            updated.rolpassword = toLower(password) == "null"
+                                      ? std::string()
+                                      : (password.rfind("SCRAM-SHA-256$", 0) == 0
+                                             ? password
+                                             : dbms::scram::makeRandomVerifier(password));
+        } else if (option == "valid" && i + 2 < tokens.size() &&
+                   toLower(tokens[i + 1]) == "until") {
+            updated.rolvaliduntil = stripQuotes(tokens[i + 2]);
+            i += 2;
+        } else if (option == "encrypted" || option == "unencrypted") {
+            // SCRAM is the only stored password format in this release.
+        } else {
+            std::cout << "ERROR: unsupported ALTER ROLE option: " << tokens[i] << std::endl;
+            return true;
+        }
+        changed = true;
+    }
+    if (!changed || !authCatalog().updateAuthId(current->oid, updated)) {
+        std::cout << "ERROR: ALTER ROLE failed" << std::endl;
+        return true;
+    }
+    persistAuthCatalog();
+    std::cout << "ALTER ROLE succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeDropRole(const DropStmt* stmt, Session& s) {
+    if (!stmt || stmt->objectNames.empty()) {
+        std::cout << "SQL syntax error: role name is required" << std::endl;
+        return true;
+    }
+    if (!checkAdmin(s)) return true;
+    for (const auto& rawName : stmt->objectNames) {
+        const std::string roleName = canonicalRoleName(rawName);
+        if (!roleExists(roleName)) {
+            if (stmt->ifExists) {
+                std::cout << "NOTICE: role \"" << roleName << "\" does not exist, skipping"
+                          << std::endl;
+                continue;
+            }
+            std::cout << "ERROR: role \"" << roleName << "\" does not exist" << std::endl;
+            return true;
+        }
+        if (!dropRole(roleName)) {
+            std::cout << "ERROR: could not drop role \"" << roleName << "\"" << std::endl;
+            return true;
+        }
+    }
+    std::cout << "DROP ROLE succeeded" << std::endl;
     return false;
 }
 

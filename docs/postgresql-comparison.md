@@ -257,7 +257,7 @@
 | 特性 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
 | pg_hba.conf | ✅ | 🔄 | 首条匹配、hostssl/hostnossl、IPv4/IPv6 CIDR、角色/数据库别名和运行时 SCRAM 已实现；其余认证方法仍缺 |
-| 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、SCRAM、递归成员匹配和有效期检查已接入；完整 ACL、ADMIN OPTION、连接数限制仍缺 |
+| 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、主要角色属性、SCRAM、递归成员匹配、有效期检查和连接数限制已接入；完整 ACL、ADMIN OPTION、owner/依赖语义仍缺 |
 | GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
 | **行级安全 (RLS) 执行** | ✅ | ⚠️ | 已有基础 USING/WITH CHECK 路径，完整 executor 集成和安全边界仍待验收 |

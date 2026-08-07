@@ -154,7 +154,7 @@
 | ✅ 2.4 实现依赖追踪与 `CASCADE/RESTRICT` 精确规则 | 4.2, 1.1.37 | planDrop + dropObject 执行集成；createClass/Type/Proc 自动注册对 namespace 的依赖 |
 | ✅ 2.5 将现有表/列/索引/函数元数据迁移到系统表 | — | `migrateDatabaseToCatalog`；未知类型在迁移时自动创建 pg_type 条目 |
 | ✅ 2.6 实现临时 schema 与会话隔离 | 4.7 | `createTempNamespace` / `dropTempNamespace` / `dropAllTempNamespaces`；修复嵌套锁死锁 |
-| 🔄 2.7 完成 `pg_authid` / `pg_auth_members` 认证目录 | 11.1, 1.1.24 | 认证、用户/角色 DDL 和成员关系已接入 catalog；仍需补全 ACL、递归成员继承和 valid-until 执行 |
+| 🔄 2.7 完成 `pg_authid` / `pg_auth_members` 认证目录 | 11.1, 1.1.24 | 认证、用户/角色 DDL、主要角色属性、SCRAM、valid-until、连接数限制和递归成员匹配已接入 catalog；仍需补全 ACL、admin option、owner/依赖语义 |
 | ✅ 2.8 补全 `COMMENT ON` 对象类型全集 | 1.1.13 | Parser 支持多对象类型；CatalogManager 支持 SCHEMA/TYPE/FUNCTION/PROCEDURE 注释 |
 
 ### Phase 2 已完成内容（截至当前 commit）
@@ -711,7 +711,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | DDL 注册和 USING/WITH CHECK 解析已有，执行器集成仍不完整 |
 | 🔄 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | 语法支持已有，执行时安全边界仍需补齐 |
 | 🔄 7.10 实现 `GRANT`/`REVOKE` ACL item 完整语义 | 1.1.40 | 基础语法和执行路径已有，完整 ACL 传播/校验仍需验证 |
-| 🔄 7.11 实现 `ALTER USER`/`ALTER ROLE` 完整权限位（superuser/createdb/replication/bypassrls） | 1.1.5 | 语法覆盖较广，属性执行和持久化仍需按 PostgreSQL 语义验收 |
+| 🔄 7.11 实现 `ALTER USER`/`ALTER ROLE` 完整权限位（superuser/createdb/replication/bypassrls） | 1.1.5 | 主要属性执行、SCRAM 密码、`VALID UNTIL`、连接数限制和持久化已接入；仍需按 PostgreSQL 语义补全 owner/ACL/依赖校验 |
 | 🔄 7.12 实现 `CREATE ROLE`/`CREATE USER` 完整属性执行、成员继承、admin option | 1.1.24 | 基础属性路径已有，成员继承和 admin option 仍需补齐 |
 
 ---

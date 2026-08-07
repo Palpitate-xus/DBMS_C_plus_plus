@@ -999,6 +999,10 @@ private:
     TableSchema readSchema(std::istream& in, const std::string& tablename) const;
 
     // Page-based heap storage
+    // Protects file-backed cache maps from the background writer/checkpointer
+    // and database lifecycle operations. A recursive mutex is intentional:
+    // cache-owning DDL paths call other cache helpers while holding it.
+    mutable std::recursive_mutex cacheMutex_;
     mutable std::map<std::string, std::unique_ptr<PageAllocator>> pageAllocators_;
     void closeAllPageAllocators();
     void closeDatabaseCaches(const std::string& dbname);

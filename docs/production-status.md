@@ -29,6 +29,6 @@
 
 数据兼容边界：旧 schema、旧 4 KiB 数据页和旧行头不会被读取或迁移。升级前必须导出 SQL，或删除并重建数据目录。
 
-仍不能称为生产就绪的主要原因包括：SSI 目前已验证关系限定的行级写偏差回滚，但 predicate/SIREAD 锁、空范围读和完整 rw-conflict 规则仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding 和结构化执行结果，ACL 与角色继承仍不完整；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
+仍不能称为生产就绪的主要原因包括：SSI 目前已验证关系限定的行级写偏差回滚，但 predicate/SIREAD 锁、空范围读和完整 rw-conflict 规则仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding 和结构化执行结果，ACL、admin option、owner/依赖和完整角色继承语义仍不完整；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。后台 writer/checkpointer 与 DDL/database lifecycle 的文件缓存并发访问已加锁并纳入回归验证。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
 
 验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`、`python3 tests/window_e2e_test.py`、`python3 tests/postgres_protocol_test.py`；Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。

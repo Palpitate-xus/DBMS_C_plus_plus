@@ -1037,6 +1037,7 @@ void StorageEngine::backgroundWorkerLoop() {
 }
 
 void StorageEngine::backgroundWalFlush() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     // walwriter: fsync all WAL managers up to their current write LSN.
     for (auto& kv : walManagers_) {
         WALManager* wal = kv.second.get();
@@ -1047,6 +1048,7 @@ void StorageEngine::backgroundWalFlush() {
 }
 
 void StorageEngine::backgroundBufferFlush() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     // bgwriter: write out dirty pages from each buffer pool.
     for (auto& kv : pageAllocators_) {
         PageAllocator* pa = kv.second.get();
@@ -1057,6 +1059,7 @@ void StorageEngine::backgroundBufferFlush() {
 }
 
 void StorageEngine::backgroundCheckpoint() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - lastBackgroundCheckpoint_).count();
@@ -1364,6 +1367,7 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
 DBStatus StorageEngine::detachPartition(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& partitionName) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
@@ -3205,6 +3209,7 @@ std::vector<std::string> StorageEngine::listTablespaces(const std::string& dbnam
 
 PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
                                                 const std::string& tablename) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = pageAllocators_.find(key);
     if (it != pageAllocators_.end()) {
@@ -3229,10 +3234,12 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
 }
 
 void StorageEngine::closeAllPageAllocators() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     pageAllocators_.clear();
 }
 
 void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string tablePrefix = dbname + "/";
     const std::string toastPrefix = dbname + ":";
 
@@ -3300,6 +3307,7 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
 
 FreeSpaceMap* StorageEngine::getFSM(const std::string& dbname,
                                      const std::string& tablename) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = fsmCache_.find(key);
     if (it != fsmCache_.end()) return it->second.get();
@@ -3312,11 +3320,13 @@ FreeSpaceMap* StorageEngine::getFSM(const std::string& dbname,
 }
 
 void StorageEngine::closeAllFSM() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     fsmCache_.clear();
 }
 
 VisibilityMap* StorageEngine::getVM(const std::string& dbname,
                                      const std::string& tablename) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = vmCache_.find(key);
     if (it != vmCache_.end()) return it->second.get();
@@ -3329,6 +3339,7 @@ VisibilityMap* StorageEngine::getVM(const std::string& dbname,
 }
 
 void StorageEngine::closeAllVM() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     vmCache_.clear();
 }
 
@@ -3509,6 +3520,7 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const Ta
 }
 
 BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = pkIndexCache_.find(key);
     if (it != pkIndexCache_.end()) {
@@ -3525,6 +3537,7 @@ BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& 
 }
 
 void StorageEngine::closeAllIndexes() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     pkIndexCache_.clear();
     secondaryIndexCache_.clear();
 }
@@ -3573,6 +3586,7 @@ std::vector<std::string> StorageEngine::getHashIndexedColumns(const std::string&
 HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& colname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "." + tablename + "." + colname;
     auto it = hashIndexCache_.find(key);
     if (it != hashIndexCache_.end()) return it->second.get();
@@ -3635,6 +3649,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
 DBStatus StorageEngine::dropHashIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
     std::set<std::string> existing;
     {
@@ -3898,6 +3913,7 @@ std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexe
 BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& colname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename + "/" + colname;
     auto it = secondaryIndexCache_.find(key);
     if (it != secondaryIndexCache_.end()) return it->second.get();
@@ -3914,6 +3930,7 @@ BPTree* StorageEngine::getSecondaryIndex(const std::string& dbname,
 BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& indexName) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename + "/C/" + indexName;
     auto it = secondaryIndexCache_.find(key);
     if (it != secondaryIndexCache_.end()) return it->second.get();
@@ -5728,6 +5745,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
 
 DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& tablename,
                                    const std::string& colname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
     std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
@@ -5862,6 +5880,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
 DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
                                             const std::string& tablename,
                                             const std::string& indexName) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     // Verify the composite index actually exists
     auto compIdxs = getCompositeIndexes(dbname, tablename);
@@ -5917,6 +5936,7 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
 
 DBStatus StorageEngine::reindex(const std::string& dbname,
                                  const std::string& tablename) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -6449,6 +6469,7 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
 DBStatus StorageEngine::dropSPGiSTIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto path = spGiSTIndexPath(dbname, tablename, colname);
     if (std::filesystem::exists(path)) std::filesystem::remove(path);
     spGiSTCache_.erase(dbname + "/" + tablename + "/" + colname);
@@ -6466,6 +6487,7 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
                                                   const std::string& colname,
                                                   const std::string& op,
                                                   const std::string& value) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::vector<int64_t> result;
     auto path = spGiSTIndexPath(dbname, tablename, colname);
     if (!std::filesystem::exists(path)) return result;
@@ -6762,6 +6784,7 @@ std::string StorageEngine::getDatabaseCharset(const std::string& dbname) const {
 }
 
 DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
     // Release database-owned caches before removing the directory. This
@@ -7319,6 +7342,7 @@ std::filesystem::path StorageEngine::toastIndexPath(const std::string& dbname,
 
 PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
                                                     const std::string& tablename) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + ":" + tablename;
     auto it = toastPageAllocators_.find(key);
     if (it != toastPageAllocators_.end()) return it->second.get();
@@ -7334,6 +7358,7 @@ PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
 
 BPTree* StorageEngine::getToastIndex(const std::string& dbname,
                                      const std::string& tablename) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + ":" + tablename;
     auto it = toastIndexes_.find(key);
     if (it != toastIndexes_.end()) return it->second.get();
@@ -7345,6 +7370,7 @@ BPTree* StorageEngine::getToastIndex(const std::string& dbname,
 }
 
 void StorageEngine::closeAllToast() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     toastPageAllocators_.clear();
     toastIndexes_.clear();
 }
@@ -7570,6 +7596,7 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
 }
 
 DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl, std::string* error) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) {
         if (error) *error = "database not found";
         return DBStatus::DATABASE_NOT_FOUND;
@@ -7677,6 +7704,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname,
 
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
@@ -7731,6 +7759,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
 
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
                                        const std::string& tablename) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
@@ -7829,6 +7858,7 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
 DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
                                              const std::string& tablename,
                                              const Column& col) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockExclusive(tablename);
@@ -8047,6 +8077,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
 DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockExclusive(tablename);
@@ -8307,6 +8338,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                                                   const std::string& tablename,
                                                   const std::string& colName,
                                                   const Column& newCol) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockExclusive(tablename);
@@ -8419,6 +8451,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
                                                 const std::string& tablename,
                                                 const std::string& oldName,
                                                 const std::string& newName) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (oldName == newName) return DBStatus::OK;
     lockManager_.lockMetadata(tablename);
@@ -8615,6 +8648,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
 DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                                                const std::string& oldName,
                                                const std::string& newName) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
     lockManager_.lockMetadata(oldName);
@@ -9032,6 +9066,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
                                                 const std::string& tablename,
                                                 const std::string& name,
                                                 const std::vector<std::string>& colNames) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     (void)name;  // PK constraint name is not separately persisted
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
@@ -9180,6 +9215,7 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
 DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
                                                   const std::string& tablename,
                                                   const std::string& name) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
@@ -16688,6 +16724,7 @@ std::vector<std::string> StorageEngine::crossJoin(
 // ========================================================================
 
 WALManager* StorageEngine::getWAL(const std::string& dbname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto it = walManagers_.find(dbname);
     if (it != walManagers_.end()) return it->second.get();
     auto wal = std::make_unique<WALManager>(walPath(dbname));
@@ -16705,6 +16742,7 @@ CatalogService& StorageEngine::catalogService() {
 }
 
 void StorageEngine::closeAllWALs() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     walManagers_.clear();
 }
 
@@ -17316,6 +17354,7 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
 // ========================================================================
 size_t StorageEngine::vacuumFull(const std::string& dbname,
                                  const std::string& tablename) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
     lockManager_.lockExclusive(tablename);
 

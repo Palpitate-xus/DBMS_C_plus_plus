@@ -76,6 +76,8 @@
 | 2026-07-01 | Phase 4 Wave 4.26 完成：`CreateTableStmt` 新增 `partitionType` 字段，parser 存储分区类型关键词；`DdlExecutor::executeCreateTable` 桥接 `PARTITION BY` 到 `TableSchema::partitionKey`+`partitionType`；LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY、GENERATED AS IDENTITY、TABLESPACE 全面验证；新增 `tests/create_table_options_test.cpp`。全量套件 PASS=94 FAIL=0。`PARTITION OF` 解析与 `accessMethod` schema 持久化仍待后续。 |
 | 2026-08-07 | 生产化审计后补齐 `CREATE TABLE child PARTITION OF parent`：Parser 保存父表与 bound，DdlExecutor 复用父表 schema、创建子表并调用 `attachPartition`，支持 RANGE/LIST 的 `FOR VALUES` 与 `DEFAULT`，新增错误父表、malformed 语法和真实 SQL 路由回归；`accessMethod` schema 持久化、分区约束证明及 global/local index 仍待后续。 |
 | 2026-08-07 | 生产化格式边界收紧：移除 schema/sequence/trigger 读取器的旧格式回退和 EOF 宽容路径；当前格式的截断或错误 magic 统一拒绝，新增 `schema_format_test.cpp`；CLOG 在数据库目录已删除时丢弃脏缓存，避免迟写或重建已删除目录。 |
+| 2026-08-07 | 认证 DDL 收口：`CREATE/ALTER/DROP ROLE`、`CREATE/ALTER/DROP USER` 统一走 AST/Catalog 执行路径；主分发器仅对认证 DDL 传递原始 SQL，避免密码字面量大小写被归一化；新增角色重命名、登录属性和混合大小写 SCRAM 密码回归。完整 ACL、admin option、owner/依赖语义仍待后续。 |
+| 2026-08-07 | 修复 `StorageEngine` 后台 writer/checkpointer 与 DDL/database lifecycle 并发访问文件缓存 map 的数据竞争；缓存锁覆盖 WAL/page flush、数据库删除、页/索引/TOAST 缓存及主要表 rewrite 路径，手工验证连续 10 次通过。 |
 | 2026-06-28 | Phase 4 Wave 4.30 CREATE TYPE range/base/shell + enum DROP TYPE 修复：`parseCreateType` 支持无 `AS` 子句的 `CREATE TYPE name`（shell type）、`CREATE TYPE name AS RANGE (subtype = ...)` 与 `CREATE TYPE name (INPUT = ..., OUTPUT = ..., ...)`（base type）；`DdlExecutor::executeCreateType` 将 shell 类型写入 `{db}/.shell_types`，range/base 类型写入 `{db}/.udt_meta`（`kind|name|key=value;...`），并统一用 `anyTypeExists` 防止同名重复；`DdlExecutor::executeDropType` 原先只调用 `dropCompositeType`，现改为依次尝试 `dropCompositeType` → `dropEnumType` → 移除 `.udt_meta` → 移除 `.shell_types`。扩展 `tests/create_type_shell_test.cpp` 覆盖 enum DROP、shell、range（含重复创建拒绝）、base、composite DROP 回归。全量套件通过。作为列类型的实际输入/输出/范围语义仍待后续（当前仅注册元数据）。 |
 | 2026-06-29 | Phase 4 Wave 4.21 窗口函数 frame exclusion 与命名窗口：`main.cpp` 的 `WindowFunc` 新增 `frameExclusion` 字段；`parseWindowFunc` 支持解析 `EXCLUDE CURRENT ROW`/`GROUP`/`TIES`/`NO OTHERS`，并在聚合窗口函数执行时按 peers 组（partition + ORDER BY 值相等）排除当前行/当前 peer 组/ties；SELECT 路径新增标准 SQL `WINDOW w AS (...)` 子句解析，支持 `OVER w` 复用，并修复 `WHERE ... WINDOW ... ORDER BY` 子句边界抽取（`tnameEnd`/`condEnd`/`windowEnd` 均按标准顺序停靠）。新增 `tests/window_e2e_test.py`（9 用例：默认 frame、EXCLUDE CURRENT ROW/GROUP/TIES/NO OTHERS 无 ties 与有 ties、命名窗口基础与 EXCLUDE CURRENT ROW）。全量套件 PASS=88 FAIL=0。RANGE/GROUPS frame、ordered-set over 仍待后续。 |
 | 2026-06-29 | Phase 4 Wave 4.20 聚合函数扩展：新增 `bool_and`/`bool_or`/`every` 三处聚合实现（`aggregate()`、`groupAggregate()` computeAgg lambda、第三处 computeAgg lambda），逻辑：跳过 NULL、`val=="true"`/`val=="false"` 逐行累积，全空→NULL；新增 `percentile_cont`/`percentile_disc`（arg 格式 `"fraction,col"`），continuous 线性插值、discrete 取 `ceil(f*n)` 索引值。新增 `tests/aggregate_bool_test.cpp`（7 用例）+ `tests/aggregate_percentile_test.cpp`（7 用例）。全量套件 PASS=88 FAIL=0。ordered-set 聚合（WITHIN GROUP 语法）、假设集聚合、并行聚合仍待后续。 |
@@ -213,7 +215,7 @@
 | 1.1.21 | `CREATE MATERIALIZED VIEW` | CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果（列序映射已修复），支持 `WITH [NO] DATA`，`.mview` 保存 SQL；仍缺唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
 | 1.1.22 | `CREATE POLICY` | 已迁移到 `DdlExecutor`：`parseCreatePolicy` 完整解析 `ON table / FOR cmd / TO roles / USING / WITH CHECK`，`executeCreatePolicy` 校验表存在并写入 RLS policy 文件；仍缺少 `WITH CHECK`/`USING` 在 DML 路径的真实行级强制、role 解析、`ALTER POLICY`、PERMISSIVE/RESTRICTIVE | ⚠️ |
 | 1.1.23 | `CREATE PROCEDURE` | 基本创建已落地，`DdlExecutor` 按分号切分 body 并调用 `createProcedure`；仍缺少语言运行时、事务控制规则、异常、变量、权限属性 | ⚠️ |
-| 1.1.24 | `CREATE ROLE` / `CREATE USER` | 已写入 `pg_authid`，成员关系写入 `pg_auth_members`；仍缺完整属性、递归成员继承和 admin option 执行 | ⚠️ |
+| 1.1.24 | `CREATE ROLE` / `CREATE USER` | 已写入 `pg_authid`，成员关系写入 `pg_auth_members`；主要角色属性、SCRAM 密码、`VALID UNTIL`、连接数限制和递归成员匹配已接入；仍缺完整 ACL、admin option 执行和 owner/依赖语义 | ⚠️ |
 | 1.1.25 | `CREATE SCHEMA` | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义 | ⚠️ |
 | 1.1.26 | `CREATE SEQUENCE` | 有 nextval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics | ⚠️ |
 | 1.1.27 | `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 有扩展统计对象元数据；`dependencies` kind 已落地（`computeFunctionalDependencies` 计算各有序列对函数依赖强度并随 CREATE STATISTICS 输出）；仍缺 `pg_statistic_ext` catalog、表达式统计、ndistinct/mcv 精确算法和 planner 深度使用 | ⚠️ |
@@ -453,7 +455,7 @@
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
-| 11.1 | 用户/角色 catalog | 已统一到 `pg_authid`/`pg_auth_members`；角色属性执行、password expiration、递归 membership 和完整 ACL 仍缺 | ⚠️ |
+| 11.1 | 用户/角色 catalog | 已统一到 `pg_authid`/`pg_auth_members`；主要角色属性、SCRAM、password expiration、连接数限制和递归 membership 已执行；完整 ACL、admin option、owner/依赖语义仍缺 | ⚠️ |
 | 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配、IPv4/IPv6 及角色/数据库匹配和 TLS；缺少 OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
 | 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 核心 startup/auth/query framing 和 SCRAM；缺少完整类型/扩展消息和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |

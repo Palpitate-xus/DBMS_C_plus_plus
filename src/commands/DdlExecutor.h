@@ -10,6 +10,7 @@
 //   - CREATE / DROP SEQUENCE
 //   - CREATE / DROP DOMAIN
 //   - CREATE / DROP TYPE (composite)
+//   - CREATE / ALTER / DROP ROLE, USER, GROUP
 //   - COMMENT ON TABLE / COLUMN
 //
 // 未覆盖命令由 main.cpp 显式回退到尚未迁移的路径；本 executor 自身不会
@@ -60,6 +61,8 @@ private:
     bool executeDropDatabase(const DropStmt* stmt, Session& s);
     bool executeCreateSchema(const CreateObjectStmt* stmt, Session& s);
     bool executeCreateRole(const CreateRoleStmt* stmt, Session& s);
+    bool executeAlterRole(const AlterObjectStmt* stmt, Session& s);
+    bool executeDropRole(const DropStmt* stmt, Session& s);
     bool executeDropSchema(const DropStmt* stmt, Session& s);
     bool executeComment(const CommentStmt* stmt, Session& s);
     bool executeAlterTable(const AlterTableStmt* stmt, Session& s);
@@ -80,6 +83,7 @@ private:
 //   - 返回值：false=成功，true=错误（与 main.cpp::execute() 一致）。
 //   - CTAS (CREATE TABLE ... AS SELECT ...) 由当前 AST executor 处理。
 bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
-                  Session& s, bool& handled);
+                  Session& s, bool& handled,
+                  const std::string& rawSql = {});
 
 } // namespace dbms
