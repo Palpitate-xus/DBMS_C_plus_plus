@@ -111,6 +111,7 @@
 
 ### 网络服务
 - **PostgreSQL TCP 服务器**：`./dbms_main --server PORT` 启动 PostgreSQL protocol 3.0 服务端
+- **扩展查询协议**：支持 Parse/Bind/Execute/Describe/Close/Sync、SCRAM、常用标量及 date/time/timestamp/timestamptz/uuid binary 参数与结果，以及基础 portal `maxRows` 分页；完整 libpq/cursor 语义仍在建设中
 - **TLS 加密**：默认必须提供证书和私钥；证书缺失或 TLS 初始化失败时拒绝启动
 - **开发明文模式**：仅可通过显式 `./dbms_main --server PORT --insecure` 开启，不得用于生产环境
 - **多客户端**：每个连接独立线程，支持并发访问

@@ -26,6 +26,7 @@
 - 角色 DDL 回归：`CREATE/ALTER/DROP ROLE`、`CREATE/ALTER/DROP USER` 统一走 Catalog/AST 路径，混合大小写密码通过真实验证。
 - PostgreSQL 协议 E2E：`python3 tests/postgres_protocol_test.py` 验证 SSLRequest/plaintext 协商、StartupMessage、真实 SCRAM-SHA-256 握手、simple query 和 Parse/Bind/Execute/Sync。
 - 协议扩展查询回归：验证 `ParameterDescription`、文本和 binary `int4` 参数 `$1`、binary `int4` 结果、statement `Describe`、portal/statement `Close` 的真实 Parse/Bind/Execute 生命周期，以及 OID/长度/属性号/表 OID RowDescription 元数据。
+- 协议日期时间/UUID binary 回归：验证 `date`、`time`、秒精度 `timestamp`/`timestamptz` 和 `uuid` 的 binary 参数、binary 结果、OID/格式元数据及单列空格值不被拆分。
 - 协议 portal 分页回归：验证 `Execute maxRows` 分批返回、未耗尽时发送 `PortalSuspended`、耗尽时发送 `CommandComplete`，以及耗尽 portal 再执行不重复返回数据。
 - 协议 ACL 回归：alice 将 `SELECT` 授予 `analyst`，bob 通过角色继承读取表数据；bob 未获得 `INSERT` 时真实协议返回权限错误。
 - 协议错误恢复回归：验证扩展查询错误后的 Bind/Execute 被忽略至 Sync、Sync 后连接可继续查询，以及事务外错误返回 `ReadyForQuery('I')`。

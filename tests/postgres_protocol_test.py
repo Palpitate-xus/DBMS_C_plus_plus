@@ -3,6 +3,7 @@
 
 import hashlib
 import base64
+import datetime
 import hmac
 import os
 import socket
@@ -252,6 +253,64 @@ def extended_query_binary_int_parameter(sock, sql, value):
     assert any(kind == b"C" for kind, _ in messages)
 
 
+def extended_query_binary_parameter(sock, suffix, sql, type_oid, raw, expected):
+    statement_name = ("binary_" + suffix).encode()
+    portal_name = ("binary_portal_" + suffix).encode()
+    parse = (statement_name + b"\0" + sql.encode() + b"\0" +
+             struct.pack("!H", 1) + struct.pack("!I", type_oid))
+    sock.sendall(typed(b"P", parse))
+    kind, body = read_message(sock)
+    assert kind == b"t" and body == struct.pack("!H", 1) + struct.pack("!I", type_oid)
+    kind, _ = read_message(sock)
+    assert kind == b"1"
+
+    bind = (portal_name + b"\0" + statement_name + b"\0" +
+            struct.pack("!H", 1) + struct.pack("!H", 1) +
+            struct.pack("!H", 1) + struct.pack("!i", len(raw)) + raw +
+            struct.pack("!H", 1) + struct.pack("!H", 1))
+    sock.sendall(typed(b"B", bind))
+    kind, _ = read_message(sock)
+    assert kind == b"2"
+    sock.sendall(typed(b"E", portal_name + b"\0" + struct.pack("!I", 0)) + typed(b"S"))
+    messages = read_until_ready(sock)
+    fields = row_description_fields(messages)
+    assert len(fields) == 1 and fields[0][3] == type_oid and fields[0][6] == 1, fields
+    assert data_row_values(messages) == [[expected]], messages
+    assert any(kind == b"C" for kind, _ in messages)
+
+    sock.sendall(typed(b"C", b"P" + portal_name + b"\0") +
+                 typed(b"C", b"S" + statement_name + b"\0") + typed(b"S"))
+    messages = read_until_ready(sock)
+    assert sum(kind == b"3" for kind, _ in messages) == 2, messages
+
+
+def extended_query_temporal_binary_parameters(sock):
+    epoch_date = datetime.date(2000, 1, 1)
+    sample_date = datetime.date(2026, 8, 7)
+    date_days = (sample_date - epoch_date).days
+    epoch_timestamp = datetime.datetime(2000, 1, 1)
+    sample_timestamp = datetime.datetime(2026, 8, 7, 12, 34, 56)
+    timestamp_micros = int((sample_timestamp - epoch_timestamp).total_seconds() * 1000000)
+    time_micros = (12 * 3600 + 34 * 60 + 56) * 1000000
+    uuid_bytes = bytes.fromhex("550e8400e29b41d4a716446655440000")
+
+    extended_query_binary_parameter(
+        sock, "date", "SELECT d FROM protocol_temporal WHERE d = $1", 1082,
+        struct.pack("!i", date_days), struct.pack("!i", date_days))
+    extended_query_binary_parameter(
+        sock, "time", "SELECT tm FROM protocol_temporal WHERE tm = $1", 1083,
+        struct.pack("!q", time_micros), struct.pack("!q", time_micros))
+    extended_query_binary_parameter(
+        sock, "timestamp", "SELECT ts FROM protocol_temporal WHERE ts = $1", 1114,
+        struct.pack("!q", timestamp_micros), struct.pack("!q", timestamp_micros))
+    extended_query_binary_parameter(
+        sock, "timestamptz", "SELECT tz FROM protocol_temporal WHERE tz = $1", 1184,
+        struct.pack("!q", timestamp_micros), struct.pack("!q", timestamp_micros))
+    extended_query_binary_parameter(
+        sock, "uuid", "SELECT u FROM protocol_temporal WHERE u = $1", 2950,
+        uuid_bytes, uuid_bytes)
+
+
 def extended_query_portal_pagination(sock):
     parse = b"paged_stmt\0SELECT id FROM portal_t\0" + struct.pack("!H", 0)
     sock.sendall(typed(b"P", parse))
@@ -358,6 +417,14 @@ def main():
             sock, "INSERT INTO portal_t VALUES (1)"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO portal_t VALUES (3)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_temporal "
+            "(d DATE, tm TIME, ts TIMESTAMP, tz TIMESTAMPTZ, u UUID)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO protocol_temporal VALUES "
+            "('2026-08-07', '12:34:56', '2026-08-07 12:34:56', "
+            "'2026-08-07 12:34:56+00:00', "
+            "'550e8400-e29b-41d4-a716-446655440000')"))
         messages = simple_query(sock, "SELECT id FROM t")
         assert messages[0][0] == b"T"
         assert any(kind == b"D" for kind, _ in messages)
@@ -365,6 +432,7 @@ def main():
         extended_query(sock, "SELECT id FROM t")
         extended_query_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
         extended_query_binary_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
+        extended_query_temporal_binary_parameters(sock)
         extended_query_portal_pagination(sock)
         extended_query_error_recovery(sock)
         error_messages = simple_query(sock, "SELECT * FROM protocol_missing_table")

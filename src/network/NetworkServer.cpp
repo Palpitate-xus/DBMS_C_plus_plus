@@ -8,6 +8,7 @@
 #include "common/scram_sha256.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
+#include "common/DateType.h"
 
 #include <arpa/inet.h>
 #include <cctype>
@@ -291,6 +292,43 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             std::memcpy(&number, &bits, sizeof(number));
             return std::to_string(number);
         }
+        case 1082: {
+            if (!decodeBinaryUnsigned(raw, 4, bits)) break;
+            const int32_t days = static_cast<int32_t>(bits);
+            const Date date = DISCONV(Date(2000, 1, 1).convert() + days);
+            if (date.year == 0) break;
+            return quoteProtocolText(str(date), error);
+        }
+        case 1083: {
+            if (!decodeBinaryUnsigned(raw, 8, bits)) break;
+            const int64_t micros = static_cast<int64_t>(bits);
+            if (micros < 0 || micros % 1000000 != 0 || micros >= 86400LL * 1000000) break;
+            return quoteProtocolText(formatTimeSeconds(static_cast<int32_t>(micros / 1000000)), error);
+        }
+        case 1114: case 1184: {
+            if (!decodeBinaryUnsigned(raw, 8, bits)) break;
+            const int64_t micros = static_cast<int64_t>(bits);
+            if (micros % 1000000 != 0) break;
+            const int64_t epoch = parseTimestampToSeconds("2000-01-01 00:00:00");
+            const __int128 seconds = static_cast<__int128>(epoch) + micros / 1000000;
+            if (seconds < std::numeric_limits<int64_t>::min() ||
+                seconds > std::numeric_limits<int64_t>::max()) break;
+            const std::string formatted = formatTimestampSeconds(static_cast<int64_t>(seconds));
+            if (formatted.empty()) break;
+            return quoteProtocolText(formatted, error);
+        }
+        case 2950: {
+            if (raw.size() != 16) break;
+            static constexpr char hex[] = "0123456789abcdef";
+            std::string uuid;
+            uuid.reserve(36);
+            for (size_t i = 0; i < raw.size(); ++i) {
+                if (i == 4 || i == 6 || i == 8 || i == 10) uuid.push_back('-');
+                uuid.push_back(hex[raw[i] >> 4]);
+                uuid.push_back(hex[raw[i] & 0x0f]);
+            }
+            return quoteProtocolText(uuid, error);
+        }
         case 25: case 1042: case 1043:
             return quoteProtocolText(std::string(raw.begin(), raw.end()), error);
         default:
@@ -487,6 +525,7 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
         case 700: return 4;  // float4
         case 701: return 8;  // float8
         case 1082: return 4; // date
+        case 1083: return 8; // time
         case 1114: case 1184: return 8; // timestamp/timestamptz
         case 2950: return 16; // uuid
         default: return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
@@ -650,7 +689,11 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         } else {
             result.columns = splitProtocolFields(lines.front());
             for (size_t i = 1; i < lines.size(); ++i) {
-                result.rows.push_back(splitProtocolFields(lines[i]));
+                // The legacy executor prints one column as the complete line.
+                // Splitting it on whitespace corrupts timestamp/time-like
+                // values that legitimately contain spaces.
+                if (result.columns.size() == 1) result.rows.push_back({lines[i]});
+                else result.rows.push_back(splitProtocolFields(lines[i]));
             }
         }
         result.columnDescriptions = describeProtocolColumns(result, sql, session);

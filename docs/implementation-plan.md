@@ -11,7 +11,7 @@
 
 协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；完整参数绑定和类型化结果仍列为协议缺口。
 
-协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本及常用类型二进制参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换，Describe/Close 会校验并管理 statement/portal 生命周期，Execute 支持基础 `maxRows` 分批返回与 `PortalSuspended`，常见单表结果填充 catalog/table schema 驱动的 RowDescription 元数据；numeric/日期/UUID/数组等复杂类型的二进制 I/O、复杂表达式的完整类型推导和 holdable/scrollable cursor 等完整 portal 语义仍列为协议缺口。
+协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本及常用类型二进制参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换，date/time/秒精度 timestamp/timestamptz/uuid 也支持 binary 参数与结果，Describe/Close 会校验并管理 statement/portal 生命周期，Execute 支持基础 `maxRows` 分批返回与 `PortalSuspended`，常见单表结果填充 catalog/table schema 驱动的 RowDescription 元数据；numeric/数组等复杂类型的二进制 I/O、完整 RowDescription 类型推导和 holdable/scrollable cursor 等完整 portal 语义仍列为协议缺口。
 
 ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权，且协议回归验证授权读取与未授权写入均走真实网络路径；对象 owner、完整 `GRANT OPTION` 继承/回收以及 schema/database/function ACL 仍列为后续安全缺口。
 
@@ -27,7 +27,7 @@ ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权，
 | 复杂查询执行 | 部分完成 | Volcano 基础算子已验证；复杂子查询、集合操作、窗口和 grouping 扩展仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
-| PostgreSQL wire protocol / SCRAM | 部分完成 | 已有 Startup/SSLRequest/Query/Parse-Bind-Execute/Describe/Close framing、文本及常用类型二进制参数/结果、基础 portal maxRows 分页、catalog SCRAM 和基础 pg_hba 运行时决策；复杂类型 I/O、完整 RowDescription 类型映射、结构化结果、holdable/scrollable portal 和 libpq 全语义仍未完成 |
+| PostgreSQL wire protocol / SCRAM | 部分完成 | 已有 Startup/SSLRequest/Query/Parse-Bind-Execute/Describe/Close framing、文本及常用标量与 date/time/timestamp/uuid 二进制参数/结果、基础 portal maxRows 分页、catalog SCRAM 和基础 pg_hba 运行时决策；numeric/数组等复杂类型 I/O、完整 RowDescription 类型映射、结构化结果、holdable/scrollable portal 和 libpq 全语义仍未完成 |
 | 复制、逻辑解码、PITR、pg_basebackup | 部分完成 | 有 WAL/归档/ReplicationManager 框架，但缺完整端到端故障切换与恢复证明 |
 | 系统目录与监控 | 部分完成 | 核心 catalog 可用；完整 `pg_stat_*`、`pg_locks`、`pg_stat_activity` 尚未完成 |
 | PL/pgSQL、扩展和 FDW | 未完成 | parser/DDL 或 stub 存在，但运行时生态未形成 |
@@ -713,7 +713,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| 🔄 7.1 实现 PostgreSQL wire protocol（Frontend/Backend protocol） | 16.6, 11.3 | 已实现 StartupMessage、SSLRequest、catalog SCRAM、pg_hba 基础决策、Query、文本及常用类型二进制参数 Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页；复杂类型 I/O、完整 RowDescription、扩展消息、holdable/scrollable portal 和结构化执行结果仍缺 |
+| 🔄 7.1 实现 PostgreSQL wire protocol（Frontend/Backend protocol） | 16.6, 11.3 | 已实现 StartupMessage、SSLRequest、catalog SCRAM、pg_hba 基础决策、Query、文本及常用标量与 date/time/timestamp/uuid 二进制参数/结果 Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页；numeric/数组等复杂类型 I/O、完整 RowDescription、扩展消息、holdable/scrollable portal 和结构化执行结果仍缺 |
 | 🔄 7.2 实现 `pg_hba.conf` 解析与匹配 | 11.2 | 已接入网络运行时首条匹配、host/hostssl/hostnossl、reject/trust/password/scram、IPv4/IPv6 CIDR 及角色/数据库组匹配；其余认证方法仍缺 |
 | 🔄 7.3 实现 SCRAM-SHA-256 认证 | 11.2 | 已实现 nonce、salt、PBKDF2、client proof/server signature、catalog 凭据和协议 E2E；仍缺 channel binding 与完整 SASL 语义 |
 | 🔄 7.4 实现 OAuth（PG18）、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 11.2 | 部分方法仅有配置解析或接口骨架，尚无可验收的端到端认证实现 |

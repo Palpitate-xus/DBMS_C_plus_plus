@@ -7,6 +7,8 @@
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
 
+协议当前已通过真实 E2E 覆盖常用标量及 `date`/`time`/`timestamp`/`timestamptz`/`uuid` 的 binary 参数与结果、基础 portal `maxRows` 分页；numeric/数组 binary I/O、亚秒时间精度、holdable/scrollable cursor 和完整 libpq 语义仍属于协议差距。
+
 ---
 
 ## 总览

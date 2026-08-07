@@ -1,6 +1,8 @@
 #include "PostgresProtocol.h"
+#include "common/DateType.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -42,6 +44,50 @@ void appendRawUInt64(std::vector<uint8_t>& output, uint64_t value) {
     for (int shift = 56; shift >= 0; shift -= 8) {
         output.push_back(static_cast<uint8_t>((value >> shift) & 0xff));
     }
+}
+
+bool parseDateDays(const std::string& value, int32_t& days) {
+    Date date(value.c_str());
+    if (date.year == 0) return false;
+    const int64_t offset = date.convert() - Date(2000, 1, 1).convert();
+    if (offset < std::numeric_limits<int32_t>::min() ||
+        offset > std::numeric_limits<int32_t>::max()) return false;
+    days = static_cast<int32_t>(offset);
+    return true;
+}
+
+bool parseTimestampMicros(const std::string& value, int64_t& micros) {
+    const int64_t seconds = parseTimestampToSeconds(value);
+    if (seconds == INT64_MAX || seconds == INT64_MIN) return false;
+    const int64_t epoch = parseTimestampToSeconds("2000-01-01 00:00:00");
+    const __int128 result = (static_cast<__int128>(seconds) - epoch) * 1000000;
+    if (result < std::numeric_limits<int64_t>::min() ||
+        result > std::numeric_limits<int64_t>::max()) return false;
+    micros = static_cast<int64_t>(result);
+    return true;
+}
+
+bool parseUuidBytes(const std::string& value, std::vector<uint8_t>& bytes) {
+    std::string hex;
+    hex.reserve(32);
+    for (char c : value) {
+        if (c == '-') continue;
+        if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+        hex.push_back(c);
+    }
+    if (hex.size() != 32) return false;
+    auto hexValue = [](char c) -> uint8_t {
+        if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return static_cast<uint8_t>(c - 'a' + 10);
+    };
+    bytes.clear();
+    bytes.reserve(16);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        bytes.push_back(static_cast<uint8_t>((hexValue(hex[i]) << 4) |
+                                              hexValue(hex[i + 1])));
+    }
+    return true;
 }
 
 bool encodeBinaryValue(const std::string& value, const PgColumnDescription& column,
@@ -91,6 +137,26 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 appendRawUInt64(encoded, bits);
                 return true;
             }
+            case 1082: {
+                int32_t days = 0;
+                if (!parseDateDays(value, days)) return false;
+                appendRawUInt32(encoded, static_cast<uint32_t>(days));
+                return true;
+            }
+            case 1083: {
+                const int32_t seconds = parseTimeToSeconds(value);
+                if (seconds < 0) return false;
+                appendRawUInt64(encoded, static_cast<uint64_t>(seconds) * 1000000);
+                return true;
+            }
+            case 1114: case 1184: {
+                int64_t micros = 0;
+                if (!parseTimestampMicros(value, micros)) return false;
+                appendRawUInt64(encoded, static_cast<uint64_t>(micros));
+                return true;
+            }
+            case 2950:
+                return parseUuidBytes(value, encoded);
             case 25: case 1042: case 1043:
                 encoded.insert(encoded.end(), value.begin(), value.end());
                 return true;
