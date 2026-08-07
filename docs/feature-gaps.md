@@ -2,12 +2,12 @@
 
 > 生成日期: 2026-08-07
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
-> 本 DBMS 当前状态: 生产化重构进行中，回归基线 PASS=118 FAIL=0（117 个 C++ 测试 + 1 个协议 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
+> 本 DBMS 当前状态: 生产化重构进行中，回归基线 PASS=120 FAIL=0（119 个 C++ 测试 + 1 个协议 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
 
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
 
-协议当前已通过真实 E2E 覆盖常用标量及 `date`/`time`/`timestamp`/`timestamptz`/`uuid` 的 binary 参数与结果、基础 portal `maxRows` 分页；numeric/数组 binary I/O、亚秒时间精度、holdable/scrollable cursor 和完整 libpq 语义仍属于协议差距。
+协议当前已通过真实 E2E 覆盖常用标量、`numeric` 以及 `date`/`time`/`timestamp`/`timestamptz`/`uuid` 的 binary 参数与结果、基础 portal `maxRows` 分页；数组 binary I/O、亚秒时间精度、holdable/scrollable cursor 和完整 libpq 语义仍属于协议差距。
 
 ---
 

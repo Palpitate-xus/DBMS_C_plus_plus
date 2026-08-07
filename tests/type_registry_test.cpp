@@ -1,4 +1,5 @@
 #include "catalog/type_registry.h"
+#include "types/numeric.h"
 #include "interfaces/table_schema.h"
 #include "Config.h"
 #include <cassert>
@@ -66,8 +67,8 @@ static void test_apply_type_mods_numeric() {
     TypeRegistry& reg = TypeRegistry::instance();
     TypeModResult r = reg.applyTypeMods("numeric", {"10", "2"});
     assert(r.ok());
-    assert(r.dsize == 8);
-    assert(!r.isVariableLength);
+    assert(r.dsize == dbms::Numeric::kMaxTextLength);
+    assert(r.isVariableLength);
 
     r = reg.applyTypeMods("decimal", {"5"});
     assert(r.ok());

@@ -1,5 +1,6 @@
 #include "PostgresProtocol.h"
 #include "common/DateType.h"
+#include "PostgresNumeric.h"
 
 #include <algorithm>
 #include <cctype>
@@ -155,6 +156,8 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 appendRawUInt64(encoded, static_cast<uint64_t>(micros));
                 return true;
             }
+            case 1700:
+                return encodePostgresNumeric(value, encoded);
             case 2950:
                 return parseUuidBytes(value, encoded);
             case 25: case 1042: case 1043:

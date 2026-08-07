@@ -1,5 +1,6 @@
 #include "ExecutionPlan.h"
 #include "Config.h"
+#include "types/numeric.h"
 
 #include <algorithm>
 #include <cmath>
@@ -63,7 +64,20 @@ static bool evalCondRaw(const StorageEngine::Condition& cond,
 
     std::string val = StorageEngine::extractColumnValueStatic(rowBuffer, tbl, ci);
     const Column& col = tbl.cols[ci];
-    if (col.dataType == "char" || col.isVariableLength) {
+    if (col.dataType == "numeric") {
+        try {
+            Numeric num = val.empty() ? Numeric(0) : Numeric(val);
+            Numeric cmp(cond.value);
+            if (cond.op == "<"  && !(num < cmp)) return false;
+            if (cond.op == ">"  && !(num > cmp)) return false;
+            if (cond.op == "="  && num != cmp)    return false;
+            if (cond.op == "<=" && (num > cmp))   return false;
+            if (cond.op == ">=" && (num < cmp))   return false;
+            if (cond.op == "!=" && num == cmp)    return false;
+        } catch (...) {
+            return false;
+        }
+    } else if (col.dataType == "char" || col.isVariableLength) {
         if (cond.op == "<"  && !(val <  cond.value)) return false;
         if (cond.op == ">"  && !(val >  cond.value)) return false;
         if (cond.op == "="  && val != cond.value)    return false;

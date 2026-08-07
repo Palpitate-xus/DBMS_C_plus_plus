@@ -58,6 +58,9 @@ public:
     Numeric withPrecision(int maxPrecision, RoundingMode mode = RoundingMode::HalfUp) const;
 
     static constexpr int kMaxPrecision = 1000;
+    // Decimal text storage leaves room for sign, decimal point, and a small
+    // formatting margin while retaining the 1000-digit precision cap.
+    static constexpr int kMaxTextLength = kMaxPrecision + 24;
 
 private:
     bool nan_ = false;

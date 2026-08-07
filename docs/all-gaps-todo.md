@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：回归基线 PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：回归基线 PASS=120 FAIL=0（119 个 C++ 测试 + PostgreSQL 协议 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | numeric 生产化补强：新格式将 `numeric/decimal` 作为可变长精确 decimal 文本保存，不再走 double/fixed-width 路径；共享 PostgreSQL base-10000 numeric binary codec 接入 Bind/Execute；补充 exact storage、wire vector 和 command-tag 回归。numeric typmod 完整舍入/溢出、数组 binary I/O 仍待后续。 |
 | 2026-08-07 | PostgreSQL binary 日期时间/UUID 补强：Bind/Execute 支持 `date`、`time`、秒精度 `timestamp`/`timestamptz` 和 `uuid` 的 PostgreSQL binary 编解码；修复协议单列空格值（timestamp）被 legacy 输出拆分的问题，新增五类真实 binary E2E。numeric/数组及亚秒时间精度仍待后续。 |
 | 2026-08-07 | PostgreSQL portal 分页补强：Execute 支持非负 `maxRows`，portal 只执行一次并保存结果/游标偏移，按批次返回 DataRow，未耗尽时发送 `PortalSuspended`，耗尽时发送 `CommandComplete`；新增两批次协议 E2E。holdable/scrollable cursor、portal 资源生命周期和复杂类型仍待后续。 |
 | 2026-08-07 | PostgreSQL binary 参数/结果补强：Bind/Execute 支持 bool/int2/int4/int8/oid/float4/float8/text/varchar 的 binary 编解码，支持单一或逐列结果格式并新增 int4 binary E2E；numeric/数组等复杂类型仍待后续。 |
@@ -167,7 +168,7 @@
 - 根目录保持干净：所有测试数据自动隔离，不污染项目根目录
 - 修复: 61 个测试文件批量更新 include 和 cleanup 逻辑
 
-历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=118 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=120 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -467,7 +468,7 @@
 |---|------|---------|------|
 | 11.1 | 用户/角色 catalog | 已统一到 `pg_authid`/`pg_auth_members`；主要角色属性、SCRAM、password expiration、连接数限制和递归 membership 已执行；完整 ACL、admin option、owner/依赖语义仍缺 | ⚠️ |
 | 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配、IPv4/IPv6 及角色/数据库匹配和 TLS；缺少 OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
-| 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页、文本及常用标量与 date/time/timestamp/uuid 二进制参数/结果和常见单表 RowDescription 元数据；缺少 numeric/数组等复杂类型 I/O、扩展消息、holdable/scrollable portal 和完整 libpq 语义 | 🔄 |
+| 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果和常见单表 RowDescription 元数据；缺少数组等复杂类型 I/O、扩展消息、holdable/scrollable portal 和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
 | 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
 | 11.6 | RLS | 有 policy 文件和透明条件追加；源码注释显示 `WITH CHECK` 复杂验证被简化允许，缺少 PG executor-integrated RLS | ⚠️ |
@@ -558,7 +559,7 @@
 | 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 | ✅ 已是 redo log：LSN/segment/full-page/redo/timeline/archive + 两趟扫描崩溃恢复（Phase 3.4~3.6）；PITR/复制仍 ❌ |
 | 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 | 🔄 `HeapTupleHeader`(xmin/xmax/ctid) + HOT + CLOG 可见性已实现（Phase 3.7/3.8）；多版本边界/vacuum 回收仍需深化 |
 | 16.5 | **DDL 事务化** — 多处 DDL 隐式提交，与 PG 事务语义不一致 | 数据一致性、回滚、并发 | 高 | 🔄 Wave 0.4 骨架（`DdlTransaction` + `XLOG_CATALOG_*` WAL）；全量移除隐式提交待 Phase 4.39 Wave 5 |
-| 16.6 | **PostgreSQL Wire Protocol** — 核心 framing、扩展查询生命周期、基础 portal `maxRows` 分页、常用标量与 date/time/timestamp/uuid binary I/O 和常见单表结果元数据已接入，完整协议语义未完成 | libpq 兼容性、生态工具 | 高 | 🔄 Phase 7 进行中 |
+| 16.6 | **PostgreSQL Wire Protocol** — 核心 framing、扩展查询生命周期、基础 portal `maxRows` 分页、常用标量、numeric 与 date/time/timestamp/uuid binary I/O 和常见单表结果元数据已接入，完整协议语义未完成 | libpq 兼容性、生态工具 | 高 | 🔄 Phase 7 进行中 |
 | 16.7 | **扩展系统** — 没有插件加载框架、Hook 系统、共享内存扩展 | EXTENSION、FDW、PL、自定义类型 | 极高 | ❌ Phase 10 待办 |
 | 16.8 | **多进程模型** — 项目是多线程 server，PG 是多进程 backend + shared memory | 连接隔离、崩溃恢复、共享内存 | 高 | ❌ Phase 9 待办 |
 | 16.9 | **Buffer Manager** — 缺少 shared buffers、clock sweep、pin/lock、bgwriter、walwriter | I/O 性能、并发、恢复 | 高 | ✅ `BufferPool`(clock sweep + pin/usage) + bgwriter/checkpointer/walwriter 后台线程已实现（Phase 3.3/3.4） |

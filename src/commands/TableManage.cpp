@@ -905,8 +905,9 @@ Column makeDecimalColumn(const std::string& name, bool isNull, int precision, in
     c.dataName = name;
     c.isNull = isNull;
     c.isPrimaryKey = isPK;
+    c.isVariableLength = true;
     c.dataType = "numeric";
-    c.dsize = 8;  // currently stored as double; will migrate to variable-length decimal later
+    c.dsize = Numeric::kMaxTextLength;
     return c;
 }
 
@@ -9883,7 +9884,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     bool condIsNull = cond.value.empty();
     if (valIsNull || condIsNull) return false;
 
-    if (col.dataType == "char" || col.dataType == "uuid" || col.isVariableLength) {
+    if (col.dataType == "char" || col.dataType == "uuid" ||
+        (col.isVariableLength && col.dataType != "numeric")) {
         // Apply the column's collation for equality/comparison operators.
         const std::string& coll = col.collation;
         auto scmp = [&](const std::string& a, const std::string& b) {
@@ -10646,7 +10648,12 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
-        if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") && !val.empty()) {
+        if (col.dataType == "numeric" && !val.empty()) {
+            try { Numeric numeric(val); (void)numeric; } catch (...) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+        } else if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal") && !val.empty()) {
             try { std::stod(val); } catch (...) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;

@@ -3,9 +3,9 @@
 > 生成日期: 2026-08-07（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线: PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
+> 测试基线: PASS=120 FAIL=0（119 个 C++ 测试 + PostgreSQL 协议 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
-协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，numeric/数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
+协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
 ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` 的解析，并验证角色授权可以通过真实 PostgreSQL 协议生效；owner、完整 ACL 对象范围及 `GRANT OPTION` 生命周期仍未达到 PostgreSQL 语义。
 
@@ -54,7 +54,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | DOMAIN | ✅ | ✅ | ✅ |
 | **Pseudo types (record/anyelement/anyarray)** | ✅ | ✅ (注册) | ⚠️ 缺函数重载 |
 | **bytea 存储** | ✅ TOAST | ✅ overflow | ⚠️ 无 TOAST 压缩 |
-| **numeric NaN/Infinity** | ✅ | ⚠️ | 部分 |
+| **numeric NaN/Infinity** | ✅ | ✅ | wire codec 与基础值语义已覆盖，精确 typmod/完整函数族仍有差距 |
 
 ---
 

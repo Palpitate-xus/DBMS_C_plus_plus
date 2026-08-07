@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-07
-> 自动测试套件基线：PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E）；窗口函数 E2E：9/9
+> 自动测试套件基线：PASS=120 FAIL=0（119 个 C++ 测试 + PostgreSQL 协议 E2E）；窗口函数 E2E：9/9
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -24,7 +24,7 @@
 - 网络启动安全边界：无 TLS 证书/私钥时默认拒绝启动；明文仅由显式 `--insecure` 开关启用。
 - 网络连接容量回归：accept 路径原子预留 `maxConnections` 槽位，认证失败和 TLS 握手失败均释放槽位。
 - 角色 DDL 回归：`CREATE/ALTER/DROP ROLE`、`CREATE/ALTER/DROP USER` 统一走 Catalog/AST 路径，混合大小写密码通过真实验证。
-- PostgreSQL 协议 E2E：`python3 tests/postgres_protocol_test.py` 验证 SSLRequest/plaintext 协商、StartupMessage、真实 SCRAM-SHA-256 握手、simple query 和 Parse/Bind/Execute/Sync。
+- PostgreSQL 协议 E2E：`python3 tests/postgres_protocol_test.py` 验证 SSLRequest/plaintext 协商、StartupMessage、真实 SCRAM-SHA-256 握手、simple query 和 Parse/Bind/Execute/Sync，并覆盖 NUMERIC 精确存储、1700 binary 参数/结果与 PostgreSQL INSERT command tag。
 - 协议扩展查询回归：验证 `ParameterDescription`、文本和 binary `int4` 参数 `$1`、binary `int4` 结果、statement `Describe`、portal/statement `Close` 的真实 Parse/Bind/Execute 生命周期，以及 OID/长度/属性号/表 OID RowDescription 元数据。
 - 协议日期时间/UUID binary 回归：验证 `date`、`time`、秒精度 `timestamp`/`timestamptz` 和 `uuid` 的 binary 参数、binary 结果、OID/格式元数据及单列空格值不被拆分。
 - 协议 portal 分页回归：验证 `Execute maxRows` 分批返回、未耗尽时发送 `PortalSuspended`、耗尽时发送 `CommandComplete`，以及耗尽 portal 再执行不重复返回数据。
@@ -865,7 +865,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景、117 个独立 C++ 回归测试和 PostgreSQL 协议 E2E 均通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景、119 个独立 C++ 回归测试和 PostgreSQL 协议 E2E 均通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）

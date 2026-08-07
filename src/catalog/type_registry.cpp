@@ -1,4 +1,5 @@
 #include "type_registry.h"
+#include "types/numeric.h"
 
 #include <cctype>
 #include <cstdint>
@@ -109,8 +110,8 @@ TypeModResult TypeRegistry::applyTypeMods(const std::string& canonicalName,
                 return res;
             }
             res.typmod = static_cast<int32_t>((precision + 4) << 16);
-            res.dsize = 8; // 内部仍按 double 存储，后续改为变长 decimal
-            res.isVariableLength = false;
+            res.dsize = Numeric::kMaxTextLength;
+            res.isVariableLength = true;
         } else if (c == "timestamp" || c == "timestamptz" || c == "time" || c == "timetz") {
             int64_t prec = n;
             if (prec < 0 || prec > 6) {
@@ -157,8 +158,8 @@ TypeModResult TypeRegistry::applyTypeMods(const std::string& canonicalName,
             return res;
         }
         res.typmod = static_cast<int32_t>(((precision + 4) << 16) + (scale & 0xFFFF));
-        res.dsize = 8;
-        res.isVariableLength = false;
+        res.dsize = Numeric::kMaxTextLength;
+        res.isVariableLength = true;
         return res;
     }
 
@@ -294,8 +295,9 @@ void TypeRegistry::registerNumericTypes() {
     registerType({"double precision", 8, 'd', 'p', TypeCategory::Numeric, false, -1, 0, true},
                  {"double", "float8"});
 
-    registerType({"numeric", 8, 'd', 'p', TypeCategory::Numeric, true, -1, 0, false},
-                 {"decimal"}); // 当前内部用 double，后续改为变长 decimal
+    registerType({"numeric", -1, 'd', 'p', TypeCategory::Numeric, true, -1,
+                  Numeric::kMaxTextLength, false},
+                 {"decimal"});
 
     // SERIAL 是宏，不是真正类型；注册为别名以便解析时识别
     registerType({"smallserial", 2, 's', 'p', TypeCategory::Numeric, false, -1, 0, false},

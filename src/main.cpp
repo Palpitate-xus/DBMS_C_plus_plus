@@ -5292,7 +5292,8 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
             } else if (ctype == "cidr") {
                 col = makeCidrColumn(cname, isNull, isPK);
                 colCreated = true;
-            } else if (ctype.substr(0, 7) == "decimal") {
+            } else if (ctype.substr(0, 7) == "decimal" ||
+                       ctype.substr(0, 7) == "numeric") {
                 int prec = 10, sc = 0;
                 size_t lp = ctype.find('(');
                 size_t rp = ctype.find(')');

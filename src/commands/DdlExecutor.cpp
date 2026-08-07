@@ -246,7 +246,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
         attr.attnum = static_cast<int16_t>(i + 1);
         attr.attname = col.dataName;
         attr.atttypid = ensureTypeInCatalog(cat, nspOid, col);
-        attr.attlen = static_cast<int16_t>(col.dsize);
+        attr.attlen = col.isVariableLength ? -1 : static_cast<int16_t>(col.dsize);
         attr.atttypmod = -1;
         attr.attnotnull = !col.isNull;
         attr.atthasdef = !col.defaultValue.empty();

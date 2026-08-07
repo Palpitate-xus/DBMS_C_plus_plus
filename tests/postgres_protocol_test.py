@@ -167,7 +167,7 @@ def row_description_fields(messages):
                 "!IHI", body[offset:offset + 10])
             offset += 10
             type_size, type_modifier, format_code = struct.unpack(
-                "!HiH", body[offset:offset + 8])
+                "!hiH", body[offset:offset + 8])
             offset += 8
             fields.append((name, table_oid, attribute_number, type_oid,
                            type_size, type_modifier, format_code))
@@ -311,6 +311,13 @@ def extended_query_temporal_binary_parameters(sock):
         uuid_bytes, uuid_bytes)
 
 
+def extended_query_numeric_binary_parameter(sock):
+    numeric_raw = struct.pack("!hhhhHHH", 3, 1, 0, 2, 1, 2345, 6700)
+    extended_query_binary_parameter(
+        sock, "numeric", "SELECT n FROM protocol_numeric WHERE n = $1", 1700,
+        numeric_raw, numeric_raw)
+
+
 def extended_query_portal_pagination(sock):
     parse = b"paged_stmt\0SELECT id FROM portal_t\0" + struct.pack("!H", 0)
     sock.sendall(typed(b"P", parse))
@@ -425,6 +432,23 @@ def main():
             "('2026-08-07', '12:34:56', '2026-08-07 12:34:56', "
             "'2026-08-07 12:34:56+00:00', "
             "'550e8400-e29b-41d4-a716-446655440000')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_numeric (n NUMERIC)"))
+        numeric_description = row_description_fields(
+            simple_query(sock, "SELECT n FROM protocol_numeric"))
+        assert numeric_description[0][3] == 1700, numeric_description
+        assert numeric_description[0][4] == -1, numeric_description
+        numeric_insert_messages = simple_query(
+            sock, "INSERT INTO protocol_numeric VALUES ('12345.67')")
+        assert any(kind == b"C" for kind, _ in numeric_insert_messages), numeric_insert_messages
+        assert any(kind == b"C" and body == b"INSERT 0 1\0"
+                   for kind, body in numeric_insert_messages), numeric_insert_messages
+        numeric_messages = simple_query(sock, "SELECT n FROM protocol_numeric")
+        numeric_rows = data_row_values(numeric_messages)
+        assert numeric_rows == [[b"12345.67"]], numeric_messages
+        numeric_rows = data_row_values(simple_query(
+            sock, "SELECT n FROM protocol_numeric WHERE n = 12345.67"))
+        assert numeric_rows == [[b"12345.67"]], numeric_rows
         messages = simple_query(sock, "SELECT id FROM t")
         assert messages[0][0] == b"T"
         assert any(kind == b"D" for kind, _ in messages)
@@ -433,6 +457,7 @@ def main():
         extended_query_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
         extended_query_binary_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
         extended_query_temporal_binary_parameters(sock)
+        extended_query_numeric_binary_parameter(sock)
         extended_query_portal_pagination(sock)
         extended_query_error_recovery(sock)
         error_messages = simple_query(sock, "SELECT * FROM protocol_missing_table")

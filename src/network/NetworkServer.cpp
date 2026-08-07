@@ -9,7 +9,9 @@
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "common/DateType.h"
+#include "PostgresNumeric.h"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
 #include <chrono>
@@ -317,6 +319,11 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             if (formatted.empty()) break;
             return quoteProtocolText(formatted, error);
         }
+        case 1700: {
+            std::string numeric;
+            if (!decodePostgresNumeric(raw, numeric)) break;
+            return quoteProtocolText(numeric, error);
+        }
         case 2950: {
             if (raw.size() != 16) break;
             static constexpr char hex[] = "0123456789abcdef";
@@ -527,6 +534,7 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
         case 1082: return 4; // date
         case 1083: return 8; // time
         case 1114: case 1184: return 8; // timestamp/timestamptz
+        case 1700: return -1; // numeric
         case 2950: return 16; // uuid
         default: return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
     }
@@ -594,6 +602,22 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (keyword == "insert") {
         for (const auto& line : lines) {
             if (line.rfind("INSERT ", 0) == 0) return line;
+
+            // The legacy executor reports successful VALUES/SELECT inserts as
+            // "N row(s) inserted". Normalize that output to PostgreSQL's
+            // command tag so simple-query clients observe the real count.
+            for (const std::string suffix : {" row(s) inserted", " rows inserted",
+                                              " row(s) replaced"}) {
+                if (line.size() <= suffix.size() ||
+                    line.compare(line.size() - suffix.size(), suffix.size(), suffix) != 0) {
+                    continue;
+                }
+                const std::string count = line.substr(0, line.size() - suffix.size());
+                if (!count.empty() && std::all_of(count.begin(), count.end(),
+                                                  [](unsigned char c) { return std::isdigit(c); })) {
+                    return "INSERT 0 " + count;
+                }
+            }
         }
         return "INSERT 0 0";
     }
