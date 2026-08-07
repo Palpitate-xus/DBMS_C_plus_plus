@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前回归基线为 PASS=114 FAIL=0。
+> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前回归基线为 PASS=115 FAIL=0。
 
 ### 当前代码路径审计覆盖层
 
@@ -129,6 +129,7 @@
   - ✅ pg_authid / pg_auth_members（CatalogManager CRUD + CSV 持久化）
   - ✅ pg_description（COMMENT ON：setDescription / getDescription / removeDescription）
 - **存储引擎 / heap storage（当前重构状态）**：
+  - ✅ schema/sequence/trigger 读取只接受当前格式；旧格式回退、EOF 宽容解析已删除，截断或错误 magic 通过 `schema_format_test.cpp` 验证为 fail-closed。
   - ✅ 删除未接入的 ClusterLayout 和旧 Page（4KB）实现，避免并行存储架构继续漂移
   - ✅ 数据页统一为 PgPage（8KB）+ PageWrapper v2；旧页格式不读取、不迁移
   - ✅ 数据库/表空间路径管理、关系文件路径（含 fork：main/fsm/vm/init）
@@ -615,7 +616,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
   - ✅ LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY 已有 DdlExecutor 支持并验证。
   - ✅ GENERATED ALWAYS/BY DEFAULT AS IDENTITY → `isAutoIncrement` 映射验证。
   - ✅ TABLESPACE 存储到 schema 验证。
-  - ✅ 新增 `tests/create_table_options_test.cpp`（10 个测试路径），全量套件 PASS=114 FAIL=0。
+  - ✅ 新增 `tests/create_table_options_test.cpp`（10 个测试路径），全量套件 PASS=115 FAIL=0。
 - 🔄 仍待后续：`accessMethod` schema 持久化、分区约束证明和完整 global/local index 语义。
 - **Wave 4 仍进行中**：CREATE TYPE（range/base/shell）、聚合/窗口函数完整集等。
 

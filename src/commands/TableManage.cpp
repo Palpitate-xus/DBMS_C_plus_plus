@@ -5187,28 +5187,27 @@ void StorageEngine::writeTrigger(std::ostream& out, const Trigger& trg) const {
 
 StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
     Trigger trg;
-    auto readStr = [&](std::string& s) {
+    auto readStr = [&](std::string& s) -> bool {
         size_t n = 0;
         in.read(reinterpret_cast<char*>(&n), sizeof(size_t));
-        if (!in || n > 100000) return;
+        if (!in || n > 100000) return false;
         s.resize(n);
         in.read(s.data(), static_cast<std::streamsize>(n));
+        return static_cast<bool>(in);
     };
-    readStr(trg.name);
-    readStr(trg.timing);
-    readStr(trg.event);
-    readStr(trg.tableName);
-    readStr(trg.action);
-    // Backward compatibility: whenCondition may not exist in old files
-    readStr(trg.whenCondition);
-    // Backward compatibility: forEachRow flag may not exist in old files
-    char forEachRow = 1;
+    if (!readStr(trg.name) || !readStr(trg.timing) || !readStr(trg.event) ||
+        !readStr(trg.tableName) || !readStr(trg.action) ||
+        !readStr(trg.whenCondition)) {
+        return {};
+    }
+    char forEachRow = 0;
     in.read(&forEachRow, sizeof(char));
-    if (in) trg.forEachRow = (forEachRow != 0);
-    // Backward compatibility: enabled flag may not exist in old files
-    char enabled = 1;
+    if (!in) return {};
+    trg.forEachRow = (forEachRow != 0);
+    char enabled = 0;
     in.read(&enabled, sizeof(char));
-    if (in) trg.enabled = (enabled != 0);
+    if (!in) return {};
+    trg.enabled = (enabled != 0);
     return trg;
 }
 
@@ -6953,22 +6952,16 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     tbl.tablename = tablename;
     int32_t firstInt = 0;
     in.read(reinterpret_cast<char*>(&firstInt), 4);
-    if (!in) return tbl;
+    if (!in) return {};
 
     if (firstInt != SCHEMA_FORMAT_VERSION) {
         std::cerr << "[catalog] unsupported schema format for table " << tablename
                   << "; recreate the database with the current binary" << std::endl;
-        return tbl;
+        return {};
     }
-    constexpr bool hasVersionHeader = true;
-    constexpr bool hasArray = true;
-    constexpr bool hasOnUpdate = true;
-    constexpr bool hasFormatVersion = true;
-    constexpr bool hasGeneratedKind = true;
-    constexpr bool hasCheckDeferrability = true;
     int32_t len = 0;
     in.read(reinterpret_cast<char*>(&len), 4);
-    if (len < 0 || len > static_cast<int32_t>(MAX_COLUMNS)) return tbl;
+    if (!in || len < 0 || len > static_cast<int32_t>(MAX_COLUMNS)) return {};
     tbl.len = static_cast<size_t>(len);
     for (size_t i = 0; i < tbl.len; ++i) {
         uint8_t flags = 0;
@@ -6997,14 +6990,12 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 in.read(checkExpr.data(), checkLen);
                 tbl.cols[i].checkExpr = checkExpr;
             }
-            if (hasCheckDeferrability) {
-                tbl.cols[i].checkConstraintName = readFixedString(in, MAX_COL_NAME_LEN);
-                uint8_t deferFlags = 0;
-                in.read(reinterpret_cast<char*>(&deferFlags), 1);
-                if (in) {
-                    tbl.cols[i].deferrable = (deferFlags & 1) != 0;
-                    tbl.cols[i].initiallyDeferred = (deferFlags & 2) != 0;
-                }
+            tbl.cols[i].checkConstraintName = readFixedString(in, MAX_COL_NAME_LEN);
+            uint8_t deferFlags = 0;
+            in.read(reinterpret_cast<char*>(&deferFlags), 1);
+            if (in) {
+                tbl.cols[i].deferrable = (deferFlags & 1) != 0;
+                tbl.cols[i].initiallyDeferred = (deferFlags & 2) != 0;
             }
         }
         if (hasGenerated) {
@@ -7015,13 +7006,9 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 in.read(genExpr.data(), genLen);
                 tbl.cols[i].generatedExpr = genExpr;
             }
-            if (hasGeneratedKind) {
-                uint8_t genKind = 's';
-                in.read(reinterpret_cast<char*>(&genKind), 1);
-                if (in) tbl.cols[i].generatedKind = static_cast<char>(genKind);
-            } else {
-                tbl.cols[i].generatedKind = 's';
-            }
+            uint8_t genKind = 's';
+            in.read(reinterpret_cast<char*>(&genKind), 1);
+            if (in) tbl.cols[i].generatedKind = static_cast<char>(genKind);
         }
         // Read enum values.
         uint16_t enumCount = 0;
@@ -7032,52 +7019,36 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 if (!ev.empty()) tbl.cols[i].enumValues.push_back(ev);
             }
         }
-        // Read array flag (new in version 2)
-        if (hasArray) {
-            uint8_t arrFlag = 0;
-            in.read(reinterpret_cast<char*>(&arrFlag), 1);
-            if (in) tbl.cols[i].isArray = (arrFlag != 0);
-        }
+        uint8_t arrFlag = 0;
+        in.read(reinterpret_cast<char*>(&arrFlag), 1);
+        if (in) tbl.cols[i].isArray = (arrFlag != 0);
     }
     // Read foreign keys
     int32_t fkLen = 0;
     in.read(reinterpret_cast<char*>(&fkLen), 4);
-    if (in && fkLen > 0 && fkLen <= static_cast<int32_t>(MAX_COLUMNS)) {
+    if (!in || fkLen < 0 || fkLen > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (fkLen > 0) {
         tbl.fkLen = static_cast<size_t>(fkLen);
         for (size_t i = 0; i < tbl.fkLen; ++i) {
-            if (hasVersionHeader) {
-                int32_t numCols = 0;
-                in.read(reinterpret_cast<char*>(&numCols), 4);
-                if (!in || numCols <= 0 || numCols > static_cast<int32_t>(MAX_COLUMNS)) break;
-                tbl.fks[i].colNames.reserve(numCols);
-                tbl.fks[i].refCols.reserve(numCols);
-                for (int32_t ci = 0; ci < numCols; ++ci) {
-                    tbl.fks[i].colNames.push_back(readFixedString(in, MAX_COL_NAME_LEN));
-                    tbl.fks[i].refCols.push_back(readFixedString(in, MAX_COL_NAME_LEN));
-                }
-                tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
-                tbl.fks[i].onDelete = readFixedString(in, 10);
-                if (hasOnUpdate) {
-                    tbl.fks[i].onUpdate = readFixedString(in, 10);
-                } else {
-                    tbl.fks[i].onUpdate = "restrict";
-                }
-            } else {
-                // Legacy single-column format
-                std::string colName = readFixedString(in, MAX_COL_NAME_LEN);
-                tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
-                std::string refCol = readFixedString(in, MAX_COL_NAME_LEN);
-                tbl.fks[i].onDelete = readFixedString(in, 10);
-                tbl.fks[i].onUpdate = "restrict";
-                tbl.fks[i].colNames.push_back(colName);
-                tbl.fks[i].refCols.push_back(refCol);
+            int32_t numCols = 0;
+            in.read(reinterpret_cast<char*>(&numCols), 4);
+            if (!in || numCols <= 0 || numCols > static_cast<int32_t>(MAX_COLUMNS)) return {};
+            tbl.fks[i].colNames.reserve(numCols);
+            tbl.fks[i].refCols.reserve(numCols);
+            for (int32_t ci = 0; ci < numCols; ++ci) {
+                tbl.fks[i].colNames.push_back(readFixedString(in, MAX_COL_NAME_LEN));
+                tbl.fks[i].refCols.push_back(readFixedString(in, MAX_COL_NAME_LEN));
             }
+            tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
+            tbl.fks[i].onDelete = readFixedString(in, 10);
+            tbl.fks[i].onUpdate = readFixedString(in, 10);
         }
     }
-    // Read composite primary key column indices (new format, ignore if EOF)
+    // Read composite primary key column indices.
     int32_t pkCount = 0;
     in.read(reinterpret_cast<char*>(&pkCount), 4);
-    if (in && pkCount > 0 && pkCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+    if (!in || pkCount < 0 || pkCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (pkCount > 0) {
         tbl.pkColIndices.reserve(pkCount);
         for (int32_t i = 0; i < pkCount; ++i) {
             int32_t cidx = 0;
@@ -7087,10 +7058,11 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
-    // Read composite UNIQUE constraints (new format, ignore if EOF)
+    // Read composite UNIQUE constraints.
     int32_t ucCount = 0;
     in.read(reinterpret_cast<char*>(&ucCount), 4);
-    if (in && ucCount > 0 && ucCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+    if (!in || ucCount < 0 || ucCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (ucCount > 0) {
         tbl.uniqueConstraints.reserve(ucCount);
         for (int32_t i = 0; i < ucCount; ++i) {
             int32_t cc = 0;
@@ -7108,16 +7080,19 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             if (!constraint.empty()) tbl.uniqueConstraints.push_back(std::move(constraint));
         }
     }
-    // Read partitioning info (new format, ignore if EOF for backward compatibility)
+    // Read partitioning info.
     int32_t ptype = 0;
     in.read(reinterpret_cast<char*>(&ptype), 4);
-    if (in) {
+    if (!in || ptype < static_cast<int32_t>(TableSchema::PartitionType::None) ||
+        ptype > static_cast<int32_t>(TableSchema::PartitionType::Hash)) return {};
+    {
         tbl.partitionType = static_cast<TableSchema::PartitionType>(ptype);
         tbl.partitionKey = readFixedString(in, MAX_COL_NAME_LEN);
         if (tbl.partitionType == TableSchema::PartitionType::Range) {
             int32_t rpCount = 0;
             in.read(reinterpret_cast<char*>(&rpCount), 4);
-            if (in && rpCount > 0) {
+            if (!in || rpCount < 0 || rpCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+            if (rpCount > 0) {
                 for (int32_t i = 0; i < rpCount; ++i) {
                     std::string pname = readFixedString(in, MAX_TABLE_NAME_LEN);
                     std::string bound = readFixedString(in, MAX_COL_NAME_LEN);
@@ -7127,11 +7102,13 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         } else if (tbl.partitionType == TableSchema::PartitionType::List) {
             int32_t lpCount = 0;
             in.read(reinterpret_cast<char*>(&lpCount), 4);
-            if (in && lpCount > 0) {
+            if (!in || lpCount < 0 || lpCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+            if (lpCount > 0) {
                 for (int32_t i = 0; i < lpCount; ++i) {
                     std::string pname = readFixedString(in, MAX_TABLE_NAME_LEN);
                     int32_t vcount = 0;
                     in.read(reinterpret_cast<char*>(&vcount), 4);
+                    if (!in || vcount < 0 || vcount > static_cast<int32_t>(MAX_COLUMNS)) return {};
                     std::vector<std::string> values;
                     for (int32_t j = 0; j < vcount; ++j) {
                         values.push_back(readFixedString(in, MAX_COL_NAME_LEN));
@@ -7142,29 +7119,34 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
             int32_t hcount = 0;
             in.read(reinterpret_cast<char*>(&hcount), 4);
-            if (in && hcount > 0) tbl.hashPartitions = static_cast<size_t>(hcount);
+            if (!in || hcount < 0 || hcount > static_cast<int32_t>(MAX_COLUMNS * MAX_COLUMNS)) return {};
+            if (hcount > 0) tbl.hashPartitions = static_cast<size_t>(hcount);
         }
     }
 
-    // Read subpartitioning info (new, ignore if EOF for backward compatibility)
+    // Read subpartitioning info.
     int32_t sptype = 0;
     in.read(reinterpret_cast<char*>(&sptype), 4);
-    if (in) {
+    if (!in || sptype < static_cast<int32_t>(TableSchema::PartitionType::None) ||
+        sptype > static_cast<int32_t>(TableSchema::PartitionType::Hash)) return {};
+    {
         tbl.subPartitionType = static_cast<TableSchema::PartitionType>(sptype);
         if (tbl.subPartitionType != TableSchema::PartitionType::None) {
             tbl.subPartitionKey = readFixedString(in, MAX_COL_NAME_LEN);
             if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
                 int32_t shcount = 0;
                 in.read(reinterpret_cast<char*>(&shcount), 4);
-                if (in && shcount > 0) tbl.subHashPartitions = static_cast<size_t>(shcount);
+                if (!in || shcount < 0 || shcount > static_cast<int32_t>(MAX_COLUMNS * MAX_COLUMNS)) return {};
+                if (shcount > 0) tbl.subHashPartitions = static_cast<size_t>(shcount);
             }
         }
     }
 
-    // Read named CHECK constraints (new, ignore if EOF for backward compatibility)
+    // Read named CHECK constraints.
     int32_t namedCheckCount = 0;
     in.read(reinterpret_cast<char*>(&namedCheckCount), 4);
-    if (in && namedCheckCount > 0 && namedCheckCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+    if (!in || namedCheckCount < 0 || namedCheckCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (namedCheckCount > 0) {
         for (int32_t i = 0; i < namedCheckCount; ++i) {
             int32_t cidx = 0;
             in.read(reinterpret_cast<char*>(&cidx), 4);
@@ -7176,20 +7158,22 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         }
     }
 
-    // Read named UNIQUE constraints (new, ignore if EOF)
+    // Read named UNIQUE constraints.
     int32_t namedUniqueCount = 0;
     in.read(reinterpret_cast<char*>(&namedUniqueCount), 4);
-    if (in && namedUniqueCount >= 0 && namedUniqueCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+    if (!in || namedUniqueCount < 0 || namedUniqueCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    {
         tbl.uniqueConstraintNames.reserve(namedUniqueCount);
         for (int32_t i = 0; i < namedUniqueCount; ++i) {
             tbl.uniqueConstraintNames.push_back(readFixedString(in, MAX_TABLE_NAME_LEN));
         }
     }
 
-    // Read named FK constraints (new, ignore if EOF)
+    // Read named FK constraints.
     int32_t namedFkCount = 0;
     in.read(reinterpret_cast<char*>(&namedFkCount), 4);
-    if (in && namedFkCount > 0 && namedFkCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+    if (!in || namedFkCount < 0 || namedFkCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (namedFkCount > 0) {
         for (int32_t i = 0; i < namedFkCount; ++i) {
             int32_t fidx = 0;
             in.read(reinterpret_cast<char*>(&fidx), 4);
@@ -7203,35 +7187,36 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // UNLOGGED flag.
     uint8_t unloggedFlag = 0;
     in.read(reinterpret_cast<char*>(&unloggedFlag), 1);
-    if (in) tbl.isUnlogged = (unloggedFlag != 0);
+    if (!in) return {};
+    tbl.isUnlogged = (unloggedFlag != 0);
     // Row-Level Security flags.
     uint8_t rlsFlags = 0;
     in.read(reinterpret_cast<char*>(&rlsFlags), 1);
-    if (in) {
-        tbl.rowLevelSecurity = (rlsFlags & 1) != 0;
-        tbl.forceRowLevelSecurity = (rlsFlags & 2) != 0;
-    }
+    if (!in) return {};
+    tbl.rowLevelSecurity = (rlsFlags & 1) != 0;
+    tbl.forceRowLevelSecurity = (rlsFlags & 2) != 0;
     // Default partition name.
     std::string dpName = readFixedString(in, MAX_TABLE_NAME_LEN);
-    if (in) tbl.defaultPartitionName = dpName;
-    // Storage format version (new in version 4)
-    if (hasFormatVersion) {
-        uint32_t fv = 0;
-        in.read(reinterpret_cast<char*>(&fv), 4);
-        if (in) tbl.formatVersion = fv;
-        // Tablespace.
-        uint16_t tsLen = 0;
-        in.read(reinterpret_cast<char*>(&tsLen), 2);
-        if (in && tsLen > 0 && tsLen <= MAX_TABLE_NAME_LEN) {
-            std::string ts(tsLen, '\0');
-            in.read(ts.data(), tsLen);
-            if (in) tbl.tablespace = std::move(ts);
-        }
+    if (!in) return {};
+    tbl.defaultPartitionName = dpName;
+    // Storage format version and tablespace.
+    uint32_t fv = 0;
+    in.read(reinterpret_cast<char*>(&fv), 4);
+    if (!in || fv != DATA_FILE_FORMAT_VERSION) return {};
+    tbl.formatVersion = fv;
+    uint16_t tsLen = 0;
+    in.read(reinterpret_cast<char*>(&tsLen), 2);
+    if (!in || tsLen > MAX_TABLE_NAME_LEN) return {};
+    if (tsLen > 0) {
+        std::string ts(tsLen, '\0');
+        in.read(ts.data(), tsLen);
+        if (in) tbl.tablespace = std::move(ts);
     }
     // Column collations.
     int32_t collCount = 0;
     in.read(reinterpret_cast<char*>(&collCount), 4);
-    if (in && collCount > 0 && collCount <= static_cast<int32_t>(MAX_COLUMNS)) {
+    if (!in || collCount < 0 || collCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (collCount > 0) {
         for (int32_t i = 0; i < collCount; ++i) {
             int32_t cidx = 0;
             in.read(reinterpret_cast<char*>(&cidx), 4);
@@ -7248,6 +7233,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         }
     }
 
+    if (!in) return {};
     return tbl;
 }
 
@@ -9170,12 +9156,15 @@ static bool readSequenceFile(const std::filesystem::path& path,
     if (!ifs) return false;
     int64_t start = 1, increment = 1;
     if (!(ifs >> start >> increment)) return false;
-    std::streampos after2 = ifs.tellg();
     int64_t minV, maxV, cache, cycleFlag, nextV, lastAlloc;
     if (ifs >> minV >> maxV >> cache >> cycleFlag >> nextV >> lastAlloc) {
         std::string ownedTable, ownedCol;
-        ifs >> ownedTable;
-        ifs >> ownedCol;
+        if (ifs >> ownedTable) {
+            if (!(ifs >> ownedCol)) return false;
+        } else if (!ifs.eof()) {
+            return false;
+        }
+        ifs.clear();
         info = dbms::SequenceInfo{};
         info.start = start;
         info.increment = increment;
@@ -9188,15 +9177,7 @@ static bool readSequenceFile(const std::filesystem::path& path,
         nextValue = nextV;
         lastAllocated = lastAlloc;
     } else {
-        // Backward compatibility: old format was "<current> <increment>"
-        ifs.clear();
-        ifs.seekg(after2);
-        info = dbms::SequenceInfo{};
-        info.start = start;
-        info.increment = increment;
-        info.applyDefaults();
-        nextValue = start;
-        lastAllocated = start - increment; // force allocation on first nextval
+        return false;
     }
     return true;
 }

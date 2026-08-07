@@ -73,6 +73,14 @@ void CommitLog::saveSegment(uint64_t segNo) {
     auto it = segments_.find(segNo);
     if (it == segments_.end() || !it->second.dirty) return;
 
+    // A test or an administrative drop may remove the database directory
+    // while an uncached owner still exists. Never recreate a dropped database
+    // or write stale CLOG state into a later same-name database.
+    if (!std::filesystem::is_directory(dataDir_)) {
+        it->second.dirty = false;
+        return;
+    }
+
     std::string path = segmentPath(segNo);
     std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
     if (!ofs) {

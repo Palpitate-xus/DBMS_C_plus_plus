@@ -5,11 +5,11 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：回归基线 PASS=114 FAIL=0；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：回归基线 PASS=115 FAIL=0；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE` 已接入 typed AST bridge；复杂/尚未迁移的 RLS、触发器、分区、OWNER/CLUSTER/REPLICA 等动作仍由 legacy handler 执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE` 与 `CREATE TABLE` 分区路径已接入 typed AST bridge；复杂/尚未迁移的 RLS、触发器、OWNER/CLUSTER/REPLICA 等动作仍由 legacy handler 执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -75,6 +75,7 @@
 | 2026-06-28 | Phase 4 Wave 4.26 分区执行测试：分区功能（`CREATE TABLE ... PARTITION BY`、`PARTITION OF`、INSERT 路由、ATTACH/DETACH PARTITION、RANGE/LIST/HASH 分区、RANGE+HASH 二级子分区、全表扫描合并所有分区）已在引擎实现但此前无测试。新增 `tests/partition_test.cpp`，通过直接构造 `TableSchema` 调用 `StorageEngine::createTable`（因 DDL AST 桥 `DdlExecutor::executeCreateTable` 未把 `partitionBy` 转发给引擎；本次未改桥接，以测试覆盖既有实现为主）。覆盖：RANGE 三分区插入/扫描/ATTACH 新分区/DETACH 分区、LIST 分区含 DEFAULT 分区、HASH 4 分区 + ATTACH p4、RANGE+HASH 子分区。全量套件通过。DDL 桥接分区元数据仍未完成。 |
 | 2026-07-01 | Phase 4 Wave 4.26 完成：`CreateTableStmt` 新增 `partitionType` 字段，parser 存储分区类型关键词；`DdlExecutor::executeCreateTable` 桥接 `PARTITION BY` 到 `TableSchema::partitionKey`+`partitionType`；LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY、GENERATED AS IDENTITY、TABLESPACE 全面验证；新增 `tests/create_table_options_test.cpp`。全量套件 PASS=94 FAIL=0。`PARTITION OF` 解析与 `accessMethod` schema 持久化仍待后续。 |
 | 2026-08-07 | 生产化审计后补齐 `CREATE TABLE child PARTITION OF parent`：Parser 保存父表与 bound，DdlExecutor 复用父表 schema、创建子表并调用 `attachPartition`，支持 RANGE/LIST 的 `FOR VALUES` 与 `DEFAULT`，新增错误父表、malformed 语法和真实 SQL 路由回归；`accessMethod` schema 持久化、分区约束证明及 global/local index 仍待后续。 |
+| 2026-08-07 | 生产化格式边界收紧：移除 schema/sequence/trigger 读取器的旧格式回退和 EOF 宽容路径；当前格式的截断或错误 magic 统一拒绝，新增 `schema_format_test.cpp`；CLOG 在数据库目录已删除时丢弃脏缓存，避免迟写或重建已删除目录。 |
 | 2026-06-28 | Phase 4 Wave 4.30 CREATE TYPE range/base/shell + enum DROP TYPE 修复：`parseCreateType` 支持无 `AS` 子句的 `CREATE TYPE name`（shell type）、`CREATE TYPE name AS RANGE (subtype = ...)` 与 `CREATE TYPE name (INPUT = ..., OUTPUT = ..., ...)`（base type）；`DdlExecutor::executeCreateType` 将 shell 类型写入 `{db}/.shell_types`，range/base 类型写入 `{db}/.udt_meta`（`kind|name|key=value;...`），并统一用 `anyTypeExists` 防止同名重复；`DdlExecutor::executeDropType` 原先只调用 `dropCompositeType`，现改为依次尝试 `dropCompositeType` → `dropEnumType` → 移除 `.udt_meta` → 移除 `.shell_types`。扩展 `tests/create_type_shell_test.cpp` 覆盖 enum DROP、shell、range（含重复创建拒绝）、base、composite DROP 回归。全量套件通过。作为列类型的实际输入/输出/范围语义仍待后续（当前仅注册元数据）。 |
 | 2026-06-29 | Phase 4 Wave 4.21 窗口函数 frame exclusion 与命名窗口：`main.cpp` 的 `WindowFunc` 新增 `frameExclusion` 字段；`parseWindowFunc` 支持解析 `EXCLUDE CURRENT ROW`/`GROUP`/`TIES`/`NO OTHERS`，并在聚合窗口函数执行时按 peers 组（partition + ORDER BY 值相等）排除当前行/当前 peer 组/ties；SELECT 路径新增标准 SQL `WINDOW w AS (...)` 子句解析，支持 `OVER w` 复用，并修复 `WHERE ... WINDOW ... ORDER BY` 子句边界抽取（`tnameEnd`/`condEnd`/`windowEnd` 均按标准顺序停靠）。新增 `tests/window_e2e_test.py`（9 用例：默认 frame、EXCLUDE CURRENT ROW/GROUP/TIES/NO OTHERS 无 ties 与有 ties、命名窗口基础与 EXCLUDE CURRENT ROW）。全量套件 PASS=88 FAIL=0。RANGE/GROUPS frame、ordered-set over 仍待后续。 |
 | 2026-06-29 | Phase 4 Wave 4.20 聚合函数扩展：新增 `bool_and`/`bool_or`/`every` 三处聚合实现（`aggregate()`、`groupAggregate()` computeAgg lambda、第三处 computeAgg lambda），逻辑：跳过 NULL、`val=="true"`/`val=="false"` 逐行累积，全空→NULL；新增 `percentile_cont`/`percentile_disc`（arg 格式 `"fraction,col"`），continuous 线性插值、discrete 取 `ceil(f*n)` 索引值。新增 `tests/aggregate_bool_test.cpp`（7 用例）+ `tests/aggregate_percentile_test.cpp`（7 用例）。全量套件 PASS=88 FAIL=0。ordered-set 聚合（WITHIN GROUP 语法）、假设集聚合、并行聚合仍待后续。 |
@@ -152,7 +153,7 @@
 - 根目录保持干净：所有测试数据自动隔离，不污染项目根目录
 - 修复: 61 个测试文件批量更新 include 和 cleanup 逻辑
 
-历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=114 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=115 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
