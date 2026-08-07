@@ -67,6 +67,16 @@ def scram_verifier(password, salt=b"0123456789abcdef", iterations=4096):
     )
 
 
+def write_auth_catalog(work_dir, username, password, superuser=True):
+    catalog_dir = os.path.join(work_dir, "info", "pg_catalog")
+    os.makedirs(catalog_dir, exist_ok=True)
+    password_record = scram_verifier(password)
+    flags = "t,t,t,t,t,f,f" if superuser else "f,t,f,f,t,f,f"
+    with open(os.path.join(catalog_dir, "pg_authid.cat"), "w", encoding="utf-8") as auth:
+        auth.write('10,"%s",%s,-1,"%s",""\n' %
+                   (username, flags, password_record))
+
+
 def startup(sock, user, database, fragmented=False):
     params = b"user\0" + user.encode() + b"\0database\0" + database.encode() + b"\0\0"
     packet = frame(struct.pack("!I", 196608) + params)
@@ -149,10 +159,11 @@ def main():
     work_dir = tempfile.mkdtemp(prefix="dbms-pg-protocol-")
     process = None
     try:
-        with open(os.path.join(work_dir, "user.dat"), "w", encoding="utf-8") as users:
-            users.write("alice " + scram_verifier("secret") + " admin\n")
         os.mkdir(os.path.join(work_dir, "info"))
         open(os.path.join(work_dir, "info", "tlist.lst"), "wb").close()
+        write_auth_catalog(work_dir, "alice", "secret")
+        with open(os.path.join(work_dir, "pg_hba.conf"), "w", encoding="utf-8") as hba:
+            hba.write("host all all 127.0.0.1/32 scram-sha-256\n")
 
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))

@@ -62,6 +62,17 @@ static void test_match() {
     auto m4 = dbms::PgHbaFile::match(records, "host", "mydb", "user1", "10.0.0.1");
     assert(m4 == dbms::HbaMethod::Reject);
 
+    writeTestHba("/tmp/pg_hba_transport.conf",
+        "hostssl all all 127.0.0.1/32 scram-sha-256\n"
+        "hostnossl all all 127.0.0.1/32 trust\n"
+        "host all all 127.0.0.1/32 password\n");
+    auto transport = dbms::PgHbaFile::parse("/tmp/pg_hba_transport.conf");
+    assert(dbms::PgHbaFile::match(transport, "hostssl", "mydb", "user1", "127.0.0.1") ==
+           dbms::HbaMethod::ScramSha256);
+    assert(dbms::PgHbaFile::match(transport, "hostnossl", "mydb", "user1", "127.0.0.1") ==
+           dbms::HbaMethod::Trust);
+    std::remove("/tmp/pg_hba_transport.conf");
+
     std::remove("/tmp/pg_hba_match.conf");
     std::cout << "[PG_HBA] match OK" << std::endl;
 }

@@ -1289,8 +1289,6 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
         try { g_config.queryPlanCacheSize = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
     } else if (param == "password_policy_level") {
         try { g_config.passwordPolicyLevel = std::stoi(val); ok = true; } catch (...) {}
-    } else if (param == "password_hash_algorithm") {
-        g_config.passwordHashAlgorithm = val; ok = true;
     } else if (param == "audit_level") {
         try { g_config.auditLevel = std::stoi(val); ok = true; } catch (...) {}
     } else if (param == "auto_vacuum") {
@@ -6389,58 +6387,8 @@ static bool setSessionAuthorization(Session& s, const string& targetRaw) {
     return false;
 }
 
-static std::filesystem::path roleAttributesPath() {
-    return std::filesystem::path(".pg_role_attrs");
-}
-
-static map<string, string> loadRoleAttributes() {
-    map<string, string> attrs;
-    ifstream in(roleAttributesPath());
-    string line;
-    while (getline(in, line)) {
-        if (trim(line).empty()) continue;
-        auto parts = splitByDelimiter(line, '|');
-        if (parts.size() < 2) continue;
-        attrs[catalogUnescape(parts[0])] = catalogUnescape(parts[1]);
-    }
-    return attrs;
-}
-
-static bool saveRoleAttributes(const map<string, string>& attrs) {
-    ofstream out(roleAttributesPath(), ios::trunc);
-    if (!out) return false;
-    for (const auto& kv : attrs) {
-        out << catalogEscape(kv.first) << "|" << catalogEscape(kv.second) << "\n";
-    }
-    return true;
-}
-
 static bool renameExplicitRole(const string& oldName, const string& newName) {
-    ifstream in("role.dat");
-    if (!in) return false;
-    vector<pair<string, string>> rows;
-    string roleName, member;
-    bool found = false;
-    bool conflict = false;
-    while (in >> roleName >> member) {
-        if (roleName == newName) conflict = true;
-        if (roleName == oldName) {
-            roleName = newName;
-            found = true;
-        }
-        rows.emplace_back(roleName, member);
-    }
-    if (!found || conflict) return false;
-    ofstream out("role.dat", ios::trunc);
-    for (const auto& row : rows) out << row.first << " " << row.second << "\n";
-    auto attrs = loadRoleAttributes();
-    auto it = attrs.find(oldName);
-    if (it != attrs.end()) {
-        attrs[newName] = it->second;
-        attrs.erase(it);
-        saveRoleAttributes(attrs);
-    }
-    return true;
+    return renameUser(oldName, newName);
 }
 
 static bool handleCreateGroup(const string& sql, Session& s) {
@@ -6550,12 +6498,57 @@ static bool handleAlterRole(const string& sql, Session& s) {
         cout << "Role " << roleName << " renamed to " << newName << endl;
         return false;
     }
-    auto attrs = loadRoleAttributes();
-    attrs[roleName] = trim(rest.substr(roleName.size()));
-    if (!saveRoleAttributes(attrs)) {
+    const auto* current = authCatalog().findAuthIdByName(roleName);
+    if (!current) {
+        cout << "Role " << roleName << " not exist" << endl;
+        return true;
+    }
+    dbms::PgAuthIdRow updated = *current;
+    bool changed = false;
+    for (size_t i = 1; i < tokens.size(); ++i) {
+        const string option = toLower(tokens[i]);
+        if (option == "with") continue;
+        if (option == "superuser") updated.rolsuper = true;
+        else if (option == "nosuperuser") updated.rolsuper = false;
+        else if (option == "createdb") updated.rolcreatedb = true;
+        else if (option == "nocreatedb") updated.rolcreatedb = false;
+        else if (option == "createrole") updated.rolcreaterole = true;
+        else if (option == "nocreaterole") updated.rolcreaterole = false;
+        else if (option == "login") updated.rolcanlogin = true;
+        else if (option == "nologin") updated.rolcanlogin = false;
+        else if (option == "inherit") updated.rolinherit = true;
+        else if (option == "noinherit") updated.rolinherit = false;
+        else if (option == "replication") updated.rolreplication = true;
+        else if (option == "noreplication") updated.rolreplication = false;
+        else if (option == "bypassrls") updated.rolbypassrls = true;
+        else if (option == "nobypassrls") updated.rolbypassrls = false;
+        else if (option == "connection" && i + 2 < tokens.size() &&
+                 toLower(tokens[i + 1]) == "limit") {
+            try {
+                updated.rolconnlimit = stoi(tokens[i + 2]);
+            } catch (...) {
+                cout << "invalid connection limit" << endl;
+                return true;
+            }
+            i += 2;
+        } else if (option == "valid" && i + 2 < tokens.size() &&
+                   toLower(tokens[i + 1]) == "until") {
+            updated.rolvaliduntil = stripQuotes(tokens[i + 2]);
+            i += 2;
+        } else if (option == "password" && i + 1 < tokens.size()) {
+            const string password = stripQuotes(tokens[++i]);
+            updated.rolpassword = dbms::scram::makeRandomVerifier(password);
+        } else {
+            cout << "unsupported ALTER ROLE option: " << tokens[i] << endl;
+            return true;
+        }
+        changed = true;
+    }
+    if (!changed || !authCatalog().updateAuthId(current->oid, updated)) {
         cout << "Alter role failed" << endl;
         return true;
     }
+    authCatalog().persistAll();
     cout << "Role " << roleName << " altered" << endl;
     return false;
 }
@@ -6581,9 +6574,6 @@ static bool handleDropGroup(const string& sql, Session& s) {
         cout << "Group " << groupName << " not exist" << endl;
         return true;
     }
-    auto attrs = loadRoleAttributes();
-    attrs.erase(groupName);
-    saveRoleAttributes(attrs);
     cout << "Group dropped" << endl;
     return false;
 }
@@ -6609,9 +6599,6 @@ static bool handleDropRoleGlobal(const string& sql, Session& s) {
         cout << "Role " << roleName << " not exist" << endl;
         return true;
     }
-    auto attrs = loadRoleAttributes();
-    attrs.erase(roleName);
-    saveRoleAttributes(attrs);
     cout << "Role dropped" << endl;
     return false;
 }
@@ -8676,7 +8663,10 @@ bool execute(const string& rawSql, Session& s) {
                     cout << "Password strength: " << strength << " (score=" << score << ")" << endl;
                 }
             }
-            createUser(temp, g_config.passwordHashAlgorithm);
+            if (createUser(temp) != 0) {
+                cout << "ERROR: could not create user" << endl;
+                return true;
+            }
             cout << "create user  " << temp.username << "  succeeded" << endl;
             return false;
         }
@@ -9770,32 +9760,16 @@ bool execute(const string& rawSql, Session& s) {
                 while (rss >> rp) rawParts.push_back(rp);
                 if (rawParts.size() >= 2) newPw = rawParts[1];
             }
-            ifstream infile("user.dat");
-            vector<user> users;
-            bool found = false;
-            if (infile) {
-                user temp;
-                while (infile >> temp.username >> temp.password >> temp.permission) {
-                    if (temp.username == uname) {
-                        found = true;
-                        if (isMd5Hash(temp.password))
-                            temp.password = md5(newPw);
-                        else
-                            temp.password = sha256(newPw);
-                    }
-                    users.push_back(temp);
-                }
-            }
-            if (!found) {
+            const auto* current = authCatalog().findAuthIdByName(uname);
+            if (!current || !current->rolcanlogin) {
                 cout << "User " << uname << " not exist" << endl;
                 return true;
             }
-            ofstream outfile("user.dat");
-            for (size_t i = 0; i < users.size(); ++i) {
-                if (i > 0) outfile << '\n';
-                outfile << users[i].username << " " << users[i].password << " " << users[i].permission;
-            }
-            outfile << endl;
+            dbms::PgAuthIdRow updated = *current;
+            newPw = stripQuotes(newPw);
+            updated.rolpassword = dbms::scram::makeRandomVerifier(newPw);
+            authCatalog().updateAuthId(current->oid, updated);
+            authCatalog().persistAll();
             cout << "User password updated" << endl;
             return false;
         }
@@ -12438,23 +12412,7 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         if (op == "user") {
-            ifstream infile("user.dat");
-            vector<user> users;
-            bool found = false;
-            if (infile) {
-                user temp;
-                while (infile >> temp.username >> temp.password >> temp.permission) {
-                    if (temp.username == name) found = true;
-                    else users.push_back(temp);
-                }
-            }
-            ofstream outfile("user.dat");
-            for (size_t i = 0; i < users.size(); ++i) {
-                if (i > 0) outfile << '\n';
-                outfile << users[i].username << " " << users[i].password << " " << users[i].permission;
-            }
-            outfile << endl;
-            if (!found) {
+            if (!deleteUser(name)) {
                 cout << "User " << name << " not exist" << endl;
                 return true;
             }
@@ -13401,31 +13359,28 @@ bool execute(const string& rawSql, Session& s) {
         }
         if (rest == "users") {
             if (!checkAdmin(s)) return true;
-            std::ifstream infile("user.dat");
-            if (!infile) {
+            const auto accounts = authCatalog().listAuthIds();
+            if (accounts.empty()) {
                 cout << "No users found" << endl;
                 return false;
             }
-            user temp;
             cout << "username permission" << endl;
-            while (infile >> temp.username >> temp.password >> temp.permission) {
-                cout << temp.username << " " << temp.permission << endl;
+            for (const auto& account : accounts) {
+                if (!account.rolcanlogin) continue;
+                cout << account.rolname << " " << (account.rolsuper ? "1" : "0") << endl;
             }
             return false;
         }
         if (rest == "roles") {
             if (!checkAdmin(s)) return true;
-            std::ifstream infile("role.dat");
-            if (!infile) {
+            const auto accounts = authCatalog().listAuthIds();
+            if (accounts.empty()) {
                 cout << "No roles found" << endl;
                 return false;
             }
-            std::string r, u;
             cout << "role_name" << endl;
-            while (infile >> r >> u) {
-                if (u == "__ROLE__") {
-                    cout << r << endl;
-                }
+            for (const auto& account : accounts) {
+                if (!account.rolcanlogin) cout << account.rolname << endl;
             }
             return false;
         }
@@ -13743,9 +13698,6 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "Invalid value for password_policy_level" << endl;
                 return true;
             }
-        } else if (var == "password_hash_algorithm") {
-            g_config.passwordHashAlgorithm = val;
-            cout << "password_hash_algorithm set to " << g_config.passwordHashAlgorithm << endl;
         } else if (var == "audit_level") {
             try {
                 g_config.auditLevel = std::stoi(val);
@@ -14494,28 +14446,10 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "audit_level " << g_config.auditLevel << " " << endl;
             } else if (tname == "pg_roles") {
                 cout << "rolname rolsuper rolcreatedb rolcanlogin " << endl;
-                // Read users from user.dat
-                {
-                    ifstream uf("user.dat");
-                    string line;
-                    while (getline(uf, line)) {
-                        stringstream ss(line);
-                        string u, p;
-                        int perm = 0;
-                        ss >> u >> p >> perm;
-                        if (u.empty()) continue;
-                        cout << u << " " << (perm == 1 ? "t" : "f") << " t t " << endl;
-                    }
-                }
-                // Read roles from role.dat
-                {
-                    ifstream rf("role.dat");
-                    string line;
-                    while (getline(rf, line)) {
-                        string r = trim(line);
-                        if (r.empty()) continue;
-                        cout << r << " f f f " << endl;
-                    }
+                for (const auto& account : g_engine.catalogService().get("info").listAuthIds()) {
+                    cout << account.rolname << " " << (account.rolsuper ? "t" : "f") << " "
+                         << (account.rolcreatedb ? "t" : "f") << " "
+                         << (account.rolcanlogin ? "t" : "f") << " " << endl;
                 }
             } else if (tname == "pg_namespace") {
                 cout << "oid nspname nspowner " << endl;

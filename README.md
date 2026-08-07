@@ -93,7 +93,7 @@
 - **自动 VACUUM**：可配置阈值，死行数达到阈值时自动触发
 
 ### 权限管理
-- 用户登录系统（用户名/密码存储于 `user.dat`）
+- 用户登录系统（角色与 SCRAM 凭据存储于 `info/pg_catalog/pg_authid.cat`）
 - 管理员与普通用户权限区分
 - `CREATE USER` 创建新用户，支持密码强度策略
 - **表级权限**：`GRANT` / `REVOKE` SELECT/INSERT/UPDATE/DELETE/ALL
@@ -209,7 +209,7 @@ cmake --build build -j$(nproc)
 ```bash
 ./dbms_main
 ```
-启动后输入用户名和密码登录（默认管理员账户在 `user.dat` 中配置）。
+启动后输入用户名和密码登录（角色必须先存在于 `pg_authid`，密码使用 SCRAM-SHA-256）。
 
 ### 网络服务模式
 ```bash
@@ -524,7 +524,7 @@ show deadlocks;
 ├── permissions.h            # 用户认证与权限查询
 ├── sha256.h                 # SHA-256 哈希实现
 ├── set.h                    # 集合数据结构
-├── user.dat                 # 用户账号数据
+├── info/pg_catalog/pg_authid.cat # 角色与 SCRAM 凭据 catalog
 ├── dbms.log                 # 运行日志
 ├── slow_query.log           # 慢查询日志
 ├── Dockerfile               # Docker 多阶段构建定义
@@ -620,7 +620,7 @@ Var Offset Array 每项 (4 bytes):
 - **标量函数不支持独立 SELECT**：`SELECT upper('hello')` 会报语法错误，需用于表列：`SELECT upper(name) FROM users`
 - **`SAVEPOINT` 需要在事务内**：`SAVEPOINT` 命令必须在 `BEGIN` 之后执行，否则返回 "Not in transaction"
 - **`CREATE HASH INDEX`** ✅ 已实现：`CREATE HASH INDEX name ON table(col)` 创建哈希索引，支持 O(1) 等值查询
-- **`SHOW USERS` / `SHOW ROLES`** ✅ 已实现：`SHOW USERS` 读取 `user.dat` 展示所有用户及权限级别，`SHOW ROLES` 读取 `role.dat` 展示所有角色名称（需 admin 权限）
+- **`SHOW USERS` / `SHOW ROLES`** ✅ 已实现：从 `pg_authid` 展示用户与角色属性（需 admin 权限）
 
 ## 参考项目
 

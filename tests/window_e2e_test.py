@@ -4,12 +4,28 @@
 Runs dbms_main with a set of SELECT statements and checks the output.
 """
 import os
+import base64
+import hashlib
+import hmac
 import subprocess
 import shutil
 import sys
 import tempfile
 
 DBMS_MAIN = os.path.join(os.path.dirname(__file__), "..", "dbms_main")
+
+
+def scram_verifier(password, salt=b"0123456789abcdef", iterations=4096):
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+    stored_key = hashlib.sha256(client_key).digest()
+    server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+    return (
+        "SCRAM-SHA-256$%d:%s$%s:%s"
+        % (iterations, base64.b64encode(salt).decode(),
+           base64.b64encode(stored_key).decode(),
+           base64.b64encode(server_key).decode())
+    )
 
 def run_sql(sql):
     """Send SQL commands (semicolon-separated) to dbms_main and return stdout lines."""
@@ -61,8 +77,10 @@ def main():
     try:
         os.chdir(work_dir)
         # Keep the E2E test independent of developer-machine authentication state.
-        with open("user.dat", "w", encoding="utf-8") as users:
-            users.write("admin admin admin\n")
+        os.makedirs(os.path.join("info", "pg_catalog"), exist_ok=True)
+        with open(os.path.join("info", "pg_catalog", "pg_authid.cat"), "w", encoding="utf-8") as auth:
+            auth.write('10,"admin",t,t,t,t,t,f,f,-1,"%s",""\n' % scram_verifier("admin"))
+        open(os.path.join("info", "tlist.lst"), "wb").close()
         setup_db()
 
         # Create table and insert data

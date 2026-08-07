@@ -28,7 +28,7 @@ struct HbaRecord {
     std::string database;        // 数据库名 或 "all" 或 "sameuser" 等
     std::string user;            // 用户名 或 "all" 或 "+" 角色
     std::string address;         // IP/mask (local 时为空)
-    HbaMethod method;
+    HbaMethod method = HbaMethod::Reject;
     std::string options;         // 额外选项
 };
 

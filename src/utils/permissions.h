@@ -1,11 +1,13 @@
 #pragma once
 
-#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
-#include "sha256.h"
+#include "commands/TableManage.h"
+#include "catalog/CatalogService.h"
 #include "common/scram_sha256.h"
+
+extern dbms::StorageEngine g_engine;
 
 struct user {
     std::string username;
@@ -13,119 +15,90 @@ struct user {
     std::string permission;
 };
 
-// ===================== Role Management =====================
-// role.dat format: role_name username
-// username = "__ROLE__" means the role itself exists
+// Authentication and role state is cluster-scoped and stored in the catalog
+// database. The old user.dat/role.dat files are intentionally not read or
+// written: this release has a hard storage boundary and does not provide a
+// legacy authentication migration path.
+
+inline dbms::CatalogManager& authCatalog() {
+    return g_engine.catalogService().get("info");
+}
+
+inline void persistAuthCatalog() {
+    authCatalog().persistAll();
+}
 
 inline bool roleExists(const std::string& roleName) {
-    // Check role.dat for explicit roles
-    std::ifstream rolefile("role.dat");
-    if (rolefile) {
-        std::string r, u;
-        while (rolefile >> r >> u) {
-            if (r == roleName && u == "__ROLE__") return true;
-        }
-    }
-    // In PostgreSQL, users are also roles; check user.dat
-    std::ifstream userfile("user.dat");
-    if (userfile) {
-        user temp;
-        while (userfile >> temp.username >> temp.password >> temp.permission) {
-            if (temp.username == roleName) return true;
-        }
-    }
-    return false;
+    return authCatalog().findAuthIdByName(roleName) != nullptr;
 }
 
 inline int createRole(const std::string& roleName) {
     if (roleExists(roleName)) return -1; // already exists
-    std::ofstream fs("role.dat", std::ios::binary | std::ios::out | std::ios::app);
-    fs << roleName << " __ROLE__" << std::endl;
+    dbms::PgAuthIdRow row;
+    row.rolname = roleName;
+    row.rolcanlogin = false;
+    authCatalog().createAuthId(row);
+    persistAuthCatalog();
     return 0;
 }
 
 inline bool dropRole(const std::string& roleName) {
-    std::ifstream infile("role.dat");
-    if (!infile) return false;
-    std::vector<std::pair<std::string, std::string>> entries;
-    std::string r, u;
-    bool found = false;
-    while (infile >> r >> u) {
-        if (r == roleName) {
-            found = true;
-            continue;
-        }
-        entries.emplace_back(r, u);
-    }
-    if (!found) return false;
-    std::ofstream outfile("role.dat", std::ios::trunc);
-    for (size_t i = 0; i < entries.size(); ++i) {
-        if (i > 0) outfile << '\n';
-        outfile << entries[i].first << " " << entries[i].second;
-    }
-    if (!entries.empty()) outfile << std::endl;
-    return true;
+    const auto* role = authCatalog().findAuthIdByName(roleName);
+    if (!role) return false;
+    const bool ok = authCatalog().dropAuthId(role->oid);
+    if (ok) persistAuthCatalog();
+    return ok;
 }
 
 inline int grantRoleToUser(const std::string& roleName, const std::string& username) {
-    if (!roleExists(roleName)) return -1;
-    std::ifstream infile("role.dat");
-    std::string r, u;
-    while (infile >> r >> u) {
-        if (r == roleName && u == username) return -2; // already granted
+    const auto* role = authCatalog().findAuthIdByName(roleName);
+    const auto* member = authCatalog().findAuthIdByName(username);
+    if (!role || !member) return -1;
+    for (const auto& relation : authCatalog().findAuthMembers(role->oid)) {
+        if (relation.member == member->oid) return -2;
     }
-    std::ofstream fs("role.dat", std::ios::binary | std::ios::out | std::ios::app);
-    fs << roleName << " " << username << std::endl;
+    dbms::PgAuthMembersRow relation;
+    relation.roleid = role->oid;
+    relation.member = member->oid;
+    relation.grantor = role->oid;
+    authCatalog().addAuthMember(relation);
+    persistAuthCatalog();
     return 0;
 }
 
 inline bool revokeRoleFromUser(const std::string& roleName, const std::string& username) {
-    std::ifstream infile("role.dat");
-    if (!infile) return false;
-    std::vector<std::pair<std::string, std::string>> entries;
-    std::string r, u;
-    bool found = false;
-    while (infile >> r >> u) {
-        if (r == roleName && u == username) {
-            found = true;
-            continue;
-        }
-        entries.emplace_back(r, u);
-    }
-    if (!found) return false;
-    std::ofstream outfile("role.dat", std::ios::trunc);
-    for (size_t i = 0; i < entries.size(); ++i) {
-        if (i > 0) outfile << '\n';
-        outfile << entries[i].first << " " << entries[i].second;
-    }
-    if (!entries.empty()) outfile << std::endl;
-    return true;
+    const auto* role = authCatalog().findAuthIdByName(roleName);
+    const auto* member = authCatalog().findAuthIdByName(username);
+    if (!role || !member) return false;
+    const bool ok = authCatalog().removeAuthMember(role->oid, member->oid);
+    if (ok) persistAuthCatalog();
+    return ok;
 }
 
 inline std::vector<std::string> getUserRoles(const std::string& username) {
     std::vector<std::string> roles;
-    std::ifstream infile("role.dat");
-    if (!infile) return roles;
-    std::string r, u;
-    while (infile >> r >> u) {
-        if (u == username && r != "__ROLE__") {
-            roles.push_back(r);
-        }
+    const auto* member = authCatalog().findAuthIdByName(username);
+    if (!member) return roles;
+    for (const auto& relation : authCatalog().findAuthMemberships(member->oid)) {
+        const auto* role = authCatalog().findAuthId(relation.roleid);
+        if (role) roles.push_back(role->rolname);
     }
     return roles;
 }
 
 inline bool userHasRole(const std::string& username, const std::string& roleName) {
-    std::ifstream infile("role.dat");
-    if (!infile) return false;
-    std::string r, u;
-    while (infile >> r >> u) {
-        if (r == roleName && u == username) return true;
+    const auto* role = authCatalog().findAuthIdByName(roleName);
+    const auto* member = authCatalog().findAuthIdByName(username);
+    if (!role || !member) return false;
+    for (const auto& relation : authCatalog().findAuthMembers(role->oid)) {
+        if (relation.member == member->oid) return true;
     }
     return false;
 }
 
 inline bool userIsAdminViaRole(const std::string& username) {
+    const auto* member = authCatalog().findAuthIdByName(username);
+    if (member && member->rolsuper) return true;
     return userHasRole(username, "admin");
 }
 
@@ -154,61 +127,24 @@ inline std::string passwordStrengthMessage(int score) {
     return "weak";
 }
 
-inline bool isSha256Hash(const std::string& pw) {
-    if (pw.size() != 64) return false;
-    for (char c : pw) {
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-    }
-    return true;
-}
-
-inline bool isMd5Hash(const std::string& pw) {
-    if (pw.size() != 32) return false;
-    for (char c : pw) {
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-    }
-    return true;
-}
-
-inline bool isHashedPassword(const std::string& pw) {
-    return isSha256Hash(pw) || isMd5Hash(pw);
-}
-
 // Verify credentials without producing frontend-specific output. Network
 // protocols must return authentication failures on their own wire, not via
 // the process-wide stdout stream used by the legacy interactive frontend.
 inline bool getStoredUserPassword(const std::string& username, std::string& storedPassword) {
-    std::ifstream infile("user.dat");
-    if (!infile) return false;
-
-    user temp;
-    while (infile >> temp.username >> temp.password >> temp.permission) {
-        if (temp.username == username) {
-            storedPassword = temp.password;
-            return true;
-        }
-    }
-    return false;
+    const auto* account = authCatalog().findAuthIdByName(username);
+    if (!account || !account->rolcanlogin) return false;
+    storedPassword = account->rolpassword;
+    return true;
 }
 
 inline bool verifyUserPassword(const std::string& username, const std::string& password) {
     std::string storedPassword;
     if (!getStoredUserPassword(username, storedPassword)) return false;
-    if (storedPassword.rfind("SCRAM-SHA-256$", 0) == 0) {
-        return dbms::scram::verifyPassword(password, storedPassword);
-    }
-    std::string checkPw = password;
-    if (isSha256Hash(storedPassword)) {
-        checkPw = sha256(password);
-    } else if (isMd5Hash(storedPassword)) {
-        checkPw = md5(password);
-    }
-    return storedPassword == checkPw;
+    return storedPassword.rfind("SCRAM-SHA-256$", 0) == 0 &&
+           dbms::scram::verifyPassword(password, storedPassword);
 }
 
 inline int login(const std::string& username, const std::string& password) {
-    std::ifstream infile("user.dat");
-    if (!infile) return 0;
     if (verifyUserPassword(username, password)) {
         std::cout << "successfully login" << std::endl;
         return 1;
@@ -218,78 +154,41 @@ inline int login(const std::string& username, const std::string& password) {
 }
 
 inline int permissionQuery(const std::string& username) {
-    std::ifstream infile("user.dat");
-    if (!infile) return -1;
-
-    user temp;
-    while (infile >> temp.username >> temp.password >> temp.permission) {
-        if (temp.username == username) {
-            return (temp.permission == "admin" || temp.permission == "1") ? 1 : 0;
-        }
-    }
-    return -1;
+    const auto* account = authCatalog().findAuthIdByName(username);
+    if (!account) return -1;
+    return (account->rolsuper || account->rolname == "admin") ? 1 : 0;
 }
 
-inline int createUser(const user& new_user, const std::string& hashAlgo = "scram-sha-256") {
-    std::ofstream fs("user.dat", std::ios::binary | std::ios::out | std::ios::app);
+inline int createUser(const user& new_user) {
+    if (roleExists(new_user.username)) return -1;
     std::string hashedPw;
-    if (isHashedPassword(new_user.password)) {
+    if (new_user.password.rfind("SCRAM-SHA-256$", 0) == 0) {
         hashedPw = new_user.password;
-    } else if (hashAlgo == "md5") {
-        hashedPw = md5(new_user.password);
-    } else if (hashAlgo == "scram" || hashAlgo == "scram-sha-256") {
-        hashedPw = dbms::scram::makeRandomVerifier(new_user.password);
     } else {
-        hashedPw = sha256(new_user.password);
+        hashedPw = dbms::scram::makeRandomVerifier(new_user.password);
     }
-    fs << '\n' << new_user.username << " " << hashedPw << " " << new_user.permission << std::endl;
+    dbms::PgAuthIdRow row;
+    row.rolname = new_user.username;
+    row.rolpassword = hashedPw;
+    row.rolcanlogin = true;
+    row.rolsuper = new_user.permission == "1" || new_user.permission == "admin";
+    row.rolcreaterole = row.rolsuper;
+    row.rolcreatedb = row.rolsuper;
+    authCatalog().createAuthId(row);
+    persistAuthCatalog();
     return 0;
 }
 
 inline bool renameUser(const std::string& oldName, const std::string& newName) {
-    std::ifstream infile("user.dat");
-    if (!infile) return false;
-    std::vector<user> users;
-    user temp;
-    bool found = false;
-    bool conflict = false;
-    while (infile >> temp.username >> temp.password >> temp.permission) {
-        if (temp.username == newName) conflict = true;
-        if (temp.username == oldName) {
-            temp.username = newName;
-            found = true;
-        }
-        users.push_back(temp);
-    }
-    if (!found || conflict) return false;
-    std::ofstream outfile("user.dat", std::ios::trunc);
-    for (size_t i = 0; i < users.size(); ++i) {
-        if (i > 0) outfile << '\n';
-        outfile << users[i].username << " " << users[i].password << " " << users[i].permission;
-    }
-    if (!users.empty()) outfile << std::endl;
-    return true;
+    const auto* account = authCatalog().findAuthIdByName(oldName);
+    if (!account || authCatalog().findAuthIdByName(newName)) return false;
+    dbms::PgAuthIdRow updated = *account;
+    updated.rolname = newName;
+    const bool ok = authCatalog().updateAuthId(account->oid, updated);
+    if (ok) persistAuthCatalog();
+    return ok;
 }
 
 inline bool deleteUser(const std::string& username) {
-    std::ifstream infile("user.dat");
-    if (!infile) return false;
-    std::vector<user> users;
-    user temp;
-    bool found = false;
-    while (infile >> temp.username >> temp.password >> temp.permission) {
-        if (temp.username == username) {
-            found = true;
-            continue;
-        }
-        users.push_back(temp);
-    }
-    if (!found) return false;
-    std::ofstream outfile("user.dat", std::ios::trunc);
-    for (size_t i = 0; i < users.size(); ++i) {
-        if (i > 0) outfile << '\n';
-        outfile << users[i].username << " " << users[i].password << " " << users[i].permission;
-    }
-    if (!users.empty()) outfile << std::endl;
-    return true;
+    return dropRole(username);
 }

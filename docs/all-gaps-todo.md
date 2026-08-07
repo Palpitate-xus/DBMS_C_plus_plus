@@ -213,7 +213,7 @@
 | 1.1.21 | `CREATE MATERIALIZED VIEW` | CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果（列序映射已修复），支持 `WITH [NO] DATA`，`.mview` 保存 SQL；仍缺唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
 | 1.1.22 | `CREATE POLICY` | 已迁移到 `DdlExecutor`：`parseCreatePolicy` 完整解析 `ON table / FOR cmd / TO roles / USING / WITH CHECK`，`executeCreatePolicy` 校验表存在并写入 RLS policy 文件；仍缺少 `WITH CHECK`/`USING` 在 DML 路径的真实行级强制、role 解析、`ALTER POLICY`、PERMISSIVE/RESTRICTIVE | ⚠️ |
 | 1.1.23 | `CREATE PROCEDURE` | 基本创建已落地，`DdlExecutor` 按分号切分 body 并调用 `createProcedure`；仍缺少语言运行时、事务控制规则、异常、变量、权限属性 | ⚠️ |
-| 1.1.24 | `CREATE ROLE` / `CREATE USER` | 用户在 `user.dat`，角色在 `role.dat`；缺少 PG 角色属性执行、成员继承、admin option、系统 catalog | ⚠️ |
+| 1.1.24 | `CREATE ROLE` / `CREATE USER` | 已写入 `pg_authid`，成员关系写入 `pg_auth_members`；仍缺完整属性、递归成员继承和 admin option 执行 | ⚠️ |
 | 1.1.25 | `CREATE SCHEMA` | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义 | ⚠️ |
 | 1.1.26 | `CREATE SEQUENCE` | 有 nextval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics | ⚠️ |
 | 1.1.27 | `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 有扩展统计对象元数据；`dependencies` kind 已落地（`computeFunctionalDependencies` 计算各有序列对函数依赖强度并随 CREATE STATISTICS 输出）；仍缺 `pg_statistic_ext` catalog、表达式统计、ndistinct/mcv 精确算法和 planner 深度使用 | ⚠️ |
@@ -449,12 +449,12 @@
 
 ## 11. 安全、认证、权限差距
 
-> **已完成进展（2026-08-07）**：目录层已有 `pg_authid`/`pg_auth_members` CRUD，但网络/DDL 账号路径仍使用 `user.dat`/`role.dat`，11.1 仍 ⚠️。网络服务已改为 TLS 默认 fail-closed，且已接入 PostgreSQL protocol 3.0 的 SSLRequest、Startup、SCRAM-SHA-256、密码认证、Query 和基础扩展查询；`--insecure` 仅用于本地开发。TLS 仍缺客户端证书认证和 channel binding；运行时 pg_hba、完整 wire protocol 语义和统一认证存储仍待 Phase 7。
+> **已完成进展（2026-08-07）**：角色、用户、成员关系和 SCRAM 凭据已统一写入 `pg_authid`/`pg_auth_members`，网络服务已接入 `pg_hba.conf` 首条匹配和 host/hostssl/hostnossl 传输约束；网络服务仍默认 TLS fail-closed，`--insecure` 仅用于本地开发。TLS 客户端证书/channel binding、pg_hba 角色组匹配、完整 wire protocol 语义和 ACL 仍待 Phase 7。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
-| 11.1 | 用户/角色 catalog | `user.dat` / `role.dat` / `.pg_role_attrs` 文件，非 `pg_authid`/`pg_auth_members`；角色属性目前主要可记录和审计，缺少 OID、属性执行语义、password expiration、membership options | ⚠️ |
-| 11.2 | 认证 | 已有 sha256/md5 迁移校验、SCRAM-SHA-256、pg_hba 解析和 TLS；缺少运行时 pg_hba 决策、OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
+| 11.1 | 用户/角色 catalog | 已统一到 `pg_authid`/`pg_auth_members`；角色属性执行、password expiration、递归 membership 和完整 ACL 仍缺 | ⚠️ |
+| 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配和 TLS；缺少完整角色/数据库匹配、OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
 | 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 核心 startup/auth/query framing 和 SCRAM；缺少完整类型/扩展消息和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
 | 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
@@ -589,7 +589,7 @@
 
 ### Phase 6：协议与认证 🔄 进行中
 - 支持 PostgreSQL wire protocol、libpq — **核心已启动，完整兼容性未完成**
-- 实现 pg_hba.conf、SCRAM-SHA-256 — **SCRAM 握手已实现；运行时 pg_hba 决策未完成**
+- 实现 pg_hba.conf、SCRAM-SHA-256 — **基础运行时决策和 SCRAM 已实现；角色/数据库组匹配及完整认证方法未完成**
 
 ### Phase 7：复制/PITR ❌ 未启动
 - 在 WAL 稳定后实现 streaming replication、logical decoding、PITR — **未启动**

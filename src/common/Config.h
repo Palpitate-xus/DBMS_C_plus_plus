@@ -21,7 +21,6 @@ struct Config {
     bool enableQueryPlanCache = true;
     size_t queryPlanCacheSize = 100;
     int passwordPolicyLevel = 0; // 0=none, 1=warn, 2=medium required, 3=strong required
-    std::string passwordHashAlgorithm = "scram-sha-256"; // "scram-sha-256", "sha256" or "md5"
     int auditLevel = 0; // 0=none, 1=DDL only, 2=DML+DDL, 3=all
     bool autoVacuumEnabled = true; // automatically VACUUM when dead tuples exceed threshold
     int autoVacuumThreshold = 50;  // dead tuple count threshold to trigger auto-vacuum

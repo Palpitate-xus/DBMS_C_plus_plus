@@ -1260,7 +1260,7 @@ SHOW PLAN CACHE;
 SHOW USERS;
 ```
 
-**说明** 显示所有用户及其权限级别，从 `user.dat` 读取。需要 admin 权限。
+**说明** 显示 `pg_authid` 中所有可登录角色及其权限级别。需要 admin 权限。
 
 **示例**
 ```sql
@@ -1279,7 +1279,7 @@ SHOW USERS;
 SHOW ROLES;
 ```
 
-**说明** 显示所有角色名称，从 `role.dat` 读取（仅显示 `__ROLE__` 标记的条目）。需要 admin 权限。
+**说明** 显示 `pg_authid` 中不可登录角色。需要 admin 权限。
 
 **示例**
 ```sql
@@ -1427,7 +1427,6 @@ SET variable_name = value
 | `checkpoint_interval` | `INT` | 自动 checkpoint 间隔（SQL 条数） |
 | `statement_timeout` | `INT` | 语句超时（毫秒） |
 | `password_policy_level` | `INT` | 密码强度策略（0-3） |
-| `password_hash_algorithm` | `STRING` | 密码哈希算法 |
 | `audit_level` | `INT` | 审计日志级别（0-3） |
 
 **示例**

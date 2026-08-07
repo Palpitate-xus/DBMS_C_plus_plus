@@ -45,7 +45,7 @@ static HbaMethod parseMethod(const std::string& s) {
     if (l == "pam") return HbaMethod::Pam;
     if (l == "ldap") return HbaMethod::Ldap;
     if (l == "radius") return HbaMethod::RADIUS;
-    return HbaMethod::Trust;  // default
+    return HbaMethod::Reject;  // invalid methods must fail closed
 }
 
 std::vector<HbaRecord> PgHbaFile::parse(const std::string& path) {
@@ -130,6 +130,8 @@ HbaMethod PgHbaFile::match(const std::vector<HbaRecord>& records,
                    rec.connectionType == "hostssl" ||
                    rec.connectionType == "hostnossl") {
             if (connType == "local") continue;
+            if (rec.connectionType == "hostssl" && connType != "hostssl") continue;
+            if (rec.connectionType == "hostnossl" && connType != "hostnossl") continue;
         } else {
             continue;  // unknown
         }

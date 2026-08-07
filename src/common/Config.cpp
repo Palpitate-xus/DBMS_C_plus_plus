@@ -37,8 +37,6 @@ bool Config::load(const std::string& filename) {
             try { queryPlanCacheSize = static_cast<size_t>(std::stoull(val)); } catch (...) {}
         } else if (key == "password_policy_level") {
             try { passwordPolicyLevel = std::stoi(val); } catch (...) {}
-        } else if (key == "password_hash_algorithm") {
-            passwordHashAlgorithm = val;
         } else if (key == "audit_level") {
             try { auditLevel = std::stoi(val); } catch (...) {}
         } else if (key == "auto_vacuum") {
@@ -79,7 +77,6 @@ void Config::printAll() const {
               << "enable_query_plan_cache " << (enableQueryPlanCache ? "on" : "off") << "\n"
               << "query_plan_cache_size " << queryPlanCacheSize << "\n"
               << "password_policy_level " << passwordPolicyLevel << "\n"
-              << "password_hash_algorithm " << passwordHashAlgorithm << "\n"
               << "audit_level " << auditLevel << "\n"
               << "auto_vacuum " << (autoVacuumEnabled ? "on" : "off") << "\n"
               << "auto_vacuum_threshold " << autoVacuumThreshold << "\n"
@@ -107,7 +104,6 @@ bool Config::save(const std::string& filename) const {
         << "enable_query_plan_cache=" << (enableQueryPlanCache ? "on" : "off") << "\n"
         << "query_plan_cache_size=" << queryPlanCacheSize << "\n"
         << "password_policy_level=" << passwordPolicyLevel << "\n"
-        << "password_hash_algorithm=" << passwordHashAlgorithm << "\n"
         << "audit_level=" << auditLevel << "\n"
         << "auto_vacuum=" << (autoVacuumEnabled ? "on" : "off") << "\n"
         << "auto_vacuum_threshold=" << autoVacuumThreshold << "\n"

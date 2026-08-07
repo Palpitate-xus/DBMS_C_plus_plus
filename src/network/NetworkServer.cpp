@@ -4,6 +4,7 @@
 #include "PostgresProtocol.h"
 #include "Session.h"
 #include "TLSWrapper.h"
+#include "utils/pg_hba.h"
 
 #include <arpa/inet.h>
 #include <cctype>
@@ -577,29 +578,61 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         return;
     }
 
-    std::string storedPassword;
-    if (!getStoredUserPassword(username, storedPassword)) {
-        protocol.sendErrorResponse("FATAL", "28P01", "password authentication failed");
+    const char* configuredHba = std::getenv("DBMS_PG_HBA");
+    const std::string hbaPath = configuredHba && *configuredHba ? configuredHba : "pg_hba.conf";
+    const auto hbaRecords = PgHbaFile::parse(hbaPath);
+    std::string clientIp = clientHost;
+    const size_t portSeparator = clientIp.rfind(':');
+    if (portSeparator != std::string::npos) clientIp.resize(portSeparator);
+    const HbaMethod authMethod = PgHbaFile::match(
+        hbaRecords, socket.tlsOK ? "hostssl" : "hostnossl",
+        startup.parameters.count("database") ? startup.parameters.at("database") : "info",
+        username, clientIp);
+    if (hbaRecords.empty() || authMethod == HbaMethod::Reject) {
+        protocol.sendErrorResponse("FATAL", "28000",
+                                   "no pg_hba.conf entry for host " + clientIp +
+                                   ", user " + username);
         return;
     }
-    if (storedPassword.rfind("SCRAM-SHA-256$", 0) == 0) {
-        if (!authenticateScram(protocol, username, storedPassword, protocolError)) return;
-    } else {
-        // Legacy records are accepted only as a migration bridge. New users
-        // are written as SCRAM-SHA-256 by default.
-        if (!protocol.sendAuthenticationCleartextPassword()) return;
-        PgFrontendMessage passwordMessage;
-        if (!protocol.readMessage(passwordMessage, protocolError) || passwordMessage.type != 'p') {
-            protocol.sendErrorResponse("FATAL", "08P01", "expected PasswordMessage");
+
+    bool authenticationCompleted = false;
+    if (authMethod == HbaMethod::Trust) {
+        std::string ignoredPassword;
+        if (!getStoredUserPassword(username, ignoredPassword)) {
+            protocol.sendErrorResponse("FATAL", "28000", "role does not exist or cannot log in");
             return;
         }
-        const std::string password = messageCString(passwordMessage);
-        if (password.empty() || !verifyUserPassword(username, password)) {
+        authenticationCompleted = protocol.sendAuthenticationOk();
+    } else {
+        std::string storedPassword;
+        if (!getStoredUserPassword(username, storedPassword)) {
             protocol.sendErrorResponse("FATAL", "28P01", "password authentication failed");
             return;
         }
-        if (!protocol.sendAuthenticationOk()) return;
+        if (authMethod == HbaMethod::ScramSha256 ||
+            (authMethod == HbaMethod::Md5 && storedPassword.rfind("SCRAM-SHA-256$", 0) == 0)) {
+            authenticationCompleted = authenticateScram(protocol, username, storedPassword,
+                                                        protocolError);
+        } else if (authMethod == HbaMethod::Password) {
+            if (!protocol.sendAuthenticationCleartextPassword()) return;
+            PgFrontendMessage passwordMessage;
+            if (!protocol.readMessage(passwordMessage, protocolError) || passwordMessage.type != 'p') {
+                protocol.sendErrorResponse("FATAL", "08P01", "expected PasswordMessage");
+                return;
+            }
+            const std::string password = messageCString(passwordMessage);
+            if (password.empty() || !verifyUserPassword(username, password)) {
+                protocol.sendErrorResponse("FATAL", "28P01", "password authentication failed");
+                return;
+            }
+            authenticationCompleted = protocol.sendAuthenticationOk();
+        } else {
+            protocol.sendErrorResponse("FATAL", "0A000",
+                                       "pg_hba authentication method is not implemented");
+            return;
+        }
     }
+    if (!authenticationCompleted) return;
 
     Session session;
     session.username = username;
