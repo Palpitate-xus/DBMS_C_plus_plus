@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | 扩展查询生命周期补强：Describe 严格校验 statement/portal 目标并返回参数描述，Close 真正删除 statement/portal 及其依赖资源；新增协议回归。SELECT 的完整 RowDescription 类型推导、二进制格式和 portal 分页仍待后续。 |
 | 2026-08-07 | ACL 执行路径补强：表/列权限检查统一支持会话用户、递归继承角色和 `PUBLIC`；协议 E2E 验证角色继承 SELECT 与未授权 INSERT 拒绝。对象 owner、完整 GRANT OPTION 生命周期及 schema/database/function ACL 仍待后续。 |
 | 2026-08-07 | PostgreSQL 扩展查询参数路径补强：Parse 返回 `ParameterDescription`，Bind 支持文本参数、NULL、格式/数量校验和 `$n` 安全字面量绑定；新增参数化查询 E2E。二进制格式、完整 OID 类型映射、结构化结果和 portal 分页仍待后续。 |
 | 2026-08-07 | backend 事务上下文隔离补强：将共享 `StorageEngine` 中的事务 ID、快照、回滚日志、savepoint、隔离级别、延迟约束和 `lastval` 改为连接工作线程局部；连接断开时回滚未完成事务并清理上下文；新增双连接协议回归，验证未提交行隔离、ROLLBACK 清理、断开回滚和 COMMIT 后可见。全局锁/提交/SSI 协调和完整 session 生命周期仍待继续审计。 |

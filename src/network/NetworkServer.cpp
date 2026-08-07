@@ -186,6 +186,7 @@ struct ProtocolPreparedStatement {
 };
 
 struct ProtocolPortal {
+    std::string statement;
     std::string sql;
 };
 
@@ -1064,7 +1065,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
-            portals[portal] = ProtocolPortal{std::move(expandedSql)};
+            portals[portal] = ProtocolPortal{statement, std::move(expandedSql)};
             protocol.sendBindComplete();
             continue;
         }
@@ -1110,10 +1111,82 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             continue;
         }
         if (message.type == 'D') {
-            protocol.sendNoData();
+            if (message.payload.empty()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Describe message");
+                extendedQueryError = true;
+                continue;
+            }
+            const char target = static_cast<char>(message.payload[0]);
+            size_t offset = 1;
+            std::string name;
+            if (!PostgresProtocol::readCString(message.payload, offset, name) ||
+                offset != message.payload.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Describe message");
+                extendedQueryError = true;
+                continue;
+            }
+            if (target == 'S') {
+                auto statementIt = preparedStatements.find(name);
+                if (statementIt == preparedStatements.end()) {
+                    protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
+                    extendedQueryError = true;
+                    continue;
+                }
+                if (!protocol.sendParameterDescription(statementIt->second.parameterTypes) ||
+                    !protocol.sendNoData()) {
+                    extendedQueryError = true;
+                }
+                continue;
+            }
+            if (target == 'P') {
+                if (portals.find(name) == portals.end()) {
+                    protocol.sendErrorResponse("ERROR", "34000", "portal does not exist");
+                    extendedQueryError = true;
+                    continue;
+                }
+                protocol.sendNoData();
+                continue;
+            }
+            protocol.sendErrorResponse("ERROR", "08P01", "invalid Describe target");
+            extendedQueryError = true;
             continue;
         }
         if (message.type == 'C') {
+            if (message.payload.empty()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Close message");
+                extendedQueryError = true;
+                continue;
+            }
+            const char target = static_cast<char>(message.payload[0]);
+            size_t offset = 1;
+            std::string name;
+            if (!PostgresProtocol::readCString(message.payload, offset, name) ||
+                offset != message.payload.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Close message");
+                extendedQueryError = true;
+                continue;
+            }
+            if (target == 'S') {
+                if (preparedStatements.erase(name) == 0) {
+                    protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
+                    extendedQueryError = true;
+                    continue;
+                }
+                for (auto portalIt = portals.begin(); portalIt != portals.end();) {
+                    if (portalIt->second.statement == name) portalIt = portals.erase(portalIt);
+                    else ++portalIt;
+                }
+            } else if (target == 'P') {
+                if (portals.erase(name) == 0) {
+                    protocol.sendErrorResponse("ERROR", "34000", "portal does not exist");
+                    extendedQueryError = true;
+                    continue;
+                }
+            } else {
+                protocol.sendErrorResponse("ERROR", "08P01", "invalid Close target");
+                extendedQueryError = true;
+                continue;
+            }
             protocol.sendCloseComplete();
             continue;
         }

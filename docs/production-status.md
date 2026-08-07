@@ -25,7 +25,7 @@
 - 网络服务默认 fail-closed：证书/私钥缺失、OpenSSL 不可用或 TLS 初始化失败时拒绝启动；明文只能通过显式 `--insecure` 开启，且仅用于本地开发。
 - 删除运行时自动生成自签名证书的 shell 调用，避免私钥落盘位置和命令参数不可控；部署必须显式提供 TLS 材料。
 - 网络服务已切换到 PostgreSQL Frontend/Backend protocol 3.0 核心路径：支持 SSLRequest 协商、StartupMessage、catalog SCRAM-SHA-256、参数状态、简单 Query，以及 Parse/Bind/Execute/Sync 基础流程；协议回归由 `tests/postgres_protocol_test.py` 覆盖真实 SCRAM 握手。
-- 扩展查询已支持文本参数的 `Parse` 参数描述、`Bind` 参数数量/格式/NULL 校验和 `$n` 字面量绑定，整数、数值、布尔参数按类型严格校验；二进制参数/结果格式、完整 OID 类型映射和 portal 分页仍明确拒绝或待实现。
+- 扩展查询已支持文本参数的 `Parse` 参数描述、`Bind` 参数数量/格式/NULL 校验、`Describe`/`Close` 生命周期和 `$n` 字面量绑定，整数、数值、布尔参数按类型严格校验；二进制参数/结果格式、SELECT 的完整 RowDescription 类型推导和 portal 分页仍明确拒绝或待实现。
 - 表/列 ACL 检查已统一解析会话用户自身、递归继承角色和 `PUBLIC` 授权；真实协议回归验证了角色继承的 `SELECT` 和未授权 `INSERT` 拒绝。对象 owner、`GRANT OPTION` 完整转移/回收、schema/database/function ACL 及 RLS 与 ACL 的完整组合语义仍待补齐。
 - 协议错误状态已收敛：扩展查询在 Parse/Bind/Execute 错误后进入 PostgreSQL 的 ignore-until-Sync 状态；事务外简单查询错误返回 `ReadyForQuery('I')`，连接可在 Sync/错误响应后继续使用。完整类型映射、二进制参数/结果和扩展消息语义仍未完成。
 - 事务上下文已从共享 `StorageEngine` 实例移为连接工作线程局部：事务 ID、快照、回滚日志、savepoint、隔离级别、延迟约束和 `lastval` 不再在协议连接之间互相覆盖；连接断开时会回滚未完成事务并丢弃 backend 上下文。全局锁管理器和提交状态仍用于跨 backend 协调。双连接协议回归已验证未提交行隔离、回滚恢复、断开回滚和提交后可见性。

@@ -160,6 +160,12 @@ def extended_query(sock, sql):
     kind, _ = read_message(sock)
     assert kind == b"1"
 
+    sock.sendall(typed(b"D", b"S\0"))
+    kind, body = read_message(sock)
+    assert kind == b"t" and body == struct.pack("!H", 0)
+    kind, _ = read_message(sock)
+    assert kind == b"n"
+
     # Bind unnamed portal to unnamed statement with text formats and no args.
     bind = b"\0\0" + struct.pack("!H", 0) + struct.pack("!H", 0) + struct.pack("!H", 0)
     sock.sendall(typed(b"B", bind))
@@ -172,6 +178,10 @@ def extended_query(sock, sql):
     messages = read_until_ready(sock)
     assert any(kind == b"D" for kind, _ in messages)
     assert any(kind == b"C" for kind, _ in messages)
+
+    sock.sendall(typed(b"C", b"P\0") + typed(b"C", b"S\0") + typed(b"S"))
+    messages = read_until_ready(sock)
+    assert sum(kind == b"3" for kind, _ in messages) == 2, messages
 
 
 def extended_query_int_parameter(sock, sql, value):
