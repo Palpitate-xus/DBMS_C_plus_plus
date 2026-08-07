@@ -157,8 +157,8 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | 表级锁 (共享/排他) | ✅ | ✅ | ✅ |
 | **行级锁** | ✅ | ✅ | ✅ (rowLockShared/Exclusive + NOWAIT) |
 | **Deadlock detection** | ✅ | ✅ | ✅ (wait-for graph + cycle detection + log) |
-| **Gap locks / predicate locks** | ✅ | ❌ | 缺 |
-| **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 已有关系限定的行级 rw-conflict/写偏差回滚；缺 predicate/SIREAD、空范围和完整 SSI 规则 |
+| **Gap locks / predicate locks** | ✅ | ⚠️ | 有简化 gap lock 和关系级 SIREAD；缺页/索引粒度 predicate lock |
+| **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 行级 rw-conflict + 关系级 SIREAD 覆盖空范围读；缺精确 phantom 推理和完整 SSI 规则 |
 | **两阶段提交 (2PC)** | ✅ | ✅ | ✅ (prepareTransaction + COMMIT/ROLLBACK PREPARED) |
 | **并行查询** | ✅ | ❌ | 框架 stub (parallelWorkers_=0) |
 | **JIT compilation (LLVM)** | ✅ | ❌ | 缺 |
@@ -317,7 +317,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 2. **JIT 编译** — 表达式求值仍为解释执行, 无 LLVM 后端
 3. **索引 GiST** — 全文搜索/几何最近邻索引缺失 (仅有 SP-GiST)
 4. **Gap locks / predicate locks** — 无法完全防止幻读
-5. **SSI (Serializable Snapshot Isolation)** — 已覆盖关系限定的行级写偏差回滚，但 predicate/SIREAD 和完整冲突规则仍未实现
+5. **SSI (Serializable Snapshot Isolation)** — 已覆盖关系限定的行级写偏差回滚及空谓词的关系级 SIREAD，但页/索引级 predicate lock 和完整冲突规则仍未实现
 6. **Bitmap scan** — 等值多索引 Bitmap AND 已接入；Bitmap OR、范围 bitmap 和并行路径仍缺
 7. **INSTEAD OF 视图触发器** — 已支持简单单表视图上的逐行 INSERT/UPDATE/DELETE action SQL，并覆盖多行协议 E2E；复杂视图映射、transition tables、完整函数/PL 运行时仍缺失
 

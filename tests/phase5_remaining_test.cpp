@@ -91,6 +91,45 @@ static void test_ssi_locks() {
     std::cout << "[P5.43] SSI write-skew abort OK" << std::endl;
 }
 
+// Predicate reads must participate in SSI even when the predicate currently
+// matches no row.  Otherwise two serializable transactions can both observe
+// an empty range and insert into it without any row-level read-set overlap.
+static void test_ssi_empty_predicate() {
+    const std::string db = testDbPath("ssi_empty_predicate");
+    cleanupTestDb("ssi_empty_predicate");
+    {
+        dbms::StorageEngine first;
+        dbms::StorageEngine second;
+        assert(first.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+        dbms::TableSchema items;
+        items.tablename = "items";
+        items.append(dbms::makeIntColumn("id", false, 2, true));
+        items.pkColIndices.push_back(0);
+        assert(first.createTable(db, items) == dbms::DBStatus::OK);
+        assert(first.insert(db, "items", {{"id", "1"}}) == dbms::DBStatus::OK);
+
+        first.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        second.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        assert(first.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(second.beginTransaction(db) == dbms::DBStatus::OK);
+
+        assert(first.query(db, "items", {"=id 99"}, {"id"}).empty());
+        assert(second.query(db, "items", {"=id 100"}, {"id"}).empty());
+        assert(first.insert(db, "items", {{"id", "99"}}) == dbms::DBStatus::OK);
+        assert(second.insert(db, "items", {{"id", "100"}}) == dbms::DBStatus::OK);
+
+        const dbms::DBStatus firstCommit = first.commitTransaction();
+        const dbms::DBStatus secondCommit = second.commitTransaction();
+        const bool oneAborted = firstCommit == dbms::DBStatus::SERIALIZATION_FAILURE ||
+                                secondCommit == dbms::DBStatus::SERIALIZATION_FAILURE;
+        assert(oneAborted);
+        assert(firstCommit == dbms::DBStatus::OK || secondCommit == dbms::DBStatus::OK);
+    }
+    cleanupTestDb("ssi_empty_predicate");
+    std::cout << "[P5.43] empty predicate SIREAD abort OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_skip_scan_logic();
@@ -98,6 +137,7 @@ int main() {
     test_jit_stub();
     test_aio_stub();
     test_ssi_locks();
+    test_ssi_empty_predicate();
     std::cout << "[P5_REMAINING] all passed" << std::endl;
     return 0;
 }

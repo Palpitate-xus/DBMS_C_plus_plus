@@ -1167,6 +1167,13 @@ private:
     static std::mutex ssiMutex_;
     static std::map<uint64_t, std::set<std::string>> ssiReadSets_;   // txId -> relation-qualified RIDs read
     static std::map<uint64_t, std::set<std::string>> ssiWriteSets_;  // txId -> relation-qualified RIDs written
+    // Coarse-grained SIREAD coverage.  A relation marker is retained for the
+    // lifetime of overlapping serializable transactions so empty/range reads
+    // still conflict with concurrent writes (the row sets alone cannot see a
+    // phantom).  This is conservative by design until page/index predicate
+    // locks are implemented.
+    static std::map<uint64_t, std::set<std::string>> ssiReadRelations_;
+    static std::map<uint64_t, std::set<std::string>> ssiWriteRelations_;
     static std::map<uint64_t, std::set<uint64_t>> ssiOutEdges_; // T1 -> {T2} means T1 read something written by T2
     static std::map<uint64_t, std::set<uint64_t>> ssiInEdges_;  // T2 -> {T1} means T1 read something written by T2
 
@@ -1205,6 +1212,8 @@ private:
         std::optional<CatalogSnapshot> catalogSnapshot;
         std::set<std::string> txnReadRids;        // relation-qualified RIDs
         std::set<std::string> txnWrittenRids;     // relation-qualified RIDs
+        std::set<std::string> txnReadRelations;  // coarse SIREAD relation coverage
+        std::set<std::string> txnWrittenRelations;
         std::string lastvalDb;
         std::string lastvalSeq;
         int64_t lastvalValue = 0;
