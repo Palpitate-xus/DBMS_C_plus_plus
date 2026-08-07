@@ -32,7 +32,7 @@
 ./dbms_main
 ```
 
-输入用户名密码登录（默认在 `user.dat` 中配置）。
+输入用户名密码登录；角色和 SCRAM-SHA-256 凭据存储在 `info/pg_catalog/pg_authid.cat`。
 
 ### 1.3 启动网络服务
 
@@ -44,15 +44,13 @@
 
 ### 1.4 初始化管理员账号
 
-创建 `user.dat`：
+首次启动后使用交互模式创建账号：
 
-```
-admin admin admin
+```sql
+CREATE USER admin PASSWORD 'change-this-password' SUPERUSER;
 ```
 
-格式：`username password permission`
-- `permission = admin` — 管理员（所有权限）
-- `permission = 0` — 普通用户
+用户和角色由 `pg_authid` 管理；密码统一存储为 SCRAM-SHA-256 verifier，不再读取旧的平面文件。
 
 ---
 

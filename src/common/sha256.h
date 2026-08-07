@@ -55,8 +55,15 @@ private:
             0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
         };
         uint32_t m[64];
-        for (int i = 0; i < 16; ++i)
-            m[i] = (block[i * 4] << 24) | (block[i * 4 + 1] << 16) | (block[i * 4 + 2] << 8) | block[i * 4 + 3];
+        for (int i = 0; i < 16; ++i) {
+            // uint8_t is promoted to signed int before shifting. Cast each
+            // byte first so high-bit message bytes cannot trigger signed
+            // overflow or produce an invalid SHA-256 digest.
+            m[i] = (static_cast<uint32_t>(block[i * 4]) << 24) |
+                   (static_cast<uint32_t>(block[i * 4 + 1]) << 16) |
+                   (static_cast<uint32_t>(block[i * 4 + 2]) << 8) |
+                   static_cast<uint32_t>(block[i * 4 + 3]);
+        }
         for (int i = 16; i < 64; ++i)
             m[i] = sig1(m[i - 2]) + m[i - 7] + sig0(m[i - 15]) + m[i - 16];
 

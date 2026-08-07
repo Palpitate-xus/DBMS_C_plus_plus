@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-08-07
 > 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=117 FAIL=0（`scripts/run_all_tests_fast.sh` 与 `scripts/build_tests.sh`，含 PostgreSQL 协议 E2E）
+> 回归基线: PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
@@ -696,7 +696,7 @@ CREATE TABLE orders (
 CREATE USER alice WITH PASSWORD 'secret';
 
 -- 创建超级用户
-CREATE USER admin WITH PASSWORD 'admin' SUPERUSER;
+CREATE USER admin WITH PASSWORD 'change-this-password' SUPERUSER;
 
 -- 删除用户
 DROP USER alice;
@@ -934,7 +934,8 @@ hostssl all       admin     10.0.0.0/8      cert
 host    all       all       0.0.0.0/0       reject
 ```
 
-支持的认证方法: `trust`, `md5`, `scram-sha-256`, `password`, `ident`, `peer`, `cert`, `pam`, `ldap`, `radius`, `reject`。
+解析器识别 `trust`, `md5`, `scram-sha-256`, `password`, `ident`, `peer`, `cert`, `pam`, `ldap`, `radius`, `reject`。
+网络运行时当前实际执行 `trust`、`password`、`scram-sha-256`、使用 SCRAM verifier 的 `md5`、以及 `reject`；其他方法 fail-closed 返回未实现错误。支持首条匹配、`hostssl`/`hostnossl`、IPv4/IPv6 CIDR、`sameuser`、`samerole`/`samegroup` 和 `+role`。
 
 ---
 
@@ -1024,7 +1025,7 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 
 ```bash
 ./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 运行全部 117 个测试
+./scripts/run_all_tests_fast.sh # 运行全部 117 个 C++ 测试及协议 E2E
 ./scripts/build_tests.sh        # 独立编译并运行每个 C++ 测试
 python3 tests/window_e2e_test.py # 窗口函数端到端测试（9 用例）
 ```

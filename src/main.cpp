@@ -16,6 +16,7 @@
 #include "NetworkServer.h"
 #include "logs.h"
 #include "permissions.h"
+#include "common/scram_sha256.h"
 #include "Session.h"
 #include "Config.h"
 #include "parser/parser.h"
@@ -6498,7 +6499,7 @@ static bool handleAlterRole(const string& sql, Session& s) {
         cout << "Role " << roleName << " renamed to " << newName << endl;
         return false;
     }
-    const auto* current = authCatalog().findAuthIdByName(roleName);
+    const auto current = authCatalog().getAuthIdByName(roleName);
     if (!current) {
         cout << "Role " << roleName << " not exist" << endl;
         return true;
@@ -9760,7 +9761,7 @@ bool execute(const string& rawSql, Session& s) {
                 while (rss >> rp) rawParts.push_back(rp);
                 if (rawParts.size() >= 2) newPw = rawParts[1];
             }
-            const auto* current = authCatalog().findAuthIdByName(uname);
+            const auto current = authCatalog().getAuthIdByName(uname);
             if (!current || !current->rolcanlogin) {
                 cout << "User " << uname << " not exist" << endl;
                 return true;
@@ -13406,6 +13407,10 @@ bool execute(const string& rawSql, Session& s) {
             }
             if (res == -2) {
                 cout << "error: role already granted to user" << endl;
+                return true;
+            }
+            if (res != 0) {
+                cout << "error: cannot grant role due to invalid membership or role cycle" << endl;
                 return true;
             }
             cout << "Granted role " << roleName << " to " << username << endl;

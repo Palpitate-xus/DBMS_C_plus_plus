@@ -39,6 +39,8 @@ int main() {
         assert(mgr.findAuthIdByName("admin"));
         assert(mgr.findAuthIdByName("user1"));
         assert(!mgr.findAuthIdByName("nobody"));
+        auto userSnapshot = mgr.getAuthIdByName("user1");
+        assert(userSnapshot && userSnapshot->rolconnlimit == 10);
         std::cout << "[AUTH] create/find OK\n";
 
         // UPDATE name
@@ -49,6 +51,9 @@ int main() {
         assert(!mgr.findAuthIdByName("user1"));
         assert(mgr.findAuthIdByName("user1_renamed"));
         assert(mgr.findAuthId(user1Oid)->rolconnlimit == 20);
+        auto renamedSnapshot = mgr.getAuthId(user1Oid);
+        assert(renamedSnapshot && renamedSnapshot->rolname == "user1_renamed" &&
+               renamedSnapshot->rolconnlimit == 20);
         std::cout << "[AUTH] update OK\n";
 
         // LIST

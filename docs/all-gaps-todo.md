@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：回归基线 PASS=117 FAIL=0（含 PostgreSQL 协议 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：回归基线 PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -19,7 +19,7 @@
 |------|------|
 | 2026-06-10 | 初始生成，基于 gap-analysis 逐条提取全部 gap |
 | 2026-06-21 | 大范围同步实现现状：Phase 1（Parser/AST）、Phase 2（Catalog/OID）、Phase 3（WAL/MVCC/Buffer/Cluster）、Phase 4 Wave 0~2（TypeRegistry/ExprEvaluator/DDL AST 桥/DDL 事务骨架/函数/聚合/窗口骨架）已落地，逐章更新状态标记与"已完成进展"小节。详见各章末尾与下文总览。 |
-| 2026-06-21（修正） | 经运行时核对，**Phase 1/2 为"模块+测试已写、未接入主程序 `execute()` 运行时"**：DML 全部走字符串分发（AST 未被消费）；`CatalogManager` 在 main.cpp 从未构造、`migrateDatabaseToCatalog` 无调用者、`planDrop` 无 DROP 处理器接入、核心系统表不可查、`resolveTableName` 仍用 `schema__table` 编码。据此下调 §1/§4/§16/§17 相关表述，16.1 由 ✅ 改 🔄，4.1/4.2 维持 🔄 但注明未接入运行时。Phase 3（WAL/MVCC/Buffer）为真实接入运行时。 |
+| 2026-06-21（历史修正） | 当时的运行时核对曾将 Phase 1/2 标为“模块+测试、尚未接入”；后续 CatalogService、DDL bridge 和系统目录路径已接入，当前状态以 2026-08-07 审计及本文件各章节最新说明为准。 |
 | 2026-06-25 | Phase 4 Wave 3 约束/默认值/生成列落地：DEFAULT 表达式（含字面量与复杂表达式）、GENERATED ALWAYS AS (expr) STORED、GENERATED/BY DEFAULT AS IDENTITY、CHECK 约束在 INSERT/UPDATE 路径通过 `ExprHelper` + `ExprEvaluator` 真正执行；新增 `src/expression/expr_helper.h/.cpp` 与 `tests/constraint_expr_test.cpp`；修复 parser 将数字/字符串字面量误当列引用、DDL 桥工厂函数覆盖 `Column` 导致元数据丢失、IDENTITY 大小写解析等问题。`docs/implementation-plan.md` 同步更新 Phase 4 Wave 3 完成状态。 |
 | 2026-06-30 | Phase 4 Wave 4.22 DEFAULT 表达式、函数 volatility、序列所有权落地：`DEFAULT nextval('seq')` 通过 `ExprEvaluator` 内置 `nextval`/`currval`/`lastval` 端到端可用；volatility 从 `CREATE FUNCTION IMMUTABLE/STABLE/VOLATILE` 持久化到 UDF 元数据与 `pg_proc.provolatile`，`ExprEvaluator` 内置函数分类 volatility；CREATE TABLE 时扫描 `DEFAULT nextval('seq')` 自动注册序列到表的 `pg_depend` 依赖，`DROP SEQUENCE RESTRICT` 拒绝存在依赖，`DROP SEQUENCE CASCADE` 清除依赖列的 default。新增/扩展 `tests/default_sequence_test.cpp` 与 `tests/function_procedure_test.cpp`。 |
 | 2026-06-30 | Phase 4 Wave 4.23 GENERATED 虚拟/存储生成列完整语义落地：`Column`/`ColumnDef` 新增 `generatedKind`（'s'=STORED, 'v'=VIRTUAL），schema 二进制格式升级到 `0x44420005`；parser 解析 `GENERATED ALWAYS AS (expr) [STORED|VIRTUAL]`；`GENERATED ALWAYS AS ... STORED` 在 INSERT/UPDATE 时按当前行求值并持久化，拒绝用户直接写入；`GENERATED ALWAYS AS ... VIRTUAL` 不写入行缓冲，在 SELECT 投影与标量函数参数中通过 `extractColumnValue(..., dbname, computeVirtual=true)` 实时计算；新增 `tests/generated_columns_test.cpp`。WHERE/DISTINCT/索引/内部约束比较中 VIRTUAL 列的实时计算仍待 planner 阶段完善。 |
@@ -104,7 +104,7 @@
 > - 🔄 6.2 B-tree dedup, 6.3 Hash WAL-safe, 6.5 CONCURRENTLY, 6.7 index maintenance, 6.8 partitioned index, 6.9 opclass/collation
 
 > **Phase 7（安全/认证/Wire Protocol）**：当前已具备基础 wire protocol 与 SCRAM 握手，完整 PostgreSQL 语义仍未完成
-> - ✅ 7.2 pg_hba.conf 解析（10+ auth methods: trust/md5/scram-sha-256/password/ident/peer/cert/pam/ldap/radius/reject）+ CIDR IP 匹配
+> - ✅ 7.2 pg_hba.conf 解析（识别多种认证方法；运行时支持 trust/password/md5→SCRAM/scram/reject）+ IPv4/IPv6 CIDR、角色组和数据库别名匹配
 > - ✅ 7.12 CREATE ROLE 完整属性（SUPERUSER/CREATEROLE/CREATEDB/LOGIN/INHERIT/REPLICATION/BYPASSRLS/CONNECTION LIMIT/PASSWORD/VALID UNTIL/IN ROLE）
 > - 🔄 7.1 Wire Protocol, 🔄 7.3 SCRAM-SHA-256（协议握手已实现，运行时策略和完整生态仍待验收）
 > - 🔄 7.4 auth methods, 7.5 TLS 完整协商, 7.6-7.11 认证/权限
@@ -155,7 +155,7 @@
 - 根目录保持干净：所有测试数据自动隔离，不污染项目根目录
 - 修复: 61 个测试文件批量更新 include 和 cleanup 逻辑
 
-历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=117 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=118 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -168,14 +168,14 @@
 | SQL 命令 | 约 65 条 | 约 55 条 | 约 45 条 ❌ | DDL 已可解析为 AST 并经 DdlExecutor 执行（TABLE/INDEX/VIEW/SEQUENCE/DOMAIN/TYPE/DB/SCHEMA/COMMENT） |
 | 数据类型 | 约 10 种 | 约 35 种 | 约 3 种 ❌ | TypeRegistry 统一注册 40+ 类型与别名/修饰符校验；多数类型仍"字符串存储+注册校验"，未达 PG I/O 语义 |
 | 表达式/函数 | 基础子集 | 中量 | 大量 | ExprEvaluator 支持 cast/case/coalesce/between/in/like/funcall/子查询；内置函数子集 |
-| DDL 对象模型 | 基础 | 简化→中量（模块+测试） | 架构级未接入运行时 | pg_class/attribute/type/proc/depend/namespace + OID/依赖 CASCADE/RESTRICT 模块已写并有测试，但 **CatalogManager 未在 main.cpp 构造、DROP 未接 planDrop**，运行时仍走文件+`schema__table` |
+| DDL 对象模型 | 基础 | 简化→中量（模块+测试） | 仍有架构缺口 | CatalogService 已接入运行时；pg_class/attribute/type/proc/depend/namespace + OID/依赖 CASCADE/RESTRICT 的主要 DDL 路径可验证，但 DML 全量目录化、owner/ACL、对象全集依赖和 legacy 分发拆分仍缺 |
 | 约束 | 6 类 | 5 类 | 1 类 ❌ | DEFAULT/GENERATED STORED/IDENTITY/CHECK 已接入 INSERT/UPDATE 执行路径（ExprHelper + ExprEvaluator）；DEFERRABLE 延迟队列+提交时检查已实现；EXCLUDE 执行检查已实现；constraint trigger 仍 ⚠️ |
 | DQL/查询 | 大量 | 中量 | 大量 | SELECT 已解析为 AST（CTE/JOIN/SET OPS）；执行仍走旧 switch/case |
 | 优化器/执行器 | 简化 | 中量 | 大量 ❌ | `src/optimizer/` 仍为空；Path/RelOptInfo 框架未建（Phase 5 未启动） |
 | 索引 | 6 种 | 简化 | 大量 ❌ | IIndexAM 适配器已统一；AM API/opclass/concurrent/维护仍 ❌ |
 | 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI 仅完成关系限定的行级写偏差检测，完整子事务仍 ❌ |
 | 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
-| 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；运行时 pg_hba、完整 SCRAM 策略和 wire protocol 语义仍待完善 |
+| 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；运行时 pg_hba、SCRAM 和基础 wire protocol 已接入，完整 ACL、channel binding 和协议语义仍待完善 |
 | 复制/HA | 0 | WAL archive 1 项 | 全部 ❌ | `src/replication/` 仅有 README；流复制/逻辑复制/PITR 全缺 |
 | 监控/诊断 | 子集 | 子集 | 大量 ❌ | pg_stat_activity/locks/statements 风格子集；pg_stat_io/wait events 缺 |
 | 扩展/生态 | 0 | 0 | 全部 ❌ | EXTENSION/FDW/PL 全缺；event trigger/rule 仅 parser classify stub |
@@ -317,7 +317,7 @@
 
 ## 4. DDL 和对象模型差距
 
-> **已完成进展（2026-06-21，含运行时核对）**：⚠️ **Phase 2 模块与单元测试已写，但尚未接入主程序运行时**。`CatalogManager`（`src/catalog/catalog.{h,cpp}`）以内存缓存 + 按 OID/名称索引 + CSV 持久化承载 `pg_namespace`/`pg_class`/`pg_attribute`/`pg_type`/`pg_proc`/`pg_depend`/`pg_authid`/`pg_auth_members`/`pg_description` 系统表行格式；OID 分配器（单调递增/批量预留/空闲回收，持久化 `.oid_counter.free`）；`planDrop` 拓扑排序 + pin 保护 + 循环检测 + RESTRICT/CASCADE；`migrateDatabaseToCatalog` 迁移工具；临时 schema + 嵌套锁死锁修复——**以上均有测试覆盖，但运行时未生效**：`CatalogManager` 在 `main.cpp` 中从未被构造（仅测试/README 使用），`migrateDatabaseToCatalog` 无任何调用者，`planDrop` 仅被 catalog 内部 `dropObject` 调用而**无 DROP 命令处理器接入**。`pg_class`/`pg_attribute`/`pg_type`/`pg_proc`/`pg_depend` **不可查询**（只有 pg_database/pg_tables/pg_indexes/pg_settings/pg_roles/pg_namespace 是 main.cpp ~14208 的硬编码虚拟表）。`resolveTableName`（main.cpp:2504）仍用 `schema__table` 字符串拼接，未走 CatalogManager 的 search_path。`TypeRegistry::instance()` 全程序仅被调用 1 次（TableManage.cpp:6057 建表列校验）。故 4.1/4.2 仍标 🔄（**框架已写+有测试，未接入运行时**），4.3 标 ⚠️（运行时表名解析仍是 `schema__table` 编码，非真正 search_path）。后续真正"完成 Phase 2"的关键是把 CatalogManager 接入建表/删表/表名解析执行路径。
+> **当前进展（2026-08-07，含运行时核对）**：`CatalogService` 已由 `StorageEngine` 持有并负责按数据库缓存、引导和持久化 `CatalogManager`；DDL bridge 已将主要建表、删表、索引、序列、schema、依赖和系统目录路径接入运行时。`pg_authid`/`pg_auth_members` 也已成为认证与角色 DDL 的唯一来源。当前未完成的是 DML 全量目录化、所有对象类型的依赖/owner/ACL 集成、完整系统目录查询，以及把 legacy `main.cpp` 执行分发进一步拆分为独立 handler；因此 Phase 2 仍保持进行中，不再把已接入的目录框架描述为“完全未生效”。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
@@ -449,12 +449,12 @@
 
 ## 11. 安全、认证、权限差距
 
-> **已完成进展（2026-08-07）**：角色、用户、成员关系和 SCRAM 凭据已统一写入 `pg_authid`/`pg_auth_members`，网络服务已接入 `pg_hba.conf` 首条匹配和 host/hostssl/hostnossl 传输约束；网络服务仍默认 TLS fail-closed，`--insecure` 仅用于本地开发。TLS 客户端证书/channel binding、pg_hba 角色组匹配、完整 wire protocol 语义和 ACL 仍待 Phase 7。
+> **已完成进展（2026-08-07）**：角色、用户、成员关系和 SCRAM 凭据已统一写入 `pg_authid`/`pg_auth_members`，网络服务已接入 `pg_hba.conf` 首条匹配、IPv4/IPv6 CIDR、数据库/角色组匹配和 host/hostssl/hostnossl 传输约束；网络服务仍默认 TLS fail-closed，`--insecure` 仅用于本地开发。TLS 客户端证书/channel binding、完整 wire protocol 语义和 ACL 仍待 Phase 7。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 11.1 | 用户/角色 catalog | 已统一到 `pg_authid`/`pg_auth_members`；角色属性执行、password expiration、递归 membership 和完整 ACL 仍缺 | ⚠️ |
-| 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配和 TLS；缺少完整角色/数据库匹配、OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
+| 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配、IPv4/IPv6 及角色/数据库匹配和 TLS；缺少 OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
 | 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 核心 startup/auth/query framing 和 SCRAM；缺少完整类型/扩展消息和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
 | 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
@@ -542,7 +542,7 @@
 | # | 差距 | 影响范围 | 难度 | 状态 |
 |---|------|---------|------|------|
 | 16.1 | **Parser/AST** — 当前 `execute()` 是巨大字符串分发器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 | 🔄 框架已建：`src/parser/` 递归下降 Parser + AST + `classify()`，DDL 子集经 `DdlExecutor`；但 DML 全部仍走字符串分发，AST 未被执行器消费 |
-| 16.2 | **Catalog/OID** — 没有完整 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等对象图 | DDL、权限、依赖、对象寻址 | 极高 | 🔄 模块+测试已写（系统表对象图/OID/依赖 CASCADE/RESTRICT），但 **CatalogManager 未在 main.cpp 构造、DROP 未接 planDrop、系统表不可查**，运行时仍用文件+`schema__table` |
+| 16.2 | **Catalog/OID** — 目录对象图、owner/ACL 和完整依赖语义仍不完整 | DDL、权限、依赖、对象寻址 | 极高 | 🔄 CatalogService、核心系统表、OID 和主要 DDL 依赖路径已接入；DML 全量目录化、对象全集 owner/ACL/依赖和事务化 rewrite 仍缺 |
 | 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 | ✅ 已是 redo log：LSN/segment/full-page/redo/timeline/archive + 两趟扫描崩溃恢复（Phase 3.4~3.6）；PITR/复制仍 ❌ |
 | 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 | 🔄 `HeapTupleHeader`(xmin/xmax/ctid) + HOT + CLOG 可见性已实现（Phase 3.7/3.8）；多版本边界/vacuum 回收仍需深化 |
 | 16.5 | **DDL 事务化** — 多处 DDL 隐式提交，与 PG 事务语义不一致 | 数据一致性、回滚、并发 | 高 | 🔄 Wave 0.4 骨架（`DdlTransaction` + `XLOG_CATALOG_*` WAL）；全量移除隐式提交待 Phase 4.39 Wave 5 |
@@ -565,10 +565,10 @@
 - 实现完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function — **解析层完成，执行期 cast/重载仍 ⚠️**
 - 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 子集经 DdlExecutor 走 AST；DML（SELECT/INSERT/UPDATE/DELETE/MERGE）仍全部走字符串分发，AST 未被消费**
 
-### Phase 2：Catalog 体系 🔄 模块+测试完成，未接入运行时
-- 建立对象 OID、namespace、owner、ACL、dependency 体系 — **模块+测试完成，但 CatalogManager 未在 main.cpp 构造，运行时未生效；ACL/owner 待深化**
-- 实现 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等系统表 — **对象图已写并有测试，但不可查询（仅 pg_database/pg_tables 等硬编码虚拟表可查）**
-- 所有 DROP/ALTER 行为改为基于 catalog 的依赖追踪 — **planDrop 框架已写，但无 DROP 命令处理器接入；ALTER rewrite 路径待补**
+### Phase 2：Catalog 体系 🔄 主要 DDL 已接入运行时
+- 建立对象 OID、namespace、owner、ACL、dependency 体系 — **CatalogService/主要对象图已接入；owner/ACL 传播和对象全集依赖仍待深化**
+- 实现 `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等系统表 — **核心目录可由虚拟系统表查询；完整列定义、函数、依赖和统计视图仍待补全**
+- 所有 DROP/ALTER 行为改为基于 catalog 的依赖追踪 — **主要 DROP/ALTER 路径已有 catalog 同步；DML 目录化、剩余对象和事务化 rewrite 仍待补**
 
 ### Phase 3：事务/WAL/MVCC ✅ 完成
 - 实现真实 WAL record/LSN/redo、tuple xmin/xmax、多版本链和崩溃恢复 — **已完成**
@@ -589,7 +589,7 @@
 
 ### Phase 6：协议与认证 🔄 进行中
 - 支持 PostgreSQL wire protocol、libpq — **核心已启动，完整兼容性未完成**
-- 实现 pg_hba.conf、SCRAM-SHA-256 — **基础运行时决策和 SCRAM 已实现；角色/数据库组匹配及完整认证方法未完成**
+- 实现 pg_hba.conf、SCRAM-SHA-256 — **基础运行时决策、SCRAM、角色/数据库组匹配已实现；完整认证方法未完成**
 
 ### Phase 7：复制/PITR ❌ 未启动
 - 在 WAL 稳定后实现 streaming replication、logical decoding、PITR — **未启动**

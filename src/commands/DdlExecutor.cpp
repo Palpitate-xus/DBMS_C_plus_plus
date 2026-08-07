@@ -8,6 +8,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "common/logs.h"
+#include "common/scram_sha256.h"
 #include "permissions.h"
 #include <algorithm>
 #include <cctype>
@@ -313,6 +314,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropDatabase(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateSchema:
             return executeCreateSchema(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
+        case SqlCommand::CreateRole:
+            return executeCreateRole(dynamic_cast<const CreateRoleStmt*>(stmt.get()), s);
         case SqlCommand::DropSchema:
             return executeDropSchema(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::Comment:
@@ -364,6 +367,8 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropSchema:
         case dbms::SqlCommand::CreateCollation:
         case dbms::SqlCommand::DropCollation:
+        case dbms::SqlCommand::CreateRole:
+        case dbms::SqlCommand::CreateUser:
         case dbms::SqlCommand::Comment:
             handled = true;
             break;
@@ -773,6 +778,58 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 // CREATE / DROP SCHEMA
 // ----------------------------------------------------------------------------
+
+bool DdlExecutor::executeCreateRole(const CreateRoleStmt* stmt, Session& s) {
+    if (!stmt || stmt->roleName.empty()) {
+        std::cout << "SQL syntax error: role name is required" << std::endl;
+        return true;
+    }
+    if (!checkAdmin(s)) return true;
+    if (roleExists(stmt->roleName)) {
+        std::cout << "ERROR: role \"" << stmt->roleName << "\" already exists" << std::endl;
+        return true;
+    }
+
+    dbms::PgAuthIdRow row;
+    row.rolname = stmt->roleName;
+    row.rolsuper = stmt->superuser;
+    row.rolinherit = stmt->inherit;
+    row.rolcreaterole = stmt->createrole;
+    row.rolcreatedb = stmt->createdb;
+    row.rolcanlogin = stmt->login;
+    row.rolreplication = stmt->replication;
+    row.rolbypassrls = stmt->bypassrls;
+    row.rolconnlimit = stmt->connectionLimit;
+    row.rolpassword = stmt->password.empty()
+                          ? std::string()
+                          : (stmt->password.rfind("SCRAM-SHA-256$", 0) == 0
+                                 ? stmt->password
+                                 : dbms::scram::makeRandomVerifier(stmt->password));
+    row.rolvaliduntil = stmt->validUntil;
+    authCatalog().createAuthId(row);
+
+    for (const auto& membership : stmt->inRole) {
+        // IN ROLE means the new role is a member of each existing role.
+        if (grantRoleToUser(membership.first, stmt->roleName) != 0) {
+            dropRole(stmt->roleName);
+            std::cout << "ERROR: role \"" << membership.first << "\" does not exist"
+                      << std::endl;
+            return true;
+        }
+    }
+    for (const auto& membership : stmt->roleMembers) {
+        if (grantRoleToUser(stmt->roleName, membership.first) != 0) {
+            dropRole(stmt->roleName);
+            std::cout << "ERROR: role member \"" << membership.first << "\" does not exist"
+                      << std::endl;
+            return true;
+        }
+    }
+    persistAuthCatalog();
+    std::cout << (stmt->isUser ? "CREATE USER" : (stmt->isGroup ? "CREATE GROUP" : "CREATE ROLE"))
+              << " succeeded" << std::endl;
+    return false;
+}
 
 bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) {
     if (!stmt) return false;

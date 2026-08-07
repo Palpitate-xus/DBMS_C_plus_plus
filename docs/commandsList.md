@@ -361,20 +361,22 @@ CREATE ROLE readonly;
 
 **语法**
 ```sql
-CREATE USER username password permission_level
+CREATE USER username [WITH] PASSWORD 'password' [SUPERUSER|NOSUPERUSER] [LOGIN|NOLOGIN]
+    [CREATEDB|NOCREATEDB] [CREATEROLE|NOCREATEROLE]
+    [CONNECTION LIMIT connection_limit] [VALID UNTIL 'timestamp']
 ```
 
 **参数**
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `username` | `STRING` | 用户名 |
-| `password` | `STRING` | 密码（明文，按配置哈希存储） |
-| `permission_level` | `INT` | 权限等级：0=普通用户，1=管理员 |
+| `password` | `STRING` | 密码；存储为 SCRAM-SHA-256 verifier |
+| `SUPERUSER` | `OPTION` | 创建超级用户（默认普通用户） |
 
 **示例**
 ```sql
-CREATE USER alice secret123 0;
-CREATE USER admin admin 1;
+CREATE USER alice WITH PASSWORD 'secret123';
+CREATE USER admin WITH PASSWORD 'change-this-password' SUPERUSER;
 ```
 
 ---

@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-07）**: 生产化重构进行中；回归基线 PASS=117 FAIL=0，含 PostgreSQL 协议 E2E。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移。
+> **当前状态（2026-08-07）**: 生产化重构进行中；回归基线 PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E）。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移。
 
 ## 功能特性
 
@@ -170,7 +170,7 @@ select * from users where id = 10;  -- 现在能看到
 ```
 
 ### 新增功能 (Phase 4 完整化)
-- **pg_hba.conf 访问控制**: 10+ 认证方法, CIDR IP 匹配
+- **pg_hba.conf 访问控制**: 首条匹配、CIDR/IPv4/IPv6、角色组和传输类型约束；运行时支持 trust/password/md5→SCRAM/scram/reject
 - **表继承**: `ALTER TABLE ... INHERIT / NO INHERIT`
 - **ALTER TABLE SET TABLESPACE / SET STATISTICS**
 - **COMMIT/ROLLBACK AND [NO] CHAIN**
@@ -633,7 +633,7 @@ Var Offset Array 每项 (4 bytes):
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与 Wave 进度 (193 waves 全部完成) |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=117 FAIL=0） |
+| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=118 FAIL=0） |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 

@@ -616,6 +616,20 @@ const PgAuthIdRow* CatalogManager::findAuthIdByName(const std::string& name) con
     return nullptr;
 }
 
+std::optional<PgAuthIdRow> CatalogManager::getAuthId(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* row = findAuthIdUnlocked(oid);
+    return row ? std::optional<PgAuthIdRow>(*row) : std::nullopt;
+}
+
+std::optional<PgAuthIdRow> CatalogManager::getAuthIdByName(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = authIdByName_.find(name);
+    if (it == authIdByName_.end()) return std::nullopt;
+    const auto* row = findAuthIdUnlocked(it->second);
+    return row ? std::optional<PgAuthIdRow>(*row) : std::nullopt;
+}
+
 bool CatalogManager::updateAuthId(Oid oid, const PgAuthIdRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = authIdByOid_.find(oid);

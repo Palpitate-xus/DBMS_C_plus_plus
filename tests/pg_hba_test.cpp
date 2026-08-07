@@ -73,6 +73,28 @@ static void test_match() {
            dbms::HbaMethod::Trust);
     std::remove("/tmp/pg_hba_transport.conf");
 
+    writeTestHba("/tmp/pg_hba_roles.conf",
+        "host sameuser all 127.0.0.1/32 trust\n"
+        "host samerole all 127.0.0.1/32 password\n"
+        "host all +analyst 127.0.0.1/32 scram-sha-256\n");
+    auto roleRecords = dbms::PgHbaFile::parse("/tmp/pg_hba_roles.conf");
+    auto isMember = [](const std::string& member, const std::string& role) {
+        return member == "alice" && (role == "analyst" || role == "sales");
+    };
+    assert(dbms::PgHbaFile::match(roleRecords, "host", "alice", "alice", "127.0.0.1",
+                                  isMember) == dbms::HbaMethod::Trust);
+    assert(dbms::PgHbaFile::match(roleRecords, "host", "sales", "alice", "127.0.0.1",
+                                  isMember) == dbms::HbaMethod::Password);
+    assert(dbms::PgHbaFile::match(roleRecords, "host", "other", "alice", "127.0.0.1",
+                                  isMember) == dbms::HbaMethod::ScramSha256);
+    std::remove("/tmp/pg_hba_roles.conf");
+
+    writeTestHba("/tmp/pg_hba_ipv6.conf", "host all all ::1/128 trust\n");
+    auto ipv6 = dbms::PgHbaFile::parse("/tmp/pg_hba_ipv6.conf");
+    assert(dbms::PgHbaFile::match(ipv6, "host", "mydb", "user1", "::1") ==
+           dbms::HbaMethod::Trust);
+    std::remove("/tmp/pg_hba_ipv6.conf");
+
     std::remove("/tmp/pg_hba_match.conf");
     std::cout << "[PG_HBA] match OK" << std::endl;
 }

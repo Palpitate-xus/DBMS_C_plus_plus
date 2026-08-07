@@ -1,6 +1,7 @@
 #pragma once
 
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -34,6 +35,9 @@ struct HbaRecord {
 
 class PgHbaFile {
 public:
+    using RoleMembershipChecker = std::function<bool(const std::string& member,
+                                                      const std::string& role)>;
+
     // 解析 pg_hba.conf 文件
     static std::vector<HbaRecord> parse(const std::string& path);
 
@@ -43,7 +47,8 @@ public:
                            const std::string& connType,    // "local" / "host"
                            const std::string& database,
                            const std::string& user,
-                           const std::string& ip = "");    // 客户端 IP (IPv4 or IPv6)
+                           const std::string& ip = "",    // 客户端 IP (IPv4 or IPv6)
+                           RoleMembershipChecker roleMembership = {});
 
 private:
     static bool ipInCidr(const std::string& ip, const std::string& cidr);

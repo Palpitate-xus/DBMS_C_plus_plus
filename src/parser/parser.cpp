@@ -2347,6 +2347,10 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
             r.stmt = parseCreateTrigger(tokens, pos);
         } else if (kw == "role" || kw == "user") {
             r.stmt = parseCreateRole(tokens, pos, /*isUser=*/(kw == "user"));
+        } else if (kw == "group") {
+            auto role = parseCreateRole(tokens, pos, /*isUser=*/false);
+            if (role) static_cast<CreateRoleStmt*>(role.get())->isGroup = true;
+            r.stmt = std::move(role);
         } else if (kw == "tablespace") {
             r.stmt = parseCreateTablespace(tokens, pos);
         } else if (kw == "statistics") {
@@ -4643,6 +4647,9 @@ StmtPtr SQLParser::parseCreateTrigger(const std::vector<std::string>& tokens, si
 StmtPtr SQLParser::parseCreateRole(const std::vector<std::string>& tokens, size_t& pos, bool isUser) {
     auto stmt = std::make_unique<CreateRoleStmt>();
     stmt->isUser = isUser;
+    // PostgreSQL treats CREATE USER as CREATE ROLE ... LOGIN by default;
+    // explicit NOLOGIN still overrides this below.
+    stmt->login = isUser;
     // roleName is at current pos (kw "role"/"user" already consumed by caller).
     if (pos < tokens.size()) {
         stmt->roleName = tokens[pos++];

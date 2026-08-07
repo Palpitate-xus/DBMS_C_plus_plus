@@ -5,6 +5,8 @@
 #include "Session.h"
 #include "TLSWrapper.h"
 #include "utils/pg_hba.h"
+#include "common/scram_sha256.h"
+#include "catalog/CatalogService.h"
 
 #include <arpa/inet.h>
 #include <cctype>
@@ -19,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -43,6 +46,8 @@ static std::mutex g_processMutex;
 static std::map<uint64_t, ProcessInfo> g_processList;
 static uint64_t g_nextProcessId = 1;
 static std::mutex g_outputCaptureMutex;
+static std::mutex g_roleConnectionMutex;
+static std::unordered_map<std::string, int> g_roleConnections;
 
 ServerStats& getServerStats() {
     return g_stats;
@@ -91,6 +96,22 @@ void releaseConnectionSlot() {
             return;
         }
     }
+}
+
+bool tryReserveRoleConnection(const dbms::PgAuthIdRow& account) {
+    if (account.rolsuper || account.rolconnlimit < 0) return true;
+    std::lock_guard<std::mutex> lock(g_roleConnectionMutex);
+    int& active = g_roleConnections[account.rolname];
+    if (active >= account.rolconnlimit) return false;
+    ++active;
+    return true;
+}
+
+void releaseRoleConnection(const std::string& roleName) {
+    std::lock_guard<std::mutex> lock(g_roleConnectionMutex);
+    auto it = g_roleConnections.find(roleName);
+    if (it == g_roleConnections.end()) return;
+    if (--it->second <= 0) g_roleConnections.erase(it);
 }
 
 void updateProcessInfo(uint64_t pid, const std::string& command,
@@ -587,7 +608,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     const HbaMethod authMethod = PgHbaFile::match(
         hbaRecords, socket.tlsOK ? "hostssl" : "hostnossl",
         startup.parameters.count("database") ? startup.parameters.at("database") : "info",
-        username, clientIp);
+        username, clientIp,
+        [](const std::string& member, const std::string& role) {
+            return userHasRole(member, role);
+        });
     if (hbaRecords.empty() || authMethod == HbaMethod::Reject) {
         protocol.sendErrorResponse("FATAL", "28000",
                                    "no pg_hba.conf entry for host " + clientIp +
@@ -648,6 +672,16 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         protocol.sendErrorResponse("FATAL", "3D000", "database \"" + session.currentDB + "\" does not exist");
         return;
     }
+
+    const auto account = authCatalog().getAuthIdByName(username);
+    if (!account || !tryReserveRoleConnection(*account)) {
+        protocol.sendErrorResponse("FATAL", "53300", "too many connections for role \"" + username + "\"");
+        return;
+    }
+    struct RoleConnectionGuard {
+        std::string roleName;
+        ~RoleConnectionGuard() { releaseRoleConnection(roleName); }
+    } roleConnectionGuard{username};
 
     const uint64_t pid = registerProcess(username, clientHost, session.currentDB);
     session.pid = pid;

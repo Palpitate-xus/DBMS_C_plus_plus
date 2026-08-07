@@ -59,6 +59,7 @@ private:
     bool executeCreateDatabase(const CreateObjectStmt* stmt, Session& s);
     bool executeDropDatabase(const DropStmt* stmt, Session& s);
     bool executeCreateSchema(const CreateObjectStmt* stmt, Session& s);
+    bool executeCreateRole(const CreateRoleStmt* stmt, Session& s);
     bool executeDropSchema(const DropStmt* stmt, Session& s);
     bool executeComment(const CommentStmt* stmt, Session& s);
     bool executeAlterTable(const AlterTableStmt* stmt, Session& s);

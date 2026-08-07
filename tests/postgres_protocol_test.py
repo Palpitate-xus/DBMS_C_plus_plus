@@ -77,7 +77,7 @@ def write_auth_catalog(work_dir, username, password, superuser=True):
                    (username, flags, password_record))
 
 
-def startup(sock, user, database, fragmented=False):
+def startup(sock, user, database, password="secret", fragmented=False):
     params = b"user\0" + user.encode() + b"\0database\0" + database.encode() + b"\0\0"
     packet = frame(struct.pack("!I", 196608) + params)
     if fragmented:
@@ -95,7 +95,7 @@ def startup(sock, user, database, fragmented=False):
         sasl_initial = b"SCRAM-SHA-256\0" + struct.pack("!i", len(initial)) + initial
         sock.sendall(typed(b"p", sasl_initial))
         kind, body = read_message(sock)
-        assert kind == b"R" and struct.unpack("!I", body[:4])[0] == 11
+        assert kind == b"R" and struct.unpack("!I", body[:4])[0] == 11, (kind, body)
         server_first = body[4:].rstrip(b"\0").decode()
         server_attributes = dict(item.split("=", 1) for item in server_first.split(","))
         assert server_attributes["r"].startswith("clientnonce")
@@ -103,7 +103,7 @@ def startup(sock, user, database, fragmented=False):
         auth_message = client_first_bare + "," + server_first + "," + client_final_without_proof
         salt = base64.b64decode(server_attributes["s"])
         iterations = int(server_attributes["i"])
-        salted = hashlib.pbkdf2_hmac("sha256", b"secret", salt, iterations)
+        salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
         client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
         stored_key = hashlib.sha256(client_key).digest()
         client_signature = hmac.new(stored_key, auth_message.encode(), hashlib.sha256).digest()
@@ -111,7 +111,7 @@ def startup(sock, user, database, fragmented=False):
         sock.sendall(typed(b"p", (client_final_without_proof + ",p=" +
                                   base64.b64encode(proof).decode()).encode()))
         kind, body = read_message(sock)
-        assert kind == b"R" and struct.unpack("!I", body[:4])[0] == 12
+        assert kind == b"R" and struct.unpack("!I", body[:4])[0] == 12, (kind, body)
         expected_server_signature = base64.b64encode(
             hmac.new(hmac.new(salted, b"Server Key", hashlib.sha256).digest(),
                      auth_message.encode(), hashlib.sha256).digest()
@@ -119,7 +119,7 @@ def startup(sock, user, database, fragmented=False):
         assert body[4:].rstrip(b"\0") == ("v=" + expected_server_signature).encode()
     else:
         assert auth_type == 3
-        sock.sendall(typed(b"p", b"secret\0"))
+        sock.sendall(typed(b"p", password.encode() + b"\0"))
     messages = read_until_ready(sock)
     assert messages[0] == (b"R", struct.pack("!I", 0))
     assert messages[-1] == (b"Z", b"I")
@@ -163,7 +163,8 @@ def main():
         open(os.path.join(work_dir, "info", "tlist.lst"), "wb").close()
         write_auth_catalog(work_dir, "alice", "secret")
         with open(os.path.join(work_dir, "pg_hba.conf"), "w", encoding="utf-8") as hba:
-            hba.write("host all all 127.0.0.1/32 scram-sha-256\n")
+            hba.write("host all alice 127.0.0.1/32 scram-sha-256\n"
+                      "host all +analyst 127.0.0.1/32 scram-sha-256\n")
 
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
@@ -190,6 +191,12 @@ def main():
                 time.sleep(0.05)
 
         startup(sock, "alice", "info")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE ROLE analyst"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE USER bob WITH PASSWORD 'bobpass'"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "GRANT analyst TO bob"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
         messages = simple_query(sock, "SELECT id FROM t")
@@ -199,6 +206,13 @@ def main():
         extended_query(sock, "SELECT id FROM t")
         sock.sendall(typed(b"X"))
         sock.close()
+
+        role_sock = socket.socket()
+        role_sock.settimeout(2)
+        role_sock.connect(("127.0.0.1", port))
+        startup(role_sock, "bob", "info", password="bobpass")
+        role_sock.sendall(typed(b"X"))
+        role_sock.close()
 
         # In explicit plaintext mode the server must answer the PostgreSQL
         # SSLRequest with 'N' and continue with the normal startup packet.

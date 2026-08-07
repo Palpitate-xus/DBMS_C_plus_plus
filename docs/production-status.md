@@ -2,7 +2,7 @@
 
 最后更新：2026-08-07
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，快速回归套件和独立测试入口均为 `PASS=117 FAIL=0`，窗口函数 E2E 为 `9/9`，PostgreSQL 协议 E2E 通过。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，117 个 C++ 回归测试和 1 个协议 E2E 共 `PASS=118 FAIL=0`，窗口函数 E2E 为 `9/9`。
 
 本轮已完成的基础收敛：
 
@@ -23,12 +23,12 @@
 - CLOG 刷盘在数据库目录已被删除时不会重建目录或把旧事务状态写入同名新数据库。
 - 网络服务默认 fail-closed：证书/私钥缺失、OpenSSL 不可用或 TLS 初始化失败时拒绝启动；明文只能通过显式 `--insecure` 开启，且仅用于本地开发。
 - 删除运行时自动生成自签名证书的 shell 调用，避免私钥落盘位置和命令参数不可控；部署必须显式提供 TLS 材料。
-- 网络服务已切换到 PostgreSQL Frontend/Backend protocol 3.0 核心路径：支持 SSLRequest 协商、StartupMessage、SCRAM-SHA-256（旧凭据格式暂作迁移桥接）、参数状态、简单 Query，以及 Parse/Bind/Execute/Sync 基础流程；协议回归由 `tests/postgres_protocol_test.py` 覆盖真实 SCRAM 握手。
+- 网络服务已切换到 PostgreSQL Frontend/Backend protocol 3.0 核心路径：支持 SSLRequest 协商、StartupMessage、catalog SCRAM-SHA-256、参数状态、简单 Query，以及 Parse/Bind/Execute/Sync 基础流程；协议回归由 `tests/postgres_protocol_test.py` 覆盖真实 SCRAM 握手。
 
 启动安全边界：非空但 magic/版本不匹配的数据文件会直接拒绝打开，不会被清零或按新格式覆盖。部署时必须将数据目录初始化为当前格式，并通过备份恢复或 SQL 导入完成升级。
 
 数据兼容边界：旧 schema、旧 4 KiB 数据页和旧行头不会被读取或迁移。升级前必须导出 SQL，或删除并重建数据目录。
 
-仍不能称为生产就绪的主要原因包括：SSI 目前已验证关系限定的行级写偏差回滚，但 predicate/SIREAD 锁、空范围读和完整 rw-conflict 规则仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding、完整角色/数据库 pg_hba 匹配和结构化执行结果，ACL 与角色继承仍不完整；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
+仍不能称为生产就绪的主要原因包括：SSI 目前已验证关系限定的行级写偏差回滚，但 predicate/SIREAD 锁、空范围读和完整 rw-conflict 规则仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding 和结构化执行结果，ACL 与角色继承仍不完整；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
 
 验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`、`python3 tests/window_e2e_test.py`、`python3 tests/postgres_protocol_test.py`；Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。

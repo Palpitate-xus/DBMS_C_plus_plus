@@ -6,6 +6,7 @@
 #include <vector>
 #include <unordered_map>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace dbms {
@@ -156,6 +157,10 @@ public:
     Oid createAuthId(const PgAuthIdRow& row);
     const PgAuthIdRow* findAuthId(Oid oid) const;
     const PgAuthIdRow* findAuthIdByName(const std::string& name) const;
+    // Copy-returning variants for concurrent runtime callers. Pointer-returning
+    // APIs are retained for catalog inspection but must not outlive the lock.
+    std::optional<PgAuthIdRow> getAuthId(Oid oid) const;
+    std::optional<PgAuthIdRow> getAuthIdByName(const std::string& name) const;
     bool updateAuthId(Oid oid, const PgAuthIdRow& row);
     bool dropAuthId(Oid oid);
     std::vector<PgAuthIdRow> listAuthIds() const;

@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前回归基线为 PASS=117 FAIL=0，另有 PostgreSQL 协议 E2E。
+> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前回归基线为 PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E）。
 
 ### 当前代码路径审计覆盖层
 
@@ -702,7 +702,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
 | 🔄 7.1 实现 PostgreSQL wire protocol（Frontend/Backend protocol） | 16.6, 11.3 | 已实现 StartupMessage、SSLRequest、catalog SCRAM、pg_hba 基础决策、Query 和基础 Parse/Bind/Execute/Sync；完整扩展消息和结构化执行结果仍缺 |
-| 🔄 7.2 实现 `pg_hba.conf` 解析与匹配 | 11.2 | 已接入网络运行时首条匹配、host/hostssl/hostnossl、reject/trust/password/scram；其余认证方法和角色/数据库组匹配仍缺 |
+| 🔄 7.2 实现 `pg_hba.conf` 解析与匹配 | 11.2 | 已接入网络运行时首条匹配、host/hostssl/hostnossl、reject/trust/password/scram、IPv4/IPv6 CIDR 及角色/数据库组匹配；其余认证方法仍缺 |
 | 🔄 7.3 实现 SCRAM-SHA-256 认证 | 11.2 | 已实现 nonce、salt、PBKDF2、client proof/server signature、catalog 凭据和协议 E2E；仍缺 channel binding 与完整 SASL 语义 |
 | 🔄 7.4 实现 OAuth（PG18）、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 11.2 | 部分方法仅有配置解析或接口骨架，尚无可验收的端到端认证实现 |
 | 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |

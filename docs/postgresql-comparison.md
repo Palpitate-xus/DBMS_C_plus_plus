@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-07（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线: PASS=117 FAIL=0（含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性、网络启动安全和 PostgreSQL 协议 E2E）
+> 测试基线: PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
 ---
 
@@ -13,7 +13,7 @@
 |------|--------------|---------|------|
 | 代码量 | ~1.2M 行 | ~66K 行 | ~18x |
 | 开发团队 | 全球数百人/20+年 | 单人/数周 | — |
-| 测试覆盖 | ~2000+ 测试 | 114 单元测试 | ~18x |
+| 测试覆盖 | ~2000+ 测试 | 117 C++ 单元测试 + 1 个协议 E2E | 以回归结果为准 |
 | 功能完成度 | 不宣称生产级 | DDL/DML 核心已覆盖，高级特性和运维能力仍有缺口 | 以测试和代码路径为准 |
 
 ---
@@ -256,12 +256,12 @@
 
 | 特性 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
-| pg_hba.conf | ✅ | ⚠️ | 解析/CIDR 匹配存在，运行时认证链路未达到 PostgreSQL 语义 |
-| 用户/角色系统 | ✅ | ⚠️ | 基础 CRUD 存在，完整属性、成员继承和认证持久化仍待验收 |
+| pg_hba.conf | ✅ | 🔄 | 首条匹配、hostssl/hostnossl、IPv4/IPv6 CIDR、角色/数据库别名和运行时 SCRAM 已实现；其余认证方法仍缺 |
+| 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、SCRAM、递归成员匹配和有效期检查已接入；完整 ACL、ADMIN OPTION、连接数限制仍缺 |
 | GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
 | **行级安全 (RLS) 执行** | ✅ | ⚠️ | 已有基础 USING/WITH CHECK 路径，完整 executor 集成和安全边界仍待验收 |
-| **SCRAM-SHA-256 完整协议** | ✅ | 🔄 | 已实现 SCRAM challenge/response 与 E2E；缺 channel binding、pg_hba 运行时决策和统一 `pg_authid` |
+| **SCRAM-SHA-256 完整协议** | ✅ | 🔄 | 已实现 catalog verifier、challenge/response、pg_hba 运行时决策和 E2E；缺 channel binding 与完整 SASL 语义 |
 | **LDAP/Kerberos/GSSAPI/PAM/RADIUS** | ✅ | ❌ | 缺 |
 | **SSL 双向认证** | ✅ | ⚠️ TLSWrapper；服务端默认 fail-closed，但缺少 PostgreSQL SSL 协商、客户端证书认证和 channel binding | |
 | **安全标签 (SE-PostgreSQL)** | ✅ | ❌ | 缺 |

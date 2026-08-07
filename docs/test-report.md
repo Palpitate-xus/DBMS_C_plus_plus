@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-07
-> 自动测试套件基线：PASS=117 FAIL=0（快速入口和独立入口均通过，含 PostgreSQL 协议 E2E）；窗口函数 E2E：9/9
+> 自动测试套件基线：PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E）；窗口函数 E2E：9/9
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -642,7 +642,7 @@ COMMIT;
 
 **输入**
 ```sql
-CREATE USER testuser testpass 0;
+CREATE USER testuser WITH PASSWORD 'testpass' NOSUPERUSER;
 GRANT SELECT ON t1 TO testuser;
 ```
 
@@ -856,7 +856,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景与当前 117 个独立回归测试均通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景、117 个独立 C++ 回归测试和 PostgreSQL 协议 E2E 均通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
