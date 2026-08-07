@@ -4,6 +4,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "TableManage.h"
@@ -31,6 +32,23 @@ public:
 };
 
 using OpPtr = std::unique_ptr<Operator>;
+
+// MaterializedRows: adapter for result rows produced by a legacy or external
+// executor.  It lets higher-level operators consume those rows through the
+// same Volcano interface while the underlying producer is migrated.
+class MaterializedRowsOp : public Operator {
+public:
+    explicit MaterializedRowsOp(std::vector<std::string> rows)
+        : rows_(std::move(rows)) {}
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+
+private:
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+};
 
 // ========================================================================
 // TableScan: full table scan using forEachRow

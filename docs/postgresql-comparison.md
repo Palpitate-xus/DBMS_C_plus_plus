@@ -110,7 +110,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | **LATERAL JOIN** | ✅ | ❌ | 缺 |
 | Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ✅ (parser + volcano) | ⚠️ 复杂子查询回退 legacy |
 | CTE (WITH/RECURSIVE) | ✅ | ✅ (parser + executor) | ✅ 基础 + RETURNING |
-| UNION/INTERSECT/EXCEPT | ✅ | ⚠️ 简单单表 operand 走 Volcano `SetOperationOp`，复杂 operand 回退 legacy（含 ALL） | ⚠️ AST 下推、类型合并/collation 和完整作用域仍缺 |
+| UNION/INTERSECT/EXCEPT | ✅ | ⚠️ 组合统一走 Volcano `SetOperationOp`；简单 operand 直接计划，复杂 operand 经 `MaterializedRowsOp` 接 legacy producer（含 ALL） | ⚠️ AST 全量下推、类型合并/collation 和完整作用域仍缺 |
 | Window Functions (ROW_NUMBER/RANK/...) | ✅ | ✅ (parser + DDL) | ⚠️ executor 回退 legacy |
 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ✅ (parser) | ⚠️ executor 回退 legacy |
 | GROUPING_ID | ✅ | ❌ | 缺 |
@@ -324,7 +324,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 ### 🟡 重要缺失 (影响实用性)
 1. **Window Function executor** — parser 就绪但 executor 回退 legacy (无 WindowOp)
 2. **复杂子查询 executor** — 简单子查询走 volcano, 关联子查询回退 legacy
-3. **UNION/INTERSECT/EXCEPT executor** — 简单单表已接入 Volcano `SetOperationOp` 并覆盖 ALL；仍缺 AST 全量下推、类型合并和结构化结果边界
+3. **UNION/INTERSECT/EXCEPT executor** — 组合语义已统一进入 Volcano，复杂 operand 的 producer 仍待 AST 全量下推；类型合并和结构化列结果也仍缺
 4. **GROUP BY ROLLUP/CUBE/GROUPING SETS executor** — 回退 legacy
 5. **GiST 索引** — 全文搜索基础架构缺
 6. **TOAST 压缩** — 大字段存储无 lz4/pglz 压缩

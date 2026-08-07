@@ -478,6 +478,11 @@ def main():
         assert data_row_values(simple_query(
             sock, "SELECT id FROM set_left EXCEPT ALL SELECT id FROM set_right")) == [
                 [b"1"], [b"3"]]
+        # A complex operand may still use the legacy SELECT producer, but the
+        # set semantics must be executed by the same structured SetOperationOp.
+        complex_set_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM set_left UNION SELECT count(*) FROM set_right"))
+        assert complex_set_rows == [[b"1"], [b"2"], [b"3"], [b"4"]], complex_set_rows
 
         # INSTEAD OF view triggers must be creatable on views and must route
         # each DML operation to the trigger action instead of the base-view

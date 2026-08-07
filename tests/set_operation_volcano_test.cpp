@@ -68,6 +68,14 @@ int main() {
     assert(executeSet(db, dbms::SetOperationType::Except, true) ==
            std::vector<std::string>({"1", "3"}));
 
+    auto materializedPlan = dbms::QueryPlanner::buildSetOperationPlan(
+        std::make_unique<dbms::MaterializedRowsOp>(std::vector<std::string>{"1", "1", "2"}),
+        std::make_unique<dbms::MaterializedRowsOp>(std::vector<std::string>{"2", "3"}),
+        dbms::SetOperationType::Union, false);
+    auto materializedRows = dbms::QueryPlanner::executePlan(std::move(materializedPlan));
+    for (auto& row : materializedRows) row = normalized(row);
+    assert(materializedRows == std::vector<std::string>({"1", "2", "3"}));
+
     assert(!ddl.executeSql("CREATE TABLE distinct_values (id INT, grp VARCHAR(8))", session));
     assert(g_engine.insert(db, "distinct_values", {{"id", "1"}, {"grp", "same"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "distinct_values", {{"id", "2"}, {"grp", "same"}}) == dbms::DBStatus::OK);

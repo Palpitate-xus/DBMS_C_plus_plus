@@ -588,7 +588,8 @@ SELECT id FROM t1 UNION SELECT fid FROM t2;
 **实际结果** ✅ 返回 UNION 结果
 
 `tests/set_operation_volcano_test.cpp` 进一步验证了 Volcano `SetOperationOp` 的
-UNION/INTERSECT/EXCEPT 及 ALL 多重集结果，并覆盖投影后的 DISTINCT 去重。
+UNION/INTERSECT/EXCEPT 及 ALL 多重集结果，并覆盖投影后的 DISTINCT 去重；协议 E2E
+另验证了聚合 legacy producer 经 `MaterializedRowsOp` 进入同一集合节点。
 
 ---
 

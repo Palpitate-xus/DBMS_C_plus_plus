@@ -139,6 +139,21 @@ static bool evalCondRaw(const StorageEngine::Condition& cond,
 // TableScanOp
 // ========================================================================
 
+bool MaterializedRowsOp::open() {
+    pos_ = 0;
+    return true;
+}
+
+bool MaterializedRowsOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    return true;
+}
+
+void MaterializedRowsOp::close() {
+    pos_ = 0;
+}
+
 TableScanOp::TableScanOp(StorageEngine* engine, const std::string& dbname,
                           const std::string& tablename)
     : engine_(engine), dbname_(dbname), tablename_(tablename) {}

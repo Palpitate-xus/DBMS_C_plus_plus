@@ -3027,46 +3027,35 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     if (!captureSetOperand(leftSql, s, leftLines) ||
         !captureSetOperand(rightSql, s, rightLines)) return true;
 
-    const string header = !leftLines.empty() ? leftLines.front()
-                       : !rightLines.empty() ? rightLines.front() : string();
-    if (header.empty()) return false;
+    if (leftLines.empty() || rightLines.empty()) {
+        cout << "ERROR: set operation operand returned no columns" << endl;
+        return true;
+    }
+    const string header = leftLines.front();
     vector<string> leftRows(leftLines.begin() + 1, leftLines.end());
     vector<string> rightRows(rightLines.begin() + 1, rightLines.end());
+    auto countHeaderColumns = [](const string& line) {
+        stringstream ss(line);
+        size_t count = 0;
+        string column;
+        while (ss >> column) ++count;
+        return count;
+    };
+    if (countHeaderColumns(leftLines.front()) != countHeaderColumns(rightLines.front())) {
+        cout << "ERROR: each set operation query must have the same number of columns" << endl;
+        return true;
+    }
+
+    dbms::SetOperationType type = dbms::SetOperationType::Union;
+    if (split.kind == SetOperationKind::Intersect) type = dbms::SetOperationType::Intersect;
+    else if (split.kind == SetOperationKind::Except) type = dbms::SetOperationType::Except;
+    auto plan = dbms::QueryPlanner::buildSetOperationPlan(
+        std::make_unique<dbms::MaterializedRowsOp>(std::move(leftRows)),
+        std::make_unique<dbms::MaterializedRowsOp>(std::move(rightRows)),
+        type, split.all);
+    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
     cout << header << endl;
-
-    if (split.kind == SetOperationKind::Union) {
-        set<string> seen;
-        for (const auto& row : leftRows) {
-            if (split.all || seen.insert(row).second) cout << row << endl;
-        }
-        for (const auto& row : rightRows) {
-            if (split.all || seen.insert(row).second) cout << row << endl;
-        }
-        return false;
-    }
-
-    map<string, size_t> rightCounts;
-    for (const auto& row : rightRows) ++rightCounts[row];
-    set<string> emitted;
-    for (const auto& row : leftRows) {
-        auto rightIt = rightCounts.find(row);
-        const size_t available = rightIt == rightCounts.end() ? 0 : rightIt->second;
-        if (split.kind == SetOperationKind::Intersect) {
-            if (available == 0) continue;
-            if (split.all) {
-                cout << row << endl;
-                --rightIt->second;
-            } else if (emitted.insert(row).second) {
-                cout << row << endl;
-            }
-        } else {
-            if (available > 0) {
-                if (split.all) --rightIt->second;
-                continue;
-            }
-            if (split.all || emitted.insert(row).second) cout << row << endl;
-        }
-    }
+    for (const auto& row : rows) cout << row << endl;
     return false;
 }
 

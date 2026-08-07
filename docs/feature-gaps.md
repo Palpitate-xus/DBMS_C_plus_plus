@@ -129,11 +129,11 @@
 
 ### P1-2: UNION/INTERSECT/EXCEPT Executor
 - **类别**: 执行器 / 集合操作
-- **现状**: 已统一集合操作分支，支持顶层运算符优先级、错误传播以及 `UNION/INTERSECT/EXCEPT [ALL]` 的重复行语义；简单单表 SELECT operand 已进入 Volcano `SetOperationOp` 计划树，复杂 operand 仍通过 legacy 输出边界降级
+- **现状**: 所有 operand 的集合组合已统一由 Volcano `SetOperationOp` 执行，支持顶层运算符优先级、错误传播以及 `UNION/INTERSECT/EXCEPT [ALL]` 的重复行语义；简单单表 SELECT 直接构建子计划，复杂 operand 暂由 legacy producer 经 `MaterializedRowsOp` 接入
 - **PG 参考**: `Append` (UNION), `HashSetOp` (INTERSECT/EXCEPT)
-- **影响**: 复杂集合操作仍不能复用完整结构化结果、类型合并和完整排序/分页作用域
+- **影响**: 复杂 operand 的数据生产仍不是完整结构化计划，类型合并、collation 和完整排序/分页作用域仍缺
 - **实现路径**:
-  1. 将当前集合操作结果边界改为结构化行/列结果
+  1. ✅ 将 legacy operand 结果通过 `MaterializedRowsOp` 接入结构化集合节点
   2. ✅ 实现 `SetOperationOp`：合并两个 Volcano 子计划并执行 UNION/INTERSECT/EXCEPT [ALL]
   3. 将 parser AST 的集合操作直接下推到 `QueryPlanner`，覆盖 JOIN/聚合/表达式 operand
   4. 补齐类型合并、collation、排序/分页作用域
