@@ -339,6 +339,7 @@ bool PostgresProtocol::sendParseComplete() { return sendMessage('1', {}); }
 bool PostgresProtocol::sendBindComplete() { return sendMessage('2', {}); }
 bool PostgresProtocol::sendCloseComplete() { return sendMessage('3', {}); }
 bool PostgresProtocol::sendNoData() { return sendMessage('n', {}); }
+bool PostgresProtocol::sendPortalSuspended() { return sendMessage('s', {}); }
 
 bool PostgresProtocol::sendCommandComplete(const std::string& tag) {
     std::vector<uint8_t> body;

@@ -63,6 +63,7 @@ public:
     bool sendBindComplete();
     bool sendCloseComplete();
     bool sendNoData();
+    bool sendPortalSuspended();
     bool sendCommandComplete(const std::string& tag);
     bool sendRowDescription(const std::vector<PgColumnDescription>& columns);
     bool sendDataRow(const std::vector<std::string>& values);

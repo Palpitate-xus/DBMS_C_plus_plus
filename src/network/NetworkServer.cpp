@@ -189,9 +189,21 @@ struct ProtocolPreparedStatement {
 };
 
 struct ProtocolPortal {
+    ProtocolPortal() = default;
+    ProtocolPortal(std::string statementName, std::string query,
+                   std::vector<uint16_t> formats)
+        : statement(std::move(statementName)),
+          sql(std::move(query)),
+          resultFormats(std::move(formats)) {}
+
     std::string statement;
     std::string sql;
     std::vector<uint16_t> resultFormats;
+    QueryResult result;
+    size_t rowOffset = 0;
+    bool executed = false;
+    bool rowDescriptionSent = false;
+    bool completed = false;
 };
 
 bool isIntegerParameterType(uint32_t typeOid) {
@@ -1263,8 +1275,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             const int32_t maxRows = PostgresProtocol::readInt32(message.payload, offset);
-            if (maxRows < 0 || maxRows != 0) {
-                protocol.sendErrorResponse("ERROR", "0A000", "portal row limits are not supported");
+            if (maxRows < 0) {
+                protocol.sendErrorResponse("ERROR", "08P01", "negative portal row limit");
                 extendedQueryError = true;
                 continue;
             }
@@ -1274,7 +1286,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
-            QueryResult result = executeForProtocol(portalIt->second.sql);
+            auto& portalState = portalIt->second;
+            if (!portalState.executed) {
+                portalState.result = executeForProtocol(portalState.sql);
+                portalState.executed = true;
+            }
+            QueryResult& result = portalState.result;
             if (result.error) {
                 protocol.sendErrorResponse("ERROR", result.sqlState, result.errorMessage);
                 extendedQueryError = true;
@@ -1287,25 +1304,36 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         columns.push_back(PgColumnDescription{name});
                     }
                 }
-                if (!portalIt->second.resultFormats.empty() &&
-                    portalIt->second.resultFormats.size() != 1 &&
-                    portalIt->second.resultFormats.size() != columns.size()) {
+                if (!portalState.resultFormats.empty() &&
+                    portalState.resultFormats.size() != 1 &&
+                    portalState.resultFormats.size() != columns.size()) {
                     protocol.sendErrorResponse("ERROR", "08P01", "result format count does not match result columns");
                     extendedQueryError = true;
                     continue;
                 }
-                if (portalIt->second.resultFormats.size() == 1) {
+                if (portalState.resultFormats.size() == 1) {
                     for (auto& column : columns) {
-                        column.formatCode = static_cast<int16_t>(portalIt->second.resultFormats.front());
+                        column.formatCode = static_cast<int16_t>(portalState.resultFormats.front());
                     }
-                } else if (!portalIt->second.resultFormats.empty()) {
+                } else if (!portalState.resultFormats.empty()) {
                     for (size_t i = 0; i < columns.size(); ++i) {
-                        columns[i].formatCode = static_cast<int16_t>(portalIt->second.resultFormats[i]);
+                        columns[i].formatCode = static_cast<int16_t>(portalState.resultFormats[i]);
                     }
                 }
-                protocol.sendRowDescription(columns);
+                if (!portalState.rowDescriptionSent) {
+                    if (!protocol.sendRowDescription(columns)) {
+                        extendedQueryError = true;
+                        continue;
+                    }
+                    portalState.rowDescriptionSent = true;
+                }
+                const size_t remaining = result.rows.size() - portalState.rowOffset;
+                const size_t batchSize = maxRows == 0
+                                             ? remaining
+                                             : std::min(remaining, static_cast<size_t>(maxRows));
                 bool rowsSent = true;
-                for (const auto& row : result.rows) {
+                for (size_t i = 0; i < batchSize; ++i) {
+                    const auto& row = result.rows[portalState.rowOffset + i];
                     std::vector<std::string> normalized = row;
                     normalized.resize(columns.size());
                     if (!protocol.sendDataRow(normalized, columns)) {
@@ -1316,8 +1344,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     }
                 }
                 if (!rowsSent) continue;
-                protocol.sendCommandComplete(result.commandTag);
+                portalState.rowOffset += batchSize;
+                if (portalState.rowOffset < result.rows.size()) {
+                    protocol.sendPortalSuspended();
+                } else {
+                    portalState.completed = true;
+                    protocol.sendCommandComplete(result.commandTag);
+                }
             } else {
+                portalState.completed = true;
                 protocol.sendCommandComplete(result.commandTag);
             }
             continue;

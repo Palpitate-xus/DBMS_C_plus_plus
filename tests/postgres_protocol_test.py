@@ -252,6 +252,39 @@ def extended_query_binary_int_parameter(sock, sql, value):
     assert any(kind == b"C" for kind, _ in messages)
 
 
+def extended_query_portal_pagination(sock):
+    parse = b"paged_stmt\0SELECT id FROM portal_t\0" + struct.pack("!H", 0)
+    sock.sendall(typed(b"P", parse))
+    kind, body = read_message(sock)
+    assert kind == b"t" and body == struct.pack("!H", 0)
+    kind, _ = read_message(sock)
+    assert kind == b"1"
+
+    bind = b"paged\0paged_stmt\0" + struct.pack("!H", 0) + struct.pack("!H", 0) + struct.pack("!H", 0)
+    sock.sendall(typed(b"B", bind))
+    kind, _ = read_message(sock)
+    assert kind == b"2"
+
+    def execute_batch(expected_rows, suspended):
+        sock.sendall(typed(b"E", b"paged\0" + struct.pack("!I", 1)) + typed(b"S"))
+        messages = read_until_ready(sock)
+        assert data_row_values(messages) == expected_rows, messages
+        assert any(kind == b"s" for kind, _ in messages) if suspended else not any(kind == b"s" for kind, _ in messages), messages
+        assert not any(kind == b"C" for kind, _ in messages) if suspended else any(kind == b"C" for kind, _ in messages), messages
+        return messages
+
+    execute_batch([[b"1"]], True)
+    execute_batch([[b"3"]], False)
+    sock.sendall(typed(b"E", b"paged\0" + struct.pack("!I", 1)) + typed(b"S"))
+    messages = read_until_ready(sock)
+    assert data_row_values(messages) == []
+    assert any(kind == b"C" for kind, _ in messages)
+
+    sock.sendall(typed(b"C", b"P\0") + typed(b"C", b"S\0") + typed(b"S"))
+    messages = read_until_ready(sock)
+    assert sum(kind == b"3" for kind, _ in messages) == 2, messages
+
+
 def extended_query_error_recovery(sock):
     # A Parse error puts the extended-query protocol into the ignore-until-Sync
     # state. Bind/Execute sent before Sync must not run or emit completions.
@@ -319,6 +352,12 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT SELECT ON t TO analyst"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE portal_t (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO portal_t VALUES (1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO portal_t VALUES (3)"))
         messages = simple_query(sock, "SELECT id FROM t")
         assert messages[0][0] == b"T"
         assert any(kind == b"D" for kind, _ in messages)
@@ -326,6 +365,7 @@ def main():
         extended_query(sock, "SELECT id FROM t")
         extended_query_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
         extended_query_binary_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
+        extended_query_portal_pagination(sock)
         extended_query_error_recovery(sock)
         error_messages = simple_query(sock, "SELECT * FROM protocol_missing_table")
         assert any(kind == b"E" for kind, _ in error_messages)
