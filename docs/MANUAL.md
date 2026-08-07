@@ -1030,4 +1030,6 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 python3 tests/window_e2e_test.py # 窗口函数端到端测试（9 用例）
 ```
 
+上述 shell 入口共享 `scripts/build_common.sh` 的编译配置；`scripts/build_one_test.sh <test_name>` 可用于单测试增量编译，编译配置变化会自动使对象缓存失效。
+
 每个 C++ 测试执行完毕后自动清理数据库目录（`__t_*` 前缀）。窗口函数 E2E 测试使用临时工作目录和临时管理员账号，结束后自动删除，不依赖或污染项目根目录。

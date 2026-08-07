@@ -7,6 +7,8 @@
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
+构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`。
+
 ### 当前代码路径审计覆盖层
 
 下表优先于后续历史 Wave 的 `✅` 标记；只有同时具备真实运行时路径和回归/故障验证，才可标记为已完成。

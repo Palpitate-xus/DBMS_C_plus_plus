@@ -8,41 +8,19 @@ set -u
 
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${SRC_DIR}/build/test_obj"
+. "${SRC_DIR}/scripts/build_common.sh"
+dbms_init_build_config "${SRC_DIR}"
+dbms_test_project_sources
 
-HAS_OPENSSL=0
-if pkg-config --exists openssl 2>/dev/null; then
-    HAS_OPENSSL=1
-    echo "[test-build] OpenSSL detected, TLS support enabled"
-else
-    echo "[test-build] OpenSSL not found, using TLS stub (plain TCP)"
-fi
-
-INCLUDES=(
-    -Isrc -Isrc/common -Isrc/storage -Isrc/access -Isrc/transaction
-    -Isrc/network -Isrc/utils -Isrc/executor -Isrc/commands -Isrc/interfaces
-    -Isrc/parser -Isrc/catalog -Isrc/expression -Isrc/replication -Isrc/process
-)
-CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
-LDFLAGS=(-pthread)
-if [ "$HAS_OPENSSL" -eq 1 ]; then
-    CXXFLAGS+=(-DHAS_OPENSSL=1)
-    LDFLAGS+=(-lssl -lcrypto)
-    TLS_SOURCE="src/network/TLSWrapper.cpp"
-else
-    TLS_SOURCE="src/network/TLSWrapper_stub.cpp"
-fi
-
-mapfile -t MANIFEST_SOURCES < <(
-    sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "${SRC_DIR}/cmake/dbms_sources.txt"
-)
-PROJECT_SOURCES=()
-for src in "${MANIFEST_SOURCES[@]}"; do
-    [ "$src" = "src/main.cpp" ] || PROJECT_SOURCES+=("$src")
-done
-PROJECT_SOURCES+=("$TLS_SOURCE")
+dbms_print_tls_status test-build
 
 cd "${SRC_DIR}"
 mkdir -p "${BUILD_DIR}"
+CACHE_INVALID=0
+if dbms_cache_needs_rebuild "${BUILD_DIR}"; then
+    CACHE_INVALID=1
+    echo "[test-build] Build configuration changed; invalidating cached objects"
+fi
 
 object_for_source() {
     local source="$1"
@@ -55,10 +33,10 @@ compile_source() {
     local source="$1"
     local object
     object="$(object_for_source "$source")"
-    if [ ! -f "$object" ] || [ "$source" -nt "$object" ] || \
+    if [ "$CACHE_INVALID" -eq 1 ] || [ ! -f "$object" ] || [ "$source" -nt "$object" ] || \
        find src -type f \( -name '*.h' -o -name '*.hpp' \) -newer "$object" -print -quit | grep -q .; then
         echo "[test-build] Compiling production unit ${source} ..." >&2
-        if ! g++ "${CXXFLAGS[@]}" "${INCLUDES[@]}" -c "$source" -o "$object"; then
+        if ! g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_PRODUCTION_INCLUDES[@]}" -c "$source" -o "$object"; then
             echo "[test-build] COMPILE FAILED: ${source}" >&2
             return 1
         fi
@@ -68,7 +46,7 @@ compile_source() {
 
 PROJECT_OBJECTS=()
 FAILED=0
-for source in "${PROJECT_SOURCES[@]}"; do
+for source in "${DBMS_PROJECT_SOURCES[@]}"; do
     if object="$(compile_source "$source")"; then
         PROJECT_OBJECTS+=("$object")
     else
@@ -77,9 +55,9 @@ for source in "${PROJECT_SOURCES[@]}"; do
 done
 
 TEST_STUB_OBJECT="$(object_for_source tests/test_stubs.cpp)"
-if [ ! -f "$TEST_STUB_OBJECT" ] || [ tests/test_stubs.cpp -nt "$TEST_STUB_OBJECT" ]; then
+if [ "$CACHE_INVALID" -eq 1 ] || [ ! -f "$TEST_STUB_OBJECT" ] || [ tests/test_stubs.cpp -nt "$TEST_STUB_OBJECT" ]; then
     echo "[test-build] Compiling shared test stubs ..."
-    if ! g++ "${CXXFLAGS[@]}" "${INCLUDES[@]}" -c tests/test_stubs.cpp -o "$TEST_STUB_OBJECT"; then
+    if ! g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_TEST_INCLUDES[@]}" -c tests/test_stubs.cpp -o "$TEST_STUB_OBJECT"; then
         echo "[test-build] COMPILE FAILED: tests/test_stubs.cpp" >&2
         FAILED=1
     fi
@@ -111,13 +89,13 @@ for test_file in tests/*_test.cpp; do
     fi
 
     echo "[test-build] Compiling ${test_file} ..."
-    if ! g++ "${CXXFLAGS[@]}" "${INCLUDES[@]}" -c "$test_file" -o "$test_object"; then
+    if ! g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_TEST_INCLUDES[@]}" -c "$test_file" -o "$test_object"; then
         echo "[test-build] ${name} COMPILE FAILED" >&2
         FAILED=1
         continue
     fi
     echo "[test-build] Linking/running ${binary} ..."
-    if ! g++ "${CXXFLAGS[@]}" "$test_object" "${link_objects[@]}" "${LDFLAGS[@]}" -o "$binary"; then
+    if ! g++ "${DBMS_CXXFLAGS[@]}" "$test_object" "${link_objects[@]}" "${DBMS_LDFLAGS[@]}" -o "$binary"; then
         echo "[test-build] ${name} LINK FAILED" >&2
         FAILED=1
         continue
@@ -144,4 +122,5 @@ if [ "$FAILED" -ne 0 ]; then
     exit 1
 fi
 
+dbms_write_cache_signature "${BUILD_DIR}"
 echo "[test-build] All tests passed"
