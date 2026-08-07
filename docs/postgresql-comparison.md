@@ -160,7 +160,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | **Gap locks / predicate locks** | ✅ | ⚠️ | 有简化 gap lock 和关系级 SIREAD；缺页/索引粒度 predicate lock |
 | **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 行级 rw-conflict + 关系级 SIREAD 覆盖空范围读；缺精确 phantom 推理和完整 SSI 规则 |
 | **两阶段提交 (2PC)** | ✅ | ✅ | ✅ (prepareTransaction + COMMIT/ROLLBACK PREPARED) |
-| **并行查询** | ✅ | ❌ | 框架 stub (parallelWorkers_=0) |
+| **并行查询** | ✅ | ⚠️ | 非分区 heap 已支持按 page range 并行扫描和确定性 Gather；事务内回退，parallel join/aggregate/GatherMerge/worker pool 仍缺 |
 | **JIT compilation (LLVM)** | ✅ | ❌ | 缺 |
 | **Async I/O (io_uring)** | ✅ (PG18) | ❌ | 缺 |
 | HOT Update | ✅ | ✅ | ✅ |
@@ -313,7 +313,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 ## 十二、性能特性缺失 (关键差距)
 
 ### 🔴 严重缺失 (生产级必需)
-1. **并行查询** — parallelWorkers_=0, 无实际多 worker 调度
+1. **并行查询** — 已有非分区 heap page-range 多 worker scan；事务安全回退，parallel join/aggregate、GatherMerge、worker pool 和 parallel-aware planner 仍缺
 2. **JIT 编译** — 表达式求值仍为解释执行, 无 LLVM 后端
 3. **索引 GiST** — 全文搜索/几何最近邻索引缺失 (仅有 SP-GiST)
 4. **Gap locks / predicate locks** — 无法完全防止幻读

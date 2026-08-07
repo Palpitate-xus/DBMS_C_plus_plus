@@ -882,6 +882,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 - ✅ 权限管理（GRANT/REVOKE）
 - ✅ 分区管理（Range/List/Hash + ATTACH/DETACH）
 - ✅ 查询能力（JOIN/UNION/INTERSECT/EXCEPT 含 ALL 语义、GROUP BY/窗口函数/CTE/LATERAL）
+- ✅ Volcano 并行 heap scan（page-range workers、确定性 Gather、串行结果等价性）
 - ✅ 工具命令（SHOW/EXPLAIN/ANALYZE/VACUUM/CHECKPOINT）
 - ✅ INSERT 省略列名 / ALTER RENAME / CREATE TABLE AS SELECT
 

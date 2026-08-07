@@ -32,6 +32,8 @@ void GUCRegistry::initialize() {
     add({"standard_conforming_strings", "treat backslashes literally in strings", "",
          "on", "on", GucType::Bool});
     add({"autocommit", "autocommit mode (non-PG compat)", "", "on", "on", GucType::Bool});
+    add({"max_parallel_workers_per_gather", "maximum parallel heap-scan workers", "",
+         "0", "0", GucType::Int, GucContext::UserSet, 0, 128});
 }
 
 bool GUCRegistry::define(const GUCVariable& var) {

@@ -736,6 +736,15 @@ public:
                     const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback,
                     const ReadView* readView = nullptr,
                     const std::vector<std::string>& targetPartitions = {}) const;
+    // Scan a non-partitioned heap page range through the engine's shared
+    // read-only allocator. This is used by the parallel executor; the caller
+    // must only use it outside an active transaction so backend-local SSI
+    // state cannot be mutated from worker threads.
+    void forEachRowPageRange(const std::string& dbname, const std::string& tablename,
+                             uint32_t firstPage, uint32_t endPage,
+                             const std::function<void(uint32_t pageId, uint16_t slotId,
+                                                      const char* data, size_t len)>& callback,
+                             const ReadView* readView = nullptr) const;
     bool readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer, const TableSchema& tbl) const;
 
     // Schema helpers (public for execution plan use)

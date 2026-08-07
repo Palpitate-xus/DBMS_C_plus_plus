@@ -1318,6 +1318,17 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     } else if (param == "enable_merge_join") {
         g_config.enableMergeJoin = (val == "1" || val == "true" || val == "on");
         ok = true;
+    } else if (param == "max_parallel_workers_per_gather") {
+        try {
+            int workers = std::stoi(val);
+            if (workers < 0 || workers > 128) {
+                cout << "Invalid value for parameter " << param << endl;
+                return true;
+            }
+            g_config.maxParallelWorkersPerGather = workers;
+            dbms::QueryPlanner::setParallelWorkers(workers);
+            ok = true;
+        } catch (...) {}
     } else if (param == "auto_explain") {
         g_config.autoExplainEnabled = (val == "1" || val == "true" || val == "on");
         ok = true;
@@ -2355,6 +2366,7 @@ static bool handleExplain(const string& sql, Session& s) {
     if (opts.timing) cacheKey += ":T";
     if (opts.costs) cacheKey += ":C";
     if (opts.settings) cacheKey += ":S";
+    cacheKey += ":P" + std::to_string(dbms::QueryPlanner::parallelWorkers());
     string planOutput;
     bool cacheHit = false;
     {
@@ -8717,6 +8729,8 @@ bool execute(const string& rawSql, Session& s) {
                     if (!checkAdmin(s)) return true;
                     if (g_config.load("dbms.conf")) {
                         g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
+                        dbms::QueryPlanner::setParallelWorkers(
+                            g_config.maxParallelWorkersPerGather);
                         cout << "t" << endl;
                     } else {
                         cout << "f" << endl;
@@ -14760,6 +14774,7 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "enable_seq_scan " << (g_config.enableSeqScan ? "on" : "off") << " " << endl;
                 cout << "enable_hash_join " << (g_config.enableHashJoin ? "on" : "off") << " " << endl;
                 cout << "enable_merge_join " << (g_config.enableMergeJoin ? "on" : "off") << " " << endl;
+                cout << "max_parallel_workers_per_gather " << g_config.maxParallelWorkersPerGather << " " << endl;
                 cout << "auto_explain " << (g_config.autoExplainEnabled ? "on" : "off") << " " << endl;
                 cout << "auto_explain.log_min_duration " << g_config.autoExplainThresholdMs << " ms" << endl;
                 cout << "auto_vacuum " << (g_config.autoVacuumEnabled ? "on" : "off") << " " << endl;
@@ -16208,6 +16223,7 @@ int main(int argc, char* argv[]) {
         g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs);
         g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
     }
+    dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
 
     // Server mode: ./dbms_main --server PORT [--insecure]
     if (argc >= 3 && std::string(argv[1]) == "--server") {

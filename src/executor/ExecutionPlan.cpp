@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iterator>
 #include <map>
+#include <thread>
 
 extern dbms::Config g_config;
 
@@ -180,6 +181,90 @@ bool TableScanOp::next(std::string& outRow) {
 
 void TableScanOp::close() {
     rows_.clear();
+}
+
+// ========================================================================
+// ParallelTableScanOp
+// ========================================================================
+
+ParallelTableScanOp::ParallelTableScanOp(StorageEngine* engine,
+                                         const std::string& dbname,
+                                         const std::string& tablename,
+                                         int workers)
+    : engine_(engine), dbname_(dbname), tablename_(tablename), workers_(workers) {}
+
+bool ParallelTableScanOp::open() {
+    tbl_ = engine_->getTableSchema(dbname_, tablename_);
+    rows_.clear();
+    pos_ = 0;
+    usedParallelWorkers_ = false;
+
+    auto appendSequential = [this]() {
+        engine_->forEachRow(dbname_, tablename_,
+            [this](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+                std::string row(data, len);
+                row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+                rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
+            });
+    };
+
+    // Do not move transaction-local visibility/SSI state to anonymous worker
+    // threads.  Partitioned relations also need their existing routing path.
+    if (workers_ <= 1 || engine_->inTransaction() ||
+        tbl_.partitionType != TableSchema::PartitionType::None) {
+        appendSequential();
+        return true;
+    }
+
+    const uint32_t pageCount = engine_->tableNumPages(dbname_, tablename_);
+    if (pageCount <= 1) return true;
+    const int activeWorkers = std::min<int>(workers_, static_cast<int>(pageCount - 1));
+    if (activeWorkers <= 1) {
+        appendSequential();
+        return true;
+    }
+
+    usedParallelWorkers_ = true;
+    using Row = std::pair<int64_t, std::string>;
+    std::vector<std::vector<Row>> local(static_cast<size_t>(activeWorkers));
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(activeWorkers));
+    for (int worker = 0; worker < activeWorkers; ++worker) {
+        const uint32_t begin = 1 + static_cast<uint32_t>(worker) * (pageCount - 1) /
+                                   static_cast<uint32_t>(activeWorkers);
+        const uint32_t end = 1 + static_cast<uint32_t>(worker + 1) * (pageCount - 1) /
+                                 static_cast<uint32_t>(activeWorkers);
+        threads.emplace_back([this, &local, worker, begin, end]() {
+            auto& output = local[static_cast<size_t>(worker)];
+            engine_->forEachRowPageRange(
+                dbname_, tablename_, begin, end,
+                [this, &output](uint32_t pageId, uint16_t slotId,
+                                const char* data, size_t len) {
+                    std::string row(data, len);
+                    output.emplace_back(StorageEngine::encodeRid(pageId, slotId),
+                                        std::move(row));
+                });
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    for (auto& part : local) {
+        for (auto& row : part) {
+            row.second = engine_->resolveToastValues(dbname_, tablename_, row.second, tbl_);
+            rows_.push_back(std::move(row));
+        }
+    }
+    return true;
+}
+
+bool ParallelTableScanOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++].second;
+    return true;
+}
+
+void ParallelTableScanOp::close() {
+    rows_.clear();
+    pos_ = 0;
 }
 
 // ========================================================================
@@ -1186,7 +1271,12 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
     }
 
     if (!root) {
-        root = std::make_unique<TableScanOp>(engine, ctx.dbname, ctx.tablename);
+        if (parallelWorkers_ > 1) {
+            root = std::make_unique<ParallelTableScanOp>(
+                engine, ctx.dbname, ctx.tablename, parallelWorkers_);
+        } else {
+            root = std::make_unique<TableScanOp>(engine, ctx.dbname, ctx.tablename);
+        }
     }
 
     // Add Filter if there are remaining conditions
@@ -1394,7 +1484,15 @@ static CostEstimate explainOp(Operator* op, int indent,
     std::string prefix(indent * 2, ' ');
     CostEstimate est;
 
-    if (auto* scan = dynamic_cast<TableScanOp*>(op)) {
+    if (auto* pscan = dynamic_cast<ParallelTableScanOp*>(op)) {
+        double rows = static_cast<double>(engine->getTableRowCount(dbname, pscan->tableName()));
+        est.rows = rows;
+        est.cost = rows / std::max(1, pscan->workers());
+        out += prefix + "ParallelTableScan(table=" + pscan->tableName() +
+               ", workers=" + std::to_string(pscan->workers()) + ")" +
+               costRowsStr(est, opts) + "\n";
+
+    } else if (auto* scan = dynamic_cast<TableScanOp*>(op)) {
         double rows = static_cast<double>(engine->getTableRowCount(dbname, scan->tableName()));
         est.rows = rows;
         est.cost = rows * 1.0;
@@ -1429,6 +1527,8 @@ static CostEstimate explainOp(Operator* op, int indent,
             std::string tblName;
             if (auto* ts = dynamic_cast<TableScanOp*>(filt->child())) {
                 tblName = ts->tableName();
+            } else if (auto* pts = dynamic_cast<ParallelTableScanOp*>(filt->child())) {
+                tblName = pts->tableName();
             } else if (auto* is = dynamic_cast<IndexScanOp*>(filt->child())) {
                 tblName = is->tableName();
             }
@@ -1522,6 +1622,8 @@ std::string QueryPlanner::explain(OpPtr& plan, StorageEngine* engine,
         result += ", enable_seqscan=" + std::string(cfg.enableSeqScan ? "on" : "off");
         result += ", enable_hashjoin=" + std::string(cfg.enableHashJoin ? "on" : "off");
         result += ", enable_mergejoin=" + std::string(cfg.enableMergeJoin ? "on" : "off");
+        result += ", max_parallel_workers_per_gather=" +
+                  std::to_string(cfg.maxParallelWorkersPerGather);
         result += ", checkpoint_interval=" + std::to_string(cfg.checkpointInterval) + "\n";
     }
     if (opts.costs) {
@@ -1569,7 +1671,17 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
     std::string json = "{";
     CostEstimate est;
 
-    if (auto* scan = dynamic_cast<TableScanOp*>(op)) {
+    if (auto* pscan = dynamic_cast<ParallelTableScanOp*>(op)) {
+        double rows = static_cast<double>(engine->getTableRowCount(dbname, pscan->tableName()));
+        est.rows = rows;
+        est.cost = rows / std::max(1, pscan->workers());
+        json += "\"nodeType\":\"Gather\",";
+        json += "\"parallelWorkers\":" + std::to_string(pscan->workers()) + ",";
+        json += "\"table\":\"" + jsonEscape(pscan->tableName()) + "\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[]";
+
+    } else if (auto* scan = dynamic_cast<TableScanOp*>(op)) {
         double rows = static_cast<double>(engine->getTableRowCount(dbname, scan->tableName()));
         est.rows = rows;
         est.cost = rows * 1.0;
@@ -1609,6 +1721,8 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
             std::string tblName;
             if (auto* ts = dynamic_cast<TableScanOp*>(filt->child())) {
                 tblName = ts->tableName();
+            } else if (auto* pts = dynamic_cast<ParallelTableScanOp*>(filt->child())) {
+                tblName = pts->tableName();
             } else if (auto* is = dynamic_cast<IndexScanOp*>(filt->child())) {
                 tblName = is->tableName();
             }
@@ -1732,6 +1846,8 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
         result += "    \"enableSeqScan\": " + std::string(cfg.enableSeqScan ? "true" : "false") + ",\n";
         result += "    \"enableHashJoin\": " + std::string(cfg.enableHashJoin ? "true" : "false") + ",\n";
         result += "    \"enableMergeJoin\": " + std::string(cfg.enableMergeJoin ? "true" : "false") + ",\n";
+        result += "    \"maxParallelWorkersPerGather\": " +
+                  std::to_string(cfg.maxParallelWorkersPerGather) + ",\n";
         result += "    \"checkpointInterval\": " + std::to_string(cfg.checkpointInterval) + "\n";
         result += "  }";
     }

@@ -72,6 +72,33 @@ private:
     size_t pos_ = 0;
 };
 
+// ParallelTableScan: partition a non-partitioned heap by page ranges.  It
+// falls back to the regular scan while a transaction is active, because the
+// current transaction/SSI bookkeeping is backend-local rather than worker-
+// local.  Results are gathered in page-range order for deterministic output.
+class ParallelTableScanOp : public Operator {
+public:
+    ParallelTableScanOp(StorageEngine* engine, const std::string& dbname,
+                        const std::string& tablename, int workers);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    const std::string& tableName() const { return tablename_; }
+    int workers() const { return workers_; }
+    bool usedParallelWorkers() const { return usedParallelWorkers_; }
+
+private:
+    StorageEngine* engine_;
+    std::string dbname_;
+    std::string tablename_;
+    int workers_;
+    TableSchema tbl_;
+    std::vector<std::pair<int64_t, std::string>> rows_;
+    size_t pos_ = 0;
+    bool usedParallelWorkers_ = false;
+};
+
 // ========================================================================
 // IndexScan: use B+ tree index for equality lookup
 // ========================================================================
@@ -518,9 +545,9 @@ public:
     // Execute a plan built by buildSelectPlan and return result rows.
     static std::vector<std::string> executePlan(OpPtr plan);
 
-    // Parallel query support: number of worker threads (0 = single-threaded).
+    // Parallel query support: number of worker threads (0 = disabled).
     static int parallelWorkers() { return parallelWorkers_; }
-    static void setParallelWorkers(int n) { parallelWorkers_ = n; }
+    static void setParallelWorkers(int n) { parallelWorkers_ = n < 0 ? 0 : n; }
 
 private:
     static int parallelWorkers_;

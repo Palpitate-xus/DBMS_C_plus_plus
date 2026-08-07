@@ -3536,6 +3536,53 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     }
 }
 
+void StorageEngine::forEachRowPageRange(
+    const std::string& dbname, const std::string& tablename,
+    uint32_t firstPage, uint32_t endPage,
+    const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
+    const ReadView* readView) const {
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    if (tbl.partitionType != TableSchema::PartitionType::None || firstPage >= endPage)
+        return;
+
+    // Workers share the engine's page allocator.  BufferPool operations are
+    // internally synchronized and the page lock prevents a writer from
+    // changing a pinned page while its callback is reading it.  Using the
+    // shared allocator is important: a private file descriptor would miss
+    // dirty pages that have not reached disk yet.
+    PageAllocator* allocator = getPageAllocator(dbname, tablename);
+    if (!allocator) return;
+
+    const ReadView* rv = readView;
+    const uint32_t pageCount = allocator->numPages();
+    const uint32_t lastPage = std::min(endPage, pageCount);
+    const uint32_t fmtVer = tbl.formatVersion;
+    const size_t natts = tbl.len;
+
+    auto emitRow = [&callback, rv, fmtVer, natts](uint32_t pid, uint16_t sid,
+                                                   const char* data, size_t len) {
+        if (len == 0) return;
+        const size_t hdrLen = rowHeaderSize(fmtVer, natts);
+        if (len <= hdrLen) return;
+        if (rv && !rv->isVisible(data, len, fmtVer)) return;
+        size_t offset = dataOffset(fmtVer, natts);
+        if (usesHeapTupleHeader(fmtVer)) offset = castHeapHeader(data)->t_hoff;
+        if (offset >= len) return;
+        callback(pid, sid, data + offset, len - offset);
+    };
+
+    for (uint32_t pid = std::max<uint32_t>(1, firstPage); pid < lastPage; ++pid) {
+        lockManager_.pageLockShared(dbname, tablename, pid);
+        char* buf = allocator->fetchPage(pid);
+        PageWrapper page(buf, allocator->pageSize(), tbl.formatVersion);
+        page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
+            emitRow(pid, sid, data, len);
+        });
+        allocator->unpinPage(pid);
+        lockManager_.pageUnlock(dbname, tablename, pid);
+    }
+}
+
 bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer,
                                   const TableSchema& tbl) const {
     if (!pa) return false;

@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | P0-1 并行查询首步：新增 `ParallelTableScanOp`，对非分区 heap 按 page range 分片并确定性 Gather；加入 `max_parallel_workers_per_gather` 配置，事务内和分区表安全回退，新增并行/串行等价性与事务回归。parallel join/aggregate、GatherMerge 和长期 worker pool 仍待后续。 |
 | 2026-08-07 | B+Tree 正确性补强：修复 root leaf 分裂传错 child、叶分裂丢弃中间键、重复键跨叶查找遗漏和范围扫描重复返回；新增 250 条跨叶唯一键、6000 条跨叶/内部节点重复键回归。PostgreSQL B-tree 的 dedup、删除合并、opclass/collation 和并发构建语义仍待后续。 |
 | 2026-08-07 | P0-6 Bitmap OR 补强：新增 `BitmapOrHeapScanOp`，每个 OR 分支先求等值索引候选 RID 交集，再 union 后统一 heap fetch 与原谓词重检；主查询路径不再按投影文本错误去重，新增 Volcano 与协议 OR 回归。范围/并行 bitmap 和真正 block bitmap 仍待后续。 |
 | 2026-08-07 | P0-5 SSI 正确性补强：SERIALIZABLE 扫描登记关系级 SIREAD 覆盖，即使谓词返回空集也保留读覆盖；提交时将关系级读写纳入 dangerous-structure 检测，并保留重叠事务的 SSI 历史，新增空谓词并发回归。关系级粒度是保守安全边界，页/索引 predicate lock 和完整 rw-conflict 图仍待后续。 |
@@ -139,7 +140,7 @@
 
 > 2026-07-02 收尾 + Phase 8 启动：
 > - 5.5 skip scan/index cond recheck: FilterOp indexConditionRecheck + canUseSkipScan ✅
-> - 5.21 parallel: QueryPlanner::parallelWorkers API ✅
+> - 5.21 parallel: `ParallelTableScanOp` 已实现非分区 heap page-range scan、确定性 Gather 和 `max_parallel_workers_per_gather` 配置；parallel join/aggregate/GatherMerge 仍待实现 🔄
 > - 5.22 JIT / 5.23 AIO: 基础框架 stub；5.43 SSI: 已验证关系限定的行级写偏差回滚和空谓词关系级 SIREAD，页/索引 predicate lock 仍待实现
 > - 4.27 ALTER TABLE: ONLY/INHERIT/SET TABLESPACE 全部完成 (FOR 关键字修复) ✅
 > - Phase 8: ReplicationManager (slots/standby/WAL shipping) 基础框架新建
@@ -404,7 +405,7 @@
 | 7.2 | Cost-based planner | 有简化成本、统计和 plan cache；缺少 path 枚举、参数化路径、join search、equivalence classes、pathkeys、parallel aware path | ⚠️ |
 | 7.3 | 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化、扩展统计对象元数据与函数依赖（dependencies）强度计算；缺少 PostgreSQL 级 ndistinct、correlation、表达式统计、catalog 和 planner 深度使用 | ⚠️ |
 | 7.4 | Index selection | 已支持等值多索引 Bitmap AND/OR、候选 RID 组合、heap fetch 和原谓词 recheck；缺少范围/并行 bitmap、skip scan、lossy pages | ⚠️ |
-| 7.5 | Parallel query | 缺失：无 Gather/Gather Merge、parallel scan/join/aggregate、worker lifecycle | ❌ |
+| 7.5 | Parallel query | 已有非分区 heap page-range parallel scan 和确定性 Gather；缺 GatherMerge、parallel join/aggregate、worker lifecycle 与 parallel-aware path | ⚠️ |
 | 7.6 | JIT | 缺失 LLVM JIT | ❌ |
 | 7.7 | Async I/O | 缺失 PostgreSQL 18 AIO 子系统 | ❌ |
 | 7.8 | Plan invalidation | 缺少基于 catalog/dependency 的 plan invalidation | ❌ |

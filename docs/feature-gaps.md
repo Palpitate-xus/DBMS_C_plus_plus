@@ -26,16 +26,16 @@
 
 ### P0-1: 并行查询执行
 - **类别**: 性能 / 执行器
-- **现状**: `parallelWorkers_ = 0`，无实际多 worker 调度
+- **现状**: 已实现 `ParallelTableScanOp`：非分区 heap 按 page range 分片，由多个 worker 读取并按范围顺序 Gather；事务内和分区表安全回退到普通扫描。尚无并行 join/aggregate、GatherMerge、work-stealing worker pool 或完整 parallel-aware planner。
 - **PG 参考**: `parallel_workers`, `parallel_leader_participation`, `Gather`/`GatherMerge` 节点
 - **影响**: 大表全表扫描、聚合、JOIN 无法利用多核，性能差距 10x+
 - **实现路径**:
-  1. 在 `QueryPlanner` 中增加 `ParallelSeqScanOp` / `ParallelHashJoinOp` 算子
-  2. 实现 `ThreadPool` 任务分发（`std::thread` work-stealing queue）
-  3. 实现 `Gather` / `GatherMerge` 合并算子
-  4. 增加 `max_parallel_workers_per_gather` GUC 参数
+  1. ✅ 在 `QueryPlanner` 中接入 `ParallelTableScanOp`，按 heap page range 分片
+  2. ⚠️ 当前使用每次查询创建的固定 worker，仍需独立 ThreadPool/work-stealing 生命周期
+  3. ⚠️ 已有确定性 Gather，仍需 GatherMerge、并行 HashJoin/Aggregate
+  4. ✅ 增加 `max_parallel_workers_per_gather` 配置入口
 - **预估工作量**: 2-3 周
-- **相关文件**: `src/executor/ExecutionPlan.cpp`, `src/common/GUC.cpp`
+- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `src/common/Config.{h,cpp}`, `src/common/GUC.cpp`
 
 ### P0-2: JIT 编译 (LLVM)
 - **类别**: 性能 / 表达式求值

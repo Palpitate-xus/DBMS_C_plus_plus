@@ -661,9 +661,9 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 5.18 实现 `FOR UPDATE` with JOIN/GROUP BY/aggregate/window/scalar functions | 6.9 | parseSelect 完整实现 (fix: FOR added to isKeyword to prevent alias capture) |
 | ✅ 5.19 实现 EXPLAIN ANALYZE 真实节点级统计（时间/rows） | 7.9, 1.1.39 | 本次改为通过 volcano 算子树执行并测量实际 rows + 时间 |
 | ✅ 5.20 实现 plan invalidation（基于 catalog/dependency） | 7.8 | invalidateCatalogSchema on DDL; plan cache cleared on schema change |
-| ✅ 5.21 实现并行查询（Gather/Gather Merge、parallel scan/join/aggregate） | 7.5 | QueryPlanner::parallelWorkers + setParallelWorkers API |
-| ✅ 5.22 实现 JIT（LLVM） | 7.6 | jit GUC flag stub; architecture-level JIT deferred |
-| ✅ 5.23 实现 Async I/O（AIO） | 7.7 | aio GUC flag stub; PG18 feature |
+| ⚠️ 5.21 实现并行查询（Gather/Gather Merge、parallel scan/join/aggregate） | 7.5 | `ParallelTableScanOp` 已实现非分区 heap page-range scan、确定性 Gather 和 `max_parallel_workers_per_gather`；parallel join/aggregate/GatherMerge/worker pool 仍缺 |
+| ❌ 5.22 实现 JIT（LLVM） | 7.6 | 当前没有 LLVM backend；旧 GUC/stub 表述已移除 |
+| ❌ 5.23 实现 Async I/O（AIO） | 7.7 | 当前没有 io_uring/AIO executor；旧 GUC/stub 表述已移除 |
 | ✅ 5.24 实现 `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` 子事务完整语义 | 1.1.49, 9.5 | 完整实现 |
 | ✅ 5.25 实现 `COMMIT`/`ROLLBACK` `AND [NO] CHAIN`、全局事务状态 | 1.1.14, 1.1.38, 1.1.8 | 本次新增 AND CHAIN/NO CHAIN 语法 |
 | ✅ 5.26 实现 `PREPARE TRANSACTION` / `COMMIT PREPARED` 完整语义 | 1.1.15 | 基础 two-phase commit 已就绪 |

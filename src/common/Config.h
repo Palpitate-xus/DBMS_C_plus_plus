@@ -32,6 +32,7 @@ struct Config {
     bool enableSeqScan = true;     // enable sequential scan
     bool enableHashJoin = true;    // enable hash join
     bool enableMergeJoin = true;   // enable merge join
+    int maxParallelWorkersPerGather = 0; // 0 disables parallel heap scans
     bool autoExplainEnabled = false; // auto_explain: log query plan for slow queries
     double autoExplainThresholdMs = 100.0; // threshold for auto_explain
 

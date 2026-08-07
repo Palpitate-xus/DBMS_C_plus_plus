@@ -275,6 +275,58 @@ static void test_bitmap_or() {
     std::cout << "[VOLCANO-5.1] bitmap OR + disjunctive recheck OK" << std::endl;
 }
 
+// -------- Test 9: parallel heap page ranges + deterministic gather --------
+static void test_parallel_scan() {
+    std::string db = testDbPath("volc_parallel_scan");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, payload VARCHAR(32))", s));
+    for (int i = 0; i < 300; ++i) {
+        insertRow(db, "t", {{"id", std::to_string(i)}, {"payload", "v" + std::to_string(i)}});
+    }
+
+    dbms::PlanContext ctx;
+    ctx.dbname = db; ctx.tablename = "t";
+    dbms::QueryPlanner::setParallelWorkers(3);
+    auto parallelPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    auto* project = dynamic_cast<dbms::ProjectOp*>(parallelPlan.get());
+    assert(project);
+    auto* scan = dynamic_cast<dbms::ParallelTableScanOp*>(project->child());
+    assert(scan);
+    assert(parallelPlan->open());
+    assert(scan->usedParallelWorkers());
+    std::vector<std::string> parallelRows;
+    std::string row;
+    while (parallelPlan->next(row)) parallelRows.push_back(row);
+    parallelPlan->close();
+    parallelPlan.reset();
+
+    dbms::QueryPlanner::setParallelWorkers(0);
+    auto sequentialPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    auto sequentialRows = dbms::QueryPlanner::executePlan(std::move(sequentialPlan));
+    assert(parallelRows == sequentialRows);
+
+    // Transaction-local visibility/SSI state must stay on the backend
+    // thread; the parallel node therefore falls back safely in a transaction.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    dbms::QueryPlanner::setParallelWorkers(3);
+    auto transactionalPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    auto* transactionalProject = dynamic_cast<dbms::ProjectOp*>(transactionalPlan.get());
+    assert(transactionalProject);
+    auto* transactionalScan = dynamic_cast<dbms::ParallelTableScanOp*>(transactionalProject->child());
+    assert(transactionalScan);
+    assert(transactionalPlan->open());
+    assert(!transactionalScan->usedParallelWorkers());
+    transactionalPlan->close();
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    dbms::QueryPlanner::setParallelWorkers(0);
+
+    cleanup(db);
+    std::cout << "[VOLCANO-5.1] parallel page scan + deterministic gather OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_full_scan();
@@ -285,6 +337,7 @@ int main() {
     test_like_filter();
     test_bitmap_and();
     test_bitmap_or();
+    test_parallel_scan();
     std::cout << "[VOLCANO-5.1] all Phase 5.1 volcano SELECT tests passed" << std::endl;
     return 0;
 }

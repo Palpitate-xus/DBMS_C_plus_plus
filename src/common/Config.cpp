@@ -59,6 +59,8 @@ bool Config::load(const std::string& filename) {
             enableHashJoin = (val == "1" || val == "true" || val == "on");
         } else if (key == "enable_merge_join") {
             enableMergeJoin = (val == "1" || val == "true" || val == "on");
+        } else if (key == "max_parallel_workers_per_gather") {
+            try { maxParallelWorkersPerGather = std::max(0, std::stoi(val)); } catch (...) {}
         } else if (key == "auto_explain") {
             autoExplainEnabled = (val == "1" || val == "true" || val == "on");
         } else if (key == "auto_explain_threshold_ms") {
@@ -88,6 +90,7 @@ void Config::printAll() const {
               << "enable_seq_scan " << (enableSeqScan ? "on" : "off") << "\n"
               << "enable_hash_join " << (enableHashJoin ? "on" : "off") << "\n"
               << "enable_merge_join " << (enableMergeJoin ? "on" : "off") << "\n"
+              << "max_parallel_workers_per_gather " << maxParallelWorkersPerGather << "\n"
               << "auto_explain " << (autoExplainEnabled ? "on" : "off") << "\n"
               << "auto_explain_threshold_ms " << autoExplainThresholdMs << "\n";
 }
@@ -115,6 +118,7 @@ bool Config::save(const std::string& filename) const {
         << "enable_seq_scan=" << (enableSeqScan ? "on" : "off") << "\n"
         << "enable_hash_join=" << (enableHashJoin ? "on" : "off") << "\n"
         << "enable_merge_join=" << (enableMergeJoin ? "on" : "off") << "\n"
+        << "max_parallel_workers_per_gather=" << maxParallelWorkersPerGather << "\n"
         << "auto_explain=" << (autoExplainEnabled ? "on" : "off") << "\n"
         << "auto_explain_threshold_ms=" << autoExplainThresholdMs << "\n";
     return true;
