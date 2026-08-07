@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -190,6 +191,7 @@ struct ProtocolPreparedStatement {
 struct ProtocolPortal {
     std::string statement;
     std::string sql;
+    std::vector<uint16_t> resultFormats;
 };
 
 bool isIntegerParameterType(uint32_t typeOid) {
@@ -234,9 +236,64 @@ std::string quoteProtocolText(const std::string& value, std::string& error) {
     return literal;
 }
 
+bool decodeBinaryUnsigned(const std::vector<uint8_t>& raw, size_t width, uint64_t& value) {
+    if (raw.size() != width || width == 0 || width > sizeof(uint64_t)) return false;
+    value = 0;
+    for (uint8_t byte : raw) value = (value << 8) | byte;
+    return true;
+}
+
+std::string binaryProtocolParameterLiteral(uint32_t typeOid,
+                                           const std::vector<uint8_t>& raw,
+                                           std::string& error) {
+    uint64_t bits = 0;
+    switch (typeOid) {
+        case 16:
+            if (raw.size() != 1 || (raw[0] != 0 && raw[0] != 1)) {
+                error = "invalid binary input syntax for type boolean";
+                return {};
+            }
+            return raw[0] ? "TRUE" : "FALSE";
+        case 21:
+            if (!decodeBinaryUnsigned(raw, 2, bits)) break;
+            return std::to_string(static_cast<int16_t>(bits));
+        case 23:
+            if (!decodeBinaryUnsigned(raw, 4, bits)) break;
+            return std::to_string(static_cast<int32_t>(bits));
+        case 26:
+            if (!decodeBinaryUnsigned(raw, 4, bits)) break;
+            return std::to_string(bits);
+        case 20:
+            if (!decodeBinaryUnsigned(raw, 8, bits)) break;
+            return std::to_string(static_cast<int64_t>(bits));
+        case 700: {
+            if (!decodeBinaryUnsigned(raw, 4, bits)) break;
+            uint32_t rawBits = static_cast<uint32_t>(bits);
+            float number = 0;
+            std::memcpy(&number, &rawBits, sizeof(number));
+            return std::to_string(number);
+        }
+        case 701: {
+            if (!decodeBinaryUnsigned(raw, 8, bits)) break;
+            double number = 0;
+            std::memcpy(&number, &bits, sizeof(number));
+            return std::to_string(number);
+        }
+        case 25: case 1042: case 1043:
+            return quoteProtocolText(std::string(raw.begin(), raw.end()), error);
+        default:
+            error = "binary parameter type is not supported";
+            return {};
+    }
+    error = "invalid binary input length for parameter type";
+    return {};
+}
+
 std::string protocolParameterLiteral(uint32_t typeOid,
                                      const std::vector<uint8_t>& raw,
+                                     bool binary,
                                      std::string& error) {
+    if (binary) return binaryProtocolParameterLiteral(typeOid, raw, error);
     std::string value(raw.begin(), raw.end());
     if (value.find('\0') != std::string::npos) {
         error = "parameter contains a NUL byte";
@@ -1129,9 +1186,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 uint16_t format = 0;
                 if (parameterFormats.size() == 1) format = parameterFormats.front();
                 else if (parameterFormats.size() == valueCount) format = parameterFormats[i];
-                if (format != 0) {
+                if (format != 0 && format != 1) {
                     bindError = true;
-                    bindErrorMessage = "binary parameter format is not supported";
+                    bindErrorMessage = "unsupported parameter format code";
                     break;
                 }
                 if (valueLength == -1) {
@@ -1142,7 +1199,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         message.payload.begin() + static_cast<std::ptrdiff_t>(offset + valueLength));
                     offset += static_cast<size_t>(valueLength);
                     std::string literal = protocolParameterLiteral(
-                        prepared.parameterTypes[i], raw, bindErrorMessage);
+                        prepared.parameterTypes[i], raw, format == 1, bindErrorMessage);
                     if (!bindErrorMessage.empty()) {
                         bindError = true;
                         break;
@@ -1162,17 +1219,25 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             const uint16_t resultFormatCount = PostgresProtocol::readUInt16(message.payload, offset);
             offset += 2;
-            if (resultFormatCount > 1 ||
-                offset + static_cast<size_t>(resultFormatCount) * 2 != message.payload.size()) {
-                protocol.sendErrorResponse("ERROR", "08P01", "unsupported Bind result format list");
+            if (offset + static_cast<size_t>(resultFormatCount) * 2 != message.payload.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind result format list");
                 extendedQueryError = true;
                 continue;
             }
-            if (resultFormatCount == 1 && PostgresProtocol::readUInt16(message.payload, offset) != 0) {
-                protocol.sendErrorResponse("ERROR", "0A000", "binary result format is not supported");
-                extendedQueryError = true;
-                continue;
+            std::vector<uint16_t> resultFormats;
+            resultFormats.reserve(resultFormatCount);
+            for (uint16_t i = 0; i < resultFormatCount; ++i) {
+                const uint16_t format = PostgresProtocol::readUInt16(message.payload, offset);
+                offset += 2;
+                if (format > 1) {
+                    protocol.sendErrorResponse("ERROR", "08P01", "unsupported result format code");
+                    extendedQueryError = true;
+                    resultFormats.clear();
+                    break;
+                }
+                resultFormats.push_back(format);
             }
+            if (extendedQueryError) continue;
             std::string expandedSql;
             std::string substitutionError;
             if (!substituteProtocolParameters(prepared.sql, literals, expandedSql, substitutionError)) {
@@ -1180,7 +1245,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
-            portals[portal] = ProtocolPortal{statement, std::move(expandedSql)};
+            portals[portal] = ProtocolPortal{statement, std::move(expandedSql), std::move(resultFormats)};
             protocol.sendBindComplete();
             continue;
         }
@@ -1222,8 +1287,35 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         columns.push_back(PgColumnDescription{name});
                     }
                 }
+                if (!portalIt->second.resultFormats.empty() &&
+                    portalIt->second.resultFormats.size() != 1 &&
+                    portalIt->second.resultFormats.size() != columns.size()) {
+                    protocol.sendErrorResponse("ERROR", "08P01", "result format count does not match result columns");
+                    extendedQueryError = true;
+                    continue;
+                }
+                if (portalIt->second.resultFormats.size() == 1) {
+                    for (auto& column : columns) {
+                        column.formatCode = static_cast<int16_t>(portalIt->second.resultFormats.front());
+                    }
+                } else if (!portalIt->second.resultFormats.empty()) {
+                    for (size_t i = 0; i < columns.size(); ++i) {
+                        columns[i].formatCode = static_cast<int16_t>(portalIt->second.resultFormats[i]);
+                    }
+                }
                 protocol.sendRowDescription(columns);
-                for (const auto& row : result.rows) protocol.sendDataRow(row);
+                bool rowsSent = true;
+                for (const auto& row : result.rows) {
+                    std::vector<std::string> normalized = row;
+                    normalized.resize(columns.size());
+                    if (!protocol.sendDataRow(normalized, columns)) {
+                        protocol.sendErrorResponse("ERROR", "0A000", "binary result type is not supported");
+                        extendedQueryError = true;
+                        rowsSent = false;
+                        break;
+                    }
+                }
+                if (!rowsSent) continue;
                 protocol.sendCommandComplete(result.commandTag);
             } else {
                 protocol.sendCommandComplete(result.commandTag);

@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <string>
 
 namespace dbms {
 
@@ -23,6 +24,82 @@ uint32_t decodeUInt32(const uint8_t* bytes) {
 uint16_t decodeUInt16(const uint8_t* bytes) {
     return static_cast<uint16_t>((static_cast<uint16_t>(bytes[0]) << 8) |
                                   static_cast<uint16_t>(bytes[1]));
+}
+
+void appendRawUInt16(std::vector<uint8_t>& output, uint16_t value) {
+    output.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    output.push_back(static_cast<uint8_t>(value & 0xff));
+}
+
+void appendRawUInt32(std::vector<uint8_t>& output, uint32_t value) {
+    output.push_back(static_cast<uint8_t>((value >> 24) & 0xff));
+    output.push_back(static_cast<uint8_t>((value >> 16) & 0xff));
+    output.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    output.push_back(static_cast<uint8_t>(value & 0xff));
+}
+
+void appendRawUInt64(std::vector<uint8_t>& output, uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        output.push_back(static_cast<uint8_t>((value >> shift) & 0xff));
+    }
+}
+
+bool encodeBinaryValue(const std::string& value, const PgColumnDescription& column,
+                       std::vector<uint8_t>& encoded) {
+    try {
+        switch (column.typeOid) {
+            case 16: {
+                if (value == "true" || value == "t" || value == "1") encoded.push_back(1);
+                else if (value == "false" || value == "f" || value == "0") encoded.push_back(0);
+                else return false;
+                return true;
+            }
+            case 21: {
+                const auto number = std::stoll(value);
+                if (number < std::numeric_limits<int16_t>::min() ||
+                    number > std::numeric_limits<int16_t>::max()) return false;
+                appendRawUInt16(encoded, static_cast<uint16_t>(static_cast<int16_t>(number)));
+                return true;
+            }
+            case 23: {
+                const auto number = std::stoll(value);
+                if (number < std::numeric_limits<int32_t>::min() ||
+                    number > std::numeric_limits<int32_t>::max()) return false;
+                appendRawUInt32(encoded, static_cast<uint32_t>(static_cast<int32_t>(number)));
+                return true;
+            }
+            case 20: {
+                const auto number = std::stoll(value);
+                appendRawUInt64(encoded, static_cast<uint64_t>(number));
+                return true;
+            }
+            case 700: {
+                size_t consumed = 0;
+                const float number = std::stof(value, &consumed);
+                if (consumed != value.size()) return false;
+                uint32_t bits = 0;
+                std::memcpy(&bits, &number, sizeof(bits));
+                appendRawUInt32(encoded, bits);
+                return true;
+            }
+            case 701: {
+                size_t consumed = 0;
+                const double number = std::stod(value, &consumed);
+                if (consumed != value.size()) return false;
+                uint64_t bits = 0;
+                std::memcpy(&bits, &number, sizeof(bits));
+                appendRawUInt64(encoded, bits);
+                return true;
+            }
+            case 25: case 1042: case 1043:
+                encoded.insert(encoded.end(), value.begin(), value.end());
+                return true;
+            default:
+                return false;
+        }
+    } catch (...) {
+        return false;
+    }
 }
 
 } // namespace
@@ -286,17 +363,33 @@ bool PostgresProtocol::sendRowDescription(const std::vector<PgColumnDescription>
 }
 
 bool PostgresProtocol::sendDataRow(const std::vector<std::string>& values) {
+    std::vector<PgColumnDescription> columns(values.size());
+    return sendDataRow(values, columns);
+}
+
+bool PostgresProtocol::sendDataRow(const std::vector<std::string>& values,
+                                   const std::vector<PgColumnDescription>& columns) {
     if (values.size() > std::numeric_limits<uint16_t>::max()) return false;
+    if (columns.size() != values.size()) return false;
     std::vector<uint8_t> body;
     appendUInt16(body, static_cast<uint16_t>(values.size()));
-    for (const auto& value : values) {
+    for (size_t i = 0; i < values.size(); ++i) {
+        const auto& value = values[i];
         if (value == "NULL") {
             appendInt32(body, -1);
-        } else if (value.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
-            return false;
         } else {
-            appendInt32(body, static_cast<int32_t>(value.size()));
-            body.insert(body.end(), value.begin(), value.end());
+            std::vector<uint8_t> encoded;
+            if (columns[i].formatCode == 0) {
+                if (value.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) return false;
+                encoded.assign(value.begin(), value.end());
+            } else if (columns[i].formatCode == 1) {
+                if (!encodeBinaryValue(value, columns[i], encoded)) return false;
+            } else {
+                return false;
+            }
+            if (encoded.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) return false;
+            appendInt32(body, static_cast<int32_t>(encoded.size()));
+            body.insert(body.end(), encoded.begin(), encoded.end());
         }
     }
     return sendMessage('D', body);

@@ -230,6 +230,28 @@ def extended_query_int_parameter(sock, sql, value):
     assert any(kind == b"C" for kind, _ in messages)
 
 
+def extended_query_binary_int_parameter(sock, sql, value):
+    parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", 1) + struct.pack("!I", 23)
+    sock.sendall(typed(b"P", parse))
+    kind, body = read_message(sock)
+    assert kind == b"t" and body == struct.pack("!H", 1) + struct.pack("!I", 23)
+    kind, _ = read_message(sock)
+    assert kind == b"1"
+
+    bind = (b"\0\0" + struct.pack("!H", 1) + struct.pack("!H", 1) +
+            struct.pack("!H", 1) + struct.pack("!i", 4) + struct.pack("!i", value) +
+            struct.pack("!H", 1) + struct.pack("!H", 1))
+    sock.sendall(typed(b"B", bind))
+    kind, _ = read_message(sock)
+    assert kind == b"2"
+    sock.sendall(typed(b"E", b"\0" + struct.pack("!I", 0)) + typed(b"S"))
+    messages = read_until_ready(sock)
+    fields = row_description_fields(messages)
+    assert len(fields) == 1 and fields[0][3] == 23 and fields[0][6] == 1, fields
+    assert data_row_values(messages) == [[struct.pack("!i", value)]], messages
+    assert any(kind == b"C" for kind, _ in messages)
+
+
 def extended_query_error_recovery(sock):
     # A Parse error puts the extended-query protocol into the ignore-until-Sync
     # state. Bind/Execute sent before Sync must not run or emit completions.
@@ -303,6 +325,7 @@ def main():
         assert any(kind == b"C" for kind, _ in messages)
         extended_query(sock, "SELECT id FROM t")
         extended_query_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
+        extended_query_binary_int_parameter(sock, "SELECT id FROM t WHERE id = $1", 1)
         extended_query_error_recovery(sock)
         error_messages = simple_query(sock, "SELECT * FROM protocol_missing_table")
         assert any(kind == b"E" for kind, _ in error_messages)

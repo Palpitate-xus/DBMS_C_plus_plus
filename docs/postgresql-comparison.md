@@ -5,7 +5,7 @@
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线: PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
-协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本整数参数绑定、statement/portal 的 Describe/Close 生命周期及常见单表 `int4` RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，二进制参数/结果、复杂表达式的完整类型映射、portal 分页和扩展消息仍与 PostgreSQL 有差距。
+协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数参数与结果、statement/portal 的 Describe/Close 生命周期及常见单表 `int4` RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，numeric/日期/UUID/数组等复杂类型 I/O、复杂表达式的完整类型映射、portal 分页和扩展消息仍与 PostgreSQL 有差距。
 
 ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` 的解析，并验证角色授权可以通过真实 PostgreSQL 协议生效；owner、完整 ACL 对象范围及 `GRANT OPTION` 生命周期仍未达到 PostgreSQL 语义。
 

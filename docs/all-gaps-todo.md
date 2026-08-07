@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | PostgreSQL binary 参数/结果补强：Bind/Execute 支持 bool/int2/int4/int8/oid/float4/float8/text/varchar 的 binary 编解码，支持单一或逐列结果格式并新增 int4 binary E2E；numeric/日期/UUID/数组等复杂类型及 portal 分页仍待后续。 |
 | 2026-08-07 | 扩展查询生命周期与结果元数据补强：Describe 严格校验 statement/portal 目标并返回参数描述，Close 真正删除 statement/portal 及其依赖资源；常见单表结果返回 catalog/table schema 驱动的 OID、长度、属性号和表 OID。复杂表达式的完整 RowDescription 类型推导、二进制格式和 portal 分页仍待后续。 |
 | 2026-08-07 | ACL 执行路径补强：表/列权限检查统一支持会话用户、递归继承角色和 `PUBLIC`；协议 E2E 验证角色继承 SELECT 与未授权 INSERT 拒绝。对象 owner、完整 GRANT OPTION 生命周期及 schema/database/function ACL 仍待后续。 |
 | 2026-08-07 | PostgreSQL 扩展查询参数路径补强：Parse 返回 `ParameterDescription`，Bind 支持文本参数、NULL、格式/数量校验和 `$n` 安全字面量绑定；新增参数化查询 E2E。二进制格式、完整 OID 类型映射、结构化结果和 portal 分页仍待后续。 |
@@ -464,7 +465,7 @@
 |---|------|---------|------|
 | 11.1 | 用户/角色 catalog | 已统一到 `pg_authid`/`pg_auth_members`；主要角色属性、SCRAM、password expiration、连接数限制和递归 membership 已执行；完整 ACL、admin option、owner/依赖语义仍缺 | ⚠️ |
 | 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配、IPv4/IPv6 及角色/数据库匹配和 TLS；缺少 OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
-| 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、文本参数和常见单表 RowDescription 元数据；缺少完整类型/二进制格式/扩展消息和完整 libpq 语义 | 🔄 |
+| 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、文本及常用类型二进制参数/结果和常见单表 RowDescription 元数据；缺少复杂类型 I/O/扩展消息和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
 | 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
 | 11.6 | RLS | 有 policy 文件和透明条件追加；源码注释显示 `WITH CHECK` 复杂验证被简化允许，缺少 PG executor-integrated RLS | ⚠️ |
@@ -555,7 +556,7 @@
 | 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 | ✅ 已是 redo log：LSN/segment/full-page/redo/timeline/archive + 两趟扫描崩溃恢复（Phase 3.4~3.6）；PITR/复制仍 ❌ |
 | 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 | 🔄 `HeapTupleHeader`(xmin/xmax/ctid) + HOT + CLOG 可见性已实现（Phase 3.7/3.8）；多版本边界/vacuum 回收仍需深化 |
 | 16.5 | **DDL 事务化** — 多处 DDL 隐式提交，与 PG 事务语义不一致 | 数据一致性、回滚、并发 | 高 | 🔄 Wave 0.4 骨架（`DdlTransaction` + `XLOG_CATALOG_*` WAL）；全量移除隐式提交待 Phase 4.39 Wave 5 |
-| 16.6 | **PostgreSQL Wire Protocol** — 核心 framing、扩展查询生命周期和常见单表结果元数据已接入，完整协议语义未完成 | libpq 兼容性、生态工具 | 高 | 🔄 Phase 7 进行中 |
+| 16.6 | **PostgreSQL Wire Protocol** — 核心 framing、扩展查询生命周期、常用类型 binary I/O 和常见单表结果元数据已接入，完整协议语义未完成 | libpq 兼容性、生态工具 | 高 | 🔄 Phase 7 进行中 |
 | 16.7 | **扩展系统** — 没有插件加载框架、Hook 系统、共享内存扩展 | EXTENSION、FDW、PL、自定义类型 | 极高 | ❌ Phase 10 待办 |
 | 16.8 | **多进程模型** — 项目是多线程 server，PG 是多进程 backend + shared memory | 连接隔离、崩溃恢复、共享内存 | 高 | ❌ Phase 9 待办 |
 | 16.9 | **Buffer Manager** — 缺少 shared buffers、clock sweep、pin/lock、bgwriter、walwriter | I/O 性能、并发、恢复 | 高 | ✅ `BufferPool`(clock sweep + pin/usage) + bgwriter/checkpointer/walwriter 后台线程已实现（Phase 3.3/3.4） |

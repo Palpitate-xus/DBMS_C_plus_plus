@@ -66,6 +66,8 @@ public:
     bool sendCommandComplete(const std::string& tag);
     bool sendRowDescription(const std::vector<PgColumnDescription>& columns);
     bool sendDataRow(const std::vector<std::string>& values);
+    bool sendDataRow(const std::vector<std::string>& values,
+                     const std::vector<PgColumnDescription>& columns);
 
     static uint32_t readUInt32(const std::vector<uint8_t>& data, size_t offset);
     static uint16_t readUInt16(const std::vector<uint8_t>& data, size_t offset);
