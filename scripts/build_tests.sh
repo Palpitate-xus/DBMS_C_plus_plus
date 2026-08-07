@@ -15,48 +15,12 @@ else
     echo "[test-build] OpenSSL not found, using TLS stub (plain TCP)"
 fi
 
-# 共享源文件列表（与 build.sh 一致，但不含 src/main.cpp）
-SOURCES=(
-    src/commands/TableManage.cpp
-    src/executor/ExecutionPlan.cpp
-    src/storage/BufferPool.cpp
-    src/storage/PageAllocator.cpp
-    src/storage/PgPage.cpp
-    src/storage/PageWrapper.cpp
-    src/storage/FreeSpaceMap.cpp
-    src/storage/VisibilityMap.cpp
-    src/storage/CommitLog.cpp
-    src/storage/WAL.cpp
-    src/access/BPTree.cpp
-    src/access/HashIndex.cpp
-    src/access/SPGiSTIndex.cpp
-    src/access/GinIndex.cpp
-    src/access/BrinIndex.cpp
-    src/access/BPTreeIndexAM.cpp
-    src/access/HashIndexAM.cpp
-    src/transaction/LockManager.cpp
-    src/transaction/TxnIdGenerator.cpp
-    src/network/NetworkServer.cpp
-    src/common/Config.cpp
-    src/common/GUC.cpp
-    src/parser/parser.cpp
-    src/catalog/catalog.cpp
-    src/catalog/oid.cpp
-    src/catalog/systables.cpp
-    src/catalog/migrate.cpp
-    src/catalog/CatalogService.cpp
-    src/catalog/type_registry.cpp
-    src/catalog/collation.cpp
-    src/expression/ExprEvaluator.cpp
-    src/expression/expr_helper.cpp
-    src/commands/DdlExecutor.cpp
-    src/commands/DdlTransaction.cpp
-    src/utils/pg_hba.cpp
-    src/replication/ReplicationManager.cpp
-    src/process/ProcessManager.cpp
-    src/storage/LargeObject.cpp
-    src/types/numeric.cpp
-)
+# Shared source manifest; tests link every production unit except main.cpp.
+SOURCES=()
+while IFS= read -r src; do
+    [[ -z "$src" || "$src" == \#* || "$src" == "src/main.cpp" ]] && continue
+    SOURCES+=("$src")
+done < <(sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "${SRC_DIR}/cmake/dbms_sources.txt")
 
 if [ "$HAS_OPENSSL" -eq 1 ]; then
     SOURCES+=(src/network/TLSWrapper.cpp)

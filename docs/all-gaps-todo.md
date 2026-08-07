@@ -168,7 +168,7 @@
 | 优化器/执行器 | 简化 | 中量 | 大量 ❌ | `src/optimizer/` 仍为空；Path/RelOptInfo 框架未建（Phase 5 未启动） |
 | 索引 | 6 种 | 简化 | 大量 ❌ | IIndexAM 适配器已统一；AM API/opclass/concurrent/维护仍 ❌ |
 | 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI/完整子事务仍 ❌ |
-| 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、BufferPool(clock sweep/pin)、ClusterLayout、TOAST、checksum 已实现；PITR/真实 freeze 仍 ❌ |
+| 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
 | 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；pg_hba/SCRAM/wire protocol 仍 ❌ |
 | 复制/HA | 0 | WAL archive 1 项 | 全部 ❌ | `src/replication/` 仅有 README；流复制/逻辑复制/PITR 全缺 |
 | 监控/诊断 | 子集 | 子集 | 大量 ❌ | pg_stat_activity/locks/statements 风格子集；pg_stat_io/wait events 缺 |

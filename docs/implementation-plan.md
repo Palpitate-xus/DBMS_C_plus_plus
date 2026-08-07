@@ -179,7 +179,7 @@
 | ✅ 3.7 实现 tuple `xmin/xmax`、ctid chain、HOT update | 16.4, 9.1 | HOT update test in src/commands
 | ✅ 3.8 实现 CLOG / `pg_xact`、visibility map、hint bits | 9.9, 10.2 | CommitLog + vis map integration
 | ✅ 3.9 实现 Snapshot 导出/导入、`subxip`、catalog snapshot | 9.2 | snapshot_export_import_test
-| ✅ 3.10 实现 cluster layout（base / global / pg_wal / pg_xact …） | 10.1 | ClusterLayout full init
+| ✅ 3.10 实现数据库目录与关系 fork 管理（当前实现） | 10.1 | 当前使用 StorageEngine 路径管理；旧 `ClusterLayout` 并行实现已删除
 | ✅ 3.11 实现 TOAST relation / index / compression / chunking | 10.8 | toast_test 覆盖
 | ✅ 3.12 实现 tablespace 物理路由与 `pg_tblspc` 符号链接 | 10.9, 1.1.30 | tablespace __TABL__ routing
 | ✅ 3.13 实现 data page checksums | 10.10 | Page checksum in PgPage

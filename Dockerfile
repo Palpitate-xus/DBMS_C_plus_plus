@@ -22,6 +22,7 @@ WORKDIR /app
 # Copy source tree
 COPY src/ src/
 COPY scripts/ scripts/
+COPY cmake/ cmake/
 COPY CMakeLists.txt ./
 
 # Build the binary (build.sh detects OpenSSL automatically)

@@ -10,7 +10,8 @@
 
 - OS: Linux 6.8.0-117-generic
 - Compiler: g++ -std=c++17 -O2 -pthread
-- 编译命令：`./scripts/build.sh`；测试编译命令：`./scripts/run_all_tests_fast.sh`
+- 标准编译命令：`./scripts/build.sh`；测试编译命令：`./scripts/run_all_tests_fast.sh`
+- CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 
 ---
 

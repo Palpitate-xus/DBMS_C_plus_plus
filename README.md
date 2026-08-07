@@ -189,24 +189,18 @@ select * from users where id = 10;  -- 现在能看到
 
 ### 编译
 
-#### 方式一：CMake（推荐）
-```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
-```
-
-#### 方式二：自动构建脚本（自动检测 OpenSSL）
+#### 方式一：标准脚本构建（推荐）
 ```bash
 ./scripts/build.sh
 ```
 
-#### 方式三：手动 g++
+#### 方式二：CMake
 ```bash
-./scripts/build.sh  # 推荐，自动检测 OpenSSL 并包含全部模块
+cmake -S . -B build
+cmake --build build -j$(nproc)
 ```
 
-> 完整模块列表见 `scripts/build.sh`。
+> 两个入口共同使用 [`cmake/dbms_sources.txt`](cmake/dbms_sources.txt)；新增或删除生产模块只修改这份清单，不再分别维护多个源文件列表。
 
 > **TLS 说明**：若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会自动启用真实 TLS 支持；否则回退到明文 TCP（stub 实现）。
 

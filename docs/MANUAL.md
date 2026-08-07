@@ -47,7 +47,7 @@
 ./scripts/build.sh
 
 # 方式二: CMake
-mkdir -p build && cd build && cmake .. && make -j$(nproc)
+cmake -S . -B build && cmake --build build -j$(nproc)
 ```
 
 ### 运行
@@ -1015,7 +1015,7 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 
 ```bash
 ./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 运行全部 109 个测试
+./scripts/run_all_tests_fast.sh # 运行全部 113 个测试
 ```
 
 每个测试函数执行完毕后自动清理数据库目录（`__t_*` 前缀），不影响项目根目录。

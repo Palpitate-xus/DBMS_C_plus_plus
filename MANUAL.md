@@ -21,10 +21,10 @@
 ### 1.1 编译
 
 ```bash
-g++ -std=c++17 -O2 -pthread main.cpp TableManage.cpp ExecutionPlan.cpp BufferPool.cpp \
-    PageAllocator.cpp Page.cpp BPTree.cpp LockManager.cpp NetworkServer.cpp \
-    TxnIdGenerator.cpp -o dbms_main
+./scripts/build.sh
 ```
+
+当前版本统一使用 v2、8 KiB heap page；生产源码清单位于 `cmake/dbms_sources.txt`，不要手工引用已删除的旧 `Page.cpp`。
 
 ### 1.2 启动交互模式
 
