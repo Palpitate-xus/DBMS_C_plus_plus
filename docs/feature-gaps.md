@@ -104,15 +104,11 @@
 
 ### P0-7: INSTEAD OF 视图触发器
 - **类别**: 触发器 / 数据完整性
-- **现状**: BEFORE 行级触发器已接入 INSERT/UPDATE/DELETE；INSTEAD OF 视图触发器仍待补
-- **PG 参考**: `CREATE TRIGGER ... BEFORE INSERT ... FOR EACH ROW`
-- **影响**: 无法在写入前修改数据、无法通过视图更新多表
-- **实现路径**:
-  1. 在视图 DML 路径中增加 INSTEAD OF 触发器调用
-  2. 实现视图行变量与底层表写入映射
-  3. 增加 `TriggerExecutor` 的视图触发器执行路径
-- **预估工作量**: 3-5 天
-- **相关文件**: `src/commands/TableManage.cpp`, `src/main.cpp`
+- **现状**: 已支持在视图上创建行级 `INSTEAD OF INSERT/UPDATE/DELETE`，并通过协议连接执行 action SQL；`NEW`/`OLD` 变量、`WHEN`、动作失败传播和 server/CLI 会话执行路径已接入
+- **剩余差距**: 当前视图 DML 路径仍按简化语句模型处理，尚未完整支持多行逐行触发、`INSERT ... SELECT`、完整 `RETURNING`、transition tables，以及真正的 `EXECUTE FUNCTION`/PL 触发器运行时
+- **PG 参考**: `CREATE TRIGGER ... INSTEAD OF INSERT OR UPDATE OR DELETE ON view FOR EACH ROW`
+- **验证**: `tests/postgres_protocol_test.py` 覆盖通过视图触发器插入、更新、删除底表行
+- **相关文件**: `src/commands/DdlExecutor.cpp`, `src/main.cpp`, `tests/postgres_protocol_test.py`
 
 ---
 
@@ -405,7 +401,7 @@
 ## 实施路线图建议
 
 ### 第一优先级 (并发正确性 + 查询完整性) — 约 4 周
-1. P0-7 BEFORE 行级触发器 (3-5d)
+1. P0-7 视图触发器多行/函数运行时语义 (后续)
 2. P0-6 Bitmap Scan (1w)
 3. P1-1 Window Function Executor (1-2w)
 4. P1-2 UNION/INTERSECT Executor (3-5d)

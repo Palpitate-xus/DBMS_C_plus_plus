@@ -449,6 +449,41 @@ def main():
         numeric_rows = data_row_values(simple_query(
             sock, "SELECT n FROM protocol_numeric WHERE n = 12345.67"))
         assert numeric_rows == [[b"12345.67"]], numeric_rows
+
+        # INSTEAD OF view triggers must be creatable on views and must route
+        # each DML operation to the trigger action instead of the base-view
+        # rewrite path.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE view_trigger_base (id INT PRIMARY KEY, name TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE VIEW writable_view AS "
+            "SELECT id, name FROM view_trigger_base"))
+        insert_trigger_ddl = simple_query(
+            sock, "CREATE TRIGGER writable_view_insert INSTEAD OF INSERT ON writable_view "
+            "FOR EACH ROW INSERT INTO view_trigger_base VALUES (NEW.id, NEW.name)")
+        assert any(kind == b"C" for kind, _ in insert_trigger_ddl), insert_trigger_ddl
+        update_trigger_ddl = simple_query(
+            sock, "CREATE TRIGGER writable_view_update INSTEAD OF UPDATE ON writable_view "
+            "FOR EACH ROW UPDATE view_trigger_base SET name = NEW.name WHERE id = OLD.id")
+        assert any(kind == b"C" for kind, _ in update_trigger_ddl), update_trigger_ddl
+        delete_trigger_ddl = simple_query(
+            sock, "CREATE TRIGGER writable_view_delete INSTEAD OF DELETE ON writable_view "
+            "FOR EACH ROW DELETE FROM view_trigger_base WHERE id = OLD.id")
+        assert any(kind == b"C" for kind, _ in delete_trigger_ddl), delete_trigger_ddl
+        insert_messages = simple_query(
+            sock, "INSERT INTO writable_view (id, name) VALUES (10, 'alice')")
+        assert any(kind == b"C" for kind, _ in insert_messages), insert_messages
+        view_rows = simple_query(sock, "SELECT name FROM view_trigger_base WHERE id = 10")
+        assert data_row_values(view_rows) == [[b"alice"]], view_rows
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "UPDATE writable_view SET name = 'bob' WHERE id = 10"))
+        assert data_row_values(simple_query(
+            sock, "SELECT name FROM view_trigger_base WHERE id = 10")) == [[b"bob"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "DELETE FROM writable_view WHERE id = 10"))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM view_trigger_base WHERE id = 10")) == []
+
         messages = simple_query(sock, "SELECT id FROM t")
         assert messages[0][0] == b"T"
         assert any(kind == b"D" for kind, _ in messages)

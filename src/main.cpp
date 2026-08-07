@@ -2597,47 +2597,77 @@ static bool isTempTable(Session& s, const string& name) {
 // INSTEAD OF trigger helper: execute trigger action on view
 // Returns true if an INSTEAD OF trigger was executed, false otherwise
 // ========================================================================
+static void replaceTriggerReference(string& sql, const string& prefix,
+                                    const string& column, const string& value) {
+    if (prefix.empty() || column.empty()) return;
+    auto equalIgnoreCase = [](const string& lhs, size_t pos, const string& rhs) {
+        if (pos + rhs.size() > lhs.size()) return false;
+        for (size_t i = 0; i < rhs.size(); ++i) {
+            if (tolower(static_cast<unsigned char>(lhs[pos + i])) !=
+                tolower(static_cast<unsigned char>(rhs[i]))) return false;
+        }
+        return true;
+    };
+    for (size_t pos = 0; pos < sql.size();) {
+        if (!equalIgnoreCase(sql, pos, prefix)) {
+            ++pos;
+            continue;
+        }
+        size_t end = pos + prefix.size();
+        while (end < sql.size() && isspace(static_cast<unsigned char>(sql[end]))) ++end;
+        if (end >= sql.size() || sql[end] != '.') {
+            ++pos;
+            continue;
+        }
+        ++end;
+        while (end < sql.size() && isspace(static_cast<unsigned char>(sql[end]))) ++end;
+        if (!equalIgnoreCase(sql, end, column)) {
+            ++pos;
+            continue;
+        }
+        sql.replace(pos, end + column.size() - pos, value);
+        pos += value.size();
+    }
+}
+
 static bool executeInsteadOfTrigger(Session& s, const string& viewname,
                                      const string& event,
                                      const map<string, string>& newValues,
-                                     const map<string, string>& oldValues) {
+                                     const map<string, string>& oldValues,
+                                     bool* actionFailed = nullptr) {
+    if (actionFailed) *actionFailed = false;
     if (!g_engine.viewExists(s.currentDB, viewname)) return false;
     auto triggers = g_engine.getTriggers(s.currentDB, viewname, "instead of", event);
     if (triggers.empty()) return false;
     for (const auto& trg : triggers) {
-        string action = trg.action;
-        // Substitute NEW.column (case-insensitive search)
-        for (const auto& [col, val] : newValues) {
-            string placeholderLower = "new." + col;
-            string placeholderUpper = "NEW." + col;
-            size_t pos = 0;
-            while ((pos = action.find(placeholderLower, pos)) != string::npos) {
-                action.replace(pos, placeholderLower.size(), val);
-                pos += val.size();
+        // An INSTEAD OF trigger consumes the view DML even when its WHEN
+        // predicate is false; in that case PostgreSQL simply affects no row.
+        if (!trg.whenCondition.empty()) {
+            string condition = trg.whenCondition;
+            for (const auto& [col, val] : newValues) {
+                replaceTriggerReference(condition, "NEW", col, val);
             }
-            pos = 0;
-            while ((pos = action.find(placeholderUpper, pos)) != string::npos) {
-                action.replace(pos, placeholderUpper.size(), val);
-                pos += val.size();
+            for (const auto& [col, val] : oldValues) {
+                replaceTriggerReference(condition, "OLD", col, val);
+            }
+            if (g_engine.evaluateWhenCondition(condition, newValues, oldValues) == false) {
+                continue;
             }
         }
-        // Substitute OLD.column (case-insensitive search)
+        string action = trg.action;
+        // Substitute NEW.column and OLD.column without changing the value's
+        // SQL representation (quoted strings and NULL must remain intact).
+        for (const auto& [col, val] : newValues) {
+            replaceTriggerReference(action, "NEW", col, val);
+        }
         for (const auto& [col, val] : oldValues) {
-            string placeholderLower = "old." + col;
-            string placeholderUpper = "OLD." + col;
-            size_t pos = 0;
-            while ((pos = action.find(placeholderLower, pos)) != string::npos) {
-                action.replace(pos, placeholderLower.size(), val);
-                pos += val.size();
-            }
-            pos = 0;
-            while ((pos = action.find(placeholderUpper, pos)) != string::npos) {
-                action.replace(pos, placeholderUpper.size(), val);
-                pos += val.size();
-            }
+            replaceTriggerReference(action, "OLD", col, val);
         }
         // Execute the action SQL via trigger executor
-        g_engine.executeTriggerAction(action);
+        if (g_engine.executeTriggerAction(action)) {
+            if (actionFailed) *actionFailed = true;
+            return true;
+        }
     }
     return true;
 }
@@ -10919,7 +10949,12 @@ bool execute(const string& rawSql, Session& s) {
                     }
                 }
             }
-            if (executeInsteadOfTrigger(s, tname, "insert", newValues, {})) {
+            bool triggerFailed = false;
+            if (executeInsteadOfTrigger(s, tname, "insert", newValues, {}, &triggerFailed)) {
+                if (triggerFailed) {
+                    cout << "INSTEAD OF INSERT trigger action failed" << endl;
+                    return true;
+                }
                 cout << "INSTEAD OF INSERT trigger executed on view " << tname << endl;
                 return false;
             }
@@ -11411,7 +11446,12 @@ bool execute(const string& rawSql, Session& s) {
                         }
                     }
                 }
-                if (executeInsteadOfTrigger(s, ioTname, "delete", {}, oldValues)) {
+                bool triggerFailed = false;
+                if (executeInsteadOfTrigger(s, ioTname, "delete", {}, oldValues, &triggerFailed)) {
+                    if (triggerFailed) {
+                        cout << "INSTEAD OF DELETE trigger action failed" << endl;
+                        return true;
+                    }
                     cout << "INSTEAD OF DELETE trigger executed on view " << ioTname << endl;
                     return false;
                 }
@@ -11727,7 +11767,12 @@ bool execute(const string& rawSql, Session& s) {
                         }
                     }
                 }
-                if (executeInsteadOfTrigger(s, tname, "update", newValues, oldValues)) {
+                bool triggerFailed = false;
+                if (executeInsteadOfTrigger(s, tname, "update", newValues, oldValues, &triggerFailed)) {
+                    if (triggerFailed) {
+                        cout << "INSTEAD OF UPDATE trigger action failed" << endl;
+                        return true;
+                    }
                     cout << "INSTEAD OF UPDATE trigger executed on view " << tname << endl;
                     return false;
                 }
@@ -15869,6 +15914,20 @@ int main(int argc, char* argv[]) {
     // Set locale for Unicode support
     std::setlocale(LC_CTYPE, "");
 
+    // Trigger actions run in the session that is currently executing SQL.
+    // Install this before entering server mode; the old registration lived
+    // after the server-mode early return, making triggers silently no-op for
+    // every PostgreSQL protocol connection.
+    g_engine.setTriggerExecutor([](const std::string& actionSql) -> bool {
+        Session* activeSession = dbms::currentSession();
+        if (!activeSession) return true;
+        Session triggerSession = *activeSession;
+        triggerSession.preparedStmts.clear();
+        bool failed = execute(actionSql, triggerSession);
+        dbms::setCurrentSession(activeSession);
+        return failed;
+    });
+
     // Load runtime configuration
     if (g_config.load("dbms.conf")) {
         g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
@@ -15897,12 +15956,6 @@ int main(int argc, char* argv[]) {
     Session s;
     s.statementTimeoutMs = g_config.statementTimeoutMs;
     s.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
-    // Register trigger executor callback
-    g_engine.setTriggerExecutor([&](const std::string& actionSql) -> bool {
-        Session triggerSession = s;
-        triggerSession.preparedStmts.clear();
-        return execute(actionSql, triggerSession);
-    });
     // Register WHEN condition evaluator for triggers
     g_engine.setWhenConditionEvaluator(
         [&](const std::string& condition,

@@ -2871,8 +2871,10 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
     }
 
     std::string tname = resolveTableName(s, stmt->tableName);
-    if (!g_engine.tableExists(s.currentDB, tname)) {
-        std::cout << "Table " << tname << " not found" << std::endl;
+    const bool isTable = g_engine.tableExists(s.currentDB, tname);
+    const bool isView = g_engine.viewExists(s.currentDB, tname);
+    if (!isTable && !isView) {
+        std::cout << "Relation " << tname << " not found" << std::endl;
         return true;
     }
 
@@ -2884,6 +2886,27 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
     trg.action = stmt->action;
     if (stmt->whenCondition) trg.whenCondition = stmt->whenCondition->toString();
     trg.forEachRow = stmt->forEachRow;
+
+    // PostgreSQL only permits INSTEAD OF triggers on views, and they are
+    // row-level triggers.  Enforce this at DDL time so the DML executor never
+    // has to guess whether a stored trigger definition is valid.
+    if (trg.timing == "instead of") {
+        if (!isView) {
+            std::cout << "INSTEAD OF triggers require a view" << std::endl;
+            return true;
+        }
+        if (!trg.forEachRow) {
+            std::cout << "INSTEAD OF triggers must be FOR EACH ROW" << std::endl;
+            return true;
+        }
+        if (trg.event != "insert" && trg.event != "update" && trg.event != "delete") {
+            std::cout << "INSTEAD OF triggers support INSERT, UPDATE, or DELETE" << std::endl;
+            return true;
+        }
+    } else if (isView) {
+        std::cout << "Only INSTEAD OF triggers are supported on views" << std::endl;
+        return true;
+    }
 
     DBStatus res = g_engine.createTrigger(s.currentDB, trg);
     if (res != DBStatus::OK) {

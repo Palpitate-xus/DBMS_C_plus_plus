@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE` 与 `CREATE TABLE` 分区路径已接入 typed AST bridge；复杂/尚未迁移的 RLS、触发器、OWNER/CLUSTER/REPLICA 等动作仍由 legacy handler 执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区和视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | INSTEAD OF 视图触发器补强：允许在 view 上创建行级 INSERT/UPDATE/DELETE 触发器；视图 DML 通过当前 backend 会话执行 action SQL，支持 `NEW`/`OLD`、`WHEN` 和动作失败传播；新增协议 E2E 覆盖三类写操作。多行逐行触发、transition tables、完整 `EXECUTE FUNCTION`/PL runtime 仍待后续。 |
 | 2026-08-07 | numeric 生产化补强：新格式将 `numeric/decimal` 作为可变长精确 decimal 文本保存，不再走 double/fixed-width 路径；共享 PostgreSQL base-10000 numeric binary codec 接入 Bind/Execute；补充 exact storage、wire vector 和 command-tag 回归。numeric typmod 完整舍入/溢出、数组 binary I/O 仍待后续。 |
 | 2026-08-07 | PostgreSQL binary 日期时间/UUID 补强：Bind/Execute 支持 `date`、`time`、秒精度 `timestamp`/`timestamptz` 和 `uuid` 的 PostgreSQL binary 编解码；修复协议单列空格值（timestamp）被 legacy 输出拆分的问题，新增五类真实 binary E2E。numeric/数组及亚秒时间精度仍待后续。 |
 | 2026-08-07 | PostgreSQL portal 分页补强：Execute 支持非负 `maxRows`，portal 只执行一次并保存结果/游标偏移，按批次返回 DataRow，未耗尽时发送 `PortalSuspended`，耗尽时发送 `CommandComplete`；新增两批次协议 E2E。holdable/scrollable cursor、portal 资源生命周期和复杂类型仍待后续。 |
