@@ -6,6 +6,8 @@
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
+> 路由说明：基础 `ALTER TABLE` 由 typed AST executor 执行；尚未迁移的 RLS、触发器、分区、OWNER/CLUSTER/REPLICA 等子命令继续使用 legacy handler，并在生产状态文档中单独列明。
+
 ---
 
 ## 目录

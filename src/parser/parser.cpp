@@ -2300,6 +2300,8 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
     bool isUnique = false;
     if (match(tokens, pos, "unique")) { isUnique = true; ++pos; }
     if (match(tokens, pos, "temp") || match(tokens, pos, "temporary")) ++pos;
+    bool isUnlogged = false;
+    if (match(tokens, pos, "unlogged")) { isUnlogged = true; ++pos; }
     if (match(tokens, pos, "materialized")) {
         ++pos;
         if (match(tokens, pos, "view")) ++pos;
@@ -2319,6 +2321,9 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
         ++pos;
         if (kw == "table") {
             r.stmt = parseCreateTable(tokens, pos);
+            if (r.stmt && isUnlogged) {
+                static_cast<CreateTableStmt*>(r.stmt.get())->unlogged = true;
+            }
         } else if (kw == "index") {
             r.stmt = parseCreateIndex(tokens, pos);
             if (r.stmt && isUnique) static_cast<CreateIndexStmt*>(r.stmt.get())->unique = true;
@@ -5964,16 +5969,50 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
 
     while (pos < tokens.size() && tokens[pos] != ";") {
         AlterTableStmt::SubCmd sub;
+        bool recognized = false;
         std::string kw = toLower(tokens[pos]);
         if (kw == "add" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::AddColumn; pos += 2;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "if") {
-                pos += 3; // IF NOT EXISTS
+            if (pos + 2 < tokens.size() && toLower(tokens[pos]) == "if" &&
+                toLower(tokens[pos + 1]) == "not" && toLower(tokens[pos + 2]) == "exists") {
+                sub.ifNotExists = true;
+                pos += 3;
             }
             if (pos < tokens.size()) sub.colDef.name = tokens[pos++];
-            if (pos < tokens.size()) sub.colDef.typeName = tokens[pos++];
-            // TODO: column constraints, type mods
+            if (pos < tokens.size()) {
+                sub.colDef.typeName = tokens[pos++];
+                std::string type = toLower(sub.colDef.typeName);
+                if ((type == "double" || type == "character" || type == "timestamp") &&
+                    pos < tokens.size() && toLower(tokens[pos]) == "precision") {
+                    sub.colDef.typeName += " " + tokens[pos++];
+                } else if (type == "character" && pos < tokens.size() &&
+                           toLower(tokens[pos]) == "varying") {
+                    sub.colDef.typeName += " " + tokens[pos++];
+                }
+                if (pos < tokens.size() && tokens[pos] == "(") {
+                    auto mods = collectParenthesized(tokens, pos);
+                    for (const auto& mod : mods) if (mod != ",") sub.colDef.typeMods.push_back(mod);
+                }
+            }
+            // Keep the common column modifiers in the AST. Unsupported
+            // modifiers are left for the caller to reject rather than being
+            // silently treated as a different column definition.
+            while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";") {
+                std::string modifier = toLower(tokens[pos]);
+                if (modifier == "not" && pos + 1 < tokens.size() &&
+                    toLower(tokens[pos + 1]) == "null") {
+                    sub.colDef.isNull = false;
+                    pos += 2;
+                } else if (modifier == "default") {
+                    ++pos;
+                    sub.colDef.defaultValue = parseSimpleExpr(tokens, pos);
+                } else {
+                    ++pos;
+                }
+            }
         } else if (kw == "add") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::AddConstraint; ++pos;
             if (pos < tokens.size() && toLower(tokens[pos]) == "constraint") {
                 ++pos;
@@ -5989,8 +6028,14 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 }
             }
             if (sub.constraint.type != "EXCLUDE" && pos < tokens.size() && tokens[pos] == "(") {
-                auto cols = collectParenthesized(tokens, pos);
-                for (const auto& c : cols) if (c != ",") sub.constraint.columns.push_back(c);
+                if (sub.constraint.type == "CHECK") {
+                    ++pos;
+                    sub.constraint.checkExpr = parseSimpleExpr(tokens, pos);
+                    if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                } else {
+                    auto cols = collectParenthesized(tokens, pos);
+                    for (const auto& c : cols) if (c != ",") sub.constraint.columns.push_back(c);
+                }
             }
             if (pos < tokens.size() && toLower(tokens[pos]) == "references") {
                 ++pos;
@@ -6001,21 +6046,26 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 }
             }
         } else if (kw == "drop" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::DropColumn; pos += 2;
             if (pos < tokens.size() && toLower(tokens[pos]) == "if") {
+                sub.ifExists = true;
                 pos += 3; // IF EXISTS
             }
             if (pos < tokens.size()) sub.name = tokens[pos++];
             if (pos < tokens.size() && toLower(tokens[pos]) == "cascade") { sub.options["cascade"] = "true"; ++pos; }
         } else if (kw == "drop") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::DropConstraint; ++pos;
             if (pos < tokens.size() && toLower(tokens[pos]) == "constraint") ++pos;
             if (pos < tokens.size() && toLower(tokens[pos]) == "if") {
+                sub.ifExists = true;
                 pos += 2; // IF EXISTS
             }
             if (pos < tokens.size()) sub.name = tokens[pos++];
             if (pos < tokens.size() && toLower(tokens[pos]) == "cascade") { sub.options["cascade"] = "true"; ++pos; }
         } else if (kw == "alter" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::AlterColumn; pos += 2;
             if (pos < tokens.size()) sub.name = tokens[pos++];
             if (pos < tokens.size() && toLower(tokens[pos]) == "set") {
@@ -6028,7 +6078,30 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     sub.setNotNull = true;
                 } else if (pos < tokens.size() && toLower(tokens[pos]) == "data") {
                     pos += 2; // DATA TYPE
-                    if (pos < tokens.size()) sub.dataType = tokens[pos++];
+                    if (pos < tokens.size()) {
+                        sub.dataType = tokens[pos++];
+                        if ((toLower(sub.dataType) == "double" ||
+                             toLower(sub.dataType) == "character" ||
+                             toLower(sub.dataType) == "timestamp") &&
+                            pos < tokens.size() && toLower(tokens[pos]) == "precision") {
+                            sub.dataType += " " + tokens[pos++];
+                        } else if (toLower(sub.dataType) == "character" &&
+                                   pos < tokens.size() && toLower(tokens[pos]) == "varying") {
+                            sub.dataType += " " + tokens[pos++];
+                        }
+                        if (pos < tokens.size() && tokens[pos] == "(") {
+                            sub.dataType += "(";
+                            ++pos;
+                            while (pos < tokens.size() && tokens[pos] != ")") {
+                                if (tokens[pos] != ",") sub.dataType += tokens[pos];
+                                ++pos;
+                            }
+                            if (pos < tokens.size() && tokens[pos] == ")") {
+                                sub.dataType += ")";
+                                ++pos;
+                            }
+                        }
+                    }
                 } else if (pos < tokens.size() && toLower(tokens[pos]) == "statistics") {
                     ++pos;
                     sub.action = AlterTableStmt::Action::SetStatistics;
@@ -6047,21 +6120,50 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             }
         } else if (kw == "rename") {
             ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "column") ++pos;
-            if (pos < tokens.size()) sub.name = tokens[pos++];
-            if (pos < tokens.size() && toLower(tokens[pos]) == "to") ++pos;
-            if (pos < tokens.size()) sub.newName = tokens[pos++];
-            sub.action = sub.name.empty() ? AlterTableStmt::Action::RenameTable : AlterTableStmt::Action::RenameColumn;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "constraint") {
+                recognized = true;
+                sub.action = AlterTableStmt::Action::RenameConstraint;
+                ++pos;
+                if (pos + 2 < tokens.size() && toLower(tokens[pos]) == "if" &&
+                    toLower(tokens[pos + 1]) == "exists") { sub.ifExists = true; pos += 2; }
+                if (pos < tokens.size()) sub.name = tokens[pos++];
+                if (pos < tokens.size() && toLower(tokens[pos]) == "to") ++pos;
+                if (pos < tokens.size()) sub.newName = tokens[pos++];
+            } else {
+                bool explicitColumn = pos < tokens.size() && toLower(tokens[pos]) == "column";
+                if (explicitColumn) ++pos;
+                if (!explicitColumn && pos < tokens.size() && toLower(tokens[pos]) == "to") {
+                    ++pos;
+                    if (pos < tokens.size()) sub.newName = tokens[pos++];
+                    sub.action = AlterTableStmt::Action::RenameTable;
+                    recognized = true;
+                } else {
+                    if (pos + 2 < tokens.size() && toLower(tokens[pos]) == "if" &&
+                        toLower(tokens[pos + 1]) == "exists") { sub.ifExists = true; pos += 2; }
+                    if (pos < tokens.size()) sub.name = tokens[pos++];
+                    if (pos < tokens.size() && toLower(tokens[pos]) == "to") ++pos;
+                    if (pos < tokens.size()) sub.newName = tokens[pos++];
+                    sub.action = AlterTableStmt::Action::RenameColumn;
+                    recognized = true;
+                }
+            }
         } else if (kw == "set") {
             ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "schema") {
+            if (pos < tokens.size() && toLower(tokens[pos]) == "logged") {
+                sub.action = AlterTableStmt::Action::SetLogged; ++pos; recognized = true;
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "unlogged") {
+                sub.action = AlterTableStmt::Action::SetUnlogged; ++pos; recognized = true;
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "schema") {
                 sub.action = AlterTableStmt::Action::SetSchema; ++pos;
                 if (pos < tokens.size()) sub.newName = tokens[pos++];
+                recognized = true;
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "tablespace") {
                 sub.action = AlterTableStmt::Action::SetTablespace; ++pos;
                 if (pos < tokens.size()) sub.newName = tokens[pos++];
+                recognized = true;
             } else if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "with" && tokens[pos + 1] == "(") {
                 sub.action = AlterTableStmt::Action::SetOptions; pos += 2;
+                recognized = true;
                 auto opts = collectParenthesized(tokens, pos);
                 for (size_t i = 0; i < opts.size(); i += 2) {
                     if (i + 1 < opts.size() && opts[i + 1] == "=") {
@@ -6072,39 +6174,33 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 }
             }
         } else if (kw == "reset") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::ResetOptions; ++pos;
             if (pos < tokens.size() && toLower(tokens[pos]) == "(") {
                 auto opts = collectParenthesized(tokens, pos);
                 for (const auto& o : opts) if (o != ",") sub.options[o] = "";
             }
         } else if (kw == "attach") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::AttachPartition; pos += 2; // ATTACH PARTITION
             if (pos < tokens.size()) sub.partitionSpec = tokens[pos++];
         } else if (kw == "detach") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::DetachPartition; pos += 2; // DETACH PARTITION
             if (pos < tokens.size()) sub.partitionSpec = tokens[pos++];
         } else if (kw == "inherit") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::Inherit; ++pos;
             if (pos < tokens.size()) sub.parentTable = tokens[pos++];
         } else if (kw == "no" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "inherit") {
+            recognized = true;
             sub.action = AlterTableStmt::Action::NoInherit; pos += 2;
             if (pos < tokens.size()) sub.parentTable = tokens[pos++];
         } else {
             // Unknown subcommand; skip to next comma or semicolon
             while (pos < tokens.size() && tokens[pos] != ";" && tokens[pos] != ",") ++pos;
         }
-        if (sub.action != AlterTableStmt::Action::AddColumn || !sub.colDef.name.empty() ||
-            sub.action != AlterTableStmt::Action::DropColumn || !sub.name.empty() ||
-            sub.action != AlterTableStmt::Action::AddConstraint || !sub.constraint.type.empty() ||
-            sub.action != AlterTableStmt::Action::AlterColumn || !sub.name.empty() ||
-            sub.action != AlterTableStmt::Action::RenameColumn || !sub.newName.empty() ||
-            sub.action == AlterTableStmt::Action::RenameTable ||
-            sub.action == AlterTableStmt::Action::SetSchema ||
-            sub.action == AlterTableStmt::Action::SetTablespace ||
-            sub.action == AlterTableStmt::Action::SetOptions ||
-            sub.action == AlterTableStmt::Action::ResetOptions ||
-            sub.action == AlterTableStmt::Action::AttachPartition ||
-            sub.action == AlterTableStmt::Action::DetachPartition) {
+        if (recognized) {
             stmt->subCommands.push_back(std::move(sub));
         }
         if (pos < tokens.size() && tokens[pos] == ",") ++pos;

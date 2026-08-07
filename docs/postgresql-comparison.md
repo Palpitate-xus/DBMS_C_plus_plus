@@ -58,7 +58,7 @@
 |------|-------|---------|------|
 | CREATE/DROP/ALTER DATABASE | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER SCHEMA | ✅ | ✅ | ✅ |
-| CREATE/DROP/ALTER TABLE (全量子命令) | ✅ | ✅ | ✅ |
+| CREATE/DROP/ALTER TABLE (基础子命令；全量仍有缺口) | ✅ | ⚠️ | ⚠️ |
 | CREATE/DROP/ALTER VIEW | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER MATERIALIZED VIEW | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER INDEX | ✅ | ✅ | ✅ |

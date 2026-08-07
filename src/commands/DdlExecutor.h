@@ -61,6 +61,7 @@ private:
     bool executeCreateSchema(const CreateObjectStmt* stmt, Session& s);
     bool executeDropSchema(const DropStmt* stmt, Session& s);
     bool executeComment(const CommentStmt* stmt, Session& s);
+    bool executeAlterTable(const AlterTableStmt* stmt, Session& s);
 
     // 辅助：AST -> StorageEngine 结构转换
     static Column columnDefToColumn(const ColumnDef& cd, const std::string& dbname = "");

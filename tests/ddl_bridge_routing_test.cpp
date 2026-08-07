@@ -109,12 +109,54 @@ static void test_bridge_handles_ctas() {
     std::cout << "[DDL-ROUTE] bridge handles CTAS OK" << std::endl;
 }
 
+static void test_bridge_handles_typed_alter_table() {
+    std::string db = testDbPath("ddl_route_alter");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    auto run = [&](const std::string& sql) {
+        bool handled = false;
+        auto cmd = dbms::SQLParser::classify(sql);
+        bool err = dbms::tryDdlBridge(sql, cmd, s, handled);
+        assert(handled);
+        assert(!err);
+    };
+
+    run("CREATE TABLE alter_t (id INT, name VARCHAR(20))");
+    run("ALTER TABLE alter_t ADD COLUMN score INT");
+    run("ALTER TABLE alter_t ADD COLUMN IF NOT EXISTS score INT");
+    assert(g_engine.getTableSchema(db, "alter_t").len == 3);
+    run("ALTER TABLE alter_t ALTER COLUMN score SET DEFAULT 10");
+    run("ALTER TABLE alter_t ALTER COLUMN score SET NOT NULL");
+    run("ALTER TABLE alter_t ADD PRIMARY KEY (id)");
+    run("ALTER TABLE alter_t DROP CONSTRAINT IF EXISTS alter_t_pkey");
+    run("ALTER TABLE alter_t DROP CONSTRAINT IF EXISTS missing_constraint");
+    run("ALTER TABLE alter_t RENAME COLUMN name TO full_name");
+    auto renamed = g_engine.getTableSchema(db, "alter_t");
+    assert(renamed.cols[1].dataName == "full_name");
+    run("ALTER TABLE alter_t RENAME TO alter_t_v2");
+    assert(g_engine.tableExists(db, "alter_t_v2"));
+
+    dbms::SQLParser parser;
+    auto parsed = parser.parse("ALTER TABLE alter_t_v2 RENAME TO alter_t_v3");
+    assert(parsed.success);
+    auto* alter = dynamic_cast<dbms::AlterTableStmt*>(parsed.stmt.get());
+    assert(alter && alter->subCommands.size() == 1);
+    assert(alter->subCommands[0].action == dbms::AlterTableStmt::Action::RenameTable);
+
+    cleanup(db);
+    std::cout << "[DDL-ROUTE] typed ALTER TABLE bridge OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_bridge_handles_create_table();
     test_bridge_falls_back_for_unhandled();
     test_bridge_fails_closed_on_parse_error();
     test_bridge_handles_ctas();
+    test_bridge_handles_typed_alter_table();
     std::cout << "[DDL-ROUTE] all passed" << std::endl;
     return 0;
 }

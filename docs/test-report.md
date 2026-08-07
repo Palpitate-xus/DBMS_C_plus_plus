@@ -15,6 +15,7 @@
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - 独立入口 `./scripts/build_tests.sh` 缓存生产对象后逐个测试独立链接运行，结果 `All tests passed`。
 - 新增数据库生命周期回归：`DROP DATABASE` 释放数据库级缓存后，同名重建不会继承旧 CLOG/WAL/page/index 状态。
+- 新增 typed `ALTER TABLE` 路由回归：验证 AST bridge 的 ADD COLUMN、DEFAULT、NOT NULL、RENAME COLUMN/TABLE，以及 `RENAME TO` 不再误判为列重命名。
 - Docker 镜像构建：`docker build -t dbms-c-plus-plus:codex-verify .` ✅；Compose 配置检查 ✅。
 - CMake：当前验证环境未安装 `cmake`，配置/编译未执行。
 
@@ -843,15 +844,15 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ### 14.1 ALTER TABLE SET SCHEMA
 
-**问题**：`ALTER TABLE t1 SET SCHEMA other_db` 不被支持
+**当前行为**：命令已由 AST bridge 转发到现有存储实现；当前实现的目标参数仍按数据库级迁移处理，不等价于 PostgreSQL 的 namespace-only 语义。
 
-**级别**：功能缺失（gap 文档已记录）
+**级别**：部分实现（语义与 catalog namespace 迁移仍待补齐）
 
 ---
 
 ## 15. 结论
 
-本次测试覆盖 72 项核心功能，**全部通过**。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景与当前 114 个独立回归测试均通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）

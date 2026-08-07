@@ -9,6 +9,8 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
+当前路径补充：基础 `ALTER TABLE` 已接入 typed AST bridge；复杂/尚未迁移的 RLS、触发器、分区、OWNER/CLUSTER/REPLICA 等动作仍由 legacy handler 执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+
 ---
 
 ## 更新记录

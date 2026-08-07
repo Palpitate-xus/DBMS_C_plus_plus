@@ -273,6 +273,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeCreateTable(dynamic_cast<const CreateTableStmt*>(stmt.get()), s);
         case SqlCommand::DropTable:
             return executeDropTable(dynamic_cast<const DropStmt*>(stmt.get()), s);
+        case SqlCommand::AlterTable:
+            return executeAlterTable(dynamic_cast<const AlterTableStmt*>(stmt.get()), s);
         case SqlCommand::CreateIndex:
             return executeCreateIndex(dynamic_cast<const CreateIndexStmt*>(stmt.get()), s);
         case SqlCommand::CreateSequence:
@@ -342,6 +344,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     switch (parsedCmd) {
         case dbms::SqlCommand::CreateTable:
         case dbms::SqlCommand::DropTable:
+        case dbms::SqlCommand::AlterTable:
         case dbms::SqlCommand::CreateIndex:
         case dbms::SqlCommand::CreateSequence:
         case dbms::SqlCommand::DropSequence:
@@ -379,6 +382,43 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         std::cout << std::endl;
         return true;
     }
+    if (parsedCmd == dbms::SqlCommand::AlterTable) {
+        const auto* alter = dynamic_cast<const dbms::AlterTableStmt*>(r.stmt.get());
+        bool supported = alter && !alter->subCommands.empty();
+        if (supported) {
+            for (const auto& sub : alter->subCommands) {
+                switch (sub.action) {
+                    case dbms::AlterTableStmt::Action::AddColumn:
+                    case dbms::AlterTableStmt::Action::DropColumn:
+                    case dbms::AlterTableStmt::Action::AlterColumn:
+                    case dbms::AlterTableStmt::Action::RenameColumn:
+                    case dbms::AlterTableStmt::Action::RenameConstraint:
+                    case dbms::AlterTableStmt::Action::RenameTable:
+                    case dbms::AlterTableStmt::Action::SetSchema:
+                    case dbms::AlterTableStmt::Action::SetTablespace:
+                    case dbms::AlterTableStmt::Action::AddConstraint:
+                    case dbms::AlterTableStmt::Action::DropConstraint:
+                    case dbms::AlterTableStmt::Action::SetOptions:
+                    case dbms::AlterTableStmt::Action::ResetOptions:
+                    case dbms::AlterTableStmt::Action::SetLogged:
+                    case dbms::AlterTableStmt::Action::SetUnlogged:
+                    case dbms::AlterTableStmt::Action::SetStatistics:
+                    case dbms::AlterTableStmt::Action::Inherit:
+                    case dbms::AlterTableStmt::Action::NoInherit:
+                        break;
+                    default:
+                        supported = false;
+                        break;
+                }
+                if (!supported) break;
+            }
+        }
+        if (!supported) {
+            // Leave the command to main.cpp's still-supported legacy handlers.
+            handled = false;
+            return false;
+        }
+    }
     dbms::DdlExecutor ddlExec;
     return ddlExec.execute(r.stmt, s); // false=success, true=error
 }
@@ -393,6 +433,293 @@ void DdlExecutor::checkAndImplicitCommit(Session& s) {
         g_engine.commitTransaction();
         std::cout << "Note: DDL caused implicit commit of open transaction" << std::endl;
     }
+}
+
+// ALTER TABLE is deliberately executed from the typed AST.  Keep the
+// conversion here small and deterministic: the storage engine receives the
+// same Column representation used by CREATE TABLE, so ALTER COLUMN TYPE does
+// not have a second, subtly different type mapping.
+static ColumnDef columnDefFromAlterType(const std::string& name,
+                                        const std::string& typeSpec) {
+    ColumnDef cd;
+    cd.name = name;
+    cd.isNull = true;
+    std::string spec = trim(typeSpec);
+    size_t lp = spec.find('(');
+    if (lp == std::string::npos) {
+        cd.typeName = trim(spec);
+        return cd;
+    }
+    cd.typeName = trim(spec.substr(0, lp));
+    size_t rp = spec.rfind(')');
+    std::string mods = spec.substr(lp + 1, (rp == std::string::npos ? spec.size() : rp) - lp - 1);
+    std::stringstream ss(mods);
+    std::string mod;
+    while (std::getline(ss, mod, ',')) {
+        mod = trim(mod);
+        if (!mod.empty()) cd.typeMods.push_back(mod);
+    }
+    return cd;
+}
+
+static bool alterStatusOk(DBStatus status, const std::string& operation) {
+    if (status == DBStatus::OK) return true;
+    if (status == DBStatus::TABLE_NOT_FOUND) std::cout << "Table not found" << std::endl;
+    else if (status == DBStatus::TABLE_ALREADY_EXISTS)
+        std::cout << operation << " already exists" << std::endl;
+    else if (status == DBStatus::INVALID_VALUE)
+        std::cout << operation << " is invalid or does not exist" << std::endl;
+    else
+        std::cout << operation << " failed" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
+    if (!stmt) return true;
+    if (!checkAdmin(s) || !checkDB(s)) return true;
+    if (stmt->tableName.empty() || stmt->subCommands.empty()) {
+        std::cout << "SQL syntax error: ALTER TABLE requires a subcommand" << std::endl;
+        return true;
+    }
+
+    checkAndImplicitCommit(s);
+    const std::string tableName = resolveTableName(s, stmt->tableName);
+
+    // Validate the action set before making any change.  The storage
+    // primitives currently persist each subcommand independently, so a later
+    // semantic failure can still leave an earlier supported subcommand
+    // applied; full statement-atomic DDL remains a PostgreSQL-alignment gap.
+    for (const auto& sub : stmt->subCommands) {
+        switch (sub.action) {
+            case AlterTableStmt::Action::AddColumn:
+            case AlterTableStmt::Action::DropColumn:
+            case AlterTableStmt::Action::AlterColumn:
+            case AlterTableStmt::Action::RenameColumn:
+            case AlterTableStmt::Action::RenameConstraint:
+            case AlterTableStmt::Action::RenameTable:
+            case AlterTableStmt::Action::SetSchema:
+            case AlterTableStmt::Action::SetTablespace:
+            case AlterTableStmt::Action::AddConstraint:
+            case AlterTableStmt::Action::DropConstraint:
+            case AlterTableStmt::Action::SetOptions:
+            case AlterTableStmt::Action::ResetOptions:
+            case AlterTableStmt::Action::SetLogged:
+            case AlterTableStmt::Action::SetUnlogged:
+            case AlterTableStmt::Action::SetStatistics:
+            case AlterTableStmt::Action::Inherit:
+            case AlterTableStmt::Action::NoInherit:
+                break;
+            default:
+                std::cout << "ALTER TABLE subcommand is not supported by the AST executor" << std::endl;
+                return true;
+        }
+    }
+
+    for (const auto& sub : stmt->subCommands) {
+        DBStatus status = DBStatus::OK;
+        switch (sub.action) {
+            case AlterTableStmt::Action::AddColumn: {
+                if (sub.colDef.name.empty() || sub.colDef.typeName.empty()) {
+                    std::cout << "SQL syntax error: ADD COLUMN requires name and type" << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableAddColumn(
+                    s.currentDB, tableName, columnDefToColumn(sub.colDef, s.currentDB));
+                if (status == DBStatus::TABLE_ALREADY_EXISTS && sub.ifNotExists) {
+                    std::cout << "NOTICE: column already exists, skipping" << std::endl;
+                    break;
+                }
+                if (!alterStatusOk(status, "Column")) return true;
+                break;
+            }
+            case AlterTableStmt::Action::DropColumn:
+                if (sub.name.empty()) {
+                    std::cout << "SQL syntax error: DROP COLUMN requires a name" << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableDropColumn(s.currentDB, tableName, sub.name);
+                if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
+                    std::cout << "NOTICE: column does not exist, skipping" << std::endl;
+                    break;
+                }
+                if (!alterStatusOk(status, "Column")) return true;
+                break;
+            case AlterTableStmt::Action::RenameColumn:
+                if (sub.name.empty() || sub.newName.empty()) {
+                    std::cout << "SQL syntax error: RENAME COLUMN requires two names" << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableRenameColumn(s.currentDB, tableName,
+                                                         sub.name, sub.newName);
+                if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
+                    std::cout << "NOTICE: column does not exist, skipping" << std::endl;
+                    break;
+                }
+                if (!alterStatusOk(status, "Column")) return true;
+                break;
+            case AlterTableStmt::Action::RenameConstraint:
+                if (sub.name.empty() || sub.newName.empty()) {
+                    std::cout << "SQL syntax error: RENAME CONSTRAINT requires two names" << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableRenameConstraint(s.currentDB, tableName,
+                                                             sub.name, sub.newName);
+                if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
+                    std::cout << "NOTICE: constraint does not exist, skipping" << std::endl;
+                    break;
+                }
+                if (!alterStatusOk(status, "Constraint")) return true;
+                break;
+            case AlterTableStmt::Action::RenameTable:
+                if (sub.newName.empty()) {
+                    std::cout << "SQL syntax error: RENAME TO requires a table name" << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableRenameTable(s.currentDB, tableName, sub.newName);
+                if (!alterStatusOk(status, "Table")) return true;
+                break;
+            case AlterTableStmt::Action::AlterColumn: {
+                if (sub.name.empty()) {
+                    std::cout << "SQL syntax error: ALTER COLUMN requires a name" << std::endl;
+                    return true;
+                }
+                if (sub.defaultValue) {
+                    status = g_engine.alterTableSetDefault(s.currentDB, tableName,
+                                                            sub.name, sub.defaultValue->toString());
+                } else if (sub.dropDefault) {
+                    status = g_engine.alterTableDropDefault(s.currentDB, tableName, sub.name);
+                } else if (sub.setNotNull) {
+                    status = g_engine.alterTableSetNotNull(s.currentDB, tableName, sub.name);
+                } else if (sub.dropNotNull) {
+                    status = g_engine.alterTableDropNotNull(s.currentDB, tableName, sub.name);
+                } else if (!sub.dataType.empty()) {
+                    ColumnDef cd = columnDefFromAlterType(sub.name, sub.dataType);
+                    status = g_engine.alterTableAlterColumnType(
+                        s.currentDB, tableName, sub.name, columnDefToColumn(cd, s.currentDB));
+                } else {
+                    std::cout << "ALTER COLUMN subcommand is unsupported" << std::endl;
+                    return true;
+                }
+                if (!alterStatusOk(status, "Column")) return true;
+                break;
+            }
+            case AlterTableStmt::Action::SetStatistics: {
+                if (sub.name.empty() || sub.statisticsTarget < 0 || sub.statisticsTarget > 10000) {
+                    std::cout << "Invalid statistics target" << std::endl;
+                    return true;
+                }
+                std::map<std::string, std::string> params;
+                params["column_statistics:" + sub.name] = std::to_string(sub.statisticsTarget);
+                g_engine.setStorageParams(s.currentDB, tableName, params);
+                break;
+            }
+            case AlterTableStmt::Action::SetLogged:
+                status = g_engine.alterTableSetLogged(s.currentDB, tableName, true);
+                if (!alterStatusOk(status, "Table")) return true;
+                break;
+            case AlterTableStmt::Action::SetUnlogged:
+                status = g_engine.alterTableSetLogged(s.currentDB, tableName, false);
+                if (!alterStatusOk(status, "Table")) return true;
+                break;
+            case AlterTableStmt::Action::SetSchema:
+                status = g_engine.alterTableSetSchema(s.currentDB, tableName, sub.newName);
+                if (!alterStatusOk(status, "Schema")) return true;
+                break;
+            case AlterTableStmt::Action::SetTablespace:
+                status = g_engine.alterTableTablespace(s.currentDB, tableName, sub.newName);
+                if (!alterStatusOk(status, "Tablespace")) return true;
+                break;
+            case AlterTableStmt::Action::AddConstraint: {
+                const auto& tc = sub.constraint;
+                const std::string type = toLower(tc.type);
+                std::string constraintName = tc.name;
+                if (constraintName.empty()) {
+                    std::string suffix = tc.columns.empty() ? "constraint" : tc.columns.front();
+                    if (type == "primary key") constraintName = tableName + "_pkey";
+                    else if (type == "unique") constraintName = tableName + "_" + suffix + "_key";
+                    else if (type == "foreign key") constraintName = tableName + "_" + suffix + "_fkey";
+                    else if (type == "check") constraintName = tableName + "_check";
+                    else {
+                        std::cout << "ALTER TABLE constraint name is required" << std::endl;
+                        return true;
+                    }
+                }
+                if (type == "check") {
+                    if (!tc.checkExpr) {
+                        std::cout << "CHECK constraint expression is required" << std::endl;
+                        return true;
+                    }
+                    status = g_engine.alterTableAddCheckConstraint(
+                        s.currentDB, tableName, constraintName, tc.checkExpr->toString());
+                } else if (type == "primary key") {
+                    status = g_engine.alterTableAddPrimaryKey(
+                        s.currentDB, tableName, constraintName, tc.columns);
+                } else if (type == "unique") {
+                    status = g_engine.alterTableAddUniqueConstraint(
+                        s.currentDB, tableName, constraintName, tc.columns);
+                } else if (type == "foreign key") {
+                    status = g_engine.alterTableAddFKConstraint(
+                        s.currentDB, tableName, constraintName, tc.columns, tc.refTable,
+                        tc.refColumns, tc.onDelete, tc.onUpdate);
+                } else {
+                    std::cout << "ALTER TABLE constraint type is unsupported" << std::endl;
+                    return true;
+                }
+                if (!alterStatusOk(status, "Constraint")) return true;
+                TableConstraint metadata;
+                metadata.name = constraintName;
+                metadata.type = tc.type;
+                metadata.columns = tc.columns;
+                metadata.refTable = tc.refTable;
+                metadata.refColumns = tc.refColumns;
+                recordConstraintCompat(s.currentDB, tableName, metadata);
+                break;
+            }
+            case AlterTableStmt::Action::DropConstraint:
+                status = g_engine.alterTableDropConstraint(s.currentDB, tableName, sub.name);
+                if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
+                    std::cout << "NOTICE: constraint does not exist, skipping" << std::endl;
+                    break;
+                }
+                if (!alterStatusOk(status, "Constraint")) return true;
+                break;
+            case AlterTableStmt::Action::SetOptions:
+            case AlterTableStmt::Action::ResetOptions: {
+                std::map<std::string, std::string> params;
+                for (const auto& option : sub.options) params[option.first] = option.second;
+                g_engine.setStorageParams(s.currentDB, tableName, params);
+                break;
+            }
+            case AlterTableStmt::Action::Inherit:
+            case AlterTableStmt::Action::NoInherit: {
+                if (sub.parentTable.empty()) {
+                    std::cout << "INHERIT requires a parent table" << std::endl;
+                    return true;
+                }
+                auto path = std::filesystem::path(g_engine.dbPath(s.currentDB)) /
+                            ("." + tableName + ".inherits");
+                std::vector<std::string> parents;
+                if (std::filesystem::exists(path)) {
+                    std::ifstream in(path);
+                    std::string parent;
+                    while (std::getline(in, parent)) if (!parent.empty()) parents.push_back(parent);
+                }
+                if (sub.action == AlterTableStmt::Action::Inherit) {
+                    if (std::find(parents.begin(), parents.end(), sub.parentTable) == parents.end())
+                        parents.push_back(sub.parentTable);
+                } else {
+                    parents.erase(std::remove(parents.begin(), parents.end(), sub.parentTable), parents.end());
+                }
+                std::ofstream out(path, std::ios::trunc);
+                for (const auto& parent : parents) out << parent << '\n';
+                break;
+            }
+            default:
+                return true;
+        }
+    }
+    std::cout << "ALTER TABLE succeeded" << std::endl;
+    return false;
 }
 
 // ----------------------------------------------------------------------------

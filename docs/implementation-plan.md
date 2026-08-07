@@ -11,7 +11,7 @@
 
 | 能力 | 当前真实状态 | 证据/边界 |
 |------|--------------|-----------|
-| DDL AST bridge | 部分完成 | 核心 CREATE/DROP 已桥接；部分 ALTER TABLE 和未迁移命令仍由 `main.cpp` legacy 路径执行 |
+| DDL AST bridge | 部分完成 | 核心 CREATE/DROP 与基础 ALTER TABLE 已桥接；RLS、触发器、分区、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy 路径执行 |
 | 复杂查询执行 | 部分完成 | Volcano 基础算子已验证；复杂子查询、集合操作、窗口和 grouping 扩展仍有 legacy 回退 |
 | Serializable / SSI | 未完成 | 尚无完整 predicate/SIREAD lock 与 rw-conflict abort 验证 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |

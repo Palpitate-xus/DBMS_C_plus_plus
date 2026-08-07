@@ -914,7 +914,7 @@ struct AlterTableStmt : public Stmt {
 
     enum class Action {
         AddColumn, DropColumn, AlterColumn, RenameColumn,
-        RenameTable, SetSchema, SetTablespace,
+        RenameConstraint, RenameTable, SetSchema, SetTablespace,
         AddConstraint, DropConstraint, AlterConstraint,
         AttachPartition, DetachPartition,
         SetOptions, ResetOptions,
@@ -931,6 +931,8 @@ struct AlterTableStmt : public Stmt {
     struct SubCmd {
         Action action;
         std::string name;              // column/constraint/index name
+        bool ifExists = false;
+        bool ifNotExists = false;
         ColumnDef colDef;              // for AddColumn / AlterColumn
         TableConstraint constraint;    // for AddConstraint
         std::string newName;
