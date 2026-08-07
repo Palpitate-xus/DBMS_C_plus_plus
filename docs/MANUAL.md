@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-08-07
 > 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=113 FAIL=0 (`scripts/run_all_tests_fast.sh`)
+> 回归基线: PASS=113 FAIL=0（`scripts/run_all_tests_fast.sh` 与 `scripts/build_tests.sh`）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
@@ -1016,6 +1016,8 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 ```bash
 ./scripts/build.sh              # 编译
 ./scripts/run_all_tests_fast.sh # 运行全部 113 个测试
+./scripts/build_tests.sh        # 独立编译并运行每个 C++ 测试
+python3 tests/window_e2e_test.py # 窗口函数端到端测试（9 用例）
 ```
 
-每个测试函数执行完毕后自动清理数据库目录（`__t_*` 前缀），不影响项目根目录。
+每个 C++ 测试执行完毕后自动清理数据库目录（`__t_*` 前缀）。窗口函数 E2E 测试使用临时工作目录和临时管理员账号，结束后自动删除，不依赖或污染项目根目录。
