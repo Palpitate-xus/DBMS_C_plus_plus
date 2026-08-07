@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <random>
@@ -178,6 +179,154 @@ struct QueryResult {
     std::vector<std::vector<std::string>> rows;
     std::string commandTag;
 };
+
+struct ProtocolPreparedStatement {
+    std::string sql;
+    std::vector<uint32_t> parameterTypes;
+};
+
+struct ProtocolPortal {
+    std::string sql;
+};
+
+bool isIntegerParameterType(uint32_t typeOid) {
+    return typeOid == 20 || typeOid == 21 || typeOid == 23 || typeOid == 26;
+}
+
+bool isNumericParameterType(uint32_t typeOid) {
+    return typeOid == 700 || typeOid == 701 || typeOid == 1700;
+}
+
+bool isStrictInteger(const std::string& value) {
+    if (value.empty()) return false;
+    size_t offset = (value.front() == '-' || value.front() == '+') ? 1 : 0;
+    if (offset == value.size()) return false;
+    for (; offset < value.size(); ++offset) {
+        if (!std::isdigit(static_cast<unsigned char>(value[offset]))) return false;
+    }
+    return true;
+}
+
+bool isStrictNumeric(const std::string& value) {
+    if (value.empty()) return false;
+    char* end = nullptr;
+    errno = 0;
+    std::strtold(value.c_str(), &end);
+    return errno != ERANGE && end == value.c_str() + value.size();
+}
+
+std::string quoteProtocolText(const std::string& value, std::string& error) {
+    if (value.find('\0') != std::string::npos) {
+        error = "parameter contains a NUL byte";
+        return {};
+    }
+    std::string literal;
+    literal.reserve(value.size() + 2);
+    literal.push_back('\'');
+    for (char c : value) {
+        if (c == '\'') literal.push_back('\'');
+        literal.push_back(c);
+    }
+    literal.push_back('\'');
+    return literal;
+}
+
+std::string protocolParameterLiteral(uint32_t typeOid,
+                                     const std::vector<uint8_t>& raw,
+                                     std::string& error) {
+    std::string value(raw.begin(), raw.end());
+    if (value.find('\0') != std::string::npos) {
+        error = "parameter contains a NUL byte";
+        return {};
+    }
+    if (typeOid == 16) {
+        std::string lower = value;
+        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lower == "t" || lower == "true" || lower == "1") return "TRUE";
+        if (lower == "f" || lower == "false" || lower == "0") return "FALSE";
+        error = "invalid input syntax for type boolean";
+        return {};
+    }
+    if (isIntegerParameterType(typeOid)) {
+        if (!isStrictInteger(value)) {
+            error = "invalid input syntax for integer parameter";
+            return {};
+        }
+        return value;
+    }
+    if (isNumericParameterType(typeOid)) {
+        if (!isStrictNumeric(value)) {
+            error = "invalid input syntax for numeric parameter";
+            return {};
+        }
+        return value;
+    }
+    return quoteProtocolText(value, error);
+}
+
+bool substituteProtocolParameters(const std::string& sql,
+                                  const std::vector<std::string>& literals,
+                                  std::string& expanded,
+                                  std::string& error) {
+    expanded.clear();
+    expanded.reserve(sql.size());
+    bool singleQuoted = false;
+    bool doubleQuoted = false;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        const char c = sql[i];
+        if (singleQuoted) {
+            expanded.push_back(c);
+            if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
+                expanded.push_back(sql[++i]);
+            } else if (c == '\'') {
+                singleQuoted = false;
+            }
+            continue;
+        }
+        if (doubleQuoted) {
+            expanded.push_back(c);
+            if (c == '"' && i + 1 < sql.size() && sql[i + 1] == '"') {
+                expanded.push_back(sql[++i]);
+            } else if (c == '"') {
+                doubleQuoted = false;
+            }
+            continue;
+        }
+        if (c == '\'') {
+            singleQuoted = true;
+            expanded.push_back(c);
+            continue;
+        }
+        if (c == '"') {
+            doubleQuoted = true;
+            expanded.push_back(c);
+            continue;
+        }
+        if (c != '$' || i + 1 >= sql.size() ||
+            !std::isdigit(static_cast<unsigned char>(sql[i + 1]))) {
+            expanded.push_back(c);
+            continue;
+        }
+        size_t number = 0;
+        size_t end = i + 1;
+        while (end < sql.size() && std::isdigit(static_cast<unsigned char>(sql[end]))) {
+            const size_t digit = static_cast<size_t>(sql[end] - '0');
+            if (number > (std::numeric_limits<size_t>::max() - digit) / 10) {
+                error = "parameter number is too large";
+                return false;
+            }
+            number = number * 10 + digit;
+            ++end;
+        }
+        if (number == 0 || number > literals.size()) {
+            error = "there is no parameter $" + std::to_string(number);
+            return false;
+        }
+        expanded += literals[number - 1];
+        i = end - 1;
+    }
+    return true;
+}
 
 std::string trimText(const std::string& value) {
     size_t first = 0;
@@ -714,7 +863,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         return;
     }
 
-    std::map<std::string, std::string> portals;
+    std::map<std::string, ProtocolPreparedStatement> preparedStatements;
+    std::map<std::string, ProtocolPortal> portals;
     bool transactionFailed = false;
     bool extendedQueryError = false;
     const auto readyStatus = [&]() -> char {
@@ -765,12 +915,26 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             const uint16_t parameterCount = PostgresProtocol::readUInt16(message.payload, offset);
-            if (parameterCount != 0) {
-                protocol.sendErrorResponse("ERROR", "0A000", "parameters are not yet supported");
+            offset += 2;
+            if (parameterCount > 1024 ||
+                message.payload.size() - offset != static_cast<size_t>(parameterCount) * 4) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Parse parameter type list");
                 extendedQueryError = true;
                 continue;
             }
-            session.preparedStmts[statement] = sql;
+            ProtocolPreparedStatement prepared;
+            prepared.sql = std::move(sql);
+            prepared.parameterTypes.reserve(parameterCount);
+            for (uint16_t i = 0; i < parameterCount; ++i) {
+                prepared.parameterTypes.push_back(
+                    PostgresProtocol::readUInt32(message.payload, offset));
+                offset += 4;
+            }
+            preparedStatements[statement] = std::move(prepared);
+            if (!protocol.sendParameterDescription(preparedStatements[statement].parameterTypes)) {
+                extendedQueryError = true;
+                continue;
+            }
             protocol.sendParseComplete();
             continue;
         }
@@ -780,12 +944,127 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::string statement;
             if (!PostgresProtocol::readCString(message.payload, offset, portal) ||
                 !PostgresProtocol::readCString(message.payload, offset, statement) ||
-                session.preparedStmts.find(statement) == session.preparedStmts.end()) {
+                preparedStatements.find(statement) == preparedStatements.end()) {
                 protocol.sendErrorResponse("ERROR", "26000", "prepared statement does not exist");
                 extendedQueryError = true;
                 continue;
             }
-            portals[portal] = session.preparedStmts[statement];
+            const auto& prepared = preparedStatements.at(statement);
+            if (offset + 2 > message.payload.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind message");
+                extendedQueryError = true;
+                continue;
+            }
+            const uint16_t parameterFormatCount =
+                PostgresProtocol::readUInt16(message.payload, offset);
+            offset += 2;
+            std::vector<uint16_t> parameterFormats;
+            if (parameterFormatCount > 0) {
+                if (parameterFormatCount > message.payload.size() / 2 ||
+                    offset + static_cast<size_t>(parameterFormatCount) * 2 > message.payload.size()) {
+                    protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind format list");
+                    extendedQueryError = true;
+                    continue;
+                }
+                parameterFormats.reserve(parameterFormatCount);
+                for (uint16_t i = 0; i < parameterFormatCount; ++i) {
+                    parameterFormats.push_back(
+                        PostgresProtocol::readUInt16(message.payload, offset));
+                    offset += 2;
+                }
+            }
+            if (offset + 2 > message.payload.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind parameter count");
+                extendedQueryError = true;
+                continue;
+            }
+            const uint16_t valueCount = PostgresProtocol::readUInt16(message.payload, offset);
+            offset += 2;
+            if (valueCount != prepared.parameterTypes.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "bind message supplies a different number of parameters");
+                extendedQueryError = true;
+                continue;
+            }
+            if (!parameterFormats.empty() && parameterFormats.size() != 1 &&
+                parameterFormats.size() != valueCount) {
+                protocol.sendErrorResponse("ERROR", "08P01", "bind message has an invalid parameter format count");
+                extendedQueryError = true;
+                continue;
+            }
+            std::vector<std::string> literals;
+            literals.reserve(valueCount);
+            bool bindError = false;
+            std::string bindErrorMessage;
+            for (uint16_t i = 0; i < valueCount; ++i) {
+                if (offset + 4 > message.payload.size()) {
+                    bindError = true;
+                    bindErrorMessage = "malformed Bind parameter value";
+                    break;
+                }
+                const int32_t valueLength = PostgresProtocol::readInt32(message.payload, offset);
+                offset += 4;
+                if (valueLength < -1 ||
+                    (valueLength >= 0 &&
+                     static_cast<size_t>(valueLength) > message.payload.size() - offset)) {
+                    bindError = true;
+                    bindErrorMessage = "malformed Bind parameter value length";
+                    break;
+                }
+                uint16_t format = 0;
+                if (parameterFormats.size() == 1) format = parameterFormats.front();
+                else if (parameterFormats.size() == valueCount) format = parameterFormats[i];
+                if (format != 0) {
+                    bindError = true;
+                    bindErrorMessage = "binary parameter format is not supported";
+                    break;
+                }
+                if (valueLength == -1) {
+                    literals.push_back("NULL");
+                } else {
+                    std::vector<uint8_t> raw(
+                        message.payload.begin() + static_cast<std::ptrdiff_t>(offset),
+                        message.payload.begin() + static_cast<std::ptrdiff_t>(offset + valueLength));
+                    offset += static_cast<size_t>(valueLength);
+                    std::string literal = protocolParameterLiteral(
+                        prepared.parameterTypes[i], raw, bindErrorMessage);
+                    if (!bindErrorMessage.empty()) {
+                        bindError = true;
+                        break;
+                    }
+                    literals.push_back(std::move(literal));
+                }
+            }
+            if (bindError) {
+                protocol.sendErrorResponse("ERROR", "0A000", bindErrorMessage);
+                extendedQueryError = true;
+                continue;
+            }
+            if (offset + 2 > message.payload.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Bind result format count");
+                extendedQueryError = true;
+                continue;
+            }
+            const uint16_t resultFormatCount = PostgresProtocol::readUInt16(message.payload, offset);
+            offset += 2;
+            if (resultFormatCount > 1 ||
+                offset + static_cast<size_t>(resultFormatCount) * 2 != message.payload.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "unsupported Bind result format list");
+                extendedQueryError = true;
+                continue;
+            }
+            if (resultFormatCount == 1 && PostgresProtocol::readUInt16(message.payload, offset) != 0) {
+                protocol.sendErrorResponse("ERROR", "0A000", "binary result format is not supported");
+                extendedQueryError = true;
+                continue;
+            }
+            std::string expandedSql;
+            std::string substitutionError;
+            if (!substituteProtocolParameters(prepared.sql, literals, expandedSql, substitutionError)) {
+                protocol.sendErrorResponse("ERROR", "42P02", substitutionError);
+                extendedQueryError = true;
+                continue;
+            }
+            portals[portal] = ProtocolPortal{std::move(expandedSql)};
             protocol.sendBindComplete();
             continue;
         }
@@ -797,13 +1076,24 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
+            if (offset + 4 != message.payload.size()) {
+                protocol.sendErrorResponse("ERROR", "08P01", "malformed Execute max-rows field");
+                extendedQueryError = true;
+                continue;
+            }
+            const int32_t maxRows = PostgresProtocol::readInt32(message.payload, offset);
+            if (maxRows < 0 || maxRows != 0) {
+                protocol.sendErrorResponse("ERROR", "0A000", "portal row limits are not supported");
+                extendedQueryError = true;
+                continue;
+            }
             auto portalIt = portals.find(portal);
             if (portalIt == portals.end()) {
                 protocol.sendErrorResponse("ERROR", "34000", "portal does not exist");
                 extendedQueryError = true;
                 continue;
             }
-            QueryResult result = executeForProtocol(portalIt->second);
+            QueryResult result = executeForProtocol(portalIt->second.sql);
             if (result.error) {
                 protocol.sendErrorResponse("ERROR", result.sqlState, result.errorMessage);
                 extendedQueryError = true;

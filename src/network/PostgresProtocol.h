@@ -58,6 +58,7 @@ public:
                            const std::string& detail = {});
     bool sendNoticeResponse(const std::string& message);
     bool sendEmptyQueryResponse();
+    bool sendParameterDescription(const std::vector<uint32_t>& parameterTypes);
     bool sendParseComplete();
     bool sendBindComplete();
     bool sendCloseComplete();

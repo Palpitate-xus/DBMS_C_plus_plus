@@ -5,7 +5,7 @@
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线: PASS=118 FAIL=0（117 个 C++ 测试 + PostgreSQL 协议 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
-协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复和事务外 `ReadyForQuery('I')` 状态；这只补齐了错误状态机的一部分，完整参数绑定、类型化结果和扩展消息仍与 PostgreSQL 有差距。
+协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态和文本整数参数绑定；这只补齐了错误状态机与参数路径的一部分，二进制参数/结果、完整 OID 类型映射、portal 分页和扩展消息仍与 PostgreSQL 有差距。
 
 事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志和 SSI 冲突图仍是跨 backend 共享协调结构，不能据此宣称完整 PostgreSQL 事务语义已完成。
 

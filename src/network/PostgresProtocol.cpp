@@ -250,6 +250,14 @@ bool PostgresProtocol::sendEmptyQueryResponse() {
     return sendMessage('I', {});
 }
 
+bool PostgresProtocol::sendParameterDescription(const std::vector<uint32_t>& parameterTypes) {
+    if (parameterTypes.size() > std::numeric_limits<uint16_t>::max()) return false;
+    std::vector<uint8_t> body;
+    appendUInt16(body, static_cast<uint16_t>(parameterTypes.size()));
+    for (uint32_t type : parameterTypes) appendUInt32(body, type);
+    return sendMessage('t', body);
+}
+
 bool PostgresProtocol::sendParseComplete() { return sendMessage('1', {}); }
 bool PostgresProtocol::sendBindComplete() { return sendMessage('2', {}); }
 bool PostgresProtocol::sendCloseComplete() { return sendMessage('3', {}); }
