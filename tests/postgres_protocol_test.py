@@ -484,6 +484,21 @@ def main():
             sock, "SELECT id FROM set_left UNION SELECT count(*) FROM set_right"))
         assert complex_set_rows == [[b"1"], [b"2"], [b"3"], [b"4"]], complex_set_rows
 
+        # OR branches with separate equality indexes use one BitmapOr heap
+        # fetch path and must preserve all matching rows.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE bitmap_t (id INT, tenant INT, state INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE INDEX ON bitmap_t(tenant)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE INDEX ON bitmap_t(state)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO bitmap_t VALUES "
+            "(1, 7, 1), (2, 7, 2), (3, 8, 1)"))
+        bitmap_or_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM bitmap_t WHERE tenant = 7 OR state = 1"))
+        assert bitmap_or_rows == [[b"1"], [b"2"], [b"3"]], bitmap_or_rows
+
         # INSTEAD OF view triggers must be creatable on views and must route
         # each DML operation to the trigger action instead of the base-view
         # rewrite path.

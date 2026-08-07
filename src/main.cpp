@@ -15288,7 +15288,7 @@ bool execute(const string& rawSql, Session& s) {
         // in which case the caller falls back to g_engine.query().
         auto executeVolcanoSelect = [&](const std::string& tblName,
                                          const std::set<std::string>& projCols,
-                                         const std::vector<std::string>& conds,
+                                         const std::vector<std::vector<std::string>>& condGroups,
                                          const StorageEngine::OrderBySpec* orderBy,
                                          bool distinct,
                                          std::vector<std::string>& outAnswers) -> bool {
@@ -15314,10 +15314,21 @@ bool execute(const string& rawSql, Session& s) {
                 ctx.orderByAsc = orderBy->ascending;
             }
             ctx.distinct = distinct;
-            // Parse conditions: conds is a vector of "col op value" strings.
-            ctx.conds = dbms::StorageEngine::parseConditions(conds);
+            std::vector<std::vector<dbms::StorageEngine::Condition>> branches;
+            for (const auto& group : condGroups) {
+                branches.push_back(dbms::StorageEngine::parseConditions(group));
+            }
 
-            auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+            dbms::OpPtr plan;
+            if (branches.size() > 1) {
+                plan = dbms::QueryPlanner::buildDisjunctiveSelectPlan(
+                    &g_engine, ctx, branches);
+                if (!plan) return false;
+            } else {
+                // One group (or no groups) is the normal AND/table path.
+                if (!branches.empty()) ctx.conds = std::move(branches.front());
+                plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+            }
             outAnswers = dbms::QueryPlanner::executePlan(std::move(plan));
             return true;
         };
@@ -15954,17 +15965,8 @@ bool execute(const string& rawSql, Session& s) {
                 condCopy.push_back(")");
                 for (auto& t : condCopy) t = modifyLogic(t);
                 auto groups = breakDownConditions(condCopy);
-                set<string> seen;
-                for (const auto& g : groups) {
-                    vector<string> part;
-                    bool ok = executeVolcanoSelect(tname, selectCols, g,
-                                                    firstOrderBy, useDistinct, part);
-                    if (!ok) { volcanoUsed = false; break; }
-                    for (const auto& row : part) {
-                        if (seen.insert(row).second) answers.push_back(row);
-                    }
-                    volcanoUsed = true;
-                }
+                volcanoUsed = executeVolcanoSelect(tname, selectCols, groups,
+                                                    firstOrderBy, useDistinct, answers);
             }
 
             if (!volcanoUsed) {

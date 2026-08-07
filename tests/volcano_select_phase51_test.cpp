@@ -243,6 +243,38 @@ static void test_bitmap_and() {
     std::cout << "[VOLCANO-5.1] bitmap AND + heap recheck OK" << std::endl;
 }
 
+// -------- Test 8: bitmap candidate union + disjunctive recheck --------
+static void test_bitmap_or() {
+    std::string db = testDbPath("volc_bitmap_or");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, tenant INT, state INT)", s));
+    assert(!ddl.executeSql("CREATE INDEX ON t(tenant)", s));
+    assert(!ddl.executeSql("CREATE INDEX ON t(state)", s));
+
+    insertRow(db, "t", {{"id", "1"}, {"tenant", "7"}, {"state", "1"}});
+    insertRow(db, "t", {{"id", "2"}, {"tenant", "7"}, {"state", "2"}});
+    insertRow(db, "t", {{"id", "3"}, {"tenant", "8"}, {"state", "1"}});
+
+    dbms::PlanContext ctx;
+    ctx.dbname = db; ctx.tablename = "t"; ctx.selectCols = {"id"};
+    std::vector<std::vector<dbms::StorageEngine::Condition>> branches = {
+        dbms::StorageEngine::parseConditions({"=tenant 7"}),
+        dbms::StorageEngine::parseConditions({"=state 1"})
+    };
+    auto plan = dbms::QueryPlanner::buildDisjunctiveSelectPlan(&g_engine, ctx, branches);
+    auto* project = dynamic_cast<dbms::ProjectOp*>(plan.get());
+    assert(project);
+    assert(dynamic_cast<dbms::BitmapOrHeapScanOp*>(project->child()) != nullptr);
+    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    assert(rows.size() == 3);
+
+    cleanup(db);
+    std::cout << "[VOLCANO-5.1] bitmap OR + disjunctive recheck OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_full_scan();
@@ -252,6 +284,7 @@ int main() {
     test_projection();
     test_like_filter();
     test_bitmap_and();
+    test_bitmap_or();
     std::cout << "[VOLCANO-5.1] all Phase 5.1 volcano SELECT tests passed" << std::endl;
     return 0;
 }

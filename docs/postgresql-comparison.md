@@ -139,7 +139,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | **唯一索引 + 约束** | ✅ | ✅ | ✅ |
 | **多列复合索引** | ✅ | ✅ | ✅ |
 | **Index Only Scan** | ✅ | ✅ | ✅ |
-| **Bitmap Index/Heap Scan** | ✅ | ⚠️ | 等值多索引 AND 已由 `BitmapHeapScanOp` 接入；OR/范围 bitmap 仍缺 |
+| **Bitmap Index/Heap Scan** | ✅ | ⚠️ | 等值多索引 AND/OR 已由 `BitmapHeapScanOp`/`BitmapOrHeapScanOp` 接入；范围 bitmap 仍缺 |
 
 ---
 
@@ -214,10 +214,10 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | **等价类 (Equivalence Classes)** | ✅ | ⚠️ | 基础 |
 | **PathKeys / 排序路径** | ✅ | ⚠️ | 基础 |
 | Join reorder (动态规划) | ✅ | ⚠️ | 启发式 |
-| Bitmap scan | ✅ | ⚠️ | 等值 Bitmap AND 已接入；OR/范围/并行路径仍缺 |
+| Bitmap scan | ✅ | ⚠️ | 等值 Bitmap AND/OR 已接入；范围/并行路径仍缺 |
 | **计划缓存** | ✅ | ✅ | ✅ |
 | EXPLAIN ANALYZE 真实统计 | ✅ | ✅ | ✅ |
-| 多索引组合 (Bitmap AND/OR) | ✅ | ⚠️ | Bitmap AND 已接入，Bitmap OR 仍缺 |
+| 多索引组合 (Bitmap AND/OR) | ✅ | ⚠️ | 等值 Bitmap AND/OR 已接入，范围/并行组合仍缺 |
 | **参数化路径** | ✅ | ❌ | 缺 |
 | **自定义成本函数** | ✅ | ❌ | 缺 |
 | **遗传算法 join reorder** | ✅ | ❌ | 缺 |
@@ -318,7 +318,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 3. **索引 GiST** — 全文搜索/几何最近邻索引缺失 (仅有 SP-GiST)
 4. **Gap locks / predicate locks** — 无法完全防止幻读
 5. **SSI (Serializable Snapshot Isolation)** — 已覆盖关系限定的行级写偏差回滚及空谓词的关系级 SIREAD，但页/索引级 predicate lock 和完整冲突规则仍未实现
-6. **Bitmap scan** — 等值多索引 Bitmap AND 已接入；Bitmap OR、范围 bitmap 和并行路径仍缺
+6. **Bitmap scan** — 等值多索引 Bitmap AND/OR 已接入；范围 bitmap 和并行路径仍缺
 7. **INSTEAD OF 视图触发器** — 已支持简单单表视图上的逐行 INSERT/UPDATE/DELETE action SQL，并覆盖多行协议 E2E；复杂视图映射、transition tables、完整函数/PL 运行时仍缺失
 
 ### 🟡 重要缺失 (影响实用性)

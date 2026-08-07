@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | P0-6 Bitmap OR 补强：新增 `BitmapOrHeapScanOp`，每个 OR 分支先求等值索引候选 RID 交集，再 union 后统一 heap fetch 与原谓词重检；主查询路径不再按投影文本错误去重，新增 Volcano 与协议 OR 回归。范围/并行 bitmap 和真正 block bitmap 仍待后续。 |
 | 2026-08-07 | P0-5 SSI 正确性补强：SERIALIZABLE 扫描登记关系级 SIREAD 覆盖，即使谓词返回空集也保留读覆盖；提交时将关系级读写纳入 dangerous-structure 检测，并保留重叠事务的 SSI 历史，新增空谓词并发回归。关系级粒度是保守安全边界，页/索引 predicate lock 和完整 rw-conflict 图仍待后续。 |
 | 2026-08-07 | P0-6 Bitmap AND 首步：新增 `BitmapHeapScanOp`，对两个以上等值 B-tree/Hash/单列 PK 索引求候选 RID 交集，再进行 heap fetch 与 Filter recheck；`QueryPlanner` 已接入 path 选择，新增 Volcano 双索引回归。Bitmap OR、范围/并行 bitmap 和真正 block bitmap 仍待后续。 |
 | 2026-08-07 | SELECT 集合操作 parser 修复：按 PostgreSQL 规则将 INTERSECT 设为高于 UNION/EXCEPT 的优先级，并为同级链式操作增加左结合 AST 包装；新增 parser 回归覆盖 `A INTERSECT B UNION C`、`A UNION B INTERSECT C`、`A UNION B UNION C` 与 ALL 修饰符。 |
@@ -401,7 +402,7 @@
 | 7.1 | Parser/analyzer/rewrite/planner/executor 分层 | 主要在 `execute()` 中字符串解析并直接调用 engine | 🔄 |
 | 7.2 | Cost-based planner | 有简化成本、统计和 plan cache；缺少 path 枚举、参数化路径、join search、equivalence classes、pathkeys、parallel aware path | ⚠️ |
 | 7.3 | 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化、扩展统计对象元数据与函数依赖（dependencies）强度计算；缺少 PostgreSQL 级 ndistinct、correlation、表达式统计、catalog 和 planner 深度使用 | ⚠️ |
-| 7.4 | Index selection | 已支持等值多索引 Bitmap AND、候选 RID 交集、heap fetch 和 Filter recheck；缺少 Bitmap OR、范围/并行 bitmap、skip scan、lossy pages | ⚠️ |
+| 7.4 | Index selection | 已支持等值多索引 Bitmap AND/OR、候选 RID 组合、heap fetch 和原谓词 recheck；缺少范围/并行 bitmap、skip scan、lossy pages | ⚠️ |
 | 7.5 | Parallel query | 缺失：无 Gather/Gather Merge、parallel scan/join/aggregate、worker lifecycle | ❌ |
 | 7.6 | JIT | 缺失 LLVM JIT | ❌ |
 | 7.7 | Async I/O | 缺失 PostgreSQL 18 AIO 子系统 | ❌ |
@@ -602,7 +603,7 @@
 ### Phase 5：Planner 与执行器 🔄 进行中（Wave 5.1 已启动）
 - 建立 path/relation/statistics 框架 — **QueryPlanner + 11 类算子已实现（TableScan/IndexScan/Filter/Project/Sort/Limit/Distinct/NLJ/HJ/MJ/Aggregate）**
 - AST→算子树执行路径（Wave 5.1）— **进行中**
-- 补 bitmap/parallel/partitionwise/skip scan — **未启动**
+- 补 bitmap 范围/parallel/partitionwise/skip scan — **部分进行中**（等值 Bitmap AND/OR 已接入）
 - 实现 EXPLAIN ANALYZE 真实节点级统计 — **未启动**
 
 ### Phase 6：协议与认证 🔄 进行中

@@ -352,6 +352,43 @@ void IndexOnlyScanOp::close() {
     rids_.clear();
 }
 
+static bool collectEqualityIndexCandidates(
+    StorageEngine* engine, const std::string& dbname,
+    const std::string& tablename, const TableSchema& tbl,
+    const std::vector<std::string>& hashIndexedColumns,
+    const StorageEngine::Condition& condition,
+    std::set<int64_t>& candidates) {
+    if (condition.op != "=") return false;
+
+    bool isPrimaryKey = false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == condition.colName && tbl.cols[i].isPrimaryKey) {
+            isPrimaryKey = true;
+            break;
+        }
+    }
+    if (isPrimaryKey && tbl.pkColIndices.size() == 1) {
+        auto* index = engine->getPKIndex(dbname, tablename);
+        if (!index) return false;
+        int64_t rid = 0;
+        if (index->search(condition.value, rid)) candidates.insert(rid);
+        return true;
+    }
+
+    if (std::find(hashIndexedColumns.begin(), hashIndexedColumns.end(),
+                  condition.colName) != hashIndexedColumns.end()) {
+        auto* hash = engine->getHashIndex(dbname, tablename, condition.colName);
+        if (!hash) return false;
+        for (int64_t rid : hash->search(condition.value)) candidates.insert(rid);
+        return true;
+    }
+
+    auto* index = engine->getSecondaryIndex(dbname, tablename, condition.colName);
+    if (!index) return false;
+    for (int64_t rid : index->searchMulti(condition.value)) candidates.insert(rid);
+    return true;
+}
+
 // ========================================================================
 // BitmapHeapScanOp
 // ========================================================================
@@ -379,31 +416,9 @@ bool BitmapHeapScanOp::open() {
             continue;
 
         std::set<int64_t> candidates;
-        bool foundIndex = false;
-        bool isPrimaryKey = false;
-        for (size_t i = 0; i < tbl_.len; ++i) {
-            if (tbl_.cols[i].dataName == condition.colName && tbl_.cols[i].isPrimaryKey) {
-                isPrimaryKey = true;
-                break;
-            }
-        }
-        if (isPrimaryKey && tbl_.pkColIndices.size() == 1) {
-            if (auto* index = engine_->getPKIndex(dbname_, tablename_)) {
-                int64_t rid = 0;
-                foundIndex = true;
-                if (index->search(condition.value, rid)) candidates.insert(rid);
-            }
-        } else if (std::find(hashIndexedColumns.begin(), hashIndexedColumns.end(),
-                             condition.colName) != hashIndexedColumns.end()) {
-            if (auto* hash = engine_->getHashIndex(dbname_, tablename_, condition.colName)) {
-                foundIndex = true;
-                for (int64_t rid : hash->search(condition.value)) candidates.insert(rid);
-            }
-        } else if (auto* index = engine_->getSecondaryIndex(dbname_, tablename_, condition.colName)) {
-            foundIndex = true;
-            for (int64_t rid : index->searchMulti(condition.value)) candidates.insert(rid);
-        }
-        if (!foundIndex) continue;
+        if (!collectEqualityIndexCandidates(engine_, dbname_, tablename_, tbl_,
+                                            hashIndexedColumns, condition, candidates))
+            continue;
         ++indexedPredicates;
 
         if (!initialized) {
@@ -442,6 +457,91 @@ bool BitmapHeapScanOp::next(std::string& outRow) {
 
 void BitmapHeapScanOp::close() {
     rids_.clear();
+    rows_.clear();
+    pos_ = 0;
+}
+
+// ========================================================================
+// BitmapOrHeapScanOp
+// ========================================================================
+
+BitmapOrHeapScanOp::BitmapOrHeapScanOp(
+    StorageEngine* engine, const std::string& dbname,
+    const std::string& tablename,
+    const std::vector<std::vector<StorageEngine::Condition>>& branches)
+    : engine_(engine), dbname_(dbname), tablename_(tablename), branches_(branches) {}
+
+bool BitmapOrHeapScanOp::open() {
+    tbl_ = engine_->getTableSchema(dbname_, tablename_);
+    rows_.clear();
+    pos_ = 0;
+    if (branches_.size() < 2) return false;
+
+    const auto hashIndexedColumns = engine_->getHashIndexedColumns(dbname_, tablename_);
+    std::set<int64_t> unionRids;
+    for (const auto& branch : branches_) {
+        std::set<std::string> indexedColumns;
+        std::set<int64_t> matched;
+        bool initialized = false;
+        size_t indexedPredicates = 0;
+
+        for (const auto& condition : branch) {
+            if (!indexedColumns.insert(condition.colName).second) continue;
+            std::set<int64_t> candidates;
+            if (!collectEqualityIndexCandidates(engine_, dbname_, tablename_, tbl_,
+                                                hashIndexedColumns, condition, candidates))
+                continue;
+            ++indexedPredicates;
+            if (!initialized) {
+                matched = std::move(candidates);
+                initialized = true;
+            } else {
+                std::set<int64_t> intersection;
+                std::set_intersection(matched.begin(), matched.end(),
+                                      candidates.begin(), candidates.end(),
+                                      std::inserter(intersection, intersection.end()));
+                matched = std::move(intersection);
+            }
+        }
+        // A branch without an equality index cannot safely be represented by
+        // this node; the planner must choose the normal DNF/legacy path.
+        if (indexedPredicates == 0 || !initialized) return false;
+        unionRids.insert(matched.begin(), matched.end());
+    }
+
+    PageAllocator* allocator = engine_->getPageAllocator(dbname_, tablename_);
+    if (!allocator) return true;
+    for (int64_t rid : unionRids) {
+        std::string row;
+        if (!engine_->readRowByRid(allocator, rid, row, tbl_)) continue;
+        row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+
+        bool matches = false;
+        for (const auto& branch : branches_) {
+            bool branchMatches = true;
+            for (const auto& condition : branch) {
+                if (!evalCondRaw(condition, row, tbl_)) {
+                    branchMatches = false;
+                    break;
+                }
+            }
+            if (branchMatches) {
+                matches = true;
+                break;
+            }
+        }
+        if (matches) rows_.push_back(std::move(row));
+    }
+    return true;
+}
+
+bool BitmapOrHeapScanOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    return true;
+}
+
+void BitmapOrHeapScanOp::close() {
     rows_.clear();
     pos_ = 0;
 }
@@ -975,6 +1075,27 @@ static bool canUseBitmapHeapScan(StorageEngine* engine, const PlanContext& ctx) 
     return indexedPredicates >= 2;
 }
 
+static bool canUseBitmapOrScan(
+    StorageEngine* engine, const PlanContext& ctx,
+    const std::vector<std::vector<StorageEngine::Condition>>& branches) {
+    const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    if (table.partitionType != TableSchema::PartitionType::None || branches.size() < 2)
+        return false;
+    for (const auto& branch : branches) {
+        std::set<std::string> seenColumns;
+        bool indexed = false;
+        for (const auto& condition : branch) {
+            if (!seenColumns.insert(condition.colName).second) continue;
+            if (hasEqualityIndex(engine, ctx, condition)) {
+                indexed = true;
+                break;
+            }
+        }
+        if (!indexed) return false;
+    }
+    return true;
+}
+
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ctx) {
     OpPtr root;
 
@@ -1099,6 +1220,25 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         root = std::make_unique<LimitOp>(std::move(root), ctx.limit);
     }
 
+    return root;
+}
+
+OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
+    StorageEngine* engine, const PlanContext& ctx,
+    const std::vector<std::vector<StorageEngine::Condition>>& branches) {
+    if (!canUseBitmapOrScan(engine, ctx, branches)) return nullptr;
+
+    OpPtr root = std::make_unique<BitmapOrHeapScanOp>(
+        engine, ctx.dbname, ctx.tablename, branches);
+    TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+
+    if (!ctx.orderByCol.empty()) {
+        root = std::make_unique<SortOp>(std::move(root), tbl,
+                                        ctx.orderByCol, ctx.orderByAsc);
+    }
+    root = std::make_unique<ProjectOp>(std::move(root), tbl, ctx.selectCols);
+    if (ctx.distinct) root = std::make_unique<DistinctOp>(std::move(root));
+    if (ctx.limit > 0) root = std::make_unique<LimitOp>(std::move(root), ctx.limit);
     return root;
 }
 

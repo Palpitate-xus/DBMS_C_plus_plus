@@ -92,16 +92,17 @@
 
 ### P0-6: Bitmap Index/Heap Scan
 - **类别**: 执行器 / 索引组合
-- **现状**: `BitmapHeapScanOp` 已接入 planner：对多个等值 B-tree/Hash/PK 索引求候选 RID 交集，再做 heap fetch 和 Filter 条件重检；Bitmap OR、范围 bitmap 和并行 bitmap 扫描仍缺
+- **现状**: `BitmapHeapScanOp` 和 `BitmapOrHeapScanOp` 已接入 planner：对等值 B-tree/Hash/PK 索引执行候选 RID 的 AND/OR 组合，再统一 heap fetch 与原谓词重检；范围 bitmap、并行 bitmap 和真正 block bitmap 仍缺
 - **PG 参考**: `BitmapIndexScan`, `BitmapHeapScan`, `BitmapAnd`, `BitmapOr`
 - **影响**: 多索引 WHERE 条件性能差（如 `WHERE a=1 AND b=2` 有两个索引时）
 - **实现路径**:
   1. ✅ 实现多等值索引候选 RID 集合
   2. ✅ 在 `BitmapHeapScanOp` 中执行 Bitmap AND 和 heap fetch
-  3. 增加 Bitmap OR、范围条件和真正 page/block bitmap 表示
-  4. ✅ 在 `QueryPlanner` 中为两个以上可用等值索引生成 bitmap path
+  3. ✅ 实现 Bitmap OR、分支 union 和原谓词重检
+  4. 增加范围条件、并行 bitmap 和真正 page/block bitmap 表示
+  5. ✅ 在 `QueryPlanner` 中为 AND/OR 等值索引生成 bitmap path
 - **预估工作量**: 1 周
-- **验证**: `tests/volcano_select_phase51_test.cpp` 覆盖双索引 AND、heap recheck 和节点选型
+- **验证**: `tests/volcano_select_phase51_test.cpp` 与 `tests/postgres_protocol_test.py` 覆盖双索引 AND/OR、heap recheck 和节点选型
 - **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`
 
 ### P0-7: INSTEAD OF 视图触发器

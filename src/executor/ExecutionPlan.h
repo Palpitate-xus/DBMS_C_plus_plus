@@ -157,6 +157,30 @@ private:
     size_t pos_ = 0;
 };
 
+// BitmapOrHeapScan: build one candidate RID set per AND branch, union the
+// branches, fetch each heap row once, and recheck the original disjunction.
+// Every branch must have at least one usable equality index; otherwise the
+// planner falls back to the legacy/table-scan path.
+class BitmapOrHeapScanOp : public Operator {
+public:
+    BitmapOrHeapScanOp(StorageEngine* engine, const std::string& dbname,
+                       const std::string& tablename,
+                       const std::vector<std::vector<StorageEngine::Condition>>& branches);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+
+private:
+    StorageEngine* engine_;
+    std::string dbname_;
+    std::string tablename_;
+    std::vector<std::vector<StorageEngine::Condition>> branches_;
+    TableSchema tbl_;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+};
+
 // ========================================================================
 // Filter: apply WHERE conditions
 // ========================================================================
@@ -452,6 +476,12 @@ public:
     // Build operator tree for SELECT agg(...) FROM t WHERE ...
     static OpPtr buildAggregatePlan(StorageEngine* engine, const PlanContext& ctx,
                                      const std::vector<StorageEngine::AggItem>& items);
+
+    // Build a structured OR plan. Each inner vector is an AND branch.
+    // Returns nullptr when the branches cannot all use safe equality indexes.
+    static OpPtr buildDisjunctiveSelectPlan(
+        StorageEngine* engine, const PlanContext& ctx,
+        const std::vector<std::vector<StorageEngine::Condition>>& branches);
 
     // Build a structured set-operation node over two compatible child plans.
     static OpPtr buildSetOperationPlan(OpPtr left, OpPtr right,
