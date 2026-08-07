@@ -133,8 +133,8 @@ bool DdlTransaction::undoCreate(const RecordedOp& op) {
             engine_.dropTable(db, op.name);
             break;
         case DdlObjectKind::Index:
-            engine_.dropIndex(db, op.name);
-            break;
+            if (op.extra.empty()) return false;
+            return engine_.dropIndex(db, op.extra, op.name) == DBStatus::OK;
         case DdlObjectKind::Sequence:
             engine_.dropSequence(db, op.name);
             break;

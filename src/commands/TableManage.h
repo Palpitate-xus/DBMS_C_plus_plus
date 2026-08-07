@@ -20,7 +20,6 @@
 
 #include "DateType.h"
 #include "table_schema.h"
-#include "storage_engine.h"
 #include "BPTree.h"
 #include "BufferPool.h"
 #include "PageAllocator.h"
@@ -67,51 +66,10 @@ std::string sqlstateForDBStatus(DBStatus res);
 void setCurrentSession(Session* s);
 Session* currentSession();
 
-class StorageEngine : public IStorageEngine {
+class StorageEngine {
 public:
     StorageEngine();
     ~StorageEngine();
-
-    // ========================================================================
-    // IStorageEngine interface overrides (Phase 0)
-    // ========================================================================
-    // The following methods adapt the richer StorageEngine API to the
-    // IStorageEngine interface. Some are simple wrappers; row-level methods
-    // that require explicit TxnId/Snapshot are stubs that will be fleshed out
-    // when the executor/planner moves to the interface.
-    DBStatus useDatabase(const std::string& dbName) override;
-    std::vector<std::string> listDatabases() const override;
-    std::vector<std::string> listTables(
-        const std::string& dbName) const override;
-    RowId insert(const std::string& dbName,
-                 const std::string& tableName,
-                 const std::map<std::string, std::string>& values,
-                 TxnId txnId) override;
-    std::vector<std::map<std::string, std::string>> query(
-        const std::string& dbName,
-        const std::string& tableName,
-        const Snapshot* snapshot) override;
-    size_t update(const std::string& dbName,
-                  const std::string& tableName,
-                  const std::map<std::string, std::string>& newValues,
-                  const std::vector<RowId>& rowIds,
-                  TxnId txnId) override;
-    size_t remove(const std::string& dbName,
-                  const std::string& tableName,
-                  const std::vector<RowId>& rowIds,
-                  TxnId txnId) override;
-    DBStatus createIndex(const std::string& dbName,
-                         const std::string& tableName,
-                         const std::string& indexName,
-                         const std::vector<std::string>& columns,
-                         const std::string& indexType) override;
-    DBStatus dropIndex(const std::string& dbName,
-                       const std::string& indexName) override;
-    TxnId beginTransaction(IsolationLevel level) override;
-    DBStatus commitTransaction(TxnId txnId) override;
-    DBStatus rollbackTransaction(TxnId txnId) override;
-    DBStatus checkpoint() override;
-    Lsn getCurrentLsn() const override;
 
     // The heap format is deliberately single-versioned.
     static size_t pageSizeForFormatVersion(uint32_t formatVersion) {
@@ -127,7 +85,7 @@ public:
 
     // Table operations
     DBStatus createTable(const std::string& dbname, const TableSchema& tbl, std::string* error = nullptr);
-    DBStatus createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl, std::string* error = nullptr) override;
+    DBStatus createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl, std::string* error = nullptr);
     DBStatus dropTable(const std::string& dbname, const std::string& tablename);
     DBStatus truncateTable(const std::string& dbname, const std::string& tablename);
     DBStatus alterTableAddColumn(const std::string& dbname, const std::string& tablename,

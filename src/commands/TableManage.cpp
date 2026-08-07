@@ -1065,7 +1065,7 @@ void StorageEngine::backgroundCheckpoint() {
     lastBackgroundCheckpoint_ = now;
 
     // checkpointer: run checkpoint for every known database.
-    auto dbs = listDatabases();
+    auto dbs = getDatabaseNames();
     for (const auto& dbname : dbs) {
         checkpoint(dbname);
     }
@@ -18986,119 +18986,6 @@ std::vector<std::string> StorageEngine::getUserPermissions(
         if (u == username && t == tablename) result.push_back(p);
     }
     return result;
-}
-
-// ============================================================================
-// IStorageEngine interface overrides (Phase 0)
-// ============================================================================
-
-DBStatus StorageEngine::useDatabase(const std::string& dbName) {
-    // StorageEngine does not keep a global current database; transactions are
-    // started explicitly with a database name.  This is a no-op at the
-    // interface level.
-    (void)dbName;
-    return DBStatus::OK;
-}
-
-std::vector<std::string> StorageEngine::listDatabases() const {
-    return getDatabaseNames();
-}
-
-std::vector<std::string> StorageEngine::listTables(const std::string& dbName) const {
-    return getTableNames(dbName);
-}
-
-RowId StorageEngine::insert(const std::string& dbName,
-                            const std::string& tableName,
-                            const std::map<std::string, std::string>& values,
-                            TxnId txnId) {
-    (void)txnId;
-    DBStatus r = insert(dbName, tableName, values);
-    return (r == DBStatus::OK) ? 0 : INVALID_ROW_ID;
-}
-
-std::vector<std::map<std::string, std::string>> StorageEngine::query(
-    const std::string& dbName,
-    const std::string& tableName,
-    const Snapshot* snapshot) {
-    (void)dbName;
-    (void)tableName;
-    (void)snapshot;
-    // Interface query() is not yet wired to the legacy query() API.  The
-    // executor still uses StorageEngine::query(...).
-    return {};
-}
-
-size_t StorageEngine::update(const std::string& dbName,
-                             const std::string& tableName,
-                             const std::map<std::string, std::string>& newValues,
-                             const std::vector<RowId>& rowIds,
-                             TxnId txnId) {
-    (void)dbName;
-    (void)tableName;
-    (void)newValues;
-    (void)rowIds;
-    (void)txnId;
-    return 0;
-}
-
-size_t StorageEngine::remove(const std::string& dbName,
-                             const std::string& tableName,
-                             const std::vector<RowId>& rowIds,
-                             TxnId txnId) {
-    (void)dbName;
-    (void)tableName;
-    (void)rowIds;
-    (void)txnId;
-    return 0;
-}
-
-DBStatus StorageEngine::createIndex(const std::string& dbName,
-                                    const std::string& tableName,
-                                    const std::string& indexName,
-                                    const std::vector<std::string>& columns,
-                                    const std::string& indexType) {
-    (void)indexName;
-    if (columns.empty()) return DBStatus::INVALID_ARGUMENT;
-    // Map to the legacy single-column index API as a stub.
-    if (indexType == "hash" || indexType == "HASH") {
-        return createHashIndex(dbName, tableName, columns[0]);
-    }
-    return createIndex(dbName, tableName, columns[0], true, {}, "", "", false);
-}
-
-DBStatus StorageEngine::dropIndex(const std::string& dbName,
-                                  const std::string& indexName) {
-    (void)dbName;
-    (void)indexName;
-    // Legacy metadata indexes tables by (tableName, columnName), not by a
-    // standalone index name, so this interface variant is not yet supported.
-    return DBStatus::INTERNAL_ERROR;
-}
-
-TxnId StorageEngine::beginTransaction(IsolationLevel level) {
-    (void)level;
-    // The legacy beginTransaction requires a database name.  Interface callers
-    // that need a named database should use beginTransaction(dbname) directly.
-    return INVALID_TXN_ID;
-}
-
-DBStatus StorageEngine::commitTransaction(TxnId txnId) {
-    (void)txnId;
-    return commitTransaction();
-}
-
-DBStatus StorageEngine::rollbackTransaction(TxnId txnId) {
-    (void)txnId;
-    return rollbackTransaction();
-}
-
-DBStatus StorageEngine::checkpoint() {
-    return DBStatus::OK;
-}
-
-Lsn StorageEngine::getCurrentLsn() const {
-    return INVALID_LSN;
 }
 
 } // namespace dbms

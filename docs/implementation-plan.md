@@ -28,24 +28,24 @@
 
 ## Phase 0：接口统一与代码清理
 
-**目标**：现有 `StorageEngine`、`ExecutionPlan`、`BPTree/HashIndex` 等已实现功能尚未继承 `IStorageEngine`、`IOperator`、`IIndexAM`；先统一接口，使后续重构有边界。
+**目标**：保留确实被执行器和索引实现使用的接口边界，删除没有运行时消费者的伪适配层，避免静默空结果和“成功但未执行”的生产风险。
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| ✅ 0.1 让 StorageEngine 继承 `IStorageEngine` | — | `class StorageEngine : public IStorageEngine` + storage_engine.h 接口文件 |
+| ✅ 0.1 删除未接入的 `IStorageEngine` 伪适配层 | — | `StorageEngine` 是唯一实际存储入口；删除返回空结果/0 的未接入接口和 `storage_engine.h` |
 | ✅ 0.2 让执行算子继承 `IOperator`，迁移到 `src/executor/` | 7.1 | 12 个 Operator (TableScan/IndexScan/Filter/Sort/Limit/Distinct/Join/Aggregate/...) |
 | ✅ 0.3 让索引实现继承 `IIndexAM` | 8.1 | BPTreeIndexAM + HashIndexAM 适配器 |
 | ✅ 0.4 统一 `DBStatus`、`TxnId`、`RowId` 等基础类型定义 | — | dbms_defs.h + DBStatus 枚举 |
 
 ### Phase 0 已完成内容
 
-- **StorageEngine 继承 `IStorageEngine`**：`src/commands/TableManage.h` 中 `class StorageEngine : public IStorageEngine`，并实现/override 接口中所有纯虚方法（部分为适配现有 API 的 wrapper/stub）。
+- **删除未接入的 `IStorageEngine`**：审计确认该接口没有运行时消费者；原适配层中的 `query()` 恒返回空数组，`update()`/`remove()` 恒返回 0，部分事务和索引方法忽略参数。已删除 `src/interfaces/storage_engine.h`、继承关系和整组伪 wrapper，避免错误被静默吞掉。后续如需要稳定抽象，必须先由真实执行路径驱动接口设计。
 - **算子迁移到 `src/executor/`**：`ExecutionPlan.h` / `ExecutionPlan.cpp` 从 `src/optimizer/` 移动到 `src/executor/`；`build.sh`、`build_tests.sh`、`CMakeLists.txt` 同步更新源文件与 include 路径。
 - **基础类型统一**：
   - 将原 `OpResult` 枚举合并到 `DBStatus`，扩展 `DBStatus` 包含 `TABLE_NOT_FOUND`、`DATABASE_NOT_FOUND`、`TABLE_ALREADY_EXISTS`、`INVALID_VALUE`、`NULL_NOT_ALLOWED`、`SYNTAX_ERROR`、`DUPLICATE_KEY`、`LOCK_CONFLICT`、`SERIALIZATION_FAILURE`。
   - 保留 `using OpResult = DBStatus;` 作为兼容别名。
   - 删除 `StorageEngine::IsolationLevel`，统一使用 `dbms::IsolationLevel`（`READ_UNCOMMITTED` / `READ_COMMITTED` / `REPEATABLE_READ` / `SERIALIZABLE`）。
-- **提取 `table_schema.h`**：将 `Column`、`ForeignKey`、`TableSchema` 定义从 `TableManage.h` 移到 `src/interfaces/table_schema.h`，使 `storage_engine.h` 可自包含并被 `TableManage.h` 在 `namespace dbms` 外部包含，避免嵌套命名空间问题。
+- **提取 `table_schema.h`**：将 `Column`、`ForeignKey`、`TableSchema` 定义从 `TableManage.h` 移到 `src/interfaces/table_schema.h`，保持 schema 类型独立于具体存储实现。
 
 ---
 
@@ -85,7 +85,7 @@
   - ✅ 事务命令：`BEGIN`/`START TRANSACTION`、`COMMIT`/`END`、`COMMIT PREPARED`、`ROLLBACK`/`ABORT`、`ROLLBACK PREPARED`、`SAVEPOINT`、`RELEASE SAVEPOINT`、`ROLLBACK TO SAVEPOINT`
   - ✅ 配置命令：`SET`（ROLE / SESSION AUTHORIZATION / CONSTRAINTS / TRANSACTION ISOLATION / TIMEZONE / 通用参数 / auto_vacuum）、`RESET`（ROLE / ALL / 参数）、`ALTER SYSTEM SET`
   - ✅ Utility 命令：`ANALYZE`、`VACUUM`（含 FULL / CONCURRENTLY）、`CHECKPOINT`、`TRUNCATE`、`LOCK TABLE`、`COMMENT ON`（TABLE / COLUMN）、`SECURITY LABEL`、`REFRESH MATERIALIZED VIEW`、`REINDEX`
-- **接口统一**：`IOperator`、`Operator`、`IIndexAM`、BPTreeIndexAM / HashIndexAM 适配器已完成（Phase 0）。
+- **接口收敛**：`IOperator`、`Operator`、`IIndexAM`、BPTreeIndexAM / HashIndexAM 适配器仍由真实执行路径使用；`IStorageEngine` 未接入执行器，已删除而不是继续保留伪实现（Phase 0）。
 
   - ✅ 程序命令：`CALL`、Prepared Statements（`PREPARE`、`EXECUTE`、`DEALLOCATE`）、`COPY` FROM/TO
   - ✅ 查询计划：`EXPLAIN`（含 ANALYZE / BUFFERS / FORMAT JSON / 括号选项）

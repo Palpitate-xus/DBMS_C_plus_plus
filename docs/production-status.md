@@ -11,6 +11,9 @@
 - 存储统一为 v2、8 KiB PostgreSQL 风格 heap page 和当前 schema 格式。
 - `PageAllocator`、`PageWrapper`、TOAST 路径统一使用同一页格式。
 - 删除确认无引用的 helper 和重复的 parser/聚合辅助代码。
+- 删除未被执行器使用的 `IStorageEngine` 伪适配层；`StorageEngine` 不再提供会静默返回空结果、0 或伪成功的接口 wrapper。
+
+启动安全边界：非空但 magic/版本不匹配的数据文件会直接拒绝打开，不会被清零或按新格式覆盖。部署时必须将数据目录初始化为当前格式，并通过备份恢复或 SQL 导入完成升级。
 
 数据兼容边界：旧 schema、旧 4 KiB 数据页和旧行头不会被读取或迁移。升级前必须导出 SQL，或删除并重建数据目录。
 
