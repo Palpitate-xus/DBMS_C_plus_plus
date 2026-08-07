@@ -23,7 +23,7 @@ dbms::StorageEngine g_engine;
 // Stubs for main.cpp helpers referenced by DdlExecutor.cpp / NetworkServer.cpp
 bool checkAdmin(const Session& s) { return s.permission == 1; }
 bool checkDB(const Session& s) { return !s.currentDB.empty(); }
-std::string resolveTableName(Session& s, const std::string& name) { return name; }
+std::string resolveTableName(Session&, const std::string& name) { return name; }
 
 // Global current database context for trigger executor in tests
 static std::string g_currentTestDB;

@@ -7,9 +7,7 @@
 // covered by create_table_options_test.cpp.
 // ============================================================================
 
-#include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
-#include "Session.h"
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
@@ -20,15 +18,7 @@
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
-namespace fs = std::filesystem;
-
 static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
-
-static void setupSession(Session& s, const std::string& db) {
-    s.username = "testuser";
-    s.permission = 1;
-    s.currentDB = db;
-}
 
 static dbms::TableSchema makeSchema(const std::string& tname, const std::vector<std::string>& colDefs) {
     dbms::TableSchema tbl;

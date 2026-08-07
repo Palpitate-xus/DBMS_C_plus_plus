@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | 构建质量收敛：清理 planner 的未使用 join cost 参数并修复 merge join cost 调用传错参数的问题；移除 parser 未使用参数名、测试中的死 helper 与多余 include。主构建、快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。 |
 | 2026-06-10 | 初始生成，基于 gap-analysis 逐条提取全部 gap |
 | 2026-06-21 | 大范围同步实现现状：Phase 1（Parser/AST）、Phase 2（Catalog/OID）、Phase 3（WAL/MVCC/Buffer/Cluster）、Phase 4 Wave 0~2（TypeRegistry/ExprEvaluator/DDL AST 桥/DDL 事务骨架/函数/聚合/窗口骨架）已落地，逐章更新状态标记与"已完成进展"小节。详见各章末尾与下文总览。 |
 | 2026-06-21（历史修正） | 当时的运行时核对曾将 Phase 1/2 标为“模块+测试、尚未接入”；后续 CatalogService、DDL bridge 和系统目录路径已接入，当前状态以 2026-08-07 审计及本文件各章节最新说明为准。 |

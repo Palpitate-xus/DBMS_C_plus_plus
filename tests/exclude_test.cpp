@@ -9,19 +9,12 @@
 
 extern dbms::StorageEngine g_engine;
 
-namespace fs = std::filesystem;
-
 static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser";
     s.permission = 1;
     s.currentDB = db;
-}
-
-static std::string trimRight(const std::string& s) {
-    size_t end = s.find_last_not_of(" \t\n\r");
-    return (end == std::string::npos) ? "" : s.substr(0, end + 1);
 }
 
 static void test_exclude_equality() {

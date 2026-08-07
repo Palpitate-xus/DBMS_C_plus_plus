@@ -869,7 +869,7 @@ OpPtr QueryPlanner::buildAggregatePlan(StorageEngine* engine, const PlanContext&
 
 // Estimate the cost of a join algorithm for given table sizes & index availability.
 static double estimateJoinCost(size_t leftRows, size_t rightRows,
-                                bool leftIndexed, bool rightIndexed,
+                                bool rightIndexed,
                                 const std::string& algo) {
     if (algo == "nlj") {
         // NLJ: O(left * right) without index; O(left * log(right)) with index on right
@@ -919,11 +919,11 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     }
 
     // Cost-based algorithm choice: try all three, pick the cheapest.
-    double costNLJ = estimateJoinCost(leftRows, rightRows, leftColIndexed, rightColIndexed, "nlj");
+    double costNLJ = estimateJoinCost(leftRows, rightRows, rightColIndexed, "nlj");
     double costMerge = (leftColIndexed && rightColIndexed)
-        ? estimateJoinCost(leftRows, rightColIndexed, true, true, "merge")
+        ? estimateJoinCost(leftRows, rightRows, true, "merge")
         : 1e18;
-    double costHash = estimateJoinCost(leftRows, rightRows, false, false, "hash");
+    double costHash = estimateJoinCost(leftRows, rightRows, false, "hash");
 
     // Decide: if small tables, NLJ is fine; otherwise pick cheapest.
     std::string chosenAlgo;
@@ -1393,6 +1393,7 @@ static bool indexProvidesOrdering(StorageEngine* engine, const std::string& dbna
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ctx,
                                       const std::vector<PathKey>& requiredPathkeys,
                                       const std::vector<EquivalenceClass>& eqClasses) {
+    (void)eqClasses;
     // Use equivalence classes to find additional filter conditions.
     // If t1.id = t2.fk is an equivalence class and we're scanning t1 with
     // WHERE t1.id = 5, we can also infer t2.fk = 5 for a subsequent join.

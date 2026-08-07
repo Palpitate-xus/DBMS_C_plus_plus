@@ -1749,7 +1749,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             bool asc = true;
             if (pos < tokens.size() && toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
             else if (pos < tokens.size() && toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
-            if (expr) stmt->orderBy.push_back({std::move(expr), asc});
+            if (expr) stmt->orderBy.push_back({std::move(expr), asc, false, ""});
             if (pos < tokens.size() && toLower(tokens[pos]) == "nulls") {
                 ++pos;
                 if (pos < tokens.size() && toLower(tokens[pos]) == "first") {
@@ -2761,7 +2761,7 @@ ParseResult SQLParser::parseAlter(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseTruncate(const std::string& sql) {
+ParseResult SQLParser::parseTruncate(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Truncate);
@@ -2772,7 +2772,7 @@ ParseResult SQLParser::parseTruncate(const std::string& sql) {
 // 事务语句解析
 // ------------------------------------------------------------------------
 
-ParseResult SQLParser::parseBegin(const std::string& sql) {
+ParseResult SQLParser::parseBegin(const std::string&) {
     ParseResult r;
     r.success = true;
     auto stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::Begin);
@@ -2781,7 +2781,7 @@ ParseResult SQLParser::parseBegin(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseCommit(const std::string& sql) {
+ParseResult SQLParser::parseCommit(const std::string&) {
     ParseResult r;
     r.success = true;
     auto stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::Commit);
@@ -2804,7 +2804,7 @@ ParseResult SQLParser::parseRollback(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseSavepoint(const std::string& sql) {
+ParseResult SQLParser::parseSavepoint(const std::string&) {
     ParseResult r;
     r.success = true;
     auto stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::Savepoint);
@@ -2813,7 +2813,7 @@ ParseResult SQLParser::parseSavepoint(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseRelease(const std::string& sql) {
+ParseResult SQLParser::parseRelease(const std::string&) {
     ParseResult r;
     r.success = true;
     auto stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::Release);
@@ -2935,7 +2935,7 @@ ParseResult SQLParser::parseUse(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseDiscard(const std::string& sql) {
+ParseResult SQLParser::parseDiscard(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Discard);
@@ -3019,35 +3019,35 @@ ParseResult SQLParser::parseAnalyze(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseVacuum(const std::string& sql) {
+ParseResult SQLParser::parseVacuum(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Vacuum);
     return r;
 }
 
-ParseResult SQLParser::parseCheckpoint(const std::string& sql) {
+ParseResult SQLParser::parseCheckpoint(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Checkpoint);
     return r;
 }
 
-ParseResult SQLParser::parseReindex(const std::string& sql) {
+ParseResult SQLParser::parseReindex(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Reindex);
     return r;
 }
 
-ParseResult SQLParser::parseCluster(const std::string& sql) {
+ParseResult SQLParser::parseCluster(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Cluster);
     return r;
 }
 
-ParseResult SQLParser::parseCopy(const std::string& sql) {
+ParseResult SQLParser::parseCopy(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<CopyStmt>();
@@ -3134,14 +3134,14 @@ ParseResult SQLParser::parseComment(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseSecurityLabel(const std::string& sql) {
+ParseResult SQLParser::parseSecurityLabel(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::SecurityLabel);
     return r;
 }
 
-ParseResult SQLParser::parseLock(const std::string& sql) {
+ParseResult SQLParser::parseLock(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Lock);
@@ -3152,21 +3152,21 @@ ParseResult SQLParser::parseLock(const std::string& sql) {
 // Listen / Notify / Unlisten
 // ------------------------------------------------------------------------
 
-ParseResult SQLParser::parseListen(const std::string& sql) {
+ParseResult SQLParser::parseListen(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Listen);
     return r;
 }
 
-ParseResult SQLParser::parseNotify(const std::string& sql) {
+ParseResult SQLParser::parseNotify(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Notify);
     return r;
 }
 
-ParseResult SQLParser::parseUnlisten(const std::string& sql) {
+ParseResult SQLParser::parseUnlisten(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Unlisten);
@@ -3177,28 +3177,28 @@ ParseResult SQLParser::parseUnlisten(const std::string& sql) {
 // Cursor
 // ------------------------------------------------------------------------
 
-ParseResult SQLParser::parseDeclare(const std::string& sql) {
+ParseResult SQLParser::parseDeclare(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Declare);
     return r;
 }
 
-ParseResult SQLParser::parseFetch(const std::string& sql) {
+ParseResult SQLParser::parseFetch(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Fetch);
     return r;
 }
 
-ParseResult SQLParser::parseMove(const std::string& sql) {
+ParseResult SQLParser::parseMove(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Move);
     return r;
 }
 
-ParseResult SQLParser::parseClose(const std::string& sql) {
+ParseResult SQLParser::parseClose(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Close);
@@ -3209,21 +3209,21 @@ ParseResult SQLParser::parseClose(const std::string& sql) {
 // Prepared statement
 // ------------------------------------------------------------------------
 
-ParseResult SQLParser::parsePrepare(const std::string& sql) {
+ParseResult SQLParser::parsePrepare(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Prepare);
     return r;
 }
 
-ParseResult SQLParser::parseExecute(const std::string& sql) {
+ParseResult SQLParser::parseExecute(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Execute);
     return r;
 }
 
-ParseResult SQLParser::parseDeallocate(const std::string& sql) {
+ParseResult SQLParser::parseDeallocate(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Deallocate);
@@ -3234,14 +3234,14 @@ ParseResult SQLParser::parseDeallocate(const std::string& sql) {
 // Grant / Revoke
 // ------------------------------------------------------------------------
 
-ParseResult SQLParser::parseGrant(const std::string& sql) {
+ParseResult SQLParser::parseGrant(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<GrantStmt>();
     return r;
 }
 
-ParseResult SQLParser::parseRevoke(const std::string& sql) {
+ParseResult SQLParser::parseRevoke(const std::string&) {
     ParseResult r;
     r.success = true;
     auto stmt = std::make_unique<GrantStmt>();
@@ -3254,21 +3254,21 @@ ParseResult SQLParser::parseRevoke(const std::string& sql) {
 // Call / Do / ImportForeignSchema
 // ------------------------------------------------------------------------
 
-ParseResult SQLParser::parseCall(const std::string& sql) {
+ParseResult SQLParser::parseCall(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Call);
     return r;
 }
 
-ParseResult SQLParser::parseDo(const std::string& sql) {
+ParseResult SQLParser::parseDo(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::Do);
     return r;
 }
 
-ParseResult SQLParser::parseImportForeignSchema(const std::string& sql) {
+ParseResult SQLParser::parseImportForeignSchema(const std::string&) {
     ParseResult r;
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::ImportForeignSchema);

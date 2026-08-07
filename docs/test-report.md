@@ -11,6 +11,7 @@
 - OS: Linux 6.8.0-117-generic
 - Compiler: g++ -std=c++17 -O2 -pthread
 - 标准编译命令：`./scripts/build.sh`；批量回归：`./scripts/run_all_tests_fast.sh`；独立测试入口：`./scripts/build_tests.sh`
+- 本轮构建质量检查：主程序在 `-Wall -Wextra` 下无编译警告；修复 join cost 参数错误及 parser/测试中的未使用代码。
 - 窗口函数端到端测试：`python3 tests/window_e2e_test.py`（9 用例，使用隔离临时目录和临时管理员账号）
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - 独立入口 `./scripts/build_tests.sh` 缓存生产对象后逐个测试独立链接运行，结果 `All tests passed`。
