@@ -2,6 +2,7 @@
 #include "HeapTupleHeader.h"
 #include "Config.h"
 #include <cassert>
+#include <filesystem>
 #include <iostream>
 
 dbms::Config g_config;
@@ -79,6 +80,29 @@ int main() {
         assert(rv.isVisible(buf, sizeof(buf), 2));
 
         std::cout << "[SUBXIP] heap header subTxnIds visibility OK\n";
+    }
+
+    // Test 4: CLOG status is authoritative for an xid inside the snapshot.
+    {
+        const std::string clogDir = "__t_subxip_clog";
+        std::filesystem::remove_all(clogDir);
+        CommitLog clog(clogDir);
+
+        StorageEngine::ReadView rv;
+        rv.creatorTxnId = 1;
+        rv.upLimitId = 10;
+        rv.lowLimitId = 100;
+        rv.commitLog = &clog;
+
+        // A missing CLOG entry is IN_PROGRESS and must remain invisible.
+        assert(!rv.isVisible(20));
+        clog.setStatus(20, CommitLog::Status::Committed);
+        assert(rv.isVisible(20));
+        clog.setStatus(21, CommitLog::Status::Aborted);
+        assert(!rv.isVisible(21));
+
+        std::filesystem::remove_all(clogDir);
+        std::cout << "[SUBXIP] CLOG visibility is fail-closed OK\n";
     }
 
     std::cout << "[SUBXIP] all passed\n";

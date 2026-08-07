@@ -192,9 +192,10 @@ bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
     if (commitLog) {
         auto status = commitLog->getStatus(static_cast<TxnId>(rowTxnId));
         if (status == CommitLog::Status::Committed) return true;
-        if (status == CommitLog::Status::Aborted) return false;
-        // SUB_COMMITTED: not visible until parent commits (simplified)
-        if (status == CommitLog::Status::SubCommitted) return false;
+        // ABORTED, SUB_COMMITTED, and an unflushed IN_PROGRESS status are all
+        // non-visible. Never infer a commit from a missing/unfinished CLOG
+        // entry: doing so leaks uncommitted rows across snapshots.
+        return false;
     }
 
     // Fallback: assume committed for xids that left the active set
