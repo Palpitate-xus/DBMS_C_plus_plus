@@ -1,10 +1,11 @@
 # 关系型数据库管理系统 (DBMS)
 
-基于 C++17 实现的关系型数据库管理系统，支持标准 SQL 交互，具备页式存储、B+ 树索引、MVCC 事务、查询优化器、网络服务等生产级数据库核心功能。对标 PostgreSQL 级功能完整度。
+基于 C++17 实现的关系型数据库管理系统，支持标准 SQL 交互，具备页式存储、B+ 树索引、MVCC 事务、查询优化器、网络服务等数据库核心功能。
 
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
+> **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态**: 全部 193 个 Wave 完成 (100%), 测试 PASS=112 FAIL=0
+> **当前状态（2026-08-07）**: 生产化重构进行中；回归基线 PASS=113 FAIL=0。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移。
 
 ## 功能特性
 
@@ -54,14 +55,14 @@
 - `COMMIT` — 提交事务，持久化到 WAL
 - `ROLLBACK` — 基于 Undo Log 的增量回滚
 - `SAVEPOINT spname` / `ROLLBACK TO SAVEPOINT spname` / `RELEASE SAVEPOINT spname`
-- **MVCC 快照隔离**：每行带 16 字节 MVCC 头部（creatorTxnId + rollbackPtr），事务内读取基于 ReadView 的可见性规则，实现读写不阻塞
+- **MVCC 快照隔离**：每行使用 PostgreSQL 风格 HeapTupleHeader，事务内读取基于 ReadView 的可见性规则
 - **隔离级别**：支持 `READ UNCOMMITTED` / `READ COMMITTED` / `REPEATABLE READ` / `SERIALIZABLE`
 - **全局事务 ID 生成器**：单调递增 64 位 txId，持久化到 `.txnid` 文件
 - **HOT 更新**：堆内元组直接更新（不更新索引指针），减少 WAL 写入与索引维护开销
 - **CLOG (Commit Log)**：事务提交状态位图，加速可见性判断与故障恢复
 
 ### 索引
-- **B+ 树主键索引**：磁盘页式存储（4096 字节/页），O(log n) 精确查找
+- **B+ 树主键索引**：磁盘页式存储，O(log n) 精确查找
 - **B+ 树二级索引**：单列/多列二级索引，支持覆盖索引和部分索引
 - **Hash 索引**：等值查询优化
 - **Fulltext 索引**：文本全文检索
@@ -77,7 +78,7 @@
 - **查询计划缓存**：重复 SQL 自动复用执行计划
 
 ### 存储引擎
-- **Slotted Page**：4096 字节页式存储，slot 数组管理记录位置
+- **Slotted Page**：8192 字节页式存储，line pointer 数组管理记录位置
 - **页分配器**：空闲页链表管理，支持页复用
 - **Buffer Pool**：LRU 缓存，减少磁盘 I/O
 - **页校验和**：Fletcher-16 校验，检测页损坏
@@ -86,7 +87,7 @@
 - **fsync 持久化**：WAL 写入、事务提交、Checkpoint 均调用 `fsync()` 保证数据落盘
 - **VARCHAR 变长行**：`[定长数据 | 变长偏移数组 | 变长数据]` 格式，减少存储浪费
 - **溢出页**：单行数据超过页空间时，大字段（TEXT/BLOB/JSON）自动存放到溢出页
-- **MVCC 行格式**：每行开头 16 字节头部（8B creatorTxnId + 8B rollbackPtr）
+- **MVCC 行格式**：每行开头为 PostgreSQL 风格 HeapTupleHeader（含 xmin/xmax/ctid、null bitmap 和对齐信息）
 - **统计信息**：`ANALYZE TABLE` 收集行数、列基数、最小/最大值、MCV（最常出现值）、多列统计
 - **VACUUM**：`VACUUM [tablename]` 回收已删除行占用的空间，页压缩并归还空页
 - **自动 VACUUM**：可配置阈值，死行数达到阈值时自动触发
@@ -495,8 +496,10 @@ show deadlocks;
 ├── TableManage.cpp          # 存储引擎实现（DDL/DML/索引/事务/权限/统计/MVCC/Checkpoint）
 ├── ExecutionPlan.h          # 查询执行计划框架（火山模型算子）
 ├── ExecutionPlan.cpp        # 查询优化器与 EXPLAIN，JOIN 算法选择
-├── Page.h                   # Slotted Page 数据结构
-├── Page.cpp                 # 页操作（插入/删除/更新/压缩/校验和）
+├── PgPage.h                 # 8 KiB PostgreSQL 风格 heap page
+├── PgPage.cpp               # 页操作（插入/删除/更新/压缩/校验和）
+├── PageWrapper.h            # 引擎 RowId 与 line pointer 的适配层
+├── PageWrapper.cpp          # 单一 v2 页格式实现
 ├── PageAllocator.h          # 页分配管理器
 ├── PageAllocator.cpp        # 页分配与空闲链表
 ├── BufferPool.h             # LRU 缓冲池
@@ -556,8 +559,8 @@ dbname/
 ├── wal                     # Write-Ahead Log（事务日志）
 ├── .txnid                  # 全局事务 ID 持久化文件
 ├── tablename.stc           # 表结构（二进制）
-├── tablename.dt            # 表数据（Slotted Page，4096 字节/页）
-├── tablename.idx           # B+ 树主键索引（4096 字节/页）
+├── tablename.dt            # 表数据（Slotted Page，8192 字节/页）
+├── tablename.idx           # B+ 树主键索引
 ├── tablename.colname.idx   # 二级索引
 ├── tablename.secidx        # 二级索引元数据
 └── tablename.hashidx       # Hash 索引
@@ -565,7 +568,7 @@ dbname/
 
 ## 页格式
 
-数据页（4096 字节）：
+数据页（8192 字节）：
 
 ```
 +--------------+------------------+-------------+---------------+--------+
@@ -630,7 +633,7 @@ Var Offset Array 每项 (4 bytes):
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与 Wave 进度 (193 waves 全部完成) |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 自动测试报告 (PASS=112 FAIL=0) |
+| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=113 FAIL=0） |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 

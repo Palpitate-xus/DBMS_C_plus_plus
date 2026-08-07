@@ -1,9 +1,9 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
-> 生成日期: 2026-07-03 (更新反映 Phase 5.1 + 并发实现后的实际状态)
+> 生成日期: 2026-08-07（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试: PASS=112 FAIL=0 (含 6 项 volcano 算子 + 10 项并发测试)
+> 测试基线: PASS=113 FAIL=0（含 Volcano 算子与并发测试）
 
 ---
 
@@ -13,8 +13,8 @@
 |------|--------------|---------|------|
 | 代码量 | ~1.2M 行 | ~66K 行 | ~18x |
 | 开发团队 | 全球数百人/20+年 | 单人/数周 | — |
-| 测试覆盖 | ~2000+ 测试 | 112 单元测试 | ~18x |
-| 功能完成度 | 100% (生产级) | DDL/DML核心 95%, 高级特性 50% | — |
+| 测试覆盖 | ~2000+ 测试 | 113 单元测试 | ~18x |
+| 功能完成度 | 不宣称生产级 | DDL/DML 核心已覆盖，高级特性和运维能力仍有缺口 | 以测试和代码路径为准 |
 
 ---
 
@@ -311,7 +311,7 @@
 4. **Gap locks / predicate locks** — 无法完全防止幻读
 5. **SSI (Serializable Snapshot Isolation)** — 可串行化隔离未实现
 6. **Bitmap scan** — 多索引组合 (Bitmap AND/OR) 缺失, 影响复杂 WHERE 性能
-7. **触发器 BEFORE 行级执行** — AFTER 触发器已工作, BEFORE 行级 + INSTEAD OF 视图触发器待补
+7. **INSTEAD OF 视图触发器** — BEFORE 行级执行已接入，视图写入触发器待补
 
 ### 🟡 重要缺失 (影响实用性)
 1. **Window Function executor** — parser 就绪但 executor 回退 legacy (无 WindowOp)

@@ -84,8 +84,7 @@ void BrinIndex::load() {
     if (!ifs) return;
     std::string line;
     std::getline(ifs, line);
-    size_t n = 0;
-    try { n = std::stoull(line); } catch (...) { return; }
+    try { std::stoull(line); } catch (...) { return; }
     std::getline(ifs, line);
     std::istringstream rss(line);
     RowId rid;

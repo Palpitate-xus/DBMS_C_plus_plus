@@ -20,9 +20,6 @@ static std::string stripQuotes(const std::string& s) {
 // ============================================================================
 
 static std::vector<std::string> collectParenthesized(const std::vector<std::string>& tokens, size_t& pos);
-static std::string collectExpression(const std::vector<std::string>& tokens, size_t& pos,
-                                      bool stopAtComma = false,
-                                      const std::set<std::string>& stopWords = {});
 static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseExpr(const std::vector<std::string>& tokens, size_t& pos);
 static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t& pos);
@@ -731,21 +728,6 @@ ParseResult SQLParser::parse(const std::string& sql) {
 // ============================================================================
 
 static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos);
-
-// 解析逗号分隔的列表，每个元素用 parseItem 解析
-static std::vector<ExprPtr> parseExprList(const std::vector<std::string>& tokens, size_t& pos) {
-    std::vector<ExprPtr> result;
-    while (pos < tokens.size()) {
-        auto expr = parseSimpleExpr(tokens, pos);
-        if (expr) result.push_back(std::move(expr));
-        if (pos < tokens.size() && tokens[pos] == ",") {
-            ++pos;
-            continue;
-        }
-        break;
-    }
-    return result;
-}
 
 // ============================================================================
 // Operator precedence expression parser (PostgreSQL-compatible)
@@ -3282,51 +3264,6 @@ ParseResult SQLParser::parseImportForeignSchema(const std::string& sql) {
     r.success = true;
     r.stmt = std::make_unique<Stmt>(SqlCommand::ImportForeignSchema);
     return r;
-}
-
-// ============================================================================
-// 表达式解析辅助（Phase 1.2 简化版：收集 token 直到匹配括号）
-// ============================================================================
-
-static std::string collectExpression(const std::vector<std::string>& tokens, size_t& pos,
-                                      bool stopAtComma,
-                                      const std::set<std::string>& stopWords) {
-    std::string expr;
-    int parenDepth = 0;
-    while (pos < tokens.size()) {
-        const std::string& tok = tokens[pos];
-        if (tok == "(") {
-            ++parenDepth;
-            expr += "(";
-            ++pos;
-            continue;
-        }
-        if (tok == ")") {
-            if (parenDepth > 0) {
-                --parenDepth;
-                expr += ")";
-                ++pos;
-                continue;
-            }
-            // 顶层右括号，结束
-            break;
-        }
-        if (parenDepth == 0) {
-            if (tok == ",") {
-                if (stopAtComma) break;
-                expr += ",";
-                ++pos;
-                continue;
-            }
-            if (stopWords.count(SQLParser::toLower(tok)) > 0) break;
-        }
-        if (!expr.empty() && expr.back() != '(' && expr.back() != ',') expr += " ";
-        expr += tok;
-        ++pos;
-    }
-    // trim trailing space
-    while (!expr.empty() && expr.back() == ' ') expr.pop_back();
-    return expr;
 }
 
 // 从当前位置解析到匹配的 ')'，返回包含在内的 token 列表（不含外层括号）

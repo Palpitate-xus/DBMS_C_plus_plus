@@ -22,7 +22,7 @@ namespace dbms {
 //   [实际列数据]
 //
 // 注意：为了兼容现有 16 字节 header（creatorTxnId + rollbackPtr），
-// 新表使用 formatVersion=2 时启用本 header；旧表保持原格式。
+// All heap tuples use this header in the current storage format (v2).
 
 #pragma pack(push, 1)
 

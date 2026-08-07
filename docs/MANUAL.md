@@ -1,8 +1,10 @@
 # DBMS 完整使用手册
 
-> 最后更新: 2026-07-02
-> 版本: Wave 4.x 全量完成
-> 测试: PASS=109 FAIL=0 (`scripts/run_all_tests_fast.sh`)
+> 最后更新: 2026-08-07
+> 版本: v2 存储格式 / 生产化重构阶段
+> 回归基线: PASS=113 FAIL=0 (`scripts/run_all_tests_fast.sh`)
+
+> 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
 ---
 

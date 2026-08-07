@@ -113,9 +113,9 @@ public:
     DBStatus checkpoint() override;
     Lsn getCurrentLsn() const override;
 
-    // Page size for a given storage format version
+    // The heap format is deliberately single-versioned.
     static size_t pageSizeForFormatVersion(uint32_t formatVersion) {
-        return formatVersion >= 2 ? 8192 : 4096;
+        return formatVersion == DATA_FILE_FORMAT_VERSION ? PgPage::PAGE_SIZE : 0;
     }
 
     // Database operations
@@ -1043,8 +1043,6 @@ private:
     // Page-based heap storage
     mutable std::map<std::string, std::unique_ptr<PageAllocator>> pageAllocators_;
     void closeAllPageAllocators();
-    void migrateAllDataFiles();
-    void migrateToPageStorage(const std::string& dbname, const std::string& tablename) const;
 
     // Free Space Map + Visibility Map (fork files)
     mutable std::map<std::string, std::unique_ptr<FreeSpaceMap>> fsmCache_;
@@ -1068,7 +1066,6 @@ private:
     mutable std::map<std::string, Lsn> lastCheckpointLsns_;
 
     // Helpers to emit WAL records for heap operations.
-    // These are no-ops for legacy formatVersion 0/1 tables.
     Lsn walPageImage(const std::string& dbname, const std::string& tablename,
                      uint32_t pageId, const char* pageBuf, size_t pageSize,
                      bool beforeImage);

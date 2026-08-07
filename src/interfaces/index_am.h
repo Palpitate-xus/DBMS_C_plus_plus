@@ -8,10 +8,8 @@ namespace dbms {
 
 // ============================================================================
 // 索引访问方法接口 (Index Access Method)
-// Phase 6 逐步实现：BTree/Hash/GIN/GiST/BRIN/SP-GiST 均实现此接口
-//
-// 当前状态：BPTree、HashIndex、SPGiSTIndex 已实现于 src/access/，
-// 尚未统一实现 IIndexAM 接口。后续 Phase 将抽象为可插拔的索引访问方法。
+// B-tree and hash adapters implement this contract in src/access/. Other
+// access methods may add specialized capabilities without changing callers.
 // ============================================================================
 
 class IIndexAM {

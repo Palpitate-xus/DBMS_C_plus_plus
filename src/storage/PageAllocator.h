@@ -5,7 +5,7 @@
 #include <string>
 
 #include "BufferPool.h"
-#include "Page.h"
+#include "DataFileHeader.h"
 #include "PageWrapper.h"
 
 namespace dbms {
@@ -16,7 +16,8 @@ namespace dbms {
 class PageAllocator {
 public:
     PageAllocator(const std::string& filename, size_t rowSize,
-                  size_t pageSize = 4096, uint32_t formatVersion = 0);
+                  size_t pageSize = 8192,
+                  uint32_t formatVersion = DATA_FILE_FORMAT_VERSION);
     ~PageAllocator();
 
     // Open or create the data file.
@@ -58,8 +59,8 @@ private:
     std::unique_ptr<BufferPool> bp_;
 
     // Read/write the file header stored in page 0.
-    bool readFileHeader(Page::FileHeader& fh);
-    void writeFileHeader(const Page::FileHeader& fh);
+    bool readFileHeader(DataFileHeader& fh);
+    void writeFileHeader(const DataFileHeader& fh);
 };
 
 } // namespace dbms

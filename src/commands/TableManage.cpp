@@ -27,8 +27,8 @@ std::string dbms::sqlstateForDBStatus(DBStatus res) {
         case DBStatus::DUPLICATE_KEY: return "23505";
         case DBStatus::LOCK_CONFLICT: return "55P03";
         case DBStatus::SERIALIZATION_FAILURE: return "40001";
+        default: return "XX000";
     }
-    return "XX000"; // internal_error
 }
 
 static std::string escapeString(const std::string& s) {
@@ -201,14 +201,10 @@ bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
     return true;
 }
 
-// PostgreSQL-style visibility using HeapTupleHeader (formatVersion >= 2)
+// Visibility using the current PostgreSQL-style HeapTupleHeader.
 bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint32_t formatVersion) const {
     if (len == 0) return false;
-    if (!usesHeapTupleHeader(formatVersion)) {
-        uint64_t rowTxnId = 0;
-        std::memcpy(&rowTxnId, rowBuffer, sizeof(uint64_t));
-        return isVisible(rowTxnId);
-    }
+    if (!usesHeapTupleHeader(formatVersion)) return false;
 
     if (len < sizeof(HeapTupleHeaderData)) return false;
     const auto* htup = castHeapHeader(rowBuffer);
@@ -311,52 +307,6 @@ static std::string evalExpressionSql(
     return res.isNull ? "" : res.value;
 }
 
-// SQL LIKE pattern matching (% = any sequence, _ = single char), case-insensitive
-// Evaluate a simple generated-column expression: supports binary ops + - * /
-// e.g. "age * 2", "salary + bonus", "price - discount"
-static std::string evaluateGeneratedExpr(
-    const std::string& expr,
-    const std::map<std::string, std::string>& colValues) {
-    // Find the operator
-    char op = 0;
-    size_t opPos = std::string::npos;
-    for (size_t i = 0; i < expr.size(); ++i) {
-        if (expr[i] == '+' || expr[i] == '-' || expr[i] == '*' || expr[i] == '/') {
-            op = expr[i];
-            opPos = i;
-            break;
-        }
-    }
-    if (opPos == std::string::npos || op == 0) return "";
-    std::string left = trim(expr.substr(0, opPos));
-    std::string right = trim(expr.substr(opPos + 1));
-    if (left.empty() || right.empty()) return "";
-    // Resolve operand values
-    auto resolve = [&](const std::string& token) -> double {
-        auto it = colValues.find(token);
-        if (it != colValues.end() && !it->second.empty()) {
-            try { return std::stod(it->second); } catch (...) {}
-        }
-        try { return std::stod(token); } catch (...) { return 0.0; }
-    };
-    double lv = resolve(left);
-    double rv = resolve(right);
-    double result = 0.0;
-    switch (op) {
-        case '+': result = lv + rv; break;
-        case '-': result = lv - rv; break;
-        case '*': result = lv * rv; break;
-        case '/': result = (rv != 0.0) ? lv / rv : 0.0; break;
-    }
-    // Return as integer string if whole number, else decimal
-    if (result == std::floor(result)) {
-        return std::to_string(static_cast<int64_t>(result));
-    }
-    std::ostringstream oss;
-    oss << result;
-    return oss.str();
-}
-
 static bool likeMatch(const std::string& text, const std::string& pattern) {
     std::string t = text;
     std::string p = pattern;
@@ -392,7 +342,7 @@ static bool regexMatch(const std::string& text, const std::string& pattern) {
 }
 
 // ========================================================================
-// Helper: fixed-length string IO (for backward-compatible binary format)
+// Helper: fixed-length string IO for the current binary catalog format.
 // ========================================================================
 static void writeFixedString(std::ostream& out, const std::string& s, size_t len) {
     std::string buf = s;
@@ -1014,7 +964,6 @@ Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK) {
 // ========================================================================
 StorageEngine::StorageEngine() {
     recoverAllDatabases();
-    migrateAllDataFiles();
     catalogService_ = std::make_unique<CatalogService>(*this);
     // Keep trigger WHEN semantics available for direct StorageEngine users
     // (unit tests and embedded callers) as well as the interactive frontend.
@@ -1533,15 +1482,11 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                                   uint64_t creatorTxnId);
 
 // ========================================================================
-// Row header abstraction: legacy 16-byte header vs PostgreSQL HeapTupleHeader
+// PostgreSQL HeapTupleHeader row format
 // ========================================================================
-// formatVersion 0/1: 16 bytes [creatorTxnId:8][rollbackPtr:8]
-// formatVersion 2:   HeapTupleHeaderData (t_xmin/t_xmax/t_ctid/infomask/t_hoff)
-
-static constexpr size_t LEGACY_MVCC_HEADER_SIZE = 16;
 
 static bool usesHeapTupleHeader(uint32_t formatVersion) {
-    return formatVersion >= 2;
+    return formatVersion == DATA_FILE_FORMAT_VERSION;
 }
 
 static size_t heapTupleHeaderSize(const TableSchema& tbl) {
@@ -1549,11 +1494,12 @@ static size_t heapTupleHeaderSize(const TableSchema& tbl) {
 }
 
 static size_t rowHeaderSize(const TableSchema& tbl) {
-    return usesHeapTupleHeader(tbl.formatVersion) ? heapTupleHeaderSize(tbl) : LEGACY_MVCC_HEADER_SIZE;
+    return heapTupleHeaderSize(tbl);
 }
 
 static size_t rowHeaderSize(uint32_t formatVersion, size_t natts) {
-    return usesHeapTupleHeader(formatVersion) ? computeHeapHeaderSize(static_cast<int>(natts)) : LEGACY_MVCC_HEADER_SIZE;
+    (void)formatVersion;
+    return computeHeapHeaderSize(static_cast<int>(natts));
 }
 
 static size_t dataOffset(const TableSchema& tbl) {
@@ -1562,15 +1508,6 @@ static size_t dataOffset(const TableSchema& tbl) {
 
 static size_t dataOffset(uint32_t formatVersion, size_t natts) {
     return rowHeaderSize(formatVersion, natts);
-}
-
-// Build a legacy 16-byte MVCC header
-static std::string buildLegacyHeader(uint64_t creatorTxnId) {
-    std::string header;
-    uint64_t rollbackPtr = 0;
-    header.append(reinterpret_cast<const char*>(&creatorTxnId), sizeof(uint64_t));
-    header.append(reinterpret_cast<const char*>(&rollbackPtr), sizeof(uint64_t));
-    return header;
 }
 
 // Build a PostgreSQL HeapTupleHeader
@@ -1589,73 +1526,30 @@ static std::string buildHeapTupleHeader(const TableSchema& tbl,
     return header;
 }
 
-// Read xmin from a row buffer
-static uint64_t getRowXmin(const char* rowBuffer, size_t len, uint32_t formatVersion) {
-    if (len == 0) return 0;
-    if (usesHeapTupleHeader(formatVersion)) {
-        if (len < sizeof(HeapTupleHeaderData)) return 0;
-        auto* htup = castHeapHeader(rowBuffer);
-        return htup->t_fields.t_xmin;
-    }
-    uint64_t creatorTxnId = 0;
-    std::memcpy(&creatorTxnId, rowBuffer, sizeof(uint64_t));
-    return creatorTxnId;
-}
-
-// Read xmax from a row buffer
-static uint64_t getRowXmax(const char* rowBuffer, size_t len, uint32_t formatVersion) {
-    if (len == 0) return 0;
-    if (usesHeapTupleHeader(formatVersion)) {
-        if (len < sizeof(HeapTupleHeaderData)) return 0;
-        auto* htup = castHeapHeader(rowBuffer);
-        return htup->t_fields.t_xmax;
-    }
-    // Legacy header has no xmax; treat as never deleted
-    return 0;
-}
-
 // Set xmax on a mutable row buffer
 static void setRowXmax(char* rowBuffer, size_t len, uint32_t formatVersion, uint64_t xmax) {
     if (len == 0) return;
-    if (usesHeapTupleHeader(formatVersion)) {
-        if (len < sizeof(HeapTupleHeaderData)) return;
-        auto* htup = castHeapHeader(rowBuffer);
-        htup->t_fields.t_xmax = static_cast<uint32_t>(xmax);
-    }
-    // Legacy: no-op
-}
-
-// Read ctid from a row buffer
-static ItemPointer getRowCtid(const char* rowBuffer, size_t len, uint32_t formatVersion) {
-    if (len == 0) return { INVALID_PAGE_ID, 0 };
-    if (usesHeapTupleHeader(formatVersion)) {
-        if (len < sizeof(HeapTupleHeaderData)) return { INVALID_PAGE_ID, 0 };
-        return getCtid(castHeapHeader(rowBuffer));
-    }
-    return { INVALID_PAGE_ID, 0 };
+    if (!usesHeapTupleHeader(formatVersion) || len < sizeof(HeapTupleHeaderData)) return;
+    auto* htup = castHeapHeader(rowBuffer);
+    htup->t_fields.t_xmax = static_cast<uint32_t>(xmax);
 }
 
 // Set ctid on a mutable row buffer
 static void setRowCtid(char* rowBuffer, size_t len, uint32_t formatVersion, const ItemPointer& ctid) {
     if (len == 0) return;
-    if (usesHeapTupleHeader(formatVersion)) {
-        if (len < sizeof(HeapTupleHeaderData)) return;
-        setCtid(castHeapHeader(rowBuffer), ctid);
-    }
+    if (!usesHeapTupleHeader(formatVersion) || len < sizeof(HeapTupleHeaderData)) return;
+    setCtid(castHeapHeader(rowBuffer), ctid);
 }
 
 // Strip the MVCC header and return the payload data
 static std::string stripRowHeader(const char* rowBuffer, size_t len, uint32_t formatVersion, size_t natts) {
     size_t hdrLen = rowHeaderSize(formatVersion, natts);
     if (len <= hdrLen) return {};
-    if (usesHeapTupleHeader(formatVersion)) {
-        if (len < sizeof(HeapTupleHeaderData)) return {};
-        auto* htup = castHeapHeader(rowBuffer);
-        size_t off = htup->t_hoff;
-        if (off == 0 || off > len) off = hdrLen;
-        return std::string(rowBuffer + off, len - off);
-    }
-    return std::string(rowBuffer + hdrLen, len - hdrLen);
+    if (!usesHeapTupleHeader(formatVersion) || len < sizeof(HeapTupleHeaderData)) return {};
+    auto* htup = castHeapHeader(rowBuffer);
+    size_t off = htup->t_hoff;
+    if (off == 0 || off > len) off = hdrLen;
+    return std::string(rowBuffer + off, len - off);
 }
 
 static std::string stripRowHeader(const std::string& rowBuffer, uint32_t formatVersion, size_t natts) {
@@ -1671,24 +1565,15 @@ static std::string replaceRowData(const std::string& fullRow,
     if (fullRow.empty()) return newData;
     size_t hdrLen = rowHeaderSize(formatVersion, natts);
     if (fullRow.size() < hdrLen) return newData;
-    if (usesHeapTupleHeader(formatVersion)) {
-        const auto* htup = castHeapHeader(fullRow.data());
-        hdrLen = htup->t_hoff;
-    }
+    if (!usesHeapTupleHeader(formatVersion) || fullRow.size() < sizeof(HeapTupleHeaderData)) return newData;
+    const auto* htup = castHeapHeader(fullRow.data());
+    hdrLen = htup->t_hoff;
     std::string result;
     result.reserve(hdrLen + newData.size());
     result.append(fullRow.data(), hdrLen);
     result.append(newData);
     return result;
 }
-
-// For header-stripped data, return the fixed-data offset for a given column index.
-// This mirrors buildRowBuffer's layout and is used by extractColumnValue.
-static size_t legacyDataOffset(uint32_t formatVersion, size_t natts) {
-    (void)formatVersion; (void)natts;
-    return 0; // stripped data always starts at 0
-}
-
 
 // ========================================================================
 // WITH CHECK OPTION helpers
@@ -3293,25 +3178,17 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    if (tbl.formatVersion != DATA_FILE_FORMAT_VERSION) {
+        std::cerr << "[storage] table " << dbname << "/" << tablename
+                  << " uses an unsupported schema format; recreate it" << std::endl;
+        return nullptr;
+    }
     // Route data file according to tablespace
     std::filesystem::path baseDir = tablespaceDir(dbname, tbl.tablespace);
     std::filesystem::path dt = baseDir / (tablename + ".dt");
 
-    // Migrate legacy file if needed
-    if (std::filesystem::exists(dt)) {
-        std::ifstream check(dt, std::ios::binary);
-        if (check) {
-            uint32_t magic = 0;
-            check.read(reinterpret_cast<char*>(&magic), 4);
-            if (magic != Page::MAGIC) {
-                check.close();
-                migrateToPageStorage(dbname, tablename);
-            }
-        }
-    }
-
     auto pa = std::make_unique<PageAllocator>(dt.string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-    pa->open();
+    if (!pa->open()) return nullptr;
     PageAllocator* ptr = pa.get();
     pageAllocators_[key] = std::move(pa);
     return ptr;
@@ -3367,73 +3244,6 @@ CommitLog* StorageEngine::getCommitLog(const std::string& dbname) const {
 
 void StorageEngine::closeAllCommitLogs() {
     commitLogs_.clear();
-}
-
-void StorageEngine::migrateToPageStorage(const std::string& dbname,
-                                          const std::string& tablename) const {
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t rowSize = tbl.rowSize();
-    std::filesystem::path oldPath = dataPath(dbname, tablename);
-    std::string tmpPath = oldPath.string() + ".new";
-
-    {
-        PageAllocator pa(tmpPath, rowSize, pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        pa.open();
-        std::ifstream in(oldPath, std::ios::binary);
-        if (in && rowSize > 0) {
-            in.seekg(0, std::ios::end);
-            auto fs = static_cast<size_t>(in.tellg());
-            in.seekg(0, std::ios::beg);
-            size_t rowCount = fs / rowSize;
-            uint32_t currentPageId = 0;
-            for (size_t i = 0; i < rowCount; ++i) {
-                std::string row(rowSize, '\0');
-                in.read(row.data(), static_cast<std::streamsize>(rowSize));
-                if (currentPageId == 0) {
-                    currentPageId = pa.allocPage();
-                }
-                char* buf = pa.fetchPage(currentPageId);
-                PageWrapper page(buf, pa.pageSize(), tbl.formatVersion);
-                uint16_t slotId = 0;
-                if (!page.insert(row.data(), rowSize, slotId)) {
-                    pa.markDirty(currentPageId);
-                    pa.unpinPage(currentPageId);
-                    currentPageId = pa.allocPage();
-                    buf = pa.fetchPage(currentPageId);
-                    page = PageWrapper(buf, pa.pageSize(), tbl.formatVersion);
-                    page.insert(row.data(), rowSize, slotId);
-                }
-                pa.markDirty(currentPageId);
-                pa.unpinPage(currentPageId);
-            }
-        }
-        pa.close();
-    }
-    std::filesystem::remove(oldPath);
-    std::filesystem::rename(tmpPath, oldPath);
-}
-
-void StorageEngine::migrateAllDataFiles() {
-    for (const auto& entry : std::filesystem::directory_iterator(".", std::filesystem::directory_options::skip_permission_denied)) {
-        try { if (!entry.is_directory()) continue; } catch (...) { continue; }
-        std::string dbname;
-        try { dbname = entry.path().filename().string(); } catch (...) { continue; }
-        try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
-        auto tables = getTableNames(dbname);
-        for (const auto& tname : tables) {
-            std::filesystem::path dt = dataPath(dbname, tname);
-            if (!std::filesystem::exists(dt)) continue;
-            std::ifstream check(dt, std::ios::binary);
-            if (!check) continue;
-            uint32_t magic = 0;
-            check.read(reinterpret_cast<char*>(&magic), 4);
-            if (magic != Page::MAGIC) {
-                std::cerr << "[MIGRATION] Migrating " << dbname << "/" << tname
-                          << " to page-based storage..." << std::endl;
-                migrateToPageStorage(dbname, tname);
-            }
-        }
-    }
 }
 
 int64_t StorageEngine::encodeRid(uint32_t pageId, uint16_t slotId) {
@@ -6806,6 +6616,9 @@ std::vector<std::string> StorageEngine::getDatabaseNames() const {
         } catch (...) { continue; }
         std::string dbname;
         try { dbname = entry.path().filename().string(); } catch (...) { continue; }
+        if (dbname.empty() || dbname[0] == '.' ||
+            dbname.find(".txn_backup") != std::string::npos ||
+            dbname.find(".archive") != std::string::npos) continue;
         try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
         result.push_back(dbname);
     }
@@ -6845,7 +6658,7 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     return DBStatus::OK;
 }
 
-constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420006;  // "DB" + version 6 (added check constraint deferrability)
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420007;  // "DB" + current clean schema format
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -6921,7 +6734,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(reinterpret_cast<const char*>(&cidx), 4);
         }
     }
-    // Write partitioning info (new: backward-compatible)
+    // Write partitioning info in the current schema format.
     int32_t ptype = static_cast<int32_t>(tbl.partitionType);
     out.write(reinterpret_cast<const char*>(&ptype), 4);
     writeFixedString(out, tbl.partitionKey, MAX_COL_NAME_LEN);
@@ -6948,7 +6761,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         out.write(reinterpret_cast<const char*>(&hcount), 4);
     }
 
-    // Subpartitioning info (new, backward-compatible)
+    // Write subpartitioning info in the current schema format.
     int32_t sptype = static_cast<int32_t>(tbl.subPartitionType);
     out.write(reinterpret_cast<const char*>(&sptype), 4);
     if (tbl.subPartitionType != TableSchema::PartitionType::None) {
@@ -6959,7 +6772,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         }
     }
 
-    // Named constraint names (appended for backward compatibility)
+    // Named constraint names.
     int32_t namedCheckCount = 0;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (!tbl.cols[i].checkConstraintName.empty()) namedCheckCount++;
@@ -6991,21 +6804,21 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             writeFixedString(out, tbl.fks[i].name, MAX_TABLE_NAME_LEN);
         }
     }
-    // UNLOGGED flag (backward-compatible: new field at tail)
+    // UNLOGGED flag.
     uint8_t unloggedFlag = tbl.isUnlogged ? 1 : 0;
     out.write(reinterpret_cast<const char*>(&unloggedFlag), 1);
-    // Row-Level Security flags (backward-compatible)
+    // Row-Level Security flags.
     uint8_t rlsFlags = (tbl.rowLevelSecurity ? 1 : 0) | (tbl.forceRowLevelSecurity ? 2 : 0);
     out.write(reinterpret_cast<const char*>(&rlsFlags), 1);
-    // Default partition name (backward-compatible)
+    // Default partition name.
     writeFixedString(out, tbl.defaultPartitionName, MAX_TABLE_NAME_LEN);
     // Storage format version (new in version 4)
     out.write(reinterpret_cast<const char*>(&tbl.formatVersion), 4);
-    // Tablespace (backward-compatible tail append)
+    // Tablespace.
     uint16_t tsLen = static_cast<uint16_t>(tbl.tablespace.size());
     out.write(reinterpret_cast<const char*>(&tsLen), 2);
     if (tsLen > 0) out.write(tbl.tablespace.data(), tsLen);
-    // Column collations (backward-compatible tail append): count + (cidx, name-len, name)
+    // Column collations: count + (cidx, name-len, name).
     int32_t collCount = 0;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (!tbl.cols[i].collation.empty()) collCount++;
@@ -7028,19 +6841,19 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return tbl;
 
-    bool hasVersionHeader = (firstInt >= 0x44420001 && firstInt <= 0x44420006);
-    bool hasArray = (firstInt >= 0x44420002);
-    bool hasOnUpdate = (firstInt >= 0x44420003);
-    bool hasFormatVersion = (firstInt >= 0x44420004);
-    bool hasGeneratedKind = (firstInt >= 0x44420005);
-    bool hasCheckDeferrability = (firstInt >= 0x44420006);
-    int32_t len = 0;
-    if (hasVersionHeader) {
-        in.read(reinterpret_cast<char*>(&len), 4);
-    } else {
-        // Legacy format: first 4 bytes are column count
-        len = firstInt;
+    if (firstInt != SCHEMA_FORMAT_VERSION) {
+        std::cerr << "[catalog] unsupported schema format for table " << tablename
+                  << "; recreate the database with the current binary" << std::endl;
+        return tbl;
     }
+    constexpr bool hasVersionHeader = true;
+    constexpr bool hasArray = true;
+    constexpr bool hasOnUpdate = true;
+    constexpr bool hasFormatVersion = true;
+    constexpr bool hasGeneratedKind = true;
+    constexpr bool hasCheckDeferrability = true;
+    int32_t len = 0;
+    in.read(reinterpret_cast<char*>(&len), 4);
     if (len < 0 || len > static_cast<int32_t>(MAX_COLUMNS)) return tbl;
     tbl.len = static_cast<size_t>(len);
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -7096,7 +6909,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 tbl.cols[i].generatedKind = 's';
             }
         }
-        // Read enum values (backward-compatible: may not exist in old files)
+        // Read enum values.
         uint16_t enumCount = 0;
         in.read(reinterpret_cast<char*>(&enumCount), 2);
         if (in && enumCount > 0 && enumCount <= 1000) {
@@ -7273,18 +7086,18 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
-    // UNLOGGED flag (backward-compatible: may not exist in old files)
+    // UNLOGGED flag.
     uint8_t unloggedFlag = 0;
     in.read(reinterpret_cast<char*>(&unloggedFlag), 1);
     if (in) tbl.isUnlogged = (unloggedFlag != 0);
-    // Row-Level Security flags (backward-compatible)
+    // Row-Level Security flags.
     uint8_t rlsFlags = 0;
     in.read(reinterpret_cast<char*>(&rlsFlags), 1);
     if (in) {
         tbl.rowLevelSecurity = (rlsFlags & 1) != 0;
         tbl.forceRowLevelSecurity = (rlsFlags & 2) != 0;
     }
-    // Default partition name (backward-compatible)
+    // Default partition name.
     std::string dpName = readFixedString(in, MAX_TABLE_NAME_LEN);
     if (in) tbl.defaultPartitionName = dpName;
     // Storage format version (new in version 4)
@@ -7292,7 +7105,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         uint32_t fv = 0;
         in.read(reinterpret_cast<char*>(&fv), 4);
         if (in) tbl.formatVersion = fv;
-        // Tablespace (backward-compatible tail append)
+        // Tablespace.
         uint16_t tsLen = 0;
         in.read(reinterpret_cast<char*>(&tsLen), 2);
         if (in && tsLen > 0 && tsLen <= MAX_TABLE_NAME_LEN) {
@@ -7301,7 +7114,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             if (in) tbl.tablespace = std::move(ts);
         }
     }
-    // Column collations (backward-compatible tail append; ignore if EOF)
+    // Column collations.
     int32_t collCount = 0;
     in.read(reinterpret_cast<char*>(&collCount), 4);
     if (in && collCount > 0 && collCount <= static_cast<int32_t>(MAX_COLUMNS)) {
@@ -7409,8 +7222,8 @@ PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
     auto pa = std::make_unique<PageAllocator>(toastDataPath(dbname, tablename).string(),
                                               /*rowSize=*/0, // variable-length rows
                                               /*pageSize=*/8192,
-                                              /*formatVersion=*/0); // legacy, no heap header
-    pa->open();
+                                              /*formatVersion=*/DATA_FILE_FORMAT_VERSION);
+    if (!pa->open()) return nullptr;
     PageAllocator* ptr = pa.get();
     toastPageAllocators_[key] = std::move(pa);
     return ptr;
@@ -7474,7 +7287,7 @@ void StorageEngine::writeToast(const std::string& dbname, const std::string& tab
         for (uint32_t pid = (numPages == 0 ? 0 : 1); pid < numPages && !inserted; ++pid) {
             lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
             char* buf = pa->fetchPage(pid);
-            PageWrapper page(buf, pa->pageSize(), 0);
+            PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
             if (page.canFit(row.size())) {
                 if (page.insert(row.data(), row.size(), slotId)) {
                     pa->markDirty(pid);
@@ -7490,7 +7303,7 @@ void StorageEngine::writeToast(const std::string& dbname, const std::string& tab
             uint32_t pid = pa->allocPage();
             lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
             char* buf = pa->fetchPage(pid);
-            PageWrapper page(buf, pa->pageSize(), 0);
+            PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
             if (page.insert(row.data(), row.size(), slotId)) {
                 pa->markDirty(pid);
                 int64_t rid = encodeRid(pid, slotId);
@@ -7525,7 +7338,7 @@ std::string StorageEngine::readToast(const std::string& dbname, const std::strin
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
             break;
         }
-        PageWrapper page(buf, pa->pageSize(), 0);
+        PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
         const char* row = nullptr;
         size_t rowLen = 0;
         if (!page.read(slotId, row, rowLen) || rowLen < sizeof(uint64_t) + sizeof(uint32_t)) {
@@ -7567,7 +7380,7 @@ void StorageEngine::deleteToast(const std::string& dbname, const std::string& ta
         lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
         char* buf = pa->fetchPage(pid);
         if (buf) {
-            PageWrapper page(buf, pa->pageSize(), 0);
+            PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
             page.remove(slotId);
             pa->markDirty(pid);
         }
@@ -7673,8 +7486,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         }
     }
 
-    if (tblWithVersion.formatVersion == 0) {
-        tblWithVersion.formatVersion = 2;  // Default to PostgreSQL 8KB format
+    if (tblWithVersion.formatVersion != DATA_FILE_FORMAT_VERSION) {
+        if (error) *error = "unsupported table storage format; expected format version 2";
+        return DBStatus::INVALID_ARGUMENT;
     }
     size_t pageSize = pageSizeForFormatVersion(tblWithVersion.formatVersion);
 
@@ -7719,7 +7533,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     if (hasVarLen) {
         auto toastPa = std::make_unique<PageAllocator>(
             toastDataPath(dbname, tblWithVersion.tablename).string(),
-            /*rowSize=*/0, /*pageSize=*/8192, /*formatVersion=*/0);
+            /*rowSize=*/0, /*pageSize=*/8192, /*formatVersion=*/DATA_FILE_FORMAT_VERSION);
         toastPa->open(); toastPa->close();
         BPTree toastIdx(toastIndexPath(dbname, tblWithVersion.tablename).string());
         toastIdx.open();
@@ -9830,37 +9644,6 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
 }
 
 // ========================================================================
-// Parse CHECK expression into Condition list
-// e.g., "score>=0andscore<=100" -> [{"score",">=","0"}, {"score","<=","100"}]
-// ========================================================================
-static std::vector<StorageEngine::Condition> parseCheckConditions(const std::string& expr) {
-    std::vector<StorageEngine::Condition> result;
-    size_t pos = 0;
-    while (pos < expr.size()) {
-        size_t andPos = expr.find("and", pos);
-        std::string condStr = (andPos == std::string::npos) ? expr.substr(pos) : expr.substr(pos, andPos - pos);
-        if (!condStr.empty()) {
-            size_t opStart = 0;
-            while (opStart < condStr.size() && !strchr("<>=!", condStr[opStart])) ++opStart;
-            if (opStart > 0 && opStart < condStr.size()) {
-                StorageEngine::Condition c;
-                c.colName = trim(condStr.substr(0, opStart));
-                size_t opEnd = opStart;
-                while (opEnd < condStr.size() && strchr("<>=!", condStr[opEnd])) ++opEnd;
-                c.op = trim(condStr.substr(opStart, opEnd - opStart));
-                c.value = trim(condStr.substr(opEnd));
-                if (c.value.size() >= 2 && c.value.front() == '\'' && c.value.back() == '\'')
-                    c.value = c.value.substr(1, c.value.size() - 2);
-                result.push_back(c);
-            }
-        }
-        if (andPos == std::string::npos) break;
-        pos = andPos + 3;
-    }
-    return result;
-}
-
-// ========================================================================
 // Helper: build full row buffer (with MVCC header) from column values
 // ========================================================================
 static std::string buildRowBuffer(const TableSchema& tbl,
@@ -9875,12 +9658,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
         }
     }
 
-    std::string rowBuffer;
-    if (usesHeapTupleHeader(tbl.formatVersion)) {
-        rowBuffer = buildHeapTupleHeader(tbl, creatorTxnId, hasNull, tbl.hasVariableLength());
-    } else {
-        rowBuffer = buildLegacyHeader(creatorTxnId);
-    }
+    std::string rowBuffer = buildHeapTupleHeader(tbl, creatorTxnId, hasNull, tbl.hasVariableLength());
 
     if (!tbl.hasVariableLength()) {
         rowBuffer.resize(tbl.rowSize(), '\0');
@@ -10788,7 +10566,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     }
 
     // Check if row fits in a page (page capacity = PAGE_SIZE - header - slot)
-    constexpr size_t MAX_ROW_SIZE = Page::PAGE_SIZE - sizeof(Page::Header) - sizeof(Page::Slot);
+    constexpr size_t MAX_ROW_SIZE = PgPage::PAGE_SIZE - sizeof(PgPage::PageHeaderData) - sizeof(PgPage::ItemIdData);
     if (rowBuffer.size() > MAX_ROW_SIZE) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
@@ -12517,9 +12295,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 decodeRid(sa.rid, opid, osid);
                 char* obuf = opa->fetchPage(opid);
                 if (obuf) {
-                    Page opage(obuf, opa->pageSize());
+                    PageWrapper opage(obuf, opa->pageSize(), otbl.formatVersion);
                     opage.update(osid, newORow.data(), newORow.size());
-                    pa->markDirty(opid);
+                    opa->markDirty(opid);
                     opa->unpinPage(opid);
                 }
             }
@@ -12548,9 +12326,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 decodeRid(ca.rid, opid, osid);
                 char* obuf = opa->fetchPage(opid);
                 if (obuf) {
-                    Page opage(obuf, opa->pageSize());
+                    PageWrapper opage(obuf, opa->pageSize(), otbl.formatVersion);
                     opage.update(osid, newORow.data(), newORow.size());
-                    pa->markDirty(opid);
+                    opa->markDirty(opid);
                     opa->unpinPage(opid);
                 }
             }
@@ -15109,8 +14887,6 @@ std::vector<std::string> StorageEngine::groupAggregate(
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
         bool isArrayAgg = (func == "array_agg");
-        bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
-        bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
         bool isModeMedian = (func == "mode" || func == "median");
         bool isPercentile = (func == "percentile_cont" || func == "percentile_disc");
         double pctFraction = 0.5;
@@ -15151,10 +14927,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
-        // jsonAggFirst removed (unused)
-
-        double wMean = 0.0, wM2 = 0.0;
-        size_t wCount = 0;
+        // jsonAggFirst is not needed; JSON aggregation uses jsonAggVals directly.
 
         if (isDistinctCount) {
             std::set<std::string> distinctVals;
@@ -15445,7 +15218,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         matchIds.assign(ids.begin(), ids.end());
     }
 
-    // Reuse computeAgg lambda from groupAggregate
+    // Reuse the aggregate implementation for HAVING-style filters.
     auto computeAgg = [&](const std::vector<int64_t>& gids,
                            const std::string& func, const std::string& colName,
                            const std::vector<std::string>& filterConds = {}) -> std::string {
@@ -15453,9 +15226,6 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         std::string actualColName = isDistinctCount ? colName.substr(9) : colName;
         bool isJsonAgg = (func == "json_agg" || func == "jsonb_agg");
         bool isArrayAgg = (func == "array_agg");
-        bool isVar = (func == "var_pop" || func == "var_samp" || func == "variance");
-        bool isStddev = (func == "stddev_pop" || func == "stddev_samp" || func == "stddev");
-        bool isModeMedian = (func == "mode" || func == "median");
         bool isPercentile = (func == "percentile_cont" || func == "percentile_disc");
         double pctFraction = 0.5;
         std::string pctColName = colName;
@@ -15495,9 +15265,6 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         bool groupConcatFirst = true;
         std::vector<std::string> jsonAggVals;
         std::vector<std::string> arrayAggVals;
-
-        double wMean = 0.0, wM2 = 0.0;
-        size_t wCount = 0;
 
         if (isDistinctCount) {
             std::set<std::string> distinctVals;
@@ -16665,6 +16432,9 @@ void StorageEngine::recoverAllDatabases() {
         } catch (...) { continue; }
         std::string dbname;
         try { dbname = entry.path().filename().string(); } catch (...) { continue; }
+        if (dbname.empty() || dbname[0] == '.' ||
+            dbname.find(".txn_backup") != std::string::npos ||
+            dbname.find(".archive") != std::string::npos) continue;
         // Skip non-database directories (simple heuristic: must have tlist.lst)
         try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
 

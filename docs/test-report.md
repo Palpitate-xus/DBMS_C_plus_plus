@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
-> 最后更新：2026-07-02
-> 自动测试套件：PASS=109 FAIL=0 (scripts/run_all_tests_fast.sh)
+> 最后更新：2026-08-07
+> 自动测试套件基线：PASS=113 FAIL=0 (scripts/run_all_tests_fast.sh)
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -10,7 +10,7 @@
 
 - OS: Linux 6.8.0-117-generic
 - Compiler: g++ -std=c++17 -O2 -pthread
-- 编译命令：`g++ -std=c++17 -O2 -pthread -I. main.cpp TableManage.cpp BPTree.cpp BufferPool.cpp Page.cpp ExecutionPlan.cpp LockManager.cpp NetworkServer.cpp HashIndex.cpp Config.cpp TxnIdGenerator.cpp PageAllocator.cpp TLSWrapper_stub.cpp -o dbms_main`
+- 编译命令：`./scripts/build.sh`；测试编译命令：`./scripts/run_all_tests_fast.sh`
 
 ---
 

@@ -3,6 +3,8 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
+> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。
+
 ---
 
 ## 执行顺序总览
@@ -111,10 +113,10 @@
   - ✅ 临时 schema（createTempNamespace / dropTempNamespace / dropAllTempNamespaces）
   - ✅ pg_authid / pg_auth_members（CatalogManager CRUD + CSV 持久化）
   - ✅ pg_description（COMMENT ON：setDescription / getDescription / removeDescription）
-- **存储引擎 / Cluster Layout（Phase 3 进行中）**：
-  - ✅ ClusterLayout：初始化标准 PG 数据目录结构（base、global、pg_wal、pg_xact、pg_tblspc 等 20+ 子目录）
-  - ✅ 数据库/表空间路径管理、符号链接、关系文件路径（含 fork：main/fsm/vm/init）
-  - ✅ PgPage 集成：PageWrapper 统一 Page（4KB）与 PgPage（8KB）接口；formatVersion=2 默认使用 8KB 页
+- **存储引擎 / heap storage（当前重构状态）**：
+  - ✅ 删除未接入的 ClusterLayout 和旧 Page（4KB）实现，避免并行存储架构继续漂移
+  - ✅ 数据页统一为 PgPage（8KB）+ PageWrapper v2；旧页格式不读取、不迁移
+  - ✅ 数据库/表空间路径管理、关系文件路径（含 fork：main/fsm/vm/init）
   - ✅ Shared Buffers：BufferPool 实现 clock sweep、pin/usage count、dirty page flush
   - ✅ Free Space Map / Visibility Map：fork 文件管理，已集成到 insert/update/delete/vacuum 路径
   - ✅ CLOG / pg_xact：CommitLog 实现 2-bit 事务状态（IN_PROGRESS/COMMITTED/ABORTED/SUB_COMMITTED），按段文件持久化；StorageEngine commit/rollback 自动更新 CLOG；ReadView 使用 CLOG 判断事务状态
@@ -217,7 +219,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
   - `query` 与 `TableScanOp`/`IndexScanOp` 在返回行前调用 `resolveToastValues()` 将 `__TOAST__<id>` 标记替换回原始值。
   - 新增测试：`tests/toast_test.cpp`。
 
-- **HeapTupleHeader**：新增 `src/storage/HeapTupleHeader.h`，实现 PostgreSQL 风格行头（t_xmin/t_xmax/t_ctid/t_infomask/t_infomask2/t_hoff、null bitmap、hint bits、ctid 读写、对齐计算）。formatVersion ≥ 2 的表启用新 header，formatVersion 0/1 保持旧 16 字节 [creatorTxnId:8][rollbackPtr:8] 兼容。
+- **HeapTupleHeader**：`src/storage/HeapTupleHeader.h` 提供 PostgreSQL 风格行头（t_xmin/t_xmax/t_ctid/t_infomask/t_infomask2/t_hoff、null bitmap、hint bits、ctid 读写、对齐计算）。当前所有表统一使用 v2 header；旧 16 字节行格式不再读取或迁移。
 - **Row header 抽象**：`src/commands/TableManage.cpp` 新增 `usesHeapTupleHeader`、`buildHeapTupleHeader`、`stripRowHeader`、`replaceRowData` 等辅助函数；`TableSchema::rowSize()` 按 formatVersion 动态计算 header 大小；insert/update/delete/rollback 均按 header 类型处理。
 - **xmin/xmax 可见性**：`ReadView::isVisible()` 新增 HeapTupleHeader 重载，结合 hint bits 与 CLOG 判断事务状态；`forEachRow`/`readRowByRid` 按 t_hoff 剥离 header 后返回数据。
 - **ctid 自引用链**：insert/update 完成后将新行 ctid 指向自身（self-ctid），为后续版本链遍历做准备。

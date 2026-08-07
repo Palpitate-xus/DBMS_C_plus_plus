@@ -120,8 +120,8 @@ struct TableSchema {
     bool forceRowLevelSecurity = false; // FORCE ROW LEVEL SECURITY (applies to table owner too)
     std::map<std::string, std::string> storageParams; // WITH (fillfactor=70, autovacuum_enabled=off)
 
-    // Storage format version: 0 = legacy 4KB, 1 = 4KB with MVCC, 2 = PostgreSQL 8KB
-    uint32_t formatVersion = 0;
+    // Storage format version: the current release accepts v2 only.
+    uint32_t formatVersion = 2;
 
     // Tablespace: physical location for data files (default = "pg_default")
     std::string tablespace = "pg_default";

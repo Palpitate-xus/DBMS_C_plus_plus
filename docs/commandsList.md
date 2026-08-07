@@ -1573,7 +1573,7 @@ EXPLAIN ANALYZE SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.u
 | `ARRAY <type>` | 数组 | 变长 | `ARRAY INT` |
 
 **说明**
-- 每行前 16 字节为 MVCC 头部（`creatorTxnId` + `rollbackPtr`）。
+- 每行使用 PostgreSQL 风格 HeapTupleHeader（`xmin`/`xmax`/`ctid`、null bitmap 和对齐信息）。
 - `VARCHAR`、`TEXT`、`BLOB`、`JSON`、`JSONB` 为变长类型，行内存储偏移数组 + 实际数据。
 - 单行数据超过页可用空间时，大字段自动存放到溢出页。
 

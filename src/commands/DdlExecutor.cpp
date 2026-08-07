@@ -250,7 +250,6 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     }
 
     for (size_t i = 0; i < tbl.fkLen; ++i) {
-        const ForeignKey& fk = tbl.fks[i];
         PgDependRow dep;
         dep.classid = PgClassOid_Class;
         dep.objid = classOid;

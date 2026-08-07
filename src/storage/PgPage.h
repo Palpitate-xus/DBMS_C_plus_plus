@@ -26,9 +26,9 @@ namespace dbms {
 //
 // freeSpace = pd_upper - pd_lower
 //
-// 兼容策略：
-//   FileHeader.formatVersion = 0/1 -> 使用旧 Page 类（4096 bytes）
-//   FileHeader.formatVersion = 2   -> 使用本 PgPage 类（8192 bytes）
+// The engine accepts only this 8 KiB heap layout.  Older page files are
+// intentionally rejected at open time; migration is outside the product
+// contract for this clean-storage release.
 
 class PgPage {
 public:

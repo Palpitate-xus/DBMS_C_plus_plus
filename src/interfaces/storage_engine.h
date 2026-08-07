@@ -16,13 +16,9 @@ struct ReadView;
 
 // ============================================================================
 // 存储引擎接口
-// Phase 1+ 逐步实现：从当前 StorageEngine 类迁移至此接口
-//
-// 当前状态：StorageEngine 类（src/commands/TableManage.h）已实现全部功能，
-// 尚未正式继承 IStorageEngine。后续 Phase 将按以下步骤迁移：
-//   1. 让 StorageEngine 继承 IStorageEngine 并实现所有纯虚方法
-//   2. 将调用方从直接调用 StorageEngine 改为通过 IStorageEngine* 接口调用
-//   3. 支持插件式存储引擎（如列存、内存表等）
+// StorageEngine is the canonical implementation of this interface. Keeping
+// this boundary lets clients depend on the stable engine contract without
+// including the command-layer implementation.
 // ============================================================================
 
 class IStorageEngine {

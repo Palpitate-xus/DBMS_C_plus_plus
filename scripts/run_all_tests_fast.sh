@@ -28,7 +28,6 @@ PROJECT_SOURCES=(
     src/executor/ExecutionPlan.cpp
     src/storage/BufferPool.cpp
     src/storage/PageAllocator.cpp
-    src/storage/Page.cpp
     src/storage/PgPage.cpp
     src/storage/PageWrapper.cpp
     src/storage/FreeSpaceMap.cpp

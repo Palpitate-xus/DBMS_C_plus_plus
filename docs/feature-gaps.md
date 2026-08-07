@@ -1,8 +1,8 @@
 # 功能缺失清单 (Feature Gaps)
 
-> 生成日期: 2026-07-03
+> 生成日期: 2026-08-07
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
-> 本 DBMS 当前状态: 193 Wave 完成, PASS=112 FAIL=0, Phase 5.1 上线
+> 本 DBMS 当前状态: 生产化重构进行中，回归基线 PASS=113 FAIL=0；v2/8 KiB 存储格式已统一，旧数据不迁移。
 
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
@@ -100,16 +100,15 @@
 - **预估工作量**: 1 周
 - **相关文件**: `src/executor/ExecutionPlan.cpp`
 
-### P0-7: BEFORE 行级触发器 + INSTEAD OF 视图触发器
+### P0-7: INSTEAD OF 视图触发器
 - **类别**: 触发器 / 数据完整性
-- **现状**: AFTER 触发器已工作，BEFORE 行级 + INSTEAD OF 视图触发器待补
+- **现状**: BEFORE 行级触发器已接入 INSERT/UPDATE/DELETE；INSTEAD OF 视图触发器仍待补
 - **PG 参考**: `CREATE TRIGGER ... BEFORE INSERT ... FOR EACH ROW`
 - **影响**: 无法在写入前修改数据、无法通过视图更新多表
 - **实现路径**:
-  1. 在 `TableManage.cpp` insert/update/delete 路径中增加 BEFORE 行级触发器调用
-  2. 实现 `NEW`/`OLD` 行变量替换
-  3. 在视图 DML 路径中增加 INSTEAD OF 触发器调用
-  4. 增加 `TriggerExecutor` 对 BEFORE/INSTEAD OF 的支持
+  1. 在视图 DML 路径中增加 INSTEAD OF 触发器调用
+  2. 实现视图行变量与底层表写入映射
+  3. 增加 `TriggerExecutor` 的视图触发器执行路径
 - **预估工作量**: 3-5 天
 - **相关文件**: `src/commands/TableManage.cpp`, `src/main.cpp`
 
@@ -173,11 +172,11 @@
 - **影响**: 大字段（TEXT/BLOB/JSON）存储浪费空间
 - **实现路径**:
   1. 引入 `lz4` 库（header-only 或系统包）
-  2. 在 `Page.cpp` 写入大字段时自动压缩
+  2. 在 TOAST 写入路径中自动压缩
   3. 实现 TOAST 策略：`PLAIN`, `EXTENDED` (压缩+线外), `EXTERNAL` (线外不压缩), `MAIN` (尽量内联)
   4. 增加 `toast_tuple_target` GUC
 - **预估工作量**: 3-5 天
-- **相关文件**: `src/storage/Page.cpp`, `src/storage/Page.h`
+- **相关文件**: `src/commands/TableManage.cpp`, `src/storage/PgPage.cpp`
 
 ### P1-6: 后台统计收集器 (Stats Collector)
 - **类别**: 可观测性 / 运行时统计
@@ -325,10 +324,10 @@
 - **影响**: 无法满足合规要求
 - **实现路径**:
   1. 实现 `PageCrypto`：AES-256-GCM 页级加密
-  2. 在 `Page.cpp` 读写路径中加解密
+  2. 在 `PageAllocator` 读写路径中加解密
   3. 实现密钥管理：`pg_tde_keyring`
 - **预估工作量**: 1 周
-- **相关文件**: `src/storage/Page.cpp`
+- **相关文件**: `src/storage/PageAllocator.cpp`
 
 ---
 

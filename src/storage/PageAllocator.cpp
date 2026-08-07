@@ -1,5 +1,6 @@
 #include "PageAllocator.h"
 
+#include <filesystem>
 #include <iostream>
 
 namespace dbms {
@@ -12,22 +13,45 @@ PageAllocator::~PageAllocator() {
 }
 
 bool PageAllocator::open() {
+    if (pageSize_ != PgPage::PAGE_SIZE || formatVersion_ != DATA_FILE_FORMAT_VERSION) {
+        std::cerr << "[storage] unsupported heap format: pageSize=" << pageSize_
+                  << ", formatVersion=" << formatVersion_ << std::endl;
+        return false;
+    }
+    bool existingFile = false;
+    try {
+        existingFile = std::filesystem::exists(filename_) &&
+                       std::filesystem::file_size(filename_) != 0;
+    } catch (...) {
+        return false;
+    }
     if (bp_->isOpen()) return true;
     if (!bp_->open()) return false;
 
     // Check if page 0 exists and has valid magic
     char* buf = bp_->fetchPage(0);
-    Page::FileHeader* fh = reinterpret_cast<Page::FileHeader*>(buf);
-    if (fh->magic != Page::MAGIC) {
+    DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(buf);
+    if (fh->magic != DATA_FILE_MAGIC) {
+        if (existingFile) {
+            std::cerr << "[storage] unsupported heap file header: " << filename_ << std::endl;
+            bp_->unpinPage(0);
+            bp_->close();
+            return false;
+        }
         // New file: initialize file header
         std::memset(buf, 0, pageSize_);
-        fh->magic = Page::MAGIC;
+        fh->magic = DATA_FILE_MAGIC;
         fh->numPages = 1;  // only page 0 (header)
         fh->freeListHead = 0;
         fh->rowSize = static_cast<uint32_t>(rowSize_);
-        // Infer format version from page size if not explicitly set
-        fh->formatVersion = (formatVersion_ == 0) ? ((pageSize_ >= 8192) ? 2 : 0) : formatVersion_;
+        fh->formatVersion = DATA_FILE_FORMAT_VERSION;
         bp_->markDirty(0);
+    } else if (fh->formatVersion != DATA_FILE_FORMAT_VERSION) {
+        std::cerr << "[storage] unsupported data file format version: "
+                  << fh->formatVersion << std::endl;
+        bp_->unpinPage(0);
+        bp_->close();
+        return false;
     }
     bp_->unpinPage(0);
     return true;
@@ -48,7 +72,7 @@ uint32_t PageAllocator::allocPage() {
     if (!isOpen()) return 0;
 
     char* fhBuf = bp_->fetchPage(0);
-    Page::FileHeader* fh = reinterpret_cast<Page::FileHeader*>(fhBuf);
+    DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
     uint32_t pageId = 0;
 
     if (fh->freeListHead != 0) {
@@ -83,7 +107,7 @@ void PageAllocator::freePage(uint32_t pageId) {
 
     // Read file header
     char* fhBuf = bp_->fetchPage(0);
-    Page::FileHeader* fh = reinterpret_cast<Page::FileHeader*>(fhBuf);
+    DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
 
     // Initialize the freed page and link it to free list
     char* pageBuf = bp_->fetchPage(pageId);
@@ -102,7 +126,7 @@ void PageAllocator::freePage(uint32_t pageId) {
 uint32_t PageAllocator::numPages() const {
     if (!isOpen()) return 0;
     char* fhBuf = const_cast<BufferPool*>(bp_.get())->fetchPage(0);
-    Page::FileHeader* fh = reinterpret_cast<Page::FileHeader*>(fhBuf);
+    DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
     uint32_t n = fh->numPages;
     bp_->unpinPage(0);
     return n;
@@ -132,18 +156,18 @@ void PageAllocator::flush() {
     if (isOpen()) bp_->flush();
 }
 
-bool PageAllocator::readFileHeader(Page::FileHeader& fh) {
+bool PageAllocator::readFileHeader(DataFileHeader& fh) {
     if (!isOpen()) return false;
     char* buf = bp_->fetchPage(0);
-    std::memcpy(&fh, buf, sizeof(Page::FileHeader));
+    std::memcpy(&fh, buf, sizeof(DataFileHeader));
     bp_->unpinPage(0);
     return true;
 }
 
-void PageAllocator::writeFileHeader(const Page::FileHeader& fh) {
+void PageAllocator::writeFileHeader(const DataFileHeader& fh) {
     if (!isOpen()) return;
     char* buf = bp_->fetchPage(0);
-    std::memcpy(buf, &fh, sizeof(Page::FileHeader));
+    std::memcpy(buf, &fh, sizeof(DataFileHeader));
     bp_->markDirty(0);
     bp_->unpinPage(0);
 }
