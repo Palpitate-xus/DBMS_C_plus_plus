@@ -779,6 +779,10 @@ bool checkAdmin(const Session& s);
 bool checkDB(const Session& s);
 bool execute(const std::string& rawSql, Session& s);
 string resolveTableName(Session& s, const string& name);
+static bool checkTablePermission(Session& s, const string& tname,
+                                 dbms::StorageEngine::TablePrivilege privilege);
+static bool checkSelectColumnPermission(Session& s, const string& tname,
+                                         const string& columns);
 static vector<string> splitConds(const string& s);
 static string normalizeConditionStr(string s);
 static string modifyLogic(const string& logic);
@@ -2811,6 +2815,154 @@ static SetOperationSplit findTopLevelSetOperation(const string& sql) {
     return selected;
 }
 
+struct StructuredSetOperand {
+    dbms::OpPtr plan;
+    string header;
+    size_t columnCount = 0;
+};
+
+// Build the common, single-table SELECT shape directly as a Volcano plan.
+// Complex operands intentionally return false and use the established
+// executor path below; this keeps the migration incremental without silently
+// changing semantics for joins, aggregates, expressions, or CTEs.
+static bool buildStructuredSetOperand(const string& rawSql, Session& s,
+                                      StructuredSetOperand& out,
+                                      bool& executionError) {
+    executionError = false;
+    string query = trim(rawSql);
+    if (query.size() < 6 || query.substr(0, 6) != "select") return false;
+    if (query.find('(') != string::npos || query.find(')') != string::npos) return false;
+
+    const size_t fromPos = findTopLevelKeyword(query, "from");
+    if (fromPos == string::npos) return false;
+    const size_t wherePos = findTopLevelKeyword(query, "where", fromPos + 4);
+    const size_t orderPos = findTopLevelKeyword(query, "order by", fromPos + 4);
+    const size_t limitPos = findTopLevelKeyword(query, "limit", fromPos + 4);
+    const size_t offsetPos = findTopLevelKeyword(query, "offset", fromPos + 4);
+    const size_t groupPos = findTopLevelKeyword(query, "group by", fromPos + 4);
+    const size_t havingPos = findTopLevelKeyword(query, "having", fromPos + 4);
+    const size_t windowPos = findTopLevelKeyword(query, "window", fromPos + 4);
+    if (groupPos != string::npos || havingPos != string::npos || windowPos != string::npos ||
+        offsetPos != string::npos || findTopLevelKeyword(query, "join", fromPos + 4) != string::npos) {
+        return false;
+    }
+
+    string columns = trim(query.substr(6, fromPos - 6));
+    bool distinct = false;
+    if (columns.size() >= 9 && columns.substr(0, 9) == "distinct ") {
+        distinct = true;
+        columns = trim(columns.substr(9));
+    }
+
+    auto clauseEnd = [&](size_t start) {
+        size_t end = query.size();
+        for (size_t candidate : {wherePos, orderPos, limitPos, offsetPos}) {
+            if (candidate != string::npos && candidate > start) end = min(end, candidate);
+        }
+        return end;
+    };
+    const size_t tableEnd = clauseEnd(fromPos + 4);
+    string tableSpec = trim(query.substr(fromPos + 4, tableEnd - fromPos - 4));
+    // Aliases would require carrying target-list names separately from the
+    // current TableSchema-based ProjectOp, so leave them to the full path.
+    if (tableSpec.empty() || tableSpec.find_first_of(" \t") != string::npos) return false;
+    string tableName = resolveTableName(s, tableSpec);
+    if (!g_engine.tableExists(s.currentDB, tableName)) return false;
+    if (!isTempTable(s, tableSpec) &&
+        !checkTablePermission(s, tableSpec, dbms::StorageEngine::TablePrivilege::Select)) {
+        executionError = true;
+        return false;
+    }
+    if (!isTempTable(s, tableSpec) && !checkSelectColumnPermission(s, tableSpec, columns)) {
+        executionError = true;
+        return false;
+    }
+
+    TableSchema table = g_engine.getTableSchema(s.currentDB, tableName);
+    set<string> selectCols;
+    vector<string> selectedNames;
+    if (columns != "*") {
+        for (const auto& rawColumn : splitSelectColumns(columns)) {
+            string column = trim(rawColumn);
+            if (column.empty() || column.find_first_of(" \t") != string::npos ||
+                column.find('.') != string::npos) return false;
+            bool found = false;
+            for (size_t i = 0; i < table.len; ++i) {
+                if (table.cols[i].dataName == column) {
+                    found = true;
+                    selectCols.insert(column);
+                    selectedNames.push_back(column);
+                    break;
+                }
+            }
+            if (!found) return false;
+        }
+        if (selectedNames.empty()) return false;
+    }
+
+    vector<string> conditionStrings;
+    if (wherePos != string::npos) {
+        const size_t end = clauseEnd(wherePos + 5);
+        string where = trim(query.substr(wherePos + 5, end - wherePos - 5));
+        if (where.empty() || where.find(" or ") != string::npos || where.find(" and ") == string::npos) {
+            if (where.empty() || where.find(" or ") != string::npos) return false;
+        }
+        string normalized = normalizeConditionStr(where);
+        for (auto& condition : splitConds(normalized)) {
+            condition = modifyLogic(condition);
+            if (condition.empty()) return false;
+            conditionStrings.push_back(condition);
+        }
+    }
+
+    string orderByCol;
+    bool orderByAsc = true;
+    if (orderPos != string::npos) {
+        const size_t end = clauseEnd(orderPos + 8);
+        vector<string> orderTokens = tokenize(trim(query.substr(orderPos + 8, end - orderPos - 8)));
+        if (orderTokens.empty() || orderTokens.size() > 2) return false;
+        orderByCol = orderTokens[0];
+        if (orderTokens.size() == 2) {
+            if (orderTokens[1] == "desc") orderByAsc = false;
+            else if (orderTokens[1] != "asc") return false;
+        }
+        bool found = false;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == orderByCol) { found = true; break; }
+        }
+        if (!found) return false;
+    }
+
+    size_t limit = 0;
+    if (limitPos != string::npos) {
+        string limitText = trim(query.substr(limitPos + 5));
+        try {
+            size_t parsed = 0;
+            limit = static_cast<size_t>(stoull(limitText, &parsed));
+            if (parsed != limitText.size()) return false;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    dbms::PlanContext context;
+    context.dbname = s.currentDB;
+    context.tablename = tableName;
+    context.conds = dbms::StorageEngine::parseConditions(conditionStrings);
+    context.selectCols = selectCols;
+    context.orderByCol = orderByCol;
+    context.orderByAsc = orderByAsc;
+    context.limit = limit;
+    context.distinct = distinct;
+    out.plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, context);
+    out.columnCount = columns == "*" ? table.len : selectedNames.size();
+    for (size_t i = 0; i < table.len; ++i) {
+        if (columns != "*" && selectCols.find(table.cols[i].dataName) == selectCols.end()) continue;
+        out.header += table.cols[i].dataName + ' ';
+    }
+    return true;
+}
+
 static bool captureSetOperand(const string& sql, Session& s, vector<string>& lines) {
     stringstream captured;
     auto* oldBuffer = cout.rdbuf(captured.rdbuf());
@@ -2845,6 +2997,29 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     if (leftSql.empty() || rightSql.empty()) {
         cout << "SQL syntax error: invalid set operation" << endl;
         return true;
+    }
+
+    StructuredSetOperand leftPlan;
+    StructuredSetOperand rightPlan;
+    bool structuredError = false;
+    const bool leftStructured = buildStructuredSetOperand(leftSql, s, leftPlan, structuredError);
+    if (structuredError) return true;
+    const bool rightStructured = buildStructuredSetOperand(rightSql, s, rightPlan, structuredError);
+    if (structuredError) return true;
+    if (leftStructured && rightStructured) {
+        if (leftPlan.columnCount != rightPlan.columnCount) {
+            cout << "ERROR: each set operation query must have the same number of columns" << endl;
+            return true;
+        }
+        dbms::SetOperationType type = dbms::SetOperationType::Union;
+        if (split.kind == SetOperationKind::Intersect) type = dbms::SetOperationType::Intersect;
+        else if (split.kind == SetOperationKind::Except) type = dbms::SetOperationType::Except;
+        auto plan = dbms::QueryPlanner::buildSetOperationPlan(
+            std::move(leftPlan.plan), std::move(rightPlan.plan), type, split.all);
+        auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+        cout << leftPlan.header << endl;
+        for (const auto& row : rows) cout << row << endl;
+        return false;
     }
 
     vector<string> leftLines;

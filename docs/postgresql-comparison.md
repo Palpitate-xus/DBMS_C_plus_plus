@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-07（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线: PASS=120 FAIL=0（119 个 C++ 测试 + PostgreSQL 协议 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
+> 测试基线: PASS=121 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -110,7 +110,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | **LATERAL JOIN** | ✅ | ❌ | 缺 |
 | Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ✅ (parser + volcano) | ⚠️ 复杂子查询回退 legacy |
 | CTE (WITH/RECURSIVE) | ✅ | ✅ (parser + executor) | ✅ 基础 + RETURNING |
-| UNION/INTERSECT/EXCEPT | ✅ | ⚠️ 统一 legacy 集合执行（含 ALL） | ⚠️ 尚未进入 Volcano 计划树/结构化结果 |
+| UNION/INTERSECT/EXCEPT | ✅ | ⚠️ 简单单表 operand 走 Volcano `SetOperationOp`，复杂 operand 回退 legacy（含 ALL） | ⚠️ AST 下推、类型合并/collation 和完整作用域仍缺 |
 | Window Functions (ROW_NUMBER/RANK/...) | ✅ | ✅ (parser + DDL) | ⚠️ executor 回退 legacy |
 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ✅ (parser) | ⚠️ executor 回退 legacy |
 | GROUPING_ID | ✅ | ❌ | 缺 |
@@ -324,7 +324,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 ### 🟡 重要缺失 (影响实用性)
 1. **Window Function executor** — parser 就绪但 executor 回退 legacy (无 WindowOp)
 2. **复杂子查询 executor** — 简单子查询走 volcano, 关联子查询回退 legacy
-3. **UNION/INTERSECT/EXCEPT executor** — 已统一语义分支并覆盖 ALL；仍缺 Volcano `Append/HashSetOp` 与结构化结果边界
+3. **UNION/INTERSECT/EXCEPT executor** — 简单单表已接入 Volcano `SetOperationOp` 并覆盖 ALL；仍缺 AST 全量下推、类型合并和结构化结果边界
 4. **GROUP BY ROLLUP/CUBE/GROUPING SETS executor** — 回退 legacy
 5. **GiST 索引** — 全文搜索基础架构缺
 6. **TOAST 压缩** — 大字段存储无 lz4/pglz 压缩

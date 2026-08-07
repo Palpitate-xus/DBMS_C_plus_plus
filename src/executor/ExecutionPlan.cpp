@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
 
 extern dbms::Config g_config;
 
@@ -494,6 +495,86 @@ void DistinctOp::close() {
 }
 
 // ========================================================================
+// SetOperationOp
+// ========================================================================
+
+SetOperationOp::SetOperationOp(OpPtr left, OpPtr right,
+                               SetOperationType type, bool all)
+    : left_(std::move(left)), right_(std::move(right)), type_(type), all_(all) {}
+
+bool SetOperationOp::open() {
+    rows_.clear();
+    pos_ = 0;
+    if (!left_ || !right_ || !left_->open()) return false;
+    if (!right_->open()) {
+        left_->close();
+        return false;
+    }
+
+    std::vector<std::string> leftRows;
+    std::vector<std::string> rightRows;
+    std::string row;
+    while (left_->next(row)) leftRows.push_back(row);
+    while (right_->next(row)) rightRows.push_back(row);
+
+    if (type_ == SetOperationType::Union) {
+        if (all_) {
+            rows_ = std::move(leftRows);
+            rows_.insert(rows_.end(), rightRows.begin(), rightRows.end());
+            return true;
+        }
+        std::set<std::string> seen;
+        for (const auto& candidate : leftRows) {
+            if (seen.insert(candidate).second) rows_.push_back(candidate);
+        }
+        for (const auto& candidate : rightRows) {
+            if (seen.insert(candidate).second) rows_.push_back(candidate);
+        }
+        return true;
+    }
+
+    std::map<std::string, size_t> rightCounts;
+    for (const auto& candidate : rightRows) ++rightCounts[candidate];
+    std::set<std::string> emitted;
+    for (const auto& candidate : leftRows) {
+        auto it = rightCounts.find(candidate);
+        const size_t available = it == rightCounts.end() ? 0 : it->second;
+        if (type_ == SetOperationType::Intersect) {
+            if (available == 0) continue;
+            if (all_) {
+                rows_.push_back(candidate);
+                --it->second;
+            } else if (emitted.insert(candidate).second) {
+                rows_.push_back(candidate);
+            }
+            continue;
+        }
+
+        // EXCEPT: a row survives only when the right side has no remaining
+        // matching occurrence.  EXCEPT ALL consumes one right occurrence.
+        if (available > 0) {
+            if (all_) --it->second;
+            continue;
+        }
+        if (all_ || emitted.insert(candidate).second) rows_.push_back(candidate);
+    }
+    return true;
+}
+
+bool SetOperationOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    return true;
+}
+
+void SetOperationOp::close() {
+    rows_.clear();
+    pos_ = 0;
+    if (left_) left_->close();
+    if (right_) right_->close();
+}
+
+// ========================================================================
 // NestedLoopJoinOp
 // ========================================================================
 
@@ -855,16 +936,18 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         root = std::make_unique<SortOp>(std::move(root), tbl, ctx.orderByCol, ctx.orderByAsc);
     }
 
-    // Add Distinct if needed
-    if (ctx.distinct) {
-        root = std::make_unique<DistinctOp>(std::move(root));
-    }
-
     // Always add a Project so the output is formatted text (not raw binary).
     // When selectCols is empty, Project emits all columns (SELECT * semantics).
     {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<ProjectOp>(std::move(root), tbl, ctx.selectCols);
+    }
+
+    // DISTINCT applies to the projected target list, not the hidden columns
+    // carried by the scan.  Keeping it after Project is important for
+    // queries such as SELECT DISTINCT department FROM employees.
+    if (ctx.distinct) {
+        root = std::make_unique<DistinctOp>(std::move(root));
     }
 
     // Add Limit
@@ -879,6 +962,11 @@ OpPtr QueryPlanner::buildAggregatePlan(StorageEngine* engine, const PlanContext&
                                         const std::vector<StorageEngine::AggItem>& items) {
     (void)ctx;
     return std::make_unique<AggregateOp>(engine, ctx.dbname, ctx.tablename, items);
+}
+
+OpPtr QueryPlanner::buildSetOperationPlan(OpPtr left, OpPtr right,
+                                          SetOperationType type, bool all) {
+    return std::make_unique<SetOperationOp>(std::move(left), std::move(right), type, all);
 }
 
 // Estimate the cost of a join algorithm for given table sizes & index availability.

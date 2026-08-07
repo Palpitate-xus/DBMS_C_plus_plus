@@ -2,7 +2,7 @@
 
 > 生成日期: 2026-08-07
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
-> 本 DBMS 当前状态: 生产化重构进行中，回归基线 PASS=120 FAIL=0（119 个 C++ 测试 + 1 个协议 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
+> 本 DBMS 当前状态: 生产化重构进行中，回归基线 PASS=121 FAIL=0（120 个 C++ 测试 + 1 个协议 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
 
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
@@ -129,16 +129,16 @@
 
 ### P1-2: UNION/INTERSECT/EXCEPT Executor
 - **类别**: 执行器 / 集合操作
-- **现状**: 已统一集合操作分支，支持顶层运算符优先级、错误传播以及 `UNION/INTERSECT/EXCEPT [ALL]` 的重复行语义；当前仍通过 legacy 输出边界执行，尚未进入 Volcano `Append/HashSetOp` 计划树
+- **现状**: 已统一集合操作分支，支持顶层运算符优先级、错误传播以及 `UNION/INTERSECT/EXCEPT [ALL]` 的重复行语义；简单单表 SELECT operand 已进入 Volcano `SetOperationOp` 计划树，复杂 operand 仍通过 legacy 输出边界降级
 - **PG 参考**: `Append` (UNION), `HashSetOp` (INTERSECT/EXCEPT)
-- **影响**: 集合操作暂不能复用结构化执行器、类型合并和完整排序/分页作用域
+- **影响**: 复杂集合操作仍不能复用完整结构化结果、类型合并和完整排序/分页作用域
 - **实现路径**:
   1. 将当前集合操作结果边界改为结构化行/列结果
-  2. 实现 `UnionOp`：合并多个子计划输出
-  3. 实现 `IntersectOp` / `ExceptOp`：哈希集合操作
-  4. 在 `QueryPlanner` 中识别集合操作并构建对应算子树
+  2. ✅ 实现 `SetOperationOp`：合并两个 Volcano 子计划并执行 UNION/INTERSECT/EXCEPT [ALL]
+  3. 将 parser AST 的集合操作直接下推到 `QueryPlanner`，覆盖 JOIN/聚合/表达式 operand
+  4. 补齐类型合并、collation、排序/分页作用域
 - **预估工作量**: 3-5 天
-- **验证**: `tests/postgres_protocol_test.py` 覆盖 UNION、UNION ALL、INTERSECT、INTERSECT ALL、EXCEPT、EXCEPT ALL
+- **验证**: `tests/set_operation_volcano_test.cpp` 与 `tests/postgres_protocol_test.py` 覆盖 UNION、UNION ALL、INTERSECT、INTERSECT ALL、EXCEPT、EXCEPT ALL
 - **相关文件**: `src/main.cpp`, `src/executor/ExecutionPlan.cpp`
 
 ### P1-3: GROUP BY ROLLUP/CUBE/GROUPING SETS Executor

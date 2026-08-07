@@ -219,6 +219,31 @@ private:
 };
 
 // ========================================================================
+// SetOperation: combine two already-projected child streams.
+// Rows are kept in child order for a deterministic executor-facing result
+// stream. DISTINCT and ALL semantics are explicit instead of being
+// implemented by the SQL output layer.
+// ========================================================================
+enum class SetOperationType { Union, Intersect, Except };
+
+class SetOperationOp : public Operator {
+public:
+    SetOperationOp(OpPtr left, OpPtr right, SetOperationType type, bool all);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+
+private:
+    OpPtr left_;
+    OpPtr right_;
+    SetOperationType type_;
+    bool all_;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+};
+
+// ========================================================================
 // NestedLoopJoin: INNER JOIN two tables
 // ========================================================================
 class NestedLoopJoinOp : public Operator {
@@ -385,6 +410,10 @@ public:
     // Build operator tree for SELECT agg(...) FROM t WHERE ...
     static OpPtr buildAggregatePlan(StorageEngine* engine, const PlanContext& ctx,
                                      const std::vector<StorageEngine::AggItem>& items);
+
+    // Build a structured set-operation node over two compatible child plans.
+    static OpPtr buildSetOperationPlan(OpPtr left, OpPtr right,
+                                       SetOperationType type, bool all);
 
     // Build operator tree for JOIN
     static OpPtr buildJoinPlan(StorageEngine* engine, const std::string& dbname,

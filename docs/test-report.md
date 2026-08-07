@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-07
-> 自动测试套件基线：PASS=120 FAIL=0（119 个 C++ 测试 + PostgreSQL 协议 E2E）；窗口函数 E2E：9/9
+> 自动测试套件基线：PASS=121 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E）；窗口函数 E2E：9/9
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -587,6 +587,9 @@ SELECT id FROM t1 UNION SELECT fid FROM t2;
 
 **实际结果** ✅ 返回 UNION 结果
 
+`tests/set_operation_volcano_test.cpp` 进一步验证了 Volcano `SetOperationOp` 的
+UNION/INTERSECT/EXCEPT 及 ALL 多重集结果，并覆盖投影后的 DISTINCT 去重。
+
 ---
 
 ### 8.4 GROUP BY + HAVING
@@ -865,7 +868,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景、119 个独立 C++ 回归测试和 PostgreSQL 协议 E2E 均通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景、120 个独立 C++ 回归测试和 PostgreSQL 协议 E2E 均通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
