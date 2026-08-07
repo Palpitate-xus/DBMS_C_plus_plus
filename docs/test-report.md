@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-07
-> 自动测试套件基线：PASS=113 FAIL=0（快速入口和独立入口均通过）；窗口函数 E2E：9/9
+> 自动测试套件基线：PASS=114 FAIL=0（快速入口和独立入口均通过）；窗口函数 E2E：9/9
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -14,6 +14,7 @@
 - 窗口函数端到端测试：`python3 tests/window_e2e_test.py`（9 用例，使用隔离临时目录和临时管理员账号）
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - 独立入口 `./scripts/build_tests.sh` 缓存生产对象后逐个测试独立链接运行，结果 `All tests passed`。
+- 新增数据库生命周期回归：`DROP DATABASE` 释放数据库级缓存后，同名重建不会继承旧 CLOG/WAL/page/index 状态。
 - Docker 镜像构建：`docker build -t dbms-c-plus-plus:codex-verify .` ✅；Compose 配置检查 ✅。
 - CMake：当前验证环境未安装 `cmake`，配置/编译未执行。
 

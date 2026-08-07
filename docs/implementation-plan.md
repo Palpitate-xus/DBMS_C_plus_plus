@@ -3,7 +3,22 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。
+> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前回归基线为 PASS=114 FAIL=0。
+
+### 当前代码路径审计覆盖层
+
+下表优先于后续历史 Wave 的 `✅` 标记；只有同时具备真实运行时路径和回归/故障验证，才可标记为已完成。
+
+| 能力 | 当前真实状态 | 证据/边界 |
+|------|--------------|-----------|
+| DDL AST bridge | 部分完成 | 核心 CREATE/DROP 已桥接；部分 ALTER TABLE 和未迁移命令仍由 `main.cpp` legacy 路径执行 |
+| 复杂查询执行 | 部分完成 | Volcano 基础算子已验证；复杂子查询、集合操作、窗口和 grouping 扩展仍有 legacy 回退 |
+| Serializable / SSI | 未完成 | 尚无完整 predicate/SIREAD lock 与 rw-conflict abort 验证 |
+| 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
+| PostgreSQL wire protocol / SCRAM | 未完成 | 当前 NetworkServer/TLS/认证为骨架或简化实现，不等价于 libpq 兼容协议 |
+| 复制、逻辑解码、PITR、pg_basebackup | 部分完成 | 有 WAL/归档/ReplicationManager 框架，但缺完整端到端故障切换与恢复证明 |
+| 系统目录与监控 | 部分完成 | 核心 catalog 可用；完整 `pg_stat_*`、`pg_locks`、`pg_stat_activity` 尚未完成 |
+| PL/pgSQL、扩展和 FDW | 未完成 | parser/DDL 或 stub 存在，但运行时生态未形成 |
 
 ---
 

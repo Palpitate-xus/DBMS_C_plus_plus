@@ -1001,6 +1001,7 @@ private:
     // Page-based heap storage
     mutable std::map<std::string, std::unique_ptr<PageAllocator>> pageAllocators_;
     void closeAllPageAllocators();
+    void closeDatabaseCaches(const std::string& dbname);
 
     // Free Space Map + Visibility Map (fork files)
     mutable std::map<std::string, std::unique_ptr<FreeSpaceMap>> fsmCache_;

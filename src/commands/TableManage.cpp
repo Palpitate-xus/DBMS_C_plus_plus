@@ -3198,6 +3198,72 @@ void StorageEngine::closeAllPageAllocators() {
     pageAllocators_.clear();
 }
 
+void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
+    const std::string tablePrefix = dbname + "/";
+    const std::string toastPrefix = dbname + ":";
+
+    auto eraseTableCaches = [&tablePrefix](auto& cache) {
+        for (auto it = cache.begin(); it != cache.end();) {
+            if (it->first.rfind(tablePrefix, 0) == 0) {
+                it = cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    };
+    eraseTableCaches(pageAllocators_);
+    eraseTableCaches(fsmCache_);
+    eraseTableCaches(vmCache_);
+    eraseTableCaches(pkIndexCache_);
+    eraseTableCaches(secondaryIndexCache_);
+    eraseTableCaches(hashIndexCache_);
+
+    for (auto it = toastPageAllocators_.begin(); it != toastPageAllocators_.end();) {
+        if (it->first.rfind(toastPrefix, 0) == 0) {
+            it = toastPageAllocators_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = toastIndexes_.begin(); it != toastIndexes_.end();) {
+        if (it->first.rfind(toastPrefix, 0) == 0) {
+            it = toastIndexes_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(spGiSTMutex_);
+        for (auto it = spGiSTCache_.begin(); it != spGiSTCache_.end();) {
+            if (it->first.rfind(tablePrefix, 0) == 0) {
+                it = spGiSTCache_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    commitLogs_.erase(dbname);
+    walManagers_.erase(dbname);
+    lastCheckpointLsns_.erase(dbname);
+
+    for (auto it = deadTupleCounts_.begin(); it != deadTupleCounts_.end();) {
+        if (it->first.first == dbname) {
+            it = deadTupleCounts_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = modifyCounts_.begin(); it != modifyCounts_.end();) {
+        if (it->first.first == dbname) {
+            it = modifyCounts_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 FreeSpaceMap* StorageEngine::getFSM(const std::string& dbname,
                                      const std::string& tablename) const {
     std::string key = dbname + "/" + tablename;
@@ -6654,6 +6720,13 @@ std::string StorageEngine::getDatabaseCharset(const std::string& dbname) const {
 
 DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+
+    // Release database-owned caches before removing the directory. This
+    // prevents a later same-name database from inheriting stale CLOG/WAL or
+    // page/index objects, and lets file-backed destructors flush while their
+    // directory still exists.
+    if (catalogService_) catalogService_->evict(dbname);
+    closeDatabaseCaches(dbname);
     std::filesystem::remove_all(dbPath(dbname));
     return DBStatus::OK;
 }
@@ -7607,8 +7680,9 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     fsmCache_.erase(key);
     vmCache_.erase(key);
     secondaryIndexCache_.erase(key);
-    toastPageAllocators_.erase(key);
-    toastIndexes_.erase(key);
+    const std::string toastKey = dbname + ":" + tablename;
+    toastPageAllocators_.erase(toastKey);
+    toastIndexes_.erase(toastKey);
 
     auto names = getTableNames(dbname);
     {
