@@ -673,6 +673,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     if (!authenticationCompleted) return;
 
     Session session;
+    struct BackendSessionGuard {
+        ~BackendSessionGuard() { g_engine.endBackendSession(); }
+    } backendSessionGuard;
     session.username = username;
     session.permission = permissionQuery(username);
     session.authenticatedUser = username;

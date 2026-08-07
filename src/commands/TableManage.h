@@ -510,9 +510,12 @@ public:
                                         const std::set<std::string>& selectCols);
 
     // Transaction operations
-    bool inTransaction() const { return inTransaction_; }
-    bool isReadOnly() const { return readOnly_; }
-    void setReadOnly(bool ro) { readOnly_ = ro; }
+    bool inTransaction() const { return transactionContext().inTransaction; }
+    bool isReadOnly() const { return transactionContext().readOnly; }
+    void setReadOnly(bool ro) { transactionContext().readOnly = ro; }
+    // Abort any open transaction and discard backend-local state when a
+    // protocol connection terminates.
+    void endBackendSession();
     DBStatus beginTransaction(const std::string& dbname);
     DBStatus commitTransaction();
     DBStatus rollbackTransaction();
@@ -714,12 +717,14 @@ public:
 
     // MVCC ReadView
     struct ReadView {
-        uint64_t creatorTxnId = 0;
-        uint64_t upLimitId = 0;
-        uint64_t lowLimitId = 0;
+        ReadView()
+            : creatorTxnId(0), upLimitId(0), lowLimitId(0), commitLog(nullptr) {}
+        uint64_t creatorTxnId;
+        uint64_t upLimitId;
+        uint64_t lowLimitId;
         std::set<uint64_t> activeTxnIds;
         std::set<uint64_t> subTxnIds;        // subtransaction IDs in progress
-        const CommitLog* commitLog = nullptr; // for CLOG lookups
+        const CommitLog* commitLog; // for CLOG lookups
         bool isVisible(uint64_t rowTxnId) const;
         // PostgreSQL-style visibility using full HeapTupleHeader row buffer
         bool isVisible(const char* rowBuffer, size_t len, uint32_t formatVersion) const;
@@ -866,9 +871,10 @@ public:
     bool isConstraintDeferred(const std::string& name, bool defaultDeferred = false) const;
 
     // Current transaction ID (0 = not in a transaction)
-    uint64_t currentTxnId() const { return currentTxnId_; }
+    uint64_t currentTxnId() const { return transactionContext().currentTxnId; }
     const ReadView* getCurrentReadView() const {
-        return inTransaction_ ? &readView_ : nullptr;
+        const auto& tx = transactionContext();
+        return tx.inTransaction ? &tx.readView : nullptr;
     }
 
     // Snapshot export/import (for cross-backend snapshot sharing)
@@ -876,8 +882,8 @@ public:
     bool importSnapshot(const std::string& bytes);
 
     // Transaction isolation levels (unified with dbms::IsolationLevel in dbms_defs.h)
-    void setIsolationLevel(IsolationLevel level) { txnIsolationLevel_ = level; }
-    IsolationLevel getIsolationLevel() const { return txnIsolationLevel_; }
+    void setIsolationLevel(IsolationLevel level) { transactionContext().txnIsolationLevel = level; }
+    IsolationLevel getIsolationLevel() const { return transactionContext().txnIsolationLevel; }
     void refreshReadView();  // For READ COMMITTED: re-snapshot before each query
 
 public:
@@ -1101,8 +1107,6 @@ private:
         std::string constraintName;
         size_t colIdx;
     };
-    mutable std::map<std::string, bool> constraintMode_; // name -> deferred?
-    mutable std::map<uint64_t, std::vector<DeferredCheck>> deferredChecks_;
     bool runDeferredCheck(const DeferredCheck& dc) const;
 
     // Evaluate a single row against conditions, returning matching row indices
@@ -1125,34 +1129,27 @@ private:
     mutable std::map<std::pair<std::string, std::string>, size_t> modifyCounts_;
 
     // Transaction state
-    bool inTransaction_ = false;
-    bool readOnly_ = false;
-    std::string txnDB_;
-    uint64_t currentTxnId_ = 0;
-    ReadView readView_;
-    IsolationLevel txnIsolationLevel_ = IsolationLevel::REPEATABLE_READ;
+    // Transaction execution state is backend/session-local. StorageEngine is
+    // shared by all protocol workers, so each worker gets a context keyed by
+    // its thread and StorageEngine instance. Global lock/SSI structures below
+    // still coordinate concurrent backends.
     struct TxnLogEntry {
         enum class Op { Insert, Update, Delete } op;
         std::string tableName;
         int64_t rowIdx;
         std::string rowData;
     };
-    std::vector<TxnLogEntry> txnLog_;
     void logTxnInsert(const std::string& tableName, int64_t rowIdx);
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
 
     // Savepoint support
-    std::map<std::string, size_t> savepoints_; // name -> txnLog_ index
-    std::vector<uint64_t> txnSubTxnIds_;       // current transaction's subtransaction IDs (reserved)
 
     // Catalog snapshot: consistent schema/table list view within a transaction
     struct CatalogSnapshot {
         std::map<std::pair<std::string, std::string>, TableSchema> schemas;
         std::map<std::string, std::vector<std::string>> tableNames;
     };
-    mutable std::optional<CatalogSnapshot> catalogSnapshot_;
-    mutable std::mutex catalogSnapshotMutex_;
     void captureCatalogSnapshot();
     void clearCatalogSnapshot();
     void invalidateCatalogSchema(const std::string& dbname, const std::string& tablename);
@@ -1162,8 +1159,6 @@ private:
     // Relation-qualified row identities.  A (page, slot) pair is only unique
     // within one table; omitting the relation causes false SSI conflicts
     // between unrelated tables.
-    mutable std::set<std::string> txnReadRids_;    // relation-qualified RIDs read by current transaction
-    mutable std::set<std::string> txnWrittenRids_; // relation-qualified RIDs written by current transaction
 
     // Global active transaction tracking (for ReadView)
     static std::mutex globalTxnMutex_;
@@ -1194,10 +1189,31 @@ private:
     uint32_t backgroundCheckpointIntervalMs_ = 300000; // 5 minutes
     std::chrono::steady_clock::time_point lastBackgroundCheckpoint_;
 
-    // Sequence session state for lastval()
-    mutable std::string lastvalDb_;
-    mutable std::string lastvalSeq_;
-    mutable int64_t lastvalValue_ = 0;
+    // Backend-local transaction and sequence state for lastval().
+    struct TransactionContext {
+        std::map<std::string, bool> constraintMode; // name -> deferred?
+        std::map<uint64_t, std::vector<DeferredCheck>> deferredChecks;
+        bool inTransaction = false;
+        bool readOnly = false;
+        std::string txnDB;
+        uint64_t currentTxnId = 0;
+        ReadView readView;
+        IsolationLevel txnIsolationLevel = IsolationLevel::REPEATABLE_READ;
+        std::vector<TxnLogEntry> txnLog;
+        std::map<std::string, size_t> savepoints; // name -> txnLog index
+        std::vector<uint64_t> txnSubTxnIds;       // current transaction's subtransaction IDs
+        std::optional<CatalogSnapshot> catalogSnapshot;
+        std::set<std::string> txnReadRids;        // relation-qualified RIDs
+        std::set<std::string> txnWrittenRids;     // relation-qualified RIDs
+        std::string lastvalDb;
+        std::string lastvalSeq;
+        int64_t lastvalValue = 0;
+    };
+
+    mutable std::mutex transactionContextsMutex_;
+    mutable std::map<std::thread::id, std::unique_ptr<TransactionContext>> transactionContexts_;
+    TransactionContext& transactionContext() const;
+    mutable std::mutex catalogSnapshotMutex_;
 };
 
 // Column type constructors

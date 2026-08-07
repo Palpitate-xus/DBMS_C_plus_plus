@@ -984,6 +984,23 @@ StorageEngine::StorageEngine() {
     startBackgroundWorker();
 }
 
+StorageEngine::TransactionContext& StorageEngine::transactionContext() const {
+    const std::thread::id worker = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(transactionContextsMutex_);
+    auto& context = transactionContexts_[worker];
+    if (!context) context = std::make_unique<TransactionContext>();
+    return *context;
+}
+
+void StorageEngine::endBackendSession() {
+    const std::thread::id worker = std::this_thread::get_id();
+    if (transactionContext().inTransaction) {
+        rollbackTransaction();
+    }
+    std::lock_guard<std::mutex> lock(transactionContextsMutex_);
+    transactionContexts_.erase(worker);
+}
+
 StorageEngine::~StorageEngine() {
     if (catalogService_) catalogService_->persistAll();
     stopBackgroundWorker();
@@ -3378,7 +3395,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 const ReadView* readView,
                                 const std::vector<std::string>& targetPartitions) const {
     const ReadView* rv = readView;
-    if (!rv && inTransaction_) rv = &readView_;
+    if (!rv && transactionContext().inTransaction) rv = &transactionContext().readView;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -3393,12 +3410,12 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         if (rv) {
             if (!rv->isVisible(data, len, fmtVer)) return;
         }
-        if (this->inTransaction_ && this->txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
+        if (this->transactionContext().inTransaction && this->transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
             int64_t rid = this->encodeRid(pid, sid);
             std::string key = ssiRidKey(dbname, tablename, rid);
-            this->txnReadRids_.insert(key);
+            this->transactionContext().txnReadRids.insert(key);
             std::lock_guard<std::mutex> lock(ssiMutex_);
-            ssiReadSets_[this->currentTxnId_].insert(std::move(key));
+            ssiReadSets_[this->transactionContext().currentTxnId].insert(std::move(key));
         }
         size_t off = dataOffset(fmtVer, natts);
         if (usesHeapTupleHeader(fmtVer)) {
@@ -5543,15 +5560,15 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
 // ========================================================================
 void StorageEngine::setConstraintMode(const std::vector<std::string>& names, bool deferred) {
     for (const auto& name : names) {
-        constraintMode_[name] = deferred;
+        transactionContext().constraintMode[name] = deferred;
     }
 }
 
 bool StorageEngine::isConstraintDeferred(const std::string& name, bool defaultDeferred) const {
-    auto it = constraintMode_.find(name);
-    if (it != constraintMode_.end()) return it->second;
-    auto allIt = constraintMode_.find("all");
-    if (allIt != constraintMode_.end()) return allIt->second;
+    auto it = transactionContext().constraintMode.find(name);
+    if (it != transactionContext().constraintMode.end()) return it->second;
+    auto allIt = transactionContext().constraintMode.find("all");
+    if (allIt != transactionContext().constraintMode.end()) return allIt->second;
     return defaultDeferred;
 }
 
@@ -9474,9 +9491,9 @@ std::string StorageEngine::getColumnComment(const std::string& dbname,
 std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname) const {
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
-        if (catalogSnapshot_) {
-            auto it = catalogSnapshot_->tableNames.find(dbname);
-            if (it != catalogSnapshot_->tableNames.end()) {
+        if (transactionContext().catalogSnapshot) {
+            auto it = transactionContext().catalogSnapshot->tableNames.find(dbname);
+            if (it != transactionContext().catalogSnapshot->tableNames.end()) {
                 return it->second;
             }
         }
@@ -9492,8 +9509,8 @@ std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname)
 
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
-        if (catalogSnapshot_) {
-            catalogSnapshot_->tableNames[dbname] = names;
+        if (transactionContext().catalogSnapshot) {
+            transactionContext().catalogSnapshot->tableNames[dbname] = names;
         }
     }
     return names;
@@ -9701,9 +9718,9 @@ int64_t StorageEngine::nextval(const std::string& dbname,
     }
 
     writeSequenceFile(path, info, nextValue, lastAllocated);
-    lastvalDb_ = dbname;
-    lastvalSeq_ = seqname;
-    lastvalValue_ = result;
+    transactionContext().lastvalDb = dbname;
+    transactionContext().lastvalSeq = seqname;
+    transactionContext().lastvalValue = result;
     if (g_currentSession) {
         g_currentSession->sequenceLastValues[seqname] = result;
     }
@@ -9721,7 +9738,7 @@ int64_t StorageEngine::currval(const std::string& dbname,
 }
 
 int64_t StorageEngine::lastval() const {
-    return lastvalValue_;
+    return transactionContext().lastvalValue;
 }
 
 int64_t StorageEngine::setval(const std::string& dbname,
@@ -9769,10 +9786,10 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
                                             const std::string& tablename) const {
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
-        if (catalogSnapshot_) {
+        if (transactionContext().catalogSnapshot) {
             auto key = std::make_pair(dbname, tablename);
-            auto it = catalogSnapshot_->schemas.find(key);
-            if (it != catalogSnapshot_->schemas.end()) {
+            auto it = transactionContext().catalogSnapshot->schemas.find(key);
+            if (it != transactionContext().catalogSnapshot->schemas.end()) {
                 return it->second;
             }
         }
@@ -9784,8 +9801,8 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
 
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
-        if (catalogSnapshot_) {
-            catalogSnapshot_->schemas[std::make_pair(dbname, tablename)] = tbl;
+        if (transactionContext().catalogSnapshot) {
+            transactionContext().catalogSnapshot->schemas[std::make_pair(dbname, tablename)] = tbl;
         }
     }
     return tbl;
@@ -10479,7 +10496,7 @@ static bool isValidJson(const std::string& s) {
 DBStatus StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values) {
-    if (readOnly_) return DBStatus::INVALID_VALUE;
+    if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockExclusive(tablename);
 
@@ -10924,7 +10941,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     prepareToastValues(dbname, tablename, tbl, actualValues);
 
     // Build row buffer
-    uint64_t creatorTxnId = inTransaction_ ? currentTxnId_ : 0;
+    uint64_t creatorTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
     std::string rowBuffer = buildRowBuffer(tbl, actualValues, creatorTxnId);
     std::string strippedRow = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
 
@@ -11156,9 +11173,9 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     int64_t rid = encodeRid(pageId, slotId);
 
     // Queue deferred CHECK constraints for commit-time validation.
-    if (inTransaction_ && !deferredCheckCols.empty()) {
+    if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
         for (size_t ci : deferredCheckCols) {
-            deferredChecks_[currentTxnId_].push_back({dbname, tablename, rid, tbl.cols[ci].checkConstraintName, ci});
+            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back({dbname, tablename, rid, tbl.cols[ci].checkConstraintName, ci});
         }
     }
 
@@ -11189,7 +11206,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     }
 
     // Log for transaction rollback
-    if (inTransaction_ && dbname == txnDB_) {
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         logTxnInsert(tablename, rid);
     }
 
@@ -11652,7 +11669,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
 DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
                                              const std::string& tablename,
                                              const TableSchema& tbl) {
-    if (readOnly_) return DBStatus::INVALID_VALUE;
+    if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     // Build row with DEFAULT values or NULL for each column.
@@ -11691,7 +11708,7 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
 DBStatus StorageEngine::remove(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::vector<std::string>& conditions) {
-    if (readOnly_) return DBStatus::INVALID_VALUE;
+    if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockIntentExclusive(tablename);
 
@@ -11846,7 +11863,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                         for (size_t ci : sa.colIndices) {
                             rowValues[otbl.cols[ci].dataName] = "";
                         }
-                        std::string newRow = buildRowBuffer(otbl, rowValues, currentTxnId_);
+                        std::string newRow = buildRowBuffer(otbl, rowValues, transactionContext().currentTxnId);
                         uint32_t pid; uint16_t sid;
                         decodeRid(sa.rid, pid, sid);
                         char* pbuf = opa->fetchPage(pid);
@@ -11889,7 +11906,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                     PageAllocator* opa = getPageAllocator(dbname, ca.table);
 
                     // Log for transaction rollback
-                    if (inTransaction_ && dbname == txnDB_) {
+                    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
                         std::string row;
                         if (readRowByRid(opa, ca.rid, row, otbl)) {
                             logTxnDelete(ca.table, ca.rid, row);
@@ -12041,7 +12058,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     size_t delIdx = 0;
     for (int64_t rid : toDelete) {
         // Log for transaction rollback (before deletion)
-        if (inTransaction_ && dbname == txnDB_ && !rowsToDelete[delIdx].empty()) {
+        if (transactionContext().inTransaction && dbname == transactionContext().txnDB && !rowsToDelete[delIdx].empty()) {
             logTxnDelete(tablename, rid, rowsToDelete[delIdx]);
         }
 
@@ -12053,12 +12070,12 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
             walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
             // Mark row as deleted by setting xmax for PostgreSQL-style tuples.
-            if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
+            if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
                 const char* data = nullptr;
                 size_t len = 0;
                 if (page.read(slotId, data, len)) {
                     std::string mutableRow(data, len);
-                    setRowXmax(mutableRow.data(), mutableRow.size(), tbl.formatVersion, currentTxnId_);
+                    setRowXmax(mutableRow.data(), mutableRow.size(), tbl.formatVersion, transactionContext().currentTxnId);
                     page.update(slotId, mutableRow.data(), mutableRow.size());
                 }
             }
@@ -12234,7 +12251,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& updates,
                                 const std::vector<std::string>& conditions) {
-    if (readOnly_) return DBStatus::INVALID_VALUE;
+    if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -12383,7 +12400,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
             // in-flight transaction must not continue with a partially
             // locked statement; abort it so all previously acquired row
             // locks are released atomically.
-            if (inTransaction_) {
+            if (transactionContext().inTransaction) {
                 rollbackTransaction();
             } else {
                 lockManager_.unlock(tablename);
@@ -12401,7 +12418,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
         if (!readRowByRid(pa, rid, row, tbl)) continue;
 
         // Log for transaction rollback (before modification)
-        if (inTransaction_ && dbname == txnDB_) {
+        if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
             logTxnUpdate(tablename, rid, row);
         }
 
@@ -12598,7 +12615,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
         // TOAST: delete old toast entries, create new ones for large values
         deleteRowToast(dbname, tablename, rid);
         prepareToastValues(dbname, tablename, tbl, rowValues);
-        uint64_t updateTxnId = inTransaction_ ? currentTxnId_ : 0;
+        uint64_t updateTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
         std::string newRow = buildRowBuffer(tbl, rowValues, updateTxnId);
         std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
 
@@ -12624,9 +12641,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 return DBStatus::INVALID_VALUE;
             }
         }
-        if (inTransaction_ && !deferredCheckCols.empty()) {
+        if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
             for (size_t ci : deferredCheckCols) {
-                deferredChecks_[currentTxnId_].push_back({dbname, tablename, rid, tbl.cols[ci].checkConstraintName, ci});
+                transactionContext().deferredChecks[transactionContext().currentTxnId].push_back({dbname, tablename, rid, tbl.cols[ci].checkConstraintName, ci});
             }
         }
 
@@ -12748,7 +12765,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 if (!readRowByRid(opa, sa.rid, oRow, otbl)) continue;
 
                 // Transaction log
-                if (inTransaction_ && dbname == txnDB_) {
+                if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
                     logTxnUpdate(sa.table, sa.rid, oRow);
                 }
 
@@ -12760,7 +12777,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 for (size_t ci : sa.colIndices) {
                     oRowVals[otbl.cols[ci].dataName] = "";
                 }
-                std::string newORow = buildRowBuffer(otbl, oRowVals, currentTxnId_);
+                std::string newORow = buildRowBuffer(otbl, oRowVals, transactionContext().currentTxnId);
                 uint32_t opid; uint16_t osid;
                 decodeRid(sa.rid, opid, osid);
                 char* obuf = opa->fetchPage(opid);
@@ -12780,7 +12797,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 if (!readRowByRid(opa, ca.rid, oRow, otbl)) continue;
 
                 // Transaction log
-                if (inTransaction_ && dbname == txnDB_) {
+                if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
                     logTxnUpdate(ca.table, ca.rid, oRow);
                 }
 
@@ -12791,7 +12808,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 for (const auto& kv : ca.newFkVals) {
                     oRowVals[kv.first] = kv.second;
                 }
-                std::string newORow = buildRowBuffer(otbl, oRowVals, currentTxnId_);
+                std::string newORow = buildRowBuffer(otbl, oRowVals, transactionContext().currentTxnId);
                 uint32_t opid; uint16_t osid;
                 decodeRid(ca.rid, opid, osid);
                 char* obuf = opa->fetchPage(opid);
@@ -12815,12 +12832,12 @@ DBStatus StorageEngine::update(const std::string& dbname,
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
             walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
             // Mark old row as updated (xmax) for PostgreSQL-style tuples.
-            if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
+            if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
                 const char* oldData = nullptr;
                 size_t oldLen = 0;
                 if (page.read(slotId, oldData, oldLen)) {
                     std::string mutableOld(oldData, oldLen);
-                    setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, currentTxnId_);
+                    setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, transactionContext().currentTxnId);
                     uint16_t dummySlot = slotId;
                     page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
                 }
@@ -12829,7 +12846,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
             bool usedHot = false;
 
             // Attempt HOT update for PostgreSQL-style tuples when no indexed column changes.
-            if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
+            if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
                 bool indexesAffected = false;
                 for (const auto& kv : oldIdxVals) {
                     size_t colIdx = tbl.len;
@@ -12850,7 +12867,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                             size_t oldLen = 0;
                             if (page.read(slotId, oldData, oldLen)) {
                                 std::string mutableOld(oldData, oldLen);
-                                setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, currentTxnId_);
+                                setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, transactionContext().currentTxnId);
                                 setRowCtid(mutableOld.data(), mutableOld.size(), tbl.formatVersion, newCtid);
                                 uint16_t dummySlot = slotId;
                                 page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
@@ -12864,12 +12881,12 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
             if (!usedHot) {
                 // Mark old row as updated (xmax) for PostgreSQL-style tuples.
-                if (usesHeapTupleHeader(tbl.formatVersion) && inTransaction_ && dbname == txnDB_) {
+                if (usesHeapTupleHeader(tbl.formatVersion) && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
                     const char* oldData = nullptr;
                     size_t oldLen = 0;
                     if (page.read(slotId, oldData, oldLen)) {
                         std::string mutableOld(oldData, oldLen);
-                        setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, currentTxnId_);
+                        setRowXmax(mutableOld.data(), mutableOld.size(), tbl.formatVersion, transactionContext().currentTxnId);
                         uint16_t dummySlot = slotId;
                         page.update(slotId, mutableOld.data(), mutableOld.size(), dummySlot);
                     }
@@ -12908,8 +12925,8 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (newSlotId != slotId) {
                 actualRid = encodeRid(pageId, newSlotId);
                 // Update the last txnLog entry with the new rid since the row moved
-                if (inTransaction_ && dbname == txnDB_ && !txnLog_.empty()) {
-                    txnLog_.back().rowIdx = actualRid;
+                if (transactionContext().inTransaction && dbname == transactionContext().txnDB && !transactionContext().txnLog.empty()) {
+                    transactionContext().txnLog.back().rowIdx = actualRid;
                 }
             }
         }
@@ -13410,7 +13427,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     if (!tableExists(dbname, tablename)) return result;
-    if (inTransaction_) {
+    if (transactionContext().inTransaction) {
         if (forUpdate) {
             lockManager_.lockIntentExclusive(tablename);
         } else {
@@ -13421,7 +13438,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     // READ COMMITTED: refresh snapshot before each query
-    if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::READ_COMMITTED) {
+    if (transactionContext().inTransaction && transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
         refreshReadView();
     }
 
@@ -13442,7 +13459,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     } else if (tbl.partitionType != TableSchema::PartitionType::None) {
         // Partitioned table: use forEachRow with partition pruning + in-callback filtering
         auto targetParts = getTargetPartitions(tbl, conds);
-        const ReadView* rv = inTransaction_ ? &readView_ : nullptr;
+        const ReadView* rv = transactionContext().inTransaction ? &transactionContext().readView : nullptr;
         forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             std::string row(data, len);
             bool match = true;
@@ -13468,7 +13485,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     }
 
     // Row-level locks within transaction
-    if (inTransaction_) {
+    if (transactionContext().inTransaction) {
         std::vector<std::pair<int64_t, std::string>> lockedRows;
         for (auto& mr : matchRows) {
             bool locked;
@@ -14771,7 +14788,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return result;
     lockManager_.lockShared(tablename);
 
-    if (inTransaction_ && txnIsolationLevel_ == IsolationLevel::READ_COMMITTED) {
+    if (transactionContext().inTransaction && transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
         refreshReadView();
     }
 
@@ -16778,7 +16795,7 @@ Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& ta
     payload.insert(payload.end(), pageBuf, pageBuf + pageSize);
     uint8_t info = beforeImage ? XLOG_HEAP_PAGE_BEFORE : XLOG_HEAP_PAGE_AFTER;
     return wal->XLogInsert(RM_HEAP_ID, info,
-                           inTransaction_ ? currentTxnId_ : 0, payload);
+                           transactionContext().inTransaction ? transactionContext().currentTxnId : 0, payload);
 }
 
 static void setPageLsnAndChecksum(char* buf, Lsn lsn) {
@@ -16816,7 +16833,7 @@ Lsn StorageEngine::walCheckpoint(const std::string& dbname, uint64_t nextXid) {
     payload.insert(payload.end(), reinterpret_cast<const char*>(&timestamp),
                    reinterpret_cast<const char*>(&timestamp) + sizeof(timestamp));
     return wal->XLogInsert(RM_CHECKPOINT_ID, XLOG_CHECKPOINT_SHUTDOWN,
-                           inTransaction_ ? currentTxnId_ : 0, payload);
+                           transactionContext().inTransaction ? transactionContext().currentTxnId : 0, payload);
 }
 
 Lsn StorageEngine::walCatalogChange(const std::string& dbname, uint8_t info,
@@ -16831,7 +16848,7 @@ Lsn StorageEngine::walCatalogChange(const std::string& dbname, uint8_t info,
     payload.insert(payload.end(), objType.data(), objType.data() + typeLen);
     payload.push_back(nameLen);
     payload.insert(payload.end(), objName.data(), objName.data() + nameLen);
-    return wal->XLogInsert(RM_CATALOG_ID, info, inTransaction_ ? currentTxnId_ : 0, payload);
+    return wal->XLogInsert(RM_CATALOG_ID, info, transactionContext().inTransaction ? transactionContext().currentTxnId : 0, payload);
 }
 
 void StorageEngine::markPageDirtyAndLsn(PageAllocator* pa, uint32_t pageId, Lsn lsn,
@@ -17012,46 +17029,46 @@ void StorageEngine::recoverAllDatabases() {
 // ReadView refresh (for READ COMMITTED)
 // ========================================================================
 void StorageEngine::refreshReadView() {
-    if (!inTransaction_ || txnIsolationLevel_ != IsolationLevel::READ_COMMITTED) return;
+    if (!transactionContext().inTransaction || transactionContext().txnIsolationLevel != IsolationLevel::READ_COMMITTED) return;
     std::lock_guard<std::mutex> lock(globalTxnMutex_);
-    readView_.creatorTxnId = currentTxnId_;
-    readView_.upLimitId = activeTransactions_.empty() ? currentTxnId_ : *activeTransactions_.begin();
-    readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-    readView_.activeTxnIds = activeTransactions_;
-    readView_.activeTxnIds.erase(currentTxnId_);
-    readView_.subTxnIds.clear();
-    readView_.subTxnIds.insert(txnSubTxnIds_.begin(), txnSubTxnIds_.end());
-    readView_.commitLog = getCommitLog(txnDB_);
+    transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
+    transactionContext().readView.upLimitId = activeTransactions_.empty() ? transactionContext().currentTxnId : *activeTransactions_.begin();
+    transactionContext().readView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+    transactionContext().readView.activeTxnIds = activeTransactions_;
+    transactionContext().readView.activeTxnIds.erase(transactionContext().currentTxnId);
+    transactionContext().readView.subTxnIds.clear();
+    transactionContext().readView.subTxnIds.insert(transactionContext().txnSubTxnIds.begin(), transactionContext().txnSubTxnIds.end());
+    transactionContext().readView.commitLog = getCommitLog(transactionContext().txnDB);
 }
 
 // ========================================================================
 // Snapshot export/import
 // ========================================================================
 std::string StorageEngine::exportSnapshot() const {
-    if (!inTransaction_) return "";
+    if (!transactionContext().inTransaction) return "";
     Snapshot snap;
     snap.version = 1;
-    snap.xmin = readView_.upLimitId;
-    snap.xmax = readView_.lowLimitId;
+    snap.xmin = transactionContext().readView.upLimitId;
+    snap.xmax = transactionContext().readView.lowLimitId;
     snap.curCid = 0; // command id not tracked yet
-    snap.activeXids.assign(readView_.activeTxnIds.begin(), readView_.activeTxnIds.end());
-    snap.subxip.assign(readView_.subTxnIds.begin(), readView_.subTxnIds.end());
+    snap.activeXids.assign(transactionContext().readView.activeTxnIds.begin(), transactionContext().readView.activeTxnIds.end());
+    snap.subxip.assign(transactionContext().readView.subTxnIds.begin(), transactionContext().readView.subTxnIds.end());
     return snap.exportToBytes();
 }
 
 bool StorageEngine::importSnapshot(const std::string& bytes) {
-    if (!inTransaction_) return false;
+    if (!transactionContext().inTransaction) return false;
     auto snapOpt = Snapshot::importFromBytes(bytes);
     if (!snapOpt) return false;
     const Snapshot& snap = *snapOpt;
-    readView_.creatorTxnId = currentTxnId_;
-    readView_.upLimitId = snap.xmin;
-    readView_.lowLimitId = snap.xmax;
-    readView_.activeTxnIds.clear();
-    readView_.activeTxnIds.insert(snap.activeXids.begin(), snap.activeXids.end());
-    readView_.subTxnIds.clear();
-    readView_.subTxnIds.insert(snap.subxip.begin(), snap.subxip.end());
-    readView_.commitLog = getCommitLog(txnDB_);
+    transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
+    transactionContext().readView.upLimitId = snap.xmin;
+    transactionContext().readView.lowLimitId = snap.xmax;
+    transactionContext().readView.activeTxnIds.clear();
+    transactionContext().readView.activeTxnIds.insert(snap.activeXids.begin(), snap.activeXids.end());
+    transactionContext().readView.subTxnIds.clear();
+    transactionContext().readView.subTxnIds.insert(snap.subxip.begin(), snap.subxip.end());
+    transactionContext().readView.commitLog = getCommitLog(transactionContext().txnDB);
     return true;
 }
 
@@ -17060,28 +17077,28 @@ bool StorageEngine::importSnapshot(const std::string& bytes) {
 // ========================================================================
 void StorageEngine::captureCatalogSnapshot() {
     std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
-    catalogSnapshot_.emplace();
-    catalogSnapshot_->schemas.clear();
-    catalogSnapshot_->tableNames.clear();
+    transactionContext().catalogSnapshot.emplace();
+    transactionContext().catalogSnapshot->schemas.clear();
+    transactionContext().catalogSnapshot->tableNames.clear();
 }
 
 void StorageEngine::clearCatalogSnapshot() {
     std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
-    catalogSnapshot_.reset();
+    transactionContext().catalogSnapshot.reset();
 }
 
 void StorageEngine::invalidateCatalogSchema(const std::string& dbname,
                                             const std::string& tablename) {
     std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
-    if (catalogSnapshot_) {
-        catalogSnapshot_->schemas.erase(std::make_pair(dbname, tablename));
+    if (transactionContext().catalogSnapshot) {
+        transactionContext().catalogSnapshot->schemas.erase(std::make_pair(dbname, tablename));
     }
 }
 
 void StorageEngine::invalidateCatalogTableList(const std::string& dbname) {
     std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
-    if (catalogSnapshot_) {
-        catalogSnapshot_->tableNames.erase(dbname);
+    if (transactionContext().catalogSnapshot) {
+        transactionContext().catalogSnapshot->tableNames.erase(dbname);
     }
 }
 
@@ -17437,34 +17454,34 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
 // ========================================================================
 
 void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx) {
-    txnLog_.push_back({TxnLogEntry::Op::Insert, tableName, rowIdx, ""});
-    if (txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
-        std::string key = ssiRidKey(txnDB_, tableName, rowIdx);
-        txnWrittenRids_.insert(key);
+    transactionContext().txnLog.push_back({TxnLogEntry::Op::Insert, tableName, rowIdx, ""});
+    if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
+        std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
+        transactionContext().txnWrittenRids.insert(key);
         std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiWriteSets_[currentTxnId_].insert(std::move(key));
+        ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
     }
 }
 
 void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
-    txnLog_.push_back({TxnLogEntry::Op::Update, tableName, rowIdx, oldRowData});
-    if (txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
-        std::string key = ssiRidKey(txnDB_, tableName, rowIdx);
-        txnWrittenRids_.insert(key);
+    transactionContext().txnLog.push_back({TxnLogEntry::Op::Update, tableName, rowIdx, oldRowData});
+    if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
+        std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
+        transactionContext().txnWrittenRids.insert(key);
         std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiWriteSets_[currentTxnId_].insert(std::move(key));
+        ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
     }
 }
 
 void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
-    txnLog_.push_back({TxnLogEntry::Op::Delete, tableName, rowIdx, oldRowData});
-    if (txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
-        std::string key = ssiRidKey(txnDB_, tableName, rowIdx);
-        txnWrittenRids_.insert(key);
+    transactionContext().txnLog.push_back({TxnLogEntry::Op::Delete, tableName, rowIdx, oldRowData});
+    if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
+        std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
+        transactionContext().txnWrittenRids.insert(key);
         std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiWriteSets_[currentTxnId_].insert(std::move(key));
+        ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
     }
 }
 
@@ -17473,10 +17490,10 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
 // ========================================================================
 
 DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
-    if (inTransaction_) {
+    if (transactionContext().inTransaction) {
         // Commit existing transaction before starting a new one.
         // This matches PostgreSQL's implicit-commit-on-DDL behavior and
-        // prevents txnDB_ from pointing to a stale database.
+        // prevents transactionContext().txnDB from pointing to a stale database.
         commitTransaction();
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
@@ -17515,55 +17532,55 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     }
 
     // Assign transaction ID and create ReadView (if needed)
-    currentTxnId_ = TxnIdGenerator::instance().nextTxId();
+    transactionContext().currentTxnId = TxnIdGenerator::instance().nextTxId();
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.insert(currentTxnId_);
+        activeTransactions_.insert(transactionContext().currentTxnId);
     }
     // Initialize SSI tracking
     {
         std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_[currentTxnId_].clear();
-        ssiWriteSets_[currentTxnId_].clear();
+        ssiReadSets_[transactionContext().currentTxnId].clear();
+        ssiWriteSets_[transactionContext().currentTxnId].clear();
     }
-    txnReadRids_.clear();
-    txnWrittenRids_.clear();
-    if (txnIsolationLevel_ != IsolationLevel::READ_UNCOMMITTED) {
+    transactionContext().txnReadRids.clear();
+    transactionContext().txnWrittenRids.clear();
+    if (transactionContext().txnIsolationLevel != IsolationLevel::READ_UNCOMMITTED) {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        readView_.creatorTxnId = currentTxnId_;
-        readView_.upLimitId = activeTransactions_.empty() ? currentTxnId_ : *activeTransactions_.begin();
-        readView_.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        readView_.activeTxnIds = activeTransactions_;
-        readView_.activeTxnIds.erase(currentTxnId_);
-        readView_.subTxnIds.clear();
-        readView_.subTxnIds.insert(txnSubTxnIds_.begin(), txnSubTxnIds_.end());
-        readView_.commitLog = getCommitLog(dbname);
+        transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
+        transactionContext().readView.upLimitId = activeTransactions_.empty() ? transactionContext().currentTxnId : *activeTransactions_.begin();
+        transactionContext().readView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        transactionContext().readView.activeTxnIds = activeTransactions_;
+        transactionContext().readView.activeTxnIds.erase(transactionContext().currentTxnId);
+        transactionContext().readView.subTxnIds.clear();
+        transactionContext().readView.subTxnIds.insert(transactionContext().txnSubTxnIds.begin(), transactionContext().txnSubTxnIds.end());
+        transactionContext().readView.commitLog = getCommitLog(dbname);
     }
 
     // Capture catalog snapshot for consistent catalog view within transaction
     captureCatalogSnapshot();
 
-    txnLog_.clear();
-    inTransaction_ = true;
-    txnDB_ = dbname;
+    transactionContext().txnLog.clear();
+    transactionContext().inTransaction = true;
+    transactionContext().txnDB = dbname;
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::commitTransaction() {
-    if (!inTransaction_) return DBStatus::OK;
+    if (!transactionContext().inTransaction) return DBStatus::OK;
 
     // SSI conflict detection for Serializable isolation
-    if (txnIsolationLevel_ == IsolationLevel::SERIALIZABLE) {
+    if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         std::unique_lock<std::mutex> lock(ssiMutex_);
         bool hasOutgoing = false, hasIncoming = false;
 
         for (const auto& [otherTxId, otherWriteSet] : ssiWriteSets_) {
-            if (otherTxId == currentTxnId_) continue;
-            for (const auto& rid : txnReadRids_) {
+            if (otherTxId == transactionContext().currentTxnId) continue;
+            for (const auto& rid : transactionContext().txnReadRids) {
                 if (otherWriteSet.count(rid)) {
                     hasOutgoing = true;
-                    ssiOutEdges_[currentTxnId_].insert(otherTxId);
-                    ssiInEdges_[otherTxId].insert(currentTxnId_);
+                    ssiOutEdges_[transactionContext().currentTxnId].insert(otherTxId);
+                    ssiInEdges_[otherTxId].insert(transactionContext().currentTxnId);
                     break;
                 }
             }
@@ -17571,12 +17588,12 @@ DBStatus StorageEngine::commitTransaction() {
         }
 
         for (const auto& [otherTxId, otherReadSet] : ssiReadSets_) {
-            if (otherTxId == currentTxnId_) continue;
-            for (const auto& rid : txnWrittenRids_) {
+            if (otherTxId == transactionContext().currentTxnId) continue;
+            for (const auto& rid : transactionContext().txnWrittenRids) {
                 if (otherReadSet.count(rid)) {
                     hasIncoming = true;
-                    ssiInEdges_[currentTxnId_].insert(otherTxId);
-                    ssiOutEdges_[otherTxId].insert(currentTxnId_);
+                    ssiInEdges_[transactionContext().currentTxnId].insert(otherTxId);
+                    ssiOutEdges_[otherTxId].insert(transactionContext().currentTxnId);
                     break;
                 }
             }
@@ -17585,15 +17602,15 @@ DBStatus StorageEngine::commitTransaction() {
 
         if (hasOutgoing && hasIncoming) {
             // Dangerous structure detected - must abort
-            uint64_t abortedId = currentTxnId_;
+            uint64_t abortedId = transactionContext().currentTxnId;
             ssiReadSets_.erase(abortedId);
             ssiWriteSets_.erase(abortedId);
             ssiOutEdges_.erase(abortedId);
             for (auto& [k, v] : ssiInEdges_) v.erase(abortedId);
             ssiInEdges_.erase(abortedId);
             for (auto& [k, v] : ssiOutEdges_) v.erase(abortedId);
-            txnReadRids_.clear();
-            txnWrittenRids_.clear();
+            transactionContext().txnReadRids.clear();
+            transactionContext().txnWrittenRids.clear();
             // rollbackTransaction() performs its own SSI cleanup and must
             // acquire ssiMutex_.  Release the detection lock first to avoid
             // self-deadlocking on the serialization-failure path.
@@ -17603,82 +17620,82 @@ DBStatus StorageEngine::commitTransaction() {
         }
 
         // No conflict - clean up SSI data for committed transaction
-        ssiReadSets_.erase(currentTxnId_);
-        ssiWriteSets_.erase(currentTxnId_);
-        ssiOutEdges_.erase(currentTxnId_);
-        for (auto& [k, v] : ssiInEdges_) v.erase(currentTxnId_);
-        ssiInEdges_.erase(currentTxnId_);
-        for (auto& [k, v] : ssiOutEdges_) v.erase(currentTxnId_);
-        txnReadRids_.clear();
-        txnWrittenRids_.clear();
+        ssiReadSets_.erase(transactionContext().currentTxnId);
+        ssiWriteSets_.erase(transactionContext().currentTxnId);
+        ssiOutEdges_.erase(transactionContext().currentTxnId);
+        for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
+        ssiInEdges_.erase(transactionContext().currentTxnId);
+        for (auto& [k, v] : ssiOutEdges_) v.erase(transactionContext().currentTxnId);
+        transactionContext().txnReadRids.clear();
+        transactionContext().txnWrittenRids.clear();
     }
 
     // Run deferred CHECK constraints queued for this transaction before committing.
     {
-        auto it = deferredChecks_.find(currentTxnId_);
-        if (it != deferredChecks_.end()) {
+        auto it = transactionContext().deferredChecks.find(transactionContext().currentTxnId);
+        if (it != transactionContext().deferredChecks.end()) {
             for (const auto& dc : it->second) {
                 if (!runDeferredCheck(dc)) {
                     rollbackTransaction();
                     return DBStatus::INVALID_VALUE;
                 }
             }
-            deferredChecks_.erase(it);
+            transactionContext().deferredChecks.erase(it);
         }
     }
 
     // Update CLOG before clearing state
-    CommitLog* clog = getCommitLog(txnDB_);
-    if (clog) clog->setStatus(currentTxnId_, CommitLog::Status::Committed);
+    CommitLog* clog = getCommitLog(transactionContext().txnDB);
+    if (clog) clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Committed);
 
     // Update max committed txId
-    TxnIdGenerator::instance().notifyCommit(currentTxnId_);
+    TxnIdGenerator::instance().notifyCommit(transactionContext().currentTxnId);
     // Remove from active set
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.erase(currentTxnId_);
+        activeTransactions_.erase(transactionContext().currentTxnId);
     }
     // Write WAL COMMIT marker and flush WAL before clearing state.
-    WALManager* wal = getWAL(txnDB_);
+    WALManager* wal = getWAL(transactionContext().txnDB);
     if (wal) {
-        Lsn commitLsn = walXactCommit(txnDB_, currentTxnId_);
+        Lsn commitLsn = walXactCommit(transactionContext().txnDB, transactionContext().currentTxnId);
         if (commitLsn != INVALID_LSN) {
             wal->XLogFlush(commitLsn);
         }
     }
 
-    txnLog_.clear();
-    savepoints_.clear();
-    txnSubTxnIds_.clear();
+    transactionContext().txnLog.clear();
+    transactionContext().savepoints.clear();
+    transactionContext().txnSubTxnIds.clear();
     clearCatalogSnapshot();
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
-    constraintMode_.clear();
-    deferredChecks_.erase(currentTxnId_);
-    currentTxnId_ = 0;
-    inTransaction_ = false;
-    readOnly_ = false;
-    txnDB_.clear();
+    transactionContext().constraintMode.clear();
+    transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
+    transactionContext().currentTxnId = 0;
+    transactionContext().inTransaction = false;
+    transactionContext().readOnly = false;
+    transactionContext().txnDB.clear();
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::rollbackTransaction() {
-    if (!inTransaction_) return DBStatus::OK;
+    if (!transactionContext().inTransaction) return DBStatus::OK;
 
     // Mark transaction as aborted in CLOG
-    CommitLog* clog = getCommitLog(txnDB_);
-    if (clog) clog->setStatus(currentTxnId_, CommitLog::Status::Aborted);
+    CommitLog* clog = getCommitLog(transactionContext().txnDB);
+    if (clog) clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Aborted);
 
     // Remove from active set (aborted, not committed)
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.erase(currentTxnId_);
+        activeTransactions_.erase(transactionContext().currentTxnId);
     }
 
     // Replay txnLog in reverse order to undo changes
-    for (auto it = txnLog_.rbegin(); it != txnLog_.rend(); ++it) {
-        PageAllocator* pa = getPageAllocator(txnDB_, it->tableName);
-        TableSchema tbl = getTableSchema(txnDB_, it->tableName);
+    for (auto it = transactionContext().txnLog.rbegin(); it != transactionContext().txnLog.rend(); ++it) {
+        PageAllocator* pa = getPageAllocator(transactionContext().txnDB, it->tableName);
+        TableSchema tbl = getTableSchema(transactionContext().txnDB, it->tableName);
 
         if (it->op == TxnLogEntry::Op::Insert) {
             // Undo INSERT: remove the row
@@ -17691,7 +17708,7 @@ DBStatus StorageEngine::rollbackTransaction() {
                 std::string row;
                 if (readRowByRid(pa, it->rowIdx, row, tbl)) {
                     pkVal = extractPKValue(row, tbl);
-                    auto indexedCols = getIndexedColumns(txnDB_, it->tableName);
+                    auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
                     for (const auto& colname : indexedCols) {
                         size_t colIdx = tbl.len;
                         for (size_t i = 0; i < tbl.len; ++i) {
@@ -17712,13 +17729,13 @@ DBStatus StorageEngine::rollbackTransaction() {
                 pa->unpinPage(pageId);
             }
             // Remove from PK index
-            BPTree* pkIdx = getPKIndex(txnDB_, it->tableName);
+            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
             if (pkIdx && !pkVal.empty()) {
                 pkIdx->remove(pkVal);
             }
             // Remove from secondary indexes
             for (const auto& kv : secIdxVals) {
-                BPTree* secIdx = getSecondaryIndex(txnDB_, it->tableName, kv.first);
+                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, kv.first);
                 if (secIdx && !kv.second.empty()) {
                     secIdx->remove(kv.second);
                 }
@@ -17775,7 +17792,7 @@ DBStatus StorageEngine::rollbackTransaction() {
                 pa->unpinPage(pageId);
             }
             // Rebuild indexes: remove current (stale) values then insert restored values
-            BPTree* pkIdx = getPKIndex(txnDB_, it->tableName);
+            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
             if (pkIdx) {
                 if (foundCurrent) {
                     std::string currentPk = extractPKValue(currentRow, tbl);
@@ -17784,14 +17801,14 @@ DBStatus StorageEngine::rollbackTransaction() {
                 std::string pkVal = extractPKValue(it->rowData, tbl);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, it->rowIdx);
             }
-            auto indexedCols = getIndexedColumns(txnDB_, it->tableName);
+            auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
             for (const auto& colname : indexedCols) {
                 size_t colIdx = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
                 }
                 if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(txnDB_, it->tableName, colname);
+                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, colname);
                 if (!secIdx) continue;
                 if (foundCurrent) {
                     std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
@@ -17824,19 +17841,19 @@ DBStatus StorageEngine::rollbackTransaction() {
                 pa->unpinPage(pageId);
             }
             // Re-add to indexes
-            BPTree* pkIdx = getPKIndex(txnDB_, it->tableName);
+            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
             if (pkIdx) {
                 std::string pkVal = extractPKValue(it->rowData, tbl);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, it->rowIdx);
             }
-            auto indexedCols = getIndexedColumns(txnDB_, it->tableName);
+            auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
             for (const auto& colname : indexedCols) {
                 size_t colIdx = tbl.len;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
                 }
                 if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(txnDB_, it->tableName, colname);
+                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, colname);
                 if (!secIdx) continue;
                 std::string val = extractColumnValue(it->rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
@@ -17845,15 +17862,15 @@ DBStatus StorageEngine::rollbackTransaction() {
     }
 
     // Write WAL ABORT marker after undo.
-    WALManager* wal = getWAL(txnDB_);
+    WALManager* wal = getWAL(transactionContext().txnDB);
     if (wal) {
-        walXactAbort(txnDB_, currentTxnId_);
+        walXactAbort(transactionContext().txnDB, transactionContext().currentTxnId);
     }
 
-    deferredChecks_.erase(currentTxnId_);
-    txnLog_.clear();
-    savepoints_.clear();
-    txnSubTxnIds_.clear();
+    transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
+    transactionContext().txnLog.clear();
+    transactionContext().savepoints.clear();
+    transactionContext().txnSubTxnIds.clear();
     clearCatalogSnapshot();
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
@@ -17861,22 +17878,22 @@ DBStatus StorageEngine::rollbackTransaction() {
     // Clean up SSI data for aborted transaction
     {
         std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_.erase(currentTxnId_);
-        ssiWriteSets_.erase(currentTxnId_);
-        ssiOutEdges_.erase(currentTxnId_);
-        for (auto& [k, v] : ssiInEdges_) v.erase(currentTxnId_);
-        ssiInEdges_.erase(currentTxnId_);
-        for (auto& [k, v] : ssiOutEdges_) v.erase(currentTxnId_);
+        ssiReadSets_.erase(transactionContext().currentTxnId);
+        ssiWriteSets_.erase(transactionContext().currentTxnId);
+        ssiOutEdges_.erase(transactionContext().currentTxnId);
+        for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
+        ssiInEdges_.erase(transactionContext().currentTxnId);
+        for (auto& [k, v] : ssiOutEdges_) v.erase(transactionContext().currentTxnId);
     }
-    txnReadRids_.clear();
-    txnWrittenRids_.clear();
+    transactionContext().txnReadRids.clear();
+    transactionContext().txnWrittenRids.clear();
 
-    currentTxnId_ = 0;
-    inTransaction_ = false;
-    readOnly_ = false;
-    txnDB_.clear();
-    constraintMode_.clear();
-    deferredChecks_.clear();
+    transactionContext().currentTxnId = 0;
+    transactionContext().inTransaction = false;
+    transactionContext().readOnly = false;
+    transactionContext().txnDB.clear();
+    transactionContext().constraintMode.clear();
+    transactionContext().deferredChecks.clear();
     return DBStatus::OK;
 }
 
@@ -17893,7 +17910,7 @@ static std::filesystem::path preparedPath(const std::string& xid) {
 }
 
 DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
-    if (!inTransaction_) return DBStatus::INVALID_VALUE;
+    if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     if (xid.empty()) return DBStatus::INVALID_VALUE;
 
     std::filesystem::path pdir = preparedDir();
@@ -17907,10 +17924,10 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     if (!ofs) return DBStatus::INVALID_VALUE;
 
     // Transaction metadata
-    ofs << "TXN_ID " << currentTxnId_ << "\n";
-    ofs << "DBNAME " << txnDB_ << "\n";
-    ofs << "ISOLATION " << static_cast<int>(txnIsolationLevel_) << "\n";
-    ofs << "READONLY " << (readOnly_ ? 1 : 0) << "\n";
+    ofs << "TXN_ID " << transactionContext().currentTxnId << "\n";
+    ofs << "DBNAME " << transactionContext().txnDB << "\n";
+    ofs << "ISOLATION " << static_cast<int>(transactionContext().txnIsolationLevel) << "\n";
+    ofs << "READONLY " << (transactionContext().readOnly ? 1 : 0) << "\n";
 
     // Held locks (resource mode)
     auto locks = lockManager_.getLockHolds();
@@ -17919,7 +17936,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     }
 
     // Transaction log
-    for (const auto& entry : txnLog_) {
+    for (const auto& entry : transactionContext().txnLog) {
         ofs << "LOG ";
         if (entry.op == TxnLogEntry::Op::Insert) ofs << "INSERT";
         else if (entry.op == TxnLogEntry::Op::Update) ofs << "UPDATE";
@@ -17937,29 +17954,29 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     // Remove from active set (prepared txns are not active for ReadView)
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.erase(currentTxnId_);
+        activeTransactions_.erase(transactionContext().currentTxnId);
     }
 
     // Clear transaction state but KEEP locks (2PC semantics)
-    txnLog_.clear();
-    savepoints_.clear();
+    transactionContext().txnLog.clear();
+    transactionContext().savepoints.clear();
 
     {
         std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_.erase(currentTxnId_);
-        ssiWriteSets_.erase(currentTxnId_);
-        ssiOutEdges_.erase(currentTxnId_);
-        for (auto& [k, v] : ssiInEdges_) v.erase(currentTxnId_);
-        ssiInEdges_.erase(currentTxnId_);
-        for (auto& [k, v] : ssiOutEdges_) v.erase(currentTxnId_);
+        ssiReadSets_.erase(transactionContext().currentTxnId);
+        ssiWriteSets_.erase(transactionContext().currentTxnId);
+        ssiOutEdges_.erase(transactionContext().currentTxnId);
+        for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
+        ssiInEdges_.erase(transactionContext().currentTxnId);
+        for (auto& [k, v] : ssiOutEdges_) v.erase(transactionContext().currentTxnId);
     }
-    txnReadRids_.clear();
-    txnWrittenRids_.clear();
+    transactionContext().txnReadRids.clear();
+    transactionContext().txnWrittenRids.clear();
 
-    currentTxnId_ = 0;
-    inTransaction_ = false;
-    readOnly_ = false;
-    txnDB_.clear();
+    transactionContext().currentTxnId = 0;
+    transactionContext().inTransaction = false;
+    transactionContext().readOnly = false;
+    transactionContext().txnDB.clear();
     return DBStatus::OK;
 }
 
@@ -17993,14 +18010,14 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
         activeTransactions_.erase(savedTxnId);
     }
 
-    txnLog_.clear();
-    savepoints_.clear();
+    transactionContext().txnLog.clear();
+    transactionContext().savepoints.clear();
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
-    currentTxnId_ = 0;
-    inTransaction_ = false;
-    readOnly_ = false;
-    txnDB_.clear();
+    transactionContext().currentTxnId = 0;
+    transactionContext().inTransaction = false;
+    transactionContext().readOnly = false;
+    transactionContext().txnDB.clear();
 
     std::filesystem::remove(pfile);
     return DBStatus::OK;
@@ -18056,11 +18073,11 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     if (savedTxnId == 0 || savedDB.empty()) return DBStatus::INVALID_VALUE;
 
     // Temporarily restore state and use normal rollback
-    currentTxnId_ = savedTxnId;
-    txnDB_ = savedDB;
-    txnIsolationLevel_ = savedIso;
-    inTransaction_ = true;
-    txnLog_ = std::move(savedLog);
+    transactionContext().currentTxnId = savedTxnId;
+    transactionContext().txnDB = savedDB;
+    transactionContext().txnIsolationLevel = savedIso;
+    transactionContext().inTransaction = true;
+    transactionContext().txnLog = std::move(savedLog);
 
     DBStatus res = rollbackTransaction();
 
@@ -18085,26 +18102,26 @@ std::vector<std::string> StorageEngine::listPreparedTransactions() const {
 // ========================================================================
 
 DBStatus StorageEngine::savepoint(const std::string& name) {
-    if (!inTransaction_) return DBStatus::INVALID_VALUE;
-    savepoints_[name] = txnLog_.size();
+    if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    transactionContext().savepoints[name] = transactionContext().txnLog.size();
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
-    if (!inTransaction_) return DBStatus::INVALID_VALUE;
-    auto it = savepoints_.find(name);
-    if (it == savepoints_.end()) return DBStatus::INVALID_VALUE;
+    if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    auto it = transactionContext().savepoints.find(name);
+    if (it == transactionContext().savepoints.end()) return DBStatus::INVALID_VALUE;
     size_t spIdx = it->second;
-    if (spIdx > txnLog_.size()) return DBStatus::INVALID_VALUE;
+    if (spIdx > transactionContext().txnLog.size()) return DBStatus::INVALID_VALUE;
 
     // Undo entries from end back to savepoint
-    for (size_t i = txnLog_.size(); i > spIdx; --i) {
-        auto& entry = txnLog_[i - 1];
-        PageAllocator* pa = getPageAllocator(txnDB_, entry.tableName);
-        TableSchema tbl = getTableSchema(txnDB_, entry.tableName);
+    for (size_t i = transactionContext().txnLog.size(); i > spIdx; --i) {
+        auto& entry = transactionContext().txnLog[i - 1];
+        PageAllocator* pa = getPageAllocator(transactionContext().txnDB, entry.tableName);
+        TableSchema tbl = getTableSchema(transactionContext().txnDB, entry.tableName);
         if (entry.op == TxnLogEntry::Op::Insert) {
             // Remove from indexes first (row still exists)
-            BPTree* pkIdx = getPKIndex(txnDB_, entry.tableName);
+            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
             if (pkIdx) {
                 std::string row;
                 if (readRowByRid(pa, entry.rowIdx, row, tbl)) {
@@ -18112,14 +18129,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     if (!pkVal.empty()) pkIdx->remove(pkVal);
                 }
             }
-            auto indexedCols = getIndexedColumns(txnDB_, entry.tableName);
+            auto indexedCols = getIndexedColumns(transactionContext().txnDB, entry.tableName);
             for (const auto& colname : indexedCols) {
                 size_t colIdx = tbl.len;
                 for (size_t j = 0; j < tbl.len; ++j) {
                     if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
                 }
                 if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(txnDB_, entry.tableName, colname);
+                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
                 if (!secIdx) continue;
                 std::string row;
                 if (readRowByRid(pa, entry.rowIdx, row, tbl)) {
@@ -18187,7 +18204,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 pa->unpinPage(pageId);
             }
             // Rebuild indexes: remove current (stale) values then insert restored values
-            BPTree* pkIdx = getPKIndex(txnDB_, entry.tableName);
+            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
             if (pkIdx) {
                 if (foundCurrent) {
                     std::string currentPk = extractPKValue(currentRow, tbl);
@@ -18196,14 +18213,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 std::string newPk = extractPKValue(entry.rowData, tbl);
                 if (!newPk.empty()) pkIdx->insert(newPk, entry.rowIdx);
             }
-            auto indexedCols = getIndexedColumns(txnDB_, entry.tableName);
+            auto indexedCols = getIndexedColumns(transactionContext().txnDB, entry.tableName);
             for (const auto& colname : indexedCols) {
                 size_t colIdx = tbl.len;
                 for (size_t j = 0; j < tbl.len; ++j) {
                     if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
                 }
                 if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(txnDB_, entry.tableName, colname);
+                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
                 if (!secIdx) continue;
                 if (foundCurrent) {
                     std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
@@ -18222,40 +18239,40 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 pa->markDirty(pageId);
                 pa->unpinPage(pageId);
             }
-            BPTree* pkIdx = getPKIndex(txnDB_, entry.tableName);
+            BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
             if (pkIdx) {
                 std::string pkVal = extractPKValue(entry.rowData, tbl);
                 if (!pkVal.empty()) pkIdx->insert(pkVal, entry.rowIdx);
             }
-            auto indexedCols = getIndexedColumns(txnDB_, entry.tableName);
+            auto indexedCols = getIndexedColumns(transactionContext().txnDB, entry.tableName);
             for (const auto& colname : indexedCols) {
                 size_t colIdx = tbl.len;
                 for (size_t j = 0; j < tbl.len; ++j) {
                     if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
                 }
                 if (colIdx >= tbl.len) continue;
-                BPTree* secIdx = getSecondaryIndex(txnDB_, entry.tableName, colname);
+                BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
                 if (!secIdx) continue;
                 std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
             }
         }
     }
-    txnLog_.resize(spIdx);
+    transactionContext().txnLog.resize(spIdx);
 
     // Remove all savepoints created after this one
-    for (auto sit = savepoints_.begin(); sit != savepoints_.end(); ) {
-        if (sit->second > spIdx) sit = savepoints_.erase(sit);
+    for (auto sit = transactionContext().savepoints.begin(); sit != transactionContext().savepoints.end(); ) {
+        if (sit->second > spIdx) sit = transactionContext().savepoints.erase(sit);
         else ++sit;
     }
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
-    if (!inTransaction_) return DBStatus::INVALID_VALUE;
-    auto it = savepoints_.find(name);
-    if (it == savepoints_.end()) return DBStatus::INVALID_VALUE;
-    savepoints_.erase(it);
+    if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    auto it = transactionContext().savepoints.find(name);
+    if (it == transactionContext().savepoints.end()) return DBStatus::INVALID_VALUE;
+    transactionContext().savepoints.erase(it);
     return DBStatus::OK;
 }
 

@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | backend 事务上下文隔离补强：将共享 `StorageEngine` 中的事务 ID、快照、回滚日志、savepoint、隔离级别、延迟约束和 `lastval` 改为连接工作线程局部；连接断开时回滚未完成事务并清理上下文；新增双连接协议回归，验证未提交行隔离、ROLLBACK 清理、断开回滚和 COMMIT 后可见。全局锁/提交/SSI 协调和完整 session 生命周期仍待继续审计。 |
 | 2026-08-07 | PostgreSQL 协议错误状态机补强：扩展查询在 Parse/Bind/Execute 错误后按协议忽略消息直到 Sync，事务外错误返回正确的 `ReadyForQuery('I')`；新增协议 E2E 回归，验证错误恢复后连接可继续查询。完整类型/参数/扩展语义仍待后续。 |
 | 2026-08-07 | 构建入口收敛：新增 `scripts/build_common.sh`，统一四个 shell 入口的编译选项、include、TLS 检测、链接库和缓存配置指纹；快速回归、独立测试和增量单测入口均已验证。 |
 | 2026-08-07 | 构建质量收敛：清理 planner 的未使用 join cost 参数并修复 merge join cost 调用传错参数的问题；移除 parser 未使用参数名、测试中的死 helper 与多余 include。主构建、快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。 |

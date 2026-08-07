@@ -131,6 +131,26 @@ def simple_query(sock, sql):
     return read_until_ready(sock)
 
 
+def data_row_values(messages):
+    values = []
+    for kind, body in messages:
+        if kind != b"D":
+            continue
+        field_count = struct.unpack("!H", body[:2])[0]
+        offset = 2
+        row = []
+        for _ in range(field_count):
+            length = struct.unpack("!i", body[offset:offset + 4])[0]
+            offset += 4
+            if length < 0:
+                row.append(None)
+            else:
+                row.append(body[offset:offset + length])
+                offset += length
+        values.append(row)
+    return values
+
+
 def extended_query(sock, sql):
     # Parse unnamed statement with no parameter types.
     parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", 0)
@@ -227,6 +247,53 @@ def main():
         assert any(kind == b"E" for kind, _ in error_messages)
         assert error_messages[-1] == (b"Z", b"I")
         assert any(kind == b"C" for kind, _ in simple_query(sock, "SELECT id FROM t"))
+
+        # A backend's transaction state must not leak through the shared
+        # StorageEngine into another protocol connection.
+        peer_sock = socket.socket()
+        peer_sock.settimeout(2)
+        peer_sock.connect(("127.0.0.1", port))
+        startup(peer_sock, "alice", "info")
+        assert simple_query(peer_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (2)"))
+        peer_rows = data_row_values(simple_query(peer_sock, "SELECT id FROM t"))
+        assert peer_rows == [[b"1"]], peer_rows
+        own_rows = data_row_values(simple_query(sock, "SELECT id FROM t"))
+        assert own_rows == [[b"1"], [b"2"]], own_rows
+        assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        assert data_row_values(simple_query(peer_sock, "SELECT id FROM t")) == [[b"1"]]
+        assert simple_query(peer_sock, "COMMIT")[-1] == (b"Z", b"I")
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (3)"))
+        assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
+        assert simple_query(peer_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert data_row_values(simple_query(peer_sock, "SELECT id FROM t")) == [[b"1"], [b"3"]]
+        assert simple_query(peer_sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        peer_sock.sendall(typed(b"X"))
+        peer_sock.close()
+
+        # Disconnecting a backend must abort its open transaction and discard
+        # its context before the worker thread can be reused.
+        leaked_sock = socket.socket()
+        leaked_sock.settimeout(2)
+        leaked_sock.connect(("127.0.0.1", port))
+        startup(leaked_sock, "alice", "info")
+        assert simple_query(leaked_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(leaked_sock, "INSERT INTO t VALUES (4)"))
+        leaked_sock.sendall(typed(b"X"))
+        leaked_sock.close()
+        time.sleep(0.1)
+
+        observer_sock = socket.socket()
+        observer_sock.settimeout(2)
+        observer_sock.connect(("127.0.0.1", port))
+        startup(observer_sock, "alice", "info")
+        assert simple_query(observer_sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert data_row_values(simple_query(observer_sock, "SELECT id FROM t")) == [[b"1"], [b"3"]]
+        assert simple_query(observer_sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        observer_sock.sendall(typed(b"X"))
+        observer_sock.close()
         sock.sendall(typed(b"X"))
         sock.close()
 
