@@ -62,7 +62,7 @@ if (!plan.ok()) std::cerr << plan.error;
 ### 待完成
 
 - 临时 schema 与会话隔离（2.6）
-- `pg_authid` / `pg_auth_members` 替代 `user.dat`/`role.dat`（2.7）
+- `pg_authid` / `pg_auth_members` catalog 结构与 CRUD 已存在（2.7）；网络与 DDL 账号路径仍在从 `user.dat`/`role.dat` 迁移
 - `COMMENT ON` 对象类型全集（2.8）
 - 与 `main.cpp` / `StorageEngine` 的集成（在启动时自动初始化 Catalog）
 - 从内存 vector 迁移到真正的 HeapTuple/页面格式（Phase 3/4）

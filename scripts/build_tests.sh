@@ -131,6 +131,14 @@ for test_file in tests/*_test.cpp; do
     echo
 done
 
+echo "[test-build] Running tests/postgres_protocol_test.py ..."
+if python3 tests/postgres_protocol_test.py; then
+    echo "[test-build] postgres_protocol_test PASSED"
+else
+    echo "[test-build] postgres_protocol_test FAILED"
+    FAILED=1
+fi
+
 if [ "$FAILED" -ne 0 ]; then
     echo "[test-build] Some tests failed" >&2
     exit 1

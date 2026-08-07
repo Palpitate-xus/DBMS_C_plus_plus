@@ -1,6 +1,7 @@
 #include "TLSWrapper.h"
 #include <cerrno>
 #include <cstring>
+#include <sys/socket.h>
 #include <unistd.h>
 
 namespace dbms {
@@ -65,7 +66,7 @@ ssize_t SecureSocket::send(const void* buf, size_t len) {
         return n > 0 ? n : -1;
     }
     if (fd >= 0) {
-        return ::write(fd, buf, len);
+        return ::send(fd, buf, len, MSG_NOSIGNAL);
     }
     return -1;
 }

@@ -87,6 +87,13 @@ for tf in tests/*_test.cpp; do
         echo "RUN-FAIL $name (exit $?)"; fail=$((fail+1)); failed+=("$name")
     fi
 done
+
+if python3 tests/postgres_protocol_test.py >/dev/null 2>&1; then
+    pass=$((pass+1))
+else
+    echo "RUN-FAIL postgres_protocol_test"
+    fail=$((fail+1)); failed+=("postgres_protocol_test")
+fi
 echo "=================================="
 echo "PASS=$pass FAIL=$fail"
 if [[ $fail -gt 0 ]]; then

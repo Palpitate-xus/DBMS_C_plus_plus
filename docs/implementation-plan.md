@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前回归基线为 PASS=116 FAIL=0。
+> 当前审计（2026-08-07）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前回归基线为 PASS=117 FAIL=0，另有 PostgreSQL 协议 E2E。
 
 ### 当前代码路径审计覆盖层
 
@@ -15,7 +15,7 @@
 | 复杂查询执行 | 部分完成 | Volcano 基础算子已验证；复杂子查询、集合操作、窗口和 grouping 扩展仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
-| PostgreSQL wire protocol / SCRAM | 未完成 | 当前 NetworkServer/TLS/认证为骨架或简化实现，不等价于 libpq 兼容协议 |
+| PostgreSQL wire protocol / SCRAM | 部分完成 | 已有 Startup/SSLRequest/Query/Parse-Bind-Execute framing 和可验证 SCRAM-SHA-256；完整类型映射、结构化结果、运行时 pg_hba 和 libpq 全语义仍未完成 |
 | 复制、逻辑解码、PITR、pg_basebackup | 部分完成 | 有 WAL/归档/ReplicationManager 框架，但缺完整端到端故障切换与恢复证明 |
 | 系统目录与监控 | 部分完成 | 核心 catalog 可用；完整 `pg_stat_*`、`pg_locks`、`pg_stat_activity` 尚未完成 |
 | PL/pgSQL、扩展和 FDW | 未完成 | parser/DDL 或 stub 存在，但运行时生态未形成 |
@@ -154,7 +154,7 @@
 | ✅ 2.4 实现依赖追踪与 `CASCADE/RESTRICT` 精确规则 | 4.2, 1.1.37 | planDrop + dropObject 执行集成；createClass/Type/Proc 自动注册对 namespace 的依赖 |
 | ✅ 2.5 将现有表/列/索引/函数元数据迁移到系统表 | — | `migrateDatabaseToCatalog`；未知类型在迁移时自动创建 pg_type 条目 |
 | ✅ 2.6 实现临时 schema 与会话隔离 | 4.7 | `createTempNamespace` / `dropTempNamespace` / `dropAllTempNamespaces`；修复嵌套锁死锁 |
-| ✅ 2.7 实现 `pg_authid` / `pg_auth_members` 替代 `user.dat`/`role.dat` | 11.1, 1.1.24 | CRUD + 成员关系 + 级联删除 + CSV 持久化 |
+| 🔄 2.7 实现 `pg_authid` / `pg_auth_members` 替代 `user.dat`/`role.dat` | 11.1, 1.1.24 | catalog CRUD、成员关系和 CSV 持久化已有；网络与 DDL 账号路径仍未统一接入 |
 | ✅ 2.8 补全 `COMMENT ON` 对象类型全集 | 1.1.13 | Parser 支持多对象类型；CatalogManager 支持 SCHEMA/TYPE/FUNCTION/PROCEDURE 注释 |
 
 ### Phase 2 已完成内容（截至当前 commit）
@@ -701,9 +701,9 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| ❌ 7.1 实现 PostgreSQL wire protocol（Frontend/Backend protocol） | 16.6, 11.3 | 当前仍是自定义文本换行协议，未实现 StartupMessage、Authentication、Query/Bind/Execute 等 libpq 消息 |
+| 🔄 7.1 实现 PostgreSQL wire protocol（Frontend/Backend protocol） | 16.6, 11.3 | 已实现 StartupMessage、SSLRequest、SCRAM/旧凭据迁移认证、Query 和基础 Parse/Bind/Execute/Sync；完整扩展消息和结构化执行结果仍缺 |
 | 🔄 7.2 实现 `pg_hba.conf` 解析与匹配 | 11.2 | 配置解析和 CIDR 匹配已有；运行时认证链路尚未达到 PostgreSQL 语义 |
-| ❌ 7.3 实现 SCRAM-SHA-256 认证 | 11.2 | 当前登录仍是简化凭据校验，未实现 SCRAM challenge/response、nonce、channel binding |
+| 🔄 7.3 实现 SCRAM-SHA-256 认证 | 11.2 | 已实现 nonce、salt、PBKDF2、client proof/server signature 和协议 E2E；仍缺 channel binding、运行时 pg_hba 决策及统一 `pg_authid` 存储 |
 | 🔄 7.4 实现 OAuth（PG18）、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 11.2 | 部分方法仅有配置解析或接口骨架，尚无可验收的端到端认证实现 |
 | 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |
 | 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | 基础权限路径已有，目录持久化和完整继承语义仍需补齐 |
@@ -808,7 +808,7 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 | ✅ 16.3 WAL redo | **Phase 3** | 崩溃恢复基础 |
 | ✅ 16.4 MVCC 版本链 | **Phase 3** | 并发控制基础 |
 | ✅ 16.5 DDL 事务化 | **Phase 4** | 依赖 Catalog + WAL |
-| ❌ 16.6 Wire Protocol | **Phase 7** | 当前为自定义文本协议，客户端兼容尚未实现 |
+| 🔄 16.6 Wire Protocol | **Phase 7** | PostgreSQL protocol 3.0 核心 framing 和 SCRAM 已接入；完整 libpq 兼容、类型映射和消息语义仍待完成 |
 | ✅ 16.7 扩展系统 | **Phase 10** | 最后搭建 |
 | ✅ 16.8 多进程模型 | **Phase 9** | 可与 Phase 3 并行设计 |
 | ✅ 16.9 Buffer Manager | **Phase 3** | 存储基础 |

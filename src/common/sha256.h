@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <array>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -9,11 +10,16 @@
 
 class SHA256 {
 public:
-    static std::string hash(const std::string& input) {
+    static std::array<uint8_t, 32> digestBytes(const std::string& input) {
         SHA256 sha;
         sha.update(reinterpret_cast<const uint8_t*>(input.data()), input.size());
-        uint8_t digest[32];
-        sha.finalize(digest);
+        std::array<uint8_t, 32> digest{};
+        sha.finalize(digest.data());
+        return digest;
+    }
+
+    static std::string hash(const std::string& input) {
+        const auto digest = digestBytes(input);
         std::ostringstream oss;
         for (int i = 0; i < 32; ++i)
             oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(digest[i]);

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "sha256.h"
+#include "common/scram_sha256.h"
 
 struct user {
     std::string username;
@@ -173,29 +174,47 @@ inline bool isHashedPassword(const std::string& pw) {
     return isSha256Hash(pw) || isMd5Hash(pw);
 }
 
-inline int login(const std::string& username, const std::string& password) {
+// Verify credentials without producing frontend-specific output. Network
+// protocols must return authentication failures on their own wire, not via
+// the process-wide stdout stream used by the legacy interactive frontend.
+inline bool getStoredUserPassword(const std::string& username, std::string& storedPassword) {
     std::ifstream infile("user.dat");
-    if (!infile) return 0;
+    if (!infile) return false;
 
     user temp;
     while (infile >> temp.username >> temp.password >> temp.permission) {
         if (temp.username == username) {
-            std::string checkPw = password;
-            if (isSha256Hash(temp.password)) {
-                checkPw = sha256(password);
-            } else if (isMd5Hash(temp.password)) {
-                checkPw = md5(password);
-            }
-            if (temp.password == checkPw) {
-                std::cout << "successfully login" << std::endl;
-                return 1;
-            }
-            std::cout << "wrong password" << std::endl;
-            return -1;
+            storedPassword = temp.password;
+            return true;
         }
     }
-    std::cout << "this user is not exist" << std::endl;
-    return 0;
+    return false;
+}
+
+inline bool verifyUserPassword(const std::string& username, const std::string& password) {
+    std::string storedPassword;
+    if (!getStoredUserPassword(username, storedPassword)) return false;
+    if (storedPassword.rfind("SCRAM-SHA-256$", 0) == 0) {
+        return dbms::scram::verifyPassword(password, storedPassword);
+    }
+    std::string checkPw = password;
+    if (isSha256Hash(storedPassword)) {
+        checkPw = sha256(password);
+    } else if (isMd5Hash(storedPassword)) {
+        checkPw = md5(password);
+    }
+    return storedPassword == checkPw;
+}
+
+inline int login(const std::string& username, const std::string& password) {
+    std::ifstream infile("user.dat");
+    if (!infile) return 0;
+    if (verifyUserPassword(username, password)) {
+        std::cout << "successfully login" << std::endl;
+        return 1;
+    }
+    std::cout << "wrong username or password" << std::endl;
+    return -1;
 }
 
 inline int permissionQuery(const std::string& username) {
@@ -211,13 +230,15 @@ inline int permissionQuery(const std::string& username) {
     return -1;
 }
 
-inline int createUser(const user& new_user, const std::string& hashAlgo = "sha256") {
+inline int createUser(const user& new_user, const std::string& hashAlgo = "scram-sha-256") {
     std::ofstream fs("user.dat", std::ios::binary | std::ios::out | std::ios::app);
     std::string hashedPw;
     if (isHashedPassword(new_user.password)) {
         hashedPw = new_user.password;
     } else if (hashAlgo == "md5") {
         hashedPw = md5(new_user.password);
+    } else if (hashAlgo == "scram" || hashAlgo == "scram-sha-256") {
+        hashedPw = dbms::scram::makeRandomVerifier(new_user.password);
     } else {
         hashedPw = sha256(new_user.password);
     }

@@ -1,0 +1,297 @@
+#include "PostgresProtocol.h"
+
+#include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <limits>
+
+namespace dbms {
+
+namespace {
+
+constexpr uint32_t kProtocol30 = 0x00030000;
+constexpr size_t kMaxStartupPacket = 1024 * 1024;
+constexpr size_t kMaxFrontendPacket = 16 * 1024 * 1024;
+
+uint32_t decodeUInt32(const uint8_t* bytes) {
+    return (static_cast<uint32_t>(bytes[0]) << 24) |
+           (static_cast<uint32_t>(bytes[1]) << 16) |
+           (static_cast<uint32_t>(bytes[2]) << 8) |
+           static_cast<uint32_t>(bytes[3]);
+}
+
+uint16_t decodeUInt16(const uint8_t* bytes) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(bytes[0]) << 8) |
+                                  static_cast<uint16_t>(bytes[1]));
+}
+
+} // namespace
+
+bool PostgresProtocol::readExact(void* destination, size_t length) {
+    auto* bytes = static_cast<uint8_t*>(destination);
+    size_t received = 0;
+    while (received < length) {
+        ssize_t n = socket_.recv(bytes + received, length - received);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        received += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+bool PostgresProtocol::writeAll(const void* data, size_t length) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    size_t written = 0;
+    while (written < length) {
+        ssize_t n = socket_.send(bytes + written, length - written);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        written += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+bool PostgresProtocol::readStartup(PgStartupMessage& startup, std::string& error) {
+    uint8_t lengthBytes[4]{};
+    if (!readExact(lengthBytes, sizeof(lengthBytes))) {
+        error = "connection closed while reading startup packet";
+        return false;
+    }
+    uint32_t length = decodeUInt32(lengthBytes);
+    if (length < 8 || length > kMaxStartupPacket) {
+        error = "invalid startup packet length";
+        return false;
+    }
+
+    std::vector<uint8_t> body(length - 4);
+    if (!readExact(body.data(), body.size())) {
+        error = "connection closed inside startup packet";
+        return false;
+    }
+    startup.protocolVersion = readUInt32(body, 0);
+    if (startup.protocolVersion != kProtocol30) {
+        error = "unsupported PostgreSQL protocol version";
+        return false;
+    }
+
+    size_t offset = 4;
+    while (offset < body.size()) {
+        std::string key;
+        if (!readCString(body, offset, key)) {
+            error = "malformed startup parameter";
+            return false;
+        }
+        if (key.empty()) break;
+        std::string value;
+        if (!readCString(body, offset, value)) {
+            error = "malformed startup parameter value";
+            return false;
+        }
+        startup.parameters[std::move(key)] = std::move(value);
+    }
+    return true;
+}
+
+bool PostgresProtocol::readMessage(PgFrontendMessage& message, std::string& error) {
+    uint8_t type = 0;
+    uint8_t lengthBytes[4]{};
+    if (!readExact(&type, sizeof(type)) || !readExact(lengthBytes, sizeof(lengthBytes))) {
+        error = "connection closed while reading frontend message";
+        return false;
+    }
+    uint32_t length = decodeUInt32(lengthBytes);
+    if (length < 4 || length > kMaxFrontendPacket) {
+        error = "invalid frontend message length";
+        return false;
+    }
+    message.type = static_cast<char>(type);
+    message.payload.resize(length - 4);
+    if (!message.payload.empty() && !readExact(message.payload.data(), message.payload.size())) {
+        error = "connection closed inside frontend message";
+        return false;
+    }
+    return true;
+}
+
+bool PostgresProtocol::sendMessage(char type, const std::vector<uint8_t>& body) {
+    if (body.size() > std::numeric_limits<uint32_t>::max() - 4) return false;
+    std::vector<uint8_t> packet;
+    packet.reserve(1 + 4 + body.size());
+    packet.push_back(static_cast<uint8_t>(type));
+    appendUInt32(packet, static_cast<uint32_t>(body.size() + 4));
+    packet.insert(packet.end(), body.begin(), body.end());
+    return writeAll(packet.data(), packet.size());
+}
+
+void PostgresProtocol::appendUInt16(std::vector<uint8_t>& body, uint16_t value) {
+    body.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    body.push_back(static_cast<uint8_t>(value & 0xff));
+}
+
+void PostgresProtocol::appendUInt32(std::vector<uint8_t>& body, uint32_t value) {
+    body.push_back(static_cast<uint8_t>((value >> 24) & 0xff));
+    body.push_back(static_cast<uint8_t>((value >> 16) & 0xff));
+    body.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
+    body.push_back(static_cast<uint8_t>(value & 0xff));
+}
+
+void PostgresProtocol::appendInt32(std::vector<uint8_t>& body, int32_t value) {
+    appendUInt32(body, static_cast<uint32_t>(value));
+}
+
+void PostgresProtocol::appendCString(std::vector<uint8_t>& body, const std::string& value) {
+    body.insert(body.end(), value.begin(), value.end());
+    body.push_back(0);
+}
+
+uint32_t PostgresProtocol::readUInt32(const std::vector<uint8_t>& data, size_t offset) {
+    if (offset > data.size() || data.size() - offset < 4) return 0;
+    return decodeUInt32(data.data() + offset);
+}
+
+uint16_t PostgresProtocol::readUInt16(const std::vector<uint8_t>& data, size_t offset) {
+    if (offset > data.size() || data.size() - offset < 2) return 0;
+    return decodeUInt16(data.data() + offset);
+}
+
+int32_t PostgresProtocol::readInt32(const std::vector<uint8_t>& data, size_t offset) {
+    return static_cast<int32_t>(readUInt32(data, offset));
+}
+
+bool PostgresProtocol::readCString(const std::vector<uint8_t>& data, size_t& offset,
+                                   std::string& value) {
+    if (offset > data.size()) return false;
+    auto end = std::find(data.begin() + static_cast<std::ptrdiff_t>(offset), data.end(), 0);
+    if (end == data.end()) return false;
+    value.assign(data.begin() + static_cast<std::ptrdiff_t>(offset), end);
+    offset = static_cast<size_t>(std::distance(data.begin(), end)) + 1;
+    return true;
+}
+
+bool PostgresProtocol::sendAuthenticationOk() {
+    std::vector<uint8_t> body;
+    appendUInt32(body, 0);
+    return sendMessage('R', body);
+}
+
+bool PostgresProtocol::sendAuthenticationCleartextPassword() {
+    std::vector<uint8_t> body;
+    appendUInt32(body, 3);
+    return sendMessage('R', body);
+}
+
+bool PostgresProtocol::sendAuthenticationSasl(const std::vector<std::string>& mechanisms) {
+    std::vector<uint8_t> body;
+    appendUInt32(body, 10);
+    for (const auto& mechanism : mechanisms) appendCString(body, mechanism);
+    body.push_back(0);
+    return sendMessage('R', body);
+}
+
+bool PostgresProtocol::sendAuthenticationSaslContinue(const std::string& data) {
+    std::vector<uint8_t> body;
+    appendUInt32(body, 11);
+    appendCString(body, data);
+    return sendMessage('R', body);
+}
+
+bool PostgresProtocol::sendAuthenticationSaslFinal(const std::string& data) {
+    std::vector<uint8_t> body;
+    appendUInt32(body, 12);
+    appendCString(body, data);
+    return sendMessage('R', body);
+}
+
+bool PostgresProtocol::sendParameterStatus(const std::string& name, const std::string& value) {
+    std::vector<uint8_t> body;
+    appendCString(body, name);
+    appendCString(body, value);
+    return sendMessage('S', body);
+}
+
+bool PostgresProtocol::sendBackendKeyData(uint32_t processId, uint32_t secretKey) {
+    std::vector<uint8_t> body;
+    appendUInt32(body, processId);
+    appendUInt32(body, secretKey);
+    return sendMessage('K', body);
+}
+
+bool PostgresProtocol::sendReadyForQuery(char transactionStatus) {
+    std::vector<uint8_t> body{static_cast<uint8_t>(transactionStatus)};
+    return sendMessage('Z', body);
+}
+
+bool PostgresProtocol::sendErrorResponse(const std::string& severity,
+                                         const std::string& sqlState,
+                                         const std::string& message,
+                                         const std::string& detail) {
+    std::vector<uint8_t> body;
+    body.push_back('S'); appendCString(body, severity);
+    body.push_back('V'); appendCString(body, severity);
+    body.push_back('C'); appendCString(body, sqlState.empty() ? "XX000" : sqlState);
+    body.push_back('M'); appendCString(body, message);
+    if (!detail.empty()) {
+        body.push_back('D'); appendCString(body, detail);
+    }
+    body.push_back(0);
+    return sendMessage('E', body);
+}
+
+bool PostgresProtocol::sendNoticeResponse(const std::string& message) {
+    std::vector<uint8_t> body;
+    body.push_back('S'); appendCString(body, "NOTICE");
+    body.push_back('V'); appendCString(body, "NOTICE");
+    body.push_back('M'); appendCString(body, message);
+    body.push_back(0);
+    return sendMessage('N', body);
+}
+
+bool PostgresProtocol::sendEmptyQueryResponse() {
+    return sendMessage('I', {});
+}
+
+bool PostgresProtocol::sendParseComplete() { return sendMessage('1', {}); }
+bool PostgresProtocol::sendBindComplete() { return sendMessage('2', {}); }
+bool PostgresProtocol::sendCloseComplete() { return sendMessage('3', {}); }
+bool PostgresProtocol::sendNoData() { return sendMessage('n', {}); }
+
+bool PostgresProtocol::sendCommandComplete(const std::string& tag) {
+    std::vector<uint8_t> body;
+    appendCString(body, tag);
+    return sendMessage('C', body);
+}
+
+bool PostgresProtocol::sendRowDescription(const std::vector<PgColumnDescription>& columns) {
+    if (columns.size() > std::numeric_limits<uint16_t>::max()) return false;
+    std::vector<uint8_t> body;
+    appendUInt16(body, static_cast<uint16_t>(columns.size()));
+    for (const auto& column : columns) {
+        appendCString(body, column.name);
+        appendUInt32(body, column.tableOid);
+        appendUInt16(body, column.attributeNumber);
+        appendUInt32(body, column.typeOid);
+        appendUInt16(body, static_cast<uint16_t>(column.typeSize));
+        appendInt32(body, column.typeModifier);
+        appendUInt16(body, static_cast<uint16_t>(column.formatCode));
+    }
+    return sendMessage('T', body);
+}
+
+bool PostgresProtocol::sendDataRow(const std::vector<std::string>& values) {
+    if (values.size() > std::numeric_limits<uint16_t>::max()) return false;
+    std::vector<uint8_t> body;
+    appendUInt16(body, static_cast<uint16_t>(values.size()));
+    for (const auto& value : values) {
+        if (value == "NULL") {
+            appendInt32(body, -1);
+        } else if (value.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            return false;
+        } else {
+            appendInt32(body, static_cast<int32_t>(value.size()));
+            body.insert(body.end(), value.begin(), value.end());
+        }
+    }
+    return sendMessage('D', body);
+}
+
+} // namespace dbms

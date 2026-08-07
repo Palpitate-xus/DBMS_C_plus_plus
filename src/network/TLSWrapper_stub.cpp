@@ -22,7 +22,7 @@ bool SecureSocket::initTLS(SSL_CTX*) { return false; }
 bool SecureSocket::handshake() { return false; }
 ssize_t SecureSocket::send(const void* buf, size_t len) {
     if (fd < 0) return -1;
-    return ::send(fd, buf, len, 0);
+    return ::send(fd, buf, len, MSG_NOSIGNAL);
 }
 ssize_t SecureSocket::recv(void* buf, size_t len) {
     if (fd < 0) return -1;

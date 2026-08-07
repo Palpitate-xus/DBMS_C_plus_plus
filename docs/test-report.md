@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-07
-> 自动测试套件基线：PASS=116 FAIL=0（快速入口和独立入口均通过）；窗口函数 E2E：9/9
+> 自动测试套件基线：PASS=117 FAIL=0（快速入口和独立入口均通过，含 PostgreSQL 协议 E2E）；窗口函数 E2E：9/9
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -21,6 +21,7 @@
 - CMake：当前验证环境未安装 `cmake`，配置/编译未执行。
 - 网络启动安全边界：无 TLS 证书/私钥时默认拒绝启动；明文仅由显式 `--insecure` 开关启用。
 - 网络连接容量回归：accept 路径原子预留 `maxConnections` 槽位，认证失败和 TLS 握手失败均释放槽位。
+- PostgreSQL 协议 E2E：`python3 tests/postgres_protocol_test.py` 验证 SSLRequest/plaintext 协商、StartupMessage、真实 SCRAM-SHA-256 握手、simple query 和 Parse/Bind/Execute/Sync。
 
 ---
 
@@ -855,7 +856,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景与当前 116 个独立回归测试均通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景与当前 117 个独立回归测试均通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）

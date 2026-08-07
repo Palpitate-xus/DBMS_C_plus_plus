@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-07（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线: PASS=116 FAIL=0（含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性与网络启动安全测试）
+> 测试基线: PASS=117 FAIL=0（含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性、网络启动安全和 PostgreSQL 协议 E2E）
 
 ---
 
@@ -261,7 +261,7 @@
 | GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
 | **行级安全 (RLS) 执行** | ✅ | ⚠️ | 已有基础 USING/WITH CHECK 路径，完整 executor 集成和安全边界仍待验收 |
-| **SCRAM-SHA-256 完整协议** | ✅ | ❌ | 仅 hash 验证 |
+| **SCRAM-SHA-256 完整协议** | ✅ | 🔄 | 已实现 SCRAM challenge/response 与 E2E；缺 channel binding、pg_hba 运行时决策和统一 `pg_authid` |
 | **LDAP/Kerberos/GSSAPI/PAM/RADIUS** | ✅ | ❌ | 缺 |
 | **SSL 双向认证** | ✅ | ⚠️ TLSWrapper；服务端默认 fail-closed，但缺少 PostgreSQL SSL 协商、客户端证书认证和 channel binding | |
 | **安全标签 (SE-PostgreSQL)** | ✅ | ❌ | 缺 |

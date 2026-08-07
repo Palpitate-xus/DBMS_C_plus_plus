@@ -19,6 +19,7 @@ src/access/HashIndexAM.cpp
 src/transaction/LockManager.cpp
 src/transaction/TxnIdGenerator.cpp
 src/network/NetworkServer.cpp
+src/network/PostgresProtocol.cpp
 src/common/Config.cpp
 src/common/GUC.cpp
 src/parser/parser.cpp

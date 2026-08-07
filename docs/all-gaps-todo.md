@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：回归基线 PASS=116 FAIL=0；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：回归基线 PASS=117 FAIL=0（含 PostgreSQL 协议 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -103,10 +103,10 @@
 > - ✅ 6.6 expression/partial/include 索引
 > - 🔄 6.2 B-tree dedup, 6.3 Hash WAL-safe, 6.5 CONCURRENTLY, 6.7 index maintenance, 6.8 partitioned index, 6.9 opclass/collation
 
-> **Phase 7（安全/认证/Wire Protocol）**：当前仅部分基础组件存在，wire protocol/SCRAM 仍未完成
+> **Phase 7（安全/认证/Wire Protocol）**：当前已具备基础 wire protocol 与 SCRAM 握手，完整 PostgreSQL 语义仍未完成
 > - ✅ 7.2 pg_hba.conf 解析（10+ auth methods: trust/md5/scram-sha-256/password/ident/peer/cert/pam/ldap/radius/reject）+ CIDR IP 匹配
 > - ✅ 7.12 CREATE ROLE 完整属性（SUPERUSER/CREATEROLE/CREATEDB/LOGIN/INHERIT/REPLICATION/BYPASSRLS/CONNECTION LIMIT/PASSWORD/VALID UNTIL/IN ROLE）
-> - ❌ 7.1 Wire Protocol, 7.3 SCRAM-SHA-256
+> - 🔄 7.1 Wire Protocol, 🔄 7.3 SCRAM-SHA-256（协议握手已实现，运行时策略和完整生态仍待验收）
 > - 🔄 7.4 auth methods, 7.5 TLS 完整协商, 7.6-7.11 认证/权限
 
 > 2026-07-01 Phase 8-16 进展：
@@ -155,7 +155,7 @@
 - 根目录保持干净：所有测试数据自动隔离，不污染项目根目录
 - 修复: 61 个测试文件批量更新 include 和 cleanup 逻辑
 
-历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=116 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前回归基线为 **PASS=117 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -175,7 +175,7 @@
 | 索引 | 6 种 | 简化 | 大量 ❌ | IIndexAM 适配器已统一；AM API/opclass/concurrent/维护仍 ❌ |
 | 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI 仅完成关系限定的行级写偏差检测，完整子事务仍 ❌ |
 | 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
-| 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；pg_hba/SCRAM/wire protocol 仍 ❌ |
+| 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；运行时 pg_hba、完整 SCRAM 策略和 wire protocol 语义仍待完善 |
 | 复制/HA | 0 | WAL archive 1 项 | 全部 ❌ | `src/replication/` 仅有 README；流复制/逻辑复制/PITR 全缺 |
 | 监控/诊断 | 子集 | 子集 | 大量 ❌ | pg_stat_activity/locks/statements 风格子集；pg_stat_io/wait events 缺 |
 | 扩展/生态 | 0 | 0 | 全部 ❌ | EXTENSION/FDW/PL 全缺；event trigger/rule 仅 parser classify stub |
@@ -449,13 +449,13 @@
 
 ## 11. 安全、认证、权限差距
 
-> **已完成进展（2026-08-07）**：Phase 2.7 已用 `pg_authid`/`pg_auth_members` 替代 `user.dat`/`role.dat`（CRUD + 成员关系 + 级联删除 + CSV 持久化），11.1 差距收窄但仍 ⚠️（属性执行/membership options/password expiration 未做）。网络服务已改为 TLS 默认 fail-closed，缺失证书/私钥不会静默降级为明文；`--insecure` 仅用于本地开发。TLS 仍缺 PostgreSQL SSL 协商、客户端证书认证和 channel binding；pg_hba/SCRAM/wire protocol（11.2/11.3）仍 ❌，待 Phase 7。
+> **已完成进展（2026-08-07）**：目录层已有 `pg_authid`/`pg_auth_members` CRUD，但网络/DDL 账号路径仍使用 `user.dat`/`role.dat`，11.1 仍 ⚠️。网络服务已改为 TLS 默认 fail-closed，且已接入 PostgreSQL protocol 3.0 的 SSLRequest、Startup、SCRAM-SHA-256、密码认证、Query 和基础扩展查询；`--insecure` 仅用于本地开发。TLS 仍缺客户端证书认证和 channel binding；运行时 pg_hba、完整 wire protocol 语义和统一认证存储仍待 Phase 7。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 11.1 | 用户/角色 catalog | `user.dat` / `role.dat` / `.pg_role_attrs` 文件，非 `pg_authid`/`pg_auth_members`；角色属性目前主要可记录和审计，缺少 OID、属性执行语义、password expiration、membership options | ⚠️ |
-| 11.2 | 认证 | 支持 sha256/md5 哈希和 TLS 可选；缺少 `pg_hba.conf`、SCRAM-SHA-256、OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | ❌ |
-| 11.3 | 传输协议 | 不是 PostgreSQL wire protocol/libpq；客户端仅文本登录/SQL 行 | ❌ |
+| 11.2 | 认证 | 已有 sha256/md5 迁移校验、SCRAM-SHA-256、pg_hba 解析和 TLS；缺少运行时 pg_hba 决策、OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
+| 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 核心 startup/auth/query framing 和 SCRAM；缺少完整类型/扩展消息和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
 | 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
 | 11.6 | RLS | 有 policy 文件和透明条件追加；源码注释显示 `WITH CHECK` 复杂验证被简化允许，缺少 PG executor-integrated RLS | ⚠️ |
@@ -546,7 +546,7 @@
 | 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 | ✅ 已是 redo log：LSN/segment/full-page/redo/timeline/archive + 两趟扫描崩溃恢复（Phase 3.4~3.6）；PITR/复制仍 ❌ |
 | 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 | 🔄 `HeapTupleHeader`(xmin/xmax/ctid) + HOT + CLOG 可见性已实现（Phase 3.7/3.8）；多版本边界/vacuum 回收仍需深化 |
 | 16.5 | **DDL 事务化** — 多处 DDL 隐式提交，与 PG 事务语义不一致 | 数据一致性、回滚、并发 | 高 | 🔄 Wave 0.4 骨架（`DdlTransaction` + `XLOG_CATALOG_*` WAL）；全量移除隐式提交待 Phase 4.39 Wave 5 |
-| 16.6 | **PostgreSQL Wire Protocol** — 不是 PG 协议，客户端仅文本登录 | libpq 兼容性、生态工具 | 高 | ❌ Phase 7 待办 |
+| 16.6 | **PostgreSQL Wire Protocol** — 核心 framing 已接入，完整协议语义未完成 | libpq 兼容性、生态工具 | 高 | 🔄 Phase 7 进行中 |
 | 16.7 | **扩展系统** — 没有插件加载框架、Hook 系统、共享内存扩展 | EXTENSION、FDW、PL、自定义类型 | 极高 | ❌ Phase 10 待办 |
 | 16.8 | **多进程模型** — 项目是多线程 server，PG 是多进程 backend + shared memory | 连接隔离、崩溃恢复、共享内存 | 高 | ❌ Phase 9 待办 |
 | 16.9 | **Buffer Manager** — 缺少 shared buffers、clock sweep、pin/lock、bgwriter、walwriter | I/O 性能、并发、恢复 | 高 | ✅ `BufferPool`(clock sweep + pin/usage) + bgwriter/checkpointer/walwriter 后台线程已实现（Phase 3.3/3.4） |
@@ -587,9 +587,9 @@
 - 补 bitmap/parallel/partitionwise/skip scan — **未启动**
 - 实现 EXPLAIN ANALYZE 真实节点级统计 — **未启动**
 
-### Phase 6：协议与认证 ❌ 未启动
-- 支持 PostgreSQL wire protocol、libpq — **未启动**
-- 实现 pg_hba.conf、SCRAM-SHA-256 — **未启动**
+### Phase 6：协议与认证 🔄 进行中
+- 支持 PostgreSQL wire protocol、libpq — **核心已启动，完整兼容性未完成**
+- 实现 pg_hba.conf、SCRAM-SHA-256 — **SCRAM 握手已实现；运行时 pg_hba 决策未完成**
 
 ### Phase 7：复制/PITR ❌ 未启动
 - 在 WAL 稳定后实现 streaming replication、logical decoding、PITR — **未启动**

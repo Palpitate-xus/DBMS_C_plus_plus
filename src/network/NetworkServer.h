@@ -34,11 +34,9 @@ struct ProcessInfo {
 // Start a TCP server on the given port. TLS is mandatory unless
 // allowPlaintext is explicitly set by the caller for local development.
 // Each client connection gets a dedicated thread.
-// Protocol (text, newline-delimited):
-//   Server -> Client: "login"
-//   Client -> Server: "username password"
-//   Server -> Client: "successfully login" or "wrong username or password"
-//   Then SQL commands are exchanged until client sends "exit".
+// Protocol: PostgreSQL Frontend/Backend protocol 3.0. The server handles
+// SSLRequest negotiation, startup/authentication, simple Query messages and
+// the Parse/Bind/Execute/Sync extended-query flow.
 void startServer(int port, bool allowPlaintext = false);
 
 // Transport policy used by startup and unit tests. A server may listen only

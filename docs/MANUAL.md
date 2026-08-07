@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-08-07
 > 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=116 FAIL=0（`scripts/run_all_tests_fast.sh` 与 `scripts/build_tests.sh`）
+> 回归基线: PASS=117 FAIL=0（`scripts/run_all_tests_fast.sh` 与 `scripts/build_tests.sh`，含 PostgreSQL 协议 E2E）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
@@ -873,8 +873,8 @@ export DBMS_TLS_KEY=/etc/dbms/tls/server.key
 # 仅限本地开发的明文模式（生产环境禁止）
 ./dbms_main --server 9999 --insecure
 
-# 客户端连接
-nc localhost 9999
+# 客户端连接（libpq/psql；当前支持 SCRAM-SHA-256 与基础协议流程）
+psql "host=localhost port=9999 dbname=info user=admin sslmode=require"
 
 # 连接监控
 SHOW CONNECTIONS;
@@ -1024,7 +1024,7 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 
 ```bash
 ./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 运行全部 116 个测试
+./scripts/run_all_tests_fast.sh # 运行全部 117 个测试
 ./scripts/build_tests.sh        # 独立编译并运行每个 C++ 测试
 python3 tests/window_e2e_test.py # 窗口函数端到端测试（9 用例）
 ```
