@@ -151,6 +151,29 @@ def data_row_values(messages):
     return values
 
 
+def row_description_fields(messages):
+    for kind, body in messages:
+        if kind != b"T":
+            continue
+        count = struct.unpack("!H", body[:2])[0]
+        offset = 2
+        fields = []
+        for _ in range(count):
+            end = body.index(b"\0", offset)
+            name = body[offset:end]
+            offset = end + 1
+            table_oid, attribute_number, type_oid = struct.unpack(
+                "!IHI", body[offset:offset + 10])
+            offset += 10
+            type_size, type_modifier, format_code = struct.unpack(
+                "!HiH", body[offset:offset + 8])
+            offset += 8
+            fields.append((name, table_oid, attribute_number, type_oid,
+                           type_size, type_modifier, format_code))
+        return fields
+    raise AssertionError("RowDescription was not returned")
+
+
 def extended_query(sock, sql):
     # Parse unnamed statement with no parameter types.
     parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", 0)
@@ -176,6 +199,9 @@ def extended_query(sock, sql):
     sock.sendall(typed(b"E", execute))
     sock.sendall(typed(b"S"))
     messages = read_until_ready(sock)
+    fields = row_description_fields(messages)
+    assert len(fields) == 1 and fields[0][0] == b"id", fields
+    assert fields[0][1] != 0 and fields[0][2:] == (1, 23, 4, -1, 0), fields
     assert any(kind == b"D" for kind, _ in messages)
     assert any(kind == b"C" for kind, _ in messages)
 

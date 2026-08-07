@@ -11,7 +11,7 @@
 
 协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；完整参数绑定和类型化结果仍列为协议缺口。
 
-协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换，Describe/Close 会校验并管理 statement/portal 生命周期；二进制参数/结果、SELECT 的完整 RowDescription 类型推导和 portal 分页仍列为协议缺口。
+协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换，Describe/Close 会校验并管理 statement/portal 生命周期，常见单表结果填充 catalog/table schema 驱动的 RowDescription 元数据；二进制参数/结果、复杂表达式的完整类型推导和 portal 分页仍列为协议缺口。
 
 ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权，且协议回归验证授权读取与未授权写入均走真实网络路径；对象 owner、完整 `GRANT OPTION` 继承/回收以及 schema/database/function ACL 仍列为后续安全缺口。
 

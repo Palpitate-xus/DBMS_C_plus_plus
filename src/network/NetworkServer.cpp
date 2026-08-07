@@ -7,6 +7,7 @@
 #include "utils/pg_hba.h"
 #include "common/scram_sha256.h"
 #include "catalog/CatalogService.h"
+#include "catalog/systables.h"
 
 #include <arpa/inet.h>
 #include <cctype>
@@ -176,6 +177,7 @@ struct QueryResult {
     std::string sqlState = "XX000";
     bool resultSet = false;
     std::vector<std::string> columns;
+    std::vector<PgColumnDescription> columnDescriptions;
     std::vector<std::vector<std::string>> rows;
     std::string commandTag;
 };
@@ -365,6 +367,119 @@ std::vector<std::string> outputLines(const std::string& output) {
     return lines;
 }
 
+std::string lowerProtocolText(std::string value) {
+    for (char& c : value) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
+std::string protocolRelationFromQuery(const std::string& sql) {
+    const std::string lower = lowerProtocolText(sql);
+    size_t from = lower.find(" from ");
+    if (from == std::string::npos) return {};
+    size_t begin = from + 6;
+    while (begin < sql.size() && std::isspace(static_cast<unsigned char>(sql[begin]))) ++begin;
+    if (begin >= sql.size() || sql[begin] == '(') return {};
+    size_t end = begin;
+    if (sql[end] == '"') {
+        ++end;
+        while (end < sql.size()) {
+            if (sql[end] == '"' && end + 1 < sql.size() && sql[end + 1] == '"') {
+                end += 2;
+                continue;
+            }
+            if (sql[end++] == '"') break;
+        }
+    } else {
+        while (end < sql.size() && !std::isspace(static_cast<unsigned char>(sql[end])) &&
+               sql[end] != ',' && sql[end] != ';' && sql[end] != ')') {
+            ++end;
+        }
+    }
+    if (end <= begin) return {};
+    std::string relation = trimText(sql.substr(begin, end - begin));
+    if (relation.size() >= 2 && relation.front() == '"' && relation.back() == '"') {
+        relation = relation.substr(1, relation.size() - 2);
+    }
+    const size_t dot = relation.rfind('.');
+    if (dot != std::string::npos && dot + 1 < relation.size()) {
+        relation = relation.substr(dot + 1);
+    }
+    return relation;
+}
+
+int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
+    switch (typeOid) {
+        case 16: return 1;   // bool
+        case 20: return 8;   // int8
+        case 21: return 2;   // int2
+        case 23: return 4;   // int4
+        case 700: return 4;  // float4
+        case 701: return 8;  // float8
+        case 1082: return 4; // date
+        case 1114: case 1184: return 8; // timestamp/timestamptz
+        case 2950: return 16; // uuid
+        default: return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
+    }
+}
+
+std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& result,
+                                                          const std::string& sql,
+                                                          const Session& session) {
+    std::vector<PgColumnDescription> descriptions;
+    descriptions.reserve(result.columns.size());
+
+    const std::string relationName = protocolRelationFromQuery(sql);
+    TableSchema table;
+    if (!relationName.empty() && g_engine.tableExists(session.currentDB, relationName)) {
+        table = g_engine.getTableSchema(session.currentDB, relationName);
+    }
+
+    Oid relationOid = INVALID_OID;
+    std::vector<PgAttributeRow> catalogAttributes;
+    if (!relationName.empty()) {
+        auto& catalog = g_engine.catalogService().get(session.currentDB);
+        for (const auto& relation : catalog.listClasses()) {
+            if (relation.relname == relationName) {
+                relationOid = relation.oid;
+                catalogAttributes = catalog.findAttributes(relation.oid);
+                break;
+            }
+        }
+    }
+
+    for (const auto& name : result.columns) {
+        PgColumnDescription description;
+        description.name = name;
+        for (size_t i = 0; i < table.len; ++i) {
+            const Column& column = table.cols[i];
+            if (lowerProtocolText(column.dataName) != lowerProtocolText(name)) continue;
+            description.typeOid = mapBuiltinTypeNameToOid(lowerProtocolText(column.dataType));
+            if (description.typeOid == INVALID_OID) description.typeOid = 25;
+            description.typeSize = protocolTypeSize(description.typeOid, column);
+            description.typeModifier = column.isVariableLength && column.dsize > 0
+                                           ? static_cast<int32_t>(column.dsize + 4)
+                                           : -1;
+            description.tableOid = relationOid;
+            description.attributeNumber = static_cast<uint16_t>(i + 1);
+            for (const auto& attribute : catalogAttributes) {
+                if (attribute.attname == column.dataName) {
+                    description.tableOid = relationOid;
+                    description.attributeNumber = static_cast<uint16_t>(attribute.attnum);
+                    if (attribute.atttypid != INVALID_OID) description.typeOid = attribute.atttypid;
+                    if (attribute.attlen != 0) description.typeSize = attribute.attlen;
+                    if (attribute.atttypmod >= 0) description.typeModifier = attribute.atttypmod;
+                    break;
+                }
+            }
+            break;
+        }
+        descriptions.push_back(std::move(description));
+    }
+    return descriptions;
+}
+
 std::string commandTagFor(const std::string& sql, const std::vector<std::string>& lines,
                           size_t rowCount) {
     std::string keyword = firstSqlKeyword(sql);
@@ -469,6 +584,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                 result.rows.push_back(splitProtocolFields(lines[i]));
             }
         }
+        result.columnDescriptions = describeProtocolColumns(result, sql, session);
     }
     result.commandTag = commandTagFor(sql, lines, result.rows.size());
     return result;
@@ -728,12 +844,11 @@ void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
         return;
     }
     if (result.resultSet) {
-        std::vector<PgColumnDescription> columns;
-        columns.reserve(result.columns.size());
-        for (const auto& name : result.columns) {
-            PgColumnDescription column;
-            column.name = name;
-            columns.push_back(std::move(column));
+        std::vector<PgColumnDescription> columns = result.columnDescriptions;
+        if (columns.size() != result.columns.size()) {
+            columns.clear();
+            columns.reserve(result.columns.size());
+            for (const auto& name : result.columns) columns.push_back(PgColumnDescription{name});
         }
         protocol.sendRowDescription(columns);
         for (const auto& row : result.rows) {
@@ -1100,8 +1215,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
             }
             else if (result.resultSet) {
-                std::vector<PgColumnDescription> columns;
-                for (const auto& name : result.columns) columns.push_back(PgColumnDescription{name});
+                std::vector<PgColumnDescription> columns = result.columnDescriptions;
+                if (columns.size() != result.columns.size()) {
+                    columns.clear();
+                    for (const auto& name : result.columns) {
+                        columns.push_back(PgColumnDescription{name});
+                    }
+                }
                 protocol.sendRowDescription(columns);
                 for (const auto& row : result.rows) protocol.sendDataRow(row);
                 protocol.sendCommandComplete(result.commandTag);
