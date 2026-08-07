@@ -644,6 +644,7 @@ struct SelectStmt : public Stmt {
     bool fetchFirst = false;       // FETCH FIRST / NEXT
     SetOp setOp = SetOp::None;
     bool setOpAll = false;         // UNION ALL vs UNION
+    StmtPtr setOpLhs;              // left operand for a chained set operation
     StmtPtr setOpRhs;              // 右侧 SELECT
 
     // VALUES rows (proper row structure, independent of selectList)

@@ -110,7 +110,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | **LATERAL JOIN** | ✅ | ❌ | 缺 |
 | Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ✅ (parser + volcano) | ⚠️ 复杂子查询回退 legacy |
 | CTE (WITH/RECURSIVE) | ✅ | ✅ (parser + executor) | ✅ 基础 + RETURNING |
-| UNION/INTERSECT/EXCEPT | ✅ | ⚠️ 组合统一走 Volcano `SetOperationOp`；简单 operand 直接计划，复杂 operand 经 `MaterializedRowsOp` 接 legacy producer（含 ALL） | ⚠️ AST 全量下推、类型合并/collation 和完整作用域仍缺 |
+| UNION/INTERSECT/EXCEPT | ✅ | ⚠️ AST 已按优先级/左结合解析，组合统一走 Volcano `SetOperationOp`；简单 operand 直接计划，复杂 operand 经 `MaterializedRowsOp` 接 legacy producer（含 ALL） | ⚠️ AST 到计划的全量下推、类型合并/collation 和完整作用域仍缺 |
 | Window Functions (ROW_NUMBER/RANK/...) | ✅ | ✅ (parser + DDL) | ⚠️ executor 回退 legacy |
 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ✅ (parser) | ⚠️ executor 回退 legacy |
 | GROUPING_ID | ✅ | ❌ | 缺 |

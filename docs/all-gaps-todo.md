@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-07 | SELECT 集合操作 parser 修复：按 PostgreSQL 规则将 INTERSECT 设为高于 UNION/EXCEPT 的优先级，并为同级链式操作增加左结合 AST 包装；新增 parser 回归覆盖 `A INTERSECT B UNION C`、`A UNION B INTERSECT C`、`A UNION B UNION C` 与 ALL 修饰符。 |
 | 2026-08-07 | 集合操作执行路径补强：统一 UNION/INTERSECT/EXCEPT 重复分支，修正顶层运算符优先级和子查询错误传播，支持 ALL 多重集语义；所有 operand 的组合统一由 Volcano `SetOperationOp` 执行，复杂 legacy producer 经 `MaterializedRowsOp` 接入，新增执行器与协议回归。AST 全量下推、类型合并和复杂 operand 结构化 producer 仍待后续。 |
 | 2026-08-07 | INSTEAD OF 视图触发器补强：允许在 view 上创建行级 INSERT/UPDATE/DELETE 触发器；简单单表视图 DML 按实际受影响行执行 action SQL，支持 `NEW`/`OLD`、`WHEN` 和动作失败传播；协议 E2E 覆盖多行 INSERT、UPDATE、DELETE。复杂视图映射、transition tables、完整 `EXECUTE FUNCTION`/PL runtime 仍待后续。 |
 | 2026-08-07 | numeric 生产化补强：新格式将 `numeric/decimal` 作为可变长精确 decimal 文本保存，不再走 double/fixed-width 路径；共享 PostgreSQL base-10000 numeric binary codec 接入 Bind/Execute；补充 exact storage、wire vector 和 command-tag 回归。numeric typmod 完整舍入/溢出、数组 binary I/O 仍待后续。 |
@@ -375,7 +376,7 @@
 |---|------|---------|------|
 | 6.1 | `SELECT` grammar | 缺少完整 SELECT 语法树；join、where、group、window、cte 多靠字符串定位，嵌套复杂查询容易偏离 PG | ⚠️ |
 | 6.2 | Join | 支持 inner/left/right/full/cross 部分；缺少 SEMI/ANTI 内部语义、lateral 完整相关性、join reordering/search space、outer join predicate 推理 | ⚠️ |
-| 6.3 | Set operations | UNION/INTERSECT/EXCEPT 组合统一走 Volcano `SetOperationOp` 并支持 ALL；复杂 producer、AST 全量下推、类型合并、排序/limit 作用域和 collation 仍缺 | ⚠️ |
+| 6.3 | Set operations | UNION/INTERSECT/EXCEPT 已按优先级/左结合解析，组合统一走 Volcano `SetOperationOp` 并支持 ALL；复杂 producer、AST 到计划全量下推、类型合并、排序/limit 作用域和 collation 仍缺 | ⚠️ |
 | 6.4 | CTE | 有 WITH/RECURSIVE/DML CTE 痕迹；缺少 MATERIALIZED/NOT MATERIALIZED、可写 CTE 快照语义、递归检测、cycle/search 子句 | ⚠️ |
 | 6.5 | Subquery | 有 IN/EXISTS/ANY/ALL 展开；复杂关联子查询、row comparison、array ANY/ALL、NULL 语义不完整 | ⚠️ |
 | 6.6 | `ORDER BY` | 有多列/expression/nulls/collate 简化；缺少 USING operator、位置编号全语义、collation provider | ⚠️ |

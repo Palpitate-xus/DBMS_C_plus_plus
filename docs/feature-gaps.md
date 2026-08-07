@@ -129,7 +129,7 @@
 
 ### P1-2: UNION/INTERSECT/EXCEPT Executor
 - **类别**: 执行器 / 集合操作
-- **现状**: 所有 operand 的集合组合已统一由 Volcano `SetOperationOp` 执行，支持顶层运算符优先级、错误传播以及 `UNION/INTERSECT/EXCEPT [ALL]` 的重复行语义；简单单表 SELECT 直接构建子计划，复杂 operand 暂由 legacy producer 经 `MaterializedRowsOp` 接入
+- **现状**: 所有 operand 的集合组合已统一由 Volcano `SetOperationOp` 执行，parser AST 已按 PostgreSQL 优先级和链式左结合构建，支持错误传播以及 `UNION/INTERSECT/EXCEPT [ALL]` 的重复行语义；简单单表 SELECT 直接构建子计划，复杂 operand 暂由 legacy producer 经 `MaterializedRowsOp` 接入
 - **PG 参考**: `Append` (UNION), `HashSetOp` (INTERSECT/EXCEPT)
 - **影响**: 复杂 operand 的数据生产仍不是完整结构化计划，类型合并、collation 和完整排序/分页作用域仍缺
 - **实现路径**:

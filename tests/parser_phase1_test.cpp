@@ -217,7 +217,38 @@ int main() {
         std::cout << "[PARSER P1] VALUES OK\n";
     }
 
-    // 14. COMMENT ON 多种对象类型
+    // 14. Set-operation precedence and left associativity
+    {
+        auto leftAssoc = parser.parse(
+            "SELECT a FROM t1 UNION SELECT a FROM t2 UNION SELECT a FROM t3");
+        assert(leftAssoc.success);
+        auto* root = asSelect(leftAssoc.stmt);
+        assert(root && root->setOp == SetOp::Union && root->setOpLhs && root->setOpRhs);
+        assert(asSelect(root->setOpLhs)->setOp == SetOp::Union);
+        assert(asSelect(root->setOpRhs)->setOp == SetOp::None);
+
+        auto precedence = parser.parse(
+            "SELECT a FROM t1 INTERSECT SELECT a FROM t2 UNION SELECT a FROM t3");
+        assert(precedence.success);
+        auto* precedenceRoot = asSelect(precedence.stmt);
+        assert(precedenceRoot && precedenceRoot->setOp == SetOp::Union);
+        // INTERSECT binds tighter, so the left operand carries INTERSECT.
+        assert(precedenceRoot->setOpLhs &&
+               asSelect(precedenceRoot->setOpLhs)->setOp == SetOp::Intersect);
+        assert(precedenceRoot->setOpRhs &&
+               asSelect(precedenceRoot->setOpRhs)->setOp == SetOp::None);
+
+        auto intersectFirst = parser.parse(
+            "SELECT a FROM t1 UNION SELECT a FROM t2 INTERSECT ALL SELECT a FROM t3");
+        assert(intersectFirst.success);
+        auto* intersectRoot = asSelect(intersectFirst.stmt);
+        assert(intersectRoot && intersectRoot->setOp == SetOp::Union && intersectRoot->setOpRhs);
+        assert(asSelect(intersectRoot->setOpRhs)->setOp == SetOp::Intersect);
+        assert(asSelect(intersectRoot->setOpRhs)->setOpAll);
+        std::cout << "[PARSER P1] set-operation precedence OK\n";
+    }
+
+    // 15. COMMENT ON 多种对象类型
     {
         auto r1 = parser.parse("COMMENT ON SCHEMA public IS 'schema note'");
         assert(r1.success);

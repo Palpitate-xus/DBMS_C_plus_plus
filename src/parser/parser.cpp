@@ -25,6 +25,66 @@ static ExprPtr parseExpr(const std::vector<std::string>& tokens, size_t& pos);
 static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t& pos);
 static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos);
 
+struct SetOperatorLocation {
+    size_t position = std::string::npos;
+    SetOp op = SetOp::None;
+    bool all = false;
+};
+
+// Set-operation precedence is lower than SELECT clauses, with INTERSECT
+// binding more tightly than UNION/EXCEPT.  Selecting the rightmost operator
+// at the chosen precedence builds a left-associative tree while recursively
+// parsing the two operands (A UNION B UNION C => (A UNION B) UNION C).
+static bool findTopLevelSetOperator(const std::vector<std::string>& tokens,
+                                    SetOperatorLocation& result) {
+    int depth = 0;
+    SetOperatorLocation low;
+    SetOperatorLocation intersect;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const std::string word = SQLParser::toLower(tokens[i]);
+        if (word == "(") { ++depth; continue; }
+        if (word == ")") { if (depth > 0) --depth; continue; }
+        if (depth != 0) continue;
+
+        SetOp op = SetOp::None;
+        if (word == "union") op = SetOp::Union;
+        else if (word == "except") op = SetOp::Except;
+        else if (word == "intersect") op = SetOp::Intersect;
+        if (op == SetOp::None) continue;
+
+        bool all = false;
+        if (i + 1 < tokens.size()) {
+            const std::string modifier = SQLParser::toLower(tokens[i + 1]);
+            all = modifier == "all";
+        }
+        SetOperatorLocation candidate{i, op, all};
+        if (op == SetOp::Intersect) {
+            intersect = candidate;
+        } else {
+            low = candidate;
+        }
+    }
+    if (low.position != std::string::npos) {
+        result = low;
+        return true;
+    }
+    if (intersect.position != std::string::npos) {
+        result = intersect;
+        return true;
+    }
+    return false;
+}
+
+static std::string joinParserTokens(const std::vector<std::string>& tokens,
+                                    size_t begin, size_t end) {
+    std::string result;
+    for (size_t i = begin; i < end; ++i) {
+        if (!result.empty()) result += ' ';
+        result += tokens[i];
+    }
+    return result;
+}
+
 // ============================================================================
 // 工具函数
 // ============================================================================
@@ -1502,6 +1562,58 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         return r;
     }
 
+    // Split set operations before parsing SELECT clauses.  The previous
+    // implementation parsed the first operator it encountered and treated
+    // the entire remainder as its RHS, which made UNION/EXCEPT right-
+    // associative and gave INTERSECT the wrong precedence in expressions
+    // such as A INTERSECT B UNION C.
+    SetOperatorLocation setLocation;
+    if (findTopLevelSetOperator(tokens, setLocation)) {
+        size_t rhsBegin = setLocation.position + 1;
+        if (rhsBegin < tokens.size() &&
+            (toLower(tokens[rhsBegin]) == "all" || toLower(tokens[rhsBegin]) == "distinct")) {
+            ++rhsBegin;
+        }
+        if (setLocation.position == 0 || rhsBegin >= tokens.size()) {
+            r.error = "set operation requires two SELECT operands";
+            return r;
+        }
+
+        ParseResult left = parseSelect(joinParserTokens(tokens, 0, setLocation.position));
+        if (!left.success || !left.stmt) {
+            r.error = left.error.empty() ? "invalid left set-operation operand" : left.error;
+            return r;
+        }
+        ParseResult right = parseSelect(joinParserTokens(tokens, rhsBegin, tokens.size()));
+        if (!right.success || !right.stmt) {
+            r.error = right.error.empty() ? "invalid right set-operation operand" : right.error;
+            return r;
+        }
+        auto* leftSelect = dynamic_cast<SelectStmt*>(left.stmt.get());
+        if (!leftSelect) {
+            r.error = "set operation operand must be SELECT";
+            return r;
+        }
+        if (leftSelect->setOp == SetOp::None && !leftSelect->setOpLhs) {
+            leftSelect->setOp = setLocation.op;
+            leftSelect->setOpAll = setLocation.all;
+            leftSelect->setOpRhs = std::move(right.stmt);
+            return left;
+        }
+
+        // A SelectStmt historically stores its first set operation inline.
+        // Wrap an already-composed left operand so chains remain explicitly
+        // left-associative without losing the existing AST API.
+        auto wrapper = std::make_unique<SelectStmt>();
+        wrapper->setOp = setLocation.op;
+        wrapper->setOpAll = setLocation.all;
+        wrapper->setOpLhs = std::move(left.stmt);
+        wrapper->setOpRhs = std::move(right.stmt);
+        r.success = true;
+        r.stmt = std::move(wrapper);
+        return r;
+    }
+
     auto stmt = std::make_unique<SelectStmt>();
     size_t pos = 0;
 
@@ -1846,37 +1958,6 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             }
         }
         stmt->locking.push_back(std::move(lc));
-    }
-
-    // UNION / INTERSECT / EXCEPT [ALL | DISTINCT]
-    if (pos < tokens.size()) {
-        std::string w = toLower(tokens[pos]);
-        if (w == "union") {
-            stmt->setOp = SetOp::Union;
-            ++pos;
-        } else if (w == "intersect") {
-            stmt->setOp = SetOp::Intersect;
-            ++pos;
-        } else if (w == "except") {
-            stmt->setOp = SetOp::Except;
-            ++pos;
-        }
-        if (stmt->setOp != SetOp::None) {
-            if (pos < tokens.size() && toLower(tokens[pos]) == "all") {
-                stmt->setOpAll = true;
-                ++pos;
-            } else if (pos < tokens.size() && toLower(tokens[pos]) == "distinct") {
-                ++pos;
-            }
-            // Collect remaining tokens as RHS query and parse recursively
-            std::string rhsSql;
-            for (size_t i = pos; i < tokens.size(); ++i) {
-                if (!rhsSql.empty()) rhsSql += " ";
-                rhsSql += tokens[i];
-            }
-            stmt->setOpRhs = parseSelect(rhsSql).stmt;
-            pos = tokens.size();
-        }
     }
 
     r.success = true;

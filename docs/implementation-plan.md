@@ -127,7 +127,7 @@ ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权，
 - **SELECT Grammar 补全（1.4 已完成）**：
   - ✅ CTE（WITH [RECURSIVE] ... AS (...)）
   - ✅ JOIN（INNER、LEFT [OUTER]、RIGHT [OUTER]、FULL [OUTER]、CROSS、NATURAL + ON / USING）
-  - ✅ UNION / INTERSECT / EXCEPT [ALL / DISTINCT]（递归解析 RHS）
+  - ✅ UNION / INTERSECT / EXCEPT [ALL / DISTINCT]（按 PostgreSQL 优先级解析，链式操作保持左结合）
 - **Catalog / OID / Schema 框架（Phase 2 已接入运行时）**：
   - ✅ 系统表行格式定义：pg_namespace、pg_class、pg_attribute、pg_type、pg_proc、pg_depend
   - ✅ OID 分配器（单调递增、持久化、批量预留）
