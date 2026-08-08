@@ -12,6 +12,7 @@
 #include "PostgresNumeric.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
+#include "process/OutputCapture.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -52,7 +53,6 @@ static ServerStats g_stats;
 static std::mutex g_processMutex;
 static std::map<uint64_t, ProcessInfo> g_processList;
 static uint64_t g_nextProcessId = 1;
-static std::mutex g_outputCaptureMutex;
 static std::mutex g_roleConnectionMutex;
 static std::unordered_map<std::string, int> g_roleConnections;
 
@@ -667,13 +667,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     std::string outputText;
     auto start = std::chrono::steady_clock::now();
     {
-        // execute() still writes through std::cout. Serializing this legacy
-        // boundary prevents concurrent sessions from corrupting each other's
-        // result capture while the executor is migrated to structured output.
-        std::lock_guard<std::mutex> lock(g_outputCaptureMutex);
-        auto* oldBuffer = std::cout.rdbuf();
         std::ostringstream output;
-        std::cout.rdbuf(output.rdbuf());
+        dbms::ScopedOutputCapture capture(output);
         try {
             executionError = execute(sql, session);
         } catch (const std::exception& e) {
@@ -683,7 +678,6 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
             executionError = true;
             result.errorMessage = "unhandled executor exception";
         }
-        std::cout.rdbuf(oldBuffer);
         outputText = output.str();
     }
     auto end = std::chrono::steady_clock::now();

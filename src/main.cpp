@@ -24,6 +24,7 @@
 #include "catalog/CatalogService.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
+#include "process/OutputCapture.h"
 
 using namespace std;
 using dbms::Column;
@@ -744,9 +745,11 @@ static bool handleDeclareCursor(const string& sql, Session& s) {
     string selectSql = trim(afterCursor.substr(3));
     // Execute SELECT and capture output
     std::stringstream ss;
-    auto oldBuf = std::cout.rdbuf(ss.rdbuf());
-    bool err = execute(selectSql, s);
-    std::cout.rdbuf(oldBuf);
+    bool err = false;
+    {
+        dbms::ScopedOutputCapture capture(ss);
+        err = execute(selectSql, s);
+    }
     if (err) {
         cout << "DECLARE CURSOR failed: " << ss.str() << endl;
         return true;
@@ -3127,18 +3130,19 @@ static bool buildStructuredSetOperand(const string& rawSql, Session& s,
 
 static bool captureSetOperand(const string& sql, Session& s, vector<string>& lines) {
     stringstream captured;
-    auto* oldBuffer = cout.rdbuf(captured.rdbuf());
     bool failed = false;
-    try {
-        failed = execute(sql, s);
-    } catch (const exception& e) {
-        failed = true;
-        captured << "ERROR: " << e.what() << '\n';
-    } catch (...) {
-        failed = true;
-        captured << "ERROR: unhandled set-operation operand failure\n";
+    {
+        dbms::ScopedOutputCapture capture(captured);
+        try {
+            failed = execute(sql, s);
+        } catch (const exception& e) {
+            failed = true;
+            captured << "ERROR: " << e.what() << '\n';
+        } catch (...) {
+            failed = true;
+            captured << "ERROR: unhandled set-operation operand failure\n";
+        }
     }
-    cout.rdbuf(oldBuffer);
     string line;
     while (getline(captured, line)) lines.push_back(line);
     if (failed || (!lines.empty() && lines.front().rfind("ERROR:", 0) == 0)) {
@@ -6803,9 +6807,8 @@ static std::string processCTEs(const std::string& sql, Session& s) {
                     size_t rPos = toLower(dmlNoRet).find(" returning ");
                     if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
                     stringstream nullOut;
-                    streambuf* oldBuf = cout.rdbuf(nullOut.rdbuf());
+                    dbms::ScopedOutputCapture capture(nullOut);
                     execute(dmlNoRet, s);
-                    cout.rdbuf(oldBuf);
                     // Query the inserted row using primary key if possible
                     size_t valPos = dmlLower.find(" values ");
                     if (valPos != string::npos) {
@@ -6842,9 +6845,8 @@ static std::string processCTEs(const std::string& sql, Session& s) {
                     size_t rPos = toLower(dmlNoRet).find(" returning ");
                     if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
                     stringstream nullOut;
-                    streambuf* oldBuf = cout.rdbuf(nullOut.rdbuf());
+                    dbms::ScopedOutputCapture capture(nullOut);
                     execute(dmlNoRet, s);
-                    cout.rdbuf(oldBuf);
                 }
             } else {
                 // No RETURNING or no table: just execute DML
@@ -6852,9 +6854,8 @@ static std::string processCTEs(const std::string& sql, Session& s) {
                 size_t rPos = toLower(dmlNoRet).find(" returning ");
                 if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
                 stringstream nullOut2;
-                streambuf* oldBuf = cout.rdbuf(nullOut2.rdbuf());
+                dbms::ScopedOutputCapture capture(nullOut2);
                 execute(dmlNoRet, s);
-                cout.rdbuf(oldBuf);
             }
 
             if (!colNames.empty()) {
@@ -12496,11 +12497,11 @@ bool execute(const string& rawSql, Session& s) {
             }
             Session tmpS = s;
             tmpS.preparedStmts.clear();
-            auto* oldBuf = std::cout.rdbuf();
             std::stringstream joinOutput;
-            std::cout.rdbuf(joinOutput.rdbuf());
-            execute(joinSql, tmpS);
-            std::cout.rdbuf(oldBuf);
+            {
+                dbms::ScopedOutputCapture capture(joinOutput);
+                execute(joinSql, tmpS);
+            }
             vector<string> joinLines;
             string line;
             while (getline(joinOutput, line)) {
@@ -12844,11 +12845,11 @@ bool execute(const string& rawSql, Session& s) {
             // Execute JOIN query to get matching target rows
             Session tmpS = s;
             tmpS.preparedStmts.clear();
-            auto* oldBuf = std::cout.rdbuf();
             std::stringstream joinOutput;
-            std::cout.rdbuf(joinOutput.rdbuf());
-            execute(joinSql, tmpS);
-            std::cout.rdbuf(oldBuf);
+            {
+                dbms::ScopedOutputCapture capture(joinOutput);
+                execute(joinSql, tmpS);
+            }
             // Parse output: first line is header, rest are data rows (skip timestamp lines)
             vector<string> joinLines;
             string line;

@@ -9,7 +9,7 @@
 
 构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`。
 
-协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；完整参数绑定和类型化结果仍列为协议缺口。
+协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；legacy `execute()` 的文本结果捕获已迁移到线程局部 `process/OutputCapture`，避免全局 `std::cout` 重定向串行化网络会话；完整参数绑定和类型化结果仍列为协议缺口。
 
 SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议入口共同使用，按数据库及归一化 SQL 聚合调用次数和耗时；`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。持久化、大小上限和完整 PostgreSQL 统计字段仍列为后续缺口。
 

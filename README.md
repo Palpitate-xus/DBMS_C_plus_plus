@@ -116,7 +116,7 @@
 - **扩展查询协议**：支持 Parse/Bind/Execute/Describe/Close/Sync、SCRAM、常用标量及 date/time/timestamp/timestamptz/uuid binary 参数与结果，以及基础 portal `maxRows` 分页；完整 libpq/cursor 语义仍在建设中
 - **TLS 加密**：默认必须提供证书和私钥；证书缺失或 TLS 初始化失败时拒绝启动
 - **开发明文模式**：仅可通过显式 `./dbms_main --server PORT --insecure` 开启，不得用于生产环境
-- **多客户端**：每个连接独立线程，支持并发访问
+- **多客户端**：每个连接独立线程，支持并发访问；legacy 文本执行器的结果捕获采用线程局部输出路由，不再用全局锁串行化协议会话
 - **会话隔离**：每个客户端连接拥有独立的 Session（用户名、权限、当前数据库、预编译语句、临时表），多客户端互不干扰
 - **连接管理**：最大连接数限制（默认 64）
 - **连接监控**：`SHOW CONNECTIONS`, `SHOW PROCESSLIST`, `SHOW STATUS`
@@ -515,6 +515,7 @@ show deadlocks;
 ├── LockManager.cpp          # 读写锁、行锁、死锁检测
 ├── NetworkServer.h          # TCP 网络服务头文件
 ├── NetworkServer.cpp        # 网络服务实现（TLS + 独立 Session）
+├── src/process/OutputCapture.*  # legacy 执行器的线程局部文本输出捕获
 ├── TLSWrapper.h             # TLS 加密包装器
 ├── TLSWrapper.cpp           # TLS 上下文与握手实现
 ├── TxnIdGenerator.h         # 全局事务 ID 生成器头文件

@@ -41,5 +41,6 @@ src/replication/ReplicationManager.cpp
 src/process/ProcessManager.cpp
 src/process/RuntimeStats.cpp
 src/process/SqlStats.cpp
+src/process/OutputCapture.cpp
 src/storage/LargeObject.cpp
 src/types/numeric.cpp
