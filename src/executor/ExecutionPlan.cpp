@@ -47,110 +47,6 @@ static std::string formatRow(const std::string& rowBuffer, const TableSchema& tb
     return rowStr;
 }
 
-
-// ========================================================================
-// Helper: LIKE pattern matching
-// ========================================================================
-static bool likeMatch(const std::string& text, const std::string& pattern) {
-    size_t ti = 0, pi = 0, star = std::string::npos, match = 0;
-    while (ti < text.size()) {
-        if (pi < pattern.size() && (pattern[pi] == '?' || pattern[pi] == text[ti])) {
-            ++ti; ++pi;
-        } else if (pi < pattern.size() && pattern[pi] == '*') {
-            star = pi++;
-            match = ti;
-        } else if (star != std::string::npos) {
-            pi = star + 1;
-            ti = ++match;
-        } else {
-            return false;
-        }
-    }
-    while (pi < pattern.size() && pattern[pi] == '*') ++pi;
-    return pi == pattern.size();
-}
-
-// ========================================================================
-// Helper: evaluate a single condition on raw row data
-// ========================================================================
-static bool evalCondRaw(const StorageEngine::Condition& cond,
-                         const std::string& rowBuffer, const TableSchema& tbl) {
-    size_t ci = 0;
-    for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci) {}
-    if (ci >= tbl.len) return false;
-
-    std::string val = StorageEngine::extractColumnValueStatic(rowBuffer, tbl, ci);
-    const Column& col = tbl.cols[ci];
-    if (col.dataType == "numeric") {
-        try {
-            Numeric num = val.empty() ? Numeric(0) : Numeric(val);
-            Numeric cmp(cond.value);
-            if (cond.op == "<"  && !(num < cmp)) return false;
-            if (cond.op == ">"  && !(num > cmp)) return false;
-            if (cond.op == "="  && num != cmp)    return false;
-            if (cond.op == "<=" && (num > cmp))   return false;
-            if (cond.op == ">=" && (num < cmp))   return false;
-            if (cond.op == "!=" && num == cmp)    return false;
-        } catch (...) {
-            return false;
-        }
-    } else if (col.dataType == "char" || col.isVariableLength) {
-        if (cond.op == "<"  && !(val <  cond.value)) return false;
-        if (cond.op == ">"  && !(val >  cond.value)) return false;
-        if (cond.op == "="  && val != cond.value)    return false;
-        if (cond.op == "<=" && (val >  cond.value))   return false;
-        if (cond.op == ">=" && (val <  cond.value))   return false;
-        if (cond.op == "!=" && val == cond.value)    return false;
-        if (cond.op == "like" && !likeMatch(val, cond.value)) return false;
-    } else if (col.dataType == "date") {
-        Date d = (val.empty() ? Date{} : Date(val.c_str()));
-        Date v(cond.value.c_str());
-        if (cond.op == "<"  && v.year && !(d < v))  return false;
-        if (cond.op == ">"  && v.year && !(d > v))  return false;
-        if (cond.op == "="  && v.year && d != v)    return false;
-        if (cond.op == "<=" && v.year && (d > v))   return false;
-        if (cond.op == ">=" && v.year && (d < v))   return false;
-        if (cond.op == "!=" && v.year && d == v)    return false;
-    } else if (col.dataType == "timestamp") {
-        int64_t num = val.empty() ? 0 : parseTimestampToSeconds(val);
-        int64_t cmp = parseTimestampToSeconds(cond.value);
-        if (cond.op == "<"  && cmp != 0 && !(num < cmp)) return false;
-        if (cond.op == ">"  && cmp != 0 && !(num > cmp)) return false;
-        if (cond.op == "="  && cmp != 0 && num != cmp)   return false;
-        if (cond.op == "<=" && cmp != 0 && (num > cmp))  return false;
-        if (cond.op == ">=" && cmp != 0 && (num < cmp))  return false;
-        if (cond.op == "!=" && cmp != 0 && num == cmp)   return false;
-    } else if (col.dataType == "float") {
-        float num = val.empty() ? 0.0f : std::stof(val);
-        float cmp = std::stof(cond.value);
-        if (cond.op == "<"  && !(num < cmp)) return false;
-        if (cond.op == ">"  && !(num > cmp)) return false;
-        if (cond.op == "="  && num != cmp)   return false;
-        if (cond.op == "<=" && (num > cmp))  return false;
-        if (cond.op == ">=" && (num < cmp))  return false;
-        if (cond.op == "!=" && num == cmp)   return false;
-    } else if (col.dataType == "double" || col.dataType == "decimal") {
-        double num = val.empty() ? 0.0 : std::stod(val);
-        double cmp = std::stod(cond.value);
-        if (cond.op == "<"  && !(num < cmp)) return false;
-        if (cond.op == ">"  && !(num > cmp)) return false;
-        if (cond.op == "="  && num != cmp)   return false;
-        if (cond.op == "<=" && (num > cmp))  return false;
-        if (cond.op == ">=" && (num < cmp))  return false;
-        if (cond.op == "!=" && num == cmp)   return false;
-    } else {
-        int64_t num = val.empty() ? INF : StorageEngine::parseInt(val);
-        int64_t cmp = StorageEngine::parseInt(cond.value);
-        if (cond.op == "<"  && cmp != INF && !(num < cmp)) return false;
-        if (cond.op == ">"  && cmp != INF && !(num > cmp)) return false;
-        if (cond.op == "="  && cmp != INF && num != cmp)   return false;
-        if (cond.op == "<=" && cmp != INF && (num > cmp))  return false;
-        if (cond.op == ">=" && cmp != INF && (num < cmp))  return false;
-        if (cond.op == "!=" && cmp != INF && num == cmp)   return false;
-    }
-    return true;
-}
-
 static bool rawColumnIsNull(const std::string& row, const TableSchema& tbl,
                             size_t colIdx) {
     // TableScanOp deliberately strips the MVCC/null bitmap header before
@@ -643,7 +539,7 @@ bool BitmapOrHeapScanOp::open() {
         for (const auto& branch : branches_) {
             bool branchMatches = true;
             for (const auto& condition : branch) {
-                if (!evalCondRaw(condition, row, tbl_)) {
+                if (!StorageEngine::evalConditionOnRow(condition, row, tbl_)) {
                     branchMatches = false;
                     break;
                 }
@@ -685,7 +581,22 @@ bool FilterOp::next(std::string& outRow) {
     while (child_->next(outRow)) {
         bool match = true;
         for (const auto& c : conds_) {
-            if (!evalCondRaw(c, outRow, tbl_)) { match = false; break; }
+            size_t colIdx = tbl_.len;
+            for (size_t i = 0; i < tbl_.len; ++i) {
+                if (tbl_.cols[i].dataName == c.colName) {
+                    colIdx = i;
+                    break;
+                }
+            }
+            const bool isNull = colIdx < tbl_.len && child_->lastColumnIsNull(colIdx);
+            const bool conditionMatches =
+                (c.op == "isnull") ? isNull :
+                (c.op == "isnotnull") ? !isNull :
+                !isNull && StorageEngine::evalConditionOnRow(c, outRow, tbl_);
+            if (!conditionMatches) {
+                match = false;
+                break;
+            }
         }
         if (match) return true;
     }
@@ -771,6 +682,88 @@ bool SemiJoinOp::next(std::string& outRow) {
 void SemiJoinOp::close() {
     rows_.clear();
     pos_ = 0;
+}
+
+// ========================================================================
+// QuantifiedSubqueryFilterOp
+// ========================================================================
+
+bool QuantifiedSubqueryFilterOp::open() {
+    values_.clear();
+
+    size_t outerIdx = outerTbl_.len;
+    size_t innerIdx = innerTbl_.len;
+    for (size_t i = 0; i < outerTbl_.len; ++i) {
+        if (outerTbl_.cols[i].dataName == outerColumn_) {
+            outerIdx = i;
+            break;
+        }
+    }
+    for (size_t i = 0; i < innerTbl_.len; ++i) {
+        if (innerTbl_.cols[i].dataName == innerColumn_) {
+            innerIdx = i;
+            break;
+        }
+    }
+    if (outerIdx >= outerTbl_.len || innerIdx >= innerTbl_.len) return false;
+    if (!inner_->open()) return false;
+
+    std::string row;
+    while (inner_->next(row)) {
+        values_.push_back({
+            StorageEngine::extractColumnValueStatic(row, innerTbl_, innerIdx),
+            inner_->lastColumnIsNull(innerIdx)});
+    }
+    inner_->close();
+    return outer_->open();
+}
+
+bool QuantifiedSubqueryFilterOp::next(std::string& outRow) {
+    size_t outerIdx = outerTbl_.len;
+    for (size_t i = 0; i < outerTbl_.len; ++i) {
+        if (outerTbl_.cols[i].dataName == outerColumn_) {
+            outerIdx = i;
+            break;
+        }
+    }
+    if (outerIdx >= outerTbl_.len) return false;
+
+    while (outer_->next(outRow)) {
+        const std::string left = StorageEngine::extractColumnValueStatic(
+            outRow, outerTbl_, outerIdx);
+        const bool leftIsNull = outer_->lastColumnIsNull(outerIdx);
+        if (leftIsNull) continue; // NULL <op> ANY/ALL is UNKNOWN.
+
+        bool result = all_;
+        bool hasUnknown = false;
+        for (const auto& value : values_) {
+            const auto truth = StorageEngine::compareValues(
+                outerTbl_.cols[outerIdx], left, leftIsNull,
+                value.text, value.isNull, op_);
+            if (truth == StorageEngine::PredicateTruth::Unknown) {
+                hasUnknown = true;
+                continue;
+            }
+            if (all_ && truth == StorageEngine::PredicateTruth::False) {
+                result = false;
+                hasUnknown = false;
+                break;
+            }
+            if (!all_ && truth == StorageEngine::PredicateTruth::True) {
+                result = true;
+                hasUnknown = false;
+                break;
+            }
+        }
+        if (hasUnknown) result = false; // UNKNOWN is filtered from WHERE.
+        if (result) return true;
+    }
+    return false;
+}
+
+void QuantifiedSubqueryFilterOp::close() {
+    outer_->close();
+    values_.clear();
 }
 
 // ========================================================================
@@ -2238,6 +2231,26 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         }
     }
 
+    // Lower uncorrelated quantified subqueries after the outer filter.  The
+    // inner value set is initialized once and the outer stream is evaluated
+    // with SQL's ANY/ALL three-valued logic.
+    if (!ctx.quantifiedSubqueries.empty()) {
+        const TableSchema outerTbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        for (const auto& spec : ctx.quantifiedSubqueries) {
+            const std::string innerDb = spec.dbname.empty() ? ctx.dbname : spec.dbname;
+            const TableSchema innerTbl = engine->getTableSchema(innerDb, spec.tablename);
+            OpPtr inner = std::make_unique<TableScanOp>(
+                engine, innerDb, spec.tablename);
+            if (!spec.innerConds.empty()) {
+                inner = std::make_unique<FilterOp>(
+                    std::move(inner), innerTbl, spec.innerConds);
+            }
+            root = std::make_unique<QuantifiedSubqueryFilterOp>(
+                std::move(root), std::move(inner), outerTbl, innerTbl,
+                spec.outerColumn, spec.innerColumn, spec.op, spec.all);
+        }
+    }
+
     if (!ctx.groupByCols.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<GroupAggregateOp>(
@@ -2551,6 +2564,19 @@ static CostEstimate explainOp(Operator* op, int indent,
                ", inner_col=" + semi->innerColumn() + ")" +
                costRowsStr(est, opts) + "\n";
 
+    } else if (auto* quantified = dynamic_cast<QuantifiedSubqueryFilterOp*>(op)) {
+        CostEstimate outer = explainOp(quantified->outerChild(), indent + 1,
+                                       engine, dbname, out, opts);
+        CostEstimate inner = explainOp(quantified->innerChild(), indent + 1,
+                                       engine, dbname, out, opts);
+        est.rows = outer.rows * 0.5;
+        if (est.rows < 1.0 && outer.rows > 0.0) est.rows = 1.0;
+        est.cost = outer.cost + inner.cost + outer.rows * inner.rows;
+        out += prefix + "QuantifiedSubqueryFilter(outer_col=" +
+               quantified->outerColumn() + ", op=" + quantified->op() +
+               ", quantifier=" + (quantified->isAll() ? "ALL" : "ANY") + ")" +
+               costRowsStr(est, opts) + "\n";
+
     } else if (auto* exists = dynamic_cast<ExistenceFilterOp*>(op)) {
         CostEstimate outer = explainOp(exists->outerChild(), indent + 1,
                                        engine, dbname, out, opts);
@@ -2800,6 +2826,22 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
                 std::string(semi->isAnti() ? "AntiJoin" : "SemiJoin") + "\",";
         json += "\"outerColumn\":\"" + jsonEscape(semi->outerColumn()) + "\",";
         json += "\"innerColumn\":\"" + jsonEscape(semi->innerColumn()) + "\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[" + outerJson + "," + innerJson + "]";
+
+    } else if (auto* quantified = dynamic_cast<QuantifiedSubqueryFilterOp*>(op)) {
+        auto [outerJson, outer] = explainOpJson(quantified->outerChild(), engine,
+                                                dbname, opts);
+        auto [innerJson, inner] = explainOpJson(quantified->innerChild(), engine,
+                                                dbname, opts);
+        est.rows = outer.rows * 0.5;
+        if (est.rows < 1.0 && outer.rows > 0.0) est.rows = 1.0;
+        est.cost = outer.cost + inner.cost + outer.rows * inner.rows;
+        json += "\"nodeType\":\"QuantifiedSubqueryFilter\",";
+        json += "\"outerColumn\":\"" + jsonEscape(quantified->outerColumn()) + "\",";
+        json += "\"operator\":\"" + jsonEscape(quantified->op()) + "\",";
+        json += "\"quantifier\":\"" +
+                std::string(quantified->isAll() ? "ALL" : "ANY") + "\",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[" + outerJson + "," + innerJson + "]";
 

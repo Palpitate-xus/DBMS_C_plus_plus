@@ -790,6 +790,9 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens);
 static bool setSessionAuthorization(Session& s, const string& targetRaw);
 static vector<string> splitValues(const string& s);
 static vector<string> parseCSVLine(const string& line);
+static bool parseSimpleQuantifiedSubquery(
+    const std::string& rawClause, Session& s, const std::string& dbname,
+    const std::string& outerTable, dbms::QuantifiedSubquerySpec& outSpec);
 
 // ========================================================================
 // Cursor command handlers (extracted for Parser switch/case dispatch)
@@ -2311,16 +2314,23 @@ static bool handleExplain(const string& sql, Session& s) {
     }
     string tname = trim(inner.substr(fromPos + 4, tableEnd - fromPos - 4));
     vector<string> conds;
+    dbms::QuantifiedSubquerySpec quantifiedSubquery;
+    bool structuredQuantified = false;
     if (wherePos != string::npos) {
         size_t condEnd = (orderPos != string::npos) ? orderPos
                        : (limitPos != string::npos) ? limitPos
                        : inner.size();
-        string condStr = normalizeConditionStr(trim(inner.substr(wherePos + 5, condEnd - wherePos - 5)));
-        if (!condStr.empty()) {
-            vector<string> rawConds = splitConds(condStr);
-            for (auto& c : rawConds) {
-                string mc = modifyLogic(c);
-                if (!mc.empty()) conds.push_back(mc);
+        const string rawWhere = trim(inner.substr(wherePos + 5, condEnd - wherePos - 5));
+        structuredQuantified = parseSimpleQuantifiedSubquery(
+            rawWhere, s, s.currentDB, tname, quantifiedSubquery);
+        if (!structuredQuantified) {
+            string condStr = normalizeConditionStr(rawWhere);
+            if (!condStr.empty()) {
+                vector<string> rawConds = splitConds(condStr);
+                for (auto& c : rawConds) {
+                    string mc = modifyLogic(c);
+                    if (!mc.empty()) conds.push_back(mc);
+                }
             }
         }
     }
@@ -2422,6 +2432,7 @@ static bool handleExplain(const string& sql, Session& s) {
     ctx.groupingSets = groupingSets;
     ctx.aggregateItems = aggregateItems;
     ctx.havingConds = havingConds;
+    if (structuredQuantified) ctx.quantifiedSubqueries.push_back(std::move(quantifiedSubquery));
 
     string cacheKey = s.currentDB + "::" + inner;
     if (opts.buffers) cacheKey += ":B";
@@ -6208,6 +6219,139 @@ static bool parseSimpleSemiJoinSubquery(
     outSpec.innerColumn = innerColumn;
     outSpec.innerConds = std::move(innerConds);
     outSpec.anti = anti;
+    return true;
+}
+
+// Recognize one uncorrelated quantified comparison.  The structured boundary
+// intentionally accepts a plain outer column, one comparison operator, one
+// quantifier, and a single-column inner SELECT with simple inner predicates.
+// Correlation, row comparisons, aggregates, ordering and expressions remain
+// on the legacy path until parameterized expression plans exist.
+static bool parseSimpleQuantifiedSubquery(
+    const std::string& rawClause, Session& s, const std::string& dbname,
+    const std::string& outerTable, dbms::QuantifiedSubquerySpec& outSpec) {
+    const std::string clause = trim(rawClause);
+    const size_t anyPos = findTopLevelKeyword(clause, "any");
+    const size_t allPos = findTopLevelKeyword(clause, "all");
+    if (anyPos == std::string::npos && allPos == std::string::npos) return false;
+    const bool all = allPos != std::string::npos &&
+                     (anyPos == std::string::npos || allPos < anyPos);
+    const size_t quantPos = all ? allPos : anyPos;
+    const std::string quantifier = all ? "all" : "any";
+
+    size_t opEnd = quantPos;
+    while (opEnd > 0 && std::isspace(static_cast<unsigned char>(clause[opEnd - 1]))) --opEnd;
+    size_t opStart = opEnd;
+    while (opStart > 0) {
+        const char c = clause[opStart - 1];
+        if (c != '<' && c != '>' && c != '=' && c != '!') break;
+        --opStart;
+    }
+    if (opStart == opEnd) return false;
+    std::string op = clause.substr(opStart, opEnd - opStart);
+    if (op == "<>") op = "!=";
+    if (op != "=" && op != "!=" && op != "<" && op != ">" &&
+        op != "<=" && op != ">=") return false;
+
+    std::string outerColumn = trim(clause.substr(0, opStart));
+    if (outerColumn.empty() || outerColumn.find_first_of(" ()\t\r\n") != std::string::npos)
+        return false;
+    const size_t outerDot = outerColumn.rfind('.');
+    if (outerDot != std::string::npos) outerColumn = trim(outerColumn.substr(outerDot + 1));
+    if (outerColumn.empty()) return false;
+
+    size_t parenStart = quantPos + quantifier.size();
+    while (parenStart < clause.size() &&
+           std::isspace(static_cast<unsigned char>(clause[parenStart]))) ++parenStart;
+    if (parenStart >= clause.size() || clause[parenStart] != '(') return false;
+    const size_t parenEnd = findMatchingParen(clause, parenStart);
+    if (parenEnd == std::string::npos || !trim(clause.substr(parenEnd + 1)).empty())
+        return false;
+
+    const std::string inner = trim(clause.substr(parenStart + 1,
+                                                  parenEnd - parenStart - 1));
+    if (inner.size() < 6 || inner.substr(0, 6) != "select") return false;
+    const size_t fromPos = findTopLevelKeyword(inner, "from", 6);
+    if (fromPos == std::string::npos) return false;
+    const auto selectedColumns = splitTopLevelComma(trim(inner.substr(6, fromPos - 6)));
+    if (selectedColumns.size() != 1) return false;
+    std::string innerColumn = trim(selectedColumns.front());
+    if (innerColumn.empty() || innerColumn == "distinct" ||
+        innerColumn.find_first_of(" ()\t\r\n,") != std::string::npos) return false;
+    const size_t innerDot = innerColumn.rfind('.');
+    if (innerDot != std::string::npos) innerColumn = trim(innerColumn.substr(innerDot + 1));
+    if (innerColumn.empty()) return false;
+
+    const size_t wherePos = findTopLevelKeyword(inner, "where", fromPos + 4);
+    const size_t groupPos = findTopLevelKeyword(inner, "group by", fromPos + 4);
+    const size_t havingPos = findTopLevelKeyword(inner, "having", fromPos + 4);
+    const size_t orderPos = findTopLevelKeyword(inner, "order by", fromPos + 4);
+    const size_t limitPos = findTopLevelKeyword(inner, "limit", fromPos + 4);
+    const size_t offsetPos = findTopLevelKeyword(inner, "offset", fromPos + 4);
+    if (groupPos != std::string::npos || havingPos != std::string::npos ||
+        orderPos != std::string::npos || limitPos != std::string::npos ||
+        offsetPos != std::string::npos) return false;
+
+    const size_t tableEnd = wherePos == std::string::npos ? inner.size() : wherePos;
+    const std::string tableText = trim(inner.substr(fromPos + 4,
+                                                     tableEnd - fromPos - 4));
+    if (tableText.empty() || tableText.find_first_of(" \t\r\n.") != std::string::npos)
+        return false;
+    const std::string table = resolveTableName(s, tableText);
+    if (!g_engine.tableExists(dbname, table)) return false;
+
+    const TableSchema outerSchema = g_engine.getTableSchema(dbname, outerTable);
+    const TableSchema innerSchema = g_engine.getTableSchema(dbname, table);
+    auto findColumn = [](const TableSchema& schema, const std::string& name) {
+        for (size_t i = 0; i < schema.len; ++i) {
+            if (schema.cols[i].dataName == name) return i;
+        }
+        return schema.len;
+    };
+    const size_t outerIdx = findColumn(outerSchema, outerColumn);
+    const size_t innerIdx = findColumn(innerSchema, innerColumn);
+    if (outerIdx >= outerSchema.len || innerIdx >= innerSchema.len) return false;
+
+    // Restrict the first structured implementation to compatible scalar
+    // families; comparing an integer to an arbitrary encoded type would be
+    // less safe than taking the documented legacy fallback.
+    const auto family = [](const Column& col) {
+        if (col.dataType == "numeric" || col.dataType == "decimal" ||
+            col.dataType == "double" || col.dataType == "float") return 1;
+        if (col.dataType == "date" || col.dataType == "time" ||
+            col.dataType == "timestamp" || col.dataType == "timestamptz" ||
+            col.dataType == "datetime") return 2;
+        if (col.dataType == "boolean") return 3;
+        if (col.dataType == "char" || col.dataType == "uuid" ||
+            col.isVariableLength) return 4;
+        return 5;
+    };
+    if (family(outerSchema.cols[outerIdx]) != family(innerSchema.cols[innerIdx])) return false;
+
+    std::vector<dbms::StorageEngine::Condition> innerConds;
+    if (wherePos != std::string::npos) {
+        const std::string whereClause = trim(inner.substr(wherePos + 5));
+        if (whereClause.empty()) return false;
+        std::vector<std::string> tokens = tokenize(normalizeConditionStr(whereClause));
+        tokens.insert(tokens.begin(), "(");
+        tokens.push_back(")");
+        for (auto& token : tokens) token = modifyLogic(token);
+        const auto groups = breakDownConditions(tokens);
+        if (groups.size() != 1) return false;
+        innerConds = dbms::StorageEngine::parseConditions(groups.front());
+        if (innerConds.empty() || innerConds.size() != groups.front().size()) return false;
+        for (const auto& condition : innerConds) {
+            if (findColumn(innerSchema, condition.colName) >= innerSchema.len) return false;
+        }
+    }
+
+    outSpec.dbname = dbname;
+    outSpec.tablename = table;
+    outSpec.outerColumn = outerColumn;
+    outSpec.innerColumn = innerColumn;
+    outSpec.op = op;
+    outSpec.innerConds = std::move(innerConds);
+    outSpec.all = all;
     return true;
 }
 
@@ -15811,6 +15955,7 @@ bool execute(const string& rawSql, Session& s) {
         vector<string> condTokens;
         vector<dbms::SemiJoinSpec> semiJoins;
         vector<dbms::ExistenceSpec> existenceFilters;
+        vector<dbms::QuantifiedSubquerySpec> quantifiedSubqueries;
         string rawWhereClause;
         if (wherePos != string::npos) {
             size_t condEnd = (groupPos != string::npos) ? groupPos
@@ -15823,6 +15968,7 @@ bool execute(const string& rawSql, Session& s) {
             rawWhereClause = whereClause;
             dbms::SemiJoinSpec semiJoin;
             dbms::ExistenceSpec existence;
+            dbms::QuantifiedSubquerySpec quantified;
             const bool canUseStructuredSubquery = !hasAgg && !hasWindow &&
                                                    !hasScalar &&
                                                    groupPos == string::npos;
@@ -15832,10 +15978,15 @@ bool execute(const string& rawSql, Session& s) {
             const bool structuredExistence = canUseStructuredSubquery &&
                                              parseSimpleExistenceSubquery(
                                                  whereClause, s, queryDb, existence);
+            const bool structuredQuantified = canUseStructuredSubquery &&
+                                              parseSimpleQuantifiedSubquery(
+                                                  whereClause, s, queryDb, tname, quantified);
             if (structuredSemi) {
                 semiJoins.push_back(std::move(semiJoin));
             } else if (structuredExistence) {
                 existenceFilters.push_back(std::move(existence));
+            } else if (structuredQuantified) {
+                quantifiedSubqueries.push_back(std::move(quantified));
             } else {
                 whereClause = expandSubqueries(whereClause, s);
                 string condStr = normalizeConditionStr(whereClause);
@@ -15856,6 +16007,7 @@ bool execute(const string& rawSql, Session& s) {
                                          bool distinct,
                                          const std::vector<dbms::SemiJoinSpec>& subqueryJoins,
                                          const std::vector<dbms::ExistenceSpec>& existenceSubqueries,
+                                         const std::vector<dbms::QuantifiedSubquerySpec>& quantifiedSubqueries,
                                          std::vector<std::string>& outAnswers) -> bool {
             // Fall back when the volcano path cannot yet handle the query.
             if (forUpdate || noWait || skipLocked) return false;
@@ -15881,6 +16033,7 @@ bool execute(const string& rawSql, Session& s) {
             ctx.distinct = distinct;
             ctx.semiJoins = subqueryJoins;
             ctx.existenceFilters = existenceSubqueries;
+            ctx.quantifiedSubqueries = quantifiedSubqueries;
             ctx.projectionTargets = projectionTargets;
             ctx.scalarSubquery = scalarSubquery;
             std::vector<std::vector<dbms::StorageEngine::Condition>> branches;
@@ -16747,7 +16900,7 @@ bool execute(const string& rawSql, Session& s) {
                 if (scalarGroups.size() <= 1) {
                     scalarVolcanoUsed = executeVolcanoSelect(
                         tname, selectCols, scalarGroups, nullptr, false,
-                        {}, {}, answers);
+                        {}, {}, {}, answers);
                 }
             }
             if (scalarVolcanoUsed) {
@@ -16803,7 +16956,8 @@ bool execute(const string& rawSql, Session& s) {
             if (condTokens.empty()) {
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, {},
                                                     firstOrderBy, useDistinct,
-                                                    semiJoins, existenceFilters, answers);
+                                                    semiJoins, existenceFilters,
+                                                    quantifiedSubqueries, answers);
             } else {
                 // Make a local copy since modifyLogic mutates tokens.
                 vector<string> condCopy = condTokens;
@@ -16813,17 +16967,20 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condCopy);
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, groups,
                                                     firstOrderBy, useDistinct,
-                                                    semiJoins, existenceFilters, answers);
+                                                    semiJoins, existenceFilters,
+                                                    quantifiedSubqueries, answers);
             }
 
             // A structured subquery is only valid if the complete Volcano
             // path is available.  Restore the original predicate before the
             // legacy fallback so unsupported features cannot silently drop it.
-            if (!volcanoUsed && (!semiJoins.empty() || !existenceFilters.empty())) {
+            if (!volcanoUsed && (!semiJoins.empty() || !existenceFilters.empty() ||
+                                 !quantifiedSubqueries.empty())) {
                 condTokens = tokenize(normalizeConditionStr(
                     expandSubqueries(rawWhereClause, s)));
                 semiJoins.clear();
                 existenceFilters.clear();
+                quantifiedSubqueries.clear();
             }
 
             if (!volcanoUsed) {

@@ -280,6 +280,62 @@ private:
     size_t pos_ = 0;
 };
 
+struct QuantifiedSubquerySpec {
+    std::string dbname;
+    std::string tablename;
+    std::string outerColumn;
+    std::string innerColumn;
+    std::string op;
+    std::vector<StorageEngine::Condition> innerConds;
+    bool all = false;
+};
+
+// QuantifiedSubqueryFilter evaluates one uncorrelated
+// `outer_expr <op> ANY/ALL (SELECT inner_expr ...)` predicate.  The inner
+// relation is materialized once as values; the outer stream remains lazy.
+// SQL three-valued logic is preserved for NULL and empty input sets.
+class QuantifiedSubqueryFilterOp : public Operator {
+public:
+    QuantifiedSubqueryFilterOp(OpPtr outer, OpPtr inner,
+                               const TableSchema& outerTbl,
+                               const TableSchema& innerTbl,
+                               const std::string& outerColumn,
+                               const std::string& innerColumn,
+                               const std::string& op, bool all)
+        : outer_(std::move(outer)), inner_(std::move(inner)),
+          outerTbl_(outerTbl), innerTbl_(innerTbl),
+          outerColumn_(outerColumn), innerColumn_(innerColumn),
+          op_(op), all_(all) {}
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    bool lastColumnIsNull(size_t colIdx) const override {
+        return outer_->lastColumnIsNull(colIdx);
+    }
+    Operator* outerChild() const { return outer_.get(); }
+    Operator* innerChild() const { return inner_.get(); }
+    const std::string& outerColumn() const { return outerColumn_; }
+    const std::string& innerColumn() const { return innerColumn_; }
+    const std::string& op() const { return op_; }
+    bool isAll() const { return all_; }
+
+private:
+    struct Value {
+        std::string text;
+        bool isNull = false;
+    };
+    OpPtr outer_;
+    OpPtr inner_;
+    TableSchema outerTbl_;
+    TableSchema innerTbl_;
+    std::string outerColumn_;
+    std::string innerColumn_;
+    std::string op_;
+    bool all_ = false;
+    std::vector<Value> values_;
+};
+
 // ExistenceFilter filters an outer stream using the truth value of an
 // uncorrelated EXISTS/NOT EXISTS subquery.  The inner plan is evaluated once
 // and the outer row shape is preserved for downstream projection.
@@ -709,6 +765,8 @@ struct PlanContext {
     // Uncorrelated EXISTS/NOT EXISTS predicates lowered to an existence
     // filter over a right-hand relation.
     std::vector<ExistenceSpec> existenceFilters;
+    // Uncorrelated ANY/ALL predicates lowered to a quantified filter.
+    std::vector<QuantifiedSubquerySpec> quantifiedSubqueries;
     // A narrow uncorrelated scalar target list lowered to an init-plan plus
     // target projection.  Empty means the normal column projection path.
     std::vector<ProjectionTarget> projectionTargets;

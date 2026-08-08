@@ -605,6 +605,48 @@ static void test_semi_and_anti_join() {
         dbms::QueryPlanner::buildSelectPlan(&g_engine, nullAntiCtx));
     assert(nullAntiRows.empty());
 
+    dbms::PlanContext anyCtx;
+    anyCtx.dbname = db;
+    anyCtx.tablename = "outer_t";
+    anyCtx.selectCols = {"id"};
+    anyCtx.quantifiedSubqueries.push_back({
+        db, "inner_t", "id", "id", ">",
+        dbms::StorageEngine::parseConditions({"=enabled 1"}), false});
+    auto anyPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, anyCtx);
+    auto* anyProject = dynamic_cast<dbms::ProjectOp*>(anyPlan.get());
+    assert(anyProject);
+    auto* anyFilter = dynamic_cast<dbms::QuantifiedSubqueryFilterOp*>(anyProject->child());
+    assert(anyFilter && !anyFilter->isAll() && anyFilter->op() == ">");
+    auto anyRows = dbms::QueryPlanner::executePlan(std::move(anyPlan));
+    assert((anyRows == std::vector<std::string>{"3 ", "4 "}));
+    auto quantifiedExplainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, anyCtx);
+    const auto quantifiedExplain = dbms::QueryPlanner::explain(
+        quantifiedExplainPlan, &g_engine, db);
+    assert(quantifiedExplain.find("QuantifiedSubqueryFilter") != std::string::npos);
+    const auto quantifiedExplainJson = dbms::QueryPlanner::explainJson(
+        quantifiedExplainPlan, &g_engine, db);
+    assert(quantifiedExplainJson.find(
+        "\"nodeType\":\"QuantifiedSubqueryFilter\"") != std::string::npos);
+
+    dbms::PlanContext allCtx = anyCtx;
+    allCtx.quantifiedSubqueries = {{
+        db, "clean_inner_t", "id", "id", ">", {}, true}};
+    auto allRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, allCtx));
+    assert((allRows == std::vector<std::string>{"4 "}));
+
+    dbms::PlanContext emptyAnyCtx = anyCtx;
+    emptyAnyCtx.quantifiedSubqueries = {{
+        db, "inner_t", "id", "id", ">",
+        dbms::StorageEngine::parseConditions({"=enabled 9"}), false}};
+    assert(dbms::QueryPlanner::executePlan(
+               dbms::QueryPlanner::buildSelectPlan(&g_engine, emptyAnyCtx)).empty());
+    dbms::PlanContext emptyAllCtx = emptyAnyCtx;
+    emptyAllCtx.quantifiedSubqueries[0].all = true;
+    auto emptyAllRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, emptyAllCtx));
+    assert((emptyAllRows == std::vector<std::string>{"1 ", "2 ", "3 ", "4 "}));
+
     dbms::PlanContext existsCtx;
     existsCtx.dbname = db;
     existsCtx.tablename = "outer_t";
@@ -665,7 +707,7 @@ static void test_semi_and_anti_join() {
     assert(multiScalar->errorMessage().find("more than one row") != std::string::npos);
 
     cleanup(db);
-    std::cout << "[VOLCANO-5.1] SemiJoin/AntiJoin and ExistenceFilter semantics OK" << std::endl;
+    std::cout << "[VOLCANO-5.1] SemiJoin/AntiJoin, ExistenceFilter and ANY/ALL semantics OK" << std::endl;
 }
 
 int main() {

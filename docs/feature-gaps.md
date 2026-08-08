@@ -160,7 +160,7 @@
 
 ### P1-4: 子查询结构化解嵌套 (Subquery Unnesting)
 - **类别**: 优化器 / 子查询
-- **现状**: 未关联的单列 `IN`/`NOT IN` 已由主 SQL 路径识别并下推为结构化 `SemiJoinOp`/anti 模式；未关联的单表 `EXISTS`/`NOT EXISTS`（含简单内层 `WHERE`）已下推为 `ExistenceFilterOp`；单个未关联标量目标已下推为 init-plan + `ScalarSubqueryProjectOp`，严格执行 0 行为 NULL、超过 1 行报错；关联子查询、复杂标量目标、`ANY/ALL`、row comparison 和复杂布尔组合仍回退 legacy
+- **现状**: 未关联的单列 `IN`/`NOT IN` 已由主 SQL 路径识别并下推为结构化 `SemiJoinOp`/anti 模式；未关联的单表 `EXISTS`/`NOT EXISTS`（含简单内层 `WHERE`）已下推为 `ExistenceFilterOp`；单个未关联标量目标已下推为 init-plan + `ScalarSubqueryProjectOp`，严格执行 0 行为 NULL、超过 1 行报错；单列未关联 `ANY/ALL` 已下推为 `QuantifiedSubqueryFilterOp`，保留 NULL/空集三值逻辑；关联子查询、复杂标量目标、row comparison 和复杂布尔组合仍回退 legacy
 - **PG 参考**: `pull_up_subqueries`, `convert_EXISTS_to_join`
 - **影响**: 关联子查询性能差（O(n*m) 嵌套循环）
 - **实现路径**:
@@ -168,7 +168,8 @@
   2. ✅ 实现 `SemiJoinOp`（anti 模式）及 inner Filter 子计划
   3. ✅ 实现未关联单表 `EXISTS`/`NOT EXISTS` 的 `ExistenceFilterOp` 及 inner Filter 子计划
   4. ✅ 实现单个未关联标量目标的 init-plan、NULL 和 cardinality error 语义
-  5. 补齐 `ANY/ALL`、复杂标量目标、关联性、row comparison 和完整 planner 入口
+  5. ✅ 补齐单列未关联 `ANY/ALL` 的结构化量化过滤、NULL/空集语义与 EXPLAIN
+  6. 补齐复杂标量目标、关联性、row comparison 和完整 planner 入口
 - **预估工作量**: 1-2 周
 - **相关文件**: `src/executor/ExecutionPlan.cpp`
 

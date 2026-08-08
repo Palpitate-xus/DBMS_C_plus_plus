@@ -453,6 +453,31 @@ def main():
             sock, "SELECT id FROM sub_outer "
             "WHERE NOT EXISTS (SELECT 1 FROM sub_inner WHERE enabled = 1)"))
         assert not_exists_hit_rows == [], not_exists_hit_rows
+        any_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE id > ANY (SELECT id FROM sub_inner WHERE enabled = 1)"))
+        assert any_rows == [[b"3"], [b"4"]], any_rows
+        all_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE id > ALL (SELECT id FROM sub_inner WHERE enabled = 1)"))
+        assert all_rows == [], all_rows  # NULL inner value makes ALL UNKNOWN.
+        quantified_explain = data_row_values(simple_query(
+            sock, "EXPLAIN SELECT id FROM sub_outer "
+            "WHERE id > ANY (SELECT id FROM sub_inner WHERE enabled = 1)"))
+        assert any(b"QuantifiedSubqueryFilter" in row[0] for row in quantified_explain), quantified_explain
+        nonnull_all_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE id > ALL (SELECT id FROM sub_inner "
+            "WHERE enabled = 1 AND id IS NOT NULL)"))
+        assert nonnull_all_rows == [[b"4"]], nonnull_all_rows
+        empty_any_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE id > ANY (SELECT id FROM sub_inner WHERE enabled = 9)"))
+        assert empty_any_rows == [], empty_any_rows
+        empty_all_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE id > ALL (SELECT id FROM sub_inner WHERE enabled = 9)"))
+        assert empty_all_rows == [[b"1"], [b"2"], [b"3"], [b"4"]], empty_all_rows
         scalar_rows = data_row_values(simple_query(
             sock, "SELECT id, (SELECT id FROM sub_inner WHERE id = 2) "
             "FROM sub_outer"))

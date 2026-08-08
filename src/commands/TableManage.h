@@ -699,6 +699,16 @@ public:
         std::string colName;
         std::string value;
     };
+    enum class PredicateTruth { False, True, Unknown };
+    // Compare two already decoded values using the column's PostgreSQL-like
+    // type semantics.  This is shared by quantified subqueries so NULL and
+    // empty strings are not conflated by the legacy condition format.
+    static PredicateTruth compareValues(const Column& col,
+                                        const std::string& left,
+                                        bool leftIsNull,
+                                        const std::string& right,
+                                        bool rightIsNull,
+                                        const std::string& op);
     static std::vector<Condition> parseConditions(const std::vector<std::string>& cstr);
     static bool evalConditionOnRow(const Condition& cond, const std::string& rowBuffer, const TableSchema& tbl);
     static int64_t parseInt(const std::string& s);

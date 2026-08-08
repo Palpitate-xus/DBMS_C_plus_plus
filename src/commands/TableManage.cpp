@@ -9981,6 +9981,97 @@ bool StorageEngine::stringToBuffer(const std::string& src, char* dst, size_t len
     return true;
 }
 
+StorageEngine::PredicateTruth StorageEngine::compareValues(
+    const Column& col, const std::string& left, bool leftIsNull,
+    const std::string& right, bool rightIsNull, const std::string& op) {
+    if (leftIsNull || rightIsNull) return PredicateTruth::Unknown;
+
+    auto fromCompare = [&](int cmp) -> PredicateTruth {
+        bool result = false;
+        if (op == "=") result = cmp == 0;
+        else if (op == "!=" || op == "<>") result = cmp != 0;
+        else if (op == "<") result = cmp < 0;
+        else if (op == ">") result = cmp > 0;
+        else if (op == "<=") result = cmp <= 0;
+        else if (op == ">=") result = cmp >= 0;
+        else return PredicateTruth::Unknown;
+        return result ? PredicateTruth::True : PredicateTruth::False;
+    };
+
+    if (col.dataType == "char" || col.dataType == "uuid" ||
+        (col.isVariableLength && col.dataType != "numeric")) {
+        const int cmp = col.collation.empty()
+            ? left.compare(right)
+            : collation::compare(left, right, col.collation);
+        return fromCompare(cmp);
+    }
+    if (col.dataType == "date") {
+        auto normalizeDate = [](std::string value) {
+            for (char& c : value) if (c == '/' || c == '.') c = '-';
+            return value;
+        };
+        const Date l(normalizeDate(left).c_str());
+        const Date r(normalizeDate(right).c_str());
+        if (!l.year || !r.year) return PredicateTruth::Unknown;
+        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+    }
+    if (col.dataType == "timestamp" || col.dataType == "timestamptz" ||
+        col.dataType == "datetime") {
+        const int64_t l = parseTimestampToSeconds(left);
+        const int64_t r = parseTimestampToSeconds(right);
+        if (l == 0 && r == 0 && left != right) return PredicateTruth::Unknown;
+        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+    }
+    if (col.dataType == "time") {
+        const int32_t l = parseTimeToSeconds(left);
+        const int32_t r = parseTimeToSeconds(right);
+        if (l < 0 || r < 0) return PredicateTruth::Unknown;
+        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+    }
+    if (col.dataType == "numeric") {
+        try {
+            const Numeric l(left);
+            const Numeric r(right);
+            return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+        } catch (...) {
+            return PredicateTruth::Unknown;
+        }
+    }
+    if (col.dataType == "float" || col.dataType == "double" ||
+        col.dataType == "decimal") {
+        try {
+            const double l = std::stod(left);
+            const double r = std::stod(right);
+            return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+        } catch (...) {
+            return PredicateTruth::Unknown;
+        }
+    }
+    if (col.dataType == "boolean") {
+        auto normalizeBool = [](const std::string& value) {
+            if (value == "1" || value == "true" || value == "yes" || value == "on") return 1;
+            if (value == "0" || value == "false" || value == "no" || value == "off") return 0;
+            return -1;
+        };
+        const int l = normalizeBool(left);
+        const int r = normalizeBool(right);
+        if (l < 0 || r < 0) return PredicateTruth::Unknown;
+        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+    }
+
+    // Integral types are stored in the same canonical textual form.  Unlike
+    // parseInt(), stoll accepts the signed values supported by SQL literals.
+    try {
+        size_t lp = 0, rp = 0;
+        const int64_t l = std::stoll(left, &lp);
+        const int64_t r = std::stoll(right, &rp);
+        if (lp != left.size() || rp != right.size()) return PredicateTruth::Unknown;
+        return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
+    } catch (...) {
+        return PredicateTruth::Unknown;
+    }
+}
+
 // ========================================================================
 // Helper: evaluate a single condition against a row buffer (page-based)
 // ========================================================================
