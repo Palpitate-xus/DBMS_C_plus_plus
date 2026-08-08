@@ -2,7 +2,7 @@
 
 > 生成日期: 2026-08-08
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
-> 本 DBMS 当前状态: 生产化重构进行中，统一回归基线 PASS=123 FAIL=0（121 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
+> 本 DBMS 当前状态: 生产化重构进行中，统一回归基线 PASS=124 FAIL=0（122 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
 
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
@@ -187,16 +187,16 @@
 
 ### P1-6: 后台统计收集器 (Stats Collector)
 - **类别**: 可观测性 / 运行时统计
-- **现状**: `ANALYZE TABLE` 手动收集，无运行时统计
+- **现状**: 已有线程安全 `process/RuntimeStats`，在 SQL 执行、StorageEngine 表扫描和 DML 边界记录数据库/表级运行时计数；`SHOW STATUS`、`pg_stat_database`、`pg_stat_tables` 已消费真实进程内数据。仍无独立后台采样线程、持久化、完整索引访问分类和 planner 深度反馈。
 - **PG 参考**: `pg_stat_database`, `pg_stat_user_tables`, `pg_stat_activity`
-- **影响**: 无法监控数据库运行状态、无法自动选择最优计划
+- **影响**: 基础运行监控已可用，但重启丢失，统计维度和 planner 反馈仍不足以替代 PostgreSQL 的完整 collector
 - **实现路径**:
-  1. 实现 `StatsCollector` 后台线程：定期收集表/索引/数据库级统计
-  2. 实现 `pg_stat_*` 内存结构 + `SHOW STATUS` 命令
+  1. ✅ 共享 `RuntimeStats` 在执行器/存储边界记录数据库和表级计数
+  2. ✅ 实现 `pg_stat_*` 统计子集 + `SHOW STATUS` 运行时字段
   3. 在 `QueryPlanner` 中使用运行时统计做成本估计
-  4. 增加 `stats_collector` GUC 开关
+  4. 补充独立后台采样线程、持久化、索引细分和 `stats_collector` GUC
 - **预估工作量**: 1 周
-- **相关文件**: `src/process/ProcessManager.cpp` (新建 StatsCollector)
+- **相关文件**: `src/process/RuntimeStats.{h,cpp}`, `src/main.cpp`, `src/network/NetworkServer.cpp`, `src/commands/TableManage.cpp`
 
 ### P1-7: PL/pgSQL 运行时
 - **类别**: 存储过程 / 扩展语言

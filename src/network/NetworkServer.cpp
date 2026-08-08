@@ -11,6 +11,7 @@
 #include "common/DateType.h"
 #include "PostgresNumeric.h"
 #include "process/SqlStats.h"
+#include "process/RuntimeStats.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -707,6 +708,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         } else {
             result.sqlState = "XX000";
         }
+        dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, false);
         return result;
     }
 
@@ -730,6 +732,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         result.columnDescriptions = describeProtocolColumns(result, sql, session);
     }
     result.commandTag = commandTagFor(sql, lines, result.rows.size());
+    dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true,
+                               result.rows.size());
     return result;
 }
 

@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-08）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=123 FAIL=0（121 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。
+> 当前审计（2026-08-08）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=124 FAIL=0（122 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -12,6 +12,8 @@
 协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；完整参数绑定和类型化结果仍列为协议缺口。
 
 SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议入口共同使用，按数据库及归一化 SQL 聚合调用次数和耗时；`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。持久化、大小上限和完整 PostgreSQL 统计字段仍列为后续缺口。
+
+运行时统计已统一到 `process/RuntimeStats`：SQL 执行、StorageEngine 表扫描和 DML 边界共享记录数据库/表级计数，`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 已读取真实进程内数据；后台采样线程、持久化、索引细分和 planner 反馈仍列为后续缺口。
 
 窗口执行器已将常见排名/偏移、窗口聚合和 `ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 接入 `WindowOp`/`OffsetOp`，并通过 Volcano 单元和窗口 E2E 验证；复杂目标与主 SQL EXPLAIN 窗口解析仍待迁移。
 
@@ -35,7 +37,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
 | PostgreSQL wire protocol / SCRAM | 部分完成 | 已有 Startup/SSLRequest/Query/Parse-Bind-Execute/Describe/Close framing、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果、基础 portal maxRows 分页、catalog SCRAM 和基础 pg_hba 运行时决策；数组等复杂类型 I/O、完整 RowDescription 类型映射、结构化结果、holdable/scrollable portal 和 libpq 全语义仍未完成 |
 | 复制、逻辑解码、PITR、pg_basebackup | 部分完成 | 有 WAL/归档/ReplicationManager 框架，但缺完整端到端故障切换与恢复证明 |
-| 系统目录与监控 | 部分完成 | 核心 catalog 可用；完整 `pg_stat_*`、`pg_locks`、`pg_stat_activity` 尚未完成 |
+| 系统目录与监控 | 部分完成 | 核心 catalog 可用；`RuntimeStats` 已提供数据库/表/SQL 统计子集，完整 `pg_stat_*`、`pg_locks`、`pg_stat_activity` 语义仍未完成 |
 | PL/pgSQL、扩展和 FDW | 未完成 | parser/DDL 或 stub 存在，但运行时生态未形成 |
 
 ---

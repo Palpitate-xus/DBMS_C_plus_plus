@@ -981,7 +981,7 @@ SHOW STATEMENTS;
 
 ### SHOW STATUS
 
-**说明** 显示服务器综合状态：连接数、BufferPool 命中率、查询计划缓存命中率。
+**说明** 显示服务器综合状态：连接数、BufferPool 命中率、查询计划缓存命中率，以及当前数据库的运行时 SQL/事务计数。
 
 **输出格式**
 ```
@@ -992,6 +992,12 @@ rejected_connections N
 buffer_pool_hits N
 buffer_pool_misses N
 buffer_pool_hit_rate X%
+runtime_queries N
+runtime_failed_queries N
+runtime_total_query_time_ms X
+runtime_tuples_returned N
+runtime_commits N
+runtime_rollbacks N
 plan_cache_size N
 plan_cache_hits N
 plan_cache_misses N
@@ -1001,6 +1007,18 @@ plan_cache_hit_rate X%
 **示例**
 ```sql
 SHOW STATUS;
+```
+
+---
+
+### pg_stat_database / pg_stat_tables
+
+**说明** `pg_stat_database` 提供数据库级查询、事务和返回行计数；`pg_stat_tables` 提供当前数据库表扫描、DML 行数及近似存活行数。数据由共享 `RuntimeStats` 在进程内实时更新，重启后清空。
+
+**示例**
+```sql
+SELECT * FROM pg_catalog.pg_stat_database;
+SELECT * FROM pg_catalog.pg_stat_tables;
 ```
 
 ---

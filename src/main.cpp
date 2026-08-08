@@ -23,6 +23,7 @@
 #include "commands/DdlExecutor.h"
 #include "catalog/CatalogService.h"
 #include "process/SqlStats.h"
+#include "process/RuntimeStats.h"
 
 using namespace std;
 using dbms::Column;
@@ -13799,15 +13800,25 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         if (rest == "status") {
-            auto& s = dbms::getServerStats();
-            cout << "active_connections " << s.activeConnections.load() << endl;
-            cout << "total_connections " << s.totalConnections.load() << endl;
-            cout << "max_connections " << s.maxConnections.load() << endl;
-            cout << "rejected_connections " << s.rejectedConnections.load() << endl;
+            auto& serverStats = dbms::getServerStats();
+            cout << "active_connections " << serverStats.activeConnections.load() << endl;
+            cout << "total_connections " << serverStats.totalConnections.load() << endl;
+            cout << "max_connections " << serverStats.maxConnections.load() << endl;
+            cout << "rejected_connections " << serverStats.rejectedConnections.load() << endl;
             auto bpStats = g_engine.getBufferPoolStats();
             cout << "buffer_pool_hits " << bpStats.totalHits << endl;
             cout << "buffer_pool_misses " << bpStats.totalMisses << endl;
             cout << "buffer_pool_hit_rate " << std::fixed << std::setprecision(2) << bpStats.hitRate << "%" << endl;
+            auto runtimeDbStats = dbms::getRuntimeDatabaseStats(s.currentDB);
+            if (!runtimeDbStats.empty()) {
+                cout << "runtime_queries " << runtimeDbStats.front().queries << endl;
+                cout << "runtime_failed_queries " << runtimeDbStats.front().failedQueries << endl;
+                cout << "runtime_total_query_time_ms " << std::fixed << std::setprecision(2)
+                     << runtimeDbStats.front().totalQueryTimeMs << endl;
+                cout << "runtime_tuples_returned " << runtimeDbStats.front().tupReturned << endl;
+                cout << "runtime_commits " << runtimeDbStats.front().xactCommit << endl;
+                cout << "runtime_rollbacks " << runtimeDbStats.front().xactRollback << endl;
+            }
             {
                 std::lock_guard<std::mutex> lock(g_planCacheMutex);
                 cout << "plan_cache_size " << g_queryPlanCache.size() << endl;
@@ -15213,14 +15224,36 @@ bool execute(const string& rawSql, Session& s) {
         if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
-                cout << "datname numbackends blks_read blks_hit tup_returned " << endl;
+                cout << "datname numbackends blks_read blks_hit tup_returned xact_commit xact_rollback " << endl;
+                auto runtimeStats = dbms::getRuntimeDatabaseStats();
+                auto processes = dbms::getProcessList();
                 for (const auto& dbname : g_engine.getDatabaseNames()) {
-                    cout << dbname << " 0 " << bpStats.totalMisses << " " << bpStats.totalHits << " 0 " << endl;
+                    auto it = std::find_if(runtimeStats.begin(), runtimeStats.end(),
+                                           [&](const auto& stats) { return stats.dbname == dbname; });
+                    uint64_t returned = it == runtimeStats.end() ? 0 : it->tupReturned;
+                    uint64_t commits = it == runtimeStats.end() ? 0 : it->xactCommit;
+                    uint64_t rollbacks = it == runtimeStats.end() ? 0 : it->xactRollback;
+                    size_t backends = 0;
+                    for (const auto& process : processes) {
+                        if (process.db == dbname) ++backends;
+                    }
+                    cout << dbname << " " << backends << " " << bpStats.totalMisses << " "
+                         << bpStats.totalHits << " " << returned << " " << commits << " "
+                         << rollbacks << " " << endl;
                 }
             } else if (tname == "pg_stat_tables") {
-                cout << "relname seq_scan idx_scan n_tup_ins n_tup_upd n_tup_del " << endl;
+                cout << "relname seq_scan seq_tup_read idx_scan idx_tup_fetch n_tup_ins n_tup_upd n_tup_del n_live_tup " << endl;
+                auto runtimeStats = dbms::getRuntimeTableStats(s.currentDB);
                 for (const auto& t : g_engine.getTableNames(s.currentDB)) {
-                    cout << t << " 0 0 0 0 0 " << endl;
+                    auto it = std::find_if(runtimeStats.begin(), runtimeStats.end(),
+                                           [&](const auto& stats) { return stats.relname == t; });
+                    if (it == runtimeStats.end()) {
+                        cout << t << " 0 0 0 0 0 0 0 0 " << endl;
+                    } else {
+                        cout << it->relname << " " << it->seqScan << " " << it->seqTupRead << " "
+                             << it->idxScan << " " << it->idxTupFetch << " " << it->nTupIns << " "
+                             << it->nTupUpd << " " << it->nTupDel << " " << it->nLiveTup << " " << endl;
+                    }
                 }
             } else if (tname == "pg_stat_statements") {
                 cout << "query calls total_time min_time max_time mean_time dbname " << endl;
@@ -17300,6 +17333,8 @@ int main(int argc, char* argv[]) {
                 autoExplainLog(sql, ms, s.username, s.currentDB);
             }
             dbms::recordSqlStat(sql, ms, s.currentDB);
+            dbms::recordQueryExecution(sql, ms, s.currentDB,
+                                       !ok && !timedOut);
             if (ok && !s.currentDB.empty() && g_checkpointInterval > 0) {
                 if (++sqlCount >= g_checkpointInterval) {
                     g_engine.checkpoint(s.currentDB);

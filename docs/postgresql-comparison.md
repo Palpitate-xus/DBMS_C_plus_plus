@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-08（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线: PASS=123 FAIL=0（121 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
+> 测试基线: PASS=124 FAIL=0（122 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -237,10 +237,10 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | Background workers | ✅ | ⚠️ 框架 | 11 种类型 |
 | WALWriter / BgWriter / Checkpointer | ✅ | ✅ | ✅ |
 | Autovacuum | ✅ | ⚠️ 框架 | |
-| Stats collector | ✅ | ⚠️ 框架 | |
+| Stats collector | ✅ | ⚠️ | 有 RuntimeStats 事件计数子集，后台采样/持久化仍缺 |
 | **连接池** | ✅ (外部) | ✅ | ✅ |
 | **最大连接数** | ✅ | ✅ | ✅ |
-| **pg_stat_activity** | ✅ | ❌ | 缺 |
+| **pg_stat_activity** | ✅ | ⚠️ | 有进程列表风格子集，完整 backend 状态和 wait event 语义仍缺 |
 
 ---
 
@@ -305,7 +305,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | pg_description | ✅ | ✅ | ✅ |
 | pg_database | ✅ | ✅ | ✅ |
 | information_schema | ✅ | ⚠️ 基础 | |
-| pg_stat_* views | ✅ | ⚠️ | 有若干虚拟统计视图，字段和生命周期不完整 |
+| pg_stat_* views | ✅ | ⚠️ | 有运行时数据库/表/SQL 统计及若干虚拟统计视图，字段和生命周期不完整 |
 | pg_locks / pg_stat_activity | ✅ | ⚠️ | 有风格子集，完整 backend/wait 语义仍缺 |
 | **pg_stat_statements** | ✅ | ⚠️ | 有内存统计与归一化聚合，缺持久化、上限和完整扩展语义 |
 | **auto_explain** | ✅ | ❌ | 缺 |
@@ -330,7 +330,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 4. **GROUP BY/aggregate 完整语义** — 普通聚合与 `GroupAggregateOp` 已覆盖基础路径；复杂目标、`GROUPING()`/`GROUPING_ID`、类型推导和完整排序作用域仍待迁移
 5. **GiST 索引** — 全文搜索基础架构缺
 6. **TOAST 完整语义** — 当前线外值使用 zlib 压缩；lz4/pglz、压缩策略、`toast_tuple_target` 和 PG pointer/catalog 仍待完成
-7. **后台 stats_collector** — 无运行时统计收集
+7. **后台 stats_collector** — 已有 `RuntimeStats` 在执行/存储边界收集进程内数据库和表计数，并接入 `SHOW STATUS`/`pg_stat_database`/`pg_stat_tables`；后台采样线程、持久化和完整维度仍缺
 8. **PL/pgSQL 运行时** — 存储过程解释执行缺
 9. **并行 Vacuum** — Autovacuum 已工作但非并行
 

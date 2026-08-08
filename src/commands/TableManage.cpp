@@ -9,6 +9,7 @@
 #include "expression/expr_helper.h"
 #include "permissions.h"
 #include "utils/Session.h"
+#include "process/RuntimeStats.h"
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -11575,6 +11576,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     }
 
     recordModification(dbname, tablename, 1);
+    dbms::recordTableMutation(dbname, tablename, dbms::TableMutation::Insert, 1);
     maybeAutoAnalyze(dbname, tablename);
     return DBStatus::OK;
 }
@@ -12504,6 +12506,8 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     }
     maybeAutoVacuum(dbname, tablename);
     recordModification(dbname, tablename, toDelete.size());
+    dbms::recordTableMutation(dbname, tablename, dbms::TableMutation::Delete,
+                              toDelete.size());
     maybeAutoAnalyze(dbname, tablename);
 
     return DBStatus::OK;
@@ -13358,6 +13362,8 @@ DBStatus StorageEngine::update(const std::string& dbname,
     }
 
     recordModification(dbname, tablename, matchIds.size());
+    dbms::recordTableMutation(dbname, tablename, dbms::TableMutation::Update,
+                              matchIds.size());
     maybeAutoAnalyze(dbname, tablename);
     return DBStatus::OK;
 }
@@ -14012,6 +14018,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         result.push_back(rowStr);
     }
     lockManager_.unlock(tablename);
+    dbms::recordTableScan(dbname, tablename, matchRows.size(), false, conds.empty());
     return result;
 }
 

@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：统一回归基线 PASS=123 FAIL=0（121 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：统一回归基线 PASS=124 FAIL=0（122 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -186,7 +186,9 @@
 
 2026-08-08 SQL 可观测性收敛：新增独立线程安全 `process/SqlStats`，统一交互式和 PostgreSQL 协议入口；常量/空白归一化聚合，提供 `SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表查询。持久化、大小上限、reset 权限和完整字段仍待后续。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=123 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+2026-08-08 运行时统计收敛：新增线程安全 `process/RuntimeStats`，在 SQL 执行、表扫描和 StorageEngine DML 边界记录数据库/表计数；`SHOW STATUS`、`pg_stat_database`、`pg_stat_tables` 改为读取真实进程内数据。后台采样、持久化、索引细分和 planner 反馈仍待后续。
+
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=124 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -208,7 +210,7 @@
 | 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
 | 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；运行时 pg_hba、SCRAM 和基础 wire protocol 已接入，完整 ACL、channel binding 和协议语义仍待完善 |
 | 复制/HA | 0 | WAL archive 1 项 | 全部 ❌ | `src/replication/` 仅有 README；流复制/逻辑复制/PITR 全缺 |
-| 监控/诊断 | 子集 | 子集 | 大量 ❌ | pg_stat_activity/locks/statements 风格子集；pg_stat_io/wait events 缺 |
+| 监控/诊断 | 子集 | 子集 | 大量 ❌ | RuntimeStats 已接入 pg_stat_database/pg_stat_tables/pg_stat_activity/locks/statements 风格子集；pg_stat_io/wait events 缺 |
 | 扩展/生态 | 0 | 0 | 全部 ❌ | EXTENSION/FDW/PL 全缺；event trigger/rule 仅 parser classify stub |
 
 ---
@@ -524,7 +526,7 @@
 |---|------|---------|------|
 | 13.1 | `pg_catalog` | 只实现了若干虚拟表/兼容查询；缺少几百个 catalog/view/function | 🔄 |
 | 13.2 | `information_schema` | 只有子集；缺少 SQL 标准完整 views、权限过滤 | ⚠️ |
-| 13.3 | `pg_stat_*` | 有线程安全内存 `SqlStats` 及 pg_stat_statements/pg_stat_activity/pg_locks/pg_buffercache 风格子集；缺少持久化、pg_stat_io、progress views、replication views、wait events、backend memory contexts | ⚠️ |
+| 13.3 | `pg_stat_*` | 有线程安全内存 `RuntimeStats`/`SqlStats` 及 pg_stat_database/pg_stat_tables/pg_stat_statements/pg_stat_activity/pg_locks/pg_buffercache 风格子集；缺少持久化、pg_stat_io、progress views、replication views、wait events、backend memory contexts | ⚠️ |
 | 13.4 | 日志 | 有 slow log/auto_explain/audit；缺少 PG logging collector、CSV/JSON logs、log_line_prefix、server log GUC 全集 | ❌ |
 | 13.5 | 进程模型 | 项目多线程 server；PG 是多进程 backend + shared memory 架构 | ❌ |
 | 13.6 | 工具链 | 缺少 `psql` 元命令、libpq、pg_dump、pg_restore、pg_upgrade、initdb、createdb/dropdb、pg_ctl、pgbench | ❌ |
