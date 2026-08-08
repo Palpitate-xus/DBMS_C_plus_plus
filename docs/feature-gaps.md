@@ -147,15 +147,16 @@
 
 ### P1-3: GROUP BY ROLLUP/CUBE/GROUPING SETS Executor
 - **类别**: 执行器 / 分组扩展
-- **现状**: parser 就绪，executor 回退 legacy
+- **现状**: 常见 `GROUP BY`、`ROLLUP`、`CUBE`、`GROUPING SETS`、`HAVING` 已接入结构化 `GroupAggregateOp`；复杂表达式、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍回退 legacy
 - **PG 参考**: `GroupAggregate` + `sortgroups`, `GROUPING()` 函数
-- **影响**: 多维分析报表查询无法使用
+- **影响**: 基础分组查询可使用 Volcano 执行器，多维分析的完整 PostgreSQL 语义仍未覆盖
 - **实现路径**:
-  1. 扩展 `AggregateOp` 支持多个 grouping set
-  2. 实现 `GROUPING()` 内置函数
-  3. 在 `QueryPlanner` 中识别 ROLLUP/CUBE 语法
+  1. ✅ 新增 `GroupAggregateOp`，消费过滤后的 Volcano 子计划
+  2. ✅ 支持常见 `count/sum/avg/min/max/bool_and/bool_or/every`、简单 `FILTER`/`HAVING`
+  3. ✅ `ROLLUP/CUBE/GROUPING SETS` 生成多个分组集合并输出省略列的 `NULL`
+  4. 为结构化目标列表实现类型检查、`GROUPING()`/`GROUPING_ID` 和完整排序/分页作用域
 - **预估工作量**: 3-5 天
-- **相关文件**: `src/executor/ExecutionPlan.cpp`
+- **相关文件**: `src/executor/ExecutionPlan.cpp`, `src/main.cpp`, `tests/volcano_select_phase51_test.cpp`
 
 ### P1-4: 关联子查询解嵌套 (Subquery Unnesting)
 - **类别**: 优化器 / 子查询

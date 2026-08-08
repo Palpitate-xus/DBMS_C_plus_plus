@@ -448,6 +448,64 @@ static void test_window_agg() {
     std::cout << "[VOLCANO-5.1] WindowAgg ranking + lag OK" << std::endl;
 }
 
+// -------- Test 11: structured GroupAggregate and grouping sets --------
+static void test_group_aggregate() {
+    std::string db = testDbPath("volc_group");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (dept VARCHAR(20), team VARCHAR(20), score INT)", s));
+
+    insertRow(db, "t", {{"dept", "A"}, {"team", "X"}, {"score", "10"}});
+    insertRow(db, "t", {{"dept", "A"}, {"team", "X"}, {"score", "20"}});
+    insertRow(db, "t", {{"dept", "A"}, {"team", "Y"}, {"score", "5"}});
+    insertRow(db, "t", {{"dept", "B"}, {"team", "X"}, {"score", "7"}});
+
+    dbms::PlanContext ctx;
+    ctx.dbname = db;
+    ctx.tablename = "t";
+    ctx.groupByCols = {"dept"};
+    ctx.aggregateItems = {
+        {"count", "*", {}}, {"sum", "score", {}}, {"avg", "score", {}},
+        {"min", "score", {}}, {"max", "score", {}}
+    };
+    auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    assert(dynamic_cast<dbms::GroupAggregateOp*>(plan.get()));
+    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    assert((rows == std::vector<std::string>{
+        "A 3 35 11.666667 5 20", "B 1 7 7.000000 7 7"
+    }));
+
+    dbms::PlanContext havingCtx = ctx;
+    havingCtx.aggregateItems = {{"count", "*", {}}};
+    havingCtx.havingConds = {"count(*) > 1"};
+    auto havingRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, havingCtx));
+    assert((havingRows == std::vector<std::string>{"A 3"}));
+
+    dbms::PlanContext setsCtx = ctx;
+    setsCtx.groupByCols = {"dept", "team"};
+    setsCtx.groupingSets = {{"dept", "team"}, {"dept"}, {}};
+    setsCtx.aggregateItems = {{"count", "*", {}}};
+    auto setsPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, setsCtx);
+    auto* group = dynamic_cast<dbms::GroupAggregateOp*>(setsPlan.get());
+    assert(group && group->groupingSetCount() == 3);
+    auto setsRows = dbms::QueryPlanner::executePlan(std::move(setsPlan));
+    assert((setsRows == std::vector<std::string>{
+        "A X 2", "A Y 1", "B X 1", "A NULL 3", "B NULL 1", "NULL NULL 4"
+    }));
+
+    auto explainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    const auto explain = dbms::QueryPlanner::explain(explainPlan, &g_engine, db);
+    assert(explain.find("GroupAggregate(grouping_sets=1)") != std::string::npos);
+    const auto explainJson = dbms::QueryPlanner::explainJson(explainPlan, &g_engine, db);
+    assert(explainJson.find("\"nodeType\":\"GroupAggregate\"") != std::string::npos);
+
+    cleanup(db);
+    std::cout << "[VOLCANO-5.1] GroupAggregate + grouping sets OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_full_scan();
@@ -460,6 +518,7 @@ int main() {
     test_bitmap_or();
     test_parallel_scan();
     test_window_agg();
+    test_group_aggregate();
     std::cout << "[VOLCANO-5.1] all Phase 5.1 volcano SELECT tests passed" << std::endl;
     return 0;
 }

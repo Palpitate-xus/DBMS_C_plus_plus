@@ -2301,13 +2301,15 @@ static bool handleExplain(const string& sql, Session& s) {
         columns = trim(columns.substr(9));
     }
     size_t wherePos = inner.find("where", fromPos);
+    size_t groupPos = inner.find("group by", fromPos);
+    size_t havingPos = inner.find("having", fromPos);
     size_t orderPos = inner.find("order by", fromPos);
     size_t limitPos = inner.find("limit", fromPos);
-    string tname = trim(inner.substr(fromPos + 4,
-        (wherePos != string::npos) ? (wherePos - fromPos - 4)
-        : (orderPos != string::npos) ? (orderPos - fromPos - 4)
-        : (limitPos != string::npos) ? (limitPos - fromPos - 4)
-        : (inner.size() - fromPos - 4)));
+    size_t tableEnd = inner.size();
+    for (size_t clause : {wherePos, groupPos, havingPos, orderPos, limitPos}) {
+        if (clause != string::npos && clause > fromPos) tableEnd = min(tableEnd, clause);
+    }
+    string tname = trim(inner.substr(fromPos + 4, tableEnd - fromPos - 4));
     vector<string> conds;
     if (wherePos != string::npos) {
         size_t condEnd = (orderPos != string::npos) ? orderPos
@@ -2348,6 +2350,65 @@ static bool handleExplain(const string& sql, Session& s) {
             selectCols.insert(trim(item));
         }
     }
+    vector<string> groupByCols;
+    vector<vector<string>> groupingSets;
+    vector<dbms::StorageEngine::AggItem> aggregateItems;
+    vector<string> havingConds;
+    if (groupPos != string::npos) {
+        size_t groupEnd = inner.size();
+        for (size_t clause : {havingPos, orderPos, limitPos}) {
+            if (clause != string::npos && clause > groupPos) groupEnd = min(groupEnd, clause);
+        }
+        string groupRest = trim(inner.substr(groupPos + 8, groupEnd - groupPos - 8));
+        if (groupRest.size() > 7 && groupRest.substr(0, 7) == "rollup(") {
+            string innerGroups = groupRest.substr(7);
+            if (!innerGroups.empty() && innerGroups.back() == ')') innerGroups.pop_back();
+            stringstream ss(innerGroups); string col;
+            while (getline(ss, col, ',')) groupByCols.push_back(trim(col));
+            for (size_t count = groupByCols.size(); count > 0; --count)
+                groupingSets.emplace_back(groupByCols.begin(), groupByCols.begin() + count);
+            groupingSets.push_back({});
+        } else if (groupRest.size() > 5 && groupRest.substr(0, 5) == "cube(") {
+            string innerGroups = groupRest.substr(5);
+            if (!innerGroups.empty() && innerGroups.back() == ')') innerGroups.pop_back();
+            stringstream ss(innerGroups); string col;
+            while (getline(ss, col, ',')) groupByCols.push_back(trim(col));
+            const size_t count = groupByCols.size();
+            for (size_t mask = 0; mask < (size_t{1} << count); ++mask) {
+                vector<string> set;
+                for (size_t i = 0; i < count; ++i) if (mask & (size_t{1} << i)) set.push_back(groupByCols[i]);
+                groupingSets.push_back(std::move(set));
+            }
+        } else {
+            stringstream ss(groupRest); string col;
+            while (getline(ss, col, ',')) groupByCols.push_back(trim(col));
+        }
+        for (const auto& rawItem : splitSelectColumns(columns)) {
+            string item = trim(rawItem);
+            size_t lp = item.find('('), rp = item.rfind(')');
+            if (lp != string::npos && rp != string::npos && rp > lp) {
+                dbms::StorageEngine::AggItem agg;
+                agg.func = trim(item.substr(0, lp));
+                agg.arg = trim(item.substr(lp + 1, rp - lp - 1));
+                aggregateItems.push_back(std::move(agg));
+            }
+        }
+        if (havingPos != string::npos) {
+            size_t havingEnd = inner.size();
+            for (size_t clause : {orderPos, limitPos}) {
+                if (clause != string::npos && clause > havingPos) havingEnd = min(havingEnd, clause);
+            }
+            string having = normalizeConditionStr(trim(inner.substr(havingPos + 6, havingEnd - havingPos - 6)));
+            stringstream ss(having); string condition;
+            while (getline(ss, condition, ' ')) {
+                if (!condition.empty()) havingConds.push_back(condition);
+            }
+            // Preserve the complete simple HAVING expression for GroupAggregate.
+            havingConds.clear();
+            if (!having.empty()) havingConds.push_back(having);
+        }
+        selectCols.clear();
+    }
     dbms::PlanContext ctx;
     ctx.dbname = s.currentDB;
     ctx.tablename = tname;
@@ -2357,6 +2418,10 @@ static bool handleExplain(const string& sql, Session& s) {
     ctx.orderByAsc = orderByAsc;
     ctx.limit = limitVal;
     ctx.distinct = isDistinct;
+    ctx.groupByCols = groupByCols;
+    ctx.groupingSets = groupingSets;
+    ctx.aggregateItems = aggregateItems;
+    ctx.havingConds = havingConds;
 
     string cacheKey = s.currentDB + "::" + inner;
     if (opts.buffers) cacheKey += ":B";
@@ -15484,7 +15549,83 @@ bool execute(const string& rawSql, Session& s) {
                 }
             }
             cout << '\n';
-            if (isGroupingSets) {
+            bool canUseVolcanoGroup = !noWait && !skipLocked &&
+                                      !hasWindow && !hasScalar &&
+                                      distinctOnCols.empty() &&
+                                      exprOrderBySpecs.empty() &&
+                                      orderBySpecs.empty();
+            vector<vector<string>> volcanoGroupConditions;
+            if (canUseVolcanoGroup && !condTokens.empty()) {
+                vector<string> condCopy = condTokens;
+                condCopy.insert(condCopy.begin(), "(");
+                condCopy.push_back(")");
+                for (auto& token : condCopy) token = modifyLogic(token);
+                volcanoGroupConditions = breakDownConditions(condCopy);
+                canUseVolcanoGroup = volcanoGroupConditions.size() <= 1;
+            }
+            auto hasColumn = [&](const string& name) {
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == name) return true;
+                }
+                return false;
+            };
+            auto isGroupColumn = [&](const string& name) {
+                return find(groupByCols.begin(), groupByCols.end(), name) != groupByCols.end();
+            };
+            static const set<string> volcanoAggregateFunctions = {
+                "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+            };
+            for (const auto& col : groupByCols) {
+                if (!hasColumn(col)) canUseVolcanoGroup = false;
+            }
+            for (const auto& item : pureAgg) {
+                string func = toLower(trim(item.func));
+                string arg = trim(item.arg);
+                if (!volcanoAggregateFunctions.count(func)) canUseVolcanoGroup = false;
+                if (func != "count" || arg != "*") {
+                    if (func == "count" && arg.size() > 9 && arg.substr(0, 9) == "distinct ") {
+                        arg = trim(arg.substr(9));
+                    }
+                    if (!hasColumn(arg)) canUseVolcanoGroup = false;
+                }
+                for (const auto& filter : item.filterConds) {
+                    if (filter.empty()) canUseVolcanoGroup = false;
+                }
+            }
+            for (const auto& itemRaw : splitSelectColumns(columns)) {
+                const string item = trim(itemRaw);
+                size_t lp = item.find('(');
+                size_t rp = item.rfind(')');
+                if (lp == string::npos || rp == string::npos || rp <= lp) {
+                    if (!isGroupColumn(item)) canUseVolcanoGroup = false;
+                    continue;
+                }
+                string func = toLower(trim(item.substr(0, lp)));
+                if (!volcanoAggregateFunctions.count(func)) canUseVolcanoGroup = false;
+            }
+            for (const auto& condition : havingConds) {
+                const string normalized = trim(condition);
+                const size_t rightParen = normalized.rfind(')');
+                if (normalized.find('(') == string::npos || rightParen == string::npos ||
+                    normalized.find(" or ") != string::npos) {
+                    canUseVolcanoGroup = false;
+                }
+            }
+
+            if (canUseVolcanoGroup) {
+                dbms::PlanContext ctx;
+                ctx.dbname = queryDb;
+                ctx.tablename = tname;
+                ctx.groupByCols = groupByCols;
+                ctx.groupingSets = isGroupingSets ? groupingSets : vector<vector<string>>{};
+                ctx.aggregateItems = pureAgg;
+                ctx.havingConds = havingConds;
+                if (!volcanoGroupConditions.empty()) {
+                    ctx.conds = dbms::StorageEngine::parseConditions(volcanoGroupConditions.front());
+                }
+                auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+                answers = dbms::QueryPlanner::executePlan(std::move(plan));
+            } else if (isGroupingSets) {
                 if (condTokens.empty()) {
                     answers = g_engine.groupAggregateSets(s.currentDB, tname, {}, pureAgg, groupByCols, groupingSets, havingConds);
                 } else {

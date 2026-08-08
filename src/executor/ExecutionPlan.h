@@ -521,6 +521,35 @@ private:
     bool done_ = false;
 };
 
+// GroupAggregate: consume a filtered Volcano stream and produce one row per
+// GROUP BY key or grouping set.  The node intentionally owns only the common
+// scalar aggregate contract; unsupported ordered-set/collection aggregates
+// remain outside this plan boundary until their typed semantics are modeled.
+class GroupAggregateOp : public Operator {
+public:
+    GroupAggregateOp(OpPtr child, const TableSchema& tbl,
+                     const std::vector<std::string>& groupByCols,
+                     const std::vector<std::vector<std::string>>& groupingSets,
+                     const std::vector<StorageEngine::AggItem>& items,
+                     const std::vector<std::string>& havingConds = {});
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* child() const { return child_.get(); }
+    size_t groupingSetCount() const { return groupingSets_.empty() ? 1 : groupingSets_.size(); }
+
+private:
+    OpPtr child_;
+    TableSchema tbl_;
+    std::vector<std::string> groupByCols_;
+    std::vector<std::vector<std::string>> groupingSets_;
+    std::vector<StorageEngine::AggItem> items_;
+    std::vector<std::string> havingConds_;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+};
+
 // ========================================================================
 // QueryPlanner: build operator tree from parsed SQL components
 // ========================================================================
@@ -533,6 +562,13 @@ struct PlanContext {
     bool orderByAsc = true;
     size_t limit = 0;
     bool distinct = false;
+    // When groupByCols is non-empty, buildSelectPlan creates a structured
+    // GroupAggregateOp over the filtered scan.  groupingSets is empty for a
+    // normal GROUP BY and populated for ROLLUP/CUBE/GROUPING SETS.
+    std::vector<std::string> groupByCols;
+    std::vector<std::vector<std::string>> groupingSets;
+    std::vector<StorageEngine::AggItem> aggregateItems;
+    std::vector<std::string> havingConds;
     // When non-empty, buildSelectPlan creates a structured WindowOp instead
     // of applying Project/Sort to a legacy window result.
     std::vector<WindowFunctionSpec> windowFunctions;

@@ -3,12 +3,16 @@
 #include "types/numeric.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <iomanip>
+#include <limits>
 #include <map>
+#include <sstream>
 #include <thread>
 
 extern dbms::Config g_config;
@@ -17,6 +21,13 @@ namespace dbms {
 
 // Parallel query support
 int QueryPlanner::parallelWorkers_ = 0;
+
+static std::string trimExec(const std::string& value) {
+    const size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const size_t last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
 
 // ========================================================================
 // Helper: format a raw row buffer into display string
@@ -1524,6 +1535,247 @@ void AggregateOp::close() {
 }
 
 // ========================================================================
+// GroupAggregateOp
+// ========================================================================
+
+GroupAggregateOp::GroupAggregateOp(
+    OpPtr child, const TableSchema& tbl,
+    const std::vector<std::string>& groupByCols,
+    const std::vector<std::vector<std::string>>& groupingSets,
+    const std::vector<StorageEngine::AggItem>& items,
+    const std::vector<std::string>& havingConds)
+    : child_(std::move(child)), tbl_(tbl), groupByCols_(groupByCols),
+      groupingSets_(groupingSets), items_(items), havingConds_(havingConds) {}
+
+bool GroupAggregateOp::open() {
+    rows_.clear();
+    pos_ = 0;
+    if (!child_->open()) return false;
+
+    struct InputRow {
+        std::string raw;
+        std::vector<std::string> values;
+    };
+    std::vector<InputRow> input;
+    std::string raw;
+    while (child_->next(raw)) {
+        InputRow row;
+        row.raw = std::move(raw);
+        row.values.reserve(tbl_.len);
+        for (size_t i = 0; i < tbl_.len; ++i) {
+            row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
+        }
+        input.push_back(std::move(row));
+    }
+    child_->close();
+
+    auto columnIndex = [&](const std::string& name) {
+        for (size_t i = 0; i < tbl_.len; ++i) {
+            if (tbl_.cols[i].dataName == name) return i;
+        }
+        return tbl_.len;
+    };
+    for (const auto& name : groupByCols_) {
+        const size_t index = columnIndex(name);
+        if (index >= tbl_.len) return false;
+    }
+
+    static const std::set<std::string> supported = {
+        "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+    };
+    for (const auto& item : items_) {
+        std::string func = item.func;
+        for (char& c : func) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!supported.count(func)) return false;
+        if (func == "count" && item.arg == "*") continue;
+        std::string arg = item.arg;
+        if (arg.size() > 9 && arg.substr(0, 9) == "distinct ") arg = arg.substr(9);
+        if (columnIndex(arg) >= tbl_.len) return false;
+    }
+
+    std::vector<std::vector<std::string>> effectiveSets = groupingSets_;
+    if (effectiveSets.empty()) effectiveSets.push_back(groupByCols_);
+
+    auto parseNumber = [](const std::string& value, long double& out) {
+        try {
+            size_t consumed = 0;
+            out = std::stold(value, &consumed);
+            return consumed == value.size();
+        } catch (...) {
+            return false;
+        }
+    };
+    auto formatNumber = [](long double value) {
+        if (std::floor(value) == value &&
+            value >= static_cast<long double>(std::numeric_limits<int64_t>::min()) &&
+            value <= static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+            return std::to_string(static_cast<int64_t>(value));
+        }
+        std::ostringstream out;
+        out << std::setprecision(15) << static_cast<double>(value);
+        return out.str();
+    };
+
+    auto computeAggregate = [&](const std::vector<size_t>& rowIds,
+                                const StorageEngine::AggItem& item) -> std::string {
+        std::string func = item.func;
+        for (char& c : func) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const bool distinct = func == "count" && item.arg.size() > 9 &&
+            item.arg.substr(0, 9) == "distinct ";
+        std::string arg = distinct ? item.arg.substr(9) : item.arg;
+        const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
+        const auto filters = StorageEngine::parseConditions(item.filterConds);
+        std::set<std::string> distinctValues;
+        int64_t count = 0;
+        long double sum = 0;
+        bool hasValue = false;
+        std::string selected;
+        bool boolSeen = false;
+        bool boolValue = func == "bool_and" || func == "every";
+
+        for (size_t rowId : rowIds) {
+            const auto& row = input[rowId];
+            bool passes = true;
+            for (const auto& filter : filters) {
+                if (!StorageEngine::evalConditionOnRow(filter, row.raw, tbl_)) {
+                    passes = false;
+                    break;
+                }
+            }
+            if (!passes) continue;
+
+            const std::string value = argIndex < tbl_.len ? row.values[argIndex] : "";
+            if (func == "count") {
+                if (distinct) {
+                    if (!value.empty()) distinctValues.insert(value);
+                } else if (arg == "*" || !value.empty()) {
+                    ++count;
+                }
+                continue;
+            }
+            if (value.empty()) continue;
+            if (func == "sum" || func == "avg") {
+                long double number = 0;
+                if (!parseNumber(value, number)) continue;
+                sum += number;
+                ++count;
+            } else if (func == "min" || func == "max") {
+                if (!hasValue || (func == "min"
+                        ? compareWindowValue(value, selected) < 0
+                        : compareWindowValue(value, selected) > 0)) {
+                    selected = value;
+                    hasValue = true;
+                }
+            } else if (func == "bool_and" || func == "every" || func == "bool_or") {
+                boolSeen = true;
+                if (func == "bool_or") boolValue = boolValue || value == "true";
+                else boolValue = boolValue && value == "true";
+            }
+        }
+
+        if (func == "count") {
+            return distinct ? std::to_string(distinctValues.size()) : std::to_string(count);
+        }
+        if (func == "sum") return count == 0 ? "NULL" : formatNumber(sum);
+        if (func == "avg") {
+            return count == 0 ? "NULL" : std::to_string(static_cast<double>(sum / count));
+        }
+        if (func == "min" || func == "max") return hasValue ? selected : "NULL";
+        if (func == "bool_and" || func == "every" || func == "bool_or") {
+            return boolSeen ? (boolValue ? "true" : "false") : "NULL";
+        }
+        return "NULL";
+    };
+
+    auto havingPasses = [&](const std::vector<size_t>& rowIds) {
+        for (const auto& condition : havingConds_) {
+            const std::string expression = trimExec(condition);
+            const size_t leftParen = expression.find('(');
+            const size_t rightParen = expression.find(')', leftParen == std::string::npos ? 0 : leftParen + 1);
+            if (leftParen == std::string::npos || rightParen == std::string::npos) return false;
+            size_t opStart = rightParen + 1;
+            while (opStart < expression.size() && std::isspace(static_cast<unsigned char>(expression[opStart]))) ++opStart;
+            size_t opEnd = opStart;
+            while (opEnd < expression.size() &&
+                   (expression[opEnd] == '<' || expression[opEnd] == '>' ||
+                    expression[opEnd] == '=' || expression[opEnd] == '!')) ++opEnd;
+            if (opEnd == opStart) return false;
+            const std::string op = expression.substr(opStart, opEnd - opStart);
+            const std::string expected = trimExec(expression.substr(opEnd));
+            StorageEngine::AggItem item;
+            item.func = trimExec(expression.substr(0, leftParen));
+            item.arg = trimExec(expression.substr(leftParen + 1, rightParen - leftParen - 1));
+            const std::string actual = computeAggregate(rowIds, item);
+            if (op == "=" || op == "!=") {
+                const bool equal = actual == expected;
+                if ((op == "=" && !equal) || (op == "!=" && equal)) return false;
+                continue;
+            }
+            long double actualNumber = 0, expectedNumber = 0;
+            if (!parseNumber(actual, actualNumber) || !parseNumber(expected, expectedNumber)) return false;
+            if ((op == ">" && !(actualNumber > expectedNumber)) ||
+                (op == ">=" && !(actualNumber >= expectedNumber)) ||
+                (op == "<" && !(actualNumber < expectedNumber)) ||
+                (op == "<=" && !(actualNumber <= expectedNumber))) return false;
+        }
+        return true;
+    };
+
+    for (const auto& groupingSet : effectiveSets) {
+        std::vector<size_t> setIndices;
+        for (const auto& name : groupingSet) {
+            const size_t index = columnIndex(name);
+            if (index >= tbl_.len) return false;
+            setIndices.push_back(index);
+        }
+
+        std::map<std::string, std::vector<size_t>> groups;
+        if (setIndices.empty()) groups[""] = {};
+        for (size_t rowId = 0; rowId < input.size(); ++rowId) {
+            std::string key;
+            for (size_t index : setIndices) {
+                const auto& value = input[rowId].values[index];
+                key += std::to_string(value.size()) + ":" + value + "|";
+            }
+            groups[key].push_back(rowId);
+        }
+
+        for (const auto& group : groups) {
+            if (!havingPasses(group.second)) continue;
+            std::vector<std::string> values;
+            values.reserve(groupByCols_.size() + items_.size());
+            for (const auto& column : groupByCols_) {
+                auto setIt = std::find(groupingSet.begin(), groupingSet.end(), column);
+                if (setIt == groupingSet.end() || group.second.empty()) {
+                    values.push_back("NULL");
+                } else {
+                    values.push_back(input[group.second.front()].values[columnIndex(column)]);
+                }
+            }
+            for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
+            std::string output;
+            for (const auto& value : values) {
+                if (!output.empty()) output.push_back(' ');
+                output += value.empty() ? "NULL" : value;
+            }
+            rows_.push_back(std::move(output));
+        }
+    }
+    return true;
+}
+
+bool GroupAggregateOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    return true;
+}
+
+void GroupAggregateOp::close() {
+    rows_.clear();
+    pos_ = 0;
+}
+
+// ========================================================================
 // QueryPlanner
 // ========================================================================
 
@@ -1680,7 +1932,12 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         root = std::make_unique<FilterOp>(std::move(root), tbl, remainingConds);
     }
 
-    if (!ctx.windowFunctions.empty()) {
+    if (!ctx.groupByCols.empty()) {
+        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        root = std::make_unique<GroupAggregateOp>(
+            std::move(root), tbl, ctx.groupByCols, ctx.groupingSets,
+            ctx.aggregateItems, ctx.havingConds);
+    } else if (!ctx.windowFunctions.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<WindowOp>(std::move(root), tbl,
                                           ctx.windowTargets, ctx.windowFunctions,
@@ -1955,6 +2212,15 @@ static CostEstimate explainOp(Operator* op, int indent,
                std::to_string(window->functions().size()) + ")" +
                costRowsStr(est, opts) + "\n";
 
+    } else if (auto* group = dynamic_cast<GroupAggregateOp*>(op)) {
+        CostEstimate child = explainOp(group->child(), indent + 1, engine, dbname, out, opts);
+        const double sets = static_cast<double>(group->groupingSetCount());
+        est.rows = std::max(1.0, child.rows / std::max(1.0, sets));
+        est.cost = child.cost + child.rows * 0.75;
+        out += prefix + "GroupAggregate(grouping_sets=" +
+               std::to_string(group->groupingSetCount()) + ")" +
+               costRowsStr(est, opts) + "\n";
+
     } else if (auto* sort = dynamic_cast<SortOp*>(op)) {
         CostEstimate child = explainOp(sort->child(), indent + 1, engine, dbname, out, opts);
         est.rows = child.rows;
@@ -2160,6 +2426,16 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         est.cost = child.cost + child.rows * logFactor * 0.1;
         json += "\"nodeType\":\"WindowAgg\",";
         json += "\"functions\":" + std::to_string(window->functions().size()) + ",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[" + childJson + "]";
+
+    } else if (auto* group = dynamic_cast<GroupAggregateOp*>(op)) {
+        auto [childJson, child] = explainOpJson(group->child(), engine, dbname, opts);
+        const double sets = static_cast<double>(group->groupingSetCount());
+        est.rows = std::max(1.0, child.rows / std::max(1.0, sets));
+        est.cost = child.cost + child.rows * 0.75;
+        json += "\"nodeType\":\"GroupAggregate\",";
+        json += "\"groupingSets\":" + std::to_string(group->groupingSetCount()) + ",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
 

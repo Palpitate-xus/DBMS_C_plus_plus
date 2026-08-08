@@ -18,6 +18,7 @@
 | 日期 | 摘要 |
 |------|------|
 | 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；`RANGE/GROUPS`、复杂目标、OFFSET 和主 SQL EXPLAIN 窗口解析仍明确回退或待迁移。扩展 Volcano 单元覆盖默认 frame、排除、分析函数，窗口 E2E 保持 10/10。 |
+| 2026-08-08 | Group executor 收敛：新增 `GroupAggregateOp`，主 SQL/EXPLAIN 接入常见 GROUP BY、HAVING、ROLLUP/CUBE/GROUPING SETS 及常见聚合；补充分组、HAVING、NULL grouping-set 输出和文本/JSON EXPLAIN 单测。复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域和并行聚合仍待迁移。 |
 | 2026-08-07 | 测试入口收敛：`build_tests.sh` 与 `run_all_tests_fast.sh` 通过 `build_common.sh` 统一执行协议和窗口函数两个 E2E；当前统一基线为 PASS=122 FAIL=0。 |
 | 2026-08-07 | P0-1 并行查询首步：新增 `ParallelTableScanOp`，对非分区 heap 按 page range 分片并确定性 Gather；加入 `max_parallel_workers_per_gather` 配置，事务内和分区表安全回退，新增并行/串行等价性与事务回归。parallel join/aggregate、GatherMerge 和长期 worker pool 仍待后续。 |
 | 2026-08-07 | B+Tree 正确性补强：修复 root leaf 分裂传错 child、叶分裂丢弃中间键、重复键跨叶查找遗漏和范围扫描重复返回；新增 250 条跨叶唯一键、6000 条跨叶/内部节点重复键回归。PostgreSQL B-tree 的 dedup、删除合并、opclass/collation 和并发构建语义仍待后续。 |
@@ -387,7 +388,7 @@
 | 6.4 | CTE | 有 WITH/RECURSIVE/DML CTE 痕迹；缺少 MATERIALIZED/NOT MATERIALIZED、可写 CTE 快照语义、递归检测、cycle/search 子句 | ⚠️ |
 | 6.5 | Subquery | 有 IN/EXISTS/ANY/ALL 展开；复杂关联子查询、row comparison、array ANY/ALL、NULL 语义不完整 | ⚠️ |
 | 6.6 | `ORDER BY` | 有多列/expression/nulls/collate 简化；缺少 USING operator、位置编号全语义、collation provider | ⚠️ |
-| 6.7 | `GROUP BY` | 支持 rollup/cube/grouping sets 部分；缺少 functionally dependent group by、GROUPING_ID 等完整语义 | ⚠️ |
+| 6.7 | `GROUP BY` | `GroupAggregateOp` 支持常见聚合、HAVING、rollup/cube/grouping sets；缺少复杂目标、functionally dependent group by、GROUPING()/GROUPING_ID、完整排序作用域 | ⚠️ |
 | 6.8 | `LIMIT/FETCH` | FETCH 被转 LIMIT；缺少 `WITH TIES`、百分比/复杂表达式等 | ⚠️ |
 | 6.9 | Row locking | 单表 `FOR UPDATE/SHARE` 有部分；源码明确 `FOR UPDATE not supported with JOIN/GROUP BY/aggregate/window/scalar functions`。缺少 `NO KEY UPDATE`、`KEY SHARE`、OF list 完整语义 | ⚠️ |
 | 6.10 | `INSERT` | 多行/insert-select/upsert 有；缺少 PG 的 `DEFAULT VALUES`、`OVERRIDING`、WITH query 全组合、conflict target/opclass/where | ⚠️ |
