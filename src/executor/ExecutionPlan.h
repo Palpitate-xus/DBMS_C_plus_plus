@@ -27,6 +27,14 @@ public:
     // outRow is the formatted string ready for display.
     bool next(std::string& outRow) override = 0;
 
+    // Scan-derived operators may expose NULL metadata for the row returned
+    // by the most recent next() call.  Most operators do not own storage
+    // metadata and therefore use the conservative default.
+    virtual bool lastColumnIsNull(size_t colIdx) const {
+        (void)colIdx;
+        return false;
+    }
+
     // Clean up resources
     void close() override = 0;
 };
@@ -60,6 +68,7 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool lastColumnIsNull(size_t colIdx) const override;
     void close() override;
     const std::string& tableName() const { return tablename_; }
 
@@ -70,6 +79,7 @@ private:
     TableSchema tbl_;
     std::vector<std::pair<int64_t, std::string>> rows_;
     size_t pos_ = 0;
+    int64_t lastRid_ = 0;
 };
 
 // ParallelTableScan: partition a non-partitioned heap by page ranges.  It
@@ -83,6 +93,7 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool lastColumnIsNull(size_t colIdx) const override;
     void close() override;
     const std::string& tableName() const { return tablename_; }
     int workers() const { return workers_; }
@@ -97,6 +108,7 @@ private:
     std::vector<std::pair<int64_t, std::string>> rows_;
     size_t pos_ = 0;
     bool usedParallelWorkers_ = false;
+    int64_t lastRid_ = 0;
 };
 
 // ========================================================================
@@ -220,6 +232,9 @@ public:
     bool next(std::string& outRow) override;
     void close() override;
     Operator* child() const { return child_.get(); }
+    bool lastColumnIsNull(size_t colIdx) const override {
+        return child_->lastColumnIsNull(colIdx);
+    }
     const std::vector<StorageEngine::Condition>& conditions() const { return conds_; }
 
     // Index condition recheck: apply conditions that the index could not fully evaluate
@@ -232,6 +247,37 @@ private:
     TableSchema tbl_;
     std::vector<StorageEngine::Condition> conds_;
     bool indexConditionRecheck_ = false;
+};
+
+// SemiJoin/AntiJoin filters an outer stream by the existence of a matching
+// value in an inner stream.  It is the structured execution boundary for
+// uncorrelated IN and NOT IN subqueries; the inner stream may itself have a
+// FilterOp so the subquery predicate is evaluated before matching.
+class SemiJoinOp : public Operator {
+public:
+    SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
+               const TableSchema& innerTbl, const std::string& outerColumn,
+               const std::string& innerColumn, bool anti);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* outerChild() const { return outer_.get(); }
+    Operator* innerChild() const { return inner_.get(); }
+    const std::string& outerColumn() const { return outerColumn_; }
+    const std::string& innerColumn() const { return innerColumn_; }
+    bool isAnti() const { return anti_; }
+
+private:
+    OpPtr outer_;
+    OpPtr inner_;
+    TableSchema outerTbl_;
+    TableSchema innerTbl_;
+    std::string outerColumn_;
+    std::string innerColumn_;
+    bool anti_;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
 };
 
 // ========================================================================
@@ -548,6 +594,15 @@ private:
     size_t pos_ = 0;
 };
 
+struct SemiJoinSpec {
+    std::string dbname;
+    std::string tablename;
+    std::string outerColumn;
+    std::string innerColumn;
+    std::vector<StorageEngine::Condition> innerConds;
+    bool anti = false;
+};
+
 // ========================================================================
 // QueryPlanner: build operator tree from parsed SQL components
 // ========================================================================
@@ -572,6 +627,8 @@ struct PlanContext {
     // of applying Project/Sort to a legacy window result.
     std::vector<WindowFunctionSpec> windowFunctions;
     std::vector<WindowTarget> windowTargets;
+    // Uncorrelated IN/NOT IN predicates lowered to a right-hand relation.
+    std::vector<SemiJoinSpec> semiJoins;
 };
 
 // Equivalence class: a set of expressions that are known equal.

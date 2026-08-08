@@ -554,6 +554,61 @@ static void test_group_aggregate() {
     std::cout << "[VOLCANO-5.1] GroupAggregate + grouping sets OK" << std::endl;
 }
 
+// -------- Test 11: structured uncorrelated IN / NOT IN --------
+static void test_semi_and_anti_join() {
+    std::string db = testDbPath("volc_semi");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE outer_t (id INT, payload INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE inner_t (id INT, enabled INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE clean_inner_t (id INT NOT NULL)", s));
+
+    insertRow(db, "outer_t", {{"id", "1"}, {"payload", "10"}});
+    insertRow(db, "outer_t", {{"id", "2"}, {"payload", "20"}});
+    insertRow(db, "outer_t", {{"id", "3"}, {"payload", "30"}});
+    insertRow(db, "outer_t", {{"id", "4"}, {"payload", "40"}});
+    insertRow(db, "inner_t", {{"id", "2"}, {"enabled", "1"}});
+    insertRow(db, "inner_t", {{"id", "3"}, {"enabled", "1"}});
+    // Omitting a nullable column creates a SQL NULL key.
+    insertRow(db, "inner_t", {{"enabled", "1"}});
+    insertRow(db, "clean_inner_t", {{"id", "2"}});
+    insertRow(db, "clean_inner_t", {{"id", "3"}});
+
+    dbms::PlanContext inCtx;
+    inCtx.dbname = db;
+    inCtx.tablename = "outer_t";
+    inCtx.selectCols = {"id"};
+    inCtx.semiJoins.push_back({db, "inner_t", "id", "id",
+                               dbms::StorageEngine::parseConditions({"=enabled 1"}), false});
+    auto inPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, inCtx);
+    auto* inProject = dynamic_cast<dbms::ProjectOp*>(inPlan.get());
+    assert(inProject && dynamic_cast<dbms::SemiJoinOp*>(inProject->child()));
+    auto inRows = dbms::QueryPlanner::executePlan(std::move(inPlan));
+    assert((inRows == std::vector<std::string>{"2 ", "3 "}));
+
+    dbms::PlanContext antiCtx = inCtx;
+    antiCtx.semiJoins = {{db, "clean_inner_t", "id", "id", {}, true}};
+    auto antiPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, antiCtx);
+    auto* antiProject = dynamic_cast<dbms::ProjectOp*>(antiPlan.get());
+    assert(antiProject);
+    auto* anti = dynamic_cast<dbms::SemiJoinOp*>(antiProject->child());
+    assert(anti && anti->isAnti());
+    auto antiRows = dbms::QueryPlanner::executePlan(std::move(antiPlan));
+    assert((antiRows == std::vector<std::string>{"1 ", "4 "}));
+
+    dbms::PlanContext nullAntiCtx = inCtx;
+    nullAntiCtx.semiJoins = {{db, "inner_t", "id", "id",
+                              dbms::StorageEngine::parseConditions({"=enabled 1"}), true}};
+    auto nullAntiRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, nullAntiCtx));
+    assert(nullAntiRows.empty());
+
+    cleanup(db);
+    std::cout << "[VOLCANO-5.1] SemiJoin/AntiJoin IN NULL semantics OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_full_scan();
@@ -567,6 +622,7 @@ int main() {
     test_parallel_scan();
     test_window_agg();
     test_group_aggregate();
+    test_semi_and_anti_join();
     std::cout << "[VOLCANO-5.1] all Phase 5.1 volcano SELECT tests passed" << std::endl;
     return 0;
 }

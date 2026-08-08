@@ -6107,6 +6107,110 @@ static size_t findMatchingParen(const std::string& s, size_t start) {
     return std::string::npos;
 }
 
+// Recognize the deliberately narrow structured subquery boundary used by the
+// single-table Volcano path.  Complex, correlated, and multi-branch
+// predicates deliberately return false and continue through expandSubqueries.
+static bool parseSimpleSemiJoinSubquery(
+    const std::string& rawClause, Session& s, const std::string& outerDb,
+    const std::string& outerTable, dbms::SemiJoinSpec& outSpec) {
+    std::string clause = trim(rawClause);
+    if (clause.size() >= 2 && clause.front() == '(') {
+        const size_t end = findMatchingParen(clause, 0);
+        if (end != std::string::npos && end + 1 == clause.size()) {
+            clause = trim(clause.substr(1, end - 1));
+        }
+    }
+
+    const size_t notInPos = findTopLevelKeyword(clause, "not in");
+    const size_t inPos = findTopLevelKeyword(clause, "in");
+    const bool anti = notInPos != std::string::npos &&
+                      (inPos == std::string::npos || notInPos < inPos);
+    const size_t opPos = anti ? notInPos : inPos;
+    if (opPos == std::string::npos) return false;
+
+    const size_t keywordLength = anti ? 6 : 2;
+    std::string outerColumn = trim(clause.substr(0, opPos));
+    if (outerColumn.empty() || outerColumn.find_first_of(" ()\t\r\n") != std::string::npos)
+        return false;
+    const size_t outerDot = outerColumn.rfind('.');
+    if (outerDot != std::string::npos) outerColumn = trim(outerColumn.substr(outerDot + 1));
+
+    size_t parenStart = opPos + keywordLength;
+    while (parenStart < clause.size() && isspace(static_cast<unsigned char>(clause[parenStart])))
+        ++parenStart;
+    if (parenStart >= clause.size() || clause[parenStart] != '(') return false;
+    const size_t parenEnd = findMatchingParen(clause, parenStart);
+    if (parenEnd == std::string::npos || !trim(clause.substr(parenEnd + 1)).empty()) return false;
+
+    const std::string inner = trim(clause.substr(parenStart + 1,
+                                                  parenEnd - parenStart - 1));
+    if (inner.size() < 6 || inner.substr(0, 6) != "select") return false;
+    const size_t fromPos = findTopLevelKeyword(inner, "from", 6);
+    if (fromPos == std::string::npos) return false;
+
+    const std::string innerColumns = trim(inner.substr(6, fromPos - 6));
+    const auto selectedColumns = splitTopLevelComma(innerColumns);
+    if (selectedColumns.size() != 1) return false;
+    std::string innerColumn = trim(selectedColumns.front());
+    if (innerColumn.empty() || innerColumn == "distinct" ||
+        innerColumn.find_first_of(" ()\t\r\n,") != std::string::npos) return false;
+    const size_t innerDot = innerColumn.rfind('.');
+    if (innerDot != std::string::npos) innerColumn = trim(innerColumn.substr(innerDot + 1));
+
+    const size_t wherePos = findTopLevelKeyword(inner, "where", fromPos + 4);
+    const size_t groupPos = findTopLevelKeyword(inner, "group by", fromPos + 4);
+    const size_t havingPos = findTopLevelKeyword(inner, "having", fromPos + 4);
+    const size_t orderPos = findTopLevelKeyword(inner, "order by", fromPos + 4);
+    const size_t limitPos = findTopLevelKeyword(inner, "limit", fromPos + 4);
+    const size_t offsetPos = findTopLevelKeyword(inner, "offset", fromPos + 4);
+    if (groupPos != std::string::npos || havingPos != std::string::npos ||
+        orderPos != std::string::npos || limitPos != std::string::npos ||
+        offsetPos != std::string::npos) return false;
+
+    const size_t tableEnd = wherePos == std::string::npos ? inner.size() : wherePos;
+    const std::string innerTableText = trim(inner.substr(fromPos + 4,
+                                                         tableEnd - fromPos - 4));
+    if (innerTableText.empty() || innerTableText.find_first_of(" \t\r\n.") != std::string::npos)
+        return false;
+    const std::string innerTable = resolveTableName(s, innerTableText);
+    if (!g_engine.tableExists(outerDb, innerTable)) return false;
+
+    const TableSchema outerSchema = g_engine.getTableSchema(outerDb, outerTable);
+    const TableSchema innerSchema = g_engine.getTableSchema(outerDb, innerTable);
+    auto hasColumn = [](const TableSchema& schema, const std::string& name) {
+        for (size_t i = 0; i < schema.len; ++i) {
+            if (schema.cols[i].dataName == name) return true;
+        }
+        return false;
+    };
+    if (!hasColumn(outerSchema, outerColumn) || !hasColumn(innerSchema, innerColumn)) return false;
+
+    std::vector<dbms::StorageEngine::Condition> innerConds;
+    if (wherePos != std::string::npos) {
+        const std::string whereClause = trim(inner.substr(wherePos + 5));
+        if (whereClause.empty()) return false;
+        std::vector<std::string> tokens = tokenize(normalizeConditionStr(whereClause));
+        tokens.insert(tokens.begin(), "(");
+        tokens.push_back(")");
+        for (auto& token : tokens) token = modifyLogic(token);
+        const auto groups = breakDownConditions(tokens);
+        if (groups.size() != 1) return false;
+        innerConds = dbms::StorageEngine::parseConditions(groups.front());
+        if (innerConds.empty() || innerConds.size() != groups.front().size()) return false;
+        for (const auto& condition : innerConds) {
+            if (!hasColumn(innerSchema, condition.colName)) return false;
+        }
+    }
+
+    outSpec.dbname = outerDb;
+    outSpec.tablename = innerTable;
+    outSpec.outerColumn = outerColumn;
+    outSpec.innerColumn = innerColumn;
+    outSpec.innerConds = std::move(innerConds);
+    outSpec.anti = anti;
+    return true;
+}
+
 // Execute a SELECT subquery for derived table use; returns rows and fills outColNames.
 // Supports basic SELECT with WHERE, ORDER BY, LIMIT, OFFSET.
 static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Session& s,
@@ -15490,6 +15594,8 @@ bool execute(const string& rawSql, Session& s) {
 
         // WHERE clause
         vector<string> condTokens;
+        vector<dbms::SemiJoinSpec> semiJoins;
+        string rawWhereClause;
         if (wherePos != string::npos) {
             size_t condEnd = (groupPos != string::npos) ? groupPos
                            : (havingPos != string::npos) ? havingPos
@@ -15498,9 +15604,19 @@ bool execute(const string& rawSql, Session& s) {
                            : (limitPos != string::npos) ? limitPos
                            : (offsetPos != string::npos) ? offsetPos : sql.size();
             string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
-            whereClause = expandSubqueries(whereClause, s);
-            string condStr = normalizeConditionStr(whereClause);
-            condTokens = tokenize(condStr);
+            rawWhereClause = whereClause;
+            dbms::SemiJoinSpec semiJoin;
+            const bool structured = !hasAgg && !hasWindow && !hasScalar &&
+                                    groupPos == string::npos &&
+                                    parseSimpleSemiJoinSubquery(
+                                        whereClause, s, queryDb, tname, semiJoin);
+            if (structured) {
+                semiJoins.push_back(std::move(semiJoin));
+            } else {
+                whereClause = expandSubqueries(whereClause, s);
+                string condStr = normalizeConditionStr(whereClause);
+                condTokens = tokenize(condStr);
+            }
         }
 
         // Helper: execute a single-table SELECT via the volcano operator tree.
@@ -15513,6 +15629,7 @@ bool execute(const string& rawSql, Session& s) {
                                          const std::vector<std::vector<std::string>>& condGroups,
                                          const StorageEngine::OrderBySpec* orderBy,
                                          bool distinct,
+                                         const std::vector<dbms::SemiJoinSpec>& subqueryJoins,
                                          std::vector<std::string>& outAnswers) -> bool {
             // Fall back when the volcano path cannot yet handle the query.
             if (forUpdate || noWait || skipLocked) return false;
@@ -15536,6 +15653,7 @@ bool execute(const string& rawSql, Session& s) {
                 ctx.orderByAsc = orderBy->ascending;
             }
             ctx.distinct = distinct;
+            ctx.semiJoins = subqueryJoins;
             std::vector<std::vector<dbms::StorageEngine::Condition>> branches;
             for (const auto& group : condGroups) {
                 branches.push_back(dbms::StorageEngine::parseConditions(group));
@@ -16408,7 +16526,8 @@ bool execute(const string& rawSql, Session& s) {
             bool volcanoUsed = false;
             if (condTokens.empty()) {
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, {},
-                                                    firstOrderBy, useDistinct, answers);
+                                                    firstOrderBy, useDistinct,
+                                                    semiJoins, answers);
             } else {
                 // Make a local copy since modifyLogic mutates tokens.
                 vector<string> condCopy = condTokens;
@@ -16417,7 +16536,17 @@ bool execute(const string& rawSql, Session& s) {
                 for (auto& t : condCopy) t = modifyLogic(t);
                 auto groups = breakDownConditions(condCopy);
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, groups,
-                                                    firstOrderBy, useDistinct, answers);
+                                                    firstOrderBy, useDistinct,
+                                                    semiJoins, answers);
+            }
+
+            // A structured subquery is only valid if the complete Volcano
+            // path is available.  Restore the original predicate before the
+            // legacy fallback so unsupported features cannot silently drop it.
+            if (!volcanoUsed && !semiJoins.empty()) {
+                condTokens = tokenize(normalizeConditionStr(
+                    expandSubqueries(rawWhereClause, s)));
+                semiJoins.clear();
             }
 
             if (!volcanoUsed) {

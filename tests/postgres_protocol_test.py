@@ -424,6 +424,24 @@ def main():
             sock, "SELECT count(*), sum(amount) FROM aggregate_t WHERE amount > 10"))
         assert aggregate_rows == [[b"2", b"50"]], aggregate_rows
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE sub_outer (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE sub_inner (id INT, enabled INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO sub_outer VALUES (1), (2), (3), (4)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO sub_inner VALUES (2, 1), (3, 1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO sub_inner (enabled) VALUES (1)"))
+        semi_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE id IN (SELECT id FROM sub_inner WHERE enabled = 1)"))
+        assert semi_rows == [[b"2"], [b"3"]], semi_rows
+        anti_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE id NOT IN (SELECT id FROM sub_inner WHERE enabled = 1)"))
+        assert anti_rows == [], anti_rows
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT SELECT ON t TO analyst"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE portal_t (id INT)"))

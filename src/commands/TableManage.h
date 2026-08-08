@@ -713,6 +713,8 @@ public:
 
     // RID encode/decode (public for external use)
     static int64_t encodeRid(uint32_t pageId, uint16_t slotId);
+    bool isColumnNullByRid(const std::string& dbname, const std::string& tablename,
+                           int64_t rid, size_t colIdx) const;
     static void decodeRid(int64_t rid, uint32_t& pageId, uint16_t& slotId);
 
     // MVCC ReadView

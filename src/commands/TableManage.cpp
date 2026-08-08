@@ -3601,6 +3601,31 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
     return true;
 }
 
+bool StorageEngine::isColumnNullByRid(const std::string& dbname,
+                                      const std::string& tablename,
+                                      int64_t rid, size_t colIdx) const {
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    if (colIdx >= tbl.len || !tbl.cols[colIdx].isNull) return false;
+    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    if (!pa) return false;
+
+    uint32_t pageId = 0;
+    uint16_t slotId = 0;
+    decodeRid(rid, pageId, slotId);
+    char* buf = pa->fetchPage(pageId);
+    PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
+    const char* data = nullptr;
+    size_t len = 0;
+    const bool ok = page.read(slotId, data, len);
+    bool result = false;
+    if (ok && usesHeapTupleHeader(tbl.formatVersion) &&
+        len >= sizeof(HeapTupleHeaderData)) {
+        result = dbms::isNull(castHeapHeader(data), static_cast<int>(colIdx));
+    }
+    pa->unpinPage(pageId);
+    return result;
+}
+
 std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const TableSchema& tbl) {
     return tbl.buildPKValue(rowBuffer);
 }
@@ -10263,6 +10288,15 @@ static std::string buildRowBuffer(const TableSchema& tbl,
     }
 
     std::string rowBuffer = buildHeapTupleHeader(tbl, creatorTxnId, hasNull, tbl.hasVariableLength());
+    if (hasNull) {
+        auto* header = castHeapHeader(rowBuffer.data());
+        for (size_t i = 0; i < tbl.len; ++i) {
+            auto it = values.find(tbl.cols[i].dataName);
+            if (it != values.end() && !it->second.empty()) {
+                setNotNull(header, static_cast<int>(i));
+            }
+        }
+    }
 
     if (!tbl.hasVariableLength()) {
         rowBuffer.resize(tbl.rowSize(), '\0');

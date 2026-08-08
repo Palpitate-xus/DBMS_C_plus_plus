@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-08 | 子查询执行路径首步：未关联单列 `IN`/`NOT IN` 下推为 Volcano `SemiJoinOp`/anti 模式，内层过滤、重复键和 `NOT IN` NULL 语义加入单测与协议 E2E；关联子查询、EXISTS/ANY/ALL、row comparison 和复杂组合仍待迁移。 |
 | 2026-08-08 | 聚合执行路径收敛：删除只调用 `StorageEngine::aggregate()` 且忽略计划输入的冗余 `AggregateOp`，无 GROUP BY 的普通聚合统一复用过滤后的 `GroupAggregateOp`；补充 Volcano 单测与协议 E2E。 |
 | 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；新增 `OffsetOp`，复杂目标和主 SQL EXPLAIN 窗口解析仍待迁移。扩展 Volcano 单元与窗口 E2E，窗口 E2E 为 13/13。 |
 | 2026-08-08 | Group executor 收敛：新增 `GroupAggregateOp`，主 SQL/EXPLAIN 接入常见 GROUP BY、HAVING、ROLLUP/CUBE/GROUPING SETS 及常见聚合；补充分组、HAVING、NULL grouping-set 输出和文本/JSON EXPLAIN 单测。复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域和并行聚合仍待迁移。 |
@@ -385,10 +386,10 @@
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 6.1 | `SELECT` grammar | 缺少完整 SELECT 语法树；join、where、group、window、cte 多靠字符串定位，嵌套复杂查询容易偏离 PG | ⚠️ |
-| 6.2 | Join | 支持 inner/left/right/full/cross 部分；缺少 SEMI/ANTI 内部语义、lateral 完整相关性、join reordering/search space、outer join predicate 推理 | ⚠️ |
+| 6.2 | Join | 支持 inner/left/right/full/cross 部分；未关联 IN/NOT IN 已有 Volcano semi/anti 节点，但显式 SEMI/ANTI、lateral 完整相关性、join reordering/search space、outer join predicate 推理仍缺 | ⚠️ |
 | 6.3 | Set operations | UNION/INTERSECT/EXCEPT 已按优先级/左结合解析，组合统一走 Volcano `SetOperationOp` 并支持 ALL；复杂 producer、AST 到计划全量下推、类型合并、排序/limit 作用域和 collation 仍缺 | ⚠️ |
 | 6.4 | CTE | 有 WITH/RECURSIVE/DML CTE 痕迹；缺少 MATERIALIZED/NOT MATERIALIZED、可写 CTE 快照语义、递归检测、cycle/search 子句 | ⚠️ |
-| 6.5 | Subquery | 有 IN/EXISTS/ANY/ALL 展开；复杂关联子查询、row comparison、array ANY/ALL、NULL 语义不完整 | ⚠️ |
+| 6.5 | Subquery | 未关联单列 IN/NOT IN 已下推 Volcano semi/anti plan 并覆盖 NULL 语义；EXISTS/ANY/ALL、复杂关联子查询、row comparison、array ANY/ALL 和复杂组合仍不完整 | ⚠️ |
 | 6.6 | `ORDER BY` | 有多列/expression/nulls/collate 简化；缺少 USING operator、位置编号全语义、collation provider | ⚠️ |
 | 6.7 | `GROUP BY` | 普通聚合与 `GroupAggregateOp` 支持过滤后的 Volcano 输入、HAVING、rollup/cube/grouping sets；缺少复杂目标、functionally dependent group by、GROUPING()/GROUPING_ID、完整排序作用域 | ⚠️ |
 | 6.8 | `LIMIT/FETCH` | FETCH 被转 LIMIT；缺少 `WITH TIES`、百分比/复杂表达式等 | ⚠️ |

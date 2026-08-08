@@ -14,6 +14,7 @@
 #include <map>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 
 extern dbms::Config g_config;
 
@@ -150,6 +151,15 @@ static bool evalCondRaw(const StorageEngine::Condition& cond,
     return true;
 }
 
+static bool rawColumnIsNull(const std::string& row, const TableSchema& tbl,
+                            size_t colIdx) {
+    // TableScanOp deliberately strips the MVCC/null bitmap header before
+    // exposing rows.  The payload format uses the same empty-value sentinel
+    // as extractColumnValueStatic for nullable fixed-width values.
+    return colIdx < tbl.len && tbl.cols[colIdx].isNull &&
+           StorageEngine::extractColumnValueStatic(row, tbl, colIdx).empty();
+}
+
 // ========================================================================
 // TableScanOp
 // ========================================================================
@@ -175,6 +185,8 @@ TableScanOp::TableScanOp(StorageEngine* engine, const std::string& dbname,
 
 bool TableScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
+    rows_.clear();
+    lastRid_ = 0;
     engine_->forEachRow(dbname_, tablename_,
         [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
             std::string row(data, len);
@@ -187,13 +199,19 @@ bool TableScanOp::open() {
 
 bool TableScanOp::next(std::string& outRow) {
     if (pos_ >= rows_.size()) return false;
+    lastRid_ = rows_[pos_].first;
     outRow = rows_[pos_].second;
     ++pos_;
     return true;
 }
 
+bool TableScanOp::lastColumnIsNull(size_t colIdx) const {
+    return engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
+}
+
 void TableScanOp::close() {
     rows_.clear();
+    lastRid_ = 0;
 }
 
 // ========================================================================
@@ -211,6 +229,7 @@ bool ParallelTableScanOp::open() {
     rows_.clear();
     pos_ = 0;
     usedParallelWorkers_ = false;
+    lastRid_ = 0;
 
     auto appendSequential = [this]() {
         engine_->forEachRow(dbname_, tablename_,
@@ -271,13 +290,19 @@ bool ParallelTableScanOp::open() {
 
 bool ParallelTableScanOp::next(std::string& outRow) {
     if (pos_ >= rows_.size()) return false;
+    lastRid_ = rows_[pos_].first;
     outRow = rows_[pos_++].second;
     return true;
+}
+
+bool ParallelTableScanOp::lastColumnIsNull(size_t colIdx) const {
+    return engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
 }
 
 void ParallelTableScanOp::close() {
     rows_.clear();
     pos_ = 0;
+    lastRid_ = 0;
 }
 
 // ========================================================================
@@ -669,6 +694,83 @@ bool FilterOp::next(std::string& outRow) {
 
 void FilterOp::close() {
     child_->close();
+}
+
+// ========================================================================
+// SemiJoinOp / AntiJoinOp
+// ========================================================================
+
+SemiJoinOp::SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
+                       const TableSchema& innerTbl,
+                       const std::string& outerColumn,
+                       const std::string& innerColumn, bool anti)
+    : outer_(std::move(outer)), inner_(std::move(inner)), outerTbl_(outerTbl),
+      innerTbl_(innerTbl), outerColumn_(outerColumn), innerColumn_(innerColumn),
+      anti_(anti) {}
+
+bool SemiJoinOp::open() {
+    rows_.clear();
+    pos_ = 0;
+
+    size_t outerIdx = outerTbl_.len;
+    size_t innerIdx = innerTbl_.len;
+    for (size_t i = 0; i < outerTbl_.len; ++i) {
+        if (outerTbl_.cols[i].dataName == outerColumn_) {
+            outerIdx = i;
+            break;
+        }
+    }
+    for (size_t i = 0; i < innerTbl_.len; ++i) {
+        if (innerTbl_.cols[i].dataName == innerColumn_) {
+            innerIdx = i;
+            break;
+        }
+    }
+    if (outerIdx >= outerTbl_.len || innerIdx >= innerTbl_.len) return false;
+    if (!inner_->open()) return false;
+
+    std::unordered_set<std::string> innerKeys;
+    bool innerHasNull = false;
+    std::string row;
+    while (inner_->next(row)) {
+        const std::string value =
+            StorageEngine::extractColumnValueStatic(row, innerTbl_, innerIdx);
+        if (inner_->lastColumnIsNull(innerIdx) ||
+            rawColumnIsNull(row, innerTbl_, innerIdx)) {
+            innerHasNull = true;
+        } else {
+            innerKeys.insert(value);
+        }
+    }
+    inner_->close();
+
+    if (!outer_->open()) return false;
+    while (outer_->next(row)) {
+        const std::string value =
+            StorageEngine::extractColumnValueStatic(row, outerTbl_, outerIdx);
+        const bool outerIsNull = outer_->lastColumnIsNull(outerIdx) ||
+                                 rawColumnIsNull(row, outerTbl_, outerIdx);
+        const bool found = !outerIsNull && innerKeys.find(value) != innerKeys.end();
+
+        // SQL's three-valued logic matters for NOT IN: a NULL in the inner
+        // relation makes every non-matching comparison UNKNOWN, not TRUE.
+        const bool keep = anti_ ? (!outerIsNull && !found && !innerHasNull)
+                                : found;
+        if (keep) rows_.push_back(row);
+    }
+    outer_->close();
+    return true;
+}
+
+bool SemiJoinOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    return true;
+}
+
+void SemiJoinOp::close() {
+    rows_.clear();
+    pos_ = 0;
 }
 
 // ========================================================================
@@ -1990,6 +2092,26 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         root = std::make_unique<FilterOp>(std::move(root), tbl, remainingConds);
     }
 
+    // Lower uncorrelated IN/NOT IN predicates after the outer filter and
+    // before projection/aggregation.  The join only carries outer rows, so
+    // it does not change the schema visible to all downstream operators.
+    if (!ctx.semiJoins.empty()) {
+        const TableSchema outerTbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        for (const auto& spec : ctx.semiJoins) {
+            const std::string innerDb = spec.dbname.empty() ? ctx.dbname : spec.dbname;
+            const TableSchema innerTbl = engine->getTableSchema(innerDb, spec.tablename);
+            OpPtr inner = std::make_unique<TableScanOp>(
+                engine, innerDb, spec.tablename);
+            if (!spec.innerConds.empty()) {
+                inner = std::make_unique<FilterOp>(
+                    std::move(inner), innerTbl, spec.innerConds);
+            }
+            root = std::make_unique<SemiJoinOp>(
+                std::move(root), std::move(inner), outerTbl, innerTbl,
+                spec.outerColumn, spec.innerColumn, spec.anti);
+        }
+    }
+
     if (!ctx.groupByCols.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<GroupAggregateOp>(
@@ -2274,6 +2396,19 @@ static CostEstimate explainOp(Operator* op, int indent,
         est.cost = child.cost + est.rows * 0.5;
         out += prefix + "Filter" + costRowsStr(est, opts) + "\n";
 
+    } else if (auto* semi = dynamic_cast<SemiJoinOp*>(op)) {
+        CostEstimate outer = explainOp(semi->outerChild(), indent + 1,
+                                       engine, dbname, out, opts);
+        CostEstimate inner = explainOp(semi->innerChild(), indent + 1,
+                                       engine, dbname, out, opts);
+        est.rows = outer.rows * 0.5;
+        if (est.rows < 1.0 && outer.rows > 0.0) est.rows = 1.0;
+        est.cost = outer.cost + inner.cost + inner.rows;
+        out += prefix + (semi->isAnti() ? "AntiJoin" : "SemiJoin") +
+               "(outer_col=" + semi->outerColumn() +
+               ", inner_col=" + semi->innerColumn() + ")" +
+               costRowsStr(est, opts) + "\n";
+
     } else if (auto* proj = dynamic_cast<ProjectOp*>(op)) {
         CostEstimate child = explainOp(proj->child(), indent + 1, engine, dbname, out, opts);
         est.rows = child.rows;
@@ -2489,6 +2624,21 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         json += "\"nodeType\":\"Filter\",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
+
+    } else if (auto* semi = dynamic_cast<SemiJoinOp*>(op)) {
+        auto [outerJson, outer] = explainOpJson(semi->outerChild(), engine,
+                                                dbname, opts);
+        auto [innerJson, inner] = explainOpJson(semi->innerChild(), engine,
+                                                dbname, opts);
+        est.rows = outer.rows * 0.5;
+        if (est.rows < 1.0 && outer.rows > 0.0) est.rows = 1.0;
+        est.cost = outer.cost + inner.cost + inner.rows;
+        json += "\"nodeType\":\"" +
+                std::string(semi->isAnti() ? "AntiJoin" : "SemiJoin") + "\",";
+        json += "\"outerColumn\":\"" + jsonEscape(semi->outerColumn()) + "\",";
+        json += "\"innerColumn\":\"" + jsonEscape(semi->innerColumn()) + "\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[" + outerJson + "," + innerJson + "]";
 
     } else if (auto* proj = dynamic_cast<ProjectOp*>(op)) {
         auto [childJson, child] = explainOpJson(proj->child(), engine, dbname, opts);

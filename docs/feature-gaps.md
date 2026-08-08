@@ -158,15 +158,15 @@
 - **预估工作量**: 3-5 天
 - **相关文件**: `src/executor/ExecutionPlan.cpp`, `src/main.cpp`, `tests/volcano_select_phase51_test.cpp`
 
-### P1-4: 关联子查询解嵌套 (Subquery Unnesting)
+### P1-4: 子查询结构化解嵌套 (Subquery Unnesting)
 - **类别**: 优化器 / 子查询
-- **现状**: 简单子查询走 volcano，关联子查询回退 legacy
+- **现状**: 未关联的单列 `IN`/`NOT IN` 已由主 SQL 路径识别并下推为结构化 `SemiJoinOp`/anti 模式，内层 `WHERE` 也消费 Volcano `FilterOp`；关联子查询、`EXISTS`、`ANY/ALL`、row comparison 和复杂布尔组合仍回退 legacy
 - **PG 参考**: `pull_up_subqueries`, `convert_EXISTS_to_join`
 - **影响**: 关联子查询性能差（O(n*m) 嵌套循环）
 - **实现路径**:
-  1. 在 `QueryPlanner` 中实现 `pull_up_subquery`：将 IN/EXISTS 转为 SEMI/ANTI JOIN
-  2. 实现 `SemiJoinOp` / `AntiJoinOp` 算子
-  3. 实现 `subquery_planner` 入口
+  1. ✅ 在 `QueryPlanner` 中实现单列未关联 IN/NOT IN 到 SEMI/ANTI 计划的下推
+  2. ✅ 实现 `SemiJoinOp`（anti 模式）及 inner Filter 子计划
+  3. 补齐 EXISTS/ANY/ALL、关联性、row comparison 和完整 planner 入口
 - **预估工作量**: 1-2 周
 - **相关文件**: `src/executor/ExecutionPlan.cpp`
 
