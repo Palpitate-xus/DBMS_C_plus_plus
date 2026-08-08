@@ -15691,7 +15691,55 @@ bool execute(const string& rawSql, Session& s) {
                 return true;
             }
             if (forUpdate) { cout << "FOR UPDATE not supported with aggregate" << endl; return true; }
-            if (condTokens.empty()) {
+            bool canUseVolcanoAggregate = !noWait && !skipLocked &&
+                !hasWindow && !hasScalar && distinctOnCols.empty() &&
+                exprOrderBySpecs.empty() && orderBySpecs.empty();
+            auto hasAggregateColumn = [&](const string& name) {
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == name) return true;
+                }
+                return false;
+            };
+            static const set<string> volcanoAggregateFunctions = {
+                "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+            };
+            for (const auto& item : pureAgg) {
+                const string func = toLower(trim(item.func));
+                string arg = trim(item.arg);
+                if (!volcanoAggregateFunctions.count(func)) canUseVolcanoAggregate = false;
+                if (func != "count" || arg != "*") {
+                    if (func == "count" && arg.size() > 9 && arg.substr(0, 9) == "distinct ") {
+                        arg = trim(arg.substr(9));
+                    }
+                    if (!hasAggregateColumn(arg)) canUseVolcanoAggregate = false;
+                }
+            }
+            if (queryDb != "information_schema" && queryDb != "pg_catalog") {
+                if (!g_engine.getInheritedChildren(queryDb, tname).empty()) {
+                    canUseVolcanoAggregate = false;
+                }
+            }
+            vector<vector<string>> volcanoAggregateConditions;
+            if (canUseVolcanoAggregate && !condTokens.empty()) {
+                vector<string> condCopy = condTokens;
+                condCopy.insert(condCopy.begin(), "(");
+                condCopy.push_back(")");
+                for (auto& token : condCopy) token = modifyLogic(token);
+                volcanoAggregateConditions = breakDownConditions(condCopy);
+                canUseVolcanoAggregate = volcanoAggregateConditions.size() <= 1;
+            }
+            if (canUseVolcanoAggregate) {
+                dbms::PlanContext ctx;
+                ctx.dbname = queryDb;
+                ctx.tablename = tname;
+                ctx.aggregateItems = pureAgg;
+                if (!volcanoAggregateConditions.empty()) {
+                    ctx.conds = dbms::StorageEngine::parseConditions(
+                        volcanoAggregateConditions.front());
+                }
+                answers = dbms::QueryPlanner::executePlan(
+                    dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx));
+            } else if (condTokens.empty()) {
                 answers = g_engine.aggregate(s.currentDB, tname, {}, pureAgg);
             } else {
                 condTokens.insert(condTokens.begin(), "(");

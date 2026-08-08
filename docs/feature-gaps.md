@@ -45,7 +45,7 @@
 - **实现路径**:
   1. 引入 LLVM C API 或 `libclangJIT` 依赖
   2. 实现 `JITCompiler` 类：将 `Expr` 树翻译为 LLVM IR
-  3. 在 `FilterOp` / `ProjectOp` / `AggregateOp` 中热点路径使用 JIT
+  3. 在 `FilterOp` / `ProjectOp` / `GroupAggregateOp` 中热点路径使用 JIT
   4. 增加 `jit` GUC 开关 + `jit_above_cost` 阈值
 - **预估工作量**: 3-4 周（依赖 LLVM 库）
 - **相关文件**: `src/expression/ExprEvaluator.cpp`
@@ -147,11 +147,11 @@
 
 ### P1-3: GROUP BY ROLLUP/CUBE/GROUPING SETS Executor
 - **类别**: 执行器 / 分组扩展
-- **现状**: 常见 `GROUP BY`、`ROLLUP`、`CUBE`、`GROUPING SETS`、`HAVING` 已接入结构化 `GroupAggregateOp`；复杂表达式、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍回退 legacy
+- **现状**: 无 GROUP BY 的普通聚合、常见 `GROUP BY`、`ROLLUP`、`CUBE`、`GROUPING SETS`、`HAVING` 已统一接入结构化 `GroupAggregateOp`；复杂表达式、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍回退 legacy
 - **PG 参考**: `GroupAggregate` + `sortgroups`, `GROUPING()` 函数
 - **影响**: 基础分组查询可使用 Volcano 执行器，多维分析的完整 PostgreSQL 语义仍未覆盖
 - **实现路径**:
-  1. ✅ 新增 `GroupAggregateOp`，消费过滤后的 Volcano 子计划
+  1. ✅ 新增 `GroupAggregateOp`，消费过滤后的 Volcano 子计划，并覆盖无 GROUP BY 的隐式空 grouping set
   2. ✅ 支持常见 `count/sum/avg/min/max/bool_and/bool_or/every`、简单 `FILTER`/`HAVING`
   3. ✅ `ROLLUP/CUBE/GROUPING SETS` 生成多个分组集合并输出省略列的 `NULL`
   4. 为结构化目标列表实现类型检查、`GROUPING()`/`GROUPING_ID` 和完整排序/分页作用域

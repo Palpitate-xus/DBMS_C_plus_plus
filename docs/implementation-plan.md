@@ -658,7 +658,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 5.12 实现 subquery 完整语义（关联子查询、row comparison、NULL 语义） | 6.5 | parser/legacy 路径支持基础 subquery/IN/EXISTS/BETWEEN；关联子查询解嵌套、row comparison 和完整 NULL 语义仍缺。 |
 | ⚠️ 5.13 实现 Join 完整语义（SEMI/ANTI、lateral 完整相关性、outer join predicate 推理） | 6.2 | INNER/LEFT/RIGHT/FULL/CROSS/NATURAL JOIN 基础路径已存在；SEMI/ANTI、LATERAL 相关性、predicate 推理和结构化 Volcano join 仍缺。 |
 | ⚠️ 5.14 实现 Set operations 完整语义（类型合并、collation、ALL/DISTINCT 作用域） | 6.3 | UNION/INTERSECT/EXCEPT [ALL/DISTINCT] 已由 Volcano 组合；复杂 operand、类型合并、collation 和完整作用域仍缺。 |
-| ⚠️ 5.15 实现 `GROUP BY` functionally dependent、`GROUPING_ID` 完整语义 | 6.7 | 常见 GROUP BY/ROLLUP/CUBE/GROUPING SETS 与常见聚合已接入 `GroupAggregateOp`，并有文本/JSON EXPLAIN；functional dependency、复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍缺。 |
+| ⚠️ 5.15 实现 `GROUP BY` functionally dependent、`GROUPING_ID` 完整语义 | 6.7 | 普通聚合与常见 GROUP BY/ROLLUP/CUBE/GROUPING SETS 已接入过滤后的 `GroupAggregateOp`，并有文本/JSON EXPLAIN；functional dependency、复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍缺。 |
 | ✅ 5.16 实现 `ORDER BY` USING operator、位置编号、collation provider | 6.6 | parseSelect 支持 ORDER BY ASC/DESC + NULLS FIRST/LAST |
 | ✅ 5.17 实现 `LIMIT/FETCH` `WITH TIES`、百分比 | 6.8 | parseSelect 支持 LIMIT/OFFSET/FETCH FIRST/ROWS ONLY/WITH TIES |
 | ⚠️ 5.18 实现 `FOR UPDATE` with JOIN/GROUP BY/aggregate/window/scalar functions | 6.9 | parser 已修复关键字识别，但源码仍明确拒绝 JOIN/GROUP BY/aggregate/window/scalar function 组合；仅基础路径可用。 |

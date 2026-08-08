@@ -519,27 +519,6 @@ private:
     size_t rightPos_ = 0;
 };
 
-// ========================================================================
-// Aggregate: COUNT/SUM/AVG/MAX/MIN
-// ========================================================================
-class AggregateOp : public Operator {
-public:
-    AggregateOp(StorageEngine* engine, const std::string& dbname,
-                const std::string& tablename,
-                const std::vector<StorageEngine::AggItem>& items);
-
-    bool open() override;
-    bool next(std::string& outRow) override;
-    void close() override;
-
-private:
-    StorageEngine* engine_;
-    std::string dbname_;
-    std::string tablename_;
-    std::vector<StorageEngine::AggItem> items_;
-    bool done_ = false;
-};
-
 // GroupAggregate: consume a filtered Volcano stream and produce one row per
 // GROUP BY key or grouping set.  The node intentionally owns only the common
 // scalar aggregate contract; unsupported ordered-set/collection aggregates

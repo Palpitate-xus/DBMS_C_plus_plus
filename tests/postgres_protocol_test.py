@@ -417,6 +417,13 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE aggregate_t (id INT, amount INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO aggregate_t VALUES (1, 10), (2, 20), (3, 30)"))
+        aggregate_rows = data_row_values(simple_query(
+            sock, "SELECT count(*), sum(amount) FROM aggregate_t WHERE amount > 10"))
+        assert aggregate_rows == [[b"2", b"50"]], aggregate_rows
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT SELECT ON t TO analyst"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE portal_t (id INT)"))

@@ -1593,32 +1593,6 @@ void MergeJoinOp::close() {
 }
 
 // ========================================================================
-// AggregateOp
-// ========================================================================
-
-AggregateOp::AggregateOp(StorageEngine* engine, const std::string& dbname,
-                          const std::string& tablename,
-                          const std::vector<StorageEngine::AggItem>& items)
-    : engine_(engine), dbname_(dbname), tablename_(tablename), items_(items) {}
-
-bool AggregateOp::open() {
-    done_ = false;
-    return true;
-}
-
-bool AggregateOp::next(std::string& outRow) {
-    if (done_) return false;
-    auto res = engine_->aggregate(dbname_, tablename_, {}, items_);
-    if (!res.empty()) outRow = res[0];
-    done_ = true;
-    return !res.empty();
-}
-
-void AggregateOp::close() {
-    done_ = false;
-}
-
-// ========================================================================
 // GroupAggregateOp
 // ========================================================================
 
@@ -2021,6 +1995,15 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         root = std::make_unique<GroupAggregateOp>(
             std::move(root), tbl, ctx.groupByCols, ctx.groupingSets,
             ctx.aggregateItems, ctx.havingConds);
+    } else if (!ctx.aggregateItems.empty()) {
+        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        // A plain aggregate is one implicit empty grouping set.  Reusing the
+        // same node keeps filtering, visibility, FILTER, DISTINCT arguments,
+        // and aggregate formatting on one structured execution path.
+        root = std::make_unique<GroupAggregateOp>(
+            std::move(root), tbl, std::vector<std::string>{},
+            std::vector<std::vector<std::string>>{}, ctx.aggregateItems,
+            ctx.havingConds);
     } else if (!ctx.windowFunctions.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<WindowOp>(std::move(root), tbl,
@@ -2084,8 +2067,11 @@ OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
 
 OpPtr QueryPlanner::buildAggregatePlan(StorageEngine* engine, const PlanContext& ctx,
                                         const std::vector<StorageEngine::AggItem>& items) {
-    (void)ctx;
-    return std::make_unique<AggregateOp>(engine, ctx.dbname, ctx.tablename, items);
+    PlanContext aggregateContext = ctx;
+    aggregateContext.aggregateItems = items;
+    aggregateContext.groupByCols.clear();
+    aggregateContext.groupingSets.clear();
+    return buildSelectPlan(engine, aggregateContext);
 }
 
 OpPtr QueryPlanner::buildSetOperationPlan(OpPtr left, OpPtr right,
@@ -2368,11 +2354,6 @@ static CostEstimate explainOp(Operator* op, int indent,
         out += prefix + "MergeJoin(" + mjoin->leftTable() + ", " + mjoin->rightTable() + ")" +
                costRowsStr(est, opts) + "\n";
 
-    } else if (dynamic_cast<AggregateOp*>(op)) {
-        est.rows = 1;
-        est.cost = 10;
-        out += prefix + "Aggregate" + costRowsStr(est, opts) + "\n";
-
     } else {
         out += prefix + "Unknown\n";
     }
@@ -2609,13 +2590,6 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         json += "\"rightTable\":\"" + jsonEscape(mjoin->rightTable()) + "\",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[" + leftJson + "," + rightJson + "]";
-
-    } else if (dynamic_cast<AggregateOp*>(op)) {
-        est.rows = 1;
-        est.cost = 10;
-        json += "\"nodeType\":\"Aggregate\",";
-        json += jsonCostRows(est, opts);
-        json += "\"children\":[]";
 
     } else {
         json += "\"nodeType\":\"Unknown\",";

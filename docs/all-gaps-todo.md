@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-08 | 聚合执行路径收敛：删除只调用 `StorageEngine::aggregate()` 且忽略计划输入的冗余 `AggregateOp`，无 GROUP BY 的普通聚合统一复用过滤后的 `GroupAggregateOp`；补充 Volcano 单测与协议 E2E。 |
 | 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；新增 `OffsetOp`，复杂目标和主 SQL EXPLAIN 窗口解析仍待迁移。扩展 Volcano 单元与窗口 E2E，窗口 E2E 为 13/13。 |
 | 2026-08-08 | Group executor 收敛：新增 `GroupAggregateOp`，主 SQL/EXPLAIN 接入常见 GROUP BY、HAVING、ROLLUP/CUBE/GROUPING SETS 及常见聚合；补充分组、HAVING、NULL grouping-set 输出和文本/JSON EXPLAIN 单测。复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域和并行聚合仍待迁移。 |
 | 2026-08-08 | TOAST 压缩首步：当前 TOAST chunk 格式升级为带 flags/originalSize 的结构，写入自动使用 zlib 压缩（不可压缩值保留原文），统一 shell/CMake 构建入口并增加物理压缩回归；旧 TOAST chunk 不兼容，lz4/pglz、storage strategy、`toast_tuple_target` 与 PG pointer/catalog 语义仍待迁移。 |
@@ -389,7 +390,7 @@
 | 6.4 | CTE | 有 WITH/RECURSIVE/DML CTE 痕迹；缺少 MATERIALIZED/NOT MATERIALIZED、可写 CTE 快照语义、递归检测、cycle/search 子句 | ⚠️ |
 | 6.5 | Subquery | 有 IN/EXISTS/ANY/ALL 展开；复杂关联子查询、row comparison、array ANY/ALL、NULL 语义不完整 | ⚠️ |
 | 6.6 | `ORDER BY` | 有多列/expression/nulls/collate 简化；缺少 USING operator、位置编号全语义、collation provider | ⚠️ |
-| 6.7 | `GROUP BY` | `GroupAggregateOp` 支持常见聚合、HAVING、rollup/cube/grouping sets；缺少复杂目标、functionally dependent group by、GROUPING()/GROUPING_ID、完整排序作用域 | ⚠️ |
+| 6.7 | `GROUP BY` | 普通聚合与 `GroupAggregateOp` 支持过滤后的 Volcano 输入、HAVING、rollup/cube/grouping sets；缺少复杂目标、functionally dependent group by、GROUPING()/GROUPING_ID、完整排序作用域 | ⚠️ |
 | 6.8 | `LIMIT/FETCH` | FETCH 被转 LIMIT；缺少 `WITH TIES`、百分比/复杂表达式等 | ⚠️ |
 | 6.9 | Row locking | 单表 `FOR UPDATE/SHARE` 有部分；源码明确 `FOR UPDATE not supported with JOIN/GROUP BY/aggregate/window/scalar functions`。缺少 `NO KEY UPDATE`、`KEY SHARE`、OF list 完整语义 | ⚠️ |
 | 6.10 | `INSERT` | 多行/insert-select/upsert 有；缺少 PG 的 `DEFAULT VALUES`、`OVERRIDING`、WITH query 全组合、conflict target/opclass/where | ⚠️ |

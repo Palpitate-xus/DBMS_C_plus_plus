@@ -515,6 +515,16 @@ static void test_group_aggregate() {
         "A 3 35 11.666667 5 20", "B 1 7 7.000000 7 7"
     }));
 
+    dbms::PlanContext plainCtx;
+    plainCtx.dbname = db;
+    plainCtx.tablename = "t";
+    plainCtx.conds = dbms::StorageEngine::parseConditions({"=dept A"});
+    plainCtx.aggregateItems = {{"count", "*", {}}, {"sum", "score", {}}};
+    auto plainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, plainCtx);
+    assert(dynamic_cast<dbms::GroupAggregateOp*>(plainPlan.get()));
+    auto plainRows = dbms::QueryPlanner::executePlan(std::move(plainPlan));
+    assert((plainRows == std::vector<std::string>{"3 35"}));
+
     dbms::PlanContext havingCtx = ctx;
     havingCtx.aggregateItems = {{"count", "*", {}}};
     havingCtx.havingConds = {"count(*) > 1"};
