@@ -6211,6 +6211,88 @@ static bool parseSimpleSemiJoinSubquery(
     return true;
 }
 
+// Recognize the narrow structured boundary for an uncorrelated EXISTS
+// predicate.  The SELECT list is deliberately ignored because EXISTS only
+// observes whether the inner relation has at least one qualifying row.
+static bool parseSimpleExistenceSubquery(
+    const std::string& rawClause, Session& s, const std::string& dbname,
+    dbms::ExistenceSpec& outSpec) {
+    std::string clause = trim(rawClause);
+    bool anti = false;
+    if (clause.size() >= 10 && clause.substr(0, 10) == "not exists") {
+        anti = true;
+        clause = trim(clause.substr(10));
+    } else if (clause.size() >= 6 && clause.substr(0, 6) == "exists") {
+        clause = trim(clause.substr(6));
+    } else {
+        return false;
+    }
+
+    if (clause.size() < 2 || clause.front() != '(') return false;
+    const size_t parenEnd = findMatchingParen(clause, 0);
+    if (parenEnd == std::string::npos || !trim(clause.substr(parenEnd + 1)).empty())
+        return false;
+    const std::string inner = trim(clause.substr(1, parenEnd - 1));
+    if (inner.size() < 6 || inner.substr(0, 6) != "select") return false;
+
+    const size_t fromPos = findTopLevelKeyword(inner, "from", 6);
+    if (fromPos == std::string::npos) return false;
+    const std::string selectList = trim(inner.substr(6, fromPos - 6));
+    if (selectList.empty() || selectList.find_first_of("(),") != std::string::npos)
+        return false;
+
+    const size_t wherePos = findTopLevelKeyword(inner, "where", fromPos + 4);
+    const size_t groupPos = findTopLevelKeyword(inner, "group by", fromPos + 4);
+    const size_t havingPos = findTopLevelKeyword(inner, "having", fromPos + 4);
+    const size_t orderPos = findTopLevelKeyword(inner, "order by", fromPos + 4);
+    const size_t limitPos = findTopLevelKeyword(inner, "limit", fromPos + 4);
+    const size_t offsetPos = findTopLevelKeyword(inner, "offset", fromPos + 4);
+    if (groupPos != std::string::npos || havingPos != std::string::npos ||
+        orderPos != std::string::npos || limitPos != std::string::npos ||
+        offsetPos != std::string::npos) return false;
+
+    const size_t tableEnd = wherePos == std::string::npos ? inner.size() : wherePos;
+    const std::string tableText = trim(inner.substr(fromPos + 4,
+                                                     tableEnd - fromPos - 4));
+    if (tableText.empty() || tableText.find_first_of(" \t\r\n.") != std::string::npos)
+        return false;
+    const std::string table = resolveTableName(s, tableText);
+    if (!g_engine.tableExists(dbname, table)) return false;
+    const TableSchema innerSchema = g_engine.getTableSchema(dbname, table);
+
+    std::vector<dbms::StorageEngine::Condition> innerConds;
+    if (wherePos != std::string::npos) {
+        const std::string whereClause = trim(inner.substr(wherePos + 5));
+        if (whereClause.empty()) return false;
+        std::vector<std::string> tokens = tokenize(normalizeConditionStr(whereClause));
+        tokens.insert(tokens.begin(), "(");
+        tokens.push_back(")");
+        for (auto& token : tokens) token = modifyLogic(token);
+        const auto groups = breakDownConditions(tokens);
+        if (groups.size() != 1) return false;
+        innerConds = dbms::StorageEngine::parseConditions(groups.front());
+        if (innerConds.empty() || innerConds.size() != groups.front().size()) return false;
+        for (const auto& condition : innerConds) {
+            bool found = false;
+            for (size_t i = 0; i < innerSchema.len; ++i) {
+                if (innerSchema.cols[i].dataName == condition.colName) {
+                    found = true;
+                    break;
+                }
+            }
+            // Reject outer references here; correlated predicates remain on
+            // the legacy path until parameterized plans exist.
+            if (!found) return false;
+        }
+    }
+
+    outSpec.dbname = dbname;
+    outSpec.tablename = table;
+    outSpec.innerConds = std::move(innerConds);
+    outSpec.anti = anti;
+    return true;
+}
+
 // Execute a SELECT subquery for derived table use; returns rows and fills outColNames.
 // Supports basic SELECT with WHERE, ORDER BY, LIMIT, OFFSET.
 static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Session& s,
@@ -15595,6 +15677,7 @@ bool execute(const string& rawSql, Session& s) {
         // WHERE clause
         vector<string> condTokens;
         vector<dbms::SemiJoinSpec> semiJoins;
+        vector<dbms::ExistenceSpec> existenceFilters;
         string rawWhereClause;
         if (wherePos != string::npos) {
             size_t condEnd = (groupPos != string::npos) ? groupPos
@@ -15606,12 +15689,20 @@ bool execute(const string& rawSql, Session& s) {
             string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
             rawWhereClause = whereClause;
             dbms::SemiJoinSpec semiJoin;
-            const bool structured = !hasAgg && !hasWindow && !hasScalar &&
-                                    groupPos == string::npos &&
-                                    parseSimpleSemiJoinSubquery(
-                                        whereClause, s, queryDb, tname, semiJoin);
-            if (structured) {
+            dbms::ExistenceSpec existence;
+            const bool canUseStructuredSubquery = !hasAgg && !hasWindow &&
+                                                   !hasScalar &&
+                                                   groupPos == string::npos;
+            const bool structuredSemi = canUseStructuredSubquery &&
+                                        parseSimpleSemiJoinSubquery(
+                                            whereClause, s, queryDb, tname, semiJoin);
+            const bool structuredExistence = canUseStructuredSubquery &&
+                                             parseSimpleExistenceSubquery(
+                                                 whereClause, s, queryDb, existence);
+            if (structuredSemi) {
                 semiJoins.push_back(std::move(semiJoin));
+            } else if (structuredExistence) {
+                existenceFilters.push_back(std::move(existence));
             } else {
                 whereClause = expandSubqueries(whereClause, s);
                 string condStr = normalizeConditionStr(whereClause);
@@ -15630,6 +15721,7 @@ bool execute(const string& rawSql, Session& s) {
                                          const StorageEngine::OrderBySpec* orderBy,
                                          bool distinct,
                                          const std::vector<dbms::SemiJoinSpec>& subqueryJoins,
+                                         const std::vector<dbms::ExistenceSpec>& existenceSubqueries,
                                          std::vector<std::string>& outAnswers) -> bool {
             // Fall back when the volcano path cannot yet handle the query.
             if (forUpdate || noWait || skipLocked) return false;
@@ -15654,6 +15746,7 @@ bool execute(const string& rawSql, Session& s) {
             }
             ctx.distinct = distinct;
             ctx.semiJoins = subqueryJoins;
+            ctx.existenceFilters = existenceSubqueries;
             std::vector<std::vector<dbms::StorageEngine::Condition>> branches;
             for (const auto& group : condGroups) {
                 branches.push_back(dbms::StorageEngine::parseConditions(group));
@@ -16527,7 +16620,7 @@ bool execute(const string& rawSql, Session& s) {
             if (condTokens.empty()) {
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, {},
                                                     firstOrderBy, useDistinct,
-                                                    semiJoins, answers);
+                                                    semiJoins, existenceFilters, answers);
             } else {
                 // Make a local copy since modifyLogic mutates tokens.
                 vector<string> condCopy = condTokens;
@@ -16537,16 +16630,17 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condCopy);
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, groups,
                                                     firstOrderBy, useDistinct,
-                                                    semiJoins, answers);
+                                                    semiJoins, existenceFilters, answers);
             }
 
             // A structured subquery is only valid if the complete Volcano
             // path is available.  Restore the original predicate before the
             // legacy fallback so unsupported features cannot silently drop it.
-            if (!volcanoUsed && !semiJoins.empty()) {
+            if (!volcanoUsed && (!semiJoins.empty() || !existenceFilters.empty())) {
                 condTokens = tokenize(normalizeConditionStr(
                     expandSubqueries(rawWhereClause, s)));
                 semiJoins.clear();
+                existenceFilters.clear();
             }
 
             if (!volcanoUsed) {

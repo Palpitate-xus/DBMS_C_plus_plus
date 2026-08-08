@@ -280,6 +280,29 @@ private:
     size_t pos_ = 0;
 };
 
+// ExistenceFilter filters an outer stream using the truth value of an
+// uncorrelated EXISTS/NOT EXISTS subquery.  The inner plan is evaluated once
+// and the outer row shape is preserved for downstream projection.
+class ExistenceFilterOp : public Operator {
+public:
+    ExistenceFilterOp(OpPtr outer, OpPtr inner, bool anti)
+        : outer_(std::move(outer)), inner_(std::move(inner)), anti_(anti) {}
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* outerChild() const { return outer_.get(); }
+    Operator* innerChild() const { return inner_.get(); }
+    bool isAnti() const { return anti_; }
+
+private:
+    OpPtr outer_;
+    OpPtr inner_;
+    bool anti_ = false;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+};
+
 // ========================================================================
 // Project: select specific columns
 // ========================================================================
@@ -603,6 +626,13 @@ struct SemiJoinSpec {
     bool anti = false;
 };
 
+struct ExistenceSpec {
+    std::string dbname;
+    std::string tablename;
+    std::vector<StorageEngine::Condition> innerConds;
+    bool anti = false;
+};
+
 // ========================================================================
 // QueryPlanner: build operator tree from parsed SQL components
 // ========================================================================
@@ -629,6 +659,9 @@ struct PlanContext {
     std::vector<WindowTarget> windowTargets;
     // Uncorrelated IN/NOT IN predicates lowered to a right-hand relation.
     std::vector<SemiJoinSpec> semiJoins;
+    // Uncorrelated EXISTS/NOT EXISTS predicates lowered to an existence
+    // filter over a right-hand relation.
+    std::vector<ExistenceSpec> existenceFilters;
 };
 
 // Equivalence class: a set of expressions that are known equal.

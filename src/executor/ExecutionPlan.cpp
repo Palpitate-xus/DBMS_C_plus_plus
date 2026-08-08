@@ -774,6 +774,38 @@ void SemiJoinOp::close() {
 }
 
 // ========================================================================
+// ExistenceFilterOp
+// ========================================================================
+
+bool ExistenceFilterOp::open() {
+    rows_.clear();
+    pos_ = 0;
+
+    if (!inner_->open()) return false;
+    std::string row;
+    const bool innerHasRow = inner_->next(row);
+    inner_->close();
+
+    const bool keepRows = anti_ ? !innerHasRow : innerHasRow;
+    if (!keepRows) return true;
+    if (!outer_->open()) return false;
+    while (outer_->next(row)) rows_.push_back(row);
+    outer_->close();
+    return true;
+}
+
+bool ExistenceFilterOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    return true;
+}
+
+void ExistenceFilterOp::close() {
+    rows_.clear();
+    pos_ = 0;
+}
+
+// ========================================================================
 // ProjectOp
 // ========================================================================
 
@@ -2112,6 +2144,24 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         }
     }
 
+    // Lower uncorrelated EXISTS/NOT EXISTS after the outer filter.  The
+    // existence predicate is independent of each outer row, so the inner
+    // plan can be opened once and the outer row shape remains unchanged.
+    if (!ctx.existenceFilters.empty()) {
+        for (const auto& spec : ctx.existenceFilters) {
+            const std::string innerDb = spec.dbname.empty() ? ctx.dbname : spec.dbname;
+            const TableSchema innerTbl = engine->getTableSchema(innerDb, spec.tablename);
+            OpPtr inner = std::make_unique<TableScanOp>(
+                engine, innerDb, spec.tablename);
+            if (!spec.innerConds.empty()) {
+                inner = std::make_unique<FilterOp>(
+                    std::move(inner), innerTbl, spec.innerConds);
+            }
+            root = std::make_unique<ExistenceFilterOp>(
+                std::move(root), std::move(inner), spec.anti);
+        }
+    }
+
     if (!ctx.groupByCols.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<GroupAggregateOp>(
@@ -2409,6 +2459,17 @@ static CostEstimate explainOp(Operator* op, int indent,
                ", inner_col=" + semi->innerColumn() + ")" +
                costRowsStr(est, opts) + "\n";
 
+    } else if (auto* exists = dynamic_cast<ExistenceFilterOp*>(op)) {
+        CostEstimate outer = explainOp(exists->outerChild(), indent + 1,
+                                       engine, dbname, out, opts);
+        CostEstimate inner = explainOp(exists->innerChild(), indent + 1,
+                                       engine, dbname, out, opts);
+        est.rows = outer.rows * 0.5;
+        if (est.rows < 1.0 && outer.rows > 0.0) est.rows = 1.0;
+        est.cost = outer.cost + inner.cost + inner.rows;
+        out += prefix + (exists->isAnti() ? "AntiExistenceFilter" : "ExistenceFilter") +
+               costRowsStr(est, opts) + "\n";
+
     } else if (auto* proj = dynamic_cast<ProjectOp*>(op)) {
         CostEstimate child = explainOp(proj->child(), indent + 1, engine, dbname, out, opts);
         est.rows = child.rows;
@@ -2637,6 +2698,19 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
                 std::string(semi->isAnti() ? "AntiJoin" : "SemiJoin") + "\",";
         json += "\"outerColumn\":\"" + jsonEscape(semi->outerColumn()) + "\",";
         json += "\"innerColumn\":\"" + jsonEscape(semi->innerColumn()) + "\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[" + outerJson + "," + innerJson + "]";
+
+    } else if (auto* exists = dynamic_cast<ExistenceFilterOp*>(op)) {
+        auto [outerJson, outer] = explainOpJson(exists->outerChild(), engine,
+                                                dbname, opts);
+        auto [innerJson, inner] = explainOpJson(exists->innerChild(), engine,
+                                                dbname, opts);
+        est.rows = outer.rows * 0.5;
+        if (est.rows < 1.0 && outer.rows > 0.0) est.rows = 1.0;
+        est.cost = outer.cost + inner.cost + inner.rows;
+        json += "\"nodeType\":\"" +
+                std::string(exists->isAnti() ? "AntiExistenceFilter" : "ExistenceFilter") + "\",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[" + outerJson + "," + innerJson + "]";
 

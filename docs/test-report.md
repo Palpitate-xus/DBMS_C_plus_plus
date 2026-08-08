@@ -15,7 +15,7 @@
 - 窗口函数端到端测试：由统一回归入口执行 `tests/window_e2e_test.py`（13 用例，包含 Volcano `WindowAgg` 排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 和命名窗口路径，使用隔离临时目录和临时管理员账号）
 - Volcano 窗口单元测试：`tests/volcano_select_phase51_test.cpp` 覆盖多窗口独立排序、排名并列、分区边界、`lag`、默认 frame、`EXCLUDE CURRENT ROW`、count/first/last/ntile/percent_rank/cume_dist 及文本/JSON EXPLAIN。
 - Volcano 分组单元测试：同一测试覆盖 `GroupAggregateOp` 的常见聚合、`HAVING`、`ROLLUP`/多个 grouping set、省略分组列的 `NULL` 输出及文本/JSON EXPLAIN；主 SQL 手工回归同时验证普通 GROUP BY 与 ROLLUP。
-- Semi/Anti Join 回归：`tests/volcano_select_phase51_test.cpp` 验证未关联 `IN`/`NOT IN`、inner 过滤、重复键和 NULL 语义；协议 E2E 验证真实 PostgreSQL 查询路径。
+- Semi/Anti/Existence 回归：`tests/volcano_select_phase51_test.cpp` 验证未关联 `IN`/`NOT IN`、inner 过滤、重复键、NULL 语义及 `ExistenceFilterOp` 的 `EXISTS`/`NOT EXISTS` 计划节点；协议 E2E 验证真实 PostgreSQL 查询路径。
 - 普通聚合结构化回归：`tests/volcano_select_phase51_test.cpp` 验证带过滤条件的隐式空 grouping set；协议 E2E 验证主 SQL `COUNT(*)`/`SUM()` 已走统一聚合计划路径。
 - TOAST 回归：`tests/toast_test.cpp` 验证大值插入/更新/删除、zlib 压缩后的物理体积和解压读取。
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
@@ -886,7 +886,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 - ✅ 事务控制（BEGIN/COMMIT/ROLLBACK/SAVEPOINT）
 - ✅ 权限管理（GRANT/REVOKE）
 - ✅ 分区管理（Range/List/Hash + ATTACH/DETACH）
-- ✅ 查询能力（JOIN/UNION/INTERSECT/EXCEPT 含 ALL 语义、基础 GROUP BY/窗口函数/CTE/LATERAL、未关联单列 IN/NOT IN）
+- ✅ 查询能力（JOIN/UNION/INTERSECT/EXCEPT 含 ALL 语义、基础 GROUP BY/窗口函数/CTE/LATERAL、未关联单列 IN/NOT IN、未关联单表 EXISTS/NOT EXISTS）
 - ✅ Volcano 并行 heap scan（page-range workers、确定性 Gather、串行结果等价性）
 - ✅ 工具命令（SHOW/EXPLAIN/ANALYZE/VACUUM/CHECKPOINT）
 - ✅ INSERT 省略列名 / ALTER RENAME / CREATE TABLE AS SELECT

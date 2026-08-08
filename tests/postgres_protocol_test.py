@@ -441,6 +441,18 @@ def main():
             sock, "SELECT id FROM sub_outer "
             "WHERE id NOT IN (SELECT id FROM sub_inner WHERE enabled = 1)"))
         assert anti_rows == [], anti_rows
+        exists_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE EXISTS (SELECT 1 FROM sub_inner WHERE enabled = 1)"))
+        assert exists_rows == [[b"1"], [b"2"], [b"3"], [b"4"]], exists_rows
+        not_exists_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE NOT EXISTS (SELECT 1 FROM sub_inner WHERE enabled = 9)"))
+        assert not_exists_rows == [[b"1"], [b"2"], [b"3"], [b"4"]], not_exists_rows
+        not_exists_hit_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM sub_outer "
+            "WHERE NOT EXISTS (SELECT 1 FROM sub_inner WHERE enabled = 1)"))
+        assert not_exists_hit_rows == [], not_exists_hit_rows
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT SELECT ON t TO analyst"))
         assert any(kind == b"C" for kind, _ in simple_query(

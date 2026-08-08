@@ -108,7 +108,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | JOIN (INNER/LEFT/RIGHT/FULL/CROSS/NATURAL) | ✅ | ✅ | ✅ |
 | **SEMI/ANTI JOIN** | ✅ | ⚠️ | 未关联单列 `IN`/`NOT IN` 已由 `SemiJoinOp`（anti 模式）执行；显式 JOIN 语法、关联性和完整 planner 语义仍缺 |
 | **LATERAL JOIN** | ✅ | ❌ | 缺 |
-| Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ⚠️ | 未关联单列 `IN`/`NOT IN` 进入 Volcano semi/anti plan；EXISTS、ANY/ALL、标量、关联和复杂组合回退 legacy |
+| Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ⚠️ | 未关联单列 `IN`/`NOT IN` 进入 Volcano semi/anti plan；未关联单表 `EXISTS`/`NOT EXISTS` 进入 `ExistenceFilterOp`；ANY/ALL、标量、关联和复杂组合回退 legacy |
 | CTE (WITH/RECURSIVE) | ✅ | ✅ (parser + executor) | ✅ 基础 + RETURNING |
 | UNION/INTERSECT/EXCEPT | ✅ | ⚠️ AST 已按优先级/左结合解析，组合统一走 Volcano `SetOperationOp`；简单 operand 直接计划，复杂 operand 经 `MaterializedRowsOp` 接 legacy producer（含 ALL） | ⚠️ AST 到计划的全量下推、类型合并/collation 和完整作用域仍缺 |
 | Window Functions (ROW_NUMBER/RANK/...) | ✅ | ⚠️ `WindowOp` 已执行常见排名/偏移、窗口聚合及 `ROWS/RANGE/GROUPS` frame/exclusion，`OffsetOp` 已接入；复杂窗口仍走 legacy | ⚠️ 复杂表达式和完整 planner/explain 语义仍缺 |

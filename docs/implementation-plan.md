@@ -655,7 +655,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 5.9 实现 `RETURNING` `OLD`/`NEW` aliases、trigger-modified rows 精确行为 | 6.12, 1.1.41 等 | 基础 RETURNING 已就绪 |
 | ✅ 5.10 实现 `UPDATE FROM` / `DELETE USING` 的语义安全实现（非文本拼接） | 6.11, 1.1.58, 1.1.35 | main.cpp UPDATE FROM multi-table + DELETE USING 已实现 |
 | ⚠️ 5.11 实现 Row locking 完整语义（`NO KEY UPDATE` / `KEY SHARE`、OF list） | 6.9 | parser 已识别多种锁子句；当前执行器主要覆盖基础单表 FOR UPDATE/SHARE，JOIN/聚合/窗口和完整 OF/NOWAIT/SKIP LOCKED 语义仍缺。 |
-| ⚠️ 5.12 实现 subquery 完整语义（关联子查询、row comparison、NULL 语义） | 6.5 | 未关联单列 IN/NOT IN 已进入 Volcano semi/anti plan 并覆盖 NULL 语义；EXISTS/ANY/ALL、关联子查询、row comparison 和复杂组合仍缺。 |
+| ⚠️ 5.12 实现 subquery 完整语义（关联子查询、row comparison、NULL 语义） | 6.5 | 未关联单列 IN/NOT IN 已进入 Volcano semi/anti plan 并覆盖 NULL 语义；未关联单表 EXISTS/NOT EXISTS 已进入 ExistenceFilterOp；标量、ANY/ALL、关联子查询、row comparison 和复杂组合仍缺。 |
 | ⚠️ 5.13 实现 Join 完整语义（SEMI/ANTI、lateral 完整相关性、outer join predicate 推理） | 6.2 | INNER/LEFT/RIGHT/FULL/CROSS/NATURAL JOIN 基础路径已存在；未关联 IN/NOT IN 已有结构化 semi/anti 节点，显式 SEMI/ANTI、LATERAL 相关性、predicate 推理和完整结构化 join 仍缺。 |
 | ⚠️ 5.14 实现 Set operations 完整语义（类型合并、collation、ALL/DISTINCT 作用域） | 6.3 | UNION/INTERSECT/EXCEPT [ALL/DISTINCT] 已由 Volcano 组合；复杂 operand、类型合并、collation 和完整作用域仍缺。 |
 | ⚠️ 5.15 实现 `GROUP BY` functionally dependent、`GROUPING_ID` 完整语义 | 6.7 | 普通聚合与常见 GROUP BY/ROLLUP/CUBE/GROUPING SETS 已接入过滤后的 `GroupAggregateOp`，并有文本/JSON EXPLAIN；functional dependency、复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍缺。 |

@@ -605,8 +605,39 @@ static void test_semi_and_anti_join() {
         dbms::QueryPlanner::buildSelectPlan(&g_engine, nullAntiCtx));
     assert(nullAntiRows.empty());
 
+    dbms::PlanContext existsCtx;
+    existsCtx.dbname = db;
+    existsCtx.tablename = "outer_t";
+    existsCtx.selectCols = {"id"};
+    existsCtx.existenceFilters.push_back({
+        db, "inner_t", dbms::StorageEngine::parseConditions({"=enabled 1"}), false});
+    auto existsPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, existsCtx);
+    auto* existsProject = dynamic_cast<dbms::ProjectOp*>(existsPlan.get());
+    assert(existsProject);
+    auto* exists = dynamic_cast<dbms::ExistenceFilterOp*>(existsProject->child());
+    assert(exists && !exists->isAnti());
+    auto existsRows = dbms::QueryPlanner::executePlan(std::move(existsPlan));
+    assert((existsRows == std::vector<std::string>{"1 ", "2 ", "3 ", "4 "}));
+
+    dbms::PlanContext notExistsCtx = existsCtx;
+    notExistsCtx.existenceFilters = {{
+        db, "inner_t", dbms::StorageEngine::parseConditions({"=enabled 9"}), true}};
+    auto notExistsPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, notExistsCtx);
+    auto* notExistsProject = dynamic_cast<dbms::ProjectOp*>(notExistsPlan.get());
+    assert(notExistsProject);
+    auto* notExists = dynamic_cast<dbms::ExistenceFilterOp*>(notExistsProject->child());
+    assert(notExists && notExists->isAnti());
+    auto notExistsRows = dbms::QueryPlanner::executePlan(std::move(notExistsPlan));
+    assert((notExistsRows == std::vector<std::string>{"1 ", "2 ", "3 ", "4 "}));
+
+    auto explainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, existsCtx);
+    const auto explain = dbms::QueryPlanner::explain(explainPlan, &g_engine, db);
+    assert(explain.find("ExistenceFilter") != std::string::npos);
+    const auto explainJson = dbms::QueryPlanner::explainJson(explainPlan, &g_engine, db);
+    assert(explainJson.find("\"nodeType\":\"ExistenceFilter\"") != std::string::npos);
+
     cleanup(db);
-    std::cout << "[VOLCANO-5.1] SemiJoin/AntiJoin IN NULL semantics OK" << std::endl;
+    std::cout << "[VOLCANO-5.1] SemiJoin/AntiJoin and ExistenceFilter semantics OK" << std::endl;
 }
 
 int main() {
