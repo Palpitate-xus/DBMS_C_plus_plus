@@ -11676,7 +11676,8 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
 
 std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                              const std::string& tablename,
-                                             const std::vector<Condition>& conds) {
+                                             const std::vector<Condition>& conds,
+                                             bool* usedIndex) {
     std::set<int64_t> ids;
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -11713,6 +11714,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                         }
                         for (auto r : toRemove) ids.erase(r);
                     }
+                    if (usedIndex) *usedIndex = true;
                     return ids;
                 }
             }
@@ -11806,6 +11808,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     }
                     for (auto r : toRemove) ids.erase(r);
                 }
+                if (usedIndex) *usedIndex = true;
                 return ids;
             }
         }
@@ -11833,6 +11836,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                         }
                         for (auto r : toRemove) ids.erase(r);
                     }
+                    if (usedIndex) *usedIndex = true;
                     return ids;
                 }
             }
@@ -11872,24 +11876,13 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     }
                     for (auto r : toRemove) ids.erase(r);
                 }
+                if (usedIndex) *usedIndex = true;
                 return ids;
             }
         }
     }
 
-    // Collect BRIN-suggested page ranges to narrow full scan
-    std::vector<std::pair<uint32_t, uint32_t>> brinRanges;
-    for (const auto& c : conds) {
-        if (hasBrinIndex(dbname, tablename, c.colName)) {
-            auto ranges = brinSearchRange(dbname, tablename, c.colName, c.op, c.value);
-            if (!ranges.empty()) {
-                brinRanges = ranges;
-                break; // Use first applicable BRIN index
-            }
-        }
-    }
-
-    // Full table scan via page iterator (with optional BRIN page-range filtering)
+    // Full table scan via page iterator.
     // Partition pruning: if conditions involve partition key, scan only matching partitions
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         auto targetParts = getTargetPartitions(tbl, conds);
@@ -13720,6 +13713,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
 
     auto conds = parseConditions(allConditions);
     std::vector<std::pair<int64_t, std::string>> matchRows;
+    bool usedIndex = false;
     if (conds.empty()) {
         forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
@@ -13737,7 +13731,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             if (match) matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
         }, rv, targetParts);
     } else {
-        auto ids = filterRows(dbname, tablename, conds);
+        auto ids = filterRows(dbname, tablename, conds, &usedIndex);
         for (int64_t rid : ids) {
             std::string row;
             if (readRowByRid(pa, rid, row, tbl)) {
@@ -14018,7 +14012,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         result.push_back(rowStr);
     }
     lockManager_.unlock(tablename);
-    dbms::recordTableScan(dbname, tablename, matchRows.size(), false, conds.empty());
+    dbms::recordTableScan(dbname, tablename, matchRows.size(), usedIndex, conds.empty());
     return result;
 }
 

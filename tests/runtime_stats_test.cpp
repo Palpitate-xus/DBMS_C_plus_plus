@@ -29,6 +29,7 @@ int main() {
     dbms::recordTableMutation("db1", "users", dbms::TableMutation::Update, 2);
     dbms::recordTableMutation("db1", "users", dbms::TableMutation::Delete, 1);
     dbms::recordTableScan("db1", "users", 2, false, true);
+    dbms::recordTableScan("db1", "users", 1, true, false);
 
     const auto db1 = dbms::getRuntimeDatabaseStats("db1");
     assert(db1.size() == 1);
@@ -42,6 +43,8 @@ int main() {
     assert(tables.size() == 1);
     assert(tables[0].seqScan == 1);
     assert(tables[0].seqTupRead == 2);
+    assert(tables[0].idxScan == 1);
+    assert(tables[0].idxTupFetch == 1);
     assert(tables[0].nTupIns == 3);
     assert(tables[0].nTupUpd == 2);
     assert(tables[0].nTupDel == 1);

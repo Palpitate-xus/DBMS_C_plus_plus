@@ -90,7 +90,7 @@
 - **MVCC 行格式**：每行开头为 PostgreSQL 风格 HeapTupleHeader（含 xmin/xmax/ctid、null bitmap 和对齐信息）
 - **统计信息**：`ANALYZE TABLE` 收集行数、列基数、最小/最大值、MCV（最常出现值）、多列统计
 - **SQL 可观测性**：`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表提供线程安全的调用次数及耗时聚合；统计当前为进程内生命周期
-- **运行时统计**：共享 `RuntimeStats` 记录数据库查询/失败/事务及表扫描、插入、更新、删除计数，供 `SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 使用；当前为进程内统计
+- **运行时统计**：共享 `RuntimeStats` 在 SQL、StorageEngine 和 Volcano 扫描算子边界记录数据库查询/失败/事务、顺序扫描、索引扫描及 DML 计数，供 `SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 使用；当前为进程内统计
 - **VACUUM**：`VACUUM [tablename]` 回收已删除行占用的空间，页压缩并归还空页
 - **自动 VACUUM**：可配置阈值，死行数达到阈值时自动触发
 

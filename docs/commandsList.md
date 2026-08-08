@@ -1013,7 +1013,7 @@ SHOW STATUS;
 
 ### pg_stat_database / pg_stat_tables
 
-**说明** `pg_stat_database` 提供数据库级查询、事务和返回行计数；`pg_stat_tables` 提供当前数据库表扫描、DML 行数及近似存活行数。数据由共享 `RuntimeStats` 在进程内实时更新，重启后清空。
+**说明** `pg_stat_database` 提供数据库级查询、事务和返回行计数；`pg_stat_tables` 提供当前数据库表的顺序扫描、索引扫描、索引取行、DML 行数及近似存活行数。数据由共享 `RuntimeStats` 在 SQL/执行器/存储边界实时更新，重启后清空。
 
 **示例**
 ```sql

@@ -416,6 +416,10 @@ def main():
             sock, "GRANT analyst TO bob"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE INDEX t_id_idx ON t(id)"))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM t WHERE id = 1")) == [[b"1"]]
         database_stats = data_row_values(simple_query(
             sock, "SELECT * FROM pg_catalog.pg_stat_database"))
         info_stats = next((row for row in database_stats if row and row[0] == b"info"), None)
@@ -425,6 +429,7 @@ def main():
             sock, "SELECT * FROM pg_catalog.pg_stat_tables"))
         table_row = next((row for row in table_stats if row and row[0] == b"t"), None)
         assert table_row is not None and len(table_row) == 9, table_stats
+        assert int(table_row[3]) >= 1 and int(table_row[4]) >= 1, table_row
         assert int(table_row[5]) >= 1 and int(table_row[8]) >= 1, table_row
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE aggregate_t (id INT, amount INT)"))

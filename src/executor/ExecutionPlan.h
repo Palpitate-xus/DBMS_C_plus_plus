@@ -80,6 +80,7 @@ private:
     std::vector<std::pair<int64_t, std::string>> rows_;
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
+    bool statsRecorded_ = false;
 };
 
 // ParallelTableScan: partition a non-partitioned heap by page ranges.  It
@@ -109,6 +110,7 @@ private:
     size_t pos_ = 0;
     bool usedParallelWorkers_ = false;
     int64_t lastRid_ = 0;
+    bool statsRecorded_ = false;
 };
 
 // ========================================================================
@@ -137,6 +139,7 @@ private:
     std::vector<int64_t> rids_;
     size_t pos_ = 0;
     bool isPK_ = false;
+    bool statsRecorded_ = false;
 };
 
 // ========================================================================
@@ -170,6 +173,7 @@ private:
     TableSchema tbl_;
     std::vector<int64_t> rids_;
     size_t pos_ = 0;
+    bool statsRecorded_ = false;
 };
 
 // BitmapHeapScan: intersect candidate RIDs from multiple equality indexes,
@@ -194,6 +198,7 @@ private:
     std::vector<int64_t> rids_;
     std::vector<std::string> rows_;
     size_t pos_ = 0;
+    bool statsRecorded_ = false;
 };
 
 // BitmapOrHeapScan: build one candidate RID set per AND branch, union the
@@ -218,6 +223,7 @@ private:
     TableSchema tbl_;
     std::vector<std::string> rows_;
     size_t pos_ = 0;
+    bool statsRecorded_ = false;
 };
 
 // ========================================================================

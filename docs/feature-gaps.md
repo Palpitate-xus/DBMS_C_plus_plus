@@ -187,14 +187,14 @@
 
 ### P1-6: 后台统计收集器 (Stats Collector)
 - **类别**: 可观测性 / 运行时统计
-- **现状**: 已有线程安全 `process/RuntimeStats`，在 SQL 执行、StorageEngine 表扫描和 DML 边界记录数据库/表级运行时计数；`SHOW STATUS`、`pg_stat_database`、`pg_stat_tables` 已消费真实进程内数据。仍无独立后台采样线程、持久化、完整索引访问分类和 planner 深度反馈。
+- **现状**: 已有线程安全 `process/RuntimeStats`，在 SQL 执行、StorageEngine、Volcano 顺序/索引扫描算子和 DML 边界记录数据库/表级运行时计数；`SHOW STATUS`、`pg_stat_database`、`pg_stat_tables` 已消费真实进程内数据，协议回归覆盖 `idx_scan`/`idx_tup_fetch`。仍无独立后台采样线程、持久化、按索引方法的完整分类和 planner 深度反馈。
 - **PG 参考**: `pg_stat_database`, `pg_stat_user_tables`, `pg_stat_activity`
 - **影响**: 基础运行监控已可用，但重启丢失，统计维度和 planner 反馈仍不足以替代 PostgreSQL 的完整 collector
 - **实现路径**:
-  1. ✅ 共享 `RuntimeStats` 在执行器/存储边界记录数据库和表级计数
+  1. ✅ 共享 `RuntimeStats` 在执行器/存储边界记录数据库和表级计数，包含顺序扫描、索引扫描和索引取行
   2. ✅ 实现 `pg_stat_*` 统计子集 + `SHOW STATUS` 运行时字段
   3. 在 `QueryPlanner` 中使用运行时统计做成本估计
-  4. 补充独立后台采样线程、持久化、索引细分和 `stats_collector` GUC
+  4. 补充独立后台采样线程、持久化、按索引方法细分和 `stats_collector` GUC
 - **预估工作量**: 1 周
 - **相关文件**: `src/process/RuntimeStats.{h,cpp}`, `src/main.cpp`, `src/network/NetworkServer.cpp`, `src/commands/TableManage.cpp`
 

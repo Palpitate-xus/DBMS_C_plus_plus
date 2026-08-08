@@ -1132,7 +1132,8 @@ private:
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,
-                                 const std::vector<Condition>& conds);
+                                 const std::vector<Condition>& conds,
+                                 bool* usedIndex = nullptr);
 
 private:
     mutable LockManager lockManager_;

@@ -186,7 +186,7 @@
 
 2026-08-08 SQL 可观测性收敛：新增独立线程安全 `process/SqlStats`，统一交互式和 PostgreSQL 协议入口；常量/空白归一化聚合，提供 `SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表查询。持久化、大小上限、reset 权限和完整字段仍待后续。
 
-2026-08-08 运行时统计收敛：新增线程安全 `process/RuntimeStats`，在 SQL 执行、表扫描和 StorageEngine DML 边界记录数据库/表计数；`SHOW STATUS`、`pg_stat_database`、`pg_stat_tables` 改为读取真实进程内数据。后台采样、持久化、索引细分和 planner 反馈仍待后续。
+2026-08-08 运行时统计收敛：新增线程安全 `process/RuntimeStats`，在 SQL 执行、Volcano 顺序/索引扫描算子、表扫描和 StorageEngine DML 边界记录数据库/表计数；`SHOW STATUS`、`pg_stat_database`、`pg_stat_tables` 改为读取真实进程内数据，并通过协议回归验证 `idx_scan`/`idx_tup_fetch`。后台采样、持久化、按索引方法细分和 planner 反馈仍待后续。
 
 历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=124 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 

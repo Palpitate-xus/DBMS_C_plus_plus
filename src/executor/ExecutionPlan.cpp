@@ -1,5 +1,6 @@
 #include "ExecutionPlan.h"
 #include "Config.h"
+#include "process/RuntimeStats.h"
 #include "types/numeric.h"
 
 #include <algorithm>
@@ -90,6 +91,10 @@ bool TableScanOp::open() {
             rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
         });
     pos_ = 0;
+    if (!statsRecorded_) {
+        recordTableScan(dbname_, tablename_, rows_.size(), false, true);
+        statsRecorded_ = true;
+    }
     return true;
 }
 
@@ -108,6 +113,7 @@ bool TableScanOp::lastColumnIsNull(size_t colIdx) const {
 void TableScanOp::close() {
     rows_.clear();
     lastRid_ = 0;
+    statsRecorded_ = false;
 }
 
 // ========================================================================
@@ -133,7 +139,13 @@ bool ParallelTableScanOp::open() {
                 std::string row(data, len);
                 row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
                 rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
-            });
+        });
+    };
+    auto recordScan = [this]() {
+        if (!statsRecorded_) {
+            recordTableScan(dbname_, tablename_, rows_.size(), false, true);
+            statsRecorded_ = true;
+        }
     };
 
     // Do not move transaction-local visibility/SSI state to anonymous worker
@@ -141,14 +153,19 @@ bool ParallelTableScanOp::open() {
     if (workers_ <= 1 || engine_->inTransaction() ||
         tbl_.partitionType != TableSchema::PartitionType::None) {
         appendSequential();
+        recordScan();
         return true;
     }
 
     const uint32_t pageCount = engine_->tableNumPages(dbname_, tablename_);
-    if (pageCount <= 1) return true;
+    if (pageCount <= 1) {
+        recordScan();
+        return true;
+    }
     const int activeWorkers = std::min<int>(workers_, static_cast<int>(pageCount - 1));
     if (activeWorkers <= 1) {
         appendSequential();
+        recordScan();
         return true;
     }
 
@@ -181,6 +198,7 @@ bool ParallelTableScanOp::open() {
             rows_.push_back(std::move(row));
         }
     }
+    recordScan();
     return true;
 }
 
@@ -199,6 +217,7 @@ void ParallelTableScanOp::close() {
     rows_.clear();
     pos_ = 0;
     lastRid_ = 0;
+    statsRecorded_ = false;
 }
 
 // ========================================================================
@@ -213,6 +232,7 @@ IndexScanOp::IndexScanOp(StorageEngine* engine, const std::string& dbname,
 
 bool IndexScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
+    rids_.clear();
     // Check if this is a PK scan
     size_t pkIdx = tbl_.len;
     for (size_t i = 0; i < tbl_.len; ++i) {
@@ -235,6 +255,10 @@ bool IndexScanOp::open() {
         }
     }
     pos_ = 0;
+    if (!statsRecorded_) {
+        recordTableScan(dbname_, tablename_, rids_.size(), true, false);
+        statsRecorded_ = true;
+    }
     return true;
 }
 
@@ -259,6 +283,7 @@ bool IndexScanOp::next(std::string& outRow) {
 
 void IndexScanOp::close() {
     rids_.clear();
+    statsRecorded_ = false;
 }
 
 // ========================================================================
@@ -300,6 +325,10 @@ bool IndexOnlyScanOp::open() {
         }
     }
     pos_ = 0;
+    if (!statsRecorded_) {
+        recordTableScan(dbname_, tablename_, rids_.size(), true, false);
+        statsRecorded_ = true;
+    }
     return true;
 }
 
@@ -369,6 +398,7 @@ bool IndexOnlyScanOp::next(std::string& outRow) {
 
 void IndexOnlyScanOp::close() {
     rids_.clear();
+    statsRecorded_ = false;
 }
 
 static bool collectEqualityIndexCandidates(
@@ -465,6 +495,10 @@ bool BitmapHeapScanOp::open() {
         if (!engine_->readRowByRid(allocator, rid, row, tbl_)) continue;
         rows_.push_back(engine_->resolveToastValues(dbname_, tablename_, row, tbl_));
     }
+    if (!statsRecorded_) {
+        recordTableScan(dbname_, tablename_, rows_.size(), true, false);
+        statsRecorded_ = true;
+    }
     return true;
 }
 
@@ -478,6 +512,7 @@ void BitmapHeapScanOp::close() {
     rids_.clear();
     rows_.clear();
     pos_ = 0;
+    statsRecorded_ = false;
 }
 
 // ========================================================================
@@ -551,6 +586,10 @@ bool BitmapOrHeapScanOp::open() {
         }
         if (matches) rows_.push_back(std::move(row));
     }
+    if (!statsRecorded_) {
+        recordTableScan(dbname_, tablename_, rows_.size(), true, false);
+        statsRecorded_ = true;
+    }
     return true;
 }
 
@@ -563,6 +602,7 @@ bool BitmapOrHeapScanOp::next(std::string& outRow) {
 void BitmapOrHeapScanOp::close() {
     rows_.clear();
     pos_ = 0;
+    statsRecorded_ = false;
 }
 
 // ========================================================================

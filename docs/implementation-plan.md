@@ -13,7 +13,7 @@
 
 SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议入口共同使用，按数据库及归一化 SQL 聚合调用次数和耗时；`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。持久化、大小上限和完整 PostgreSQL 统计字段仍列为后续缺口。
 
-运行时统计已统一到 `process/RuntimeStats`：SQL 执行、StorageEngine 表扫描和 DML 边界共享记录数据库/表级计数，`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 已读取真实进程内数据；后台采样线程、持久化、索引细分和 planner 反馈仍列为后续缺口。
+运行时统计已统一到 `process/RuntimeStats`：SQL 执行、StorageEngine、Volcano 顺序/索引扫描算子和 DML 边界共享记录数据库/表级计数，`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 已读取真实进程内数据；后台采样线程、持久化、按索引方法细分和 planner 反馈仍列为后续缺口。
 
 窗口执行器已将常见排名/偏移、窗口聚合和 `ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 接入 `WindowOp`/`OffsetOp`，并通过 Volcano 单元和窗口 E2E 验证；复杂目标与主 SQL EXPLAIN 窗口解析仍待迁移。
 

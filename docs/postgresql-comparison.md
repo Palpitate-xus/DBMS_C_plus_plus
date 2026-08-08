@@ -237,7 +237,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | Background workers | ✅ | ⚠️ 框架 | 11 种类型 |
 | WALWriter / BgWriter / Checkpointer | ✅ | ✅ | ✅ |
 | Autovacuum | ✅ | ⚠️ 框架 | |
-| Stats collector | ✅ | ⚠️ | 有 RuntimeStats 事件计数子集，后台采样/持久化仍缺 |
+| Stats collector | ✅ | ⚠️ | 有 RuntimeStats 事件计数子集（含顺序/索引扫描与索引取行），后台采样/持久化和完整索引维度仍缺 |
 | **连接池** | ✅ (外部) | ✅ | ✅ |
 | **最大连接数** | ✅ | ✅ | ✅ |
 | **pg_stat_activity** | ✅ | ⚠️ | 有进程列表风格子集，完整 backend 状态和 wait event 语义仍缺 |
@@ -330,7 +330,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 4. **GROUP BY/aggregate 完整语义** — 普通聚合与 `GroupAggregateOp` 已覆盖基础路径；复杂目标、`GROUPING()`/`GROUPING_ID`、类型推导和完整排序作用域仍待迁移
 5. **GiST 索引** — 全文搜索基础架构缺
 6. **TOAST 完整语义** — 当前线外值使用 zlib 压缩；lz4/pglz、压缩策略、`toast_tuple_target` 和 PG pointer/catalog 仍待完成
-7. **后台 stats_collector** — 已有 `RuntimeStats` 在执行/存储边界收集进程内数据库和表计数，并接入 `SHOW STATUS`/`pg_stat_database`/`pg_stat_tables`；后台采样线程、持久化和完整维度仍缺
+7. **后台 stats_collector** — 已有 `RuntimeStats` 在执行/存储边界收集进程内数据库和表计数，并接入 `SHOW STATUS`/`pg_stat_database`/`pg_stat_tables`，Volcano 扫描算子也会记录顺序/索引扫描及索引取行；后台采样线程、持久化和完整索引维度仍缺
 8. **PL/pgSQL 运行时** — 存储过程解释执行缺
 9. **并行 Vacuum** — Autovacuum 已工作但非并行
 
