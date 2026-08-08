@@ -656,6 +656,21 @@ def main():
         assert simple_query(peer_sock, "BEGIN")[-1] == (b"Z", b"T")
         assert data_row_values(simple_query(peer_sock, "SELECT id FROM t")) == [[b"1"], [b"3"]]
         assert simple_query(peer_sock, "ROLLBACK")[-1] == (b"Z", b"I")
+
+        # Transaction options and savepoint routing must be parsed structurally
+        # rather than by fixed string offsets.
+        assert simple_query(
+            sock, "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY")[-1] == (b"Z", b"T")
+        assert data_row_values(simple_query(sock, "SELECT id FROM t")) == [[b"1"], [b"3"]]
+        assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        assert simple_query(sock, "START TRANSACTION READ COMMITTED READ WRITE")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (20)"))
+        assert any(kind == b"C" for kind, _ in simple_query(sock, "SAVEPOINT sp_tx"))
+        assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (21)"))
+        assert simple_query(sock, "ROLLBACK TO SAVEPOINT sp_tx")[-1] == (b"Z", b"T")
+        assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
+        assert data_row_values(simple_query(sock, "SELECT id FROM t WHERE id >= 20")) == [[b"20"]]
+
         peer_sock.sendall(typed(b"X"))
         peer_sock.close()
 
@@ -676,7 +691,7 @@ def main():
         observer_sock.connect(("127.0.0.1", port))
         startup(observer_sock, "alice", "info")
         assert simple_query(observer_sock, "BEGIN")[-1] == (b"Z", b"T")
-        assert data_row_values(simple_query(observer_sock, "SELECT id FROM t")) == [[b"1"], [b"3"]]
+        assert data_row_values(simple_query(observer_sock, "SELECT id FROM t")) == [[b"1"], [b"3"], [b"20"]]
         assert simple_query(observer_sock, "ROLLBACK")[-1] == (b"Z", b"I")
         observer_sock.sendall(typed(b"X"))
         observer_sock.close()
@@ -688,7 +703,7 @@ def main():
         role_sock.connect(("127.0.0.1", port))
         startup(role_sock, "bob", "info", password="bObPass9!")
         role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
-        assert role_rows == [[b"1"], [b"3"]], role_rows
+        assert role_rows == [[b"1"], [b"3"], [b"20"]], role_rows
         denied_rows = simple_query(role_sock, "INSERT INTO t VALUES (99)")
         assert any(kind == b"E" for kind, _ in denied_rows)
         role_sock.sendall(typed(b"X"))

@@ -19,6 +19,8 @@ ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权，
 
 事务运行时补强了 backend 隔离：共享 `StorageEngine` 的事务执行上下文改为当前连接工作线程局部，避免事务 ID、快照、回滚日志、savepoint、隔离级别和 `lastval` 在连接之间泄漏；连接结束时回滚未完成事务并清理上下文；跨 backend 的锁管理和提交状态仍保持全局协调，后续继续补齐更完整的 session/statement 生命周期语义。
 
+TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START TRANSACTION` 的 isolation/read-only/deferrable 选项及 savepoint 名称，执行器消费 AST；修复 `ROLLBACK TO`、`COMMIT PREPARED`、`ROLLBACK PREPARED` 被通用前缀提前匹配的问题。`DEFERRABLE` 仍在执行层 fail-closed 拒绝，待安全快照语义完成后再开放。
+
 ### 当前代码路径审计覆盖层
 
 下表优先于后续历史 Wave 的 `✅` 标记；只有同时具备真实运行时路径和回归/故障验证，才可标记为已完成。

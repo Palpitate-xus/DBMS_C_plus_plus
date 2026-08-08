@@ -2,7 +2,7 @@
 // Covers SET/SHOW/RESET, EXPLAIN, CREATE INDEX/VIEW, ALTER TABLE,
 // SELECT extensions (GROUP BY ROLLUP/CUBE/GROUPING SETS, ORDER BY NULLS FIRST/LAST,
 // LIMIT WITH TIES, FETCH FIRST), function calls (named args, window, schema-qualified),
-// and VALUES.
+// and VALUES, transaction option/savepoint parsing.
 
 #include "parser.h"
 #include "ast.h"
@@ -267,6 +267,65 @@ int main() {
         auto* c3 = dynamic_cast<const CommentStmt*>(r3.stmt.get());
         assert(c3 && c3->objectType == "MATERIALIZED VIEW" && c3->objectName == "mv");
         std::cout << "[PARSER P1] COMMENT ON OK\n";
+    }
+
+    // 16. Transaction options and savepoint names
+    {
+        assert(SQLParser::classify("ROLLBACK TO SAVEPOINT sp1") ==
+               SqlCommand::RollbackToSavepoint);
+        assert(SQLParser::classify("ROLLBACK PREPARED 'gx1'") ==
+               SqlCommand::RollbackPrepared);
+        assert(SQLParser::classify("COMMIT PREPARED 'gx1'") ==
+               SqlCommand::CommitPrepared);
+
+        auto commitPrepared = parser.parse("COMMIT PREPARED 'gx1';");
+        assert(commitPrepared.success);
+        auto* commitPreparedTxn = dynamic_cast<const TransactionStmt*>(commitPrepared.stmt.get());
+        assert(commitPreparedTxn && commitPreparedTxn->kind == TransactionStmt::Kind::CommitPrepared &&
+               commitPreparedTxn->gid == "'gx1'");
+
+        auto rollbackPrepared = parser.parse("ROLLBACK PREPARED 'gx1';");
+        assert(rollbackPrepared.success);
+        auto* rollbackPreparedTxn = dynamic_cast<const TransactionStmt*>(rollbackPrepared.stmt.get());
+        assert(rollbackPreparedTxn && rollbackPreparedTxn->kind == TransactionStmt::Kind::RollbackPrepared &&
+               rollbackPreparedTxn->gid == "'gx1'");
+
+        auto begin = parser.parse(
+            "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY");
+        assert(begin.success);
+        auto* beginTxn = dynamic_cast<const TransactionStmt*>(begin.stmt.get());
+        assert(beginTxn && beginTxn->kind == TransactionStmt::Kind::Begin);
+        assert(beginTxn->isolation == IsolationLevel::SERIALIZABLE);
+        assert(beginTxn->readOnly && !beginTxn->deferrable);
+
+        auto start = parser.parse("START TRANSACTION READ COMMITTED READ WRITE NOT DEFERRABLE");
+        assert(start.success);
+        auto* startTxn = dynamic_cast<const TransactionStmt*>(start.stmt.get());
+        assert(startTxn && startTxn->kind == TransactionStmt::Kind::Start);
+        assert(startTxn->isolation == IsolationLevel::READ_COMMITTED);
+        assert(!startTxn->readOnly && !startTxn->deferrable);
+
+        auto save = parser.parse("SAVEPOINT sp1");
+        assert(save.success);
+        auto* saveTxn = dynamic_cast<const TransactionStmt*>(save.stmt.get());
+        assert(saveTxn && saveTxn->kind == TransactionStmt::Kind::Savepoint &&
+               saveTxn->savepointName == "sp1");
+
+        auto release = parser.parse("RELEASE SAVEPOINT sp1");
+        assert(release.success);
+        auto* releaseTxn = dynamic_cast<const TransactionStmt*>(release.stmt.get());
+        assert(releaseTxn && releaseTxn->kind == TransactionStmt::Kind::Release &&
+               releaseTxn->savepointName == "sp1");
+
+        auto rollbackTo = parser.parse("ROLLBACK TO sp1;");
+        assert(rollbackTo.success);
+        auto* rollbackTxn = dynamic_cast<const TransactionStmt*>(rollbackTo.stmt.get());
+        assert(rollbackTxn && rollbackTxn->kind == TransactionStmt::Kind::RollbackTo &&
+               rollbackTxn->savepointName == "sp1");
+
+        assert(!parser.parse("BEGIN ISOLATION LEVEL nonsense").success);
+        assert(!parser.parse("SAVEPOINT").success);
+        std::cout << "[PARSER P1] transaction options/savepoints OK\n";
     }
 
     std::cout << "[PARSER P1] all passed\n";

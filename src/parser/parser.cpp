@@ -500,18 +500,20 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     if (lsql.substr(0, 5) == "begin") return SqlCommand::Begin;
     if (lsql.substr(0, 5) == "start" && lsql.find("transaction") != std::string::npos)
         return SqlCommand::StartTransaction;
+    // Specific transaction forms must precede their generic prefixes.
+    // Otherwise ROLLBACK TO/PREPARED and COMMIT PREPARED are unreachable.
+    if (lsql.substr(0, 15) == "commit prepared") return SqlCommand::CommitPrepared;
+    if (lsql.substr(0, 17) == "rollback prepared") return SqlCommand::RollbackPrepared;
+    if (lsql.substr(0, 11) == "rollback to" &&
+        (lsql.size() == 11 || std::isspace(static_cast<unsigned char>(lsql[11]))))
+        return SqlCommand::RollbackToSavepoint;
     if (lsql.substr(0, 6) == "commit") return SqlCommand::Commit;
     if (lsql.substr(0, 8) == "rollback") return SqlCommand::Rollback;
     if (lsql.substr(0, 5) == "abort") return SqlCommand::Abort;
     if (lsql.substr(0, 3) == "end") return SqlCommand::End;
     if (lsql.substr(0, 9) == "savepoint") return SqlCommand::Savepoint;
     if (lsql.substr(0, 7) == "release") return SqlCommand::ReleaseSavepoint;
-    if (lsql.substr(0, 16) == "rollback to savepoint" ||
-        lsql.substr(0, 19) == "rollback to savepoint")
-        return SqlCommand::RollbackToSavepoint;
     if (lsql.substr(0, 17) == "prepare transaction") return SqlCommand::PrepareTransaction;
-    if (lsql.substr(0, 15) == "commit prepared") return SqlCommand::CommitPrepared;
-    if (lsql.substr(0, 17) == "rollback prepared") return SqlCommand::RollbackPrepared;
 
     // DCL
     if (lsql.substr(0, 5) == "grant") return SqlCommand::Grant;
@@ -682,9 +684,10 @@ ParseResult SQLParser::parse(const std::string& sql) {
 
         case SqlCommand::Begin: case SqlCommand::StartTransaction:
             return parseBegin(sql);
-        case SqlCommand::Commit:
+        case SqlCommand::Commit: case SqlCommand::CommitPrepared:
             return parseCommit(sql);
         case SqlCommand::Rollback: case SqlCommand::Abort: case SqlCommand::End:
+        case SqlCommand::RollbackToSavepoint: case SqlCommand::RollbackPrepared:
             return parseRollback(sql);
         case SqlCommand::Savepoint:
             return parseSavepoint(sql);
@@ -2853,52 +2856,272 @@ ParseResult SQLParser::parseTruncate(const std::string&) {
 // 事务语句解析
 // ------------------------------------------------------------------------
 
-ParseResult SQLParser::parseBegin(const std::string&) {
+ParseResult SQLParser::parseBegin(const std::string& sql) {
     ParseResult r;
-    r.success = true;
-    auto stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::Begin);
-    // TODO: 解析隔离级别、只读、deferrable
+    auto tokens = tokenize(sql);
+    if (tokens.empty()) {
+        r.error = "empty transaction statement";
+        return r;
+    }
+
+    const std::string first = toLower(tokens[0]);
+    TransactionStmt::Kind kind;
+    size_t pos = 1;
+    if (first == "begin") {
+        kind = TransactionStmt::Kind::Begin;
+        if (pos < tokens.size() &&
+            (toLower(tokens[pos]) == "transaction" || toLower(tokens[pos]) == "work")) {
+            ++pos;
+        }
+    } else if (first == "start") {
+        kind = TransactionStmt::Kind::Start;
+        if (pos >= tokens.size() || toLower(tokens[pos]) != "transaction") {
+            r.error = "START requires TRANSACTION";
+            return r;
+        }
+        ++pos;
+    } else {
+        r.error = "invalid transaction start";
+        return r;
+    }
+
+    auto stmt = std::make_unique<TransactionStmt>(kind);
+    bool isolationSeen = false;
+    bool readModeSeen = false;
+    bool deferrableSeen = false;
+    while (pos < tokens.size()) {
+        const std::string word = toLower(tokens[pos]);
+        if (word == ";") {
+            ++pos;
+            if (pos != tokens.size()) {
+                r.error = "transaction terminator must be last";
+                return r;
+            }
+            break;
+        }
+        if (word == "isolation") {
+            if (isolationSeen) {
+                r.error = "transaction isolation specified more than once";
+                return r;
+            }
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "level") ++pos;
+            if (pos >= tokens.size()) {
+                r.error = "ISOLATION requires a level";
+                return r;
+            }
+            const std::string level = toLower(tokens[pos++]);
+            if (level == "serializable") {
+                stmt->isolation = IsolationLevel::SERIALIZABLE;
+            } else if (level == "repeatable" && pos < tokens.size() &&
+                       toLower(tokens[pos]) == "read") {
+                ++pos;
+                stmt->isolation = IsolationLevel::REPEATABLE_READ;
+            } else if (level == "read" && pos < tokens.size()) {
+                const std::string mode = toLower(tokens[pos++]);
+                if (mode == "committed") stmt->isolation = IsolationLevel::READ_COMMITTED;
+                else if (mode == "uncommitted") stmt->isolation = IsolationLevel::READ_UNCOMMITTED;
+                else {
+                    r.error = "invalid transaction isolation level";
+                    return r;
+                }
+            } else {
+                r.error = "invalid transaction isolation level";
+                return r;
+            }
+            isolationSeen = true;
+            continue;
+        }
+        if (word == "read" && pos + 1 < tokens.size() &&
+            (toLower(tokens[pos + 1]) == "committed" ||
+             toLower(tokens[pos + 1]) == "uncommitted")) {
+            if (isolationSeen) {
+                r.error = "transaction isolation specified more than once";
+                return r;
+            }
+            const std::string mode = toLower(tokens[pos + 1]);
+            stmt->isolation = mode == "committed"
+                ? IsolationLevel::READ_COMMITTED : IsolationLevel::READ_UNCOMMITTED;
+            pos += 2;
+            isolationSeen = true;
+            continue;
+        }
+        if (word == "read" && pos + 1 < tokens.size() &&
+            (toLower(tokens[pos + 1]) == "only" || toLower(tokens[pos + 1]) == "write")) {
+            if (readModeSeen) {
+                r.error = "transaction read mode specified more than once";
+                return r;
+            }
+            stmt->readOnly = toLower(tokens[pos + 1]) == "only";
+            pos += 2;
+            readModeSeen = true;
+            continue;
+        }
+        if (word == "deferrable" || (word == "not" && pos + 1 < tokens.size() &&
+                                      toLower(tokens[pos + 1]) == "deferrable")) {
+            if (deferrableSeen) {
+                r.error = "transaction deferrability specified more than once";
+                return r;
+            }
+            stmt->deferrable = word == "deferrable";
+            pos += word == "deferrable" ? 1 : 2;
+            deferrableSeen = true;
+            continue;
+        }
+        r.error = "unsupported transaction option: " + tokens[pos];
+        return r;
+    }
     r.stmt = std::move(stmt);
+    r.success = true;
     return r;
 }
 
-ParseResult SQLParser::parseCommit(const std::string&) {
+ParseResult SQLParser::parseCommit(const std::string& sql) {
     ParseResult r;
-    r.success = true;
+    auto tokens = tokenize(sql);
+    if (tokens.empty()) {
+        r.error = "empty commit statement";
+        return r;
+    }
     auto stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::Commit);
+    size_t pos = 1;
+    if (pos < tokens.size() && toLower(tokens[pos]) == "prepared") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ";") {
+            r.error = "COMMIT PREPARED requires a transaction ID";
+            return r;
+        }
+        stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::CommitPrepared);
+        stmt->gid = tokens[pos++];
+    }
+    if (stmt->kind == TransactionStmt::Kind::Commit && pos < tokens.size() &&
+        toLower(tokens[pos]) == "and") {
+        if (pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "chain") {
+            pos += 2;
+        } else if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "no" &&
+                   toLower(tokens[pos + 2]) == "chain") {
+            pos += 3;
+        } else {
+            r.error = "invalid COMMIT chain option";
+            return r;
+        }
+    }
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        r.error = "invalid COMMIT statement";
+        return r;
+    }
     r.stmt = std::move(stmt);
+    r.success = true;
     return r;
 }
 
 ParseResult SQLParser::parseRollback(const std::string& sql) {
     ParseResult r;
-    r.success = true;
-    SqlCommand cmd = classify(sql);
-    TransactionStmt::Kind kind;
-    switch (cmd) {
-        case SqlCommand::Rollback: kind = TransactionStmt::Kind::Rollback; break;
-        case SqlCommand::Abort:    kind = TransactionStmt::Kind::Abort; break;
-        case SqlCommand::End:      kind = TransactionStmt::Kind::End; break;
-        default:                   kind = TransactionStmt::Kind::Rollback; break;
+    auto tokens = tokenize(sql);
+    if (tokens.empty()) {
+        r.error = "empty rollback statement";
+        return r;
     }
-    r.stmt = std::make_unique<TransactionStmt>(kind);
+    size_t pos = 1;
+    TransactionStmt::Kind kind;
+    const std::string first = toLower(tokens[0]);
+    if (first == "abort") kind = TransactionStmt::Kind::Abort;
+    else if (first == "end") kind = TransactionStmt::Kind::End;
+    else if (first == "rollback") kind = TransactionStmt::Kind::Rollback;
+    else {
+        r.error = "invalid rollback statement";
+        return r;
+    }
+    auto stmt = std::make_unique<TransactionStmt>(kind);
+    if (first == "rollback" && pos < tokens.size() &&
+        toLower(tokens[pos]) == "prepared") {
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ";") {
+            r.error = "ROLLBACK PREPARED requires a transaction ID";
+            return r;
+        }
+        stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::RollbackPrepared);
+        stmt->gid = tokens[pos++];
+    }
+    if (first == "rollback" && pos < tokens.size() && toLower(tokens[pos]) == "to") {
+        ++pos;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "savepoint") ++pos;
+        if (pos >= tokens.size() || tokens[pos] == ";") {
+            r.error = "ROLLBACK TO requires a savepoint name";
+            return r;
+        }
+        stmt->kind = TransactionStmt::Kind::RollbackTo;
+        stmt->command = SqlCommand::RollbackToSavepoint;
+        stmt->savepointName = tokens[pos++];
+    }
+    if (pos < tokens.size() && toLower(tokens[pos]) == "and") {
+        if (stmt->kind != TransactionStmt::Kind::Rollback) {
+            r.error = "ROLLBACK TO cannot use AND CHAIN";
+            return r;
+        }
+        if (pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "chain") {
+            pos += 2;
+        } else if (pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "no" &&
+                   toLower(tokens[pos + 2]) == "chain") {
+            pos += 3;
+        } else {
+            r.error = "invalid ROLLBACK chain option";
+            return r;
+        }
+    }
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        r.error = "invalid rollback statement";
+        return r;
+    }
+    r.stmt = std::move(stmt);
+    r.success = true;
     return r;
 }
 
-ParseResult SQLParser::parseSavepoint(const std::string&) {
+ParseResult SQLParser::parseSavepoint(const std::string& sql) {
     ParseResult r;
-    r.success = true;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 2) {
+        r.error = "SAVEPOINT requires a name";
+        return r;
+    }
     auto stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::Savepoint);
-    // TODO: 解析 savepoint 名称
+    stmt->savepointName = tokens[1];
+    size_t pos = 2;
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        r.error = "SAVEPOINT accepts exactly one name";
+        return r;
+    }
     r.stmt = std::move(stmt);
+    r.success = true;
     return r;
 }
 
-ParseResult SQLParser::parseRelease(const std::string&) {
+ParseResult SQLParser::parseRelease(const std::string& sql) {
     ParseResult r;
-    r.success = true;
+    auto tokens = tokenize(sql);
+    if (tokens.size() < 2) {
+        r.error = "RELEASE requires a savepoint name";
+        return r;
+    }
     auto stmt = std::make_unique<TransactionStmt>(TransactionStmt::Kind::Release);
+    size_t pos = 1;
+    if (toLower(tokens[pos]) == "savepoint") ++pos;
+    if (pos >= tokens.size() || tokens[pos] == ";") {
+        r.error = "RELEASE requires a savepoint name";
+        return r;
+    }
+    stmt->savepointName = tokens[pos++];
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        r.error = "RELEASE accepts exactly one savepoint name";
+        return r;
+    }
     r.stmt = std::move(stmt);
+    r.success = true;
     return r;
 }
 

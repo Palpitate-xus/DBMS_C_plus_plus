@@ -1034,35 +1034,29 @@ static bool handleCloseCursor(const string& sql, Session& s) {
 // ========================================================================
 static bool handleBeginTransaction(const string& sql, Session& s) {
     if (!checkDB(s)) return true;
-    // Parse optional isolation level: "begin read committed"
-    // Parse optional read only: "begin read only"
-    string rest = trim(sql.substr(5));
-    bool readOnly = false;
-    if (!rest.empty()) {
-        if (rest.find("read uncommitted") != string::npos) {
-            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_UNCOMMITTED);
-            s.isolationLevel = 0;
-        } else if (rest.find("read committed") != string::npos) {
-            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_COMMITTED);
-            s.isolationLevel = 1;
-        } else if (rest.find("repeatable read") != string::npos) {
-            g_engine.setIsolationLevel(dbms::IsolationLevel::REPEATABLE_READ);
-            s.isolationLevel = 2;
-        } else if (rest.find("serializable") != string::npos) {
-            g_engine.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
-            s.isolationLevel = 3;
-        }
-        if (rest.find("read only") != string::npos) {
-            readOnly = true;
-        }
+    dbms::SQLParser parser;
+    auto parsed = parser.parse(sql);
+    auto* txn = dynamic_cast<dbms::TransactionStmt*>(parsed.stmt.get());
+    if (!parsed.success || !txn ||
+        (txn->kind != dbms::TransactionStmt::Kind::Begin &&
+         txn->kind != dbms::TransactionStmt::Kind::Start)) {
+        cout << "SQL syntax error: "
+             << (parsed.error.empty() ? "invalid transaction start" : parsed.error) << endl;
+        return true;
     }
+    if (txn->deferrable) {
+        cout << "ERROR: DEFERRABLE transactions are not supported" << endl;
+        return true;
+    }
+    g_engine.setIsolationLevel(txn->isolation);
+    s.isolationLevel = static_cast<int>(txn->isolation);
     auto res = g_engine.beginTransaction(s.currentDB);
     if (res != DBStatus::OK) {
         cout << "Begin transaction failed" << endl;
         return true;
     }
-    g_engine.setReadOnly(readOnly);
-    if (readOnly) {
+    g_engine.setReadOnly(txn->readOnly);
+    if (txn->readOnly) {
         cout << "Read-only transaction started" << endl;
         log(s.username, "begin read-only transaction", getTime());
     } else {
@@ -1157,12 +1151,15 @@ static bool handleSavepoint(const string& sql, Session& s) {
         cout << "Not in transaction" << endl;
         return true;
     }
-    string name = sql.substr(10);
-    while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
-    if (name.empty()) {
-        cout << "Savepoint name required" << endl;
+    dbms::SQLParser parser;
+    auto parsed = parser.parse(sql);
+    auto* txn = dynamic_cast<dbms::TransactionStmt*>(parsed.stmt.get());
+    if (!parsed.success || !txn || txn->kind != dbms::TransactionStmt::Kind::Savepoint) {
+        cout << "SQL syntax error: "
+             << (parsed.error.empty() ? "SAVEPOINT requires a name" : parsed.error) << endl;
         return true;
     }
+    string name = stripQuotes(txn->savepointName);
     auto res = g_engine.savepoint(name);
     if (res != DBStatus::OK) {
         cout << "Savepoint failed" << endl;
@@ -1178,12 +1175,15 @@ static bool handleReleaseSavepoint(const string& sql, Session& s) {
         cout << "Not in transaction" << endl;
         return true;
     }
-    string name = sql.substr(18);
-    while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
-    if (name.empty()) {
-        cout << "Savepoint name required" << endl;
+    dbms::SQLParser parser;
+    auto parsed = parser.parse(sql);
+    auto* txn = dynamic_cast<dbms::TransactionStmt*>(parsed.stmt.get());
+    if (!parsed.success || !txn || txn->kind != dbms::TransactionStmt::Kind::Release) {
+        cout << "SQL syntax error: "
+             << (parsed.error.empty() ? "RELEASE requires a savepoint name" : parsed.error) << endl;
         return true;
     }
+    string name = stripQuotes(txn->savepointName);
     auto res = g_engine.releaseSavepoint(name);
     if (res != DBStatus::OK) {
         cout << "Savepoint not found" << endl;
@@ -1199,13 +1199,15 @@ static bool handleRollbackToSavepoint(const string& sql, Session& s) {
         cout << "Not in transaction" << endl;
         return true;
     }
-    string name = sql.substr(21);
-    while (!name.empty() && isspace((unsigned char)name.front())) name.erase(name.begin());
-    while (!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
-    if (name.empty()) {
-        cout << "Savepoint name required" << endl;
+    dbms::SQLParser parser;
+    auto parsed = parser.parse(sql);
+    auto* txn = dynamic_cast<dbms::TransactionStmt*>(parsed.stmt.get());
+    if (!parsed.success || !txn || txn->kind != dbms::TransactionStmt::Kind::RollbackTo) {
+        cout << "SQL syntax error: "
+             << (parsed.error.empty() ? "ROLLBACK TO requires a savepoint name" : parsed.error) << endl;
         return true;
     }
+    string name = stripQuotes(txn->savepointName);
     auto res = g_engine.rollbackToSavepoint(name);
     if (res != DBStatus::OK) {
         cout << "Savepoint not found" << endl;

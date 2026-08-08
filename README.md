@@ -51,10 +51,10 @@
 - **锁查询**：`FOR UPDATE`, `FOR SHARE`, `NOWAIT`, `SKIP LOCKED`
 
 ### 事务控制 (TCL) / MVCC
-- `BEGIN [TRANSACTION] [ISOLATION LEVEL level]` — 开启事务，分配全局唯一事务 ID，创建 ReadView
+- `BEGIN` / `START TRANSACTION` 支持 `ISOLATION LEVEL`、`READ ONLY/WRITE` 和 `NOT DEFERRABLE` 选项；当前 `DEFERRABLE` 会明确拒绝（尚无安全快照实现）
 - `COMMIT` — 提交事务，持久化到 WAL
 - `ROLLBACK` — 基于 Undo Log 的增量回滚
-- `SAVEPOINT spname` / `ROLLBACK TO SAVEPOINT spname` / `RELEASE SAVEPOINT spname`
+- `SAVEPOINT spname` / `ROLLBACK TO [SAVEPOINT] spname` / `RELEASE [SAVEPOINT] spname` 通过事务 AST 统一解析
 - **MVCC 快照隔离**：每行使用 PostgreSQL 风格 HeapTupleHeader，事务内读取基于 ReadView 的可见性规则
 - **隔离级别**：支持 `READ UNCOMMITTED` / `READ COMMITTED` / `REPEATABLE READ` / `SERIALIZABLE`
 - **全局事务 ID 生成器**：单调递增 64 位 txId，持久化到 `.txnid` 文件

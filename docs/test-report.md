@@ -35,7 +35,7 @@
 - 协议 portal 分页回归：验证 `Execute maxRows` 分批返回、未耗尽时发送 `PortalSuspended`、耗尽时发送 `CommandComplete`，以及耗尽 portal 再执行不重复返回数据。
 - 协议 ACL 回归：alice 将 `SELECT` 授予 `analyst`，bob 通过角色继承读取表数据；bob 未获得 `INSERT` 时真实协议返回权限错误。
 - 协议错误恢复回归：验证扩展查询错误后的 Bind/Execute 被忽略至 Sync、Sync 后连接可继续查询，以及事务外错误返回 `ReadyForQuery('I')`。
-- 协议 backend 隔离回归：双连接验证事务 ID/快照不串线，未提交行不可见，ROLLBACK 后状态清理，连接断开回滚未完成事务，COMMIT 后新事务可见。
+- 协议 backend 隔离回归：双连接验证事务 ID/快照不串线，未提交行不可见，ROLLBACK 后状态清理，连接断开回滚未完成事务，COMMIT 后新事务可见；另覆盖 `START TRANSACTION` 选项与 `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` 路由。
 
 ---
 
@@ -653,6 +653,8 @@ COMMIT;
 ```
 
 **实际结果** ✅ id=6 保留，id=7 回滚
+
+协议回归还验证 `BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY`、`START TRANSACTION READ COMMITTED READ WRITE`，以及无固定字符串偏移依赖的保存点创建和 `ROLLBACK TO SAVEPOINT`。
 
 ---
 

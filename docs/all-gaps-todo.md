@@ -182,6 +182,8 @@
 - 根目录保持干净：所有测试数据自动隔离，不污染项目根目录
 - 修复: 61 个测试文件批量更新 include 和 cleanup 逻辑
 
+2026-08-08 TCL 路由收敛：事务 AST 解析并消费 `BEGIN`/`START TRANSACTION` 选项及 `SAVEPOINT`/`ROLLBACK TO`/`RELEASE` 名称；修复特定 `ROLLBACK`/`COMMIT PREPARED` 分类被通用前缀吞掉的问题。`DEFERRABLE` 继续 fail-closed 拒绝，完整子事务资源与安全快照仍待后续。
+
 历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=122 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
@@ -225,7 +227,7 @@
 | 1.1.6 | `ALTER VIEW` | 缺少 owner、options、column default、安全屏障、security invoker | ⚠️ |
 | 1.1.7 | `ANALYZE` | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、`VERBOSE` 输出、系统统计视图集成 | ⚠️ |
 | 1.1.8 | `ABORT` | 已作为 `ROLLBACK` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
-| 1.1.9 | `BEGIN` / `START TRANSACTION` | 隔离级别和只读选项为简化解析，事务特性选项不全 | ⚠️ |
+| 1.1.9 | `BEGIN` / `START TRANSACTION` | AST 已结构化解析 isolation/read-only/write/deferrable 选项并接入执行；`DEFERRABLE` fail-closed，安全快照、时序约束和完整事务特性仍缺 | ⚠️ |
 | 1.1.10 | `CALL` | 只执行项目内字符串过程，参数替换简化；不是 PL/pgSQL/SQL procedure 运行时 | ⚠️ |
 | 1.1.11 | `CHECKPOINT` | 刷页和清 WAL；没有真实 checkpoint LSN、redo pointer、WAL segment 管理 | ⚠️ |
 | 1.1.12 | `CLOSE` / `DECLARE` / `FETCH` | 游标把 SELECT 结果捕获到内存；缺少可滚动/二进制/holdable cursor、事务生命周期、portal 语义、`MOVE` | ⚠️ |
@@ -265,14 +267,14 @@
 | 1.1.46 | `REFRESH MATERIALIZED VIEW` | 从 backing 表 schema 推导视图列、按源表 schema 顺序重跑 SELECT（修复 `SELECT *` 解析为 `["*"]` 与投影错位 bug）；支持 `CONCURRENTLY`（同步刷新）与 `WITH NO DATA`（清空）；缺少 PG 真正并发刷新条件和锁语义 | ⚠️ |
 | 1.1.47 | `REINDEX` | 基本 `REINDEX TABLE`；缺少 index/schema/database/system、`CONCURRENTLY`、tablespace、verbose | ⚠️ |
 | 1.1.48 | `RESET` | 支持 `RESET ROLE`/`RESET ALL` 等；缺少完整 GUC 语义 | ⚠️ |
-| 1.1.49 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 基于 txn log index；缺少 PG 子事务资源/锁/错误状态完整语义 | ⚠️ |
+| 1.1.49 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 名称与路由已由事务 AST 统一处理，回滚仍基于 txn log index；缺少 PG 子事务资源/锁/错误状态完整语义 | ⚠️ |
 | 1.1.50 | `SECURITY LABEL` | 保存 label 文件；缺少 provider、对象类型全集、SELinux/sepgsql 集成 | ⚠️ |
 | 1.1.51 | `SELECT` | 支持大量子集；复杂 grammar、类型推断、表达式、函数、子查询、锁、并行、planner/rewrite 差距最大 | ⚠️ |
 | 1.1.52 | `SET` / `SHOW` | 项目参数和少量 session 状态；不是 PG GUC 全体系 | ⚠️ |
 | 1.1.53 | `SET CONSTRAINTS` | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟队列在 commit 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效，per-transaction 自动清除；仍缺 constraint trigger 语义 | ⚠️ |
 | 1.1.54 | `SET ROLE` | 只改 Session 字段；缺少权限检查、role stack、session authorization 联动 | ⚠️ |
 | 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 权限矩阵和会话安全上下文完整语义 | ⚠️ |
-| 1.1.56 | `SET TRANSACTION` | 隔离级别/只读部分；缺少 deferrable、当前事务时序限制完整语义 | ⚠️ |
+| 1.1.56 | `SET TRANSACTION` | BEGIN 路径已结构化隔离级别/只读选项；SET TRANSACTION 仍缺 deferrable、当前事务时序限制完整语义 | ⚠️ |
 | 1.1.57 | `TRUNCATE` | 支持 cascade/restart identity 部分；缺少 `ONLY`/多表/trigger/identity/foreign table/transactional details | ⚠️ |
 | 1.1.58 | `UPDATE` | 支持 FROM/LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式 | ⚠️ |
 | 1.1.59 | `VACUUM` | compact/free page；缺少 freeze、visibility map、autovacuum launcher/workers、parallel vacuum、analyze coupling、wraparound 防护 | ⚠️ |
