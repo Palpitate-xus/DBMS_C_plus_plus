@@ -210,14 +210,14 @@ ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权，
 | ✅ 3.8 实现 CLOG / `pg_xact`、visibility map、hint bits | 9.9, 10.2 | CommitLog + vis map integration
 | ✅ 3.9 实现 Snapshot 导出/导入、`subxip`、catalog snapshot | 9.2 | snapshot_export_import_test
 | ✅ 3.10 实现数据库目录与关系 fork 管理（当前实现） | 10.1 | 当前使用 StorageEngine 路径管理；旧 `ClusterLayout` 并行实现已删除
-| ✅ 3.11 实现 TOAST relation / index / compression / chunking | 10.8 | toast_test 覆盖
+| ⚠️ 3.11 实现 TOAST relation / index / compression / chunking | 10.8 | 当前 relation/index、zlib compression 和 chunking 已覆盖；PG pointer/catalog、lz4/pglz 与 storage strategy 仍缺
 | ✅ 3.12 实现 tablespace 物理路由与 `pg_tblspc` 符号链接 | 10.9, 1.1.30 | tablespace __TABL__ routing
 | ✅ 3.13 实现 data page checksums | 10.10 | Page checksum in PgPage
 | ✅ 3.14 实现 storage parameters（fillfactor / autovacuum / toast …） | 10.11, 4.4 | fillfactor_test 覆盖
 
-### Phase 3 已完成内容（已关闭）
+### Phase 3 已完成内容（基础能力已关闭，PG 完整语义仍在补齐）
 
-Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；存储引擎 / WAL / MVCC / Buffer Manager 基础已稳定，可进入 Phase 4。
+Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟测试；其中 TOAST 的 relation/index/chunking/zlib 压缩已落地，但 PostgreSQL 完整的 compression strategy、pointer/catalog 语义仍保持在途。存储引擎 / WAL / MVCC / Buffer Manager 基础已稳定，可继续推进后续完整语义。
 
 - **WAL 基础设施（3.4~3.6）**：“
   - 新增 `src/storage/WAL.h` / `WAL.cpp`，实现 PostgreSQL 风格的 WAL 管理器。
@@ -243,7 +243,8 @@ Phase 3 全部 14 项子任务（3.1 ~ 3.14）已实现并通过冒烟测试；�
 
 - **TOAST（3.11）**：
   - 实现真正的 TOAST 关系：每个带变长列的表创建 `<tablename>.toast.dt`（heap relation）和 `<tablename>.toast.idx`（B+ tree index）。
-  - 大值按 `TOAST_CHUNK_SIZE`（2KB）分块存储；每块行格式为 `[toastId:8][chunkSeq:4][chunkData]`。
+  - 大值按 `TOAST_CHUNK_SIZE`（2KB）分块存储；当前块格式为 `[toastId:8][chunkSeq:4][flags:1][originalSize:8][chunkData]`，压缩状态由 flags 明确记录。
+  - 写入优先使用 zlib 压缩，压缩后更大时保留原文；读取校验所有 chunk 的 flags/原始长度并解压。
   - 索引键为 `T<toastId>:<chunkSeq>`，值为主表 RID；read/delete 按 chunk_seq 顺序通过索引定位块。
   - `createTable`/`dropTable` 自动创建/删除 TOAST 关系与索引；`deleteRowToast` 删除所有块。
   - `query` 与 `TableScanOp`/`IndexScanOp` 在返回行前调用 `resolveToastValues()` 将 `__TOAST__<id>` 标记替换回原始值。

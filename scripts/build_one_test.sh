@@ -11,7 +11,9 @@ set -e
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SRC_DIR"
 . "${SRC_DIR}/scripts/build_common.sh"
-dbms_init_build_config "${SRC_DIR}"
+if ! dbms_init_build_config "${SRC_DIR}"; then
+    exit 1
+fi
 dbms_test_project_sources
 dbms_print_tls_status inc
 

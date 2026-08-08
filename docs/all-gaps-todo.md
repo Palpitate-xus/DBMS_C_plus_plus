@@ -19,6 +19,7 @@
 |------|------|
 | 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；`RANGE/GROUPS`、复杂目标、OFFSET 和主 SQL EXPLAIN 窗口解析仍明确回退或待迁移。扩展 Volcano 单元覆盖默认 frame、排除、分析函数，窗口 E2E 保持 10/10。 |
 | 2026-08-08 | Group executor 收敛：新增 `GroupAggregateOp`，主 SQL/EXPLAIN 接入常见 GROUP BY、HAVING、ROLLUP/CUBE/GROUPING SETS 及常见聚合；补充分组、HAVING、NULL grouping-set 输出和文本/JSON EXPLAIN 单测。复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域和并行聚合仍待迁移。 |
+| 2026-08-08 | TOAST 压缩首步：当前 TOAST chunk 格式升级为带 flags/originalSize 的结构，写入自动使用 zlib 压缩（不可压缩值保留原文），统一 shell/CMake 构建入口并增加物理压缩回归；旧 TOAST chunk 不兼容，lz4/pglz、storage strategy、`toast_tuple_target` 与 PG pointer/catalog 语义仍待迁移。 |
 | 2026-08-07 | 测试入口收敛：`build_tests.sh` 与 `run_all_tests_fast.sh` 通过 `build_common.sh` 统一执行协议和窗口函数两个 E2E；当前统一基线为 PASS=122 FAIL=0。 |
 | 2026-08-07 | P0-1 并行查询首步：新增 `ParallelTableScanOp`，对非分区 heap 按 page range 分片并确定性 Gather；加入 `max_parallel_workers_per_gather` 配置，事务内和分区表安全回退，新增并行/串行等价性与事务回归。parallel join/aggregate、GatherMerge 和长期 worker pool 仍待后续。 |
 | 2026-08-07 | B+Tree 正确性补强：修复 root leaf 分裂传错 child、叶分裂丢弃中间键、重复键跨叶查找遗漏和范围扫描重复返回；新增 250 条跨叶唯一键、6000 条跨叶/内部节点重复键回归。PostgreSQL B-tree 的 dedup、删除合并、opclass/collation 和并发构建语义仍待后续。 |
@@ -464,7 +465,7 @@
 | 10.5 | WAL | 缺少 record type、LSN、WAL segment、full page writes、redo routines、timeline、archive status、replication WAL sender | 🔄 |
 | 10.6 | Checkpoint | 简化刷盘/清 WAL；缺少 redo pointer、checkpoint record、restartpoint、checkpoint throttling | 🔄 |
 | 10.7 | PITR | 缺失 | ❌ |
-| 10.8 | TOAST | 有大值外置文件；缺少 PG TOAST relation/index、compression、chunking、out-of-line pointer 语义 | 🔄 |
+| 10.8 | TOAST | 已有 TOAST relation/index、chunking 和 zlib compression；缺少 lz4/pglz、storage strategy、toast_tuple_target、out-of-line pointer/catalog 完整语义 | 🔄 |
 | 10.9 | Tablespace | 缺失 | ✅ |
 | 10.10 | Checksums | 有页 checksum 痕迹；缺少 cluster-level data checksum、initdb/pg_verify_checksums | 🔄 |
 | 10.11 | Storage parameters | 有少量 `.params`；缺少 fillfactor/autovacuum/toast/parallel/cost 等完整 reloptions | 🔄 |

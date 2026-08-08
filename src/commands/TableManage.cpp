@@ -77,6 +77,7 @@ static std::string unescapeString(const std::string& s) {
 #include <unistd.h>
 #include <vector>
 #include <cwctype>
+#include <zlib.h>
 
 namespace dbms {
 
@@ -7405,6 +7406,32 @@ static bool pageFitsWithFillfactor(const PageWrapper& page, size_t rowSize,
 // TOAST (The Oversized-Attribute Storage Technique)
 // ========================================================================
 
+namespace {
+
+constexpr size_t TOAST_CHUNK_HEADER_SIZE = sizeof(uint64_t) + sizeof(uint32_t) +
+                                           sizeof(uint8_t) + sizeof(uint64_t);
+constexpr uint8_t TOAST_FLAG_COMPRESSED = 0x01;
+
+static std::string compressToastPayload(const std::string& data, uint8_t& flags) {
+    flags = 0;
+    if (data.empty() || data.size() > std::numeric_limits<uLong>::max()) return data;
+
+    uLongf bound = compressBound(static_cast<uLong>(data.size()));
+    std::string compressed(static_cast<size_t>(bound), '\0');
+    uLongf compressedSize = bound;
+    const int status = compress2(
+        reinterpret_cast<Bytef*>(compressed.data()), &compressedSize,
+        reinterpret_cast<const Bytef*>(data.data()), static_cast<uLong>(data.size()),
+        Z_DEFAULT_COMPRESSION);
+    if (status != Z_OK || compressedSize >= data.size()) return data;
+
+    compressed.resize(static_cast<size_t>(compressedSize));
+    flags = TOAST_FLAG_COMPRESSED;
+    return compressed;
+}
+
+} // namespace
+
 std::filesystem::path StorageEngine::toastDir(const std::string& dbname,
                                                const std::string& tablename) {
     return std::filesystem::path(dbname) / (tablename + ".toast");
@@ -7484,16 +7511,21 @@ void StorageEngine::writeToast(const std::string& dbname, const std::string& tab
     BPTree* idx = getToastIndex(dbname, tablename);
     if (!pa || !idx) return;
 
+    uint8_t flags = 0;
+    const std::string storedData = compressToastPayload(data, flags);
+    const uint64_t originalSize = static_cast<uint64_t>(data.size());
     size_t offset = 0;
     uint32_t seq = 0;
     const size_t chunkSize = TOAST_CHUNK_SIZE;
-    while (offset < data.size()) {
-        size_t len = std::min(chunkSize, data.size() - offset);
+    while (offset < storedData.size()) {
+        size_t len = std::min(chunkSize, storedData.size() - offset);
         std::string row;
-        row.reserve(sizeof(uint64_t) + sizeof(uint32_t) + len);
+        row.reserve(TOAST_CHUNK_HEADER_SIZE + len);
         row.append(reinterpret_cast<const char*>(&toastId), sizeof(toastId));
         row.append(reinterpret_cast<const char*>(&seq), sizeof(seq));
-        row.append(data.data() + offset, len);
+        row.push_back(static_cast<char>(flags));
+        row.append(reinterpret_cast<const char*>(&originalSize), sizeof(originalSize));
+        row.append(storedData.data() + offset, len);
 
         bool inserted = false;
         uint32_t numPages = pa->numPages();
@@ -7539,6 +7571,8 @@ std::string StorageEngine::readToast(const std::string& dbname, const std::strin
     if (!pa || !idx) return "";
 
     std::string result;
+    uint8_t flags = 0;
+    uint64_t originalSize = 0;
     for (uint32_t seq = 0;; ++seq) {
         int64_t rid = -1;
         if (!idx->search(toastIndexKey(toastId, seq), rid)) break;
@@ -7555,26 +7589,55 @@ std::string StorageEngine::readToast(const std::string& dbname, const std::strin
         PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
         const char* row = nullptr;
         size_t rowLen = 0;
-        if (!page.read(slotId, row, rowLen) || rowLen < sizeof(uint64_t) + sizeof(uint32_t)) {
+        if (!page.read(slotId, row, rowLen) || rowLen < TOAST_CHUNK_HEADER_SIZE) {
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
             break;
         }
         uint64_t storedToastId = 0;
         uint32_t storedSeq = 0;
+        uint8_t storedFlags = 0;
+        uint64_t storedOriginalSize = 0;
         std::memcpy(&storedToastId, row, sizeof(storedToastId));
         std::memcpy(&storedSeq, row + sizeof(storedToastId), sizeof(storedSeq));
+        std::memcpy(&storedFlags, row + sizeof(storedToastId) + sizeof(storedSeq), sizeof(storedFlags));
+        std::memcpy(&storedOriginalSize,
+                    row + sizeof(storedToastId) + sizeof(storedSeq) + sizeof(storedFlags),
+                    sizeof(storedOriginalSize));
         if (storedToastId != toastId || storedSeq != seq) {
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
             break;
         }
-        result.append(row + sizeof(storedToastId) + sizeof(storedSeq),
-                      rowLen - sizeof(storedToastId) - sizeof(storedSeq));
+        if (seq == 0) {
+            if (storedFlags != 0 && storedFlags != TOAST_FLAG_COMPRESSED) {
+                pa->unpinPage(pid);
+                lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+                return "";
+            }
+            flags = storedFlags;
+            originalSize = storedOriginalSize;
+        } else if (storedFlags != flags || storedOriginalSize != originalSize) {
+            pa->unpinPage(pid);
+            lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+            return "";
+        }
+        result.append(row + TOAST_CHUNK_HEADER_SIZE, rowLen - TOAST_CHUNK_HEADER_SIZE);
         pa->unpinPage(pid);
         lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
     }
-    return result;
+    if (flags != TOAST_FLAG_COMPRESSED) return result;
+    if (originalSize > std::numeric_limits<uLongf>::max() ||
+        result.size() > std::numeric_limits<uLong>::max()) return "";
+
+    std::string decompressed(static_cast<size_t>(originalSize), '\0');
+    uLongf decompressedSize = static_cast<uLongf>(originalSize);
+    const int status = uncompress(
+        reinterpret_cast<Bytef*>(decompressed.data()), &decompressedSize,
+        reinterpret_cast<const Bytef*>(result.data()), static_cast<uLong>(result.size()));
+    if (status != Z_OK) return "";
+    decompressed.resize(static_cast<size_t>(decompressedSize));
+    return decompressed;
 }
 
 void StorageEngine::deleteToast(const std::string& dbname, const std::string& tablename,

@@ -172,16 +172,15 @@
 
 ### P1-5: TOAST 压缩
 - **类别**: 存储 / 大字段
-- **现状**: 仅有 overflow page 线外存储，无压缩
+- **现状**: 当前 TOAST relation 对线外值统一使用 zlib 压缩（不可压缩时保留原文），chunk header 保存压缩标记和原始长度；尚无 PostgreSQL 的 lz4/pglz、列级 storage strategy 和 `toast_tuple_target`
 - **PG 参考**: `TOAST` + `lz4`/`pglz` 压缩策略
-- **影响**: 大字段（TEXT/BLOB/JSON）存储浪费空间
+- **影响**: 基础大字段压缩已可用，但与 PostgreSQL 的压缩算法、reloptions 和 pointer/catalog 语义仍有差异
 - **实现路径**:
-  1. 引入 `lz4` 库（header-only 或系统包）
-  2. 在 TOAST 写入路径中自动压缩
-  3. 实现 TOAST 策略：`PLAIN`, `EXTENDED` (压缩+线外), `EXTERNAL` (线外不压缩), `MAIN` (尽量内联)
-  4. 增加 `toast_tuple_target` GUC
+  1. ✅ 引入 zlib 并纳入 shell/CMake 统一构建入口
+  2. ✅ 在 TOAST 写入路径中自动压缩，读取时校验并解压
+  3. 为 lz4/pglz、`PLAIN`/`EXTENDED`/`EXTERNAL`/`MAIN` 策略和 `toast_tuple_target` 建模
 - **预估工作量**: 3-5 天
-- **相关文件**: `src/commands/TableManage.cpp`, `src/storage/PgPage.cpp`
+- **相关文件**: `src/commands/TableManage.cpp`, `scripts/build_common.sh`, `CMakeLists.txt`, `tests/toast_test.cpp`
 
 ### P1-6: 后台统计收集器 (Stats Collector)
 - **类别**: 可观测性 / 运行时统计

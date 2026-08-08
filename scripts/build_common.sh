@@ -49,6 +49,16 @@ dbms_init_build_config() {
         DBMS_TLS_STATUS="OpenSSL not found, using TLS stub (plain TCP)"
     fi
 
+    if pkg-config --exists zlib 2>/dev/null; then
+        DBMS_HAS_ZLIB=1
+        DBMS_CXXFLAGS+=(-DHAS_ZLIB=1)
+        DBMS_LDFLAGS+=(-lz)
+        DBMS_ZLIB_STATUS="zlib detected, TOAST compression enabled"
+    else
+        echo "[build] zlib is required for production TOAST compression" >&2
+        return 1
+    fi
+
     mapfile -t DBMS_MANIFEST_SOURCES < <(
         sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$DBMS_MANIFEST"
     )
@@ -70,6 +80,7 @@ dbms_test_project_sources() {
 dbms_print_tls_status() {
     local prefix="${1:-build}"
     echo "[${prefix}] ${DBMS_TLS_STATUS}"
+    echo "[${prefix}] ${DBMS_ZLIB_STATUS}"
 }
 
 dbms_newest_header() {
@@ -90,6 +101,7 @@ dbms_cache_signature() {
         printf '%s\n' "${DBMS_TEST_INCLUDES[@]}"
         printf '%s\n' "${DBMS_LDFLAGS[@]}"
         printf '%s\n' "$DBMS_TLS_SOURCE"
+        printf '%s\n' "$DBMS_HAS_ZLIB"
     } | sha256sum | awk '{print $1}'
 }
 

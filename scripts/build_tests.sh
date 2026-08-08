@@ -9,7 +9,9 @@ set -u
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${SRC_DIR}/build/test_obj"
 . "${SRC_DIR}/scripts/build_common.sh"
-dbms_init_build_config "${SRC_DIR}"
+if ! dbms_init_build_config "${SRC_DIR}"; then
+    exit 1
+fi
 dbms_test_project_sources
 
 dbms_print_tls_status test-build

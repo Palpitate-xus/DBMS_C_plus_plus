@@ -202,9 +202,9 @@ cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
 
-> CMake 与全部 shell 构建/测试入口共同使用 [`cmake/dbms_sources.txt`](cmake/dbms_sources.txt) 和 [`scripts/build_common.sh`](scripts/build_common.sh)；新增或删除生产模块、编译选项或 TLS 依赖不再分别维护多份配置。对象缓存带有编译配置指纹，参数变化时会自动失效。
+> CMake 与全部 shell 构建/测试入口共同使用 [`cmake/dbms_sources.txt`](cmake/dbms_sources.txt) 和 [`scripts/build_common.sh`](scripts/build_common.sh)；新增或删除生产模块、编译选项或 TLS/压缩依赖不再分别维护多份配置。对象缓存带有编译配置指纹，参数变化时会自动失效。
 
-> **TLS 说明**：若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会编译真实 TLS；否则只保留离线构建所需的 stub，网络服务默认 fail-closed。生产部署必须使用真实 OpenSSL、证书和私钥。
+> **依赖说明**：zlib 开发库是当前 TOAST 压缩存储格式的必需依赖（Ubuntu/Debian 安装 `zlib1g-dev`）；CMake 与全部 shell 构建入口会统一链接它。若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会编译真实 TLS；否则只保留离线构建所需的 stub，网络服务默认 fail-closed。生产部署必须使用真实 OpenSSL、证书和私钥。
 
 ### 交互式运行
 ```bash

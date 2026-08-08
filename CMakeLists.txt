@@ -42,6 +42,12 @@ target_link_libraries(dbms_main PRIVATE
     pthread
 )
 
+# TOAST compression is part of the current storage format. Old uncompressed
+# TOAST files are intentionally not supported by this production format.
+find_package(ZLIB REQUIRED)
+target_link_libraries(dbms_main PRIVATE ZLIB::ZLIB)
+target_compile_definitions(dbms_main PRIVATE HAS_ZLIB=1)
+
 # ============================================================================
 # TLS support: auto-detect OpenSSL
 # ============================================================================

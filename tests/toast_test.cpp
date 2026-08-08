@@ -43,6 +43,8 @@ int main() {
         auto rows = engine.query(dbname, "t", {}, {"payload"});
         assert(rows.size() == 1);
         assert(rows[0].find(largeValue) != std::string::npos);
+        // The current TOAST format compresses repetitive values before chunking.
+        assert(std::filesystem::file_size(std::filesystem::path(dbname) / "t.toast.dt") < largeValue.size());
         std::cout << "[TOAST] insert + query large value OK\n";
 
         // Update with another large value.

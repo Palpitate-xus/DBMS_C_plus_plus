@@ -53,7 +53,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | RANGE/MULTIRANGE | ✅ | ✅ (基础) | ⚠️ 缺 operators |
 | DOMAIN | ✅ | ✅ | ✅ |
 | **Pseudo types (record/anyelement/anyarray)** | ✅ | ✅ (注册) | ⚠️ 缺函数重载 |
-| **bytea 存储** | ✅ TOAST | ✅ overflow | ⚠️ 无 TOAST 压缩 |
+| **bytea 存储** | ✅ TOAST | ⚠️ overflow + zlib 压缩 | ⚠️ 缺少 PG pointer/catalog 与 storage strategy 完整语义 |
 | **numeric NaN/Infinity** | ✅ | ✅ | wire codec 与基础值语义已覆盖，精确 typmod/完整函数族仍有差距 |
 
 ---
@@ -191,11 +191,11 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | Buffer Pool (clock sweep) | ✅ | ✅ | ✅ |
 | Free Space Map | ✅ | ✅ | ✅ |
 | Visibility Map | ✅ | ✅ | ✅ |
-| TOAST (大字段压缩/线外存储) | ✅ | ⚠️ | 基础 overflow page |
+| TOAST (大字段压缩/线外存储) | ✅ | ⚠️ | relation/index + zlib 压缩；缺少 PG pointer/catalog 完整语义 |
 | 页校验和 | ✅ | ✅ | ✅ |
 | 溢出页 | ✅ | ✅ | ✅ |
 | 子事务日志 | ✅ | ✅ | ✅ |
-| **TOAST 压缩 (lz4/pglz)** | ✅ | ❌ | 缺 |
+| **TOAST 压缩 (lz4/pglz)** | ✅ | ⚠️ zlib | 已有压缩标记/解压；lz4/pglz、压缩策略和 `toast_tuple_target` 仍缺 |
 | **大对象 (Large Object)** | ✅ | ✅ | ✅ |
 | **Unlogged 表** | ✅ | ✅ | ✅ |
 | **临时表** | ✅ | ✅ | ✅ |
@@ -327,7 +327,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 3. **UNION/INTERSECT/EXCEPT executor** — 组合语义已统一进入 Volcano，复杂 operand 的 producer 仍待 AST 全量下推；类型合并和结构化列结果也仍缺
 4. **GROUP BY 完整语义** — `GroupAggregateOp` 已覆盖基础路径；复杂目标、`GROUPING()`/`GROUPING_ID`、类型推导和完整排序作用域仍待迁移
 5. **GiST 索引** — 全文搜索基础架构缺
-6. **TOAST 压缩** — 大字段存储无 lz4/pglz 压缩
+6. **TOAST 完整语义** — 当前线外值使用 zlib 压缩；lz4/pglz、压缩策略、`toast_tuple_target` 和 PG pointer/catalog 仍待完成
 7. **后台 stats_collector** — 无运行时统计收集
 8. **PL/pgSQL 运行时** — 存储过程解释执行缺
 9. **并行 Vacuum** — Autovacuum 已工作但非并行
