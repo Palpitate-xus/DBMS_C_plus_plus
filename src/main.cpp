@@ -2583,6 +2583,89 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
     return true;
 }
 
+static bool isSimpleWindowIdentifier(const string& value) {
+    if (value.empty()) return false;
+    for (unsigned char c : value) {
+        if (!(isalnum(c) || c == '_')) return false;
+    }
+    return true;
+}
+
+static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
+                                       const TableSchema& tbl,
+                                       dbms::WindowFunctionSpec& spec) {
+    static const set<string> supported = {
+        "row_number", "rank", "dense_rank", "lag", "lead"
+    };
+    if (wf.isAggregate || !supported.count(wf.name) || wf.hasFrame ||
+        !wf.frameExclusion.empty()) return false;
+
+    auto isColumn = [&](const string& name) {
+        if (!isSimpleWindowIdentifier(name)) return false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == name) return true;
+        }
+        return false;
+    };
+
+    spec = {};
+    spec.name = wf.name;
+    spec.orderBy = wf.orderByCol;
+    spec.orderAscending = wf.orderByAsc;
+    for (const auto& column : wf.partitionByCols) {
+        if (!isColumn(column)) return false;
+        spec.partitionBy.push_back(column);
+    }
+    if (!spec.orderBy.empty() && !isColumn(spec.orderBy)) return false;
+
+    if (wf.name == "row_number" || wf.name == "rank" || wf.name == "dense_rank") {
+        return trim(wf.arg).empty();
+    }
+
+    // Keep the first implementation deliberately strict: support the common
+    // lag/lead(value) form and the standard numeric offset/default extension.
+    vector<string> args;
+    string current;
+    char quote = '\0';
+    for (char c : wf.arg) {
+        if ((c == '\'' || c == '"')) {
+            if (quote == '\0') quote = c;
+            else if (quote == c) quote = '\0';
+        }
+        if (c == ',' && quote == '\0') {
+            args.push_back(trim(current));
+            current.clear();
+        } else {
+            current += c;
+        }
+    }
+    if (!trim(current).empty() || !args.empty()) args.push_back(trim(current));
+    if (args.empty() || !isColumn(args[0])) return false;
+    spec.argument = args[0];
+    if (args.size() > 3) return false;
+    if (args.size() >= 2) {
+        try {
+            size_t consumed = 0;
+            const auto offset = stoull(args[1], &consumed);
+            if (consumed != args[1].size() || offset == 0) return false;
+            spec.offset = offset;
+        } catch (...) {
+            return false;
+        }
+    }
+    if (args.size() == 3) {
+        string defaultValue = args[2];
+        if (defaultValue.size() >= 2 &&
+            ((defaultValue.front() == '\'' && defaultValue.back() == '\'') ||
+             (defaultValue.front() == '"' && defaultValue.back() == '"'))) {
+            defaultValue = defaultValue.substr(1, defaultValue.size() - 2);
+        }
+        spec.defaultValue = defaultValue;
+        spec.hasDefault = true;
+    }
+    return true;
+}
+
 // ========================================================================
 // Temporary table helpers
 // ========================================================================
@@ -15425,6 +15508,113 @@ bool execute(const string& rawSql, Session& s) {
             }
         } else if (hasWindow) {
             if (forUpdate) { cout << "FOR UPDATE not supported with window functions" << endl; return true; }
+
+            // Route the stable, non-aggregate window subset through the
+            // structured Volcano executor.  The legacy implementation below
+            // remains the semantic fallback for frames, exclusions, window
+            // aggregates, expressions, and other syntax not represented by
+            // WindowFunctionSpec yet.
+            size_t windowLimit = 0, windowOffset = 0;
+            parseLimitOffset(windowLimit, windowOffset);
+            bool canUseVolcanoWindow = !hasAgg && !hasScalar &&
+                                       distinctOnCols.empty() &&
+                                       exprOrderBySpecs.empty() &&
+                                       windowOffset == 0 &&
+                                       orderBySpecs.size() <= 1;
+            vector<dbms::WindowFunctionSpec> volcanoWindowFunctions;
+            vector<dbms::WindowTarget> volcanoWindowTargets;
+            if (canUseVolcanoWindow) {
+                for (const auto& wf : windowFuncs) {
+                    dbms::WindowFunctionSpec spec;
+                    if (!convertToVolcanoWindowSpec(wf, tbl, spec)) {
+                        canUseVolcanoWindow = false;
+                        break;
+                    }
+                    volcanoWindowFunctions.push_back(std::move(spec));
+                }
+            }
+            if (canUseVolcanoWindow) {
+                size_t windowIndex = 0;
+                for (const auto& itemRaw : splitSelectColumns(columns)) {
+                    const string item = trim(itemRaw);
+                    WindowFunc targetWindow;
+                    if (parseWindowFunc(item, targetWindow, namedWindows)) {
+                        if (windowIndex >= volcanoWindowFunctions.size()) {
+                            canUseVolcanoWindow = false;
+                            break;
+                        }
+                        volcanoWindowTargets.push_back({true, "", windowIndex++});
+                        continue;
+                    }
+                    if (item == "*" || !isSimpleWindowIdentifier(item)) {
+                        canUseVolcanoWindow = false;
+                        break;
+                    }
+                    bool found = false;
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (tbl.cols[ci].dataName == item) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        canUseVolcanoWindow = false;
+                        break;
+                    }
+                    volcanoWindowTargets.push_back({false, item, 0});
+                }
+                if (windowIndex != volcanoWindowFunctions.size()) canUseVolcanoWindow = false;
+            }
+            if (canUseVolcanoWindow && !orderBySpecs.empty()) {
+                const auto& spec = orderBySpecs.front();
+                canUseVolcanoWindow = !spec.isExpression && !spec.nullsFirst &&
+                                      spec.collation.empty();
+                if (canUseVolcanoWindow) {
+                    bool found = false;
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (tbl.cols[ci].dataName == spec.colName) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    canUseVolcanoWindow = found;
+                }
+            }
+            vector<vector<string>> volcanoWindowGroups;
+            if (canUseVolcanoWindow && !condTokens.empty()) {
+                vector<string> condCopy = condTokens;
+                condCopy.insert(condCopy.begin(), "(");
+                condCopy.push_back(")");
+                for (auto& token : condCopy) token = modifyLogic(token);
+                volcanoWindowGroups = breakDownConditions(condCopy);
+                canUseVolcanoWindow = volcanoWindowGroups.size() <= 1;
+            }
+            if (canUseVolcanoWindow) {
+                dbms::PlanContext ctx;
+                ctx.dbname = queryDb;
+                ctx.tablename = tname;
+                ctx.limit = windowLimit;
+                ctx.distinct = isDistinct;
+                ctx.windowFunctions = std::move(volcanoWindowFunctions);
+                ctx.windowTargets = std::move(volcanoWindowTargets);
+                if (!orderBySpecs.empty()) {
+                    ctx.orderByCol = orderBySpecs.front().colName;
+                    ctx.orderByAsc = orderBySpecs.front().ascending;
+                }
+                if (!volcanoWindowGroups.empty()) {
+                    ctx.conds = dbms::StorageEngine::parseConditions(volcanoWindowGroups.front());
+                }
+                auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+                vector<string> windowAnswers = dbms::QueryPlanner::executePlan(std::move(plan));
+                for (const auto& itemRaw : splitSelectColumns(columns)) cout << trim(itemRaw) << ' ';
+                cout << '\n';
+                for (const auto& row : windowAnswers) {
+                    cout << row << endl;
+                    log(s.username, row, getTime());
+                }
+                return false;
+            }
+
             // Output header
             for (size_t i = 0; i < aggItems.size(); ++i) {
                 if (exprTypes[i] == 2) {

@@ -119,16 +119,17 @@
 
 ### P1-1: Window Function Executor
 - **类别**: 执行器 / 分析函数
-- **现状**: parser 就绪，executor 回退 legacy `g_engine.query()`
+- **现状**: 常见无 frame 的 `row_number`/`rank`/`dense_rank`/`lag`/`lead` 已通过 Volcano `WindowOp` 执行；窗口聚合、显式 frame/exclusion、复杂表达式和 OFFSET 仍回退 legacy `main.cpp` 路径
 - **PG 参考**: `WindowAgg` 节点, `row_number()`, `rank()`, `lag()`, `lead()` 等
-- **影响**: 报表、排名、移动平均等分析查询无法使用
+- **影响**: 基础排名/偏移查询已具备结构化执行器；完整 frame、窗口聚合和高级分析语义仍无法使用生产级计划路径
 - **实现路径**:
-  1. 实现 `WindowOp` 算子：按 PARTITION BY 分组 + ORDER BY 排序
-  2. 实现内置 window function: `row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`, `percent_rank`, `cume_dist`
-  3. 在 `QueryPlanner` 中识别 window function 并插入 `WindowOp`
-  4. 增加 `WindowAgg` EXPLAIN 输出
-- **预估工作量**: 1-2 周
-- **相关文件**: `src/executor/ExecutionPlan.cpp`
+  1. ✅ 实现 `WindowOp` 算子：按每个窗口的 PARTITION BY 分组 + ORDER BY 排序
+  2. ⚠️ 接入 `row_number`, `rank`, `dense_rank`, `lag`, `lead`；`first_value`、`last_value`、`ntile`、`percent_rank`、`cume_dist` 及窗口聚合仍待结构化实现
+  3. ✅ 在 `QueryPlanner` 中识别稳定窗口子集并插入 `WindowOp`
+  4. ✅ 为结构化 `WindowOp` 增加 `WindowAgg` 文本/JSON EXPLAIN 输出
+  5. ⚠️ 将主 SQL EXPLAIN 的窗口解析，以及 legacy frame/exclusion、命名窗口和复杂目标列表迁移到结构化执行器
+- **预估工作量**: 1-2 周（剩余完整语义）
+- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/main.cpp`
 
 ### P1-2: UNION/INTERSECT/EXCEPT Executor
 - **类别**: 执行器 / 集合操作

@@ -253,6 +253,56 @@ private:
     std::set<std::string> selectCols_;
 };
 
+// A deliberately narrow, structured window specification.  The legacy SQL
+// parser still owns complex frame syntax; this specification is used when a
+// query can be executed by the Volcano WindowOp without semantic fallback.
+struct WindowFunctionSpec {
+    std::string name;
+    std::string argument;
+    std::vector<std::string> partitionBy;
+    std::string orderBy;
+    bool orderAscending = true;
+    size_t offset = 1;
+    std::string defaultValue;
+    bool hasDefault = false;
+};
+
+struct WindowTarget {
+    // A target is either a base-table column or the zero-based window index.
+    bool isWindow = false;
+    std::string column;
+    size_t windowIndex = 0;
+};
+
+// WindowOp materializes its child once, computes independent window streams,
+// then formats the requested target list.  It intentionally handles the
+// stable ranking/offset subset; aggregate windows and explicit frames remain
+// on the legacy path until their frame semantics are represented here.
+class WindowOp : public Operator {
+public:
+    WindowOp(OpPtr child, const TableSchema& tbl,
+             const std::vector<WindowTarget>& targets,
+             const std::vector<WindowFunctionSpec>& functions,
+             const std::string& finalOrderBy = "",
+             bool finalOrderAscending = true);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* child() const { return child_.get(); }
+    const std::vector<WindowFunctionSpec>& functions() const { return functions_; }
+
+private:
+    OpPtr child_;
+    TableSchema tbl_;
+    std::vector<WindowTarget> targets_;
+    std::vector<WindowFunctionSpec> functions_;
+    std::string finalOrderBy_;
+    bool finalOrderAscending_;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+};
+
 // ========================================================================
 // Sort: ORDER BY
 // ========================================================================
@@ -475,6 +525,10 @@ struct PlanContext {
     bool orderByAsc = true;
     size_t limit = 0;
     bool distinct = false;
+    // When non-empty, buildSelectPlan creates a structured WindowOp instead
+    // of applying Project/Sort to a legacy window result.
+    std::vector<WindowFunctionSpec> windowFunctions;
+    std::vector<WindowTarget> windowTargets;
 };
 
 // Equivalence class: a set of expressions that are known equal.

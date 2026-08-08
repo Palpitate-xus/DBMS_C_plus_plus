@@ -327,6 +327,65 @@ static void test_parallel_scan() {
     std::cout << "[VOLCANO-5.1] parallel page scan + deterministic gather OK" << std::endl;
 }
 
+// -------- Test 10: structured WindowAgg ranking and offsets --------
+static void test_window_agg() {
+    std::string db = testDbPath("volc_window");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, dept VARCHAR(20), score INT)", s));
+
+    // Insert a tie in each partition.  The final id sort makes the expected
+    // output deterministic while each window keeps its own score ordering.
+    insertRow(db, "t", {{"id", "3"}, {"dept", "A"}, {"score", "20"}});
+    insertRow(db, "t", {{"id", "1"}, {"dept", "A"}, {"score", "10"}});
+    insertRow(db, "t", {{"id", "2"}, {"dept", "A"}, {"score", "20"}});
+    insertRow(db, "t", {{"id", "4"}, {"dept", "B"}, {"score", "10"}});
+    insertRow(db, "t", {{"id", "5"}, {"dept", "B"}, {"score", "20"}});
+
+    dbms::WindowFunctionSpec rowNumber;
+    rowNumber.name = "row_number";
+    rowNumber.partitionBy = {"dept"};
+    rowNumber.orderBy = "score";
+    dbms::WindowFunctionSpec rank = rowNumber;
+    rank.name = "rank";
+    dbms::WindowFunctionSpec denseRank = rowNumber;
+    denseRank.name = "dense_rank";
+    dbms::WindowFunctionSpec lag = rowNumber;
+    lag.name = "lag";
+    lag.argument = "score";
+
+    dbms::PlanContext ctx;
+    ctx.dbname = db; ctx.tablename = "t";
+    ctx.orderByCol = "id"; ctx.orderByAsc = true;
+    ctx.windowFunctions = {rowNumber, rank, denseRank, lag};
+    ctx.windowTargets = {
+        {false, "id", 0}, {true, "", 0}, {true, "", 1},
+        {true, "", 2}, {true, "", 3}
+    };
+
+    auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    auto* window = dynamic_cast<dbms::WindowOp*>(plan.get());
+    assert(window);
+    assert(window->functions().size() == 4);
+    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    const std::vector<std::string> expected = {
+        "1 1 1 1 NULL", "2 3 2 2 20", "3 2 2 2 10",
+        "4 1 1 1 NULL", "5 2 2 2 10"
+    };
+    assert(rows == expected);
+
+    auto explainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    const auto explain = dbms::QueryPlanner::explain(explainPlan, &g_engine, db);
+    assert(explain.find("WindowAgg(functions=4)") != std::string::npos);
+    const auto explainJson = dbms::QueryPlanner::explainJson(explainPlan, &g_engine, db);
+    assert(explainJson.find("\"nodeType\":\"WindowAgg\"") != std::string::npos);
+
+    cleanup(db);
+    std::cout << "[VOLCANO-5.1] WindowAgg ranking + lag OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_full_scan();
@@ -338,6 +397,7 @@ int main() {
     test_bitmap_and();
     test_bitmap_or();
     test_parallel_scan();
+    test_window_agg();
     std::cout << "[VOLCANO-5.1] all Phase 5.1 volcano SELECT tests passed" << std::endl;
     return 0;
 }

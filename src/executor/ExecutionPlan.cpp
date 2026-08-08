@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iterator>
 #include <map>
+#include <cstdlib>
 #include <thread>
 
 extern dbms::Config g_config;
@@ -682,6 +683,216 @@ void ProjectOp::close() {
 }
 
 // ========================================================================
+// WindowOp
+// ========================================================================
+
+namespace {
+
+struct WindowInputRow {
+    std::string raw;
+    std::vector<std::string> values;
+};
+
+static int compareWindowValue(const std::string& left, const std::string& right) {
+    if (left.empty() && right.empty()) return 0;
+    if (left.empty()) return -1;
+    if (right.empty()) return 1;
+
+    char* leftEnd = nullptr;
+    char* rightEnd = nullptr;
+    const double leftNumber = std::strtod(left.c_str(), &leftEnd);
+    const double rightNumber = std::strtod(right.c_str(), &rightEnd);
+    if (leftEnd != left.c_str() && *leftEnd == '\0' &&
+        rightEnd != right.c_str() && *rightEnd == '\0') {
+        if (leftNumber < rightNumber) return -1;
+        if (leftNumber > rightNumber) return 1;
+        return 0;
+    }
+    if (left < right) return -1;
+    if (left > right) return 1;
+    return 0;
+}
+
+static size_t windowColumnIndex(const TableSchema& tbl, const std::string& name) {
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == name) return i;
+    }
+    return tbl.len;
+}
+
+static bool sameWindowPartition(const WindowInputRow& left,
+                                const WindowInputRow& right,
+                                const std::vector<size_t>& columns) {
+    for (size_t column : columns) {
+        if (left.values[column] != right.values[column]) return false;
+    }
+    return true;
+}
+
+static std::string displayWindowValue(const std::string& value) {
+    return value.empty() ? "NULL" : value;
+}
+
+} // namespace
+
+WindowOp::WindowOp(OpPtr child, const TableSchema& tbl,
+                   const std::vector<WindowTarget>& targets,
+                   const std::vector<WindowFunctionSpec>& functions,
+                   const std::string& finalOrderBy,
+                   bool finalOrderAscending)
+    : child_(std::move(child)), tbl_(tbl), targets_(targets),
+      functions_(functions), finalOrderBy_(finalOrderBy),
+      finalOrderAscending_(finalOrderAscending) {}
+
+bool WindowOp::open() {
+    rows_.clear();
+    pos_ = 0;
+    if (!child_->open()) return false;
+
+    std::vector<WindowInputRow> input;
+    std::string raw;
+    while (child_->next(raw)) {
+        WindowInputRow row;
+        row.raw = std::move(raw);
+        row.values.reserve(tbl_.len);
+        for (size_t i = 0; i < tbl_.len; ++i) {
+            row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
+        }
+        input.push_back(std::move(row));
+    }
+    child_->close();
+
+    std::vector<std::vector<std::string>> computed(
+        input.size(), std::vector<std::string>(functions_.size()));
+    for (size_t functionIndex = 0; functionIndex < functions_.size(); ++functionIndex) {
+        const auto& function = functions_[functionIndex];
+        std::vector<size_t> partitionColumns;
+        for (const auto& name : function.partitionBy) {
+            const size_t column = windowColumnIndex(tbl_, name);
+            if (column >= tbl_.len) return false;
+            partitionColumns.push_back(column);
+        }
+        const size_t orderColumn = function.orderBy.empty()
+            ? tbl_.len : windowColumnIndex(tbl_, function.orderBy);
+        if (!function.orderBy.empty() && orderColumn >= tbl_.len) return false;
+
+        const size_t argumentColumn = function.argument.empty()
+            ? tbl_.len : windowColumnIndex(tbl_, function.argument);
+        if ((function.name == "lag" || function.name == "lead") &&
+            argumentColumn >= tbl_.len) return false;
+
+        std::vector<size_t> order(input.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t left, size_t right) {
+            const auto& leftRow = input[left];
+            const auto& rightRow = input[right];
+            for (size_t column : partitionColumns) {
+                const int cmp = compareWindowValue(leftRow.values[column], rightRow.values[column]);
+                if (cmp != 0) return cmp < 0;
+            }
+            if (orderColumn < tbl_.len) {
+                const int cmp = compareWindowValue(leftRow.values[orderColumn], rightRow.values[orderColumn]);
+                if (cmp != 0) return function.orderAscending ? cmp < 0 : cmp > 0;
+            }
+            return left < right;
+        });
+
+        size_t partitionStart = 0;
+        size_t rank = 1;
+        size_t denseRank = 1;
+        for (size_t position = 0; position < order.size(); ++position) {
+            if (position == 0 || !sameWindowPartition(input[order[position]],
+                                                      input[order[partitionStart]],
+                                                      partitionColumns)) {
+                partitionStart = position;
+                rank = 1;
+                denseRank = 1;
+            } else if (orderColumn < tbl_.len &&
+                       compareWindowValue(input[order[position]].values[orderColumn],
+                                          input[order[position - 1]].values[orderColumn]) != 0) {
+                rank = position - partitionStart + 1;
+                ++denseRank;
+            }
+
+            const size_t rowIndex = order[position];
+            if (function.name == "row_number") {
+                computed[rowIndex][functionIndex] = std::to_string(position - partitionStart + 1);
+            } else if (function.name == "rank") {
+                computed[rowIndex][functionIndex] = std::to_string(rank);
+            } else if (function.name == "dense_rank") {
+                computed[rowIndex][functionIndex] = std::to_string(denseRank);
+            } else if (function.name == "lag" || function.name == "lead") {
+                const size_t offset = std::max<size_t>(1, function.offset);
+                const bool hasTarget = function.name == "lag"
+                    ? position >= partitionStart + offset
+                    : position + offset < order.size() &&
+                      sameWindowPartition(input[order[position + offset]],
+                                          input[order[partitionStart]], partitionColumns);
+                if (hasTarget) {
+                    const size_t targetPosition = function.name == "lag"
+                        ? position - offset : position + offset;
+                    computed[rowIndex][functionIndex] =
+                        displayWindowValue(input[order[targetPosition]].values[argumentColumn]);
+                } else if (function.hasDefault) {
+                    computed[rowIndex][functionIndex] = displayWindowValue(function.defaultValue);
+                } else {
+                    computed[rowIndex][functionIndex] = "NULL";
+                }
+            }
+        }
+    }
+
+    struct OutputRow {
+        std::string text;
+        std::string sortKey;
+    };
+    std::vector<OutputRow> output;
+    output.reserve(input.size());
+    const size_t finalOrderColumn = finalOrderBy_.empty()
+        ? tbl_.len : windowColumnIndex(tbl_, finalOrderBy_);
+    if (!finalOrderBy_.empty() && finalOrderColumn >= tbl_.len) return false;
+    for (size_t rowIndex = 0; rowIndex < input.size(); ++rowIndex) {
+        std::string line;
+        for (const auto& target : targets_) {
+            std::string value;
+            if (target.isWindow) {
+                if (target.windowIndex >= functions_.size()) return false;
+                value = computed[rowIndex][target.windowIndex];
+            } else {
+                const size_t column = windowColumnIndex(tbl_, target.column);
+                if (column >= tbl_.len) return false;
+                value = input[rowIndex].values[column];
+                if (value.empty() && !tbl_.cols[column].isNull) value = "NULL";
+            }
+            if (!line.empty()) line.push_back(' ');
+            line += value;
+        }
+        output.push_back({std::move(line),
+                          finalOrderColumn < tbl_.len
+                              ? input[rowIndex].values[finalOrderColumn] : ""});
+    }
+    if (finalOrderColumn < tbl_.len) {
+        std::stable_sort(output.begin(), output.end(), [&](const OutputRow& left, const OutputRow& right) {
+            const int cmp = compareWindowValue(left.sortKey, right.sortKey);
+            return finalOrderAscending_ ? cmp < 0 : cmp > 0;
+        });
+    }
+    for (auto& row : output) rows_.push_back(std::move(row.text));
+    return true;
+}
+
+bool WindowOp::next(std::string& outRow) {
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    return true;
+}
+
+void WindowOp::close() {
+    rows_.clear();
+    pos_ = 0;
+}
+
+// ========================================================================
 // SortOp
 // ========================================================================
 
@@ -1285,15 +1496,22 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         root = std::make_unique<FilterOp>(std::move(root), tbl, remainingConds);
     }
 
-    // Add Sort if ORDER BY
-    if (!ctx.orderByCol.empty()) {
+    if (!ctx.windowFunctions.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
-        root = std::make_unique<SortOp>(std::move(root), tbl, ctx.orderByCol, ctx.orderByAsc);
-    }
+        root = std::make_unique<WindowOp>(std::move(root), tbl,
+                                          ctx.windowTargets, ctx.windowFunctions,
+                                          ctx.orderByCol, ctx.orderByAsc);
+    } else {
+        // Add Sort if ORDER BY.  WindowOp sorts each window internally and
+        // applies the final query ordering after it computes the values.
+        if (!ctx.orderByCol.empty()) {
+            TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+            root = std::make_unique<SortOp>(std::move(root), tbl,
+                                            ctx.orderByCol, ctx.orderByAsc);
+        }
 
-    // Always add a Project so the output is formatted text (not raw binary).
-    // When selectCols is empty, Project emits all columns (SELECT * semantics).
-    {
+        // Always add a Project so the output is formatted text (not raw binary).
+        // When selectCols is empty, Project emits all columns (SELECT * semantics).
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<ProjectOp>(std::move(root), tbl, ctx.selectCols);
     }
@@ -1544,6 +1762,15 @@ static CostEstimate explainOp(Operator* op, int indent,
         est.cost = child.cost + child.rows * 0.1;
         out += prefix + "Project" + costRowsStr(est, opts) + "\n";
 
+    } else if (auto* window = dynamic_cast<WindowOp*>(op)) {
+        CostEstimate child = explainOp(window->child(), indent + 1, engine, dbname, out, opts);
+        est.rows = child.rows;
+        const double logFactor = child.rows > 1.0 ? std::log2(child.rows) : 1.0;
+        est.cost = child.cost + child.rows * logFactor * 0.1;
+        out += prefix + "WindowAgg(functions=" +
+               std::to_string(window->functions().size()) + ")" +
+               costRowsStr(est, opts) + "\n";
+
     } else if (auto* sort = dynamic_cast<SortOp*>(op)) {
         CostEstimate child = explainOp(sort->child(), indent + 1, engine, dbname, out, opts);
         est.rows = child.rows;
@@ -1739,6 +1966,16 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         est.rows = child.rows;
         est.cost = child.cost + child.rows * 0.1;
         json += "\"nodeType\":\"Project\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[" + childJson + "]";
+
+    } else if (auto* window = dynamic_cast<WindowOp*>(op)) {
+        auto [childJson, child] = explainOpJson(window->child(), engine, dbname, opts);
+        est.rows = child.rows;
+        const double logFactor = child.rows > 1.0 ? std::log2(child.rows) : 1.0;
+        est.cost = child.cost + child.rows * logFactor * 0.1;
+        json += "\"nodeType\":\"WindowAgg\",";
+        json += "\"functions\":" + std::to_string(window->functions().size()) + ",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
 

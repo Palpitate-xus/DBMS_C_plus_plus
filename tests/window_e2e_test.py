@@ -117,6 +117,18 @@ def main():
                 print("  stdout:", out)
                 print("  stderr:", err)
 
+        # ---- structured Volcano WindowAgg subset ----
+        # These ranking/offset functions do not use frames and are routed
+        # through the reusable executor path.
+        check(
+            "SELECT id, row_number() OVER (PARTITION BY dept ORDER BY salary), "
+            "rank() OVER (PARTITION BY dept ORDER BY salary), "
+            "lag(salary) OVER (PARTITION BY dept ORDER BY salary) "
+            "FROM emp ORDER BY id;",
+            {1: "NULL", 2: "100", 3: "200", 4: "NULL", 5: "100"},
+            "Volcano WindowAgg ranking/lag",
+        )
+
         # ---- frame exclusion tests ----
         # sum over full partition: A=600, B=300
         check(
