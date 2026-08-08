@@ -698,8 +698,15 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         if (result.errorMessage.empty()) {
             result.errorMessage = lines.empty() ? "query failed" : lines.front().substr(6);
         }
-        result.sqlState = (result.errorMessage.find("syntax") != std::string::npos)
-                              ? "42601" : "XX000";
+        if (result.errorMessage.find("syntax") != std::string::npos) {
+            result.sqlState = "42601";
+        } else if (result.errorMessage.find(
+                       "more than one row returned by a subquery used as an expression")
+                   != std::string::npos) {
+            result.sqlState = "21000";
+        } else {
+            result.sqlState = "XX000";
+        }
         return result;
     }
 

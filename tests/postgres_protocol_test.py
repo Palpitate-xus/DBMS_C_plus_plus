@@ -453,6 +453,22 @@ def main():
             sock, "SELECT id FROM sub_outer "
             "WHERE NOT EXISTS (SELECT 1 FROM sub_inner WHERE enabled = 1)"))
         assert not_exists_hit_rows == [], not_exists_hit_rows
+        scalar_rows = data_row_values(simple_query(
+            sock, "SELECT id, (SELECT id FROM sub_inner WHERE id = 2) "
+            "FROM sub_outer"))
+        assert scalar_rows == [[b"1", b"2"], [b"2", b"2"],
+                               [b"3", b"2"], [b"4", b"2"]], scalar_rows
+        scalar_null_rows = data_row_values(simple_query(
+            sock, "SELECT id, (SELECT id FROM sub_inner WHERE id = 9) "
+            "FROM sub_outer"))
+        assert scalar_null_rows == [[b"1", None], [b"2", None],
+                                    [b"3", None], [b"4", None]], scalar_null_rows
+        scalar_multi_messages = simple_query(
+            sock, "SELECT id, (SELECT id FROM sub_inner WHERE enabled = 1) "
+            "FROM sub_outer")
+        assert any(kind == b"E" for kind, _ in scalar_multi_messages), scalar_multi_messages
+        assert any(kind == b"E" and b"C21000\x00" in body
+                   for kind, body in scalar_multi_messages), scalar_multi_messages
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT SELECT ON t TO analyst"))
         assert any(kind == b"C" for kind, _ in simple_query(

@@ -41,7 +41,7 @@
 - **分组**：`GROUP BY ... HAVING ...`
 - **表连接**：`INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `CROSS JOIN`
 - **JOIN 算法选择**：NestedLoopJoin / HashJoin / MergeJoin，查询优化器根据统计信息自动选择
-- **子查询**：解析层支持 `IN`, `EXISTS`, `ANY`, `ALL` 及标量子查询；执行层已结构化未关联单列 `IN`/`NOT IN` 和未关联单表 `EXISTS`/`NOT EXISTS`，标量、关联、`ANY/ALL` 和复杂组合仍走兼容 fallback
+- **子查询**：解析层支持 `IN`, `EXISTS`, `ANY`, `ALL` 及标量子查询；执行层已结构化未关联单列 `IN`/`NOT IN`、未关联单表 `EXISTS`/`NOT EXISTS`，以及单个未关联标量目标（严格 0/1 行）；关联、复杂标量、`ANY/ALL` 和复杂组合仍走兼容 fallback
 - **联合**：`UNION`, `UNION ALL`
 - **CTE**：`WITH cte_name AS (SELECT ...)` 公用表表达式
 - **导出**：`SELECT ... INTO OUTFILE 'file.csv'`

@@ -6293,6 +6293,91 @@ static bool parseSimpleExistenceSubquery(
     return true;
 }
 
+// Recognize one uncorrelated scalar subquery in a SELECT target.  The inner
+// query deliberately has one plain column, one table, and at most one simple
+// AND predicate branch.  This is the init-plan boundary; correlated and
+// expression-heavy scalar subqueries remain outside the structured path.
+static bool parseSimpleScalarSubquery(
+    const std::string& rawItem, Session& s, const std::string& dbname,
+    dbms::ScalarSubquerySpec& outSpec) {
+    std::string item = trim(rawItem);
+    if (item.size() < 2 || item.front() != '(') return false;
+    const size_t itemEnd = findMatchingParen(item, 0);
+    if (itemEnd == std::string::npos || itemEnd + 1 != item.size()) return false;
+
+    const std::string inner = trim(item.substr(1, itemEnd - 1));
+    if (inner.size() < 6 || inner.substr(0, 6) != "select") return false;
+    const size_t fromPos = findTopLevelKeyword(inner, "from", 6);
+    if (fromPos == std::string::npos) return false;
+
+    const auto selectedColumns = splitTopLevelComma(trim(inner.substr(6, fromPos - 6)));
+    if (selectedColumns.size() != 1) return false;
+    std::string innerColumn = trim(selectedColumns.front());
+    if (innerColumn.empty() || innerColumn == "distinct" ||
+        innerColumn.find_first_of(" ()\t\r\n,") != std::string::npos) return false;
+    const size_t innerDot = innerColumn.rfind('.');
+    if (innerDot != std::string::npos) innerColumn = trim(innerColumn.substr(innerDot + 1));
+    if (innerColumn.empty()) return false;
+
+    const size_t wherePos = findTopLevelKeyword(inner, "where", fromPos + 4);
+    const size_t groupPos = findTopLevelKeyword(inner, "group by", fromPos + 4);
+    const size_t havingPos = findTopLevelKeyword(inner, "having", fromPos + 4);
+    const size_t orderPos = findTopLevelKeyword(inner, "order by", fromPos + 4);
+    const size_t limitPos = findTopLevelKeyword(inner, "limit", fromPos + 4);
+    const size_t offsetPos = findTopLevelKeyword(inner, "offset", fromPos + 4);
+    if (groupPos != std::string::npos || havingPos != std::string::npos ||
+        orderPos != std::string::npos || limitPos != std::string::npos ||
+        offsetPos != std::string::npos) return false;
+
+    const size_t tableEnd = wherePos == std::string::npos ? inner.size() : wherePos;
+    const std::string tableText = trim(inner.substr(fromPos + 4,
+                                                     tableEnd - fromPos - 4));
+    if (tableText.empty() || tableText.find_first_of(" \t\r\n.") != std::string::npos)
+        return false;
+    const std::string table = resolveTableName(s, tableText);
+    if (!g_engine.tableExists(dbname, table)) return false;
+    const TableSchema innerSchema = g_engine.getTableSchema(dbname, table);
+
+    bool selectedColumnExists = false;
+    for (size_t i = 0; i < innerSchema.len; ++i) {
+        if (innerSchema.cols[i].dataName == innerColumn) {
+            selectedColumnExists = true;
+            break;
+        }
+    }
+    if (!selectedColumnExists) return false;
+
+    std::vector<dbms::StorageEngine::Condition> innerConds;
+    if (wherePos != std::string::npos) {
+        const std::string whereClause = trim(inner.substr(wherePos + 5));
+        if (whereClause.empty()) return false;
+        std::vector<std::string> tokens = tokenize(normalizeConditionStr(whereClause));
+        tokens.insert(tokens.begin(), "(");
+        tokens.push_back(")");
+        for (auto& token : tokens) token = modifyLogic(token);
+        const auto groups = breakDownConditions(tokens);
+        if (groups.size() != 1) return false;
+        innerConds = dbms::StorageEngine::parseConditions(groups.front());
+        if (innerConds.empty() || innerConds.size() != groups.front().size()) return false;
+        for (const auto& condition : innerConds) {
+            bool found = false;
+            for (size_t i = 0; i < innerSchema.len; ++i) {
+                if (innerSchema.cols[i].dataName == condition.colName) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return false;
+        }
+    }
+
+    outSpec.dbname = dbname;
+    outSpec.tablename = table;
+    outSpec.column = innerColumn;
+    outSpec.innerConds = std::move(innerConds);
+    return true;
+}
+
 // Execute a SELECT subquery for derived table use; returns rows and fills outColNames.
 // Supports basic SELECT with WHERE, ORDER BY, LIMIT, OFFSET.
 static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Session& s,
@@ -15518,6 +15603,9 @@ bool execute(const string& rawSql, Session& s) {
         bool hasAgg = false;
         bool hasWindow = false;
         bool hasScalar = false;
+        vector<dbms::ProjectionTarget> projectionTargets;
+        dbms::ScalarSubquerySpec scalarSubquery;
+        bool structuredScalar = false;
         {
             for (const auto& itemRaw : splitSelectColumns(columns)) {
                 string item = trim(itemRaw);
@@ -15674,6 +15762,51 @@ bool execute(const string& rawSql, Session& s) {
             }
         }
 
+        // A single plain scalar subquery can use the structured init-plan
+        // boundary.  Keep scalar functions and mixed scalar expressions on
+        // queryExpr until a typed expression projection is available.
+        if (hasScalar && !hasAgg && !hasWindow) {
+            bool validTargets = true;
+            size_t scalarTargetCount = 0;
+            dbms::ScalarSubquerySpec parsedScalar;
+            for (const auto& itemRaw : splitSelectColumns(columns)) {
+                const string item = trim(itemRaw);
+                if (item.size() >= 2 && item.front() == '(' &&
+                    item.substr(1, 7) == "select ") {
+                    if (++scalarTargetCount > 1 ||
+                        !parseSimpleScalarSubquery(item, s, queryDb, parsedScalar)) {
+                        validTargets = false;
+                        break;
+                    }
+                    projectionTargets.push_back({true, {}});
+                } else {
+                    if (item.empty() || item == "*" || item.find('(') != string::npos ||
+                        item.find(')') != string::npos || item.find(" as ") != string::npos) {
+                        validTargets = false;
+                        break;
+                    }
+                    bool found = false;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName == item) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        validTargets = false;
+                        break;
+                    }
+                    projectionTargets.push_back({false, item});
+                }
+            }
+            if (validTargets && scalarTargetCount == 1) {
+                scalarSubquery = std::move(parsedScalar);
+                structuredScalar = true;
+            } else {
+                projectionTargets.clear();
+            }
+        }
+
         // WHERE clause
         vector<string> condTokens;
         vector<dbms::SemiJoinSpec> semiJoins;
@@ -15715,6 +15848,7 @@ bool execute(const string& rawSql, Session& s) {
         // Returns false when the query has features the volcano path doesn't yet
         // support (inheritance, FOR UPDATE, DISTINCT ON, NOWAIT/SKIP LOCKED, etc.),
         // in which case the caller falls back to g_engine.query().
+        bool volcanoExecutionError = false;
         auto executeVolcanoSelect = [&](const std::string& tblName,
                                          const std::set<std::string>& projCols,
                                          const std::vector<std::vector<std::string>>& condGroups,
@@ -15747,6 +15881,8 @@ bool execute(const string& rawSql, Session& s) {
             ctx.distinct = distinct;
             ctx.semiJoins = subqueryJoins;
             ctx.existenceFilters = existenceSubqueries;
+            ctx.projectionTargets = projectionTargets;
+            ctx.scalarSubquery = scalarSubquery;
             std::vector<std::vector<dbms::StorageEngine::Condition>> branches;
             for (const auto& group : condGroups) {
                 branches.push_back(dbms::StorageEngine::parseConditions(group));
@@ -15754,6 +15890,7 @@ bool execute(const string& rawSql, Session& s) {
 
             dbms::OpPtr plan;
             if (branches.size() > 1) {
+                if (!ctx.projectionTargets.empty()) return false;
                 plan = dbms::QueryPlanner::buildDisjunctiveSelectPlan(
                     &g_engine, ctx, branches);
                 if (!plan) return false;
@@ -15762,7 +15899,21 @@ bool execute(const string& rawSql, Session& s) {
                 if (!branches.empty()) ctx.conds = std::move(branches.front());
                 plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
             }
-            outAnswers = dbms::QueryPlanner::executePlan(std::move(plan));
+            if (auto* scalarPlan = dynamic_cast<dbms::ScalarSubqueryProjectOp*>(plan.get())) {
+                if (!scalarPlan->open()) {
+                    if (!scalarPlan->errorMessage().empty()) {
+                        volcanoExecutionError = true;
+                        cout << "ERROR: " << scalarPlan->errorMessage() << endl;
+                        return true;
+                    }
+                    return false;
+                }
+                string row;
+                while (scalarPlan->next(row)) outAnswers.push_back(row);
+                scalarPlan->close();
+            } else {
+                outAnswers = dbms::QueryPlanner::executePlan(std::move(plan));
+            }
             return true;
         };
 
@@ -16580,12 +16731,44 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         } else if (hasScalar) {
             if (forUpdate) { cout << "FOR UPDATE not supported with scalar functions" << endl; return true; }
+
+            bool scalarVolcanoUsed = false;
+            if (structuredScalar && !isDistinct && distinctOnCols.empty() &&
+                orderBySpecs.empty() && limitPos == string::npos &&
+                offsetPos == string::npos) {
+                vector<vector<string>> scalarGroups;
+                if (!condTokens.empty()) {
+                    vector<string> condCopy = condTokens;
+                    condCopy.insert(condCopy.begin(), "(");
+                    condCopy.push_back(")");
+                    for (auto& token : condCopy) token = modifyLogic(token);
+                    scalarGroups = breakDownConditions(condCopy);
+                }
+                if (scalarGroups.size() <= 1) {
+                    scalarVolcanoUsed = executeVolcanoSelect(
+                        tname, selectCols, scalarGroups, nullptr, false,
+                        {}, {}, answers);
+                }
+            }
+            if (scalarVolcanoUsed) {
+                if (volcanoExecutionError) return true;
+                for (const auto& target : projectionTargets) {
+                    cout << (target.isScalar ? "?column?" : target.column) << ' ';
+                }
+                cout << '\n';
+                for (const auto& row : answers) {
+                    cout << row << endl;
+                    log(s.username, row, getTime());
+                }
+                return false;
+            }
+
             for (const auto& expr : selectExprs) {
                 cout << expr.displayName << ' ';
             }
             cout << '\n';
             if (condTokens.empty()) {
-                answers = g_engine.queryExpr(s.currentDB, tname, {}, selectExprs, orderBySpecs);
+                answers = g_engine.queryExpr(queryDb, tname, {}, selectExprs, orderBySpecs);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
@@ -16593,7 +16776,7 @@ bool execute(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.queryExpr(s.currentDB, tname, g, selectExprs, orderBySpecs);
+                    auto part = g_engine.queryExpr(queryDb, tname, g, selectExprs, orderBySpecs);
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }

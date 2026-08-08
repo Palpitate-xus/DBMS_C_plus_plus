@@ -636,6 +636,34 @@ static void test_semi_and_anti_join() {
     const auto explainJson = dbms::QueryPlanner::explainJson(explainPlan, &g_engine, db);
     assert(explainJson.find("\"nodeType\":\"ExistenceFilter\"") != std::string::npos);
 
+    dbms::PlanContext scalarCtx;
+    scalarCtx.dbname = db;
+    scalarCtx.tablename = "outer_t";
+    scalarCtx.selectCols = {"id"};
+    scalarCtx.projectionTargets = {{false, "id"}, {true, {}}};
+    scalarCtx.scalarSubquery = {
+        db, "inner_t", "id", dbms::StorageEngine::parseConditions({"=id 2"})};
+    auto scalarPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx);
+    auto* scalar = dynamic_cast<dbms::ScalarSubqueryProjectOp*>(scalarPlan.get());
+    assert(scalar);
+    auto scalarRows = dbms::QueryPlanner::executePlan(std::move(scalarPlan));
+    assert((scalarRows == std::vector<std::string>{
+        "1 2 ", "2 2 ", "3 2 ", "4 2 "}));
+
+    scalarCtx.scalarSubquery.innerConds =
+        dbms::StorageEngine::parseConditions({"=id 9"});
+    auto nullScalarRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx));
+    assert((nullScalarRows == std::vector<std::string>{
+        "1 NULL ", "2 NULL ", "3 NULL ", "4 NULL "}));
+
+    scalarCtx.scalarSubquery.innerConds =
+        dbms::StorageEngine::parseConditions({"=enabled 1"});
+    auto multiScalarPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx);
+    auto* multiScalar = dynamic_cast<dbms::ScalarSubqueryProjectOp*>(multiScalarPlan.get());
+    assert(multiScalar && !multiScalar->open());
+    assert(multiScalar->errorMessage().find("more than one row") != std::string::npos);
+
     cleanup(db);
     std::cout << "[VOLCANO-5.1] SemiJoin/AntiJoin and ExistenceFilter semantics OK" << std::endl;
 }

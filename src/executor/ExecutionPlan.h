@@ -303,6 +303,53 @@ private:
     size_t pos_ = 0;
 };
 
+struct ProjectionTarget {
+    bool isScalar = false;
+    std::string column;
+};
+
+struct ScalarSubquerySpec {
+    std::string dbname;
+    std::string tablename;
+    std::string column;
+    std::vector<StorageEngine::Condition> innerConds;
+};
+
+// ScalarSubqueryProject evaluates one uncorrelated scalar subquery as an
+// init-plan and applies its single value to every outer row.  It enforces the
+// SQL scalar cardinality rule: zero rows become NULL, more than one row is an
+// execution error.
+class ScalarSubqueryProjectOp : public Operator {
+public:
+    ScalarSubqueryProjectOp(OpPtr outer, OpPtr inner,
+                            const TableSchema& outerTbl,
+                            const TableSchema& innerTbl,
+                            const std::vector<ProjectionTarget>& targets,
+                            const std::string& innerColumn)
+        : outer_(std::move(outer)), inner_(std::move(inner)),
+          outerTbl_(outerTbl), innerTbl_(innerTbl), targets_(targets),
+          innerColumn_(innerColumn) {}
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    const std::string& errorMessage() const { return errorMessage_; }
+    Operator* outerChild() const { return outer_.get(); }
+    Operator* innerChild() const { return inner_.get(); }
+    const std::string& innerColumn() const { return innerColumn_; }
+
+private:
+    OpPtr outer_;
+    OpPtr inner_;
+    TableSchema outerTbl_;
+    TableSchema innerTbl_;
+    std::vector<ProjectionTarget> targets_;
+    std::string innerColumn_;
+    std::string scalarValue_;
+    bool scalarIsNull_ = true;
+    std::string errorMessage_;
+};
+
 // ========================================================================
 // Project: select specific columns
 // ========================================================================
@@ -662,6 +709,10 @@ struct PlanContext {
     // Uncorrelated EXISTS/NOT EXISTS predicates lowered to an existence
     // filter over a right-hand relation.
     std::vector<ExistenceSpec> existenceFilters;
+    // A narrow uncorrelated scalar target list lowered to an init-plan plus
+    // target projection.  Empty means the normal column projection path.
+    std::vector<ProjectionTarget> projectionTargets;
+    ScalarSubquerySpec scalarSubquery;
 };
 
 // Equivalence class: a set of expressions that are known equal.

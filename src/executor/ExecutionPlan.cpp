@@ -806,6 +806,82 @@ void ExistenceFilterOp::close() {
 }
 
 // ========================================================================
+// ScalarSubqueryProjectOp
+// ========================================================================
+
+bool ScalarSubqueryProjectOp::open() {
+    scalarValue_.clear();
+    scalarIsNull_ = true;
+    errorMessage_.clear();
+
+    size_t innerIdx = innerTbl_.len;
+    for (size_t i = 0; i < innerTbl_.len; ++i) {
+        if (innerTbl_.cols[i].dataName == innerColumn_) {
+            innerIdx = i;
+            break;
+        }
+    }
+    if (innerIdx >= innerTbl_.len) {
+        errorMessage_ = "scalar subquery column does not exist";
+        return false;
+    }
+    if (!inner_->open()) return false;
+
+    std::string row;
+    if (inner_->next(row)) {
+        scalarIsNull_ = inner_->lastColumnIsNull(innerIdx) ||
+                        rawColumnIsNull(row, innerTbl_, innerIdx);
+        if (!scalarIsNull_) {
+            scalarValue_ = StorageEngine::extractColumnValueStatic(
+                row, innerTbl_, innerIdx);
+        }
+        if (inner_->next(row)) {
+            inner_->close();
+            errorMessage_ =
+                "more than one row returned by a subquery used as an expression";
+            return false;
+        }
+    }
+    inner_->close();
+    return outer_->open();
+}
+
+bool ScalarSubqueryProjectOp::next(std::string& outRow) {
+    std::string row;
+    if (!outer_->next(row)) return false;
+
+    outRow.clear();
+    for (const auto& target : targets_) {
+        std::string value;
+        if (target.isScalar) {
+            value = scalarIsNull_ ? "NULL" : scalarValue_;
+        } else {
+            size_t outerIdx = outerTbl_.len;
+            for (size_t i = 0; i < outerTbl_.len; ++i) {
+                if (outerTbl_.cols[i].dataName == target.column) {
+                    outerIdx = i;
+                    break;
+                }
+            }
+            if (outerIdx >= outerTbl_.len) {
+                errorMessage_ = "scalar projection column does not exist";
+                return false;
+            }
+            const bool isNull = rawColumnIsNull(row, outerTbl_, outerIdx);
+            value = isNull ? "NULL" :
+                StorageEngine::extractColumnValueStatic(row, outerTbl_, outerIdx);
+        }
+        outRow += value;
+        outRow += ' ';
+    }
+    return true;
+}
+
+void ScalarSubqueryProjectOp::close() {
+    outer_->close();
+}
+
+// ========================================================================
 // ProjectOp
 // ========================================================================
 
@@ -2193,7 +2269,23 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         // Always add a Project so the output is formatted text (not raw binary).
         // When selectCols is empty, Project emits all columns (SELECT * semantics).
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
-        root = std::make_unique<ProjectOp>(std::move(root), tbl, ctx.selectCols);
+        if (!ctx.projectionTargets.empty()) {
+            const std::string innerDb = ctx.scalarSubquery.dbname.empty()
+                ? ctx.dbname : ctx.scalarSubquery.dbname;
+            const TableSchema innerTbl = engine->getTableSchema(
+                innerDb, ctx.scalarSubquery.tablename);
+            OpPtr inner = std::make_unique<TableScanOp>(
+                engine, innerDb, ctx.scalarSubquery.tablename);
+            if (!ctx.scalarSubquery.innerConds.empty()) {
+                inner = std::make_unique<FilterOp>(
+                    std::move(inner), innerTbl, ctx.scalarSubquery.innerConds);
+            }
+            root = std::make_unique<ScalarSubqueryProjectOp>(
+                std::move(root), std::move(inner), tbl, innerTbl,
+                ctx.projectionTargets, ctx.scalarSubquery.column);
+        } else {
+            root = std::make_unique<ProjectOp>(std::move(root), tbl, ctx.selectCols);
+        }
     }
 
     // DISTINCT applies to the projected target list, not the hidden columns
@@ -2470,6 +2562,16 @@ static CostEstimate explainOp(Operator* op, int indent,
         out += prefix + (exists->isAnti() ? "AntiExistenceFilter" : "ExistenceFilter") +
                costRowsStr(est, opts) + "\n";
 
+    } else if (auto* scalar = dynamic_cast<ScalarSubqueryProjectOp*>(op)) {
+        CostEstimate outer = explainOp(scalar->outerChild(), indent + 1,
+                                       engine, dbname, out, opts);
+        CostEstimate inner = explainOp(scalar->innerChild(), indent + 1,
+                                       engine, dbname, out, opts);
+        est.rows = outer.rows;
+        est.cost = outer.cost + inner.cost + outer.rows * 0.1;
+        out += prefix + "ScalarSubqueryProject(inner_col=" +
+               scalar->innerColumn() + ")" + costRowsStr(est, opts) + "\n";
+
     } else if (auto* proj = dynamic_cast<ProjectOp*>(op)) {
         CostEstimate child = explainOp(proj->child(), indent + 1, engine, dbname, out, opts);
         est.rows = child.rows;
@@ -2711,6 +2813,18 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         est.cost = outer.cost + inner.cost + inner.rows;
         json += "\"nodeType\":\"" +
                 std::string(exists->isAnti() ? "AntiExistenceFilter" : "ExistenceFilter") + "\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[" + outerJson + "," + innerJson + "]";
+
+    } else if (auto* scalar = dynamic_cast<ScalarSubqueryProjectOp*>(op)) {
+        auto [outerJson, outer] = explainOpJson(scalar->outerChild(), engine,
+                                                dbname, opts);
+        auto [innerJson, inner] = explainOpJson(scalar->innerChild(), engine,
+                                                dbname, opts);
+        est.rows = outer.rows;
+        est.cost = outer.cost + inner.cost + outer.rows * 0.1;
+        json += "\"nodeType\":\"ScalarSubqueryProject\",";
+        json += "\"innerColumn\":\"" + jsonEscape(scalar->innerColumn()) + "\",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[" + outerJson + "," + innerJson + "]";
 
