@@ -22,6 +22,7 @@
 #include "parser/parser.h"
 #include "commands/DdlExecutor.h"
 #include "catalog/CatalogService.h"
+#include "process/SqlStats.h"
 
 using namespace std;
 using dbms::Column;
@@ -105,21 +106,6 @@ void logSlowQuery(const std::string& sql, double ms,
                   const std::string& dbname = "");
 
 // ========================================================================
-// SQL execution statistics (pg_stat_statements)
-// ========================================================================
-struct SqlStatEntry {
-    std::string sql;
-    uint64_t calls = 0;
-    double totalTimeMs = 0.0;
-    double minTimeMs = 0.0;
-    double maxTimeMs = 0.0;
-    double meanTimeMs = 0.0;
-    std::string dbname;
-};
-static std::map<std::string, SqlStatEntry> g_sqlStats; // key = db + "|" + normalized_sql
-static std::mutex g_sqlStatsMutex;
-
-// ========================================================================
 // NOTIFY / LISTEN async messaging
 // ========================================================================
 static std::mutex g_notifyMutex;
@@ -137,63 +123,6 @@ static void checkNotifications(Session& s) {
         }
         g_pendingNotifies.erase(it);
     }
-}
-
-std::string normalizeSqlForStats(const std::string& sql) {
-    std::string s = sql;
-    // Trim whitespace
-    size_t a = 0;
-    while (a < s.size() && isspace(static_cast<unsigned char>(s[a]))) ++a;
-    size_t b = s.size();
-    while (b > a && isspace(static_cast<unsigned char>(s[b - 1]))) --b;
-    s = s.substr(a, b - a);
-    // Replace consecutive whitespace with single space
-    std::string r;
-    bool lastWasSpace = false;
-    for (char c : s) {
-        if (isspace(static_cast<unsigned char>(c))) {
-            if (!lastWasSpace) r += ' ';
-            lastWasSpace = true;
-        } else {
-            r += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            lastWasSpace = false;
-        }
-    }
-    return r;
-}
-
-void recordSqlStat(const std::string& sql, double ms, const std::string& dbname) {
-    std::lock_guard<std::mutex> lock(g_sqlStatsMutex);
-    std::string key = dbname + "|" + normalizeSqlForStats(sql);
-    auto& entry = g_sqlStats[key];
-    if (entry.calls == 0) {
-        entry.sql = sql;
-        entry.dbname = dbname;
-        entry.minTimeMs = ms;
-        entry.maxTimeMs = ms;
-    } else {
-        if (ms < entry.minTimeMs) entry.minTimeMs = ms;
-        if (ms > entry.maxTimeMs) entry.maxTimeMs = ms;
-    }
-    entry.calls++;
-    entry.totalTimeMs += ms;
-    entry.meanTimeMs = entry.totalTimeMs / static_cast<double>(entry.calls);
-}
-
-static std::vector<SqlStatEntry> getSqlStats(const std::string& dbFilter = "") {
-    std::lock_guard<std::mutex> lock(g_sqlStatsMutex);
-    std::vector<SqlStatEntry> result;
-    for (const auto& kv : g_sqlStats) {
-        if (dbFilter.empty() || kv.second.dbname == dbFilter) {
-            result.push_back(kv.second);
-        }
-    }
-    // Sort by total time descending
-    std::sort(result.begin(), result.end(),
-        [](const SqlStatEntry& a, const SqlStatEntry& b) {
-            return a.totalTimeMs > b.totalTimeMs;
-        });
-    return result;
 }
 
 // Forward declaration for SHOW VARIABLES
@@ -13846,7 +13775,7 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
         if (rest == "statements") {
-            auto stats = getSqlStats(s.currentDB);
+            auto stats = dbms::getSqlStats(s.currentDB);
             cout << "query calls total_time min_time max_time mean_time dbname " << endl;
             for (const auto& st : stats) {
                 std::string q = st.sql;
@@ -15295,7 +15224,7 @@ bool execute(const string& rawSql, Session& s) {
                 }
             } else if (tname == "pg_stat_statements") {
                 cout << "query calls total_time min_time max_time mean_time dbname " << endl;
-                auto stats = getSqlStats(s.currentDB);
+                auto stats = dbms::getSqlStats(s.currentDB);
                 for (const auto& st : stats) {
                     std::string q = st.sql;
                     // Replace spaces with single space for compact display
@@ -17370,7 +17299,7 @@ int main(int argc, char* argv[]) {
             if (g_config.autoExplainEnabled && ms >= g_config.autoExplainThresholdMs) {
                 autoExplainLog(sql, ms, s.username, s.currentDB);
             }
-            recordSqlStat(sql, ms, s.currentDB);
+            dbms::recordSqlStat(sql, ms, s.currentDB);
             if (ok && !s.currentDB.empty() && g_checkpointInterval > 0) {
                 if (++sqlCount >= g_checkpointInterval) {
                     g_engine.checkpoint(s.currentDB);

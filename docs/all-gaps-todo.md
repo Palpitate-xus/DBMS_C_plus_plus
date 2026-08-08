@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：统一回归基线 PASS=122 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：统一回归基线 PASS=123 FAIL=0（121 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -184,7 +184,9 @@
 
 2026-08-08 TCL 路由收敛：事务 AST 解析并消费 `BEGIN`/`START TRANSACTION` 选项及 `SAVEPOINT`/`ROLLBACK TO`/`RELEASE` 名称；修复特定 `ROLLBACK`/`COMMIT PREPARED` 分类被通用前缀吞掉的问题。`DEFERRABLE` 继续 fail-closed 拒绝，完整子事务资源与安全快照仍待后续。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=122 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+2026-08-08 SQL 可观测性收敛：新增独立线程安全 `process/SqlStats`，统一交互式和 PostgreSQL 协议入口；常量/空白归一化聚合，提供 `SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表查询。持久化、大小上限、reset 权限和完整字段仍待后续。
+
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=123 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -522,7 +524,7 @@
 |---|------|---------|------|
 | 13.1 | `pg_catalog` | 只实现了若干虚拟表/兼容查询；缺少几百个 catalog/view/function | 🔄 |
 | 13.2 | `information_schema` | 只有子集；缺少 SQL 标准完整 views、权限过滤 | ⚠️ |
-| 13.3 | `pg_stat_*` | 有 pg_stat_statements/pg_stat_activity/pg_locks/pg_buffercache 风格子集；缺少 pg_stat_io、progress views、replication views、wait events、backend memory contexts | ⚠️ |
+| 13.3 | `pg_stat_*` | 有线程安全内存 `SqlStats` 及 pg_stat_statements/pg_stat_activity/pg_locks/pg_buffercache 风格子集；缺少持久化、pg_stat_io、progress views、replication views、wait events、backend memory contexts | ⚠️ |
 | 13.4 | 日志 | 有 slow log/auto_explain/audit；缺少 PG logging collector、CSV/JSON logs、log_line_prefix、server log GUC 全集 | ❌ |
 | 13.5 | 进程模型 | 项目多线程 server；PG 是多进程 backend + shared memory 架构 | ❌ |
 | 13.6 | 工具链 | 缺少 `psql` 元命令、libpq、pg_dump、pg_restore、pg_upgrade、initdb、createdb/dropdb、pg_ctl、pgbench | ❌ |

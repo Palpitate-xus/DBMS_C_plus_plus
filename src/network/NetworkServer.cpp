@@ -10,6 +10,7 @@
 #include "catalog/systables.h"
 #include "common/DateType.h"
 #include "PostgresNumeric.h"
+#include "process/SqlStats.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -41,7 +42,6 @@ extern double g_slowQueryThresholdMs;
 extern void logSlowQuery(const std::string& sql, double ms,
                          const std::string& username,
                          const std::string& dbname);
-extern void recordSqlStat(const std::string& sql, double ms, const std::string& dbname);
 
 namespace dbms {
 
@@ -690,7 +690,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     if (elapsedMs > g_slowQueryThresholdMs) {
         logSlowQuery(sql, elapsedMs, session.username, session.currentDB);
     }
-    recordSqlStat(sql, elapsedMs, session.currentDB);
+    dbms::recordSqlStat(sql, elapsedMs, session.currentDB);
 
     auto lines = outputLines(outputText);
     if (executionError || (!lines.empty() && lines.front().rfind("ERROR:", 0) == 0)) {

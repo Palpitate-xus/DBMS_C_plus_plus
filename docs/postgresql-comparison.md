@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-08（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线: PASS=122 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
+> 测试基线: PASS=123 FAIL=0（121 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -12,6 +12,8 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志、SSI 完整语义和 DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
 2026-08-08 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
+
+SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlStats`，`SHOW STATEMENTS`/`pg_stat_statements` 风格查询可按归一化 SQL 聚合耗时；当前仍是进程内统计，缺少持久化、完整字段和扩展生命周期。
 
 ---
 
@@ -289,7 +291,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | **Hook 系统** | ✅ | ❌ | 缺 |
 | **Background worker API** | ✅ | ⚠️ 框架 | |
 | **Shared memory 扩展** | ✅ | ❌ | 缺 |
-| 内置扩展 (pg_stat_statements 等) | ✅ | ❌ | 缺 |
+| 内置扩展 (pg_stat_statements 等) | ✅ | ⚠️ | SQL 统计子集已接入，完整扩展生命周期仍缺 |
 
 ---
 
@@ -303,9 +305,9 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | pg_description | ✅ | ✅ | ✅ |
 | pg_database | ✅ | ✅ | ✅ |
 | information_schema | ✅ | ⚠️ 基础 | |
-| pg_stat_* views | ✅ | ❌ | 缺 |
-| pg_locks / pg_stat_activity | ✅ | ❌ | 缺 |
-| **pg_stat_statements** | ✅ | ❌ | 缺 |
+| pg_stat_* views | ✅ | ⚠️ | 有若干虚拟统计视图，字段和生命周期不完整 |
+| pg_locks / pg_stat_activity | ✅ | ⚠️ | 有风格子集，完整 backend/wait 语义仍缺 |
+| **pg_stat_statements** | ✅ | ⚠️ | 有内存统计与归一化聚合，缺持久化、上限和完整扩展语义 |
 | **auto_explain** | ✅ | ❌ | 缺 |
 
 ---

@@ -3,13 +3,15 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-08）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=122 FAIL=0（120 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。
+> 当前审计（2026-08-08）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=123 FAIL=0（121 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
 构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`。
 
 协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；完整参数绑定和类型化结果仍列为协议缺口。
+
+SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议入口共同使用，按数据库及归一化 SQL 聚合调用次数和耗时；`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。持久化、大小上限和完整 PostgreSQL 统计字段仍列为后续缺口。
 
 窗口执行器已将常见排名/偏移、窗口聚合和 `ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 接入 `WindowOp`/`OffsetOp`，并通过 Volcano 单元和窗口 E2E 验证；复杂目标与主 SQL EXPLAIN 窗口解析仍待迁移。
 

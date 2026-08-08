@@ -39,5 +39,6 @@ src/utils/pg_hba.cpp
 src/utils/permissions.cpp
 src/replication/ReplicationManager.cpp
 src/process/ProcessManager.cpp
+src/process/SqlStats.cpp
 src/storage/LargeObject.cpp
 src/types/numeric.cpp

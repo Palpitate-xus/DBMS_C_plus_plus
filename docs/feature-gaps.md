@@ -2,7 +2,7 @@
 
 > 生成日期: 2026-08-08
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
-> 本 DBMS 当前状态: 生产化重构进行中，统一回归基线 PASS=122 FAIL=0（120 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
+> 本 DBMS 当前状态: 生产化重构进行中，统一回归基线 PASS=123 FAIL=0（121 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
 
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
@@ -241,14 +241,14 @@
 
 ### P2-1: pg_stat_statements
 - **类别**: 可观测性 / SQL 统计
-- **现状**: 无 SQL 级统计
+- **现状**: 已有线程安全的进程内 SQL 统计模块，`SHOW STATEMENTS` 和 `pg_stat_statements` 风格虚拟表可查询调用次数、总/最小/最大/平均耗时；常量与空白会归一化，主程序和 PostgreSQL 协议入口共用同一实现。仍缺持久化、大小上限/淘汰、reset 权限和完整扩展/catalog 语义。
 - **PG 参考**: `pg_stat_statements` extension
-- **影响**: 无法识别慢查询热点、无法做 SQL 级优化
+- **影响**: 基础热点识别已可用，但重启后统计丢失，无法作为 PostgreSQL 完整监控扩展直接使用
 - **实现路径**:
-  1. 实现 `SqlStats` 哈希表：key=normalized SQL, value=call_count/total_time/rows
-  2. 在 SQL 执行入口增加统计收集
-  3. 增加 `SHOW SQL_STATS` 命令
-  4. 增加 `pg_stat_statements.max` GUC
+  1. ✅ 实现线程安全 `SqlStats`：key=数据库+归一化 SQL，value=call_count/total/min/max/mean
+  2. ✅ 在交互式和 PostgreSQL 协议 SQL 入口收集统计
+  3. ✅ 提供 `SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表
+  4. 补充持久化、`pg_stat_statements.max`、reset 权限和 rows/blocks 等 PostgreSQL 字段
 - **预估工作量**: 2-3 天
 - **相关文件**: `src/common/Config.cpp`, `src/main.cpp`
 
