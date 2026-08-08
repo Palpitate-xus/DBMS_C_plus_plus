@@ -111,7 +111,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ✅ (parser + volcano) | ⚠️ 复杂子查询回退 legacy |
 | CTE (WITH/RECURSIVE) | ✅ | ✅ (parser + executor) | ✅ 基础 + RETURNING |
 | UNION/INTERSECT/EXCEPT | ✅ | ⚠️ AST 已按优先级/左结合解析，组合统一走 Volcano `SetOperationOp`；简单 operand 直接计划，复杂 operand 经 `MaterializedRowsOp` 接 legacy producer（含 ALL） | ⚠️ AST 到计划的全量下推、类型合并/collation 和完整作用域仍缺 |
-| Window Functions (ROW_NUMBER/RANK/...) | ✅ | ⚠️ `WindowOp` 已执行常见排名/偏移、窗口聚合及 `ROWS` frame/exclusion；复杂窗口仍走 legacy | ⚠️ `RANGE/GROUPS`、复杂表达式、OFFSET 和完整 planner/explain 语义仍缺 |
+| Window Functions (ROW_NUMBER/RANK/...) | ✅ | ⚠️ `WindowOp` 已执行常见排名/偏移、窗口聚合及 `ROWS/RANGE/GROUPS` frame/exclusion，`OffsetOp` 已接入；复杂窗口仍走 legacy | ⚠️ 复杂表达式和完整 planner/explain 语义仍缺 |
 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ⚠️ `GroupAggregateOp` 覆盖常见聚合与基础 grouping sets | ⚠️ 复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍缺 |
 | GROUPING_ID | ✅ | ❌ | 缺 |
 | FOR UPDATE/SHARE/NOWAIT/SKIP LOCKED | ✅ | ✅ | ✅ (行级锁 + 死锁检测) |
@@ -322,7 +322,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 7. **INSTEAD OF 视图触发器** — 已支持简单单表视图上的逐行 INSERT/UPDATE/DELETE action SQL，并覆盖多行协议 E2E；复杂视图映射、transition tables、完整函数/PL 运行时仍缺失
 
 ### 🟡 重要缺失 (影响实用性)
-1. **Window Function executor** — 常见排名/偏移、窗口聚合和 `ROWS` frame/exclusion 已进入 Volcano `WindowOp`，`RANGE/GROUPS` 与复杂目标仍回退 legacy
+1. **Window Function executor** — 常见排名/偏移、窗口聚合和 `ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 已进入 Volcano `WindowOp`/`OffsetOp`，复杂目标仍回退 legacy
 2. **复杂子查询 executor** — 简单子查询走 volcano, 关联子查询回退 legacy
 3. **UNION/INTERSECT/EXCEPT executor** — 组合语义已统一进入 Volcano，复杂 operand 的 producer 仍待 AST 全量下推；类型合并和结构化列结果也仍缺
 4. **GROUP BY 完整语义** — `GroupAggregateOp` 已覆盖基础路径；复杂目标、`GROUPING()`/`GROUPING_ID`、类型推导和完整排序作用域仍待迁移

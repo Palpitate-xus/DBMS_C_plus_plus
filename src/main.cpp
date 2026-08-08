@@ -2665,8 +2665,7 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
         "bool_and", "bool_or", "every",
         "first_value", "last_value", "ntile", "percent_rank", "cume_dist"
     };
-    if (!supported.count(wf.name) ||
-        (wf.hasFrame && wf.frameType != WindowFunc::FrameType::ROWS)) return false;
+    if (!supported.count(wf.name)) return false;
 
     auto isColumn = [&](const string& name) {
         if (!isSimpleWindowIdentifier(name)) return false;
@@ -2681,7 +2680,13 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
     spec.orderBy = wf.orderByCol;
     spec.orderAscending = wf.orderByAsc;
     spec.hasFrame = wf.hasFrame;
-    spec.frameType = dbms::WindowFunctionSpec::FrameType::ROWS;
+    if (wf.frameType == WindowFunc::FrameType::RANGE) {
+        spec.frameType = dbms::WindowFunctionSpec::FrameType::RANGE;
+    } else if (wf.frameType == WindowFunc::FrameType::GROUPS) {
+        spec.frameType = dbms::WindowFunctionSpec::FrameType::GROUPS;
+    } else {
+        spec.frameType = dbms::WindowFunctionSpec::FrameType::ROWS;
+    }
     spec.frameStartOffset = wf.frameStartOffset;
     spec.frameEndOffset = wf.frameEndOffset;
     spec.frameExclusion = wf.frameExclusion;
@@ -2690,6 +2695,19 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
         spec.partitionBy.push_back(column);
     }
     if (!spec.orderBy.empty() && !isColumn(spec.orderBy)) return false;
+    if (wf.hasFrame && wf.frameType == WindowFunc::FrameType::RANGE) {
+        if (spec.orderBy.empty()) return false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName != spec.orderBy) continue;
+            string type = toLower(tbl.cols[i].dataType);
+            const bool numeric = type == "smallint" || type == "tinyint" ||
+                type == "int" || type == "long" || type == "bigint" ||
+                type == "float" || type == "double" || type == "decimal" ||
+                type == "numeric" || type.find(" unsigned") != string::npos;
+            if (!numeric) return false;
+            break;
+        }
+    }
 
     if (wf.name == "row_number" || wf.name == "rank" || wf.name == "dense_rank" ||
         wf.name == "percent_rank" || wf.name == "cume_dist") {
@@ -15691,17 +15709,14 @@ bool execute(const string& rawSql, Session& s) {
         } else if (hasWindow) {
             if (forUpdate) { cout << "FOR UPDATE not supported with window functions" << endl; return true; }
 
-            // Route the stable, non-aggregate window subset through the
-            // structured Volcano executor.  The legacy implementation below
-            // remains the semantic fallback for frames, exclusions, window
-            // aggregates, expressions, and other syntax not represented by
-            // WindowFunctionSpec yet.
+            // Route the supported window subset through the structured
+            // Volcano executor.  Unsupported expressions and syntax retain
+            // the legacy semantic fallback below.
             size_t windowLimit = 0, windowOffset = 0;
             parseLimitOffset(windowLimit, windowOffset);
             bool canUseVolcanoWindow = !hasAgg && !hasScalar &&
                                        distinctOnCols.empty() &&
                                        exprOrderBySpecs.empty() &&
-                                       windowOffset == 0 &&
                                        orderBySpecs.size() <= 1;
             vector<dbms::WindowFunctionSpec> volcanoWindowFunctions;
             vector<dbms::WindowTarget> volcanoWindowTargets;
@@ -15775,6 +15790,7 @@ bool execute(const string& rawSql, Session& s) {
                 dbms::PlanContext ctx;
                 ctx.dbname = queryDb;
                 ctx.tablename = tname;
+                ctx.offset = windowOffset;
                 ctx.limit = windowLimit;
                 ctx.distinct = isDistinct;
                 ctx.windowFunctions = std::move(volcanoWindowFunctions);

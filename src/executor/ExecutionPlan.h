@@ -284,8 +284,8 @@ struct WindowTarget {
 
 // WindowOp materializes its child once, computes independent window streams,
 // then formats the requested target list.  It handles common ranking/offset
-// and aggregate windows, including PostgreSQL default and ROWS frame
-// semantics; complex RANGE/GROUPS syntax remains outside this contract.
+// and aggregate windows, including PostgreSQL default, ROWS, RANGE, and
+// GROUPS frame semantics for the supported scalar window functions.
 class WindowOp : public Operator {
 public:
     WindowOp(OpPtr child, const TableSchema& tbl,
@@ -350,6 +350,25 @@ private:
     OpPtr child_;
     size_t limit_;
     size_t count_ = 0;
+};
+
+// ========================================================================
+// Offset: OFFSET n
+// ========================================================================
+class OffsetOp : public Operator {
+public:
+    OffsetOp(OpPtr child, size_t offset);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* child() const { return child_.get(); }
+    size_t offset() const { return offset_; }
+
+private:
+    OpPtr child_;
+    size_t offset_;
+    size_t skipped_ = 0;
 };
 
 // ========================================================================
@@ -560,6 +579,7 @@ struct PlanContext {
     std::set<std::string> selectCols;
     std::string orderByCol;
     bool orderByAsc = true;
+    size_t offset = 0;
     size_t limit = 0;
     bool distinct = false;
     // When groupByCols is non-empty, buildSelectPlan creates a structured

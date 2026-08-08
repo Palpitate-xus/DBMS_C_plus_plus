@@ -123,6 +123,18 @@ static void test_order_by_limit() {
     assert(extractId(rows[0]) == 1);
     assert(extractId(rows[1]) == 2);
 
+    ctx.offset = 1;
+    ctx.limit = 2;
+    auto offsetPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    assert(dynamic_cast<dbms::LimitOp*>(offsetPlan.get()));
+    auto* offset = dynamic_cast<dbms::OffsetOp*>(
+        dynamic_cast<dbms::LimitOp*>(offsetPlan.get())->child());
+    assert(offset && offset->offset() == 1);
+    auto offsetRows = dbms::QueryPlanner::executePlan(std::move(offsetPlan));
+    assert(offsetRows.size() == 2);
+    assert(extractId(offsetRows[0]) == 2);
+    assert(extractId(offsetRows[1]) == 3);
+
     cleanup(db);
     std::cout << "[VOLCANO-5.1] ORDER BY + LIMIT OK" << std::endl;
 }
@@ -387,6 +399,32 @@ static void test_window_agg() {
     auto defaultFrameRows = dbms::QueryPlanner::executePlan(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, defaultFrameCtx));
     assert((defaultFrameRows == std::vector<std::string>{
+        "1 10", "2 50", "3 50", "4 10", "5 30"
+    }));
+
+    dbms::WindowFunctionSpec rangeSum = defaultSum;
+    rangeSum.hasFrame = true;
+    rangeSum.frameType = dbms::WindowFunctionSpec::FrameType::RANGE;
+    rangeSum.frameStartOffset = 10;
+    rangeSum.frameEndOffset = 0;
+    dbms::PlanContext rangeCtx = defaultFrameCtx;
+    rangeCtx.windowFunctions = {rangeSum};
+    auto rangeRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, rangeCtx));
+    assert((rangeRows == std::vector<std::string>{
+        "1 10", "2 50", "3 50", "4 10", "5 30"
+    }));
+
+    dbms::WindowFunctionSpec groupsSum = defaultSum;
+    groupsSum.hasFrame = true;
+    groupsSum.frameType = dbms::WindowFunctionSpec::FrameType::GROUPS;
+    groupsSum.frameStartOffset = 1;
+    groupsSum.frameEndOffset = 0;
+    dbms::PlanContext groupsCtx = defaultFrameCtx;
+    groupsCtx.windowFunctions = {groupsSum};
+    auto groupsRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, groupsCtx));
+    assert((groupsRows == std::vector<std::string>{
         "1 10", "2 50", "3 50", "4 10", "5 30"
     }));
 

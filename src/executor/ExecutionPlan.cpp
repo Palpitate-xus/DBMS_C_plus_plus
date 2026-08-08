@@ -753,6 +753,13 @@ static std::string displayWindowValue(const std::string& value) {
     return value.empty() ? "NULL" : value;
 }
 
+static bool parseWindowNumber(const std::string& value, double& out) {
+    if (value.empty()) return false;
+    char* end = nullptr;
+    out = std::strtod(value.c_str(), &end);
+    return end != value.c_str() && *end == '\0' && std::isfinite(out);
+}
+
 } // namespace
 
 WindowOp::WindowOp(OpPtr child, const TableSchema& tbl,
@@ -786,9 +793,6 @@ bool WindowOp::open() {
         input.size(), std::vector<std::string>(functions_.size()));
     for (size_t functionIndex = 0; functionIndex < functions_.size(); ++functionIndex) {
         const auto& function = functions_[functionIndex];
-        if (function.hasFrame && function.frameType != WindowFunctionSpec::FrameType::ROWS) {
-            return false;
-        }
         std::vector<size_t> partitionColumns;
         for (const auto& name : function.partitionBy) {
             const size_t column = windowColumnIndex(tbl_, name);
@@ -879,6 +883,66 @@ bool WindowOp::open() {
             if (!function.hasFrame) {
                 if (orderColumn < tbl_.len) return {partitionStart, groupEndAt[position]};
                 return {partitionStart, partitionEnd};
+            }
+            if (function.frameType == WindowFunctionSpec::FrameType::GROUPS) {
+                size_t begin = groupStartAt[position];
+                size_t end = groupEndAt[position];
+                if (function.frameStartOffset >= 0) {
+                    size_t groups = static_cast<size_t>(function.frameStartOffset);
+                    while (groups-- > 0 && begin > partitionStart) {
+                        begin = groupStartAt[begin - 1];
+                    }
+                }
+                if (function.frameEndOffset >= 0) {
+                    size_t groups = static_cast<size_t>(function.frameEndOffset);
+                    while (groups-- > 0 && end < partitionEnd) {
+                        end = groupEndAt[end];
+                    }
+                }
+                return {begin, end};
+            }
+            if (function.frameType == WindowFunctionSpec::FrameType::RANGE &&
+                orderColumn < tbl_.len) {
+                double currentKey = 0.0;
+                if (!parseWindowNumber(input[order[position]].values[orderColumn], currentKey)) {
+                    return {groupStartAt[position], groupEndAt[position]};
+                }
+                if (!function.orderAscending) currentKey = -currentKey;
+                auto orderedKey = [&](size_t framePosition, double& key) {
+                    if (!parseWindowNumber(input[order[framePosition]].values[orderColumn], key)) {
+                        return false;
+                    }
+                    if (!function.orderAscending) key = -key;
+                    return true;
+                };
+                size_t begin = partitionStart;
+                size_t end = partitionEnd;
+                if (function.frameStartOffset >= 0) {
+                    if (function.frameStartOffset == 0) {
+                        begin = groupStartAt[position];
+                    } else {
+                        const double threshold = currentKey - function.frameStartOffset;
+                        while (begin < partitionEnd) {
+                            double key = 0.0;
+                            if (!orderedKey(begin, key) || key >= threshold) break;
+                            ++begin;
+                        }
+                    }
+                }
+                if (function.frameEndOffset >= 0) {
+                    if (function.frameEndOffset == 0) {
+                        end = groupEndAt[position];
+                    } else {
+                        const double threshold = currentKey + function.frameEndOffset;
+                        end = position;
+                        while (end < partitionEnd) {
+                            double key = 0.0;
+                            if (!orderedKey(end, key) || key > threshold) break;
+                            ++end;
+                        }
+                    }
+                }
+                return {begin, end};
             }
             size_t begin = partitionStart;
             size_t end = partitionEnd;
@@ -1150,7 +1214,7 @@ void SortOp::close() {
 }
 
 // ========================================================================
-// LimitOp
+// LimitOp / OffsetOp
 // ========================================================================
 
 LimitOp::LimitOp(OpPtr child, size_t limit)
@@ -1169,6 +1233,26 @@ bool LimitOp::next(std::string& outRow) {
 
 void LimitOp::close() {
     count_ = 0;
+    child_->close();
+}
+
+OffsetOp::OffsetOp(OpPtr child, size_t offset)
+    : child_(std::move(child)), offset_(offset) {}
+
+bool OffsetOp::open() {
+    skipped_ = 0;
+    if (!child_->open()) return false;
+    std::string ignored;
+    while (skipped_ < offset_ && child_->next(ignored)) ++skipped_;
+    return true;
+}
+
+bool OffsetOp::next(std::string& outRow) {
+    return child_->next(outRow);
+}
+
+void OffsetOp::close() {
+    skipped_ = 0;
     child_->close();
 }
 
@@ -1964,6 +2048,12 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         root = std::make_unique<DistinctOp>(std::move(root));
     }
 
+    // OFFSET is applied after projection/distinct and before LIMIT, matching
+    // SQL's result-window semantics.
+    if (ctx.offset > 0) {
+        root = std::make_unique<OffsetOp>(std::move(root), ctx.offset);
+    }
+
     // Add Limit
     if (ctx.limit > 0) {
         root = std::make_unique<LimitOp>(std::move(root), ctx.limit);
@@ -1987,6 +2077,7 @@ OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
     }
     root = std::make_unique<ProjectOp>(std::move(root), tbl, ctx.selectCols);
     if (ctx.distinct) root = std::make_unique<DistinctOp>(std::move(root));
+    if (ctx.offset > 0) root = std::make_unique<OffsetOp>(std::move(root), ctx.offset);
     if (ctx.limit > 0) root = std::make_unique<LimitOp>(std::move(root), ctx.limit);
     return root;
 }
@@ -2228,6 +2319,13 @@ static CostEstimate explainOp(Operator* op, int indent,
         est.cost = child.cost + child.rows * logFactor * 0.1;
         out += prefix + "Sort" + costRowsStr(est, opts) + "\n";
 
+    } else if (auto* off = dynamic_cast<OffsetOp*>(op)) {
+        CostEstimate child = explainOp(off->child(), indent + 1, engine, dbname, out, opts);
+        est.rows = std::max(0.0, child.rows - static_cast<double>(off->offset()));
+        est.cost = child.cost + est.rows * 0.01;
+        out += prefix + "Offset(offset=" + std::to_string(off->offset()) + ")" +
+               costRowsStr(est, opts) + "\n";
+
     } else if (auto* lim = dynamic_cast<LimitOp*>(op)) {
         CostEstimate child = explainOp(lim->child(), indent + 1, engine, dbname, out, opts);
         est.rows = std::min(child.rows, static_cast<double>(lim->limit()));
@@ -2445,6 +2543,15 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         double logFactor = child.rows > 1.0 ? std::log2(child.rows) : 1.0;
         est.cost = child.cost + child.rows * logFactor * 0.1;
         json += "\"nodeType\":\"Sort\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[" + childJson + "]";
+
+    } else if (auto* off = dynamic_cast<OffsetOp*>(op)) {
+        auto [childJson, child] = explainOpJson(off->child(), engine, dbname, opts);
+        est.rows = std::max(0.0, child.rows - static_cast<double>(off->offset()));
+        est.cost = child.cost + est.rows * 0.01;
+        json += "\"nodeType\":\"Offset\",";
+        json += "\"offset\":" + std::to_string(off->offset()) + ",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[" + childJson + "]";
 

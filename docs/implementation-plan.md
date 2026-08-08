@@ -11,7 +11,7 @@
 
 协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；完整参数绑定和类型化结果仍列为协议缺口。
 
-窗口执行器已将常见排名/偏移、窗口聚合和 `ROWS` frame/exclusion 接入 `WindowOp`，并通过 Volcano 单元和窗口 E2E 验证；`RANGE/GROUPS`、复杂目标、OFFSET 与主 SQL EXPLAIN 窗口解析仍待迁移。
+窗口执行器已将常见排名/偏移、窗口聚合和 `ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 接入 `WindowOp`/`OffsetOp`，并通过 Volcano 单元和窗口 E2E 验证；复杂目标与主 SQL EXPLAIN 窗口解析仍待迁移。
 
 协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本及常用类型二进制参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换，numeric 采用 PostgreSQL base-10000 binary codec，date/time/秒精度 timestamp/timestamptz/uuid 也支持 binary 参数与结果，Describe/Close 会校验并管理 statement/portal 生命周期，Execute 支持基础 `maxRows` 分批返回与 `PortalSuspended`，常见单表结果填充 catalog/table schema 驱动的 RowDescription 元数据；数组等复杂类型的二进制 I/O、完整 RowDescription 类型推导和 holdable/scrollable cursor 等完整 portal 语义仍列为协议缺口。
 
@@ -292,7 +292,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 4.18 实现伪类型 `record` / `anyelement` / `anyarray` 的函数调用约束 | 2.21 | 伪类型已在 `TypeRegistry` 中注册（`record`/`anyelement`/`anyarray` 为 pseudo category）；函数声明可使用这些类型作为参数/返回类型。函数重载解析、polymorphic 类型推断仍待后续。 |
 | ⚠️ 4.19 补全数学/字符串/日期时间/JSON/XML/Array/Range 函数全集 | 3.3~3.6 | 标量函数库已大幅扩充并经 SELECT 投影端到端可用：字符串（`tests/string_functions_test.cpp`）、数学（`tests/math_functions_test.cpp`）、日期时间（`tests/date_functions_test.cpp`）、编码/哈希 md5/encode/decode（`tests/encoding_functions_test.cpp`）、数组（`tests/array_functions_test.cpp`）、JSON（`tests/json_functions_test.cpp`）、正则（`tests/regexp_functions_test.cpp`）、范围（`tests/range_functions_test.cpp`）。XML 函数、JSON 路径求值、集合返回函数仍待后续。 |
 | ⚠️ 4.20 实现聚合函数完整集（ordered-set、percentile、统计回归） | 3.7 | bool_and/bool_or/every、percentile_cont/percentile_disc 已落地（`tests/aggregate_bool_test.cpp` + `tests/aggregate_percentile_test.cpp`）；ordered-set、统计回归仍待后续。 |
-| ⚠️ 4.21 实现窗口函数完整语义（frame exclusion、RANGE/GROUPS、命名窗口） | 3.8 | 常见排名/偏移、窗口聚合、`ROWS` frame/exclusion 已由主入口接入 Volcano `WindowOp`；结构化计划支持 `WindowAgg` 文本/JSON EXPLAIN。`RANGE/GROUPS`、复杂目标列表、OFFSET 以及主 SQL EXPLAIN 的窗口解析仍待迁移，10 个窗口 E2E 与 Volcano 单元覆盖结构化路径。 |
+| ⚠️ 4.21 实现窗口函数完整语义（frame exclusion、RANGE/GROUPS、命名窗口） | 3.8 | 常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion 和 OFFSET 已由主入口接入 Volcano `WindowOp`/`OffsetOp`；结构化计划支持 `WindowAgg` 文本/JSON EXPLAIN。复杂目标列表及主 SQL EXPLAIN 的窗口解析仍待迁移，13 个窗口 E2E 与 Volcano 单元覆盖结构化路径。 |
 | ✅ 4.22 实现 `DEFAULT` 表达式默认值、稳定/易变函数、序列所有权 | 5.5 | `DEFAULT nextval('seq')` / `currval()` 经 `ExprEvaluator` 内置序列函数端到端可用；function volatility 从 `CREATE FUNCTION IMMUTABLE/STABLE/VOLATILE` 持久化到 UDF 元数据与 `pg_proc.provolatile`，内置函数分类 volatility；`DEFAULT nextval('seq')` 自动注册序列到表的 `pg_depend` 依赖，`DROP SEQUENCE RESTRICT/CASCADE` 正确处理依赖。planner 级 volatility 优化仍延期。 |
 | ✅ 4.23 实现 `GENERATED` 虚拟/存储生成列完整语义 | 5.6 | `GENERATED ALWAYS AS (expr) STORED` 在 INSERT/UPDATE 时按当前行求值并持久化，拒绝用户直接写入；`GENERATED ALWAYS AS (expr) VIRTUAL` 不占用存储，在 SELECT 投影与标量函数参数中按当前行实时计算；schema 二进制格式 `0x44420005` 持久化 `generatedKind`。新增 `tests/generated_columns_test.cpp`。WHERE/DISTINCT/索引中 VIRTUAL 列的实时计算仍待后续 planner 阶段完善。 |
 | ⚠️ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 已实现元数据持久化和 `=`/`&&` 的全表冲突检查，并有 `tests/exclude_test.cpp`；真实 GiST 加速、operator class、多元素/表达式元素和完整并发语义仍待后续。 |

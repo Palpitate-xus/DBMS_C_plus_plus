@@ -17,7 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
-| 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；`RANGE/GROUPS`、复杂目标、OFFSET 和主 SQL EXPLAIN 窗口解析仍明确回退或待迁移。扩展 Volcano 单元覆盖默认 frame、排除、分析函数，窗口 E2E 保持 10/10。 |
+| 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；新增 `OffsetOp`，复杂目标和主 SQL EXPLAIN 窗口解析仍待迁移。扩展 Volcano 单元与窗口 E2E，窗口 E2E 为 13/13。 |
 | 2026-08-08 | Group executor 收敛：新增 `GroupAggregateOp`，主 SQL/EXPLAIN 接入常见 GROUP BY、HAVING、ROLLUP/CUBE/GROUPING SETS 及常见聚合；补充分组、HAVING、NULL grouping-set 输出和文本/JSON EXPLAIN 单测。复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域和并行聚合仍待迁移。 |
 | 2026-08-08 | TOAST 压缩首步：当前 TOAST chunk 格式升级为带 flags/originalSize 的结构，写入自动使用 zlib 压缩（不可压缩值保留原文），统一 shell/CMake 构建入口并增加物理压缩回归；旧 TOAST chunk 不兼容，lz4/pglz、storage strategy、`toast_tuple_target` 与 PG pointer/catalog 语义仍待迁移。 |
 | 2026-08-07 | 测试入口收敛：`build_tests.sh` 与 `run_all_tests_fast.sh` 通过 `build_common.sh` 统一执行协议和窗口函数两个 E2E；当前统一基线为 PASS=122 FAIL=0。 |
@@ -334,7 +334,7 @@
 | 3.5 | 日期时间函数 | 支持 current/now/extract/date_part(全字段)/date_trunc/make_date·time·timestamp/current_* 家族；缺少 time zone database、`date_bin`、justify 系列、`age`、`to_char`/`to_timestamp`、ISO week、precision、interval field 复杂行为 | ⚠️ |
 | 3.6 | JSON/XML/Array/Range | Array 函数已扩充（length/upper/lower/ndims/cardinality/append/prepend/cat/position/array_to_string/string_to_array）；JSON/XML/Range 仍为小子集；缺少 PostgreSQL 18 SQL/JSON、JSON_TABLE、XMLTABLE、unnest/切片、range/multirange 全函数 | ⚠️ |
 | 3.7 | 聚合函数 | 有 count/sum/avg/min/max、部分 string/json/array 聚合痕迹；新增 bool_and/bool_or/every（Wave 4.20）、percentile_cont/percentile_disc（Wave 4.20）；缺少 ordered-set/hypothetical-set 全集、统计回归聚合、parallel aggregate | ⚠️ |
-| 3.8 | 窗口函数 | 常见排名/偏移、窗口聚合、`ROWS` frame/exclusion 和默认 frame 已接入 Volcano `WindowOp`，并由 Volcano 单元与 `tests/window_e2e_test.py` 覆盖（10 用例全绿）；仍缺 `RANGE/GROUPS`、复杂目标、OFFSET、完整窗口函数集和 ordered-set over | ⚠️ |
+| 3.8 | 窗口函数 | 常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 和默认 frame 已接入 Volcano `WindowOp`/`OffsetOp`，并由 Volcano 单元与 `tests/window_e2e_test.py` 覆盖（13 用例全绿）；仍缺复杂目标、完整窗口函数集和 ordered-set over | ⚠️ |
 | 3.9 | 系统函数 | 只有少量 `pg_*` 函数拦截；缺少系统信息、WAL、replication、snapshot、privilege inquiry、object addressing、admin 函数全集 | ⚠️ |
 | 3.10 | 用户自定义函数 | 仅保存表达式或 SQL 字符串；缺少语言、严格性、稳定性、并行安全、security definer、成本、依赖和 plan cache | ⚠️ |
 

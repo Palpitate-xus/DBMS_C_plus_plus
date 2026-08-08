@@ -173,6 +173,21 @@ def main():
             {1: "800", 2: "800", 3: "800", 6: "800"},
             "EXCLUDE NO OTHERS with ties",
         )
+        check(
+            "SELECT id, dept, salary, sum(salary) OVER (PARTITION BY dept ORDER BY salary RANGE BETWEEN 100 PRECEDING AND CURRENT ROW) FROM emp ORDER BY id;",
+            {1: "100", 2: "500", 3: "700", 4: "100", 5: "300", 6: "500"},
+            "Volcano RANGE frame",
+        )
+        check(
+            "SELECT id, dept, salary, sum(salary) OVER (PARTITION BY dept ORDER BY salary GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM emp ORDER BY id;",
+            {1: "100", 2: "500", 3: "700", 4: "100", 5: "300", 6: "500"},
+            "Volcano GROUPS frame",
+        )
+        check(
+            "SELECT id, row_number() OVER (PARTITION BY dept ORDER BY salary) FROM emp ORDER BY id OFFSET 2;",
+            {3: "4", 4: "1", 5: "2", 6: "3"},
+            "Volcano OFFSET",
+        )
 
         # ---- named window tests ----
         # Use standard SQL clause ordering: WHERE ... WINDOW ... ORDER BY

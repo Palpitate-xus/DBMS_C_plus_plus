@@ -2,7 +2,7 @@
 
 最后更新：2026-08-08
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，120 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=122 FAIL=0`，其中窗口函数 E2E 为 `10/10`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，120 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=122 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
 本轮已完成的基础收敛：
 
@@ -30,7 +30,7 @@
 - 简单单表视图已支持行级 `INSTEAD OF INSERT/UPDATE/DELETE` action SQL；多行 `VALUES`、按实际匹配行的 UPDATE/DELETE、`NEW`/`OLD`/`WHEN` 和 server 会话执行均有协议回归，复杂视图映射与函数/PL 触发器运行时仍未完成。
 - `UNION`/`INTERSECT`/`EXCEPT` 的组合语义已统一由 Volcano `SetOperationOp` 执行，覆盖顶层优先级、错误传播及 `ALL` 重复行语义；简单单表 operand 直接构建子计划，复杂 operand 通过 `MaterializedRowsOp` 接入，完整 AST 下推和类型合并尚未完成。
 - 并行执行已具备可验证的 `ParallelTableScanOp`：非分区 heap 按 page range 由多个 worker 读取并按范围顺序 Gather，`max_parallel_workers_per_gather` 可配置；事务内、分区表、并行 join/aggregate、GatherMerge 和长期 worker pool 仍未完成。
-- 窗口执行已具备可复用的 `WindowOp`/`WindowAgg` 计划节点：主 SQL 入口已接入常见排名/偏移、窗口聚合、`ROWS` frame/exclusion、独立分区/排序和最终结果排序；`RANGE/GROUPS`、复杂目标列表、OFFSET 和主 SQL EXPLAIN 的窗口解析仍保留 legacy fallback。
+- 窗口执行已具备可复用的 `WindowOp`/`WindowAgg` 计划节点：主 SQL 入口已接入常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、独立分区/排序、OFFSET 和最终结果排序；复杂目标列表和主 SQL EXPLAIN 的窗口解析仍保留 legacy fallback。
 - 分组执行已具备可复用的 `GroupAggregateOp` 计划节点：主 SQL 入口和 EXPLAIN 已接入常见 `GROUP BY`、`HAVING`、`ROLLUP/CUBE/GROUPING SETS` 及常见标量聚合；复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域和并行聚合仍待完成。
 - 多个等值索引条件已由 `BitmapHeapScanOp`/`BitmapOrHeapScanOp` 执行候选 RID 的 AND/OR 组合，再统一 heap fetch 和原谓词重检；范围 bitmap、并行 bitmap 和真正 block bitmap 扫描尚未完成。
 - SERIALIZABLE 事务对关系级读取登记 SIREAD 覆盖，即使谓词返回空集也会参与 rw-conflict 检测；该粒度是保守安全边界，页/索引级 predicate lock 和完整 SSI 冲突图仍未完成。
