@@ -1,6 +1,6 @@
 # 功能缺失清单 (Feature Gaps)
 
-> 生成日期: 2026-08-07
+> 生成日期: 2026-08-08
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
 > 本 DBMS 当前状态: 生产化重构进行中，统一回归基线 PASS=122 FAIL=0（120 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
 
@@ -119,15 +119,15 @@
 
 ### P1-1: Window Function Executor
 - **类别**: 执行器 / 分析函数
-- **现状**: 常见无 frame 的 `row_number`/`rank`/`dense_rank`/`lag`/`lead` 已通过 Volcano `WindowOp` 执行；窗口聚合、显式 frame/exclusion、复杂表达式和 OFFSET 仍回退 legacy `main.cpp` 路径
+- **现状**: 常见排名/偏移函数、窗口聚合和 `ROWS` frame/exclusion 已通过 Volcano `WindowOp` 执行；`RANGE/GROUPS`、复杂表达式和 OFFSET 仍回退 legacy `main.cpp` 路径
 - **PG 参考**: `WindowAgg` 节点, `row_number()`, `rank()`, `lag()`, `lead()` 等
-- **影响**: 基础排名/偏移查询已具备结构化执行器；完整 frame、窗口聚合和高级分析语义仍无法使用生产级计划路径
+- **影响**: 常见分析查询已具备结构化执行器；`RANGE/GROUPS`、复杂窗口表达式和完整 planner/explain 语义仍未达到 PostgreSQL 级别
 - **实现路径**:
   1. ✅ 实现 `WindowOp` 算子：按每个窗口的 PARTITION BY 分组 + ORDER BY 排序
-  2. ⚠️ 接入 `row_number`, `rank`, `dense_rank`, `lag`, `lead`；`first_value`、`last_value`、`ntile`、`percent_rank`、`cume_dist` 及窗口聚合仍待结构化实现
+  2. ✅ 接入 `row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`, `percent_rank`, `cume_dist` 及常见窗口聚合
   3. ✅ 在 `QueryPlanner` 中识别稳定窗口子集并插入 `WindowOp`
   4. ✅ 为结构化 `WindowOp` 增加 `WindowAgg` 文本/JSON EXPLAIN 输出
-  5. ⚠️ 将主 SQL EXPLAIN 的窗口解析，以及 legacy frame/exclusion、命名窗口和复杂目标列表迁移到结构化执行器
+  5. ⚠️ 将 `RANGE/GROUPS`、复杂目标列表、OFFSET 和主 SQL EXPLAIN 的窗口解析迁移到结构化执行器
 - **预估工作量**: 1-2 周（剩余完整语义）
 - **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/main.cpp`
 

@@ -1,6 +1,6 @@
 # DBMS 全部 Gap TODO（唯一来源）
 
-> 生成日期：2026-06-10 | 当前审计：2026-08-07
+> 生成日期：2026-06-10 | 当前审计：2026-08-08
 > 来源：基于 `postgresql-complete-gap-analysis.md` 逐条提取，**无一遗漏**
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
@@ -17,7 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
-| 2026-08-07 | Window executor 首步：新增结构化 `WindowOp`/`WindowAgg` 计划节点，主 SQL 入口将无 frame 的 `row_number`、`rank`、`dense_rank`、`lag`、`lead` 接入 Volcano，支持每个窗口独立分区/排序及最终 `ORDER BY`，结构化计划提供文本/JSON EXPLAIN；窗口聚合、frame/exclusion、RANGE/GROUPS、复杂目标、OFFSET 和主 SQL EXPLAIN 窗口解析仍明确回退或待迁移。新增 Volcano 单元覆盖和窗口 E2E，窗口 E2E 由 9 个增至 10 个。 |
+| 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；`RANGE/GROUPS`、复杂目标、OFFSET 和主 SQL EXPLAIN 窗口解析仍明确回退或待迁移。扩展 Volcano 单元覆盖默认 frame、排除、分析函数，窗口 E2E 保持 10/10。 |
 | 2026-08-07 | 测试入口收敛：`build_tests.sh` 与 `run_all_tests_fast.sh` 通过 `build_common.sh` 统一执行协议和窗口函数两个 E2E；当前统一基线为 PASS=122 FAIL=0。 |
 | 2026-08-07 | P0-1 并行查询首步：新增 `ParallelTableScanOp`，对非分区 heap 按 page range 分片并确定性 Gather；加入 `max_parallel_workers_per_gather` 配置，事务内和分区表安全回退，新增并行/串行等价性与事务回归。parallel join/aggregate、GatherMerge 和长期 worker pool 仍待后续。 |
 | 2026-08-07 | B+Tree 正确性补强：修复 root leaf 分裂传错 child、叶分裂丢弃中间键、重复键跨叶查找遗漏和范围扫描重复返回；新增 250 条跨叶唯一键、6000 条跨叶/内部节点重复键回归。PostgreSQL B-tree 的 dedup、删除合并、opclass/collation 和并发构建语义仍待后续。 |
@@ -332,7 +332,7 @@
 | 3.5 | 日期时间函数 | 支持 current/now/extract/date_part(全字段)/date_trunc/make_date·time·timestamp/current_* 家族；缺少 time zone database、`date_bin`、justify 系列、`age`、`to_char`/`to_timestamp`、ISO week、precision、interval field 复杂行为 | ⚠️ |
 | 3.6 | JSON/XML/Array/Range | Array 函数已扩充（length/upper/lower/ndims/cardinality/append/prepend/cat/position/array_to_string/string_to_array）；JSON/XML/Range 仍为小子集；缺少 PostgreSQL 18 SQL/JSON、JSON_TABLE、XMLTABLE、unnest/切片、range/multirange 全函数 | ⚠️ |
 | 3.7 | 聚合函数 | 有 count/sum/avg/min/max、部分 string/json/array 聚合痕迹；新增 bool_and/bool_or/every（Wave 4.20）、percentile_cont/percentile_disc（Wave 4.20）；缺少 ordered-set/hypothetical-set 全集、统计回归聚合、parallel aggregate | ⚠️ |
-| 3.8 | 窗口函数 | 无 frame 的 `row_number`/`rank`/`dense_rank`/`lag`/`lead` 已接入 Volcano `WindowOp`；聚合窗口、ROWS frame exclusion、命名窗口仍由 legacy 执行并由 `tests/window_e2e_test.py` 覆盖（10 用例全绿）；仍缺结构化 frame/exclusion、RANGE/GROUPS、完整窗口函数集和 ordered-set over | ⚠️ |
+| 3.8 | 窗口函数 | 常见排名/偏移、窗口聚合、`ROWS` frame/exclusion 和默认 frame 已接入 Volcano `WindowOp`，并由 Volcano 单元与 `tests/window_e2e_test.py` 覆盖（10 用例全绿）；仍缺 `RANGE/GROUPS`、复杂目标、OFFSET、完整窗口函数集和 ordered-set over | ⚠️ |
 | 3.9 | 系统函数 | 只有少量 `pg_*` 函数拦截；缺少系统信息、WAL、replication、snapshot、privilege inquiry、object addressing、admin 函数全集 | ⚠️ |
 | 3.10 | 用户自定义函数 | 仅保存表达式或 SQL 字符串；缺少语言、严格性、稳定性、并行安全、security definer、成本、依赖和 plan cache | ⚠️ |
 

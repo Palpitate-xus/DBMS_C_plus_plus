@@ -376,6 +376,68 @@ static void test_window_agg() {
     };
     assert(rows == expected);
 
+    dbms::WindowFunctionSpec defaultSum;
+    defaultSum.name = "sum";
+    defaultSum.argument = "score";
+    defaultSum.partitionBy = {"dept"};
+    defaultSum.orderBy = "score";
+    dbms::PlanContext defaultFrameCtx = ctx;
+    defaultFrameCtx.windowFunctions = {defaultSum};
+    defaultFrameCtx.windowTargets = {{false, "id", 0}, {true, "", 0}};
+    auto defaultFrameRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, defaultFrameCtx));
+    assert((defaultFrameRows == std::vector<std::string>{
+        "1 10", "2 50", "3 50", "4 10", "5 30"
+    }));
+
+    dbms::WindowFunctionSpec excludedSum = defaultSum;
+    excludedSum.hasFrame = true;
+    excludedSum.frameStartOffset = -1;
+    excludedSum.frameEndOffset = -1;
+    excludedSum.frameExclusion = "current row";
+    dbms::PlanContext excludedFrameCtx = defaultFrameCtx;
+    excludedFrameCtx.windowFunctions = {excludedSum};
+    auto excludedFrameRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, excludedFrameCtx));
+    assert((excludedFrameRows == std::vector<std::string>{
+        "1 40", "2 30", "3 30", "4 20", "5 10"
+    }));
+
+    dbms::WindowFunctionSpec countRows;
+    countRows.name = "count";
+    countRows.argument = "*";
+    countRows.partitionBy = {"dept"};
+    countRows.orderBy = "score";
+    dbms::WindowFunctionSpec firstValue = defaultSum;
+    firstValue.name = "first_value";
+    dbms::WindowFunctionSpec lastValue = defaultSum;
+    lastValue.name = "last_value";
+    dbms::WindowFunctionSpec ntile = defaultSum;
+    ntile.name = "ntile";
+    ntile.argument = "2";
+    dbms::WindowFunctionSpec percentRank = defaultSum;
+    percentRank.name = "percent_rank";
+    percentRank.argument.clear();
+    dbms::WindowFunctionSpec cumeDist = percentRank;
+    cumeDist.name = "cume_dist";
+    dbms::PlanContext analyticCtx = ctx;
+    analyticCtx.windowFunctions = {
+        countRows, firstValue, lastValue, ntile, percentRank, cumeDist
+    };
+    analyticCtx.windowTargets = {
+        {false, "id", 0}, {true, "", 0}, {true, "", 1},
+        {true, "", 2}, {true, "", 3}, {true, "", 4}, {true, "", 5}
+    };
+    auto analyticRows = dbms::QueryPlanner::executePlan(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, analyticCtx));
+    assert((analyticRows == std::vector<std::string>{
+        "1 1 10 10 1 0.0000 0.3333",
+        "2 3 10 20 2 0.5000 1.0000",
+        "3 3 10 20 1 0.5000 1.0000",
+        "4 1 10 10 1 0.0000 0.5000",
+        "5 2 10 20 2 1.0000 1.0000"
+    }));
+
     auto explainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
     const auto explain = dbms::QueryPlanner::explain(explainPlan, &g_engine, db);
     assert(explain.find("WindowAgg(functions=4)") != std::string::npos);

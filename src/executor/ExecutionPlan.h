@@ -257,6 +257,7 @@ private:
 // parser still owns complex frame syntax; this specification is used when a
 // query can be executed by the Volcano WindowOp without semantic fallback.
 struct WindowFunctionSpec {
+    enum class FrameType { ROWS, RANGE, GROUPS };
     std::string name;
     std::string argument;
     std::vector<std::string> partitionBy;
@@ -265,6 +266,13 @@ struct WindowFunctionSpec {
     size_t offset = 1;
     std::string defaultValue;
     bool hasDefault = false;
+    // A missing frame uses PostgreSQL's default: the whole partition without
+    // ORDER BY, or RANGE UNBOUNDED PRECEDING .. CURRENT ROW with ORDER BY.
+    bool hasFrame = false;
+    FrameType frameType = FrameType::ROWS;
+    int frameStartOffset = -1; // -1 = UNBOUNDED PRECEDING
+    int frameEndOffset = 0;    // -1 = UNBOUNDED FOLLOWING
+    std::string frameExclusion; // current row, group, ties, no others
 };
 
 struct WindowTarget {
@@ -275,9 +283,9 @@ struct WindowTarget {
 };
 
 // WindowOp materializes its child once, computes independent window streams,
-// then formats the requested target list.  It intentionally handles the
-// stable ranking/offset subset; aggregate windows and explicit frames remain
-// on the legacy path until their frame semantics are represented here.
+// then formats the requested target list.  It handles common ranking/offset
+// and aggregate windows, including PostgreSQL default and ROWS frame
+// semantics; complex RANGE/GROUPS syntax remains outside this contract.
 class WindowOp : public Operator {
 public:
     WindowOp(OpPtr child, const TableSchema& tbl,

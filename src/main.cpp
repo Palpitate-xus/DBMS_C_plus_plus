@@ -2595,10 +2595,13 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
                                        const TableSchema& tbl,
                                        dbms::WindowFunctionSpec& spec) {
     static const set<string> supported = {
-        "row_number", "rank", "dense_rank", "lag", "lead"
+        "row_number", "rank", "dense_rank", "lag", "lead",
+        "sum", "count", "avg", "min", "max",
+        "bool_and", "bool_or", "every",
+        "first_value", "last_value", "ntile", "percent_rank", "cume_dist"
     };
-    if (wf.isAggregate || !supported.count(wf.name) || wf.hasFrame ||
-        !wf.frameExclusion.empty()) return false;
+    if (!supported.count(wf.name) ||
+        (wf.hasFrame && wf.frameType != WindowFunc::FrameType::ROWS)) return false;
 
     auto isColumn = [&](const string& name) {
         if (!isSimpleWindowIdentifier(name)) return false;
@@ -2612,14 +2615,52 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
     spec.name = wf.name;
     spec.orderBy = wf.orderByCol;
     spec.orderAscending = wf.orderByAsc;
+    spec.hasFrame = wf.hasFrame;
+    spec.frameType = dbms::WindowFunctionSpec::FrameType::ROWS;
+    spec.frameStartOffset = wf.frameStartOffset;
+    spec.frameEndOffset = wf.frameEndOffset;
+    spec.frameExclusion = wf.frameExclusion;
     for (const auto& column : wf.partitionByCols) {
         if (!isColumn(column)) return false;
         spec.partitionBy.push_back(column);
     }
     if (!spec.orderBy.empty() && !isColumn(spec.orderBy)) return false;
 
-    if (wf.name == "row_number" || wf.name == "rank" || wf.name == "dense_rank") {
+    if (wf.name == "row_number" || wf.name == "rank" || wf.name == "dense_rank" ||
+        wf.name == "percent_rank" || wf.name == "cume_dist") {
         return trim(wf.arg).empty();
+    }
+
+    if (wf.name == "count") {
+        if (trim(wf.arg) == "*") {
+            spec.argument = "*";
+            return true;
+        }
+        if (!isColumn(trim(wf.arg))) return false;
+        spec.argument = trim(wf.arg);
+        return true;
+    }
+
+    if (wf.name == "ntile") {
+        try {
+            size_t consumed = 0;
+            const auto bucketCount = stoull(trim(wf.arg), &consumed);
+            if (consumed != trim(wf.arg).size() || bucketCount == 0) return false;
+        } catch (...) {
+            return false;
+        }
+        spec.argument = trim(wf.arg);
+        return true;
+    }
+
+    static const set<string> columnArgumentFunctions = {
+        "sum", "avg", "min", "max", "bool_and", "bool_or", "every",
+        "first_value", "last_value"
+    };
+    if (columnArgumentFunctions.count(wf.name)) {
+        if (!isColumn(trim(wf.arg))) return false;
+        spec.argument = trim(wf.arg);
+        return true;
     }
 
     // Keep the first implementation deliberately strict: support the common

@@ -1,6 +1,6 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
-> 生成日期: 2026-08-07（更新反映存储格式硬切与当前代码状态）
+> 生成日期: 2026-08-08（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线: PASS=122 FAIL=0（120 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
@@ -11,7 +11,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 
 事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志和 SSI 冲突图仍是跨 backend 共享协调结构，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
-2026-08-07 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
+2026-08-08 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
 
 ---
 
@@ -111,7 +111,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 | Subquery (IN/EXISTS/ANY/ALL/标量) | ✅ | ✅ (parser + volcano) | ⚠️ 复杂子查询回退 legacy |
 | CTE (WITH/RECURSIVE) | ✅ | ✅ (parser + executor) | ✅ 基础 + RETURNING |
 | UNION/INTERSECT/EXCEPT | ✅ | ⚠️ AST 已按优先级/左结合解析，组合统一走 Volcano `SetOperationOp`；简单 operand 直接计划，复杂 operand 经 `MaterializedRowsOp` 接 legacy producer（含 ALL） | ⚠️ AST 到计划的全量下推、类型合并/collation 和完整作用域仍缺 |
-| Window Functions (ROW_NUMBER/RANK/...) | ✅ | ⚠️ `WindowOp` 已执行无 frame 的 `row_number`/`rank`/`dense_rank`/`lag`/`lead`，复杂窗口仍走 legacy | ⚠️ 窗口聚合、frame/exclusion、RANGE/GROUPS 和完整窗口语义仍缺 |
+| Window Functions (ROW_NUMBER/RANK/...) | ✅ | ⚠️ `WindowOp` 已执行常见排名/偏移、窗口聚合及 `ROWS` frame/exclusion；复杂窗口仍走 legacy | ⚠️ `RANGE/GROUPS`、复杂表达式、OFFSET 和完整 planner/explain 语义仍缺 |
 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ✅ (parser) | ⚠️ executor 回退 legacy |
 | GROUPING_ID | ✅ | ❌ | 缺 |
 | FOR UPDATE/SHARE/NOWAIT/SKIP LOCKED | ✅ | ✅ | ✅ (行级锁 + 死锁检测) |
@@ -322,7 +322,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 7. **INSTEAD OF 视图触发器** — 已支持简单单表视图上的逐行 INSERT/UPDATE/DELETE action SQL，并覆盖多行协议 E2E；复杂视图映射、transition tables、完整函数/PL 运行时仍缺失
 
 ### 🟡 重要缺失 (影响实用性)
-1. **Window Function executor** — 稳定排名/偏移子集已进入 Volcano `WindowOp`，窗口聚合、frame/exclusion 和复杂目标仍回退 legacy
+1. **Window Function executor** — 常见排名/偏移、窗口聚合和 `ROWS` frame/exclusion 已进入 Volcano `WindowOp`，`RANGE/GROUPS` 与复杂目标仍回退 legacy
 2. **复杂子查询 executor** — 简单子查询走 volcano, 关联子查询回退 legacy
 3. **UNION/INTERSECT/EXCEPT executor** — 组合语义已统一进入 Volcano，复杂 operand 的 producer 仍待 AST 全量下推；类型合并和结构化列结果也仍缺
 4. **GROUP BY ROLLUP/CUBE/GROUPING SETS executor** — 回退 legacy

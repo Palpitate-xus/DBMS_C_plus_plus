@@ -4,10 +4,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <map>
-#include <cstdlib>
 #include <thread>
 
 extern dbms::Config g_config;
@@ -729,6 +730,14 @@ static bool sameWindowPartition(const WindowInputRow& left,
     return true;
 }
 
+static bool sameWindowPeer(const WindowInputRow& left,
+                           const WindowInputRow& right,
+                           size_t orderColumn,
+                           size_t columnCount) {
+    return orderColumn >= columnCount ||
+           compareWindowValue(left.values[orderColumn], right.values[orderColumn]) == 0;
+}
+
 static std::string displayWindowValue(const std::string& value) {
     return value.empty() ? "NULL" : value;
 }
@@ -766,6 +775,9 @@ bool WindowOp::open() {
         input.size(), std::vector<std::string>(functions_.size()));
     for (size_t functionIndex = 0; functionIndex < functions_.size(); ++functionIndex) {
         const auto& function = functions_[functionIndex];
+        if (function.hasFrame && function.frameType != WindowFunctionSpec::FrameType::ROWS) {
+            return false;
+        }
         std::vector<size_t> partitionColumns;
         for (const auto& name : function.partitionBy) {
             const size_t column = windowColumnIndex(tbl_, name);
@@ -776,10 +788,14 @@ bool WindowOp::open() {
             ? tbl_.len : windowColumnIndex(tbl_, function.orderBy);
         if (!function.orderBy.empty() && orderColumn >= tbl_.len) return false;
 
-        const size_t argumentColumn = function.argument.empty()
+        const size_t argumentColumn = (function.argument.empty() || function.argument == "*")
             ? tbl_.len : windowColumnIndex(tbl_, function.argument);
-        if ((function.name == "lag" || function.name == "lead") &&
-            argumentColumn >= tbl_.len) return false;
+        const bool argumentRequired = function.name == "lag" || function.name == "lead" ||
+            function.name == "sum" || function.name == "avg" || function.name == "min" ||
+            function.name == "max" || function.name == "first_value" ||
+            function.name == "last_value" || function.name == "bool_and" ||
+            function.name == "bool_or" || function.name == "every";
+        if (argumentRequired && argumentColumn >= tbl_.len) return false;
 
         std::vector<size_t> order(input.size());
         for (size_t i = 0; i < order.size(); ++i) order[i] = i;
@@ -797,24 +813,109 @@ bool WindowOp::open() {
             return left < right;
         });
 
-        size_t partitionStart = 0;
-        size_t rank = 1;
-        size_t denseRank = 1;
-        for (size_t position = 0; position < order.size(); ++position) {
-            if (position == 0 || !sameWindowPartition(input[order[position]],
-                                                      input[order[partitionStart]],
-                                                      partitionColumns)) {
-                partitionStart = position;
-                rank = 1;
-                denseRank = 1;
-            } else if (orderColumn < tbl_.len &&
-                       compareWindowValue(input[order[position]].values[orderColumn],
-                                          input[order[position - 1]].values[orderColumn]) != 0) {
-                rank = position - partitionStart + 1;
-                ++denseRank;
+        std::vector<size_t> partitionStartAt(order.size());
+        std::vector<size_t> partitionEndAt(order.size());
+        for (size_t position = 0; position < order.size();) {
+            size_t end = position + 1;
+            while (end < order.size() &&
+                   sameWindowPartition(input[order[end]], input[order[position]], partitionColumns)) {
+                ++end;
             }
+            for (size_t p = position; p < end; ++p) {
+                partitionStartAt[p] = position;
+                partitionEndAt[p] = end;
+            }
+            position = end;
+        }
 
+        std::vector<size_t> groupStartAt(order.size());
+        std::vector<size_t> groupEndAt(order.size());
+        for (size_t partitionStart = 0; partitionStart < order.size();) {
+            const size_t partitionEnd = partitionEndAt[partitionStart];
+            size_t groupStart = partitionStart;
+            while (groupStart < partitionEnd) {
+                size_t groupEnd = groupStart + 1;
+                while (groupEnd < partitionEnd &&
+                       sameWindowPeer(input[order[groupEnd]], input[order[groupStart]],
+                                      orderColumn, tbl_.len)) {
+                    ++groupEnd;
+                }
+                for (size_t p = groupStart; p < groupEnd; ++p) {
+                    groupStartAt[p] = groupStart;
+                    groupEndAt[p] = groupEnd;
+                }
+                groupStart = groupEnd;
+            }
+            partitionStart = partitionEnd;
+        }
+
+        std::vector<size_t> rankAt(order.size());
+        std::vector<size_t> denseRankAt(order.size());
+        for (size_t partitionStart = 0; partitionStart < order.size();) {
+            const size_t partitionEnd = partitionEndAt[partitionStart];
+            size_t denseRank = 1;
+            for (size_t position = partitionStart; position < partitionEnd; ++position) {
+                if (position > partitionStart && groupStartAt[position] == position) ++denseRank;
+                rankAt[position] = groupStartAt[position] - partitionStart + 1;
+                denseRankAt[position] = denseRank;
+            }
+            partitionStart = partitionEnd;
+        }
+
+        auto frameBounds = [&](size_t position) -> std::pair<size_t, size_t> {
+            const size_t partitionStart = partitionStartAt[position];
+            const size_t partitionEnd = partitionEndAt[position];
+            if (!function.hasFrame) {
+                if (orderColumn < tbl_.len) return {partitionStart, groupEndAt[position]};
+                return {partitionStart, partitionEnd};
+            }
+            size_t begin = partitionStart;
+            size_t end = partitionEnd;
+            const size_t partitionPosition = position - partitionStart;
+            if (function.frameStartOffset >= 0) {
+                const size_t preceding = static_cast<size_t>(function.frameStartOffset);
+                begin = preceding > partitionPosition
+                    ? partitionStart : position - preceding;
+            }
+            if (function.frameEndOffset >= 0) {
+                const size_t following = static_cast<size_t>(function.frameEndOffset);
+                end = std::min(partitionEnd, position + following + 1);
+            }
+            return {begin, end};
+        };
+
+        auto rowIsExcluded = [&](size_t framePosition, size_t currentPosition) {
+            if (function.frameExclusion == "current row") return framePosition == currentPosition;
+            if (function.frameExclusion == "group") {
+                return framePosition >= groupStartAt[currentPosition] &&
+                       framePosition < groupEndAt[currentPosition];
+            }
+            if (function.frameExclusion == "ties") {
+                return framePosition >= groupStartAt[currentPosition] &&
+                       framePosition < groupEndAt[currentPosition] &&
+                       framePosition != currentPosition;
+            }
+            return false;
+        };
+
+        auto parseInteger = [](const std::string& value, int64_t& out) {
+            try {
+                size_t consumed = 0;
+                out = std::stoll(value, &consumed);
+                return consumed == value.size();
+            } catch (...) {
+                return false;
+            }
+        };
+
+        for (size_t position = 0; position < order.size(); ++position) {
             const size_t rowIndex = order[position];
+            const size_t partitionStart = partitionStartAt[position];
+            const size_t partitionEnd = partitionEndAt[position];
+            const size_t peerEnd = groupEndAt[position];
+            const size_t rank = rankAt[position];
+            const size_t denseRank = denseRankAt[position];
+
             if (function.name == "row_number") {
                 computed[rowIndex][functionIndex] = std::to_string(position - partitionStart + 1);
             } else if (function.name == "rank") {
@@ -825,9 +926,7 @@ bool WindowOp::open() {
                 const size_t offset = std::max<size_t>(1, function.offset);
                 const bool hasTarget = function.name == "lag"
                     ? position >= partitionStart + offset
-                    : position + offset < order.size() &&
-                      sameWindowPartition(input[order[position + offset]],
-                                          input[order[partitionStart]], partitionColumns);
+                    : position + offset < partitionEnd;
                 if (hasTarget) {
                     const size_t targetPosition = function.name == "lag"
                         ? position - offset : position + offset;
@@ -835,6 +934,91 @@ bool WindowOp::open() {
                         displayWindowValue(input[order[targetPosition]].values[argumentColumn]);
                 } else if (function.hasDefault) {
                     computed[rowIndex][functionIndex] = displayWindowValue(function.defaultValue);
+                } else {
+                    computed[rowIndex][functionIndex] = "NULL";
+                }
+            } else if (function.name == "ntile") {
+                int64_t bucketCount = 1;
+                if (!parseInteger(function.argument, bucketCount) || bucketCount <= 0) bucketCount = 1;
+                const size_t partitionSize = partitionEnd - partitionStart;
+                const size_t bucket = (position - partitionStart) * static_cast<size_t>(bucketCount) /
+                    std::max<size_t>(1, partitionSize) + 1;
+                computed[rowIndex][functionIndex] = std::to_string(bucket);
+            } else if (function.name == "percent_rank") {
+                const double value = partitionEnd - partitionStart <= 1
+                    ? 0.0 : static_cast<double>(rank - 1) /
+                        static_cast<double>(partitionEnd - partitionStart - 1);
+                char buffer[64];
+                std::snprintf(buffer, sizeof(buffer), "%.4f", value);
+                computed[rowIndex][functionIndex] = buffer;
+            } else if (function.name == "cume_dist") {
+                const double value = static_cast<double>(peerEnd - partitionStart) /
+                    static_cast<double>(std::max<size_t>(1, partitionEnd - partitionStart));
+                char buffer[64];
+                std::snprintf(buffer, sizeof(buffer), "%.4f", value);
+                computed[rowIndex][functionIndex] = buffer;
+            } else {
+                const auto [frameBegin, frameEnd] = frameBounds(position);
+                int64_t count = 0;
+                int64_t sum = 0;
+                bool hasValue = false;
+                bool boolValue = function.name == "bool_and" || function.name == "every";
+                bool boolSeen = false;
+                std::string selected;
+                for (size_t framePosition = frameBegin; framePosition < frameEnd; ++framePosition) {
+                    if (rowIsExcluded(framePosition, position)) continue;
+                    const std::string& value = function.argument == "*"
+                        ? std::string{} : input[order[framePosition]].values[argumentColumn];
+                    if (function.name == "count") {
+                        if (function.argument == "*" || !value.empty()) ++count;
+                        continue;
+                    }
+                    if (function.name == "first_value" && !hasValue) {
+                        selected = displayWindowValue(value);
+                        hasValue = true;
+                        continue;
+                    }
+                    if (function.name == "last_value") {
+                        selected = displayWindowValue(value);
+                        hasValue = true;
+                        continue;
+                    }
+                    if (function.name == "bool_and" || function.name == "every" ||
+                        function.name == "bool_or") {
+                        if (value.empty()) continue;
+                        boolSeen = true;
+                        if (function.name == "bool_or") boolValue = boolValue || value == "true";
+                        else boolValue = boolValue && value == "true";
+                        continue;
+                    }
+                    if (value.empty()) continue;
+                    int64_t number = 0;
+                    if (function.name == "sum" || function.name == "avg") {
+                        if (!parseInteger(value, number)) continue;
+                        sum += number;
+                        ++count;
+                    } else if (function.name == "min" || function.name == "max") {
+                        if (!hasValue || (function.name == "min"
+                                ? compareWindowValue(value, selected) < 0
+                                : compareWindowValue(value, selected) > 0)) {
+                            selected = value;
+                            hasValue = true;
+                        }
+                    }
+                }
+                if (function.name == "count") {
+                    computed[rowIndex][functionIndex] = std::to_string(count);
+                } else if (function.name == "sum") {
+                    computed[rowIndex][functionIndex] = count == 0 ? "NULL" : std::to_string(sum);
+                } else if (function.name == "avg") {
+                    computed[rowIndex][functionIndex] = count == 0
+                        ? "NULL" : std::to_string(static_cast<double>(sum) / count);
+                } else if (function.name == "bool_and" || function.name == "every" ||
+                           function.name == "bool_or") {
+                    computed[rowIndex][functionIndex] = boolSeen ? (boolValue ? "true" : "false") : "NULL";
+                } else if (function.name == "first_value" || function.name == "last_value" ||
+                           function.name == "min" || function.name == "max") {
+                    computed[rowIndex][functionIndex] = hasValue ? selected : "NULL";
                 } else {
                     computed[rowIndex][functionIndex] = "NULL";
                 }
