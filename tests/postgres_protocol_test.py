@@ -442,6 +442,16 @@ def main():
             [b"4", b"returned"], [b"5", b"returned2"]], returning_insert
         assert any(kind == b"C" and body == b"INSERT 0 2\0"
                    for kind, body in returning_insert), returning_insert
+        returning_expr = simple_query(
+            sock, "INSERT INTO dml_ast VALUES (6, 'expr') "
+            "RETURNING id + 10 AS next_id, name || '-x' AS tagged")
+        assert data_row_values(returning_expr) == [[b"16", b"expr-x"]], returning_expr
+        returning_expr_fields = row_description_fields(returning_expr)
+        assert [field[0] for field in returning_expr_fields] == [
+            b"next_id", b"tagged"], returning_expr
+        assert [field[3] for field in returning_expr_fields] == [23, 25], returning_expr
+        assert any(kind == b"C" and body == b"INSERT 0 1\0"
+                   for kind, body in returning_expr), returning_expr
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE dml_copy (id INT, name TEXT)"))
         returning_select = simple_query(
@@ -478,11 +488,17 @@ def main():
         assert [field[0] for field in row_description_fields(returning_update)] == [b"id", b"name"]
         assert any(kind == b"C" and body == b"UPDATE 1\0"
                    for kind, body in returning_update), returning_update
+        returning_update_expr = simple_query(
+            sock, "UPDATE dml_ast SET name = 'changed2' WHERE id = 8 "
+            "RETURNING id + 10 AS next_id, name || '-x' AS tagged")
+        assert data_row_values(returning_update_expr) == [[b"18", b"changed2-x"]], returning_update_expr
+        assert any(kind == b"C" and body == b"UPDATE 1\0"
+                   for kind, body in returning_update_expr), returning_update_expr
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "DELETE FROM dml_ast WHERE id = 3"))
         returning_delete = simple_query(
             sock, "DELETE FROM dml_ast WHERE id = 8 RETURNING *")
-        assert data_row_values(returning_delete) == [[b"8", b"changed"]], returning_delete
+        assert data_row_values(returning_delete) == [[b"8", b"changed2"]], returning_delete
         assert any(kind == b"C" and body == b"DELETE 1\0"
                    for kind, body in returning_delete), returning_delete
         assert data_row_values(simple_query(

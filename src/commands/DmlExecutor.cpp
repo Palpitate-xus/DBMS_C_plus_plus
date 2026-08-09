@@ -247,49 +247,212 @@ bool buildConditions(const ExprPtr& expr, std::vector<std::string>& conditions) 
     return appendCondition(expr.get(), conditions);
 }
 
-// Keep the first structured RETURNING slice deliberately narrow.  A column
-// projection can be captured directly at the storage mutation boundary;
-// arbitrary expressions remain on the legacy path until they have complete
-// row evaluation and PostgreSQL type metadata.
-bool buildReturningColumns(const std::vector<SelectItem>& returning,
-                           const TableSchema& table,
-                           std::vector<std::string>& columns,
-                           std::vector<std::string>& names) {
-    columns.clear();
-    names.clear();
+struct ReturningProjection {
+    const Expr* expression = nullptr;
+    std::string column;
+    std::string name;
+    std::string typeName;
+};
+
+std::string tableColumnType(const TableSchema& table, const std::string& name) {
+    const std::string column = identifier(name);
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == column) return table.cols[i].dataType;
+    }
+    return "text";
+}
+
+std::string inferReturningType(const Expr* expr, const TableSchema& table) {
+    if (!expr) return "text";
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expr)) {
+        if (!literal->typeName.empty()) return literal->typeName;
+        if (literal->value.size() >= 2 && literal->value.front() == '\'' &&
+            literal->value.back() == '\'') {
+            return "text";
+        }
+        const std::string value = lower(literal->value);
+        if (value == "true" || value == "false") return "boolean";
+        if (value == "null") return "text";
+        if (value.find('.') != std::string::npos) return "double precision";
+        bool numeric = !value.empty();
+        const size_t start = !value.empty() &&
+                             (value.front() == '-' || value.front() == '+') ? 1 : 0;
+        for (size_t i = start; i < value.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
+                numeric = false;
+                break;
+            }
+        }
+        return numeric ? "integer" : "text";
+    }
+    if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
+        return tableColumnType(table, ref->column);
+    }
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+        const std::string op = lower(unary->op);
+        if (op == "not" || op.find("is ") == 0) return "boolean";
+        return inferReturningType(unary->operand.get(), table);
+    }
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
+        const std::string op = lower(binary->op);
+        if (op == "and" || op == "or" || op == "=" || op == "<>" || op == "!=" ||
+            op == "<" || op == ">" || op == "<=" || op == ">=" || op == "like" ||
+            op == "not like" || op == "ilike" || op == "not ilike" || op == "in") {
+            return "boolean";
+        }
+        if (op == "||") return "text";
+        if (op == "::") {
+            if (const auto* castType = dynamic_cast<const LiteralExpr*>(binary->right.get())) {
+                return lower(castType->value);
+            }
+        }
+        const std::string left = lower(inferReturningType(binary->left.get(), table));
+        const std::string right = lower(inferReturningType(binary->right.get(), table));
+        if (left == "numeric" || right == "numeric" ||
+            left == "double precision" || right == "double precision" ||
+            left == "real" || right == "real") {
+            return left == "numeric" || right == "numeric" ? "numeric" : "double precision";
+        }
+        return "integer";
+    }
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+        const std::string name = lower(call->funcName);
+        static const std::set<std::string> textFunctions = {
+            "lower", "upper", "initcap", "concat", "concat_ws", "substring",
+            "substr", "left", "right", "trim", "ltrim", "rtrim", "reverse",
+            "replace", "translate", "format", "quote_literal", "quote_nullable"
+        };
+        static const std::set<std::string> integerFunctions = {
+            "length", "char_length", "character_length", "bit_length", "strpos",
+            "position", "ascii"
+        };
+        if (textFunctions.count(name)) return "text";
+        if (integerFunctions.count(name)) return "integer";
+        if (name == "coalesce" || name == "nullif" || name == "greatest" ||
+            name == "least") {
+            return call->args.empty() ? "text" : inferReturningType(call->args.front().get(), table);
+        }
+        if (name == "now" || name == "current_timestamp") return "timestamp";
+        if (name == "current_date") return "date";
+        return "text";
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) return lower(cast->typeName);
+    if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
+        if (!caseExpr->whenClauses.empty()) {
+            return inferReturningType(caseExpr->whenClauses.front().second.get(), table);
+        }
+        return caseExpr->elseExpr ? inferReturningType(caseExpr->elseExpr.get(), table) : "text";
+    }
+    if (dynamic_cast<const ArrayExpr*>(expr)) return "text";
+    if (dynamic_cast<const RowExpr*>(expr)) return "record";
+    return "text";
+}
+
+bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
+                                 ExprEvaluator& evaluator) {
+    if (!expr) return false;
+    if (dynamic_cast<const LiteralExpr*>(expr)) return true;
+    if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
+        if (!ref->schema.empty() || !ref->table.empty()) return false;
+        const std::string column = identifier(ref->column);
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == column) return true;
+        }
+        return false;
+    }
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+        static const std::set<std::string> supported = {
+            "+", "-", "not", "is null", "is not null",
+            "is true", "is not true", "is false", "is not false"
+        };
+        return supported.count(lower(unary->op)) != 0 &&
+               supportsReturningExpression(unary->operand.get(), table, evaluator);
+    }
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
+        static const std::set<std::string> supported = {
+            "and", "or", "=", "<>", "!=", "<", ">", "<=", ">=",
+            "+", "-", "*", "/", "%", "^", "||", "like", "not like",
+            "ilike", "not ilike", "similar to", "not similar to", "in", "::"
+        };
+        return supported.count(lower(binary->op)) != 0 &&
+               supportsReturningExpression(binary->left.get(), table, evaluator) &&
+               supportsReturningExpression(binary->right.get(), table, evaluator);
+    }
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+        if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
+            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty()) {
+            return false;
+        }
+        for (const auto& arg : call->args) {
+            if (!supportsReturningExpression(arg.get(), table, evaluator)) return false;
+        }
+        return true;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
+        return supportsReturningExpression(cast->operand.get(), table, evaluator);
+    }
+    if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
+        if (caseExpr->switchExpr &&
+            !supportsReturningExpression(caseExpr->switchExpr.get(), table, evaluator)) {
+            return false;
+        }
+        for (const auto& clause : caseExpr->whenClauses) {
+            if (!supportsReturningExpression(clause.first.get(), table, evaluator) ||
+                !supportsReturningExpression(clause.second.get(), table, evaluator)) {
+                return false;
+            }
+        }
+        return !caseExpr->elseExpr ||
+               supportsReturningExpression(caseExpr->elseExpr.get(), table, evaluator);
+    }
+    if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
+        for (const auto& element : array->elements) {
+            if (!supportsReturningExpression(element.get(), table, evaluator)) return false;
+        }
+        return true;
+    }
+    if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
+        for (const auto& element : row->elements) {
+            if (!supportsReturningExpression(element.get(), table, evaluator)) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool buildReturningProjections(const std::vector<SelectItem>& returning,
+                               const TableSchema& table,
+                               std::vector<ReturningProjection>& projections) {
+    projections.clear();
+    ExprEvaluator evaluator;
     for (const auto& item : returning) {
-        const auto* ref = item.expr ? dynamic_cast<const ColumnRefExpr*>(item.expr.get()) : nullptr;
+        if (!item.expr) return false;
         const auto* star = item.expr ? dynamic_cast<const LiteralExpr*>(item.expr.get()) : nullptr;
         if (star && star->value == "*") {
             if (!item.alias.empty()) return false;
             for (size_t i = 0; i < table.len; ++i) {
-                columns.push_back(table.cols[i].dataName);
-                names.push_back(table.cols[i].dataName);
+                projections.push_back({nullptr, table.cols[i].dataName,
+                                       table.cols[i].dataName, table.cols[i].dataType});
             }
             continue;
         }
-        if (!ref || !ref->schema.empty() || !ref->table.empty()) return false;
-        const std::string column = identifier(ref->column);
-        if (column == "*") {
+        const auto* ref = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+        if (ref && identifier(ref->column) == "*") {
             if (!item.alias.empty()) return false;
             for (size_t i = 0; i < table.len; ++i) {
-                columns.push_back(table.cols[i].dataName);
-                names.push_back(table.cols[i].dataName);
+                projections.push_back({nullptr, table.cols[i].dataName,
+                                       table.cols[i].dataName, table.cols[i].dataType});
             }
             continue;
         }
-        bool found = false;
-        for (size_t i = 0; i < table.len; ++i) {
-            if (table.cols[i].dataName == column) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return false;
-        columns.push_back(column);
-        names.push_back(item.alias.empty() ? column : identifier(item.alias));
+        if (!supportsReturningExpression(item.expr.get(), table, evaluator)) return false;
+        const std::string name = item.alias.empty()
+            ? (ref ? identifier(ref->column) : item.expr->toString())
+            : identifier(item.alias);
+        projections.push_back({item.expr.get(), {}, name.empty() ? "?column?" : name,
+                               inferReturningType(item.expr.get(), table)});
     }
-    return !columns.empty();
+    return !projections.empty();
 }
 
 bool collectSourceColumns(const Expr* expr, const TableSchema& table,
@@ -553,25 +716,82 @@ InsertSelectBuildResult buildInsertSelectRows(
                             : InsertSelectBuildResult::Success;
 }
 
-void publishReturning(const std::vector<std::string>& columns,
-                      const std::vector<std::string>& names,
+RowContext returningContext(const std::map<std::string, std::string>& source,
+                            const TableSchema& table) {
+    RowContext context;
+    for (size_t i = 0; i < table.len; ++i) {
+        const Column& column = table.cols[i];
+        const auto it = source.find(column.dataName);
+        const bool isNull = it == source.end() || it->second.empty();
+        context.set(column.dataName,
+                    ExprValue(column.dataType, isNull ? "" : it->second, isNull));
+    }
+    return context;
+}
+
+bool evaluateReturningExpression(const Expr* expression,
+                                 const std::map<std::string, std::string>& source,
+                                 const TableSchema& table,
+                                 const std::string& currentDB,
+                                 std::string& value,
+                                 std::string& typeName) {
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    const ExprValue result = evaluator.eval(expression, returningContext(source, table));
+    if (!result.isNull && (result.isUnknown() || result.typeName == "unknown")) {
+        return false;
+    }
+    if (result.isNull) {
+        value = "NULL";
+        typeName = result.typeName;
+        return true;
+    }
+    value = result.value;
+    typeName = result.typeName;
+    return true;
+}
+
+bool publishReturning(const std::vector<ReturningProjection>& projections,
+                      const TableSchema& table,
+                      const std::string& currentDB,
                       const std::vector<std::map<std::string, std::string>>& rows,
                       const std::string& command) {
     g_lastDmlResult.available = true;
-    g_lastDmlResult.columns = names;
+    g_lastDmlResult.columns.clear();
+    g_lastDmlResult.columnTypes.clear();
+    for (const auto& projection : projections) {
+        g_lastDmlResult.columns.push_back(projection.name);
+        g_lastDmlResult.columnTypes.push_back(projection.typeName);
+    }
     g_lastDmlResult.commandTag = command == "INSERT"
         ? "INSERT 0 " + std::to_string(rows.size())
         : command + " " + std::to_string(rows.size());
     g_lastDmlResult.rows.reserve(rows.size());
     for (const auto& source : rows) {
         std::vector<std::string> row;
-        row.reserve(columns.size());
-        for (const auto& column : columns) {
-            const auto it = source.find(column);
-            row.push_back(it == source.end() || it->second.empty() ? "NULL" : it->second);
+        row.reserve(projections.size());
+        for (size_t i = 0; i < projections.size(); ++i) {
+            const auto& projection = projections[i];
+            std::string value;
+            if (projection.expression == nullptr) {
+                const auto it = source.find(projection.column);
+                value = it == source.end() || it->second.empty() ? "NULL" : it->second;
+            } else {
+                std::string typeName;
+                if (!evaluateReturningExpression(projection.expression, source, table,
+                                                  currentDB, value, typeName)) {
+                    std::cout << "RETURNING expression evaluation failed" << std::endl;
+                    return false;
+                }
+                if (!typeName.empty() && typeName != "unknown") {
+                    g_lastDmlResult.columnTypes[i] = typeName;
+                }
+            }
+            row.push_back(std::move(value));
         }
         g_lastDmlResult.rows.push_back(std::move(row));
     }
+    return true;
 }
 
 void printReturningRows(const DmlResult& result) {
@@ -702,10 +922,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
 
     if (!checkInsertColumns(s, requestedTable, columns)) return true;
 
-    std::vector<std::string> returningColumns;
-    std::vector<std::string> returningNames;
+    std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningColumns(stmt.returning, table, returningColumns, returningNames)) {
+        !buildReturningProjections(stmt.returning, table, returningProjections)) {
         fallback = true;
         return false;
     }
@@ -777,7 +996,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
         std::cout << inserted << " row(s) inserted" << std::endl;
         if (!stmt.returning.empty()) {
-            publishReturning(returningColumns, returningNames, insertedRows, "INSERT");
+            if (!publishReturning(returningProjections, table, s.currentDB,
+                                  insertedRows, "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
         if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
@@ -796,7 +1016,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         if (status == DBStatus::DUPLICATE_KEY && ignoreDuplicate) {
             std::cout << "INSERT 0 0 (ON CONFLICT DO NOTHING)" << std::endl;
             if (!stmt.returning.empty()) {
-                publishReturning(returningColumns, returningNames, insertedRows, "INSERT");
+                if (!publishReturning(returningProjections, table, s.currentDB,
+                                      insertedRows, "INSERT")) return true;
                 printReturningRows(g_lastDmlResult);
             }
             return false;
@@ -807,7 +1028,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
         std::cout << "INSERT 0 1 (DEFAULT VALUES)" << std::endl;
         if (!stmt.returning.empty()) {
-            publishReturning(returningColumns, returningNames, insertedRows, "INSERT");
+            if (!publishReturning(returningProjections, table, s.currentDB,
+                                  insertedRows, "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
         g_engine.analyzeTable(s.currentDB, resolvedTable);
@@ -896,7 +1118,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
 
     std::cout << inserted << " row(s) inserted" << std::endl;
     if (!stmt.returning.empty()) {
-        publishReturning(returningColumns, returningNames, insertedRows, "INSERT");
+        if (!publishReturning(returningProjections, table, s.currentDB,
+                              insertedRows, "INSERT")) return true;
         printReturningRows(g_lastDmlResult);
     }
     if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
@@ -955,10 +1178,9 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         return false;
     }
     const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
-    std::vector<std::string> returningColumns;
-    std::vector<std::string> returningNames;
+    std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningColumns(stmt.returning, table, returningColumns, returningNames)) {
+        !buildReturningProjections(stmt.returning, table, returningProjections)) {
         fallback = true;
         return false;
     }
@@ -972,7 +1194,8 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     }
     std::cout << "Update done" << std::endl;
     if (!stmt.returning.empty()) {
-        publishReturning(returningColumns, returningNames, updatedRows, "UPDATE");
+        if (!publishReturning(returningProjections, table, s.currentDB,
+                              updatedRows, "UPDATE")) return true;
         printReturningRows(g_lastDmlResult);
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
@@ -1002,10 +1225,9 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
         return false;
     }
     const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
-    std::vector<std::string> returningColumns;
-    std::vector<std::string> returningNames;
+    std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
-        !buildReturningColumns(stmt.returning, table, returningColumns, returningNames)) {
+        !buildReturningProjections(stmt.returning, table, returningProjections)) {
         fallback = true;
         return false;
     }
@@ -1019,7 +1241,8 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
     }
     std::cout << "Delete done" << std::endl;
     if (!stmt.returning.empty()) {
-        publishReturning(returningColumns, returningNames, deletedRows, "DELETE");
+        if (!publishReturning(returningProjections, table, s.currentDB,
+                              deletedRows, "DELETE")) return true;
         printReturningRows(g_lastDmlResult);
     }
     g_engine.analyzeTable(s.currentDB, resolvedTable);

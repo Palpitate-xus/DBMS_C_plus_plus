@@ -20,6 +20,9 @@ namespace dbms {
 struct DmlResult {
     bool available = false;
     std::vector<std::string> columns;
+    // PostgreSQL type names for structured RETURNING columns.  Empty means
+    // that the protocol layer should infer metadata from the relation/name.
+    std::vector<std::string> columnTypes;
     std::vector<std::vector<std::string>> rows;
     std::string commandTag;
 };

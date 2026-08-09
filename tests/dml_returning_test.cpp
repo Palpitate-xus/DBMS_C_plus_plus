@@ -117,6 +117,13 @@ int main() {
     assert(result.available);
     assert(result.commandTag == "INSERT 0 1");
     assert((result.rows[0] == std::vector<std::string>{"3", "inserted"}));
+    assert(!runDml("INSERT INTO ret VALUES (4, 'expr') "
+                   "RETURNING id + 10 AS next_id, name || '-x' AS tagged", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 1");
+    assert((result.columns == std::vector<std::string>{"next_id", "tagged"}));
+    assert((result.rows[0] == std::vector<std::string>{"14", "expr-x"}));
 
     // The predicate column changes. A post-update query using the old WHERE
     // clause would return nothing; storage-boundary capture must return id=2.
@@ -128,13 +135,26 @@ int main() {
     assert(result.rows.size() == 1);
     assert((result.rows[0] == std::vector<std::string>{"2", "after"}));
 
+    assert(!runDml("UPDATE ret SET name = 'after2' WHERE id = 2 "
+                   "RETURNING id + 10 AS next_id, name || '-x' AS tagged", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "UPDATE 1");
+    assert((result.rows[0] == std::vector<std::string>{"12", "after2-x"}));
+
     assert(!runDml("DELETE FROM ret WHERE id = 2 RETURNING *", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);
     assert(result.commandTag == "DELETE 1");
     assert((result.columns == std::vector<std::string>{"id", "name"}));
-    assert((result.rows[0] == std::vector<std::string>{"2", "after"}));
+    assert((result.rows[0] == std::vector<std::string>{"2", "after2"}));
     assert(!runDml("DELETE FROM ret WHERE id = 3", session));
+    assert(!runDml("DELETE FROM ret WHERE id = 4 "
+                   "RETURNING id * 2 AS doubled, name || '-deleted' AS tagged", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "DELETE 1");
+    assert((result.rows[0] == std::vector<std::string>{"8", "expr-deleted"}));
     assert(g_engine.query(db, "ret", {}, {}, {}).empty());
 
     cleanup(db);

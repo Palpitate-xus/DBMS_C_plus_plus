@@ -183,6 +183,7 @@ struct QueryResult {
     std::string sqlState = "XX000";
     bool resultSet = false;
     std::vector<std::string> columns;
+    std::vector<std::string> columnTypes;
     std::vector<PgColumnDescription> columnDescriptions;
     std::vector<std::vector<std::string>> rows;
     std::string commandTag;
@@ -570,24 +571,41 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
     for (const auto& name : result.columns) {
         PgColumnDescription description;
         description.name = name;
+        const size_t columnIndex = descriptions.size();
+        const bool hasStructuredType =
+            columnIndex < result.columnTypes.size() &&
+            !result.columnTypes[columnIndex].empty();
+        if (hasStructuredType) {
+            Column expressionColumn;
+            expressionColumn.dataType = result.columnTypes[columnIndex];
+            expressionColumn.isVariableLength = true;
+            description.typeOid = mapBuiltinTypeNameToOid(
+                lowerProtocolText(expressionColumn.dataType));
+            if (description.typeOid == INVALID_OID) description.typeOid = 25;
+            description.typeSize = protocolTypeSize(description.typeOid, expressionColumn);
+        }
         for (size_t i = 0; i < table.len; ++i) {
             const Column& column = table.cols[i];
             if (lowerProtocolText(column.dataName) != lowerProtocolText(name)) continue;
-            description.typeOid = mapBuiltinTypeNameToOid(lowerProtocolText(column.dataType));
-            if (description.typeOid == INVALID_OID) description.typeOid = 25;
-            description.typeSize = protocolTypeSize(description.typeOid, column);
-            description.typeModifier = column.isVariableLength && column.dsize > 0
-                                           ? static_cast<int32_t>(column.dsize + 4)
-                                           : -1;
+            if (!hasStructuredType) {
+                description.typeOid = mapBuiltinTypeNameToOid(lowerProtocolText(column.dataType));
+                if (description.typeOid == INVALID_OID) description.typeOid = 25;
+                description.typeSize = protocolTypeSize(description.typeOid, column);
+                description.typeModifier = column.isVariableLength && column.dsize > 0
+                                               ? static_cast<int32_t>(column.dsize + 4)
+                                               : -1;
+            }
             description.tableOid = relationOid;
             description.attributeNumber = static_cast<uint16_t>(i + 1);
             for (const auto& attribute : catalogAttributes) {
                 if (attribute.attname == column.dataName) {
                     description.tableOid = relationOid;
                     description.attributeNumber = static_cast<uint16_t>(attribute.attnum);
-                    if (attribute.atttypid != INVALID_OID) description.typeOid = attribute.atttypid;
-                    if (attribute.attlen != 0) description.typeSize = attribute.attlen;
-                    if (attribute.atttypmod >= 0) description.typeModifier = attribute.atttypmod;
+                    if (!hasStructuredType) {
+                        if (attribute.atttypid != INVALID_OID) description.typeOid = attribute.atttypid;
+                        if (attribute.attlen != 0) description.typeSize = attribute.attlen;
+                        if (attribute.atttypmod >= 0) description.typeModifier = attribute.atttypmod;
+                    }
                     break;
                 }
             }
@@ -712,6 +730,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     if (structuredDml.available) {
         result.resultSet = true;
         result.columns = structuredDml.columns;
+        result.columnTypes = structuredDml.columnTypes;
         result.rows = structuredDml.rows;
         result.columnDescriptions = describeProtocolColumns(result, sql, session);
         result.commandTag = structuredDml.commandTag;
