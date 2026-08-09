@@ -6736,7 +6736,6 @@ static std::string processCTEs(const std::string& sql, Session& s) {
         size_t parenStart = result.find('(', asPos + 4);
         if (parenStart == std::string::npos) break;
         size_t parenEnd = findMatchingParen(result, parenStart);
-        // debug removed
         if (parenEnd == std::string::npos) break;
 
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
@@ -7012,7 +7011,6 @@ static std::string processCTEs(const std::string& sql, Session& s) {
     if (mainQueryStart < result.size()) {
         result = result.substr(0, withPos) + result.substr(mainQueryStart);
     }
-    // debug removed
     return result;
 }
 
@@ -16864,7 +16862,6 @@ bool execute(const string& rawSql, Session& s) {
                 if (!line.empty() && line.back() == ' ') line.pop_back();
                 winAnswers.push_back(line);
             }
-            // (debug removed)
 
             // DISTINCT
             if (isDistinct) {

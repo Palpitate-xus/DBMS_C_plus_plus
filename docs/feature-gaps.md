@@ -9,18 +9,19 @@
 
 协议当前已通过真实 E2E 覆盖常用标量、`numeric` 以及 `date`/`time`/`timestamp`/`timestamptz`/`uuid` 的 binary 参数与结果、基础 portal `maxRows` 分页；legacy 文本执行器的结果捕获已采用线程局部输出路由，不再以全局锁串行化会话；数组 binary I/O、亚秒时间精度、holdable/scrollable cursor 和完整 libpq 语义仍属于协议差距。
 
-本轮 DML 架构进展：普通单表 `INSERT ... VALUES` 和 `INSERT ... DEFAULT VALUES` 已进入 `src/commands/DmlExecutor.cpp` 的 AST 执行路径，解析器保留混合 `DEFAULT` 的列位置；不属于该子集的视图写入、`INSERT ... SELECT`、冲突处理和 `RETURNING` 仍明确由 legacy 路径处理。
+本轮 DML 架构进展：普通单表 `INSERT ... VALUES`/`DEFAULT VALUES`、常量表达式单表 `UPDATE` 和简单谓词单表 `DELETE` 已进入 `src/commands/DmlExecutor.cpp` 的 AST 执行路径；解析器保留混合 `DEFAULT` 的列位置并对 UPDATE/DELETE 尾随垃圾 fail-closed。视图写入、`INSERT ... SELECT`、冲突处理、`RETURNING`、多表 DML 和复杂表达式仍明确由 legacy 路径处理。
 
 ### P1-0: DML AST 全量执行迁移
 - **类别**: 执行器 / 架构一致性
-- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES` 已由 `DmlExecutor` 结构化执行，并通过协议回归；`INSERT` 的 SELECT/冲突/RETURNING、UPDATE、DELETE、MERGE 仍由 `main.cpp` 字符串分发，复杂表达式未被 AST 执行器支持时也会回退。
+- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、常量表达式单表 UPDATE、简单谓词单表 DELETE 已由 `DmlExecutor` 结构化执行，并通过 parser/协议回归；INSERT 的 SELECT/冲突/RETURNING、UPDATE 的列引用表达式/FROM、DELETE 的 USING/RETURNING、MERGE 和视图写入仍回退 legacy。
 - **PG 参考**: PostgreSQL 的 parse/analyze/rewrite/plan/execute 分层，以及 `ModifyTable`。
 - **影响**: 当前 DML 仍存在两套执行入口，错误码、RETURNING、权限和计划可观测性的统一程度不足。
 - **实现路径**:
   1. ✅ 抽出普通 INSERT AST executor，并验证多行、DEFAULT、StorageEngine 约束和 ACL。
-  2. 迁移 INSERT SELECT / ON CONFLICT / RETURNING，统一结果与 command tag。
-  3. 迁移 UPDATE、DELETE、MERGE 到结构化 `ModifyTable` 风格执行器。
-  4. 删除已完全迁移子集对应的 legacy 分支，并为每个回退边界增加 fail-closed 测试。
+  2. ✅ 抽出常量 UPDATE/简单谓词 DELETE AST executor，并验证触发器、RLS/FK/索引写入入口和 fail-closed 解析。
+  3. 迁移 INSERT SELECT / ON CONFLICT / RETURNING，统一结果与 command tag。
+  4. 迁移 UPDATE、DELETE、MERGE 到结构化 `ModifyTable` 风格执行器。
+  5. 删除已完全迁移子集对应的 legacy 分支，并为每个回退边界增加 fail-closed 测试。
 - **相关文件**: `src/commands/DmlExecutor.{h,cpp}`, `src/parser/ast.h`, `src/main.cpp`, `src/commands/TableManage.cpp`
 
 ---

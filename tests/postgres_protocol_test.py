@@ -431,6 +431,14 @@ def main():
         assert data_row_values(simple_query(
             sock, "SELECT name FROM dml_ast WHERE id = 3")) == [[b"MiXeD"]]
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "UPDATE dml_ast SET name = 'changed' WHERE id = 2"))
+        assert data_row_values(simple_query(
+            sock, "SELECT name FROM dml_ast WHERE id = 2")) == [[b"changed"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "DELETE FROM dml_ast WHERE id = 3"))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM dml_ast WHERE id = 3")) == []
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE INDEX t_id_idx ON t(id)"))
         assert data_row_values(simple_query(
             sock, "SELECT id FROM t WHERE id = 1")) == [[b"1"]]

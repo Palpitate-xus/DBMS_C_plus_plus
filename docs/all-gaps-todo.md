@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES 和视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT/ON CONFLICT/RETURNING、UPDATE/DELETE/MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、常量 UPDATE、简单谓词 DELETE 和视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT/ON CONFLICT/RETURNING、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -221,7 +221,7 @@
 
 ### 1.1 有实现但与 PostgreSQL 不等价的命令
 
-> **已完成进展（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并迁移旧 `.stc` 数据库；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。**DML（SELECT/INSERT/UPDATE/DELETE/MERGE）仍走旧字符串分发，AST 未被消费**——已明确延期为独立后续任务。DDL 中仍缺 `ALTER TABLE`/`DROP INDEX`/视图/物化视图/触发器/策略/函数/过程的目录集成。
+> **历史进展记录（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并迁移旧 `.stc` 数据库；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。该记录当时将 DML AST 迁移延期；当前普通 INSERT、常量 UPDATE、简单 DELETE 已由 `DmlExecutor` 消费，复杂 DML 仍待迁移。DDL 中仍缺 `ALTER TABLE`/`DROP INDEX`/视图/物化视图/触发器/策略/函数/过程的目录集成。
 
 | # | 命令 | 差距描述 | 状态 |
 |---|------|---------|------|
@@ -576,7 +576,7 @@
 
 | # | 差距 | 影响范围 | 难度 | 状态 |
 |---|------|---------|------|------|
-| 16.1 | **Parser/AST** — 当前 `execute()` 是巨大字符串分发器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 | 🔄 框架已建：`src/parser/` 递归下降 Parser + AST + `classify()`，DDL 子集经 `DdlExecutor`；但 DML 全部仍走字符串分发，AST 未被执行器消费 |
+| 16.1 | **Parser/AST** — 当前 `execute()` 仍是巨大路由器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 | 🔄 框架已建：`src/parser/` 递归下降 Parser + AST + `classify()`，DDL 子集及普通 INSERT/常量 UPDATE/简单 DELETE 经独立 executor；高级 DML/DQL 仍有明确 legacy fallback |
 | 16.2 | **Catalog/OID** — 目录对象图、owner/ACL 和完整依赖语义仍不完整 | DDL、权限、依赖、对象寻址 | 极高 | 🔄 CatalogService、核心系统表、OID 和主要 DDL 依赖路径已接入；DML 全量目录化、对象全集 owner/ACL/依赖和事务化 rewrite 仍缺 |
 | 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 | ✅ 已是 redo log：LSN/segment/full-page/redo/timeline/archive + 两趟扫描崩溃恢复（Phase 3.4~3.6）；PITR/复制仍 ❌ |
 | 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 | 🔄 `HeapTupleHeader`(xmin/xmax/ctid) + HOT + CLOG 可见性已实现（Phase 3.7/3.8）；多版本边界/vacuum 回收仍需深化 |
@@ -598,7 +598,7 @@
 ### Phase 1：Parser 与 AST 🔄 框架完成，DML 正在接入执行
 - 引入真正 SQL parser 或至少分层 AST，替代 `execute()` 超大字符串分支 — **框架已完成**（`src/parser/`，~6400 行）
 - 实现完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function — **解析层完成，执行期 cast/重载仍 ⚠️**
-- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 子集经 DdlExecutor 走 AST；普通 INSERT VALUES/DEFAULT VALUES 已经由 DmlExecutor 消费 AST，其他 DML 仍按明确边界走 legacy fallback**
+- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 子集及普通 INSERT、常量 UPDATE、简单谓词 DELETE 经独立 executor 消费 AST；其他 DML 仍按明确边界走 legacy fallback**
 
 ### Phase 2：Catalog 体系 🔄 主要 DDL 已接入运行时
 - 建立对象 OID、namespace、owner、ACL、dependency 体系 — **CatalogService/主要对象图已接入；owner/ACL 传播和对象全集依赖仍待深化**
@@ -636,14 +636,14 @@
 
 ### 进度备注（追加记录）
 
-- **2026-08-09**：普通单表 INSERT AST executor 落地：支持显式/隐式列、多行 VALUES、表达式、混合 DEFAULT、DEFAULT VALUES；修正 StorageEngine 仅在列缺失时应用默认值，并以 parser 单测和协议 E2E 验证。INSERT SELECT/ON CONFLICT/RETURNING、视图写入以及 UPDATE/DELETE/MERGE 仍待迁移。
+- **2026-08-09**：DML AST executor 扩展：普通 INSERT、常量单表 UPDATE、简单谓词单表 DELETE 已接入；修复列引用被误写成 NULL 的 fallback 边界，补充 UPDATE/DELETE 协议回归和 UPDATE/DELETE 尾随垃圾 fail-closed parser 测试。高级 DML、多表语义和复杂表达式仍待迁移。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。
 
 ---
 
-*最后更新：2026-07-02*
+*最后更新：2026-08-09*
 *关联文档：*
 - [postgresql-complete-gap-analysis.md](postgresql-complete-gap-analysis.md) — 最详细的差距分析原文（不可删除）
 - [implementation-plan.md](implementation-plan.md) — 按 phase 排列的实施计划与"已完成内容"记录（Phase 0~3 已完成，Phase 4 进行中）

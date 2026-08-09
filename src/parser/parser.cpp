@@ -2127,21 +2127,45 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
     }
 
     // SET clause
-    if (pos < tokens.size() && toLower(tokens[pos]) == "set") {
-        ++pos;
-        while (pos < tokens.size()) {
-            std::string w = toLower(tokens[pos]);
-            if (w == "from" || w == "where" || w == "returning" || tokens[pos] == ";") break;
-            if (pos + 1 < tokens.size() && tokens[pos + 1] == "=") {
-                std::string col = tokens[pos];
-                pos += 2;
-                auto expr = parseSimpleExpr(tokens, pos);
-                stmt->setClauses[col] = std::move(expr);
-            } else {
-                ++pos;
-            }
-            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+    if (pos >= tokens.size() || toLower(tokens[pos]) != "set") {
+        r.error = "UPDATE requires SET";
+        return r;
+    }
+    ++pos;
+    while (pos < tokens.size()) {
+        std::string w = toLower(tokens[pos]);
+        if (w == "from" || w == "where" || w == "returning" || tokens[pos] == ";") break;
+        if (tokens[pos] == ",") {
+            r.error = "unexpected comma in UPDATE SET clause";
+            return r;
         }
+        if (pos + 1 >= tokens.size() || tokens[pos + 1] != "=") {
+            r.error = "expected column = expression in UPDATE SET clause";
+            return r;
+        }
+        std::string col = tokens[pos];
+        pos += 2;
+        auto expr = parseSimpleExpr(tokens, pos);
+        if (!expr) {
+            r.error = "missing expression in UPDATE SET clause";
+            return r;
+        }
+        stmt->setClauses[col] = std::move(expr);
+        if (pos < tokens.size() && tokens[pos] == ",") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";" ||
+                toLower(tokens[pos]) == "from" ||
+                toLower(tokens[pos]) == "where" ||
+                toLower(tokens[pos]) == "returning") {
+                r.error = "trailing comma in UPDATE SET clause";
+                return r;
+            }
+        }
+    }
+
+    if (stmt->setClauses.empty()) {
+        r.error = "UPDATE requires at least one assignment";
+        return r;
     }
 
     // FROM clause
@@ -2163,6 +2187,12 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
             stmt->returning.push_back(parseSelectItem(tokens, pos));
             if (pos < tokens.size() && tokens[pos] == ",") ++pos;
         }
+    }
+
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        r.error = "unexpected token in UPDATE statement: " + tokens[pos];
+        return r;
     }
 
     r.success = true;
@@ -2211,6 +2241,12 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
             stmt->returning.push_back(parseSelectItem(tokens, pos));
             if (pos < tokens.size() && tokens[pos] == ",") ++pos;
         }
+    }
+
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        r.error = "unexpected token in DELETE statement: " + tokens[pos];
+        return r;
     }
 
     r.success = true;

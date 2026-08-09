@@ -238,6 +238,10 @@ int main() {
         assert(defaultStmt->values.empty());
         auto malformed = parser.parse("INSERT INTO t VALUES (1), DEFAULT");
         assert(!malformed.success);
+        assert(!parser.parse("UPDATE t SET a = 1 trailing").success);
+        assert(!parser.parse("UPDATE t SET a = 1, WHERE a = 1").success);
+        assert(!parser.parse("UPDATE t SET WHERE a = 1").success);
+        assert(!parser.parse("DELETE FROM t WHERE a = 1 trailing").success);
         std::cout << "[PARSER P1] INSERT AST DEFAULT handling OK\n";
     }
 

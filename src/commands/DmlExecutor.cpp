@@ -104,8 +104,106 @@ bool checkInsertColumns(Session& s, const std::string& table,
     return true;
 }
 
+bool checkTablePrivilege(Session& s, const std::string& table,
+                         StorageEngine::TablePrivilege privilege) {
+    if (s.permission == 1 || isTempTable(s, table)) return true;
+    if (g_engine.hasPermission(s.currentDB, table, s.username, privilege)) {
+        return true;
+    }
+    for (const auto& permission : g_engine.getUserPermissions(
+             s.currentDB, table, s.username)) {
+        const bool matches =
+            (privilege == StorageEngine::TablePrivilege::Update && permission == "update") ||
+            (privilege == StorageEngine::TablePrivilege::Delete && permission == "delete") ||
+            permission == "all";
+        if (matches) return true;
+    }
+    std::cout << "permission denied on table " << table << std::endl;
+    return false;
+}
+
+// Convert the deliberately small predicate subset owned by this executor to
+// the StorageEngine condition contract.  AND is safe because the engine
+// accepts a conjunction of independent conditions; OR, subqueries, functions
+// and column-to-column comparisons remain on the legacy path until they have
+// a structured plan representation.
+bool appendCondition(const Expr* expr, std::vector<std::string>& conditions) {
+    if (!expr) return true;
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
+        const std::string op = lower(binary->op);
+        if (op == "and") {
+            return appendCondition(binary->left.get(), conditions) &&
+                   appendCondition(binary->right.get(), conditions);
+        }
+        static const std::set<std::string> supported = {
+            "=", "<>", "!=", "<", ">", "<=", ">=", "like"
+        };
+        if (!supported.count(op)) return false;
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(binary->left.get());
+        const auto* literal = dynamic_cast<const LiteralExpr*>(binary->right.get());
+        if (!column || !literal || !column->schema.empty() || !column->table.empty()) {
+            return false;
+        }
+        if (lower(literal->value) == "null") return false;
+        conditions.push_back(op + identifier(column->column) + " " + literal->value);
+        return true;
+    }
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(unary->operand.get());
+        if (!column || !column->schema.empty() || !column->table.empty()) return false;
+        const std::string op = lower(unary->op);
+        if (op == "is null") {
+            conditions.push_back("isnull" + identifier(column->column));
+            return true;
+        }
+        if (op == "is not null") {
+            conditions.push_back("isnotnull" + identifier(column->column));
+            return true;
+        }
+    }
+    return false;
+}
+
+bool buildConditions(const ExprPtr& expr, std::vector<std::string>& conditions) {
+    return appendCondition(expr.get(), conditions);
+}
+
+bool referencesColumn(const Expr* expr) {
+    if (!expr) return false;
+    if (dynamic_cast<const ColumnRefExpr*>(expr)) return true;
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+        return referencesColumn(unary->operand.get());
+    }
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
+        return referencesColumn(binary->left.get()) ||
+               referencesColumn(binary->right.get());
+    }
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+        for (const auto& arg : call->args) {
+            if (referencesColumn(arg.get())) return true;
+        }
+        return false;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
+        return referencesColumn(cast->operand.get());
+    }
+    if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
+        for (const auto& element : array->elements) {
+            if (referencesColumn(element.get())) return true;
+        }
+        return false;
+    }
+    if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
+        for (const auto& element : row->elements) {
+            if (referencesColumn(element.get())) return true;
+        }
+    }
+    return false;
+}
+
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
                    std::string& value) {
+    if (referencesColumn(expr.get())) return false;
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     RowContext emptyContext;
@@ -250,31 +348,140 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     return false;
 }
 
+bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
+    fallback = false;
+    if (!checkDatabase(s)) return true;
+    const std::string requestedTable = identifier(stmt.tableName);
+    const std::string resolvedTable = resolveTable(s, requestedTable);
+    if (g_engine.viewExists(s.currentDB, requestedTable) ||
+        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+        fallback = true;
+        return false;
+    }
+    if (!g_engine.tableExists(s.currentDB, resolvedTable)) {
+        std::cout << "Table " << requestedTable << " not exist" << std::endl;
+        return true;
+    }
+    if (!checkTablePrivilege(s, requestedTable,
+                             StorageEngine::TablePrivilege::Update)) return true;
+
+    std::vector<std::string> columns;
+    std::map<std::string, std::string> updates;
+    for (const auto& [rawColumn, expr] : stmt.setClauses) {
+        const std::string column = identifier(rawColumn);
+        columns.push_back(column);
+        if (isDefaultValue(expr)) {
+            fallback = true;
+            return false;
+        }
+        std::string value;
+        if (!evaluateValue(expr, s.currentDB, value)) {
+            fallback = true;
+            return false;
+        }
+        updates[column] = std::move(value);
+    }
+    if (updates.empty()) {
+        std::cout << "SQL syntax error: empty UPDATE SET clause" << std::endl;
+        return true;
+    }
+    if (s.permission != 1 && !isTempTable(s, requestedTable) &&
+        !g_engine.hasColumnPermission(
+            s.currentDB, requestedTable, s.username,
+            StorageEngine::TablePrivilege::Update, columns)) {
+        std::cout << "permission denied: UPDATE on restricted columns of table "
+                  << requestedTable << std::endl;
+        return true;
+    }
+
+    std::vector<std::string> conditions;
+    if (!buildConditions(stmt.whereClause, conditions)) {
+        fallback = true;
+        return false;
+    }
+    const DBStatus status = g_engine.update(
+        s.currentDB, resolvedTable, updates, conditions);
+    if (status != DBStatus::OK) {
+        std::cout << "Update failed" << std::endl;
+        return true;
+    }
+    std::cout << "Update done" << std::endl;
+    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    return false;
+}
+
+bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
+    fallback = false;
+    if (!checkDatabase(s)) return true;
+    const std::string requestedTable = identifier(stmt.tableName);
+    const std::string resolvedTable = resolveTable(s, requestedTable);
+    if (g_engine.viewExists(s.currentDB, requestedTable) ||
+        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+        fallback = true;
+        return false;
+    }
+    if (!g_engine.tableExists(s.currentDB, resolvedTable)) {
+        std::cout << "Table " << requestedTable << " not exist" << std::endl;
+        return true;
+    }
+    if (!checkTablePrivilege(s, requestedTable,
+                             StorageEngine::TablePrivilege::Delete)) return true;
+
+    std::vector<std::string> conditions;
+    if (!buildConditions(stmt.whereClause, conditions)) {
+        fallback = true;
+        return false;
+    }
+    const DBStatus status = g_engine.remove(
+        s.currentDB, resolvedTable, conditions);
+    if (status != DBStatus::OK) {
+        std::cout << "Delete failed" << std::endl;
+        return true;
+    }
+    std::cout << "Delete done" << std::endl;
+    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    return false;
+}
+
 } // namespace
 
 bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                   Session& s, bool& handled, const std::string& rawSql) {
     handled = false;
-    if (parsedCmd != SqlCommand::Insert) return false;
+    if (parsedCmd != SqlCommand::Insert && parsedCmd != SqlCommand::Update &&
+        parsedCmd != SqlCommand::Delete) return false;
 
     SQLParser parser;
     // sql is normalized by the legacy entry point and may have changed the
     // case of string literals.  Parse the original text whenever available so
     // AST execution preserves user data exactly.
     const ParseResult parsed = parser.parse(rawSql.empty() ? sql : rawSql);
-    const auto* stmt = parsed.stmt
-        ? dynamic_cast<const InsertStmt*>(parsed.stmt.get()) : nullptr;
-    if (!parsed.success || !stmt) {
+    if (!parsed.success || !parsed.stmt) {
         handled = true;
+        const char* statementName = parsedCmd == SqlCommand::Update ? "UPDATE" :
+                                    parsedCmd == SqlCommand::Delete ? "DELETE" : "INSERT";
         std::cout << "SQL syntax error: "
-                  << (parsed.error.empty() ? "invalid INSERT statement" : parsed.error)
+                  << (parsed.error.empty() ? std::string("invalid ") + statementName + " statement"
+                                            : parsed.error)
                   << std::endl;
         return true;
     }
-    if (!supportsInsert(*stmt)) return false;
 
     bool fallback = false;
-    const bool error = executeInsert(*stmt, s, fallback);
+    bool error = false;
+    if (parsedCmd == SqlCommand::Insert) {
+        const auto* stmt = dynamic_cast<const InsertStmt*>(parsed.stmt.get());
+        if (!stmt || !supportsInsert(*stmt)) return false;
+        error = executeInsert(*stmt, s, fallback);
+    } else if (parsedCmd == SqlCommand::Update) {
+        const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
+        if (!stmt || stmt->fromClause || !stmt->returning.empty()) return false;
+        error = executeUpdate(*stmt, s, fallback);
+    } else {
+        const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
+        if (!stmt || stmt->usingClause || !stmt->returning.empty() || stmt->only) return false;
+        error = executeDelete(*stmt, s, fallback);
+    }
     if (fallback) {
         handled = false;
         return false;

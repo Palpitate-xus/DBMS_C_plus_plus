@@ -2,12 +2,12 @@
 
 ## 当前状态
 
-SQL 解析当前内嵌在 `src/main.cpp` 的 `execute()` 函数中，采用手工字符串解析方式：
+SQL 解析主入口已拆到 `src/parser/`，由递归下降 parser 生成 typed AST；`src/main.cpp::execute()` 仍保留未迁移命令的路由和 legacy fallback：
 
-- 关键字匹配（`startsWithKeyword`, `findTopLevelKeyword`）
-- 子句拆分（`parseColumns`, `parseConditions` 等）
-- 表达式简单求值
+- `DdlExecutor` 消费已迁移的 DDL AST 子集
+- `DmlExecutor` 消费普通单表 `INSERT VALUES/DEFAULT VALUES`、简单单表 `UPDATE` 和 `DELETE`
+- `execute()` 中的字符串解析仅保留尚未完成 AST 迁移的高级 DML/DQL 与兼容路径
 
 ## 未来迁移计划
 
-Phase 4 将引入独立的词法/语法分析器，支持完整的 SQL 语法树（AST）生成，并迁移至此目录。
+继续将 `INSERT SELECT/ON CONFLICT/RETURNING`、多表 DML、`MERGE` 和复杂表达式迁移到结构化执行器，并在每个边界删除对应 legacy 分支。
