@@ -9,9 +9,12 @@
 namespace dbms {
 
 constexpr size_t MAX_COLUMNS = 30;
-constexpr size_t MAX_TABLE_NAME_LEN = 15;
-constexpr size_t MAX_TYPE_NAME_LEN = 12;
-constexpr size_t MAX_COL_NAME_LEN = 15;
+// PostgreSQL stores at most NAMEDATALEN-1 bytes for identifiers.  The
+// current format reserves the full 64-byte field (including the terminator)
+// so logical names are never silently truncated at the old 15-byte limit.
+constexpr size_t MAX_TABLE_NAME_LEN = 64;
+constexpr size_t MAX_TYPE_NAME_LEN = 64;
+constexpr size_t MAX_COL_NAME_LEN = 64;
 constexpr size_t DATE_SIZE = 12;
 constexpr size_t TIMESTAMP_SIZE = 8;
 constexpr int64_t INF = 0x8000000000000000LL;

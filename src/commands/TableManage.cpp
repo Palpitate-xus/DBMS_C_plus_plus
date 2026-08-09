@@ -426,6 +426,42 @@ static std::string readFixedString(std::istream& in, size_t len) {
     return buf;
 }
 
+static bool validStoredIdentifier(const std::string& value, size_t fieldSize) {
+    return value.find('\0') == std::string::npos && value.size() < fieldSize;
+}
+
+static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* error) {
+    auto reject = [&](const std::string& value, size_t fieldSize, const char* kind) {
+        if (validStoredIdentifier(value, fieldSize)) return false;
+        if (error) *error = std::string(kind) + " exceeds the current 63-byte identifier limit";
+        return true;
+    };
+    if (reject(tbl.tablename, MAX_TABLE_NAME_LEN, "table name")) return false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (reject(tbl.cols[i].dataName, MAX_COL_NAME_LEN, "column name") ||
+            reject(tbl.cols[i].dataType, MAX_TYPE_NAME_LEN, "type name") ||
+            reject(tbl.cols[i].checkConstraintName, MAX_COL_NAME_LEN, "constraint name")) {
+            return false;
+        }
+    }
+    for (const auto& name : tbl.uniqueConstraintNames) {
+        if (reject(name, MAX_TABLE_NAME_LEN, "constraint name")) return false;
+    }
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        if (reject(tbl.fks[i].name, MAX_TABLE_NAME_LEN, "constraint name") ||
+            reject(tbl.fks[i].refTable, MAX_TABLE_NAME_LEN, "table name")) {
+            return false;
+        }
+        for (const auto& name : tbl.fks[i].colNames) {
+            if (reject(name, MAX_COL_NAME_LEN, "column name")) return false;
+        }
+        for (const auto& name : tbl.fks[i].refCols) {
+            if (reject(name, MAX_COL_NAME_LEN, "column name")) return false;
+        }
+    }
+    return true;
+}
+
 // ========================================================================
 // Column / TableSchema
 // ========================================================================
@@ -7113,7 +7149,7 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     return DBStatus::OK;
 }
 
-constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420008;  // "DB" + current clean schema format
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identifier fields
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -8004,6 +8040,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (error) *error = "database not found";
         return DBStatus::DATABASE_NOT_FOUND;
     }
+    if (!validateTableSchemaIdentifiers(tbl, error)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     if (tableExists(dbname, tbl.tablename)) {
         if (error) *error = "table already exists";
         return DBStatus::TABLE_ALREADY_EXISTS;
@@ -8291,6 +8330,11 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     Column validatedCol = col;
+    if (!validStoredIdentifier(validatedCol.dataName, MAX_COL_NAME_LEN) ||
+        !validStoredIdentifier(validatedCol.dataType, MAX_TYPE_NAME_LEN)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
     std::string typeErr = TypeRegistry::instance().validateColumn(validatedCol);
     if (!typeErr.empty()) {
         lockManager_.unlock(tablename);
@@ -8879,6 +8923,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
                                                 const std::string& newName) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!validStoredIdentifier(newName, MAX_COL_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (oldName == newName) return DBStatus::OK;
     lockManager_.lockMetadata(tablename);
 
@@ -9101,6 +9146,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                                                const std::string& newName) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
+    if (!validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
     lockManager_.lockMetadata(oldName);
     lockManager_.lockMetadata(newName);
@@ -9578,6 +9624,7 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
                                                         const std::string& name,
                                                         const std::string& expr) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -9616,6 +9663,7 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
                                                          const std::string& name,
                                                          const std::vector<std::string>& colNames) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -9659,6 +9707,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     (void)name;  // PK constraint name is not separately persisted
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -9754,6 +9803,8 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
                                                      const std::string& onDelete,
                                                      const std::string& onUpdate) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) ||
+        !validStoredIdentifier(refTable, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, refTable)) {
         // FK references a table in the same database
         if (!std::filesystem::exists(schemaPath(dbname, refTable))) {
@@ -9882,6 +9933,7 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
                                                     const std::string& oldName,
                                                     const std::string& newName) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (oldName == newName) return DBStatus::OK;
     lockManager_.lockMetadata(tablename);
 

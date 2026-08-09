@@ -242,20 +242,53 @@ static void test_alter_table_metadata_actions() {
     assert(relation != nullptr && relation->relreplident == 'd');
 
     assert(!ddl.executeSql(
-        "ALTER TABLE alter_meta ADD CONSTRAINT pos_check CHECK (id > 0) NOT VALID", s));
+        "ALTER TABLE alter_meta ADD CONSTRAINT alter_meta_positive CHECK (id > 0) NOT VALID", s));
     auto constraintParams = g_engine.getStorageParams(db, "alter_meta");
-    assert(constraintParams.at("constraint.pos_check.not_valid") == "1");
+    assert(constraintParams.at("constraint.alter_meta_positive.not_valid") == "1");
     assert(!ddl.executeSql(
-        "ALTER TABLE alter_meta ALTER CONSTRAINT pos_check DEFERRABLE INITIALLY DEFERRED", s));
+        "ALTER TABLE alter_meta ALTER CONSTRAINT alter_meta_positive DEFERRABLE INITIALLY DEFERRED", s));
     auto schema = g_engine.getTableSchema(db, "alter_meta");
     assert(schema.cols[0].deferrable);
     assert(schema.cols[0].initiallyDeferred);
-    assert(!ddl.executeSql("ALTER TABLE alter_meta VALIDATE CONSTRAINT pos_check", s));
+    assert(!ddl.executeSql("ALTER TABLE alter_meta VALIDATE CONSTRAINT alter_meta_positive", s));
     params = g_engine.getStorageParams(db, "alter_meta");
-    assert(params.at("constraint.pos_check.validated") == "1");
+    assert(params.at("constraint.alter_meta_positive.validated") == "1");
+    assert(g_engine.getTableSchema(db, "alter_meta").cols[0].checkConstraintName ==
+           "alter_meta_positive");
 
     cleanup(db);
     std::cout << "[DDL] ALTER TABLE metadata actions OK" << std::endl;
+}
+
+static void test_long_identifiers_round_trip() {
+    std::string db = testDbPath("ddl_long_identifiers");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    const std::string tableName = "production_identifier_table";
+    const std::string columnName = "production_identifier_column";
+    const std::string constraintName = "production_identifier_check";
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE " + tableName + " (" + columnName + " INT)", s));
+    auto schema = g_engine.getTableSchema(db, tableName);
+    assert(schema.tablename == tableName);
+    assert(schema.len == 1 && schema.cols[0].dataName == columnName);
+    assert(!ddl.executeSql(
+        "ALTER TABLE " + tableName + " ADD CONSTRAINT " + constraintName +
+        " CHECK (" + columnName + " > 0)", s));
+    schema = g_engine.getTableSchema(db, tableName);
+    assert(schema.cols[0].checkConstraintName == constraintName);
+
+    auto& cat = g_engine.catalogService().get(db);
+    const auto* ns = cat.findNamespaceByName("public");
+    assert(ns != nullptr);
+    assert(cat.findClassByName(tableName, ns->oid) != nullptr);
+
+    cleanup(db);
+    std::cout << "[DDL] long identifier round-trip OK" << std::endl;
 }
 
 static void test_drop_database_evicts_catalog() {
@@ -293,6 +326,7 @@ int main() {
     test_drop_database_evicts_catalog();
     test_comment_on();
     test_alter_table_metadata_actions();
+    test_long_identifiers_round_trip();
     std::cout << "[DDL] all passed" << std::endl;
     return 0;
 }

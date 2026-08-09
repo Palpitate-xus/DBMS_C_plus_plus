@@ -9,6 +9,8 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
+当前 schema 格式为 `0x44420009`，标识符固定字段容量提升至 64 字节（最多 63 字节），避免旧 15 字节字段导致的约束/列名静默截断；旧 schema 不兼容，需重建。
+
 当前路径补充：基础 `ALTER TABLE`、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版单表 MERGE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；USING/WITH CHECK 形式的 RLS 关系感知扫描也已统一接入查询/更新/删除和结构化 DML 来源关系，并支持默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、INHERIT/NOINHERIT 和角色属性绕过；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表/复杂 UPDATE/DELETE、MERGE 的完整 WHEN/source/RETURNING 语义、RLS 的完整 owner/ACL 语义、触发器函数运行时仍由 legacy 或 fail-closed 路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
