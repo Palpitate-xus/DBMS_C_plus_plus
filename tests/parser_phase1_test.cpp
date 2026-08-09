@@ -137,6 +137,21 @@ int main() {
         assert(local.success);
         table = asCreateTable(local.stmt);
         assert(table && table->temp && table->localTemp);
+        auto deleteRows = parser.parse(
+            "CREATE TEMP TABLE delete_rows (id INT) ON COMMIT DELETE ROWS");
+        assert(deleteRows.success);
+        table = asCreateTable(deleteRows.stmt);
+        assert(table && table->onCommitSpecified && table->onCommit == "delete");
+        auto dropTable = parser.parse(
+            "CREATE TEMP TABLE drop_table (id INT) ON COMMIT DROP");
+        assert(dropTable.success);
+        table = asCreateTable(dropTable.stmt);
+        assert(table && table->onCommitSpecified && table->onCommit == "drop");
+        auto ctas = parser.parse(
+            "CREATE TEMP TABLE ctas_temp ON COMMIT DROP AS SELECT id FROM source_table");
+        assert(ctas.success);
+        table = asCreateTable(ctas.stmt);
+        assert(table && table->onCommit == "drop" && !table->asSelect.empty());
         std::cout << "[PARSER P1] CREATE TEMP flags OK\n";
     }
     }

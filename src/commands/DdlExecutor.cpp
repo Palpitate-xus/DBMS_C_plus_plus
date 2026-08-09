@@ -339,6 +339,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
 
 bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
     if (!stmt) return false;
+    setCurrentSession(&s);
     switch (stmt->command) {
         case SqlCommand::CreateTable:
             return executeCreateTable(dynamic_cast<const CreateTableStmt*>(stmt.get()), s);
@@ -2028,6 +2029,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         return true;
     }
     const bool temporary = stmt->temp || stmt->localTemp;
+    if (!stmt->onCommitValid || (stmt->onCommitSpecified && !temporary)) {
+        std::cout << "ERROR: ON COMMIT is only supported for valid temporary tables" << std::endl;
+        return true;
+    }
     const std::string tname = temporary
                                   ? tempTablePrefix(s, stmt->tableName)
                                   : resolveTableName(s, stmt->tableName);
@@ -2044,6 +2049,14 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cout << "CREATE TEMP TABLE PARTITION OF is not supported" << std::endl;
         return true;
     }
+    const auto registerTemporaryTable = [&]() {
+        if (!temporary) return;
+        s.tempTables.insert(stmt->tableName);
+        s.tempTableOnCommit[stmt->tableName] = stmt->onCommit;
+        if (g_engine.inTransaction()) {
+            s.tempTablesCreatedInTransaction.insert(stmt->tableName);
+        }
+    };
 
     // CREATE TABLE child PARTITION OF parent ...
     if (!stmt->partitionOf.empty()) {
@@ -2108,8 +2121,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname,
                                             effectiveSessionRole(s));
         }
+        registerTemporaryTable();
         txn.commit();
-        if (temporary) s.tempTables.insert(stmt->tableName);
         return false;
     }
 
@@ -2126,8 +2139,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 std::cerr << "WARNING: CTAS catalog registration failed: " << e.what() << std::endl;
             }
             txn.recordCreate(DdlObjectKind::Table, tname);
+            registerTemporaryTable();
             txn.commit();
-            if (temporary) s.tempTables.insert(stmt->tableName);
         }
         return err;
     }
@@ -2333,8 +2346,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     }
 
     txn.recordCreate(DdlObjectKind::Table, tname);
+    registerTemporaryTable();
     txn.commit();
-    if (temporary) s.tempTables.insert(stmt->tableName);
     std::cout << "CREATE TABLE succeeded" << std::endl;
     return false;
 }
@@ -2377,7 +2390,9 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cout << "SQL syntax error: DROP TABLE name" << std::endl;
         return true;
     }
-    std::string tname = resolveTableName(s, stmt->objectNames.front());
+    const std::string logicalName = stmt->objectNames.front();
+    const bool droppingTemp = s.tempTables.count(logicalName) != 0;
+    std::string tname = resolveTableName(s, logicalName);
     if (!g_engine.tableExists(s.currentDB, tname)) {
         if (stmt->ifExists) {
             std::cout << "NOTICE: table \"" << tname << "\" does not exist, skipping" << std::endl;
@@ -2421,6 +2436,11 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         return true;
     }
     txn.commit();
+    if (droppingTemp) {
+        s.tempTables.erase(logicalName);
+        s.tempTableOnCommit.erase(logicalName);
+        s.tempTablesCreatedInTransaction.erase(logicalName);
+    }
     std::cout << "DROP TABLE succeeded" << std::endl;
     return false;
 }

@@ -801,6 +801,9 @@ struct CreateTableStmt : public Stmt {
     bool unlogged = false;
     bool temp = false;
     bool localTemp = false;
+    std::string onCommit = "preserve";         // preserve, delete, or drop
+    bool onCommitSpecified = false;
+    bool onCommitValid = true;
     std::string tablespace;
     std::string accessMethod;
     std::string ofType;                        // OF type_name

@@ -179,8 +179,9 @@ CREATE TABLE items (
 
 -- 临时表
 CREATE TEMPORARY TABLE tmp_data (X INT, Y INT);
--- 临时表仅在当前连接可见，断开连接后自动清理；ON COMMIT 和完整 pg_temp
--- schema/catalog/search_path 语义尚未实现。
+-- 临时表仅在当前连接可见，断开连接后自动清理；支持 ON COMMIT
+-- PRESERVE ROWS/DELETE ROWS/DROP，完整 pg_temp schema/catalog/search_path
+-- 语义尚未实现。
 
 -- Unlogged 表 (不写 WAL)
 CREATE UNLOGGED TABLE cache (KEY TEXT, VALUE TEXT);

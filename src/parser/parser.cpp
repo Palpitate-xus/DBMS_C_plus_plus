@@ -3844,6 +3844,33 @@ static void parseConstraintDeferrability(const std::vector<std::string>& tokens,
 // CREATE 子命令解析（Phase 1.2 逐步完善）
 // ============================================================================
 
+static void parseCreateTableOnCommit(const std::vector<std::string>& tokens,
+                                     size_t& pos,
+                                     CreateTableStmt& stmt) {
+    stmt.onCommitSpecified = true;
+    pos += 2; // ON COMMIT
+    if (pos >= tokens.size()) {
+        stmt.onCommitValid = false;
+        return;
+    }
+    const std::string action = SQLParser::toLower(tokens[pos++]);
+    if (action == "preserve") {
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "rows") ++pos;
+        stmt.onCommit = "preserve";
+    } else if (action == "delete") {
+        if (pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "rows") {
+            stmt.onCommitValid = false;
+        } else {
+            ++pos;
+            stmt.onCommit = "delete";
+        }
+    } else if (action == "drop") {
+        stmt.onCommit = "drop";
+    } else {
+        stmt.onCommitValid = false;
+    }
+}
+
 StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateTableStmt>();
 
@@ -3880,6 +3907,12 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
         if (bound.empty()) return nullptr;
         stmt->partitionBoundSpec = std::move(bound);
         return stmt;
+    }
+
+    // PostgreSQL places ON COMMIT before AS in CREATE TEMP TABLE ... AS.
+    if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "on" &&
+        toLower(tokens[pos + 1]) == "commit") {
+        parseCreateTableOnCommit(tokens, pos, *stmt);
     }
 
     // CREATE TABLE ... AS SELECT ...
@@ -4348,6 +4381,9 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 stmt->likeClauses.push_back(lc);
                 stmt->likeTables.emplace_back(lc.tableName, ColumnDef());
             }
+        } else if (kw == "on" && pos + 1 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "commit") {
+            parseCreateTableOnCommit(tokens, pos, *stmt);
         } else {
             ++pos;
         }

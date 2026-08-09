@@ -813,6 +813,32 @@ def main():
             sock, "INSERT INTO temp_shadow VALUES (7)"))
         assert data_row_values(simple_query(
             sock, "SELECT id FROM temp_shadow")) == [[b"7"]]
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TEMP TABLE delete_rows (id INT) ON COMMIT DELETE ROWS"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO delete_rows VALUES (8)"))
+        assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM delete_rows")) == []
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TEMP TABLE drop_rows (id INT) ON COMMIT DROP"))
+        assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
+        dropped_temp = simple_query(sock, "SELECT id FROM drop_rows")
+        assert any(kind == b"E" for kind, _ in dropped_temp), dropped_temp
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TEMP TABLE ctas_drop ON COMMIT DROP AS SELECT id FROM t"))
+        assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
+        ctas_dropped = simple_query(sock, "SELECT id FROM ctas_drop")
+        assert any(kind == b"E" for kind, _ in ctas_dropped), ctas_dropped
+        assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TEMP TABLE rollback_temp (id INT)"))
+        assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        rolled_back_temp = simple_query(sock, "SELECT id FROM rollback_temp")
+        assert any(kind == b"E" for kind, _ in rolled_back_temp), rolled_back_temp
 
         # A backend's transaction state must not leak through the shared
         # StorageEngine into another protocol connection.

@@ -18416,6 +18416,44 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
 // Transaction support (Undo Log based rollback, no full-db snapshot)
 // ========================================================================
 
+static void applySessionTempTableCommitActions(StorageEngine& engine,
+                                               Session& session,
+                                               const std::string& dbname) {
+    std::vector<std::string> names;
+    names.reserve(session.tempTableOnCommit.size());
+    for (const auto& entry : session.tempTableOnCommit) names.push_back(entry.first);
+
+    for (const auto& logicalName : names) {
+        if (!session.tempTables.count(logicalName)) {
+            session.tempTableOnCommit.erase(logicalName);
+            continue;
+        }
+        const auto actionIt = session.tempTableOnCommit.find(logicalName);
+        if (actionIt == session.tempTableOnCommit.end()) continue;
+        const std::string physicalName = tempTablePrefix(session, logicalName);
+        if (actionIt->second == "delete") {
+            engine.truncateTable(dbname, physicalName);
+        } else if (actionIt->second == "drop") {
+            engine.dropTable(dbname, physicalName);
+            session.tempTables.erase(logicalName);
+            session.tempTableOnCommit.erase(logicalName);
+        }
+    }
+    session.tempTablesCreatedInTransaction.clear();
+}
+
+static void rollbackSessionTempTables(StorageEngine& engine,
+                                      Session& session,
+                                      const std::string& dbname) {
+    const auto created = session.tempTablesCreatedInTransaction;
+    for (const auto& logicalName : created) {
+        engine.dropTable(dbname, tempTablePrefix(session, logicalName));
+        session.tempTables.erase(logicalName);
+        session.tempTableOnCommit.erase(logicalName);
+    }
+    session.tempTablesCreatedInTransaction.clear();
+}
+
 DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     if (transactionContext().inTransaction) {
         // Commit existing transaction before starting a new one.
@@ -18645,6 +18683,10 @@ DBStatus StorageEngine::commitTransaction() {
     clearCatalogSnapshot();
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
+    if (Session* session = currentSession();
+        session && session->currentDB == transactionContext().txnDB) {
+        applySessionTempTableCommitActions(*this, *session, transactionContext().txnDB);
+    }
     transactionContext().constraintMode.clear();
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().currentTxnId = 0;
@@ -18877,6 +18919,11 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().txnWrittenRids.clear();
     transactionContext().txnReadRelations.clear();
     transactionContext().txnWrittenRelations.clear();
+
+    if (Session* session = currentSession();
+        session && session->currentDB == transactionContext().txnDB) {
+        rollbackSessionTempTables(*this, *session, transactionContext().txnDB);
+    }
 
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;

@@ -150,8 +150,9 @@ CREATE TEMPORARY TABLE table_name (
 
 **说明** 临时表仅在当前会话可见，会话结束后自动删除。`TEMP` 与
 `TEMPORARY` 均由 typed DDL 执行；每个连接使用独立的内部对象名，因此
-不同会话可以创建同名临时表。当前尚未实现 `ON COMMIT DROP/DELETE ROWS`
-及 PostgreSQL 的完整 `pg_temp` catalog/search_path 语义。
+不同会话可以创建同名临时表。支持 `ON COMMIT PRESERVE ROWS`、
+`ON COMMIT DELETE ROWS` 和 `ON COMMIT DROP`；PostgreSQL 的完整
+`pg_temp` catalog/search_path 语义仍未实现。
 
 **示例**
 ```sql

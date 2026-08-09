@@ -379,7 +379,7 @@
 | 4.4 | 表定义 | `LIKE INCLUDING` 全集已落地（DEFAULTS/CONSTRAINTS/INDEXES/IDENTITY）；`OF type`、identity 列（GENERATED AS IDENTITY）、`PARTITION BY` 与 `PARTITION OF` 已从 AST 桥接到引擎；tablespace 存储到 schema；仍缺 access method schema 持久化、typed table、storage/compression、statistics target、replica identity、reloptions 全集 | ⚠️ |
 | 4.5 | 分区 | 有 range/list/hash/attach/detach 子集；缺少 PG 分区约束证明、分区索引联动、global/local index 语义、默认分区验证、运行时 partition pruning 完整能力 | ⚠️ |
 | 4.6 | 继承 | 有 `.inherits` 文件和查询合并痕迹；缺少 PG 表继承的约束/触发器/权限/`ONLY`/`NO INHERIT` 完整语义 | ⚠️ |
-| 4.7 | 临时表 | typed `CREATE TEMP/TEMPORARY TABLE` 已按连接隔离并在连接断开时清理；缺少 `ON COMMIT DROP/DELETE/PRESERVE`、真正 temp schema/catalog visibility、search_path 与跨事务生命周期细节 | ⚠️ |
+| 4.7 | 临时表 | typed `CREATE TEMP/TEMPORARY TABLE` 已按连接隔离、在连接断开时清理，并支持 `ON COMMIT PRESERVE/DELETE/DROP`；缺少真正 temp schema/catalog visibility、search_path 与完整跨事务生命周期细节 | ⚠️ |
 | 4.8 | UNLOGGED | 有标志和崩溃截断；缺少 PG unlogged init fork、复制限制、分区限制等 | ⚠️ |
 | 4.9 | 视图 | 视图保存 SQL 并展开；缺少 rewrite rule 系统、security barrier/invoker、列权限、复杂 updatable view | ⚠️ |
 | 4.10 | 物化视图 | backing table 简化；缺少 PG 依赖、索引要求、concurrent refresh 的可见性和锁 | ⚠️ |

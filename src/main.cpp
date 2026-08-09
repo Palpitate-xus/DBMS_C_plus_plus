@@ -2746,6 +2746,8 @@ void cleanupSessionTempTables(Session& s) {
     }
     s.tempTables.clear();
     s.transientTempTables.clear();
+    s.tempTableOnCommit.clear();
+    s.tempTablesCreatedInTransaction.clear();
 }
 
 string resolveTableName(Session& s, const string& name) {
@@ -11445,6 +11447,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return true;
             }
             s.tempTables.erase(origName);
+            s.tempTableOnCommit.erase(origName);
+            s.tempTablesCreatedInTransaction.erase(origName);
             cout << "Temporary table dropped" << endl;
             return false;
         }
@@ -11458,6 +11462,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     return true;
                 }
                 s.tempTables.erase(name);
+                s.tempTableOnCommit.erase(name);
+                s.tempTablesCreatedInTransaction.erase(name);
                 cout << "Table dropped" << endl;
                 return false;
             }
