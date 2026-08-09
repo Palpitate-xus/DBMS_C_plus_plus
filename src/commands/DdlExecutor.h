@@ -75,6 +75,9 @@ private:
     static void recordConstraintCompat(const std::string& dbname,
                                        const std::string& tablename,
                                        const TableConstraint& tc);
+    static bool removeConstraintCompat(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& constraintName);
 
     // 事务隐式提交（PG 语义；后续 Wave 5 移除）
     static void checkAndImplicitCommit(Session& s);

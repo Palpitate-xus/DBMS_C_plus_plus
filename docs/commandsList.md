@@ -217,6 +217,26 @@ ALTER TABLE users ADD COLUMN status INT NOT NULL DEFAULT 1;
 
 ---
 
+### ALTER TABLE 约束
+
+**语法**
+```sql
+ALTER TABLE table_name ADD CONSTRAINT constraint_name
+    EXCLUDE [USING {btree | gist}] (column_name WITH operator [, ...]);
+ALTER TABLE table_name DROP CONSTRAINT [IF EXISTS] constraint_name;
+```
+
+**说明** 当前 EXCLUDE 约束由 typed DDL 执行器持久化，并在 INSERT/UPDATE 时执行冲突检查；支持 `=` 等值排斥和 `&&` `int4range` 重叠排斥。GiST 索引加速、完整 operator class 和复杂表达式元素仍未完成。
+
+**示例**
+```sql
+ALTER TABLE rooms ADD CONSTRAINT rooms_no_overlap
+    EXCLUDE USING gist (during WITH &&);
+ALTER TABLE rooms DROP CONSTRAINT rooms_no_overlap;
+```
+
+---
+
 ### ALTER TABLE DROP COLUMN
 
 **语法**

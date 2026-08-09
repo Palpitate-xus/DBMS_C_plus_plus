@@ -6534,7 +6534,9 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 if (sub.constraint.type == "PRIMARY") { sub.constraint.type = "PRIMARY KEY"; ++pos; }
                 if (sub.constraint.type == "FOREIGN") { sub.constraint.type = "FOREIGN KEY"; ++pos; }
                 if (sub.constraint.type == "EXCLUDE") {
+                    const std::string constraintName = sub.constraint.name;
                     sub.constraint = parseExcludeConstraint(tokens, pos);
+                    sub.constraint.name = constraintName;
                     sub.constraint.type = "EXCLUDE";
                 }
             }

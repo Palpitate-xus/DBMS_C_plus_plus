@@ -239,7 +239,7 @@
 | 1.1.1 | `ALTER DEFAULT PRIVILEGES` | 只解析 `GRANT` 路径；缺少完整 `REVOKE`、对象类型、角色继承、schema/default ACL 语义 | ⚠️ |
 | 1.1.2 | `ALTER SCHEMA` | 主要支持 `RENAME TO`；缺少 owner、权限、依赖重写 | ⚠️ |
 | 1.1.3 | `ALTER SYSTEM` | 只写项目 `dbms.conf` 中有限参数；不是 PG GUC 体系 | ⚠️ |
-| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（正式 schema/`pg_class.relowner`）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD CONSTRAINT(CHECK/UNIQUE/FK/PRIMARY KEY)、DROP CONSTRAINT（含 `IF EXISTS`）、TRIGGER/RLS/SET SCHEMA/分区（RLS、ATTACH/DETACH、trigger enable/disable 已走 typed AST）、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；仍缺 `ONLY`、真正 SET TABLESPACE 迁移、真正延迟约束队列 | 🔄 |
+| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（正式 schema/`pg_class.relowner`）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD/DROP CONSTRAINT（CHECK/UNIQUE/FK/PRIMARY KEY/EXCLUDE，EXCLUDE 已走 typed AST 并清理持久化状态）、TRIGGER/RLS/SET SCHEMA/分区（RLS、ATTACH/DETACH、trigger enable/disable 已走 typed AST）、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；仍缺 `ONLY`、真正 SET TABLESPACE 迁移、真正延迟约束队列 | 🔄 |
 | 1.1.5 | `ALTER USER` / `ALTER ROLE` | 缺少真实 superuser/createdb/replication/bypassrls 权限位、连接限制、valid until、配置参数执行语义 | ⚠️ |
 | 1.1.6 | `ALTER VIEW` | 缺少 owner、options、column default、安全屏障、security invoker | ⚠️ |
 | 1.1.7 | `ANALYZE` | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、`VERBOSE` 输出、系统统计视图集成 | ⚠️ |
@@ -393,7 +393,7 @@
 | 5.4 | `CHECK` | 表达式解析范围有限，并登记 `DEFERRABLE`、`INITIALLY DEFERRED`、`NOT VALID`、`VALIDATE` 元数据；`DEFERRABLE INITIALLY DEFERRED` CHECK 约束已实现延迟队列与提交时检查；仍缺 `NO INHERIT`、PostgreSQL 级表达式语义 | ⚠️ |
 | 5.5 | `DEFAULT` | 表达式默认值已接入 INSERT 执行路径；`DEFAULT nextval('seq')` 可获取序列值；函数 volatility 已持久化；`DEFAULT nextval('seq')` 自动建立序列到表的依赖，`DROP SEQUENCE RESTRICT/CASCADE` 正确处理依赖。仍缺：planner 级 volatility 优化、`DEFAULT VALUES` 语法、复杂表达式与类型转换的 PG 级语义 | ⚠️ |
 | 5.6 | `GENERATED` | `GENERATED ALWAYS AS (expr) STORED` 已接入 INSERT/UPDATE 执行路径并持久化；`GENERATED ALWAYS AS (expr) VIRTUAL` 已在 SELECT 投影与标量函数参数中实现查询时实时计算；schema 二进制格式 `0x44420005` 持久化 `generatedKind`；新增 `tests/generated_columns_test.cpp`。仍缺：WHERE/DISTINCT/索引/内部约束比较中 VIRTUAL 列的实时计算、planner 级优化、PG18 默认 virtual 语义兼容 | ⚠️ |
-| 5.7 | Exclusion constraints | 解析 `EXCLUDE [USING method] (elem WITH op [, ...]) [WHERE (pred)]` 已落地；`StorageEngine` 以 `.exclusions` 文件持久化约束并在 INSERT/UPDATE 执行全表冲突检查，支持 `=` 等值排斥与 `&&` int4range 重叠排斥；CREATE TABLE 由 `DdlExecutor` 创建约束，ALTER TABLE ADD/DROP CONSTRAINT 由 `main.cpp` 桥接，`DROP TABLE` 自动清理所属约束；新增 `tests/exclude_test.cpp`。仍缺：GiST 索引加速、多元素/表达式元素/其他操作符 | ⚠️ |
+| 5.7 | Exclusion constraints | 解析 `EXCLUDE [USING method] (elem WITH op [, ...]) [WHERE (pred)]` 已落地；`StorageEngine` 以 `.exclusions` 文件持久化约束并在 INSERT/UPDATE 执行全表冲突检查，支持 `=` 等值排斥与 `&&` int4range 重叠排斥；CREATE TABLE 与 ALTER TABLE ADD/DROP CONSTRAINT 均由 typed `DdlExecutor` 创建/删除，parser 保留约束名并清理约束元数据，`DROP TABLE` 自动清理所属约束；新增 `tests/exclude_test.cpp` bridge 回归。仍缺：GiST 索引加速、多元素/表达式元素/其他操作符 | ⚠️ |
 | 5.8 | Temporal constraints | 缺失。PostgreSQL 18 对 range 上的 temporal primary/unique/foreign key 支持缺失 | ❌ |
 | 5.9 | Assertions | `CREATE/DROP ASSERTION` 已有目录级入口；PostgreSQL 本身未实现 SQL 标准 ASSERTION，本项目也缺少全库断言执行、依赖和重验证机制 | ⚠️ |
 | 5.10 | `SET CONSTRAINTS` | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟队列在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效，`NOT DEFERRABLE` 不受 `SET ALL DEFERRED` 影响；schema `0x44420006` 持久化约束名与延迟标志；`constraintMode_` per-transaction 自动清除。仍缺：constraint trigger 语义、`SET CONSTRAINTS` SQL 层完整解析 | ⚠️ |
@@ -663,6 +663,7 @@
 
 - **2026-08-09**：DML AST executor 扩展：窄版单源表 MERGE（单个 MATCHED UPDATE/DO NOTHING + 单个 NOT MATCHED INSERT/DO NOTHING）已从 `main.cpp` 字符串执行器迁移到 `DmlExecutor`；INSERT values 表达式改为保留 ColumnRef AST，重复 source-to-target 匹配在存储修改前拒绝，并新增 parser/执行回归。MERGE 的多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query、RETURNING 和完整并发语义仍待迁移。
 - **2026-08-09**：ALTER TABLE typed 路径扩展：RLS enable/disable/force/no-force、分区 ATTACH/DETACH、trigger enable/disable 已由 parser AST + DdlExecutor 消费，删除 `main.cpp` 中对应字符串分支；新增 AST 字段、分区规格传递、RLS/trigger 持久化回归。
+- **2026-08-09**：ALTER TABLE EXCLUDE typed 收口：parser 保留命名 EXCLUDE 约束，`DdlExecutor` 负责 ADD/DROP、约束名冲突校验、`.exclusions` 与约束元数据清理；删除 `main.cpp` 的专用 EXCLUDE 字符串解析/执行分支，新增 bridge 增删与冲突行为回归。GiST 加速、多元素/表达式元素和完整 operator class 语义仍待后续。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。

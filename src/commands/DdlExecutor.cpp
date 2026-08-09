@@ -755,12 +755,56 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     else if (type == "unique") constraintName = tableName + "_" + suffix + "_key";
                     else if (type == "foreign key") constraintName = tableName + "_" + suffix + "_fkey";
                     else if (type == "check") constraintName = tableName + "_check";
+                    else if (type == "exclude") constraintName = tableName + "_excl";
                     else {
                         std::cout << "ALTER TABLE constraint name is required" << std::endl;
                         return true;
                     }
                 }
-                if (type == "check") {
+                if (type == "exclude") {
+                    if (tc.excludeElements.empty()) {
+                        std::cout << "EXCLUDE constraint requires at least one element" << std::endl;
+                        return true;
+                    }
+                    if (!g_engine.tableExists(s.currentDB, tableName)) {
+                        std::cout << "Table not found" << std::endl;
+                        return true;
+                    }
+                    const auto table = g_engine.getTableSchema(s.currentDB, tableName);
+                    bool nameExists = false;
+                    for (size_t i = 0; i < table.len && !nameExists; ++i) {
+                        nameExists = table.cols[i].checkConstraintName == constraintName;
+                    }
+                    for (const auto& name : table.uniqueConstraintNames) {
+                        if (name == constraintName) { nameExists = true; break; }
+                    }
+                    for (size_t i = 0; i < table.fkLen && !nameExists; ++i) {
+                        nameExists = table.fks[i].name == constraintName;
+                    }
+                    const auto exclusions = g_engine.getExclusionConstraints(s.currentDB, tableName);
+                    if (std::any_of(exclusions.begin(), exclusions.end(),
+                                    [&](const auto& ec) { return ec.name == constraintName; })) {
+                        nameExists = true;
+                    }
+                    if (nameExists) {
+                        std::cout << "Constraint name already exists" << std::endl;
+                        return true;
+                    }
+                    StorageEngine::ExclusionConstraint ec;
+                    ec.name = constraintName;
+                    ec.tableName = tableName;
+                    ec.accessMethod = tc.accessMethod.empty() ? "btree" : toLower(tc.accessMethod);
+                    for (const auto& element : tc.excludeElements) {
+                        if (element.first.empty() || element.second.empty()) {
+                            std::cout << "Invalid EXCLUDE constraint element" << std::endl;
+                            return true;
+                        }
+                        ec.elements.push_back({element.first, toLower(element.second)});
+                    }
+                    ec.wherePredicate = tc.excludeWhere;
+                    status = g_engine.createExclusionConstraint(s.currentDB, ec);
+                    if (!alterStatusOk(status, "Constraint")) return true;
+                } else if (type == "check") {
                     if (!tc.checkExpr) {
                         std::cout << "CHECK constraint expression is required" << std::endl;
                         return true;
@@ -788,17 +832,28 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 metadata.columns = tc.columns;
                 metadata.refTable = tc.refTable;
                 metadata.refColumns = tc.refColumns;
+                metadata.accessMethod = tc.accessMethod;
+                metadata.excludeElements = tc.excludeElements;
+                metadata.excludeWhere = tc.excludeWhere;
                 recordConstraintCompat(s.currentDB, tableName, metadata);
                 break;
             }
-            case AlterTableStmt::Action::DropConstraint:
-                status = g_engine.alterTableDropConstraint(s.currentDB, tableName, sub.name);
+            case AlterTableStmt::Action::DropConstraint: {
+                const auto exclusions = g_engine.getExclusionConstraints(s.currentDB, tableName);
+                const bool isExclusion = std::any_of(
+                    exclusions.begin(), exclusions.end(),
+                    [&](const auto& ec) { return ec.name == sub.name; });
+                status = isExclusion
+                    ? g_engine.dropExclusionConstraint(s.currentDB, sub.name)
+                    : g_engine.alterTableDropConstraint(s.currentDB, tableName, sub.name);
                 if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
                     std::cout << "NOTICE: constraint does not exist, skipping" << std::endl;
                     break;
                 }
                 if (!alterStatusOk(status, "Constraint")) return true;
+                removeConstraintCompat(s.currentDB, tableName, sub.name);
                 break;
+            }
             case AlterTableStmt::Action::SetOptions:
             case AlterTableStmt::Action::ResetOptions: {
                 std::map<std::string, std::string> params;
@@ -1606,6 +1661,34 @@ void DdlExecutor::recordConstraintCompat(const std::string& dbname,
         for (const auto& c : tc.refColumns) ofs << "|" << c;
     }
     ofs << "\n";
+}
+
+bool DdlExecutor::removeConstraintCompat(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& constraintName) {
+    const auto path = std::filesystem::path(g_engine.dbPath(dbname)) /
+                      (tablename + ".constraints");
+    if (!std::filesystem::exists(path)) return false;
+
+    std::ifstream in(path);
+    if (!in) return false;
+    std::vector<std::string> kept;
+    std::string line;
+    bool removed = false;
+    while (std::getline(in, line)) {
+        const auto separator = line.find('|');
+        if (separator != std::string::npos && line.substr(0, separator) == constraintName) {
+            removed = true;
+            continue;
+        }
+        kept.push_back(std::move(line));
+    }
+    if (!removed) return false;
+
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+    for (const auto& keptLine : kept) out << keptLine << '\n';
+    return static_cast<bool>(out);
 }
 
 // ----------------------------------------------------------------------------

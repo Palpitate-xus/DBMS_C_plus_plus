@@ -31,7 +31,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 
 | 能力 | 当前真实状态 | 证据/边界 |
 |------|--------------|-----------|
-| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable 和 CREATE TRIGGER 已桥接；RLS 可见性已由 StorageEngine 统一执行，触发器 action runtime、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy/简化路径执行 |
+| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable 和 CREATE TRIGGER 已桥接；RLS 可见性已由 StorageEngine 统一执行，触发器 action runtime、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy/简化路径执行 |
 | 复杂查询执行 | 部分完成 | Volcano 基础算子和集合组合节点已验证；复杂集合 operand、子查询、窗口和 grouping producer 仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
@@ -304,7 +304,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 已实现元数据持久化和 `=`/`&&` 的全表冲突检查，并有 `tests/exclude_test.cpp`；真实 GiST 加速、operator class、多元素/表达式元素和完整并发语义仍待后续。 |
 | ✅ 4.25 实现 `SET CONSTRAINTS` 延迟队列、提交时检查 | 5.10, 1.1.53 | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟检查在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 映射生效，`NOT DEFERRABLE` 约束不受 `SET CONSTRAINTS ALL DEFERRED` 影响；schema 格式 `0x44420006` 持久化 `checkConstraintName`/`deferrable`/`initiallyDeferred`；`constraintMode_` 在事务结束时自动清除（per-transaction 语义）；`beginTransaction` 修复：已有事务时先 commit 再开新事务，防止 `txnDB_` 指向错误数据库。新增 `tests/deferrable_test.cpp`（6 个测试）。constraint trigger 语义仍待后续。 |
 | ⚠️ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 已由 typed AST/DdlExecutor 桥接并验证；tablespace 存储在 schema 中。新增回归覆盖 10 个选项路径。`accessMethod` schema 持久化仍待后续。 |
-| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、约束、RLS、分区 ATTACH/DETACH、trigger enable/disable 和 tablespace 路径已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`，并检查所有者/目标角色授权；CLUSTER/REPLICA、触发器函数运行时和完整延迟约束语义仍有 legacy/简化路径。 |
+| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束、RLS、分区 ATTACH/DETACH、trigger enable/disable 和 tablespace 路径已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`，并检查所有者/目标角色授权；CLUSTER/REPLICA、触发器函数运行时和完整延迟约束语义仍有 legacy/简化路径。 |
 | ⚠️ 4.28 补全 `CREATE/ALTER VIEW`（security barrier/invoker、recursive view、check option） | 1.1.6, 1.1.33, 4.9 | 已支持基本单表可更新视图、WITH CHECK OPTION、OR REPLACE，并有 `tests/view_test.cpp`；SECURITY BARRIER/INVOKER、递归视图和复杂映射仍待后续。 |
 | ⚠️ 4.29 补全 `CREATE TRIGGER`（transition tables、constraint triggers、deferred triggers、event triggers） | 1.1.31, 4.11 | 已解析并执行基础 BEFORE/AFTER/INSTEAD OF、事件和 WHEN 条件，并有 `tests/trigger_test.cpp`；transition tables、constraint/deferred/event triggers 和完整函数运行时仍待后续。 |
 | ✅ 4.30 补全 `CREATE TYPE`（enum/range/base/shell） | 1.1.32 | enum/composite/range/base/shell 元数据注册 + DROP TYPE 全类型修复已落地；`ALTER TYPE ADD/RENAME VALUE` 已落地。作为列类型的完整运行时语义仍待后续。 |

@@ -92,6 +92,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | LIKE ( INCLUDING ALL/DEFAULTS/CONSTRAINTS/INDEXES/IDENTITY) | ✅ | ✅ | ✅ |
 | TRUNCATE (ONLY/RESTART IDENTITY/CASCADE) | ✅ | ✅ | ✅ |
 | **ALTER TABLE ... ADD COLUMN ... IF NOT EXISTS** | ✅ | ✅ | ✅ |
+| **ALTER TABLE ... ADD/DROP EXCLUDE CONSTRAINT** | ✅ | ⚠️ | typed DDL bridge 已支持名称保留、冲突检查、INSERT/UPDATE 执行与删除清理；GiST 加速、完整 operator class 和复杂表达式元素仍缺 |
 | **REINDEX CONCURRENTLY** | ✅ | ⚠️ | |
 
 ### 2.2 DML
