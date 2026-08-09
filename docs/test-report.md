@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-09
-> 自动测试套件基线：PASS=126 FAIL=0（124 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
+> 自动测试套件基线：PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -901,7 +901,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景、124 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过；分组 Volcano 单元与主 SQL 手工回归也通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景、125 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过；分组 Volcano 单元与主 SQL 手工回归也通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
