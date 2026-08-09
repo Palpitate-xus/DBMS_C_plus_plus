@@ -103,6 +103,15 @@ int main() {
     assert(result.commandTag == "INSERT 0 0");
     assert(result.rows.empty());
 
+    assert(!runDml("INSERT INTO conflict_t VALUES (1, 'updated'), (3, 'third') "
+                   "ON CONFLICT (id) DO UPDATE SET name = 'upserted' "
+                   "RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 2");
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"1", "upserted"}, {"3", "third"}}));
+
     assert(!runDml("INSERT INTO ret VALUES (3, 'inserted') RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);

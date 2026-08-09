@@ -99,17 +99,20 @@ bool isDefaultValue(const ExprPtr& expr) {
 
 bool supportsConflict(const InsertStmt& stmt) {
     const std::string action = lower(stmt.conflictAction);
-    // DO NOTHING without an inference target is the only conflict policy
-    // whose behavior can be delegated to the storage uniqueness boundary
-    // without reimplementing index inference.
-    return action.empty() ||
-           (action == "do nothing" && stmt.conflictTarget.empty() &&
-            !stmt.conflictWhere);
+    // Only target-less DO NOTHING and a narrow single-column DO UPDATE shape
+    // are admitted here; all other conflict inference remains legacy-owned.
+    if (action.empty()) return true;
+    if (action == "do nothing") {
+        return stmt.conflictTarget.empty() && !stmt.conflictWhere;
+    }
+    return action == "do update" && stmt.conflictTarget.size() == 1 &&
+           !stmt.conflictWhere && !stmt.defaultValues &&
+           stmt.selectSource == nullptr && !stmt.values.empty();
 }
 
 bool supportsInsert(const InsertStmt& stmt) {
     // The bridge owns ordinary VALUES inserts, simple single-table SELECT
-    // sources, column-projection RETURNING, and target-less DO NOTHING.
+    // sources, column-projection RETURNING, and narrow conflict actions.
     // Every feature outside this contract remains on the established
     // implementation until its AST semantics are migrated.
     return !stmt.tableName.empty() &&
@@ -129,6 +132,54 @@ bool checkInsertColumns(Session& s, const std::string& table,
         return false;
     }
     return true;
+}
+
+bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
+                   std::string& value);
+
+bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
+                             const std::string& currentDB,
+                             std::string& targetColumn,
+                             std::map<std::string, std::string>& updates) {
+    if (lower(stmt.conflictAction) != "do update" ||
+        stmt.conflictTarget.size() != 1 || stmt.conflictWhere ||
+        stmt.conflictUpdateSet.empty()) {
+        return false;
+    }
+
+    targetColumn = identifier(stmt.conflictTarget.front());
+    size_t targetIndex = table.len;
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == targetColumn) {
+            targetIndex = i;
+            break;
+        }
+    }
+    if (targetIndex >= table.len ||
+        (!table.cols[targetIndex].isPrimaryKey && !table.cols[targetIndex].isUnique)) {
+        return false;
+    }
+
+    std::set<std::string> seen;
+    for (const auto& [rawColumn, expr] : stmt.conflictUpdateSet) {
+        const std::string column = identifier(rawColumn);
+        if (column.empty() || !seen.insert(column).second || isDefaultValue(expr)) {
+            return false;
+        }
+        bool found = false;
+        for (const auto& tableColumn : table.cols) {
+            if (tableColumn.dataName == column) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+
+        std::string value;
+        if (!evaluateValue(expr, currentDB, value)) return false;
+        updates[column] = std::move(value);
+    }
+    return !updates.empty();
 }
 
 bool checkTablePrivilege(Session& s, const std::string& table,
@@ -660,6 +711,38 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     }
     std::vector<std::map<std::string, std::string>> insertedRows;
     const bool ignoreDuplicate = lower(stmt.conflictAction) == "do nothing";
+    const bool conflictUpdate = lower(stmt.conflictAction) == "do update";
+    std::string conflictTarget;
+    std::map<std::string, std::string> conflictUpdates;
+
+    if (conflictUpdate) {
+        if (!checkTablePrivilege(s, requestedTable,
+                                 StorageEngine::TablePrivilege::Update)) {
+            return true;
+        }
+        if (!buildConflictUpdatePlan(stmt, table, s.currentDB, conflictTarget,
+                                     conflictUpdates)) {
+            fallback = true;
+            return false;
+        }
+        const std::vector<std::string> updateColumns = [&]() {
+            std::vector<std::string> result;
+            result.reserve(conflictUpdates.size());
+            for (const auto& [column, value] : conflictUpdates) {
+                (void)value;
+                result.push_back(column);
+            }
+            return result;
+        }();
+        if (s.permission != 1 && !isTempTable(s, requestedTable) &&
+            !g_engine.hasColumnPermission(
+                s.currentDB, requestedTable, s.username,
+                StorageEngine::TablePrivilege::Update, updateColumns)) {
+            std::cout << "permission denied: UPDATE on restricted columns of table "
+                      << requestedTable << std::endl;
+            return true;
+        }
+    }
 
     if (stmt.selectSource) {
         const auto* select = dynamic_cast<const SelectStmt*>(stmt.selectSource.get());
@@ -758,6 +841,19 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         pendingRows.push_back(std::move(values));
     }
 
+    if (conflictUpdate) {
+        // The narrow plan needs the inferred target value before the insert
+        // reports a duplicate. DEFAULT/generated target values require a
+        // storage-level conflict key API and therefore remain legacy-owned.
+        for (const auto& values : pendingRows) {
+            const auto it = values.find(conflictTarget);
+            if (it == values.end() || it->second.empty()) {
+                fallback = true;
+                return false;
+            }
+        }
+    }
+
     int inserted = 0;
     for (const auto& values : pendingRows) {
         const DBStatus status = g_engine.insert(
@@ -765,6 +861,29 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             stmt.returning.empty() ? nullptr : &insertedRows);
         if (status == DBStatus::DUPLICATE_KEY) {
             if (ignoreDuplicate) continue;
+            if (conflictUpdate) {
+                const auto targetValue = values.find(conflictTarget);
+                if (targetValue == values.end() || targetValue->second.empty()) {
+                    std::cout << "ON CONFLICT target value is unavailable" << std::endl;
+                    return true;
+                }
+                std::vector<std::string> conditions = {
+                    "=" + conflictTarget + " " + targetValue->second};
+                std::vector<std::map<std::string, std::string>> updatedRows;
+                const DBStatus updateStatus = g_engine.update(
+                    s.currentDB, resolvedTable, conflictUpdates, conditions,
+                    &updatedRows);
+                if (updateStatus != DBStatus::OK || updatedRows.size() != 1) {
+                    std::cout << "ON CONFLICT DO UPDATE failed" << std::endl;
+                    return true;
+                }
+                if (!stmt.returning.empty()) {
+                    insertedRows.insert(insertedRows.end(), updatedRows.begin(),
+                                        updatedRows.end());
+                }
+                ++inserted;
+                continue;
+            }
             std::cout << "Duplicate key" << std::endl;
             return true;
         }

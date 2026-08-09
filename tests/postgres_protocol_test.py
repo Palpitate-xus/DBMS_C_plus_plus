@@ -460,6 +460,14 @@ def main():
         assert data_row_values(conflict_messages) == [[b"2", b"new"]], conflict_messages
         assert any(kind == b"C" and body == b"INSERT 0 1\0"
                    for kind, body in conflict_messages), conflict_messages
+        upsert_messages = simple_query(
+            sock, "INSERT INTO dml_conflict VALUES (1, 'ignored'), (3, 'third') "
+            "ON CONFLICT (id) DO UPDATE SET name = 'upserted' "
+            "RETURNING id, name")
+        assert data_row_values(upsert_messages) == [
+            [b"1", b"upserted"], [b"3", b"third"]], upsert_messages
+        assert any(kind == b"C" and body == b"INSERT 0 2\0"
+                   for kind, body in upsert_messages), upsert_messages
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "UPDATE dml_ast SET name = 'changed' WHERE id = 2"))
         assert data_row_values(simple_query(

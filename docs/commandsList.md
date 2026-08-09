@@ -431,7 +431,7 @@ INSERT INTO table_name (column1, column2, ...) VALUES (value1, value2, ...)
 ON CONFLICT (conflict_column) DO UPDATE SET column = value [, ...]
 ```
 
-**说明** 插入时若主键冲突，则执行 UPDATE 操作。本质是 `INSERT ... ON CONFLICT` 语法，不是独立的 `UPSERT` 命令。
+**说明** 插入时若单列主键/唯一列冲突，则执行 UPDATE 操作。本项目当前结构化执行器支持普通 `VALUES`、单列主键/唯一列 conflict target、常量 `SET` 且无 `WHERE` 的窄版；引用 `excluded`/列值、复合或部分索引 target 等复杂语义仍走 legacy 路径。本质是 `INSERT ... ON CONFLICT` 语法，不是独立的 `UPSERT` 命令。
 
 **示例**
 ```sql
