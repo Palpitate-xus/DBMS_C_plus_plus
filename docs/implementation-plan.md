@@ -125,7 +125,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - ✅ 程序命令：`CALL`、Prepared Statements（`PREPARE`、`EXECUTE`、`DEALLOCATE`）、`COPY` FROM/TO
   - ✅ 查询计划：`EXPLAIN`（含 ANALYZE / BUFFERS / FORMAT JSON / 括号选项）
   - 🔄 元数据/权限命令：`SHOW`、`GRANT`、`REVOKE` — 已通过 `switch/case` 路由（代码块极大，暂保留在 `execute()` 内，后续提取）
-  - 🔄 核心 DQL/DML/DDL：`SELECT`、`CREATE`/`DROP`/`ALTER` 及 DML 全量子命令 — 普通 INSERT、常量 UPDATE、简单谓词 DELETE 已提取到 `commands/DmlExecutor`；高级 DML、MERGE 和复杂 SELECT 仍在 `execute()` 中保留明确 legacy fallback，后续按完整语义迁移
+  - 🔄 核心 DQL/DML/DDL：`SELECT`、`CREATE`/`DROP`/`ALTER` 及 DML 全量子命令 — 普通 INSERT、简单单表 INSERT SELECT、常量/列表达式 UPDATE、简单谓词 DELETE 已提取到 `commands/DmlExecutor`；高级 DML、MERGE 和复杂 SELECT 仍在 `execute()` 中保留明确 legacy fallback，后续按完整语义迁移
 - **Parser 参数解析完善（1.2 已完成）**：
   - ✅ 填充实 `CREATE`/`DROP`/`ALTER` 全量子命令解析 stub（~100 个函数），从空实现改为提取对象名、IF EXISTS/NOT EXISTS、CASCADE/RESTRICT 等关键属性
   - ✅ 实现 `CREATE TABLE` 完整解析：列定义（名/类型/约束/生成列/IDENTITY）、表级约束（PK/FK/UNIQUE/CHECK/EXCLUSION）、`LIKE`、`INHERITS`、`PARTITION BY`、`WITH` 存储参数、`TABLESPACE`、`ON COMMIT`
@@ -657,7 +657,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 5.5 实现 skip scan、index condition recheck、lossy pages | 8.2, 7.4 | FilterOp indexConditionRecheck + canUseSkipScan in QueryPlanner |
 | ✅ 5.6 实现 CTE `MATERIALIZED/NOT MATERIALIZED`、可写 CTE 快照、递归检测 | 6.4 | parser 已解析 CTE；executor 未实现 |
 | ✅ 5.7 实现 `MERGE` 完整 WHEN 分支（UPDATE SET + INSERT VALUES） | 1.1.44, 6.13 | main.cpp MERGE INTO ... USING ... ON ... UPDATE SET ... INSERT 完整执行 |
-| 🔄 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | 普通 VALUES/DEFAULT VALUES 及列投影 RETURNING 已新增 `DmlExecutor` AST 执行路径；OVERRIDING、conflict target/opclass/where、INSERT SELECT 和 RETURNING 表达式仍由 legacy 路径处理 |
+| 🔄 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | 普通 VALUES/DEFAULT VALUES、简单单表 INSERT SELECT 及列投影 RETURNING 已新增 `DmlExecutor` AST 执行路径；OVERRIDING、conflict target/opclass/where、复杂 INSERT SELECT 和 RETURNING 表达式仍由 legacy 路径处理 |
 | ✅ 5.9 实现 `RETURNING` `OLD`/`NEW` aliases、trigger-modified rows 精确行为 | 6.12, 1.1.41 等 | 基础 RETURNING 已就绪 |
 | ✅ 5.10 实现 `UPDATE FROM` / `DELETE USING` 的语义安全实现（非文本拼接） | 6.11, 1.1.58, 1.1.35 | main.cpp UPDATE FROM multi-table + DELETE USING 已实现 |
 | ⚠️ 5.11 实现 Row locking 完整语义（`NO KEY UPDATE` / `KEY SHARE`、OF list） | 6.9 | parser 已识别多种锁子句；当前执行器主要覆盖基础单表 FOR UPDATE/SHARE，JOIN/聚合/窗口和完整 OF/NOWAIT/SKIP LOCKED 语义仍缺。 |

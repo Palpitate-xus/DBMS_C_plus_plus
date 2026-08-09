@@ -94,7 +94,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 
 | 功能 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
-| INSERT (VALUES/SELECT/ON CONFLICT/RETURNING) | ✅ | ⚠️ | 普通单表 VALUES/DEFAULT VALUES（含多行、混合 DEFAULT、表达式）及列投影 RETURNING 走 `DmlExecutor` AST；SELECT/ON CONFLICT、RETURNING 表达式、视图写入和复杂未支持表达式明确回退 legacy |
+| INSERT (VALUES/SELECT/ON CONFLICT/RETURNING) | ✅ | ⚠️ | 普通单表 VALUES/DEFAULT VALUES、无 JOIN/聚合/排序的 INSERT SELECT（含列表达式）及列投影 RETURNING 走 `DmlExecutor` AST；复杂 SELECT/ON CONFLICT、RETURNING 表达式、视图写入和复杂未支持表达式明确回退 legacy |
 | UPDATE (FROM/LIMIT/RETURNING) | ✅ | ⚠️ | 常量表达式单表 UPDATE 及列投影 RETURNING 走 `DmlExecutor` AST；列引用表达式、FROM/LIMIT、RETURNING 表达式、视图写入仍回退 legacy |
 | DELETE (USING/LIMIT/RETURNING) | ✅ | ⚠️ | 简单谓词单表 DELETE 及列投影 RETURNING 走 `DmlExecutor` AST；USING/LIMIT、RETURNING 表达式、ONLY、视图写入仍回退 legacy |
 | MERGE (MATCHED/NOT MATCHED) | ✅ | ✅ | ✅ |

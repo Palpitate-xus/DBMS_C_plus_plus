@@ -2038,12 +2038,29 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
     } else if (pos < tokens.size() && toLower(tokens[pos]) == "select") {
         // INSERT INTO ... SELECT ...
         std::string selectSql;
+        size_t returningPos = tokens.size();
+        int depth = 0;
         for (size_t i = pos; i < tokens.size(); ++i) {
+            if (tokens[i] == "(") {
+                ++depth;
+            } else if (tokens[i] == ")" && depth > 0) {
+                --depth;
+            } else if (depth == 0 && toLower(tokens[i]) == "returning") {
+                returningPos = i;
+                break;
+            }
+        }
+        for (size_t i = pos; i < returningPos; ++i) {
             if (!selectSql.empty()) selectSql += " ";
             selectSql += tokens[i];
         }
-        stmt->selectSource = parseSelect(selectSql).stmt;
-        pos = tokens.size();
+        ParseResult source = parseSelect(selectSql);
+        if (!source.success || !source.stmt) {
+            r.error = source.error.empty() ? "invalid INSERT SELECT source" : source.error;
+            return r;
+        }
+        stmt->selectSource = std::move(source.stmt);
+        pos = returningPos;
     }
 
     // ON CONFLICT

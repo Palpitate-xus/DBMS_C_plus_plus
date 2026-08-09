@@ -443,6 +443,14 @@ def main():
         assert any(kind == b"C" and body == b"INSERT 0 2\0"
                    for kind, body in returning_insert), returning_insert
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE dml_copy (id INT, name TEXT)"))
+        returning_select = simple_query(
+            sock, "INSERT INTO dml_copy (id, name) "
+            "SELECT id, name FROM dml_ast WHERE id = 3 RETURNING id, name")
+        assert data_row_values(returning_select) == [[b"3", b"MiXeD"]], returning_select
+        assert any(kind == b"C" and body == b"INSERT 0 1\0"
+                   for kind, body in returning_select), returning_select
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "UPDATE dml_ast SET name = 'changed' WHERE id = 2"))
         assert data_row_values(simple_query(
             sock, "SELECT name FROM dml_ast WHERE id = 2")) == [[b"changed"]]

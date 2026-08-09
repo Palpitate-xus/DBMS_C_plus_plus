@@ -9,11 +9,11 @@
 
 协议当前已通过真实 E2E 覆盖常用标量、`numeric` 以及 `date`/`time`/`timestamp`/`timestamptz`/`uuid` 的 binary 参数与结果、基础 portal `maxRows` 分页；legacy 文本执行器的结果捕获已采用线程局部输出路由，不再以全局锁串行化会话；数组 binary I/O、亚秒时间精度、holdable/scrollable cursor 和完整 libpq 语义仍属于协议差距。
 
-本轮 DML 架构进展：普通单表 `INSERT ... VALUES`/`DEFAULT VALUES`、常量表达式单表 `UPDATE` 和简单谓词单表 `DELETE` 已进入 `src/commands/DmlExecutor.cpp` 的 AST 执行路径；解析器保留混合 `DEFAULT` 的列位置并对 UPDATE/DELETE 尾随垃圾 fail-closed。普通单表 INSERT/UPDATE/DELETE 的简单列投影 `RETURNING` 也已由 StorageEngine 在实际修改边界收集，并由协议层作为结构化结果集发送。视图写入、`INSERT ... SELECT`、冲突处理、`RETURNING` 表达式、多表 DML 和复杂表达式仍明确由 legacy 路径处理。
+本轮 DML 架构进展：普通单表 `INSERT ... VALUES`/`DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、常量/列表达式单表 `UPDATE` 和简单谓词单表 `DELETE` 已进入 `src/commands/DmlExecutor.cpp` 的 AST 执行路径；解析器保留混合 `DEFAULT` 的列位置并对 DML 尾随垃圾 fail-closed。普通单表 INSERT/UPDATE/DELETE 的简单列投影 `RETURNING` 也已由 StorageEngine 在实际修改边界收集，并由协议层作为结构化结果集发送。视图写入、复杂 `INSERT ... SELECT`、冲突处理、`RETURNING` 表达式、多表 DML 和复杂表达式仍明确由 legacy 路径处理。
 
 ### P1-0: DML AST 全量执行迁移
 - **类别**: 执行器 / 架构一致性
-- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、常量表达式单表 UPDATE、简单谓词单表 DELETE 已由 `DmlExecutor` 结构化执行，并通过 parser/协议回归；普通单表 INSERT/UPDATE/DELETE 的简单列投影 RETURNING 已统一结果集和 command tag。INSERT 的 SELECT/冲突、RETURNING 表达式、UPDATE 的列引用表达式/FROM、DELETE 的 USING、MERGE 和视图写入仍回退 legacy。
+- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、简单单表 `INSERT ... SELECT`、常量/列表达式单表 UPDATE、简单谓词单表 DELETE 已由 `DmlExecutor` 结构化执行，并通过 parser/协议回归；普通单表 INSERT/UPDATE/DELETE 的简单列投影 RETURNING 已统一结果集和 command tag。复杂 INSERT SELECT/冲突、RETURNING 表达式、UPDATE 的 FROM、DELETE 的 USING、MERGE 和视图写入仍回退 legacy。
 - **PG 参考**: PostgreSQL 的 parse/analyze/rewrite/plan/execute 分层，以及 `ModifyTable`。
 - **影响**: 当前 DML 仍存在两套执行入口，错误码、RETURNING、权限和计划可观测性的统一程度不足。
 - **实现路径**:
@@ -123,7 +123,7 @@
 ### P0-7: INSTEAD OF 视图触发器
 - **类别**: 触发器 / 数据完整性
 - **现状**: 已支持在视图上创建行级 `INSTEAD OF INSERT/UPDATE/DELETE`，并通过协议连接执行 action SQL；`NEW`/`OLD` 变量、`WHEN`、动作失败传播、server/CLI 会话执行和简单单表视图的逐行派发已接入
-- **剩余差距**: 尚未完整支持 `INSERT ... SELECT`、复杂视图行映射、完整 `RETURNING`、transition tables，以及真正的 `EXECUTE FUNCTION`/PL 触发器运行时
+- **剩余差距**: 尚未完整支持复杂 `INSERT ... SELECT`（JOIN/聚合/排序/CTE 等）、复杂视图行映射、完整 `RETURNING`、transition tables，以及真正的 `EXECUTE FUNCTION`/PL 触发器运行时
 - **PG 参考**: `CREATE TRIGGER ... INSTEAD OF INSERT OR UPDATE OR DELETE ON view FOR EACH ROW`
 - **验证**: `tests/postgres_protocol_test.py` 覆盖通过视图触发器插入、更新、删除底表行
 - **相关文件**: `src/commands/DdlExecutor.cpp`, `src/main.cpp`, `tests/postgres_protocol_test.py`

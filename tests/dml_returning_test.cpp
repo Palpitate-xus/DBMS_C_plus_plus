@@ -52,8 +52,40 @@ int main() {
     assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "ret", {{"id", "1"}, {"name", "before"}}) == dbms::DBStatus::OK);
 
+    dbms::TableSchema source = table;
+    source.tablename = "src";
+    dbms::TableSchema copy = table;
+    copy.tablename = "copy";
+    assert(g_engine.createTable(db, source) == dbms::DBStatus::OK);
+    assert(g_engine.createTable(db, copy) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "src", {{"id", "1"}, {"name", "one"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "src", {{"id", "2"}, {"name", "two"}}) == dbms::DBStatus::OK);
+
+    dbms::DmlResult result;
+    dbms::SQLParser parser;
+    auto parsedInsertSelect = parser.parse(
+        "INSERT INTO copy (id, name) SELECT id, name FROM src WHERE id >= 2 RETURNING id, name");
+    assert(parsedInsertSelect.success);
+    auto* parsedInsert = dynamic_cast<dbms::InsertStmt*>(parsedInsertSelect.stmt.get());
+    assert(parsedInsert && parsedInsert->selectSource);
+    auto* parsedSelect = dynamic_cast<dbms::SelectStmt*>(parsedInsert->selectSource.get());
+    assert(parsedSelect && parsedSelect->whereClause);
+    assert(!runDml("INSERT INTO copy (id, name) SELECT id, name FROM src "
+                   "WHERE id >= 2 RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 1");
+    assert((result.rows[0] == std::vector<std::string>{"2", "two"}));
+
+    assert(!runDml("INSERT INTO copy (id, name) SELECT id + 10, name FROM src "
+                   "WHERE id = 1 RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 1");
+    assert((result.rows[0] == std::vector<std::string>{"11", "one"}));
+
     assert(!runDml("INSERT INTO ret VALUES (3, 'inserted') RETURNING id, name", session));
-    dbms::DmlResult result = dbms::takeLastDmlResult();
+    result = dbms::takeLastDmlResult();
     assert(result.available);
     assert(result.commandTag == "INSERT 0 1");
     assert((result.rows[0] == std::vector<std::string>{"3", "inserted"}));
@@ -78,6 +110,6 @@ int main() {
     assert(g_engine.query(db, "ret", {}, {}, {}).empty());
 
     cleanup(db);
-    std::cout << "[DML-RETURNING] storage-boundary UPDATE/DELETE RETURNING OK" << std::endl;
+    std::cout << "[DML-RETURNING] INSERT SELECT and storage-boundary RETURNING OK" << std::endl;
     return 0;
 }
