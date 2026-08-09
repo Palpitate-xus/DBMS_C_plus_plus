@@ -6069,7 +6069,10 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     // Build index from existing data using page-based iteration
     BPTree* idx = getSecondaryIndex(dbname, tablename,
         isExpression ? expression : actualColname);
-    if (!idx) return DBStatus::INVALID_VALUE;
+    if (!idx) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
     forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -6090,6 +6093,10 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     // Record in metadata
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
     std::ofstream out(meta, std::ios::out | std::ios::app);
+    if (!out) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
     if (isExpression) {
         out << "EXPR:" << expression;
     } else {
@@ -8101,36 +8108,136 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     }
     size_t pageSize = pageSizeForFormatVersion(tblWithVersion.formatVersion);
 
+    // CREATE TABLE is a multi-relation operation: schema, heap forks, TOAST,
+    // indexes, sequences and tlist.lst are created in stages.  Keep a narrow
+    // rollback guard so a failed initializer cannot publish a half-created
+    // relation or leave cache entries pointing at removed files.
+    auto cleanupFailedCreate = [&]() {
+        const std::string key = dbname + "/" + tbl.tablename;
+        pageAllocators_.erase(key);
+        pkIndexCache_.erase(key);
+        fsmCache_.erase(key);
+        vmCache_.erase(key);
+        const std::string secondaryPrefix = dbname + "/" + tbl.tablename + "/";
+        for (auto it = secondaryIndexCache_.begin(); it != secondaryIndexCache_.end();) {
+            if (it->first.rfind(secondaryPrefix, 0) == 0) it = secondaryIndexCache_.erase(it);
+            else ++it;
+        }
+        const std::string hashPrefix = dbname + "." + tbl.tablename + ".";
+        for (auto it = hashIndexCache_.begin(); it != hashIndexCache_.end();) {
+            if (it->first.rfind(hashPrefix, 0) == 0) it = hashIndexCache_.erase(it);
+            else ++it;
+        }
+        toastPageAllocators_.erase(dbname + ":" + tbl.tablename);
+        toastIndexes_.erase(dbname + ":" + tbl.tablename);
+
+        std::error_code ec;
+        for (const auto& path : {
+                 schemaPath(dbname, tbl.tablename), paramsPath(dbname, tbl.tablename),
+                 dataPath(dbname, tbl.tablename), indexPath(dbname, tbl.tablename),
+                 secondaryIndexMetaPath(dbname, tbl.tablename),
+                 hashIndexMetaPath(dbname, tbl.tablename),
+                 namedIndexMetaPath(*this, dbname, tbl.tablename),
+                 fsmPath(dbname, tbl.tablename), vmPath(dbname, tbl.tablename),
+                 toastMetaPath(dbname, tbl.tablename),
+                 toastDataPath(dbname, tbl.tablename), toastIndexPath(dbname, tbl.tablename)}) {
+            std::filesystem::remove(path, ec);
+            ec.clear();
+        }
+        removeSeq(dbname, tbl.tablename);
+        std::filesystem::remove_all(toastDir(dbname, tbl.tablename), ec);
+        ec.clear();
+
+        if (tblWithVersion.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& p : tblWithVersion.rangePartitions) {
+                std::filesystem::remove(partitionDataPath(dbname, tbl.tablename, p.first), ec);
+                ec.clear();
+            }
+        } else if (tblWithVersion.partitionType == TableSchema::PartitionType::List) {
+            for (const auto& p : tblWithVersion.listPartitions) {
+                std::filesystem::remove(partitionDataPath(dbname, tbl.tablename, p.first), ec);
+                ec.clear();
+            }
+        } else if (tblWithVersion.partitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < tblWithVersion.hashPartitions; ++i) {
+                std::filesystem::remove(
+                    partitionDataPath(dbname, tbl.tablename, "p" + std::to_string(i)), ec);
+                ec.clear();
+            }
+        }
+
+        std::vector<std::string> names = getTableNames(dbname);
+        if (std::find(names.begin(), names.end(), tbl.tablename) != names.end()) {
+            std::ofstream out(tableListPath(dbname), std::ios::binary);
+            if (out) {
+                for (const auto& name : names) {
+                    if (name != tbl.tablename) writeFixedString(out, name, MAX_TABLE_NAME_LEN);
+                }
+            }
+            invalidateCatalogTableList(dbname);
+        }
+    };
+    auto failCreate = [&](const std::string& message) {
+        cleanupFailedCreate();
+        if (error) *error = message;
+        return DBStatus::INVALID_VALUE;
+    };
+    bool createCompleted = false;
+    std::unique_ptr<int, std::function<void(int*)>> cleanupGuard(
+        reinterpret_cast<int*>(1),
+        [&](int*) {
+            if (!createCompleted) cleanupFailedCreate();
+        });
+
     {
         std::ofstream out(schemaPath(dbname, tblWithVersion.tablename), std::ios::binary);
+        if (!out) return failCreate("could not create table schema");
         writeSchema(out, tblWithVersion);
+        if (!out) return failCreate("could not write table schema");
     }
+
+    auto initializeHeap = [&](const std::filesystem::path& path, size_t rowSize) {
+        auto pa = std::make_unique<PageAllocator>(path.string(), rowSize, pageSize,
+                                                   tblWithVersion.formatVersion);
+        if (!pa->open()) return false;
+        pa->close();
+        return true;
+    };
     // Initialize page-based data file(s) via PageAllocator
     if (tblWithVersion.partitionType != TableSchema::PartitionType::None) {
         if (tblWithVersion.partitionType == TableSchema::PartitionType::Range) {
             for (const auto& rp : tblWithVersion.rangePartitions) {
-                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tblWithVersion.tablename, rp.first).string(), tblWithVersion.rowSize(), pageSize, tblWithVersion.formatVersion);
-                pa->open(); pa->close();
+                if (!initializeHeap(partitionDataPath(dbname, tblWithVersion.tablename, rp.first),
+                                    tblWithVersion.rowSize())) {
+                    return failCreate("could not initialize table partition");
+                }
             }
         } else if (tblWithVersion.partitionType == TableSchema::PartitionType::List) {
             for (const auto& lp : tblWithVersion.listPartitions) {
-                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tblWithVersion.tablename, lp.first).string(), tblWithVersion.rowSize(), pageSize, tblWithVersion.formatVersion);
-                pa->open(); pa->close();
+                if (!initializeHeap(partitionDataPath(dbname, tblWithVersion.tablename, lp.first),
+                                    tblWithVersion.rowSize())) {
+                    return failCreate("could not initialize table partition");
+                }
             }
         } else if (tblWithVersion.partitionType == TableSchema::PartitionType::Hash) {
             for (size_t i = 0; i < tblWithVersion.hashPartitions; ++i) {
-                auto pa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tblWithVersion.tablename, "p" + std::to_string(i)).string(), tblWithVersion.rowSize(), pageSize, tblWithVersion.formatVersion);
-                pa->open(); pa->close();
+                if (!initializeHeap(partitionDataPath(dbname, tblWithVersion.tablename,
+                                                      "p" + std::to_string(i)),
+                                    tblWithVersion.rowSize())) {
+                    return failCreate("could not initialize table partition");
+                }
             }
         }
     } else {
-        auto pa = std::make_unique<PageAllocator>(dataPath(dbname, tblWithVersion.tablename).string(), tblWithVersion.rowSize(), pageSize, tblWithVersion.formatVersion);
-        pa->open();
-        pa->close();
+        if (!initializeHeap(dataPath(dbname, tblWithVersion.tablename), tblWithVersion.rowSize())) {
+            return failCreate("could not initialize table heap");
+        }
     }
     {
         std::ofstream out(tableListPath(dbname), std::ios::binary | std::ios::app);
+        if (!out) return failCreate("could not update table list");
         writeFixedString(out, tbl.tablename, MAX_TABLE_NAME_LEN);
+        if (!out) return failCreate("could not update table list");
     }
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, tbl.tablename);
@@ -8143,9 +8250,10 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         auto toastPa = std::make_unique<PageAllocator>(
             toastDataPath(dbname, tblWithVersion.tablename).string(),
             /*rowSize=*/0, /*pageSize=*/8192, /*formatVersion=*/DATA_FILE_FORMAT_VERSION);
-        toastPa->open(); toastPa->close();
+        if (!toastPa->open()) return failCreate("could not initialize TOAST heap");
+        toastPa->close();
         BPTree toastIdx(toastIndexPath(dbname, tblWithVersion.tablename).string());
-        toastIdx.open();
+        if (!toastIdx.open()) return failCreate("could not initialize TOAST index");
         toastIdx.close();
         // Ensure toast metadata file exists.
         allocToastId(dbname, tblWithVersion.tablename);
@@ -8154,7 +8262,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     // Create B+ tree index if table has primary key
     if (tbl.hasPrimaryKey()) {
         BPTree idx(indexPath(dbname, tbl.tablename));
-        idx.open();
+        if (!idx.open()) return failCreate("could not initialize primary key index");
         idx.close();
     }
     // Initialize auto-increment sequences
@@ -8166,9 +8274,12 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     // Auto-create secondary index for UNIQUE columns
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].isUnique) {
-            createIndex(dbname, tbl.tablename, tbl.cols[i].dataName);
+            if (createIndex(dbname, tbl.tablename, tbl.cols[i].dataName) != DBStatus::OK) {
+                return failCreate("could not initialize unique index");
+            }
         }
     }
+    createCompleted = true;
     return DBStatus::OK;
 }
 
