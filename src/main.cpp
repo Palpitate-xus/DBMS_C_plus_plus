@@ -2737,10 +2737,20 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
 // ========================================================================
 // Temporary table helpers
 // ========================================================================
-string tempTablePrefix(const string& name) { return "__tmp_" + name; }
+void cleanupSessionTempTables(Session& s) {
+    for (const auto& name : s.tempTables) {
+        g_engine.dropTable(s.currentDB, tempTablePrefix(s, name));
+    }
+    for (const auto& name : s.transientTempTables) {
+        g_engine.dropTable(s.currentDB, tempTablePrefix(s, name));
+    }
+    s.tempTables.clear();
+    s.transientTempTables.clear();
+}
 
 string resolveTableName(Session& s, const string& name) {
-    if (s.tempTables.count(name)) return tempTablePrefix(name);
+    if (s.tempTables.count(name)) return tempTablePrefix(s, name);
+    if (s.transientTempTables.count(name)) return tempTablePrefix(s, name);
     // Materialized views redirect to backing table
     if (g_engine.isMaterializedView(s.currentDB, name)) {
         return dbms::StorageEngine::materializedViewPrefix(name);
@@ -4280,10 +4290,9 @@ static bool handleSelectIntoTable(const string& sql, Session& s, bool& handled) 
     if (target.empty() || target.find(' ') != string::npos) return false;
     string selectList = trim(sql.substr(6, intoPos - 6));
     string fromRest = trim(sql.substr(fromPos));
-    string createTarget = temporary ? tempTablePrefix(target) : target;
     string createSql = string("create ") +
-        (unlogged ? "unlogged " : "") +
-        "table " + createTarget + " as select " + selectList + " " + fromRest;
+        (temporary ? "temporary " : (unlogged ? "unlogged " : "")) +
+        "table " + target + " as select " + selectList + " " + fromRest;
     handled = true;
     bool failed = execute(createSql, s);
     if (!failed && temporary) s.tempTables.insert(target);
@@ -6137,7 +6146,7 @@ static std::string createTempTableFromRows(Session& s,
                                            const std::vector<std::string>& colNames,
                                            int& counter) {
     std::string tmpName = "__cte_" + std::to_string(counter++);
-    std::string actualName = tempTablePrefix(tmpName);
+    std::string actualName = tempTablePrefix(s, tmpName);
     TableSchema tmpTbl;
     tmpTbl.tablename = actualName;
     for (const auto& cname : colNames) {
@@ -6151,7 +6160,7 @@ static std::string createTempTableFromRows(Session& s,
     }
     auto res = g_engine.createTable(s.currentDB, tmpTbl);
     if (res != DBStatus::OK) return "";
-    s.tempTables.insert(tmpName);
+    s.transientTempTables.insert(tmpName);
 
     for (const auto& row : rows) {
         std::map<std::string, std::string> values;
@@ -6415,7 +6424,7 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
             // Create temp table from anchor rows
             tmpName = createTempTableFromRows(s, anchorRows, colNames, cteCount);
             if (tmpName.empty()) break;
-            std::string tmpActualName = tempTablePrefix(tmpName);
+            std::string tmpActualName = tempTablePrefix(s, tmpName);
 
             // Iteratively execute recursive part
             std::vector<std::string> allRows = anchorRows;
@@ -9303,37 +9312,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return res != DBStatus::OK;
         }
 
-        if (sql.substr(7, 9) == "temporary") {
-            // create temporary table tname (...)
-            if (!checkAdmin(s)) return true;
-            if (!checkDB(s)) return true;
-            string rest = trim(sql.substr(17)); // skip "create temporary "
-            if (rest.substr(0, 5) != "table") {
-                cout << "SQL syntax error" << endl;
-                return true;
-            }
-            rest = trim(rest.substr(5));
-            size_t sp = rest.find(' ');
-            if (sp == string::npos) {
-                cout << "SQL syntax error" << endl;
-                return true;
-            }
-            string origName = rest.substr(0, sp);
-            string tmpName = tempTablePrefix(origName);
-            TableSchema tbl = parseTableColumns(sql, 17 + 5 + 1 + sp + 1, s.currentDB);
-            tbl.tablename = tmpName;
-            tbl.owner = s.username;
-            auto res = g_engine.createTable(s.currentDB, tbl);
-            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
-                cout << "Temporary table " << origName << " already exists" << endl;
-                return true;
-            }
-            s.tempTables.insert(origName);
-            cout << "Temporary table " << origName << " created" << endl;
-            log(s.username, "temporary table create succeeded", getTime());
-            return false;
-        }
-
         bool isUnlogged = false;
         size_t tableKeywordPos = 7;
         if (sql.size() > 16 && sql.substr(7, 9) == "unlogged ") {
@@ -11460,7 +11438,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "Temporary table " << origName << " not exist" << endl;
                 return true;
             }
-            string tmpName = tempTablePrefix(origName);
+            string tmpName = tempTablePrefix(s, origName);
             auto res = g_engine.dropTable(s.currentDB, tmpName);
             if (res == DBStatus::TABLE_NOT_FOUND) {
                 cout << "Temporary table " << origName << " not exist" << endl;
@@ -11473,7 +11451,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (op == "table") {
             // Check if it's a temp table first
             if (s.tempTables.count(name)) {
-                string tmpName = tempTablePrefix(name);
+                string tmpName = tempTablePrefix(s, name);
                 auto res = g_engine.dropTable(s.currentDB, tmpName);
                 if (res != DBStatus::OK) {
                     cout << "Table " << name << " not exist" << endl;
@@ -12697,11 +12675,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     // DISCARD ALL: reset session state
     if (sql == "discard all") {
-        // Drop all temporary tables
-        for (const auto& t : s.tempTables) {
-            g_engine.dropTable(s.currentDB, tempTablePrefix(t));
-        }
-        s.tempTables.clear();
+        // Drop all session-owned temporary tables.
+        cleanupSessionTempTables(s);
         // Clear prepared statements
         s.preparedStmts.clear();
         // Reset session variables
@@ -12897,15 +12872,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
 
-        // RAII guard to drop temp tables created for CTEs and derived tables
+        // RAII guard to drop query-local CTE and derived tables. User-created
+        // temporary tables belong to the session and must survive the query.
         struct TempTableGuard {
             Session* ps;
             TempTableGuard(Session* s) : ps(s) {}
             ~TempTableGuard() {
-                for (const auto& t : ps->tempTables) {
-                    g_engine.dropTable(ps->currentDB, tempTablePrefix(t));
+                for (const auto& t : ps->transientTempTables) {
+                    g_engine.dropTable(ps->currentDB, tempTablePrefix(*ps, t));
                 }
-                ps->tempTables.clear();
+                ps->transientTempTables.clear();
             }
         } guard(&s);
 
@@ -15531,6 +15507,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        cleanupSessionTempTables(s);
         dbms::unregisterProcess(pid);
     } else {
         cout << "wrong username or password" << endl;

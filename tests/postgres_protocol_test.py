@@ -795,12 +795,41 @@ def main():
         assert error_messages[-1] == (b"Z", b"I")
         assert any(kind == b"C" for kind, _ in simple_query(sock, "SELECT id FROM t"))
 
+        # Temporary tables are typed DDL, isolated by backend identity, and
+        # survive ordinary statements in their owning session.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TEMP TABLE session_temp (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO session_temp VALUES (1)"))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM session_temp")) == [[b"1"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE temp_shadow (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO temp_shadow VALUES (99)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TEMPORARY TABLE temp_shadow (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO temp_shadow VALUES (7)"))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM temp_shadow")) == [[b"7"]]
+
         # A backend's transaction state must not leak through the shared
         # StorageEngine into another protocol connection.
         peer_sock = socket.socket()
         peer_sock.settimeout(2)
         peer_sock.connect(("127.0.0.1", port))
         startup(peer_sock, "alice", "info")
+        assert any(kind == b"C" for kind, _ in simple_query(
+            peer_sock, "CREATE TEMP TABLE peer_temp (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            peer_sock, "INSERT INTO peer_temp VALUES (2)"))
+        assert data_row_values(simple_query(
+            peer_sock, "SELECT id FROM peer_temp")) == [[b"2"]]
+        peer_temp_in_owner = simple_query(sock, "SELECT id FROM peer_temp")
+        assert any(kind == b"E" for kind, _ in peer_temp_in_owner), peer_temp_in_owner
+        assert data_row_values(simple_query(sock, "SELECT id FROM session_temp")) == [[b"1"]]
+        assert data_row_values(simple_query(peer_sock, "SELECT id FROM temp_shadow")) == [[b"99"]]
         assert simple_query(peer_sock, "BEGIN")[-1] == (b"Z", b"T")
         assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (2)"))
@@ -851,6 +880,8 @@ def main():
         observer_sock.settimeout(2)
         observer_sock.connect(("127.0.0.1", port))
         startup(observer_sock, "alice", "info")
+        peer_temp_after_disconnect = simple_query(observer_sock, "SELECT id FROM peer_temp")
+        assert any(kind == b"E" for kind, _ in peer_temp_after_disconnect), peer_temp_after_disconnect
         assert simple_query(observer_sock, "BEGIN")[-1] == (b"Z", b"T")
         assert data_row_values(simple_query(observer_sock, "SELECT id FROM t")) == [[b"1"], [b"3"], [b"20"]]
         assert simple_query(observer_sock, "ROLLBACK")[-1] == (b"Z", b"I")

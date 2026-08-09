@@ -1113,8 +1113,23 @@ void handleClient(SecureSocket socket, std::string clientHost) {
 
     Session session;
     struct BackendSessionGuard {
-        ~BackendSessionGuard() { g_engine.endBackendSession(); }
-    } backendSessionGuard;
+        Session* session;
+        ~BackendSessionGuard() {
+            if (session) {
+                for (const auto& name : session->tempTables) {
+                    g_engine.dropTable(session->currentDB,
+                                       tempTablePrefix(*session, name));
+                }
+                for (const auto& name : session->transientTempTables) {
+                    g_engine.dropTable(session->currentDB,
+                                       tempTablePrefix(*session, name));
+                }
+                session->tempTables.clear();
+                session->transientTempTables.clear();
+            }
+            g_engine.endBackendSession();
+        }
+    } backendSessionGuard{&session};
     session.username = username;
     session.permission = permissionQuery(username);
     session.authenticatedUser = username;

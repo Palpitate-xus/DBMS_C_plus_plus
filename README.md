@@ -112,8 +112,9 @@
 - **标量函数**：`JSONB_EXTRACT`, `JSONB_EXTRACT_TEXT`, `JSONB_CONTAINS`, `JSONB_EXISTS`, `JSONB_PRETTY`
 
 ### 临时表
-- **CREATE TEMPORARY TABLE**：会话级临时表，自动覆盖同名永久表
-- 临时表存储在会话中，断开连接后自动清理
+- **CREATE TEMP/TEMPORARY TABLE**：typed DDL 会话级临时表，自动覆盖同名永久表
+- 每个连接使用独立内部对象名，可创建同名临时表；连接断开时自动清理
+- `ON COMMIT DROP/DELETE ROWS`、真正的 `pg_temp` catalog/search_path 语义尚未实现
 
 ### 网络服务
 - **PostgreSQL TCP 服务器**：`./dbms_main --server PORT` 启动 PostgreSQL protocol 3.0 服务端

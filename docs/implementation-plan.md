@@ -659,10 +659,10 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 5.3 实现 join search / join reordering（cost-based DP） | 6.2, 7.2 | estimateJoinCost for NLJ/Merge/Hash; cost-based algorithm selection + size-based join order swap |
 | ✅ 5.4 实现 bitmap heap scan、bitmap and/or、多索引组合 | 7.4 | IndexOnlyScanOp (covering index), IndexScanOp (PK/secondary); filter pushdown in buildSelectPlan |
 | ✅ 5.5 实现 skip scan、index condition recheck、lossy pages | 8.2, 7.4 | FilterOp indexConditionRecheck + canUseSkipScan in QueryPlanner |
-| ✅ 5.6 实现 CTE `MATERIALIZED/NOT MATERIALIZED`、可写 CTE 快照、递归检测 | 6.4 | parser 已解析 CTE；executor 未实现 |
+| ⚠️ 5.6 实现 CTE `MATERIALIZED/NOT MATERIALIZED`、可写 CTE 快照、递归检测 | 6.4 | parser 已解析 CTE；当前 executor 有字符串化 CTE/递归子集，但 materialization 选项与 PostgreSQL writable-CTE snapshot 仍未完整实现 |
 | 🔄 5.7 实现 `MERGE` 完整 WHEN 分支 | 1.1.44, 6.13 | 窄版单源表 MATCHED UPDATE/DO NOTHING + NOT MATCHED INSERT/DO NOTHING 已由 `DmlExecutor` 执行；多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query、RETURNING 和完整并发/事务语义仍待迁移 |
 | 🔄 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | 普通 VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE 及列投影/受限标量表达式 RETURNING 已新增 `DmlExecutor` AST 执行路径；OVERRIDING、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂 INSERT SELECT 和复杂/子查询/窗口 RETURNING 仍由 legacy 路径处理 |
-| ✅ 5.9 实现 `RETURNING` `OLD`/`NEW` aliases、trigger-modified rows 精确行为 | 6.12, 1.1.41 等 | 基础 RETURNING 已就绪 |
+| ⚠️ 5.9 实现 `RETURNING` `OLD`/`NEW` aliases、trigger-modified rows 精确行为 | 6.12, 1.1.41 等 | 基础 RETURNING 已就绪；`OLD`/`NEW` aliases 与 trigger-modified row 精确语义仍未完整实现 |
 | 🔄 5.10 实现 `UPDATE FROM` / `DELETE USING` 的语义安全实现（非文本拼接） | 6.11, 1.1.58, 1.1.35 | 单源表及来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING 已由 DmlExecutor AST 执行并复用 StorageEngine 修改边界；外连接/复杂 JOIN/子查询、完整重复匹配和并发语义仍待迁移 |
 | ⚠️ 5.11 实现 Row locking 完整语义（`NO KEY UPDATE` / `KEY SHARE`、OF list） | 6.9 | parser 已识别多种锁子句；当前执行器主要覆盖基础单表 FOR UPDATE/SHARE，JOIN/聚合/窗口和完整 OF/NOWAIT/SKIP LOCKED 语义仍缺。 |
 | ⚠️ 5.12 实现 subquery 完整语义（关联子查询、row comparison、NULL 语义） | 6.5 | 未关联单列 IN/NOT IN 已进入 Volcano semi/anti plan 并覆盖 NULL 语义；未关联单表 EXISTS/NOT EXISTS 已进入 ExistenceFilterOp；单个未关联标量目标已进入 init-plan 并覆盖 NULL/cardinality error；单列未关联 ANY/ALL 已进入 QuantifiedSubqueryFilterOp 并覆盖 NULL/空集三值逻辑；复杂标量、关联子查询、row comparison 和复杂组合仍缺。 |
@@ -677,7 +677,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 5.21 实现并行查询（Gather/Gather Merge、parallel scan/join/aggregate） | 7.5 | `ParallelTableScanOp` 已实现非分区 heap page-range scan、确定性 Gather 和 `max_parallel_workers_per_gather`；parallel join/aggregate/GatherMerge/worker pool 仍缺 |
 | ❌ 5.22 实现 JIT（LLVM） | 7.6 | 当前没有 LLVM backend；旧 GUC/stub 表述已移除 |
 | ❌ 5.23 实现 Async I/O（AIO） | 7.7 | 当前没有 io_uring/AIO executor；旧 GUC/stub 表述已移除 |
-| ✅ 5.24 实现 `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` 子事务完整语义 | 1.1.49, 9.5 | 完整实现 |
+| ⚠️ 5.24 实现 `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` 子事务完整语义 | 1.1.49, 9.5 | 基础事务日志位置与回滚路径已就绪；资源/锁/目录快照及完整 PostgreSQL 子事务语义仍待补齐 |
 | ✅ 5.25 实现 `COMMIT`/`ROLLBACK` `AND [NO] CHAIN`、全局事务状态 | 1.1.14, 1.1.38, 1.1.8 | 本次新增 AND CHAIN/NO CHAIN 语法 |
 | ✅ 5.26 实现 `PREPARE TRANSACTION` / `COMMIT PREPARED` 完整语义 | 1.1.15 | 基础 two-phase commit 已就绪 |
 | ⚠️ 5.27 实现 `COPY` `STDIN/STDOUT`、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH` | 1.1.16 | 当前仅基础 COPY/CSV 路径可用，binary/program/freeze/header 语义仍缺。 |
@@ -832,7 +832,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 16.2 Catalog/OID | **Phase 2** | 对象管理基础 |
 | ✅ 16.3 WAL redo | **Phase 3** | 崩溃恢复基础 |
 | ✅ 16.4 MVCC 版本链 | **Phase 3** | 并发控制基础 |
-| ✅ 16.5 DDL 事务化 | **Phase 4** | 依赖 Catalog + WAL |
+| 🔄 16.5 DDL 事务化 | **Phase 4** | `DdlTransaction`、部分 DDL 回滚与 WAL catalog 记录已接入；所有 DDL 的完整回滚、隐式提交边界和跨对象依赖仍待完成 |
 | 🔄 16.6 Wire Protocol | **Phase 7** | PostgreSQL protocol 3.0 核心 framing 和 SCRAM 已接入；完整 libpq 兼容、类型映射和消息语义仍待完成 |
 | ✅ 16.7 扩展系统 | **Phase 10** | 最后搭建 |
 | ✅ 16.8 多进程模型 | **Phase 9** | 可与 Phase 3 并行设计 |

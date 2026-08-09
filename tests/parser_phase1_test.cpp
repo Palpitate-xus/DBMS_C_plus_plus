@@ -35,6 +35,10 @@ static const CreateViewStmt* asCreateView(const StmtPtr& stmt) {
     return dynamic_cast<const CreateViewStmt*>(stmt.get());
 }
 
+static const CreateTableStmt* asCreateTable(const StmtPtr& stmt) {
+    return dynamic_cast<const CreateTableStmt*>(stmt.get());
+}
+
 static const AlterTableStmt* asAlterTable(const StmtPtr& stmt) {
     return dynamic_cast<const AlterTableStmt*>(stmt.get());
 }
@@ -120,7 +124,21 @@ int main() {
         assert(!c->columns[0].ascending);
         assert(c->columns[1].nullsFirst);
         assert(c->whereClause);
-        std::cout << "[PARSER P1] CREATE INDEX OK\n";
+    std::cout << "[PARSER P1] CREATE INDEX OK\n";
+
+    // CREATE TEMP/TEMPORARY must preserve session-local DDL flags for the
+    // typed executor instead of silently becoming persistent CREATE TABLE.
+    {
+        auto temp = parser.parse("CREATE TEMP TABLE session_data (id INT)");
+        assert(temp.success);
+        auto* table = asCreateTable(temp.stmt);
+        assert(table && table->temp && !table->localTemp);
+        auto local = parser.parse("CREATE LOCAL TEMPORARY TABLE local_data (id INT)");
+        assert(local.success);
+        table = asCreateTable(local.stmt);
+        assert(table && table->temp && table->localTemp);
+        std::cout << "[PARSER P1] CREATE TEMP flags OK\n";
+    }
     }
 
     // 7. CREATE VIEW

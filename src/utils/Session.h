@@ -17,6 +17,7 @@ struct Session {
     std::map<std::string, std::string> preparedStmts;
     int isolationLevel = 2; // 0=READ UNCOMMITTED, 1=READ COMMITTED, 2=REPEATABLE READ, 3=SERIALIZABLE
     std::set<std::string> tempTables; // temporary table names in this session
+    std::set<std::string> transientTempTables; // query-local CTE/derived table names
     int statementTimeoutMs = 0; // 0 = disabled
     int defaultStatementTimeoutMs = 0; // RESET statement_timeout target
     int timezoneOffsetMinutes = 0; // Session timezone offset from UTC (e.g. +480 for Asia/Shanghai)
@@ -40,3 +41,7 @@ struct Session {
     bool cancelRequested = false;   // set true to cancel current query
     bool terminateRequested = false; // set true to terminate session
 };
+
+inline std::string tempTablePrefix(const Session& session, const std::string& name) {
+    return "__tmp_" + std::to_string(session.pid) + "_" + name;
+}

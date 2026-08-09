@@ -2455,7 +2455,18 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
     }
     bool isUnique = false;
     if (match(tokens, pos, "unique")) { isUnique = true; ++pos; }
-    if (match(tokens, pos, "temp") || match(tokens, pos, "temporary")) ++pos;
+    bool isTemp = false;
+    bool isLocalTemp = false;
+    if (match(tokens, pos, "local")) {
+        if (match(tokens, pos + 1, "temp") || match(tokens, pos + 1, "temporary")) {
+            isTemp = true;
+            isLocalTemp = true;
+            pos += 2;
+        }
+    } else if (match(tokens, pos, "temp") || match(tokens, pos, "temporary")) {
+        isTemp = true;
+        ++pos;
+    }
     bool isUnlogged = false;
     if (match(tokens, pos, "unlogged")) { isUnlogged = true; ++pos; }
     if (match(tokens, pos, "materialized")) {
@@ -2477,8 +2488,11 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
         ++pos;
         if (kw == "table") {
             r.stmt = parseCreateTable(tokens, pos);
-            if (r.stmt && isUnlogged) {
-                static_cast<CreateTableStmt*>(r.stmt.get())->unlogged = true;
+            if (r.stmt) {
+                auto* table = static_cast<CreateTableStmt*>(r.stmt.get());
+                table->unlogged = isUnlogged;
+                table->temp = isTemp;
+                table->localTemp = isLocalTemp;
             }
         } else if (kw == "index") {
             r.stmt = parseCreateIndex(tokens, pos);

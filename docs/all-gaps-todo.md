@@ -131,7 +131,7 @@
 > 2026-07-01 Phase 4–7 进展详情（历史记录）：
 
 > **Phase 4（类型系统/约束/DDL 完整化）**：全部 40 Wave ✅/🔄
-> - ✅ 4.1 numeric/decimal, 4.2 类型别名, 4.3 CREATE/DROP COLLATION (DDL+元数据), 4.4 bytea, 4.5 date infinity, 4.6 ENUM, 4.7 几何类型, 4.8 macaddr, 4.9 bit, 4.10 tsearch, 4.11 uuid, 4.12 XML, 4.13 jsonpath, 4.14 array, 4.15 composite, 4.16 range, 4.17 domain multi-CHECK (本次), 4.18 pseudo types, 4.22 DEFAULT, 4.23 GENERATED, 4.24 EXCLUDE, 4.25 SET CONSTRAINTS (本次), 4.26 CREATE TABLE options + PARTITION BY (本次), 4.28 VIEW, 4.29 TRIGGER, 4.30 CREATE TYPE, 4.31 CTAS, 4.32 STATISTICS algorithms, 4.33 SEQUENCE, 4.34 DOMAIN, 4.35 FUNCTION, 4.36 PROCEDURE, 4.37 POLICY, 4.38 MATVIEW, 4.39 DDL 事务化, 4.40 ASSERTION=scope exclusion
+> - ✅ 4.1 numeric/decimal, 4.2 类型别名, 4.3 CREATE/DROP COLLATION (DDL+元数据), 4.4 bytea, 4.5 date infinity, 4.6 ENUM, 4.7 几何类型, 4.8 macaddr, 4.9 bit, 4.10 tsearch, 4.11 uuid, 4.12 XML, 4.13 jsonpath, 4.14 array, 4.15 composite, 4.16 range, 4.17 domain multi-CHECK (本次), 4.18 pseudo types, 4.22 DEFAULT, 4.23 GENERATED, 4.24 EXCLUDE, 4.25 SET CONSTRAINTS (本次), 4.26 CREATE TABLE options + PARTITION BY (本次), 4.28 VIEW, 4.29 TRIGGER, 4.30 CREATE TYPE, 4.31 CTAS, 4.32 STATISTICS algorithms, 4.33 SEQUENCE, 4.34 DOMAIN, 4.35 FUNCTION, 4.36 PROCEDURE, 4.37 POLICY, 4.38 MATVIEW, 4.40 ASSERTION=scope exclusion；4.39 DDL 事务化仍为 🔄。
 > - 🔄 4.19-4.21 函数/聚合/窗口（核心集就绪，缺高级特性）, 4.27 ALTER TABLE（本次新增 INHERIT/STATISTICS，缺 ONLY/延迟约束队列）
 
 > **Phase 5（Planner/执行器/DQL/DML）**：核心完成，高级标注 🔄
@@ -379,7 +379,7 @@
 | 4.4 | 表定义 | `LIKE INCLUDING` 全集已落地（DEFAULTS/CONSTRAINTS/INDEXES/IDENTITY）；`OF type`、identity 列（GENERATED AS IDENTITY）、`PARTITION BY` 与 `PARTITION OF` 已从 AST 桥接到引擎；tablespace 存储到 schema；仍缺 access method schema 持久化、typed table、storage/compression、statistics target、replica identity、reloptions 全集 | ⚠️ |
 | 4.5 | 分区 | 有 range/list/hash/attach/detach 子集；缺少 PG 分区约束证明、分区索引联动、global/local index 语义、默认分区验证、运行时 partition pruning 完整能力 | ⚠️ |
 | 4.6 | 继承 | 有 `.inherits` 文件和查询合并痕迹；缺少 PG 表继承的约束/触发器/权限/`ONLY`/`NO INHERIT` 完整语义 | ⚠️ |
-| 4.7 | 临时表 | 有会话临时表；缺少 `ON COMMIT DROP/DELETE/PRESERVE`、temp schema、catalog visibility、跨事务生命周期细节 | ⚠️ |
+| 4.7 | 临时表 | typed `CREATE TEMP/TEMPORARY TABLE` 已按连接隔离并在连接断开时清理；缺少 `ON COMMIT DROP/DELETE/PRESERVE`、真正 temp schema/catalog visibility、search_path 与跨事务生命周期细节 | ⚠️ |
 | 4.8 | UNLOGGED | 有标志和崩溃截断；缺少 PG unlogged init fork、复制限制、分区限制等 | ⚠️ |
 | 4.9 | 视图 | 视图保存 SQL 并展开；缺少 rewrite rule 系统、security barrier/invoker、列权限、复杂 updatable view | ⚠️ |
 | 4.10 | 物化视图 | backing table 简化；缺少 PG 依赖、索引要求、concurrent refresh 的可见性和锁 | ⚠️ |

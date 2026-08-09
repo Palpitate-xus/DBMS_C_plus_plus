@@ -54,7 +54,7 @@ std::string identifier(std::string value) {
 }
 
 bool isTempTable(const Session& s, const std::string& name) {
-    return s.tempTables.count(name) != 0;
+    return s.tempTables.count(name) != 0 || s.transientTempTables.count(name) != 0;
 }
 
 bool checkDatabase(const Session& s) {
@@ -67,7 +67,7 @@ bool checkDatabase(const Session& s) {
 }
 
 std::string resolveTable(Session& s, const std::string& name) {
-    if (isTempTable(s, name)) return "__tmp_" + name;
+    if (isTempTable(s, name)) return tempTablePrefix(s, name);
     if (g_engine.isMaterializedView(s.currentDB, name)) {
         return StorageEngine::materializedViewPrefix(name);
     }
