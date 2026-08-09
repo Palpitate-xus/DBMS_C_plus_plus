@@ -352,7 +352,7 @@ CREATE INDEX idx_name ON t1(name);
 
 ---
 
-### 4.2 CREATE HASH INDEX
+### 4.2 CREATE INDEX USING HASH
 
 **输入**
 ```sql
