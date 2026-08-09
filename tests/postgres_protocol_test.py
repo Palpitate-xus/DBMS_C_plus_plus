@@ -483,6 +483,11 @@ def main():
             sock, "CREATE TABLE dml_conflict (id INT PRIMARY KEY, name TEXT)"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO dml_conflict VALUES (1, 'old')"))
+        atomic_failure = simple_query(
+            sock, "INSERT INTO dml_conflict VALUES (9, 'rolled-back'), (1, 'duplicate')")
+        assert any(kind == b"E" for kind, _ in atomic_failure), atomic_failure
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM dml_conflict WHERE id = 9")) == [], atomic_failure
         conflict_messages = simple_query(
             sock, "INSERT INTO dml_conflict VALUES (1, 'ignored'), (2, 'new') "
             "ON CONFLICT DO NOTHING RETURNING id, name")

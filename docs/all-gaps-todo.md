@@ -29,6 +29,7 @@
 | 2026-08-09 | 角色继承边界收敛：ACL/RLS 使用有效继承权限，`NOINHERIT` 会话角色不自动获得成员角色权限；原始成员关系独立供 `pg_hba.conf` 角色匹配和成员环检测使用，并新增 ACL/RLS 回归。 |
 | 2026-08-09 | RLS 语义补强：策略默认按 permissive OR 组合，`AS RESTRICTIVE` 按 AND 组合；显式 `TO PUBLIC` 与空角色列表统一匹配 PUBLIC；`ALL/UPDATE` 省略 `WITH CHECK` 时继承 `USING`；策略文件写入统一复用序列化 helper，并增加运行时回归。完整 owner/ACL 组合仍待后续。 |
 | 2026-08-09 | 测试架构进一步收敛：删除 `run_all_tests_fast.sh` 中重复的生产对象编译、测试链接、stub 过滤和 E2E 调度实现；`build_tests.sh` 成为唯一完整测试编排入口，快速脚本仅负责安静输出，失败时打印完整诊断。 |
+| 2026-08-09 | 顶层 DML statement atomicity 收敛：普通 `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`REPLACE` 由 `execute()` 建立内部事务，成功自动提交，错误/异常自动回滚；递归触发器与视图 action 复用同一边界，并新增协议回归验证批量 INSERT 后续行冲突不会留下前序行。 |
 | 2026-08-09 | 移除 CatalogService 的旧 `.stc` 元数据迁移器、`.migrated` 标记和专用测试；catalog 现在只加载当前版本 `.cat` 文件，旧数据统一采用 SQL 导出后重建。 |
 | 2026-08-08 | 子查询执行路径推进：未关联单列 `IN`/`NOT IN` 下推为 Volcano `SemiJoinOp`/anti 模式；未关联单表 `EXISTS`/`NOT EXISTS` 下推为 `ExistenceFilterOp`；单个未关联标量目标下推为 init-plan + `ScalarSubqueryProjectOp`，覆盖 NULL 和多行 cardinality error；单列未关联 `ANY/ALL` 下推为 `QuantifiedSubqueryFilterOp`，覆盖 NULL/空集三值逻辑；复杂标量、关联子查询、row comparison 和复杂组合仍待迁移。 |
 | 2026-08-08 | 聚合执行路径收敛：删除只调用 `StorageEngine::aggregate()` 且忽略计划输入的冗余 `AggregateOp`，无 GROUP BY 的普通聚合统一复用过滤后的 `GroupAggregateOp`；补充 Volcano 单测与协议 E2E。 |

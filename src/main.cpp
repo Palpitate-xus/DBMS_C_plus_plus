@@ -8740,7 +8740,7 @@ static int sqlAuditCategory(const string& sql) {
     return 3; // other (DCL, etc.)
 }
 
-bool execute(const string& rawSql, Session& s) {
+static bool executeInternal(const string& rawSql, Session& s) {
     // Check for pg_terminate_backend / pg_cancel_backend flags
     if (s.terminateRequested) {
         cout << "ERROR: session terminated" << endl;
@@ -11107,10 +11107,7 @@ bool execute(const string& rawSql, Session& s) {
         if (!isTempTable(s, tname) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Update)) return true;
         {
             size_t wPos = sql.find("where", setPos);
-            size_t lPos = sql.find("limit", setPos);
-            size_t setEnd = sql.size();
-            if (wPos != string::npos) setEnd = wPos;
-            if (lPos != string::npos && lPos < setEnd) setEnd = lPos;
+            size_t setEnd = (wPos != string::npos) ? wPos : sql.size();
             string setClause = trim(sql.substr(setPos + 3, setEnd - setPos - 3));
             if (!isTempTable(s, tname) && !checkUpdateColumnPermission(s, tname, setClause)) return true;
         }
@@ -15203,6 +15200,61 @@ bool execute(const string& rawSql, Session& s) {
 
     cout << "SQL syntax error" << endl;
     return true;
+}
+
+namespace {
+
+thread_local unsigned executeDepth = 0;
+
+bool isTopLevelDml(const std::string& rawSql) {
+    const std::string normalized = toLowerSql(trim(rawSql));
+    return startsWithKeyword(normalized, "insert") ||
+           startsWithKeyword(normalized, "update") ||
+           startsWithKeyword(normalized, "delete") ||
+           startsWithKeyword(normalized, "merge") ||
+           startsWithKeyword(normalized, "replace");
+}
+
+} // namespace
+
+// PostgreSQL statements are atomic even outside an explicit BEGIN block.  The
+// storage engine's undo log is transaction-scoped, so give each top-level DML
+// statement an internal transaction. Recursive execution used by triggers,
+// view rewrites and compatibility helpers stays inside the same boundary.
+bool execute(const std::string& rawSql, Session& s) {
+    const bool outermost = executeDepth == 0;
+    const bool statementTransaction = outermost &&
+        !g_engine.inTransaction() &&
+        g_engine.databaseExists(s.currentDB) &&
+        isTopLevelDml(rawSql);
+
+    ++executeDepth;
+    if (statementTransaction &&
+        g_engine.beginTransaction(s.currentDB) != dbms::DBStatus::OK) {
+        --executeDepth;
+        std::cout << "ERROR: could not start statement transaction" << std::endl;
+        return true;
+    }
+
+    bool error = false;
+    try {
+        error = executeInternal(rawSql, s);
+    } catch (...) {
+        if (statementTransaction) g_engine.rollbackTransaction();
+        --executeDepth;
+        throw;
+    }
+
+    if (statementTransaction) {
+        if (error) {
+            g_engine.rollbackTransaction();
+        } else if (g_engine.commitTransaction() != dbms::DBStatus::OK) {
+            error = true;
+            g_engine.rollbackTransaction();
+        }
+    }
+    --executeDepth;
+    return error;
 }
 
 // ========================================================================

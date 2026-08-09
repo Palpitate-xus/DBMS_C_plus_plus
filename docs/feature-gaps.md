@@ -11,6 +11,8 @@
 
 本轮 DML 架构进展：普通单表 `INSERT ... VALUES`/`DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、无 target 或显式匹配主键/唯一约束 target 的 `ON CONFLICT DO NOTHING`，以及显式匹配单列或复合主键/唯一约束 target、配合常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET`、目标行/`excluded` 受限 `WHERE` 的窄版 `ON CONFLICT DO UPDATE`、以当前目标行列值为输入的受限标量表达式单表 `UPDATE`、单源表 `UPDATE ... FROM`、单源表 `DELETE ... USING` 和简单谓词单表 `DELETE` 已进入 `src/commands/DmlExecutor.cpp` 的 AST 执行路径；UPDATE FROM/DELETE USING 进一步支持来源 INNER/CROSS JOIN、来源别名、限定连接谓词和受限 `RETURNING`。解析器保留混合 `DEFAULT` 的列位置并对 DML 尾随垃圾 fail-closed。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 `RETURNING` 也已由 StorageEngine 在实际修改边界收集，并由协议层作为结构化结果集发送。视图写入、复杂 `INSERT ... SELECT`、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、外连接/复杂 JOIN、多表 DML 和复杂表达式仍明确由 legacy 路径处理。
 
+普通顶层 `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`REPLACE` 已统一包在内部事务中，成功后自动提交，错误或异常自动回滚；触发器、视图 action 和兼容性辅助执行通过递归深度复用同一事务边界。显式 `BEGIN` 仍由连接事务管理，复杂 DML 的语义支持范围未因此扩大。
+
 RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 `PERMISSIVE`，`AS RESTRICTIVE` 策略要求同时通过；显式 `TO PUBLIC` 与空角色列表均按 PUBLIC 处理；`ALL`/`UPDATE` 省略 `WITH CHECK` 时继承 `USING`；`NOINHERIT` 不自动继承成员角色权限，`SET ROLE` 后按有效角色评估；表 owner、`SUPERUSER`/`BYPASSRLS` 绕过普通 RLS，`FORCE ROW LEVEL SECURITY` 重新强制执行。表 owner 已写入正式 schema 与 `pg_class.relowner`，并在统一 ACL 查询中获得隐含表/列权限和 `GRANT OPTION`；表级 `GRANT OPTION` 支持独立撤销、依赖授权的 `RESTRICT`/`CASCADE`，`pg_auth_members.admin_option` 已接入角色授权与撤销；`ALTER TABLE ... OWNER TO` 会同步更新两者并执行所有者/目标角色授权检查；查询、更新、删除和结构化 DML 来源仍共享关系感知扫描，复杂对象 owner/ACL 组合语义仍属于差距。
 
 ### P1-0: DML AST 全量执行迁移
