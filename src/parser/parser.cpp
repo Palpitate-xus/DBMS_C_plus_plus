@@ -5129,6 +5129,18 @@ StmtPtr SQLParser::parseCreatePolicy(const std::vector<std::string>& tokens, siz
         }
     }
 
+    // [AS {PERMISSIVE|RESTRICTIVE}]
+    if (match(tokens, pos, "as") && pos + 1 < tokens.size()) {
+        ++pos;
+        if (match(tokens, pos, "permissive")) {
+            stmt->permissive = true;
+            ++pos;
+        } else if (match(tokens, pos, "restrictive")) {
+            stmt->permissive = false;
+            ++pos;
+        }
+    }
+
     // [FOR cmd]
     if (match(tokens, pos, "for") && pos + 1 < tokens.size()) {
         ++pos;

@@ -823,6 +823,7 @@ public:
     struct RowPolicy {
         std::string name;
         std::string cmd;           // ALL, SELECT, INSERT, UPDATE, DELETE
+        bool permissive = true;    // false for AS RESTRICTIVE
         std::string usingExpr;     // USING expression (for SELECT/UPDATE/DELETE)
         std::string withCheckExpr; // WITH CHECK expression (for INSERT/UPDATE)
         std::vector<std::string> roles; // empty = PUBLIC

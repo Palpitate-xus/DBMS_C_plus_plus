@@ -101,7 +101,7 @@ static void test_rls_visible_source_scan() {
     assert(g_engine.insert(db, "source", {{"id", "1"}, {"owner", "testuser"}, {"delta", "10"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "source", {{"id", "2"}, {"owner", "otheruser"}, {"delta", "20"}}) == dbms::DBStatus::OK);
     assert(!ddl.executeSql(
-        "CREATE POLICY source_select ON source FOR SELECT USING (owner = current_user)", s));
+        "CREATE POLICY source_select ON source FOR SELECT TO public USING (owner = current_user)", s));
     assert(g_engine.enableRowLevelSecurity(db, "source") == dbms::DBStatus::OK);
 
     dbms::StorageEngine::setRLSUser(s.username);
@@ -163,6 +163,37 @@ static void test_rls_visible_source_scan() {
         db, "no_policy", "SELECT",
         [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
     assert(visible == 0);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE policy_modes (id INT PRIMARY KEY)", s));
+    assert(g_engine.insert(db, "policy_modes", {{"id", "1"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "policy_modes", {{"id", "2"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "policy_modes", {{"id", "3"}}) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE POLICY mode_left ON policy_modes FOR SELECT USING (id <= 2)", s));
+    assert(!ddl.executeSql(
+        "CREATE POLICY mode_right ON policy_modes FOR SELECT USING (id = 3)", s));
+    assert(!ddl.executeSql(
+        "CREATE POLICY mode_restrictive ON policy_modes AS RESTRICTIVE FOR SELECT USING (id > 1)", s));
+    assert(g_engine.enableRowLevelSecurity(db, "policy_modes") == dbms::DBStatus::OK);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_modes", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 2);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE policy_default_check (id INT PRIMARY KEY, owner VARCHAR(50))", s));
+    assert(!ddl.executeSql(
+        "CREATE POLICY default_check ON policy_default_check FOR ALL "
+        "USING (owner = current_user)", s));
+    assert(g_engine.enableRowLevelSecurity(db, "policy_default_check") == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "policy_default_check",
+                           {{"id", "1"}, {"owner", "testuser"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "policy_default_check",
+                           {{"id", "2"}, {"owner", "otheruser"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.update(db, "policy_default_check", {{"owner", "otheruser"}},
+                           {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
 
     dbms::StorageEngine::setRLSUser("");
     cleanup(db);

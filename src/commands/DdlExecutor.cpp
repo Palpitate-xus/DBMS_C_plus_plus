@@ -3066,6 +3066,7 @@ bool DdlExecutor::executeCreatePolicy(const CreatePolicyStmt* stmt, Session& s) 
 
     dbms::StorageEngine::RowPolicy policy;
     policy.name = stmt->policyName;
+    policy.permissive = stmt->permissive;
     policy.cmd = stmt->command.empty() ? "ALL" : stmt->command;
     policy.usingExpr = stmt->usingExpr;
     policy.withCheckExpr = stmt->withCheckExpr;

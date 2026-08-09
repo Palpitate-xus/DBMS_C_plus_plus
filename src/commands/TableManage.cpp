@@ -107,9 +107,58 @@ Session* currentSession() { return g_currentSession; }
 // ========================================================================
 // Row-Level Security helpers
 // ========================================================================
+static std::string toLowerUtf8(const std::string& s);
+
 static bool shouldEnforceRLS(const TableSchema& tbl, const std::string& user) {
     return tbl.rowLevelSecurity &&
            !(user == "admin" && !tbl.forceRowLevelSecurity);
+}
+
+static bool evaluateRlsPolicies(
+    const std::vector<StorageEngine::RowPolicy>& policies,
+    bool withCheck,
+    const std::map<std::string, std::string>& values,
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& dbname,
+    const std::string& user,
+    bool& evaluationError) {
+    bool hasPermissive = false;
+    bool permissivePassed = false;
+
+    for (const auto& policy : policies) {
+        std::string expression = withCheck ? policy.withCheckExpr : policy.usingExpr;
+        // PostgreSQL uses USING as the default WITH CHECK expression for
+        // ALL and UPDATE policies when WITH CHECK is omitted.
+        if (withCheck && expression.empty()) {
+            const std::string command = toLowerUtf8(policy.cmd);
+            if (command == "all" || command == "update") {
+                expression = policy.usingExpr;
+            }
+        }
+
+        bool passed = true;
+        if (!expression.empty()) {
+            std::string error;
+            passed = ExprHelper::evalBool(expression, values, typeHints, &error,
+                                          dbname, user);
+            if (!error.empty()) {
+                evaluationError = true;
+                return false;
+            }
+        }
+
+        if (policy.permissive) {
+            hasPermissive = true;
+            permissivePassed = permissivePassed || passed;
+        } else if (!passed) {
+            // Every applicable restrictive policy must accept the row.
+            return false;
+        }
+    }
+
+    // A set containing only restrictive policies is still default-deny: a
+    // permissive policy must establish the positive access set first.
+    return hasPermissive && permissivePassed;
 }
 
 static bool rowPassesRLS(const StorageEngine* engine,
@@ -126,20 +175,10 @@ static bool rowPassesRLS(const StorageEngine* engine,
     const auto policies = engine->getApplicablePolicies(dbname, tablename, command, user);
     if (policies.empty()) return false;
 
-    // Policies are permissive until RESTRICTIVE policies are modeled. A row
-    // is allowed when one applicable policy accepts it; an empty expression
-    // is PostgreSQL's unconditional policy form. Any parser/evaluator failure
-    // remains false so a malformed policy cannot widen access.
-    for (const auto& policy : policies) {
-        const std::string& expression = withCheck ? policy.withCheckExpr : policy.usingExpr;
-        if (expression.empty()) return true;
-        std::string error;
-        if (ExprHelper::evalBool(expression, values, typeHints, &error,
-                                 dbname, user)) {
-            return true;
-        }
-    }
-    return false;
+    bool evaluationError = false;
+    return evaluateRlsPolicies(policies, withCheck, values, typeHints,
+                               dbname, user, evaluationError) &&
+           !evaluationError;
 }
 
 // ========================================================================
@@ -3569,27 +3608,8 @@ bool StorageEngine::forEachVisibleRow(
             typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
         }
 
-        bool allowed = false;
-        for (const auto& policy : policies) {
-            if (policy.usingExpr.empty()) {
-                allowed = true;
-                break;
-            }
-            std::string error;
-            if (ExprHelper::evalBool(policy.usingExpr, values, typeHints, &error,
-                                     dbname, user)) {
-                allowed = true;
-                break;
-            }
-            // A parse/evaluation error is distinguishable from a false policy
-            // only through the error output. Fail closed and let the caller
-            // choose a safe fallback instead of silently hiding or exposing
-            // rows.
-            if (!error.empty()) {
-                evaluationError = true;
-                return;
-            }
-        }
+        const bool allowed = evaluateRlsPolicies(
+            policies, false, values, typeHints, dbname, user, evaluationError);
         if (allowed) visible.push_back({pageId, slotId, row});
     }, readView, targetPartitions);
 
@@ -18892,6 +18912,25 @@ DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
 // Row-Level Security (RLS)
 // ========================================================================
 
+static bool writePolicyFile(const std::filesystem::path& path,
+                            const std::vector<StorageEngine::RowPolicy>& policies) {
+    std::ofstream ofs(path);
+    if (!ofs) return false;
+    for (const auto& p : policies) {
+        ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
+        ofs << " AS:" << (p.permissive ? "PERMISSIVE" : "RESTRICTIVE");
+        ofs << " USING:" << escapeString(p.usingExpr);
+        ofs << " WITHCHECK:" << escapeString(p.withCheckExpr);
+        ofs << " ROLES:";
+        for (size_t i = 0; i < p.roles.size(); ++i) {
+            if (i > 0) ofs << ",";
+            ofs << escapeString(p.roles[i]);
+        }
+        ofs << "\n";
+    }
+    return true;
+}
+
 std::filesystem::path StorageEngine::rlsPath(const std::string& dbname, const std::string& tablename) const {
     return dbPath(dbname) / (tablename + ".rls");
 }
@@ -18905,20 +18944,7 @@ DBStatus StorageEngine::createPolicy(const std::string& dbname, const std::strin
         if (p.name == policy.name) return DBStatus::TABLE_ALREADY_EXISTS;
     }
     policies.push_back(policy);
-    std::ofstream ofs(rpath);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    for (const auto& p : policies) {
-        ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
-        ofs << " USING:" << escapeString(p.usingExpr);
-        ofs << " WITHCHECK:" << escapeString(p.withCheckExpr);
-        ofs << " ROLES:";
-        for (size_t i = 0; i < p.roles.size(); ++i) {
-            if (i > 0) ofs << ",";
-            ofs << escapeString(p.roles[i]);
-        }
-        ofs << "\n";
-    }
-    return DBStatus::OK;
+    return writePolicyFile(rpath, policies) ? DBStatus::OK : DBStatus::INVALID_VALUE;
 }
 
 DBStatus StorageEngine::alterPolicy(const std::string& dbname, const std::string& tablename,
@@ -18938,20 +18964,7 @@ DBStatus StorageEngine::alterPolicy(const std::string& dbname, const std::string
         }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::ofstream ofs(rpath);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    for (const auto& p : policies) {
-        ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
-        ofs << " USING:" << escapeString(p.usingExpr);
-        ofs << " WITHCHECK:" << escapeString(p.withCheckExpr);
-        ofs << " ROLES:";
-        for (size_t i = 0; i < p.roles.size(); ++i) {
-            if (i > 0) ofs << ",";
-            ofs << escapeString(p.roles[i]);
-        }
-        ofs << "\n";
-    }
-    return DBStatus::OK;
+    return writePolicyFile(rpath, policies) ? DBStatus::OK : DBStatus::INVALID_VALUE;
 }
 
 DBStatus StorageEngine::dropPolicy(const std::string& dbname, const std::string& tablename,
@@ -18969,20 +18982,7 @@ DBStatus StorageEngine::dropPolicy(const std::string& dbname, const std::string&
         }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::ofstream ofs(rpath);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    for (const auto& p : policies) {
-        ofs << "POLICY " << escapeString(p.name) << " " << p.cmd;
-        ofs << " USING:" << escapeString(p.usingExpr);
-        ofs << " WITHCHECK:" << escapeString(p.withCheckExpr);
-        ofs << " ROLES:";
-        for (size_t i = 0; i < p.roles.size(); ++i) {
-            if (i > 0) ofs << ",";
-            ofs << escapeString(p.roles[i]);
-        }
-        ofs << "\n";
-    }
-    return DBStatus::OK;
+    return writePolicyFile(rpath, policies) ? DBStatus::OK : DBStatus::INVALID_VALUE;
 }
 
 std::vector<StorageEngine::RowPolicy> StorageEngine::getPolicies(const std::string& dbname,
@@ -19000,10 +19000,17 @@ std::vector<StorageEngine::RowPolicy> StorageEngine::getPolicies(const std::stri
         RowPolicy p;
         p.name = unescapeString(line.substr(pos, sp - pos));
         pos = sp + 1;
-        sp = line.find(" USING:", pos);
+        sp = line.find(" AS:", pos);
         if (sp == std::string::npos) continue;
         p.cmd = line.substr(pos, sp - pos);
-        pos = sp + 7;
+        pos = sp + 4;
+        size_t modeEnd = line.find(" USING:", pos);
+        if (modeEnd == std::string::npos) continue;
+        const std::string mode = line.substr(pos, modeEnd - pos);
+        if (mode == "PERMISSIVE") p.permissive = true;
+        else if (mode == "RESTRICTIVE") p.permissive = false;
+        else continue;
+        pos = modeEnd + 7;
         sp = line.find(" WITHCHECK:", pos);
         if (sp == std::string::npos) continue;
         p.usingExpr = unescapeString(line.substr(pos, sp - pos));
@@ -19036,7 +19043,8 @@ std::vector<StorageEngine::RowPolicy> StorageEngine::getApplicablePolicies(
             result.push_back(p);
         } else {
             for (const auto& r : p.roles) {
-                if (r == username) {
+                if (toLowerUtf8(r) == "public" || r == username ||
+                    userHasRole(username, r)) {
                     result.push_back(p);
                     break;
                 }

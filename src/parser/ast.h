@@ -1176,6 +1176,7 @@ struct CreateTriggerStmt : public Stmt {
 struct CreatePolicyStmt : public Stmt {
     std::string policyName;
     std::string tableName;
+    bool permissive = true; // PostgreSQL default; AS RESTRICTIVE sets false
     std::string command = "ALL"; // ALL, SELECT, INSERT, UPDATE, DELETE
     std::vector<std::string> roles;
     std::string usingExpr;

@@ -314,7 +314,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 4.34 实现 `CREATE DOMAIN` 多约束与全表 revalidation | 1.1.18 | DOMAIN 约束执行已落地。 |
 | ⚠️ 4.35 实现 `CREATE FUNCTION` 完整语义（language/volatility/strict/parallel/cost/security definer） | 1.1.19 | 已支持基础标量 UDF/TVF、volatility 元数据和 `tests/function_procedure_test.cpp`；PL/pgSQL 运行时、函数权限与依赖、OUT 参数和重载解析仍待后续。 |
 | ⚠️ 4.36 实现 `CREATE PROCEDURE` 语言运行时与事务控制 | 1.1.23 | 已保存并解析基础 procedure 定义；PL/pgSQL 运行时和 PostgreSQL 事务控制语义仍待后续。 |
-| ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL、USING 关系感知扫描和运行时 policy 回归已落地；完整 WITH CHECK executor 强制、role/owner 解析和 `ALTER POLICY` 仍待后续。 |
+| ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL、USING/WITH CHECK 关系感知扫描、默认 WITH CHECK、PUBLIC 和基础 PERMISSIVE/RESTRICTIVE 组合已落地；role/owner 解析、ACL 组合和 `ALTER POLICY` 完整语义仍待后续。 |
 | ⚠️ 4.38 实现 `CREATE MATERIALIZED VIEW` `WITH [NO] DATA`、并发刷新 | 1.1.21, 4.10 | 已支持基础创建、列序、`WITH [NO] DATA` 和刷新；唯一索引要求、真正的 CONCURRENTLY 锁语义和 `pg_matview` 依赖追踪仍待后续。 |
 | ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 和基础事务路径已落地；完整 DDL 回滚、跨对象依赖和 PostgreSQL 隐式提交边界仍待后续。 |
 | ✅ 4.40 实现 `CREATE ASSERTION` 执行（如决定支持） | 5.9 | PG 本身未实现。本项目暂不支持Assertion，标记为完成（scope exclusion）。 |
@@ -424,11 +424,11 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - 🔄 仍待后续：PL/pgSQL 运行时、函数/过程权限与依赖、OUT 参数、重载解析、SET configuration 执行。
 - **Wave 4 DDL 完整化 — CREATE POLICY（4.37，本次完成）**：
   - ✅ 新增 `CreatePolicyStmt` AST 节点（policyName/tableName/command/roles/usingExpr/withCheckExpr/ifNotExists）。
-  - ✅ `parseCreatePolicy` 完整解析：`CREATE POLICY name ON table [FOR cmd] [TO role,...] [USING (expr)] [WITH CHECK (expr)]`，USING/WITH CHECK 支持括号深度匹配与去引号。
+  - ✅ `parseCreatePolicy` 完整解析：`CREATE POLICY name ON table [AS PERMISSIVE|RESTRICTIVE] [FOR cmd] [TO role,...] [USING (expr)] [WITH CHECK (expr)]`，USING/WITH CHECK 支持括号深度匹配与去引号。
   - ✅ `DdlExecutor::executeCreatePolicy` 落地：校验目标表存在，构造 `StorageEngine::RowPolicy`（command 缺省为 `ALL`）并调用 `createPolicy`；通过 `DdlTransaction` 记录 `DdlObjectKind::Policy`。
   - ✅ `tryDdlBridge` 接管 `CreatePolicy`，移除 `main.cpp` 中的 legacy 内联处理。
-  - ✅ 新增 `tests/policy_test.cpp`：默认 ALL policy、`FOR UPDATE ... USING ... WITH CHECK`、`FOR INSERT WITH CHECK`。
-  - 🔄 仍待后续：`WITH CHECK` / `USING` 表达式在 DML 路径上的真实行级强制执行、role 解析、`ALTER POLICY`、`AS PERMISSIVE/RESTRICTIVE`。
+  - ✅ 新增 `tests/policy_test.cpp`：默认 ALL policy、`FOR UPDATE ... USING ... WITH CHECK`、`FOR INSERT WITH CHECK`、PUBLIC、默认 WITH CHECK 继承以及 permissive/restrictive 组合。
+  - 🔄 仍待后续：完整 role/owner 解析、ACL 组合和 `ALTER POLICY` 语义。
 - **Wave 4 DDL 完整化 — CREATE TABLE (LIKE ...)（4.26 部分，本次完成）**：
   - ✅ 新增 `CreateTableStmt::LikeClause`（tableName + INCLUDING ALL/DEFAULTS/CONSTRAINTS/INDEXES/IDENTITY 标志）与 `likeClauses` 向量。
   - ✅ `parseCreateTable` 解析括号内 `LIKE source [{INCLUDING|EXCLUDING} option ...]`（含括号外尾随形式）；schema 限定名支持。
@@ -729,7 +729,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |
 | 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | 基础权限路径已有，目录持久化和完整继承语义仍需补齐 |
 | 🔄 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | 解析路径已有，默认权限的完整 catalog/executor 语义仍需验证 |
-| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；无适用策略默认拒绝、求值失败安全回退；WITH CHECK、PERMISSIVE/RESTRICTIVE、owner/角色继承和 ACL 组合语义仍不完整 |
+| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING/WITH CHECK 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC 和基础 PERMISSIVE/RESTRICTIVE 组合已验证；无适用策略默认拒绝、求值失败安全回退；owner/角色继承和 ACL 组合语义仍不完整 |
 | 🔄 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | 语法支持已有，执行时安全边界仍需补齐 |
 | 🔄 7.10 实现 `GRANT`/`REVOKE` ACL item 完整语义 | 1.1.40 | 基础语法和执行路径已有，完整 ACL 传播/校验仍需验证 |
 | 🔄 7.11 实现 `ALTER USER`/`ALTER ROLE` 完整权限位（superuser/createdb/replication/bypassrls） | 1.1.5 | 主要属性执行、SCRAM 密码、`VALID UNTIL`、连接数限制和持久化已接入；仍需按 PostgreSQL 语义补全 owner/ACL/依赖校验 |
