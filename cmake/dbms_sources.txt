@@ -35,6 +35,7 @@ src/expression/ExprEvaluator.cpp
 src/expression/expr_helper.cpp
 src/commands/DdlExecutor.cpp
 src/commands/DdlTransaction.cpp
+src/commands/DmlExecutor.cpp
 src/utils/pg_hba.cpp
 src/utils/permissions.cpp
 src/replication/ReplicationManager.cpp

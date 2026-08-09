@@ -1,6 +1,6 @@
 # DBMS 功能测试报告
 
-> 最后更新：2026-08-08
+> 最后更新：2026-08-09
 > 自动测试套件基线：PASS=124 FAIL=0（122 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
@@ -40,6 +40,7 @@
 - SQL 统计模块回归：`tests/sql_stats_test.cpp` 验证字符串/数字常量归一化、引号标识符区分、调用次数与耗时聚合、数据库过滤及 reset。
 - 运行时统计模块回归：`tests/runtime_stats_test.cpp` 验证并发 SQL 计数、失败/提交/回滚计数、表扫描和实际 DML 行数统计及 reset。
 - 协议运行时统计回归：`postgres_protocol_test.py` 通过真实 PostgreSQL wire 查询验证 `pg_stat_database`/`pg_stat_tables` 返回数据库查询、表 DML 及 Volcano 索引扫描/取行计数，而非固定零值。
+- DML AST 回归：`parser_phase1_test.cpp` 验证 `INSERT` 的多行 AST、混合 `DEFAULT` 保持位置以及 `DEFAULT VALUES` 的区分；协议 E2E 验证普通单表 INSERT 的多行/表达式/DEFAULT、显式 NULL 不被默认值覆盖，以及 `DEFAULT VALUES` command tag。
 
 ---
 
@@ -54,7 +55,7 @@
 | DDL - 视图 | 5 | 5 | 0 | 含 ALTER VIEW RENAME TO / SET SCHEMA |
 | DDL - 触发器 | 2 | 2 | 0 | — |
 | DDL - 用户/角色 | 4 | 4 | 0 | — |
-| DML - INSERT | 4 | 4 | 0 | 含省略列名 |
+| DML - INSERT | 5 | 5 | 0 | 含 AST bridge 的多行/DEFAULT/显式 NULL 回归 |
 | DML - UPDATE/DELETE | 2 | 2 | 0 | — |
 | DQL - SELECT | 5 | 5 | 0 | — |
 | DQL - JOIN | 3 | 3 | 0 | — |

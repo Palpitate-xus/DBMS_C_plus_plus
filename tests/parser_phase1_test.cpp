@@ -217,7 +217,31 @@ int main() {
         std::cout << "[PARSER P1] VALUES OK\n";
     }
 
-    // 14. Set-operation precedence and left associativity
+    // 14. INSERT AST keeps DEFAULT positional and distinguishes DEFAULT VALUES
+    {
+        auto r = parser.parse("INSERT INTO t (a, b) VALUES (DEFAULT, 1), (2, NULL)");
+        assert(r.success);
+        auto* i = dynamic_cast<InsertStmt*>(r.stmt.get());
+        assert(i);
+        assert(i->tableName == "t");
+        assert(i->columns.size() == 2);
+        assert(i->values.size() == 2);
+        assert(i->values[0].size() == 2);
+        auto* defaultExpr = dynamic_cast<LiteralExpr*>(i->values[0][0].get());
+        assert(defaultExpr && defaultExpr->value == "default");
+        assert(i->values[1].size() == 2);
+
+        auto defaultRow = parser.parse("INSERT INTO t DEFAULT VALUES");
+        assert(defaultRow.success);
+        auto* defaultStmt = dynamic_cast<InsertStmt*>(defaultRow.stmt.get());
+        assert(defaultStmt && defaultStmt->defaultValues);
+        assert(defaultStmt->values.empty());
+        auto malformed = parser.parse("INSERT INTO t VALUES (1), DEFAULT");
+        assert(!malformed.success);
+        std::cout << "[PARSER P1] INSERT AST DEFAULT handling OK\n";
+    }
+
+    // 15. Set-operation precedence and left associativity
     {
         auto leftAssoc = parser.parse(
             "SELECT a FROM t1 UNION SELECT a FROM t2 UNION SELECT a FROM t3");

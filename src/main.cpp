@@ -21,6 +21,7 @@
 #include "Config.h"
 #include "parser/parser.h"
 #include "commands/DdlExecutor.h"
+#include "commands/DmlExecutor.h"
 #include "catalog/CatalogService.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
@@ -141,6 +142,41 @@ static string toLower(string s) {
     return s;
 }
 
+// Normalize SQL keywords without changing quoted string literals or quoted
+// identifiers.  Lowercasing the complete SQL text makes `WHERE name = 'A'`
+// disagree with an AST insert that correctly stores 'A'.
+static string toLowerSql(string s) {
+    bool singleQuoted = false;
+    bool doubleQuoted = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char& c = s[i];
+        if (singleQuoted) {
+            if (c == '\'' && i + 1 < s.size() && s[i + 1] == '\'') {
+                ++i; // SQL escaped quote: ''
+            } else if (c == '\'') {
+                singleQuoted = false;
+            }
+            continue;
+        }
+        if (doubleQuoted) {
+            if (c == '"' && i + 1 < s.size() && s[i + 1] == '"') {
+                ++i; // SQL escaped identifier quote: ""
+            } else if (c == '"') {
+                doubleQuoted = false;
+            }
+            continue;
+        }
+        if (c == '\'') {
+            singleQuoted = true;
+        } else if (c == '"') {
+            doubleQuoted = true;
+        } else {
+            c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    return s;
+}
+
 static string trim(const string& s) {
     size_t a = 0;
     while (a < s.size() && isspace(static_cast<unsigned char>(s[a]))) ++a;
@@ -199,7 +235,7 @@ static string preprocessCaseWhen(string s);
 // ========================================================================
 static string foldConstants(const string& s);
 static string sqlProcessor(string raw) {
-    raw = toLower(raw);
+    raw = toLowerSql(raw);
     raw.erase(remove(raw.begin(), raw.end(), '\n'), raw.end());
     raw.erase(remove(raw.begin(), raw.end(), '\t'), raw.end());
     raw.erase(remove(raw.begin(), raw.end(), '\r'), raw.end());
@@ -9000,7 +9036,7 @@ static bool handleAlterSequence(const string& sql, Session& s) {
 }
 
 static bool checkTablePermission(Session& s, const string& tname,
-                                  dbms::StorageEngine::TablePrivilege priv) {
+                                 dbms::StorageEngine::TablePrivilege priv) {
     if (s.permission == 1) return true; // admin bypass
     if (!g_engine.hasPermission(s.currentDB, tname, s.username, priv)) {
         // If there are column-level permissions for this privilege type,
@@ -9562,6 +9598,15 @@ bool execute(const string& rawSql, Session& s) {
 
         default:
             break;
+    }
+
+    // Phase 4 Wave 0.4: DML AST bridge — try AST-driven execution before legacy string dispatch.
+    {
+        bool handled = false;
+        bool err = dbms::tryDmlBridge(sql, parsedCmd, s, handled, rawSql);
+        if (handled) {
+            return err;
+        }
     }
 
     // Phase 4 Wave 0.3: DDL AST bridge — try AST-driven execution before legacy string dispatch.

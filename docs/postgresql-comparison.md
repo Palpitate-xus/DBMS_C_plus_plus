@@ -11,7 +11,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 
 事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志、SSI 完整语义和 DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
-2026-08-08 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。legacy 文本执行器的协议结果捕获已改为线程局部路由，避免全局 `std::cout` 锁造成会话串行化。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
+2026-08-09 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。普通单表 INSERT 的 VALUES/DEFAULT VALUES 已进入独立 AST 执行器，混合 DEFAULT、显式列、多行和默认值存储语义有 parser/协议回归；INSERT SELECT、ON CONFLICT、RETURNING 及 UPDATE/DELETE/MERGE 仍保留明确 legacy 回退。legacy 文本执行器的协议结果捕获已改为线程局部路由，避免全局 `std::cout` 锁造成会话串行化。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
 
 SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlStats`，`SHOW STATEMENTS`/`pg_stat_statements` 风格查询可按归一化 SQL 聚合耗时；当前仍是进程内统计，缺少持久化、完整字段和扩展生命周期。
 
@@ -94,7 +94,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 
 | 功能 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
-| INSERT (VALUES/SELECT/ON CONFLICT/RETURNING) | ✅ | ✅ | ✅ |
+| INSERT (VALUES/SELECT/ON CONFLICT/RETURNING) | ✅ | ⚠️ | 普通单表 VALUES/DEFAULT VALUES（含多行、混合 DEFAULT、表达式）走 `DmlExecutor` AST；SELECT/ON CONFLICT/RETURNING、视图写入和复杂未支持表达式明确回退 legacy |
 | UPDATE (FROM/LIMIT/RETURNING) | ✅ | ✅ | ✅ |
 | DELETE (USING/LIMIT/RETURNING) | ✅ | ✅ | ✅ |
 | MERGE (MATCHED/NOT MATCHED) | ✅ | ✅ | ✅ |
@@ -351,7 +351,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 本 DBMS 在 **DDL 完整化** 方面达到了很高的完成度（SQL 语法覆盖 ~95%），但**运行时 semantics** 的执行层面还有显著差距：
 
 - **DDL Parser**: ✅ 高度完整 (184 命令)
-- **DML Executor**: ✅ 核心完整 (INSERT/UPDATE/DELETE/基础 SELECT)
+- **DML Executor**: ⚠️ 普通 INSERT VALUES/DEFAULT VALUES 已进入 AST 执行器；INSERT 的高级子句和 UPDATE/DELETE/MERGE 仍有 legacy 执行路径
 - **高级 Query**: ⚠️ parser 就绪, executor 部分完成
 - **并发控制**: ⚠️ MVCC 基础有, 行级锁/死锁缺失
 - **性能**: ⚠️ 无并行/JIT/高级索引

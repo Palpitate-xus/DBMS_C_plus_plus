@@ -417,6 +417,20 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE dml_ast (id INT DEFAULT 7, name TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO dml_ast VALUES (DEFAULT, 'first'), (2, NULL), (NULL, 'null-id')"))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM dml_ast")) == [[b"7"], [b"2"], [b"0"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO dml_ast DEFAULT VALUES"))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM dml_ast WHERE id = 7")) == [[b"7"], [b"7"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO dml_ast VALUES (3, 'MiXeD')"))
+        assert data_row_values(simple_query(
+            sock, "SELECT name FROM dml_ast WHERE id = 3")) == [[b"MiXeD"]]
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE INDEX t_id_idx ON t(id)"))
         assert data_row_values(simple_query(
             sock, "SELECT id FROM t WHERE id = 1")) == [[b"1"]]

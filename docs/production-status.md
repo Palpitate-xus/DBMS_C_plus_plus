@@ -1,6 +1,6 @@
 # 生产化状态
 
-最后更新：2026-08-08
+最后更新：2026-08-09
 
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，122 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=124 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
@@ -28,6 +28,7 @@
 - 删除运行时自动生成自签名证书的 shell 调用，避免私钥落盘位置和命令参数不可控；部署必须显式提供 TLS 材料。
 - 网络服务已切换到 PostgreSQL Frontend/Backend protocol 3.0 核心路径：支持 SSLRequest 协商、StartupMessage、catalog SCRAM-SHA-256、参数状态、简单 Query，以及 Parse/Bind/Execute/Sync 基础流程；协议回归由 `tests/postgres_protocol_test.py` 覆盖真实 SCRAM 握手。
 - legacy `execute()` 的协议结果捕获已改为线程局部 `process/OutputCapture` multiplexing；移除网络入口对全局 `std::cout` 缓冲区和 `g_outputCaptureMutex` 的依赖，协议会话不再因文本捕获而全局串行化，并有多线程无串扰回归。
+- 普通单表 `INSERT` 已新增 `commands/DmlExecutor` AST 执行路径：`VALUES`（含多行、表达式、显式列和混合 `DEFAULT`）及 `DEFAULT VALUES` 在进入 legacy 分发前统一执行，并复用 StorageEngine 约束、触发器、索引、RLS 和 ACL；视图、`INSERT ... SELECT`、`ON CONFLICT`、`RETURNING` 和尚未由 AST 执行器覆盖的表达式明确回退到旧路径。存储层默认值只对缺失列生效，显式 NULL 不再被默认值覆盖。
 - 简单单表视图已支持行级 `INSTEAD OF INSERT/UPDATE/DELETE` action SQL；多行 `VALUES`、按实际匹配行的 UPDATE/DELETE、`NEW`/`OLD`/`WHEN` 和 server 会话执行均有协议回归，复杂视图映射与函数/PL 触发器运行时仍未完成。
 - `UNION`/`INTERSECT`/`EXCEPT` 的组合语义已统一由 Volcano `SetOperationOp` 执行，覆盖顶层优先级、错误传播及 `ALL` 重复行语义；简单单表 operand 直接构建子计划，复杂 operand 通过 `MaterializedRowsOp` 接入，完整 AST 下推和类型合并尚未完成。
 - 并行执行已具备可验证的 `ParallelTableScanOp`：非分区 heap 按 page range 由多个 worker 读取并按范围顺序 Gather，`max_parallel_workers_per_gather` 可配置；事务内、分区表、并行 join/aggregate、GatherMerge 和长期 worker pool 仍未完成。
@@ -51,4 +52,4 @@
 
 仍不能称为生产就绪的主要原因包括：SSI 目前已增加关系级 SIREAD 以覆盖空范围读，但页/索引粒度 predicate lock 和完整 rw-conflict 规则仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding 和结构化执行结果，ACL、admin option、owner/依赖和完整角色继承语义仍不完整；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。后台 writer/checkpointer 与 DDL/database lifecycle 的文件缓存并发访问已加锁并纳入回归验证。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
 
-验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`；两个 E2E 已由统一测试入口自动执行。Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。
+验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`；两个 E2E 已由统一测试入口自动执行。DML AST 路径另由 parser 单测和协议 E2E 覆盖。Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。

@@ -1,6 +1,6 @@
 # DBMS 全部 Gap TODO（唯一来源）
 
-> 生成日期：2026-06-10 | 当前审计：2026-08-08
+> 生成日期：2026-06-10 | 当前审计：2026-08-09
 > 来源：基于 `postgresql-complete-gap-analysis.md` 逐条提取，**无一遗漏**
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区和视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES 和视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT/ON CONFLICT/RETURNING、UPDATE/DELETE/MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -595,10 +595,10 @@
 
 > **进度（2026-06-21）**：Phase 0~3 已完成；Phase 4 进行中（Wave 0~2 已落地，Wave 3 约束进行中，Wave 4~6 待办）；Phase 5~10 未启动。详见 `docs/implementation-plan.md` 与 `docs/phase4-plan.md`。
 
-### Phase 1：Parser 与 AST 🔄 框架完成，DML 未接入执行
+### Phase 1：Parser 与 AST 🔄 框架完成，DML 正在接入执行
 - 引入真正 SQL parser 或至少分层 AST，替代 `execute()` 超大字符串分支 — **框架已完成**（`src/parser/`，~6400 行）
 - 实现完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function — **解析层完成，执行期 cast/重载仍 ⚠️**
-- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 子集经 DdlExecutor 走 AST；DML（SELECT/INSERT/UPDATE/DELETE/MERGE）仍全部走字符串分发，AST 未被消费**
+- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 子集经 DdlExecutor 走 AST；普通 INSERT VALUES/DEFAULT VALUES 已经由 DmlExecutor 消费 AST，其他 DML 仍按明确边界走 legacy fallback**
 
 ### Phase 2：Catalog 体系 🔄 主要 DDL 已接入运行时
 - 建立对象 OID、namespace、owner、ACL、dependency 体系 — **CatalogService/主要对象图已接入；owner/ACL 传播和对象全集依赖仍待深化**
@@ -635,6 +635,8 @@
 - 实现 Hook 系统、后台工作进程、共享内存扩展 — **未启动**
 
 ### 进度备注（追加记录）
+
+- **2026-08-09**：普通单表 INSERT AST executor 落地：支持显式/隐式列、多行 VALUES、表达式、混合 DEFAULT、DEFAULT VALUES；修正 StorageEngine 仅在列缺失时应用默认值，并以 parser 单测和协议 E2E 验证。INSERT SELECT/ON CONFLICT/RETURNING、视图写入以及 UPDATE/DELETE/MERGE 仍待迁移。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。

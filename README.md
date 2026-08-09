@@ -33,6 +33,8 @@
 - **删除**：`DELETE FROM ... WHERE ...`, `DELETE ... USING ... WHERE ...`, `DELETE ... LIMIT n`
 - **多表更新/删除**：支持 `FROM` / `USING` 子句的跨表 UPDATE/DELETE
 
+普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`（含多行、显式列、表达式和混合 `DEFAULT`）当前由 `src/commands/DmlExecutor` 消费 AST；`INSERT ... SELECT`、冲突处理、`RETURNING`、视图写入及其他尚未迁移的 DML 明确回退到 legacy 执行路径。该回退边界会随着结构化执行器迁移逐步缩小，不能视为 PostgreSQL 完整语义。
+
 ### 高级查询 (DQL)
 - **条件过滤**：支持 `=`, `<>`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `BETWEEN`, `IN`, `EXISTS`, `ANY`, `ALL`, `IS NULL`, `IS NOT NULL` 以及 `AND`/`OR` 组合；未关联单列 `IN`/`NOT IN`、未关联单表 `EXISTS`/`NOT EXISTS` 和单列 `ANY/ALL` 已进入结构化 Volcano 计划，复杂/关联子查询仍受生产边界限制
 - **三值逻辑**：`TRUE` / `FALSE` / `UNKNOWN`，WHERE 子句中 `UNKNOWN` 被当作 `FALSE`

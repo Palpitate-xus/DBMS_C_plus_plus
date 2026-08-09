@@ -1,6 +1,6 @@
 # 功能缺失清单 (Feature Gaps)
 
-> 生成日期: 2026-08-08
+> 生成日期: 2026-08-09
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
 > 本 DBMS 当前状态: 生产化重构进行中，统一回归基线 PASS=124 FAIL=0（122 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移。
 
@@ -8,6 +8,20 @@
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
 
 协议当前已通过真实 E2E 覆盖常用标量、`numeric` 以及 `date`/`time`/`timestamp`/`timestamptz`/`uuid` 的 binary 参数与结果、基础 portal `maxRows` 分页；legacy 文本执行器的结果捕获已采用线程局部输出路由，不再以全局锁串行化会话；数组 binary I/O、亚秒时间精度、holdable/scrollable cursor 和完整 libpq 语义仍属于协议差距。
+
+本轮 DML 架构进展：普通单表 `INSERT ... VALUES` 和 `INSERT ... DEFAULT VALUES` 已进入 `src/commands/DmlExecutor.cpp` 的 AST 执行路径，解析器保留混合 `DEFAULT` 的列位置；不属于该子集的视图写入、`INSERT ... SELECT`、冲突处理和 `RETURNING` 仍明确由 legacy 路径处理。
+
+### P1-0: DML AST 全量执行迁移
+- **类别**: 执行器 / 架构一致性
+- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES` 已由 `DmlExecutor` 结构化执行，并通过协议回归；`INSERT` 的 SELECT/冲突/RETURNING、UPDATE、DELETE、MERGE 仍由 `main.cpp` 字符串分发，复杂表达式未被 AST 执行器支持时也会回退。
+- **PG 参考**: PostgreSQL 的 parse/analyze/rewrite/plan/execute 分层，以及 `ModifyTable`。
+- **影响**: 当前 DML 仍存在两套执行入口，错误码、RETURNING、权限和计划可观测性的统一程度不足。
+- **实现路径**:
+  1. ✅ 抽出普通 INSERT AST executor，并验证多行、DEFAULT、StorageEngine 约束和 ACL。
+  2. 迁移 INSERT SELECT / ON CONFLICT / RETURNING，统一结果与 command tag。
+  3. 迁移 UPDATE、DELETE、MERGE 到结构化 `ModifyTable` 风格执行器。
+  4. 删除已完全迁移子集对应的 legacy 分支，并为每个回退边界增加 fail-closed 测试。
+- **相关文件**: `src/commands/DmlExecutor.{h,cpp}`, `src/parser/ast.h`, `src/main.cpp`, `src/commands/TableManage.cpp`
 
 ---
 

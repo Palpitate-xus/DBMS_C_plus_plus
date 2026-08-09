@@ -2002,7 +2002,13 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
                 std::vector<ExprPtr> row;
                 while (pos < tokens.size() && tokens[pos] != ")") {
                     if (toLower(tokens[pos]) == "default") {
-                        stmt->defaultValues = true;
+                        // DEFAULT is a value expression, not the statement-level
+                        // DEFAULT VALUES form.  Keeping it in the row preserves
+                        // positional information for mixed rows such as
+                        // VALUES (DEFAULT, 1).
+                        auto defaultExpr = std::make_unique<LiteralExpr>();
+                        defaultExpr->value = "default";
+                        row.push_back(std::move(defaultExpr));
                         ++pos;
                     } else {
                         auto expr = parseSimpleExpr(tokens, pos);
@@ -2088,6 +2094,15 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
             stmt->returning.push_back(parseSelectItem(tokens, pos));
             if (pos < tokens.size() && tokens[pos] == ",") ++pos;
         }
+    }
+
+    // INSERT is one of the statements executed through a staged AST bridge.
+    // Do not report success while silently leaving trailing tokens for a
+    // legacy dispatcher to reinterpret.
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) {
+        r.error = "unexpected token in INSERT statement: " + tokens[pos];
+        return r;
     }
 
     r.success = true;

@@ -10777,7 +10777,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
-        if ((it == actualValues.end() || it->second.empty()) && !col.defaultValue.empty()) {
+        // Presence means the caller supplied the column, including an explicit
+        // NULL represented by an empty value.  Only an omitted column receives
+        // its DEFAULT; this is required to distinguish DEFAULT from NULL.
+        if (it == actualValues.end() && !col.defaultValue.empty()) {
             bool ok = false;
             std::string computed = evalExpressionSql(col.defaultValue, actualValues, typeHints, dbname, &ok);
             if (ok) {
@@ -10794,7 +10797,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         const Column& col = tbl.cols[i];
         if (!col.isAutoIncrement) continue;
         auto it = actualValues.find(col.dataName);
-        if (it != actualValues.end() && !it->second.empty()) continue;
+        if (it != actualValues.end()) continue;
         int64_t nextVal = readNextSeq(dbname, tablename, col.dataName);
         actualValues[col.dataName] = std::to_string(nextVal);
         writeNextSeq(dbname, tablename, col.dataName, nextVal + 1);
