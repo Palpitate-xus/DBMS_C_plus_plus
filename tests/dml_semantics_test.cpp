@@ -213,6 +213,63 @@ static void test_join_dml_engine() {
     std::cout << "[DML] joined UPDATE FROM/DELETE USING setup OK" << std::endl;
 }
 
+// 5.7 MERGE: typed AST execution with cardinality protection
+static void test_merge_engine() {
+    const std::string db = testDbPath("dml_merge");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE target (id INT PRIMARY KEY, val INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE source (id INT, val INT)", s));
+    assert(g_engine.insert(db, "target", {{"id", "1"}, {"val", "10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source", {{"id", "1"}, {"val", "100"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source", {{"id", "2"}, {"val", "200"}}) == dbms::DBStatus::OK);
+
+    const std::string mergeSql =
+        "MERGE INTO target USING source AS src ON target.id = src.id "
+        "WHEN MATCHED THEN UPDATE SET val = src.val "
+        "WHEN NOT MATCHED THEN INSERT (id, val) VALUES (src.id, src.val)";
+    dbms::SQLParser parser;
+    auto parsed = parser.parse(mergeSql);
+    assert(parsed.success);
+    auto* merge = dynamic_cast<dbms::MergeStmt*>(parsed.stmt.get());
+    assert(merge && merge->source && merge->source->alias == "src");
+    assert(merge->whenClauses.size() == 2);
+    assert(dynamic_cast<dbms::ColumnRefExpr*>(
+        merge->whenClauses[1].insertCols[0].second.get()));
+
+    bool handled = false;
+    assert(!dbms::tryDmlBridge(mergeSql, dbms::SqlCommand::Merge, s, handled));
+    assert(handled);
+    const auto targetSchema = g_engine.getTableSchema(db, "target");
+    std::map<std::string, std::string> values;
+    g_engine.forEachRow(db, "target", [&](uint32_t, uint16_t, const char* data, size_t len) {
+        const std::string row(data, len);
+        const std::string id = g_engine.extractColumnValue(row, targetSchema, 0, db, true);
+        const std::string val = g_engine.extractColumnValue(row, targetSchema, 1, db, true);
+        values[id] = val;
+    });
+    assert((values == std::map<std::string, std::string>{{"1", "100"}, {"2", "200"}}));
+
+    // A source row may not update the same target row twice.  The check must
+    // happen before storage mutation, preserving the previous target value.
+    assert(g_engine.insert(db, "source", {{"id", "1"}, {"val", "999"}}) == dbms::DBStatus::OK);
+    handled = false;
+    assert(dbms::tryDmlBridge(mergeSql, dbms::SqlCommand::Merge, s, handled));
+    assert(handled);
+    values.clear();
+    g_engine.forEachRow(db, "target", [&](uint32_t, uint16_t, const char* data, size_t len) {
+        const std::string row(data, len);
+        values[g_engine.extractColumnValue(row, targetSchema, 0, db, true)] =
+            g_engine.extractColumnValue(row, targetSchema, 1, db, true);
+    });
+    assert(values["1"] == "100");
+    cleanup(db);
+    std::cout << "[DML] MERGE setup OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_set_ops_parser();
@@ -223,6 +280,7 @@ int main() {
     test_update_from_engine();
     test_delete_using_engine();
     test_join_dml_engine();
+    test_merge_engine();
     std::cout << "[DML] all passed" << std::endl;
     return 0;
 }

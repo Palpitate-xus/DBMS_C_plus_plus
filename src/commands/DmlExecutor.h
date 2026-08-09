@@ -2,9 +2,10 @@
 // DML AST Executor — Phase 4 Wave 0.4
 //
 // This module is the structured execution entry point for the DML subset that
-// is safe to execute from the parser AST.  Unsupported DML deliberately
-// returns handled=false so the compatibility path in main.cpp can continue to
-// own features that have not migrated yet.
+// is safe to execute from the parser AST.  Unsupported INSERT/UPDATE/DELETE
+// shapes deliberately return handled=false so the compatibility path can own
+// features that have not migrated yet.  MERGE is fully owned here and rejects
+// unsupported branches explicitly because its old string executor was removed.
 // ============================================================================
 
 #pragma once

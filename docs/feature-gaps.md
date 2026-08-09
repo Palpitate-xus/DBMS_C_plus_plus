@@ -15,7 +15,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P1-0: DML AST 全量执行迁移
 - **类别**: 执行器 / 架构一致性
-- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、简单单表 `INSERT ... SELECT`、无 target 或显式匹配主键/唯一约束 target 的 `ON CONFLICT DO NOTHING`、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 `DO UPDATE`、目标行/`excluded` 的受限 `WHERE`、以当前目标行列值为输入的受限标量表达式单表 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、简单谓词单表 DELETE 已由 `DmlExecutor` 结构化执行，并通过 parser/协议回归；其中 UPDATE FROM/DELETE USING 支持来源 INNER/CROSS JOIN。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 RETURNING 已统一结果集和 command tag。复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE`/`WHERE`、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、MERGE 和视图写入仍回退 legacy。
+- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、简单单表 `INSERT ... SELECT`、无 target 或显式匹配主键/唯一约束 target 的 `ON CONFLICT DO NOTHING`、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 `DO UPDATE`、目标行/`excluded` 的受限 `WHERE`、以当前目标行列值为输入的受限标量表达式单表 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、简单谓词单表 DELETE 和窄版单源表 MERGE 已由 `DmlExecutor` 结构化执行，并通过 parser/协议回归；其中 UPDATE FROM/DELETE USING 支持来源 INNER/CROSS JOIN，MERGE 支持单个 MATCHED UPDATE/DO NOTHING、单个 NOT MATCHED INSERT/DO NOTHING，并拒绝多源行匹配同一目标行。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 RETURNING 已统一结果集和 command tag。复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE`/`WHERE`、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、MERGE 的多 WHEN/BY SOURCE/BY TARGET/DELETE/复杂 source/RETURNING 以及视图写入仍 fail-closed 或回退 legacy。
 - **PG 参考**: PostgreSQL 的 parse/analyze/rewrite/plan/execute 分层，以及 `ModifyTable`。
 - **影响**: 当前 DML 仍存在两套执行入口，错误码、RETURNING、权限和计划可观测性的统一程度不足。
 - **实现路径**:

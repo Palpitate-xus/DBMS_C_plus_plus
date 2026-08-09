@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-09）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=126 FAIL=0（124 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-09）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=126 FAIL=0（124 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -95,7 +95,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 1.2 实现 operator precedence、类型解析、隐式 cast | 3.1 | — |
 | ✅ 1.3 实现函数重载、schema-qualified function、named/default args | 3.1, 3.10 | — |
 | ✅ 1.4 补全 `SELECT` grammar（join、where、group、window、cte） | 6.1~6.8 | — |
-| 🔄 1.5 补全 `INSERT/UPDATE/DELETE/MERGE` AST 路径 | 1.1.35, 1.1.41, 1.1.44, 1.1.58, 6.10~6.13 | AST 已完整建模；普通 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费，INSERT 高级子句、外连接/复杂 JOIN、复杂/子查询/窗口 RETURNING、复杂 UPDATE/DELETE 和 MERGE 仍待迁移 |
+| 🔄 1.5 补全 `INSERT/UPDATE/DELETE/MERGE` AST 路径 | 1.1.35, 1.1.41, 1.1.44, 1.1.58, 6.10~6.13 | AST 已完整建模；普通 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费；INSERT 高级子句、外连接/复杂 JOIN、复杂/子查询/窗口 RETURNING、复杂 UPDATE/DELETE 和 MERGE 完整 WHEN 语义仍待迁移 |
 | ✅ 1.6 补全 DDL AST（`CREATE`/`ALTER`/`DROP` 各对象） | 1.1.3, 1.1.4, 1.1.6, 1.1.17, 1.1.24~1.1.33 等 | — |
 | ✅ 1.7 补全 `SET`/`SHOW`/`RESET` GUC 框架 | 1.1.48, 1.1.52, 1.1.56 | 需先定义 GUC 变量表 |
 | ✅ 1.8 补全 `VALUES` 作为通用 query expression | 1.1.60 | — |
@@ -125,7 +125,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - ✅ 程序命令：`CALL`、Prepared Statements（`PREPARE`、`EXECUTE`、`DEALLOCATE`）、`COPY` FROM/TO
   - ✅ 查询计划：`EXPLAIN`（含 ANALYZE / BUFFERS / FORMAT JSON / 括号选项）
   - 🔄 元数据/权限命令：`SHOW`、`GRANT`、`REVOKE` — 已通过 `switch/case` 路由（代码块极大，暂保留在 `execute()` 内，后续提取）
-  - 🔄 核心 DQL/DML/DDL：`SELECT`、`CREATE`/`DROP`/`ALTER` 及 DML 全量子命令 — 普通 INSERT、简单单表 INSERT SELECT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE 已提取到 `commands/DmlExecutor`；高级 DML、MERGE 和复杂 SELECT 仍在 `execute()` 中保留明确 legacy fallback，后续按完整语义迁移
+  - 🔄 核心 DQL/DML/DDL：`SELECT`、`CREATE`/`DROP`/`ALTER` 及 DML 全量子命令 — 普通 INSERT、简单单表 INSERT SELECT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE 已提取到 `commands/DmlExecutor`；高级 DML、MERGE 完整 WHEN 语义和复杂 SELECT 仍保留明确边界，后续按完整语义迁移
 - **Parser 参数解析完善（1.2 已完成）**：
   - ✅ 填充实 `CREATE`/`DROP`/`ALTER` 全量子命令解析 stub（~100 个函数），从空实现改为提取对象名、IF EXISTS/NOT EXISTS、CASCADE/RESTRICT 等关键属性
   - ✅ 实现 `CREATE TABLE` 完整解析：列定义（名/类型/约束/生成列/IDENTITY）、表级约束（PK/FK/UNIQUE/CHECK/EXCLUSION）、`LIKE`、`INHERITS`、`PARTITION BY`、`WITH` 存储参数、`TABLESPACE`、`ON COMMIT`
@@ -157,7 +157,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - ✅ Free Space Map / Visibility Map：fork 文件管理，已集成到 insert/update/delete/vacuum 路径
   - ✅ CLOG / pg_xact：CommitLog 实现 2-bit 事务状态（IN_PROGRESS/COMMITTED/ABORTED/SUB_COMMITTED），按段文件持久化；StorageEngine commit/rollback 自动更新 CLOG；ReadView 使用 CLOG 判断事务状态
 
-> 未迁移到 switch/case 的命令（classify 暂不支持或非标准 PG 语法）：`DUMP`、`RESTORE`、`BACKUP DATABASE`、`RESTORE DATABASE`、`CLEAR PLAN CACHE`、`MERGE INTO`、`REPLACE INTO`、`INSERT INTO` 特定语法及复杂 DDL（CREATE/DROP/ALTER）执行逻辑。`SELECT` 等已可解析为 AST，执行仍保留在 `switch/case` 内，后续逐步提取为独立 handler。这些将在后续阶段逐步处理。
+> 未迁移到 switch/case 的命令（classify 暂不支持或非标准 PG 语法）：`DUMP`、`RESTORE`、`BACKUP DATABASE`、`RESTORE DATABASE`、`CLEAR PLAN CACHE`、`REPLACE INTO`、`INSERT INTO` 特定语法及复杂 DDL（CREATE/DROP/ALTER）执行逻辑。`MERGE INTO` 已由 DML bridge 消费 typed AST，但完整 WHEN/复杂 source 语义仍待后续处理。`SELECT` 等已可解析为 AST，执行仍保留在 `switch/case` 内，后续逐步提取为独立 handler。
 
 ---
 
@@ -195,7 +195,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - `CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步更新目录；`CREATE INDEX` 建立对基表的 auto 依赖。
   - `StorageEngine::checkpoint()` 持久化所有缓存目录；`DROP DATABASE` 先 `evict()` 目录缓存。
   - `pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表暴露给 `SELECT *`。
-  - 明确延期：复杂 DML AST（复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 ON CONFLICT DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表 UPDATE/DELETE、MERGE）迁移、CTAS 语义补全、完整 FK `refobjid` 解析、`ALTER TABLE`/视图/触发器/函数/过程的目录集成仍为后续工作；普通 INSERT、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单 DELETE 及列投影/受限标量表达式 RETURNING 已进入结构化执行器。
+  - 明确延期：复杂 DML AST（复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 ON CONFLICT DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表 UPDATE/DELETE、MERGE 完整 WHEN/source/RETURNING 语义）迁移、CTAS 语义补全、完整 FK `refobjid` 解析、`ALTER TABLE`/视图/触发器/函数/过程的目录集成仍为后续工作；普通 INSERT、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单 DELETE、窄版 MERGE 及列投影/受限标量表达式 RETURNING 已进入结构化执行器。
 
 ---
 
@@ -656,7 +656,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 5.4 实现 bitmap heap scan、bitmap and/or、多索引组合 | 7.4 | IndexOnlyScanOp (covering index), IndexScanOp (PK/secondary); filter pushdown in buildSelectPlan |
 | ✅ 5.5 实现 skip scan、index condition recheck、lossy pages | 8.2, 7.4 | FilterOp indexConditionRecheck + canUseSkipScan in QueryPlanner |
 | ✅ 5.6 实现 CTE `MATERIALIZED/NOT MATERIALIZED`、可写 CTE 快照、递归检测 | 6.4 | parser 已解析 CTE；executor 未实现 |
-| ✅ 5.7 实现 `MERGE` 完整 WHEN 分支（UPDATE SET + INSERT VALUES） | 1.1.44, 6.13 | main.cpp MERGE INTO ... USING ... ON ... UPDATE SET ... INSERT 完整执行 |
+| 🔄 5.7 实现 `MERGE` 完整 WHEN 分支 | 1.1.44, 6.13 | 窄版单源表 MATCHED UPDATE/DO NOTHING + NOT MATCHED INSERT/DO NOTHING 已由 `DmlExecutor` 执行；多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query、RETURNING 和完整并发/事务语义仍待迁移 |
 | 🔄 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | 普通 VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE 及列投影/受限标量表达式 RETURNING 已新增 `DmlExecutor` AST 执行路径；OVERRIDING、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂 INSERT SELECT 和复杂/子查询/窗口 RETURNING 仍由 legacy 路径处理 |
 | ✅ 5.9 实现 `RETURNING` `OLD`/`NEW` aliases、trigger-modified rows 精确行为 | 6.12, 1.1.41 等 | 基础 RETURNING 已就绪 |
 | 🔄 5.10 实现 `UPDATE FROM` / `DELETE USING` 的语义安全实现（非文本拼接） | 6.11, 1.1.58, 1.1.35 | 单源表及来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING 已由 DmlExecutor AST 执行并复用 StorageEngine 修改边界；外连接/复杂 JOIN/子查询、完整重复匹配和并发语义仍待迁移 |

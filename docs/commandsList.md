@@ -518,17 +518,17 @@ DELETE FROM events LIMIT 100;
 **语法**
 ```sql
 MERGE INTO target_table USING source_table ON condition
-UPDATE SET column = value [, ...]
-INSERT (column1, ...) VALUES (value1, ...)
+WHEN MATCHED THEN UPDATE SET column = value [, ...]
+WHEN NOT MATCHED THEN INSERT (column1, ...) VALUES (value1, ...)
 ```
 
-**说明** 将源表数据合并到目标表：匹配则 UPDATE，不匹配则 INSERT。
+**说明** 将源表数据合并到目标表：匹配则 UPDATE，不匹配则 INSERT。当前 typed executor 支持单源表、一个 MATCHED 分支和一个 NOT MATCHED 分支，以及 `DO NOTHING`；多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query 和 RETURNING 会明确拒绝。
 
 **示例**
 ```sql
 MERGE INTO users USING temp_users ON users.id = temp_users.id
-UPDATE SET name = temp_users.name, email = temp_users.email
-INSERT (id, name, email) VALUES (temp_users.id, temp_users.name, temp_users.email);
+WHEN MATCHED THEN UPDATE SET name = temp_users.name, email = temp_users.email
+WHEN NOT MATCHED THEN INSERT (id, name, email) VALUES (temp_users.id, temp_users.name, temp_users.email);
 ```
 
 ---

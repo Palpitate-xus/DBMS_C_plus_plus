@@ -2363,14 +2363,20 @@ ParseResult SQLParser::parseMerge(const std::string& sql) {
             if (pos < tokens.size() && toLower(tokens[pos]) == "values") {
                 ++pos;
                 if (pos < tokens.size() && tokens[pos] == "(") {
-                    auto vals = collectParenthesized(tokens, pos);
-                    for (size_t i = 0, j = 0; i < vals.size() && j < wc.insertCols.size(); ++i) {
-                        if (vals[i] == ",") continue;
-                        auto expr = std::make_unique<LiteralExpr>();
-                        expr->value = vals[i];
-                        wc.insertCols[j].second = std::move(expr);
-                        ++j;
+                    ++pos;
+                    size_t columnIndex = 0;
+                    while (pos < tokens.size() && tokens[pos] != ")") {
+                        auto expr = parseSimpleExpr(tokens, pos);
+                        if (expr && columnIndex < wc.insertCols.size()) {
+                            wc.insertCols[columnIndex++].second = std::move(expr);
+                        }
+                        if (pos < tokens.size() && tokens[pos] == ",") {
+                            ++pos;
+                        } else if (pos < tokens.size() && tokens[pos] != ")") {
+                            ++pos;
+                        }
                     }
+                    if (pos < tokens.size() && tokens[pos] == ")") ++pos;
                 }
             }
         } else if (pos < tokens.size() && toLower(tokens[pos]) == "delete") {

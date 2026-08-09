@@ -355,7 +355,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 本 DBMS 在 **DDL 完整化** 方面达到了很高的完成度（SQL 语法覆盖 ~95%），但**运行时 semantics** 的执行层面还有显著差距：
 
 - **DDL Parser**: ✅ 高度完整 (184 命令)
-- **DML Executor**: ⚠️ 普通 INSERT、受限行级标量表达式单表 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词单表 DELETE 已进入 AST 执行器；高级 DML 和 MERGE 仍有 legacy 执行路径
+- **DML Executor**: ⚠️ 普通 INSERT、受限行级标量表达式单表 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词单表 DELETE 和窄版 MERGE 已进入 AST 执行器；MERGE 的多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query、RETURNING 仍 fail-closed，高级 DML 仍有 legacy 执行路径
 - **高级 Query**: ⚠️ parser 就绪, executor 部分完成
 - **并发控制**: ⚠️ MVCC 基础有, 行级锁/死锁缺失
 - **性能**: ⚠️ 无并行/JIT/高级索引

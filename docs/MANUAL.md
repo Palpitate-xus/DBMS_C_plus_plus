@@ -403,6 +403,8 @@ MERGE INTO target USING source ON target.ID = source.ID
     WHEN NOT MATCHED THEN INSERT (ID, NAME) VALUES (source.ID, source.NAME);
 ```
 
+当前 typed executor 仅支持单源表、一个 `MATCHED` 分支和一个 `NOT MATCHED` 分支；支持 `UPDATE`/`INSERT`/`DO NOTHING`。多 `WHEN`、`BY SOURCE`/`BY TARGET`、`DELETE`、复杂 source query 和 `RETURNING` 会明确拒绝。
+
 ### REPLACE INTO (MySQL 兼容)
 
 ```sql

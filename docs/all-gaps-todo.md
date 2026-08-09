@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；USING/WITH CHECK 形式的 RLS 关系感知扫描也已统一接入查询/更新/删除和结构化 DML 来源关系，并支持默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、INHERIT/NOINHERIT 和角色属性绕过；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表/复杂 UPDATE/DELETE、MERGE、RLS 的完整 owner/ACL 语义、触发器函数运行时、CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版单源表 MERGE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；USING/WITH CHECK 形式的 RLS 关系感知扫描也已统一接入查询/更新/删除和结构化 DML 来源关系，并支持默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、INHERIT/NOINHERIT 和角色属性绕过；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表/复杂 UPDATE/DELETE、MERGE 的完整 WHEN/source/RETURNING 语义、RLS 的完整 owner/ACL 语义、触发器函数运行时、CLUSTER/REPLICA 等动作仍由 legacy 或 fail-closed 路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -167,7 +167,7 @@
 > 2026-07-01 (更新) Phase 5 DML 语义完善 + Wave 4.27 完成 + Phase 7 认证完善：
 > - 5.2 等价类/PathKey 实现 (EquivalenceClass + PathKey structs, buildSelectPlan 重载)
 > - 5.3 cost-based join algorithm selection (estimateJoinCost: NLJ/Merge/Hash)
-> - 5.7 MERGE 标为完成 (main.cpp 完整执行路径)
+> - 5.7 MERGE 仅窄版完成；完整 WHEN/source/RETURNING/并发语义仍待实现
 > - 5.10-5.18 的历史 parser/DML 标记不代表 executor 已达到 PostgreSQL 完整语义；当前仍有 legacy fallback 和组合语义缺口。
 > - 5.36 LISTEN/NOTIFY 标为完成 (内存 listener map + pending notify queue)
 > - 历史上曾将 7.3 SCRAM-SHA-256、7.4 auth methods、7.6-7.11 认证/权限标为完成；2026-08-07 审计后回退为“部分实现/待验收”
@@ -661,7 +661,7 @@
 
 - **2026-08-09（RLS 可见性边界）**：移除旧的策略字符串到 legacy 条件解析器的转换；查询、更新、删除和结构化 DML 来源统一使用关系感知 RLS 扫描，补充 `current_user` 表达式求值、普通查询/删除和来源 DML 回归。随后补齐默认 `WITH CHECK`、PUBLIC 以及基础 PERMISSIVE/RESTRICTIVE 组合；完整角色/owner/ACL 组合语义仍待实现。
 
-- **2026-08-09**：DML AST executor 扩展：普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式及受限行级标量表达式单表 UPDATE、简单谓词单表 DELETE 及三类 DML 的列投影和受限标量表达式 RETURNING 已接入；修复 INSERT SELECT 的 `RETURNING` parser 边界和列引用被误写成 NULL 的 fallback 边界，补充 INSERT/UPDATE/DELETE/冲突处理协议回归和 DML 尾随垃圾 fail-closed parser 测试。复合/部分/索引推断冲突目标、引用子查询或其他关系的 upsert、复杂 RETURNING、多表语义和复杂表达式仍待迁移。
+- **2026-08-09**：DML AST executor 扩展：窄版单源表 MERGE（单个 MATCHED UPDATE/DO NOTHING + 单个 NOT MATCHED INSERT/DO NOTHING）已从 `main.cpp` 字符串执行器迁移到 `DmlExecutor`；INSERT values 表达式改为保留 ColumnRef AST，重复 source-to-target 匹配在存储修改前拒绝，并新增 parser/执行回归。MERGE 的多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query、RETURNING 和完整并发语义仍待迁移。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。
