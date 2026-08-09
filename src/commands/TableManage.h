@@ -375,6 +375,8 @@ public:
         std::map<std::string, std::string>&)>;
     using UpdateMatcher = std::function<bool(
         const std::map<std::string, std::string>&)>;
+    using DeleteMatcher = std::function<bool(
+        const std::map<std::string, std::string>&)>;
     DBStatus insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values,
                     std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);
@@ -391,7 +393,8 @@ public:
                     const UpdateMatcher& updateMatcher = {});
     DBStatus remove(const std::string& dbname, const std::string& tablename,
                     const std::vector<std::string>& conditions,
-                    std::vector<std::map<std::string, std::string>>* deletedRows = nullptr);
+                    std::vector<std::map<std::string, std::string>>* deletedRows = nullptr,
+                    const DeleteMatcher& deleteMatcher = {});
     struct OrderBySpec {
         std::string colName;
         bool ascending = true;

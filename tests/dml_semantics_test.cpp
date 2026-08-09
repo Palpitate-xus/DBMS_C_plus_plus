@@ -118,6 +118,45 @@ static void test_update_from_engine() {
     std::cout << "[DML] UPDATE FROM setup OK" << std::endl;
 }
 
+// 5.11 DELETE USING engine support
+static void test_delete_using_engine() {
+    std::string db = testDbPath("dml_del_using");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE target (id INT PRIMARY KEY, val INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE source (id INT)", s));
+    for (const auto& row : {std::pair{"1", "10"}, std::pair{"2", "20"},
+                            std::pair{"3", "30"}}) {
+        assert(g_engine.insert(db, "target", {{"id", row.first}, {"val", row.second}}) ==
+               dbms::DBStatus::OK);
+    }
+    assert(g_engine.insert(db, "source", {{"id", "1"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source", {{"id", "3"}}) == dbms::DBStatus::OK);
+
+    bool handled = false;
+    const bool error = dbms::tryDmlBridge(
+        "DELETE FROM target USING source AS s "
+        "WHERE target.id = s.id RETURNING id, val",
+        dbms::SqlCommand::Delete, s, handled);
+    assert(handled && !error);
+    const dbms::DmlResult result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "DELETE 2");
+    assert(result.rows.size() == 2);
+    assert((result.rows[0] == std::vector<std::string>{"1", "10"}));
+    assert((result.rows[1] == std::vector<std::string>{"3", "30"}));
+
+    size_t remaining = 0;
+    g_engine.forEachRow(db, "target", [&](uint32_t, uint16_t, const char*, size_t) {
+        ++remaining;
+    });
+    assert(remaining == 1);
+    cleanup(db);
+    std::cout << "[DML] DELETE USING setup OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_set_ops_parser();
@@ -126,6 +165,7 @@ int main() {
     test_limit_with_ties();
     test_for_update_parser();
     test_update_from_engine();
+    test_delete_using_engine();
     std::cout << "[DML] all passed" << std::endl;
     return 0;
 }

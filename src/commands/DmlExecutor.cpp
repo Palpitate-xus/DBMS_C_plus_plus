@@ -1083,6 +1083,21 @@ RowContext updateFromContext(const std::map<std::string, std::string>& targetVal
     return context;
 }
 
+void collectTableRows(const std::string& currentDB, const std::string& tableName,
+                      const TableSchema& table,
+                      std::vector<std::map<std::string, std::string>>& rows) {
+    g_engine.forEachRow(currentDB, tableName,
+                        [&](uint32_t, uint16_t, const char* data, size_t len) {
+        const std::string row(data, len);
+        std::map<std::string, std::string> values;
+        for (size_t i = 0; i < table.len; ++i) {
+            values[table.cols[i].dataName] =
+                g_engine.extractColumnValue(row, table, i, currentDB, true);
+        }
+        rows.push_back(std::move(values));
+    });
+}
+
 bool evaluateUpdateFromExpression(
     const Expr* expression,
     const std::map<std::string, std::string>& targetValues,
@@ -1803,6 +1818,12 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
     const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
+    // forEachRow is a raw heap scan.  Do not bypass a source SELECT policy
+    // until the structured scan API can evaluate RLS for the source relation.
+    if (sourceSchema.rowLevelSecurity || sourceSchema.forceRowLevelSecurity) {
+        fallback = true;
+        return false;
+    }
     const std::string targetQualifier = unqualifiedRelationName(requestedTable);
     const std::string sourceQualifier = stmt.fromClause->alias.empty()
         ? unqualifiedRelationName(requestedSource)
@@ -1863,28 +1884,14 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     }
 
     std::vector<std::map<std::string, std::string>> sourceRows;
-    g_engine.forEachRow(s.currentDB, resolvedSource,
-                        [&](uint32_t, uint16_t, const char* data, size_t len) {
-        const std::string row(data, len);
-        std::map<std::string, std::string> values;
-        for (size_t i = 0; i < sourceSchema.len; ++i) {
-            values[sourceSchema.cols[i].dataName] =
-                g_engine.extractColumnValue(row, sourceSchema, i, s.currentDB, true);
-        }
-        sourceRows.push_back(std::move(values));
-    });
+    collectTableRows(s.currentDB, resolvedSource, sourceSchema, sourceRows);
 
     std::map<std::string, std::map<std::string, std::string>> matchedUpdates;
     bool evaluationFailed = false;
-    g_engine.forEachRow(s.currentDB, resolvedTable,
-                        [&](uint32_t, uint16_t, const char* data, size_t len) {
-        if (evaluationFailed) return;
-        const std::string row(data, len);
-        std::map<std::string, std::string> targetValues;
-        for (size_t i = 0; i < targetSchema.len; ++i) {
-            targetValues[targetSchema.cols[i].dataName] =
-                g_engine.extractColumnValue(row, targetSchema, i, s.currentDB, true);
-        }
+    std::vector<std::map<std::string, std::string>> targetRows;
+    collectTableRows(s.currentDB, resolvedTable, targetSchema, targetRows);
+    for (const auto& targetValues : targetRows) {
+        if (evaluationFailed) break;
         for (const auto& sourceValues : sourceRows) {
             ExprEvaluator evaluator;
             evaluator.setCurrentDB(s.currentDB);
@@ -1904,14 +1911,14 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
                         sourceValues, sourceSchema, sourceQualifier,
                         s.currentDB, value)) {
                     evaluationFailed = true;
-                    return;
+                    break;
                 }
                 effectiveUpdates[column] = std::move(value);
             }
             matchedUpdates.emplace(rowValueKey(targetValues), std::move(effectiveUpdates));
             break; // PostgreSQL permits one source row to determine each target row.
         }
-    });
+    }
     if (evaluationFailed) {
         std::cout << "UPDATE FROM expression evaluation failed" << std::endl;
         return true;
@@ -2066,7 +2073,134 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     return false;
 }
 
+bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
+    fallback = false;
+    if (!stmt.usingClause || stmt.usingClause->type != FromItem::Type::Table) {
+        fallback = true;
+        return false;
+    }
+    if (!checkDatabase(s)) return true;
+
+    const std::string requestedTable = identifier(stmt.tableName);
+    const std::string resolvedTable = resolveTable(s, requestedTable);
+    if (g_engine.viewExists(s.currentDB, requestedTable) ||
+        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+        fallback = true;
+        return false;
+    }
+    if (!g_engine.tableExists(s.currentDB, resolvedTable)) {
+        std::cout << "Table " << requestedTable << " not exist" << std::endl;
+        return true;
+    }
+
+    const std::string requestedSource = identifier(stmt.usingClause->tableName);
+    const std::string resolvedSource = resolveTable(s, requestedSource);
+    if (g_engine.viewExists(s.currentDB, requestedSource) ||
+        g_engine.isMaterializedView(s.currentDB, requestedSource) ||
+        !g_engine.tableExists(s.currentDB, resolvedSource)) {
+        fallback = true;
+        return false;
+    }
+    if (!checkTablePrivilege(s, requestedTable,
+                             StorageEngine::TablePrivilege::Delete) ||
+        !checkTablePrivilege(s, requestedSource,
+                             StorageEngine::TablePrivilege::Select)) {
+        return true;
+    }
+
+    const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
+    // forEachRow is a raw heap scan.  Do not expose source rows without a
+    // structured SELECT-policy scan; ordinary DELETE still applies target RLS
+    // inside StorageEngine::remove.
+    if (sourceSchema.rowLevelSecurity || sourceSchema.forceRowLevelSecurity) {
+        fallback = true;
+        return false;
+    }
+    const std::string targetQualifier = unqualifiedRelationName(requestedTable);
+    const std::string sourceQualifier = stmt.usingClause->alias.empty()
+        ? unqualifiedRelationName(requestedSource)
+        : identifier(stmt.usingClause->alias);
+
+    if (stmt.whereClause) {
+        ExprEvaluator evaluator;
+        if (!validateUpdateFromExpression(stmt.whereClause.get(), targetSchema,
+                                           targetQualifier, sourceSchema,
+                                           sourceQualifier, evaluator)) {
+            fallback = true;
+            return false;
+        }
+    }
+
+    std::vector<std::map<std::string, std::string>> sourceRows;
+    std::vector<std::map<std::string, std::string>> targetRows;
+    collectTableRows(s.currentDB, resolvedSource, sourceSchema, sourceRows);
+    collectTableRows(s.currentDB, resolvedTable, targetSchema, targetRows);
+
+    std::set<std::string> matchedTargets;
+    bool evaluationFailed = false;
+    for (const auto& targetValues : targetRows) {
+        for (const auto& sourceValues : sourceRows) {
+            if (stmt.whereClause) {
+                ExprEvaluator evaluator;
+                evaluator.setCurrentDB(s.currentDB);
+                const RowContext context = updateFromContext(
+                    targetValues, targetSchema, targetQualifier,
+                    sourceValues, sourceSchema, sourceQualifier);
+                const ExprValue predicate = evaluator.eval(stmt.whereClause.get(), context);
+                if (predicate.isUnknown() || predicate.typeName == "unknown") {
+                    evaluationFailed = true;
+                    break;
+                }
+                // DELETE ... USING follows normal SQL three-valued logic:
+                // NULL predicates do not select a target row.
+                if (predicate.isNull) continue;
+                if (predicate.typeName != "boolean") {
+                    evaluationFailed = true;
+                    break;
+                }
+                if (!predicate.asBool()) continue;
+            }
+            matchedTargets.insert(rowValueKey(targetValues));
+            break; // one matching source row is enough for DELETE.
+        }
+        if (evaluationFailed) break;
+    }
+    if (evaluationFailed) {
+        fallback = true;
+        return false;
+    }
+
+    std::vector<ReturningProjection> returningProjections;
+    if (!stmt.returning.empty() &&
+        !buildReturningProjections(stmt.returning, targetSchema, returningProjections)) {
+        fallback = true;
+        return false;
+    }
+    std::vector<std::map<std::string, std::string>> deletedRows;
+    const StorageEngine::DeleteMatcher deleteMatcher = [matchedTargets](
+        const std::map<std::string, std::string>& oldValues) {
+        return matchedTargets.find(rowValueKey(oldValues)) != matchedTargets.end();
+    };
+    const DBStatus status = g_engine.remove(
+        s.currentDB, resolvedTable, {},
+        stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher);
+    if (status != DBStatus::OK) {
+        std::cout << "DELETE USING failed" << std::endl;
+        return true;
+    }
+    std::cout << "Delete done" << std::endl;
+    if (!stmt.returning.empty()) {
+        if (!publishReturning(returningProjections, targetSchema, s.currentDB,
+                              deletedRows, "DELETE")) return true;
+        printReturningRows(g_lastDmlResult);
+    }
+    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    return false;
+}
+
 bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
+    if (stmt.usingClause) return executeDeleteUsing(stmt, s, fallback);
     fallback = false;
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
@@ -2150,7 +2284,7 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         error = executeUpdate(*stmt, s, fallback);
     } else {
         const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
-        if (!stmt || stmt->usingClause || stmt->only) return false;
+        if (!stmt || stmt->only) return false;
         error = executeDelete(*stmt, s, fallback);
     }
     if (fallback) {

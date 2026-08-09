@@ -12026,7 +12026,8 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
 DBStatus StorageEngine::remove(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::vector<std::string>& conditions,
-                                std::vector<std::map<std::string, std::string>>* deletedRows) {
+                                std::vector<std::map<std::string, std::string>>* deletedRows,
+                                const DeleteMatcher& deleteMatcher) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockIntentExclusive(tablename);
@@ -12041,6 +12042,25 @@ DBStatus StorageEngine::remove(const std::string& dbname,
 
     auto conds = parseConditions(allConditions);
     std::set<int64_t> toDelete = filterRows(dbname, tablename, conds);
+
+    // Structured DELETE ... USING performs the source-row match before this
+    // storage operation.  Keep the final target-row selection inside the
+    // storage boundary so RLS, row locks, FK actions, indexes and RETURNING
+    // continue to use the same delete path as ordinary DELETE.
+    if (deleteMatcher && !toDelete.empty()) {
+        std::set<int64_t> filteredIds;
+        for (int64_t rid : toDelete) {
+            std::string row;
+            if (!readRowByRid(pa, rid, row, tbl)) continue;
+            std::map<std::string, std::string> rowValues;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                rowValues[tbl.cols[i].dataName] =
+                    extractColumnValue(row, tbl, i, dbname, true);
+            }
+            if (deleteMatcher(rowValues)) filteredIds.insert(rid);
+        }
+        toDelete.swap(filteredIds);
+    }
 
     if (toDelete.empty()) {
         lockManager_.unlock(tablename);
