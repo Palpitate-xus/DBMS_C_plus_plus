@@ -19,7 +19,7 @@ SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议
 
 协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本及常用类型二进制参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换，numeric 采用 PostgreSQL base-10000 binary codec，date/time/秒精度 timestamp/timestamptz/uuid 也支持 binary 参数与结果，Describe/Close 会校验并管理 statement/portal 生命周期，Execute 支持基础 `maxRows` 分批返回与 `PortalSuspended`，常见单表结果填充 catalog/table schema 驱动的 RowDescription 元数据；数组等复杂类型的二进制 I/O、完整 RowDescription 类型推导和 holdable/scrollable cursor 等完整 portal 语义仍列为协议缺口。
 
-ACL 检查已统一覆盖会话用户、递归继承角色、`PUBLIC` 和表 owner 隐含权限；`NOINHERIT` 不自动继承成员角色权限，`SET ROLE` 使用原始成员关系并切换 ACL/RLS 的有效角色；`ALTER TABLE ... OWNER TO` 已检查表所有者和目标角色可切换性，表 owner 可执行表级 GRANT/REVOKE；角色 ADMIN OPTION 已接入授权/升级/撤销。完整对象 owner、`GRANT OPTION` 继承/回收以及 schema/database/function ACL 仍列为后续安全缺口。
+ACL 检查已统一覆盖会话用户、递归继承角色、`PUBLIC` 和表 owner 隐含权限；`NOINHERIT` 不自动继承成员角色权限，`SET ROLE` 使用原始成员关系并切换 ACL/RLS 的有效角色；`ALTER TABLE ... OWNER TO` 已检查表所有者和目标角色可切换性，表 owner 可执行表级 GRANT/REVOKE；角色 ADMIN OPTION 和表级 GRANT OPTION 的基础授权/撤销/级联已接入。完整对象 owner、ACL item 继承和 schema/database/function ACL 仍列为后续安全缺口。
 
 事务运行时补强了 backend 隔离：共享 `StorageEngine` 的事务执行上下文改为当前连接工作线程局部，避免事务 ID、快照、回滚日志、savepoint、隔离级别和 `lastval` 在连接之间泄漏；连接结束时回滚未完成事务并清理上下文；跨 backend 的锁管理和提交状态仍保持全局协调，后续继续补齐更完整的 session/statement 生命周期语义。
 
@@ -727,7 +727,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 7.3 实现 SCRAM-SHA-256 认证 | 11.2 | 已实现 nonce、salt、PBKDF2、client proof/server signature、catalog 凭据和协议 E2E；仍缺 channel binding 与完整 SASL 语义 |
 | 🔄 7.4 实现 OAuth（PG18）、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 11.2 | 部分方法仅有配置解析或接口骨架，尚无可验收的端到端认证实现 |
 | 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |
-| 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | PUBLIC、表/列 grant option、表 owner 和角色 ADMIN OPTION 基础路径已有，ACL item、目录持久化和完整继承语义仍需补齐 |
+| 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | PUBLIC、表/列 grant option（含独立撤销与基础 RESTRICT/CASCADE）、表 owner 和角色 ADMIN OPTION 基础路径已有，ACL item、目录持久化和完整继承语义仍需补齐 |
 | 🔄 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | 解析路径已有，默认权限的完整 catalog/executor 语义仍需验证 |
 | 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING/WITH CHECK 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、`SUPERUSER/BYPASSRLS` 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、求值失败安全回退；对象 owner/角色继承和 ACL 组合语义仍不完整 |
 | 🔄 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | 语法支持已有，执行时安全边界仍需补齐 |

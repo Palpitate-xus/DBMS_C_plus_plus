@@ -625,7 +625,7 @@ def main():
         assert any(kind == b"E" and b"C21000\x00" in body
                    for kind, body in scalar_multi_messages), scalar_multi_messages
         assert any(kind == b"C" for kind, _ in simple_query(
-            sock, "GRANT SELECT ON t TO analyst"))
+            sock, "GRANT SELECT ON t TO analyst WITH GRANT OPTION"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE portal_t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(
@@ -838,6 +838,10 @@ def main():
             role_sock, "GRANT analyst TO carol WITH ADMIN OPTION"))
         assert any(kind == b"C" for kind, _ in simple_query(
             role_sock, "REVOKE ADMIN OPTION FOR analyst FROM carol"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            role_sock, "GRANT SELECT ON t TO carol WITH GRANT OPTION"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            role_sock, "REVOKE GRANT OPTION FOR SELECT ON t FROM carol"))
         denied_rows = simple_query(role_sock, "INSERT INTO t VALUES (99)")
         assert any(kind == b"E" for kind, _ in denied_rows)
         role_sock.sendall(typed(b"X"))

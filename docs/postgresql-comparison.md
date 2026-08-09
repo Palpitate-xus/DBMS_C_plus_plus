@@ -7,7 +7,7 @@
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
-ACL 回归现已覆盖表/列权限对会话用户、递归继承角色和 `PUBLIC` 的解析；`NOINHERIT` 会话角色不会自动获得成员角色权限，原始成员关系与有效权限关系已分开；角色授权可通过真实 PostgreSQL 协议生效。表 owner 已进入正式 schema/`pg_class.relowner`，并参与 RLS owner bypass；完整 ACL 对象范围、对象 owner 传播及 `GRANT OPTION` 生命周期仍未达到 PostgreSQL 语义。
+ACL 回归现已覆盖表/列权限对会话用户、递归继承角色和 `PUBLIC` 的解析；`NOINHERIT` 会话角色不会自动获得成员角色权限，原始成员关系与有效权限关系已分开；角色授权可通过真实 PostgreSQL 协议生效。表 owner 已进入正式 schema/`pg_class.relowner`，并参与 RLS owner bypass；表级 `GRANT OPTION` 已支持独立撤销和基础授权链 `RESTRICT/CASCADE`，完整 ACL 对象范围和对象 owner 传播仍未达到 PostgreSQL 语义。
 
 所有权授权回归已覆盖：非所有者即使带有旧式管理员标志也不能转移表所有权；所有者只有在能够 `SET ROLE` 到目标角色时才能转移；`SET ROLE` 使用成员关系而不是 `rolinherit`，切换后的有效角色用于 `current_user`、RLS 和表 ACL。表 owner 的隐含表/列权限和 `GRANT OPTION` 已进入统一 ACL 查询；完整对象类型 owner/ACL 传播仍有差距。
 
@@ -272,7 +272,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|-------|---------|------|
 | pg_hba.conf | ✅ | 🔄 | 首条匹配、hostssl/hostnossl、IPv4/IPv6 CIDR、角色/数据库别名和运行时 SCRAM 已实现；其余认证方法仍缺 |
 | 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、主要角色属性、SCRAM、递归成员匹配、INHERIT/NOINHERIT、SET ROLE、角色 ADMIN OPTION、有效期检查和连接数限制已接入；完整 ACL、owner/依赖语义仍缺 |
-| GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 表/列 ACL、PUBLIC、有效角色、表 owner 和角色 ADMIN OPTION 基础语义已执行；ACL item、完整 ADMIN/GRANT OPTION 生命周期及对象全集仍缺 |
+| GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 表/列 ACL、PUBLIC、有效角色、表 owner、角色 ADMIN OPTION 和表级 GRANT OPTION 基础撤销/级联已执行；ACL item、完整 ADMIN/GRANT OPTION 生命周期及对象全集仍缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
 | **行级安全 (RLS) 执行** | ✅ | ⚠️ | USING/WITH CHECK 已接入关系感知扫描，默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner/`SUPERUSER/BYPASSRLS` 绕过、有效角色和 FORCE RLS 已实现；无适用策略默认拒绝、策略求值失败安全回退；对象 owner/ACL 组合语义仍不完整 |
 | **SCRAM-SHA-256 完整协议** | ✅ | 🔄 | 已实现 catalog verifier、challenge/response、pg_hba 运行时决策和 E2E；缺 channel binding 与完整 SASL 语义 |

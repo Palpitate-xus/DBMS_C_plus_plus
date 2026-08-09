@@ -21,6 +21,7 @@
 | 2026-08-09 | 会话角色边界收敛：SET ROLE 不再接受任意字符串，按原始成员关系授权；SET ROLE 后 `current_user`、RLS、DML ACL 和 CREATE TABLE owner 使用有效角色，超级用户切换到普通角色后不再保留管理员绕过。 |
 | 2026-08-09 | 表 owner ACL 收敛：owner 在统一权限查询中获得隐含表/列权限和 `GRANT OPTION`，表级 REVOKE 使用相同授权判定；schema/database/function ACL 和完整 ACL item 生命周期仍待后续。 |
 | 2026-08-09 | 角色 ADMIN OPTION 收敛：`GRANT role TO member WITH ADMIN OPTION` 支持授权与重复关系升级，`REVOKE ADMIN OPTION FOR` 支持只撤销管理员选项；授权按超级用户、CREATEROLE 或现有 ADMIN OPTION 检查。完整级联和 grantor 生命周期仍待后续。 |
+| 2026-08-09 | 表级 GRANT OPTION 收敛：支持 `REVOKE GRANT OPTION FOR`，整表 grant marker 正确保留基础权限；授权链记录实际 grantor，`RESTRICT` 拒绝存在下游授权，`CASCADE` 递归撤销并清理链路。完整 ACL item 和对象全集仍待后续。 |
 | 2026-08-09 | RLS 绕过边界收敛：删除用户名 `admin` 硬编码，改由 `pg_authid.rolsuper`/`rolbypassrls` 决定普通 RLS 绕过；`FORCE ROW LEVEL SECURITY` 优先强制策略，新增普通角色、超级用户、BYPASSRLS 和 FORCE 回归。 |
 | 2026-08-09 | 角色继承边界收敛：ACL/RLS 使用有效继承权限，`NOINHERIT` 会话角色不自动获得成员角色权限；原始成员关系独立供 `pg_hba.conf` 角色匹配和成员环检测使用，并新增 ACL/RLS 回归。 |
 | 2026-08-09 | RLS 语义补强：策略默认按 permissive OR 组合，`AS RESTRICTIVE` 按 AND 组合；显式 `TO PUBLIC` 与空角色列表统一匹配 PUBLIC；`ALL/UPDATE` 省略 `WITH CHECK` 时继承 `USING`；策略文件写入统一复用序列化 helper，并增加运行时回归。完整 owner/ACL 组合仍待后续。 |
@@ -273,7 +274,7 @@
 | 1.1.37 | `DROP ...` 常见对象 | table/database/view/mview/index/trigger/user/role/group/schema/domain/type/sequence/function/procedure 等部分；缺少依赖图、`CASCADE/RESTRICT` 精确行为、`IF EXISTS`/多对象列表完整支持 | ⚠️ |
 | 1.1.38 | `END` | 已作为 `COMMIT` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
 | 1.1.39 | `EXPLAIN` | 只面向 SELECT 的简化计划；缺少真实 runtime instrumentation、JIT/WAL/BUFFERS/SETTINGS 完整输出和所有语句支持 | ⚠️ |
-| 1.1.40 | `GRANT` / `REVOKE` | 支持有限 privilege 和列权限；表/列 ACL 已支持会话用户、PUBLIC、有效角色继承和表 owner 隐含权限，表 owner 可执行表级 REVOKE；角色 ADMIN OPTION 支持授权、升级和撤销；缺少 PostgreSQL ACL item、set option、对象类型全集、默认权限联动 | ⚠️ |
+| 1.1.40 | `GRANT` / `REVOKE` | 支持有限 privilege 和列权限；表/列 ACL 已支持会话用户、PUBLIC、有效角色继承和表 owner 隐含权限，表 owner 可执行表级 REVOKE；表级 GRANT OPTION 支持独立撤销、RESTRICT/CASCADE 授权链；角色 ADMIN OPTION 支持授权、升级和撤销；缺少 PostgreSQL ACL item、set option、对象类型全集、默认权限联动 | ⚠️ |
 | 1.1.41 | `INSERT` | 支持 values、insert-select、无 target 或显式匹配主键/唯一约束 target 的 DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、returning 部分；缺少 `OVERRIDING`、部分/索引推断、引用子查询或其他关系的 DO UPDATE/WHERE、RETURNING OLD/NEW | ⚠️ |
 | 1.1.42 | `LISTEN` / `NOTIFY` / `UNLISTEN` | 进程内 map；缺少事务提交后发送、payload 长度/通道语义、跨进程持久服务语义 | ⚠️ |
 | 1.1.43 | `LOCK` | 支持 share/exclusive；缺少 PG 全锁模式、`NOWAIT`、`ONLY`、锁队列/冲突矩阵 | ⚠️ |
@@ -501,7 +502,7 @@
 | 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配、IPv4/IPv6 及角色/数据库匹配和 TLS；缺少 OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
 | 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果和常见单表 RowDescription 元数据；缺少数组等复杂类型 I/O、扩展消息、holdable/scrollable portal 和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
-| 11.5 | ACL | 简化 privilege 文件；表/列权限已统一解析 PUBLIC、有效角色和表 owner 隐含权限，OWNER TO/SET ROLE/表级 REVOKE/角色 ADMIN OPTION 基础授权边界已接入；缺少 ACL item、grant options 完整生命周期、set options、对象全集和 default privileges 完整传播 | ⚠️ |
+| 11.5 | ACL | 简化 privilege 文件；表/列权限已统一解析 PUBLIC、有效角色和表 owner 隐含权限，OWNER TO/SET ROLE/表级 REVOKE、表级 GRANT OPTION 独立撤销与 RESTRICT/CASCADE 授权链、角色 ADMIN OPTION 基础授权边界已接入；缺少 ACL item、grant options 完整生命周期、set options、对象全集和 default privileges 完整传播 | ⚠️ |
 | 11.6 | RLS | policy 文件和 USING/WITH CHECK 关系感知扫描已接入查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、INHERIT/NOINHERIT、表 owner、`pg_authid` 的 SUPERUSER/BYPASSRLS 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、策略求值失败 fail-closed；完整 owner 解析和 ACL 组合语义仍缺 | ⚠️ |
 | 11.7 | SECURITY DEFINER/INVOKER | 函数/过程缺少完整 security definer/invoker、search_path 安全规则 | ❌ |
 | 11.8 | 审计 | 项目有 audit log；PG 核心不内置同等 audit，通常靠扩展 | — |

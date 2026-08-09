@@ -14517,6 +14517,11 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         string privPart = trim(rest.substr(0, onPos));
+        bool grantOptionOnly = false;
+        if (privPart.rfind("grant option for ", 0) == 0) {
+            grantOptionOnly = true;
+            privPart = trim(privPart.substr(17));
+        }
         string onPart = trim(rest.substr(onPos + 4, fromPos - onPos - 4));
         string afterFrom = trim(rest.substr(fromPos + 6));
         bool cascade = false;
@@ -14584,7 +14589,11 @@ bool execute(const string& rawSql, Session& s) {
                  << privStr << " on " << tname << endl;
             return true;
         }
-        g_engine.revoke(s.currentDB, tname, uname, priv, colList, cascade);
+        if (!g_engine.revoke(s.currentDB, tname, uname, priv, colList, cascade,
+                             grantOptionOnly)) {
+            cout << "REVOKE failed: dependent grants require CASCADE" << endl;
+            return true;
+        }
         string scope;
         if (tname == "*") scope = "database " + s.currentDB;
         else if (objectType == "schema") scope = "schema " + onPart.substr(7);
@@ -14598,9 +14607,11 @@ bool execute(const string& rawSql, Session& s) {
                 if (i > 0) cols += ",";
                 cols += colList[i];
             }
-            cout << "Revoked " << privStr << "(" << cols << ") on " << scope << " from " << uname << casStr << endl;
+            cout << "Revoked " << (grantOptionOnly ? "GRANT OPTION FOR " : "")
+                 << privStr << "(" << cols << ") on " << scope << " from " << uname << casStr << endl;
         } else {
-            cout << "Revoked " << privStr << " on " << scope << " from " << uname << casStr << endl;
+            cout << "Revoked " << (grantOptionOnly ? "GRANT OPTION FOR " : "")
+                 << privStr << " on " << scope << " from " << uname << casStr << endl;
         }
         return false;
     }

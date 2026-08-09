@@ -867,6 +867,7 @@ GRANT readonly TO alice WITH ADMIN OPTION;
 **语法**
 ```sql
 REVOKE privilege [(column1, column2, ...)] ON table_name FROM user_name
+REVOKE GRANT OPTION FOR privilege [(column1, column2, ...)] ON table_name FROM user_name [CASCADE]
 REVOKE role_name FROM user_name
 REVOKE ADMIN OPTION FOR role_name FROM user_name
 ```
@@ -875,6 +876,7 @@ REVOKE ADMIN OPTION FOR role_name FROM user_name
 ```sql
 REVOKE INSERT ON orders FROM alice;
 REVOKE ALL ON users FROM readonly_user;
+REVOKE GRANT OPTION FOR SELECT ON users FROM alice CASCADE;
 REVOKE readonly FROM alice;
 REVOKE ADMIN OPTION FOR readonly FROM alice;
 ```

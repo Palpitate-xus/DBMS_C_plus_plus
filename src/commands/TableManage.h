@@ -805,10 +805,11 @@ public:
                const std::vector<std::string>& columns = {},
                bool withGrantOption = false,
                const std::string& grantedBy = "");
-    void revoke(const std::string& dbname, const std::string& tablename,
+    bool revoke(const std::string& dbname, const std::string& tablename,
                 const std::string& username, TablePrivilege priv,
                 const std::vector<std::string>& columns = {},
-                bool cascade = false);
+                bool cascade = false,
+                bool grantOptionOnly = false);
     bool hasPermission(const std::string& dbname, const std::string& tablename,
                        const std::string& username, TablePrivilege priv) const;
     bool hasGrantOption(const std::string& dbname, const std::string& tablename,

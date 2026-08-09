@@ -363,6 +363,35 @@ static void test_rls_visible_source_scan() {
         [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
     assert(visible == 0);
 
+    // GRANT OPTION is a separate ACL bit: removing it keeps the upstream
+    // privilege, while CASCADE removes privileges granted downstream.
+    g_engine.grant(db, "policy_owner", inheritedParentName,
+                   dbms::StorageEngine::TablePrivilege::Select, {}, true, ownerName);
+    g_engine.grant(db, "policy_owner", bypassName,
+                   dbms::StorageEngine::TablePrivilege::Select, {}, false,
+                   inheritedParentName);
+    assert(g_engine.hasPermission(
+        db, "policy_owner", bypassName,
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(g_engine.hasGrantOption(
+        db, "policy_owner", inheritedParentName,
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(!g_engine.revoke(
+        db, "policy_owner", inheritedParentName,
+        dbms::StorageEngine::TablePrivilege::Select, {}, false, true));
+    assert(g_engine.revoke(
+        db, "policy_owner", inheritedParentName,
+        dbms::StorageEngine::TablePrivilege::Select, {}, true, true));
+    assert(g_engine.hasPermission(
+        db, "policy_owner", inheritedParentName,
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(!g_engine.hasGrantOption(
+        db, "policy_owner", inheritedParentName,
+        dbms::StorageEngine::TablePrivilege::Select));
+    assert(!g_engine.hasPermission(
+        db, "policy_owner", bypassName,
+        dbms::StorageEngine::TablePrivilege::Select));
+
     Session unauthorizedOwnerChange = ownerSession;
     unauthorizedOwnerChange.username = regularName;
     unauthorizedOwnerChange.permission = 1;

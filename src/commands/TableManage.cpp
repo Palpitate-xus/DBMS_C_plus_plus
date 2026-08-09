@@ -19994,19 +19994,61 @@ void StorageEngine::grant(const std::string& dbname, const std::string& tablenam
         if (!kv.second.empty()) ofs << " " << joinColumns(std::vector<std::string>(kv.second.begin(), kv.second.end()));
         ofs << "\n";
     }
-    // Record grant chain when withGrantOption is used and granter is known
-    if (withGrantOption && !grantedBy.empty()) {
+    // Record every explicit grant when the grantor is known.  PostgreSQL's
+    // CASCADE semantics must be able to follow grants made without GRANT
+    // OPTION as well: removing a grant option from the upstream grantor can
+    // invalidate those downstream grants.
+    if (!grantedBy.empty()) {
         auto gcp = grantChainPath(dbPath(dbname));
-        std::ofstream gcfs(gcp, std::ios::app);
-        gcfs << username << " " << tablename << " " << privToStr(priv) << " " << grantedBy << "\n";
+        bool exists = false;
+        if (std::filesystem::exists(gcp)) {
+            std::ifstream ifs(gcp);
+            std::string line;
+            while (std::getline(ifs, line)) {
+                std::stringstream ss(line);
+                std::string grantee, object, privilege, grantor;
+                ss >> grantee >> object >> privilege >> grantor;
+                if (grantee == username && object == tablename &&
+                    privilege == privToStr(priv) && grantor == grantedBy) {
+                    exists = true;
+                    break;
+                }
+            }
+        }
+        if (!exists) {
+            std::ofstream gcfs(gcp, std::ios::app);
+            gcfs << username << " " << tablename << " " << privToStr(priv)
+                 << " " << grantedBy << "\n";
+        }
     }
 }
 
-void StorageEngine::revoke(const std::string& dbname, const std::string& tablename,
+bool StorageEngine::revoke(const std::string& dbname, const std::string& tablename,
                            const std::string& username, TablePrivilege priv,
-                           const std::vector<std::string>& columns, bool cascade) {
+                           const std::vector<std::string>& columns, bool cascade,
+                           bool grantOptionOnly) {
     auto ppath = permPath(dbname);
-    if (!std::filesystem::exists(ppath)) return;
+    const auto gcp = grantChainPath(dbPath(dbname));
+    std::vector<std::string> chainLines;
+    if (std::filesystem::exists(gcp)) {
+        std::ifstream ifs(gcp);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (!line.empty()) chainLines.push_back(line);
+        }
+    }
+    std::vector<std::tuple<std::string, std::string, std::string>> downstream;
+    for (const auto& line : chainLines) {
+        std::stringstream ss(line);
+        std::string grantee, object, privilege, grantor;
+        ss >> grantee >> object >> privilege >> grantor;
+        if (grantor == username && object == tablename &&
+            privilege == privToStr(priv)) {
+            downstream.emplace_back(grantee, object, privilege);
+        }
+    }
+    if (!cascade && !downstream.empty()) return false;
+    if (!std::filesystem::exists(ppath)) return true;
     std::map<std::string, std::set<std::string>> perms;
     {
         std::ifstream ifs(ppath);
@@ -20030,9 +20072,22 @@ void StorageEngine::revoke(const std::string& dbname, const std::string& tablena
     auto it = perms.find(key);
     if (it != perms.end()) {
         if (columns.empty()) {
-            perms.erase(it); // revoke entire privilege
+            if (grantOptionOnly) {
+                it->second.erase(GRANT_OPTION_MARK);
+                // An empty set is the canonical representation of a
+                // table-level privilege, so keep it when the grant option
+                // is removed from a table-level grant.  Column-scoped
+                // grants with no remaining columns disappear.
+                if (it->second.empty() && !columns.empty()) perms.erase(it);
+            } else {
+                perms.erase(it); // revoke entire privilege
+            }
         } else {
-            for (const auto& c : columns) it->second.erase(c);
+            if (grantOptionOnly) {
+                it->second.erase(GRANT_OPTION_MARK);
+            } else {
+                for (const auto& c : columns) it->second.erase(c);
+            }
             if (it->second.empty()) perms.erase(it);
         }
     }
@@ -20050,46 +20105,47 @@ void StorageEngine::revoke(const std::string& dbname, const std::string& tablena
         }
     }
 
+    // A fully revoked privilege no longer has a valid upstream grant chain.
+    // Keep the chain when only GRANT OPTION is removed, because the base
+    // privilege itself remains valid.
+    if (!grantOptionOnly) {
+        std::vector<std::string> remaining;
+        for (const auto& line : chainLines) {
+            std::stringstream ss(line);
+            std::string grantee, object, privilege, grantor;
+            ss >> grantee >> object >> privilege >> grantor;
+            if (grantee == username && object == tablename &&
+                privilege == privToStr(priv)) continue;
+            remaining.push_back(line);
+        }
+        chainLines.swap(remaining);
+    }
+
+    if (!chainLines.empty()) {
+        std::ofstream ofs(gcp);
+        for (const auto& line : chainLines) ofs << line << "\n";
+    } else if (std::filesystem::exists(gcp)) {
+        std::error_code ec;
+        std::filesystem::remove(gcp, ec);
+    }
+
     // CASCADE: recursively revoke from users who received this privilege via the revoked user
     if (cascade) {
-        auto gcp = grantChainPath(dbPath(dbname));
-        if (std::filesystem::exists(gcp)) {
-            std::vector<std::tuple<std::string, std::string, std::string>> chains; // grantee, obj, priv
-            {
-                std::ifstream ifs(gcp);
-                std::string line;
-                while (std::getline(ifs, line)) {
-                    if (line.empty()) continue;
-                    std::stringstream ss(line);
-                    std::string gee, obj, pr, grter;
-                    ss >> gee >> obj >> pr >> grter;
-                    if (grter == username && obj == tablename && pr == privToStr(priv)) {
-                        chains.emplace_back(gee, obj, pr);
-                    }
-                }
-            }
-            // Remove matching grant-chain entries
-            {
-                std::ifstream ifs(gcp);
-                std::vector<std::string> remaining;
-                std::string line;
-                while (std::getline(ifs, line)) {
-                    if (line.empty()) continue;
-                    std::stringstream ss(line);
-                    std::string gee, obj, pr, grter;
-                    ss >> gee >> obj >> pr >> grter;
-                    bool match = (grter == username && obj == tablename && pr == privToStr(priv));
-                    if (!match) remaining.push_back(line);
-                }
-                std::ofstream ofs(gcp);
-                for (const auto& r : remaining) ofs << r << "\n";
-            }
-            // Recursively revoke from downstream grantees
-            for (const auto& ch : chains) {
-                revoke(dbname, std::get<1>(ch), std::get<0>(ch), priv, {}, true);
-            }
+        std::vector<std::string> remaining;
+        for (const auto& line : chainLines) {
+            std::stringstream ss(line);
+            std::string grantee, object, privilege, grantor;
+            ss >> grantee >> object >> privilege >> grantor;
+            if (grantor == username && object == tablename &&
+                privilege == privToStr(priv)) continue;
+            remaining.push_back(line);
+        }
+        chainLines.swap(remaining);
+        for (const auto& ch : downstream) {
+            revoke(dbname, std::get<1>(ch), std::get<0>(ch), priv, {}, true);
         }
     }
+    return true;
 }
 
 bool StorageEngine::hasPermission(const std::string& dbname, const std::string& tablename,
@@ -20171,9 +20227,18 @@ bool StorageEngine::hasColumnPermission(const std::string& dbname, const std::st
             if (p == target) {
                 if (cols.empty()) hasTableLevel = true;
                 else {
+                    bool hasGrantMarker = false;
+                    bool hasColumn = false;
                     for (const auto& c : parseColumns(cols)) {
-                        if (c != GRANT_OPTION_MARK) allowedCols.insert(c);
+                        if (c == GRANT_OPTION_MARK) hasGrantMarker = true;
+                        else {
+                            hasColumn = true;
+                            allowedCols.insert(c);
+                        }
                     }
+                    // A table-level grant with GRANT OPTION is serialized as
+                    // the marker alone and still applies to every column.
+                    if (hasGrantMarker && !hasColumn) hasTableLevel = true;
                 }
             }
         }
