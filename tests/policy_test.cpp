@@ -242,6 +242,7 @@ static void test_rls_visible_source_scan() {
     roleMembership.roleid = inheritedParent->oid;
     roleMembership.member = noinheritMember->oid;
     roleMembership.grantor = inheritedParent->oid;
+    roleMembership.admin_option = false;
     auth.removeAuthMember(inheritedParent->oid, noinheritMember->oid);
     auth.addAuthMember(roleMembership);
     auth.persistAll();
@@ -249,6 +250,16 @@ static void test_rls_visible_source_scan() {
     assert(userIsMemberOfRole(noinheritMemberName, inheritedParentName));
     assert(!userHasRole(noinheritMemberName, inheritedParentName));
     assert(canSetRole(noinheritMemberName, inheritedParentName));
+    assert(!hasRoleAdminOption(inheritedParentName, noinheritMemberName));
+    assert(grantRoleToUser(inheritedParentName, noinheritMemberName, true,
+                           noinheritMemberName) == 0);
+    assert(hasRoleAdminOption(inheritedParentName, noinheritMemberName));
+    const auto adminRelations = auth.findAuthMemberships(noinheritMember->oid);
+    assert(adminRelations.size() == 1);
+    assert(adminRelations[0].grantor == noinheritMember->oid);
+    assert(grantRoleToUser(inheritedParentName, noinheritMemberName) == -2);
+    assert(revokeRoleAdminOption(inheritedParentName, noinheritMemberName));
+    assert(!hasRoleAdminOption(inheritedParentName, noinheritMemberName));
     assert(!ddl.executeSql("CREATE TABLE inherited_acl (id INT PRIMARY KEY)", s));
     g_engine.grant(db, "inherited_acl", inheritedParentName,
                    dbms::StorageEngine::TablePrivilege::Select);

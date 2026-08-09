@@ -166,6 +166,7 @@ public:
     std::vector<PgAuthIdRow> listAuthIds() const;
 
     void addAuthMember(const PgAuthMembersRow& row);
+    bool updateAuthMember(Oid oid, const PgAuthMembersRow& row);
     std::vector<PgAuthMembersRow> findAuthMembers(Oid roleid) const;
     std::vector<PgAuthMembersRow> findAuthMemberships(Oid member) const;
     bool removeAuthMember(Oid roleid, Oid member);

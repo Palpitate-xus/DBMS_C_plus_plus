@@ -683,6 +683,15 @@ void CatalogManager::addAuthMember(const PgAuthMembersRow& row) {
     authMemberByOid_[r.oid] = idx;
 }
 
+bool CatalogManager::updateAuthMember(Oid oid, const PgAuthMembersRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = authMemberByOid_.find(oid);
+    if (it == authMemberByOid_.end() || it->second >= authMembers_.size()) return false;
+    authMembers_[it->second] = row;
+    authMembers_[it->second].oid = oid;
+    return true;
+}
+
 std::vector<PgAuthMembersRow> CatalogManager::findAuthMembers(Oid roleid) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<PgAuthMembersRow> result;

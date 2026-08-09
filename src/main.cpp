@@ -7436,7 +7436,9 @@ static bool handleCreateGroup(const string& sql, Session& s) {
         string userList = trim(rest.substr(userPos + 4));
         for (auto userName : splitTopLevelComma(userList)) {
             userName = stripQuotes(trim(userName));
-            if (!userName.empty()) grantRoleToUser(groupName, userName);
+            if (!userName.empty()) {
+                grantRoleToUser(groupName, userName, false, effectiveSessionRole(s));
+            }
         }
     }
     cout << "CREATE GROUP succeeded" << endl;
@@ -7482,7 +7484,7 @@ static bool handleAlterGroup(const string& sql, Session& s) {
         userName = stripQuotes(trim(userName));
         if (userName.empty()) continue;
         if (addUser) {
-            int grantRes = grantRoleToUser(groupName, userName);
+            int grantRes = grantRoleToUser(groupName, userName, false, effectiveSessionRole(s));
             if (grantRes == 0) ++changed;
         } else {
             if (revokeRoleFromUser(groupName, userName)) ++changed;
@@ -14342,11 +14344,26 @@ bool execute(const string& rawSql, Session& s) {
         size_t onPos = rest.find(" on ");
         size_t toPos = rest.find(" to ");
         if (onPos == string::npos && toPos != string::npos) {
-            if (!checkAdmin(s)) return true;
             // GRANT role_name TO user_name
             string roleName = trim(rest.substr(0, toPos));
-            string username = trim(rest.substr(toPos + 4));
-            int res = grantRoleToUser(roleName, username);
+            string afterTo = trim(rest.substr(toPos + 4));
+            bool adminOption = false;
+            size_t adminPos = afterTo.find("with admin option");
+            if (adminPos != string::npos) {
+                adminOption = true;
+                afterTo = trim(afterTo.substr(0, adminPos));
+            }
+            string username = afterTo;
+            const string grantor = effectiveSessionRole(s);
+            const auto grantorAccount = authCatalog().getAuthIdByName(grantor);
+            const bool canGrantRole = sessionIsAdmin(s) ||
+                                      (grantorAccount && grantorAccount->rolcreaterole) ||
+                                      hasRoleAdminOption(roleName, grantor);
+            if (!canGrantRole) {
+                cout << "permission denied to grant role " << roleName << endl;
+                return true;
+            }
+            int res = grantRoleToUser(roleName, username, adminOption, grantor);
             if (res == -1) {
                 cout << "error: role does not exist" << endl;
                 return true;
@@ -14359,7 +14376,8 @@ bool execute(const string& rawSql, Session& s) {
                 cout << "error: cannot grant role due to invalid membership or role cycle" << endl;
                 return true;
             }
-            cout << "Granted role " << roleName << " to " << username << endl;
+            cout << "Granted role " << roleName << " to " << username
+                 << (adminOption ? " WITH ADMIN OPTION" : "") << endl;
             return false;
         }
         if (onPos == string::npos || toPos == string::npos) {
@@ -14466,14 +14484,32 @@ bool execute(const string& rawSql, Session& s) {
         size_t fromPos = rest.find(" from ");
         if (onPos == string::npos && fromPos != string::npos) {
             // REVOKE role_name FROM user_name
-            if (!checkAdmin(s)) return true;
-            string roleName = trim(rest.substr(0, fromPos));
+            string rolePart = trim(rest.substr(0, fromPos));
+            bool adminOnly = false;
+            if (rolePart.rfind("admin option for ", 0) == 0) {
+                adminOnly = true;
+                rolePart = trim(rolePart.substr(17));
+            }
+            string roleName = rolePart;
             string username = trim(rest.substr(fromPos + 6));
-            if (!revokeRoleFromUser(roleName, username)) {
+            const string grantor = effectiveSessionRole(s);
+            const auto grantorAccount = authCatalog().getAuthIdByName(grantor);
+            const bool canRevokeRole = sessionIsAdmin(s) ||
+                                       (grantorAccount && grantorAccount->rolcreaterole) ||
+                                       hasRoleAdminOption(roleName, grantor);
+            if (!canRevokeRole) {
+                cout << "permission denied to revoke role " << roleName << endl;
+                return true;
+            }
+            const bool changed = adminOnly
+                                     ? revokeRoleAdminOption(roleName, username)
+                                     : revokeRoleFromUser(roleName, username);
+            if (!changed) {
                 cout << "error: role not granted to user" << endl;
                 return true;
             }
-            cout << "Revoked role " << roleName << " from " << username << endl;
+            cout << (adminOnly ? "Revoked ADMIN OPTION FOR role " : "Revoked role ")
+                 << roleName << " from " << username << endl;
             return false;
         }
         if (onPos == string::npos || fromPos == string::npos) {

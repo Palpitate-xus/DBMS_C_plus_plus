@@ -94,18 +94,33 @@ bool dropRole(const std::string& roleName) {
     return ok;
 }
 
-int grantRoleToUser(const std::string& roleName, const std::string& username) {
+int grantRoleToUser(const std::string& roleName, const std::string& username,
+                    bool adminOption, const std::string& grantorName) {
     const auto role = authByName(roleName);
     const auto member = authByName(username);
     if (!role || !member) return -1;
+    dbms::Oid grantorOid = role->oid;
+    if (!grantorName.empty()) {
+        const auto grantor = authByName(grantorName);
+        if (!grantor) return -1;
+        grantorOid = grantor->oid;
+    }
     if (role->oid == member->oid || userIsMemberOfRole(roleName, username)) return -3;
     for (const auto& relation : authCatalog().findAuthMembers(role->oid)) {
-        if (relation.member == member->oid) return -2;
+        if (relation.member != member->oid) continue;
+        if (!adminOption || relation.admin_option) return -2;
+        auto upgraded = relation;
+        upgraded.admin_option = true;
+        upgraded.grantor = grantorOid;
+        if (!authCatalog().updateAuthMember(relation.oid, upgraded)) return -1;
+        persistAuthCatalog();
+        return 0;
     }
     dbms::PgAuthMembersRow relation;
     relation.roleid = role->oid;
     relation.member = member->oid;
-    relation.grantor = role->oid;
+    relation.grantor = grantorOid;
+    relation.admin_option = adminOption;
     authCatalog().addAuthMember(relation);
     persistAuthCatalog();
     return 0;
@@ -118,6 +133,31 @@ bool revokeRoleFromUser(const std::string& roleName, const std::string& username
     const bool ok = authCatalog().removeAuthMember(role->oid, member->oid);
     if (ok) persistAuthCatalog();
     return ok;
+}
+
+bool revokeRoleAdminOption(const std::string& roleName, const std::string& username) {
+    const auto role = authByName(roleName);
+    const auto member = authByName(username);
+    if (!role || !member) return false;
+    for (const auto& relation : authCatalog().findAuthMembers(role->oid)) {
+        if (relation.member != member->oid || !relation.admin_option) continue;
+        auto updated = relation;
+        updated.admin_option = false;
+        const bool ok = authCatalog().updateAuthMember(relation.oid, updated);
+        if (ok) persistAuthCatalog();
+        return ok;
+    }
+    return false;
+}
+
+bool hasRoleAdminOption(const std::string& roleName, const std::string& grantorName) {
+    const auto role = authByName(roleName);
+    const auto grantor = authByName(grantorName);
+    if (!role || !grantor) return false;
+    for (const auto& relation : authCatalog().findAuthMembers(role->oid)) {
+        if (relation.member == grantor->oid && relation.admin_option) return true;
+    }
+    return false;
 }
 
 std::vector<std::string> getUserRoles(const std::string& username) {

@@ -414,6 +414,10 @@ def main():
             sock, "CREATE USER bob WITH PASSWORD 'bObPass9!'"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "GRANT analyst TO bob"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "GRANT analyst TO bob WITH ADMIN OPTION"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE USER carol WITH PASSWORD 'cArolPass9!'"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
         assert any(kind == b"C" for kind, _ in simple_query(
@@ -830,6 +834,10 @@ def main():
         startup(role_sock, "bob", "info", password="bObPass9!")
         role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
         assert role_rows == [[b"1"], [b"3"], [b"20"]], role_rows
+        assert any(kind == b"C" for kind, _ in simple_query(
+            role_sock, "GRANT analyst TO carol WITH ADMIN OPTION"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            role_sock, "REVOKE ADMIN OPTION FOR analyst FROM carol"))
         denied_rows = simple_query(role_sock, "INSERT INTO t VALUES (99)")
         assert any(kind == b"E" for kind, _ in denied_rows)
         role_sock.sendall(typed(b"X"))

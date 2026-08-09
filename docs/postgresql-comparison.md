@@ -271,8 +271,8 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 特性 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
 | pg_hba.conf | ✅ | 🔄 | 首条匹配、hostssl/hostnossl、IPv4/IPv6 CIDR、角色/数据库别名和运行时 SCRAM 已实现；其余认证方法仍缺 |
-| 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、主要角色属性、SCRAM、递归成员匹配、INHERIT/NOINHERIT、SET ROLE、有效期检查和连接数限制已接入；完整 ACL、ADMIN OPTION、owner/依赖语义仍缺 |
-| GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 表/列 ACL、PUBLIC、有效角色和表 owner 基础语义已执行；ACL item、ADMIN/GRANT OPTION 生命周期及对象全集仍缺 |
+| 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、主要角色属性、SCRAM、递归成员匹配、INHERIT/NOINHERIT、SET ROLE、角色 ADMIN OPTION、有效期检查和连接数限制已接入；完整 ACL、owner/依赖语义仍缺 |
+| GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 表/列 ACL、PUBLIC、有效角色、表 owner 和角色 ADMIN OPTION 基础语义已执行；ACL item、完整 ADMIN/GRANT OPTION 生命周期及对象全集仍缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
 | **行级安全 (RLS) 执行** | ✅ | ⚠️ | USING/WITH CHECK 已接入关系感知扫描，默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner/`SUPERUSER/BYPASSRLS` 绕过、有效角色和 FORCE RLS 已实现；无适用策略默认拒绝、策略求值失败安全回退；对象 owner/ACL 组合语义仍不完整 |
 | **SCRAM-SHA-256 完整协议** | ✅ | 🔄 | 已实现 catalog verifier、challenge/response、pg_hba 运行时决策和 E2E；缺 channel binding 与完整 SASL 语义 |

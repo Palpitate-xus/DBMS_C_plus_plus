@@ -876,7 +876,7 @@ bool DdlExecutor::executeCreateRole(const CreateRoleStmt* stmt, Session& s) {
     for (const auto& membership : stmt->inRole) {
         // IN ROLE means the new role is a member of each existing role.
         const std::string parentRole = canonicalRoleName(membership.first);
-        if (grantRoleToUser(parentRole, roleName) != 0) {
+        if (grantRoleToUser(parentRole, roleName, false, effectiveSessionRole(s)) != 0) {
             dropRole(roleName);
             std::cout << "ERROR: role \"" << parentRole << "\" does not exist"
                       << std::endl;
@@ -885,7 +885,7 @@ bool DdlExecutor::executeCreateRole(const CreateRoleStmt* stmt, Session& s) {
     }
     for (const auto& membership : stmt->roleMembers) {
         const std::string member = canonicalRoleName(membership.first);
-        if (grantRoleToUser(roleName, member) != 0) {
+        if (grantRoleToUser(roleName, member, false, effectiveSessionRole(s)) != 0) {
             dropRole(roleName);
             std::cout << "ERROR: role member \"" << member << "\" does not exist"
                       << std::endl;

@@ -38,6 +38,7 @@
 - 角色继承边界回归：`NOINHERIT` 用户保留原始成员关系但不获得父角色 ACL/RLS 权限，切换为 `INHERIT` 后两条权限路径同时生效；`pg_hba.conf` 角色匹配仍使用原始成员关系。
 - 对象授权回归：非所有者即使带有管理员标志也不能执行 `ALTER TABLE ... OWNER TO`；所有者仅可转移给能够 `SET ROLE` 到的目标角色；`SET ROLE` 后超级用户绕过和表 ACL/RLS 有效角色均正确收敛。
 - owner ACL 回归：无显式 `.permissions` 记录时，表 owner 仍拥有表级/列级权限、`GRANT OPTION` 和 `all` 权限视图。
+- 角色 ADMIN OPTION 回归：验证角色关系的 ADMIN OPTION 授予、重复授权升级、只撤销 ADMIN OPTION，以及撤销后成员关系仍保留。
 - 协议错误恢复回归：验证扩展查询错误后的 Bind/Execute 被忽略至 Sync、Sync 后连接可继续查询，以及事务外错误返回 `ReadyForQuery('I')`。
 - 协议 backend 隔离回归：双连接验证事务 ID/快照不串线，未提交行不可见，ROLLBACK 后状态清理，连接断开回滚未完成事务，COMMIT 后新事务可见；另覆盖 `START TRANSACTION` 选项与 `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` 路由。
 - SQL 统计模块回归：`tests/sql_stats_test.cpp` 验证字符串/数字常量归一化、引号标识符区分、调用次数与耗时聚合、数据库过滤及 reset。

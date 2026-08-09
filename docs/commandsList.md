@@ -840,6 +840,7 @@ SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
 ```sql
 GRANT privilege [(column1, column2, ...)] ON table_name TO user_name
 GRANT role_name TO user_name
+GRANT role_name TO user_name WITH ADMIN OPTION
 ```
 
 **参数**
@@ -856,6 +857,7 @@ GRANT SELECT ON users TO readonly_user;
 GRANT SELECT, INSERT ON orders TO alice;
 GRANT SELECT (name, email) ON users TO reporter;
 GRANT readonly TO alice;
+GRANT readonly TO alice WITH ADMIN OPTION;
 ```
 
 ---
@@ -866,6 +868,7 @@ GRANT readonly TO alice;
 ```sql
 REVOKE privilege [(column1, column2, ...)] ON table_name FROM user_name
 REVOKE role_name FROM user_name
+REVOKE ADMIN OPTION FOR role_name FROM user_name
 ```
 
 **示例**
@@ -873,6 +876,7 @@ REVOKE role_name FROM user_name
 REVOKE INSERT ON orders FROM alice;
 REVOKE ALL ON users FROM readonly_user;
 REVOKE readonly FROM alice;
+REVOKE ADMIN OPTION FOR readonly FROM alice;
 ```
 
 ---

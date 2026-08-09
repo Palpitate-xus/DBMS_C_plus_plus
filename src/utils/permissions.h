@@ -23,8 +23,12 @@ void persistAuthCatalog();
 bool roleExists(const std::string& roleName);
 int createRole(const std::string& roleName);
 bool dropRole(const std::string& roleName);
-int grantRoleToUser(const std::string& roleName, const std::string& username);
+int grantRoleToUser(const std::string& roleName, const std::string& username,
+                    bool adminOption = false,
+                    const std::string& grantorName = {});
 bool revokeRoleFromUser(const std::string& roleName, const std::string& username);
+bool revokeRoleAdminOption(const std::string& roleName, const std::string& username);
+bool hasRoleAdminOption(const std::string& roleName, const std::string& grantorName);
 std::vector<std::string> getUserRoles(const std::string& username);
 // Raw membership is used by role selectors such as pg_hba.conf. It does not
 // imply inherited privileges; privilege checks must use userHasRole().

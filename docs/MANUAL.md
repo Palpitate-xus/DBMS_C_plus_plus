@@ -732,6 +732,8 @@ CREATE USER bob WITH PASSWORD 'secret' LOGIN IN ROLE readonly_role;
 
 -- 授予/撤销角色
 GRANT readonly_role TO bob;
+GRANT readonly_role TO bob WITH ADMIN OPTION;
+REVOKE ADMIN OPTION FOR readonly_role FROM bob;
 REVOKE readonly_role FROM bob;
 
 -- 修改角色属性
