@@ -343,7 +343,7 @@ INSERT INTO users (ID, NAME) VALUES
 -- INSERT INTO ... SELECT
 INSERT INTO users_backup SELECT * FROM users WHERE AGE > 20;
 
--- ON CONFLICT (UPSERT；当前 AST 路径为单列主键/唯一列 target + 常量或只引用 excluded 的受限标量表达式 SET)
+-- ON CONFLICT (UPSERT；当前 AST 路径为单列主键/唯一列 target + 常量或只引用 excluded 的受限标量表达式 SET/WHERE)
 INSERT INTO users (ID, NAME, AGE) VALUES (1, 'Alice Updated', 26)
     ON CONFLICT (ID) DO UPDATE SET NAME = 'Alice Updated', AGE = 26;
 

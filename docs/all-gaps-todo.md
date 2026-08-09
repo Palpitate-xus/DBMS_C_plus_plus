@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、常量/列表达式 UPDATE、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT、复合/部分/索引推断 conflict target、引用目标表列/子查询的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式 UPDATE、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT、复合/部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -266,7 +266,7 @@
 | 1.1.38 | `END` | 已作为 `COMMIT` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
 | 1.1.39 | `EXPLAIN` | 只面向 SELECT 的简化计划；缺少真实 runtime instrumentation、JIT/WAL/BUFFERS/SETTINGS 完整输出和所有语句支持 | ⚠️ |
 | 1.1.40 | `GRANT` / `REVOKE` | 支持有限 privilege 和列权限；缺少 PostgreSQL ACL item、`PUBLIC`、role inheritance/admin option/set option、对象类型全集、默认权限联动 | ⚠️ |
-| 1.1.41 | `INSERT` | 支持 values、insert-select、无 target DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、returning 部分；缺少 `OVERRIDING`、ON CONFLICT constraint/index inference 全集、引用目标表列/子查询的 DO UPDATE/WHERE、RETURNING OLD/NEW | ⚠️ |
+| 1.1.41 | `INSERT` | 支持 values、insert-select、无 target DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、returning 部分；缺少 `OVERRIDING`、ON CONFLICT constraint/index inference 全集、引用子查询或其他关系的 DO UPDATE/WHERE、RETURNING OLD/NEW | ⚠️ |
 | 1.1.42 | `LISTEN` / `NOTIFY` / `UNLISTEN` | 进程内 map；缺少事务提交后发送、payload 长度/通道语义、跨进程持久服务语义 | ⚠️ |
 | 1.1.43 | `LOCK` | 支持 share/exclusive；缺少 PG 全锁模式、`NOWAIT`、`ONLY`、锁队列/冲突矩阵 | ⚠️ |
 | 1.1.44 | `MERGE` | 支持 `MATCHED UPDATE` / `NOT MATCHED INSERT` 的窄路径；缺少 BY SOURCE、DELETE、DO NOTHING、多个 WHEN、RETURNING OLD/NEW、复杂 source query | ⚠️ |
@@ -403,7 +403,7 @@
 | 6.7 | `GROUP BY` | 普通聚合与 `GroupAggregateOp` 支持过滤后的 Volcano 输入、HAVING、rollup/cube/grouping sets；缺少复杂目标、functionally dependent group by、GROUPING()/GROUPING_ID、完整排序作用域 | ⚠️ |
 | 6.8 | `LIMIT/FETCH` | FETCH 被转 LIMIT；缺少 `WITH TIES`、百分比/复杂表达式等 | ⚠️ |
 | 6.9 | Row locking | 单表 `FOR UPDATE/SHARE` 有部分；源码明确 `FOR UPDATE not supported with JOIN/GROUP BY/aggregate/window/scalar functions`。缺少 `NO KEY UPDATE`、`KEY SHARE`、OF list 完整语义 | ⚠️ |
-| 6.10 | `INSERT` | 多行/insert-select/部分 upsert 有；缺少 PG 的 `DEFAULT VALUES` 组合语义、`OVERRIDING`、WITH query 全组合、复合/部分/索引推断 conflict target、引用目标表列/子查询的 DO UPDATE/WHERE | ⚠️ |
+| 6.10 | `INSERT` | 多行/insert-select/部分 upsert 有；缺少 PG 的 `DEFAULT VALUES` 组合语义、`OVERRIDING`、WITH query 全组合、复合/部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE | ⚠️ |
 | 6.11 | `UPDATE FROM` / `DELETE USING` | 通过执行 JOIN 并解析文本输出实现；对空格、列顺序、别名、重复匹配、并发语义风险高 | ⚠️ |
 | 6.12 | `RETURNING` | 有列投影和受限标量表达式返回；缺少 PG 18 `OLD`/`NEW` aliases、复杂/子查询/窗口表达式、trigger-modified rows 的精确行为 | ⚠️ |
 | 6.13 | `MERGE` | 只支持小子集；缺少完整 WHEN 分支和并发/可见性语义 | ⚠️ |
@@ -637,7 +637,7 @@
 
 ### 进度备注（追加记录）
 
-- **2026-08-09**：DML AST executor 扩展：普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、常量/列表达式单表 UPDATE、简单谓词单表 DELETE 及三类 DML 的列投影和受限标量表达式 RETURNING 已接入；修复 INSERT SELECT 的 `RETURNING` parser 边界和列引用被误写成 NULL 的 fallback 边界，补充 INSERT/UPDATE/DELETE/冲突处理协议回归和 DML 尾随垃圾 fail-closed parser 测试。复合/部分/索引推断冲突目标、引用目标表列/子查询的 upsert、复杂 RETURNING、多表语义和复杂表达式仍待迁移。
+- **2026-08-09**：DML AST executor 扩展：普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式单表 UPDATE、简单谓词单表 DELETE 及三类 DML 的列投影和受限标量表达式 RETURNING 已接入；修复 INSERT SELECT 的 `RETURNING` parser 边界和列引用被误写成 NULL 的 fallback 边界，补充 INSERT/UPDATE/DELETE/冲突处理协议回归和 DML 尾随垃圾 fail-closed parser 测试。复合/部分/索引推断冲突目标、引用子查询或其他关系的 upsert、复杂 RETURNING、多表语义和复杂表达式仍待迁移。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。

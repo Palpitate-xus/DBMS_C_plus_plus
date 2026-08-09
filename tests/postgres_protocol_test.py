@@ -494,6 +494,14 @@ def main():
             [b"1", b"expression-x"], [b"5", b"five"]], excluded_expr_upsert
         assert any(kind == b"C" and body == b"INSERT 0 2\0"
                    for kind, body in excluded_expr_upsert), excluded_expr_upsert
+        conflict_where = simple_query(
+            sock, "INSERT INTO dml_conflict VALUES (1, 'where-update'), (6, 'six') "
+            "ON CONFLICT (id) DO UPDATE SET name = excluded.name "
+            "WHERE name = 'expression-x' RETURNING id, name")
+        assert data_row_values(conflict_where) == [
+            [b"1", b"where-update"], [b"6", b"six"]], conflict_where
+        assert any(kind == b"C" and body == b"INSERT 0 2\0"
+                   for kind, body in conflict_where), conflict_where
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "UPDATE dml_ast SET name = 'changed' WHERE id = 2"))
         assert data_row_values(simple_query(

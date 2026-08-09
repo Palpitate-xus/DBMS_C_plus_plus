@@ -3602,6 +3602,30 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
     return true;
 }
 
+bool StorageEngine::readVisibleRowByRid(PageAllocator* pa, int64_t rid,
+                                         std::string& rowBuffer,
+                                         const TableSchema& tbl) const {
+    if (!pa) return false;
+    uint32_t pageId = 0;
+    uint16_t slotId = 0;
+    decodeRid(rid, pageId, slotId);
+    char* buf = pa->fetchPage(pageId);
+    PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
+    const char* data = nullptr;
+    size_t len = 0;
+    const bool ok = page.read(slotId, data, len);
+    bool visible = ok;
+    if (visible && transactionContext().inTransaction) {
+        visible = transactionContext().readView.isVisible(
+            data, len, tbl.formatVersion);
+    }
+    if (visible) {
+        rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
+    }
+    pa->unpinPage(pageId);
+    return visible;
+}
+
 bool StorageEngine::isColumnNullByRid(const std::string& dbname,
                                       const std::string& tablename,
                                       int64_t rid, size_t colIdx) const {
