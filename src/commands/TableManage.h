@@ -371,11 +371,13 @@ public:
 
     // Data operations
     DBStatus insert(const std::string& dbname, const std::string& tablename,
-                    const std::map<std::string, std::string>& values);
+                    const std::map<std::string, std::string>& values,
+                    std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
-                                 const TableSchema& tbl);
+                                 const TableSchema& tbl,
+                                 std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);
     DBStatus update(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& updates,
                     const std::vector<std::string>& conditions,

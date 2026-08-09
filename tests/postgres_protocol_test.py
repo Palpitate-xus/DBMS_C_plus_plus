@@ -426,10 +426,22 @@ def main():
             sock, "INSERT INTO dml_ast DEFAULT VALUES"))
         assert data_row_values(simple_query(
             sock, "SELECT id FROM dml_ast WHERE id = 7")) == [[b"7"], [b"7"]]
+        returning_default = simple_query(
+            sock, "INSERT INTO dml_ast DEFAULT VALUES RETURNING id, name")
+        assert data_row_values(returning_default) == [[b"7", None]], returning_default
+        assert any(kind == b"C" and body == b"INSERT 0 1\0"
+                   for kind, body in returning_default), returning_default
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO dml_ast VALUES (3, 'MiXeD')"))
         assert data_row_values(simple_query(
             sock, "SELECT name FROM dml_ast WHERE id = 3")) == [[b"MiXeD"]]
+        returning_insert = simple_query(
+            sock, "INSERT INTO dml_ast VALUES (4, 'returned'), (5, 'returned2') "
+            "RETURNING id, name")
+        assert data_row_values(returning_insert) == [
+            [b"4", b"returned"], [b"5", b"returned2"]], returning_insert
+        assert any(kind == b"C" and body == b"INSERT 0 2\0"
+                   for kind, body in returning_insert), returning_insert
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "UPDATE dml_ast SET name = 'changed' WHERE id = 2"))
         assert data_row_values(simple_query(

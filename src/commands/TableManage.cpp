@@ -10753,7 +10753,8 @@ static bool isValidJson(const std::string& s) {
 
 DBStatus StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
-                                const std::map<std::string, std::string>& values) {
+                                const std::map<std::string, std::string>& values,
+                                std::vector<std::map<std::string, std::string>>* insertedRows) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockExclusive(tablename);
@@ -11529,6 +11530,18 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     }
     lockManager_.unlock(tablename);
 
+    // INSERT RETURNING observes the tuple after BEFORE INSERT triggers and
+    // generated columns have been applied, but before AFTER triggers run.
+    // Capture the logical values here so callers do not need a second query.
+    if (insertedRows) {
+        std::map<std::string, std::string> returnedValues;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            returnedValues[tbl.cols[i].dataName] =
+                extractColumnValue(strippedRow, tbl, i, dbname, true);
+        }
+        insertedRows->push_back(std::move(returnedValues));
+    }
+
     // Fire AFTER INSERT triggers
     if (triggerExecutor_) {
         auto triggers = getTriggers(dbname, tablename, "after", "insert");
@@ -11928,7 +11941,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
 
 DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
                                              const std::string& tablename,
-                                             const TableSchema& tbl) {
+                                             const TableSchema& tbl,
+                                             std::vector<std::map<std::string, std::string>>* insertedRows) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
@@ -11962,7 +11976,7 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
         // nullable without default → stays NULL (omitted)
     }
 
-    return insert(dbname, tablename, actualValues);
+    return insert(dbname, tablename, actualValues, insertedRows);
 }
 
 DBStatus StorageEngine::remove(const std::string& dbname,

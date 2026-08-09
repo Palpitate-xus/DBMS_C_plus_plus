@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-09）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=124 FAIL=0（122 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、常量 UPDATE、简单谓词 DELETE，以及 UPDATE/DELETE 的简单列投影 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-09）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=124 FAIL=0（122 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、常量 UPDATE、简单谓词 DELETE，以及普通单表 INSERT/UPDATE/DELETE 的简单列投影 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -95,7 +95,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 1.2 实现 operator precedence、类型解析、隐式 cast | 3.1 | — |
 | ✅ 1.3 实现函数重载、schema-qualified function、named/default args | 3.1, 3.10 | — |
 | ✅ 1.4 补全 `SELECT` grammar（join、where、group、window、cte） | 6.1~6.8 | — |
-| 🔄 1.5 补全 `INSERT/UPDATE/DELETE/MERGE` AST 路径 | 1.1.35, 1.1.41, 1.1.44, 1.1.58, 6.10~6.13 | AST 已完整建模；普通 INSERT、常量 UPDATE、简单谓词 DELETE，以及 UPDATE/DELETE 的简单列投影 RETURNING 已由 `DmlExecutor` 消费，INSERT 高级子句、RETURNING 表达式、复杂 UPDATE/DELETE 和 MERGE 仍待迁移 |
+| 🔄 1.5 补全 `INSERT/UPDATE/DELETE/MERGE` AST 路径 | 1.1.35, 1.1.41, 1.1.44, 1.1.58, 6.10~6.13 | AST 已完整建模；普通 INSERT、常量 UPDATE、简单谓词 DELETE，以及普通单表 INSERT/UPDATE/DELETE 的简单列投影 RETURNING 已由 `DmlExecutor` 消费，INSERT 高级子句、RETURNING 表达式、复杂 UPDATE/DELETE 和 MERGE 仍待迁移 |
 | ✅ 1.6 补全 DDL AST（`CREATE`/`ALTER`/`DROP` 各对象） | 1.1.3, 1.1.4, 1.1.6, 1.1.17, 1.1.24~1.1.33 等 | — |
 | ✅ 1.7 补全 `SET`/`SHOW`/`RESET` GUC 框架 | 1.1.48, 1.1.52, 1.1.56 | 需先定义 GUC 变量表 |
 | ✅ 1.8 补全 `VALUES` 作为通用 query expression | 1.1.60 | — |
@@ -195,7 +195,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - `CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步更新目录；`CREATE INDEX` 建立对基表的 auto 依赖。
   - `StorageEngine::checkpoint()` 持久化所有缓存目录；`DROP DATABASE` 先 `evict()` 目录缓存。
   - `pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表暴露给 `SELECT *`。
-  - 明确延期：复杂 DML AST（SELECT/INSERT SELECT/ON CONFLICT/RETURNING、多表 UPDATE/DELETE、MERGE）迁移、CTAS 语义补全、完整 FK `refobjid` 解析、`ALTER TABLE`/视图/触发器/函数/过程的目录集成仍为后续工作；普通 INSERT、常量 UPDATE、简单 DELETE 已进入结构化执行器。
+  - 明确延期：复杂 DML AST（SELECT/INSERT SELECT/ON CONFLICT/RETURNING 表达式、多表 UPDATE/DELETE、MERGE）迁移、CTAS 语义补全、完整 FK `refobjid` 解析、`ALTER TABLE`/视图/触发器/函数/过程的目录集成仍为后续工作；普通 INSERT、常量 UPDATE、简单 DELETE 及列投影 RETURNING 已进入结构化执行器。
 
 ---
 
@@ -657,7 +657,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 5.5 实现 skip scan、index condition recheck、lossy pages | 8.2, 7.4 | FilterOp indexConditionRecheck + canUseSkipScan in QueryPlanner |
 | ✅ 5.6 实现 CTE `MATERIALIZED/NOT MATERIALIZED`、可写 CTE 快照、递归检测 | 6.4 | parser 已解析 CTE；executor 未实现 |
 | ✅ 5.7 实现 `MERGE` 完整 WHEN 分支（UPDATE SET + INSERT VALUES） | 1.1.44, 6.13 | main.cpp MERGE INTO ... USING ... ON ... UPDATE SET ... INSERT 完整执行 |
-| 🔄 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | 普通 VALUES/DEFAULT VALUES 已新增 `DmlExecutor` AST 执行路径；OVERRIDING、conflict target/opclass/where、INSERT SELECT 和 RETURNING 仍由 legacy 路径处理 |
+| 🔄 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | 普通 VALUES/DEFAULT VALUES 及列投影 RETURNING 已新增 `DmlExecutor` AST 执行路径；OVERRIDING、conflict target/opclass/where、INSERT SELECT 和 RETURNING 表达式仍由 legacy 路径处理 |
 | ✅ 5.9 实现 `RETURNING` `OLD`/`NEW` aliases、trigger-modified rows 精确行为 | 6.12, 1.1.41 等 | 基础 RETURNING 已就绪 |
 | ✅ 5.10 实现 `UPDATE FROM` / `DELETE USING` 的语义安全实现（非文本拼接） | 6.11, 1.1.58, 1.1.35 | main.cpp UPDATE FROM multi-table + DELETE USING 已实现 |
 | ⚠️ 5.11 实现 Row locking 完整语义（`NO KEY UPDATE` / `KEY SHARE`、OF list） | 6.9 | parser 已识别多种锁子句；当前执行器主要覆盖基础单表 FOR UPDATE/SHARE，JOIN/聚合/窗口和完整 OF/NOWAIT/SKIP LOCKED 语义仍缺。 |

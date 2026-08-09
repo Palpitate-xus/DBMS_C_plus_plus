@@ -98,11 +98,11 @@ bool isDefaultValue(const ExprPtr& expr) {
 }
 
 bool supportsInsert(const InsertStmt& stmt) {
-    // The bridge owns only ordinary VALUES inserts.  Every feature outside
-    // this contract must remain on the established implementation until its
-    // AST semantics and RETURNING behavior are migrated together.
+    // The bridge owns ordinary VALUES inserts and column-projection
+    // RETURNING. Every feature outside this contract remains on the
+    // established implementation until its AST semantics are migrated.
     return !stmt.tableName.empty() && stmt.selectSource == nullptr &&
-           stmt.conflictAction.empty() && stmt.returning.empty() &&
+           stmt.conflictAction.empty() &&
            stmt.override_.empty() &&
            (stmt.defaultValues || !stmt.values.empty());
 }
@@ -235,7 +235,9 @@ void publishReturning(const std::vector<std::string>& columns,
                       const std::string& command) {
     g_lastDmlResult.available = true;
     g_lastDmlResult.columns = names;
-    g_lastDmlResult.commandTag = command + " " + std::to_string(rows.size());
+    g_lastDmlResult.commandTag = command == "INSERT"
+        ? "INSERT 0 " + std::to_string(rows.size())
+        : command + " " + std::to_string(rows.size());
     g_lastDmlResult.rows.reserve(rows.size());
     for (const auto& source : rows) {
         std::vector<std::string> row;
@@ -376,6 +378,15 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
 
     if (!checkInsertColumns(s, requestedTable, columns)) return true;
 
+    std::vector<std::string> returningColumns;
+    std::vector<std::string> returningNames;
+    if (!stmt.returning.empty() &&
+        !buildReturningColumns(stmt.returning, table, returningColumns, returningNames)) {
+        fallback = true;
+        return false;
+    }
+    std::vector<std::map<std::string, std::string>> insertedRows;
+
     if (stmt.defaultValues) {
         if (!stmt.values.empty()) {
             std::cout << "SQL syntax error: invalid DEFAULT VALUES statement"
@@ -383,12 +394,17 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             return true;
         }
         const DBStatus status = g_engine.insertDefaultValues(
-            s.currentDB, resolvedTable, table);
+            s.currentDB, resolvedTable, table,
+            stmt.returning.empty() ? nullptr : &insertedRows);
         if (status != DBStatus::OK) {
             std::cout << "INSERT DEFAULT VALUES failed" << std::endl;
             return true;
         }
         std::cout << "INSERT 0 1 (DEFAULT VALUES)" << std::endl;
+        if (!stmt.returning.empty()) {
+            publishReturning(returningColumns, returningNames, insertedRows, "INSERT");
+            printReturningRows(g_lastDmlResult);
+        }
         g_engine.analyzeTable(s.currentDB, resolvedTable);
         return false;
     }
@@ -422,7 +438,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
 
     int inserted = 0;
     for (const auto& values : pendingRows) {
-        const DBStatus status = g_engine.insert(s.currentDB, resolvedTable, values);
+        const DBStatus status = g_engine.insert(
+            s.currentDB, resolvedTable, values,
+            stmt.returning.empty() ? nullptr : &insertedRows);
         if (status == DBStatus::DUPLICATE_KEY) {
             std::cout << "Duplicate key" << std::endl;
             return true;
@@ -435,6 +453,10 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     }
 
     std::cout << inserted << " row(s) inserted" << std::endl;
+    if (!stmt.returning.empty()) {
+        publishReturning(returningColumns, returningNames, insertedRows, "INSERT");
+        printReturningRows(g_lastDmlResult);
+    }
     if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;
 }

@@ -52,10 +52,16 @@ int main() {
     assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "ret", {{"id", "1"}, {"name", "before"}}) == dbms::DBStatus::OK);
 
+    assert(!runDml("INSERT INTO ret VALUES (3, 'inserted') RETURNING id, name", session));
+    dbms::DmlResult result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 1");
+    assert((result.rows[0] == std::vector<std::string>{"3", "inserted"}));
+
     // The predicate column changes. A post-update query using the old WHERE
     // clause would return nothing; storage-boundary capture must return id=2.
     assert(!runDml("UPDATE ret SET id = 2, name = 'after' WHERE id = 1 RETURNING id, name", session));
-    dbms::DmlResult result = dbms::takeLastDmlResult();
+    result = dbms::takeLastDmlResult();
     assert(result.available);
     assert(result.commandTag == "UPDATE 1");
     assert((result.columns == std::vector<std::string>{"id", "name"}));
@@ -68,6 +74,7 @@ int main() {
     assert(result.commandTag == "DELETE 1");
     assert((result.columns == std::vector<std::string>{"id", "name"}));
     assert((result.rows[0] == std::vector<std::string>{"2", "after"}));
+    assert(!runDml("DELETE FROM ret WHERE id = 3", session));
     assert(g_engine.query(db, "ret", {}, {}, {}).empty());
 
     cleanup(db);
