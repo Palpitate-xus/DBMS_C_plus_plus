@@ -19917,6 +19917,17 @@ static bool aclGranteeMatches(const std::string& grantee, const std::string& use
     return grantee == username || grantee == "public" || userHasRole(username, grantee);
 }
 
+// PostgreSQL table owners have implicit privileges and grant options. Keep
+// this in the same ACL resolution layer as explicit grants so AST and legacy
+// DML paths cannot disagree about owner access.
+static bool tableOwnerMatches(const StorageEngine& engine,
+                              const std::string& dbname,
+                              const std::string& tablename,
+                              const std::string& username) {
+    if (username.empty() || !engine.tableExists(dbname, tablename)) return false;
+    return engine.getTableSchema(dbname, tablename).owner == username;
+}
+
 static bool colsEmptyIgnoreGrant(const std::string& colsStr) {
     if (colsStr.empty()) return true;
     // colsStr may start with space
@@ -20083,6 +20094,7 @@ void StorageEngine::revoke(const std::string& dbname, const std::string& tablena
 
 bool StorageEngine::hasPermission(const std::string& dbname, const std::string& tablename,
                                   const std::string& username, TablePrivilege priv) const {
+    if (tableOwnerMatches(*this, dbname, tablename, username)) return true;
     auto ppath = permPath(dbname);
     if (!std::filesystem::exists(ppath)) return false;
     std::string target = privToStr(priv);
@@ -20106,6 +20118,7 @@ bool StorageEngine::hasPermission(const std::string& dbname, const std::string& 
 
 bool StorageEngine::hasGrantOption(const std::string& dbname, const std::string& tablename,
                                    const std::string& username, TablePrivilege priv) const {
+    if (tableOwnerMatches(*this, dbname, tablename, username)) return true;
     auto ppath = permPath(dbname);
     if (!std::filesystem::exists(ppath)) return false;
     std::string target = privToStr(priv);
@@ -20133,6 +20146,7 @@ bool StorageEngine::hasGrantOption(const std::string& dbname, const std::string&
 bool StorageEngine::hasColumnPermission(const std::string& dbname, const std::string& tablename,
                                         const std::string& username, TablePrivilege priv,
                                         const std::vector<std::string>& columns) const {
+    if (tableOwnerMatches(*this, dbname, tablename, username)) return true;
     if (columns.empty()) return hasPermission(dbname, tablename, username, priv);
     auto ppath = permPath(dbname);
     if (!std::filesystem::exists(ppath)) return false;
@@ -20175,6 +20189,10 @@ std::vector<std::string> StorageEngine::getUserPermissions(
     const std::string& dbname, const std::string& tablename,
     const std::string& username) const {
     std::vector<std::string> result;
+    if (tableOwnerMatches(*this, dbname, tablename, username)) {
+        result.push_back("all");
+        return result;
+    }
     auto ppath = permPath(dbname);
     if (!std::filesystem::exists(ppath)) return result;
     std::ifstream ifs(ppath);

@@ -19,7 +19,7 @@ SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议
 
 协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本及常用类型二进制参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换，numeric 采用 PostgreSQL base-10000 binary codec，date/time/秒精度 timestamp/timestamptz/uuid 也支持 binary 参数与结果，Describe/Close 会校验并管理 statement/portal 生命周期，Execute 支持基础 `maxRows` 分批返回与 `PortalSuspended`，常见单表结果填充 catalog/table schema 驱动的 RowDescription 元数据；数组等复杂类型的二进制 I/O、完整 RowDescription 类型推导和 holdable/scrollable cursor 等完整 portal 语义仍列为协议缺口。
 
-ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权；`NOINHERIT` 不自动继承成员角色权限，`SET ROLE` 使用原始成员关系并切换 ACL/RLS 的有效角色；`ALTER TABLE ... OWNER TO` 已检查表所有者和目标角色可切换性。完整对象 owner、`GRANT OPTION` 继承/回收以及 schema/database/function ACL 仍列为后续安全缺口。
+ACL 检查已统一覆盖会话用户、递归继承角色、`PUBLIC` 和表 owner 隐含权限；`NOINHERIT` 不自动继承成员角色权限，`SET ROLE` 使用原始成员关系并切换 ACL/RLS 的有效角色；`ALTER TABLE ... OWNER TO` 已检查表所有者和目标角色可切换性，表 owner 可执行表级 GRANT/REVOKE。完整对象 owner、`GRANT OPTION` 继承/回收以及 schema/database/function ACL 仍列为后续安全缺口。
 
 事务运行时补强了 backend 隔离：共享 `StorageEngine` 的事务执行上下文改为当前连接工作线程局部，避免事务 ID、快照、回滚日志、savepoint、隔离级别和 `lastval` 在连接之间泄漏；连接结束时回滚未完成事务并清理上下文；跨 backend 的锁管理和提交状态仍保持全局协调，后续继续补齐更完整的 session/statement 生命周期语义。
 
@@ -304,7 +304,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 已实现元数据持久化和 `=`/`&&` 的全表冲突检查，并有 `tests/exclude_test.cpp`；真实 GiST 加速、operator class、多元素/表达式元素和完整并发语义仍待后续。 |
 | ✅ 4.25 实现 `SET CONSTRAINTS` 延迟队列、提交时检查 | 5.10, 1.1.53 | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟检查在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 映射生效，`NOT DEFERRABLE` 约束不受 `SET CONSTRAINTS ALL DEFERRED` 影响；schema 格式 `0x44420006` 持久化 `checkConstraintName`/`deferrable`/`initiallyDeferred`；`constraintMode_` 在事务结束时自动清除（per-transaction 语义）；`beginTransaction` 修复：已有事务时先 commit 再开新事务，防止 `txnDB_` 指向错误数据库。新增 `tests/deferrable_test.cpp`（6 个测试）。constraint trigger 语义仍待后续。 |
 | ⚠️ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 已由 typed AST/DdlExecutor 桥接并验证；tablespace 存储在 schema 中。新增回归覆盖 10 个选项路径。`accessMethod` schema 持久化仍待后续。 |
-| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、约束、分区和 tablespace 路径已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`，但 CLUSTER/REPLICA、RLS owner 权限校验、触发器和完整延迟约束语义仍有 legacy/简化路径。 |
+| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、约束、分区和 tablespace 路径已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`，并检查所有者/目标角色授权；CLUSTER/REPLICA、触发器和完整延迟约束语义仍有 legacy/简化路径。 |
 | ⚠️ 4.28 补全 `CREATE/ALTER VIEW`（security barrier/invoker、recursive view、check option） | 1.1.6, 1.1.33, 4.9 | 已支持基本单表可更新视图、WITH CHECK OPTION、OR REPLACE，并有 `tests/view_test.cpp`；SECURITY BARRIER/INVOKER、递归视图和复杂映射仍待后续。 |
 | ⚠️ 4.29 补全 `CREATE TRIGGER`（transition tables、constraint triggers、deferred triggers、event triggers） | 1.1.31, 4.11 | 已解析并执行基础 BEFORE/AFTER/INSTEAD OF、事件和 WHEN 条件，并有 `tests/trigger_test.cpp`；transition tables、constraint/deferred/event triggers 和完整函数运行时仍待后续。 |
 | ✅ 4.30 补全 `CREATE TYPE`（enum/range/base/shell） | 1.1.32 | enum/composite/range/base/shell 元数据注册 + DROP TYPE 全类型修复已落地；`ALTER TYPE ADD/RENAME VALUE` 已落地。作为列类型的完整运行时语义仍待后续。 |

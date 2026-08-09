@@ -14436,7 +14436,8 @@ bool execute(const string& rawSql, Session& s) {
             cout << "permission denied: you do not have GRANT OPTION for " << privStr << " on " << tname << endl;
             return true;
         }
-        g_engine.grant(s.currentDB, tname, uname, priv, colList, withGrantOpt, s.username);
+        g_engine.grant(s.currentDB, tname, uname, priv, colList, withGrantOpt,
+                        effectiveSessionRole(s));
         string scope;
         if (tname == "*") scope = "database " + s.currentDB;
         else if (objectType == "schema") scope = "schema " + onPart.substr(7);
@@ -14459,13 +14460,13 @@ bool execute(const string& rawSql, Session& s) {
 
     // REVOKE privilege[(col1,col2)] ON table FROM user
     if (sql.substr(0, 7) == "revoke ") {
-        if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
         string rest = trim(sql.substr(7));
         size_t onPos = rest.find(" on ");
         size_t fromPos = rest.find(" from ");
         if (onPos == string::npos && fromPos != string::npos) {
             // REVOKE role_name FROM user_name
+            if (!checkAdmin(s)) return true;
             string roleName = trim(rest.substr(0, fromPos));
             string username = trim(rest.substr(fromPos + 6));
             if (!revokeRoleFromUser(roleName, username)) {
@@ -14535,6 +14536,16 @@ bool execute(const string& rawSql, Session& s) {
         // Validate object existence
         if (objectType == "table" && tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
             cout << "Table " << tname << " not exist" << endl;
+            return true;
+        }
+        bool canRevoke = sessionIsAdmin(s);
+        if (!canRevoke && objectType == "table" && tname != "*") {
+            canRevoke = g_engine.hasGrantOption(s.currentDB, tname,
+                                                 effectiveSessionRole(s), priv);
+        }
+        if (!canRevoke) {
+            cout << "permission denied: you do not have GRANT OPTION for "
+                 << privStr << " on " << tname << endl;
             return true;
         }
         g_engine.revoke(s.currentDB, tname, uname, priv, colList, cascade);

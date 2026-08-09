@@ -317,6 +317,15 @@ static void test_rls_visible_source_scan() {
     ownerSession.username = ownerName;
     assert(!ddl.executeSql("CREATE TABLE policy_owner (id INT PRIMARY KEY)", ownerSession));
     assert(g_engine.getTableSchema(db, "policy_owner").owner == ownerName);
+    assert(g_engine.hasPermission(db, "policy_owner", ownerName,
+                                  dbms::StorageEngine::TablePrivilege::Select));
+    assert(g_engine.hasColumnPermission(
+        db, "policy_owner", ownerName, dbms::StorageEngine::TablePrivilege::Update,
+        {"id"}));
+    assert(g_engine.hasGrantOption(db, "policy_owner", ownerName,
+                                   dbms::StorageEngine::TablePrivilege::Select));
+    const auto ownerPermissions = g_engine.getUserPermissions(db, "policy_owner", ownerName);
+    assert(ownerPermissions.size() == 1 && ownerPermissions[0] == "all");
     const auto ownerAccount = auth.getAuthIdByName(ownerName);
     const auto ownerRelation = g_engine.catalogService().get(db).resolveRelation("policy_owner", {"public"});
     assert(ownerAccount && ownerRelation && ownerRelation->relowner == ownerAccount->oid);
