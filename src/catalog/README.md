@@ -11,7 +11,7 @@
 | `oid.h/cpp` | OID 分配器：单调递增、持久化到 `.oid_counter`、支持批量预留 |
 | `systables.h/cpp` | 系统表行格式：pg_namespace、pg_class、pg_attribute、pg_type、pg_proc、pg_depend |
 | `catalog.h/cpp` | CatalogManager：内存缓存、OID/名称索引、CRUD、CSV 持久化、依赖追踪 |
-| `migrate.h/cpp` | 迁移工具：从现有 `.stc` 文件迁移到系统表 |
+| `CatalogService.h/cpp` | 每数据库 catalog 缓存、当前格式加载与持久化 |
 
 ### 已实现功能
 
@@ -23,7 +23,7 @@
 - ✅ **依赖追踪**：
   - `planDrop()` 生成 CASCADE/RESTRICT 删除计划
   - 拓扑排序 + 循环检测 + pin 保护
-- ✅ **迁移工具**：`migrateDatabaseToCatalog()` 遍历 `.stc` 文件，自动创建系统表条目
+- ✅ **当前格式边界**：catalog 只加载当前版本 `.cat` 文件；旧数据目录必须导出 SQL 后重建，不执行自动迁移
 
 ### 使用方式
 

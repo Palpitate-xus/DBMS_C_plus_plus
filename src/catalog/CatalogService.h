@@ -15,10 +15,10 @@ class StorageEngine;
 // ============================================================================
 //
 // CatalogManager is per-database (constructed with a dbPath). This service
-// lazily creates one CatalogManager per database on first access, bootstraps
-// system namespaces/types, and optionally migrates existing .stc-based
-// databases on first use. It persists all cached catalogs on shutdown or
-// explicit persistAll().
+// lazily creates one CatalogManager per database on first access and bootstraps
+// system namespaces/types. It persists all cached catalogs on shutdown or
+// explicit persistAll(). The catalog format is current-version only; storage
+// files from an older release must be rebuilt from SQL instead of migrated.
 //
 // Thread-safety: the cache map is protected by its own mutex; each
 // CatalogManager is internally mutex-guarded. Lock ordering is always
@@ -33,8 +33,8 @@ public:
     CatalogService& operator=(const CatalogService&) = delete;
 
     // Get or create the CatalogManager for `dbname`.
-    // On first creation: bootstraps system namespaces/types and runs a
-    // one-time migration for pre-existing .stc databases.
+    // On first creation: bootstraps system namespaces/types and loads the
+    // current-version catalog files.
     CatalogManager& get(const std::string& dbname);
 
     // Remove the cached CatalogManager for `dbname` (e.g. on DROP DATABASE).

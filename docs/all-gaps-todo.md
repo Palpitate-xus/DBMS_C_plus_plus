@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-09 | 移除 CatalogService 的旧 `.stc` 元数据迁移器、`.migrated` 标记和专用测试；catalog 现在只加载当前版本 `.cat` 文件，旧数据统一采用 SQL 导出后重建。 |
 | 2026-08-08 | 子查询执行路径推进：未关联单列 `IN`/`NOT IN` 下推为 Volcano `SemiJoinOp`/anti 模式；未关联单表 `EXISTS`/`NOT EXISTS` 下推为 `ExistenceFilterOp`；单个未关联标量目标下推为 init-plan + `ScalarSubqueryProjectOp`，覆盖 NULL 和多行 cardinality error；单列未关联 `ANY/ALL` 下推为 `QuantifiedSubqueryFilterOp`，覆盖 NULL/空集三值逻辑；复杂标量、关联子查询、row comparison 和复杂组合仍待迁移。 |
 | 2026-08-08 | 聚合执行路径收敛：删除只调用 `StorageEngine::aggregate()` 且忽略计划输入的冗余 `AggregateOp`，无 GROUP BY 的普通聚合统一复用过滤后的 `GroupAggregateOp`；补充 Volcano 单测与协议 E2E。 |
 | 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；新增 `OffsetOp`，复杂目标和主 SQL EXPLAIN 窗口解析仍待迁移。扩展 Volcano 单元与窗口 E2E，窗口 E2E 为 13/13。 |
@@ -221,7 +222,7 @@
 
 ### 1.1 有实现但与 PostgreSQL 不等价的命令
 
-> **历史进展记录（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并迁移旧 `.stc` 数据库；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。该记录当时将 DML AST 迁移延期；当前普通 INSERT、常量 UPDATE、简单 DELETE 已由 `DmlExecutor` 消费，复杂 DML 仍待迁移。DDL 中仍缺 `ALTER TABLE`/`DROP INDEX`/视图/物化视图/触发器/策略/函数/过程的目录集成。
+> **历史进展记录（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并曾迁移旧 `.stc` 数据库（该兼容路径已于 2026-08-09 删除）；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。该记录当时将 DML AST 迁移延期；当前普通 INSERT、常量 UPDATE、简单 DELETE 已由 `DmlExecutor` 消费，复杂 DML 仍待迁移。DDL 中仍缺 `ALTER TABLE`/`DROP INDEX`/视图/物化视图/触发器/策略/函数/过程的目录集成。
 
 | # | 命令 | 差距描述 | 状态 |
 |---|------|---------|------|

@@ -8,8 +8,6 @@
 #include <iostream>
 #include "test_utils.h"
 
-namespace fs = std::filesystem;
-
 static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 
 static void test_bootstrap_and_cache() {
@@ -34,16 +32,18 @@ static void test_bootstrap_and_cache() {
     std::cout << "[CATALOG-SVC] bootstrap and cache OK" << std::endl;
 }
 
-static void test_migration_of_existing_db() {
+static void test_storage_only_metadata_is_not_imported() {
     std::string db = testDbPath("catalog_service_t2");
     cleanup(db);
 
     dbms::StorageEngine engine;
     assert(engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
-    // Create a table using the legacy StorageEngine path (produces a .stc file).
+    // The low-level storage API intentionally does not create catalog rows.
+    // Catalog registration belongs to the current DDL executor; old .stc
+    // metadata is not imported implicitly on first catalog access.
     dbms::TableSchema tbl;
-    tbl.tablename = "legacy_tbl";
+    tbl.tablename = "storage_only_tbl";
     dbms::Column col;
     col.dataName = "id";
     col.dataType = "integer";
@@ -51,23 +51,19 @@ static void test_migration_of_existing_db() {
     tbl.append(col);
     assert(engine.createTable(db, tbl) == dbms::DBStatus::OK);
 
-    // Now access the catalog for the first time: it should migrate the .stc table.
     dbms::CatalogManager& cat = engine.catalogService().get(db);
     const auto* nsPublic = cat.findNamespaceByName("public");
     assert(nsPublic != nullptr);
-    const auto* cls = cat.findClassByName("legacy_tbl", nsPublic->oid);
-    assert(cls != nullptr);
-    assert(cls->relnatts == 1);
-
-    // Marker should exist now; re-get should not re-migrate.
-    assert(fs::exists(fs::path(db) / "pg_catalog" / ".migrated"));
+    assert(cat.findClassByName("storage_only_tbl", nsPublic->oid) == nullptr);
+    assert(!std::filesystem::exists(std::filesystem::path(db) /
+                                    "pg_catalog" / ".migrated"));
 
     cleanup(db);
-    std::cout << "[CATALOG-SVC] migration of existing DB OK" << std::endl;
+    std::cout << "[CATALOG-SVC] storage-only metadata stays outside catalog OK" << std::endl;
 }
 
 static void test_checkpoint_persists_catalog() {
-    std::string db = testDbPath("catalog_service_t3");
+    std::string db = testDbPath("catalog_service_t2");
     cleanup(db);
 
     dbms::StorageEngine engine;
@@ -107,7 +103,7 @@ int main() {
     cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
     test_bootstrap_and_cache();
-    test_migration_of_existing_db();
+    test_storage_only_metadata_is_not_imported();
     test_checkpoint_persists_catalog();
     std::cout << "[CATALOG-SVC] all passed" << std::endl;
     return 0;

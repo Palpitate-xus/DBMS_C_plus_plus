@@ -8,6 +8,7 @@
 
 - 删除未接入的 `ClusterLayout` 和旧 4 KiB `Page` 实现。
 - 删除旧数据文件自动迁移路径；启动恢复不会把事务备份/归档目录误识别为数据库。
+- 删除 CatalogService 对旧 `.stc` 元数据的隐式导入和 `.migrated` 标记；当前 catalog 只加载当前版本 `.cat` 文件，升级必须通过 SQL 导出后重建。
 - 存储统一为 v2、8 KiB PostgreSQL 风格 heap page 和当前 schema 格式。
 - schema、sequence、trigger 读取路径只接受当前格式；旧格式回退和截断文件的部分解析已删除，损坏元数据 fail-closed，不会按默认值继续写入。
 - `PageAllocator`、`PageWrapper`、TOAST 路径统一使用同一页格式。

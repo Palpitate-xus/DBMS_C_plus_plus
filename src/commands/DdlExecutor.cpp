@@ -1965,6 +1965,10 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         const auto* ns = cat.findNamespaceByName(qn.schema.empty() ? "public" : qn.schema);
         const auto* tbl = (ns ? cat.resolveRelation(qn.name, {qn.schema.empty() ? "public" : qn.schema}) : nullptr);
         if (ns && tbl) {
+            // createClass() may grow CatalogManager's backing vector and
+            // invalidate pointers returned by resolveRelation(). Copy the
+            // referenced OID before mutating the catalog.
+            const Oid tableOid = tbl->oid;
             PgClassRow idx;
             idx.relname = idxName;
             idx.relnamespace = ns->oid;
@@ -1977,7 +1981,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             dep.objid = idxOid;
             dep.objsubid = 0;
             dep.refclassid = PgClassOid_Class;
-            dep.refobjid = tbl->oid;
+            dep.refobjid = tableOid;
             dep.refobjsubid = 0;
             dep.deptype = 'a';
             cat.addDepend(dep);

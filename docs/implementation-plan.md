@@ -144,7 +144,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - ✅ Schema-qualified 列引用（schema.table.column）解析
   - ✅ CASCADE/RESTRICT 删除计划（planDrop：拓扑排序、pin 保护、循环检测）
   - ✅ Bootstrap：标准 namespace（pg_catalog、public、pg_toast）+ 系统类型（bool、int4、text、timestamp 等 28 种）
-  - ✅ 现有元数据迁移工具（migrateDatabaseToCatalog：遍历 .stc 文件 → pg_namespace + pg_class + pg_attribute + pg_type + pg_depend）
+  - ✅ 当前格式 catalog 持久化：DDL executor 在创建/删除对象时维护 pg_* 条目；旧 `.stc` 元数据不再自动导入
   - ✅ 临时 schema（createTempNamespace / dropTempNamespace / dropAllTempNamespaces）
   - ✅ pg_authid / pg_auth_members（CatalogManager CRUD + CSV 持久化）
   - ✅ pg_description（COMMENT ON：setDescription / getDescription / removeDescription）
@@ -172,7 +172,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 2.2 实现 OID 分配与回收机制 | 2.19, 4.1 | 空闲列表持久化到 `.oid_counter.free`，优先复用 |
 | ✅ 2.3 实现真正 Schema / `search_path` 解析 | 4.3, 1.1.25 | 支持 schema-qualified / search_path 关系与列解析 |
 | ✅ 2.4 实现依赖追踪与 `CASCADE/RESTRICT` 精确规则 | 4.2, 1.1.37 | planDrop + dropObject 执行集成；createClass/Type/Proc 自动注册对 namespace 的依赖 |
-| ✅ 2.5 将现有表/列/索引/函数元数据迁移到系统表 | — | `migrateDatabaseToCatalog`；未知类型在迁移时自动创建 pg_type 条目 |
+| ✅ 2.5 让当前 DDL 维护表/列/索引/函数 catalog | — | DDL executor 直接注册当前格式 pg_* 条目；旧目录通过 SQL 导出后重建，不提供自动迁移 |
 | ✅ 2.6 实现临时 schema 与会话隔离 | 4.7 | `createTempNamespace` / `dropTempNamespace` / `dropAllTempNamespaces`；修复嵌套锁死锁 |
 | 🔄 2.7 完成 `pg_authid` / `pg_auth_members` 认证目录 | 11.1, 1.1.24 | 认证、用户/角色 DDL、主要角色属性、SCRAM、valid-until、连接数限制和递归成员匹配已接入 catalog；仍需补全 ACL、admin option、owner/依赖语义 |
 | ✅ 2.8 补全 `COMMENT ON` 对象类型全集 | 1.1.13 | Parser 支持多对象类型；CatalogManager 支持 SCHEMA/TYPE/FUNCTION/PROCEDURE 注释 |
@@ -182,15 +182,15 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 - **OID 分配与回收**：`OidGenerator` 支持单调递增分配、批量预留、空闲列表回收；删除对象的 OID 优先复用，空闲列表持久化到 `.oid_counter.free`。
 - **Schema / search_path 名称解析**：`CatalogManager` 支持 `schema.rel` / `rel` 关系名解析与 `schema.table.col` / `table.col` 列解析，按 `search_path` 顺序匹配；新增 `pg_class` 复合名称索引。
 - **CASCADE / RESTRICT 删除执行**：`CatalogManager::planDrop` 生成拓扑有序的删除计划，`dropObject` 按 classid/objid 执行 RESTRICT/CASCADE 删除；`createClass` / `createType` / `createProc` 自动注册对所属 namespace 的依赖。
-- **元数据迁移工具**：`migrateDatabaseToCatalog()` 遍历 `.stc` 文件，自动创建 `pg_namespace`、`pg_class`、`pg_attribute`、`pg_type` 条目；未知类型在属性插入前创建并回填 `atttypid`。
+- **catalog 当前格式边界**：`CatalogService` 只加载当前版本 `.cat` 文件；DDL executor 负责注册当前会话创建的对象。旧 `.stc`/旧 catalog 不自动导入，升级采用 SQL 导出后重建。
 - **临时 schema 与会话隔离**：`createTempNamespace` / `dropTempNamespace` / `dropAllTempNamespaces` 支持按 sessionId 管理 `pg_temp_<sessionId>`；修复公共接口之间的递归加锁死锁。
 - **pg_authid / pg_auth_members**：`CatalogManager` 支持角色/用户的创建、按名/OID 查询、更新、删除、列表；成员关系增删查；删除角色时级联清理成员关系；CSV 持久化与恢复。
 - **COMMENT ON 对象类型补全**：Parser 支持 TABLE/COLUMN/SCHEMA/INDEX/VIEW/FUNCTION/PROCEDURE/SEQUENCE/TYPE/MATERIALIZED VIEW 等；`CatalogManager` 新增 `setComment()`，支持 SCHEMA/TYPE/FUNCTION/PROCEDURE 注释。
 - **索引与并发修复**：`findNamespaceByName`、`findAuthIdByName` 避免递归加锁；`pg_class` 名称索引在 create/update/drop/rebuild 中保持一致；`dropClass` / `dropNamespace` / `dropTempNamespace` / `dropAllTempNamespaces` / `planDrop` 通过内部 unlocked 辅助函数消除嵌套锁。
-- **新增测试**：`tests/oid_test.cpp`、`tests/catalog_resolve_test.cpp`、`tests/comment_on_test.cpp`、`tests/cascade_test.cpp`、`tests/temp_namespace_test.cpp`、`tests/auth_test.cpp`、`tests/migrate_test.cpp`；`tests/parser_phase1_test.cpp` 追加 COMMENT ON 解析用例。
+- **新增测试**：`tests/oid_test.cpp`、`tests/catalog_resolve_test.cpp`、`tests/comment_on_test.cpp`、`tests/cascade_test.cpp`、`tests/temp_namespace_test.cpp`、`tests/auth_test.cpp`；`tests/parser_phase1_test.cpp` 追加 COMMENT ON 解析用例。
 - **Phase 2 已接入运行时（2026-06-22）**：
   - 修复 DDL AST bridge 双执行 bug：`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor`，成功即返回，CTAS 保留旧路径回退。
-  - 新增 `CatalogService` 作为 `StorageEngine` 的每库 `CatalogManager` 缓存，首次访问时引导系统 namespace/type 并迁移旧 `.stc` 数据库。
+  - 新增 `CatalogService` 作为 `StorageEngine` 的每库 `CatalogManager` 缓存，首次访问时只引导系统 namespace/type 并加载当前 catalog。
   - `CREATE TABLE`/`DROP TABLE` 在存储操作前后同步 `pg_class`/`pg_attribute`/`pg_type`/`pg_depend` 条目；`DROP TABLE CASCADE` 通过依赖图删除索引等从属对象。
   - `CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步更新目录；`CREATE INDEX` 建立对基表的 auto 依赖。
   - `StorageEngine::checkpoint()` 持久化所有缓存目录；`DROP DATABASE` 先 `evict()` 目录缓存。
@@ -774,7 +774,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 9.5 迁移到多进程 backend + shared memory 架构 | 16.8, 13.5 | ProcessManager: BackendType + spawnBackend (thread-model) |
 | ✅ 9.6 实现 `psql` 元命令兼容 | 13.6 | SET/SHOW/RESET GUC compatible |
 | ✅ 9.7 实现 `initdb`、`createdb`/`dropdb`、`pg_ctl`、`pgbench` | 13.6 | createDatabase/dropDatabase in StorageEngine; ClusterLayout init |
-| ✅ 9.8 实现 `pg_upgrade` | 13.6 | Binary upgrade via dump/restore + catalog migration |
+| ✅ 9.8 实现 `pg_upgrade` | 13.6 | Binary upgrade boundary采用 dump/restore；新 catalog 由当前 DDL 重建，不读取旧目录 |
 
 ---
 
