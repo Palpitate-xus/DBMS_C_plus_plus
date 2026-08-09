@@ -3481,21 +3481,13 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname, spname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
                     if (!ppa->open()) continue;
                     uint32_t np = ppa->numPages();
-                    VisibilityMap* vm = getVM(dbname, tablename);
                     for (uint32_t pid = 1; pid < np; ++pid) {
                         lockManager_.pageLockShared(dbname, tablename, pid);
                         char* buf = ppa->fetchPage(pid);
                         PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
-                        bool allVisible = vm->isAllVisible(pid);
-                        if (allVisible && !rv) {
-                            page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
-                                emitRow(pid, sid, data, len);
-                            });
-                        } else {
-                            page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
-                                emitRow(pid, sid, data, len);
-                            });
-                        }
+                        page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
+                            emitRow(pid, sid, data, len);
+                        });
                         ppa->unpinPage(pid);
                         lockManager_.pageUnlock(dbname, tablename, pid);
                     }
@@ -3505,21 +3497,13 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
                 if (!ppa->open()) continue;
                 uint32_t np = ppa->numPages();
-                VisibilityMap* vm = getVM(dbname, tablename);
                 for (uint32_t pid = 1; pid < np; ++pid) {
                     lockManager_.pageLockShared(dbname, tablename, pid);
                     char* buf = ppa->fetchPage(pid);
                     PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
-                    bool allVisible = vm->isAllVisible(pid);
-                    if (allVisible && !rv) {
-                        page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
-                            emitRow(pid, sid, data, len);
-                        });
-                    } else {
-                        page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
-                            emitRow(pid, sid, data, len);
-                        });
-                    }
+                    page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
+                        emitRow(pid, sid, data, len);
+                    });
                     ppa->unpinPage(pid);
                     lockManager_.pageUnlock(dbname, tablename, pid);
                 }
@@ -3531,14 +3515,11 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     if (!pa) return;
-    VisibilityMap* vm = getVM(dbname, tablename);
     uint32_t np = pa->numPages();
     for (uint32_t pid = 1; pid < np; ++pid) {
         lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = pa->fetchPage(pid);
         PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-        // VM optimization is implicitly handled by emitRow (no ReadView = no visibility skip)
-        (void)vm->isAllVisible(pid);
         page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
             emitRow(pid, sid, data, len);
         });
