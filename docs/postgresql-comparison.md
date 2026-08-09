@@ -270,7 +270,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、主要角色属性、SCRAM、递归成员匹配、有效期检查和连接数限制已接入；完整 ACL、ADMIN OPTION、owner/依赖语义仍缺 |
 | GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
-| **行级安全 (RLS) 执行** | ✅ | ⚠️ | 已有基础 USING/WITH CHECK 路径，完整 executor 集成和安全边界仍待验收 |
+| **行级安全 (RLS) 执行** | ✅ | ⚠️ | USING 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；无适用策略默认拒绝、策略求值失败安全回退；WITH CHECK、PERMISSIVE/RESTRICTIVE、owner/角色继承和 ACL 组合语义仍不完整 |
 | **SCRAM-SHA-256 完整协议** | ✅ | 🔄 | 已实现 catalog verifier、challenge/response、pg_hba 运行时决策和 E2E；缺 channel binding 与完整 SASL 语义 |
 | **LDAP/Kerberos/GSSAPI/PAM/RADIUS** | ✅ | ❌ | 缺 |
 | **SSL 双向认证** | ✅ | ⚠️ TLSWrapper；服务端默认 fail-closed，但缺少 PostgreSQL SSL 协商、客户端证书认证和 channel binding | |

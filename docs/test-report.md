@@ -869,6 +869,8 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 **实际结果** ✅ `Policy created`, `RLS enabled`
 
+运行时回归还验证了：`USING (owner = current_user)` 只返回当前用户行；普通查询、删除以及 `UPDATE ... FROM` 的来源扫描均不再暴露其他用户行；启用 RLS 但没有适用策略时默认返回零行。策略解析/求值失败会安全拒绝该扫描。
+
 ---
 
 ## 14. 已知问题与限制

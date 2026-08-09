@@ -762,6 +762,16 @@ public:
                     const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback,
                     const ReadView* readView = nullptr,
                     const std::vector<std::string>& targetPartitions = {}) const;
+    // Relation-aware scan that applies the current session's RLS SELECT/command
+    // policies before invoking the callback. Returns false when a policy cannot
+    // be parsed or evaluated; callers must treat that as a statement error or
+    // a safe fallback, never as an unrestricted scan.
+    bool forEachVisibleRow(const std::string& dbname, const std::string& tablename,
+                           const std::string& command,
+                           const std::function<void(uint32_t pageId, uint16_t slotId,
+                                                    const char* data, size_t len)>& callback,
+                           const ReadView* readView = nullptr,
+                           const std::vector<std::string>& targetPartitions = {}) const;
     // Scan a non-partitioned heap page range through the engine's shared
     // read-only allocator. This is used by the parallel executor; the caller
     // must only use it outside an active transaction so backend-local SSI

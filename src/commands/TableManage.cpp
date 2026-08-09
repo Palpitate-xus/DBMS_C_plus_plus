@@ -107,30 +107,39 @@ Session* currentSession() { return g_currentSession; }
 // ========================================================================
 // Row-Level Security helpers
 // ========================================================================
-static std::vector<std::string> buildRLSConditions(const StorageEngine* engine,
-                                                    const std::string& dbname,
-                                                    const std::string& tablename,
-                                                    const std::string& cmd) {
-    std::vector<std::string> extra;
-    if (!engine) return extra;
-    auto tbl = engine->getTableSchema(dbname, tablename);
-    if (!tbl.rowLevelSecurity) return extra;
-    std::string user = StorageEngine::getRLSUser();
-    if (user.empty()) return extra;
-    // Admin bypasses RLS unless FORCE
-    if (user == "admin" && !tbl.forceRowLevelSecurity) return extra;
-    auto policies = engine->getApplicablePolicies(dbname, tablename, cmd, user);
-    for (const auto& p : policies) {
-        if (!p.usingExpr.empty()) {
-            std::string expr = p.usingExpr;
-            // Strip surrounding parentheses if present
-            if (expr.size() >= 2 && expr.front() == '(' && expr.back() == ')') {
-                expr = expr.substr(1, expr.size() - 2);
-            }
-            extra.push_back(expr);
+static bool shouldEnforceRLS(const TableSchema& tbl, const std::string& user) {
+    return tbl.rowLevelSecurity &&
+           !(user == "admin" && !tbl.forceRowLevelSecurity);
+}
+
+static bool rowPassesRLS(const StorageEngine* engine,
+                         const std::string& dbname,
+                         const std::string& tablename,
+                         const TableSchema& tbl,
+                         const std::string& command,
+                         const std::map<std::string, std::string>& values,
+                         const std::map<std::string, std::string>& typeHints,
+                         bool withCheck) {
+    if (!engine) return false;
+    const std::string user = StorageEngine::getRLSUser();
+    if (!shouldEnforceRLS(tbl, user)) return true;
+    const auto policies = engine->getApplicablePolicies(dbname, tablename, command, user);
+    if (policies.empty()) return false;
+
+    // Policies are permissive until RESTRICTIVE policies are modeled. A row
+    // is allowed when one applicable policy accepts it; an empty expression
+    // is PostgreSQL's unconditional policy form. Any parser/evaluator failure
+    // remains false so a malformed policy cannot widen access.
+    for (const auto& policy : policies) {
+        const std::string& expression = withCheck ? policy.withCheckExpr : policy.usingExpr;
+        if (expression.empty()) return true;
+        std::string error;
+        if (ExprHelper::evalBool(expression, values, typeHints, &error,
+                                 dbname, user)) {
+            return true;
         }
     }
-    return extra;
+    return false;
 }
 
 // ========================================================================
@@ -3536,6 +3545,78 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         pa->unpinPage(pid);
         lockManager_.pageUnlock(dbname, tablename, pid);
     }
+}
+
+bool StorageEngine::forEachVisibleRow(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& command,
+    const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
+    const ReadView* readView,
+    const std::vector<std::string>& targetPartitions) const {
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    const std::string user = StorageEngine::getRLSUser();
+
+    // The frontend installs the authenticated username before execution. An
+    // absent identity is still kept on the policy path and therefore cannot
+    // bypass an enabled RLS table.
+    if (!shouldEnforceRLS(tbl, user)) {
+        forEachRow(dbname, tablename, callback, readView, targetPartitions);
+        return true;
+    }
+
+    const auto policies = getApplicablePolicies(dbname, tablename, command, user);
+    // RLS is default-deny when no applicable policy exists. This is essential
+    // for source scans: an empty policy list must never mean unrestricted data.
+    if (policies.empty()) return true;
+
+    struct VisibleRow {
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        std::string data;
+    };
+    std::vector<VisibleRow> visible;
+    bool evaluationError = false;
+    forEachRow(dbname, tablename,
+               [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+        if (evaluationError) return;
+        const std::string row(data, len);
+        std::map<std::string, std::string> values;
+        std::map<std::string, std::string> typeHints;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const std::string value = extractColumnValueStatic(row, tbl, i);
+            values[tbl.cols[i].dataName] = value;
+            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+        }
+
+        bool allowed = false;
+        for (const auto& policy : policies) {
+            if (policy.usingExpr.empty()) {
+                allowed = true;
+                break;
+            }
+            std::string error;
+            if (ExprHelper::evalBool(policy.usingExpr, values, typeHints, &error,
+                                     dbname, user)) {
+                allowed = true;
+                break;
+            }
+            // A parse/evaluation error is distinguishable from a false policy
+            // only through the error output. Fail closed and let the caller
+            // choose a safe fallback instead of silently hiding or exposing
+            // rows.
+            if (!error.empty()) {
+                evaluationError = true;
+                return;
+            }
+        }
+        if (allowed) visible.push_back({pageId, slotId, row});
+    }, readView, targetPartitions);
+
+    if (evaluationError) return false;
+    for (const auto& row : visible) {
+        callback(row.pageId, row.slotId, row.data.data(), row.data.size());
+    }
+    return true;
 }
 
 void StorageEngine::forEachRowPageRange(
@@ -11248,6 +11329,14 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
+    // RLS WITH CHECK is evaluated after defaults, generated values and
+    // BEFORE-trigger changes, matching the final row that will be written.
+    if (!rowPassesRLS(this, dbname, tablename, tbl, "INSERT", actualValues,
+                      typeHints, true)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
     // TOAST: offload large variable-length values to external storage
     prepareToastValues(dbname, tablename, tbl, actualValues);
 
@@ -12035,13 +12124,26 @@ DBStatus StorageEngine::remove(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
-    // Apply Row-Level Security policies
-    std::vector<std::string> allConditions = conditions;
-    auto rlsConds = buildRLSConditions(this, dbname, tablename, "DELETE");
-    allConditions.insert(allConditions.end(), rlsConds.begin(), rlsConds.end());
-
-    auto conds = parseConditions(allConditions);
-    std::set<int64_t> toDelete = filterRows(dbname, tablename, conds);
+    const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
+    auto conds = parseConditions(conditions);
+    std::set<int64_t> toDelete;
+    if (enforceRls) {
+        const bool scanOk = forEachVisibleRow(
+            dbname, tablename, "DELETE",
+            [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+                const std::string row(data, len);
+                for (const auto& c : conds) {
+                    if (!evalConditionOnRow(c, row, tbl)) return;
+                }
+                toDelete.insert(encodeRid(pid, sid));
+            });
+        if (!scanOk) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    } else {
+        toDelete = filterRows(dbname, tablename, conds);
+    }
 
     // Structured DELETE ... USING performs the source-row match before this
     // storage operation.  Keep the final target-row selection inside the
@@ -12752,15 +12854,28 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
-    // Apply Row-Level Security policies
-    std::vector<std::string> allConditions = conditions;
-    auto rlsConds = buildRLSConditions(this, dbname, tablename, "UPDATE");
-    allConditions.insert(allConditions.end(), rlsConds.begin(), rlsConds.end());
-
-    auto conds = parseConditions(allConditions);
-    std::set<int64_t> matchIds = conds.empty()
-        ? [&](){ std::set<int64_t> s; forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) { s.insert(encodeRid(pid, sid)); }); return s; }()
-        : filterRows(dbname, tablename, conds);
+    const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
+    auto conds = parseConditions(conditions);
+    std::set<int64_t> matchIds;
+    if (enforceRls) {
+        const bool scanOk = forEachVisibleRow(
+            dbname, tablename, "UPDATE",
+            [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+                const std::string row(data, len);
+                for (const auto& c : conds) {
+                    if (!evalConditionOnRow(c, row, tbl)) return;
+                }
+                matchIds.insert(encodeRid(pid, sid));
+            });
+        if (!scanOk) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    } else {
+        matchIds = conds.empty()
+            ? [&](){ std::set<int64_t> s; forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) { s.insert(encodeRid(pid, sid)); }); return s; }()
+            : filterRows(dbname, tablename, conds);
+    }
 
     if (updateMatcher && !matchIds.empty()) {
         std::set<int64_t> filteredIds;
@@ -13013,6 +13128,12 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 std::string computed = evalExpressionSql(col.generatedExpr, rowValues, updateTypeHints2, dbname, &ok);
                 if (ok) rowValues[col.dataName] = computed;
             }
+        }
+
+        if (!rowPassesRLS(this, dbname, tablename, tbl, "UPDATE", rowValues,
+                          updateTypeHints, true)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
         }
 
         // TOAST: delete old toast entries, create new ones for large values
@@ -13861,15 +13982,31 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
-    // Apply Row-Level Security policies
-    std::vector<std::string> allConditions = conditions;
-    auto rlsConds = buildRLSConditions(this, dbname, tablename, "SELECT");
-    allConditions.insert(allConditions.end(), rlsConds.begin(), rlsConds.end());
-
-    auto conds = parseConditions(allConditions);
+    // RLS policies are expression ASTs, not legacy index-condition strings.
+    // Keep user predicates separate and apply policy visibility through the
+    // relation-aware scan below; converting a policy such as
+    // `owner = current_user` to the old textual condition format is unsafe.
+    const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
+    auto conds = parseConditions(conditions);
     std::vector<std::pair<int64_t, std::string>> matchRows;
     bool usedIndex = false;
-    if (conds.empty()) {
+    if (enforceRls) {
+        const auto targetParts = tbl.partitionType == TableSchema::PartitionType::None
+            ? std::vector<std::string>{}
+            : getTargetPartitions(tbl, conds);
+        const ReadView* rv = transactionContext().inTransaction
+            ? &transactionContext().readView : nullptr;
+        const bool scanOk = forEachVisibleRow(
+            dbname, tablename, "SELECT",
+            [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+                std::string row(data, len);
+                for (const auto& c : conds) {
+                    if (!evalConditionOnRow(c, row, tbl)) return;
+                }
+                matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
+            }, rv, targetParts);
+        if (!scanOk) matchRows.clear();
+    } else if (conds.empty()) {
         forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
         });

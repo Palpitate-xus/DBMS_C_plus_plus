@@ -69,7 +69,8 @@ ExprEvalResult ExprHelper::evalString(
     const std::string& exprSql,
     const std::map<std::string, std::string>& row,
     const std::map<std::string, std::string>& typeHints,
-    const std::string& currentDB) {
+    const std::string& currentDB,
+    const std::string& currentUser) {
 
     ExprEvalResult res;
     if (exprSql.empty()) {
@@ -101,10 +102,29 @@ ExprEvalResult ExprHelper::evalString(
         }
         ctx.set(name, ExprValue(typeName, value, value.empty()));
     }
+    // PostgreSQL exposes these as special session-value expressions. The
+    // parser accepts both the function-like AST form and the bare identifier
+    // form, so seed the context as well as registering evaluator functions.
+    if (!currentUser.empty()) {
+        const ExprValue userValue("name", currentUser, false);
+        ctx.set("current_user", userValue);
+        ctx.set("session_user", userValue);
+    }
 
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
+    evaluator.registerFunction("current_user", [currentUser](const std::vector<ExprValue>&) {
+        return ExprValue("name", currentUser, currentUser.empty());
+    }, 's');
+    evaluator.registerFunction("session_user", [currentUser](const std::vector<ExprValue>&) {
+        return ExprValue("name", currentUser, currentUser.empty());
+    }, 's');
     ExprValue v = evaluator.eval(select->selectList[0].expr.get(), ctx);
+
+    if (v.isUnknown()) {
+        res.error = "expression evaluated to an unsupported value";
+        return res;
+    }
 
     res.ok = true;
     res.isNull = v.isNull;
@@ -117,9 +137,10 @@ bool ExprHelper::evalBool(
     const std::map<std::string, std::string>& row,
     const std::map<std::string, std::string>& typeHints,
     std::string* error,
-    const std::string& currentDB) {
+    const std::string& currentDB,
+    const std::string& currentUser) {
 
-    ExprEvalResult r = evalString(exprSql, row, typeHints, currentDB);
+    ExprEvalResult r = evalString(exprSql, row, typeHints, currentDB, currentUser);
     if (!r.ok) {
         if (error) *error = r.error;
         return false;

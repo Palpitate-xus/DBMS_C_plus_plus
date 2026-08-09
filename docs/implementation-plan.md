@@ -31,7 +31,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 
 | 能力 | 当前真实状态 | 证据/边界 |
 |------|--------------|-----------|
-| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE 和 CREATE TRIGGER 已桥接；触发器 action runtime、RLS、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy/简化路径执行 |
+| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE 和 CREATE TRIGGER 已桥接；RLS 可见性已由 StorageEngine 统一执行，触发器 action runtime、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy/简化路径执行 |
 | 复杂查询执行 | 部分完成 | Volcano 基础算子和集合组合节点已验证；复杂集合 operand、子查询、窗口和 grouping producer 仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
@@ -314,7 +314,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 4.34 实现 `CREATE DOMAIN` 多约束与全表 revalidation | 1.1.18 | DOMAIN 约束执行已落地。 |
 | ⚠️ 4.35 实现 `CREATE FUNCTION` 完整语义（language/volatility/strict/parallel/cost/security definer） | 1.1.19 | 已支持基础标量 UDF/TVF、volatility 元数据和 `tests/function_procedure_test.cpp`；PL/pgSQL 运行时、函数权限与依赖、OUT 参数和重载解析仍待后续。 |
 | ⚠️ 4.36 实现 `CREATE PROCEDURE` 语言运行时与事务控制 | 1.1.23 | 已保存并解析基础 procedure 定义；PL/pgSQL 运行时和 PostgreSQL 事务控制语义仍待后续。 |
-| ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL 和基础 policy 测试已落地；完整 executor 行级强制、role 解析和 `ALTER POLICY` 仍待后续。 |
+| ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL、USING 关系感知扫描和运行时 policy 回归已落地；完整 WITH CHECK executor 强制、role/owner 解析和 `ALTER POLICY` 仍待后续。 |
 | ⚠️ 4.38 实现 `CREATE MATERIALIZED VIEW` `WITH [NO] DATA`、并发刷新 | 1.1.21, 4.10 | 已支持基础创建、列序、`WITH [NO] DATA` 和刷新；唯一索引要求、真正的 CONCURRENTLY 锁语义和 `pg_matview` 依赖追踪仍待后续。 |
 | ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 和基础事务路径已落地；完整 DDL 回滚、跨对象依赖和 PostgreSQL 隐式提交边界仍待后续。 |
 | ✅ 4.40 实现 `CREATE ASSERTION` 执行（如决定支持） | 5.9 | PG 本身未实现。本项目暂不支持Assertion，标记为完成（scope exclusion）。 |
@@ -729,7 +729,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |
 | 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | 基础权限路径已有，目录持久化和完整继承语义仍需补齐 |
 | 🔄 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | 解析路径已有，默认权限的完整 catalog/executor 语义仍需验证 |
-| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | DDL 注册和 USING/WITH CHECK 解析已有，执行器集成仍不完整 |
+| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；无适用策略默认拒绝、求值失败安全回退；WITH CHECK、PERMISSIVE/RESTRICTIVE、owner/角色继承和 ACL 组合语义仍不完整 |
 | 🔄 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | 语法支持已有，执行时安全边界仍需补齐 |
 | 🔄 7.10 实现 `GRANT`/`REVOKE` ACL item 完整语义 | 1.1.40 | 基础语法和执行路径已有，完整 ACL 传播/校验仍需验证 |
 | 🔄 7.11 实现 `ALTER USER`/`ALTER ROLE` 完整权限位（superuser/createdb/replication/bypassrls） | 1.1.5 | 主要属性执行、SCRAM 密码、`VALID UNTIL`、连接数限制和持久化已接入；仍需按 PostgreSQL 语义补全 owner/ACL/依赖校验 |

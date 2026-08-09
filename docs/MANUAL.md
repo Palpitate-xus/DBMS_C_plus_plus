@@ -6,7 +6,7 @@
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
-> 路由说明：基础 `ALTER TABLE`、`CREATE TABLE` 分区和简单单表视图 `INSTEAD OF` DML 路径由统一执行链处理；尚未迁移的 RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等子命令继续使用 legacy 或简化路径，并在生产状态文档中单独列明。
+> 路由说明：基础 `ALTER TABLE`、`CREATE TABLE` 分区、RLS 可见性扫描和简单单表视图 `INSTEAD OF` DML 路径由统一执行链处理；触发器函数运行时、OWNER/CLUSTER/REPLICA 等子命令仍有 legacy 或简化路径，并在生产状态文档中单独列明。RLS 的 `WITH CHECK`、PERMISSIVE/RESTRICTIVE 和完整角色/owner 语义仍未完成。
 
 ---
 

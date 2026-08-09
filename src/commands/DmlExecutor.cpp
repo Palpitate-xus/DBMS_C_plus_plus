@@ -778,11 +778,6 @@ InsertSelectBuildResult buildInsertSelectRows(
             return InsertSelectBuildResult::Error;
         }
         sourceTable = g_engine.getTableSchema(s.currentDB, resolvedSource);
-        // forEachRow is intentionally a raw heap scan.  Do not bypass RLS
-        // policies until the scan API can apply the SELECT policy itself.
-        if (sourceTable.rowLevelSecurity || sourceTable.forceRowLevelSecurity) {
-            return InsertSelectBuildResult::Unsupported;
-        }
     }
 
     ExprEvaluator evaluator;
@@ -883,10 +878,12 @@ InsertSelectBuildResult buildInsertSelectRows(
 
     if (hasSource) {
         const std::string resolvedSource = resolveTable(s, sourceName);
-        g_engine.forEachRow(s.currentDB, resolvedSource,
-                            [&](uint32_t, uint16_t, const char* data, size_t len) {
-                                if (!evaluationFailed) appendRow(std::string(data, len));
-                            });
+        const bool scanOk = g_engine.forEachVisibleRow(
+            s.currentDB, resolvedSource, "SELECT",
+            [&](uint32_t, uint16_t, const char* data, size_t len) {
+                if (!evaluationFailed) appendRow(std::string(data, len));
+            });
+        if (!scanOk) evaluationFailed = true;
     } else {
         appendRow({});
     }
@@ -1113,11 +1110,12 @@ RowContext updateFromContext(const std::map<std::string, std::string>& targetVal
                                      {source}, rows);
 }
 
-void collectTableRows(const std::string& currentDB, const std::string& tableName,
-                      const TableSchema& table,
+bool collectTableRows(const std::string& currentDB, const std::string& tableName,
+                      const TableSchema& table, const std::string& command,
                       std::vector<std::map<std::string, std::string>>& rows) {
-    g_engine.forEachRow(currentDB, tableName,
-                        [&](uint32_t, uint16_t, const char* data, size_t len) {
+    const bool ok = g_engine.forEachVisibleRow(
+        currentDB, tableName, command,
+        [&](uint32_t, uint16_t, const char* data, size_t len) {
         const std::string row(data, len);
         std::map<std::string, std::string> values;
         for (size_t i = 0; i < table.len; ++i) {
@@ -1126,6 +1124,7 @@ void collectTableRows(const std::string& currentDB, const std::string& tableName
         }
         rows.push_back(std::move(values));
     });
+    return ok;
 }
 
 enum class StructuredRelationResult { Success, Unsupported, Error };
@@ -1162,12 +1161,9 @@ StructuredRelationResult collectStructuredRelations(
             return StructuredRelationResult::Unsupported;
         }
         source.schema = g_engine.getTableSchema(s.currentDB, resolvedName);
-        // forEachRow is a raw heap scan.  A source RLS policy must be applied
-        // by a relation-aware scan before this path can expose its rows.
-        if (source.schema.rowLevelSecurity || source.schema.forceRowLevelSecurity) {
+        if (!collectTableRows(s.currentDB, resolvedName, source.schema, "SELECT", source.rows)) {
             return StructuredRelationResult::Unsupported;
         }
-        collectTableRows(s.currentDB, resolvedName, source.schema, source.rows);
         sources.push_back(std::move(source));
         return StructuredRelationResult::Success;
     }
@@ -2057,7 +2053,10 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
     }
 
     std::vector<std::map<std::string, std::string>> targetRows;
-    collectTableRows(s.currentDB, resolvedTable, targetSchema, targetRows);
+    if (!collectTableRows(s.currentDB, resolvedTable, targetSchema, "UPDATE", targetRows)) {
+        fallback = true;
+        return false;
+    }
     std::map<std::string, std::map<std::string, std::string>> matchedUpdates;
     bool evaluationFailed = false;
     for (const auto& targetValues : targetRows) {
@@ -2167,12 +2166,6 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
     const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
-    // forEachRow is a raw heap scan.  Do not bypass a source SELECT policy
-    // until the structured scan API can evaluate RLS for the source relation.
-    if (sourceSchema.rowLevelSecurity || sourceSchema.forceRowLevelSecurity) {
-        fallback = true;
-        return false;
-    }
     const std::string targetQualifier = unqualifiedRelationName(requestedTable);
     const std::string sourceQualifier = stmt.fromClause->alias.empty()
         ? unqualifiedRelationName(requestedSource)
@@ -2233,12 +2226,18 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     }
 
     std::vector<std::map<std::string, std::string>> sourceRows;
-    collectTableRows(s.currentDB, resolvedSource, sourceSchema, sourceRows);
+    if (!collectTableRows(s.currentDB, resolvedSource, sourceSchema, "SELECT", sourceRows)) {
+        fallback = true;
+        return false;
+    }
 
     std::map<std::string, std::map<std::string, std::string>> matchedUpdates;
     bool evaluationFailed = false;
     std::vector<std::map<std::string, std::string>> targetRows;
-    collectTableRows(s.currentDB, resolvedTable, targetSchema, targetRows);
+    if (!collectTableRows(s.currentDB, resolvedTable, targetSchema, "UPDATE", targetRows)) {
+        fallback = true;
+        return false;
+    }
     for (const auto& targetValues : targetRows) {
         if (evaluationFailed) break;
         for (const auto& sourceValues : sourceRows) {
@@ -2474,7 +2473,10 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
     }
 
     std::vector<std::map<std::string, std::string>> targetRows;
-    collectTableRows(s.currentDB, resolvedTable, targetSchema, targetRows);
+    if (!collectTableRows(s.currentDB, resolvedTable, targetSchema, "DELETE", targetRows)) {
+        fallback = true;
+        return false;
+    }
     std::set<std::string> matchedTargets;
     bool evaluationFailed = false;
     for (const auto& targetValues : targetRows) {
@@ -2560,13 +2562,6 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
     const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
-    // forEachRow is a raw heap scan.  Do not expose source rows without a
-    // structured SELECT-policy scan; ordinary DELETE still applies target RLS
-    // inside StorageEngine::remove.
-    if (sourceSchema.rowLevelSecurity || sourceSchema.forceRowLevelSecurity) {
-        fallback = true;
-        return false;
-    }
     const std::string targetQualifier = unqualifiedRelationName(requestedTable);
     const std::string sourceQualifier = stmt.usingClause->alias.empty()
         ? unqualifiedRelationName(requestedSource)
@@ -2584,8 +2579,11 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
 
     std::vector<std::map<std::string, std::string>> sourceRows;
     std::vector<std::map<std::string, std::string>> targetRows;
-    collectTableRows(s.currentDB, resolvedSource, sourceSchema, sourceRows);
-    collectTableRows(s.currentDB, resolvedTable, targetSchema, targetRows);
+    if (!collectTableRows(s.currentDB, resolvedSource, sourceSchema, "SELECT", sourceRows) ||
+        !collectTableRows(s.currentDB, resolvedTable, targetSchema, "DELETE", targetRows)) {
+        fallback = true;
+        return false;
+    }
 
     std::set<std::string> matchedTargets;
     bool evaluationFailed = false;

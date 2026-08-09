@@ -33,7 +33,8 @@ public:
         const std::string& exprSql,
         const std::map<std::string, std::string>& row,
         const std::map<std::string, std::string>& typeHints = {},
-        const std::string& currentDB = "");
+        const std::string& currentDB = "",
+        const std::string& currentUser = "");
 
     // Convenience: evaluate a boolean expression. NULL is treated as false.
     // Returns false and writes the error message to `error` (if non-null) on
@@ -43,7 +44,8 @@ public:
         const std::map<std::string, std::string>& row,
         const std::map<std::string, std::string>& typeHints = {},
         std::string* error = nullptr,
-        const std::string& currentDB = "");
+        const std::string& currentDB = "",
+        const std::string& currentUser = "");
 };
 
 } // namespace dbms

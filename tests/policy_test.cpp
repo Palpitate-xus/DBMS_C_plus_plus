@@ -1,5 +1,7 @@
 #include "commands/DdlExecutor.h"
+#include "commands/DmlExecutor.h"
 #include "commands/TableManage.h"
+#include "expression/expr_helper.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
 #include <cassert>
@@ -84,11 +86,95 @@ static void test_create_policy_insert() {
     std::cout << "[POLICY] INSERT OK" << std::endl;
 }
 
+static void test_rls_visible_source_scan() {
+    std::string db = testDbPath("policy_runtime");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE target (id INT PRIMARY KEY, val INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE source (id INT PRIMARY KEY, owner VARCHAR(50), delta INT)", s));
+    assert(g_engine.insert(db, "target", {{"id", "1"}, {"val", "0"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "target", {{"id", "2"}, {"val", "0"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source", {{"id", "1"}, {"owner", "testuser"}, {"delta", "10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source", {{"id", "2"}, {"owner", "otheruser"}, {"delta", "20"}}) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE POLICY source_select ON source FOR SELECT USING (owner = current_user)", s));
+    assert(g_engine.enableRowLevelSecurity(db, "source") == dbms::DBStatus::OK);
+
+    dbms::StorageEngine::setRLSUser(s.username);
+    std::string policyError;
+    assert(dbms::ExprHelper::evalBool(
+        "owner = current_user", {{"owner", "testuser"}},
+        {{"owner", "varchar"}}, &policyError, db, s.username));
+    size_t visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "source", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 1);
+    const auto visibleRows = g_engine.query(db, "source", {}, {"id"});
+    assert(visibleRows.size() == 1);
+
+    assert(!ddl.executeSql("CREATE TABLE protected_delete (id INT PRIMARY KEY, owner VARCHAR(50))", s));
+    assert(g_engine.insert(db, "protected_delete", {{"id", "1"}, {"owner", "testuser"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "protected_delete", {{"id", "2"}, {"owner", "otheruser"}}) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE POLICY protected_delete_policy ON protected_delete FOR DELETE USING (owner = current_user)", s));
+    assert(g_engine.enableRowLevelSecurity(db, "protected_delete") == dbms::DBStatus::OK);
+    assert(g_engine.remove(db, "protected_delete", {}) == dbms::DBStatus::OK);
+    size_t remaining = 0;
+    g_engine.forEachRow(db, "protected_delete", [&](uint32_t, uint16_t, const char*, size_t) { ++remaining; });
+    assert(remaining == 1);
+
+    assert(!ddl.executeSql("CREATE TABLE protected_write (id INT PRIMARY KEY, owner VARCHAR(50))", s));
+    assert(!ddl.executeSql(
+        "CREATE POLICY protected_write_policy ON protected_write FOR ALL "
+        "USING (owner = current_user) WITH CHECK (owner = current_user)", s));
+    assert(g_engine.enableRowLevelSecurity(db, "protected_write") == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "protected_write", {{"id", "1"}, {"owner", "testuser"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "protected_write", {{"id", "2"}, {"owner", "otheruser"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.update(db, "protected_write", {{"owner", "otheruser"}}, {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
+
+    bool handled = false;
+    assert(!dbms::tryDmlBridge(
+        "UPDATE target SET val = target.val + s.delta FROM source AS s "
+        "WHERE target.id = s.id",
+        dbms::SqlCommand::Update, s, handled));
+    assert(handled);
+
+    std::vector<std::pair<int, int>> values;
+    const auto target = g_engine.getTableSchema(db, "target");
+    g_engine.forEachRow(db, "target", [&](uint32_t, uint16_t, const char* data, size_t len) {
+        const std::string row(data, len);
+        values.emplace_back(std::stoi(g_engine.extractColumnValue(row, target, 0, db, true)),
+                            std::stoi(g_engine.extractColumnValue(row, target, 1, db, true)));
+    });
+    assert(values.size() == 2);
+    assert(values[0] == std::make_pair(1, 10));
+    assert(values[1] == std::make_pair(2, 0));
+
+    assert(!ddl.executeSql("CREATE TABLE no_policy (id INT PRIMARY KEY)", s));
+    assert(g_engine.insert(db, "no_policy", {{"id", "1"}}) == dbms::DBStatus::OK);
+    assert(g_engine.enableRowLevelSecurity(db, "no_policy") == dbms::DBStatus::OK);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "no_policy", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 0);
+
+    dbms::StorageEngine::setRLSUser("");
+    cleanup(db);
+    std::cout << "[POLICY] runtime visibility and default-deny OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_policy_all();
     test_create_policy_using_and_check();
     test_create_policy_insert();
+    test_rls_visible_source_scan();
     std::cout << "[POLICY] all passed" << std::endl;
     return 0;
 }
