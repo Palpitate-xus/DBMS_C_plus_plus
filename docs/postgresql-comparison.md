@@ -100,8 +100,8 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 功能 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
 | INSERT (VALUES/SELECT/ON CONFLICT/RETURNING) | ✅ | ⚠️ | 普通单表 VALUES/DEFAULT VALUES、无 JOIN/聚合/排序的 INSERT SELECT（含列表达式）、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 的受限 WHERE 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；复杂 SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、视图写入和复杂未支持表达式明确回退 legacy |
-| UPDATE (FROM/LIMIT/RETURNING) | ✅ | ⚠️ | 受限行级标量表达式单表 UPDATE、单源表 UPDATE FROM、来源 INNER/CROSS JOIN 的 UPDATE FROM 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；外连接/复杂 UPDATE FROM、LIMIT、复杂/子查询/窗口 RETURNING、视图写入仍回退 legacy |
-| DELETE (USING/LIMIT/RETURNING) | ✅ | ⚠️ | 简单谓词单表 DELETE、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 DELETE USING 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；外连接/复杂 USING、LIMIT、复杂/子查询/窗口 RETURNING、ONLY、视图写入仍回退 legacy |
+| UPDATE (FROM/RETURNING) | ✅ | ⚠️ | 受限行级标量表达式单表 UPDATE、单源表 UPDATE FROM、来源 INNER/CROSS JOIN 的 UPDATE FROM 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；外连接/复杂 UPDATE FROM、复杂/子查询/窗口 RETURNING、视图写入仍回退 legacy；`UPDATE ... LIMIT` 是 MySQL 语法，本项目已移除 |
+| DELETE (USING/RETURNING) | ✅ | ⚠️ | 简单谓词单表 DELETE、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 DELETE USING 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；外连接/复杂 USING、复杂/子查询/窗口 RETURNING、ONLY、视图写入仍回退 legacy；`DELETE ... LIMIT` 是 MySQL 语法，本项目已移除 |
 | MERGE (MATCHED/NOT MATCHED) | ✅ | ✅ | ✅ |
 | REPLACE INTO (MySQL 兼容) | ❌ | ✅ | ✅ |
 | **COPY (binary/program)** | ✅ | ⚠️ | 仅 CSV |

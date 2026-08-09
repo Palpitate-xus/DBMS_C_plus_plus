@@ -275,7 +275,7 @@
 | 1.1.32 | `CREATE TYPE` | 支持 composite type（`AS (field type, ...)`，经 DDL 桥正确解析含修饰符字段）与 enum（`AS ENUM`）；缺少 PG 的 range/base/shell 类型创建语义 | ⚠️ |
 | 1.1.33 | `CREATE VIEW` | 支持保存 SQL 和简单 updatable view；缺少 recursive view、security_barrier、security_invoker、check option 完整性 | ⚠️ |
 | 1.1.34 | `DEALLOCATE` / `PREPARE` / `EXECUTE` | 使用字符串 `?` 替换；缺少服务器端类型推断、binary params、plan invalidation、generic/custom plan、portal | ⚠️ |
-| 1.1.35 | `DELETE` | 支持 WHERE/USING/LIMIT/RETURNING 部分；缺少 PG 全语义、CTE/`ONLY`/inheritance/RETURNING OLD/NEW 复杂表达式 | ⚠️ |
+| 1.1.35 | `DELETE` | 支持 WHERE/USING/RETURNING 部分；缺少 PG 全语义、CTE/`ONLY`/inheritance/RETURNING OLD/NEW 复杂表达式；MySQL-only LIMIT 已移除 | ⚠️ |
 | 1.1.36 | `DISCARD` | 主要 `DISCARD ALL` 清 session 局部状态；不完整 | ⚠️ |
 | 1.1.37 | `DROP ...` 常见对象 | table/database/view/mview/index/trigger/user/role/group/schema/domain/type/sequence/function/procedure 等部分；缺少依赖图、`CASCADE/RESTRICT` 精确行为、`IF EXISTS`/多对象列表完整支持 | ⚠️ |
 | 1.1.38 | `END` | 已作为 `COMMIT` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
@@ -298,7 +298,7 @@
 | 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 完整权限矩阵和会话安全上下文完整语义 | ⚠️ |
 | 1.1.56 | `SET TRANSACTION` | BEGIN 路径已结构化隔离级别/只读选项；SET TRANSACTION 仍缺 deferrable、当前事务时序限制完整语义 | ⚠️ |
 | 1.1.57 | `TRUNCATE` | 已迁移 typed AST/DdlExecutor，支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT`；仍缺 trigger/foreign table、完整 transactional/locking 细节 | ⚠️ |
-| 1.1.58 | `UPDATE` | 支持受限行级标量表达式、单源表 FROM、LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式 | ⚠️ |
+| 1.1.58 | `UPDATE` | 支持受限行级标量表达式、单源表 FROM、RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式；MySQL-only LIMIT 已移除 | ⚠️ |
 | 1.1.59 | `VACUUM` | compact/free page；缺少 freeze、visibility map、autovacuum launcher/workers、parallel vacuum、analyze coupling、wraparound 防护 | ⚠️ |
 | 1.1.60 | `VALUES` | 已支持顶层 `VALUES (..), (..)` 输出；缺少完整表达式求值、类型合并、排序/limit 组合和作为通用 query expression 的全部语义 | ⚠️ |
 
@@ -579,7 +579,7 @@
 | 15.3 | `LOAD DATA INFILE` | MySQL 风格，PG 使用 `COPY`/\`copy` |
 | 15.4 | `SELECT ... INTO OUTFILE` | MySQL 风格；PG `SELECT INTO` 是建表，导出用 `COPY TO` |
 | 15.5 | `DESC` / `VIEW TABLE` / `VIEW DATABASE` | MySQL/项目命令；PG 通常用 psql 元命令或 catalog 查询 |
-| 15.6 | `UPDATE/DELETE ... LIMIT` | MySQL 风格；PG 通常用 CTE/subquery |
+| 15.6 | `UPDATE/DELETE ... LIMIT` | MySQL 风格，已从 parser/legacy dispatcher 移除；PG 使用 CTE/subquery |
 | 15.7 | `AUTO_INCREMENT` | MySQL 风格；PG 用 serial/identity |
 | 15.8 | `DATETIME`, `TINYINT`, `BLOB`, `NCHAR/NVARCHAR` | 非 PG 原生或语义不同 |
 | 15.9 | `SET GLOBAL` | MySQL 风格；PG 用 ALTER SYSTEM/GUC reload |
@@ -656,11 +656,11 @@
 
 - **2026-08-09（约束目标 DO NOTHING）**：`DmlExecutor` 现支持无 target 或显式匹配主键/UNIQUE 约束的 `ON CONFLICT DO NOTHING`；目标化冲突只忽略目标约束命中的行，其他唯一约束冲突仍返回错误，并新增回归覆盖该边界。
 
-- **2026-08-09（行级 UPDATE 表达式）**：单表 `UPDATE` 现支持受限标量表达式引用当前目标行的列值，例如 `SET id = id + 10, name = name || '-row'`；表达式在 StorageEngine 已锁定的每个目标行上求值，并复用存储层统一的类型校验/规范化与 `RETURNING` 行捕获。复杂表达式、子查询、`FROM`/`LIMIT` 和视图写入仍按既有边界回退。
+- **2026-08-09（行级 UPDATE 表达式）**：单表 `UPDATE` 现支持受限标量表达式引用当前目标行的列值，例如 `SET id = id + 10, name = name || '-row'`；表达式在 StorageEngine 已锁定的每个目标行上求值，并复用存储层统一的类型校验/规范化与 `RETURNING` 行捕获。复杂表达式、子查询、`FROM` 和视图写入仍按既有边界回退；MySQL-only `UPDATE ... LIMIT` 已移除。
 
-- **2026-08-09（结构化 UPDATE FROM）**：单源表 `UPDATE ... FROM` 现由 `DmlExecutor` 结构化执行，支持来源别名、目标/来源限定列引用、列间连接谓词和 `RETURNING`；StorageEngine 在统一行锁、RLS、约束和索引更新路径中按匹配目标行执行。复杂 JOIN、子查询、LIMIT 和视图写入仍回退 legacy；同时修复 evaluator 让限定列引用优先于同名未限定列。
+- **2026-08-09（结构化 UPDATE FROM）**：单源表 `UPDATE ... FROM` 现由 `DmlExecutor` 结构化执行，支持来源别名、目标/来源限定列引用、列间连接谓词和 `RETURNING`；StorageEngine 在统一行锁、RLS、约束和索引更新路径中按匹配目标行执行。复杂 JOIN、子查询和视图写入仍回退 legacy；同时修复 evaluator 让限定列引用优先于同名未限定列。MySQL-only `UPDATE ... LIMIT` 已移除。
 
-- **2026-08-09（结构化 DELETE USING）**：单源表 `DELETE ... USING` 现由 `DmlExecutor` 结构化执行，支持来源别名、目标/来源限定列引用、连接谓词和 `RETURNING`；StorageEngine 在统一 RLS、行锁、外键动作、约束、索引、触发器和删除结果捕获路径中按匹配目标行执行。复杂 USING JOIN、子查询、ONLY、LIMIT 和视图写入仍回退 legacy。
+- **2026-08-09（结构化 DELETE USING）**：单源表 `DELETE ... USING` 现由 `DmlExecutor` 结构化执行，支持来源别名、目标/来源限定列引用、连接谓词和 `RETURNING`；StorageEngine 在统一 RLS、行锁、外键动作、约束、索引、触发器和删除结果捕获路径中按匹配目标行执行。复杂 USING JOIN、子查询、ONLY 和视图写入仍回退 legacy。MySQL-only `DELETE ... LIMIT` 已移除。
 
 - **2026-08-09（结构化 DML INNER JOIN + RLS）**：`UPDATE ... FROM` 和 `DELETE ... USING` 现支持来源 INNER/CROSS JOIN 的多基表组合，统一构造来源限定命名空间并按连接谓词/WHERE 选择目标行；来源关系通过 SELECT-policy 可见性扫描读取，RLS 无适用策略默认拒绝，策略求值失败安全回退。外连接、子查询和视图仍回退 legacy。
 

@@ -815,7 +815,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 11.3 `LOAD DATA INFILE` → 映射为 `COPY` | 15.3 | COPY FROM supports file input |
 | ✅ 11.4 `SELECT ... INTO OUTFILE` → 映射为 `COPY TO` | 15.4 | COPY TO STDOUT/file supported |
 | ✅ 11.5 `DESC` / `VIEW TABLE` / `VIEW DATABASE` → catalog 查询 | 15.5 | SELECT * FROM pg_class/pg_attribute replaces DESC |
-| ✅ 11.6 `UPDATE/DELETE ... LIMIT` → 支持 | 15.6 | UPDATE/DELETE with LIMIT via engine API |
+| ✅ 11.6 清理 `UPDATE/DELETE ... LIMIT` 死代码 | 15.6 | MySQL-only syntax was unreachable after parser fail-closed routing; use PostgreSQL CTE/subquery patterns |
 | ✅ 11.7 `AUTO_INCREMENT` → 映射为 `serial` / `identity` | 15.7 | GENERATED AS IDENTITY / SERIAL type mapping |
 | ✅ 11.8 `DATETIME`, `TINYINT`, `BLOB`, `NCHAR/NVARCHAR` → 映射为 PG 类型 | 15.8 | type_registry has MySQL→PG type aliases |
 | ✅ 11.9 `SET GLOBAL` → 映射为 `ALTER SYSTEM` / GUC reload | 15.9 | SET parameter = value routes to GUC |

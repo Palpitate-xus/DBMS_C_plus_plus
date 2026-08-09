@@ -500,8 +500,8 @@ ON CONFLICT (id) DO UPDATE SET name = 'Alice', age = 26;
 
 **语法**
 ```sql
-UPDATE table_name SET column1 = value1 [, column2 = value2, ...] [WHERE condition] [LIMIT n]
-UPDATE target_table SET ... FROM source_table WHERE join_condition [LIMIT n]
+UPDATE table_name SET column1 = value1 [, column2 = value2, ...] [WHERE condition]
+UPDATE target_table SET ... FROM source_table WHERE join_condition
 ```
 
 **参数**
@@ -510,14 +510,12 @@ UPDATE target_table SET ... FROM source_table WHERE join_condition [LIMIT n]
 | `table_name` | `STRING` | 要更新的表 |
 | `column = value` | `ASSIGN` | 列赋值，值可为常量或表达式 |
 | `condition` | `EXPR` | 可选，WHERE 过滤条件 |
-| `LIMIT n` | `INT` | 可选，仅更新前 n 行（要求表有主键） |
 
 **示例**
 ```sql
 UPDATE users SET age = 26 WHERE id = 1;
 UPDATE users SET status = 0 WHERE age > 60;
 UPDATE orders SET amount = amount * 1.1 FROM users WHERE orders.user_id = users.id AND users.vip = 1;
-UPDATE users SET age = age + 1 LIMIT 10;
 ```
 
 ---
@@ -526,8 +524,8 @@ UPDATE users SET age = age + 1 LIMIT 10;
 
 **语法**
 ```sql
-DELETE FROM table_name [WHERE condition] [LIMIT n]
-DELETE FROM target_table USING source_table WHERE join_condition [LIMIT n]
+DELETE FROM table_name [WHERE condition]
+DELETE FROM target_table USING source_table WHERE join_condition
 ```
 
 **参数** 同 UPDATE。
@@ -537,7 +535,6 @@ DELETE FROM target_table USING source_table WHERE join_condition [LIMIT n]
 DELETE FROM users WHERE id = 1;
 DELETE FROM orders WHERE amount < 10;
 DELETE FROM logs USING users WHERE logs.user_id = users.id AND users.status = 0;
-DELETE FROM events LIMIT 100;
 ```
 
 ---

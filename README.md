@@ -29,8 +29,8 @@
 - **合并**：`MERGE INTO ... USING ... ON ... UPDATE SET ... INSERT ...`
 - **Upsert（窄版 AST 路径）**：显式匹配单列或复合主键/UNIQUE 约束的 target，配合常量或 evaluator 支持的、只引用 `excluded` 的标量表达式 `SET` 的 `INSERT INTO ... VALUES ... ON CONFLICT (...) DO UPDATE SET ...`
 - **查询**：`SELECT` 支持 `*`、指定列、`WHERE`、`ORDER BY`、`LIMIT`、`OFFSET`、`DISTINCT`
-- **更新**：`UPDATE ... SET ... WHERE ...`, `UPDATE ... FROM ... WHERE ...`, `UPDATE ... LIMIT n`
-- **删除**：`DELETE FROM ... WHERE ...`, `DELETE ... USING ... WHERE ...`, `DELETE ... LIMIT n`
+- **更新**：`UPDATE ... SET ... WHERE ...`, `UPDATE ... FROM ... WHERE ...`
+- **删除**：`DELETE FROM ... WHERE ...`, `DELETE ... USING ... WHERE ...`
 - **多表更新/删除**：支持 `FROM` / `USING` 子句的跨表 UPDATE/DELETE
 
 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、无 target 或显式匹配主键/UNIQUE 约束 target 的 `ON CONFLICT DO NOTHING`，以及显式匹配单列或复合主键/UNIQUE 约束 target、配合常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET` 和受限 `WHERE` 的窄版 `ON CONFLICT DO UPDATE`，当前由 `src/commands/DmlExecutor` 消费 AST；单表 UPDATE 还支持以当前目标行列值为输入的受限标量表达式，单源表 `UPDATE ... FROM` 和单源表 `DELETE ... USING` 支持来源 INNER/CROSS JOIN、别名、限定连接谓词和受限 `RETURNING`。窄版 `MERGE` 也由同一 typed executor 执行：单源表、限定/别名关系、单个 MATCHED UPDATE/DO NOTHING 和单个 NOT MATCHED INSERT/DO NOTHING，并在修改前拒绝多源行匹配同一目标行。支持结构化常量/列表达式、简单 `AND` 谓词、`IS NULL`/`IS NOT NULL` 及 StorageEngine 统一约束路径。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 `RETURNING` 已在存储修改边界收集并通过 PostgreSQL 协议结果集发送。复杂 `INSERT ... SELECT`、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、外连接/复杂 JOIN、视图写入以及 MERGE 的多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query 和 RETURNING 仍 fail-closed。该边界不能视为 PostgreSQL 完整语义。

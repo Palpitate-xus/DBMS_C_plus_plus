@@ -374,9 +374,6 @@ UPDATE users SET NAME = 'Bob Updated', AGE = 31 WHERE ID = 2;
 UPDATE users SET AGE = orders.derived_age
 FROM orders WHERE users.ID = orders.user_id;
 
--- UPDATE LIMIT (MySQL 兼容)
-UPDATE users SET AGE = 0 LIMIT 10;
-
 -- RETURNING
 UPDATE users SET AGE = 18 WHERE AGE < 18 RETURNING *;
 ```
@@ -389,9 +386,6 @@ DELETE FROM users WHERE AGE < 18;
 
 -- DELETE USING
 DELETE FROM users USING orders WHERE users.ID = orders.user_id;
-
--- DELETE LIMIT
-DELETE FROM users WHERE AGE > 100 LIMIT 10;
 
 -- RETURNING
 DELETE FROM users WHERE ACTIVE = FALSE RETURNING ID;

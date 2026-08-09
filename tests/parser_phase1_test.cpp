@@ -55,6 +55,12 @@ int main() {
     assert(SQLParser::classify("CREATE INDEX idx ON t (a)") == SqlCommand::CreateIndex);
     std::cout << "[PARSER P1] classify OK\n";
 
+    // MySQL-only DML LIMIT syntax is intentionally rejected.  It used to have
+    // a dead legacy implementation behind the typed DML fail-closed boundary.
+    assert(!parser.parse("UPDATE users SET age = 0 LIMIT 10").success);
+    assert(!parser.parse("DELETE FROM users WHERE age > 100 LIMIT 10").success);
+    std::cout << "[PARSER P1] non-PG DML LIMIT rejected\n";
+
     // 2. SET
     {
         auto r = parser.parse("SET timezone = 'UTC'");

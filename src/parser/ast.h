@@ -240,8 +240,6 @@ enum class SqlCommand {
     Desc,
     ViewTable,
     ViewDatabase,
-    UpdateLimit,
-    DeleteLimit,
 };
 
 // ============================================================================
@@ -456,8 +454,6 @@ public:
             case SqlCommand::Desc: return "DESC";
             case SqlCommand::ViewTable: return "VIEW TABLE";
             case SqlCommand::ViewDatabase: return "VIEW DATABASE";
-            case SqlCommand::UpdateLimit: return "UPDATE ... LIMIT";
-            case SqlCommand::DeleteLimit: return "DELETE ... LIMIT";
             case SqlCommand::Truncate: return "TRUNCATE";
             case SqlCommand::CreateTable: return "CREATE TABLE";
             case SqlCommand::CreateIndex: return "CREATE INDEX";

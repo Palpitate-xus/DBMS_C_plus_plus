@@ -770,8 +770,6 @@ ParseResult SQLParser::parse(const std::string& sql) {
         case SqlCommand::Desc:
         case SqlCommand::ViewTable:
         case SqlCommand::ViewDatabase:
-        case SqlCommand::UpdateLimit:
-        case SqlCommand::DeleteLimit:
             result.error = "Non-PostgreSQL syntax: " + lsql.substr(0, 30);
             result.stmt = std::make_unique<Stmt>(cmd);
             return result;
