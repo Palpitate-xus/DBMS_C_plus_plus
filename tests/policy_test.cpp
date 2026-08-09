@@ -3,7 +3,9 @@
 #include "commands/TableManage.h"
 #include "expression/expr_helper.h"
 #include "Session.h"
+#include "catalog/catalog.h"
 #include "catalog/type_registry.h"
+#include "utils/permissions.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -194,6 +196,69 @@ static void test_rls_visible_source_scan() {
                            {{"id", "2"}, {"owner", "otheruser"}}) == dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.update(db, "policy_default_check", {{"owner", "otheruser"}},
                            {"=id 1"}) == dbms::DBStatus::INVALID_VALUE);
+
+    auto& auth = authCatalog();
+    const std::string regularName = "rls_regular_policy_test";
+    const std::string superName = "rls_super_policy_test";
+    const std::string bypassName = "rls_bypass_policy_test";
+    const auto ensureRole = [&](const std::string& name, bool superuser, bool bypass) {
+        auto account = auth.getAuthIdByName(name);
+        dbms::PgAuthIdRow row = account.value_or(dbms::PgAuthIdRow{});
+        row.rolname = name;
+        row.rolsuper = superuser;
+        row.rolbypassrls = bypass;
+        row.rolcanlogin = true;
+        if (account) {
+            assert(auth.updateAuthId(account->oid, row));
+        } else {
+            assert(auth.createAuthId(row) != dbms::INVALID_OID);
+        }
+    };
+    ensureRole(regularName, false, false);
+    ensureRole(superName, true, false);
+    ensureRole(bypassName, false, true);
+    auth.persistAll();
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE policy_bypass (id INT PRIMARY KEY)", s));
+    assert(g_engine.insert(db, "policy_bypass", {{"id", "1"}}) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE POLICY deny_all ON policy_bypass FOR SELECT USING (false)", s));
+    assert(g_engine.enableRowLevelSecurity(db, "policy_bypass") == dbms::DBStatus::OK);
+
+    visible = 0;
+    dbms::StorageEngine::setRLSUser(regularName);
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_bypass", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 0);
+
+    dbms::StorageEngine::setRLSUser(superName);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_bypass", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 1);
+
+    dbms::StorageEngine::setRLSUser(bypassName);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_bypass", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 1);
+
+    assert(g_engine.enableRowLevelSecurity(db, "policy_bypass", true) == dbms::DBStatus::OK);
+    dbms::StorageEngine::setRLSUser(superName);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_bypass", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 0);
+
+    assert(auth.dropAuthId(auth.getAuthIdByName(regularName)->oid));
+    assert(auth.dropAuthId(auth.getAuthIdByName(superName)->oid));
+    assert(auth.dropAuthId(auth.getAuthIdByName(bypassName)->oid));
+    auth.persistAll();
 
     dbms::StorageEngine::setRLSUser("");
     cleanup(db);

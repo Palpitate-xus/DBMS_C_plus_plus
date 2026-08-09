@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-09 | RLS 绕过边界收敛：删除用户名 `admin` 硬编码，改由 `pg_authid.rolsuper`/`rolbypassrls` 决定普通 RLS 绕过；`FORCE ROW LEVEL SECURITY` 优先强制策略，新增普通角色、超级用户、BYPASSRLS 和 FORCE 回归。 |
 | 2026-08-09 | RLS 语义补强：策略默认按 permissive OR 组合，`AS RESTRICTIVE` 按 AND 组合；显式 `TO PUBLIC` 与空角色列表统一匹配 PUBLIC；`ALL/UPDATE` 省略 `WITH CHECK` 时继承 `USING`；策略文件写入统一复用序列化 helper，并增加运行时回归。完整 role/owner/ACL 组合仍待后续。 |
 | 2026-08-09 | 测试架构进一步收敛：删除 `run_all_tests_fast.sh` 中重复的生产对象编译、测试链接、stub 过滤和 E2E 调度实现；`build_tests.sh` 成为唯一完整测试编排入口，快速脚本仅负责安静输出，失败时打印完整诊断。 |
 | 2026-08-09 | 移除 CatalogService 的旧 `.stc` 元数据迁移器、`.migrated` 标记和专用测试；catalog 现在只加载当前版本 `.cat` 文件，旧数据统一采用 SQL 导出后重建。 |
@@ -496,7 +497,7 @@
 | 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果和常见单表 RowDescription 元数据；缺少数组等复杂类型 I/O、扩展消息、holdable/scrollable portal 和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
 | 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
-| 11.6 | RLS | policy 文件和 USING/WITH CHECK 关系感知扫描已接入查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合已验证；无适用策略默认拒绝、策略求值失败 fail-closed；完整 role/owner 解析和 ACL 组合语义仍缺 | ⚠️ |
+| 11.6 | RLS | policy 文件和 USING/WITH CHECK 关系感知扫描已接入查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、`pg_authid` 的 SUPERUSER/BYPASSRLS 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、策略求值失败 fail-closed；完整 role/owner 解析和 ACL 组合语义仍缺 | ⚠️ |
 | 11.7 | SECURITY DEFINER/INVOKER | 函数/过程缺少完整 security definer/invoker、search_path 安全规则 | ❌ |
 | 11.8 | 审计 | 项目有 audit log；PG 核心不内置同等 audit，通常靠扩展 | — |
 

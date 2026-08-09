@@ -110,8 +110,15 @@ Session* currentSession() { return g_currentSession; }
 static std::string toLowerUtf8(const std::string& s);
 
 static bool shouldEnforceRLS(const TableSchema& tbl, const std::string& user) {
-    return tbl.rowLevelSecurity &&
-           !(user == "admin" && !tbl.forceRowLevelSecurity);
+    if (!tbl.rowLevelSecurity) return false;
+    if (tbl.forceRowLevelSecurity || user.empty()) return true;
+
+    // RLS bypass is a role attribute, not a username convention. Unknown
+    // identities fail closed; authenticated superusers and BYPASSRLS roles
+    // bypass ordinary RLS, while FORCE ROW LEVEL SECURITY still applies it.
+    const auto account = authCatalog().getAuthIdByName(user);
+    if (!account) return true;
+    return !(account->rolsuper || account->rolbypassrls);
 }
 
 static bool evaluateRlsPolicies(

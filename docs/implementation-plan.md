@@ -729,7 +729,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |
 | 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | 基础权限路径已有，目录持久化和完整继承语义仍需补齐 |
 | 🔄 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | 解析路径已有，默认权限的完整 catalog/executor 语义仍需验证 |
-| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING/WITH CHECK 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC 和基础 PERMISSIVE/RESTRICTIVE 组合已验证；无适用策略默认拒绝、求值失败安全回退；owner/角色继承和 ACL 组合语义仍不完整 |
+| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING/WITH CHECK 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、`SUPERUSER/BYPASSRLS` 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、求值失败安全回退；owner/角色继承和 ACL 组合语义仍不完整 |
 | 🔄 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | 语法支持已有，执行时安全边界仍需补齐 |
 | 🔄 7.10 实现 `GRANT`/`REVOKE` ACL item 完整语义 | 1.1.40 | 基础语法和执行路径已有，完整 ACL 传播/校验仍需验证 |
 | 🔄 7.11 实现 `ALTER USER`/`ALTER ROLE` 完整权限位（superuser/createdb/replication/bypassrls） | 1.1.5 | 主要属性执行、SCRAM 密码、`VALID UNTIL`、连接数限制和持久化已接入；仍需按 PostgreSQL 语义补全 owner/ACL/依赖校验 |
