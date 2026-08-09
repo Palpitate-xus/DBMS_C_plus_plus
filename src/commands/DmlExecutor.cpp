@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -941,12 +942,19 @@ std::string rowValueKey(const std::map<std::string, std::string>& values) {
     return key;
 }
 
-bool validateUpdateFromExpression(const Expr* expr,
-                                  const TableSchema& targetTable,
-                                  const std::string& targetQualifier,
-                                  const TableSchema& sourceTable,
-                                  const std::string& sourceQualifier,
-                                  ExprEvaluator& evaluator) {
+struct StructuredSourceRelation {
+    std::string requestedName;
+    std::string resolvedName;
+    std::string qualifier;
+    TableSchema schema;
+    std::vector<std::map<std::string, std::string>> rows;
+};
+
+bool validateStructuredExpression(
+    const Expr* expr, const TableSchema& targetTable,
+    const std::string& targetQualifier,
+    const std::vector<StructuredSourceRelation>& sources,
+    ExprEvaluator& evaluator) {
     if (!expr) return false;
     if (const auto* literal = dynamic_cast<const LiteralExpr*>(expr)) {
         return lower(literal->value) != "default";
@@ -960,9 +968,11 @@ bool validateUpdateFromExpression(const Expr* expr,
             qualifier == unqualifiedRelationName(targetQualifier)) {
             return findTableColumn(targetTable, column);
         }
-        if (qualifier == identifier(sourceQualifier) ||
-            qualifier == unqualifiedRelationName(sourceQualifier)) {
-            return findTableColumn(sourceTable, column);
+        for (const auto& source : sources) {
+            if (qualifier == identifier(source.qualifier) ||
+                qualifier == unqualifiedRelationName(source.qualifier)) {
+                return findTableColumn(source.schema, column);
+            }
         }
         return false;
     }
@@ -972,9 +982,8 @@ bool validateUpdateFromExpression(const Expr* expr,
             "is true", "is not true", "is false", "is not false"
         };
         return supported.count(lower(unary->op)) != 0 &&
-               validateUpdateFromExpression(unary->operand.get(), targetTable,
-                                             targetQualifier, sourceTable,
-                                             sourceQualifier, evaluator);
+               validateStructuredExpression(unary->operand.get(), targetTable,
+                                             targetQualifier, sources, evaluator);
     }
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
         static const std::set<std::string> supported = {
@@ -983,12 +992,10 @@ bool validateUpdateFromExpression(const Expr* expr,
             "ilike", "not ilike", "similar to", "not similar to", "in", "::"
         };
         return supported.count(lower(binary->op)) != 0 &&
-               validateUpdateFromExpression(binary->left.get(), targetTable,
-                                             targetQualifier, sourceTable,
-                                             sourceQualifier, evaluator) &&
-               validateUpdateFromExpression(binary->right.get(), targetTable,
-                                             targetQualifier, sourceTable,
-                                             sourceQualifier, evaluator);
+               validateStructuredExpression(binary->left.get(), targetTable,
+                                             targetQualifier, sources, evaluator) &&
+               validateStructuredExpression(binary->right.get(), targetTable,
+                                             targetQualifier, sources, evaluator);
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
         if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
@@ -996,45 +1003,39 @@ bool validateUpdateFromExpression(const Expr* expr,
             return false;
         }
         for (const auto& arg : call->args) {
-            if (!validateUpdateFromExpression(arg.get(), targetTable, targetQualifier,
-                                               sourceTable, sourceQualifier, evaluator)) {
+            if (!validateStructuredExpression(arg.get(), targetTable, targetQualifier,
+                                               sources, evaluator)) {
                 return false;
             }
         }
         return true;
     }
     if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
-        return validateUpdateFromExpression(cast->operand.get(), targetTable,
-                                            targetQualifier, sourceTable,
-                                            sourceQualifier, evaluator);
+        return validateStructuredExpression(cast->operand.get(), targetTable,
+                                            targetQualifier, sources, evaluator);
     }
     if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
         if (caseExpr->switchExpr &&
-            !validateUpdateFromExpression(caseExpr->switchExpr.get(), targetTable,
-                                           targetQualifier, sourceTable,
-                                           sourceQualifier, evaluator)) {
+            !validateStructuredExpression(caseExpr->switchExpr.get(), targetTable,
+                                           targetQualifier, sources, evaluator)) {
             return false;
         }
         for (const auto& clause : caseExpr->whenClauses) {
-            if (!validateUpdateFromExpression(clause.first.get(), targetTable,
-                                               targetQualifier, sourceTable,
-                                               sourceQualifier, evaluator) ||
-                !validateUpdateFromExpression(clause.second.get(), targetTable,
-                                               targetQualifier, sourceTable,
-                                               sourceQualifier, evaluator)) {
+            if (!validateStructuredExpression(clause.first.get(), targetTable,
+                                               targetQualifier, sources, evaluator) ||
+                !validateStructuredExpression(clause.second.get(), targetTable,
+                                               targetQualifier, sources, evaluator)) {
                 return false;
             }
         }
         return !caseExpr->elseExpr ||
-               validateUpdateFromExpression(caseExpr->elseExpr.get(), targetTable,
-                                            targetQualifier, sourceTable,
-                                            sourceQualifier, evaluator);
+               validateStructuredExpression(caseExpr->elseExpr.get(), targetTable,
+                                            targetQualifier, sources, evaluator);
     }
     if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
         for (const auto& element : array->elements) {
-            if (!validateUpdateFromExpression(element.get(), targetTable,
-                                               targetQualifier, sourceTable,
-                                               sourceQualifier, evaluator)) {
+            if (!validateStructuredExpression(element.get(), targetTable,
+                                               targetQualifier, sources, evaluator)) {
                 return false;
             }
         }
@@ -1042,9 +1043,8 @@ bool validateUpdateFromExpression(const Expr* expr,
     }
     if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
         for (const auto& element : row->elements) {
-            if (!validateUpdateFromExpression(element.get(), targetTable,
-                                               targetQualifier, sourceTable,
-                                               sourceQualifier, evaluator)) {
+            if (!validateStructuredExpression(element.get(), targetTable,
+                                               targetQualifier, sources, evaluator)) {
                 return false;
             }
         }
@@ -1053,12 +1053,24 @@ bool validateUpdateFromExpression(const Expr* expr,
     return false;
 }
 
-RowContext updateFromContext(const std::map<std::string, std::string>& targetValues,
-                             const TableSchema& targetTable,
-                             const std::string& targetQualifier,
-                             const std::map<std::string, std::string>& sourceValues,
-                             const TableSchema& sourceTable,
-                             const std::string& sourceQualifier) {
+bool validateUpdateFromExpression(const Expr* expr,
+                                  const TableSchema& targetTable,
+                                  const std::string& targetQualifier,
+                                  const TableSchema& sourceTable,
+                                  const std::string& sourceQualifier,
+                                  ExprEvaluator& evaluator) {
+    StructuredSourceRelation source;
+    source.qualifier = sourceQualifier;
+    source.schema = sourceTable;
+    return validateStructuredExpression(expr, targetTable, targetQualifier,
+                                         {source}, evaluator);
+}
+
+RowContext structuredRelationContext(
+    const std::map<std::string, std::string>& targetValues,
+    const TableSchema& targetTable, const std::string& targetQualifier,
+    const std::vector<StructuredSourceRelation>& sources,
+    const std::vector<const std::map<std::string, std::string>*>& sourceRows) {
     RowContext context;
     auto addValues = [&](const std::map<std::string, std::string>& values,
                          const TableSchema& table,
@@ -1078,9 +1090,27 @@ RowContext updateFromContext(const std::map<std::string, std::string>& targetVal
     };
     addValues(targetValues, targetTable,
               {identifier(targetQualifier), unqualifiedRelationName(targetQualifier)}, true);
-    addValues(sourceValues, sourceTable,
-              {identifier(sourceQualifier), unqualifiedRelationName(sourceQualifier)}, false);
+    for (size_t i = 0; i < sources.size() && i < sourceRows.size(); ++i) {
+        if (!sourceRows[i]) continue;
+        addValues(*sourceRows[i], sources[i].schema,
+                  {identifier(sources[i].qualifier),
+                   unqualifiedRelationName(sources[i].qualifier)}, false);
+    }
     return context;
+}
+
+RowContext updateFromContext(const std::map<std::string, std::string>& targetValues,
+                             const TableSchema& targetTable,
+                             const std::string& targetQualifier,
+                             const std::map<std::string, std::string>& sourceValues,
+                             const TableSchema& sourceTable,
+                             const std::string& sourceQualifier) {
+    StructuredSourceRelation source;
+    source.qualifier = sourceQualifier;
+    source.schema = sourceTable;
+    const std::vector<const std::map<std::string, std::string>*> rows = {&sourceValues};
+    return structuredRelationContext(targetValues, targetTable, targetQualifier,
+                                     {source}, rows);
 }
 
 void collectTableRows(const std::string& currentDB, const std::string& tableName,
@@ -1098,6 +1128,128 @@ void collectTableRows(const std::string& currentDB, const std::string& tableName
     });
 }
 
+enum class StructuredRelationResult { Success, Unsupported, Error };
+
+StructuredRelationResult collectStructuredRelations(
+    const FromItem* item, Session& s, const std::string& targetQualifier,
+    std::vector<StructuredSourceRelation>& sources,
+    std::vector<const Expr*>& joinPredicates) {
+    if (!item) return StructuredRelationResult::Unsupported;
+    if (item->type == FromItem::Type::Table) {
+        const std::string requestedName = identifier(item->tableName);
+        if (requestedName.empty()) return StructuredRelationResult::Unsupported;
+        const std::string resolvedName = resolveTable(s, requestedName);
+        if (g_engine.viewExists(s.currentDB, requestedName) ||
+            g_engine.isMaterializedView(s.currentDB, requestedName) ||
+            !g_engine.tableExists(s.currentDB, resolvedName)) {
+            return StructuredRelationResult::Unsupported;
+        }
+        if (!checkTablePrivilege(s, requestedName,
+                                 StorageEngine::TablePrivilege::Select)) {
+            return StructuredRelationResult::Error;
+        }
+        StructuredSourceRelation source;
+        source.requestedName = requestedName;
+        source.resolvedName = resolvedName;
+        source.qualifier = item->alias.empty()
+            ? unqualifiedRelationName(requestedName)
+            : identifier(item->alias);
+        if (source.qualifier.empty() ||
+            source.qualifier == identifier(targetQualifier) ||
+            std::any_of(sources.begin(), sources.end(), [&](const auto& existing) {
+                return existing.qualifier == source.qualifier;
+            })) {
+            return StructuredRelationResult::Unsupported;
+        }
+        source.schema = g_engine.getTableSchema(s.currentDB, resolvedName);
+        // forEachRow is a raw heap scan.  A source RLS policy must be applied
+        // by a relation-aware scan before this path can expose its rows.
+        if (source.schema.rowLevelSecurity || source.schema.forceRowLevelSecurity) {
+            return StructuredRelationResult::Unsupported;
+        }
+        collectTableRows(s.currentDB, resolvedName, source.schema, source.rows);
+        sources.push_back(std::move(source));
+        return StructuredRelationResult::Success;
+    }
+
+    if (item->type != FromItem::Type::Join || !item->left || !item->right) {
+        return StructuredRelationResult::Unsupported;
+    }
+    const std::string joinType = lower(item->joinType);
+    // Outer joins require NULL-extended rows and are deliberately kept on the
+    // legacy path until the structured relation executor models them exactly.
+    if (joinType != "inner" && joinType != "cross") {
+        return StructuredRelationResult::Unsupported;
+    }
+    if (!item->usingCols.empty()) return StructuredRelationResult::Unsupported;
+    const size_t sourceCount = sources.size();
+    const auto leftResult = collectStructuredRelations(
+        item->left.get(), s, targetQualifier, sources, joinPredicates);
+    if (leftResult != StructuredRelationResult::Success) return leftResult;
+    const auto rightResult = collectStructuredRelations(
+        item->right.get(), s, targetQualifier, sources, joinPredicates);
+    if (rightResult != StructuredRelationResult::Success) return rightResult;
+    if (item->joinCondition) joinPredicates.push_back(item->joinCondition.get());
+    if (sources.size() <= sourceCount) return StructuredRelationResult::Unsupported;
+    return StructuredRelationResult::Success;
+}
+
+bool structuredPredicateMatches(const Expr* expression, const RowContext& context,
+                                ExprEvaluator& evaluator, bool& evaluationFailed) {
+    if (!expression) return true;
+    const ExprValue result = evaluator.eval(expression, context);
+    // SQL NULL predicates are valid and simply do not select a row; only an
+    // evaluator failure or a non-boolean, non-NULL result is unsupported.
+    if (result.isNull) return false;
+    if (result.isUnknown() || result.typeName == "unknown" ||
+        result.typeName != "boolean") {
+        evaluationFailed = true;
+        return false;
+    }
+    return result.asBool();
+}
+
+bool findStructuredMatch(
+    const std::map<std::string, std::string>& targetValues,
+    const TableSchema& targetTable, const std::string& targetQualifier,
+    const std::vector<StructuredSourceRelation>& sources,
+    const std::vector<const Expr*>& joinPredicates, const Expr* whereClause,
+    const std::string& currentDB,
+    const std::function<bool(const RowContext&, const std::vector<
+                             const std::map<std::string, std::string>*>&)>& consumer,
+    bool& evaluationFailed) {
+    std::vector<const std::map<std::string, std::string>*> sourceRows;
+    std::function<bool(size_t)> visit = [&](size_t index) {
+        if (index < sources.size()) {
+            for (const auto& row : sources[index].rows) {
+                sourceRows.push_back(&row);
+                if (visit(index + 1)) return true;
+                sourceRows.pop_back();
+                if (evaluationFailed) return true;
+            }
+            return false;
+        }
+
+        const RowContext context = structuredRelationContext(
+            targetValues, targetTable, targetQualifier, sources, sourceRows);
+        ExprEvaluator evaluator;
+        evaluator.setCurrentDB(currentDB);
+        for (const Expr* predicate : joinPredicates) {
+            if (!structuredPredicateMatches(predicate, context, evaluator,
+                                            evaluationFailed)) {
+                return evaluationFailed;
+            }
+        }
+        if (!structuredPredicateMatches(whereClause, context, evaluator,
+                                        evaluationFailed)) {
+            return evaluationFailed;
+        }
+        return consumer(context, sourceRows);
+    };
+    const bool matched = visit(0);
+    return matched && !evaluationFailed;
+}
+
 bool evaluateUpdateFromExpression(
     const Expr* expression,
     const std::map<std::string, std::string>& targetValues,
@@ -1108,11 +1260,40 @@ bool evaluateUpdateFromExpression(
     const std::string& sourceQualifier,
     const std::string& currentDB,
     std::string& value) {
+    StructuredSourceRelation source;
+    source.qualifier = sourceQualifier;
+    source.schema = sourceTable;
+    const std::vector<const std::map<std::string, std::string>*> rows = {&sourceValues};
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const ExprValue result = evaluator.eval(
-        expression, updateFromContext(targetValues, targetTable, targetQualifier,
-                                      sourceValues, sourceTable, sourceQualifier));
+        expression, structuredRelationContext(targetValues, targetTable, targetQualifier,
+                                              {source}, rows));
+    if (result.isUnknown() || result.typeName == "unknown") return false;
+    if (result.isNull) {
+        value.clear();
+        return true;
+    }
+    value = result.value;
+    if (result.typeName == "boolean") {
+        if (value == "t") value = "1";
+        else if (value == "f") value = "0";
+    }
+    return true;
+}
+
+bool evaluateStructuredExpression(
+    const Expr* expression,
+    const std::map<std::string, std::string>& targetValues,
+    const TableSchema& targetTable, const std::string& targetQualifier,
+    const std::vector<StructuredSourceRelation>& sources,
+    const std::vector<const std::map<std::string, std::string>*>& sourceRows,
+    const std::string& currentDB, std::string& value) {
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    const ExprValue result = evaluator.eval(
+        expression, structuredRelationContext(targetValues, targetTable, targetQualifier,
+                                              sources, sourceRows));
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
         value.clear();
@@ -1781,8 +1962,176 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     return false;
 }
 
+bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
+    fallback = false;
+    if (!stmt.fromClause || stmt.fromClause->type != FromItem::Type::Join) {
+        fallback = true;
+        return false;
+    }
+    if (!checkDatabase(s)) return true;
+
+    const std::string requestedTable = identifier(stmt.tableName);
+    const std::string resolvedTable = resolveTable(s, requestedTable);
+    if (g_engine.viewExists(s.currentDB, requestedTable) ||
+        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+        fallback = true;
+        return false;
+    }
+    if (!g_engine.tableExists(s.currentDB, resolvedTable)) {
+        std::cout << "Table " << requestedTable << " not exist" << std::endl;
+        return true;
+    }
+    if (!checkTablePrivilege(s, requestedTable,
+                             StorageEngine::TablePrivilege::Update)) return true;
+
+    const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const std::string targetQualifier = unqualifiedRelationName(requestedTable);
+    std::vector<StructuredSourceRelation> sources;
+    std::vector<const Expr*> joinPredicates;
+    const StructuredRelationResult relationResult = collectStructuredRelations(
+        stmt.fromClause.get(), s, targetQualifier, sources, joinPredicates);
+    if (relationResult == StructuredRelationResult::Unsupported) {
+        fallback = true;
+        return false;
+    }
+    if (relationResult == StructuredRelationResult::Error) return true;
+
+    std::vector<std::string> columns;
+    std::map<std::string, std::string> staticUpdates;
+    std::map<std::string, const Expr*> expressionUpdates;
+    for (const auto& [rawColumn, expression] : stmt.setClauses) {
+        const std::string column = identifier(rawColumn);
+        columns.push_back(column);
+        if (!findTableColumn(targetSchema, column)) {
+            std::cout << "Column " << column << " does not exist" << std::endl;
+            return true;
+        }
+        if (isDefaultValue(expression)) {
+            fallback = true;
+            return false;
+        }
+        ExprEvaluator evaluator;
+        if (!validateStructuredExpression(expression.get(), targetSchema,
+                                          targetQualifier, sources, evaluator)) {
+            fallback = true;
+            return false;
+        }
+        if (referencesColumn(expression.get())) {
+            expressionUpdates[column] = expression.get();
+        } else {
+            std::string value;
+            if (!evaluateValue(expression, s.currentDB, value)) {
+                fallback = true;
+                return false;
+            }
+            staticUpdates[column] = std::move(value);
+        }
+    }
+    if (staticUpdates.empty() && expressionUpdates.empty()) {
+        std::cout << "SQL syntax error: empty UPDATE SET clause" << std::endl;
+        return true;
+    }
+    if (s.permission != 1 && !isTempTable(s, requestedTable) &&
+        !g_engine.hasColumnPermission(
+            s.currentDB, requestedTable, s.username,
+            StorageEngine::TablePrivilege::Update, columns)) {
+        std::cout << "permission denied: UPDATE on restricted columns of table "
+                  << requestedTable << std::endl;
+        return true;
+    }
+    for (const Expr* predicate : joinPredicates) {
+        ExprEvaluator evaluator;
+        if (!validateStructuredExpression(predicate, targetSchema, targetQualifier,
+                                           sources, evaluator)) {
+            fallback = true;
+            return false;
+        }
+    }
+    if (stmt.whereClause) {
+        ExprEvaluator evaluator;
+        if (!validateStructuredExpression(stmt.whereClause.get(), targetSchema,
+                                           targetQualifier, sources, evaluator)) {
+            fallback = true;
+            return false;
+        }
+    }
+
+    std::vector<std::map<std::string, std::string>> targetRows;
+    collectTableRows(s.currentDB, resolvedTable, targetSchema, targetRows);
+    std::map<std::string, std::map<std::string, std::string>> matchedUpdates;
+    bool evaluationFailed = false;
+    for (const auto& targetValues : targetRows) {
+        findStructuredMatch(
+            targetValues, targetSchema, targetQualifier, sources, joinPredicates,
+            stmt.whereClause.get(), s.currentDB,
+            [&](const RowContext&, const std::vector<const std::map<std::string, std::string>*>& sourceRows) {
+                std::map<std::string, std::string> effectiveUpdates = staticUpdates;
+                for (const auto& [column, expression] : expressionUpdates) {
+                    std::string value;
+                    if (!evaluateStructuredExpression(
+                            expression, targetValues, targetSchema, targetQualifier,
+                            sources, sourceRows, s.currentDB, value)) {
+                        evaluationFailed = true;
+                        return true;
+                    }
+                    effectiveUpdates[column] = std::move(value);
+                }
+                matchedUpdates.emplace(rowValueKey(targetValues),
+                                      std::move(effectiveUpdates));
+                return true;
+            }, evaluationFailed);
+        if (evaluationFailed) break;
+    }
+    if (evaluationFailed) {
+        std::cout << "UPDATE FROM expression evaluation failed" << std::endl;
+        return true;
+    }
+
+    std::vector<ReturningProjection> returningProjections;
+    if (!stmt.returning.empty() &&
+        !buildReturningProjections(stmt.returning, targetSchema, returningProjections)) {
+        fallback = true;
+        return false;
+    }
+    std::vector<std::map<std::string, std::string>> updatedRows;
+    StorageEngine::UpdateResolver updateResolver;
+    if (!expressionUpdates.empty()) {
+        updateResolver = [matchedUpdates](
+                             const std::map<std::string, std::string>& oldValues,
+                             std::map<std::string, std::string>& effectiveUpdates) {
+            const auto it = matchedUpdates.find(rowValueKey(oldValues));
+            if (it == matchedUpdates.end()) return false;
+            effectiveUpdates = it->second;
+            return true;
+        };
+    }
+    const StorageEngine::UpdateMatcher updateMatcher = [matchedUpdates](
+        const std::map<std::string, std::string>& oldValues) {
+        return matchedUpdates.find(rowValueKey(oldValues)) != matchedUpdates.end();
+    };
+    const DBStatus status = g_engine.update(
+        s.currentDB, resolvedTable, staticUpdates, {},
+        stmt.returning.empty() ? nullptr : &updatedRows,
+        updateResolver, updateMatcher);
+    if (status != DBStatus::OK) {
+        std::cout << "UPDATE FROM failed" << std::endl;
+        return true;
+    }
+    std::cout << "Update done" << std::endl;
+    if (!stmt.returning.empty()) {
+        if (!publishReturning(returningProjections, targetSchema, s.currentDB,
+                              updatedRows, "UPDATE")) return true;
+        printReturningRows(g_lastDmlResult);
+    }
+    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    return false;
+}
+
 bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     fallback = false;
+    if (stmt.fromClause && stmt.fromClause->type == FromItem::Type::Join) {
+        return executeUpdateFromJoin(stmt, s, fallback);
+    }
     if (!stmt.fromClause || stmt.fromClause->type != FromItem::Type::Table) {
         fallback = true;
         return false;
@@ -2073,7 +2422,108 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     return false;
 }
 
+bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) {
+    fallback = false;
+    if (!stmt.usingClause || stmt.usingClause->type != FromItem::Type::Join) {
+        fallback = true;
+        return false;
+    }
+    if (!checkDatabase(s)) return true;
+
+    const std::string requestedTable = identifier(stmt.tableName);
+    const std::string resolvedTable = resolveTable(s, requestedTable);
+    if (g_engine.viewExists(s.currentDB, requestedTable) ||
+        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+        fallback = true;
+        return false;
+    }
+    if (!g_engine.tableExists(s.currentDB, resolvedTable)) {
+        std::cout << "Table " << requestedTable << " not exist" << std::endl;
+        return true;
+    }
+    if (!checkTablePrivilege(s, requestedTable,
+                             StorageEngine::TablePrivilege::Delete)) return true;
+
+    const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const std::string targetQualifier = unqualifiedRelationName(requestedTable);
+    std::vector<StructuredSourceRelation> sources;
+    std::vector<const Expr*> joinPredicates;
+    const StructuredRelationResult relationResult = collectStructuredRelations(
+        stmt.usingClause.get(), s, targetQualifier, sources, joinPredicates);
+    if (relationResult == StructuredRelationResult::Unsupported) {
+        fallback = true;
+        return false;
+    }
+    if (relationResult == StructuredRelationResult::Error) return true;
+
+    for (const Expr* predicate : joinPredicates) {
+        ExprEvaluator evaluator;
+        if (!validateStructuredExpression(predicate, targetSchema, targetQualifier,
+                                           sources, evaluator)) {
+            fallback = true;
+            return false;
+        }
+    }
+    if (stmt.whereClause) {
+        ExprEvaluator evaluator;
+        if (!validateStructuredExpression(stmt.whereClause.get(), targetSchema,
+                                           targetQualifier, sources, evaluator)) {
+            fallback = true;
+            return false;
+        }
+    }
+
+    std::vector<std::map<std::string, std::string>> targetRows;
+    collectTableRows(s.currentDB, resolvedTable, targetSchema, targetRows);
+    std::set<std::string> matchedTargets;
+    bool evaluationFailed = false;
+    for (const auto& targetValues : targetRows) {
+        findStructuredMatch(
+            targetValues, targetSchema, targetQualifier, sources, joinPredicates,
+            stmt.whereClause.get(), s.currentDB,
+            [&](const RowContext&, const std::vector<const std::map<std::string, std::string>*>&) {
+                matchedTargets.insert(rowValueKey(targetValues));
+                return true;
+            }, evaluationFailed);
+        if (evaluationFailed) break;
+    }
+    if (evaluationFailed) {
+        fallback = true;
+        return false;
+    }
+
+    std::vector<ReturningProjection> returningProjections;
+    if (!stmt.returning.empty() &&
+        !buildReturningProjections(stmt.returning, targetSchema, returningProjections)) {
+        fallback = true;
+        return false;
+    }
+    std::vector<std::map<std::string, std::string>> deletedRows;
+    const StorageEngine::DeleteMatcher deleteMatcher = [matchedTargets](
+        const std::map<std::string, std::string>& oldValues) {
+        return matchedTargets.find(rowValueKey(oldValues)) != matchedTargets.end();
+    };
+    const DBStatus status = g_engine.remove(
+        s.currentDB, resolvedTable, {},
+        stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher);
+    if (status != DBStatus::OK) {
+        std::cout << "DELETE USING failed" << std::endl;
+        return true;
+    }
+    std::cout << "Delete done" << std::endl;
+    if (!stmt.returning.empty()) {
+        if (!publishReturning(returningProjections, targetSchema, s.currentDB,
+                              deletedRows, "DELETE")) return true;
+        printReturningRows(g_lastDmlResult);
+    }
+    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    return false;
+}
+
 bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
+    if (stmt.usingClause && stmt.usingClause->type == FromItem::Type::Join) {
+        return executeDeleteUsingJoin(stmt, s, fallback);
+    }
     fallback = false;
     if (!stmt.usingClause || stmt.usingClause->type != FromItem::Type::Table) {
         fallback = true;

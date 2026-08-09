@@ -157,6 +157,62 @@ static void test_delete_using_engine() {
     std::cout << "[DML] DELETE USING setup OK" << std::endl;
 }
 
+// 5.12 DML with structured inner joins
+static void test_join_dml_engine() {
+    std::string db = testDbPath("dml_join");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE target (id INT PRIMARY KEY, val INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE source_a (id INT, grp INT)", s));
+    assert(!ddl.executeSql("CREATE TABLE source_b (grp INT, delta INT)", s));
+    assert(g_engine.insert(db, "target", {{"id","1"},{"val","10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "target", {{"id","2"},{"val","20"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "target", {{"id","3"},{"val","30"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source_a", {{"id","1"},{"grp","10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source_a", {{"id","2"},{"grp","20"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source_a", {{"id","3"},{"grp","30"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source_b", {{"grp","10"},{"delta","100"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source_b", {{"grp","20"},{"delta","200"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "source_b", {{"grp","30"},{"delta","300"}}) == dbms::DBStatus::OK);
+
+    bool handled = false;
+    assert(!dbms::tryDmlBridge(
+        "UPDATE target SET val = target.val + b.delta "
+        "FROM source_a AS a JOIN source_b AS b ON a.grp = b.grp "
+        "WHERE target.id = a.id RETURNING id, val",
+        dbms::SqlCommand::Update, s, handled));
+    assert(handled);
+    const dbms::DmlResult updated = dbms::takeLastDmlResult();
+    assert(updated.commandTag == "UPDATE 3");
+    assert((updated.rows[0] == std::vector<std::string>{"1", "110"}));
+    assert((updated.rows[1] == std::vector<std::string>{"2", "220"}));
+    assert((updated.rows[2] == std::vector<std::string>{"3", "330"}));
+
+    handled = false;
+    // Outer joins remain explicitly owned by the legacy boundary until their
+    // NULL-extension semantics are represented by the structured executor.
+    assert(!dbms::tryDmlBridge(
+        "UPDATE target SET val = b.delta FROM source_a AS a "
+        "LEFT JOIN source_b AS b ON a.grp = b.grp WHERE target.id = a.id",
+        dbms::SqlCommand::Update, s, handled));
+    assert(!handled);
+
+    handled = false;
+    assert(!dbms::tryDmlBridge(
+        "DELETE FROM target USING source_a AS a JOIN source_b AS b ON a.grp = b.grp "
+        "WHERE target.id = a.id AND b.delta > 150 RETURNING id, val",
+        dbms::SqlCommand::Delete, s, handled));
+    assert(handled);
+    const dbms::DmlResult deleted = dbms::takeLastDmlResult();
+    assert(deleted.commandTag == "DELETE 2");
+    assert((deleted.rows[0] == std::vector<std::string>{"2", "220"}));
+    assert((deleted.rows[1] == std::vector<std::string>{"3", "330"}));
+    cleanup(db);
+    std::cout << "[DML] joined UPDATE FROM/DELETE USING setup OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_set_ops_parser();
@@ -166,6 +222,7 @@ int main() {
     test_for_update_parser();
     test_update_from_engine();
     test_delete_using_engine();
+    test_join_dml_engine();
     std::cout << "[DML] all passed" << std::endl;
     return 0;
 }
