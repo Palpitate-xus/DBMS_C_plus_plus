@@ -11,7 +11,7 @@ ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` �
 
 事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志、SSI 完整语义和 DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
-2026-08-09 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。普通单表 INSERT、受限行级标量表达式 UPDATE、简单谓词 DELETE 已进入独立 AST 执行器，混合 DEFAULT、显式列、多行、字符串字面量、INSERT/UPDATE/DELETE 列投影及受限标量表达式 RETURNING、修改/删除回归和默认值存储语义有 parser/协议覆盖；高级 DML 和复杂表达式仍保留明确 legacy 回退。legacy 文本执行器的协议结果捕获已改为线程局部路由，避免全局 `std::cout` 锁造成会话串行化。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
+2026-08-09 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、简单谓词 DELETE 已进入独立 AST 执行器，混合 DEFAULT、显式列、多行、字符串字面量、INSERT/UPDATE/DELETE 列投影及受限标量表达式 RETURNING、修改/删除回归和默认值存储语义有 parser/协议覆盖；高级 DML 和复杂表达式仍保留明确 legacy 回退。带表限定的表达式引用优先解析限定命名空间，避免 UPDATE FROM 中同名列被错误绑定。legacy 文本执行器的协议结果捕获已改为线程局部路由，避免全局 `std::cout` 锁造成会话串行化。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
 
 SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlStats`，`SHOW STATEMENTS`/`pg_stat_statements` 风格查询可按归一化 SQL 聚合耗时；当前仍是进程内统计，缺少持久化、完整字段和扩展生命周期。
 
@@ -95,7 +95,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 功能 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
 | INSERT (VALUES/SELECT/ON CONFLICT/RETURNING) | ✅ | ⚠️ | 普通单表 VALUES/DEFAULT VALUES、无 JOIN/聚合/排序的 INSERT SELECT（含列表达式）、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 的受限 WHERE 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；复杂 SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、视图写入和复杂未支持表达式明确回退 legacy |
-| UPDATE (FROM/LIMIT/RETURNING) | ✅ | ⚠️ | 受限行级标量表达式单表 UPDATE 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；FROM/LIMIT、复杂/子查询/窗口 RETURNING、视图写入仍回退 legacy |
+| UPDATE (FROM/LIMIT/RETURNING) | ✅ | ⚠️ | 受限行级标量表达式单表 UPDATE、单源表 UPDATE FROM 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；复杂 UPDATE FROM、LIMIT、复杂/子查询/窗口 RETURNING、视图写入仍回退 legacy |
 | DELETE (USING/LIMIT/RETURNING) | ✅ | ⚠️ | 简单谓词单表 DELETE 及列投影/受限标量表达式 RETURNING 走 `DmlExecutor` AST；USING/LIMIT、复杂/子查询/窗口 RETURNING、ONLY、视图写入仍回退 legacy |
 | MERGE (MATCHED/NOT MATCHED) | ✅ | ✅ | ✅ |
 | REPLACE INTO (MySQL 兼容) | ❌ | ✅ | ✅ |
@@ -351,7 +351,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 本 DBMS 在 **DDL 完整化** 方面达到了很高的完成度（SQL 语法覆盖 ~95%），但**运行时 semantics** 的执行层面还有显著差距：
 
 - **DDL Parser**: ✅ 高度完整 (184 命令)
-- **DML Executor**: ⚠️ 普通 INSERT、受限行级标量表达式单表 UPDATE、简单谓词单表 DELETE 已进入 AST 执行器；高级 DML 和 MERGE 仍有 legacy 执行路径
+- **DML Executor**: ⚠️ 普通 INSERT、受限行级标量表达式单表 UPDATE、单源表 UPDATE FROM、简单谓词单表 DELETE 已进入 AST 执行器；高级 DML 和 MERGE 仍有 legacy 执行路径
 - **高级 Query**: ⚠️ parser 就绪, executor 部分完成
 - **并发控制**: ⚠️ MVCC 基础有, 行级锁/死锁缺失
 - **性能**: ⚠️ 无并行/JIT/高级索引

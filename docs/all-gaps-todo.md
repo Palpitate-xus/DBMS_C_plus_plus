@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 UPDATE FROM、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、复杂 UPDATE FROM/DELETE USING、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -283,7 +283,7 @@
 | 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 权限矩阵和会话安全上下文完整语义 | ⚠️ |
 | 1.1.56 | `SET TRANSACTION` | BEGIN 路径已结构化隔离级别/只读选项；SET TRANSACTION 仍缺 deferrable、当前事务时序限制完整语义 | ⚠️ |
 | 1.1.57 | `TRUNCATE` | 支持 cascade/restart identity 部分；缺少 `ONLY`/多表/trigger/identity/foreign table/transactional details | ⚠️ |
-| 1.1.58 | `UPDATE` | 支持受限行级标量表达式、FROM/LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式 | ⚠️ |
+| 1.1.58 | `UPDATE` | 支持受限行级标量表达式、单源表 FROM、LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式 | ⚠️ |
 | 1.1.59 | `VACUUM` | compact/free page；缺少 freeze、visibility map、autovacuum launcher/workers、parallel vacuum、analyze coupling、wraparound 防护 | ⚠️ |
 | 1.1.60 | `VALUES` | 已支持顶层 `VALUES (..), (..)` 输出；缺少完整表达式求值、类型合并、排序/limit 组合和作为通用 query expression 的全部语义 | ⚠️ |
 
@@ -404,7 +404,7 @@
 | 6.8 | `LIMIT/FETCH` | FETCH 被转 LIMIT；缺少 `WITH TIES`、百分比/复杂表达式等 | ⚠️ |
 | 6.9 | Row locking | 单表 `FOR UPDATE/SHARE` 有部分；源码明确 `FOR UPDATE not supported with JOIN/GROUP BY/aggregate/window/scalar functions`。缺少 `NO KEY UPDATE`、`KEY SHARE`、OF list 完整语义 | ⚠️ |
 | 6.10 | `INSERT` | 多行/insert-select/部分 upsert 有；缺少 PG 的 `DEFAULT VALUES` 组合语义、`OVERRIDING`、WITH query 全组合、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE | ⚠️ |
-| 6.11 | `UPDATE FROM` / `DELETE USING` | 通过执行 JOIN 并解析文本输出实现；对空格、列顺序、别名、重复匹配、并发语义风险高 | ⚠️ |
+| 6.11 | `UPDATE FROM` / `DELETE USING` | 单源表 `UPDATE FROM` 已由 AST 执行器支持来源别名、限定列、连接谓词和 `RETURNING`，并复用存储层更新约束；复杂 JOIN/子查询、重复匹配的完整语义、并发细节及 `DELETE USING` 仍待迁移 | ⚠️ |
 | 6.12 | `RETURNING` | 有列投影和受限标量表达式返回；缺少 PG 18 `OLD`/`NEW` aliases、复杂/子查询/窗口表达式、trigger-modified rows 的精确行为 | ⚠️ |
 | 6.13 | `MERGE` | 只支持小子集；缺少完整 WHEN 分支和并发/可见性语义 | ⚠️ |
 
@@ -642,6 +642,8 @@
 - **2026-08-09（约束目标 DO NOTHING）**：`DmlExecutor` 现支持无 target 或显式匹配主键/UNIQUE 约束的 `ON CONFLICT DO NOTHING`；目标化冲突只忽略目标约束命中的行，其他唯一约束冲突仍返回错误，并新增回归覆盖该边界。
 
 - **2026-08-09（行级 UPDATE 表达式）**：单表 `UPDATE` 现支持受限标量表达式引用当前目标行的列值，例如 `SET id = id + 10, name = name || '-row'`；表达式在 StorageEngine 已锁定的每个目标行上求值，并复用存储层统一的类型校验/规范化与 `RETURNING` 行捕获。复杂表达式、子查询、`FROM`/`LIMIT` 和视图写入仍按既有边界回退。
+
+- **2026-08-09（结构化 UPDATE FROM）**：单源表 `UPDATE ... FROM` 现由 `DmlExecutor` 结构化执行，支持来源别名、目标/来源限定列引用、列间连接谓词和 `RETURNING`；StorageEngine 在统一行锁、RLS、约束和索引更新路径中按匹配目标行执行。复杂 JOIN、子查询、LIMIT 和视图写入仍回退 legacy；同时修复 evaluator 让限定列引用优先于同名未限定列。
 
 - **2026-08-09**：DML AST executor 扩展：普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式及受限行级标量表达式单表 UPDATE、简单谓词单表 DELETE 及三类 DML 的列投影和受限标量表达式 RETURNING 已接入；修复 INSERT SELECT 的 `RETURNING` parser 边界和列引用被误写成 NULL 的 fallback 边界，补充 INSERT/UPDATE/DELETE/冲突处理协议回归和 DML 尾随垃圾 fail-closed parser 测试。复合/部分/索引推断冲突目标、引用子查询或其他关系的 upsert、复杂 RETURNING、多表语义和复杂表达式仍待迁移。
 

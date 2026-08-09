@@ -174,14 +174,15 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
 
 ExprValue ExprEvaluator::evalColumnRef(const ColumnRefExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
-    std::string name = e->column;
-    auto v = ctx.get(name);
-    if (v) return *v;
-    // Try table.column form
+    // A qualified reference must win over an unqualified value with the same
+    // column name. This is essential for joins and UPDATE ... FROM, where
+    // the target and source relations commonly share column names.
     if (!e->table.empty()) {
-        v = ctx.get(e->table + "." + e->column);
+        auto v = ctx.get(e->table + "." + e->column);
         if (v) return *v;
     }
+    auto v = ctx.get(e->column);
+    if (v) return *v;
     return ExprValue("unknown", "", true);
 }
 

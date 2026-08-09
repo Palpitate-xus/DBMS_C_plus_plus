@@ -46,6 +46,7 @@ static void test_column_refs() {
     RowContext ctx;
     ctx.set("id", ExprValue("integer", "7", false));
     ctx.set("name", ExprValue("character varying", "Alice", false));
+    ctx.set("source.id", ExprValue("integer", "99", false));
 
     ColumnRefExpr col;
     col.column = "id";
@@ -59,6 +60,11 @@ static void test_column_refs() {
     col.column = "missing";
     v = eval.eval(&col, ctx);
     assert(v.isNull);
+
+    col.table = "source";
+    col.column = "id";
+    v = eval.eval(&col, ctx);
+    assert(v.value == "99");
 
     std::cout << "[EXPR] column refs OK" << std::endl;
 }

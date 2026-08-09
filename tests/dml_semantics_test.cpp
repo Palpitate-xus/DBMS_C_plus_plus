@@ -1,4 +1,5 @@
 #include "commands/DdlExecutor.h"
+#include "commands/DmlExecutor.h"
 #include "commands/TableManage.h"
 #include "parser/parser.h"
 #include "Session.h"
@@ -83,7 +84,34 @@ static void test_update_from_engine() {
     assert(g_engine.insert(db, "target", {{"id","1"},{"val","10"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "target", {{"id","2"},{"val","20"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "source", {{"id","1"},{"val","100"}}) == dbms::DBStatus::OK);
-    // UPDATE FROM is parsed in main.cpp; verify tables exist for the operation
+    assert(g_engine.insert(db, "source", {{"id","2"},{"val","200"}}) == dbms::DBStatus::OK);
+    // UPDATE FROM is executed through the structured DML bridge.  The source
+    // alias and target/source column qualification must survive parsing and
+    // evaluation without going through textual SELECT output.
+    bool handled = false;
+    const bool error = dbms::tryDmlBridge(
+        "UPDATE target SET val = target.val + s.val FROM source AS s "
+        "WHERE target.id = s.id RETURNING id, val",
+        dbms::SqlCommand::Update, s, handled);
+    assert(handled && !error);
+    const dbms::DmlResult result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "UPDATE 2");
+    assert(result.rows.size() == 2);
+    assert((result.rows[0] == std::vector<std::string>{"1", "110"}));
+    assert((result.rows[1] == std::vector<std::string>{"2", "220"}));
+
+    // The target row without a matching source row must remain unchanged.
+    assert(g_engine.insert(db, "target", {{"id","3"},{"val","30"}}) == dbms::DBStatus::OK);
+    handled = false;
+    assert(!dbms::tryDmlBridge(
+        "UPDATE target SET val = target.val + s.val FROM source AS s "
+        "WHERE target.id = s.id RETURNING id, val",
+        dbms::SqlCommand::Update, s, handled));
+    assert(handled);
+    const dbms::DmlResult second = dbms::takeLastDmlResult();
+    assert(second.commandTag == "UPDATE 2");
+
     assert(g_engine.tableExists(db, "target"));
     assert(g_engine.tableExists(db, "source"));
     cleanup(db);

@@ -922,6 +922,195 @@ RowContext updateContext(const std::map<std::string, std::string>& source,
     return context;
 }
 
+std::string unqualifiedRelationName(const std::string& name) {
+    const size_t dot = name.rfind('.');
+    return identifier(dot == std::string::npos ? name : name.substr(dot + 1));
+}
+
+std::string rowValueKey(const std::map<std::string, std::string>& values) {
+    std::string key;
+    for (const auto& [column, value] : values) {
+        key += std::to_string(column.size());
+        key += ':';
+        key += column;
+        key += std::to_string(value.size());
+        key += ':';
+        key += value;
+        key += ';';
+    }
+    return key;
+}
+
+bool validateUpdateFromExpression(const Expr* expr,
+                                  const TableSchema& targetTable,
+                                  const std::string& targetQualifier,
+                                  const TableSchema& sourceTable,
+                                  const std::string& sourceQualifier,
+                                  ExprEvaluator& evaluator) {
+    if (!expr) return false;
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expr)) {
+        return lower(literal->value) != "default";
+    }
+    if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
+        if (!ref->schema.empty()) return false;
+        const std::string column = identifier(ref->column);
+        const std::string qualifier = identifier(ref->table);
+        if (qualifier.empty()) return findTableColumn(targetTable, column);
+        if (qualifier == identifier(targetQualifier) ||
+            qualifier == unqualifiedRelationName(targetQualifier)) {
+            return findTableColumn(targetTable, column);
+        }
+        if (qualifier == identifier(sourceQualifier) ||
+            qualifier == unqualifiedRelationName(sourceQualifier)) {
+            return findTableColumn(sourceTable, column);
+        }
+        return false;
+    }
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+        static const std::set<std::string> supported = {
+            "+", "-", "not", "is null", "is not null",
+            "is true", "is not true", "is false", "is not false"
+        };
+        return supported.count(lower(unary->op)) != 0 &&
+               validateUpdateFromExpression(unary->operand.get(), targetTable,
+                                             targetQualifier, sourceTable,
+                                             sourceQualifier, evaluator);
+    }
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
+        static const std::set<std::string> supported = {
+            "and", "or", "=", "<>", "!=", "<", ">", "<=", ">=",
+            "+", "-", "*", "/", "%", "^", "||", "like", "not like",
+            "ilike", "not ilike", "similar to", "not similar to", "in", "::"
+        };
+        return supported.count(lower(binary->op)) != 0 &&
+               validateUpdateFromExpression(binary->left.get(), targetTable,
+                                             targetQualifier, sourceTable,
+                                             sourceQualifier, evaluator) &&
+               validateUpdateFromExpression(binary->right.get(), targetTable,
+                                             targetQualifier, sourceTable,
+                                             sourceQualifier, evaluator);
+    }
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+        if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
+            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty()) {
+            return false;
+        }
+        for (const auto& arg : call->args) {
+            if (!validateUpdateFromExpression(arg.get(), targetTable, targetQualifier,
+                                               sourceTable, sourceQualifier, evaluator)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
+        return validateUpdateFromExpression(cast->operand.get(), targetTable,
+                                            targetQualifier, sourceTable,
+                                            sourceQualifier, evaluator);
+    }
+    if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
+        if (caseExpr->switchExpr &&
+            !validateUpdateFromExpression(caseExpr->switchExpr.get(), targetTable,
+                                           targetQualifier, sourceTable,
+                                           sourceQualifier, evaluator)) {
+            return false;
+        }
+        for (const auto& clause : caseExpr->whenClauses) {
+            if (!validateUpdateFromExpression(clause.first.get(), targetTable,
+                                               targetQualifier, sourceTable,
+                                               sourceQualifier, evaluator) ||
+                !validateUpdateFromExpression(clause.second.get(), targetTable,
+                                               targetQualifier, sourceTable,
+                                               sourceQualifier, evaluator)) {
+                return false;
+            }
+        }
+        return !caseExpr->elseExpr ||
+               validateUpdateFromExpression(caseExpr->elseExpr.get(), targetTable,
+                                            targetQualifier, sourceTable,
+                                            sourceQualifier, evaluator);
+    }
+    if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
+        for (const auto& element : array->elements) {
+            if (!validateUpdateFromExpression(element.get(), targetTable,
+                                               targetQualifier, sourceTable,
+                                               sourceQualifier, evaluator)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
+        for (const auto& element : row->elements) {
+            if (!validateUpdateFromExpression(element.get(), targetTable,
+                                               targetQualifier, sourceTable,
+                                               sourceQualifier, evaluator)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+RowContext updateFromContext(const std::map<std::string, std::string>& targetValues,
+                             const TableSchema& targetTable,
+                             const std::string& targetQualifier,
+                             const std::map<std::string, std::string>& sourceValues,
+                             const TableSchema& sourceTable,
+                             const std::string& sourceQualifier) {
+    RowContext context;
+    auto addValues = [&](const std::map<std::string, std::string>& values,
+                         const TableSchema& table,
+                         const std::vector<std::string>& qualifiers,
+                         bool unqualified) {
+        for (size_t i = 0; i < table.len; ++i) {
+            const std::string& column = table.cols[i].dataName;
+            const auto it = values.find(column);
+            const bool isNull = it == values.end() || it->second.empty();
+            const ExprValue value(table.cols[i].dataType,
+                                  isNull ? std::string{} : it->second, isNull);
+            if (unqualified) context.set(column, value);
+            for (const auto& qualifier : qualifiers) {
+                if (!qualifier.empty()) context.set(qualifier + "." + column, value);
+            }
+        }
+    };
+    addValues(targetValues, targetTable,
+              {identifier(targetQualifier), unqualifiedRelationName(targetQualifier)}, true);
+    addValues(sourceValues, sourceTable,
+              {identifier(sourceQualifier), unqualifiedRelationName(sourceQualifier)}, false);
+    return context;
+}
+
+bool evaluateUpdateFromExpression(
+    const Expr* expression,
+    const std::map<std::string, std::string>& targetValues,
+    const TableSchema& targetTable,
+    const std::string& targetQualifier,
+    const std::map<std::string, std::string>& sourceValues,
+    const TableSchema& sourceTable,
+    const std::string& sourceQualifier,
+    const std::string& currentDB,
+    std::string& value) {
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    const ExprValue result = evaluator.eval(
+        expression, updateFromContext(targetValues, targetTable, targetQualifier,
+                                      sourceValues, sourceTable, sourceQualifier));
+    if (result.isUnknown() || result.typeName == "unknown") return false;
+    if (result.isNull) {
+        value.clear();
+        return true;
+    }
+    value = result.value;
+    if (result.typeName == "boolean") {
+        if (value == "t") value = "1";
+        else if (value == "f") value = "0";
+    }
+    return true;
+}
+
 bool evaluateUpdateExpression(const Expr* expression,
                               const std::map<std::string, std::string>& source,
                               const TableSchema& table,
@@ -1577,7 +1766,199 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     return false;
 }
 
+bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
+    fallback = false;
+    if (!stmt.fromClause || stmt.fromClause->type != FromItem::Type::Table) {
+        fallback = true;
+        return false;
+    }
+    if (!checkDatabase(s)) return true;
+
+    const std::string requestedTable = identifier(stmt.tableName);
+    const std::string resolvedTable = resolveTable(s, requestedTable);
+    if (g_engine.viewExists(s.currentDB, requestedTable) ||
+        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+        fallback = true;
+        return false;
+    }
+    if (!g_engine.tableExists(s.currentDB, resolvedTable)) {
+        std::cout << "Table " << requestedTable << " not exist" << std::endl;
+        return true;
+    }
+
+    const std::string requestedSource = identifier(stmt.fromClause->tableName);
+    const std::string resolvedSource = resolveTable(s, requestedSource);
+    if (g_engine.viewExists(s.currentDB, requestedSource) ||
+        g_engine.isMaterializedView(s.currentDB, requestedSource) ||
+        !g_engine.tableExists(s.currentDB, resolvedSource)) {
+        fallback = true;
+        return false;
+    }
+    if (!checkTablePrivilege(s, requestedTable,
+                             StorageEngine::TablePrivilege::Update) ||
+        !checkTablePrivilege(s, requestedSource,
+                             StorageEngine::TablePrivilege::Select)) {
+        return true;
+    }
+
+    const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
+    const std::string targetQualifier = unqualifiedRelationName(requestedTable);
+    const std::string sourceQualifier = stmt.fromClause->alias.empty()
+        ? unqualifiedRelationName(requestedSource)
+        : identifier(stmt.fromClause->alias);
+
+    std::vector<std::string> columns;
+    std::map<std::string, std::string> staticUpdates;
+    std::map<std::string, const Expr*> expressionUpdates;
+    for (const auto& [rawColumn, expression] : stmt.setClauses) {
+        const std::string column = identifier(rawColumn);
+        columns.push_back(column);
+        if (!findTableColumn(targetSchema, column)) {
+            std::cout << "Column " << column << " does not exist" << std::endl;
+            return true;
+        }
+        if (isDefaultValue(expression)) {
+            fallback = true;
+            return false;
+        }
+        ExprEvaluator evaluator;
+        if (!validateUpdateFromExpression(expression.get(), targetSchema,
+                                           targetQualifier, sourceSchema,
+                                           sourceQualifier, evaluator)) {
+            fallback = true;
+            return false;
+        }
+        if (referencesColumn(expression.get())) {
+            expressionUpdates[column] = expression.get();
+        } else {
+            std::string value;
+            if (!evaluateValue(expression, s.currentDB, value)) {
+                fallback = true;
+                return false;
+            }
+            staticUpdates[column] = std::move(value);
+        }
+    }
+    if (staticUpdates.empty() && expressionUpdates.empty()) {
+        std::cout << "SQL syntax error: empty UPDATE SET clause" << std::endl;
+        return true;
+    }
+    if (s.permission != 1 && !isTempTable(s, requestedTable) &&
+        !g_engine.hasColumnPermission(
+            s.currentDB, requestedTable, s.username,
+            StorageEngine::TablePrivilege::Update, columns)) {
+        std::cout << "permission denied: UPDATE on restricted columns of table "
+                  << requestedTable << std::endl;
+        return true;
+    }
+    if (stmt.whereClause) {
+        ExprEvaluator evaluator;
+        if (!validateUpdateFromExpression(stmt.whereClause.get(), targetSchema,
+                                           targetQualifier, sourceSchema,
+                                           sourceQualifier, evaluator)) {
+            fallback = true;
+            return false;
+        }
+    }
+
+    std::vector<std::map<std::string, std::string>> sourceRows;
+    g_engine.forEachRow(s.currentDB, resolvedSource,
+                        [&](uint32_t, uint16_t, const char* data, size_t len) {
+        const std::string row(data, len);
+        std::map<std::string, std::string> values;
+        for (size_t i = 0; i < sourceSchema.len; ++i) {
+            values[sourceSchema.cols[i].dataName] =
+                g_engine.extractColumnValue(row, sourceSchema, i, s.currentDB, true);
+        }
+        sourceRows.push_back(std::move(values));
+    });
+
+    std::map<std::string, std::map<std::string, std::string>> matchedUpdates;
+    bool evaluationFailed = false;
+    g_engine.forEachRow(s.currentDB, resolvedTable,
+                        [&](uint32_t, uint16_t, const char* data, size_t len) {
+        if (evaluationFailed) return;
+        const std::string row(data, len);
+        std::map<std::string, std::string> targetValues;
+        for (size_t i = 0; i < targetSchema.len; ++i) {
+            targetValues[targetSchema.cols[i].dataName] =
+                g_engine.extractColumnValue(row, targetSchema, i, s.currentDB, true);
+        }
+        for (const auto& sourceValues : sourceRows) {
+            ExprEvaluator evaluator;
+            evaluator.setCurrentDB(s.currentDB);
+            const RowContext context = updateFromContext(
+                targetValues, targetSchema, targetQualifier,
+                sourceValues, sourceSchema, sourceQualifier);
+            if (stmt.whereClause) {
+                const ExprValue predicate = evaluator.eval(stmt.whereClause.get(), context);
+                if (predicate.isUnknown() || predicate.isNull || !predicate.asBool()) continue;
+            }
+
+            std::map<std::string, std::string> effectiveUpdates = staticUpdates;
+            for (const auto& [column, expression] : expressionUpdates) {
+                std::string value;
+                if (!evaluateUpdateFromExpression(
+                        expression, targetValues, targetSchema, targetQualifier,
+                        sourceValues, sourceSchema, sourceQualifier,
+                        s.currentDB, value)) {
+                    evaluationFailed = true;
+                    return;
+                }
+                effectiveUpdates[column] = std::move(value);
+            }
+            matchedUpdates.emplace(rowValueKey(targetValues), std::move(effectiveUpdates));
+            break; // PostgreSQL permits one source row to determine each target row.
+        }
+    });
+    if (evaluationFailed) {
+        std::cout << "UPDATE FROM expression evaluation failed" << std::endl;
+        return true;
+    }
+
+    std::vector<ReturningProjection> returningProjections;
+    if (!stmt.returning.empty() &&
+        !buildReturningProjections(stmt.returning, targetSchema, returningProjections)) {
+        fallback = true;
+        return false;
+    }
+    std::vector<std::map<std::string, std::string>> updatedRows;
+    StorageEngine::UpdateResolver updateResolver;
+    if (!expressionUpdates.empty()) {
+        updateResolver = [matchedUpdates](
+                             const std::map<std::string, std::string>& oldValues,
+                             std::map<std::string, std::string>& effectiveUpdates) {
+            const auto it = matchedUpdates.find(rowValueKey(oldValues));
+            if (it == matchedUpdates.end()) return false;
+            effectiveUpdates = it->second;
+            return true;
+        };
+    }
+    const StorageEngine::UpdateMatcher updateMatcher = [matchedUpdates](
+        const std::map<std::string, std::string>& oldValues) {
+        return matchedUpdates.find(rowValueKey(oldValues)) != matchedUpdates.end();
+    };
+    const DBStatus status = g_engine.update(
+        s.currentDB, resolvedTable, staticUpdates, {},
+        stmt.returning.empty() ? nullptr : &updatedRows,
+        updateResolver, updateMatcher);
+    if (status != DBStatus::OK) {
+        std::cout << "UPDATE FROM failed" << std::endl;
+        return true;
+    }
+    std::cout << "Update done" << std::endl;
+    if (!stmt.returning.empty()) {
+        if (!publishReturning(returningProjections, targetSchema, s.currentDB,
+                              updatedRows, "UPDATE")) return true;
+        printReturningRows(g_lastDmlResult);
+    }
+    g_engine.analyzeTable(s.currentDB, resolvedTable);
+    return false;
+}
+
 bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
+    if (stmt.fromClause) return executeUpdateFrom(stmt, s, fallback);
     fallback = false;
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
@@ -1765,7 +2146,7 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         error = executeInsert(*stmt, s, fallback);
     } else if (parsedCmd == SqlCommand::Update) {
         const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
-        if (!stmt || stmt->fromClause) return false;
+        if (!stmt) return false;
         error = executeUpdate(*stmt, s, fallback);
     } else {
         const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());

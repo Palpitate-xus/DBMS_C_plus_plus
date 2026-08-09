@@ -12590,7 +12590,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                                 std::vector<std::map<std::string, std::string>>* updatedRows,
                                 const std::function<bool(
                                     const std::map<std::string, std::string>&,
-                                    std::map<std::string, std::string>&)>& updateResolver) {
+                                    std::map<std::string, std::string>&)>& updateResolver,
+                                const std::function<bool(
+                                    const std::map<std::string, std::string>&)>& updateMatcher) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
@@ -12739,6 +12741,21 @@ DBStatus StorageEngine::update(const std::string& dbname,
     std::set<int64_t> matchIds = conds.empty()
         ? [&](){ std::set<int64_t> s; forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) { s.insert(encodeRid(pid, sid)); }); return s; }()
         : filterRows(dbname, tablename, conds);
+
+    if (updateMatcher && !matchIds.empty()) {
+        std::set<int64_t> filteredIds;
+        for (const int64_t rid : matchIds) {
+            std::string row;
+            if (!readRowByRid(pa, rid, row, tbl)) continue;
+            std::map<std::string, std::string> rowValues;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                rowValues[tbl.cols[i].dataName] =
+                    extractColumnValue(row, tbl, i, dbname, true);
+            }
+            if (updateMatcher(rowValues)) filteredIds.insert(rid);
+        }
+        matchIds.swap(filteredIds);
+    }
 
     if (matchIds.empty()) {
         lockManager_.unlock(tablename);
