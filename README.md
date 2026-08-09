@@ -27,13 +27,13 @@
 - **插入**：`INSERT INTO ... VALUES (...)`, `INSERT INTO ... SELECT ...`
 - **替换**：`REPLACE INTO`（冲突时先删后插）
 - **合并**：`MERGE INTO ... USING ... ON ... UPDATE SET ... INSERT ...`
-- **Upsert（窄版 AST 路径）**：单列主键/唯一列 target 配合常量或直接 `excluded.column` `SET` 的 `INSERT INTO ... VALUES ... ON CONFLICT (col) DO UPDATE SET ...`
+- **Upsert（窄版 AST 路径）**：单列主键/唯一列 target 配合常量或 evaluator 支持的、只引用 `excluded` 的标量表达式 `SET` 的 `INSERT INTO ... VALUES ... ON CONFLICT (col) DO UPDATE SET ...`
 - **查询**：`SELECT` 支持 `*`、指定列、`WHERE`、`ORDER BY`、`LIMIT`、`OFFSET`、`DISTINCT`
 - **更新**：`UPDATE ... SET ... WHERE ...`, `UPDATE ... FROM ... WHERE ...`, `UPDATE ... LIMIT n`
 - **删除**：`DELETE FROM ... WHERE ...`, `DELETE ... USING ... WHERE ...`, `DELETE ... LIMIT n`
 - **多表更新/删除**：支持 `FROM` / `USING` 子句的跨表 UPDATE/DELETE
 
-普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、无 target 的 `ON CONFLICT DO NOTHING`，以及单列主键/唯一列 target 配合常量或直接 `excluded.column` `SET` 的窄版 `ON CONFLICT DO UPDATE`，当前由 `src/commands/DmlExecutor` 消费 AST；支持结构化常量/列表达式、简单 `AND` 谓词、`IS NULL`/`IS NOT NULL` 及 StorageEngine 统一约束路径。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 `RETURNING` 已在存储修改边界收集并通过 PostgreSQL 协议结果集发送。复杂 `INSERT ... SELECT`、复合/部分/索引推断 conflict target、带运算/函数的 `DO UPDATE` 表达式、`DO UPDATE WHERE`、复杂/子查询/窗口 `RETURNING`、多表/复杂表达式、视图写入和 `MERGE` 明确回退到 legacy 执行路径。该回退边界会逐步缩小，不能视为 PostgreSQL 完整语义。
+普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、无 target 的 `ON CONFLICT DO NOTHING`，以及单列主键/唯一列 target 配合常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET` 的窄版 `ON CONFLICT DO UPDATE`，当前由 `src/commands/DmlExecutor` 消费 AST；支持结构化常量/列表达式、简单 `AND` 谓词、`IS NULL`/`IS NOT NULL` 及 StorageEngine 统一约束路径。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 `RETURNING` 已在存储修改边界收集并通过 PostgreSQL 协议结果集发送。复杂 `INSERT ... SELECT`、复合/部分/索引推断 conflict target、引用目标表列或子查询的 `DO UPDATE` 表达式、`DO UPDATE WHERE`、复杂/子查询/窗口 `RETURNING`、多表/复杂表达式、视图写入和 `MERGE` 明确回退到 legacy 执行路径。该回退边界会逐步缩小，不能视为 PostgreSQL 完整语义。
 
 ### 高级查询 (DQL)
 - **条件过滤**：支持 `=`, `<>`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `BETWEEN`, `IN`, `EXISTS`, `ANY`, `ALL`, `IS NULL`, `IS NOT NULL` 以及 `AND`/`OR` 组合；未关联单列 `IN`/`NOT IN`、未关联单表 `EXISTS`/`NOT EXISTS` 和单列 `ANY/ALL` 已进入结构化 Volcano 计划，复杂/关联子查询仍受生产边界限制

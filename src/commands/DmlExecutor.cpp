@@ -136,12 +136,110 @@ bool checkInsertColumns(Session& s, const std::string& table,
 
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
                    std::string& value);
+bool referencesColumn(const Expr* expr);
+
+bool findTableColumn(const TableSchema& table, const std::string& name) {
+    const std::string column = identifier(name);
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].dataName == column) return true;
+    }
+    return false;
+}
+
+// Conflict expressions are evaluated once for each conflicting input row.
+// Keeping the source namespace explicit prevents an unqualified reference
+// from accidentally reading the target row with a different SQL meaning.
+bool validateConflictExpression(const Expr* expr, const TableSchema& table,
+                                ExprEvaluator& evaluator,
+                                std::set<std::string>& sourceColumns) {
+    if (!expr) return false;
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expr)) {
+        return lower(literal->value) != "default";
+    }
+    if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
+        if (!ref->schema.empty() || lower(ref->table) != "excluded") return false;
+        const std::string sourceColumn = identifier(ref->column);
+        if (!findTableColumn(table, sourceColumn)) return false;
+        sourceColumns.insert(sourceColumn);
+        return true;
+    }
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+        static const std::set<std::string> supported = {
+            "+", "-", "not", "is null", "is not null",
+            "is true", "is not true", "is false", "is not false"
+        };
+        return supported.count(lower(unary->op)) != 0 &&
+               validateConflictExpression(unary->operand.get(), table,
+                                           evaluator, sourceColumns);
+    }
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
+        static const std::set<std::string> supported = {
+            "and", "or", "=", "<>", "!=", "<", ">", "<=", ">=",
+            "+", "-", "*", "/", "%", "^", "||", "like", "not like",
+            "ilike", "not ilike", "similar to", "not similar to", "in", "::"
+        };
+        return supported.count(lower(binary->op)) != 0 &&
+               validateConflictExpression(binary->left.get(), table,
+                                           evaluator, sourceColumns) &&
+               validateConflictExpression(binary->right.get(), table,
+                                           evaluator, sourceColumns);
+    }
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+        if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
+            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty()) {
+            return false;
+        }
+        for (const auto& arg : call->args) {
+            if (!validateConflictExpression(arg.get(), table, evaluator,
+                                             sourceColumns)) return false;
+        }
+        return true;
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
+        return validateConflictExpression(cast->operand.get(), table,
+                                           evaluator, sourceColumns);
+    }
+    if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
+        if (caseExpr->switchExpr &&
+            !validateConflictExpression(caseExpr->switchExpr.get(), table,
+                                        evaluator, sourceColumns)) {
+            return false;
+        }
+        for (const auto& clause : caseExpr->whenClauses) {
+            if (!validateConflictExpression(clause.first.get(), table, evaluator,
+                                             sourceColumns) ||
+                !validateConflictExpression(clause.second.get(), table, evaluator,
+                                             sourceColumns)) {
+                return false;
+            }
+        }
+        return !caseExpr->elseExpr ||
+               validateConflictExpression(caseExpr->elseExpr.get(), table,
+                                           evaluator, sourceColumns);
+    }
+    if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
+        for (const auto& element : array->elements) {
+            if (!validateConflictExpression(element.get(), table, evaluator,
+                                             sourceColumns)) return false;
+        }
+        return true;
+    }
+    if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
+        for (const auto& element : row->elements) {
+            if (!validateConflictExpression(element.get(), table, evaluator,
+                                             sourceColumns)) return false;
+        }
+        return true;
+    }
+    return false;
+}
 
 bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
                              const std::string& currentDB,
                              std::string& targetColumn,
                              std::map<std::string, std::string>& updates,
-                             std::map<std::string, std::string>& excludedColumns) {
+                             std::map<std::string, const Expr*>& expressionUpdates,
+                             std::map<std::string, std::set<std::string>>& expressionSources) {
     if (lower(stmt.conflictAction) != "do update" ||
         stmt.conflictTarget.size() != 1 || stmt.conflictWhere ||
         stmt.conflictUpdateSet.empty()) {
@@ -167,29 +265,17 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
         if (column.empty() || !seen.insert(column).second || isDefaultValue(expr)) {
             return false;
         }
-        bool found = false;
-        for (const auto& tableColumn : table.cols) {
-            if (tableColumn.dataName == column) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return false;
+        if (!findTableColumn(table, column)) return false;
 
-        if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr.get())) {
-            if (!ref->schema.empty() || lower(ref->table) != "excluded") {
+        if (referencesColumn(expr.get())) {
+            ExprEvaluator evaluator;
+            std::set<std::string> sourceColumns;
+            if (!validateConflictExpression(expr.get(), table, evaluator,
+                                             sourceColumns)) {
                 return false;
             }
-            const std::string sourceColumn = identifier(ref->column);
-            bool sourceFound = false;
-            for (const auto& tableColumn : table.cols) {
-                if (tableColumn.dataName == sourceColumn) {
-                    sourceFound = true;
-                    break;
-                }
-            }
-            if (!sourceFound) return false;
-            excludedColumns[column] = sourceColumn;
+            expressionUpdates[column] = expr.get();
+            expressionSources[column] = std::move(sourceColumns);
             continue;
         }
 
@@ -197,7 +283,7 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
         if (!evaluateValue(expr, currentDB, value)) return false;
         updates[column] = std::move(value);
     }
-    return !updates.empty() || !excludedColumns.empty();
+    return !updates.empty() || !expressionUpdates.empty();
 }
 
 bool checkTablePrivilege(Session& s, const std::string& table,
@@ -878,6 +964,35 @@ bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
     return true;
 }
 
+bool evaluateConflictExpression(const Expr* expr, const TableSchema& table,
+                                const std::map<std::string, std::string>& values,
+                                const std::string& currentDB,
+                                std::string& value) {
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    RowContext context;
+    for (size_t i = 0; i < table.len; ++i) {
+        const std::string& column = table.cols[i].dataName;
+        const auto it = values.find(column);
+        context.set("excluded." + column,
+                    ExprValue(table.cols[i].dataType,
+                              it == values.end() ? std::string{} : it->second,
+                              it == values.end() || it->second.empty()));
+    }
+    const ExprValue result = evaluator.eval(expr, context);
+    if (result.isUnknown()) return false;
+    if (result.isNull) {
+        value.clear();
+        return true;
+    }
+    value = result.value;
+    if (result.typeName == "boolean") {
+        if (value == "t") value = "1";
+        else if (value == "f") value = "0";
+    }
+    return true;
+}
+
 bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     fallback = false;
     if (!checkDatabase(s)) return true;
@@ -951,7 +1066,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     const bool conflictUpdate = lower(stmt.conflictAction) == "do update";
     std::string conflictTarget;
     std::map<std::string, std::string> conflictUpdates;
-    std::map<std::string, std::string> conflictExcludedColumns;
+    std::map<std::string, const Expr*> conflictExpressionUpdates;
+    std::map<std::string, std::set<std::string>> conflictExpressionSources;
 
     if (conflictUpdate) {
         if (!checkTablePrivilege(s, requestedTable,
@@ -959,20 +1075,21 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             return true;
         }
         if (!buildConflictUpdatePlan(stmt, table, s.currentDB, conflictTarget,
-                                     conflictUpdates, conflictExcludedColumns)) {
+                                     conflictUpdates, conflictExpressionUpdates,
+                                     conflictExpressionSources)) {
             fallback = true;
             return false;
         }
         const std::vector<std::string> updateColumns = [&]() {
             std::vector<std::string> result;
-            result.reserve(conflictUpdates.size() + conflictExcludedColumns.size());
+            result.reserve(conflictUpdates.size() + conflictExpressionUpdates.size());
             std::set<std::string> seen;
             for (const auto& [column, value] : conflictUpdates) {
                 (void)value;
                 if (seen.insert(column).second) result.push_back(column);
             }
-            for (const auto& [column, value] : conflictExcludedColumns) {
-                (void)value;
+            for (const auto& [column, expression] : conflictExpressionUpdates) {
+                (void)expression;
                 if (seen.insert(column).second) result.push_back(column);
             }
             return result;
@@ -1101,14 +1218,17 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 fallback = true;
                 return false;
             }
-            for (const auto& [updateColumn, sourceColumn] : conflictExcludedColumns) {
+            for (const auto& [updateColumn, sourceColumns] : conflictExpressionSources) {
                 (void)updateColumn;
-                const auto source = values.find(sourceColumn);
-                if (source == values.end() || source->second.empty()) {
-                    // DEFAULT/generated incoming values need to be resolved by
-                    // the storage insert path before they can become EXCLUDED.
-                    fallback = true;
-                    return false;
+                for (const auto& sourceColumn : sourceColumns) {
+                    const auto source = values.find(sourceColumn);
+                    if (source == values.end()) {
+                        // DEFAULT/generated incoming values need to be resolved
+                        // by the storage insert path before they can become
+                        // EXCLUDED.
+                        fallback = true;
+                        return false;
+                    }
                 }
             }
         }
@@ -1130,13 +1250,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 std::vector<std::string> conditions = {
                     "=" + conflictTarget + " " + targetValue->second};
                 std::map<std::string, std::string> rowConflictUpdates = conflictUpdates;
-                for (const auto& [updateColumn, sourceColumn] : conflictExcludedColumns) {
-                    const auto source = values.find(sourceColumn);
-                    if (source == values.end() || source->second.empty()) {
-                        std::cout << "ON CONFLICT EXCLUDED value is unavailable" << std::endl;
+                for (const auto& [updateColumn, expression] : conflictExpressionUpdates) {
+                    std::string value;
+                    if (!evaluateConflictExpression(expression, table, values,
+                                                    s.currentDB, value)) {
+                        std::cout << "ON CONFLICT expression evaluation failed" << std::endl;
                         return true;
                     }
-                    rowConflictUpdates[updateColumn] = source->second;
+                    rowConflictUpdates[updateColumn] = std::move(value);
                 }
                 std::vector<std::map<std::string, std::string>> updatedRows;
                 const DBStatus updateStatus = g_engine.update(
