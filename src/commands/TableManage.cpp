@@ -8064,6 +8064,22 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     if (!validateTableSchemaIdentifiers(tbl, error)) {
         return DBStatus::INVALID_ARGUMENT;
     }
+    if (isSessionTempPhysicalName(tbl.tablename)) {
+        Session* session = currentSession();
+        const std::string expectedPrefix = session
+            ? tempTablePrefix(*session, "")
+            : std::string();
+        if (!tbl.isTemporary || !session ||
+            tbl.tablename.rfind(expectedPrefix, 0) != 0) {
+            if (error) {
+                *error = "the __tmp_<backend>_ namespace is reserved for session temporary relations";
+            }
+            return DBStatus::INVALID_ARGUMENT;
+        }
+    } else if (tbl.isTemporary) {
+        if (error) *error = "temporary relations must use the session temporary namespace";
+        return DBStatus::INVALID_ARGUMENT;
+    }
     if (tableExists(dbname, tbl.tablename)) {
         if (error) *error = "table already exists";
         return DBStatus::TABLE_ALREADY_EXISTS;

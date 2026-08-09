@@ -20,8 +20,16 @@ int main() {
         StorageEngine engine;
         assert(engine.createDatabase(dbname) == DBStatus::OK);
 
+        TableSchema persistent;
+        persistent.tablename = physicalName;
+        persistent.append(makeIntColumn("id", false, 0, true));
+        std::string error;
+        assert(engine.createTable(dbname, persistent, &error) == DBStatus::INVALID_ARGUMENT);
+        assert(!engine.tableExists(dbname, physicalName));
+
         TableSchema table;
         table.tablename = physicalName;
+        table.isTemporary = true;
         table.append(makeIntColumn("id", false, 0, true));
 
         Session session;

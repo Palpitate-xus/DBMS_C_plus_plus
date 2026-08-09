@@ -120,6 +120,7 @@ struct TableSchema {
     size_t subHashPartitions = 0; // number of hash sub-partitions
 
     bool isUnlogged = false;    // UNLOGGED table: no WAL, truncated on crash
+    bool isTemporary = false;   // Internal create-time marker; never persisted
     bool rowLevelSecurity = false; // ENABLE ROW LEVEL SECURITY
     bool forceRowLevelSecurity = false; // FORCE ROW LEVEL SECURITY (applies to table owner too)
     std::map<std::string, std::string> storageParams; // WITH (fillfactor=70, autovacuum_enabled=off)

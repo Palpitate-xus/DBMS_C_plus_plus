@@ -1915,6 +1915,7 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
     dbms::TableSchema newTbl;
     newTbl.tablename = tname;
     newTbl.owner = effectiveSessionRole(s);
+    newTbl.isTemporary = stmt->temp || stmt->localTemp;
 
     std::set<std::string> queryCols;
     if (selectCols.size() == 1 && selectCols[0] == "*") {
@@ -2079,6 +2080,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         TableSchema child = parentSchema;
         child.tablename = tname;
         child.owner = effectiveSessionRole(s);
+        child.isTemporary = temporary;
         child.partitionType = TableSchema::PartitionType::None;
         child.partitionKey.clear();
         child.rangePartitions.clear();
@@ -2148,6 +2150,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     TableSchema tbl;
     tbl.tablename = tname;
     tbl.owner = effectiveSessionRole(s);
+    tbl.isTemporary = temporary;
     tbl.isUnlogged = stmt->unlogged;
     tbl.tablespace = stmt->tablespace.empty() ? "pg_default" : stmt->tablespace;
     tbl.storageParams = stmt->options;

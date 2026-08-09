@@ -6151,6 +6151,7 @@ static std::string createTempTableFromRows(Session& s,
     std::string actualName = tempTablePrefix(s, tmpName);
     TableSchema tmpTbl;
     tmpTbl.tablename = actualName;
+    tmpTbl.isTemporary = true;
     for (const auto& cname : colNames) {
         Column col;
         col.dataName = cname;
