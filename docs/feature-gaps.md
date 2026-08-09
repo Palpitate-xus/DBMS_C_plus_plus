@@ -9,11 +9,11 @@
 
 协议当前已通过真实 E2E 覆盖常用标量、`numeric` 以及 `date`/`time`/`timestamp`/`timestamptz`/`uuid` 的 binary 参数与结果、基础 portal `maxRows` 分页；legacy 文本执行器的结果捕获已采用线程局部输出路由，不再以全局锁串行化会话；数组 binary I/O、亚秒时间精度、holdable/scrollable cursor 和完整 libpq 语义仍属于协议差距。
 
-本轮 DML 架构进展：普通单表 `INSERT ... VALUES`/`DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、无 target 的 `ON CONFLICT DO NOTHING`，以及显式匹配单列或复合主键/唯一约束 target、配合常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET`、目标行/`excluded` 受限 `WHERE` 的窄版 `ON CONFLICT DO UPDATE`、常量/列表达式单表 `UPDATE` 和简单谓词单表 `DELETE` 已进入 `src/commands/DmlExecutor.cpp` 的 AST 执行路径；解析器保留混合 `DEFAULT` 的列位置并对 DML 尾随垃圾 fail-closed。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 `RETURNING` 也已由 StorageEngine 在实际修改边界收集，并由协议层作为结构化结果集发送。视图写入、复杂 `INSERT ... SELECT`、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、多表 DML 和复杂表达式仍明确由 legacy 路径处理。
+本轮 DML 架构进展：普通单表 `INSERT ... VALUES`/`DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、无 target 或显式匹配主键/唯一约束 target 的 `ON CONFLICT DO NOTHING`，以及显式匹配单列或复合主键/唯一约束 target、配合常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET`、目标行/`excluded` 受限 `WHERE` 的窄版 `ON CONFLICT DO UPDATE`、常量/列表达式单表 `UPDATE` 和简单谓词单表 `DELETE` 已进入 `src/commands/DmlExecutor.cpp` 的 AST 执行路径；解析器保留混合 `DEFAULT` 的列位置并对 DML 尾随垃圾 fail-closed。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 `RETURNING` 也已由 StorageEngine 在实际修改边界收集，并由协议层作为结构化结果集发送。视图写入、复杂 `INSERT ... SELECT`、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、多表 DML 和复杂表达式仍明确由 legacy 路径处理。
 
 ### P1-0: DML AST 全量执行迁移
 - **类别**: 执行器 / 架构一致性
-- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、简单单表 `INSERT ... SELECT`、无 target 的 `ON CONFLICT DO NOTHING`、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 `DO UPDATE`、目标行/`excluded` 的受限 `WHERE`、常量/列表达式单表 UPDATE、简单谓词单表 DELETE 已由 `DmlExecutor` 结构化执行，并通过 parser/协议回归；普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 RETURNING 已统一结果集和 command tag。复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE`/`WHERE`、复杂/子查询/窗口 RETURNING、UPDATE 的 FROM、DELETE 的 USING、MERGE 和视图写入仍回退 legacy。
+- **现状**: 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、简单单表 `INSERT ... SELECT`、无 target 或显式匹配主键/唯一约束 target 的 `ON CONFLICT DO NOTHING`、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 `DO UPDATE`、目标行/`excluded` 的受限 `WHERE`、常量/列表达式单表 UPDATE、简单谓词单表 DELETE 已由 `DmlExecutor` 结构化执行，并通过 parser/协议回归；普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 RETURNING 已统一结果集和 command tag。复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE`/`WHERE`、复杂/子查询/窗口 RETURNING、UPDATE 的 FROM、DELETE 的 USING、MERGE 和视图写入仍回退 legacy。
 - **PG 参考**: PostgreSQL 的 parse/analyze/rewrite/plan/execute 分层，以及 `ModifyTable`。
 - **影响**: 当前 DML 仍存在两套执行入口，错误码、RETURNING、权限和计划可观测性的统一程度不足。
 - **实现路径**:

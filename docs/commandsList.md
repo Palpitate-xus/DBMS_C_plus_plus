@@ -428,10 +428,15 @@ REPLACE INTO users (id, name, email) VALUES (1, 'Alice Smith', 'alice@new.com');
 **语法**
 ```sql
 INSERT INTO table_name (column1, column2, ...) VALUES (value1, value2, ...)
+ON CONFLICT [(conflict_column [, ...])] DO NOTHING
+```
+
+```sql
+INSERT INTO table_name (column1, column2, ...) VALUES (value1, value2, ...)
 ON CONFLICT (conflict_column [, ...]) DO UPDATE SET column = value [, ...]
 ```
 
-**说明** 插入时若显式列出并匹配单列或复合主键/UNIQUE 约束，则执行 UPDATE 操作。本项目当前结构化执行器支持普通 `VALUES`、约束匹配的 conflict target、常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET`，以及只引用目标行/`excluded` 的受限 `WHERE`；部分索引/索引推断、引用子查询或其他关系等复杂语义仍走 legacy 路径。本质是 `INSERT ... ON CONFLICT` 语法，不是独立的 `UPSERT` 命令。
+**说明** 插入时若显式列出并匹配单列或复合主键/UNIQUE 约束，则 `DO NOTHING` 只忽略该约束冲突，`DO UPDATE` 执行 UPDATE 操作。本项目当前结构化执行器支持普通 `VALUES`、约束匹配的 conflict target、常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET`，以及只引用目标行/`excluded` 的受限 `WHERE`；部分索引/索引推断、引用子查询或其他关系等复杂语义仍走 legacy 路径。本质是 `INSERT ... ON CONFLICT` 语法，不是独立的 `UPSERT` 命令。
 
 **示例**
 ```sql

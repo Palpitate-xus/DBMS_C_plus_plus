@@ -99,12 +99,14 @@ bool isDefaultValue(const ExprPtr& expr) {
 
 bool supportsConflict(const InsertStmt& stmt) {
     const std::string action = lower(stmt.conflictAction);
-    // Only target-less DO NOTHING and a narrow VALUES DO UPDATE shape are
-    // admitted here; conflict inference remains explicit and constraint
-    // backed in buildConflictUpdatePlan().
+    // DO NOTHING may be target-less or explicitly constrained; DO UPDATE is
+    // admitted only for a narrow VALUES shape and is constraint-backed by
+    // buildConflictUpdatePlan().
     if (action.empty()) return true;
     if (action == "do nothing") {
-        return stmt.conflictTarget.empty() && !stmt.conflictWhere;
+        if (stmt.conflictTarget.empty()) return !stmt.conflictWhere;
+        return !stmt.conflictWhere && !stmt.defaultValues &&
+               stmt.selectSource == nullptr && !stmt.values.empty();
     }
     return action == "do update" && !stmt.conflictTarget.empty() &&
            !stmt.defaultValues &&
@@ -1231,6 +1233,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     std::map<std::string, std::set<std::string>> conflictExpressionSources;
     std::set<std::string> conflictWhereExcludedColumns;
 
+    if (conflictUpdate || (ignoreDuplicate && !stmt.conflictTarget.empty())) {
+        if (!conflictUpdate &&
+            !resolveConflictTarget(stmt, table, conflictTarget)) {
+            fallback = true;
+            return false;
+        }
+    }
+
     if (conflictUpdate) {
         if (!checkTablePrivilege(s, requestedTable,
                                  StorageEngine::TablePrivilege::Update)) {
@@ -1371,7 +1381,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         pendingRows.push_back(std::move(values));
     }
 
-    if (conflictUpdate) {
+    if (conflictUpdate || (ignoreDuplicate && !conflictTarget.empty())) {
         // The narrow plan needs the inferred target value before the insert
         // reports a duplicate. DEFAULT/generated target values require a
         // storage-level conflict key API and therefore remain legacy-owned.
@@ -1413,7 +1423,31 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             s.currentDB, resolvedTable, values,
             stmt.returning.empty() ? nullptr : &insertedRows);
         if (status == DBStatus::DUPLICATE_KEY) {
-            if (ignoreDuplicate) continue;
+            if (ignoreDuplicate) {
+                if (conflictTarget.empty()) continue;
+
+                std::map<std::string, std::string> targetValues;
+                bool targetValueUnavailable = false;
+                for (const auto& targetColumn : conflictTarget) {
+                    const auto targetValue = values.find(targetColumn);
+                    if (targetValue == values.end() || targetValue->second.empty()) {
+                        targetValueUnavailable = true;
+                        break;
+                    }
+                    targetValues[targetColumn] = targetValue->second;
+                }
+                std::map<std::string, std::string> targetRow;
+                if (!targetValueUnavailable &&
+                    loadConflictTargetRow(s.currentDB, resolvedTable, table,
+                                          conflictTarget, targetValues,
+                                          targetRow)) {
+                    continue;
+                }
+                // A target-specific DO NOTHING must not hide a duplicate
+                // raised by a different unique constraint.
+                std::cout << "Duplicate key" << std::endl;
+                return true;
+            }
             if (conflictUpdate) {
                 std::map<std::string, std::string> targetValues;
                 std::vector<std::string> conditions;

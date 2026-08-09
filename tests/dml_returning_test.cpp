@@ -87,6 +87,7 @@ int main() {
     dbms::TableSchema conflict = table;
     conflict.tablename = "conflict_t";
     conflict.cols[0].isPrimaryKey = true;
+    conflict.cols[1].isUnique = true;
     assert(g_engine.createTable(db, conflict) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "conflict_t", {{"id", "1"}, {"name", "old"}}) == dbms::DBStatus::OK);
     assert(!runDml("INSERT INTO conflict_t VALUES (1, 'ignored'), (2, 'new') "
@@ -164,6 +165,24 @@ int main() {
     assert(result.commandTag == "INSERT 0 1");
     assert((result.rows == std::vector<std::vector<std::string>>{
         {"1", "updated"}}));
+
+    assert(!runDml("INSERT INTO composite_conflict VALUES (1, 'updated') "
+                   "ON CONFLICT (id, name) DO NOTHING RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 0");
+    assert(result.rows.empty());
+
+    // A target-specific DO NOTHING must not hide a duplicate from another
+    // unique constraint.
+    assert(runDml("INSERT INTO conflict_t VALUES (8, 'four') "
+                  "ON CONFLICT (id) DO NOTHING", session));
+    assert(!runDml("INSERT INTO conflict_t VALUES (8, 'four') "
+                   "ON CONFLICT (name) DO NOTHING RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 0");
+    assert(result.rows.empty());
 
     // A nullable component of a composite UNIQUE key is not a conflict with
     // another NULL-containing key (the storage format represents NULL as an
