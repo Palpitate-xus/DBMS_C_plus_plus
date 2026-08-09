@@ -37,6 +37,7 @@
 - 简单单表视图已支持行级 `INSTEAD OF INSERT/UPDATE/DELETE` action SQL；多行 `VALUES`、按实际匹配行的 UPDATE/DELETE、`NEW`/`OLD`/`WHEN` 和 server 会话执行均有协议回归，复杂视图映射与函数/PL 触发器运行时仍未完成。
 - 顶层 `INSERT`/`UPDATE`/`DELETE`/`MERGE`/`REPLACE` 以及包含写 CTE 的 `WITH` 语句现在统一由 `execute()` 建立内部事务；普通语句成功自动提交，错误或异常自动回滚，递归触发器/视图/CTE 执行复用外层事务，避免多行 DML 在中途失败后留下部分写入。协议层同时把 `WITH` 查询识别为结果集。显式 `BEGIN` 仍由连接事务状态管理。
 - `CREATE TEMP/TEMPORARY TABLE` 已进入 typed DDL：物理对象名包含 backend PID，临时表可遮蔽同名永久表但不会污染持久 catalog；用户临时表与查询内部 CTE/派生表临时对象分离管理，连接断开时统一清理。`ON COMMIT PRESERVE ROWS/DELETE ROWS/DROP` 已绑定 backend-local transaction commit/rollback，真正 `pg_temp` schema/catalog/search_path 语义仍未完成。
+- 临时 relation 生命周期已覆盖异常退出边界：启动时在 WAL 恢复后清理残留的会话临时表、分区/TOAST fork、孤儿文件和 `tlist.lst` 条目，避免进程重启后的名称冲突和磁盘泄漏；`__tmp_<backend>_...` 是保留的内部物理命名空间。
 - `UNION`/`INTERSECT`/`EXCEPT` 的组合语义已统一由 Volcano `SetOperationOp` 执行，覆盖顶层优先级、错误传播及 `ALL` 重复行语义；简单单表 operand 直接构建子计划，复杂 operand 通过 `MaterializedRowsOp` 接入，完整 AST 下推和类型合并尚未完成。
 - 并行执行已具备可验证的 `ParallelTableScanOp`：非分区 heap 按 page range 由多个 worker 读取并按范围顺序 Gather，`max_parallel_workers_per_gather` 可配置；事务内、分区表、并行 join/aggregate、GatherMerge 和长期 worker pool 仍未完成。
 - 窗口执行已具备可复用的 `WindowOp`/`WindowAgg` 计划节点：主 SQL 入口已接入常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、独立分区/排序、OFFSET 和最终结果排序；复杂目标列表和主 SQL EXPLAIN 的窗口解析仍保留 legacy fallback。

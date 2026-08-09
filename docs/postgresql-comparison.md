@@ -205,7 +205,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | **TOAST 压缩 (lz4/pglz)** | ✅ | ⚠️ zlib | 已有压缩标记/解压；lz4/pglz、压缩策略和 `toast_tuple_target` 仍缺 |
 | **大对象 (Large Object)** | ✅ | ✅ | ✅ |
 | **Unlogged 表** | ✅ | ✅ | ✅ |
-| **临时表** | ✅ | ✅ | ⚠️ | typed/session-isolated subset with ON COMMIT actions; pg_temp catalog/search_path semantics remain |
+| **临时表** | ✅ | ✅ | ⚠️ | typed/session-isolated subset with ON COMMIT actions and restart cleanup; pg_temp catalog/search_path semantics remain |
 | **表空间** | ✅ | ✅ | ✅ |
 
 ---

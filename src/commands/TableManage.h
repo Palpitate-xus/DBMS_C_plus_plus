@@ -1001,6 +1001,7 @@ private:
     std::filesystem::path checkpointPath(const std::string& dbname) const;
     std::filesystem::path fsmPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path vmPath(const std::string& dbname, const std::string& tablename) const;
+    void cleanupStaleSessionTemporaryFiles();
 
 public:
     std::filesystem::path viewPath(const std::string& dbname, const std::string& viewname) const;

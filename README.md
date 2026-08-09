@@ -114,6 +114,7 @@
 ### 临时表
 - **CREATE TEMP/TEMPORARY TABLE**：typed DDL 会话级临时表，自动覆盖同名永久表
 - 每个连接使用独立内部对象名，可创建同名临时表；连接断开时自动清理
+- 服务器启动时会清理异常退出遗留的临时 relation、分区/TOAST fork 及 `tlist.lst` 条目，临时对象不会跨进程重启存活
 - 支持 `ON COMMIT PRESERVE ROWS`、`DELETE ROWS`、`DROP`；真正的 `pg_temp` catalog/search_path 语义尚未实现
 
 ### 网络服务

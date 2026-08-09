@@ -59,6 +59,26 @@ static std::string unescapeString(const std::string& s) {
     return r;
 }
 
+// Session temporary relations are deliberately kept out of the user-visible
+// namespace.  The numeric backend component makes this predicate unambiguous
+// and lets startup remove both catalog entries and orphaned relation forks
+// left behind by a crashed backend.
+static bool isSessionTempPhysicalName(const std::string& name) {
+    constexpr const char* prefix = "__tmp_";
+    constexpr size_t prefixLen = 6;
+    if (name.rfind(prefix, 0) != 0) return false;
+
+    const size_t separator = name.find('_', prefixLen);
+    if (separator == prefixLen || separator == std::string::npos ||
+        separator + 1 >= name.size()) {
+        return false;
+    }
+    for (size_t i = prefixLen; i < separator; ++i) {
+        if (name[i] < '0' || name[i] > '9') return false;
+    }
+    return true;
+}
+
 #include <algorithm>
 #include <cmath>
 #include <ctime>
@@ -1069,6 +1089,7 @@ Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK) {
 // ========================================================================
 StorageEngine::StorageEngine() {
     recoverAllDatabases();
+    cleanupStaleSessionTemporaryFiles();
     catalogService_ = std::make_unique<CatalogService>(*this);
     // Keep trigger WHEN semantics available for direct StorageEngine users
     // (unit tests and embedded callers) as well as the interactive frontend.
@@ -10139,6 +10160,51 @@ std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname)
         }
     }
     return names;
+}
+
+void StorageEngine::cleanupStaleSessionTemporaryFiles() {
+    for (const auto& dbname : getDatabaseNames()) {
+        const auto names = getTableNames(dbname);
+        bool tableListChanged = false;
+        for (const auto& name : names) {
+            if (isSessionTempPhysicalName(name)) {
+                tableListChanged = true;
+                break;
+            }
+        }
+
+        // Remove entries even when the backend died before its schema file was
+        // fully written.  This path runs before any client can observe the
+        // database, so it is safe to rewrite the persistent relation list
+        // directly instead of taking normal SQL metadata locks.
+        if (tableListChanged) {
+            std::ofstream out(tableListPath(dbname), std::ios::binary);
+            if (out) {
+                for (const auto& name : names) {
+                    if (!isSessionTempPhysicalName(name)) {
+                        writeFixedString(out, name, MAX_TABLE_NAME_LEN);
+                    }
+                }
+            }
+            invalidateCatalogTableList(dbname);
+        }
+
+        // A crash can leave relation forks behind even if the tlist append was
+        // never reached.  All files belonging to the reserved physical temp
+        // namespace share this prefix, including partition and TOAST files.
+        try {
+            for (const auto& entry : std::filesystem::directory_iterator(
+                     dbPath(dbname), std::filesystem::directory_options::skip_permission_denied)) {
+                const std::string filename = entry.path().filename().string();
+                if (!isSessionTempPhysicalName(filename)) continue;
+                std::error_code ec;
+                std::filesystem::remove_all(entry.path(), ec);
+            }
+        } catch (const std::filesystem::filesystem_error&) {
+            // Startup cleanup is best effort; normal recovery must still be
+            // able to bring the database online if a directory entry vanishes.
+        }
+    }
 }
 
 static std::mutex g_sequenceMutex;

@@ -152,7 +152,8 @@ CREATE TEMPORARY TABLE table_name (
 `TEMPORARY` 均由 typed DDL 执行；每个连接使用独立的内部对象名，因此
 不同会话可以创建同名临时表。支持 `ON COMMIT PRESERVE ROWS`、
 `ON COMMIT DELETE ROWS` 和 `ON COMMIT DROP`；PostgreSQL 的完整
-`pg_temp` catalog/search_path 语义仍未实现。
+`pg_temp` catalog/search_path 语义仍未实现。服务器启动时还会清理异常退出
+遗留的临时 relation 及其物理 fork，临时对象不会跨进程重启保留。
 
 **示例**
 ```sql

@@ -132,7 +132,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - 🔄 核心 DQL/DML/DDL：`SELECT`、`CREATE`/`DROP`/`ALTER` 及 DML 全量子命令 — 普通 INSERT、简单单表 INSERT SELECT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE 已提取到 `commands/DmlExecutor`；高级 DML、MERGE 完整 WHEN 语义和复杂 SELECT 仍保留明确边界，后续按完整语义迁移
 - **Parser 参数解析完善（1.2 已完成）**：
   - ✅ 填充实 `CREATE`/`DROP`/`ALTER` 全量子命令解析 stub（~100 个函数），从空实现改为提取对象名、IF EXISTS/NOT EXISTS、CASCADE/RESTRICT 等关键属性
-  - ✅ 实现 `CREATE TABLE` 解析：列定义（名/类型/约束/生成列/IDENTITY）、表级约束（PK/FK/UNIQUE/CHECK/EXCLUSION）、`LIKE`、`INHERITS`、`PARTITION BY`、`WITH` 存储参数、`TABLESPACE`、临时表 `ON COMMIT`；完整 temp schema/catalog 语义仍待补齐
+  - ✅ 实现 `CREATE TABLE` 解析：列定义（名/类型/约束/生成列/IDENTITY）、表级约束（PK/FK/UNIQUE/CHECK/EXCLUSION）、`LIKE`、`INHERITS`、`PARTITION BY`、`WITH` 存储参数、`TABLESPACE`、临时表 `ON COMMIT`；启动时清理异常退出遗留的临时 relation；完整 temp schema/catalog 语义仍待补齐
   - ✅ 添加表达式解析辅助函数：`parseSimpleExpr`、`parseSelectItem`、`parseFromItem`、`collectParenthesized`、`collectExpression`、`parseExprList`
   - ✅ 修复编译问题：前向声明补齐、`DropRoutine`/`AlterTransform` 枚举缺失、`Refresh`→`RefreshMaterializedView` 重命名、`AlterSystem` 重复 case 清理、`isKeyword` 公开访问
   - ✅ 实现分层 operator precedence 解析器（OR→AND→NOT→IS→Comparison→BETWEEN/IN/LIKE→||→+/-→*//%→^→Unary→::→Postfix→Primary），支持 CASE、EXISTS、子查询、数组下标、类型 cast
