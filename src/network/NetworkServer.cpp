@@ -741,7 +741,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
 
     const std::string keyword = firstSqlKeyword(sql);
     result.resultSet = keyword == "select" || keyword == "show" || keyword == "values" ||
-                       keyword == "explain";
+                       keyword == "with" || keyword == "explain";
     if (result.resultSet && !lines.empty()) {
         if (keyword == "explain") {
             result.columns = {"QUERY PLAN"};

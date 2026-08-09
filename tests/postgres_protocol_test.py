@@ -488,6 +488,17 @@ def main():
         assert any(kind == b"E" for kind, _ in atomic_failure), atomic_failure
         assert data_row_values(simple_query(
             sock, "SELECT id FROM dml_conflict WHERE id = 9")) == [], atomic_failure
+        cte_atomic_failure = simple_query(
+            sock, "WITH attempted AS (INSERT INTO dml_conflict VALUES "
+            "(10, 'cte-rolled-back'), (1, 'duplicate') RETURNING id) "
+            "SELECT id FROM attempted")
+        assert any(kind == b"E" for kind, _ in cte_atomic_failure), cte_atomic_failure
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM dml_conflict WHERE id = 10")) == [], cte_atomic_failure
+        cte_success = simple_query(
+            sock, "WITH inserted AS (INSERT INTO dml_conflict VALUES "
+            "(11, 'cte-committed') RETURNING id) SELECT id FROM inserted")
+        assert data_row_values(cte_success) == [[b"11"]], cte_success
         conflict_messages = simple_query(
             sock, "INSERT INTO dml_conflict VALUES (1, 'ignored'), (2, 'new') "
             "ON CONFLICT DO NOTHING RETURNING id, name")

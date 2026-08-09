@@ -35,7 +35,7 @@
 
 普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、无 target 或显式匹配主键/UNIQUE 约束 target 的 `ON CONFLICT DO NOTHING`，以及显式匹配单列或复合主键/UNIQUE 约束 target、配合常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET` 和受限 `WHERE` 的窄版 `ON CONFLICT DO UPDATE`，当前由 `src/commands/DmlExecutor` 消费 AST；单表 UPDATE 还支持以当前目标行列值为输入的受限标量表达式，单源表 `UPDATE ... FROM` 和单源表 `DELETE ... USING` 支持来源 INNER/CROSS JOIN、别名、限定连接谓词和受限 `RETURNING`。窄版 `MERGE` 也由同一 typed executor 执行：单源表、限定/别名关系、单个 MATCHED UPDATE/DO NOTHING 和单个 NOT MATCHED INSERT/DO NOTHING，并在修改前拒绝多源行匹配同一目标行。支持结构化常量/列表达式、简单 `AND` 谓词、`IS NULL`/`IS NOT NULL` 及 StorageEngine 统一约束路径。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 `RETURNING` 已在存储修改边界收集并通过 PostgreSQL 协议结果集发送。复杂 `INSERT ... SELECT`、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、外连接/复杂 JOIN、视图写入以及 MERGE 的多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query 和 RETURNING 仍 fail-closed。该边界不能视为 PostgreSQL 完整语义。
 
-无显式 `BEGIN` 时，顶层 `INSERT`、`UPDATE`、`DELETE`、`MERGE` 和 `REPLACE` 由统一执行入口建立内部事务：成功自动提交，错误或异常自动回滚；触发器和视图 action 的递归 SQL 复用同一边界。复杂 DML 仍按上文列出的 fail-closed/legacy 边界执行。
+无显式 `BEGIN` 时，顶层 `INSERT`、`UPDATE`、`DELETE`、`MERGE`、`REPLACE` 以及包含写 CTE 的 `WITH` 语句由统一执行入口建立内部事务：成功自动提交，错误或异常自动回滚；触发器、视图 action 和 CTE 的递归 SQL 复用同一边界。复杂 DML 仍按上文列出的 fail-closed/legacy 边界执行。
 
 ### 高级查询 (DQL)
 - **条件过滤**：支持 `=`, `<>`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `BETWEEN`, `IN`, `EXISTS`, `ANY`, `ALL`, `IS NULL`, `IS NOT NULL` 以及 `AND`/`OR` 组合；未关联单列 `IN`/`NOT IN`、未关联单表 `EXISTS`/`NOT EXISTS` 和单列 `ANY/ALL` 已进入结构化 Volcano 计划，复杂/关联子查询仍受生产边界限制

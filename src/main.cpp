@@ -6171,7 +6171,8 @@ bool execute(const std::string& rawSql, Session& s);
 
 // Process CTEs (WITH clause): WITH cte AS (SELECT ...) [, ...] SELECT ...
 // Returns modified SQL with CTE references replaced by temp table names.
-static std::string processCTEs(const std::string& sql, Session& s) {
+static std::string processCTEs(const std::string& sql, Session& s, bool& failed) {
+    failed = false;
     std::string result = sql;
     size_t withPos = result.find("with ");
     if (withPos == std::string::npos) return result;
@@ -6313,9 +6314,16 @@ static std::string processCTEs(const std::string& sql, Session& s) {
                     if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
                     stringstream nullOut;
                     dbms::ScopedOutputCapture capture(nullOut);
-                    execute(dmlNoRet, s);
+                    if (execute(dmlNoRet, s)) {
+                        failed = true;
+                        return {};
+                    }
                     // Query the inserted row using primary key if possible
-                    size_t valPos = dmlLower.find(" values ");
+                    // Parse VALUES from the RETURNING-stripped statement;
+                    // otherwise the trailing RETURNING clause becomes part
+                    // of the last literal and the CTE result loses its row.
+                    const std::string dmlNoRetLower = toLower(dmlNoRet);
+                    size_t valPos = dmlNoRetLower.find(" values ");
                     if (valPos != string::npos) {
                         string vals = trim(innerSelect.substr(valPos + 8));
                         // Remove parens
@@ -6351,7 +6359,10 @@ static std::string processCTEs(const std::string& sql, Session& s) {
                     if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
                     stringstream nullOut;
                     dbms::ScopedOutputCapture capture(nullOut);
-                    execute(dmlNoRet, s);
+                    if (execute(dmlNoRet, s)) {
+                        failed = true;
+                        return {};
+                    }
                 }
             } else {
                 // No RETURNING or no table: just execute DML
@@ -6360,7 +6371,10 @@ static std::string processCTEs(const std::string& sql, Session& s) {
                 if (rPos != string::npos) dmlNoRet = trim(dmlNoRet.substr(0, rPos));
                 stringstream nullOut2;
                 dbms::ScopedOutputCapture capture(nullOut2);
-                execute(dmlNoRet, s);
+                if (execute(dmlNoRet, s)) {
+                    failed = true;
+                    return {};
+                }
             }
 
             if (!colNames.empty()) {
@@ -12848,7 +12862,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (!checkDB(s)) return true;
 
         // Process CTEs: WITH cte AS (SELECT ...)
-        sql = processCTEs(sql, s);
+        bool cteFailed = false;
+        sql = processCTEs(sql, s, cteFailed);
+        if (cteFailed) return true;
 
         // Process derived tables: (SELECT ...) AS alias
         sql = processDerivedTables(sql, s);
@@ -15206,13 +15222,85 @@ namespace {
 
 thread_local unsigned executeDepth = 0;
 
+bool containsSqlKeyword(const std::string& sql, const std::string& keyword) {
+    bool singleQuoted = false;
+    bool doubleQuoted = false;
+    bool lineComment = false;
+    bool blockComment = false;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        const char c = sql[i];
+        if (lineComment) {
+            if (c == '\n' || c == '\r') lineComment = false;
+            continue;
+        }
+        if (blockComment) {
+            if (c == '*' && i + 1 < sql.size() && sql[i + 1] == '/') {
+                ++i;
+                blockComment = false;
+            }
+            continue;
+        }
+        if (singleQuoted) {
+            if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
+                ++i;
+            } else if (c == '\'') {
+                singleQuoted = false;
+            }
+            continue;
+        }
+        if (doubleQuoted) {
+            if (c == '"' && i + 1 < sql.size() && sql[i + 1] == '"') {
+                ++i;
+            } else if (c == '"') {
+                doubleQuoted = false;
+            }
+            continue;
+        }
+        if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+            ++i;
+            lineComment = true;
+            continue;
+        }
+        if (c == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+            ++i;
+            blockComment = true;
+            continue;
+        }
+        if (c == '\'') {
+            singleQuoted = true;
+            continue;
+        }
+        if (c == '"') {
+            doubleQuoted = true;
+            continue;
+        }
+        if (i + keyword.size() <= sql.size() &&
+            sql.compare(i, keyword.size(), keyword) == 0) {
+            const bool leftOk = i == 0 || !isSqlIdentChar(sql[i - 1]);
+            const size_t end = i + keyword.size();
+            const bool rightOk = end == sql.size() || !isSqlIdentChar(sql[end]);
+            if (leftOk && rightOk) return true;
+        }
+    }
+    return false;
+}
+
 bool isTopLevelDml(const std::string& rawSql) {
     const std::string normalized = toLowerSql(trim(rawSql));
-    return startsWithKeyword(normalized, "insert") ||
+    if (startsWithKeyword(normalized, "insert") ||
            startsWithKeyword(normalized, "update") ||
            startsWithKeyword(normalized, "delete") ||
            startsWithKeyword(normalized, "merge") ||
-           startsWithKeyword(normalized, "replace");
+           startsWithKeyword(normalized, "replace")) {
+        return true;
+    }
+    // The legacy CTE path executes DML bodies recursively, so a write CTE
+    // must make the outer WITH statement atomic as one unit as well.
+    if (!startsWithKeyword(normalized, "with")) return false;
+    for (const char* keyword : {"insert", "update", "delete", "merge", "replace"}) {
+        if (containsSqlKeyword(normalized, keyword)) return true;
+    }
+    return false;
 }
 
 } // namespace
