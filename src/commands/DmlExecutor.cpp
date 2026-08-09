@@ -246,6 +246,16 @@ bool validateConflictExpression(const Expr* expr, const TableSchema& table,
     return false;
 }
 
+bool validateUpdateExpression(const Expr* expr, const TableSchema& table,
+                              ExprEvaluator& evaluator,
+                              const std::string& targetTable) {
+    std::set<std::string> excludedColumns;
+    // UPDATE expressions may reference the current target row, but EXCLUDED
+    // is only defined inside ON CONFLICT DO UPDATE.
+    return validateConflictExpression(expr, table, evaluator, excludedColumns,
+                                      targetTable) && excludedColumns.empty();
+}
+
 bool sameColumnSet(const std::vector<size_t>& left,
                    const std::vector<size_t>& right) {
     if (left.size() != right.size()) return false;
@@ -894,6 +904,45 @@ RowContext returningContext(const std::map<std::string, std::string>& source,
                     ExprValue(column.dataType, isNull ? "" : it->second, isNull));
     }
     return context;
+}
+
+RowContext updateContext(const std::map<std::string, std::string>& source,
+                         const TableSchema& table,
+                         const std::string& targetTable) {
+    RowContext context;
+    for (size_t i = 0; i < table.len; ++i) {
+        const Column& column = table.cols[i];
+        const auto it = source.find(column.dataName);
+        const bool isNull = it == source.end() || it->second.empty();
+        const ExprValue value(column.dataType,
+                              isNull ? std::string{} : it->second, isNull);
+        context.set(column.dataName, value);
+        if (!targetTable.empty()) context.set(targetTable + "." + column.dataName, value);
+    }
+    return context;
+}
+
+bool evaluateUpdateExpression(const Expr* expression,
+                              const std::map<std::string, std::string>& source,
+                              const TableSchema& table,
+                              const std::string& targetTable,
+                              const std::string& currentDB,
+                              std::string& value) {
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    const ExprValue result = evaluator.eval(
+        expression, updateContext(source, table, targetTable));
+    if (result.isUnknown() || result.typeName == "unknown") return false;
+    if (result.isNull) {
+        value.clear();
+        return true;
+    }
+    value = result.value;
+    if (result.typeName == "boolean") {
+        if (value == "t") value = "1";
+        else if (value == "f") value = "0";
+    }
+    return true;
 }
 
 bool evaluateReturningExpression(const Expr* expression,
@@ -1545,14 +1594,31 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!checkTablePrivilege(s, requestedTable,
                              StorageEngine::TablePrivilege::Update)) return true;
 
+    const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const std::string targetQualifier = [&]() {
+        const size_t dot = requestedTable.rfind('.');
+        return dot == std::string::npos ? requestedTable : requestedTable.substr(dot + 1);
+    }();
     std::vector<std::string> columns;
     std::map<std::string, std::string> updates;
+    std::map<std::string, const Expr*> expressionUpdates;
     for (const auto& [rawColumn, expr] : stmt.setClauses) {
         const std::string column = identifier(rawColumn);
         columns.push_back(column);
         if (isDefaultValue(expr)) {
             fallback = true;
             return false;
+        }
+        if (referencesColumn(expr.get())) {
+            ExprEvaluator evaluator;
+            if (!findTableColumn(table, column) ||
+                !validateUpdateExpression(expr.get(), table, evaluator,
+                                           targetQualifier)) {
+                fallback = true;
+                return false;
+            }
+            expressionUpdates[column] = expr.get();
+            continue;
         }
         std::string value;
         if (!evaluateValue(expr, s.currentDB, value)) {
@@ -1561,7 +1627,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         }
         updates[column] = std::move(value);
     }
-    if (updates.empty()) {
+    if (updates.empty() && expressionUpdates.empty()) {
         std::cout << "SQL syntax error: empty UPDATE SET clause" << std::endl;
         return true;
     }
@@ -1579,7 +1645,6 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         fallback = true;
         return false;
     }
-    const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
     std::vector<ReturningProjection> returningProjections;
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, table, returningProjections)) {
@@ -1587,9 +1652,25 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         return false;
     }
     std::vector<std::map<std::string, std::string>> updatedRows;
+    StorageEngine::UpdateResolver updateResolver;
+    if (!expressionUpdates.empty()) {
+        updateResolver = [&, targetQualifier](
+                             const std::map<std::string, std::string>& oldValues,
+                             std::map<std::string, std::string>& effectiveUpdates) {
+            for (const auto& [column, expression] : expressionUpdates) {
+                std::string value;
+                if (!evaluateUpdateExpression(expression, oldValues, table,
+                                              targetQualifier, s.currentDB, value)) {
+                    return false;
+                }
+                effectiveUpdates[column] = std::move(value);
+            }
+            return true;
+        };
+    }
     const DBStatus status = g_engine.update(
         s.currentDB, resolvedTable, updates, conditions,
-        stmt.returning.empty() ? nullptr : &updatedRows);
+        stmt.returning.empty() ? nullptr : &updatedRows, updateResolver);
     if (status != DBStatus::OK) {
         std::cout << "Update failed" << std::endl;
         return true;

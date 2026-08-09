@@ -211,9 +211,16 @@ int main() {
     assert((result.columns == std::vector<std::string>{"next_id", "tagged"}));
     assert((result.rows[0] == std::vector<std::string>{"14", "expr-x"}));
 
+    assert(!runDml("UPDATE ret SET id = id + 10, name = ret.name || '-row' "
+                   "WHERE id = 1 RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "UPDATE 1");
+    assert((result.rows[0] == std::vector<std::string>{"11", "before-row"}));
+
     // The predicate column changes. A post-update query using the old WHERE
     // clause would return nothing; storage-boundary capture must return id=2.
-    assert(!runDml("UPDATE ret SET id = 2, name = 'after' WHERE id = 1 RETURNING id, name", session));
+    assert(!runDml("UPDATE ret SET id = 2, name = 'after' WHERE id = 11 RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);
     assert(result.commandTag == "UPDATE 1");

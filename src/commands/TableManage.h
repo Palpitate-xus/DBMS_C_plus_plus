@@ -370,6 +370,9 @@ public:
                                      const std::string& colKey) const;
 
     // Data operations
+    using UpdateResolver = std::function<bool(
+        const std::map<std::string, std::string>&,
+        std::map<std::string, std::string>&)>;
     DBStatus insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values,
                     std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);
@@ -381,7 +384,8 @@ public:
     DBStatus update(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& updates,
                     const std::vector<std::string>& conditions,
-                    std::vector<std::map<std::string, std::string>>* updatedRows = nullptr);
+                    std::vector<std::map<std::string, std::string>>* updatedRows = nullptr,
+                    const UpdateResolver& updateResolver = {});
     DBStatus remove(const std::string& dbname, const std::string& tablename,
                     const std::vector<std::string>& conditions,
                     std::vector<std::map<std::string, std::string>>* deletedRows = nullptr);

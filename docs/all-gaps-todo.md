@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式 UPDATE、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -222,7 +222,7 @@
 
 ### 1.1 有实现但与 PostgreSQL 不等价的命令
 
-> **历史进展记录（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并曾迁移旧 `.stc` 数据库（该兼容路径已于 2026-08-09 删除）；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。该记录当时将 DML AST 迁移延期；当前普通 INSERT、常量 UPDATE、简单 DELETE 已由 `DmlExecutor` 消费，复杂 DML 仍待迁移。DDL 中仍缺 `ALTER TABLE`/`DROP INDEX`/视图/物化视图/触发器/策略/函数/过程的目录集成。
+> **历史进展记录（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并曾迁移旧 `.stc` 数据库（该兼容路径已于 2026-08-09 删除）；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。该记录当时将 DML AST 迁移延期；当前普通 INSERT、受限行级标量表达式 UPDATE、简单 DELETE 已由 `DmlExecutor` 消费，复杂 DML 仍待迁移。DDL 中仍缺 `ALTER TABLE`/`DROP INDEX`/视图/物化视图/触发器/策略/函数/过程的目录集成。
 
 | # | 命令 | 差距描述 | 状态 |
 |---|------|---------|------|
@@ -283,7 +283,7 @@
 | 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 权限矩阵和会话安全上下文完整语义 | ⚠️ |
 | 1.1.56 | `SET TRANSACTION` | BEGIN 路径已结构化隔离级别/只读选项；SET TRANSACTION 仍缺 deferrable、当前事务时序限制完整语义 | ⚠️ |
 | 1.1.57 | `TRUNCATE` | 支持 cascade/restart identity 部分；缺少 `ONLY`/多表/trigger/identity/foreign table/transactional details | ⚠️ |
-| 1.1.58 | `UPDATE` | 支持 FROM/LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式 | ⚠️ |
+| 1.1.58 | `UPDATE` | 支持受限行级标量表达式、FROM/LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式 | ⚠️ |
 | 1.1.59 | `VACUUM` | compact/free page；缺少 freeze、visibility map、autovacuum launcher/workers、parallel vacuum、analyze coupling、wraparound 防护 | ⚠️ |
 | 1.1.60 | `VALUES` | 已支持顶层 `VALUES (..), (..)` 输出；缺少完整表达式求值、类型合并、排序/limit 组合和作为通用 query expression 的全部语义 | ⚠️ |
 
@@ -577,7 +577,7 @@
 
 | # | 差距 | 影响范围 | 难度 | 状态 |
 |---|------|---------|------|------|
-| 16.1 | **Parser/AST** — 当前 `execute()` 仍是巨大路由器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 | 🔄 框架已建：`src/parser/` 递归下降 Parser + AST + `classify()`，DDL 子集及普通 INSERT/常量 UPDATE/简单 DELETE 经独立 executor；高级 DML/DQL 仍有明确 legacy fallback |
+| 16.1 | **Parser/AST** — 当前 `execute()` 仍是巨大路由器，不是完整 SQL grammar 管线 | SQL 解析、类型推断、函数重载、语法错误信息 | 极高 | 🔄 框架已建：`src/parser/` 递归下降 Parser + AST + `classify()`，DDL 子集及普通 INSERT、受限行级表达式 UPDATE、简单 DELETE 经独立 executor；高级 DML/DQL 仍有明确 legacy fallback |
 | 16.2 | **Catalog/OID** — 目录对象图、owner/ACL 和完整依赖语义仍不完整 | DDL、权限、依赖、对象寻址 | 极高 | 🔄 CatalogService、核心系统表、OID 和主要 DDL 依赖路径已接入；DML 全量目录化、对象全集 owner/ACL/依赖和事务化 rewrite 仍缺 |
 | 16.3 | **WAL redo** — 当前 WAL 不是 redo log，缺少 LSN、segment、full page writes、redo routines | 崩溃恢复、PITR、复制 | 极高 | ✅ 已是 redo log：LSN/segment/full-page/redo/timeline/archive + 两趟扫描崩溃恢复（Phase 3.4~3.6）；PITR/复制仍 ❌ |
 | 16.4 | **MVCC 版本链** — 只有 creator txid，缺少 `xmin/xmax`、ctid chain、HOT update | 并发控制、VACUUM、存储格式 | 极高 | 🔄 `HeapTupleHeader`(xmin/xmax/ctid) + HOT + CLOG 可见性已实现（Phase 3.7/3.8）；多版本边界/vacuum 回收仍需深化 |
@@ -599,7 +599,7 @@
 ### Phase 1：Parser 与 AST 🔄 框架完成，DML 正在接入执行
 - 引入真正 SQL parser 或至少分层 AST，替代 `execute()` 超大字符串分支 — **框架已完成**（`src/parser/`，~6400 行）
 - 实现完整 operator precedence、类型解析、隐式 cast、函数重载、schema-qualified function — **解析层完成，执行期 cast/重载仍 ⚠️**
-- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 子集及普通 INSERT、常量 UPDATE、简单谓词 DELETE 经独立 executor 消费 AST；其他 DML 仍按明确边界走 legacy fallback**
+- 所有 SQL 命令通过 AST 表示，而非字符串解析 — **DDL 子集及普通 INSERT、受限行级表达式 UPDATE、简单谓词 DELETE 经独立 executor 消费 AST；其他 DML 仍按明确边界走 legacy fallback**
 
 ### Phase 2：Catalog 体系 🔄 主要 DDL 已接入运行时
 - 建立对象 OID、namespace、owner、ACL、dependency 体系 — **CatalogService/主要对象图已接入；owner/ACL 传播和对象全集依赖仍待深化**
@@ -641,7 +641,9 @@
 
 - **2026-08-09（约束目标 DO NOTHING）**：`DmlExecutor` 现支持无 target 或显式匹配主键/UNIQUE 约束的 `ON CONFLICT DO NOTHING`；目标化冲突只忽略目标约束命中的行，其他唯一约束冲突仍返回错误，并新增回归覆盖该边界。
 
-- **2026-08-09**：DML AST executor 扩展：普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式单表 UPDATE、简单谓词单表 DELETE 及三类 DML 的列投影和受限标量表达式 RETURNING 已接入；修复 INSERT SELECT 的 `RETURNING` parser 边界和列引用被误写成 NULL 的 fallback 边界，补充 INSERT/UPDATE/DELETE/冲突处理协议回归和 DML 尾随垃圾 fail-closed parser 测试。复合/部分/索引推断冲突目标、引用子查询或其他关系的 upsert、复杂 RETURNING、多表语义和复杂表达式仍待迁移。
+- **2026-08-09（行级 UPDATE 表达式）**：单表 `UPDATE` 现支持受限标量表达式引用当前目标行的列值，例如 `SET id = id + 10, name = name || '-row'`；表达式在 StorageEngine 已锁定的每个目标行上求值，并复用存储层统一的类型校验/规范化与 `RETURNING` 行捕获。复杂表达式、子查询、`FROM`/`LIMIT` 和视图写入仍按既有边界回退。
+
+- **2026-08-09**：DML AST executor 扩展：普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式及受限行级标量表达式单表 UPDATE、简单谓词单表 DELETE 及三类 DML 的列投影和受限标量表达式 RETURNING 已接入；修复 INSERT SELECT 的 `RETURNING` parser 边界和列引用被误写成 NULL 的 fallback 边界，补充 INSERT/UPDATE/DELETE/冲突处理协议回归和 DML 尾随垃圾 fail-closed parser 测试。复合/部分/索引推断冲突目标、引用子查询或其他关系的 upsert、复杂 RETURNING、多表语义和复杂表达式仍待迁移。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。

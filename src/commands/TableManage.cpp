@@ -12587,128 +12587,143 @@ DBStatus StorageEngine::update(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& updates,
                                 const std::vector<std::string>& conditions,
-                                std::vector<std::map<std::string, std::string>>* updatedRows) {
+                                std::vector<std::map<std::string, std::string>>* updatedRows,
+                                const std::function<bool(
+                                    const std::map<std::string, std::string>&,
+                                    std::map<std::string, std::string>&)>& updateResolver) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
-    // Validate columns and pre-check values
-    std::map<size_t, std::string> colUpdates;  // column index -> new value
-    for (const auto& kv : updates) {
-        bool found = false;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == kv.first) {
-                found = true;
-                const Column& col = tbl.cols[i];
-                // GENERATED ALWAYS AS ... columns cannot be directly updated.
-                if (!col.generatedExpr.empty()) {
-                    return DBStatus::INVALID_VALUE;
-                }
-                if (!col.isNull && kv.second.empty()) {
-                    return DBStatus::NULL_NOT_ALLOWED;
-                }
-                std::string storeVal = kv.second;
-                if (col.dataType == "date") {
-                    Date d(kv.second.c_str());
-                    if (d.year == 0) return DBStatus::INVALID_VALUE;
-                } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
-                    if (!kv.second.empty()) {
-                        int n = (col.dataType == "macaddr8") ? 8 : 6;
-                        uint8_t bytes[8];
-                        if (!normalizeMacAddr(kv.second, n, bytes)) return DBStatus::INVALID_VALUE;
-                    }
-                } else if (col.dataType == "bit" || col.dataType == "bit varying") {
-                    if (!kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeBitString(kv.second, col.dataType, col.dsize, canon))
-                            return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
-                    }
-                } else if (isGeometricTextType(col.dataType)) {
-                    if (!kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeGeometry(kv.second, col.dataType, canon))
-                            return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
-                    }
-                } else if (col.dataType == "uuid") {
-                    if (!kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeUuid(kv.second, canon))
-                            return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
-                    }
-                } else if (col.dataType == "blob") {
-                    if (!kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeBytea(kv.second, canon))
-                            return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
-                    }
-                } else if (col.dataType == "inet" || col.dataType == "cidr") {
-                    if (!kv.second.empty()) {
-                        uint8_t family = 0, prefix = 0, addr[16];
-                        if (!parseInetAddr(kv.second, family, prefix, addr))
-                            return DBStatus::INVALID_VALUE;
-                    }
-                } else if (isRangeType(col.dataType)) {
-                    if (!kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeRange(kv.second, col.dataType, canon))
-                            return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
-                    }
-                } else if (col.isArray) {
-                    if (!kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeArray(kv.second, col.dataType, canon))
-                            return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
-                    }
-                } else if (col.dataType == "xml") {
-                    if (!kv.second.empty() && !isWellFormedXml(kv.second))
+    // Validate columns and pre-check values. The same preparation function is
+    // reused for row-dependent UPDATE expressions so all update entry points
+    // share storage-level type normalization and validation.
+    auto prepareColumnUpdates = [&](const std::map<std::string, std::string>& source,
+                                     std::map<size_t, std::string>& prepared) -> DBStatus {
+        prepared.clear();
+        for (const auto& kv : source) {
+            bool found = false;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == kv.first) {
+                    found = true;
+                    const Column& col = tbl.cols[i];
+                    // GENERATED ALWAYS AS ... columns cannot be directly updated.
+                    if (!col.generatedExpr.empty()) {
                         return DBStatus::INVALID_VALUE;
-                } else if (col.dataType == "tsvector") {
-                    if (!kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeTsVector(kv.second, canon))
+                    }
+                    if (!col.isNull && kv.second.empty()) {
+                        return DBStatus::NULL_NOT_ALLOWED;
+                    }
+                    std::string storeVal = kv.second;
+                    if (col.dataType == "date") {
+                        Date d(kv.second.c_str());
+                        if (d.year == 0) return DBStatus::INVALID_VALUE;
+                    } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
+                        if (!kv.second.empty()) {
+                            int n = (col.dataType == "macaddr8") ? 8 : 6;
+                            uint8_t bytes[8];
+                            if (!normalizeMacAddr(kv.second, n, bytes)) return DBStatus::INVALID_VALUE;
+                        }
+                    } else if (col.dataType == "bit" || col.dataType == "bit varying") {
+                        if (!kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeBitString(kv.second, col.dataType, col.dsize, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (isGeometricTextType(col.dataType)) {
+                        if (!kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeGeometry(kv.second, col.dataType, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (col.dataType == "uuid") {
+                        if (!kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeUuid(kv.second, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (col.dataType == "blob") {
+                        if (!kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeBytea(kv.second, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (col.dataType == "inet" || col.dataType == "cidr") {
+                        if (!kv.second.empty()) {
+                            uint8_t family = 0, prefix = 0, addr[16];
+                            if (!parseInetAddr(kv.second, family, prefix, addr))
+                                return DBStatus::INVALID_VALUE;
+                        }
+                    } else if (isRangeType(col.dataType)) {
+                        if (!kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeRange(kv.second, col.dataType, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (col.isArray) {
+                        if (!kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeArray(kv.second, col.dataType, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (col.dataType == "xml") {
+                        if (!kv.second.empty() && !isWellFormedXml(kv.second))
                             return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
-                    }
-                } else if (col.dataType == "tsquery") {
-                    if (!kv.second.empty() && !isValidTsQuery(kv.second))
-                        return DBStatus::INVALID_VALUE;
-                } else if (col.dataType == "jsonpath") {
-                    if (!kv.second.empty() && !isValidJsonPath(kv.second))
-                        return DBStatus::INVALID_VALUE;
-                } else if (col.dataType == "interval") {
-                    if (!kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeInterval(kv.second, canon))
+                    } else if (col.dataType == "tsvector") {
+                        if (!kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeTsVector(kv.second, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (col.dataType == "tsquery") {
+                        if (!kv.second.empty() && !isValidTsQuery(kv.second))
                             return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
-                    }
-                } else if (!col.isArray && TypeRegistry::instance().findType(col.dataType) == nullptr) {
-                    CompositeType ct = getCompositeType(dbname, col.dataType);
-                    if (!ct.name.empty() && !kv.second.empty()) {
-                        std::string canon;
-                        if (!normalizeComposite(kv.second, ct, canon))
+                    } else if (col.dataType == "jsonpath") {
+                        if (!kv.second.empty() && !isValidJsonPath(kv.second))
                             return DBStatus::INVALID_VALUE;
-                        storeVal = canon;
+                    } else if (col.dataType == "interval") {
+                        if (!kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeInterval(kv.second, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (!col.isArray && TypeRegistry::instance().findType(col.dataType) == nullptr) {
+                        CompositeType ct = getCompositeType(dbname, col.dataType);
+                        if (!ct.name.empty() && !kv.second.empty()) {
+                            std::string canon;
+                            if (!normalizeComposite(kv.second, ct, canon))
+                                return DBStatus::INVALID_VALUE;
+                            storeVal = canon;
+                        }
+                    } else if (!col.isVariableLength && col.dataType != "char") {
+                        if (!kv.second.empty()) {
+                            int64_t num = parseInt(kv.second);
+                            if (num == INF) return DBStatus::INVALID_VALUE;
+                            if (col.isUnsigned && num < 0) return DBStatus::INVALID_VALUE;
+                        }
                     }
-                } else if (!col.isVariableLength && col.dataType != "char") {
-                    if (!kv.second.empty()) {
-                        int64_t num = parseInt(kv.second);
-                        if (num == INF) return DBStatus::INVALID_VALUE;
-                        if (col.isUnsigned && num < 0) return DBStatus::INVALID_VALUE;
-                    }
+                    prepared[i] = storeVal;
+                    break;
                 }
-                colUpdates[i] = storeVal;
-                break;
             }
+            if (!found) return DBStatus::INVALID_VALUE;
         }
-        if (!found) return DBStatus::INVALID_VALUE;
+        return DBStatus::OK;
+    };
+
+    std::map<size_t, std::string> colUpdates;  // column index -> new value
+    if (const DBStatus status = prepareColumnUpdates(updates, colUpdates);
+        status != DBStatus::OK) {
+        return status;
     }
 
     lockManager_.lockIntentExclusive(tablename);
@@ -12786,7 +12801,21 @@ DBStatus StorageEngine::update(const std::string& dbname,
         // Rebuild row buffer with updates
         std::map<std::string, std::string> rowValues;
         for (size_t i = 0; i < tbl.len; ++i) {
-            rowValues[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+            rowValues[tbl.cols[i].dataName] =
+                extractColumnValue(row, tbl, i, dbname, true);
+        }
+        if (updateResolver) {
+            std::map<std::string, std::string> effectiveUpdates = updates;
+            if (!updateResolver(rowValues, effectiveUpdates)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            const DBStatus prepareStatus = prepareColumnUpdates(
+                effectiveUpdates, colUpdates);
+            if (prepareStatus != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return prepareStatus;
+            }
         }
         for (const auto& kv : colUpdates) {
             rowValues[tbl.cols[kv.first].dataName] = kv.second;
