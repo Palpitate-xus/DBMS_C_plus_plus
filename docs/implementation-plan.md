@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-09）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=125 FAIL=0（123 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-09）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=126 FAIL=0（124 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 

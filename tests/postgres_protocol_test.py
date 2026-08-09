@@ -428,6 +428,14 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO default_acl_protocol VALUES (7)"))
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE protocol_truncate (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO protocol_truncate VALUES (1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "TRUNCATE TABLE protocol_truncate"))
+        assert data_row_values(simple_query(
+            sock, "SELECT id FROM protocol_truncate")) == []
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE dml_ast (id INT DEFAULT 7, name TEXT)"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO dml_ast VALUES (DEFAULT, 'first'), (2, NULL), (NULL, 'null-id')"))

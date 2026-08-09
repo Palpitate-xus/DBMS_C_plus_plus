@@ -1865,54 +1865,6 @@ static bool handleSecurityLabel(const string& sql, Session& s) {
     return false;
 }
 
-static bool handleTruncate(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
-    if (g_engine.inTransaction()) {
-        g_engine.commitTransaction();
-        cout << "Note: DDL caused implicit commit of open transaction" << endl;
-    }
-    string rest = trim(sql.substr(8));
-    if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
-    bool restartIdentity = (rest.find("restart identity") != string::npos);
-    bool cascade = (rest.find("cascade") != string::npos);
-    size_t optPos = rest.find(' ');
-    string tname = rest;
-    if (optPos != string::npos) {
-        tname = trim(rest.substr(0, optPos));
-    }
-    tname = resolveTableName(s, tname);
-    auto res = g_engine.truncateTable(s.currentDB, tname);
-    if (res == DBStatus::TABLE_NOT_FOUND) {
-        cout << "Table not exist" << endl;
-        return true;
-    }
-    if (restartIdentity) {
-        TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].isAutoIncrement) {
-                g_engine.resetSequence(s.currentDB, tname, tbl.cols[i].dataName, 1);
-            }
-        }
-    }
-    if (cascade) {
-        vector<string> allTables = g_engine.getTableNames(s.currentDB);
-        for (const string& otherTname : allTables) {
-            if (otherTname == tname) continue;
-            TableSchema otherTbl = g_engine.getTableSchema(s.currentDB, otherTname);
-            for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
-                if (otherTbl.fks[fi].refTable == tname) {
-                    g_engine.truncateTable(s.currentDB, otherTname);
-                    break;
-                }
-            }
-        }
-    }
-    cout << "TRUNCATE TABLE " << tname << " completed" << endl;
-    log(s.username, "truncate table " + tname, getTime());
-    return false;
-}
-
 static bool handleReindex(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -9573,9 +9525,6 @@ bool execute(const string& rawSql, Session& s) {
 
         case dbms::SqlCommand::SecurityLabel:
             return handleSecurityLabel(sql, s);
-
-        case dbms::SqlCommand::Truncate:
-            return handleTruncate(sql, s);
 
         case dbms::SqlCommand::Reindex:
             return handleReindex(sql, s);

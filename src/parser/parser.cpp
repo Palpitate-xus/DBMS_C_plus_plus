@@ -2913,10 +2913,101 @@ ParseResult SQLParser::parseAlter(const std::string& sql) {
     return r;
 }
 
-ParseResult SQLParser::parseTruncate(const std::string&) {
+ParseResult SQLParser::parseTruncate(const std::string& sql) {
     ParseResult r;
+    const auto tokens = tokenize(sql);
+    if (tokens.empty()) {
+        r.error = "empty TRUNCATE statement";
+        return r;
+    }
+
+    auto stmt = std::make_unique<TruncateStmt>();
+    size_t pos = 1;
+    if (pos < tokens.size() && toLower(tokens[pos]) == "table") ++pos;
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true;
+        ++pos;
+    }
+
+    const auto isOption = [](const std::string& token) {
+        const std::string word = toLower(token);
+        return word == "restart" || word == "continue" || word == "cascade" ||
+               word == "restrict" || token == ";";
+    };
+    bool expectingTable = true;
+    while (pos < tokens.size() && !isOption(tokens[pos])) {
+        if (tokens[pos] == ",") {
+            if (expectingTable) {
+                r.error = "TRUNCATE has an empty table name";
+                return r;
+            }
+            expectingTable = true;
+            ++pos;
+            continue;
+        }
+        if (!expectingTable) {
+            r.error = "TRUNCATE table names must be comma-separated";
+            return r;
+        }
+        std::string tableName = tokens[pos++];
+        if (pos + 1 < tokens.size() && tokens[pos] == ".") {
+            tableName += "." + tokens[pos + 1];
+            pos += 2;
+        }
+        stmt->tableNames.push_back(tableName);
+        expectingTable = false;
+    }
+    if (stmt->tableNames.empty() || expectingTable) {
+        r.error = "TRUNCATE requires at least one table";
+        return r;
+    }
+
+    bool identityOptionSeen = false;
+    while (pos < tokens.size()) {
+        const std::string word = toLower(tokens[pos++]);
+        if (word == ";") {
+            if (pos != tokens.size()) {
+                r.error = "TRUNCATE terminator must be last";
+                return r;
+            }
+            break;
+        }
+        if (word == "restart" || word == "continue") {
+            if (identityOptionSeen) {
+                r.error = "TRUNCATE cannot specify multiple identity options";
+                return r;
+            }
+            if (pos >= tokens.size() || toLower(tokens[pos]) != "identity") {
+                r.error = "TRUNCATE identity option requires IDENTITY";
+                return r;
+            }
+            ++pos;
+            identityOptionSeen = true;
+            stmt->restartIdentity = word == "restart";
+            continue;
+        }
+        if (word == "cascade") {
+            if (stmt->restrict || stmt->cascade) {
+                r.error = "TRUNCATE cannot specify both CASCADE and RESTRICT";
+                return r;
+            }
+            stmt->cascade = true;
+            continue;
+        }
+        if (word == "restrict") {
+            if (stmt->cascade || stmt->restrict) {
+                r.error = "TRUNCATE cannot specify both CASCADE and RESTRICT";
+                return r;
+            }
+            stmt->restrict = true;
+            continue;
+        }
+        r.error = "unsupported TRUNCATE option: " + tokens[pos - 1];
+        return r;
+    }
+
     r.success = true;
-    r.stmt = std::make_unique<Stmt>(SqlCommand::Truncate);
+    r.stmt = std::move(stmt);
     return r;
 }
 

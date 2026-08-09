@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 
 extern dbms::StorageEngine g_engine;
@@ -334,6 +335,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
         case SqlCommand::AlterDefaultPrivileges:
             return executeAlterDefaultPrivileges(
                 dynamic_cast<const AlterDefaultPrivilegesStmt*>(stmt.get()), s);
+        case SqlCommand::Truncate:
+            return executeTruncate(dynamic_cast<const TruncateStmt*>(stmt.get()), s);
         case SqlCommand::DropRole:
         case SqlCommand::DropUser:
             return executeDropRole(dynamic_cast<const DropStmt*>(stmt.get()), s);
@@ -393,6 +396,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::AlterRole:
         case dbms::SqlCommand::AlterUser:
         case dbms::SqlCommand::AlterDefaultPrivileges:
+        case dbms::SqlCommand::Truncate:
         case dbms::SqlCommand::DropRole:
         case dbms::SqlCommand::DropUser:
         case dbms::SqlCommand::Comment:
@@ -1099,6 +1103,102 @@ bool DdlExecutor::executeAlterDefaultPrivileges(const AlterDefaultPrivilegesStmt
 
     std::cout << "ALTER DEFAULT PRIVILEGES " << (stmt->revoke ? "revoked" : "granted")
               << " for role " << owner << " in schema " << schema << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
+    if (!stmt || stmt->tableNames.empty()) {
+        std::cout << "SQL syntax error: TRUNCATE requires at least one table" << std::endl;
+        return true;
+    }
+    if (!checkDB(s)) return true;
+
+    std::set<std::string> targets;
+    const auto addTargetWithChildren = [&](const std::string& rawName) {
+        std::vector<std::string> pending{rawName};
+        while (!pending.empty()) {
+            const std::string name = pending.back();
+            pending.pop_back();
+            if (!targets.insert(name).second || stmt->only) continue;
+            for (const auto& child : g_engine.getInheritedChildren(s.currentDB, name)) {
+                pending.push_back(child);
+            }
+        }
+    };
+
+    for (const auto& rawName : stmt->tableNames) {
+        const std::string name = resolveTableName(s, rawName);
+        if (!g_engine.tableExists(s.currentDB, name)) {
+            std::cout << "Table " << name << " does not exist" << std::endl;
+            return true;
+        }
+        addTargetWithChildren(name);
+    }
+
+    // Expand FK dependants before mutating any table.  This makes RESTRICT
+    // statement-atomic and makes CASCADE recursive instead of only clearing
+    // the first level of references.
+    bool expanded = true;
+    while (expanded) {
+        expanded = false;
+        for (const auto& candidate : g_engine.getTableNames(s.currentDB)) {
+            if (targets.count(candidate)) continue;
+            const TableSchema table = g_engine.getTableSchema(s.currentDB, candidate);
+            bool dependsOnTarget = false;
+            for (size_t i = 0; i < table.fkLen; ++i) {
+                if (targets.count(table.fks[i].refTable)) {
+                    dependsOnTarget = true;
+                    break;
+                }
+            }
+            if (!dependsOnTarget) continue;
+            if (!stmt->cascade) {
+                std::cout << "cannot truncate table because table \"" << candidate
+                          << "\" references it; use CASCADE" << std::endl;
+                return true;
+            }
+            addTargetWithChildren(candidate);
+            expanded = true;
+        }
+    }
+
+    for (const auto& name : targets) {
+        if (!g_engine.tableExists(s.currentDB, name)) {
+            std::cout << "TRUNCATE found missing inherited table \"" << name << "\""
+                      << std::endl;
+            return true;
+        }
+    }
+
+    const std::string actor = effectiveSessionRole(s);
+    for (const auto& name : targets) {
+        if (sessionIsAdmin(s)) continue;
+        const TableSchema table = g_engine.getTableSchema(s.currentDB, name);
+        if (table.owner != actor) {
+            std::cout << "permission denied to truncate table \"" << name << "\"" << std::endl;
+            return true;
+        }
+    }
+
+    checkAndImplicitCommit(s);
+    for (const auto& name : targets) {
+        const DBStatus result = g_engine.truncateTable(s.currentDB, name);
+        if (result != DBStatus::OK) {
+            std::cout << "TRUNCATE failed for table " << name << std::endl;
+            return true;
+        }
+        if (stmt->restartIdentity) {
+            const TableSchema table = g_engine.getTableSchema(s.currentDB, name);
+            for (size_t i = 0; i < table.len; ++i) {
+                if (table.cols[i].isAutoIncrement) {
+                    g_engine.resetSequence(s.currentDB, name, table.cols[i].dataName, 1);
+                }
+            }
+        }
+    }
+
+    std::cout << "TRUNCATE TABLE completed (" << targets.size() << " table(s))" << std::endl;
+    log(s.username, "truncate table", getTime());
     return false;
 }
 

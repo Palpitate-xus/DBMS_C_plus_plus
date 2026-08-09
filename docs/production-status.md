@@ -2,7 +2,7 @@
 
 最后更新：2026-08-09
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，123 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=125 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，124 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=126 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
 本轮已完成的基础收敛：
 
@@ -44,6 +44,7 @@
 - 表 owner 已在统一 ACL 查询中获得隐含表/列权限和 `GRANT OPTION`；表级 `REVOKE` 复用同一授权判定。schema/database/function ACL、ACL item 和默认权限完整传播仍未完成。
 - 表级 `GRANT OPTION` 已支持独立撤销、依赖授权的 `RESTRICT` 拒绝和 `CASCADE` 递归回收；表级授权链会记录实际 grantor，并在撤销后清理失效链路。完整 ACL item、对象类型和默认权限传播仍未完成。
 - `ALTER DEFAULT PRIVILEGES` 已迁移到 typed AST/DdlExecutor，支持 `TABLE/TABLES` 的 `GRANT`、`REVOKE`、多权限/多 grantee、schema 校验和幂等规则，并在新建表时按 effective owner 应用；默认权限的 grant option、sequence/function 等对象类型和完整 catalog ACL 仍未完成。
+- `TRUNCATE` 已迁移到 typed AST/DdlExecutor，支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 与 statement-atomic `RESTRICT` 预检；trigger/foreign table 和完整 PostgreSQL transactional/locking 语义仍未完成。
 - `pg_auth_members.admin_option` 已接入角色 `GRANT ... WITH ADMIN OPTION`、重复授权升级和 `REVOKE ADMIN OPTION FOR`；角色授权现在按超级用户、CREATEROLE 或现有 ADMIN OPTION 检查，完整 ADMIN OPTION 级联和 grantor 生命周期仍待补齐。
 - 协议错误状态已收敛：扩展查询在 Parse/Bind/Execute 错误后进入 PostgreSQL 的 ignore-until-Sync 状态；事务外简单查询错误返回 `ReadyForQuery('I')`，连接可在 Sync/错误响应后继续使用。数组等复杂类型、完整类型映射、二进制扩展消息语义仍未完成。
 - 事务上下文已从共享 `StorageEngine` 实例移为连接工作线程局部：事务 ID、快照、回滚日志、savepoint、隔离级别、延迟约束和 `lastval` 不再在协议连接之间互相覆盖；连接断开时会回滚未完成事务并丢弃 backend 上下文。全局锁管理器和提交状态仍用于跨 backend 协调。双连接协议回归已验证未提交行隔离、回滚恢复、断开回滚和提交后可见性。

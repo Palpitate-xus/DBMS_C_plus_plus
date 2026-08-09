@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：统一回归基线 PASS=125 FAIL=0（123 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：统一回归基线 PASS=126 FAIL=0（124 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-09 | `TRUNCATE` 架构收敛：新增 typed `TruncateStmt` 与 DdlExecutor 执行路径，删除 `main.cpp` 字符串处理；支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT` 预检，新增多表/FK/identity 回归。trigger、foreign table 与完整 transactional/locking 语义仍待后续。 |
 | 2026-08-09 | 表 owner 正式化：`TableSchema.owner` 与 schema 版本升级接入表所有者，CREATE/ALTER TABLE OWNER TO 同步维护 `pg_class.relowner`；RLS 普通模式按 PostgreSQL 语义让 owner 绕过，FORCE RLS 仍强制执行；OWNER TO 现在要求表所有者/超级用户且能 SET ROLE 到目标角色，并新增授权拒绝回归。 |
 | 2026-08-09 | 会话角色边界收敛：SET ROLE 不再接受任意字符串，按原始成员关系授权；SET ROLE 后 `current_user`、RLS、DML ACL 和 CREATE TABLE owner 使用有效角色，超级用户切换到普通角色后不再保留管理员绕过。 |
 | 2026-08-09 | 表 owner ACL 收敛：owner 在统一权限查询中获得隐含表/列权限和 `GRANT OPTION`，表级 REVOKE 使用相同授权判定；schema/database/function ACL 和完整 ACL item 生命周期仍待后续。 |
@@ -200,7 +201,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=125 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=126 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -291,7 +292,7 @@
 | 1.1.54 | `SET ROLE` | 已按 `pg_auth_members` 原始成员关系检查目标角色，SET ROLE 后 ACL/RLS/current_user 使用有效角色；仍缺 role stack、完整 session authorization 联动和角色成员生命周期语义 | ⚠️ |
 | 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 完整权限矩阵和会话安全上下文完整语义 | ⚠️ |
 | 1.1.56 | `SET TRANSACTION` | BEGIN 路径已结构化隔离级别/只读选项；SET TRANSACTION 仍缺 deferrable、当前事务时序限制完整语义 | ⚠️ |
-| 1.1.57 | `TRUNCATE` | 支持 cascade/restart identity 部分；缺少 `ONLY`/多表/trigger/identity/foreign table/transactional details | ⚠️ |
+| 1.1.57 | `TRUNCATE` | 已迁移 typed AST/DdlExecutor，支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT`；仍缺 trigger/foreign table、完整 transactional/locking 细节 | ⚠️ |
 | 1.1.58 | `UPDATE` | 支持受限行级标量表达式、单源表 FROM、LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式 | ⚠️ |
 | 1.1.59 | `VACUUM` | compact/free page；缺少 freeze、visibility map、autovacuum launcher/workers、parallel vacuum、analyze coupling、wraparound 防护 | ⚠️ |
 | 1.1.60 | `VALUES` | 已支持顶层 `VALUES (..), (..)` 输出；缺少完整表达式求值、类型合并、排序/limit 组合和作为通用 query expression 的全部语义 | ⚠️ |

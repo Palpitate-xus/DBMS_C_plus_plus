@@ -63,6 +63,7 @@ private:
     bool executeCreateRole(const CreateRoleStmt* stmt, Session& s);
     bool executeAlterRole(const AlterObjectStmt* stmt, Session& s);
     bool executeAlterDefaultPrivileges(const AlterDefaultPrivilegesStmt* stmt, Session& s);
+    bool executeTruncate(const TruncateStmt* stmt, Session& s);
     bool executeDropRole(const DropStmt* stmt, Session& s);
     bool executeDropSchema(const DropStmt* stmt, Session& s);
     bool executeComment(const CommentStmt* stmt, Session& s);

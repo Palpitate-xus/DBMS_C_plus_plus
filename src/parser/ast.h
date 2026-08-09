@@ -924,6 +924,20 @@ struct AlterDefaultPrivilegesStmt : public Stmt {
     std::string toString() const override { return "ALTER DEFAULT PRIVILEGES"; }
 };
 
+// Structured TRUNCATE statement.  The executor validates the complete target
+// set before changing storage, so RESTRICT cannot leave a partially truncated
+// statement behind and CASCADE can recursively include FK dependants.
+struct TruncateStmt : public Stmt {
+    std::vector<std::string> tableNames;
+    bool only = false;
+    bool restartIdentity = false;
+    bool cascade = false;
+    bool restrict = false;
+
+    TruncateStmt() : Stmt(SqlCommand::Truncate) {}
+    std::string toString() const override { return "TRUNCATE"; }
+};
+
 // ============================================================================
 // ALTER TABLE 语句
 // ============================================================================

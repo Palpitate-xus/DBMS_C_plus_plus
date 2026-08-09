@@ -179,6 +179,27 @@ DROP TABLE temp_results;
 
 ---
 
+### TRUNCATE
+
+**语法**
+```sql
+TRUNCATE [TABLE] [ONLY] table_name [, ...]
+    [RESTART IDENTITY | CONTINUE IDENTITY]
+    [CASCADE | RESTRICT]
+```
+
+`RESTRICT` 为默认行为，会在存在外键依赖时拒绝并保持所有表不变；`CASCADE` 递归截断依赖表。`RESTART IDENTITY` 重置 identity 序列，`ONLY` 不截断继承子表。
+执行者必须是管理员或拥有待截断的每一张表（包括 CASCADE 自动纳入的依赖表）。
+
+**示例**
+```sql
+TRUNCATE TABLE staging, staging_archive;
+TRUNCATE TABLE orders RESTART IDENTITY CASCADE;
+TRUNCATE ONLY parent_table RESTRICT;
+```
+
+---
+
 ### ALTER TABLE ADD COLUMN
 
 **语法**

@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-08-09
 > 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=125 FAIL=0（123 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
+> 回归基线: PASS=126 FAIL=0（124 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
@@ -321,7 +321,11 @@ DROP TABLE users CASCADE;
 TRUNCATE TABLE users;
 TRUNCATE TABLE users, logs, cache;
 TRUNCATE ONLY users;
+TRUNCATE TABLE parent RESTRICT;
+TRUNCATE TABLE parent RESTART IDENTITY CASCADE;
 ```
+
+`RESTRICT` 是默认行为：如果有外键依赖，语句会在任何表修改前失败；`CASCADE` 会递归截断外键依赖表。`RESTART IDENTITY` 重置被截断表的 identity 序列，`ONLY` 不扩展到继承子表。
 
 ---
 
@@ -1031,7 +1035,7 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 
 ```bash
 ./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 安静运行统一回归：123 个 C++ 测试 + 2 个 E2E
+./scripts/run_all_tests_fast.sh # 安静运行统一回归：124 个 C++ 测试 + 2 个 E2E
 ./scripts/build_tests.sh        # 完整输出的规范测试入口：C++ 测试 + 2 个 E2E
 ```
 
