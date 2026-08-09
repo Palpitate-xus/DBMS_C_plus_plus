@@ -207,6 +207,57 @@ static void test_comment_on() {
     std::cout << "[DDL] comment OK" << std::endl;
 }
 
+static void test_alter_table_metadata_actions() {
+    std::string db = testDbPath("ddl_alter_metadata");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE alter_meta (id INT, v INT)", s));
+    assert(!ddl.executeSql("CREATE INDEX alter_meta_id_idx ON alter_meta (id)", s));
+
+    assert(!ddl.executeSql("ALTER TABLE alter_meta CLUSTER ON alter_meta_id_idx", s));
+    auto params = g_engine.getStorageParams(db, "alter_meta");
+    assert(params.at("cluster_on") == "alter_meta_id_idx");
+    assert(!ddl.executeSql("ALTER TABLE alter_meta SET WITHOUT CLUSTER", s));
+    params = g_engine.getStorageParams(db, "alter_meta");
+    assert(params.count("cluster_on") == 0);
+    assert(ddl.executeSql("ALTER TABLE alter_meta CLUSTER ON missing_idx", s));
+
+    assert(!ddl.executeSql("ALTER TABLE alter_meta REPLICA IDENTITY FULL", s));
+    auto& cat = g_engine.catalogService().get(db);
+    const auto* ns = cat.findNamespaceByName("public");
+    assert(ns != nullptr);
+    const auto* relation = cat.findClassByName("alter_meta", ns->oid);
+    assert(relation != nullptr && relation->relreplident == 'f');
+    assert(!ddl.executeSql("ALTER TABLE alter_meta REPLICA IDENTITY USING INDEX alter_meta_id_idx", s));
+    relation = cat.findClassByName("alter_meta", ns->oid);
+    assert(relation != nullptr && relation->relreplident == 'i');
+    params = g_engine.getStorageParams(db, "alter_meta");
+    assert(params.at("replica_identity_index") == "alter_meta_id_idx");
+    assert(!ddl.executeSql("ALTER TABLE alter_meta REPLICA IDENTITY DEFAULT", s));
+    relation = cat.findClassByName("alter_meta", ns->oid);
+    assert(relation != nullptr && relation->relreplident == 'd');
+
+    assert(!ddl.executeSql(
+        "ALTER TABLE alter_meta ADD CONSTRAINT pos_check CHECK (id > 0) NOT VALID", s));
+    auto constraintParams = g_engine.getStorageParams(db, "alter_meta");
+    assert(constraintParams.at("constraint.pos_check.not_valid") == "1");
+    assert(!ddl.executeSql(
+        "ALTER TABLE alter_meta ALTER CONSTRAINT pos_check DEFERRABLE INITIALLY DEFERRED", s));
+    auto schema = g_engine.getTableSchema(db, "alter_meta");
+    assert(schema.cols[0].deferrable);
+    assert(schema.cols[0].initiallyDeferred);
+    assert(!ddl.executeSql("ALTER TABLE alter_meta VALIDATE CONSTRAINT pos_check", s));
+    params = g_engine.getStorageParams(db, "alter_meta");
+    assert(params.at("constraint.pos_check.validated") == "1");
+
+    cleanup(db);
+    std::cout << "[DDL] ALTER TABLE metadata actions OK" << std::endl;
+}
+
 static void test_drop_database_evicts_catalog() {
     std::string db = testDbPath("ddl_bridge_t5");
     cleanup(db);
@@ -241,6 +292,7 @@ int main() {
     test_create_database_schema();
     test_drop_database_evicts_catalog();
     test_comment_on();
+    test_alter_table_metadata_actions();
     std::cout << "[DDL] all passed" << std::endl;
     return 0;
 }

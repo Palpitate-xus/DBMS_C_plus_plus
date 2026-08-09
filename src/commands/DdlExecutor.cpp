@@ -59,6 +59,63 @@ std::string canonicalRoleName(const std::string& raw) {
     return toLower(stripQuotes(value));
 }
 
+bool tableConstraintExists(const std::string& dbname,
+                           const std::string& tableName,
+                           const std::string& constraintName) {
+    if (!g_engine.tableExists(dbname, tableName)) return false;
+    const auto table = g_engine.getTableSchema(dbname, tableName);
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].checkConstraintName == constraintName) return true;
+    }
+    for (const auto& name : table.uniqueConstraintNames) {
+        if (name == constraintName) return true;
+    }
+    for (size_t i = 0; i < table.fkLen; ++i) {
+        if (table.fks[i].name == constraintName) return true;
+    }
+    const auto exclusions = g_engine.getExclusionConstraints(dbname, tableName);
+    return std::any_of(exclusions.begin(), exclusions.end(),
+                       [&](const auto& constraint) { return constraint.name == constraintName; });
+}
+
+bool checkConstraintExists(const std::string& dbname,
+                           const std::string& tableName,
+                           const std::string& constraintName) {
+    if (!g_engine.tableExists(dbname, tableName)) return false;
+    const auto table = g_engine.getTableSchema(dbname, tableName);
+    for (size_t i = 0; i < table.len; ++i) {
+        if (table.cols[i].checkConstraintName == constraintName) return true;
+    }
+    return false;
+}
+
+std::string constraintMetadataKey(const std::string& name, const std::string& option) {
+    return "constraint." + name + "." + option;
+}
+
+bool metadataBool(const std::map<std::string, std::string>& params,
+                  const std::string& key, bool fallback) {
+    auto it = params.find(key);
+    if (it == params.end()) return fallback;
+    return it->second == "1" || it->second == "true";
+}
+
+DBStatus persistConstraintMetadata(const std::string& dbname,
+                                   const std::string& tableName,
+                                   const std::string& constraintName,
+                                   bool validated,
+                                   bool notValid,
+                                   bool deferrable,
+                                   bool initiallyDeferred) {
+    std::map<std::string, std::string> changes;
+    changes[constraintMetadataKey(constraintName, "validated")] = validated ? "1" : "0";
+    changes[constraintMetadataKey(constraintName, "not_valid")] = notValid ? "1" : "0";
+    changes[constraintMetadataKey(constraintName, "deferrable")] = deferrable ? "1" : "0";
+    changes[constraintMetadataKey(constraintName, "initially_deferred")] =
+        initiallyDeferred ? "1" : "0";
+    return g_engine.updateStorageParams(dbname, tableName, changes);
+}
+
 // ---- Shell type sidecar catalog (CREATE TYPE name) ----
 // Stored in {db}/.shell_types as one type name per line.
 static std::filesystem::path shellTypesPath(const std::string& dbname) {
@@ -449,6 +506,11 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                     case dbms::AlterTableStmt::Action::ResetOptions:
                     case dbms::AlterTableStmt::Action::SetLogged:
                     case dbms::AlterTableStmt::Action::SetUnlogged:
+                    case dbms::AlterTableStmt::Action::ValidateConstraint:
+                    case dbms::AlterTableStmt::Action::AlterConstraint:
+                    case dbms::AlterTableStmt::Action::ClusterOn:
+                    case dbms::AlterTableStmt::Action::SetWithoutCluster:
+                    case dbms::AlterTableStmt::Action::SetReplicaIdentity:
                     case dbms::AlterTableStmt::Action::EnableRowLevelSecurity:
                     case dbms::AlterTableStmt::Action::DisableRowLevelSecurity:
                     case dbms::AlterTableStmt::Action::ForceRowLevelSecurity:
@@ -566,6 +628,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             case AlterTableStmt::Action::ResetOptions:
             case AlterTableStmt::Action::SetLogged:
             case AlterTableStmt::Action::SetUnlogged:
+            case AlterTableStmt::Action::ValidateConstraint:
+            case AlterTableStmt::Action::AlterConstraint:
+            case AlterTableStmt::Action::ClusterOn:
+            case AlterTableStmt::Action::SetWithoutCluster:
+            case AlterTableStmt::Action::SetReplicaIdentity:
             case AlterTableStmt::Action::EnableRowLevelSecurity:
             case AlterTableStmt::Action::DisableRowLevelSecurity:
             case AlterTableStmt::Action::ForceRowLevelSecurity:
@@ -680,7 +747,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 std::map<std::string, std::string> params;
                 params["column_statistics:" + sub.name] = std::to_string(sub.statisticsTarget);
-                g_engine.setStorageParams(s.currentDB, tableName, params);
+                status = g_engine.updateStorageParams(s.currentDB, tableName, params);
+                if (!alterStatusOk(status, "Statistics")) return true;
                 break;
             }
             case AlterTableStmt::Action::SetLogged:
@@ -691,6 +759,78 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 status = g_engine.alterTableSetLogged(s.currentDB, tableName, false);
                 if (!alterStatusOk(status, "Table")) return true;
                 break;
+            case AlterTableStmt::Action::ClusterOn:
+                if (sub.name.empty()) {
+                    std::cout << "SQL syntax error: CLUSTER ON requires an index name" << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableSetCluster(s.currentDB, tableName, sub.name);
+                if (!alterStatusOk(status, "Cluster")) return true;
+                break;
+            case AlterTableStmt::Action::SetWithoutCluster:
+                status = g_engine.alterTableSetCluster(s.currentDB, tableName, "");
+                if (!alterStatusOk(status, "Cluster")) return true;
+                break;
+            case AlterTableStmt::Action::SetReplicaIdentity:
+                if (sub.replicaIdentity.empty()) {
+                    std::cout << "SQL syntax error: invalid REPLICA IDENTITY mode" << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableSetReplicaIdentity(
+                    s.currentDB, tableName, sub.replicaIdentity, sub.name);
+                if (!alterStatusOk(status, "Replica identity")) return true;
+                break;
+            case AlterTableStmt::Action::ValidateConstraint: {
+                if (sub.name.empty()) {
+                    std::cout << "SQL syntax error: VALIDATE CONSTRAINT requires a name" << std::endl;
+                    return true;
+                }
+                if (!tableConstraintExists(s.currentDB, tableName, sub.name)) {
+                    std::cout << "Constraint not found" << std::endl;
+                    return true;
+                }
+                status = g_engine.updateStorageParams(
+                    s.currentDB, tableName,
+                    {{constraintMetadataKey(sub.name, "validated"), "1"},
+                     {constraintMetadataKey(sub.name, "not_valid"), "0"}});
+                if (!alterStatusOk(status, "Constraint")) return true;
+                std::cout << "Constraint " << sub.name << " validated" << std::endl;
+                break;
+            }
+            case AlterTableStmt::Action::AlterConstraint: {
+                if (sub.name.empty() || (!sub.setDeferrable && !sub.setInitiallyDeferred)) {
+                    std::cout << "SQL syntax error: ALTER CONSTRAINT requires a deferrability option"
+                              << std::endl;
+                    return true;
+                }
+                if (!tableConstraintExists(s.currentDB, tableName, sub.name)) {
+                    std::cout << "Constraint not found" << std::endl;
+                    return true;
+                }
+                const auto params = g_engine.getStorageParams(s.currentDB, tableName);
+                const bool validated = metadataBool(
+                    params, constraintMetadataKey(sub.name, "validated"), true);
+                const bool notValid = metadataBool(
+                    params, constraintMetadataKey(sub.name, "not_valid"), !validated);
+                bool deferrable = metadataBool(
+                    params, constraintMetadataKey(sub.name, "deferrable"), false);
+                bool initiallyDeferred = metadataBool(
+                    params, constraintMetadataKey(sub.name, "initially_deferred"), false);
+                if (sub.setDeferrable) deferrable = sub.deferrable;
+                if (sub.setInitiallyDeferred) initiallyDeferred = sub.initiallyDeferred;
+                if (initiallyDeferred) deferrable = true;
+                status = persistConstraintMetadata(
+                    s.currentDB, tableName, sub.name, validated, notValid,
+                    deferrable, initiallyDeferred);
+                if (!alterStatusOk(status, "Constraint")) return true;
+                if (checkConstraintExists(s.currentDB, tableName, sub.name)) {
+                    status = g_engine.alterTableSetConstraintDeferrability(
+                        s.currentDB, tableName, sub.name, deferrable, initiallyDeferred);
+                    if (!alterStatusOk(status, "Constraint")) return true;
+                }
+                std::cout << "Constraint " << sub.name << " options updated" << std::endl;
+                break;
+            }
             case AlterTableStmt::Action::EnableRowLevelSecurity:
                 status = g_engine.enableRowLevelSecurity(s.currentDB, tableName, false);
                 if (!alterStatusOk(status, "Table")) return true;
@@ -838,7 +978,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 metadata.accessMethod = tc.accessMethod;
                 metadata.excludeElements = tc.excludeElements;
                 metadata.excludeWhere = tc.excludeWhere;
-                recordConstraintCompat(s.currentDB, tableName, metadata);
+                status = persistConstraintMetadata(
+                    s.currentDB, tableName, constraintName, !tc.notValid, tc.notValid,
+                    tc.deferrable, tc.initiallyDeferred);
+                if (!alterStatusOk(status, "Constraint")) return true;
                 break;
             }
             case AlterTableStmt::Action::DropConstraint: {
@@ -854,14 +997,21 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     break;
                 }
                 if (!alterStatusOk(status, "Constraint")) return true;
-                removeConstraintCompat(s.currentDB, tableName, sub.name);
+                status = g_engine.updateStorageParams(
+                    s.currentDB, tableName,
+                    {{constraintMetadataKey(sub.name, "validated"), ""},
+                     {constraintMetadataKey(sub.name, "not_valid"), ""},
+                     {constraintMetadataKey(sub.name, "deferrable"), ""},
+                     {constraintMetadataKey(sub.name, "initially_deferred"), ""}});
+                if (!alterStatusOk(status, "Constraint")) return true;
                 break;
             }
             case AlterTableStmt::Action::SetOptions:
             case AlterTableStmt::Action::ResetOptions: {
                 std::map<std::string, std::string> params;
                 for (const auto& option : sub.options) params[option.first] = option.second;
-                g_engine.setStorageParams(s.currentDB, tableName, params);
+                status = g_engine.updateStorageParams(s.currentDB, tableName, params);
+                if (!alterStatusOk(status, "Storage option")) return true;
                 break;
             }
             case AlterTableStmt::Action::Inherit:
@@ -1648,52 +1798,6 @@ ForeignKey DdlExecutor::tableConstraintToForeignKey(const TableConstraint& tc) {
     return fk;
 }
 
-void DdlExecutor::recordConstraintCompat(const std::string& dbname,
-                                         const std::string& tablename,
-                                         const TableConstraint& tc) {
-    // Persist named constraints for compatibility with legacy constraint files.
-    if (tc.name.empty()) return;
-    auto path = std::filesystem::path(g_engine.dbPath(dbname)) /
-                (tablename + ".constraints");
-    std::ofstream ofs(path, std::ios::app);
-    if (!ofs) return;
-    ofs << tc.name << "|" << toLower(tc.type);
-    for (const auto& c : tc.columns) ofs << "|" << c;
-    if (!tc.refTable.empty()) {
-        ofs << "|" << tc.refTable;
-        for (const auto& c : tc.refColumns) ofs << "|" << c;
-    }
-    ofs << "\n";
-}
-
-bool DdlExecutor::removeConstraintCompat(const std::string& dbname,
-                                         const std::string& tablename,
-                                         const std::string& constraintName) {
-    const auto path = std::filesystem::path(g_engine.dbPath(dbname)) /
-                      (tablename + ".constraints");
-    if (!std::filesystem::exists(path)) return false;
-
-    std::ifstream in(path);
-    if (!in) return false;
-    std::vector<std::string> kept;
-    std::string line;
-    bool removed = false;
-    while (std::getline(in, line)) {
-        const auto separator = line.find('|');
-        if (separator != std::string::npos && line.substr(0, separator) == constraintName) {
-            removed = true;
-            continue;
-        }
-        kept.push_back(std::move(line));
-    }
-    if (!removed) return false;
-
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) return false;
-    for (const auto& keptLine : kept) out << keptLine << '\n';
-    return static_cast<bool>(out);
-}
-
 // ----------------------------------------------------------------------------
 // CREATE TABLE AS SELECT helper
 // ----------------------------------------------------------------------------
@@ -2120,7 +2224,6 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
         } else if (t == "foreign key") {
             tbl.appendFK(tableConstraintToForeignKey(tc));
-            recordConstraintCompat(s.currentDB, tname, tc);
         } else if (t == "check") {
             if (tbl.len > 0) {
                 if (tbl.cols[0].checkExpr.empty()) {
@@ -2130,7 +2233,6 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                     tbl.cols[0].initiallyDeferred = tc.initiallyDeferred;
                 }
             }
-            recordConstraintCompat(s.currentDB, tname, tc);
         } else if (t == "exclude") {
             // Defer creation until the table exists; collect for later.
         }
@@ -2154,7 +2256,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
         ec.wherePredicate = tc.excludeWhere;
         g_engine.createExclusionConstraint(s.currentDB, ec);
-        recordConstraintCompat(s.currentDB, tname, tc);
+    }
+    for (const auto& tc : stmt->constraints) {
+        if (tc.name.empty()) continue;
+        if (!alterStatusOk(persistConstraintMetadata(
+                s.currentDB, tname, tc.name, !tc.notValid, tc.notValid,
+                tc.deferrable, tc.initiallyDeferred), "Constraint")) return true;
     }
     g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname,
                                     effectiveSessionRole(s));

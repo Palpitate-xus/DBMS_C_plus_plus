@@ -788,6 +788,7 @@ struct TableConstraint {
     ExprPtr checkExpr;
     bool deferrable = false;
     bool initiallyDeferred = false;
+    bool notValid = false;
     // EXCLUDE-specific fields
     std::string accessMethod;                  // btree, gist, etc.
     std::vector<std::pair<std::string, std::string>> excludeElements; // {column/expr, operator}
@@ -955,6 +956,7 @@ struct AlterTableStmt : public Stmt {
         AttachPartition, DetachPartition,
         SetOptions, ResetOptions,
         SetLogged, SetUnlogged,
+        ValidateConstraint,
         EnableRowLevelSecurity, DisableRowLevelSecurity,
         ForceRowLevelSecurity, NoForceRowLevelSecurity,
         EnableTrigger, DisableTrigger, EnableRule, DisableRule,
@@ -983,6 +985,10 @@ struct AlterTableStmt : public Stmt {
         std::string partitionSpec;
         std::map<std::string, std::string> options;
         std::string replicaIdentity;
+        bool setDeferrable = false;
+        bool deferrable = false;
+        bool setInitiallyDeferred = false;
+        bool initiallyDeferred = false;
         int statisticsTarget = -1;
         std::string parentTable;  // for INHERIT / NO INHERIT
     };

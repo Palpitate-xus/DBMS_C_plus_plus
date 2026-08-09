@@ -73,12 +73,6 @@ private:
     // 辅助：AST -> StorageEngine 结构转换
     static Column columnDefToColumn(const ColumnDef& cd, const std::string& dbname = "");
     static ForeignKey tableConstraintToForeignKey(const TableConstraint& tc);
-    static void recordConstraintCompat(const std::string& dbname,
-                                       const std::string& tablename,
-                                       const TableConstraint& tc);
-    static bool removeConstraintCompat(const std::string& dbname,
-                                       const std::string& tablename,
-                                       const std::string& constraintName);
 
     // 事务隐式提交（PG 语义；后续 Wave 5 移除）
     static void checkAndImplicitCommit(Session& s);

@@ -22,9 +22,9 @@
 - 统一构建源文件清单为 `cmake/dbms_sources.txt`；CMake、主程序脚本和测试脚本不再各自维护生产源列表。
 - 四个 shell 构建/测试入口统一复用 `scripts/build_common.sh` 的编译选项、include、TLS 检测和链接库；对象缓存记录配置指纹，编译参数或 TLS 模式变化会自动失效。测试编排唯一由 `build_tests.sh` 负责，`run_all_tests_fast.sh` 仅提供安静输出并在失败时保留完整诊断。
 - DDL bridge 对已归属 AST 路径的解析失败改为 fail-closed，不再把语法错误交给 legacy 分发；`DdlExecutor` 解析失败也明确返回错误。
-- `ALTER TABLE` 的基础高频子命令已迁移到 typed AST：ADD/DROP COLUMN、ALTER COLUMN（TYPE/DEFAULT/NULL）、RENAME COLUMN/CONSTRAINT/TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、SET LOGGED/UNLOGGED、STATISTICS、INHERIT、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable 和基础 storage 参数；EXCLUDE 的 parser 名称保留、冲突检查、删除清理和 bridge 回归已覆盖。未迁移动作仍明确回退到 legacy 路径。
+- `ALTER TABLE` 的基础高频子命令已迁移到 typed AST：ADD/DROP COLUMN、ALTER COLUMN（TYPE/DEFAULT/NULL）、RENAME COLUMN/CONSTRAINT/TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、SET LOGGED/UNLOGGED、STATISTICS、INHERIT、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT 和基础 storage 参数；约束状态写入统一 `.params`，副本标识同步 `pg_class.relreplident`。
 - `CREATE TABLE ... PARTITION BY` 与 `CREATE TABLE ... PARTITION OF` 已统一进入 typed AST/DdlExecutor，子表 schema、bound 和 catalog 注册均有 SQL 回归覆盖；分区约束证明与 global/local index 语义仍未完成。
-- 持续删除 `main.cpp` 中已被 typed bridge 遮蔽的 ALTER TABLE 字符串分支；本轮再移除约 830 行 ADD/DROP/ALTER/RENAME/约束/owner/storage 重复处理，剩余 ALTER legacy 仅保留 `VALIDATE/ALTER CONSTRAINT` 与尚未 typed 化的 CLUSTER/REPLICA IDENTITY。
+- 持续删除 `main.cpp` 中已被 typed bridge 遮蔽的 ALTER TABLE 字符串分支；本轮再移除约 300 行约束/CLUSTER/REPLICA 元数据重复处理，ALTER TABLE 这些动作现在统一由 parser → DdlExecutor → StorageEngine 执行。
 - 测试入口改为缓存生产对象、逐测试独立链接运行；避免每个测试重复编译完整 DBMS，同时保留自定义源和本地 stub 测试覆盖。
 - 修复 `DROP DATABASE` 未释放数据库级 page/index/TOAST/WAL/CLOG/catalog 缓存的问题；新增同名数据库重建回归测试，防止旧缓存迟写入新数据库。
 - CLOG 刷盘在数据库目录已被删除时不会重建目录或把旧事务状态写入同名新数据库。

@@ -7624,6 +7624,17 @@ DBStatus StorageEngine::setStorageParams(
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::updateStorageParams(
+    const std::string& dbname, const std::string& tablename,
+    const std::map<std::string, std::string>& changes) {
+    auto params = getStorageParams(dbname, tablename);
+    for (const auto& change : changes) {
+        if (change.second.empty()) params.erase(change.first);
+        else params[change.first] = change.second;
+    }
+    return setStorageParams(dbname, tablename, params);
+}
+
 static uint8_t getFillFactor(const TableSchema& tbl) {
     auto it = tbl.storageParams.find("fillfactor");
     if (it == tbl.storageParams.end()) return 100;
@@ -9404,6 +9415,92 @@ DBStatus StorageEngine::alterTableSetLogged(const std::string& dbname,
     {
         std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
         writeSchema(out, tbl);
+    }
+    invalidateCatalogSchema(dbname, tablename);
+    lockManager_.unlock(tablename);
+    return DBStatus::OK;
+}
+
+DBStatus StorageEngine::alterTableSetCluster(const std::string& dbname,
+                                              const std::string& tablename,
+                                              const std::string& indexName) {
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!indexName.empty() && !getNamedIndex(dbname, tablename, indexName)) {
+        return DBStatus::INVALID_VALUE;
+    }
+    return updateStorageParams(dbname, tablename, {{"cluster_on", indexName}});
+}
+
+DBStatus StorageEngine::alterTableSetReplicaIdentity(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& identity, const std::string& indexName) {
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    const std::string mode = toLowerUtf8(trim(identity));
+    char relreplident = 'd';
+    if (mode == "full") relreplident = 'f';
+    else if (mode == "nothing") relreplident = 'n';
+    else if (mode == "index") {
+        if (indexName.empty() || !getNamedIndex(dbname, tablename, indexName)) {
+            return DBStatus::INVALID_VALUE;
+        }
+        relreplident = 'i';
+    } else if (mode != "default") {
+        return DBStatus::INVALID_ARGUMENT;
+    }
+
+    lockManager_.lockMetadata(tablename);
+    try {
+        auto& catalog = catalogService().get(dbname);
+        const auto* relation = catalog.resolveRelation(tablename, {"public"});
+        if (relation) {
+            auto updated = *relation;
+            updated.relreplident = relreplident;
+            if (!catalog.updateClass(relation->oid, updated)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            catalog.persistAll();
+        }
+    } catch (...) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+    lockManager_.unlock(tablename);
+
+    std::map<std::string, std::string> changes{{"replica_identity", mode}};
+    if (mode == "index") changes["replica_identity_index"] = indexName;
+    else changes["replica_identity_index"] = "";
+    return updateStorageParams(dbname, tablename, changes);
+}
+
+DBStatus StorageEngine::alterTableSetConstraintDeferrability(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& constraintName, bool deferrable, bool initiallyDeferred) {
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    lockManager_.lockMetadata(tablename);
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    size_t match = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].checkConstraintName == constraintName) {
+            match = i;
+            break;
+        }
+    }
+    if (match == tbl.len) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+    tbl.cols[match].deferrable = deferrable;
+    tbl.cols[match].initiallyDeferred = initiallyDeferred;
+    std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+    if (!out) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+    writeSchema(out, tbl);
+    if (!out) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);

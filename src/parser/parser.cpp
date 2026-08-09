@@ -6579,6 +6579,30 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     for (const auto& c : refcols) if (c != ",") sub.constraint.refColumns.push_back(c);
                 }
             }
+            while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";") {
+                const std::string option = toLower(tokens[pos]);
+                if (option == "not" && pos + 1 < tokens.size() &&
+                    toLower(tokens[pos + 1]) == "valid") {
+                    sub.constraint.notValid = true;
+                    pos += 2;
+                } else if (option == "deferrable") {
+                    sub.constraint.deferrable = true;
+                    ++pos;
+                } else if (option == "not" && pos + 1 < tokens.size() &&
+                           toLower(tokens[pos + 1]) == "deferrable") {
+                    sub.constraint.deferrable = false;
+                    sub.constraint.initiallyDeferred = false;
+                    pos += 2;
+                } else if (option == "initially" && pos + 1 < tokens.size()) {
+                    const std::string mode = toLower(tokens[pos + 1]);
+                    if (mode != "deferred" && mode != "immediate") break;
+                    sub.constraint.initiallyDeferred = mode == "deferred";
+                    if (sub.constraint.initiallyDeferred) sub.constraint.deferrable = true;
+                    pos += 2;
+                } else {
+                    ++pos;
+                }
+            }
         } else if (kw == "drop" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "column") {
             recognized = true;
             sub.action = AlterTableStmt::Action::DropColumn; pos += 2;
@@ -6681,9 +6705,52 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     recognized = true;
                 }
             }
+        } else if (kw == "validate" && pos + 1 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "constraint") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::ValidateConstraint;
+            pos += 2;
+            if (pos < tokens.size()) sub.name = tokens[pos++];
+        } else if (kw == "alter" && pos + 1 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "constraint") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::AlterConstraint;
+            pos += 2;
+            if (pos < tokens.size()) sub.name = tokens[pos++];
+            while (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";") {
+                const std::string option = toLower(tokens[pos]);
+                if (option == "deferrable") {
+                    sub.setDeferrable = true;
+                    sub.deferrable = true;
+                    ++pos;
+                } else if (option == "not" && pos + 1 < tokens.size() &&
+                           toLower(tokens[pos + 1]) == "deferrable") {
+                    sub.setDeferrable = true;
+                    sub.deferrable = false;
+                    pos += 2;
+                } else if (option == "initially" && pos + 1 < tokens.size()) {
+                    const std::string mode = toLower(tokens[pos + 1]);
+                    if (mode != "deferred" && mode != "immediate") break;
+                    sub.setInitiallyDeferred = true;
+                    sub.initiallyDeferred = mode == "deferred";
+                    pos += 2;
+                } else {
+                    ++pos;
+                }
+            }
+        } else if (kw == "cluster" && pos + 1 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "on") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::ClusterOn;
+            pos += 2;
+            if (pos < tokens.size()) sub.name = tokens[pos++];
         } else if (kw == "set") {
             ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "logged") {
+            if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "without" &&
+                       toLower(tokens[pos + 1]) == "cluster") {
+                sub.action = AlterTableStmt::Action::SetWithoutCluster;
+                pos += 2; recognized = true;
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "logged") {
                 sub.action = AlterTableStmt::Action::SetLogged; ++pos; recognized = true;
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "unlogged") {
                 sub.action = AlterTableStmt::Action::SetUnlogged; ++pos; recognized = true;
@@ -6705,6 +6772,22 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     } else if (i + 1 < opts.size()) {
                         sub.options[opts[i]] = opts[i + 1];
                     }
+                }
+            }
+        } else if (kw == "replica" && pos + 1 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "identity") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::SetReplicaIdentity;
+            pos += 2;
+            if (pos < tokens.size()) {
+                const std::string mode = toLower(tokens[pos++]);
+                if (mode == "using" && pos + 1 < tokens.size() &&
+                    toLower(tokens[pos]) == "index") {
+                    pos += 1;
+                    sub.replicaIdentity = "index";
+                    if (pos < tokens.size()) sub.name = tokens[pos++];
+                } else if (mode == "default" || mode == "full" || mode == "nothing") {
+                    sub.replicaIdentity = mode;
                 }
             }
         } else if (kw == "reset") {

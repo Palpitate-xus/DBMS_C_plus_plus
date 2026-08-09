@@ -119,6 +119,17 @@ public:
     // flag (metadata; existing data is kept). logged=true -> LOGGED.
     DBStatus alterTableSetLogged(const std::string& dbname, const std::string& tablename,
                                   bool logged);
+    DBStatus alterTableSetCluster(const std::string& dbname, const std::string& tablename,
+                                  const std::string& indexName);
+    DBStatus alterTableSetReplicaIdentity(const std::string& dbname,
+                                          const std::string& tablename,
+                                          const std::string& identity,
+                                          const std::string& indexName = "");
+    DBStatus alterTableSetConstraintDeferrability(const std::string& dbname,
+                                                  const std::string& tablename,
+                                                  const std::string& constraintName,
+                                                  bool deferrable,
+                                                  bool initiallyDeferred);
     DBStatus alterTableAddCheckConstraint(const std::string& dbname, const std::string& tablename,
                                            const std::string& name, const std::string& expr);
     DBStatus alterTableAddUniqueConstraint(const std::string& dbname, const std::string& tablename,
@@ -165,6 +176,9 @@ public:
     DBStatus setStorageParams(const std::string& dbname,
                               const std::string& tablename,
                               const std::map<std::string, std::string>& params);
+    DBStatus updateStorageParams(const std::string& dbname,
+                                 const std::string& tablename,
+                                 const std::map<std::string, std::string>& changes);
 
     // View support
     DBStatus createView(const std::string& dbname, const std::string& viewname, const std::string& sql);

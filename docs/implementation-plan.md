@@ -31,7 +31,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 
 | 能力 | 当前真实状态 | 证据/边界 |
 |------|--------------|-----------|
-| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable 和 CREATE TRIGGER 已桥接；RLS 可见性已由 StorageEngine 统一执行，触发器 action runtime、CLUSTER/REPLICA IDENTITY、`VALIDATE/ALTER CONSTRAINT` 等仍由 `main.cpp` legacy/简化路径执行 |
+| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、`VALIDATE/ALTER CONSTRAINT` 和 CREATE TRIGGER 已桥接；触发器 action runtime、完整延迟约束语义仍待补齐 |
 | 复杂查询执行 | 部分完成 | Volcano 基础算子和集合组合节点已验证；复杂集合 operand、子查询、窗口和 grouping producer 仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
@@ -304,7 +304,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 已实现元数据持久化和 `=`/`&&` 的全表冲突检查，并有 `tests/exclude_test.cpp`；真实 GiST 加速、operator class、多元素/表达式元素和完整并发语义仍待后续。 |
 | ✅ 4.25 实现 `SET CONSTRAINTS` 延迟队列、提交时检查 | 5.10, 1.1.53 | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟检查在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 映射生效，`NOT DEFERRABLE` 约束不受 `SET CONSTRAINTS ALL DEFERRED` 影响；schema 格式 `0x44420006` 持久化 `checkConstraintName`/`deferrable`/`initiallyDeferred`；`constraintMode_` 在事务结束时自动清除（per-transaction 语义）；`beginTransaction` 修复：已有事务时先 commit 再开新事务，防止 `txnDB_` 指向错误数据库。新增 `tests/deferrable_test.cpp`（6 个测试）。constraint trigger 语义仍待后续。 |
 | ⚠️ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 已由 typed AST/DdlExecutor 桥接并验证；tablespace 存储在 schema 中。新增回归覆盖 10 个选项路径。`accessMethod` schema 持久化仍待后续。 |
-| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束、RLS、分区 ATTACH/DETACH、trigger enable/disable 和 tablespace 路径已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`，并检查所有者/目标角色授权；CLUSTER/REPLICA、触发器函数运行时和完整延迟约束语义仍有 legacy/简化路径。 |
+| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束、RLS、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT 和 tablespace 路径已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`；触发器函数运行时、完整延迟约束语义、ONLY 和真正 SET TABLESPACE 迁移仍待补齐。 |
 | ⚠️ 4.28 补全 `CREATE/ALTER VIEW`（security barrier/invoker、recursive view、check option） | 1.1.6, 1.1.33, 4.9 | 已支持基本单表可更新视图、WITH CHECK OPTION、OR REPLACE，并有 `tests/view_test.cpp`；SECURITY BARRIER/INVOKER、递归视图和复杂映射仍待后续。 |
 | ⚠️ 4.29 补全 `CREATE TRIGGER`（transition tables、constraint triggers、deferred triggers、event triggers） | 1.1.31, 4.11 | 已解析并执行基础 BEFORE/AFTER/INSTEAD OF、事件和 WHEN 条件，并有 `tests/trigger_test.cpp`；transition tables、constraint/deferred/event triggers 和完整函数运行时仍待后续。 |
 | ✅ 4.30 补全 `CREATE TYPE`（enum/range/base/shell） | 1.1.32 | enum/composite/range/base/shell 元数据注册 + DROP TYPE 全类型修复已落地；`ALTER TYPE ADD/RENAME VALUE` 已落地。作为列类型的完整运行时语义仍待后续。 |
@@ -589,12 +589,12 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - ✅ `main.cpp` 把 ADD COLUMN 约 120 行内联类型分派抽成共享 `buildColumnFromTypeSpec(cname, typeName, isNull, col)`（修正 nvarchar 起始偏移、numeric→decimal 映射），ADD COLUMN 与 ALTER COLUMN TYPE 共用；ALTER COLUMN 块新增 `[SET DATA] TYPE newtype [USING expr]` 分支：从 token 重建类型名（`varchar ( 100 )`→`varchar(100)` 收紧括号、`double precision` 保留多词、遇 `USING` 停止），构造新列后调用引擎方法。
   - ✅ 新增 `tests/alter_column_type_test.cpp`：int→bigint 加宽（数据保留+schema 类型更新）、int→varchar、varchar→int（数值成功/非数值拒绝且类型与数据不变）、未知列拒绝、NULL/空串 round-trip、二级索引幸存改写（行数+查找完好）。二进制端到端验证 `TYPE` 与 `SET DATA TYPE` 两种语法、拒绝路径数据无损。全部 82+ 个测试通过。
   - 🔄 仍待后续：`USING expr` 转换表达式当前忽略（仅按文本 round-trip 重编码）；窄定长 int 的 NULL 哨兵 INF 受 4 字节截断既有量化影响；改写期间无 MVCC 快照（独占锁下整表重建）。
-- **Wave 4 DDL 完整化 — ALTER TABLE OWNER TO / SET LOGGED / CLUSTER ON / REPLICA IDENTITY / SET RESET (4.27f，本次完成）**：
+- **Wave 4 DDL 完整化 — ALTER TABLE 元数据动作（4.27f，重构完成）**：
   - ✅ 新增 `StorageEngine::alterTableSetLogged(db, table, logged)`：直接翻转 schema 二进制中的 `isUnlogged` 标志位并写回 schema 文件；数据文件保留，仅持久化元数据变更。
-  - ✅ 历史上其余子命令曾全部走 `table_options` 旁路元数据；当前 `ALTER TABLE ... OWNER TO owner` 已迁移到正式 `TableSchema`/`pg_class.relowner`，`CLUSTER ON idx`/`SET WITHOUT CLUSTER` 与 `REPLICA IDENTITY {DEFAULT|FULL|NOTHING|USING INDEX idx}` 仍以分号分隔的 key=value 形式写入该条目的 options 字段；`SET (param=value,...)`/`RESET (param,...)` 复用既有 `StorageEngine::setStorageParams`/`getStorageParams`（旁路 `.params` 文件）。
+  - ✅ `CLUSTER ON`/`SET WITHOUT CLUSTER` 通过 `StorageEngine` 校验同表索引并写入 `.params`；`REPLICA IDENTITY {DEFAULT|FULL|NOTHING|USING INDEX idx}` 更新 `pg_class.relreplident`，并持久化索引名。
+  - ✅ `VALIDATE CONSTRAINT`/`ALTER CONSTRAINT` 由 typed parser/DdlExecutor 执行，约束状态统一写入 `.params`；CHECK 约束的 deferrability 同步回 `TableSchema`，删除了 `main.cpp` 中的 `table_options`/`constraint_option` 旁路。
   - ✅ `ALTER TABLE ... SET TABLESPACE` 明确提示暂不支持并拒绝实际迁移：当前 `getPageAllocator` 按 `tablespaceDir` 路由而 `dataPath()` 仍按 db 目录路由，未统一前迁移会孤儿化数据，故采取保守回绝。
-  - ✅ `main.cpp` 在 ALTER TABLE 块尾部新增上述分支，顺序检测 OWNER TO / SET LOGGED/UNLOGGED / SET WITHOUT CLUSTER / CLUSTER ON / REPLICA IDENTITY / SET TABLESPACE / SET (...) / RESET (...)。
-  - ✅ 新增 `tests/alter_set_logged_test.cpp`：SET UNLOGGED/LOGGED 切换、缺表拒绝、数据保留；二进制端到端验证 OWNER TO、SET LOGGED/UNLOGGED、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、SET/RESET storage、SET TABLESPACE 拒绝提示。全部测试通过。
+  - ✅ `tests/ddl_ast_bridge_test.cpp` 覆盖 cluster marker、无效索引拒绝、四种 replica identity 状态、约束 deferrability 和 validate 持久化。
   - 🔄 仍待后续：`IF [NOT] EXISTS` 守卫、`ONLY`、`INHERIT`、真正的 `SET TABLESPACE` 物理迁移（需先统一 `dataPath` 与 `getPageAllocator` 的路由）、统计目标（STATISTICS）设置。
 - **Wave 4 DDL 完整化 — ALTER TABLE ADD PRIMARY KEY（4.27a，本次完成）**：
   - ✅ 新增 `StorageEngine::alterTableAddPrimaryKey(db, table, name, colNames)`：解析列名→索引；拒绝重复添加（表已有 PK）、未知列；扫描既有行校验 PK 列非 NULL 且元组唯一（违反则拒绝、表不变）；通过后写入 `pkColIndices` 与各列 `isPrimaryKey`/隐式 NOT NULL，并**重建物理 PK B+ 树索引**并回填既有行，使 INSERT 期 PK 唯一性强制生效。
