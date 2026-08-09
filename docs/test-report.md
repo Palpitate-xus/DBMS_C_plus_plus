@@ -10,7 +10,7 @@
 
 - OS: Linux 6.8.0-117-generic
 - Compiler: g++ -std=c++17 -O2 -pthread
-- 标准编译命令：`./scripts/build.sh`；批量回归：`./scripts/run_all_tests_fast.sh`；独立测试入口：`./scripts/build_tests.sh`
+- 标准编译命令：`./scripts/build.sh`；规范测试入口：`./scripts/build_tests.sh`；`./scripts/run_all_tests_fast.sh` 是只改变输出形式的安静外壳
 - 本轮构建质量检查：主程序在 `-Wall -Wextra` 下无编译警告；修复 join cost 参数错误及 parser/测试中的未使用代码。
 - 窗口函数端到端测试：由统一回归入口执行 `tests/window_e2e_test.py`（13 用例，包含 Volcano `WindowAgg` 排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 和命名窗口路径，使用隔离临时目录和临时管理员账号）
 - Volcano 窗口单元测试：`tests/volcano_select_phase51_test.cpp` 覆盖多窗口独立排序、排名并列、分区边界、`lag`、默认 frame、`EXCLUDE CURRENT ROW`、count/first/last/ntile/percent_rank/cume_dist 及文本/JSON EXPLAIN。
@@ -20,7 +20,7 @@
 - TOAST 回归：`tests/toast_test.cpp` 验证大值插入/更新/删除、zlib 压缩后的物理体积和解压读取。
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。
-- 独立入口 `./scripts/build_tests.sh` 缓存生产对象后逐个测试独立链接运行，并自动执行两个 E2E，结果 `All tests passed`。
+- `./scripts/build_tests.sh` 是唯一的完整测试编排实现，缓存生产对象后逐个测试独立链接运行，并自动执行两个 E2E；`run_all_tests_fast.sh` 仅捕获其成功输出并显示 PASS 计数，失败时原样打印完整编译/链接/运行日志。
 - 新增数据库生命周期回归：`DROP DATABASE` 释放数据库级缓存后，同名重建不会继承旧 CLOG/WAL/page/index 状态。
 - 新增 typed `ALTER TABLE` 路由回归：验证 AST bridge 的 ADD COLUMN、DEFAULT、NOT NULL、RENAME COLUMN/TABLE，以及 `RENAME TO` 不再误判为列重命名。
 - 新增 schema 格式完整性回归：截断 schema 与错误 magic 均 fail-closed，不会返回可写的部分 schema。

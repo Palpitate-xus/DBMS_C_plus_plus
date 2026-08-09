@@ -17,6 +17,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-09 | 测试架构进一步收敛：删除 `run_all_tests_fast.sh` 中重复的生产对象编译、测试链接、stub 过滤和 E2E 调度实现；`build_tests.sh` 成为唯一完整测试编排入口，快速脚本仅负责安静输出，失败时打印完整诊断。 |
 | 2026-08-09 | 移除 CatalogService 的旧 `.stc` 元数据迁移器、`.migrated` 标记和专用测试；catalog 现在只加载当前版本 `.cat` 文件，旧数据统一采用 SQL 导出后重建。 |
 | 2026-08-08 | 子查询执行路径推进：未关联单列 `IN`/`NOT IN` 下推为 Volcano `SemiJoinOp`/anti 模式；未关联单表 `EXISTS`/`NOT EXISTS` 下推为 `ExistenceFilterOp`；单个未关联标量目标下推为 init-plan + `ScalarSubqueryProjectOp`，覆盖 NULL 和多行 cardinality error；单列未关联 `ANY/ALL` 下推为 `QuantifiedSubqueryFilterOp`，覆盖 NULL/空集三值逻辑；复杂标量、关联子查询、row comparison 和复杂组合仍待迁移。 |
 | 2026-08-08 | 聚合执行路径收敛：删除只调用 `StorageEngine::aggregate()` 且忽略计划输入的冗余 `AggregateOp`，无 GROUP BY 的普通聚合统一复用过滤后的 `GroupAggregateOp`；补充 Volcano 单测与协议 E2E。 |
