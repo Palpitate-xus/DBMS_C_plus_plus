@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；USING/WITH CHECK 形式的 RLS 关系感知扫描也已统一接入查询/更新/删除和结构化 DML 来源关系，并支持默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner 和角色属性绕过；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表/复杂 UPDATE/DELETE、MERGE、RLS 的完整角色/owner/ACL 语义、触发器函数运行时、CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；USING/WITH CHECK 形式的 RLS 关系感知扫描也已统一接入查询/更新/删除和结构化 DML 来源关系，并支持默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、INHERIT/NOINHERIT 和角色属性绕过；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表/复杂 UPDATE/DELETE、MERGE、RLS 的完整 owner/ACL 语义、触发器函数运行时、CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -19,7 +19,8 @@
 |------|------|
 | 2026-08-09 | 表 owner 正式化：`TableSchema.owner` 与 schema 版本升级接入表所有者，CREATE/ALTER TABLE OWNER TO 同步维护 `pg_class.relowner`；RLS 普通模式按 PostgreSQL 语义让 owner 绕过，FORCE RLS 仍强制执行，并新增持久化、catalog、转移 owner 回归。 |
 | 2026-08-09 | RLS 绕过边界收敛：删除用户名 `admin` 硬编码，改由 `pg_authid.rolsuper`/`rolbypassrls` 决定普通 RLS 绕过；`FORCE ROW LEVEL SECURITY` 优先强制策略，新增普通角色、超级用户、BYPASSRLS 和 FORCE 回归。 |
-| 2026-08-09 | RLS 语义补强：策略默认按 permissive OR 组合，`AS RESTRICTIVE` 按 AND 组合；显式 `TO PUBLIC` 与空角色列表统一匹配 PUBLIC；`ALL/UPDATE` 省略 `WITH CHECK` 时继承 `USING`；策略文件写入统一复用序列化 helper，并增加运行时回归。完整 role/owner/ACL 组合仍待后续。 |
+| 2026-08-09 | 角色继承边界收敛：ACL/RLS 使用有效继承权限，`NOINHERIT` 会话角色不自动获得成员角色权限；原始成员关系独立供 `pg_hba.conf` 角色匹配和成员环检测使用，并新增 ACL/RLS 回归。 |
+| 2026-08-09 | RLS 语义补强：策略默认按 permissive OR 组合，`AS RESTRICTIVE` 按 AND 组合；显式 `TO PUBLIC` 与空角色列表统一匹配 PUBLIC；`ALL/UPDATE` 省略 `WITH CHECK` 时继承 `USING`；策略文件写入统一复用序列化 helper，并增加运行时回归。完整 owner/ACL 组合仍待后续。 |
 | 2026-08-09 | 测试架构进一步收敛：删除 `run_all_tests_fast.sh` 中重复的生产对象编译、测试链接、stub 过滤和 E2E 调度实现；`build_tests.sh` 成为唯一完整测试编排入口，快速脚本仅负责安静输出，失败时打印完整诊断。 |
 | 2026-08-09 | 移除 CatalogService 的旧 `.stc` 元数据迁移器、`.migrated` 标记和专用测试；catalog 现在只加载当前版本 `.cat` 文件，旧数据统一采用 SQL 导出后重建。 |
 | 2026-08-08 | 子查询执行路径推进：未关联单列 `IN`/`NOT IN` 下推为 Volcano `SemiJoinOp`/anti 模式；未关联单表 `EXISTS`/`NOT EXISTS` 下推为 `ExistenceFilterOp`；单个未关联标量目标下推为 init-plan + `ScalarSubqueryProjectOp`，覆盖 NULL 和多行 cardinality error；单列未关联 `ANY/ALL` 下推为 `QuantifiedSubqueryFilterOp`，覆盖 NULL/空集三值逻辑；复杂标量、关联子查询、row comparison 和复杂组合仍待迁移。 |
@@ -251,7 +252,7 @@
 | 1.1.19 | `CREATE FUNCTION` | 基本 UDF/TVF 已落地，`DdlExecutor` 接管创建；volatility（IMMUTABLE/STABLE/VOLATILE）已持久化到 UDF 元数据与 `pg_proc.provolatile`，`ExprEvaluator` 内置函数已分类 volatility；解析层已记录 language/strict/parallel/cost/rows/security definer/leakproof/SET，但尚未真正影响执行；缺少 PL/pgSQL/C/内部函数、多态、重载、依赖权限 | ⚠️ |
 | 1.1.20 | `CREATE INDEX` | 支持 btree/hash/GIN/GiST/BRIN/SP-GiST 风格、include/where/expression/concurrently；缺少 operator class/family、collation、NULLS sort、storage params、parallel build、真正 concurrent algorithm、AM API | ⚠️ |
 | 1.1.21 | `CREATE MATERIALIZED VIEW` | CREATE 已落地：`DdlExecutor` 创建 `__mv_<name>` backing 表并物化 `SELECT * / 列 / WHERE` 结果（列序映射已修复），支持 `WITH [NO] DATA`，`.mview` 保存 SQL；仍缺唯一索引要求、并发刷新语义、依赖追踪 | ⚠️ |
-| 1.1.22 | `CREATE POLICY` | 已迁移到 `DdlExecutor`：`parseCreatePolicy` 解析 `ON table / AS PERMISSIVE|RESTRICTIVE / FOR cmd / TO roles / USING / WITH CHECK`，`executeCreatePolicy` 校验表存在并写入 RLS policy 文件；USING/WITH CHECK 已通过关系感知扫描接入查询/更新/删除和结构化 DML 来源关系，默认 WITH CHECK、PUBLIC、基础策略组合、表 owner/角色属性绕过、无策略/求值失败 fail-closed 均已验证；仍缺少完整 role/owner 解析、ACL 组合和 ALTER POLICY 完整语义 | ⚠️ |
+| 1.1.22 | `CREATE POLICY` | 已迁移到 `DdlExecutor`：`parseCreatePolicy` 解析 `ON table / AS PERMISSIVE|RESTRICTIVE / FOR cmd / TO roles / USING / WITH CHECK`，`executeCreatePolicy` 校验表存在并写入 RLS policy 文件；USING/WITH CHECK 已通过关系感知扫描接入查询/更新/删除和结构化 DML 来源关系，默认 WITH CHECK、PUBLIC、基础策略组合、INHERIT/NOINHERIT、表 owner/角色属性绕过、无策略/求值失败 fail-closed 均已验证；仍缺少完整 owner 解析、ACL 组合和 ALTER POLICY 完整语义 | ⚠️ |
 | 1.1.23 | `CREATE PROCEDURE` | 基本创建已落地，`DdlExecutor` 按分号切分 body 并调用 `createProcedure`；仍缺少语言运行时、事务控制规则、异常、变量、权限属性 | ⚠️ |
 | 1.1.24 | `CREATE ROLE` / `CREATE USER` | 已写入 `pg_authid`，成员关系写入 `pg_auth_members`；主要角色属性、SCRAM 密码、`VALID UNTIL`、连接数限制和递归成员匹配已接入；仍缺完整 ACL、admin option 执行和 owner/依赖语义 | ⚠️ |
 | 1.1.25 | `CREATE SCHEMA` | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义 | ⚠️ |
@@ -493,12 +494,12 @@
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
-| 11.1 | 用户/角色 catalog | 已统一到 `pg_authid`/`pg_auth_members`；主要角色属性、SCRAM、password expiration、连接数限制和递归 membership 已执行；完整 ACL、admin option、owner/依赖语义仍缺 | ⚠️ |
+| 11.1 | 用户/角色 catalog | 已统一到 `pg_authid`/`pg_auth_members`；主要角色属性、SCRAM、password expiration、连接数限制、原始 membership 和 `INHERIT/NOINHERIT` 有效权限边界已执行；完整 ACL、admin option、owner/依赖语义仍缺 | ⚠️ |
 | 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配、IPv4/IPv6 及角色/数据库匹配和 TLS；缺少 OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
 | 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果和常见单表 RowDescription 元数据；缺少数组等复杂类型 I/O、扩展消息、holdable/scrollable portal 和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
 | 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
-| 11.6 | RLS | policy 文件和 USING/WITH CHECK 关系感知扫描已接入查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、`pg_authid` 的 SUPERUSER/BYPASSRLS 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、策略求值失败 fail-closed；完整 role/owner 解析和 ACL 组合语义仍缺 | ⚠️ |
+| 11.6 | RLS | policy 文件和 USING/WITH CHECK 关系感知扫描已接入查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、INHERIT/NOINHERIT、表 owner、`pg_authid` 的 SUPERUSER/BYPASSRLS 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、策略求值失败 fail-closed；完整 owner 解析和 ACL 组合语义仍缺 | ⚠️ |
 | 11.7 | SECURITY DEFINER/INVOKER | 函数/过程缺少完整 security definer/invoker、search_path 安全规则 | ❌ |
 | 11.8 | 审计 | 项目有 audit log；PG 核心不内置同等 audit，通常靠扩展 | — |
 

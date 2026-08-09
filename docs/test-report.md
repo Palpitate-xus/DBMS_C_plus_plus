@@ -35,6 +35,7 @@
 - 协议日期时间/UUID binary 回归：验证 `date`、`time`、秒精度 `timestamp`/`timestamptz` 和 `uuid` 的 binary 参数、binary 结果、OID/格式元数据及单列空格值不被拆分。
 - 协议 portal 分页回归：验证 `Execute maxRows` 分批返回、未耗尽时发送 `PortalSuspended`、耗尽时发送 `CommandComplete`，以及耗尽 portal 再执行不重复返回数据。
 - 协议 ACL 回归：alice 将 `SELECT` 授予 `analyst`，bob 通过角色继承读取表数据；bob 未获得 `INSERT` 时真实协议返回权限错误。
+- 角色继承边界回归：`NOINHERIT` 用户保留原始成员关系但不获得父角色 ACL/RLS 权限，切换为 `INHERIT` 后两条权限路径同时生效；`pg_hba.conf` 角色匹配仍使用原始成员关系。
 - 协议错误恢复回归：验证扩展查询错误后的 Bind/Execute 被忽略至 Sync、Sync 后连接可继续查询，以及事务外错误返回 `ReadyForQuery('I')`。
 - 协议 backend 隔离回归：双连接验证事务 ID/快照不串线，未提交行不可见，ROLLBACK 后状态清理，连接断开回滚未完成事务，COMMIT 后新事务可见；另覆盖 `START TRANSACTION` 选项与 `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` 路由。
 - SQL 统计模块回归：`tests/sql_stats_test.cpp` 验证字符串/数字常量归一化、引号标识符区分、调用次数与耗时聚合、数据库过滤及 reset。
@@ -869,7 +870,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 **实际结果** ✅ `Policy created`, `RLS enabled`
 
-运行时回归还验证了：`USING (owner = current_user)` 只返回当前用户行；显式 `TO public` 按 PUBLIC 生效；多个默认 permissive 策略按 OR 组合，`AS RESTRICTIVE` 按 AND 组合；`FOR ALL` 省略 `WITH CHECK` 时继承 `USING`，阻止越权写入；表 owner、`pg_authid.rolsuper`/`rolbypassrls` 绕过普通 RLS，`FORCE ROW LEVEL SECURITY` 重新执行策略；owner 同步持久化到正式 schema 和 `pg_class.relowner`，`ALTER TABLE ... OWNER TO` 会立即改变 RLS 行为。普通查询、删除以及 `UPDATE ... FROM` 的来源扫描均不再暴露其他用户行；启用 RLS 但没有适用策略时默认返回零行。策略解析/求值失败会安全拒绝该扫描。
+运行时回归还验证了：`USING (owner = current_user)` 只返回当前用户行；显式 `TO public` 按 PUBLIC 生效；多个默认 permissive 策略按 OR 组合，`AS RESTRICTIVE` 按 AND 组合；`FOR ALL` 省略 `WITH CHECK` 时继承 `USING`，阻止越权写入；`NOINHERIT` 用户不匹配父角色策略；表 owner、`pg_authid.rolsuper`/`rolbypassrls` 绕过普通 RLS，`FORCE ROW LEVEL SECURITY` 重新执行策略；owner 同步持久化到正式 schema 和 `pg_class.relowner`，`ALTER TABLE ... OWNER TO` 会立即改变 RLS 行为。普通查询、删除以及 `UPDATE ... FROM` 的来源扫描均不再暴露其他用户行；启用 RLS 但没有适用策略时默认返回零行。策略解析/求值失败会安全拒绝该扫描。
 
 ---
 

@@ -203,12 +203,16 @@ static void test_rls_visible_source_scan() {
     const std::string superName = "rls_super_policy_test";
     const std::string bypassName = "rls_bypass_policy_test";
     const std::string ownerName = "rls_owner_policy_test";
-    const auto ensureRole = [&](const std::string& name, bool superuser, bool bypass) {
+    const std::string inheritedParentName = "rls_inherited_parent_test";
+    const std::string noinheritMemberName = "rls_noinherit_member_test";
+    const auto ensureRole = [&](const std::string& name, bool superuser, bool bypass,
+                                bool inherit = true) {
         auto account = auth.getAuthIdByName(name);
         dbms::PgAuthIdRow row = account.value_or(dbms::PgAuthIdRow{});
         row.rolname = name;
         row.rolsuper = superuser;
         row.rolbypassrls = bypass;
+        row.rolinherit = inherit;
         row.rolcanlogin = true;
         if (account) {
             assert(auth.updateAuthId(account->oid, row));
@@ -220,7 +224,42 @@ static void test_rls_visible_source_scan() {
     ensureRole(superName, true, false);
     ensureRole(bypassName, false, true);
     ensureRole(ownerName, false, false);
+    ensureRole(inheritedParentName, false, false);
+    ensureRole(noinheritMemberName, false, false, false);
+    const auto inheritedParent = auth.getAuthIdByName(inheritedParentName);
+    const auto noinheritMember = auth.getAuthIdByName(noinheritMemberName);
+    assert(inheritedParent && noinheritMember);
+    dbms::PgAuthMembersRow roleMembership;
+    roleMembership.roleid = inheritedParent->oid;
+    roleMembership.member = noinheritMember->oid;
+    roleMembership.grantor = inheritedParent->oid;
+    auth.removeAuthMember(inheritedParent->oid, noinheritMember->oid);
+    auth.addAuthMember(roleMembership);
     auth.persistAll();
+
+    assert(userIsMemberOfRole(noinheritMemberName, inheritedParentName));
+    assert(!userHasRole(noinheritMemberName, inheritedParentName));
+    assert(!ddl.executeSql("CREATE TABLE inherited_acl (id INT PRIMARY KEY)", s));
+    g_engine.grant(db, "inherited_acl", inheritedParentName,
+                   dbms::StorageEngine::TablePrivilege::Select);
+    assert(!g_engine.hasPermission(db, "inherited_acl", noinheritMemberName,
+                                   dbms::StorageEngine::TablePrivilege::Select));
+    assert(!ddl.executeSql(
+        "CREATE POLICY inherited_policy ON inherited_acl FOR SELECT TO " +
+            inheritedParentName + " USING (true)", s));
+    assert(g_engine.getApplicablePolicies(db, "inherited_acl", "SELECT",
+                                          noinheritMemberName).empty());
+
+    auto inheritedMember = auth.getAuthIdByName(noinheritMemberName);
+    assert(inheritedMember);
+    inheritedMember->rolinherit = true;
+    assert(auth.updateAuthId(inheritedMember->oid, *inheritedMember));
+    auth.persistAll();
+    assert(userHasRole(noinheritMemberName, inheritedParentName));
+    assert(g_engine.hasPermission(db, "inherited_acl", noinheritMemberName,
+                                  dbms::StorageEngine::TablePrivilege::Select));
+    assert(g_engine.getApplicablePolicies(db, "inherited_acl", "SELECT",
+                                          noinheritMemberName).size() == 1);
 
     assert(!ddl.executeSql(
         "CREATE TABLE policy_bypass (id INT PRIMARY KEY)", s));
@@ -311,6 +350,8 @@ static void test_rls_visible_source_scan() {
     assert(auth.dropAuthId(auth.getAuthIdByName(superName)->oid));
     assert(auth.dropAuthId(auth.getAuthIdByName(bypassName)->oid));
     assert(auth.dropAuthId(auth.getAuthIdByName(ownerName)->oid));
+    assert(auth.dropAuthId(auth.getAuthIdByName(inheritedParentName)->oid));
+    assert(auth.dropAuthId(auth.getAuthIdByName(noinheritMemberName)->oid));
     auth.persistAll();
 
     dbms::StorageEngine::setRLSUser("");

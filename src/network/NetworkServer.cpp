@@ -1063,7 +1063,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         startup.parameters.count("database") ? startup.parameters.at("database") : "info",
         username, clientIp,
         [](const std::string& member, const std::string& role) {
-            return userHasRole(member, role);
+            return userIsMemberOfRole(member, role);
         });
     if (hbaRecords.empty() || authMethod == HbaMethod::Reject) {
         protocol.sendErrorResponse("FATAL", "28000",

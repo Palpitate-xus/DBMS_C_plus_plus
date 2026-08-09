@@ -24,6 +24,11 @@ bool dropRole(const std::string& roleName);
 int grantRoleToUser(const std::string& roleName, const std::string& username);
 bool revokeRoleFromUser(const std::string& roleName, const std::string& username);
 std::vector<std::string> getUserRoles(const std::string& username);
+// Raw membership is used by role selectors such as pg_hba.conf. It does not
+// imply inherited privileges; privilege checks must use userHasRole().
+bool userIsMemberOfRole(const std::string& username, const std::string& roleName);
+// Effective membership for ACL/RLS checks. A NOINHERIT login role does not
+// automatically receive privileges from its memberships.
 bool userHasRole(const std::string& username, const std::string& roleName);
 bool userIsAdminViaRole(const std::string& username);
 

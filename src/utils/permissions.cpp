@@ -98,7 +98,7 @@ int grantRoleToUser(const std::string& roleName, const std::string& username) {
     const auto role = authByName(roleName);
     const auto member = authByName(username);
     if (!role || !member) return -1;
-    if (role->oid == member->oid || userHasRole(roleName, username)) return -3;
+    if (role->oid == member->oid || userIsMemberOfRole(roleName, username)) return -3;
     for (const auto& relation : authCatalog().findAuthMembers(role->oid)) {
         if (relation.member == member->oid) return -2;
     }
@@ -131,12 +131,18 @@ std::vector<std::string> getUserRoles(const std::string& username) {
     return roles;
 }
 
-bool userHasRole(const std::string& username, const std::string& roleName) {
+bool userIsMemberOfRole(const std::string& username, const std::string& roleName) {
     const auto role = authByName(roleName);
     const auto member = authByName(username);
     if (!role || !member) return false;
     std::unordered_set<dbms::Oid> visited;
     return roleMemberRecursive(member->oid, role->oid, visited);
+}
+
+bool userHasRole(const std::string& username, const std::string& roleName) {
+    const auto member = authByName(username);
+    if (!member || !member->rolinherit) return false;
+    return userIsMemberOfRole(username, roleName);
 }
 
 bool userIsAdminViaRole(const std::string& username) {
