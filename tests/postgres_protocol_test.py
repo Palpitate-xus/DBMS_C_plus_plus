@@ -434,8 +434,19 @@ def main():
             sock, "UPDATE dml_ast SET name = 'changed' WHERE id = 2"))
         assert data_row_values(simple_query(
             sock, "SELECT name FROM dml_ast WHERE id = 2")) == [[b"changed"]]
+        returning_update = simple_query(
+            sock, "UPDATE dml_ast SET id = 8 WHERE id = 2 RETURNING id, name")
+        assert data_row_values(returning_update) == [[b"8", b"changed"]], returning_update
+        assert [field[0] for field in row_description_fields(returning_update)] == [b"id", b"name"]
+        assert any(kind == b"C" and body == b"UPDATE 1\0"
+                   for kind, body in returning_update), returning_update
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "DELETE FROM dml_ast WHERE id = 3"))
+        returning_delete = simple_query(
+            sock, "DELETE FROM dml_ast WHERE id = 8 RETURNING *")
+        assert data_row_values(returning_delete) == [[b"8", b"changed"]], returning_delete
+        assert any(kind == b"C" and body == b"DELETE 1\0"
+                   for kind, body in returning_delete), returning_delete
         assert data_row_values(simple_query(
             sock, "SELECT id FROM dml_ast WHERE id = 3")) == []
         assert any(kind == b"C" for kind, _ in simple_query(

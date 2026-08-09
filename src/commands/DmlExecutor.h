@@ -11,9 +11,21 @@
 
 #include "parser/ast.h"
 #include "Session.h"
+#include <map>
 #include <string>
+#include <vector>
 
 namespace dbms {
+
+struct DmlResult {
+    bool available = false;
+    std::vector<std::string> columns;
+    std::vector<std::vector<std::string>> rows;
+    std::string commandTag;
+};
+
+DmlResult takeLastDmlResult();
+void clearLastDmlResult();
 
 // DML AST bridge entry point.  The return value follows main.cpp::execute():
 // false means success, true means an error.  `handled` is true when this

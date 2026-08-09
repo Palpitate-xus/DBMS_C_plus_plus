@@ -11967,7 +11967,8 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
 
 DBStatus StorageEngine::remove(const std::string& dbname,
                                 const std::string& tablename,
-                                const std::vector<std::string>& conditions) {
+                                const std::vector<std::string>& conditions,
+                                std::vector<std::map<std::string, std::string>>* deletedRows) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockIntentExclusive(tablename);
@@ -12228,6 +12229,21 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             rowsToDelete.push_back(row);
         } else {
             rowsToDelete.push_back("");
+        }
+    }
+
+    // DELETE RETURNING observes the target OLD rows before tombstones are
+    // installed.  BEFORE DELETE triggers cannot mutate OLD, so capture maps
+    // here and never re-query a row after DELETE.
+    if (deletedRows) {
+        deletedRows->clear();
+        for (const auto& row : rowsToDelete) {
+            if (row.empty()) continue;
+            std::map<std::string, std::string> values;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i, dbname, true);
+            }
+            deletedRows->push_back(std::move(values));
         }
     }
 
@@ -12512,7 +12528,8 @@ DBStatus StorageEngine::remove(const std::string& dbname,
 DBStatus StorageEngine::update(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& updates,
-                                const std::vector<std::string>& conditions) {
+                                const std::vector<std::string>& conditions,
+                                std::vector<std::map<std::string, std::string>>* updatedRows) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
@@ -12899,8 +12916,6 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (!dbms::ExprHelper::evalBool(col.checkExpr, rowValues, updateTypeHints, &err, dbname)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
-                lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
             }
         }
         if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
@@ -13276,6 +13291,19 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 hidx->remove(newVal, rid);
                 hidx->insert(newVal, actualRid);
             }
+        }
+
+        // Capture the row at the storage mutation boundary.  This is the
+        // value PostgreSQL exposes through UPDATE ... RETURNING: after the
+        // row has been rebuilt and generated columns/BEFORE triggers applied,
+        // without a second predicate query that could select a different row.
+        if (updatedRows) {
+            std::map<std::string, std::string> values;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                values[tbl.cols[i].dataName] =
+                    extractColumnValue(strippedNewRow, tbl, i, dbname, true);
+            }
+            updatedRows->push_back(std::move(values));
         }
     }
 

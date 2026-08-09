@@ -378,9 +378,11 @@ public:
                                  const TableSchema& tbl);
     DBStatus update(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& updates,
-                    const std::vector<std::string>& conditions);
+                    const std::vector<std::string>& conditions,
+                    std::vector<std::map<std::string, std::string>>* updatedRows = nullptr);
     DBStatus remove(const std::string& dbname, const std::string& tablename,
-                    const std::vector<std::string>& conditions);
+                    const std::vector<std::string>& conditions,
+                    std::vector<std::map<std::string, std::string>>* deletedRows = nullptr);
     struct OrderBySpec {
         std::string colName;
         bool ascending = true;

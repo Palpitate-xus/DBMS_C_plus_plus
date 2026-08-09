@@ -12,12 +12,28 @@
 #include <cctype>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <set>
 #include <string>
+#include <utility>
 
 extern dbms::StorageEngine g_engine;
 
 namespace dbms {
+
+namespace {
+thread_local DmlResult g_lastDmlResult;
+}
+
+DmlResult takeLastDmlResult() {
+    DmlResult result = std::move(g_lastDmlResult);
+    g_lastDmlResult = {};
+    return result;
+}
+
+void clearLastDmlResult() {
+    g_lastDmlResult = {};
+}
 
 namespace {
 
@@ -166,6 +182,81 @@ bool appendCondition(const Expr* expr, std::vector<std::string>& conditions) {
 
 bool buildConditions(const ExprPtr& expr, std::vector<std::string>& conditions) {
     return appendCondition(expr.get(), conditions);
+}
+
+// Keep the first structured RETURNING slice deliberately narrow.  A column
+// projection can be captured directly at the storage mutation boundary;
+// arbitrary expressions remain on the legacy path until they have complete
+// row evaluation and PostgreSQL type metadata.
+bool buildReturningColumns(const std::vector<SelectItem>& returning,
+                           const TableSchema& table,
+                           std::vector<std::string>& columns,
+                           std::vector<std::string>& names) {
+    columns.clear();
+    names.clear();
+    for (const auto& item : returning) {
+        const auto* ref = item.expr ? dynamic_cast<const ColumnRefExpr*>(item.expr.get()) : nullptr;
+        const auto* star = item.expr ? dynamic_cast<const LiteralExpr*>(item.expr.get()) : nullptr;
+        if (star && star->value == "*") {
+            if (!item.alias.empty()) return false;
+            for (size_t i = 0; i < table.len; ++i) {
+                columns.push_back(table.cols[i].dataName);
+                names.push_back(table.cols[i].dataName);
+            }
+            continue;
+        }
+        if (!ref || !ref->schema.empty() || !ref->table.empty()) return false;
+        const std::string column = identifier(ref->column);
+        if (column == "*") {
+            if (!item.alias.empty()) return false;
+            for (size_t i = 0; i < table.len; ++i) {
+                columns.push_back(table.cols[i].dataName);
+                names.push_back(table.cols[i].dataName);
+            }
+            continue;
+        }
+        bool found = false;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == column) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+        columns.push_back(column);
+        names.push_back(item.alias.empty() ? column : identifier(item.alias));
+    }
+    return !columns.empty();
+}
+
+void publishReturning(const std::vector<std::string>& columns,
+                      const std::vector<std::string>& names,
+                      const std::vector<std::map<std::string, std::string>>& rows,
+                      const std::string& command) {
+    g_lastDmlResult.available = true;
+    g_lastDmlResult.columns = names;
+    g_lastDmlResult.commandTag = command + " " + std::to_string(rows.size());
+    g_lastDmlResult.rows.reserve(rows.size());
+    for (const auto& source : rows) {
+        std::vector<std::string> row;
+        row.reserve(columns.size());
+        for (const auto& column : columns) {
+            const auto it = source.find(column);
+            row.push_back(it == source.end() || it->second.empty() ? "NULL" : it->second);
+        }
+        g_lastDmlResult.rows.push_back(std::move(row));
+    }
+}
+
+void printReturningRows(const DmlResult& result) {
+    for (const auto& row : result.rows) {
+        std::ostringstream line;
+        for (size_t i = 0; i < row.size(); ++i) {
+            if (i != 0) line << ' ';
+            line << row[i];
+        }
+        std::cout << line.str() << std::endl;
+    }
 }
 
 bool referencesColumn(const Expr* expr) {
@@ -399,13 +490,27 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         fallback = true;
         return false;
     }
+    const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    std::vector<std::string> returningColumns;
+    std::vector<std::string> returningNames;
+    if (!stmt.returning.empty() &&
+        !buildReturningColumns(stmt.returning, table, returningColumns, returningNames)) {
+        fallback = true;
+        return false;
+    }
+    std::vector<std::map<std::string, std::string>> updatedRows;
     const DBStatus status = g_engine.update(
-        s.currentDB, resolvedTable, updates, conditions);
+        s.currentDB, resolvedTable, updates, conditions,
+        stmt.returning.empty() ? nullptr : &updatedRows);
     if (status != DBStatus::OK) {
         std::cout << "Update failed" << std::endl;
         return true;
     }
     std::cout << "Update done" << std::endl;
+    if (!stmt.returning.empty()) {
+        publishReturning(returningColumns, returningNames, updatedRows, "UPDATE");
+        printReturningRows(g_lastDmlResult);
+    }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;
 }
@@ -432,13 +537,27 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
         fallback = true;
         return false;
     }
+    const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    std::vector<std::string> returningColumns;
+    std::vector<std::string> returningNames;
+    if (!stmt.returning.empty() &&
+        !buildReturningColumns(stmt.returning, table, returningColumns, returningNames)) {
+        fallback = true;
+        return false;
+    }
+    std::vector<std::map<std::string, std::string>> deletedRows;
     const DBStatus status = g_engine.remove(
-        s.currentDB, resolvedTable, conditions);
+        s.currentDB, resolvedTable, conditions,
+        stmt.returning.empty() ? nullptr : &deletedRows);
     if (status != DBStatus::OK) {
         std::cout << "Delete failed" << std::endl;
         return true;
     }
     std::cout << "Delete done" << std::endl;
+    if (!stmt.returning.empty()) {
+        publishReturning(returningColumns, returningNames, deletedRows, "DELETE");
+        printReturningRows(g_lastDmlResult);
+    }
     g_engine.analyzeTable(s.currentDB, resolvedTable);
     return false;
 }
@@ -450,6 +569,7 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     handled = false;
     if (parsedCmd != SqlCommand::Insert && parsedCmd != SqlCommand::Update &&
         parsedCmd != SqlCommand::Delete) return false;
+    clearLastDmlResult();
 
     SQLParser parser;
     // sql is normalized by the legacy entry point and may have changed the
@@ -475,11 +595,11 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         error = executeInsert(*stmt, s, fallback);
     } else if (parsedCmd == SqlCommand::Update) {
         const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
-        if (!stmt || stmt->fromClause || !stmt->returning.empty()) return false;
+        if (!stmt || stmt->fromClause) return false;
         error = executeUpdate(*stmt, s, fallback);
     } else {
         const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
-        if (!stmt || stmt->usingClause || !stmt->returning.empty() || stmt->only) return false;
+        if (!stmt || stmt->usingClause || stmt->only) return false;
         error = executeDelete(*stmt, s, fallback);
     }
     if (fallback) {

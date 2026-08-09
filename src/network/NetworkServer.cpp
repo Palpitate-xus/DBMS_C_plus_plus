@@ -1,4 +1,5 @@
 #include "NetworkServer.h"
+#include "commands/DmlExecutor.h"
 #include "TableManage.h"
 #include "permissions.h"
 #include "PostgresProtocol.h"
@@ -657,6 +658,7 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
 
 QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     QueryResult result;
+    dbms::clearLastDmlResult();
     std::string trimmed = trimText(sql);
     if (trimmed.empty()) {
         result.commandTag.clear();
@@ -680,6 +682,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
         }
         outputText = output.str();
     }
+    const dbms::DmlResult structuredDml = dbms::takeLastDmlResult();
     auto end = std::chrono::steady_clock::now();
     double elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
     if (elapsedMs > g_slowQueryThresholdMs) {
@@ -703,6 +706,17 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
             result.sqlState = "XX000";
         }
         dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, false);
+        return result;
+    }
+
+    if (structuredDml.available) {
+        result.resultSet = true;
+        result.columns = structuredDml.columns;
+        result.rows = structuredDml.rows;
+        result.columnDescriptions = describeProtocolColumns(result, sql, session);
+        result.commandTag = structuredDml.commandTag;
+        dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true,
+                                   result.rows.size());
         return result;
     }
 
