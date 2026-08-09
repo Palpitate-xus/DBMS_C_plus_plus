@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版单源表 MERGE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；USING/WITH CHECK 形式的 RLS 关系感知扫描也已统一接入查询/更新/删除和结构化 DML 来源关系，并支持默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、INHERIT/NOINHERIT 和角色属性绕过；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表/复杂 UPDATE/DELETE、MERGE 的完整 WHEN/source/RETURNING 语义、RLS 的完整 owner/ACL 语义、触发器函数运行时、CLUSTER/REPLICA 等动作仍由 legacy 或 fail-closed 路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版单源表 MERGE、三类 DML 的列投影和受限标量表达式 RETURNING 以及视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；USING/WITH CHECK 形式的 RLS 关系感知扫描也已统一接入查询/更新/删除和结构化 DML 来源关系，并支持默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、INHERIT/NOINHERIT 和角色属性绕过；复杂/尚未迁移的 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表/复杂 UPDATE/DELETE、MERGE 的完整 WHEN/source/RETURNING 语义、RLS 的完整 owner/ACL 语义、触发器函数运行时、CLUSTER/REPLICA 等动作仍由 legacy 或 fail-closed 路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -239,7 +239,7 @@
 | 1.1.1 | `ALTER DEFAULT PRIVILEGES` | 只解析 `GRANT` 路径；缺少完整 `REVOKE`、对象类型、角色继承、schema/default ACL 语义 | ⚠️ |
 | 1.1.2 | `ALTER SCHEMA` | 主要支持 `RENAME TO`；缺少 owner、权限、依赖重写 | ⚠️ |
 | 1.1.3 | `ALTER SYSTEM` | 只写项目 `dbms.conf` 中有限参数；不是 PG GUC 体系 | ⚠️ |
-| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（正式 schema/`pg_class.relowner`）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD CONSTRAINT(CHECK/UNIQUE/FK/PRIMARY KEY)、DROP CONSTRAINT（含 `IF EXISTS`）、TRIGGER/RLS/SET SCHEMA/分区、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；仍缺 `ONLY`、真正 SET TABLESPACE 迁移、真正延迟约束队列 | 🔄 |
+| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（正式 schema/`pg_class.relowner`）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD CONSTRAINT(CHECK/UNIQUE/FK/PRIMARY KEY)、DROP CONSTRAINT（含 `IF EXISTS`）、TRIGGER/RLS/SET SCHEMA/分区（RLS、ATTACH/DETACH、trigger enable/disable 已走 typed AST）、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；仍缺 `ONLY`、真正 SET TABLESPACE 迁移、真正延迟约束队列 | 🔄 |
 | 1.1.5 | `ALTER USER` / `ALTER ROLE` | 缺少真实 superuser/createdb/replication/bypassrls 权限位、连接限制、valid until、配置参数执行语义 | ⚠️ |
 | 1.1.6 | `ALTER VIEW` | 缺少 owner、options、column default、安全屏障、security invoker | ⚠️ |
 | 1.1.7 | `ANALYZE` | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、`VERBOSE` 输出、系统统计视图集成 | ⚠️ |
@@ -662,6 +662,7 @@
 - **2026-08-09（RLS 可见性边界）**：移除旧的策略字符串到 legacy 条件解析器的转换；查询、更新、删除和结构化 DML 来源统一使用关系感知 RLS 扫描，补充 `current_user` 表达式求值、普通查询/删除和来源 DML 回归。随后补齐默认 `WITH CHECK`、PUBLIC 以及基础 PERMISSIVE/RESTRICTIVE 组合；完整角色/owner/ACL 组合语义仍待实现。
 
 - **2026-08-09**：DML AST executor 扩展：窄版单源表 MERGE（单个 MATCHED UPDATE/DO NOTHING + 单个 NOT MATCHED INSERT/DO NOTHING）已从 `main.cpp` 字符串执行器迁移到 `DmlExecutor`；INSERT values 表达式改为保留 ColumnRef AST，重复 source-to-target 匹配在存储修改前拒绝，并新增 parser/执行回归。MERGE 的多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query、RETURNING 和完整并发语义仍待迁移。
+- **2026-08-09**：ALTER TABLE typed 路径扩展：RLS enable/disable/force/no-force、分区 ATTACH/DETACH、trigger enable/disable 已由 parser AST + DdlExecutor 消费，删除 `main.cpp` 中对应字符串分支；新增 AST 字段、分区规格传递、RLS/trigger 持久化回归。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。

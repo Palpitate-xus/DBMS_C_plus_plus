@@ -6691,14 +6691,63 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 auto opts = collectParenthesized(tokens, pos);
                 for (const auto& o : opts) if (o != ",") sub.options[o] = "";
             }
+        } else if (kw == "enable" && pos + 3 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "row" &&
+                   toLower(tokens[pos + 2]) == "level" &&
+                   toLower(tokens[pos + 3]) == "security") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::EnableRowLevelSecurity;
+            pos += 4;
+        } else if (kw == "disable" && pos + 3 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "row" &&
+                   toLower(tokens[pos + 2]) == "level" &&
+                   toLower(tokens[pos + 3]) == "security") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::DisableRowLevelSecurity;
+            pos += 4;
+        } else if (kw == "force" && pos + 3 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "row" &&
+                   toLower(tokens[pos + 2]) == "level" &&
+                   toLower(tokens[pos + 3]) == "security") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::ForceRowLevelSecurity;
+            pos += 4;
+        } else if (kw == "no" && pos + 4 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "force" &&
+                   toLower(tokens[pos + 2]) == "row" &&
+                   toLower(tokens[pos + 3]) == "level" &&
+                   toLower(tokens[pos + 4]) == "security") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::NoForceRowLevelSecurity;
+            pos += 5;
+        } else if (kw == "enable" && pos + 1 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "trigger") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::EnableTrigger;
+            pos += 2;
+            if (pos < tokens.size()) sub.name = tokens[pos++];
+        } else if (kw == "disable" && pos + 1 < tokens.size() &&
+                   toLower(tokens[pos + 1]) == "trigger") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::DisableTrigger;
+            pos += 2;
+            if (pos < tokens.size()) sub.name = tokens[pos++];
         } else if (kw == "attach") {
             recognized = true;
             sub.action = AlterTableStmt::Action::AttachPartition; pos += 2; // ATTACH PARTITION
-            if (pos < tokens.size()) sub.partitionSpec = tokens[pos++];
+            if (pos < tokens.size()) sub.name = tokens[pos++];
+            int depth = 0;
+            while (pos < tokens.size() && tokens[pos] != ";") {
+                if (tokens[pos] == "(") ++depth;
+                else if (tokens[pos] == ")" && depth > 0) --depth;
+                if (tokens[pos] == "," && depth == 0) break;
+                if (!sub.partitionSpec.empty()) sub.partitionSpec += " ";
+                sub.partitionSpec += tokens[pos++];
+            }
         } else if (kw == "detach") {
             recognized = true;
             sub.action = AlterTableStmt::Action::DetachPartition; pos += 2; // DETACH PARTITION
-            if (pos < tokens.size()) sub.partitionSpec = tokens[pos++];
+            if (pos < tokens.size()) sub.name = tokens[pos++];
         } else if (kw == "inherit") {
             recognized = true;
             sub.action = AlterTableStmt::Action::Inherit; ++pos;

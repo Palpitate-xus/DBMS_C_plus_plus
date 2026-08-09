@@ -3,6 +3,7 @@
 #include "parser/parser.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -49,10 +50,85 @@ static void test_set_tablespace() {
     std::cout << "[ALTER_ONLY] SET TABLESPACE OK" << std::endl;
 }
 
+static void test_typed_security_partition_and_trigger_actions() {
+    std::string db = testDbPath("alter_typed_actions");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    dbms::SQLParser parser;
+    const auto executeAlter = [&](const std::string& sql) {
+        bool handled = false;
+        const bool error = dbms::tryDdlBridge(
+            sql, dbms::SqlCommand::AlterTable, s, handled);
+        assert(handled);
+        return error;
+    };
+
+    auto rlsAst = parser.parse("ALTER TABLE secure ENABLE ROW LEVEL SECURITY");
+    assert(rlsAst.success);
+    auto* rls = dynamic_cast<dbms::AlterTableStmt*>(rlsAst.stmt.get());
+    assert(rls && rls->subCommands.size() == 1);
+    assert(rls->subCommands[0].action ==
+           dbms::AlterTableStmt::Action::EnableRowLevelSecurity);
+
+    assert(!ddl.executeSql("CREATE TABLE secure (id INT)", s));
+    assert(!executeAlter("ALTER TABLE secure ENABLE ROW LEVEL SECURITY"));
+    auto schema = g_engine.getTableSchema(db, "secure");
+    assert(schema.rowLevelSecurity && !schema.forceRowLevelSecurity);
+    assert(!executeAlter("ALTER TABLE secure FORCE ROW LEVEL SECURITY"));
+    schema = g_engine.getTableSchema(db, "secure");
+    assert(schema.rowLevelSecurity && schema.forceRowLevelSecurity);
+    assert(!executeAlter("ALTER TABLE secure NO FORCE ROW LEVEL SECURITY"));
+    schema = g_engine.getTableSchema(db, "secure");
+    assert(schema.rowLevelSecurity && !schema.forceRowLevelSecurity);
+    assert(!executeAlter("ALTER TABLE secure DISABLE ROW LEVEL SECURITY"));
+    schema = g_engine.getTableSchema(db, "secure");
+    assert(!schema.rowLevelSecurity && !schema.forceRowLevelSecurity);
+
+    assert(!ddl.executeSql(
+        "CREATE TABLE parent (id INT, yr INT) PARTITION BY RANGE (yr)", s));
+    auto attachAst = parser.parse(
+        "ALTER TABLE parent ATTACH PARTITION p2 FOR VALUES FROM (10) TO (20)");
+    assert(attachAst.success);
+    auto* attach = dynamic_cast<dbms::AlterTableStmt*>(attachAst.stmt.get());
+    assert(attach && attach->subCommands.size() == 1);
+    assert(attach->subCommands[0].action ==
+           dbms::AlterTableStmt::Action::AttachPartition);
+    assert(attach->subCommands[0].name == "p2");
+    assert(attach->subCommands[0].partitionSpec.find("FOR") != std::string::npos);
+    assert(attach->subCommands[0].partitionSpec.find("FROM") != std::string::npos);
+    assert(attach->subCommands[0].partitionSpec.find("TO") != std::string::npos);
+    assert(!executeAlter(
+        "ALTER TABLE parent ATTACH PARTITION p2 FOR VALUES FROM (10) TO (20)"));
+    schema = g_engine.getTableSchema(db, "parent");
+    assert(std::any_of(schema.rangePartitions.begin(), schema.rangePartitions.end(),
+                       [](const auto& p) { return p.first == "p2"; }));
+    assert(!executeAlter("ALTER TABLE parent DETACH PARTITION p2"));
+    schema = g_engine.getTableSchema(db, "parent");
+    assert(std::none_of(schema.rangePartitions.begin(), schema.rangePartitions.end(),
+                        [](const auto& p) { return p.first == "p2"; }));
+
+    assert(!ddl.executeSql("CREATE TABLE trigger_target (id INT)", s));
+    assert(g_engine.createTrigger(db, {
+        "typed_trigger", "before", "insert", "trigger_target", "", "", true, true
+    }) == dbms::DBStatus::OK);
+    assert(!executeAlter("ALTER TABLE trigger_target DISABLE TRIGGER typed_trigger"));
+    auto triggers = g_engine.getAllTriggers(db);
+    assert(triggers.size() == 1 && !triggers[0].enabled);
+    assert(!executeAlter("ALTER TABLE trigger_target ENABLE TRIGGER typed_trigger"));
+    triggers = g_engine.getAllTriggers(db);
+    assert(triggers.size() == 1 && triggers[0].enabled);
+
+    cleanup(db);
+    std::cout << "[ALTER_ONLY] typed security/partition/trigger actions OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_only_parser();
     test_set_tablespace();
+    test_typed_security_partition_and_trigger_actions();
     std::cout << "[ALTER_ONLY] all passed" << std::endl;
     return 0;
 }

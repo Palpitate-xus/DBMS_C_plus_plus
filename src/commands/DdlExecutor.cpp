@@ -446,6 +446,14 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                     case dbms::AlterTableStmt::Action::ResetOptions:
                     case dbms::AlterTableStmt::Action::SetLogged:
                     case dbms::AlterTableStmt::Action::SetUnlogged:
+                    case dbms::AlterTableStmt::Action::EnableRowLevelSecurity:
+                    case dbms::AlterTableStmt::Action::DisableRowLevelSecurity:
+                    case dbms::AlterTableStmt::Action::ForceRowLevelSecurity:
+                    case dbms::AlterTableStmt::Action::NoForceRowLevelSecurity:
+                    case dbms::AlterTableStmt::Action::EnableTrigger:
+                    case dbms::AlterTableStmt::Action::DisableTrigger:
+                    case dbms::AlterTableStmt::Action::AttachPartition:
+                    case dbms::AlterTableStmt::Action::DetachPartition:
                     case dbms::AlterTableStmt::Action::SetStatistics:
                     case dbms::AlterTableStmt::Action::Inherit:
                     case dbms::AlterTableStmt::Action::NoInherit:
@@ -555,6 +563,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             case AlterTableStmt::Action::ResetOptions:
             case AlterTableStmt::Action::SetLogged:
             case AlterTableStmt::Action::SetUnlogged:
+            case AlterTableStmt::Action::EnableRowLevelSecurity:
+            case AlterTableStmt::Action::DisableRowLevelSecurity:
+            case AlterTableStmt::Action::ForceRowLevelSecurity:
+            case AlterTableStmt::Action::NoForceRowLevelSecurity:
+            case AlterTableStmt::Action::EnableTrigger:
+            case AlterTableStmt::Action::DisableTrigger:
+            case AlterTableStmt::Action::AttachPartition:
+            case AlterTableStmt::Action::DetachPartition:
             case AlterTableStmt::Action::SetStatistics:
             case AlterTableStmt::Action::Inherit:
             case AlterTableStmt::Action::NoInherit:
@@ -671,6 +687,55 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             case AlterTableStmt::Action::SetUnlogged:
                 status = g_engine.alterTableSetLogged(s.currentDB, tableName, false);
                 if (!alterStatusOk(status, "Table")) return true;
+                break;
+            case AlterTableStmt::Action::EnableRowLevelSecurity:
+                status = g_engine.enableRowLevelSecurity(s.currentDB, tableName, false);
+                if (!alterStatusOk(status, "Table")) return true;
+                break;
+            case AlterTableStmt::Action::DisableRowLevelSecurity:
+                status = g_engine.disableRowLevelSecurity(s.currentDB, tableName);
+                if (!alterStatusOk(status, "Table")) return true;
+                break;
+            case AlterTableStmt::Action::ForceRowLevelSecurity:
+                status = g_engine.enableRowLevelSecurity(s.currentDB, tableName, true);
+                if (!alterStatusOk(status, "Table")) return true;
+                break;
+            case AlterTableStmt::Action::NoForceRowLevelSecurity:
+                status = g_engine.enableRowLevelSecurity(s.currentDB, tableName, false);
+                if (!alterStatusOk(status, "Table")) return true;
+                break;
+            case AlterTableStmt::Action::EnableTrigger:
+                if (sub.name.empty()) {
+                    std::cout << "SQL syntax error: ENABLE TRIGGER requires a name" << std::endl;
+                    return true;
+                }
+                status = g_engine.enableTrigger(s.currentDB, sub.name);
+                if (!alterStatusOk(status, "Trigger")) return true;
+                break;
+            case AlterTableStmt::Action::DisableTrigger:
+                if (sub.name.empty()) {
+                    std::cout << "SQL syntax error: DISABLE TRIGGER requires a name" << std::endl;
+                    return true;
+                }
+                status = g_engine.disableTrigger(s.currentDB, sub.name);
+                if (!alterStatusOk(status, "Trigger")) return true;
+                break;
+            case AlterTableStmt::Action::AttachPartition:
+                if (sub.name.empty()) {
+                    std::cout << "SQL syntax error: ATTACH PARTITION requires a name" << std::endl;
+                    return true;
+                }
+                status = g_engine.attachPartition(s.currentDB, tableName, sub.name,
+                                                  sub.partitionSpec);
+                if (!alterStatusOk(status, "Partition")) return true;
+                break;
+            case AlterTableStmt::Action::DetachPartition:
+                if (sub.name.empty()) {
+                    std::cout << "SQL syntax error: DETACH PARTITION requires a name" << std::endl;
+                    return true;
+                }
+                status = g_engine.detachPartition(s.currentDB, tableName, sub.name);
+                if (!alterStatusOk(status, "Partition")) return true;
                 break;
             case AlterTableStmt::Action::SetSchema:
                 status = g_engine.alterTableSetSchema(s.currentDB, tableName, sub.newName);
