@@ -19,7 +19,7 @@ SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议
 
 协议参数路径已补强：Parse 返回 `ParameterDescription`，Bind 支持文本及常用类型二进制参数、NULL、参数数量/格式校验和 `$n` 安全字面量替换，numeric 采用 PostgreSQL base-10000 binary codec，date/time/秒精度 timestamp/timestamptz/uuid 也支持 binary 参数与结果，Describe/Close 会校验并管理 statement/portal 生命周期，Execute 支持基础 `maxRows` 分批返回与 `PortalSuspended`，常见单表结果填充 catalog/table schema 驱动的 RowDescription 元数据；数组等复杂类型的二进制 I/O、完整 RowDescription 类型推导和 holdable/scrollable cursor 等完整 portal 语义仍列为协议缺口。
 
-ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权；`NOINHERIT` 不自动继承成员角色权限，且协议/策略回归覆盖了继承与拒绝边界；对象 owner、完整 `GRANT OPTION` 继承/回收以及 schema/database/function ACL 仍列为后续安全缺口。
+ACL 检查已统一覆盖会话用户、递归继承角色和 `PUBLIC` 授权；`NOINHERIT` 不自动继承成员角色权限，`SET ROLE` 使用原始成员关系并切换 ACL/RLS 的有效角色；`ALTER TABLE ... OWNER TO` 已检查表所有者和目标角色可切换性。完整对象 owner、`GRANT OPTION` 继承/回收以及 schema/database/function ACL 仍列为后续安全缺口。
 
 事务运行时补强了 backend 隔离：共享 `StorageEngine` 的事务执行上下文改为当前连接工作线程局部，避免事务 ID、快照、回滚日志、savepoint、隔离级别和 `lastval` 在连接之间泄漏；连接结束时回滚未完成事务并清理上下文；跨 backend 的锁管理和提交状态仍保持全局协调，后续继续补齐更完整的 session/statement 生命周期语义。
 

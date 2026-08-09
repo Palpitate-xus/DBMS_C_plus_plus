@@ -9,6 +9,8 @@
 
 ACL 回归现已覆盖表/列权限对会话用户、递归继承角色和 `PUBLIC` 的解析；`NOINHERIT` 会话角色不会自动获得成员角色权限，原始成员关系与有效权限关系已分开；角色授权可通过真实 PostgreSQL 协议生效。表 owner 已进入正式 schema/`pg_class.relowner`，并参与 RLS owner bypass；完整 ACL 对象范围、对象 owner 传播及 `GRANT OPTION` 生命周期仍未达到 PostgreSQL 语义。
 
+所有权授权回归已覆盖：非所有者即使带有旧式管理员标志也不能转移表所有权；所有者只有在能够 `SET ROLE` 到目标角色时才能转移；`SET ROLE` 使用成员关系而不是 `rolinherit`，切换后的有效角色用于 `current_user`、RLS 和表 ACL。完整对象类型 owner/ACL 传播仍有差距。
+
 RLS 回归现已覆盖默认 `WITH CHECK`、显式 `TO PUBLIC`、permissive/restrictive 策略组合、`INHERIT/NOINHERIT` 角色权限、表 owner 绕过、`pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`；复杂 owner/ACL 组合和完整 PostgreSQL policy catalog 语义仍有差距。
 
 事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志、SSI 完整语义和 DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
@@ -269,10 +271,10 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 特性 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
 | pg_hba.conf | ✅ | 🔄 | 首条匹配、hostssl/hostnossl、IPv4/IPv6 CIDR、角色/数据库别名和运行时 SCRAM 已实现；其余认证方法仍缺 |
-| 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、主要角色属性、SCRAM、递归成员匹配、有效期检查和连接数限制已接入；完整 ACL、ADMIN OPTION、owner/依赖语义仍缺 |
+| 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、主要角色属性、SCRAM、递归成员匹配、INHERIT/NOINHERIT、SET ROLE、有效期检查和连接数限制已接入；完整 ACL、ADMIN OPTION、owner/依赖语义仍缺 |
 | GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
-| **行级安全 (RLS) 执行** | ✅ | ⚠️ | USING/WITH CHECK 已接入关系感知扫描，默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner/`SUPERUSER/BYPASSRLS` 绕过和 FORCE RLS 已实现；无适用策略默认拒绝、策略求值失败安全回退；对象 owner/角色继承和 ACL 组合语义仍不完整 |
+| **行级安全 (RLS) 执行** | ✅ | ⚠️ | USING/WITH CHECK 已接入关系感知扫描，默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner/`SUPERUSER/BYPASSRLS` 绕过、有效角色和 FORCE RLS 已实现；无适用策略默认拒绝、策略求值失败安全回退；对象 owner/ACL 组合语义仍不完整 |
 | **SCRAM-SHA-256 完整协议** | ✅ | 🔄 | 已实现 catalog verifier、challenge/response、pg_hba 运行时决策和 E2E；缺 channel binding 与完整 SASL 语义 |
 | **LDAP/Kerberos/GSSAPI/PAM/RADIUS** | ✅ | ❌ | 缺 |
 | **SSL 双向认证** | ✅ | ⚠️ TLSWrapper；服务端默认 fail-closed，但缺少 PostgreSQL SSL 协商、客户端证书认证和 channel binding | |

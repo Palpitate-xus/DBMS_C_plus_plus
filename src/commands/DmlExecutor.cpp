@@ -7,6 +7,7 @@
 #include "commands/TableManage.h"
 #include "expression/ExprEvaluator.h"
 #include "parser/parser.h"
+#include "permissions.h"
 
 #include <algorithm>
 #include <cctype>
@@ -80,13 +81,13 @@ std::string resolveTable(Session& s, const std::string& name) {
 }
 
 bool checkInsertTablePermission(Session& s, const std::string& table) {
-    if (s.permission == 1 || isTempTable(s, table)) return true;
-    if (g_engine.hasPermission(s.currentDB, table, s.username,
+    if (sessionIsAdmin(s) || isTempTable(s, table)) return true;
+    if (g_engine.hasPermission(s.currentDB, table, effectiveSessionRole(s),
                                StorageEngine::TablePrivilege::Insert)) {
         return true;
     }
     for (const auto& permission : g_engine.getUserPermissions(
-             s.currentDB, table, s.username)) {
+             s.currentDB, table, effectiveSessionRole(s))) {
         if (permission == "insert" || permission == "all") return true;
     }
     std::cout << "permission denied on table " << table << std::endl;
@@ -127,8 +128,8 @@ bool supportsInsert(const InsertStmt& stmt) {
 
 bool checkInsertColumns(Session& s, const std::string& table,
                         const std::vector<std::string>& columns) {
-    if (s.permission == 1 || isTempTable(s, table)) return true;
-    if (!g_engine.hasColumnPermission(s.currentDB, table, s.username,
+    if (sessionIsAdmin(s) || isTempTable(s, table)) return true;
+    if (!g_engine.hasColumnPermission(s.currentDB, table, effectiveSessionRole(s),
                                       StorageEngine::TablePrivilege::Insert,
                                       columns)) {
         std::cout << "permission denied: INSERT on restricted columns of table "
@@ -362,12 +363,12 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
 
 bool checkTablePrivilege(Session& s, const std::string& table,
                          StorageEngine::TablePrivilege privilege) {
-    if (s.permission == 1 || isTempTable(s, table)) return true;
-    if (g_engine.hasPermission(s.currentDB, table, s.username, privilege)) {
+    if (sessionIsAdmin(s) || isTempTable(s, table)) return true;
+    if (g_engine.hasPermission(s.currentDB, table, effectiveSessionRole(s), privilege)) {
         return true;
     }
     for (const auto& permission : g_engine.getUserPermissions(
-             s.currentDB, table, s.username)) {
+             s.currentDB, table, effectiveSessionRole(s))) {
         const bool matches =
             (privilege == StorageEngine::TablePrivilege::Select && permission == "select") ||
             (privilege == StorageEngine::TablePrivilege::Update && permission == "update") ||
@@ -813,8 +814,8 @@ InsertSelectBuildResult buildInsertSelectRows(
                               sourceAlias, evaluator, referencedColumns)) {
         return InsertSelectBuildResult::Unsupported;
     }
-    if (hasSource && s.permission != 1 && !isTempTable(s, sourceName) &&
-        !g_engine.hasColumnPermission(s.currentDB, sourceName, s.username,
+    if (hasSource && !sessionIsAdmin(s) && !isTempTable(s, sourceName) &&
+        !g_engine.hasColumnPermission(s.currentDB, sourceName, effectiveSessionRole(s),
                                       StorageEngine::TablePrivilege::Select,
                                       std::vector<std::string>(referencedColumns.begin(),
                                                                referencedColumns.end()))) {
@@ -1701,9 +1702,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             fallback = true;
             return false;
         }
-        if (s.permission != 1 && !isTempTable(s, requestedTable) &&
+        if (!sessionIsAdmin(s) && !isTempTable(s, requestedTable) &&
             !g_engine.hasColumnPermission(
-                s.currentDB, requestedTable, s.username,
+                s.currentDB, requestedTable, effectiveSessionRole(s),
                 StorageEngine::TablePrivilege::Update, updateColumns)) {
             std::cout << "permission denied: UPDATE on restricted columns of table "
                       << requestedTable << std::endl;
@@ -2027,9 +2028,9 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
         std::cout << "SQL syntax error: empty UPDATE SET clause" << std::endl;
         return true;
     }
-    if (s.permission != 1 && !isTempTable(s, requestedTable) &&
+    if (!sessionIsAdmin(s) && !isTempTable(s, requestedTable) &&
         !g_engine.hasColumnPermission(
-            s.currentDB, requestedTable, s.username,
+            s.currentDB, requestedTable, effectiveSessionRole(s),
             StorageEngine::TablePrivilege::Update, columns)) {
         std::cout << "permission denied: UPDATE on restricted columns of table "
                   << requestedTable << std::endl;
@@ -2207,9 +2208,9 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
         std::cout << "SQL syntax error: empty UPDATE SET clause" << std::endl;
         return true;
     }
-    if (s.permission != 1 && !isTempTable(s, requestedTable) &&
+    if (!sessionIsAdmin(s) && !isTempTable(s, requestedTable) &&
         !g_engine.hasColumnPermission(
-            s.currentDB, requestedTable, s.username,
+            s.currentDB, requestedTable, effectiveSessionRole(s),
             StorageEngine::TablePrivilege::Update, columns)) {
         std::cout << "permission denied: UPDATE on restricted columns of table "
                   << requestedTable << std::endl;
@@ -2367,9 +2368,9 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         std::cout << "SQL syntax error: empty UPDATE SET clause" << std::endl;
         return true;
     }
-    if (s.permission != 1 && !isTempTable(s, requestedTable) &&
+    if (!sessionIsAdmin(s) && !isTempTable(s, requestedTable) &&
         !g_engine.hasColumnPermission(
-            s.currentDB, requestedTable, s.username,
+            s.currentDB, requestedTable, effectiveSessionRole(s),
             StorageEngine::TablePrivilege::Update, columns)) {
         std::cout << "permission denied: UPDATE on restricted columns of table "
                   << requestedTable << std::endl;

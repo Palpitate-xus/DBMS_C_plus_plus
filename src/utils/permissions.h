@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Session.h"
+
 #include <string>
 #include <vector>
 
@@ -31,6 +33,17 @@ bool userIsMemberOfRole(const std::string& username, const std::string& roleName
 // automatically receive privileges from its memberships.
 bool userHasRole(const std::string& username, const std::string& roleName);
 bool userIsAdminViaRole(const std::string& username);
+// SET ROLE is based on membership, not INHERIT: NOINHERIT users may still
+// explicitly switch into a role they are allowed to become.
+bool canSetRole(const std::string& sessionUser, const std::string& targetRole);
+// ALTER TABLE ... OWNER TO requires the effective role to own the table (or
+// be superuser) and the session user to be able to SET ROLE to the target.
+bool canAlterTableOwner(const std::string& sessionUser,
+                        const std::string& effectiveRole,
+                        const std::string& tableOwner,
+                        const std::string& targetOwner);
+std::string effectiveSessionRole(const Session& session);
+bool sessionIsAdmin(const Session& session);
 
 int checkPasswordStrength(const std::string& password);
 std::string passwordStrengthMessage(int score);

@@ -17,7 +17,8 @@
 
 | 日期 | 摘要 |
 |------|------|
-| 2026-08-09 | 表 owner 正式化：`TableSchema.owner` 与 schema 版本升级接入表所有者，CREATE/ALTER TABLE OWNER TO 同步维护 `pg_class.relowner`；RLS 普通模式按 PostgreSQL 语义让 owner 绕过，FORCE RLS 仍强制执行，并新增持久化、catalog、转移 owner 回归。 |
+| 2026-08-09 | 表 owner 正式化：`TableSchema.owner` 与 schema 版本升级接入表所有者，CREATE/ALTER TABLE OWNER TO 同步维护 `pg_class.relowner`；RLS 普通模式按 PostgreSQL 语义让 owner 绕过，FORCE RLS 仍强制执行；OWNER TO 现在要求表所有者/超级用户且能 SET ROLE 到目标角色，并新增授权拒绝回归。 |
+| 2026-08-09 | 会话角色边界收敛：SET ROLE 不再接受任意字符串，按原始成员关系授权；SET ROLE 后 `current_user`、RLS、DML ACL 和 CREATE TABLE owner 使用有效角色，超级用户切换到普通角色后不再保留管理员绕过。 |
 | 2026-08-09 | RLS 绕过边界收敛：删除用户名 `admin` 硬编码，改由 `pg_authid.rolsuper`/`rolbypassrls` 决定普通 RLS 绕过；`FORCE ROW LEVEL SECURITY` 优先强制策略，新增普通角色、超级用户、BYPASSRLS 和 FORCE 回归。 |
 | 2026-08-09 | 角色继承边界收敛：ACL/RLS 使用有效继承权限，`NOINHERIT` 会话角色不自动获得成员角色权限；原始成员关系独立供 `pg_hba.conf` 角色匹配和成员环检测使用，并新增 ACL/RLS 回归。 |
 | 2026-08-09 | RLS 语义补强：策略默认按 permissive OR 组合，`AS RESTRICTIVE` 按 AND 组合；显式 `TO PUBLIC` 与空角色列表统一匹配 PUBLIC；`ALL/UPDATE` 省略 `WITH CHECK` 时继承 `USING`；策略文件写入统一复用序列化 helper，并增加运行时回归。完整 owner/ACL 组合仍待后续。 |
@@ -270,7 +271,7 @@
 | 1.1.37 | `DROP ...` 常见对象 | table/database/view/mview/index/trigger/user/role/group/schema/domain/type/sequence/function/procedure 等部分；缺少依赖图、`CASCADE/RESTRICT` 精确行为、`IF EXISTS`/多对象列表完整支持 | ⚠️ |
 | 1.1.38 | `END` | 已作为 `COMMIT` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
 | 1.1.39 | `EXPLAIN` | 只面向 SELECT 的简化计划；缺少真实 runtime instrumentation、JIT/WAL/BUFFERS/SETTINGS 完整输出和所有语句支持 | ⚠️ |
-| 1.1.40 | `GRANT` / `REVOKE` | 支持有限 privilege 和列权限；缺少 PostgreSQL ACL item、`PUBLIC`、role inheritance/admin option/set option、对象类型全集、默认权限联动 | ⚠️ |
+| 1.1.40 | `GRANT` / `REVOKE` | 支持有限 privilege 和列权限；表/列 ACL 已支持会话用户、PUBLIC 和有效角色继承，缺少 PostgreSQL ACL item、admin option/set option、对象类型全集、默认权限联动 | ⚠️ |
 | 1.1.41 | `INSERT` | 支持 values、insert-select、无 target 或显式匹配主键/唯一约束 target 的 DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、returning 部分；缺少 `OVERRIDING`、部分/索引推断、引用子查询或其他关系的 DO UPDATE/WHERE、RETURNING OLD/NEW | ⚠️ |
 | 1.1.42 | `LISTEN` / `NOTIFY` / `UNLISTEN` | 进程内 map；缺少事务提交后发送、payload 长度/通道语义、跨进程持久服务语义 | ⚠️ |
 | 1.1.43 | `LOCK` | 支持 share/exclusive；缺少 PG 全锁模式、`NOWAIT`、`ONLY`、锁队列/冲突矩阵 | ⚠️ |
@@ -284,8 +285,8 @@
 | 1.1.51 | `SELECT` | 支持大量子集；复杂 grammar、类型推断、表达式、函数、子查询、锁、并行、planner/rewrite 差距最大 | ⚠️ |
 | 1.1.52 | `SET` / `SHOW` | 项目参数和少量 session 状态；不是 PG GUC 全体系 | ⚠️ |
 | 1.1.53 | `SET CONSTRAINTS` | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟队列在 commit 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效，per-transaction 自动清除；仍缺 constraint trigger 语义 | ⚠️ |
-| 1.1.54 | `SET ROLE` | 只改 Session 字段；缺少权限检查、role stack、session authorization 联动 | ⚠️ |
-| 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 权限矩阵和会话安全上下文完整语义 | ⚠️ |
+| 1.1.54 | `SET ROLE` | 已按 `pg_auth_members` 原始成员关系检查目标角色，SET ROLE 后 ACL/RLS/current_user 使用有效角色；仍缺 role stack、完整 session authorization 联动和 ADMIN OPTION 语义 | ⚠️ |
+| 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 完整权限矩阵和会话安全上下文完整语义 | ⚠️ |
 | 1.1.56 | `SET TRANSACTION` | BEGIN 路径已结构化隔离级别/只读选项；SET TRANSACTION 仍缺 deferrable、当前事务时序限制完整语义 | ⚠️ |
 | 1.1.57 | `TRUNCATE` | 支持 cascade/restart identity 部分；缺少 `ONLY`/多表/trigger/identity/foreign table/transactional details | ⚠️ |
 | 1.1.58 | `UPDATE` | 支持受限行级标量表达式、单源表 FROM、LIMIT/RETURNING 部分；缺少完整 FROM 多表语义、`WHERE CURRENT OF`、OLD/NEW RETURNING、复杂表达式 | ⚠️ |
@@ -498,7 +499,7 @@
 | 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配、IPv4/IPv6 及角色/数据库匹配和 TLS；缺少 OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
 | 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果和常见单表 RowDescription 元数据；缺少数组等复杂类型 I/O、扩展消息、holdable/scrollable portal 和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
-| 11.5 | ACL | 简化 privilege 文件；缺少 ACL item、PUBLIC、grant options/admin options/set options、ownership、default privileges 完整传播 | ⚠️ |
+| 11.5 | ACL | 简化 privilege 文件；表/列权限已统一解析 PUBLIC 和有效角色，OWNER TO/SET ROLE 基础授权边界已接入；缺少 ACL item、grant options/admin options/set options、对象全集和 default privileges 完整传播 | ⚠️ |
 | 11.6 | RLS | policy 文件和 USING/WITH CHECK 关系感知扫描已接入查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、INHERIT/NOINHERIT、表 owner、`pg_authid` 的 SUPERUSER/BYPASSRLS 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、策略求值失败 fail-closed；完整 owner 解析和 ACL 组合语义仍缺 | ⚠️ |
 | 11.7 | SECURITY DEFINER/INVOKER | 函数/过程缺少完整 security definer/invoker、search_path 安全规则 | ❌ |
 | 11.8 | 审计 | 项目有 audit log；PG 核心不内置同等 audit，通常靠扩展 | — |

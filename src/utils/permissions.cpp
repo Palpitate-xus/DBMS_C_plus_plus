@@ -152,6 +152,42 @@ bool userIsAdminViaRole(const std::string& username) {
     return userHasRole(username, "admin");
 }
 
+bool canSetRole(const std::string& sessionUser, const std::string& targetRole) {
+    const auto session = authByName(sessionUser);
+    const auto target = authByName(targetRole);
+    if (!session || !target) return false;
+    if (session->rolsuper || session->oid == target->oid) return true;
+    // Explicit SET ROLE follows membership itself; rolinherit only controls
+    // automatic privilege inheritance and must not grant implicit SET ROLE.
+    return userIsMemberOfRole(sessionUser, targetRole);
+}
+
+bool canAlterTableOwner(const std::string& sessionUser,
+                        const std::string& effectiveRole,
+                        const std::string& tableOwner,
+                        const std::string& targetOwner) {
+    const auto actor = authByName(effectiveRole);
+    if (!actor || !roleExists(targetOwner)) return false;
+    if (actor->rolsuper) return true;
+    if (actor->rolname != tableOwner) return false;
+    return canSetRole(sessionUser, targetOwner);
+}
+
+std::string effectiveSessionRole(const Session& session) {
+    return session.currentRole.empty() ? session.username : session.currentRole;
+}
+
+bool sessionIsAdmin(const Session& session) {
+    const std::string role = effectiveSessionRole(session);
+    // Unit-level callers may intentionally use an unauthenticated synthetic
+    // Session with permission=1. Network sessions always carry an auth user,
+    // so SET ROLE correctly drops inherited administrator privileges there.
+    if (session.authenticatedUser.empty()) {
+        return session.permission == 1 || userIsAdminViaRole(role);
+    }
+    return permissionQuery(role) == 1;
+}
+
 int checkPasswordStrength(const std::string& password) {
     int score = 0;
     if (password.length() >= 6) score += 20;

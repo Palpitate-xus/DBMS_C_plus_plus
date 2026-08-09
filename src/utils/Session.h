@@ -4,6 +4,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 // Per-connection session context.
 // Replaces the previous global session variables (g_nowUser, g_nowPermission, etc.)

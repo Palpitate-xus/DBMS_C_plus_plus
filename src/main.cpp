@@ -1340,6 +1340,16 @@ static bool handleSetCommand(const string& sql, Session& s) {
             cout << "SQL syntax error: SET ROLE role_name" << endl;
             return true;
         }
+        string sessionUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
+        if (roleName == "none") {
+            s.currentRole.clear();
+            cout << "Role reset to " << sessionUser << endl;
+            return false;
+        }
+        if (!canSetRole(sessionUser, roleName)) {
+            cout << "permission denied to set role " << roleName << endl;
+            return true;
+        }
         s.currentRole = roleName;
         cout << "Role set to " << roleName << endl;
         return false;
@@ -7353,7 +7363,7 @@ static std::string expandSubqueries(std::string sql, Session& s) {
 // SQL execution
 // ========================================================================
 bool checkAdmin(const Session& s) {
-    if (s.permission == 0 && !userIsAdminViaRole(s.username)) {
+    if (!sessionIsAdmin(s)) {
         cout << "permission denied" << endl;
         log(s.username, "permission denied", getTime());
         return false;
@@ -9027,14 +9037,14 @@ static bool handleAlterSequence(const string& sql, Session& s) {
 
 static bool checkTablePermission(Session& s, const string& tname,
                                  dbms::StorageEngine::TablePrivilege priv) {
-    if (s.permission == 1) return true; // admin bypass
-    if (!g_engine.hasPermission(s.currentDB, tname, s.username, priv)) {
+    if (sessionIsAdmin(s)) return true; // admin bypass
+    if (!g_engine.hasPermission(s.currentDB, tname, effectiveSessionRole(s), priv)) {
         // If there are column-level permissions for this privilege type,
         // don't reject here; let the column-level check handle it.
         if (priv == dbms::StorageEngine::TablePrivilege::Select ||
             priv == dbms::StorageEngine::TablePrivilege::Insert ||
             priv == dbms::StorageEngine::TablePrivilege::Update) {
-            auto perms = g_engine.getUserPermissions(s.currentDB, tname, s.username);
+            auto perms = g_engine.getUserPermissions(s.currentDB, tname, effectiveSessionRole(s));
             string target = (priv == dbms::StorageEngine::TablePrivilege::Select) ? "select" :
                            (priv == dbms::StorageEngine::TablePrivilege::Insert) ? "insert" : "update";
             for (const auto& p : perms) {
@@ -9050,11 +9060,11 @@ static bool checkTablePermission(Session& s, const string& tname,
 // Check column-level SELECT permission. columnsStr is comma-separated column list (or "*").
 static bool checkSelectColumnPermission(Session& s, const string& tname,
                                         const string& columnsStr) {
-    if (s.permission == 1) return true;
+    if (sessionIsAdmin(s)) return true;
     if (columnsStr == "*") {
         // SELECT * requires table-level SELECT or ALL columns allowed individually
         // For simplicity: if any column-level restrictions exist, deny SELECT *
-        auto perms = g_engine.getUserPermissions(s.currentDB, tname, s.username);
+        auto perms = g_engine.getUserPermissions(s.currentDB, tname, effectiveSessionRole(s));
         for (const auto& p : perms) {
             if (p == "select" || p == "all") {
                 // Need to check if this is table-level or column-level
@@ -9065,14 +9075,14 @@ static bool checkSelectColumnPermission(Session& s, const string& tname,
         // Actually: if hasPermission is true, we already passed table-level check
         // If hasPermission is false but hasColumnPermission might be true for some columns
         // For SELECT *, we need all columns or table-level permission
-        if (!g_engine.hasPermission(s.currentDB, tname, s.username,
+        if (!g_engine.hasPermission(s.currentDB, tname, effectiveSessionRole(s),
                                      dbms::StorageEngine::TablePrivilege::Select)) {
             // Check if ALL columns of the table are individually allowed
             auto schema = g_engine.getTableSchema(s.currentDB, tname);
             if (schema.len == 0) return true; // no columns = no restriction
             vector<string> allCols;
             for (size_t i = 0; i < schema.len; ++i) allCols.push_back(schema.cols[i].dataName);
-            if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+            if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                                dbms::StorageEngine::TablePrivilege::Select, allCols)) {
                 cout << "permission denied: SELECT * requires access to all columns on table " << tname << endl;
                 return false;
@@ -9102,7 +9112,7 @@ static bool checkSelectColumnPermission(Session& s, const string& tname,
         if (!col.empty() && col != "*") cols.push_back(col);
     }
     if (cols.empty()) return true;
-    if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+    if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                        dbms::StorageEngine::TablePrivilege::Select, cols)) {
         cout << "permission denied: SELECT on restricted columns of table " << tname << endl;
         return false;
@@ -9113,7 +9123,7 @@ static bool checkSelectColumnPermission(Session& s, const string& tname,
 // Check column-level UPDATE permission on SET columns.
 static bool checkUpdateColumnPermission(Session& s, const string& tname,
                                         const string& setClause) {
-    if (s.permission == 1) return true;
+    if (sessionIsAdmin(s)) return true;
     vector<string> cols;
     stringstream ss(setClause);
     string item;
@@ -9128,7 +9138,7 @@ static bool checkUpdateColumnPermission(Session& s, const string& tname,
         }
     }
     if (cols.empty()) return true;
-    if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+    if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                        dbms::StorageEngine::TablePrivilege::Update, cols)) {
         cout << "permission denied: UPDATE on restricted columns of table " << tname << endl;
         return false;
@@ -9139,21 +9149,21 @@ static bool checkUpdateColumnPermission(Session& s, const string& tname,
 // Check column-level INSERT permission on given columns (empty = all columns).
 static bool checkInsertColumnPermission(Session& s, const string& tname,
                                         const vector<string>& cols) {
-    if (s.permission == 1) return true;
+    if (sessionIsAdmin(s)) return true;
     if (cols.empty()) {
         // INSERT INTO t VALUES (...) - check all columns
         auto schema = g_engine.getTableSchema(s.currentDB, tname);
         if (schema.len == 0) return true;
         vector<string> allCols;
         for (size_t i = 0; i < schema.len; ++i) allCols.push_back(schema.cols[i].dataName);
-        if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+        if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                            dbms::StorageEngine::TablePrivilege::Insert, allCols)) {
             cout << "permission denied: INSERT requires access to all columns on table " << tname << endl;
             return false;
         }
         return true;
     }
-    if (!g_engine.hasColumnPermission(s.currentDB, tname, s.username,
+    if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                        dbms::StorageEngine::TablePrivilege::Insert, cols)) {
         cout << "permission denied: INSERT on restricted columns of table " << tname << endl;
         return false;
@@ -9271,7 +9281,7 @@ bool execute(const string& rawSql, Session& s) {
         cout << "ERROR: query cancelled" << endl;
         return true;
     }
-    g_engine.setRLSUser(s.username);
+    g_engine.setRLSUser(effectiveSessionRole(s));
     dbms::setCurrentSession(&s);
     string sql = sqlProcessor(rawSql);
     // Handle pg_cancel_backend / pg_terminate_backend
@@ -14417,9 +14427,10 @@ bool execute(const string& rawSql, Session& s) {
             return true;
         }
         // Permission check: admin OR user with grant option for this privilege
-        bool canGrant = (s.permission == 1 || userIsAdminViaRole(s.username));
+        bool canGrant = sessionIsAdmin(s);
         if (!canGrant) {
-            canGrant = g_engine.hasGrantOption(s.currentDB, tname, s.username, priv);
+            canGrant = g_engine.hasGrantOption(s.currentDB, tname,
+                                                effectiveSessionRole(s), priv);
         }
         if (!canGrant) {
             cout << "permission denied: you do not have GRANT OPTION for " << privStr << " on " << tname << endl;

@@ -226,6 +226,15 @@ static void test_rls_visible_source_scan() {
     ensureRole(ownerName, false, false);
     ensureRole(inheritedParentName, false, false);
     ensureRole(noinheritMemberName, false, false, false);
+    Session rolePrivilegeSession;
+    rolePrivilegeSession.username = superName;
+    rolePrivilegeSession.authenticatedUser = superName;
+    rolePrivilegeSession.permission = 1;
+    rolePrivilegeSession.authenticatedPermission = 1;
+    rolePrivilegeSession.currentRole = regularName;
+    assert(!sessionIsAdmin(rolePrivilegeSession));
+    rolePrivilegeSession.currentRole.clear();
+    assert(sessionIsAdmin(rolePrivilegeSession));
     const auto inheritedParent = auth.getAuthIdByName(inheritedParentName);
     const auto noinheritMember = auth.getAuthIdByName(noinheritMemberName);
     assert(inheritedParent && noinheritMember);
@@ -239,6 +248,7 @@ static void test_rls_visible_source_scan() {
 
     assert(userIsMemberOfRole(noinheritMemberName, inheritedParentName));
     assert(!userHasRole(noinheritMemberName, inheritedParentName));
+    assert(canSetRole(noinheritMemberName, inheritedParentName));
     assert(!ddl.executeSql("CREATE TABLE inherited_acl (id INT PRIMARY KEY)", s));
     g_engine.grant(db, "inherited_acl", inheritedParentName,
                    dbms::StorageEngine::TablePrivilege::Select);
@@ -260,6 +270,9 @@ static void test_rls_visible_source_scan() {
                                   dbms::StorageEngine::TablePrivilege::Select));
     assert(g_engine.getApplicablePolicies(db, "inherited_acl", "SELECT",
                                           noinheritMemberName).size() == 1);
+
+    const int ownerTargetMembership = grantRoleToUser(regularName, ownerName);
+    assert(ownerTargetMembership == 0 || ownerTargetMembership == -2);
 
     assert(!ddl.executeSql(
         "CREATE TABLE policy_bypass (id INT PRIMARY KEY)", s));
@@ -329,6 +342,13 @@ static void test_rls_visible_source_scan() {
         db, "policy_owner", "SELECT",
         [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
     assert(visible == 0);
+
+    Session unauthorizedOwnerChange = ownerSession;
+    unauthorizedOwnerChange.username = regularName;
+    unauthorizedOwnerChange.permission = 1;
+    assert(ddl.executeSql("ALTER TABLE policy_owner OWNER TO " + regularName,
+                          unauthorizedOwnerChange));
+    assert(g_engine.getTableSchema(db, "policy_owner").owner == ownerName);
 
     Session alterSession = ownerSession;
     assert(!ddl.executeSql("ALTER TABLE policy_owner OWNER TO " + regularName, alterSession));

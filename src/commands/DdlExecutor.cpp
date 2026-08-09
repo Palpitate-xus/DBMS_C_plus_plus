@@ -513,11 +513,16 @@ static bool alterStatusOk(DBStatus status, const std::string& operation) {
 
 bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!stmt) return true;
-    if (!checkAdmin(s) || !checkDB(s)) return true;
+    if (!checkDB(s)) return true;
     if (stmt->tableName.empty() || stmt->subCommands.empty()) {
         std::cout << "SQL syntax error: ALTER TABLE requires a subcommand" << std::endl;
         return true;
     }
+
+    const bool ownerOnly = std::all_of(
+        stmt->subCommands.begin(), stmt->subCommands.end(),
+        [](const auto& sub) { return sub.action == AlterTableStmt::Action::Owner; });
+    if (!ownerOnly && !checkAdmin(s)) return true;
 
     checkAndImplicitCommit(s);
     const std::string tableName = resolveTableName(s, stmt->tableName);
@@ -753,11 +758,25 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 break;
             }
             case AlterTableStmt::Action::Owner:
-                if (sub.newName.empty()) {
+                {
+                    const std::string targetOwner = canonicalRoleName(sub.newName);
+                    if (targetOwner.empty()) {
                     std::cout << "ALTER TABLE OWNER TO requires a role" << std::endl;
                     return true;
+                    }
+                    const std::string sessionUser = s.authenticatedUser.empty()
+                                                        ? s.username
+                                                        : s.authenticatedUser;
+                    const std::string effectiveRole = effectiveSessionRole(s);
+                    const auto table = g_engine.getTableSchema(s.currentDB, tableName);
+                    if (!canAlterTableOwner(sessionUser, effectiveRole, table.owner,
+                                             targetOwner)) {
+                        std::cout << "permission denied: must own table and be able to SET ROLE to "
+                                  << targetOwner << std::endl;
+                        return true;
+                    }
+                    status = g_engine.alterTableOwner(s.currentDB, tableName, targetOwner);
                 }
-                status = g_engine.alterTableOwner(s.currentDB, tableName, sub.newName);
                 if (!alterStatusOk(status, "Owner")) return true;
                 break;
             default:
@@ -1427,7 +1446,7 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
     dbms::TableSchema srcTbl = g_engine.getTableSchema(s.currentDB, srcTable);
     dbms::TableSchema newTbl;
     newTbl.tablename = tname;
-    newTbl.owner = s.username;
+    newTbl.owner = effectiveSessionRole(s);
 
     std::set<std::string> queryCols;
     if (selectCols.size() == 1 && selectCols[0] == "*") {
@@ -1572,7 +1591,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         // the parent and creates the parent's partition data fork.
         TableSchema child = parentSchema;
         child.tablename = tname;
-        child.owner = s.username;
+        child.owner = effectiveSessionRole(s);
         child.partitionType = TableSchema::PartitionType::None;
         child.partitionKey.clear();
         child.rangePartitions.clear();
@@ -1609,7 +1628,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::cerr << "WARNING: partition catalog registration failed: "
                       << e.what() << std::endl;
         }
-        g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname, s.username);
+        g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname,
+                                        effectiveSessionRole(s));
         txn.commit();
         return false;
     }
@@ -1632,7 +1652,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
 
     TableSchema tbl;
     tbl.tablename = tname;
-    tbl.owner = s.username;
+    tbl.owner = effectiveSessionRole(s);
     tbl.isUnlogged = stmt->unlogged;
     tbl.tablespace = stmt->tablespace.empty() ? "pg_default" : stmt->tablespace;
     tbl.storageParams = stmt->options;
@@ -1774,7 +1794,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         g_engine.createExclusionConstraint(s.currentDB, ec);
         recordConstraintCompat(s.currentDB, tname, tc);
     }
-    g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname, s.username);
+    g_engine.applyDefaultPrivileges(s.currentDB, "public", "table", tname,
+                                    effectiveSessionRole(s));
 
     // Register the table in the catalog (best-effort; storage is the authority).
     try {
@@ -2799,7 +2820,7 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     std::string backingTable = dbms::StorageEngine::materializedViewPrefix(viewname);
     dbms::TableSchema tbl;
     tbl.tablename = backingTable;
-    tbl.owner = s.username;
+    tbl.owner = effectiveSessionRole(s);
     for (const auto& cname : colNames) {
         dbms::Column col;
         col.dataName = cname;
