@@ -44,6 +44,7 @@
 - TRUNCATE 回归：验证 typed 多表 AST、`RESTRICT` 在 FK 依赖下不产生部分修改、递归 `CASCADE`、多表截断、`ONLY` 字段及 `RESTART IDENTITY`。
 - ALTER TABLE typed 回归：`tests/alter_table_only_test.cpp` 验证 RLS enable/disable/force/no-force、ATTACH/DETACH PARTITION 的 AST 规格传递，以及 trigger enable/disable 的持久化状态。
 - EXCLUDE typed 回归：`tests/exclude_test.cpp` 通过 DDL bridge 验证 `ALTER TABLE ... ADD/DROP CONSTRAINT ... EXCLUDE` 的约束名保留、冲突拒绝、删除后放行和持久化清理；CREATE TABLE 的等值与范围排斥回归继续覆盖 INSERT/UPDATE。
+- ALTER TABLE legacy 清理回归：`tests/ddl_bridge_routing_test.cpp` 验证 ADD/DROP COLUMN、ALTER COLUMN、约束增删和 RENAME TABLE/COLUMN 在删除 `main.cpp` 重复分支后仍全部由 typed bridge 执行；未迁移的 CLUSTER/REPLICA/约束元数据动作继续保留明确 legacy 边界。
 - 协议错误恢复回归：验证扩展查询错误后的 Bind/Execute 被忽略至 Sync、Sync 后连接可继续查询，以及事务外错误返回 `ReadyForQuery('I')`。
 - 协议 backend 隔离回归：双连接验证事务 ID/快照不串线，未提交行不可见，ROLLBACK 后状态清理，连接断开回滚未完成事务，COMMIT 后新事务可见；另覆盖 `START TRANSACTION` 选项与 `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` 路由。
 - SQL 统计模块回归：`tests/sql_stats_test.cpp` 验证字符串/数字常量归一化、引号标识符区分、调用次数与耗时聚合、数据库过滤及 reset。

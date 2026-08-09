@@ -31,7 +31,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 
 | 能力 | 当前真实状态 | 证据/边界 |
 |------|--------------|-----------|
-| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable 和 CREATE TRIGGER 已桥接；RLS 可见性已由 StorageEngine 统一执行，触发器 action runtime、OWNER/CLUSTER/REPLICA 等未迁移命令仍由 `main.cpp` legacy/简化路径执行 |
+| DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable 和 CREATE TRIGGER 已桥接；RLS 可见性已由 StorageEngine 统一执行，触发器 action runtime、CLUSTER/REPLICA IDENTITY、`VALIDATE/ALTER CONSTRAINT` 等仍由 `main.cpp` legacy/简化路径执行 |
 | 复杂查询执行 | 部分完成 | Volcano 基础算子和集合组合节点已验证；复杂集合 operand、子查询、窗口和 grouping producer 仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 已验证关系限定的行级写偏差回滚；predicate/SIREAD lock、空范围读和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |

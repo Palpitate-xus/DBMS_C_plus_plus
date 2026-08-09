@@ -664,6 +664,7 @@
 - **2026-08-09**：DML AST executor 扩展：窄版单源表 MERGE（单个 MATCHED UPDATE/DO NOTHING + 单个 NOT MATCHED INSERT/DO NOTHING）已从 `main.cpp` 字符串执行器迁移到 `DmlExecutor`；INSERT values 表达式改为保留 ColumnRef AST，重复 source-to-target 匹配在存储修改前拒绝，并新增 parser/执行回归。MERGE 的多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query、RETURNING 和完整并发语义仍待迁移。
 - **2026-08-09**：ALTER TABLE typed 路径扩展：RLS enable/disable/force/no-force、分区 ATTACH/DETACH、trigger enable/disable 已由 parser AST + DdlExecutor 消费，删除 `main.cpp` 中对应字符串分支；新增 AST 字段、分区规格传递、RLS/trigger 持久化回归。
 - **2026-08-09**：ALTER TABLE EXCLUDE typed 收口：parser 保留命名 EXCLUDE 约束，`DdlExecutor` 负责 ADD/DROP、约束名冲突校验、`.exclusions` 与约束元数据清理；删除 `main.cpp` 的专用 EXCLUDE 字符串解析/执行分支，新增 bridge 增删与冲突行为回归。GiST 加速、多元素/表达式元素和完整 operator class 语义仍待后续。
+- **2026-08-09**：ALTER TABLE legacy 分支清理：删除 `main.cpp` 中已被 typed bridge 遮蔽的约 830 行 ADD/DROP COLUMN、ALTER COLUMN、RENAME、ADD/DROP CONSTRAINT、INHERIT、OWNER、SET SCHEMA/LOGGED/TABLESPACE、SET/RESET STORAGE 字符串执行代码及失效辅助函数；保留 `VALIDATE/ALTER CONSTRAINT` 与尚未 typed 化的 CLUSTER/REPLICA IDENTITY 路径，并用 DDL bridge 回归确认行为未回退。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。
