@@ -3793,6 +3793,79 @@ std::filesystem::path StorageEngine::secondaryIndexMetaPath(const std::string& d
     return dbPath(dbname) / (tablename + ".secidx");
 }
 
+namespace {
+std::filesystem::path namedIndexMetaPath(const StorageEngine& engine,
+                                         const std::string& dbname,
+                                         const std::string& tablename) {
+    return engine.dbPath(dbname) / (tablename + ".idxnames");
+}
+}
+
+bool StorageEngine::registerIndexName(const std::string& dbname,
+                                      const std::string& tablename,
+                                      const std::string& indexName,
+                                      const std::string& accessMethod,
+                                      const std::string& key) {
+    if (indexName.empty() || tablename.empty() || accessMethod.empty() || key.empty()) return false;
+    std::vector<NamedIndexInfo> entries;
+    std::ifstream in(namedIndexMetaPath(*this, dbname, tablename));
+    std::string name;
+    while (std::getline(in, name, '\t')) {
+        NamedIndexInfo entry;
+        entry.name = name;
+        if (!std::getline(in, entry.accessMethod, '\t') ||
+            !std::getline(in, entry.key)) break;
+        if (entry.name != indexName) entries.push_back(std::move(entry));
+    }
+    entries.push_back({indexName, accessMethod, key});
+    std::ofstream out(namedIndexMetaPath(*this, dbname, tablename), std::ios::trunc);
+    if (!out) return false;
+    for (const auto& entry : entries) {
+        out << entry.name << '\t' << entry.accessMethod << '\t' << entry.key << '\n';
+    }
+    return static_cast<bool>(out);
+}
+
+std::optional<StorageEngine::NamedIndexInfo> StorageEngine::getNamedIndex(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& indexName) const {
+    std::ifstream in(namedIndexMetaPath(*this, dbname, tablename));
+    std::string name;
+    while (std::getline(in, name, '\t')) {
+        NamedIndexInfo entry;
+        entry.name = name;
+        if (!std::getline(in, entry.accessMethod, '\t') ||
+            !std::getline(in, entry.key)) break;
+        if (entry.name == indexName) return entry;
+    }
+    return std::nullopt;
+}
+
+bool StorageEngine::unregisterIndexName(const std::string& dbname,
+                                        const std::string& tablename,
+                                        const std::string& indexName) {
+    const auto path = namedIndexMetaPath(*this, dbname, tablename);
+    std::ifstream in(path);
+    std::vector<NamedIndexInfo> entries;
+    std::string name;
+    bool removed = false;
+    while (std::getline(in, name, '\t')) {
+        NamedIndexInfo entry;
+        entry.name = name;
+        if (!std::getline(in, entry.accessMethod, '\t') ||
+            !std::getline(in, entry.key)) break;
+        if (entry.name == indexName) { removed = true; continue; }
+        entries.push_back(std::move(entry));
+    }
+    if (!in && entries.empty() && !removed) return false;
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+    for (const auto& entry : entries) {
+        out << entry.name << '\t' << entry.accessMethod << '\t' << entry.key << '\n';
+    }
+    return removed;
+}
+
 // ========================================================================
 // Hash Index
 // ========================================================================
@@ -8030,6 +8103,9 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(schemaPath(dbname, tablename));
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
+    std::filesystem::remove(secondaryIndexMetaPath(dbname, tablename));
+    std::filesystem::remove(hashIndexMetaPath(dbname, tablename));
+    std::filesystem::remove(namedIndexMetaPath(*this, dbname, tablename));
     std::filesystem::remove(fsmPath(dbname, tablename));
     std::filesystem::remove(vmPath(dbname, tablename));
     removeSeq(dbname, tablename);
@@ -8057,6 +8133,26 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     fsmCache_.erase(key);
     vmCache_.erase(key);
     secondaryIndexCache_.erase(key);
+    const std::string secondaryPrefix = dbname + "/" + tablename + "/";
+    for (auto it = secondaryIndexCache_.begin(); it != secondaryIndexCache_.end();) {
+        if (it->first.rfind(secondaryPrefix, 0) == 0) it = secondaryIndexCache_.erase(it);
+        else ++it;
+    }
+    const std::string hashPrefix = dbname + "." + tablename + ".";
+    for (auto it = hashIndexCache_.begin(); it != hashIndexCache_.end();) {
+        if (it->first.rfind(hashPrefix, 0) == 0) it = hashIndexCache_.erase(it);
+        else ++it;
+    }
+    const auto databaseDir = dbPath(dbname);
+    if (std::filesystem::exists(databaseDir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(databaseDir)) {
+            const std::string filename = entry.path().filename().string();
+            if (filename.rfind(tablename + "_", 0) == 0 ||
+                filename.rfind(tablename + ".idx_", 0) == 0) {
+                std::filesystem::remove_all(entry.path());
+            }
+        }
+    }
     const std::string toastKey = dbname + ":" + tablename;
     toastPageAllocators_.erase(toastKey);
     toastIndexes_.erase(toastKey);
@@ -8831,6 +8927,31 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         }
     }
 
+    // Keep the SQL-name to physical-key map aligned with a column rename.
+    // Composite entries use the index name as their key and must not change.
+    {
+        const auto path = namedIndexMetaPath(*this, dbname, tablename);
+        if (std::filesystem::exists(path)) {
+            std::ifstream in(path);
+            std::vector<NamedIndexInfo> entries;
+            std::string name;
+            while (std::getline(in, name, '\t')) {
+                NamedIndexInfo entry;
+                entry.name = name;
+                if (!std::getline(in, entry.accessMethod, '\t') ||
+                    !std::getline(in, entry.key)) break;
+                if (entry.accessMethod != "composite" && entry.key == oldName) {
+                    entry.key = newName;
+                }
+                entries.push_back(std::move(entry));
+            }
+            std::ofstream out(path, std::ios::trunc);
+            for (const auto& entry : entries) {
+                out << entry.name << '\t' << entry.accessMethod << '\t' << entry.key << '\n';
+            }
+        }
+    }
+
     // Update hash index meta (.hashidx)
     {
         std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
@@ -8994,6 +9115,10 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
             if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
         }
         std::filesystem::rename(secondaryIndexMetaPath(dbname, oldName), secondaryIndexMetaPath(dbname, newName));
+    }
+    if (std::filesystem::exists(namedIndexMetaPath(*this, dbname, oldName))) {
+        std::filesystem::rename(namedIndexMetaPath(*this, dbname, oldName),
+                                namedIndexMetaPath(*this, dbname, newName));
     }
 
     // Rename hash indexes and meta

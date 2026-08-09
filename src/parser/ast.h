@@ -882,6 +882,7 @@ struct CreateObjectStmt : public Stmt {
 struct DropStmt : public Stmt {
     std::vector<std::string> objectNames;
     std::string objectType;    // TABLE, INDEX, VIEW, SCHEMA, DATABASE, ...
+    std::string tableName;     // optional table name for the legacy DROP INDEX ... ON ... form
     bool ifExists = false;
     bool cascade = false;
     bool concurrently = false; // DROP INDEX CONCURRENTLY

@@ -144,6 +144,37 @@ static void test_create_database_schema() {
     std::cout << "[DDL] database/schema OK" << std::endl;
 }
 
+static void test_drop_index_uses_sql_name() {
+    std::string db = testDbPath("ddl_drop_index");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE drop_idx_tbl (id INT, value INT)", s));
+    assert(!ddl.executeSql("CREATE INDEX idx_drop_value ON drop_idx_tbl (value)", s));
+
+    auto named = g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_drop_value");
+    assert(named.has_value());
+    assert(named->accessMethod == "btree");
+    assert(named->key == "value");
+
+    assert(!ddl.executeSql("DROP INDEX idx_drop_value", s));
+    assert(!g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_drop_value").has_value());
+    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
+    const auto* ns = cat.findNamespaceByName("public");
+    assert(ns != nullptr);
+    assert(cat.findClassByName("idx_drop_value", ns->oid) == nullptr);
+
+    assert(!ddl.executeSql("CREATE INDEX idx_drop_composite ON drop_idx_tbl (id, value)", s));
+    assert(!ddl.executeSql("DROP INDEX idx_drop_composite ON drop_idx_tbl", s));
+    assert(!ddl.executeSql("DROP INDEX IF EXISTS idx_missing", s));
+
+    cleanup(db);
+    std::cout << "[DDL] standard DROP INDEX name resolution OK" << std::endl;
+}
+
 static void test_comment_on() {
     std::string db = testDbPath("ddl_bridge_t4");
     cleanup(db);
@@ -194,6 +225,7 @@ int main() {
     test_create_drop_table();
     test_create_table_registers_in_catalog();
     test_create_index_sequence();
+    test_drop_index_uses_sql_name();
     test_create_database_schema();
     test_drop_database_evicts_catalog();
     test_comment_on();

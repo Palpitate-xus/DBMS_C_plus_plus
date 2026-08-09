@@ -428,15 +428,15 @@ SELECT * FROM locations;
 
 **输入**
 ```sql
-DROP INDEX idx_name ON t1;
-DROP INDEX idx_hash ON t1;
-DROP INDEX idx_ft ON t1;
-DROP INDEX name ON t1;   -- GIN
-DROP INDEX id ON t1;     -- GiST
-DROP BRIN INDEX id ON t1; -- BRIN
+DROP INDEX idx_name;
+DROP INDEX idx_hash;
+DROP INDEX idx_name, idx_hash CASCADE;
+DROP INDEX IF EXISTS missing_index;
+DROP INDEX idx_name ON t1; -- migration-only legacy suffix
+DROP BRIN INDEX id ON t1;  -- specialized legacy syntax
 ```
 
-**实际结果** ✅ 全部返回 `Index dropped`
+**实际结果** ✅ 标准 name-only、多名称、`IF EXISTS` 和旧 `ON table` 形式均通过；物理索引、`pg_class` 和依赖元数据同步清理。GiST/GIN/BRIN 等专用索引的独立 DROP 语法仍属于 legacy 专用路径。
 
 ---
 

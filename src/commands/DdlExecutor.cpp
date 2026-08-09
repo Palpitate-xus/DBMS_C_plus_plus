@@ -291,6 +291,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeAlterTable(dynamic_cast<const AlterTableStmt*>(stmt.get()), s);
         case SqlCommand::CreateIndex:
             return executeCreateIndex(dynamic_cast<const CreateIndexStmt*>(stmt.get()), s);
+        case SqlCommand::DropIndex:
+            return executeDropIndex(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateSequence:
             return executeCreateSequence(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
         case SqlCommand::AlterSequence:
@@ -373,6 +375,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropTable:
         case dbms::SqlCommand::AlterTable:
         case dbms::SqlCommand::CreateIndex:
+        case dbms::SqlCommand::DropIndex:
         case dbms::SqlCommand::CreateSequence:
         case dbms::SqlCommand::DropSequence:
         case dbms::SqlCommand::CreateDomain:
@@ -1920,7 +1923,6 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
-
     std::string tname = resolveTableName(s, stmt->tableName);
     if (g_engine.tableExists(s.currentDB, tname) || g_engine.viewExists(s.currentDB, tname)) {
         if (stmt->ifNotExists) {
@@ -2307,6 +2309,10 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
+    if (stmt->columns.empty()) {
+        std::cout << "SQL syntax error: CREATE INDEX requires an index key" << std::endl;
+        return true;
+    }
 
     std::string tname = resolveTableName(s, stmt->tableName);
     if (!g_engine.tableExists(s.currentDB, tname)) {
@@ -2356,6 +2362,17 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
     std::string idxName = stmt->indexName.empty() ? (tname + "_idx") : stmt->indexName;
+    const std::string physicalMethod = (colnames.size() > 1)
+        ? "composite" : (am == "hash" ? "hash" : "btree");
+    const std::string physicalKey = (colnames.size() > 1)
+        ? idxName : (stmt->columns.front().expr ? stmt->columns.front().expr->toString() : colnames.front());
+    if (!g_engine.registerIndexName(s.currentDB, tname, idxName, physicalMethod, physicalKey)) {
+        if (physicalMethod == "composite") g_engine.dropCompositeIndex(s.currentDB, tname, idxName);
+        else if (physicalMethod == "hash") g_engine.dropHashIndex(s.currentDB, tname, physicalKey);
+        else g_engine.dropIndex(s.currentDB, tname, physicalKey);
+        std::cout << "CREATE INDEX failed: cannot persist index metadata" << std::endl;
+        return true;
+    }
 
     try {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
@@ -2394,6 +2411,131 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     txn.recordCreate(DdlObjectKind::Index, idxName, tname);
     txn.commit();
     std::cout << "CREATE INDEX succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
+    if (!stmt) return true;
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    if (stmt->objectNames.empty()) {
+        std::cout << "SQL syntax error: DROP INDEX name" << std::endl;
+        return true;
+    }
+
+    DdlTransaction txn(s);
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+    for (const auto& rawName : stmt->objectNames) {
+        CatalogManager::QualifiedName indexQn;
+        if (!CatalogManager::parseQualifiedName(rawName, indexQn)) {
+            std::cout << "SQL syntax error: invalid index name" << std::endl;
+            return true;
+        }
+        const std::string indexName = indexQn.name;
+        const std::string schema = indexQn.schema.empty() ? "public" : indexQn.schema;
+        const PgClassRow* indexRel = cat.resolveRelation(rawName, {schema});
+        std::string tableName;
+        std::optional<StorageEngine::NamedIndexInfo> named;
+        Oid indexOid = INVALID_OID;
+
+        if (indexRel && indexRel->relkind == 'i') {
+            indexOid = indexRel->oid;
+            auto deps = cat.findDepends(PgClassOid_Class, indexOid);
+            for (const auto& dep : deps) {
+                if (dep.refclassid != PgClassOid_Class) continue;
+                const PgClassRow* ref = cat.findClass(dep.refobjid);
+                if (ref && ref->relkind == 'r') { tableName = ref->relname; break; }
+            }
+        }
+
+        if (!stmt->tableName.empty()) {
+            const std::string requestedTable = resolveTableName(s, stmt->tableName);
+            if (!tableName.empty() && tableName != requestedTable) {
+                std::cout << "Index " << indexName << " is not on table " << requestedTable << std::endl;
+                return true;
+            }
+            tableName = requestedTable;
+        }
+
+        if (tableName.empty()) {
+            // Catalogs created before the name map may still be usable when
+            // the caller supplies ON table; standard name-only syntax is
+            // deliberately fail-closed if ownership cannot be proven.
+            for (const auto& candidate : g_engine.getTableNames(s.currentDB)) {
+                if (g_engine.getNamedIndex(s.currentDB, candidate, indexName)) {
+                    tableName = candidate;
+                    break;
+                }
+            }
+        }
+
+        if (tableName.empty() || !g_engine.tableExists(s.currentDB, tableName)) {
+            if (stmt->ifExists) {
+                std::cout << "NOTICE: index \"" << indexName << "\" does not exist, skipping" << std::endl;
+                continue;
+            }
+            std::cout << "Index " << indexName << " does not exist" << std::endl;
+            return true;
+        }
+
+        named = g_engine.getNamedIndex(s.currentDB, tableName, indexName);
+        std::string method;
+        std::string key;
+        if (named) {
+            method = named->accessMethod;
+            key = named->key;
+        } else if (!g_engine.getCompositeIndexes(s.currentDB, tableName).empty()) {
+            for (const auto& composite : g_engine.getCompositeIndexes(s.currentDB, tableName)) {
+                if (composite.name == indexName) { method = "composite"; key = indexName; break; }
+            }
+        }
+        if (method.empty()) {
+            // Transitional fallback for an index created by the old runtime:
+            // its physical name was the indexed column rather than SQL name.
+            for (const auto& col : g_engine.getIndexedColumns(s.currentDB, tableName)) {
+                if (col == indexName) { method = "btree"; key = col; break; }
+            }
+            for (const auto& col : g_engine.getHashIndexedColumns(s.currentDB, tableName)) {
+                if (col == indexName) { method = "hash"; key = col; break; }
+            }
+        }
+        if (method.empty()) {
+            if (stmt->ifExists) {
+                std::cout << "NOTICE: index \"" << indexName << "\" does not exist, skipping" << std::endl;
+                continue;
+            }
+            std::cout << "Index " << indexName << " does not exist" << std::endl;
+            return true;
+        }
+
+        DBStatus status = DBStatus::INVALID_VALUE;
+        if (method == "composite") status = g_engine.dropCompositeIndex(s.currentDB, tableName, key);
+        else if (method == "hash") status = g_engine.dropHashIndex(s.currentDB, tableName, key);
+        else status = g_engine.dropIndex(s.currentDB, tableName, key);
+        if (status != DBStatus::OK) {
+            std::cout << "DROP INDEX failed" << std::endl;
+            return true;
+        }
+        g_engine.unregisterIndexName(s.currentDB, tableName, indexName);
+
+        if (indexOid != INVALID_OID) {
+            auto behavior = stmt->cascade ? CatalogManager::DropBehavior::Cascade
+                                           : CatalogManager::DropBehavior::Restrict;
+            std::string error;
+            if (!cat.dropObject(PgClassOid_Class, indexOid, behavior, &error)) {
+                std::cout << "ERROR: " << error << std::endl;
+                return true;
+            }
+        }
+        txn.recordDrop(DdlObjectKind::Index, indexName, tableName);
+    }
+    txn.commit();
+    std::cout << "DROP INDEX succeeded" << std::endl;
     return false;
 }
 

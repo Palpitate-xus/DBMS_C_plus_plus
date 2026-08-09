@@ -604,6 +604,24 @@ public:
                                                      const std::string& tablename,
                                                      const std::string& colname) const;
 
+    // SQL index names are separate from the physical key used by the current
+    // access-method files.  Keep that mapping durable so DROP INDEX can use
+    // PostgreSQL's standard name-only syntax for single-column indexes.
+    struct NamedIndexInfo {
+        std::string name;
+        std::string accessMethod; // btree, hash, composite, gin, gist, brin, spgist, ...
+        std::string key;          // column, expression, or composite name
+    };
+    bool registerIndexName(const std::string& dbname, const std::string& tablename,
+                           const std::string& indexName,
+                           const std::string& accessMethod,
+                           const std::string& key);
+    std::optional<NamedIndexInfo> getNamedIndex(const std::string& dbname,
+                                                 const std::string& tablename,
+                                                 const std::string& indexName) const;
+    bool unregisterIndexName(const std::string& dbname, const std::string& tablename,
+                             const std::string& indexName);
+
     // Hash index (single-column, O(1) equality lookup)
     DBStatus createHashIndex(const std::string& dbname, const std::string& tablename,
                               const std::string& colname, bool concurrently = false);

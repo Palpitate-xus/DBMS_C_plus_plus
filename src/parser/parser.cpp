@@ -5801,9 +5801,27 @@ StmtPtr SQLParser::parseDropIndex(const std::vector<std::string>& tokens, size_t
         stmt->ifExists = true; pos += 2;
     }
     while (pos < tokens.size() && tokens[pos] != ";") {
-        if (toLower(tokens[pos]) == "cascade") { stmt->cascade = true; ++pos; continue; }
-        if (toLower(tokens[pos]) == "restrict") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+        std::string word = toLower(tokens[pos]);
+        if (word == "cascade") { stmt->cascade = true; ++pos; continue; }
+        if (word == "restrict" || tokens[pos] == ",") { ++pos; continue; }
+        if (word == "on") {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos] == ";") break;
+            stmt->tableName = tokens[pos++];
+            if (pos < tokens.size() && tokens[pos] == ".") {
+                ++pos;
+                if (pos < tokens.size() && tokens[pos] != ";") {
+                    stmt->tableName += "." + tokens[pos++];
+                }
+            }
+            continue;
+        }
+        std::string name = tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos < tokens.size() && tokens[pos] != ";") name += "." + tokens[pos++];
+        }
+        stmt->objectNames.push_back(std::move(name));
     }
     return stmt;
 }

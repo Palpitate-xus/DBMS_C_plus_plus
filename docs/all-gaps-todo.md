@@ -33,6 +33,7 @@
 | 2026-08-08 | Window executor 收敛：`WindowOp`/`WindowAgg` 接入常见排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、`first_value`/`last_value`/`ntile`/`percent_rank`/`cume_dist`，并实现 PostgreSQL 默认 frame；新增 `OffsetOp`，复杂目标和主 SQL EXPLAIN 窗口解析仍待迁移。扩展 Volcano 单元与窗口 E2E，窗口 E2E 为 13/13。 |
 | 2026-08-08 | Group executor 收敛：新增 `GroupAggregateOp`，主 SQL/EXPLAIN 接入常见 GROUP BY、HAVING、ROLLUP/CUBE/GROUPING SETS 及常见聚合；补充分组、HAVING、NULL grouping-set 输出和文本/JSON EXPLAIN 单测。复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域和并行聚合仍待迁移。 |
 | 2026-08-08 | TOAST 压缩首步：当前 TOAST chunk 格式升级为带 flags/originalSize 的结构，写入自动使用 zlib 压缩（不可压缩值保留原文），统一 shell/CMake 构建入口并增加物理压缩回归；旧 TOAST chunk 不兼容，lz4/pglz、storage strategy、`toast_tuple_target` 与 PG pointer/catalog 语义仍待迁移。 |
+| 2026-08-09 | `DROP INDEX` typed 收口：parser 支持 PostgreSQL name-only、多名称、`IF EXISTS`、`CASCADE/RESTRICT`，DdlExecutor 同步删除物理索引、`pg_class` 和依赖；新增 `.idxnames` 持久化 SQL 名称到单列/Hash 物理键的映射，删除 `main.cpp` 重复的普通索引删除分支。`DROP INDEX CONCURRENTLY` 的两阶段事务/快照语义和 GIN/GiST/BRIN/SPGiST 专用语法仍待统一。 |
 | 2026-08-07 | 测试入口收敛：`build_tests.sh` 与 `run_all_tests_fast.sh` 通过 `build_common.sh` 统一执行协议和窗口函数两个 E2E；当前统一基线为 PASS=122 FAIL=0。 |
 | 2026-08-07 | P0-1 并行查询首步：新增 `ParallelTableScanOp`，对非分区 heap 按 page range 分片并确定性 Gather；加入 `max_parallel_workers_per_gather` 配置，事务内和分区表安全回退，新增并行/串行等价性与事务回归。parallel join/aggregate、GatherMerge 和长期 worker pool 仍待后续。 |
 | 2026-08-07 | B+Tree 正确性补强：修复 root leaf 分裂传错 child、叶分裂丢弃中间键、重复键跨叶查找遗漏和范围扫描重复返回；新增 250 条跨叶唯一键、6000 条跨叶/内部节点重复键回归。PostgreSQL B-tree 的 dedup、删除合并、opclass/collation 和并发构建语义仍待后续。 |
@@ -232,7 +233,7 @@
 
 ### 1.1 有实现但与 PostgreSQL 不等价的命令
 
-> **历史进展记录（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并曾迁移旧 `.stc` 数据库（该兼容路径已于 2026-08-09 删除）；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。该记录当时将 DML AST 迁移延期；当前普通 INSERT、受限行级标量表达式 UPDATE、简单 DELETE 已由 `DmlExecutor` 消费，复杂 DML 仍待迁移。DDL 中仍缺 `ALTER TABLE`/`DROP INDEX`/视图/物化视图/触发器/策略/函数/过程的目录集成。
+> **历史进展记录（2026-06-22）**：Phase 1 Parser/AST 与 Phase 2 Catalog/OID 已接入运行时。`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor` 处理 DDL，修复双执行 bug；CTAS 保留旧路径回退。`StorageEngine` 新增 `CatalogService` 缓存，首次访问时引导系统 namespace/type 并曾迁移旧 `.stc` 数据库（该兼容路径已于 2026-08-09 删除）；`CREATE TABLE`/`DROP TABLE`/`CREATE INDEX`/`DROP INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步维护 `pg_class`/`pg_attribute`/`pg_type`/`pg_namespace`/`pg_depend`；`DROP TABLE CASCADE` 通过依赖图删除从属索引。`pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表支持 `SELECT *`。`StorageEngine::checkpoint()` 持久化目录，`DROP DATABASE` 先 `evict()` 缓存。该记录当时将 DML AST 迁移延期；当前普通 INSERT、受限行级标量表达式 UPDATE、简单 DELETE 已由 `DmlExecutor` 消费，复杂 DML 仍待迁移。DDL 中仍缺视图/物化视图/触发器/策略/函数/过程的目录集成。
 
 | # | 命令 | 差距描述 | 状态 |
 |---|------|---------|------|

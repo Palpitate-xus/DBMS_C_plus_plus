@@ -42,6 +42,7 @@ private:
     bool executeCreateTable(const CreateTableStmt* stmt, Session& s);
     bool executeDropTable(const DropStmt* stmt, Session& s);
     bool executeCreateIndex(const CreateIndexStmt* stmt, Session& s);
+    bool executeDropIndex(const DropStmt* stmt, Session& s);
     bool executeCreateSequence(const CreateObjectStmt* stmt, Session& s);
     bool executeAlterSequence(const AlterObjectStmt* stmt, Session& s);
     bool executeDropSequence(const DropStmt* stmt, Session& s);

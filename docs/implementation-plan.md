@@ -192,7 +192,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - 修复 DDL AST bridge 双执行 bug：`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor`，成功即返回，CTAS 保留旧路径回退。
   - 新增 `CatalogService` 作为 `StorageEngine` 的每库 `CatalogManager` 缓存，首次访问时只引导系统 namespace/type 并加载当前 catalog。
   - `CREATE TABLE`/`DROP TABLE` 在存储操作前后同步 `pg_class`/`pg_attribute`/`pg_type`/`pg_depend` 条目；`DROP TABLE CASCADE` 通过依赖图删除索引等从属对象。
-  - `CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步更新目录；`CREATE INDEX` 建立对基表的 auto 依赖。
+  - `CREATE INDEX`/`DROP INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步更新目录；索引建立对基表的 auto 依赖，单列/Hash 索引另持久化 SQL 名称到物理键的映射。
   - `StorageEngine::checkpoint()` 持久化所有缓存目录；`DROP DATABASE` 先 `evict()` 目录缓存。
   - `pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表暴露给 `SELECT *`。
   - 明确延期：复杂 DML AST（复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 ON CONFLICT DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表 UPDATE/DELETE、MERGE 完整 WHEN/source/RETURNING 语义）迁移、CTAS 语义补全、完整 FK `refobjid` 解析、`ALTER TABLE`/视图/触发器/函数/过程的目录集成仍为后续工作；普通 INSERT、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单 DELETE、窄版 MERGE 及列投影/受限标量表达式 RETURNING 已进入结构化执行器。

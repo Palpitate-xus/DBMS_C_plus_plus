@@ -637,6 +637,7 @@ CREATE INDEX CONCURRENTLY idx_name ON users (NAME);
 
 -- 删除索引
 DROP INDEX idx_name;
+DROP INDEX IF EXISTS idx_a, idx_b CASCADE;
 
 -- 重索引
 REINDEX TABLE users;

@@ -351,13 +351,17 @@ CREATE INDEX idx_orders_amount ON orders (amount) WHERE amount > 100;
 
 **语法**
 ```sql
-DROP INDEX index_name ON table_name
+DROP INDEX [ CONCURRENTLY ] [ IF EXISTS ] index_name [, ...] [ CASCADE | RESTRICT ]
 ```
 
 **示例**
 ```sql
-DROP INDEX idx_users_name ON users;
+DROP INDEX idx_users_name;
+DROP INDEX IF EXISTS idx_orders_user, idx_users_name CASCADE;
 ```
+
+The PostgreSQL-compatible name-only form is canonical. The legacy `ON table_name`
+suffix remains accepted during migration.
 
 ---
 
