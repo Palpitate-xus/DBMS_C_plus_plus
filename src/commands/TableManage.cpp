@@ -118,6 +118,13 @@ static bool shouldEnforceRLS(const TableSchema& tbl, const std::string& user) {
     // bypass ordinary RLS, while FORCE ROW LEVEL SECURITY still applies it.
     const auto account = authCatalog().getAuthIdByName(user);
     if (!account) return true;
+
+    // PostgreSQL table owners bypass ordinary RLS. FORCE ROW LEVEL SECURITY
+    // is handled above and deliberately applies policies to the owner too.
+    // Require an existing role before comparing names; an arbitrary or
+    // unauthenticated identity must never become an owner bypass.
+    if (!tbl.owner.empty() && tbl.owner == account->rolname) return false;
+
     return !(account->rolsuper || account->rolbypassrls);
 }
 
@@ -7022,7 +7029,7 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     return DBStatus::OK;
 }
 
-constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420007;  // "DB" + current clean schema format
+constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420008;  // "DB" + current clean schema format
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // Write format version marker
@@ -7196,6 +7203,11 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         out.write(reinterpret_cast<const char*>(&clLen), 2);
         out.write(tbl.cols[i].collation.data(), clLen);
     }
+    // Relation owner is part of the canonical schema metadata. Old schema
+    // files are intentionally rejected by the version marker above.
+    uint16_t ownerLen = static_cast<uint16_t>(std::min<size_t>(tbl.owner.size(), UINT16_MAX));
+    out.write(reinterpret_cast<const char*>(&ownerLen), 2);
+    if (ownerLen > 0) out.write(tbl.owner.data(), ownerLen);
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -7482,6 +7494,15 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 tbl.cols[cidx].collation = std::move(cname);
             }
         }
+    }
+
+    uint16_t ownerLen = 0;
+    in.read(reinterpret_cast<char*>(&ownerLen), 2);
+    if (!in || ownerLen > 255) return {};
+    if (ownerLen > 0) {
+        tbl.owner.resize(ownerLen);
+        in.read(tbl.owner.data(), ownerLen);
+        if (!in) return {};
     }
 
     if (!in) return {};
@@ -9134,6 +9155,55 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
 
     lockManager_.unlock(oldName);
     lockManager_.unlock(newName);
+    return DBStatus::OK;
+}
+
+DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& owner) {
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (owner.empty()) return DBStatus::INVALID_ARGUMENT;
+
+    // Ownership is a role property. Rejecting unknown roles prevents an
+    // unresolvable owner string from becoming an RLS bypass identity.
+    const auto ownerAccount = authCatalog().getAuthIdByName(owner);
+    if (!ownerAccount) return DBStatus::INVALID_ARGUMENT;
+
+    lockManager_.lockMetadata(tablename);
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    tbl.owner = owner;
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        if (!out) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+        writeSchema(out, tbl);
+        if (!out) {
+            lockManager_.unlock(tablename);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+    invalidateCatalogSchema(dbname, tablename);
+
+    try {
+        auto& catalog = catalogService().get(dbname);
+        const auto* relation = catalog.resolveRelation(tablename, {"public"});
+        if (relation) {
+            auto updated = *relation;
+            updated.relowner = ownerAccount->oid;
+            if (!catalog.updateClass(relation->oid, updated)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            catalog.persistAll();
+        }
+    } catch (...) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
+    lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
 

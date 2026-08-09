@@ -6610,6 +6610,12 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             recognized = true;
             sub.action = AlterTableStmt::Action::NoInherit; pos += 2;
             if (pos < tokens.size()) sub.parentTable = tokens[pos++];
+        } else if (kw == "owner") {
+            recognized = true;
+            sub.action = AlterTableStmt::Action::Owner;
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "to") ++pos;
+            if (pos < tokens.size()) sub.newName = tokens[pos++];
         } else {
             // Unknown subcommand; skip to next comma or semicolon
             while (pos < tokens.size() && tokens[pos] != ";" && tokens[pos] != ",") ++pos;

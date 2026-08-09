@@ -95,7 +95,9 @@ public:
     DBStatus alterTableRenameColumn(const std::string& dbname, const std::string& tablename,
                                      const std::string& oldName, const std::string& newName);
     DBStatus alterTableRenameTable(const std::string& dbname, const std::string& oldName,
-                                    const std::string& newName);
+                                   const std::string& newName);
+    DBStatus alterTableOwner(const std::string& dbname, const std::string& tablename,
+                             const std::string& owner);
     DBStatus alterTableRenameConstraint(const std::string& dbname, const std::string& tablename,
                                          const std::string& oldName, const std::string& newName);
     DBStatus alterTableTablespace(const std::string& dbname, const std::string& tablename,

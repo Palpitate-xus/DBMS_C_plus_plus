@@ -304,7 +304,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 已实现元数据持久化和 `=`/`&&` 的全表冲突检查，并有 `tests/exclude_test.cpp`；真实 GiST 加速、operator class、多元素/表达式元素和完整并发语义仍待后续。 |
 | ✅ 4.25 实现 `SET CONSTRAINTS` 延迟队列、提交时检查 | 5.10, 1.1.53 | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟检查在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 映射生效，`NOT DEFERRABLE` 约束不受 `SET CONSTRAINTS ALL DEFERRED` 影响；schema 格式 `0x44420006` 持久化 `checkConstraintName`/`deferrable`/`initiallyDeferred`；`constraintMode_` 在事务结束时自动清除（per-transaction 语义）；`beginTransaction` 修复：已有事务时先 commit 再开新事务，防止 `txnDB_` 指向错误数据库。新增 `tests/deferrable_test.cpp`（6 个测试）。constraint trigger 语义仍待后续。 |
 | ⚠️ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 已由 typed AST/DdlExecutor 桥接并验证；tablespace 存储在 schema 中。新增回归覆盖 10 个选项路径。`accessMethod` schema 持久化仍待后续。 |
-| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、约束、分区和 tablespace 路径已接入，但 OWNER/CLUSTER/REPLICA、RLS、触发器和完整延迟约束语义仍有 legacy/简化路径。 |
+| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、约束、分区和 tablespace 路径已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`，但 CLUSTER/REPLICA、RLS owner 权限校验、触发器和完整延迟约束语义仍有 legacy/简化路径。 |
 | ⚠️ 4.28 补全 `CREATE/ALTER VIEW`（security barrier/invoker、recursive view、check option） | 1.1.6, 1.1.33, 4.9 | 已支持基本单表可更新视图、WITH CHECK OPTION、OR REPLACE，并有 `tests/view_test.cpp`；SECURITY BARRIER/INVOKER、递归视图和复杂映射仍待后续。 |
 | ⚠️ 4.29 补全 `CREATE TRIGGER`（transition tables、constraint triggers、deferred triggers、event triggers） | 1.1.31, 4.11 | 已解析并执行基础 BEFORE/AFTER/INSTEAD OF、事件和 WHEN 条件，并有 `tests/trigger_test.cpp`；transition tables、constraint/deferred/event triggers 和完整函数运行时仍待后续。 |
 | ✅ 4.30 补全 `CREATE TYPE`（enum/range/base/shell） | 1.1.32 | enum/composite/range/base/shell 元数据注册 + DROP TYPE 全类型修复已落地；`ALTER TYPE ADD/RENAME VALUE` 已落地。作为列类型的完整运行时语义仍待后续。 |
@@ -314,7 +314,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 4.34 实现 `CREATE DOMAIN` 多约束与全表 revalidation | 1.1.18 | DOMAIN 约束执行已落地。 |
 | ⚠️ 4.35 实现 `CREATE FUNCTION` 完整语义（language/volatility/strict/parallel/cost/security definer） | 1.1.19 | 已支持基础标量 UDF/TVF、volatility 元数据和 `tests/function_procedure_test.cpp`；PL/pgSQL 运行时、函数权限与依赖、OUT 参数和重载解析仍待后续。 |
 | ⚠️ 4.36 实现 `CREATE PROCEDURE` 语言运行时与事务控制 | 1.1.23 | 已保存并解析基础 procedure 定义；PL/pgSQL 运行时和 PostgreSQL 事务控制语义仍待后续。 |
-| ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL、USING/WITH CHECK 关系感知扫描、默认 WITH CHECK、PUBLIC 和基础 PERMISSIVE/RESTRICTIVE 组合已落地；role/owner 解析、ACL 组合和 `ALTER POLICY` 完整语义仍待后续。 |
+| ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL、USING/WITH CHECK 关系感知扫描、默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合和表 owner/角色属性绕过已落地；完整 role/owner ACL 组合和 `ALTER POLICY` 语义仍待后续。 |
 | ⚠️ 4.38 实现 `CREATE MATERIALIZED VIEW` `WITH [NO] DATA`、并发刷新 | 1.1.21, 4.10 | 已支持基础创建、列序、`WITH [NO] DATA` 和刷新；唯一索引要求、真正的 CONCURRENTLY 锁语义和 `pg_matview` 依赖追踪仍待后续。 |
 | ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 和基础事务路径已落地；完整 DDL 回滚、跨对象依赖和 PostgreSQL 隐式提交边界仍待后续。 |
 | ✅ 4.40 实现 `CREATE ASSERTION` 执行（如决定支持） | 5.9 | PG 本身未实现。本项目暂不支持Assertion，标记为完成（scope exclusion）。 |
@@ -591,7 +591,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - 🔄 仍待后续：`USING expr` 转换表达式当前忽略（仅按文本 round-trip 重编码）；窄定长 int 的 NULL 哨兵 INF 受 4 字节截断既有量化影响；改写期间无 MVCC 快照（独占锁下整表重建）。
 - **Wave 4 DDL 完整化 — ALTER TABLE OWNER TO / SET LOGGED / CLUSTER ON / REPLICA IDENTITY / SET RESET (4.27f，本次完成）**：
   - ✅ 新增 `StorageEngine::alterTableSetLogged(db, table, logged)`：直接翻转 schema 二进制中的 `isUnlogged` 标志位并写回 schema 文件；数据文件保留，仅持久化元数据变更。
-  - ✅ 其余子命令全部走 `table_options` 旁路元数据（不进 `TableSchema` 结构、不改 schema 磁盘格式）：`ALTER TABLE ... OWNER TO owner` 写入 compat-object catalog 的 `table_options|tableName` 条目的 owner 字段；`CLUSTER ON idx`/`SET WITHOUT CLUSTER` 与 `REPLICA IDENTITY {DEFAULT|FULL|NOTHING|USING INDEX idx}` 以分号分隔的 key=value 形式写入该条目的 options 字段；`SET (param=value,...)`/`RESET (param,...)` 复用既有 `StorageEngine::setStorageParams`/`getStorageParams`（旁路 `.params` 文件）。
+  - ✅ 历史上其余子命令曾全部走 `table_options` 旁路元数据；当前 `ALTER TABLE ... OWNER TO owner` 已迁移到正式 `TableSchema`/`pg_class.relowner`，`CLUSTER ON idx`/`SET WITHOUT CLUSTER` 与 `REPLICA IDENTITY {DEFAULT|FULL|NOTHING|USING INDEX idx}` 仍以分号分隔的 key=value 形式写入该条目的 options 字段；`SET (param=value,...)`/`RESET (param,...)` 复用既有 `StorageEngine::setStorageParams`/`getStorageParams`（旁路 `.params` 文件）。
   - ✅ `ALTER TABLE ... SET TABLESPACE` 明确提示暂不支持并拒绝实际迁移：当前 `getPageAllocator` 按 `tablespaceDir` 路由而 `dataPath()` 仍按 db 目录路由，未统一前迁移会孤儿化数据，故采取保守回绝。
   - ✅ `main.cpp` 在 ALTER TABLE 块尾部新增上述分支，顺序检测 OWNER TO / SET LOGGED/UNLOGGED / SET WITHOUT CLUSTER / CLUSTER ON / REPLICA IDENTITY / SET TABLESPACE / SET (...) / RESET (...)。
   - ✅ 新增 `tests/alter_set_logged_test.cpp`：SET UNLOGGED/LOGGED 切换、缺表拒绝、数据保留；二进制端到端验证 OWNER TO、SET LOGGED/UNLOGGED、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、SET/RESET storage、SET TABLESPACE 拒绝提示。全部测试通过。
@@ -729,7 +729,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |
 | 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | 基础权限路径已有，目录持久化和完整继承语义仍需补齐 |
 | 🔄 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | 解析路径已有，默认权限的完整 catalog/executor 语义仍需验证 |
-| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING/WITH CHECK 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、`SUPERUSER/BYPASSRLS` 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、求值失败安全回退；owner/角色继承和 ACL 组合语义仍不完整 |
+| 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING/WITH CHECK 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、`SUPERUSER/BYPASSRLS` 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、求值失败安全回退；对象 owner/角色继承和 ACL 组合语义仍不完整 |
 | 🔄 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | 语法支持已有，执行时安全边界仍需补齐 |
 | 🔄 7.10 实现 `GRANT`/`REVOKE` ACL item 完整语义 | 1.1.40 | 基础语法和执行路径已有，完整 ACL 传播/校验仍需验证 |
 | 🔄 7.11 实现 `ALTER USER`/`ALTER ROLE` 完整权限位（superuser/createdb/replication/bypassrls） | 1.1.5 | 主要属性执行、SCRAM 密码、`VALID UNTIL`、连接数限制和持久化已接入；仍需按 PostgreSQL 语义补全 owner/ACL/依赖校验 |

@@ -7,9 +7,9 @@
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
-ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` 的解析，并验证角色授权可以通过真实 PostgreSQL 协议生效；owner、完整 ACL 对象范围及 `GRANT OPTION` 生命周期仍未达到 PostgreSQL 语义。
+ACL 回归现已覆盖表/列权限对会话用户、继承角色和 `PUBLIC` 的解析，并验证角色授权可以通过真实 PostgreSQL 协议生效；表 owner 已进入正式 schema/`pg_class.relowner`，并参与 RLS owner bypass；完整 ACL 对象范围、对象 owner 传播及 `GRANT OPTION` 生命周期仍未达到 PostgreSQL 语义。
 
-RLS 回归现已覆盖默认 `WITH CHECK`、显式 `TO PUBLIC`、permissive/restrictive 策略组合、`pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`；复杂角色/owner/ACL 组合和完整 PostgreSQL policy catalog 语义仍有差距。
+RLS 回归现已覆盖默认 `WITH CHECK`、显式 `TO PUBLIC`、permissive/restrictive 策略组合、表 owner 绕过、`pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`；复杂角色/owner/ACL 组合和完整 PostgreSQL policy catalog 语义仍有差距。
 
 事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志、SSI 完整语义和 DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
@@ -81,7 +81,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | CREATE/DROP/ALTER ROLE/USER | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER TYPE (composite/enum/range) | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER DOMAIN | ✅ | ✅ | ✅ |
-| CREATE/DROP/ALTER POLICY (RLS) | ✅ | ⚠️ | CREATE 已由 AST/DDL bridge 接管并有运行时执行；ALTER POLICY、完整角色/owner/ACL 语义仍不完整 |
+| CREATE/DROP/ALTER POLICY (RLS) | ✅ | ⚠️ | CREATE 已由 AST/DDL bridge 接管并有运行时执行；表 owner/RLS bypass 已接入；ALTER POLICY、完整角色/owner/ACL 语义仍不完整 |
 | CREATE EXTENSION | ✅ | ✅ (DDL) | ⚠️ 运行时缺 |
 | CREATE/DROP/ALTER COLLATION | ✅ | ✅ (DDL) | ⚠️ ICU 缺 |
 | TABLESPACE | ✅ | ✅ | ✅ |
@@ -272,7 +272,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 用户/角色系统 | ✅ | 🔄 | pg_authid/pg_auth_members、主要角色属性、SCRAM、递归成员匹配、有效期检查和连接数限制已接入；完整 ACL、ADMIN OPTION、owner/依赖语义仍缺 |
 | GRANT/REVOKE (ACL) | ✅ | ✅ (DDL) | ⚠️ 执行缺 |
 | 列级权限 | ✅ | ✅ | ✅ |
-| **行级安全 (RLS) 执行** | ✅ | ⚠️ | USING/WITH CHECK 已接入关系感知扫描，默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、`SUPERUSER/BYPASSRLS` 绕过和 FORCE RLS 已实现；无适用策略默认拒绝、策略求值失败安全回退；owner/角色继承和 ACL 组合语义仍不完整 |
+| **行级安全 (RLS) 执行** | ✅ | ⚠️ | USING/WITH CHECK 已接入关系感知扫描，默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner/`SUPERUSER/BYPASSRLS` 绕过和 FORCE RLS 已实现；无适用策略默认拒绝、策略求值失败安全回退；对象 owner/角色继承和 ACL 组合语义仍不完整 |
 | **SCRAM-SHA-256 完整协议** | ✅ | 🔄 | 已实现 catalog verifier、challenge/response、pg_hba 运行时决策和 E2E；缺 channel binding 与完整 SASL 语义 |
 | **LDAP/Kerberos/GSSAPI/PAM/RADIUS** | ✅ | ❌ | 缺 |
 | **SSL 双向认证** | ✅ | ⚠️ TLSWrapper；服务端默认 fail-closed，但缺少 PostgreSQL SSL 协商、客户端证书认证和 channel binding | |

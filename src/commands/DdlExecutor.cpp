@@ -237,6 +237,10 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     cls.relkind = 'r';
     cls.relnatts = static_cast<int16_t>(tbl.len);
     cls.relpersistence = tbl.isUnlogged ? 'u' : 'p';
+    if (!tbl.owner.empty()) {
+        const auto owner = authCatalog().getAuthIdByName(tbl.owner);
+        if (owner) cls.relowner = owner->oid;
+    }
     Oid classOid = cat.createClass(cls);
 
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -437,6 +441,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                     case dbms::AlterTableStmt::Action::SetStatistics:
                     case dbms::AlterTableStmt::Action::Inherit:
                     case dbms::AlterTableStmt::Action::NoInherit:
+                    case dbms::AlterTableStmt::Action::Owner:
                         break;
                     default:
                         supported = false;
@@ -540,6 +545,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             case AlterTableStmt::Action::SetStatistics:
             case AlterTableStmt::Action::Inherit:
             case AlterTableStmt::Action::NoInherit:
+            case AlterTableStmt::Action::Owner:
                 break;
             default:
                 std::cout << "ALTER TABLE subcommand is not supported by the AST executor" << std::endl;
@@ -746,6 +752,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 for (const auto& parent : parents) out << parent << '\n';
                 break;
             }
+            case AlterTableStmt::Action::Owner:
+                if (sub.newName.empty()) {
+                    std::cout << "ALTER TABLE OWNER TO requires a role" << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableOwner(s.currentDB, tableName, sub.newName);
+                if (!alterStatusOk(status, "Owner")) return true;
+                break;
             default:
                 return true;
         }
@@ -1413,6 +1427,7 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
     dbms::TableSchema srcTbl = g_engine.getTableSchema(s.currentDB, srcTable);
     dbms::TableSchema newTbl;
     newTbl.tablename = tname;
+    newTbl.owner = s.username;
 
     std::set<std::string> queryCols;
     if (selectCols.size() == 1 && selectCols[0] == "*") {
@@ -1557,6 +1572,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         // the parent and creates the parent's partition data fork.
         TableSchema child = parentSchema;
         child.tablename = tname;
+        child.owner = s.username;
         child.partitionType = TableSchema::PartitionType::None;
         child.partitionKey.clear();
         child.rangePartitions.clear();
@@ -1616,6 +1632,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
 
     TableSchema tbl;
     tbl.tablename = tname;
+    tbl.owner = s.username;
     tbl.isUnlogged = stmt->unlogged;
     tbl.tablespace = stmt->tablespace.empty() ? "pg_default" : stmt->tablespace;
     tbl.storageParams = stmt->options;
@@ -2782,6 +2799,7 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     std::string backingTable = dbms::StorageEngine::materializedViewPrefix(viewname);
     dbms::TableSchema tbl;
     tbl.tablename = backingTable;
+    tbl.owner = s.username;
     for (const auto& cname : colNames) {
         dbms::Column col;
         col.dataName = cname;

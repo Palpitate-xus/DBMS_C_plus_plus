@@ -90,6 +90,7 @@ struct ForeignKey {
 
 struct TableSchema {
     std::string tablename;
+    std::string owner; // role that owns the relation; empty for engine-internal tables
     Column cols[MAX_COLUMNS];
     size_t len = 0;
     ForeignKey fks[MAX_COLUMNS];

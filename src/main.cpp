@@ -3799,10 +3799,9 @@ struct CompatObjectPrefix {
     string kind;
 };
 
-// ---- Table-level option metadata (OWNER TO / CLUSTER ON / REPLICA IDENTITY) ----
-// Stored as a "table_options" compat object: owner in the owner field, the rest
-// as semicolon-separated key=value pairs in the options field. No schema-format
-// change — purely a sidecar alongside the existing compat-object catalog.
+// ---- Table-level option metadata (CLUSTER ON / REPLICA IDENTITY) ----
+// Stored as a "table_options" compat object. Relation ownership is canonical
+// TableSchema/pg_class metadata and is deliberately not duplicated here.
 static CatalogObjectInfo getTableOptionsObj(const string& dbname, const string& tableName) {
     auto objects = loadCompatObjects(dbname);
     auto it = objects.find(compatObjectKey("table_options", tableName));
@@ -3853,13 +3852,6 @@ static bool setTableOption(const string& dbname, const string& tableName,
     obj.options = buildTableOptionsString(m);
     return saveTableOptionsObj(dbname, obj);
 }
-
-static bool setTableOwner(const string& dbname, const string& tableName, const string& owner) {
-    auto obj = getTableOptionsObj(dbname, tableName);
-    obj.owner = owner;
-    return saveTableOptionsObj(dbname, obj);
-}
-
 
 static const vector<CompatObjectPrefix>& compatCreatePrefixes() {
     static const vector<CompatObjectPrefix> prefixes = {
@@ -9839,6 +9831,7 @@ bool execute(const string& rawSql, Session& s) {
             string tmpName = tempTablePrefix(origName);
             TableSchema tbl = parseTableColumns(sql, 17 + 5 + 1 + sp + 1, s.currentDB);
             tbl.tablename = tmpName;
+            tbl.owner = s.username;
             auto res = g_engine.createTable(s.currentDB, tbl);
             if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Temporary table " << origName << " already exists" << endl;
@@ -9952,6 +9945,7 @@ bool execute(const string& rawSql, Session& s) {
                     // Build schema: infer types from first data row if available
                     TableSchema newTbl;
                     newTbl.tablename = newTname;
+                    newTbl.owner = s.username;
                     for (const auto& cname : colNames) {
                         dbms::Column col = dbms::makeVarCharColumn(cname, true, 255);
                         if (!rows.empty()) {
@@ -10022,6 +10016,7 @@ bool execute(const string& rawSql, Session& s) {
                 string spec = (sp2 == string::npos) ? "" : trim(afterPo.substr(sp2));
                 TableSchema newTbl = parentTbl;
                 newTbl.tablename = pname;
+                newTbl.owner = s.username;
                 newTbl.partitionType = dbms::TableSchema::PartitionType::None;
                 newTbl.partitionKey.clear();
                 newTbl.rangePartitions.clear();
@@ -10257,6 +10252,7 @@ bool execute(const string& rawSql, Session& s) {
                 }
             }
 
+            tbl.owner = s.username;
             auto res = g_engine.createTable(s.currentDB, tbl);
             if (res == DBStatus::TABLE_ALREADY_EXISTS) {
                 cout << "Table " << tname << " already exists" << endl;
@@ -11597,15 +11593,16 @@ bool execute(const string& rawSql, Session& s) {
             cout << "Table " << tname << " moved to database " << targetDb << endl;
             return false;
         }
-        // ALTER TABLE ... OWNER TO newowner  (metadata sidecar)
+        // ALTER TABLE ... OWNER TO newowner (canonical table metadata)
         if (op == "owner" && tokens.size() >= 5 && tokens[3] == "to") {
             if (!g_engine.tableExists(s.currentDB, tname)) {
                 cout << "Table not found" << endl;
                 return true;
             }
             string newOwner = tokens[4];
-            if (!setTableOwner(s.currentDB, tname, newOwner)) {
-                cout << "Owner metadata save failed" << endl;
+            auto ownerResult = g_engine.alterTableOwner(s.currentDB, tname, newOwner);
+            if (ownerResult != DBStatus::OK) {
+                cout << "Owner change failed: role must exist" << endl;
                 return true;
             }
             cout << "Table owner changed to " << newOwner << endl;

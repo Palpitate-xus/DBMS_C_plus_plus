@@ -929,6 +929,7 @@ struct AlterTableStmt : public Stmt {
         SetStatistics,
         Inherit,
         NoInherit,
+        Owner,
     };
 
     struct SubCmd {

@@ -4,6 +4,7 @@
 #include "expression/expr_helper.h"
 #include "Session.h"
 #include "catalog/catalog.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include "utils/permissions.h"
 #include <cassert>
@@ -201,6 +202,7 @@ static void test_rls_visible_source_scan() {
     const std::string regularName = "rls_regular_policy_test";
     const std::string superName = "rls_super_policy_test";
     const std::string bypassName = "rls_bypass_policy_test";
+    const std::string ownerName = "rls_owner_policy_test";
     const auto ensureRole = [&](const std::string& name, bool superuser, bool bypass) {
         auto account = auth.getAuthIdByName(name);
         dbms::PgAuthIdRow row = account.value_or(dbms::PgAuthIdRow{});
@@ -217,6 +219,7 @@ static void test_rls_visible_source_scan() {
     ensureRole(regularName, false, false);
     ensureRole(superName, true, false);
     ensureRole(bypassName, false, true);
+    ensureRole(ownerName, false, false);
     auth.persistAll();
 
     assert(!ddl.executeSql(
@@ -255,9 +258,59 @@ static void test_rls_visible_source_scan() {
         [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
     assert(visible == 0);
 
+    // A table owner bypasses ordinary RLS, but FORCE ROW LEVEL SECURITY
+    // applies policies to the owner as well. The owner must be persisted in
+    // the canonical schema and pg_class metadata, not a compatibility sidecar.
+    Session ownerSession = s;
+    ownerSession.username = ownerName;
+    assert(!ddl.executeSql("CREATE TABLE policy_owner (id INT PRIMARY KEY)", ownerSession));
+    assert(g_engine.getTableSchema(db, "policy_owner").owner == ownerName);
+    const auto ownerAccount = auth.getAuthIdByName(ownerName);
+    const auto ownerRelation = g_engine.catalogService().get(db).resolveRelation("policy_owner", {"public"});
+    assert(ownerAccount && ownerRelation && ownerRelation->relowner == ownerAccount->oid);
+    assert(g_engine.insert(db, "policy_owner", {{"id", "1"}}) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("CREATE POLICY deny_owner ON policy_owner FOR SELECT USING (false)", ownerSession));
+    assert(g_engine.enableRowLevelSecurity(db, "policy_owner") == dbms::DBStatus::OK);
+
+    dbms::StorageEngine::setRLSUser(regularName);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_owner", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 0);
+    dbms::StorageEngine::setRLSUser(ownerName);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_owner", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 1);
+    assert(g_engine.enableRowLevelSecurity(db, "policy_owner", true) == dbms::DBStatus::OK);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_owner", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 0);
+
+    Session alterSession = ownerSession;
+    assert(!ddl.executeSql("ALTER TABLE policy_owner OWNER TO " + regularName, alterSession));
+    assert(g_engine.getTableSchema(db, "policy_owner").owner == regularName);
+    dbms::StorageEngine::setRLSUser(regularName);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_owner", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 0);
+    assert(g_engine.enableRowLevelSecurity(db, "policy_owner") == dbms::DBStatus::OK);
+    visible = 0;
+    assert(g_engine.forEachVisibleRow(
+        db, "policy_owner", "SELECT",
+        [&](uint32_t, uint16_t, const char*, size_t) { ++visible; }));
+    assert(visible == 1);
+
     assert(auth.dropAuthId(auth.getAuthIdByName(regularName)->oid));
     assert(auth.dropAuthId(auth.getAuthIdByName(superName)->oid));
     assert(auth.dropAuthId(auth.getAuthIdByName(bypassName)->oid));
+    assert(auth.dropAuthId(auth.getAuthIdByName(ownerName)->oid));
     auth.persistAll();
 
     dbms::StorageEngine::setRLSUser("");
