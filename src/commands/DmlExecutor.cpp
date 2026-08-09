@@ -99,13 +99,14 @@ bool isDefaultValue(const ExprPtr& expr) {
 
 bool supportsConflict(const InsertStmt& stmt) {
     const std::string action = lower(stmt.conflictAction);
-    // Only target-less DO NOTHING and a narrow single-column DO UPDATE shape
-    // are admitted here; all other conflict inference remains legacy-owned.
+    // Only target-less DO NOTHING and a narrow VALUES DO UPDATE shape are
+    // admitted here; conflict inference remains explicit and constraint
+    // backed in buildConflictUpdatePlan().
     if (action.empty()) return true;
     if (action == "do nothing") {
         return stmt.conflictTarget.empty() && !stmt.conflictWhere;
     }
-    return action == "do update" && stmt.conflictTarget.size() == 1 &&
+    return action == "do update" && !stmt.conflictTarget.empty() &&
            !stmt.defaultValues &&
            stmt.selectSource == nullptr && !stmt.values.empty();
 }
@@ -243,32 +244,74 @@ bool validateConflictExpression(const Expr* expr, const TableSchema& table,
     return false;
 }
 
+bool sameColumnSet(const std::vector<size_t>& left,
+                   const std::vector<size_t>& right) {
+    if (left.size() != right.size()) return false;
+    std::multiset<size_t> lhs(left.begin(), left.end());
+    std::multiset<size_t> rhs(right.begin(), right.end());
+    return lhs == rhs;
+}
+
+bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
+                           std::vector<std::string>& targetColumns) {
+    if (stmt.conflictTarget.empty()) return false;
+
+    std::set<std::string> seen;
+    std::vector<size_t> targetIndices;
+    targetColumns.clear();
+    targetColumns.reserve(stmt.conflictTarget.size());
+    for (const auto& rawColumn : stmt.conflictTarget) {
+        const std::string column = identifier(rawColumn);
+        if (column.empty() || !seen.insert(column).second) return false;
+        size_t index = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == column) {
+                index = i;
+                break;
+            }
+        }
+        if (index >= table.len) return false;
+        targetColumns.push_back(column);
+        targetIndices.push_back(index);
+    }
+
+    std::vector<size_t> primaryKey;
+    if (!table.pkColIndices.empty()) {
+        primaryKey = table.pkColIndices;
+    } else {
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].isPrimaryKey) primaryKey.push_back(i);
+        }
+    }
+    if (sameColumnSet(targetIndices, primaryKey)) return true;
+
+    for (const auto& uniqueConstraint : table.uniqueConstraints) {
+        if (sameColumnSet(targetIndices, uniqueConstraint)) return true;
+    }
+
+    // Column-level UNIQUE/PRIMARY KEY constraints are not duplicated in
+    // uniqueConstraints, so recognize their single-column form here.
+    if (targetIndices.size() == 1) {
+        const Column& column = table.cols[targetIndices.front()];
+        return column.isUnique || column.isPrimaryKey;
+    }
+    return false;
+}
+
 bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
                              const std::string& currentDB,
-                             std::string& targetColumn,
+                             std::vector<std::string>& targetColumns,
                              const std::string& targetTable,
                              std::map<std::string, std::string>& updates,
                              std::map<std::string, const Expr*>& expressionUpdates,
                              std::map<std::string, std::set<std::string>>& expressionSources,
                              std::set<std::string>& whereExcludedColumns) {
     if (lower(stmt.conflictAction) != "do update" ||
-        stmt.conflictTarget.size() != 1 ||
         stmt.conflictUpdateSet.empty()) {
         return false;
     }
 
-    targetColumn = identifier(stmt.conflictTarget.front());
-    size_t targetIndex = table.len;
-    for (size_t i = 0; i < table.len; ++i) {
-        if (table.cols[i].dataName == targetColumn) {
-            targetIndex = i;
-            break;
-        }
-    }
-    if (targetIndex >= table.len ||
-        (!table.cols[targetIndex].isPrimaryKey && !table.cols[targetIndex].isUnique)) {
-        return false;
-    }
+    if (!resolveConflictTarget(stmt, table, targetColumns)) return false;
 
     std::set<std::string> seen;
     for (const auto& [rawColumn, expr] : stmt.conflictUpdateSet) {
@@ -1037,17 +1080,28 @@ bool evaluateConflictExpression(const Expr* expr, const TableSchema& table,
 bool loadConflictTargetRow(const std::string& currentDB,
                            const std::string& tableName,
                            const TableSchema& table,
-                           const std::string& targetColumn,
-                           const std::string& targetValue,
+                           const std::vector<std::string>& targetColumns,
+                           const std::map<std::string, std::string>& targetValues,
                            std::map<std::string, std::string>& rowValues) {
-    size_t targetIndex = table.len;
-    for (size_t i = 0; i < table.len; ++i) {
-        if (table.cols[i].dataName == targetColumn) {
-            targetIndex = i;
-            break;
+    if (targetColumns.empty()) return false;
+
+    std::vector<size_t> targetIndices;
+    targetIndices.reserve(targetColumns.size());
+    for (const auto& targetColumn : targetColumns) {
+        size_t targetIndex = table.len;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName == targetColumn) {
+                targetIndex = i;
+                break;
+            }
         }
+        const auto value = targetValues.find(targetColumn);
+        if (targetIndex >= table.len || value == targetValues.end() ||
+            value->second.empty()) {
+            return false;
+        }
+        targetIndices.push_back(targetIndex);
     }
-    if (targetIndex >= table.len) return false;
 
     auto captureRow = [&](const std::string& rowBuffer) {
         rowValues.clear();
@@ -1058,16 +1112,24 @@ bool loadConflictTargetRow(const std::string& currentDB,
         return true;
     };
 
-    BPTree* index = table.cols[targetIndex].isPrimaryKey
-        ? g_engine.getPKIndex(currentDB, tableName)
-        : g_engine.getSecondaryIndex(currentDB, tableName, targetColumn);
-    if (index) {
-        int64_t rid = 0;
-        if (index->search(targetValue, rid)) {
-            std::string rowBuffer;
-            PageAllocator* allocator = g_engine.getPageAllocator(currentDB, tableName);
-            if (allocator && g_engine.readVisibleRowByRid(allocator, rid, rowBuffer, table)) {
-                return captureRow(rowBuffer);
+    // Preserve the indexed fast path for the common single-column case. The
+    // composite path below intentionally verifies every target column from
+    // the visible heap row because composite UNIQUE constraints do not yet
+    // have a dedicated constraint index.
+    if (targetIndices.size() == 1) {
+        const std::string& targetColumn = targetColumns.front();
+        const std::string& targetValue = targetValues.at(targetColumn);
+        BPTree* index = table.cols[targetIndices.front()].isPrimaryKey
+            ? g_engine.getPKIndex(currentDB, tableName)
+            : g_engine.getSecondaryIndex(currentDB, tableName, targetColumn);
+        if (index) {
+            int64_t rid = 0;
+            if (index->search(targetValue, rid)) {
+                std::string rowBuffer;
+                PageAllocator* allocator = g_engine.getPageAllocator(currentDB, tableName);
+                if (allocator && g_engine.readVisibleRowByRid(allocator, rid, rowBuffer, table)) {
+                    return captureRow(rowBuffer);
+                }
             }
         }
     }
@@ -1077,8 +1139,15 @@ bool loadConflictTargetRow(const std::string& currentDB,
                         [&](uint32_t, uint16_t, const char* data, size_t len) {
         if (found) return;
         const std::string rowBuffer(data, len);
-        if (g_engine.extractColumnValue(rowBuffer, table, targetIndex,
-                                        currentDB, true) == targetValue) {
+        for (size_t i = 0; i < targetIndices.size(); ++i) {
+            const std::string value = g_engine.extractColumnValue(
+                rowBuffer, table, targetIndices[i], currentDB, true);
+            const auto expected = targetValues.find(targetColumns[i]);
+            if (expected == targetValues.end() || value != expected->second) {
+                return;
+            }
+        }
+        {
             found = captureRow(rowBuffer);
         }
     });
@@ -1156,7 +1225,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     std::vector<std::map<std::string, std::string>> insertedRows;
     const bool ignoreDuplicate = lower(stmt.conflictAction) == "do nothing";
     const bool conflictUpdate = lower(stmt.conflictAction) == "do update";
-    std::string conflictTarget;
+    std::vector<std::string> conflictTarget;
     std::map<std::string, std::string> conflictUpdates;
     std::map<std::string, const Expr*> conflictExpressionUpdates;
     std::map<std::string, std::set<std::string>> conflictExpressionSources;
@@ -1307,10 +1376,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         // reports a duplicate. DEFAULT/generated target values require a
         // storage-level conflict key API and therefore remain legacy-owned.
         for (const auto& values : pendingRows) {
-            const auto it = values.find(conflictTarget);
-            if (it == values.end() || it->second.empty()) {
-                fallback = true;
-                return false;
+            for (const auto& targetColumn : conflictTarget) {
+                const auto it = values.find(targetColumn);
+                if (it == values.end()) {
+                    fallback = true;
+                    return false;
+                }
             }
             for (const auto& [updateColumn, sourceColumns] : conflictExpressionSources) {
                 (void)updateColumn;
@@ -1344,17 +1415,22 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         if (status == DBStatus::DUPLICATE_KEY) {
             if (ignoreDuplicate) continue;
             if (conflictUpdate) {
-                const auto targetValue = values.find(conflictTarget);
-                if (targetValue == values.end() || targetValue->second.empty()) {
-                    std::cout << "ON CONFLICT target value is unavailable" << std::endl;
-                    return true;
+                std::map<std::string, std::string> targetValues;
+                std::vector<std::string> conditions;
+                conditions.reserve(conflictTarget.size());
+                for (const auto& targetColumn : conflictTarget) {
+                    const auto targetValue = values.find(targetColumn);
+                    if (targetValue == values.end() || targetValue->second.empty()) {
+                        std::cout << "ON CONFLICT target value is unavailable" << std::endl;
+                        return true;
+                    }
+                    targetValues[targetColumn] = targetValue->second;
+                    conditions.push_back("=" + targetColumn + " " + targetValue->second);
                 }
-                std::vector<std::string> conditions = {
-                    "=" + conflictTarget + " " + targetValue->second};
                 if (stmt.conflictWhere) {
                     std::map<std::string, std::string> targetRow;
                     if (!loadConflictTargetRow(s.currentDB, resolvedTable, table,
-                                                conflictTarget, targetValue->second,
+                                                conflictTarget, targetValues,
                                                 targetRow)) {
                         std::cout << "ON CONFLICT target row is unavailable" << std::endl;
                         return true;

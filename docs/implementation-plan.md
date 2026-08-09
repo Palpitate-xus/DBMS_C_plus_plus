@@ -195,7 +195,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - `CREATE INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步更新目录；`CREATE INDEX` 建立对基表的 auto 依赖。
   - `StorageEngine::checkpoint()` 持久化所有缓存目录；`DROP DATABASE` 先 `evict()` 目录缓存。
   - `pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表暴露给 `SELECT *`。
-  - 明确延期：复杂 DML AST（复杂 INSERT SELECT、复合/部分/索引推断 conflict target、引用子查询或其他关系的 ON CONFLICT DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、多表 UPDATE/DELETE、MERGE）迁移、CTAS 语义补全、完整 FK `refobjid` 解析、`ALTER TABLE`/视图/触发器/函数/过程的目录集成仍为后续工作；普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式 UPDATE、简单 DELETE 及列投影/受限标量表达式 RETURNING 已进入结构化执行器。
+  - 明确延期：复杂 DML AST（复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 ON CONFLICT DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、多表 UPDATE/DELETE、MERGE）迁移、CTAS 语义补全、完整 FK `refobjid` 解析、`ALTER TABLE`/视图/触发器/函数/过程的目录集成仍为后续工作；普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、常量/列表达式 UPDATE、简单 DELETE 及列投影/受限标量表达式 RETURNING 已进入结构化执行器。
 
 ---
 
@@ -657,7 +657,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 5.5 实现 skip scan、index condition recheck、lossy pages | 8.2, 7.4 | FilterOp indexConditionRecheck + canUseSkipScan in QueryPlanner |
 | ✅ 5.6 实现 CTE `MATERIALIZED/NOT MATERIALIZED`、可写 CTE 快照、递归检测 | 6.4 | parser 已解析 CTE；executor 未实现 |
 | ✅ 5.7 实现 `MERGE` 完整 WHEN 分支（UPDATE SET + INSERT VALUES） | 1.1.44, 6.13 | main.cpp MERGE INTO ... USING ... ON ... UPDATE SET ... INSERT 完整执行 |
-| 🔄 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | 普通 VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE 及列投影/受限标量表达式 RETURNING 已新增 `DmlExecutor` AST 执行路径；OVERRIDING、复合/部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂 INSERT SELECT 和复杂/子查询/窗口 RETURNING 仍由 legacy 路径处理 |
+| 🔄 5.8 实现 `INSERT` `DEFAULT VALUES`、`OVERRIDING`、conflict target/opclass/where | 1.1.41, 6.10 | 普通 VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE 及列投影/受限标量表达式 RETURNING 已新增 `DmlExecutor` AST 执行路径；OVERRIDING、部分/索引推断 conflict target、引用子查询或其他关系的 DO UPDATE/WHERE、复杂 INSERT SELECT 和复杂/子查询/窗口 RETURNING 仍由 legacy 路径处理 |
 | ✅ 5.9 实现 `RETURNING` `OLD`/`NEW` aliases、trigger-modified rows 精确行为 | 6.12, 1.1.41 等 | 基础 RETURNING 已就绪 |
 | ✅ 5.10 实现 `UPDATE FROM` / `DELETE USING` 的语义安全实现（非文本拼接） | 6.11, 1.1.58, 1.1.35 | main.cpp UPDATE FROM multi-table + DELETE USING 已实现 |
 | ⚠️ 5.11 实现 Row locking 完整语义（`NO KEY UPDATE` / `KEY SHARE`、OF list） | 6.9 | parser 已识别多种锁子句；当前执行器主要覆盖基础单表 FOR UPDATE/SHARE，JOIN/聚合/窗口和完整 OF/NOWAIT/SKIP LOCKED 语义仍缺。 |

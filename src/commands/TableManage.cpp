@@ -10873,21 +10873,41 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     for (const auto& uc : tbl.uniqueConstraints) {
         if (uc.empty()) continue;
         std::string compositeKey;
+        bool containsNull = false;
         for (size_t idx : uc) {
             if (idx < tbl.len) {
                 auto it = actualValues.find(tbl.cols[idx].dataName);
-                compositeKey += (it != actualValues.end() ? it->second : "") + "\x01";
+                const std::string value = it != actualValues.end() ? it->second : "";
+                // PostgreSQL UNIQUE constraints treat NULL values as distinct
+                // (unless NULLS NOT DISTINCT is explicitly requested).  The
+                // storage row format represents NULL as an empty value, so a
+                // composite key containing one must not participate in the
+                // duplicate check.
+                if (value.empty()) {
+                    containsNull = true;
+                    break;
+                }
+                compositeKey += value + "\x01";
             }
         }
+        if (containsNull) continue;
         bool duplicate = false;
         forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
             if (duplicate) return;
             std::string row(data, len);
             std::string existingKey;
+            bool existingContainsNull = false;
             for (size_t idx : uc) {
-                if (idx < tbl.len) existingKey += extractColumnValue(row, tbl, idx) + "\x01";
+                if (idx < tbl.len) {
+                    const std::string value = extractColumnValue(row, tbl, idx);
+                    if (value.empty()) {
+                        existingContainsNull = true;
+                        break;
+                    }
+                    existingKey += value + "\x01";
+                }
             }
-            if (existingKey == compositeKey) duplicate = true;
+            if (!existingContainsNull && existingKey == compositeKey) duplicate = true;
         });
         if (duplicate) {
             lockManager_.unlock(tablename);

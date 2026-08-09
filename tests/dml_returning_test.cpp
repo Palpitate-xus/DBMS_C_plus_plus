@@ -148,6 +148,37 @@ int main() {
     assert((result.rows == std::vector<std::vector<std::string>>{
         {"7", "seven"}}));
 
+    dbms::TableSchema compositeConflict = table;
+    compositeConflict.tablename = "composite_conflict";
+    compositeConflict.uniqueConstraints = {{0, 1}};
+    compositeConflict.uniqueConstraintNames = {"composite_conflict_key"};
+    assert(g_engine.createTable(db, compositeConflict) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "composite_conflict",
+                           {{"id", "1"}, {"name", "old"}}) == dbms::DBStatus::OK);
+    assert(!runDml("INSERT INTO composite_conflict VALUES (1, 'old') "
+                   "ON CONFLICT (name, id) DO UPDATE SET name = 'updated' "
+                   "WHERE name = 'old' "
+                   "RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 1");
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"1", "updated"}}));
+
+    // A nullable component of a composite UNIQUE key is not a conflict with
+    // another NULL-containing key (the storage format represents NULL as an
+    // empty value).
+    dbms::TableSchema nullableUnique = table;
+    nullableUnique.tablename = "nullable_unique";
+    nullableUnique.cols[0].isNull = true;
+    nullableUnique.cols[1].isNull = true;
+    nullableUnique.uniqueConstraints = {{0, 1}};
+    assert(g_engine.createTable(db, nullableUnique) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "nullable_unique",
+                           {{"id", "1"}, {"name", ""}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "nullable_unique",
+                           {{"id", "1"}, {"name", ""}}) == dbms::DBStatus::OK);
+
     assert(!runDml("INSERT INTO ret VALUES (3, 'inserted') RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);

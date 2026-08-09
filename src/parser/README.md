@@ -10,4 +10,4 @@ SQL 解析主入口已拆到 `src/parser/`，由递归下降 parser 生成 typed
 
 ## 未来迁移计划
 
-继续将复杂 `INSERT SELECT`、复合/部分/索引推断 conflict target、引用子查询或其他关系的 `ON CONFLICT DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、多表 DML、`MERGE` 和复杂表达式迁移到结构化执行器，并在每个边界删除对应 legacy 分支；简单单表 INSERT SELECT、无 target 的 `ON CONFLICT DO NOTHING`、单列主键/唯一列 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 `DO UPDATE` 及目标行/`excluded` 的受限 `WHERE`、列投影和 evaluator 支持的受限标量表达式 RETURNING 已接入。
+继续将复杂 `INSERT SELECT`、部分/索引推断 conflict target、引用子查询或其他关系的 `ON CONFLICT DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、多表 DML、`MERGE` 和复杂表达式迁移到结构化执行器，并在每个边界删除对应 legacy 分支；简单单表 INSERT SELECT、无 target 的 `ON CONFLICT DO NOTHING`、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 `DO UPDATE` 及目标行/`excluded` 的受限 `WHERE`、列投影和 evaluator 支持的受限标量表达式 RETURNING 已接入。
