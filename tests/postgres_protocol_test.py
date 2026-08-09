@@ -421,6 +421,13 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(sock, "CREATE TABLE t (id INT)"))
         assert any(kind == b"C" for kind, _ in simple_query(sock, "INSERT INTO t VALUES (1)"))
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+            "GRANT SELECT ON TABLES TO analyst"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE default_acl_protocol (id INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO default_acl_protocol VALUES (7)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE dml_ast (id INT DEFAULT 7, name TEXT)"))
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO dml_ast VALUES (DEFAULT, 'first'), (2, NULL), (NULL, 'null-id')"))
@@ -834,6 +841,9 @@ def main():
         startup(role_sock, "bob", "info", password="bObPass9!")
         role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
         assert role_rows == [[b"1"], [b"3"], [b"20"]], role_rows
+        default_role_rows = data_row_values(simple_query(
+            role_sock, "SELECT id FROM default_acl_protocol"))
+        assert default_role_rows == [[b"7"]], default_role_rows
         assert any(kind == b"C" for kind, _ in simple_query(
             role_sock, "GRANT analyst TO carol WITH ADMIN OPTION"))
         assert any(kind == b"C" for kind, _ in simple_query(

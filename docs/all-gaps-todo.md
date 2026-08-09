@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：统一回归基线 PASS=124 FAIL=0（122 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态**：统一回归基线 PASS=125 FAIL=0（123 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -200,7 +200,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=124 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=125 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -502,7 +502,7 @@
 | 11.2 | 认证 | 已有 catalog SCRAM-SHA-256、pg_hba 首条匹配、IPv4/IPv6 及角色/数据库匹配和 TLS；缺少 OAuth(PG18)、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 🔄 |
 | 11.3 | 传输协议 | 已有 PostgreSQL protocol 3.0 startup/auth/query framing、Parse/Bind/Execute/Describe/Close/Sync、基础 portal `maxRows` 分页、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果和常见单表 RowDescription 元数据；缺少数组等复杂类型 I/O、扩展消息、holdable/scrollable portal 和完整 libpq 语义 | 🔄 |
 | 11.4 | TLS | 有 OpenSSL wrapper；服务端默认 fail-closed，缺少 PG SSL negotiation、client cert auth、channel binding；无 OpenSSL 时仅能离线构建，不能启动网络服务 | ⚠️ |
-| 11.5 | ACL | 简化 privilege 文件；表/列权限已统一解析 PUBLIC、有效角色和表 owner 隐含权限，OWNER TO/SET ROLE/表级 REVOKE、表级 GRANT OPTION 独立撤销与 RESTRICT/CASCADE 授权链、角色 ADMIN OPTION 基础授权边界已接入；缺少 ACL item、grant options 完整生命周期、set options、对象全集和 default privileges 完整传播 | ⚠️ |
+| 11.5 | ACL | 简化 privilege 文件；表/列权限已统一解析 PUBLIC、有效角色和表 owner 隐含权限，OWNER TO/SET ROLE/表级 REVOKE、表级 GRANT OPTION 独立撤销与 RESTRICT/CASCADE 授权链、角色 ADMIN OPTION 基础授权边界及表级 default privileges GRANT/REVOKE 已接入；缺少 ACL item、grant options 完整生命周期、set options、对象全集和 catalog 化 default ACL | ⚠️ |
 | 11.6 | RLS | policy 文件和 USING/WITH CHECK 关系感知扫描已接入查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、INHERIT/NOINHERIT、表 owner、`pg_authid` 的 SUPERUSER/BYPASSRLS 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、策略求值失败 fail-closed；完整 owner 解析和 ACL 组合语义仍缺 | ⚠️ |
 | 11.7 | SECURITY DEFINER/INVOKER | 函数/过程缺少完整 security definer/invoker、search_path 安全规则 | ❌ |
 | 11.8 | 审计 | 项目有 audit log；PG 核心不内置同等 audit，通常靠扩展 | — |

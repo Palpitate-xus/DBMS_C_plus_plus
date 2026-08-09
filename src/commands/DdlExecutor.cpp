@@ -331,6 +331,9 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
         case SqlCommand::AlterRole:
         case SqlCommand::AlterUser:
             return executeAlterRole(dynamic_cast<const AlterObjectStmt*>(stmt.get()), s);
+        case SqlCommand::AlterDefaultPrivileges:
+            return executeAlterDefaultPrivileges(
+                dynamic_cast<const AlterDefaultPrivilegesStmt*>(stmt.get()), s);
         case SqlCommand::DropRole:
         case SqlCommand::DropUser:
             return executeDropRole(dynamic_cast<const DropStmt*>(stmt.get()), s);
@@ -389,6 +392,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateUser:
         case dbms::SqlCommand::AlterRole:
         case dbms::SqlCommand::AlterUser:
+        case dbms::SqlCommand::AlterDefaultPrivileges:
         case dbms::SqlCommand::DropRole:
         case dbms::SqlCommand::DropUser:
         case dbms::SqlCommand::Comment:
@@ -987,6 +991,114 @@ bool DdlExecutor::executeAlterRole(const AlterObjectStmt* stmt, Session& s) {
     }
     persistAuthCatalog();
     std::cout << "ALTER ROLE succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeAlterDefaultPrivileges(const AlterDefaultPrivilegesStmt* stmt,
+                                                Session& s) {
+    if (!stmt) {
+        std::cout << "SQL syntax error: invalid ALTER DEFAULT PRIVILEGES statement" << std::endl;
+        return true;
+    }
+    if (!checkDB(s)) return true;
+    if (stmt->privileges.empty() || stmt->grantees.empty() || stmt->objectType.empty()) {
+        std::cout << "SQL syntax error: ALTER DEFAULT PRIVILEGES requires privileges, object type, and grantee"
+                  << std::endl;
+        return true;
+    }
+    if (stmt->withGrantOption || stmt->grantOptionOnly) {
+        std::cout << "ERROR: default privilege grant options are not supported yet" << std::endl;
+        return true;
+    }
+
+    const std::string actor = effectiveSessionRole(s);
+    const std::string owner = stmt->owner.empty()
+                                  ? actor
+                                  : canonicalRoleName(stmt->owner);
+    if (owner.empty()) {
+        std::cout << "ERROR: default privilege owner is required" << std::endl;
+        return true;
+    }
+    if (owner != actor) {
+        const auto actorAccount = authCatalog().getAuthIdByName(actor);
+        if (!sessionIsAdmin(s) && (!actorAccount || !actorAccount->rolcreaterole)) {
+            std::cout << "ERROR: permission denied to alter default privileges for role \""
+                      << owner << "\"" << std::endl;
+            return true;
+        }
+        if (!authCatalog().getAuthIdByName(owner)) {
+            std::cout << "ERROR: role \"" << owner << "\" does not exist" << std::endl;
+            return true;
+        }
+    }
+
+    const std::string schema = stmt->schema.empty()
+                                   ? "public"
+                                   : canonicalRoleName(stmt->schema);
+    if (!g_engine.schemaExists(s.currentDB, schema)) {
+        std::cout << "ERROR: schema \"" << schema << "\" does not exist" << std::endl;
+        return true;
+    }
+
+    std::string objectType = toLower(stripQuotes(trim(stmt->objectType)));
+    if (objectType == "tables") objectType = "table";
+    if (objectType != "table") {
+        std::cout << "ERROR: ALTER DEFAULT PRIVILEGES currently supports TABLE/TABLES only"
+                  << std::endl;
+        return true;
+    }
+
+    using TablePrivilege = StorageEngine::TablePrivilege;
+    std::vector<TablePrivilege> privileges;
+    for (const auto& rawPrivilege : stmt->privileges) {
+        const std::string privilege = toLower(stripQuotes(trim(rawPrivilege)));
+        if (privilege == "select") privileges.push_back(TablePrivilege::Select);
+        else if (privilege == "insert") privileges.push_back(TablePrivilege::Insert);
+        else if (privilege == "update") privileges.push_back(TablePrivilege::Update);
+        else if (privilege == "delete") privileges.push_back(TablePrivilege::Delete);
+        else if (privilege == "all") privileges.push_back(TablePrivilege::All);
+        else {
+            std::cout << "ERROR: invalid table privilege \"" << rawPrivilege << "\"" << std::endl;
+            return true;
+        }
+    }
+
+    const auto privilegeName = [](TablePrivilege privilege) {
+        switch (privilege) {
+            case TablePrivilege::Select: return std::string("select");
+            case TablePrivilege::Insert: return std::string("insert");
+            case TablePrivilege::Update: return std::string("update");
+            case TablePrivilege::Delete: return std::string("delete");
+            case TablePrivilege::All: return std::string("all");
+            default: return std::string();
+        }
+    };
+
+    for (const auto privilege : privileges) {
+        for (const auto& rawGrantee : stmt->grantees) {
+            const std::string grantee = canonicalRoleName(rawGrantee);
+            if (grantee.empty()) {
+                std::cout << "ERROR: grantee name is required" << std::endl;
+                return true;
+            }
+            if (stmt->revoke) {
+                const std::vector<std::string> names =
+                    privilege == TablePrivilege::All
+                        ? std::vector<std::string>{"select", "insert", "update", "delete", "all"}
+                        : std::vector<std::string>{privilegeName(privilege)};
+                for (const auto& name : names) {
+                    g_engine.removeDefaultPrivilege(s.currentDB, owner, schema, objectType,
+                                                    name, grantee);
+                }
+            } else {
+                g_engine.addDefaultPrivilege(s.currentDB, owner, schema, objectType,
+                                             privilegeName(privilege), grantee);
+            }
+        }
+    }
+
+    std::cout << "ALTER DEFAULT PRIVILEGES " << (stmt->revoke ? "revoked" : "granted")
+              << " for role " << owner << " in schema " << schema << std::endl;
     return false;
 }
 

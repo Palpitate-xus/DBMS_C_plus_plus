@@ -7273,30 +7273,74 @@ StmtPtr SQLParser::parseAlterSubscription(const std::vector<std::string>& tokens
 }
 
 StmtPtr SQLParser::parseAlterDefaultPrivileges(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterDefaultPrivileges);
-    stmt->objectType = "DEFAULT PRIVILEGES";
-    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
-        stmt->ifExists = true; pos += 2;
-    }
-    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
-        stmt->only = true; ++pos;
-    }
-    if (pos < tokens.size()) {
-        stmt->objectName = tokens[pos++];
-        if (pos < tokens.size() && tokens[pos] == ".") {
-            ++pos;
-            if (pos < tokens.size()) {
-                stmt->schema = stmt->objectName;
-                stmt->objectName = tokens[pos++];
-            }
+    auto stmt = std::make_unique<AlterDefaultPrivilegesStmt>();
+    size_t cursor = pos;
+
+    // PostgreSQL accepts FOR ROLE and IN SCHEMA before the GRANT/REVOKE
+    // clause. Parse them as fields instead of preserving a raw string.
+    while (cursor < tokens.size() && tokens[cursor] != ";") {
+        const std::string keyword = toLower(tokens[cursor]);
+        if (keyword == "for" && cursor + 2 < tokens.size() &&
+            toLower(tokens[cursor + 1]) == "role") {
+            stmt->owner = tokens[cursor + 2];
+            cursor += 3;
+            continue;
         }
+        if (keyword == "in" && cursor + 2 < tokens.size() &&
+            toLower(tokens[cursor + 1]) == "schema") {
+            stmt->schema = tokens[cursor + 2];
+            cursor += 3;
+            continue;
+        }
+        break;
     }
-    std::string rest;
-    while (pos < tokens.size() && tokens[pos] != ";") {
-        if (!rest.empty()) rest += " ";
-        rest += tokens[pos++];
+
+    if (cursor >= tokens.size() || tokens[cursor] == ";") return stmt;
+    const std::string operation = toLower(tokens[cursor++]);
+    if (operation != "grant" && operation != "revoke") return stmt;
+    stmt->revoke = operation == "revoke";
+
+    if (stmt->revoke && cursor + 2 < tokens.size() &&
+        toLower(tokens[cursor]) == "grant" &&
+        toLower(tokens[cursor + 1]) == "option" &&
+        toLower(tokens[cursor + 2]) == "for") {
+        stmt->grantOptionOnly = true;
+        cursor += 3;
     }
-    stmt->subCommand = rest;
+
+    // Collect the privilege list up to ON. Commas are syntax separators.
+    while (cursor < tokens.size() && toLower(tokens[cursor]) != "on") {
+        const std::string token = toLower(tokens[cursor++]);
+        if (token == ",") continue;
+        if (token == "privileges" && !stmt->privileges.empty()) continue;
+        stmt->privileges.push_back(token);
+    }
+    if (cursor >= tokens.size() || toLower(tokens[cursor]) != "on") return stmt;
+    ++cursor;
+    if (cursor >= tokens.size() || tokens[cursor] == ";") return stmt;
+    stmt->objectType = toLower(tokens[cursor++]);
+
+    const std::string targetKeyword = stmt->revoke ? "from" : "to";
+    if (cursor >= tokens.size() || toLower(tokens[cursor]) != targetKeyword) return stmt;
+    ++cursor;
+    while (cursor < tokens.size() && tokens[cursor] != ";") {
+        const std::string token = toLower(tokens[cursor++]);
+        if (token == ",") continue;
+        if (token == "with" && cursor + 1 < tokens.size() &&
+            toLower(tokens[cursor]) == "grant" &&
+            toLower(tokens[cursor + 1]) == "option") {
+            stmt->withGrantOption = true;
+            cursor += 2;
+            continue;
+        }
+        if (token == "cascade") {
+            stmt->cascade = true;
+            continue;
+        }
+        if (token == "restrict") continue;
+        stmt->grantees.push_back(tokens[cursor - 1]);
+    }
+    pos = cursor;
     return stmt;
 }
 

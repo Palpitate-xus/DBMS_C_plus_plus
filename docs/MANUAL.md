@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-08-09
 > 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=124 FAIL=0（122 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
+> 回归基线: PASS=125 FAIL=0（123 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
@@ -716,7 +716,11 @@ REVOKE GRANT OPTION FOR INSERT ON users FROM alice CASCADE;
 
 -- ALTER DEFAULT PRIVILEGES
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO alice;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO alice, bob;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM alice;
 ```
+
+当前仅支持表级 `TABLE`/`TABLES` 默认权限。规则只影响之后创建的表，重复 GRANT 不会重复写入；`WITH GRANT OPTION`、`GRANT OPTION FOR` 以及 sequence/function 等对象类型会明确报错。
 
 ---
 
@@ -1027,7 +1031,7 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 
 ```bash
 ./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 安静运行统一回归：122 个 C++ 测试 + 2 个 E2E
+./scripts/run_all_tests_fast.sh # 安静运行统一回归：123 个 C++ 测试 + 2 个 E2E
 ./scripts/build_tests.sh        # 完整输出的规范测试入口：C++ 测试 + 2 个 E2E
 ```
 

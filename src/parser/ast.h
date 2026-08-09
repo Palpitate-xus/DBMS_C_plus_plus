@@ -906,6 +906,24 @@ struct AlterObjectStmt : public Stmt {
     std::string toString() const override { return "ALTER " + objectType; }
 };
 
+// Structured ALTER DEFAULT PRIVILEGES.  The executor currently accepts the
+// table default-ACL subset; keeping the grant/revoke components typed avoids
+// sending this security-sensitive command through main.cpp string parsing.
+struct AlterDefaultPrivilegesStmt : public Stmt {
+    std::string owner;
+    std::string schema = "public";
+    std::string objectType;
+    std::vector<std::string> privileges;
+    std::vector<std::string> grantees;
+    bool revoke = false;
+    bool grantOptionOnly = false;
+    bool withGrantOption = false;
+    bool cascade = false;
+
+    AlterDefaultPrivilegesStmt() : Stmt(SqlCommand::AlterDefaultPrivileges) {}
+    std::string toString() const override { return "ALTER DEFAULT PRIVILEGES"; }
+};
+
 // ============================================================================
 // ALTER TABLE 语句
 // ============================================================================

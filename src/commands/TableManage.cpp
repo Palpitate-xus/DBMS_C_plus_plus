@@ -2364,6 +2364,11 @@ DBStatus StorageEngine::alterTableSetSchema(const std::string& dbname,
 
 bool StorageEngine::schemaExists(const std::string& dbname,
                                  const std::string& schemaname) const {
+    // The public namespace is implicit for databases initialized by older
+    // bootstrap paths (including a manually prepared test/server directory).
+    // New databases persist the marker as well, but validation must preserve
+    // the PostgreSQL invariant that public always exists.
+    if (schemaname == "public" && databaseExists(dbname)) return true;
     return std::filesystem::exists(schemaMarkerPath(dbname, schemaname));
 }
 
@@ -7002,6 +7007,12 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     {
         std::ofstream f(dbPath(dbname) / ".charset");
         f << charset;
+    }
+    // Every database has the PostgreSQL-compatible public schema. Persist it
+    // as a normal schema marker so schema validation is consistent for DDL,
+    // default privileges, and future catalog-backed namespace operations.
+    {
+        std::ofstream f(dbPath(dbname) / ".schema_public");
     }
     return DBStatus::OK;
 }
@@ -19251,6 +19262,18 @@ void StorageEngine::addDefaultPrivilege(const std::string& dbname, const std::st
                                         const std::string& schema, const std::string& objType,
                                         const std::string& privilege, const std::string& grantee) {
     auto dpp = defaultPrivPath(dbPath(dbname));
+    {
+        std::ifstream ifs(dpp);
+        std::string line;
+        while (std::getline(ifs, line)) {
+            std::stringstream ss(line);
+            std::string o, s, t, p, g;
+            ss >> o >> s >> t >> p >> g;
+            if (o == owner && s == schema && t == objType && p == privilege && g == grantee) {
+                return;
+            }
+        }
+    }
     std::ofstream ofs(dpp, std::ios::app);
     ofs << owner << " " << schema << " " << objType << " " << privilege << " " << grantee << "\n";
 }

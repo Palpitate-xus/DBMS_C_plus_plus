@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-09）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=124 FAIL=0（122 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-09）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 完成记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=125 FAIL=0（123 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -728,7 +728,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 7.4 实现 OAuth（PG18）、LDAP、Kerberos/GSSAPI、SSPI、RADIUS、PAM、cert、peer、ident | 11.2 | 部分方法仅有配置解析或接口骨架，尚无可验收的端到端认证实现 |
 | 🔄 7.5 实现 TLS 完整协商（SSL negotiation、client cert auth、channel binding） | 11.4 | TLS 默认 fail-closed 已完成；PostgreSQL SSLRequest、客户端证书认证和 channel binding 仍缺失 |
 | 🔄 7.6 实现 ACL item、PUBLIC、grant options/admin options/set options、ownership 传播 | 11.5, 1.1.40 | PUBLIC、表/列 grant option（含独立撤销与基础 RESTRICT/CASCADE）、表 owner 和角色 ADMIN OPTION 基础路径已有，ACL item、目录持久化和完整继承语义仍需补齐 |
-| 🔄 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | 解析路径已有，默认权限的完整 catalog/executor 语义仍需验证 |
+| 🔄 7.7 实现 `ALTER DEFAULT PRIVILEGES` 完整语义 | 1.1.1 | typed AST/DdlExecutor 已支持表级 GRANT/REVOKE、多权限/多 grantee、schema 校验、幂等写入和新建表传播；grant option、sequence/function 等对象类型、完整角色继承与 catalog ACL 仍需补齐 |
 | 🔄 7.8 实现 RLS executor-integrated 完整语义 | 11.6, 1.1.22 | USING/WITH CHECK 已接入关系感知扫描，覆盖查询/更新/删除及结构化 DML 来源关系；默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、表 owner、`SUPERUSER/BYPASSRLS` 绕过和 FORCE RLS 已验证；无适用策略默认拒绝、求值失败安全回退；对象 owner/角色继承和 ACL 组合语义仍不完整 |
 | 🔄 7.9 实现 SECURITY DEFINER/INVOKER、search_path 安全规则 | 11.7, 1.1.19 等 | 语法支持已有，执行时安全边界仍需补齐 |
 | 🔄 7.10 实现 `GRANT`/`REVOKE` ACL item 完整语义 | 1.1.40 | 基础语法和执行路径已有，完整 ACL 传播/校验仍需验证 |

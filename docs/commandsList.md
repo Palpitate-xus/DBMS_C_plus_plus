@@ -881,6 +881,24 @@ REVOKE readonly FROM alice;
 REVOKE ADMIN OPTION FOR readonly FROM alice;
 ```
 
+### ALTER DEFAULT PRIVILEGES
+
+**语法（当前支持的表级子集）**
+```sql
+ALTER DEFAULT PRIVILEGES [FOR ROLE owner] [IN SCHEMA schema]
+    {GRANT privilege [, ...] ON {TABLE | TABLES} TO grantee [, ...]
+     | REVOKE [GRANT OPTION FOR] privilege [, ...] ON {TABLE | TABLES}
+       FROM grantee [, ...]}
+```
+
+默认权限仅应用于之后由指定 owner 在目标 schema 创建的表；`REVOKE` 不改写已有表。当前不支持默认权限 grant option、sequence/function 等对象类型，遇到这些语法会 fail-closed 报错。
+
+**示例**
+```sql
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT ON TABLES TO alice;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA public REVOKE SELECT ON TABLES FROM alice;
+```
+
 ---
 
 ## 6. 存储程序
