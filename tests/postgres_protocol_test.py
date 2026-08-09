@@ -451,6 +451,16 @@ def main():
         assert any(kind == b"C" and body == b"INSERT 0 1\0"
                    for kind, body in returning_select), returning_select
         assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE dml_conflict (id INT PRIMARY KEY, name TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO dml_conflict VALUES (1, 'old')"))
+        conflict_messages = simple_query(
+            sock, "INSERT INTO dml_conflict VALUES (1, 'ignored'), (2, 'new') "
+            "ON CONFLICT DO NOTHING RETURNING id, name")
+        assert data_row_values(conflict_messages) == [[b"2", b"new"]], conflict_messages
+        assert any(kind == b"C" and body == b"INSERT 0 1\0"
+                   for kind, body in conflict_messages), conflict_messages
+        assert any(kind == b"C" for kind, _ in simple_query(
             sock, "UPDATE dml_ast SET name = 'changed' WHERE id = 2"))
         assert data_row_values(simple_query(
             sock, "SELECT name FROM dml_ast WHERE id = 2")) == [[b"changed"]]

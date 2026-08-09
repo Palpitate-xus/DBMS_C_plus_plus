@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、常量/列表达式 UPDATE、简单谓词 DELETE、三类 DML 的列投影 RETURNING 和视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT/ON CONFLICT/RETURNING 表达式、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
+当前路径补充：基础 `ALTER TABLE`、`CREATE TABLE` 分区、普通单表 INSERT VALUES/DEFAULT VALUES、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、常量/列表达式 UPDATE、简单谓词 DELETE、三类 DML 的列投影 RETURNING 和视图 `INSTEAD OF` DML 路径已接入 typed AST/统一执行链；复杂/尚未迁移的 INSERT SELECT、conflict target/DO UPDATE、RETURNING 表达式、多表/复杂 UPDATE/DELETE、MERGE、RLS、触发器函数运行时、OWNER/CLUSTER/REPLICA 等动作仍由 legacy 或简化路径执行，不能据历史 Wave 的“全量完成”描述宣称 PostgreSQL 兼容。
 
 ---
 
@@ -637,7 +637,7 @@
 
 ### 进度备注（追加记录）
 
-- **2026-08-09**：DML AST executor 扩展：普通 INSERT、简单单表 INSERT SELECT、常量/列表达式单表 UPDATE、简单谓词单表 DELETE 及三类 DML 的列投影 RETURNING 已接入；修复 INSERT SELECT 的 `RETURNING` parser 边界和列引用被误写成 NULL 的 fallback 边界，补充 INSERT/UPDATE/DELETE 协议回归和 DML 尾随垃圾 fail-closed parser 测试。高级 DML、多表语义和复杂表达式仍待迁移。
+- **2026-08-09**：DML AST executor 扩展：普通 INSERT、简单单表 INSERT SELECT、无 target 的 ON CONFLICT DO NOTHING、常量/列表达式单表 UPDATE、简单谓词单表 DELETE 及三类 DML 的列投影 RETURNING 已接入；修复 INSERT SELECT 的 `RETURNING` parser 边界和列引用被误写成 NULL 的 fallback 边界，补充 INSERT/UPDATE/DELETE/冲突处理协议回归和 DML 尾随垃圾 fail-closed parser 测试。高级 DML、多表语义和复杂表达式仍待迁移。
 
 - **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。

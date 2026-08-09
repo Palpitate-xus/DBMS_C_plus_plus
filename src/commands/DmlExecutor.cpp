@@ -97,13 +97,23 @@ bool isDefaultValue(const ExprPtr& expr) {
     return literal && lower(literal->value) == "default";
 }
 
+bool supportsConflict(const InsertStmt& stmt) {
+    const std::string action = lower(stmt.conflictAction);
+    // DO NOTHING without an inference target is the only conflict policy
+    // whose behavior can be delegated to the storage uniqueness boundary
+    // without reimplementing index inference.
+    return action.empty() ||
+           (action == "do nothing" && stmt.conflictTarget.empty() &&
+            !stmt.conflictWhere);
+}
+
 bool supportsInsert(const InsertStmt& stmt) {
     // The bridge owns ordinary VALUES inserts, simple single-table SELECT
-    // sources, and column-projection RETURNING. Every feature outside this
-    // contract remains on the established implementation until its AST
-    // semantics are migrated.
+    // sources, column-projection RETURNING, and target-less DO NOTHING.
+    // Every feature outside this contract remains on the established
+    // implementation until its AST semantics are migrated.
     return !stmt.tableName.empty() &&
-           stmt.conflictAction.empty() &&
+           supportsConflict(stmt) &&
            stmt.override_.empty() &&
            (stmt.defaultValues || !stmt.values.empty() || stmt.selectSource != nullptr);
 }
@@ -649,6 +659,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         return false;
     }
     std::vector<std::map<std::string, std::string>> insertedRows;
+    const bool ignoreDuplicate = lower(stmt.conflictAction) == "do nothing";
 
     if (stmt.selectSource) {
         const auto* select = dynamic_cast<const SelectStmt*>(stmt.selectSource.get());
@@ -665,11 +676,13 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
         if (buildResult == InsertSelectBuildResult::Error) return true;
 
+        int inserted = 0;
         for (const auto& values : pendingRows) {
             const DBStatus status = g_engine.insert(
                 s.currentDB, resolvedTable, values,
                 stmt.returning.empty() ? nullptr : &insertedRows);
             if (status == DBStatus::DUPLICATE_KEY) {
+                if (ignoreDuplicate) continue;
                 std::cout << "Duplicate key" << std::endl;
                 return true;
             }
@@ -677,13 +690,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 std::cout << "Invalid data, please check" << std::endl;
                 return true;
             }
+            ++inserted;
         }
-        std::cout << pendingRows.size() << " row(s) inserted" << std::endl;
+        std::cout << inserted << " row(s) inserted" << std::endl;
         if (!stmt.returning.empty()) {
             publishReturning(returningColumns, returningNames, insertedRows, "INSERT");
             printReturningRows(g_lastDmlResult);
         }
-        if (!pendingRows.empty()) g_engine.analyzeTable(s.currentDB, resolvedTable);
+        if (inserted > 0) g_engine.analyzeTable(s.currentDB, resolvedTable);
         return false;
     }
 
@@ -696,6 +710,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         const DBStatus status = g_engine.insertDefaultValues(
             s.currentDB, resolvedTable, table,
             stmt.returning.empty() ? nullptr : &insertedRows);
+        if (status == DBStatus::DUPLICATE_KEY && ignoreDuplicate) {
+            std::cout << "INSERT 0 0 (ON CONFLICT DO NOTHING)" << std::endl;
+            if (!stmt.returning.empty()) {
+                publishReturning(returningColumns, returningNames, insertedRows, "INSERT");
+                printReturningRows(g_lastDmlResult);
+            }
+            return false;
+        }
         if (status != DBStatus::OK) {
             std::cout << "INSERT DEFAULT VALUES failed" << std::endl;
             return true;
@@ -742,6 +764,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             s.currentDB, resolvedTable, values,
             stmt.returning.empty() ? nullptr : &insertedRows);
         if (status == DBStatus::DUPLICATE_KEY) {
+            if (ignoreDuplicate) continue;
             std::cout << "Duplicate key" << std::endl;
             return true;
         }

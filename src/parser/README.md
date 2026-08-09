@@ -10,4 +10,4 @@ SQL 解析主入口已拆到 `src/parser/`，由递归下降 parser 生成 typed
 
 ## 未来迁移计划
 
-继续将 `INSERT SELECT/ON CONFLICT/RETURNING`、多表 DML、`MERGE` 和复杂表达式迁移到结构化执行器，并在每个边界删除对应 legacy 分支。
+继续将复杂 `INSERT SELECT`、conflict target/`ON CONFLICT DO UPDATE`、复杂 `RETURNING`、多表 DML、`MERGE` 和复杂表达式迁移到结构化执行器，并在每个边界删除对应 legacy 分支；简单单表 INSERT SELECT、无 target 的 `ON CONFLICT DO NOTHING` 和列投影 RETURNING 已接入。

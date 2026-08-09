@@ -84,6 +84,25 @@ int main() {
     assert(result.commandTag == "INSERT 0 1");
     assert((result.rows[0] == std::vector<std::string>{"11", "one"}));
 
+    dbms::TableSchema conflict = table;
+    conflict.tablename = "conflict_t";
+    conflict.cols[0].isPrimaryKey = true;
+    assert(g_engine.createTable(db, conflict) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "conflict_t", {{"id", "1"}, {"name", "old"}}) == dbms::DBStatus::OK);
+    assert(!runDml("INSERT INTO conflict_t VALUES (1, 'ignored'), (2, 'new') "
+                   "ON CONFLICT DO NOTHING RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 1");
+    assert(result.rows.size() == 1);
+    assert((result.rows[0] == std::vector<std::string>{"2", "new"}));
+    assert(!runDml("INSERT INTO conflict_t VALUES (1, 'ignored-again') "
+                   "ON CONFLICT DO NOTHING RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 0");
+    assert(result.rows.empty());
+
     assert(!runDml("INSERT INTO ret VALUES (3, 'inserted') RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);
