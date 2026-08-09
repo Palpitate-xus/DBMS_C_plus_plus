@@ -10129,51 +10129,6 @@ bool execute(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 4) == "gin " || sql.substr(7, 5) == "gist " || sql.substr(7, 5) == "brin " || sql.substr(7, 7) == "spgist ") {
-            if (!checkAdmin(s)) return true;
-            if (!checkDB(s)) return true;
-            bool isGin = (sql.substr(7, 4) == "gin ");
-            bool isGist = (sql.substr(7, 5) == "gist ");
-            bool isSpgist = (sql.substr(7, 7) == "spgist ");
-            size_t restStart = isGin ? 11 : (isSpgist ? 14 : 12); // after "create gin " or "create gist " / "create brin " / "create spgist "
-            string rest = trim(sql.substr(restStart));
-            // Remove "index " prefix if present
-            if (rest.size() >= 6 && rest.substr(0, 6) == "index ") {
-                rest = trim(rest.substr(6));
-            }
-            size_t onPos = rest.find(" on ");
-            if (onPos == string::npos) {
-                cout << "SQL syntax error: CREATE GIN/GiST/BRIN INDEX idx ON t(col)" << endl;
-                return true;
-            }
-            string idxName = trim(rest.substr(0, onPos));
-            string afterOn = trim(rest.substr(onPos + 4));
-            size_t lp = afterOn.find('(');
-            size_t rp = afterOn.find(')');
-            if (lp == string::npos || rp == string::npos || rp <= lp + 1) {
-                cout << "SQL syntax error" << endl;
-                return true;
-            }
-            string tname = resolveTableName(s, trim(afterOn.substr(0, lp)));
-            string colname = trim(afterOn.substr(lp + 1, rp - lp - 1));
-            DBStatus res;
-            if (isGin) {
-                res = g_engine.createGinIndex(s.currentDB, tname, colname);
-            } else if (isGist) {
-                res = g_engine.createGiSTIndex(s.currentDB, tname, colname);
-            } else if (isSpgist) {
-                res = g_engine.createSPGiSTIndex(s.currentDB, tname, colname);
-            } else {
-                res = g_engine.createBrinIndex(s.currentDB, tname, colname);
-            }
-            if (res != DBStatus::OK) {
-                cout << "Create index failed" << endl;
-                return true;
-            }
-            cout << "Index created" << endl;
-            return false;
-        }
-
         if (sql.substr(7, 8) == "sequence") {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
@@ -12255,34 +12210,6 @@ bool execute(const string& rawSql, Session& s) {
             }
             g_engine.dropFullTextIndex(s.currentDB, tname, idxName);
             cout << "Fulltext index dropped" << endl;
-            return false;
-        }
-        if (op == "gin" || op == "gist" || op == "brin" || op == "spgist") {
-            if (tokens.size() < 3 || tokens[1] != "index" || tokens.size() < 5 || tokens[3] != "on") {
-                cout << "SQL syntax error: DROP GIN/GiST/BRIN/SP-GiST INDEX idx ON t" << endl;
-                return true;
-            }
-            string idxName = tokens[2];
-            string tname = resolveTableName(s, tokens[4]);
-            bool hasIdx = false;
-            if (op == "gin") hasIdx = g_engine.hasGinIndex(s.currentDB, tname, idxName);
-            else if (op == "gist") hasIdx = g_engine.hasGiSTIndex(s.currentDB, tname, idxName);
-            else if (op == "brin") hasIdx = g_engine.hasBrinIndex(s.currentDB, tname, idxName);
-            else if (op == "spgist") hasIdx = g_engine.hasSPGiSTIndex(s.currentDB, tname, idxName);
-            if (!hasIdx) {
-                cout << "Index " << idxName << " not exist on table " << tname << endl;
-                return true;
-            }
-            if (op == "gin") {
-                g_engine.dropGinIndex(s.currentDB, tname, idxName);
-            } else if (op == "gist") {
-                g_engine.dropGiSTIndex(s.currentDB, tname, idxName);
-            } else if (op == "brin") {
-                g_engine.dropBrinIndex(s.currentDB, tname, idxName);
-            } else {
-                g_engine.dropSPGiSTIndex(s.currentDB, tname, idxName);
-            }
-            cout << "Index dropped" << endl;
             return false;
         }
         if (op == "view") {

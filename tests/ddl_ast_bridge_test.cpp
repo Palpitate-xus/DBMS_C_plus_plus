@@ -171,6 +171,18 @@ static void test_drop_index_uses_sql_name() {
     assert(!ddl.executeSql("DROP INDEX idx_drop_composite ON drop_idx_tbl", s));
     assert(!ddl.executeSql("DROP INDEX IF EXISTS idx_missing", s));
 
+    // Standard PostgreSQL access-method syntax must use the real specialized
+    // StorageEngine implementation, not the former B-tree compatibility path.
+    assert(!ddl.executeSql("CREATE INDEX idx_gin ON drop_idx_tbl USING GIN (value)", s));
+    assert(!ddl.executeSql("CREATE INDEX idx_gist ON drop_idx_tbl (id) USING GiST", s));
+    assert(!ddl.executeSql("CREATE INDEX idx_brin ON drop_idx_tbl USING BRIN (id)", s));
+    assert(!ddl.executeSql("CREATE INDEX idx_spgist ON drop_idx_tbl USING SPGIST (id)", s));
+    assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_gin")->accessMethod == "gin");
+    assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_gist")->accessMethod == "gist");
+    assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_brin")->accessMethod == "brin");
+    assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_spgist")->accessMethod == "spgist");
+    assert(!ddl.executeSql("DROP INDEX idx_gin, idx_gist, idx_brin, idx_spgist", s));
+
     cleanup(db);
     std::cout << "[DDL] standard DROP INDEX name resolution OK" << std::endl;
 }

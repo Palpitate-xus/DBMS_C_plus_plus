@@ -2346,15 +2346,19 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             std::cout << "HASH index only supports single column" << std::endl;
             return true;
         }
-    } else {
-        if (colnames.size() == 1) {
-            res = g_engine.createIndex(s.currentDB, tname, colnames.front(), true,
-                                       includeCols, whereCondition, "", stmt->concurrently);
-        } else {
-            res = g_engine.createCompositeIndex(s.currentDB, tname, colnames,
-                                                stmt->indexName, includeCols,
-                                                whereCondition, stmt->concurrently);
+    } else if (am == "gin" || am == "gist" || am == "brin" || am == "spgist") {
+        if (stmt->unique || colnames.size() != 1 || colnames.front().empty()) {
+            std::cout << "CREATE INDEX access method requires one non-unique column" << std::endl;
+            return true;
         }
+        const auto& colname = colnames.front();
+        if (am == "gin") res = g_engine.createGinIndex(s.currentDB, tname, colname);
+        else if (am == "gist") res = g_engine.createGiSTIndex(s.currentDB, tname, colname);
+        else if (am == "brin") res = g_engine.createBrinIndex(s.currentDB, tname, colname);
+        else res = g_engine.createSPGiSTIndex(s.currentDB, tname, colname);
+    } else {
+        std::cout << "Unsupported index access method: " << am << std::endl;
+        return true;
     }
 
     if (res != DBStatus::OK) {
@@ -2363,12 +2367,16 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     }
     std::string idxName = stmt->indexName.empty() ? (tname + "_idx") : stmt->indexName;
     const std::string physicalMethod = (colnames.size() > 1)
-        ? "composite" : (am == "hash" ? "hash" : "btree");
+        ? "composite" : (am.empty() ? "btree" : am);
     const std::string physicalKey = (colnames.size() > 1)
         ? idxName : (stmt->columns.front().expr ? stmt->columns.front().expr->toString() : colnames.front());
     if (!g_engine.registerIndexName(s.currentDB, tname, idxName, physicalMethod, physicalKey)) {
         if (physicalMethod == "composite") g_engine.dropCompositeIndex(s.currentDB, tname, idxName);
         else if (physicalMethod == "hash") g_engine.dropHashIndex(s.currentDB, tname, physicalKey);
+        else if (physicalMethod == "gin") g_engine.dropGinIndex(s.currentDB, tname, physicalKey);
+        else if (physicalMethod == "gist") g_engine.dropGiSTIndex(s.currentDB, tname, physicalKey);
+        else if (physicalMethod == "brin") g_engine.dropBrinIndex(s.currentDB, tname, physicalKey);
+        else if (physicalMethod == "spgist") g_engine.dropSPGiSTIndex(s.currentDB, tname, physicalKey);
         else g_engine.dropIndex(s.currentDB, tname, physicalKey);
         std::cout << "CREATE INDEX failed: cannot persist index metadata" << std::endl;
         return true;
@@ -2503,6 +2511,18 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             for (const auto& col : g_engine.getHashIndexedColumns(s.currentDB, tableName)) {
                 if (col == indexName) { method = "hash"; key = col; break; }
             }
+            for (const auto& col : g_engine.getGinIndexedColumns(s.currentDB, tableName)) {
+                if (col == indexName) { method = "gin"; key = col; break; }
+            }
+            for (const auto& col : g_engine.getGiSTIndexedColumns(s.currentDB, tableName)) {
+                if (col == indexName) { method = "gist"; key = col; break; }
+            }
+            for (const auto& col : g_engine.getBrinIndexedColumns(s.currentDB, tableName)) {
+                if (col == indexName) { method = "brin"; key = col; break; }
+            }
+            for (const auto& col : g_engine.getSPGiSTIndexedColumns(s.currentDB, tableName)) {
+                if (col == indexName) { method = "spgist"; key = col; break; }
+            }
         }
         if (method.empty()) {
             if (stmt->ifExists) {
@@ -2516,6 +2536,10 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         DBStatus status = DBStatus::INVALID_VALUE;
         if (method == "composite") status = g_engine.dropCompositeIndex(s.currentDB, tableName, key);
         else if (method == "hash") status = g_engine.dropHashIndex(s.currentDB, tableName, key);
+        else if (method == "gin") status = g_engine.dropGinIndex(s.currentDB, tableName, key);
+        else if (method == "gist") status = g_engine.dropGiSTIndex(s.currentDB, tableName, key);
+        else if (method == "brin") status = g_engine.dropBrinIndex(s.currentDB, tableName, key);
+        else if (method == "spgist") status = g_engine.dropSPGiSTIndex(s.currentDB, tableName, key);
         else status = g_engine.dropIndex(s.currentDB, tableName, key);
         if (status != DBStatus::OK) {
             std::cout << "DROP INDEX failed" << std::endl;

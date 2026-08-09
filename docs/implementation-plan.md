@@ -192,7 +192,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - 修复 DDL AST bridge 双执行 bug：`main.cpp::execute()` 通过 `tryDdlBridge()` 调用 `DdlExecutor`，成功即返回，CTAS 保留旧路径回退。
   - 新增 `CatalogService` 作为 `StorageEngine` 的每库 `CatalogManager` 缓存，首次访问时只引导系统 namespace/type 并加载当前 catalog。
   - `CREATE TABLE`/`DROP TABLE` 在存储操作前后同步 `pg_class`/`pg_attribute`/`pg_type`/`pg_depend` 条目；`DROP TABLE CASCADE` 通过依赖图删除索引等从属对象。
-  - `CREATE INDEX`/`DROP INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步更新目录；索引建立对基表的 auto 依赖，单列/Hash 索引另持久化 SQL 名称到物理键的映射。
+  - `CREATE INDEX`/`DROP INDEX`/`CREATE SEQUENCE`/`CREATE SCHEMA`/`DROP SEQUENCE`/`DROP SCHEMA` 同步更新目录；索引建立对基表的 auto 依赖，单列和访问方法索引另持久化 SQL 名称到物理键的映射。
   - `StorageEngine::checkpoint()` 持久化所有缓存目录；`DROP DATABASE` 先 `evict()` 目录缓存。
   - `pg_class`/`pg_namespace`/`pg_type` 作为只读虚拟系统表暴露给 `SELECT *`。
   - 明确延期：复杂 DML AST（复杂 INSERT SELECT、部分/索引推断 conflict target、引用子查询或其他关系的 ON CONFLICT DO UPDATE/WHERE、复杂/子查询/窗口 RETURNING、外连接/复杂 UPDATE FROM/DELETE USING、多表 UPDATE/DELETE、MERGE 完整 WHEN/source/RETURNING 语义）迁移、CTAS 语义补全、完整 FK `refobjid` 解析、`ALTER TABLE`/视图/触发器/函数/过程的目录集成仍为后续工作；普通 INSERT、简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 ON CONFLICT DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 DO UPDATE、目标行/`excluded` 受限 WHERE、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单 DELETE、窄版 MERGE 及列投影/受限标量表达式 RETURNING 已进入结构化执行器。
@@ -706,7 +706,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 6.1 实现 `amhandler`、support functions、opclass/opfamily、`amcostestimate`、`amvalidate` | 8.1, 16.7 | `IIndexAM` 接口 + `BPTreeIndexAM` + `HashIndexAM` 适配器已就绪；PG 完整 AM API 仍缺 |
 | ⚠️ 6.2 补全 B-tree（dedup、suffix truncation、visibility map 驱动 index-only scan） | 8.2 | 基础 B+Tree 已覆盖跨叶/内部节点分裂、重复键和范围扫描；PG 高级 B-tree 能力仍缺 |
 | ⚠️ 6.3 补全 Hash（WAL-safe bucket split、metapage/overflow page） | 8.3 | 基础 Hash 索引已就绪，WAL-safe bucket split 等 PG 语义仍缺 |
-| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | GIN/BRIN/SP-GiST 有特定实现；泛化 opclass 和 GiST 完整访问方法仍缺 |
+| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | 标准 `CREATE INDEX ... USING ...` 已由 typed DDL 路由到真实的简化实现；泛化 opclass、WAL-safe 维护和 GiST 完整访问方法仍缺 |
 | ⚠️ 6.5 实现 `CREATE INDEX CONCURRENTLY` | 8.5, 1.1.20 | 当前以共享锁/简化路径支持 concurrently；PG 两阶段/invalid catalog/旧快照等待语义仍缺 |
 | ⚠️ 6.6 实现 expression/partial/include 索引的完整支持（dependency、immutable 检查） | 8.6 | expression/partial/include 基础路径已就绪；dependency、immutable 检查和 predicate implication 仍缺 |
 | ⚠️ 6.7 实现 index maintenance（page deletion、vacuum cleanup、`amcheck`、`REINDEX CONCURRENTLY`） | 8.7, 1.1.47 | REINDEX 基础已就绪；page deletion、vacuum cleanup、amcheck 和并发重建仍缺 |

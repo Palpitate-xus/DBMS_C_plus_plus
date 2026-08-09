@@ -4412,7 +4412,10 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
     }
     while (pos < tokens.size() && tokens[pos] != ";") {
         std::string kw = toLower(tokens[pos]);
-        if (kw == "include" && pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+        if (kw == "using" && pos + 1 < tokens.size()) {
+            ++pos;
+            stmt->accessMethod = tokens[pos++];
+        } else if (kw == "include" && pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
             pos += 2;
             while (pos < tokens.size() && tokens[pos] != ")") {
                 if (tokens[pos] != ",") stmt->includeCols.push_back(tokens[pos]);

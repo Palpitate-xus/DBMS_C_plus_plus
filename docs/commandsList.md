@@ -322,7 +322,7 @@ DROP VIEW active_users;
 
 **语法**
 ```sql
-CREATE [UNIQUE | FULLTEXT] INDEX index_name ON table_name (column_name) [USING HASH]
+CREATE [UNIQUE] INDEX index_name ON table_name [USING access_method] (column_name [, ...])
     [INCLUDE (column_name [, ...])]
     [WHERE condition]
 ```
@@ -333,6 +333,7 @@ CREATE [UNIQUE | FULLTEXT] INDEX index_name ON table_name (column_name) [USING H
 | `index_name` | `STRING` | 索引名称 |
 | `table_name` | `STRING` | 表名 |
 | `column_name` | `STRING` | 索引列名 |
+| `access_method` | `STRING` | `btree`、`hash`、`gin`、`gist`、`brin` 或 `spgist` |
 | `INCLUDE` | `LIST` | 可选，覆盖索引包含的附加列 |
 | `WHERE` | `EXPR` | 可选，部分索引过滤条件 |
 
@@ -341,6 +342,10 @@ CREATE [UNIQUE | FULLTEXT] INDEX index_name ON table_name (column_name) [USING H
 CREATE INDEX idx_users_name ON users (name);
 CREATE UNIQUE INDEX idx_users_email ON users (email);
 CREATE INDEX idx_users_id ON users (id) USING HASH;
+CREATE INDEX idx_users_body ON users USING GIN (body);
+CREATE INDEX idx_users_range ON users USING GiST (id);
+CREATE INDEX idx_users_brin ON users USING BRIN (id);
+CREATE INDEX idx_users_spgist ON users USING SPGIST (id);
 CREATE INDEX idx_orders_user ON orders (user_id) INCLUDE (amount);
 CREATE INDEX idx_orders_amount ON orders (amount) WHERE amount > 100;
 ```

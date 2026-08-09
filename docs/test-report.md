@@ -61,7 +61,7 @@
 | 认证与连接 | 2 | 2 | 0 | — |
 | DDL - 数据库 | 3 | 3 | 0 | — |
 | DDL - 表 | 14 | 14 | 0 | 含 CTAS / RENAME / POINT / INET/CIDR 类型 |
-| DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/BRIN/SP-GiST 基础路径通过；GiST 关键字目前仅走兼容 fallback，不宣称真实 GiST；B+Tree 分裂/重复键/范围回归见 `gin_brin_index_test.cpp` |
+| DDL - 索引 | 7 | 7 | 0 | B+Tree/Hash/FullText/GIN/GiST/BRIN/SP-GiST 基础路径通过；专用访问方法仍是简化实现，不宣称 PostgreSQL 完整 opclass 兼容；B+Tree 分裂/重复键/范围回归见 `gin_brin_index_test.cpp` |
 | DDL - 视图 | 5 | 5 | 0 | 含 ALTER VIEW RENAME TO / SET SCHEMA |
 | DDL - 触发器 | 2 | 2 | 0 | — |
 | DDL - 用户/角色 | 4 | 4 | 0 | — |
@@ -356,7 +356,7 @@ CREATE INDEX idx_name ON t1(name);
 
 **输入**
 ```sql
-CREATE HASH INDEX idx_hash ON t1(id);
+CREATE INDEX idx_hash ON t1 USING HASH (id);
 ```
 
 **实际结果** ✅ `Index created`
@@ -372,27 +372,29 @@ CREATE FULLTEXT INDEX idx_ft ON t1(name);
 
 **实际结果** ✅ `Fulltext index created`
 
+该命令是项目扩展语法，不属于 PostgreSQL `CREATE INDEX ... USING ...` 标准路径。
+
 ---
 
 ### 4.4 CREATE GIN INDEX
 
 **输入**
 ```sql
-CREATE GIN INDEX idx_gin ON t1(name);
+CREATE INDEX idx_gin ON t1 USING GIN (name);
 ```
 
-**实际结果** ✅ `Index created`
+**实际结果** ✅ 创建真实 GIN 文件索引并登记 typed catalog 元数据。
 
 ---
 
-### 4.5 CREATE GiST INDEX（兼容 fallback，非真实 GiST）
+### 4.5 CREATE GiST INDEX
 
 **输入**
 ```sql
-CREATE GiST INDEX idx_gist ON t1(id);
+CREATE INDEX idx_gist ON t1 USING GiST (id);
 ```
 
-**实际结果** ⚠️ 语句可被接受，但当前会落到通用 B-tree 风格路径；源码没有通用 `GistIndex`，因此不计为 GiST 实现。
+**实际结果** ✅ 通过 typed DDL 创建 GiST 风格物理索引；当前实现仍是简化 range/spatial 结构，不宣称 PostgreSQL 通用 GiST opclass 兼容。
 
 ---
 
@@ -400,7 +402,7 @@ CREATE GiST INDEX idx_gist ON t1(id);
 
 **输入**
 ```sql
-CREATE BRIN INDEX idx_brin ON t1(id);
+CREATE INDEX idx_brin ON t1 USING BRIN (id);
 ```
 
 **实际结果** ✅ `Index created`
@@ -416,7 +418,7 @@ INSERT INTO locations VALUES (1, '0.0,0.0');
 INSERT INTO locations VALUES (2, '10.0,10.0');
 INSERT INTO locations VALUES (3, '20.0,20.0');
 INSERT INTO locations VALUES (4, '-5.0,5.0');
-CREATE SPGIST INDEX idx_spg ON locations(pos);
+CREATE INDEX idx_spg ON locations USING SPGIST (pos);
 SELECT * FROM locations;
 ```
 
@@ -433,10 +435,9 @@ DROP INDEX idx_hash;
 DROP INDEX idx_name, idx_hash CASCADE;
 DROP INDEX IF EXISTS missing_index;
 DROP INDEX idx_name ON t1; -- migration-only legacy suffix
-DROP BRIN INDEX id ON t1;  -- specialized legacy syntax
 ```
 
-**实际结果** ✅ 标准 name-only、多名称、`IF EXISTS` 和旧 `ON table` 形式均通过；物理索引、`pg_class` 和依赖元数据同步清理。GiST/GIN/BRIN 等专用索引的独立 DROP 语法仍属于 legacy 专用路径。
+**实际结果** ✅ 标准 name-only、多名称、`IF EXISTS`、`CASCADE/RESTRICT` 以及 B-tree/Hash/GIN/GiST/BRIN/SP-GiST 物理索引均通过；物理索引、`pg_class` 和依赖元数据同步清理。
 
 ---
 

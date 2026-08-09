@@ -619,6 +619,10 @@ CREATE INDEX idx_name_age ON users (NAME, AGE);
 
 -- Hash 索引
 CREATE INDEX idx_email_hash ON users USING HASH (EMAIL);
+CREATE INDEX idx_body_gin ON users USING GIN (BODY);
+CREATE INDEX idx_id_gist ON users USING GiST (ID);
+CREATE INDEX idx_id_brin ON users USING BRIN (ID);
+CREATE INDEX idx_id_spgist ON users USING SPGIST (ID);
 
 -- 覆盖索引 (INCLUDE)
 CREATE INDEX idx_name_include ON users (NAME) INCLUDE (AGE, EMAIL);
