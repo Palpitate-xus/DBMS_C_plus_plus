@@ -140,7 +140,8 @@ bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
 bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
                              const std::string& currentDB,
                              std::string& targetColumn,
-                             std::map<std::string, std::string>& updates) {
+                             std::map<std::string, std::string>& updates,
+                             std::map<std::string, std::string>& excludedColumns) {
     if (lower(stmt.conflictAction) != "do update" ||
         stmt.conflictTarget.size() != 1 || stmt.conflictWhere ||
         stmt.conflictUpdateSet.empty()) {
@@ -175,11 +176,28 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
         }
         if (!found) return false;
 
+        if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr.get())) {
+            if (!ref->schema.empty() || lower(ref->table) != "excluded") {
+                return false;
+            }
+            const std::string sourceColumn = identifier(ref->column);
+            bool sourceFound = false;
+            for (const auto& tableColumn : table.cols) {
+                if (tableColumn.dataName == sourceColumn) {
+                    sourceFound = true;
+                    break;
+                }
+            }
+            if (!sourceFound) return false;
+            excludedColumns[column] = sourceColumn;
+            continue;
+        }
+
         std::string value;
         if (!evaluateValue(expr, currentDB, value)) return false;
         updates[column] = std::move(value);
     }
-    return !updates.empty();
+    return !updates.empty() || !excludedColumns.empty();
 }
 
 bool checkTablePrivilege(Session& s, const std::string& table,
@@ -933,6 +951,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
     const bool conflictUpdate = lower(stmt.conflictAction) == "do update";
     std::string conflictTarget;
     std::map<std::string, std::string> conflictUpdates;
+    std::map<std::string, std::string> conflictExcludedColumns;
 
     if (conflictUpdate) {
         if (!checkTablePrivilege(s, requestedTable,
@@ -940,19 +959,28 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
             return true;
         }
         if (!buildConflictUpdatePlan(stmt, table, s.currentDB, conflictTarget,
-                                     conflictUpdates)) {
+                                     conflictUpdates, conflictExcludedColumns)) {
             fallback = true;
             return false;
         }
         const std::vector<std::string> updateColumns = [&]() {
             std::vector<std::string> result;
-            result.reserve(conflictUpdates.size());
+            result.reserve(conflictUpdates.size() + conflictExcludedColumns.size());
+            std::set<std::string> seen;
             for (const auto& [column, value] : conflictUpdates) {
                 (void)value;
-                result.push_back(column);
+                if (seen.insert(column).second) result.push_back(column);
+            }
+            for (const auto& [column, value] : conflictExcludedColumns) {
+                (void)value;
+                if (seen.insert(column).second) result.push_back(column);
             }
             return result;
         }();
+        if (updateColumns.empty()) {
+            fallback = true;
+            return false;
+        }
         if (s.permission != 1 && !isTempTable(s, requestedTable) &&
             !g_engine.hasColumnPermission(
                 s.currentDB, requestedTable, s.username,
@@ -1073,6 +1101,16 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 fallback = true;
                 return false;
             }
+            for (const auto& [updateColumn, sourceColumn] : conflictExcludedColumns) {
+                (void)updateColumn;
+                const auto source = values.find(sourceColumn);
+                if (source == values.end() || source->second.empty()) {
+                    // DEFAULT/generated incoming values need to be resolved by
+                    // the storage insert path before they can become EXCLUDED.
+                    fallback = true;
+                    return false;
+                }
+            }
         }
     }
 
@@ -1091,9 +1129,18 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 }
                 std::vector<std::string> conditions = {
                     "=" + conflictTarget + " " + targetValue->second};
+                std::map<std::string, std::string> rowConflictUpdates = conflictUpdates;
+                for (const auto& [updateColumn, sourceColumn] : conflictExcludedColumns) {
+                    const auto source = values.find(sourceColumn);
+                    if (source == values.end() || source->second.empty()) {
+                        std::cout << "ON CONFLICT EXCLUDED value is unavailable" << std::endl;
+                        return true;
+                    }
+                    rowConflictUpdates[updateColumn] = source->second;
+                }
                 std::vector<std::map<std::string, std::string>> updatedRows;
                 const DBStatus updateStatus = g_engine.update(
-                    s.currentDB, resolvedTable, conflictUpdates, conditions,
+                    s.currentDB, resolvedTable, rowConflictUpdates, conditions,
                     &updatedRows);
                 if (updateStatus != DBStatus::OK || updatedRows.size() != 1) {
                     std::cout << "ON CONFLICT DO UPDATE failed" << std::endl;

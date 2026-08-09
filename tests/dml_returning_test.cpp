@@ -112,6 +112,15 @@ int main() {
     assert((result.rows == std::vector<std::vector<std::string>>{
         {"1", "upserted"}, {"3", "third"}}));
 
+    assert(!runDml("INSERT INTO conflict_t VALUES (1, 'excluded-update'), (4, 'four') "
+                   "ON CONFLICT (id) DO UPDATE SET name = excluded.name "
+                   "RETURNING id, name", session));
+    result = dbms::takeLastDmlResult();
+    assert(result.available);
+    assert(result.commandTag == "INSERT 0 2");
+    assert((result.rows == std::vector<std::vector<std::string>>{
+        {"1", "excluded-update"}, {"4", "four"}}));
+
     assert(!runDml("INSERT INTO ret VALUES (3, 'inserted') RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);

@@ -478,6 +478,14 @@ def main():
             [b"1", b"upserted"], [b"3", b"third"]], upsert_messages
         assert any(kind == b"C" and body == b"INSERT 0 2\0"
                    for kind, body in upsert_messages), upsert_messages
+        excluded_upsert = simple_query(
+            sock, "INSERT INTO dml_conflict VALUES (1, 'excluded-update'), (4, 'four') "
+            "ON CONFLICT (id) DO UPDATE SET name = excluded.name "
+            "RETURNING id, name")
+        assert data_row_values(excluded_upsert) == [
+            [b"1", b"excluded-update"], [b"4", b"four"]], excluded_upsert
+        assert any(kind == b"C" and body == b"INSERT 0 2\0"
+                   for kind, body in excluded_upsert), excluded_upsert
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "UPDATE dml_ast SET name = 'changed' WHERE id = 2"))
         assert data_row_values(simple_query(
