@@ -991,6 +991,19 @@ bool CatalogManager::dropObject(Oid classid, Oid objid, DropBehavior behavior,
     return true;
 }
 
+bool CatalogManager::applyDropPlan(const DropPlan& plan, std::string* error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!plan.ok()) {
+        if (error) *error = plan.error;
+        return false;
+    }
+    if (!executeDropPlanUnlocked(plan)) {
+        if (error) *error = "drop execution failed";
+        return false;
+    }
+    return true;
+}
+
 // ============================================================================
 // Bootstrap: 初始化标准 namespace / 类型
 // ============================================================================

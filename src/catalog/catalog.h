@@ -151,6 +151,10 @@ public:
     bool dropObject(Oid classid, Oid objid, DropBehavior behavior,
                     std::string* error = nullptr);
 
+    // Apply a previously validated plan without recalculating dependencies.
+    // DDL callers use this after physical storage removal succeeds.
+    bool applyDropPlan(const DropPlan& plan, std::string* error = nullptr);
+
     // =====================================================================
     // pg_authid / pg_auth_members — 角色与用户
     // =====================================================================

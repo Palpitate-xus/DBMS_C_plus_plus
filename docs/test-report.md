@@ -28,6 +28,7 @@
 - 新增临时表重启生命周期回归：`tests/temp_restart_cleanup_test.cpp` 模拟临时 relation 已落盘后重启，确认 `tlist.lst`、schema/data/index/TOAST 等残留全部清理；完整测试入口通过。
 - 同一回归还覆盖 `CREATE TABLE` 在损坏 heap 初始化失败时的清理：schema、heap 和 `tlist.lst` 均不残留；唯一/索引初始化失败路径同时释放元数据锁。
 - `tests/ddl_transaction_skeleton_test.cpp` 新增后处理失败回归：强制约束 metadata 写入失败，验证 DDL executor 的物理表创建会通过事务记录完整回滚。
+- 同一测试覆盖 CatalogManager 只读 drop plan 与延后应用边界；`DROP TABLE` 的物理 relation 仍独立于 catalog plan，executor 只在物理删除成功后应用计划。
 - 新增数据库生命周期回归：`DROP DATABASE` 释放数据库级缓存后，同名重建不会继承旧 CLOG/WAL/page/index 状态。
 - 新增 typed `ALTER TABLE` 路由回归：验证 AST bridge 的 ADD COLUMN、DEFAULT、NOT NULL、RENAME COLUMN/TABLE，以及 `RENAME TO` 不再误判为列重命名。
 - 新增 schema 格式完整性回归：截断 schema 与错误 magic 均 fail-closed，不会返回可写的部分 schema。

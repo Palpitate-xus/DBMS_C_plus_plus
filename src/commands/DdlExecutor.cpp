@@ -2413,25 +2413,29 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         return true;
     }
 
-    // Catalog-side CASCADE/RESTRICT check.
+    // Build the catalog-side CASCADE/RESTRICT plan without mutating catalog
+    // state. Physical storage must be removed before applying this plan.
+    CatalogManager* catalogManager = nullptr;
+    CatalogManager::DropPlan catalogDropPlan;
+    bool hasCatalogDropPlan = false;
+    const auto catalogQualifiedName = CatalogService::logicalName(tname);
+    const std::string catalogLogicalName = catalogQualifiedName.schema.empty()
+        ? catalogQualifiedName.name
+        : (catalogQualifiedName.schema + "." + catalogQualifiedName.name);
     try {
         CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-        auto qn = CatalogService::logicalName(tname);
-        std::string logicalName = qn.schema.empty() ? qn.name : (qn.schema + "." + qn.name);
-        const PgClassRow* cls = cat.resolveRelation(logicalName, {"public"});
+        catalogManager = &cat;
+        const PgClassRow* cls = cat.resolveRelation(catalogLogicalName, {"public"});
         if (cls) {
             auto behavior = stmt->cascade
                                 ? CatalogManager::DropBehavior::Cascade
                                 : CatalogManager::DropBehavior::Restrict;
-            std::string err;
-            bool ok = cat.dropObject(PgClassOid_Class, cls->oid, behavior, &err);
-            if (!ok) {
-                std::cout << "ERROR: " << err << std::endl;
+            catalogDropPlan = cat.planDrop(PgClassOid_Class, cls->oid, behavior);
+            if (!catalogDropPlan.ok()) {
+                std::cout << "ERROR: " << catalogDropPlan.error << std::endl;
                 return true;
             }
-            if (stmt->cascade) {
-                dropOwnedSequences(s.currentDB, logicalName);
-            }
+            hasCatalogDropPlan = true;
         } else {
             std::cout << "NOTICE: table \"" << tname
                       << "\" has no catalog entry; falling back to storage drop" << std::endl;
@@ -2440,12 +2444,20 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cerr << "WARNING: catalog drop check failed: " << e.what() << std::endl;
     }
 
-    txn.recordDrop(DdlObjectKind::Table, tname);
     DBStatus res = g_engine.dropTable(s.currentDB, tname);
     if (res != DBStatus::OK) {
         std::cout << "DROP TABLE failed" << std::endl;
         return true;
     }
+    if (hasCatalogDropPlan && catalogManager) {
+        std::string err;
+        if (!catalogManager->applyDropPlan(catalogDropPlan, &err)) {
+            std::cout << "DROP TABLE catalog cleanup failed: " << err << std::endl;
+            return true;
+        }
+        if (stmt->cascade) dropOwnedSequences(s.currentDB, catalogLogicalName);
+    }
+    txn.recordDrop(DdlObjectKind::Table, tname);
     txn.commit();
     if (droppingTemp) {
         s.tempTables.erase(logicalName);

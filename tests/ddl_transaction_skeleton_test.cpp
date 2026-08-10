@@ -8,6 +8,8 @@
 #include "parser/parser.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "catalog/CatalogService.h"
+#include "catalog/systables.h"
 #include "storage/WAL.h"
 #include <cassert>
 #include <filesystem>
@@ -153,6 +155,34 @@ static void test_executor_uses_transaction() {
     std::cout << "[DDL-TXN] executor uses transaction OK" << std::endl;
 }
 
+static void test_catalog_drop_plan_is_deferred() {
+    std::string db = testDbPath("ddl_txn_t_drop_plan");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE drop_plan_tbl (id INT)", s));
+
+    auto& cat = g_engine.catalogService().get(db);
+    const auto* cls = cat.resolveRelation("drop_plan_tbl", {"public"});
+    assert(cls != nullptr);
+    const auto plan = cat.planDrop(dbms::PgClassOid_Class, cls->oid,
+                                   dbms::CatalogManager::DropBehavior::Restrict);
+    assert(plan.ok());
+    assert(g_engine.tableExists(db, "drop_plan_tbl"));
+    assert(cat.applyDropPlan(plan));
+    assert(!cat.resolveRelation("drop_plan_tbl", {"public"}));
+    // The plan is independent from physical storage; the executor applies it
+    // only after StorageEngine::dropTable succeeds.
+    assert(g_engine.tableExists(db, "drop_plan_tbl"));
+
+    assert(g_engine.dropTable(db, "drop_plan_tbl") == dbms::DBStatus::OK);
+    cleanup(db);
+    std::cout << "[DDL-TXN] catalog drop plan ordering OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_rollback_create();
@@ -160,6 +190,7 @@ int main() {
     test_create_table_post_action_rollback();
     test_wal_catalog_record();
     test_executor_uses_transaction();
+    test_catalog_drop_plan_is_deferred();
     std::cout << "[DDL-TXN] all passed" << std::endl;
     return 0;
 }
