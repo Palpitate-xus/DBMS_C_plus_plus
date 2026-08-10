@@ -1,11 +1,16 @@
 # 功能缺失清单 (Feature Gaps)
 
-> 生成日期: 2026-08-09
+> 生成日期: 2026-08-10
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
 > 本 DBMS 当前状态（2026-08-10）: 生产化重构进行中，统一回归基线 PASS=127 FAIL=0（125 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移；ALTER TABLE 多子命令失败已具备整句快照回滚，DROP TABLE/SCHEMA 已采用物理删除后应用 catalog 计划，但完整 DDL 依赖事务语义仍在建设。
 
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
+
+表空间物理路由已在本轮收敛：关系文件统一放在 `pg_default` 数据库目录或
+`<LOCATION>/<DATABASE>/`，CREATE TABLE、ALTER TABLE SET TABLESPACE、重启读取和
+跨文件系统迁移均有回归覆盖；缺失 `.path` marker 不会回退到默认目录。剩余差距是
+权限/owner、ALTER TABLESPACE 完整语义，以及 PostgreSQL OID/符号链接布局。
 
 协议当前已通过真实 E2E 覆盖常用标量、`numeric` 以及 `date`/`time`/`timestamp`/`timestamptz`/`uuid` 的 binary 参数与结果、基础 portal `maxRows` 分页；legacy 文本执行器的结果捕获已采用线程局部输出路由，不再以全局锁串行化会话；数组 binary I/O、亚秒时间精度、holdable/scrollable cursor 和完整 libpq 语义仍属于协议差距。
 

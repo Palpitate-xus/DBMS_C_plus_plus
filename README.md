@@ -181,7 +181,9 @@ select * from users where id = 10;  -- 现在能看到
 ### 新增功能 (Phase 4 完整化)
 - **pg_hba.conf 访问控制**: 首条匹配、CIDR/IPv4/IPv6、角色组和传输类型约束；运行时支持 trust/password/md5→SCRAM/scram/reject
 - **表继承**: `ALTER TABLE ... INHERIT / NO INHERIT`
-- **ALTER TABLE SET TABLESPACE / SET STATISTICS**
+- **ALTER TABLE SET TABLESPACE / SET STATISTICS**：表空间关系文件统一路由到
+  `<location>/<database>/`，`SET TABLESPACE` 会迁移 heap、fork、索引、分区和 TOAST
+  文件；重启时不会静默回退到默认目录。
 - **COMMIT/ROLLBACK AND [NO] CHAIN**
 - **复制管理**: ReplicationManager (slots, standby, sync, promote)
 - **大对象**: LargeObjectManager (CRUD + import/export)

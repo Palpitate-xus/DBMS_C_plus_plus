@@ -1234,32 +1234,43 @@ std::filesystem::path StorageEngine::paramsPath(const std::string& dbname,
     return dbPath(dbname) / (tablename + ".params");
 }
 
+std::filesystem::path StorageEngine::relationDir(const std::string& dbname,
+                                                  const std::string& tablename) const {
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    const std::string tablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
+    auto base = tablespaceDir(dbname, tablespace);
+    if (tablespace == "pg_default") return base;
+    // A tablespace is shared by databases. Keep each database isolated just
+    // like PostgreSQL's per-database tablespace subdirectories.
+    return base / dbname;
+}
+
 std::filesystem::path StorageEngine::dataPath(const std::string& dbname,
                                                const std::string& tablename) const {
-    return dbPath(dbname) / (tablename + ".dt");
+    return relationDir(dbname, tablename) / (tablename + ".dt");
 }
 
 std::filesystem::path StorageEngine::partitionDataPath(const std::string& dbname,
                                                         const std::string& tablename,
                                                         const std::string& partitionName) const {
-    return dbPath(dbname) / (tablename + "#" + partitionName + ".dt");
+    return relationDir(dbname, tablename) / (tablename + "#" + partitionName + ".dt");
 }
 
 std::filesystem::path StorageEngine::partitionDataPath(const std::string& dbname,
                                                         const std::string& tablename,
                                                         const std::string& partitionName,
                                                         const std::string& subPartitionName) const {
-    return dbPath(dbname) / (tablename + "#" + partitionName + "#" + subPartitionName + ".dt");
+    return relationDir(dbname, tablename) / (tablename + "#" + partitionName + "#" + subPartitionName + ".dt");
 }
 
 std::filesystem::path StorageEngine::fsmPath(const std::string& dbname,
                                                const std::string& tablename) const {
-    return dbPath(dbname) / (tablename + ".fsm");
+    return relationDir(dbname, tablename) / (tablename + ".fsm");
 }
 
 std::filesystem::path StorageEngine::vmPath(const std::string& dbname,
                                              const std::string& tablename) const {
-    return dbPath(dbname) / (tablename + ".vm");
+    return relationDir(dbname, tablename) / (tablename + ".vm");
 }
 
 std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) const {
@@ -3277,7 +3288,7 @@ static void syncFile(const std::filesystem::path& path) {
 
 std::filesystem::path StorageEngine::indexPath(const std::string& dbname,
                                                 const std::string& tablename) const {
-    return dbPath(dbname) / (tablename + ".idx");
+    return relationDir(dbname, tablename) / (tablename + ".idx");
 }
 
 // ========================================================================
@@ -3296,8 +3307,9 @@ std::filesystem::path StorageEngine::tablespaceDir(const std::string& dbname,
             return std::filesystem::path(path);
         }
     }
-    // Fallback to default if tablespace file missing
-    return dbPath(dbname);
+    // Never silently fall back to pg_default: doing so can make a relation
+    // appear empty after restart and can overwrite unrelated data.
+    return dbPath(dbname) / "pg_tblspc" / (tablespaceName + ".missing");
 }
 
 DBStatus StorageEngine::createTablespace(const std::string& dbname,
@@ -3376,9 +3388,12 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
                   << " uses an unsupported schema format; recreate it" << std::endl;
         return nullptr;
     }
-    // Route data file according to tablespace
-    std::filesystem::path baseDir = tablespaceDir(dbname, tbl.tablespace);
-    std::filesystem::path dt = baseDir / (tablename + ".dt");
+    const std::string tablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
+    if (tablespace != "pg_default") {
+        auto marker = dbPath(dbname) / "pg_tblspc" / (tablespace + ".path");
+        if (!std::filesystem::exists(marker)) return nullptr;
+    }
+    std::filesystem::path dt = dataPath(dbname, tablename);
 
     auto pa = std::make_unique<PageAllocator>(dt.string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
     if (!pa->open()) return nullptr;
@@ -3849,7 +3864,7 @@ void StorageEngine::closeAllIndexes() {
 std::filesystem::path StorageEngine::secondaryIndexPath(const std::string& dbname,
                                                          const std::string& tablename,
                                                          const std::string& colname) const {
-    return dbPath(dbname) / (tablename + "_" + colname + ".idx");
+    return relationDir(dbname, tablename) / (tablename + "_" + colname + ".idx");
 }
 
 std::filesystem::path StorageEngine::secondaryIndexMetaPath(const std::string& dbname,
@@ -3936,7 +3951,7 @@ bool StorageEngine::unregisterIndexName(const std::string& dbname,
 std::filesystem::path StorageEngine::hashIndexPath(const std::string& dbname,
                                                     const std::string& tablename,
                                                     const std::string& colname) const {
-    return dbPath(dbname) / (tablename + "_" + colname + ".hidx");
+    return relationDir(dbname, tablename) / (tablename + "_" + colname + ".hidx");
 }
 
 std::filesystem::path StorageEngine::hashIndexMetaPath(const std::string& dbname,
@@ -4309,7 +4324,7 @@ BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
     auto it = secondaryIndexCache_.find(key);
     if (it != secondaryIndexCache_.end()) return it->second.get();
 
-    std::filesystem::path p = dbPath(dbname) / (tablename + ".idx_" + indexName);
+    std::filesystem::path p = relationDir(dbname, tablename) / (tablename + ".idx_" + indexName);
     auto tree = std::make_unique<BPTree>(p);
     if (tree->open()) {
         BPTree* ptr = tree.get();
@@ -6272,7 +6287,7 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
         if (ci.name == indexName) { found = true; break; }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::filesystem::path p = dbPath(dbname) / (tablename + ".idx_" + indexName);
+    std::filesystem::path p = relationDir(dbname, tablename) / (tablename + ".idx_" + indexName);
     std::filesystem::remove(p);
 
     // Rewrite metadata without this composite index
@@ -6380,7 +6395,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     // 3. Rebuild composite indexes
     auto compIdxs = getCompositeIndexes(dbname, tablename);
     for (const auto& ci : compIdxs) {
-        std::filesystem::path p = dbPath(dbname) / (tablename + ".idx_" + ci.name);
+        std::filesystem::path p = relationDir(dbname, tablename) / (tablename + ".idx_" + ci.name);
         std::string cacheKey = dbname + "/" + tablename + "/C/" + ci.name;
         {
             auto it = secondaryIndexCache_.find(cacheKey);
@@ -6409,10 +6424,10 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
 // Full-text index (simplified inverted index)
 // ========================================================================
 
-static std::filesystem::path fullTextIndexPath(const std::string& dbname,
-                                                const std::string& tablename,
-                                                const std::string& colname) {
-    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".fti");
+std::filesystem::path StorageEngine::fullTextIndexPath(const std::string& dbname,
+                                                        const std::string& tablename,
+                                                        const std::string& colname) const {
+    return relationDir(dbname, tablename) / (tablename + "_" + colname + ".fti");
 }
 
 static std::vector<std::string> tokenizeText(const std::string& text) {
@@ -6514,7 +6529,7 @@ std::vector<int64_t> StorageEngine::fullTextSearch(const std::string& dbname,
 std::vector<std::string> StorageEngine::getFullTextIndexedColumns(const std::string& dbname,
                                                                    const std::string& tablename) const {
     std::vector<std::string> result;
-    auto dir = std::filesystem::path(dbname);
+    auto dir = relationDir(dbname, tablename);
     if (!std::filesystem::exists(dir)) return result;
     std::string prefix = tablename + "_";
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -6533,10 +6548,10 @@ std::vector<std::string> StorageEngine::getFullTextIndexedColumns(const std::str
 // GIN index (Generalized Inverted Index)
 // ========================================================================
 
-static std::filesystem::path ginIndexPath(const std::string& dbname,
-                                            const std::string& tablename,
-                                            const std::string& colname) {
-    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".gin");
+std::filesystem::path StorageEngine::ginIndexPath(const std::string& dbname,
+                                                  const std::string& tablename,
+                                                  const std::string& colname) const {
+    return relationDir(dbname, tablename) / (tablename + "_" + colname + ".gin");
 }
 
 // Extract keys from a column value for GIN indexing
@@ -6684,7 +6699,7 @@ std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
 std::vector<std::string> StorageEngine::getGinIndexedColumns(const std::string& dbname,
                                                               const std::string& tablename) const {
     std::vector<std::string> result;
-    auto dir = std::filesystem::path(dbname);
+    auto dir = relationDir(dbname, tablename);
     if (!std::filesystem::exists(dir)) return result;
     std::string prefix = tablename + "_";
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -6703,16 +6718,16 @@ std::vector<std::string> StorageEngine::getGinIndexedColumns(const std::string& 
 // GiST index (Generalized Search Tree) - simplified range/spatial index
 // ========================================================================
 
-static std::filesystem::path giSTIndexPath(const std::string& dbname,
-                                             const std::string& tablename,
-                                             const std::string& colname) {
-    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".gist");
+std::filesystem::path StorageEngine::giSTIndexPath(const std::string& dbname,
+                                                   const std::string& tablename,
+                                                   const std::string& colname) const {
+    return relationDir(dbname, tablename) / (tablename + "_" + colname + ".gist");
 }
 
-static std::filesystem::path spGiSTIndexPath(const std::string& dbname,
-                                              const std::string& tablename,
-                                              const std::string& colname) {
-    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".spgist");
+std::filesystem::path StorageEngine::spGiSTIndexPath(const std::string& dbname,
+                                                     const std::string& tablename,
+                                                     const std::string& colname) const {
+    return relationDir(dbname, tablename) / (tablename + "_" + colname + ".spgist");
 }
 
 DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
@@ -6805,7 +6820,7 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
 std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string& dbname,
                                                                const std::string& tablename) const {
     std::vector<std::string> result;
-    auto dir = std::filesystem::path(dbname);
+    auto dir = relationDir(dbname, tablename);
     if (!std::filesystem::exists(dir)) return result;
     std::string prefix = tablename + "_";
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -6950,7 +6965,7 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
 std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::string& dbname,
                                                                  const std::string& tablename) const {
     std::vector<std::string> result;
-    auto dir = std::filesystem::path(dbname);
+    auto dir = relationDir(dbname, tablename);
     if (!std::filesystem::exists(dir)) return result;
     std::string prefix = tablename + "_";
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -6969,10 +6984,10 @@ std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::strin
 // BRIN index (Block Range Index) - per-block min/max summary
 // ========================================================================
 
-static std::filesystem::path brinIndexPath(const std::string& dbname,
-                                            const std::string& tablename,
-                                            const std::string& colname) {
-    return std::filesystem::path(dbname) / (tablename + "_" + colname + ".brin");
+std::filesystem::path StorageEngine::brinIndexPath(const std::string& dbname,
+                                                   const std::string& tablename,
+                                                   const std::string& colname) const {
+    return relationDir(dbname, tablename) / (tablename + "_" + colname + ".brin");
 }
 
 DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
@@ -7102,7 +7117,7 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
 std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string& dbname,
                                                                const std::string& tablename) const {
     std::vector<std::string> result;
-    auto dir = std::filesystem::path(dbname);
+    auto dir = relationDir(dbname, tablename);
     if (!std::filesystem::exists(dir)) return result;
     std::string prefix = tablename + "_";
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
@@ -7761,23 +7776,23 @@ static std::string compressToastPayload(const std::string& data, uint8_t& flags)
 } // namespace
 
 std::filesystem::path StorageEngine::toastDir(const std::string& dbname,
-                                               const std::string& tablename) {
-    return std::filesystem::path(dbname) / (tablename + ".toast");
+                                               const std::string& tablename) const {
+    return relationDir(dbname, tablename) / (tablename + ".toast");
 }
 
 std::filesystem::path StorageEngine::toastMetaPath(const std::string& dbname,
-                                                    const std::string& tablename) {
-    return std::filesystem::path(dbname) / (tablename + ".toastmeta");
+                                                    const std::string& tablename) const {
+    return relationDir(dbname, tablename) / (tablename + ".toastmeta");
 }
 
 std::filesystem::path StorageEngine::toastDataPath(const std::string& dbname,
-                                                   const std::string& tablename) {
-    return std::filesystem::path(dbname) / (tablename + ".toast.dt");
+                                                   const std::string& tablename) const {
+    return relationDir(dbname, tablename) / (tablename + ".toast.dt");
 }
 
 std::filesystem::path StorageEngine::toastIndexPath(const std::string& dbname,
-                                                    const std::string& tablename) {
-    return std::filesystem::path(dbname) / (tablename + ".toast.idx");
+                                                    const std::string& tablename) const {
+    return relationDir(dbname, tablename) / (tablename + ".toast.idx");
 }
 
 PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
@@ -8103,6 +8118,15 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
 
     // Wave 0: 通过 TypeRegistry 校验并补齐每列类型元数据
     TableSchema tblWithVersion = tbl;
+    if (tblWithVersion.tablespace.empty()) tblWithVersion.tablespace = "pg_default";
+    if (tblWithVersion.tablespace != "pg_default") {
+        const auto marker = dbPath(dbname) / "pg_tblspc" /
+            (tblWithVersion.tablespace + ".path");
+        if (!std::filesystem::exists(marker)) {
+            if (error) *error = "tablespace does not exist";
+            return DBStatus::INVALID_VALUE;
+        }
+    }
     for (size_t i = 0; i < tblWithVersion.len; ++i) {
         std::string typeErr = TypeRegistry::instance().validateColumn(tblWithVersion.cols[i]);
         if (!typeErr.empty()) {
@@ -8141,6 +8165,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         toastIndexes_.erase(dbname + ":" + tbl.tablename);
 
         std::error_code ec;
+        const auto relationRoot = tblWithVersion.tablespace == "pg_default"
+            ? dbPath(dbname)
+            : tablespaceDir(dbname, tblWithVersion.tablespace) / dbname;
         for (const auto& path : {
                  schemaPath(dbname, tbl.tablename), paramsPath(dbname, tbl.tablename),
                  dataPath(dbname, tbl.tablename), indexPath(dbname, tbl.tablename),
@@ -8159,18 +8186,21 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
 
         if (tblWithVersion.partitionType == TableSchema::PartitionType::Range) {
             for (const auto& p : tblWithVersion.rangePartitions) {
-                std::filesystem::remove(partitionDataPath(dbname, tbl.tablename, p.first), ec);
+                std::filesystem::remove(relationRoot /
+                    (tbl.tablename + "#" + p.first + ".dt"), ec);
                 ec.clear();
             }
         } else if (tblWithVersion.partitionType == TableSchema::PartitionType::List) {
             for (const auto& p : tblWithVersion.listPartitions) {
-                std::filesystem::remove(partitionDataPath(dbname, tbl.tablename, p.first), ec);
+                std::filesystem::remove(relationRoot /
+                    (tbl.tablename + "#" + p.first + ".dt"), ec);
                 ec.clear();
             }
         } else if (tblWithVersion.partitionType == TableSchema::PartitionType::Hash) {
             for (size_t i = 0; i < tblWithVersion.hashPartitions; ++i) {
                 std::filesystem::remove(
-                    partitionDataPath(dbname, tbl.tablename, "p" + std::to_string(i)), ec);
+                    relationRoot /
+                    (tbl.tablename + "#p" + std::to_string(i) + ".dt"), ec);
                 ec.clear();
             }
         }
@@ -8203,6 +8233,11 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (!out) return failCreate("could not create table schema");
         writeSchema(out, tblWithVersion);
         if (!out) return failCreate("could not write table schema");
+    }
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(relationDir(dbname, tblWithVersion.tablename), ec);
+        if (ec) return failCreate("could not create tablespace relation directory");
     }
 
     auto initializeHeap = [&](const std::filesystem::path& path, size_t rowSize) {
@@ -8307,7 +8342,9 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     lockManager_.lockMetadata(tablename);
 
-    std::filesystem::remove(schemaPath(dbname, tablename));
+    // Keep the schema readable until every physical path has been resolved;
+    // custom tablespace paths are derived from the schema itself.
+    const auto relationRoot = relationDir(dbname, tablename);
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
     std::filesystem::remove(secondaryIndexMetaPath(dbname, tablename));
@@ -8350,9 +8387,8 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         if (it->first.rfind(hashPrefix, 0) == 0) it = hashIndexCache_.erase(it);
         else ++it;
     }
-    const auto databaseDir = dbPath(dbname);
-    if (std::filesystem::exists(databaseDir)) {
-        for (const auto& entry : std::filesystem::directory_iterator(databaseDir)) {
+    if (std::filesystem::exists(relationRoot)) {
+        for (const auto& entry : std::filesystem::directory_iterator(relationRoot)) {
             const std::string filename = entry.path().filename().string();
             if (filename.rfind(tablename + "_", 0) == 0 ||
                 filename.rfind(tablename + ".idx_", 0) == 0) {
@@ -8360,6 +8396,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
             }
         }
     }
+    std::filesystem::remove(schemaPath(dbname, tablename));
     const std::string toastKey = dbname + ":" + tablename;
     toastPageAllocators_.erase(toastKey);
     toastIndexes_.erase(toastKey);
@@ -8408,7 +8445,7 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     // Remove and recreate secondary indexes
     auto idxMeta = getIndexMetadata(dbname, tablename);
     for (const auto& meta : idxMeta) {
-        std::filesystem::remove(dbPath(dbname) / (tablename + ".idx_" + meta.name));
+        std::filesystem::remove(relationDir(dbname, tablename) / (tablename + ".idx_" + meta.name));
     }
     auto hashIdx = getHashIndexedColumns(dbname, tablename);
     for (const auto& col : hashIdx) {
@@ -8416,7 +8453,7 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     }
     auto compIdx = getCompositeIndexes(dbname, tablename);
     for (const auto& ci : compIdx) {
-        std::filesystem::remove(dbPath(dbname) / (tablename + ".idx_" + ci.name));
+        std::filesystem::remove(relationDir(dbname, tablename) / (tablename + ".idx_" + ci.name));
     }
     auto ftCols = getFullTextIndexedColumns(dbname, tablename);
     for (const auto& col : ftCols) {
@@ -8578,7 +8615,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         std::filesystem::remove(hashIndexPath(dbname, tablename, cn));
     }
     for (const auto& ci : compositeIndexes) {
-        std::filesystem::remove(dbPath(dbname) / (tablename + ".idx_" + ci.name));
+        std::filesystem::remove(relationDir(dbname, tablename) / (tablename + ".idx_" + ci.name));
     }
     for (const auto& cn : fullTextCols) std::filesystem::remove(fullTextIndexPath(dbname, tablename, cn));
     for (const auto& cn : ginCols) std::filesystem::remove(ginIndexPath(dbname, tablename, cn));
@@ -8805,7 +8842,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     std::filesystem::remove(indexPath(dbname, tablename));
     for (const auto& cn : indexedCols) std::filesystem::remove(secondaryIndexPath(dbname, tablename, cn));
     for (const auto& cn : hashCols) std::filesystem::remove(hashIndexPath(dbname, tablename, cn));
-    for (const auto& ci : compositeIndexes) std::filesystem::remove(dbPath(dbname) / (tablename + ".idx_" + ci.name));
+    for (const auto& ci : compositeIndexes) std::filesystem::remove(relationDir(dbname, tablename) / (tablename + ".idx_" + ci.name));
     for (const auto& cn : fullTextCols) std::filesystem::remove(fullTextIndexPath(dbname, tablename, cn));
     for (const auto& cn : ginCols) std::filesystem::remove(ginIndexPath(dbname, tablename, cn));
     for (const auto& cn : gistCols) std::filesystem::remove(giSTIndexPath(dbname, tablename, cn));
@@ -9307,12 +9344,36 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
     lockManager_.lockMetadata(oldName);
     lockManager_.lockMetadata(newName);
+    closeDatabaseCaches(dbname);
 
-    auto dbDir = dbPath(dbname);
+    TableSchema renamedSchema = getTableSchema(dbname, oldName);
+    renamedSchema.tablename = newName;
 
-    // Rename schema, data, PK index, sequence files
-    std::filesystem::rename(schemaPath(dbname, oldName), schemaPath(dbname, newName));
+    // Publish a temporary new schema first. Path helpers use the schema's
+    // tablespace, so both old and new relation paths remain resolvable while
+    // physical files are being renamed.
+    {
+        std::ofstream out(schemaPath(dbname, newName), std::ios::binary);
+        if (!out) {
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return DBStatus::INVALID_VALUE;
+        }
+        writeSchema(out, renamedSchema);
+        if (!out) {
+            std::filesystem::remove(schemaPath(dbname, newName));
+            lockManager_.unlock(oldName);
+            lockManager_.unlock(newName);
+            return DBStatus::INVALID_VALUE;
+        }
+    }
+
+    // Rename data, forks, PK index and sequence files.
     std::filesystem::rename(dataPath(dbname, oldName), dataPath(dbname, newName));
+    if (std::filesystem::exists(fsmPath(dbname, oldName)))
+        std::filesystem::rename(fsmPath(dbname, oldName), fsmPath(dbname, newName));
+    if (std::filesystem::exists(vmPath(dbname, oldName)))
+        std::filesystem::rename(vmPath(dbname, oldName), vmPath(dbname, newName));
     if (std::filesystem::exists(indexPath(dbname, oldName))) {
         std::filesystem::rename(indexPath(dbname, oldName), indexPath(dbname, newName));
     }
@@ -9349,9 +9410,30 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     // Rename composite indexes
     auto compIdxs = getCompositeIndexes(dbname, oldName);
     for (const auto& ci : compIdxs) {
-        std::filesystem::path oldIdx = dbDir / (oldName + ".idx_" + ci.name);
-        std::filesystem::path newIdx = dbDir / (newName + ".idx_" + ci.name);
+        std::filesystem::path oldIdx = relationDir(dbname, oldName) / (oldName + ".idx_" + ci.name);
+        std::filesystem::path newIdx = relationDir(dbname, newName) / (newName + ".idx_" + ci.name);
         if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+    }
+
+    if (renamedSchema.partitionType == TableSchema::PartitionType::Range) {
+        for (const auto& p : renamedSchema.rangePartitions) {
+            auto oldPath = partitionDataPath(dbname, oldName, p.first);
+            auto newPath = partitionDataPath(dbname, newName, p.first);
+            if (std::filesystem::exists(oldPath)) std::filesystem::rename(oldPath, newPath);
+        }
+    } else if (renamedSchema.partitionType == TableSchema::PartitionType::List) {
+        for (const auto& p : renamedSchema.listPartitions) {
+            auto oldPath = partitionDataPath(dbname, oldName, p.first);
+            auto newPath = partitionDataPath(dbname, newName, p.first);
+            if (std::filesystem::exists(oldPath)) std::filesystem::rename(oldPath, newPath);
+        }
+    } else if (renamedSchema.partitionType == TableSchema::PartitionType::Hash) {
+        for (size_t i = 0; i < renamedSchema.hashPartitions; ++i) {
+            const auto name = "p" + std::to_string(i);
+            auto oldPath = partitionDataPath(dbname, oldName, name);
+            auto newPath = partitionDataPath(dbname, newName, name);
+            if (std::filesystem::exists(oldPath)) std::filesystem::rename(oldPath, newPath);
+        }
     }
 
     // Rename fulltext indexes
@@ -9403,6 +9485,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
             writeFixedString(out, writeName, MAX_TABLE_NAME_LEN);
         }
     }
+    std::filesystem::remove(schemaPath(dbname, oldName));
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, oldName);
     invalidateCatalogSchema(dbname, newName);
@@ -10147,15 +10230,116 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
 DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& tablespace) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    const std::string targetTablespace = tablespace.empty() ? "pg_default" : tablespace;
+    if (targetTablespace != "pg_default") {
+        const auto marker = dbPath(dbname) / "pg_tblspc" /
+            (targetTablespace + ".path");
+        if (!std::filesystem::exists(marker)) return DBStatus::INVALID_VALUE;
+    }
     lockManager_.lockMetadata(tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    tbl.tablespace = tablespace;
+    const std::string oldTablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
+    if (oldTablespace == targetTablespace) {
+        lockManager_.unlock(tablename);
+        return DBStatus::OK;
+    }
 
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
+    const auto oldDir = relationDir(dbname, tablename);
+    const auto newDir = targetTablespace == "pg_default"
+        ? dbPath(dbname)
+        : tablespaceDir(dbname, targetTablespace) / dbname;
+    std::error_code ec;
+    std::filesystem::create_directories(newDir, ec);
+    if (ec) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
+    auto isRelationFile = [&](const std::string& name) {
+        const std::string prefix = tablename;
+        if (name == prefix + ".toast") return true;
+        const std::array<std::string, 9> suffixes = {
+            ".dt", ".fsm", ".vm", ".idx", ".hidx", ".fti", ".gin", ".gist", ".brin"};
+        for (const auto& suffix : suffixes) {
+            if (name.size() >= prefix.size() + suffix.size() &&
+                name.compare(0, prefix.size(), prefix) == 0 &&
+                name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                return true;
+            }
+        }
+        return name == prefix + ".toastmeta" ||
+               (name.rfind(prefix + ".idx_", 0) == 0);
+    };
+
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moved;
+    auto rollbackMove = [&]() {
+        std::error_code rollbackEc;
+        for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
+            if (!std::filesystem::exists(it->first)) continue;
+            std::filesystem::rename(it->first, it->second, rollbackEc);
+            if (rollbackEc) {
+                rollbackEc.clear();
+                std::filesystem::copy(it->first, it->second,
+                    std::filesystem::copy_options::recursive |
+                    std::filesystem::copy_options::overwrite_existing, rollbackEc);
+                if (!rollbackEc) std::filesystem::remove_all(it->first, rollbackEc);
+                rollbackEc.clear();
+            }
+        }
+    };
+
+    try {
+        if (std::filesystem::exists(oldDir)) {
+            for (const auto& entry : std::filesystem::directory_iterator(oldDir)) {
+                const auto name = entry.path().filename().string();
+                if (!isRelationFile(name)) continue;
+                const auto destination = newDir / name;
+                if (std::filesystem::exists(destination)) {
+                    rollbackMove();
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+                std::error_code moveEc;
+                std::filesystem::rename(entry.path(), destination, moveEc);
+                if (moveEc) {
+                    moveEc.clear();
+                    if (entry.is_directory()) {
+                        std::filesystem::copy(entry.path(), destination,
+                            std::filesystem::copy_options::recursive, moveEc);
+                    } else {
+                        std::filesystem::copy_file(entry.path(), destination, moveEc);
+                    }
+                    if (!moveEc) std::filesystem::remove_all(entry.path(), moveEc);
+                }
+                if (moveEc) {
+                    rollbackMove();
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+                moved.emplace_back(destination, entry.path());
+            }
+        }
+
+        tbl.tablespace = targetTablespace;
+        const auto schemaTmp = schemaPath(dbname, tablename).string() + ".tablespace.tmp";
+        {
+            std::ofstream out(schemaTmp, std::ios::binary | std::ios::trunc);
+            if (!out) throw std::runtime_error("could not write tablespace schema");
+            writeSchema(out, tbl);
+            if (!out) throw std::runtime_error("could not write tablespace schema");
+        }
+        std::filesystem::rename(schemaTmp, schemaPath(dbname, tablename), ec);
+        if (ec) {
+            std::filesystem::remove(schemaTmp, ec);
+            throw std::runtime_error("could not publish tablespace schema");
+        }
+    } catch (...) {
+        rollbackMove();
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
     }
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
@@ -18134,8 +18318,8 @@ void StorageEngine::recoverAllDatabases() {
             for (const auto& tn : tnames) {
                 TableSchema ts = getTableSchema(dbname, tn);
                 if (ts.isUnlogged) {
-                    std::filesystem::path dtPath = dbPath(dbname) / (tn + ".dt");
-                    std::filesystem::path idxPath = dbPath(dbname) / (tn + ".idx");
+                    std::filesystem::path dtPath = dataPath(dbname, tn);
+                    std::filesystem::path idxPath = indexPath(dbname, tn);
                     if (std::filesystem::exists(dtPath)) std::filesystem::remove(dtPath);
                     if (std::filesystem::exists(idxPath)) std::filesystem::remove(idxPath);
                     std::ofstream(dtPath, std::ios::binary).close();
@@ -18322,6 +18506,26 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
                 std::filesystem::copy_options::overwrite_existing |
                 std::filesystem::copy_options::recursive);
         }
+
+        // A database directory only contains tablespace markers for external
+        // relations. Include the database's subdirectory from every marker so
+        // physical backup/transaction snapshots are complete.
+        auto tablespaceBackup = dst / "tablespaces";
+        auto markerSourceDir = src / "pg_tblspc";
+        if (std::filesystem::exists(markerSourceDir)) {
+            for (const auto& marker : std::filesystem::directory_iterator(markerSourceDir)) {
+                if (!marker.is_regular_file() || marker.path().extension() != ".path") continue;
+                std::ifstream in(marker.path());
+                std::string location;
+                if (!std::getline(in, location) || location.empty()) return false;
+                auto relationRoot = std::filesystem::path(location) / dbname;
+                if (!std::filesystem::exists(relationRoot)) return false;
+                auto destination = tablespaceBackup / marker.path().stem();
+                std::filesystem::create_directories(tablespaceBackup);
+                std::filesystem::copy(relationRoot, destination,
+                    std::filesystem::copy_options::recursive);
+            }
+        }
         return true;
     } catch (...) {
         return false;
@@ -18361,6 +18565,29 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
             }
             std::filesystem::copy(srcArchive, dstArchive,
                 std::filesystem::copy_options::recursive);
+        }
+
+        // Restore external relation files after restoring the database
+        // directory and its tablespace markers. Keep the marker's location so
+        // a physical restore does not silently relocate data.
+        auto tablespaceBackup = src / "tablespaces";
+        auto markerDir = dst / "pg_tblspc";
+        if (std::filesystem::exists(markerDir) && std::filesystem::exists(tablespaceBackup)) {
+            for (const auto& marker : std::filesystem::directory_iterator(markerDir)) {
+                if (!marker.is_regular_file() || marker.path().extension() != ".path") continue;
+                std::ifstream in(marker.path());
+                std::string location;
+                if (!std::getline(in, location) || location.empty()) return false;
+                auto source = tablespaceBackup / marker.path().stem();
+                if (!std::filesystem::exists(source)) return false;
+                auto relationRoot = std::filesystem::path(location) / dbname;
+                if (std::filesystem::exists(relationRoot)) {
+                    std::filesystem::remove_all(relationRoot);
+                }
+                std::filesystem::create_directories(std::filesystem::path(location));
+                std::filesystem::copy(source, relationRoot,
+                    std::filesystem::copy_options::recursive);
+            }
         }
         return true;
     } catch (...) {

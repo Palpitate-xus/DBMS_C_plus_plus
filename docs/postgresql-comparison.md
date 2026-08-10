@@ -1,6 +1,6 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
-> 生成日期: 2026-08-09（更新反映存储格式硬切与当前代码状态）
+> 生成日期: 2026-08-10（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线（2026-08-10）: PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
@@ -86,7 +86,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | CREATE/DROP/ALTER POLICY (RLS) | ✅ | ⚠️ | CREATE 已由 AST/DDL bridge 接管并有运行时执行；表 owner/RLS bypass 已接入；ALTER POLICY、完整角色/owner/ACL 语义仍不完整 |
 | CREATE EXTENSION | ✅ | ✅ (DDL) | ⚠️ 运行时缺 |
 | CREATE/DROP/ALTER COLLATION | ✅ | ✅ (DDL) | ⚠️ ICU 缺 |
-| TABLESPACE | ✅ | ✅ | ✅ |
+| TABLESPACE | ✅ | ✅ | ⚠️ 关系文件已统一物理路由并支持跨文件系统 SET TABLESPACE/重启恢复；权限、owner、ALTER TABLESPACE 完整语义和 PostgreSQL OID/符号链接布局仍缺 |
 | PARTITION BY RANGE/LIST/HASH | ✅ | ✅ | ✅ |
 | INHERITS | ✅ | ✅ | ✅ |
 | LIKE ( INCLUDING ALL/DEFAULTS/CONSTRAINTS/INDEXES/IDENTITY) | ✅ | ✅ | ✅ |

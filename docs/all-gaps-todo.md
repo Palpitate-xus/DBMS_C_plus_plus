@@ -1,6 +1,6 @@
 # DBMS 全部 Gap TODO（唯一来源）
 
-> 生成日期：2026-06-10 | 当前审计：2026-08-09
+> 生成日期：2026-06-10 | 当前审计：2026-08-10
 > 来源：基于 `postgresql-complete-gap-analysis.md` 逐条提取，**无一遗漏**
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
@@ -247,7 +247,7 @@
 | 1.1.1 | `ALTER DEFAULT PRIVILEGES` | 只解析 `GRANT` 路径；缺少完整 `REVOKE`、对象类型、角色继承、schema/default ACL 语义 | ⚠️ |
 | 1.1.2 | `ALTER SCHEMA` | 主要支持 `RENAME TO`；缺少 owner、权限、依赖重写 | ⚠️ |
 | 1.1.3 | `ALTER SYSTEM` | 只写项目 `dbms.conf` 中有限参数；不是 PG GUC 体系 | ⚠️ |
-| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（正式 schema/`pg_class.relowner`）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD/DROP CONSTRAINT（CHECK/UNIQUE/FK/PRIMARY KEY/EXCLUDE，EXCLUDE 已走 typed AST 并清理持久化状态）、TRIGGER/RLS/SET SCHEMA/分区（RLS、ATTACH/DETACH、trigger enable/disable 已走 typed AST）、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；ALTER 多子命令失败时已恢复整句快照；仍缺 `ONLY`、真正 SET TABLESPACE 迁移、完整延迟约束/约束触发器语义和跨对象依赖 undo | 🔄 |
+| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（正式 schema/`pg_class.relowner`）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD/DROP CONSTRAINT（CHECK/UNIQUE/FK/PRIMARY KEY/EXCLUDE，EXCLUDE 已走 typed AST 并清理持久化状态）、TRIGGER/RLS/SET SCHEMA/分区（RLS、ATTACH/DETACH、trigger enable/disable 已走 typed AST）、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；ALTER 多子命令失败时已恢复整句快照，SET TABLESPACE 已迁移关系文件并支持重启读取；仍缺 `ONLY`、表空间权限/owner、完整延迟约束/约束触发器语义和跨对象依赖 undo | 🔄 |
 | 1.1.5 | `ALTER USER` / `ALTER ROLE` | 缺少真实 superuser/createdb/replication/bypassrls 权限位、连接限制、valid until、配置参数执行语义 | ⚠️ |
 | 1.1.6 | `ALTER VIEW` | 缺少 owner、options、column default、安全屏障、security invoker | ⚠️ |
 | 1.1.7 | `ANALYZE` | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、`VERBOSE` 输出、系统统计视图集成 | ⚠️ |
@@ -271,9 +271,9 @@
 | 1.1.25 | `CREATE SCHEMA` | 用 `schema__table` 或 marker 文件模拟；缺少真正 namespace、owner、search_path 语义 | ⚠️ |
 | 1.1.26 | `CREATE SEQUENCE` | 有 nextval 文件；缺少 cache/cycle/min/max/ownership/transactional semantics | ⚠️ |
 | 1.1.27 | `CREATE STATISTICS` / `ALTER STATISTICS` / `DROP STATISTICS` | 有扩展统计对象元数据；`dependencies` kind 已落地（`computeFunctionalDependencies` 计算各有序列对函数依赖强度并随 CREATE STATISTICS 输出）；仍缺 `pg_statistic_ext` catalog、表达式统计、ndistinct/mcv 精确算法和 planner 深度使用 | ⚠️ |
-| 1.1.28 | `CREATE TABLE` | 可建表、分区、临时/unlogged、继承等部分；`LIKE source [INCLUDING ...]`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 均经 typed AST/DdlExecutor 桥接；tablespace 存储到 schema；仍缺复合 PK/UNIQUE 与索引结构复制、`accessMethod` schema 持久化 | ⚠️ |
+| 1.1.28 | `CREATE TABLE` | 可建表、分区、临时/unlogged、继承等部分；`LIKE source [INCLUDING ...]`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 均经 typed AST/DdlExecutor 桥接；tablespace 既写入 schema 又统一路由关系文件；仍缺复合 PK/UNIQUE 与索引结构复制、`accessMethod` schema 持久化 | ⚠️ |
 | 1.1.29 | `CREATE TABLE AS` | 有 CTAS 路径，按源表列精确建表（类型/长度），列序映射已修复，支持 `WITH [NO] DATA`、`SELECT *`/投影/WHERE；缺少 tablespace/access method、表达式列类型推断、含空格 varchar 值的精确复制 | ⚠️ |
-| 1.1.30 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 已支持表空间对象元数据；缺少物理存储路由、权限、依赖检查和 `pg_tblspc` 符号链接语义 | ⚠️ |
+| 1.1.30 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 关系文件已统一路由到 `<location>/<database>/`，CREATE/ALTER SET TABLESPACE 支持跨文件系统迁移并在缺失表空间时 fail-closed；仍缺权限、owner、ALTER TABLESPACE 完整语义和 PostgreSQL OID/符号链接布局 | ⚠️ |
 | 1.1.31 | `CREATE TRIGGER` | 支持 before/after/instead of、row/statement、`WHEN`、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime | ⚠️ |
 | 1.1.32 | `CREATE TYPE` | 支持 composite type（`AS (field type, ...)`，经 DDL 桥正确解析含修饰符字段）与 enum（`AS ENUM`）；缺少 PG 的 range/base/shell 类型创建语义 | ⚠️ |
 | 1.1.33 | `CREATE VIEW` | 支持保存 SQL 和简单 updatable view；缺少 recursive view、security_barrier、security_invoker、check option 完整性 | ⚠️ |

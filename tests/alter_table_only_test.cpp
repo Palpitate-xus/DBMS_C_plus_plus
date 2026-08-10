@@ -29,24 +29,52 @@ static void test_only_parser() {
     std::cout << "[ALTER_ONLY] parser OK" << std::endl;
 }
 
-// Test ALTER TABLE SET TABLESPACE updates schema
+// Test ALTER TABLE SET TABLESPACE migrates relation files and survives restart.
 static void test_set_tablespace() {
     std::string db = testDbPath("alter_ts");
+    std::string location = db + "_location";
     cleanup(db);
+    cleanup(location);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    assert(g_engine.createTablespace(db, "my_space", location) == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE t (id INT)", s));
+    assert(g_engine.insert(db, "t", {{"id", "42"}}) == dbms::DBStatus::OK);
 
-    // Alter tablespace via engine API
     auto res = g_engine.alterTableTablespace(db, "t", "my_space");
     assert(res == dbms::DBStatus::OK);
 
-    // Verify it was persisted
     auto schema = g_engine.getTableSchema(db, "t");
     assert(schema.tablespace == "my_space");
+    assert(fs::exists(fs::path(location) / db / "t.dt"));
+    assert(!fs::exists(fs::path(db) / "t.dt"));
+
+    // A fresh engine must read the migrated relation, not create an empty
+    // default-path file after restart.
+    dbms::StorageEngine restarted;
+    size_t rows = 0;
+    restarted.forEachRow(db, "t", [&](uint32_t, uint16_t, const char* data, size_t len) {
+        ++rows;
+        assert(len > 0);
+        (void)data;
+    });
+    assert(rows == 1);
+
+    const std::string backup = db + "_backup";
+    cleanup(backup);
+    assert(restarted.physicalBackup(db, backup));
+    dbms::StorageEngine restored;
+    assert(restored.physicalRestore(db, backup));
+    rows = 0;
+    restored.forEachRow(db, "t", [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
+    assert(rows == 1);
+    assert(restored.dropTable(db, "t") == dbms::DBStatus::OK);
+    assert(!fs::exists(fs::path(location) / db / "t.dt"));
 
     cleanup(db);
+    cleanup(location);
+    cleanup(backup);
     std::cout << "[ALTER_ONLY] SET TABLESPACE OK" << std::endl;
 }
 

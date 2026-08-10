@@ -896,6 +896,15 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ## 14. 已知问题与限制
 
+### 14.0 TABLESPACE 物理路由
+
+`CREATE TABLE ... TABLESPACE`、`ALTER TABLE ... SET TABLESPACE` 已验证真实关系文件迁移：
+heap、FSM/VM、索引、分区和 TOAST 文件位于 `<LOCATION>/<DATABASE>/`，目标目录不存在或
+表空间 marker 缺失时拒绝操作，不会回退到默认目录。测试还使用全新 `StorageEngine`
+重启读取迁移后的行，覆盖了此前“重启打开空文件”的数据损失风险。
+
+剩余限制：表空间权限/owner、`ALTER TABLESPACE` 完整语义和 PostgreSQL OID/符号链接布局。
+
 ### 14.1 ALTER TABLE SET SCHEMA
 
 **当前行为**：命令已由 AST bridge 转发到现有存储实现；当前实现的目标参数仍按数据库级迁移处理，不等价于 PostgreSQL 的 namespace-only 语义。
@@ -925,5 +934,5 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 
 ---
 
-*报告生成时间：2026-08-08*
+*报告生成时间：2026-08-10*
 *测试执行人：自动化测试脚本 + 人工验证*

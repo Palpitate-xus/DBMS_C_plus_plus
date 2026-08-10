@@ -994,6 +994,10 @@ public:
 private:
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path paramsPath(const std::string& dbname, const std::string& tablename) const;
+    // Physical relation files live in the database directory for pg_default,
+    // and in <tablespace-location>/<database> for user tablespaces. Catalog
+    // and table metadata files always remain in dbPath(dbname).
+    std::filesystem::path relationDir(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path partitionDataPath(const std::string& dbname, const std::string& tablename,
                                             const std::string& partitionName) const;
@@ -1048,10 +1052,10 @@ public:
         size_t ps = pageSizeForFormatVersion(formatVersion);
         return std::max(TOAST_THRESHOLD_BASE, ps / 4);
     }
-    static std::filesystem::path toastDir(const std::string& dbname, const std::string& tablename);
-    static std::filesystem::path toastMetaPath(const std::string& dbname, const std::string& tablename);
-    static std::filesystem::path toastDataPath(const std::string& dbname, const std::string& tablename);
-    static std::filesystem::path toastIndexPath(const std::string& dbname, const std::string& tablename);
+    std::filesystem::path toastDir(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path toastMetaPath(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path toastDataPath(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path toastIndexPath(const std::string& dbname, const std::string& tablename) const;
     uint64_t allocToastId(const std::string& dbname, const std::string& tablename);
     void writeToast(const std::string& dbname, const std::string& tablename, uint64_t toastId, const std::string& data);
     std::string readToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
@@ -1144,6 +1148,21 @@ private:
 
     // B+ Tree primary key index
     std::filesystem::path indexPath(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path fullTextIndexPath(const std::string& dbname,
+                                             const std::string& tablename,
+                                             const std::string& colname) const;
+    std::filesystem::path ginIndexPath(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& colname) const;
+    std::filesystem::path giSTIndexPath(const std::string& dbname,
+                                        const std::string& tablename,
+                                        const std::string& colname) const;
+    std::filesystem::path spGiSTIndexPath(const std::string& dbname,
+                                           const std::string& tablename,
+                                           const std::string& colname) const;
+    std::filesystem::path brinIndexPath(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname) const;
     mutable std::map<std::string, std::unique_ptr<BPTree>> pkIndexCache_;
     void closeAllIndexes();
 

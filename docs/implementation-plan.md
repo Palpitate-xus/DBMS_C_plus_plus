@@ -221,7 +221,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 3.9 实现 Snapshot 导出/导入、`subxip`、catalog snapshot | 9.2 | snapshot_export_import_test
 | ✅ 3.10 实现数据库目录与关系 fork 管理（当前实现） | 10.1 | 当前使用 StorageEngine 路径管理；旧 `ClusterLayout` 并行实现已删除
 | ⚠️ 3.11 实现 TOAST relation / index / compression / chunking | 10.8 | 当前 relation/index、zlib compression 和 chunking 已覆盖；PG pointer/catalog、lz4/pglz 与 storage strategy 仍缺
-| ✅ 3.12 实现 tablespace 物理路由与 `pg_tblspc` 符号链接 | 10.9, 1.1.30 | tablespace __TABL__ routing
+| ✅ 3.12 实现 tablespace 物理路由与 `pg_tblspc` 符号链接 | 10.9, 1.1.30 | 关系文件统一路由到 `<location>/<database>/`；当前用 `.path` marker 表示位置，真实 PostgreSQL OID/符号链接布局仍待补齐
 | ✅ 3.13 实现 data page checksums | 10.10 | Page checksum in PgPage
 | ✅ 3.14 实现 storage parameters（fillfactor / autovacuum / toast …） | 10.11, 4.4 | fillfactor_test 覆盖
 
@@ -308,7 +308,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 4.24 实现 Exclusion constraints 的执行检查（GiST + operator class） | 5.7 | 已实现元数据持久化和 `=`/`&&` 的全表冲突检查，并有 `tests/exclude_test.cpp`；真实 GiST 加速、operator class、多元素/表达式元素和完整并发语义仍待后续。 |
 | ✅ 4.25 实现 `SET CONSTRAINTS` 延迟队列、提交时检查 | 5.10, 1.1.53 | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟检查在 `commitTransaction` 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 映射生效，`NOT DEFERRABLE` 约束不受 `SET CONSTRAINTS ALL DEFERRED` 影响；schema 格式 `0x44420006` 持久化 `checkConstraintName`/`deferrable`/`initiallyDeferred`；`constraintMode_` 在事务结束时自动清除（per-transaction 语义）；`beginTransaction` 修复：已有事务时先 commit 再开新事务，防止 `txnDB_` 指向错误数据库。新增 `tests/deferrable_test.cpp`（6 个测试）。constraint trigger 语义仍待后续。 |
 | ⚠️ 4.26 补全 `CREATE TABLE` 选项（`LIKE INCLUDING` 全集、`OF type`、access method、tablespace、identity、**PARTITION BY 执行测试**） | 1.1.28, 4.4 | `LIKE INCLUDING CONSTRAINTS/INDEXES/IDENTITY`、`OF type`、identity、`PARTITION BY RANGE/LIST/HASH` 与 `PARTITION OF` 已由 typed AST/DdlExecutor 桥接并验证；tablespace 存储在 schema 中。新增回归覆盖 10 个选项路径。`accessMethod` schema 持久化仍待后续。 |
-| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束、RLS、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT 和 tablespace 路径已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`；触发器函数运行时、完整延迟约束语义、ONLY 和真正 SET TABLESPACE 迁移仍待补齐。 |
+| ⚠️ 4.27 补全 `ALTER TABLE` 全量子命令 | 1.1.4 | 基础 ADD/DROP/ALTER/RENAME、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束、RLS、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT 和物理 tablespace 迁移已接入；OWNER TO 已更新正式 schema 与 `pg_class.relowner`；触发器函数运行时、完整延迟约束语义、ONLY、tablespace 权限/owner 和 ALTER TABLESPACE 完整语义仍待补齐。 |
 | ⚠️ 4.28 补全 `CREATE/ALTER VIEW`（security barrier/invoker、recursive view、check option） | 1.1.6, 1.1.33, 4.9 | 已支持基本单表可更新视图、WITH CHECK OPTION、OR REPLACE，并有 `tests/view_test.cpp`；SECURITY BARRIER/INVOKER、递归视图和复杂映射仍待后续。 |
 | ⚠️ 4.29 补全 `CREATE TRIGGER`（transition tables、constraint triggers、deferred triggers、event triggers） | 1.1.31, 4.11 | 已解析并执行基础 BEFORE/AFTER/INSTEAD OF、事件和 WHEN 条件，并有 `tests/trigger_test.cpp`；transition tables、constraint/deferred/event triggers 和完整函数运行时仍待后续。 |
 | ✅ 4.30 补全 `CREATE TYPE`（enum/range/base/shell） | 1.1.32 | enum/composite/range/base/shell 元数据注册 + DROP TYPE 全类型修复已落地；`ALTER TYPE ADD/RENAME VALUE` 已落地。作为列类型的完整运行时语义仍待后续。 |
@@ -597,9 +597,9 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - ✅ 新增 `StorageEngine::alterTableSetLogged(db, table, logged)`：直接翻转 schema 二进制中的 `isUnlogged` 标志位并写回 schema 文件；数据文件保留，仅持久化元数据变更。
   - ✅ `CLUSTER ON`/`SET WITHOUT CLUSTER` 通过 `StorageEngine` 校验同表索引并写入 `.params`；`REPLICA IDENTITY {DEFAULT|FULL|NOTHING|USING INDEX idx}` 更新 `pg_class.relreplident`，并持久化索引名。
   - ✅ `VALIDATE CONSTRAINT`/`ALTER CONSTRAINT` 由 typed parser/DdlExecutor 执行，约束状态统一写入 `.params`；CHECK 约束的 deferrability 同步回 `TableSchema`，删除了 `main.cpp` 中的 `table_options`/`constraint_option` 旁路。
-  - ✅ `ALTER TABLE ... SET TABLESPACE` 明确提示暂不支持并拒绝实际迁移：当前 `getPageAllocator` 按 `tablespaceDir` 路由而 `dataPath()` 仍按 db 目录路由，未统一前迁移会孤儿化数据，故采取保守回绝。
+  - ✅ `ALTER TABLE ... SET TABLESPACE` 已统一关系文件路由：heap、FSM/VM、主键/二级/复合/访问方法索引、分区和 TOAST 文件会迁移到 `<location>/<database>/`；优先 rename，跨文件系统时使用 copy+remove，并在失败时回滚已迁移文件。缺失目标表空间会拒绝，缺失 marker 不会静默回退到 pg_default。
   - ✅ `tests/ddl_ast_bridge_test.cpp` 覆盖 cluster marker、无效索引拒绝、四种 replica identity 状态、约束 deferrability 和 validate 持久化。
-  - 🔄 仍待后续：`IF [NOT] EXISTS` 守卫、`ONLY`、`INHERIT`、真正的 `SET TABLESPACE` 物理迁移（需先统一 `dataPath` 与 `getPageAllocator` 的路由）、统计目标（STATISTICS）设置。
+  - 🔄 仍待后续：`IF [NOT] EXISTS` 守卫、`ONLY`、`INHERIT`、表空间权限/owner、ALTER TABLESPACE 完整语义、OID/符号链接布局、统计目标（STATISTICS）设置。
 - **Wave 4 DDL 完整化 — ALTER TABLE ADD PRIMARY KEY（4.27a，本次完成）**：
   - ✅ 新增 `StorageEngine::alterTableAddPrimaryKey(db, table, name, colNames)`：解析列名→索引；拒绝重复添加（表已有 PK）、未知列；扫描既有行校验 PK 列非 NULL 且元组唯一（违反则拒绝、表不变）；通过后写入 `pkColIndices` 与各列 `isPrimaryKey`/隐式 NOT NULL，并**重建物理 PK B+ 树索引**并回填既有行，使 INSERT 期 PK 唯一性强制生效。
   - ✅ `main.cpp` ADD CONSTRAINT 路径新增 `PRIMARY KEY (cols)` 分支（在 UNIQUE 之前检测），调用引擎方法并记录约束元数据。
@@ -629,7 +629,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - ✅ `main.cpp` 的 ADD COLUMN / DROP COLUMN / DROP CONSTRAINT / RENAME COLUMN / RENAME CONSTRAINT 处理器新增 `IF [NOT] EXISTS` 分支：ADD COLUMN IF NOT EXISTS 在 `columnExists` 为真时跳过；DROP COLUMN / DROP CONSTRAINT / RENAME * IF EXISTS 在不存在时跳过；否则正常执行。
   - ✅ 新增文件级 `columnExists(db,table,col)` 辅助；复用 `knownConstraintExists` 判断约束。
   - ✅ 零引擎方法变更、零 schema 格式变更；二进制端到端验证所有组合（ADD IF NOT EXISTS 已存在/不存在、DROP IF EXISTS 存在/不存在、RENAME IF EXISTS 存在/不存在）。全量套件 PASS=84 FAIL=0。
-  - 🔄 仍待后续：`IF EXISTS` 对 ADD CONSTRAINT、RENAME TABLE、ALTER COLUMN TYPE 等扩展；`ONLY`、`INHERIT`、真正的 SET TABLESPACE 迁移。
+  - 🔄 仍待后续：`IF EXISTS` 对 ADD CONSTRAINT、RENAME TABLE、ALTER COLUMN TYPE 等扩展；`ONLY`、`INHERIT`、表空间权限/owner 与 ALTER TABLESPACE 完整语义。
 - **Wave 4 DDL 完整化 — CREATE TABLE PARTITION BY 执行测试（4.26，本次完成）**：
   - ✅ 分区执行机制（RANGE/LIST/HASH 分区、`PARTITION OF` 声明式子分区、INSERT 路由、ALTER TABLE ATTACH/DETACH PARTITION、RANGE+HASH 二级子分区、全表扫描合并所有分区）已在引擎实现并有 API/DDL 回归覆盖；`CREATE TABLE ... PARTITION BY`、`PARTITION OF` 和 ATTACH/DETACH 均经 typed AST/DdlExecutor 验证。
   - ✅ 测试覆盖：RANGE 三分区插入/全扫描/ATTACH 新分区/DETACH 分区；LIST 分区含 DEFAULT 分区；HASH 4 分区 + ATTACH p4；RANGE+HASH 二级子分区。

@@ -250,7 +250,9 @@ static void test_partition_by_hash_ddl() {
 // Tablespace is stored in schema.
 static void test_tablespace_option() {
     std::string db = testDbPath("opts_ts");
+    std::string location = db + "_location";
     cleanup(db);
+    cleanup(location);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
     Session s; setupSession(s, db);
     dbms::DdlExecutor ddl;
@@ -259,7 +261,23 @@ static void test_tablespace_option() {
 
     auto schema = g_engine.getTableSchema(db, "t");
     assert(schema.tablespace == "pg_default");
+
+    assert(g_engine.createTablespace(db, "custom_space", location) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE TABLE custom_t (id INT) TABLESPACE custom_space", s));
+    schema = g_engine.getTableSchema(db, "custom_t");
+    assert(schema.tablespace == "custom_space");
+    assert(fs::exists(fs::path(location) / db / "custom_t.dt"));
+    assert(!fs::exists(fs::path(db) / "custom_t.dt"));
+    assert(g_engine.insert(db, "custom_t", {{"id", "7"}}) == dbms::DBStatus::OK);
+    dbms::StorageEngine restarted;
+    size_t rows = 0;
+    restarted.forEachRow(db, "custom_t", [&](uint32_t, uint16_t, const char*, size_t) {
+        ++rows;
+    });
+    assert(rows == 1);
     cleanup(db);
+    cleanup(location);
     std::cout << "[OPTS] TABLESPACE stored in schema OK" << std::endl;
 }
 
