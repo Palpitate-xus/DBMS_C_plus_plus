@@ -5745,9 +5745,11 @@ DBStatus StorageEngine::createExclusionConstraint(const std::string& dbname, con
     }
     existing.push_back(ec);
     std::ofstream out(exclusionPath(dbname), std::ios::binary | std::ios::trunc);
+    if (!out) return DBStatus::INVALID_VALUE;
     size_t count = existing.size();
     out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
     for (const auto& e : existing) writeExclusion(out, e);
+    if (!out) return DBStatus::INVALID_VALUE;
     return DBStatus::OK;
 }
 

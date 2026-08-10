@@ -78,6 +78,29 @@ static void test_commit_survives() {
     std::cout << "[DDL-TXN] commit survives OK" << std::endl;
 }
 
+static void test_create_table_post_action_rollback() {
+    std::string db = testDbPath("ddl_txn_t_post_action");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    // Force persistConstraintMetadata() to fail after the physical table has
+    // already been created. DdlTransaction must remove the relation.
+    fs::create_directory(db + "/constraint_fail.params");
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    bool err = ddl.executeSql(
+        "CREATE TABLE constraint_fail (id INT, CONSTRAINT ck CHECK (id > 0))", s);
+    assert(err);
+    assert(!g_engine.tableExists(db, "constraint_fail"));
+    assert(!fs::exists(db + "/constraint_fail.stc"));
+    assert(!fs::exists(db + "/constraint_fail.dt"));
+    for (const auto& name : g_engine.getTableNames(db)) assert(name != "constraint_fail");
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] post-create failure rollback OK" << std::endl;
+}
+
 static void test_wal_catalog_record() {
     std::string db = testDbPath("ddl_txn_t3");
     cleanup(db);
@@ -134,6 +157,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_rollback_create();
     test_commit_survives();
+    test_create_table_post_action_rollback();
     test_wal_catalog_record();
     test_executor_uses_transaction();
     std::cout << "[DDL-TXN] all passed" << std::endl;

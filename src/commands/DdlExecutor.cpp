@@ -2132,6 +2132,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!stmt->asSelect.empty()) {
         bool err = executeCreateTableAs(stmt, s, tname);
         if (!err) {
+            // Record the physical relation before catalog post-processing so
+            // a later failure can remove the table through the transaction.
+            txn.recordCreate(DdlObjectKind::Table, tname);
             try {
                 if (!temporary) {
                     dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
@@ -2140,7 +2143,6 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             } catch (const std::exception& e) {
                 std::cerr << "WARNING: CTAS catalog registration failed: " << e.what() << std::endl;
             }
-            txn.recordCreate(DdlObjectKind::Table, tname);
             registerTemporaryTable();
             txn.commit();
         }
@@ -2275,6 +2277,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cout << "CREATE TABLE failed" << std::endl;
         return true;
     }
+    // Constraint metadata and catalog registration happen after the physical
+    // relation exists.  Keep the relation in the rollback log immediately.
+    txn.recordCreate(DdlObjectKind::Table, tname);
 
     // Create exclusion constraints now that the table exists.
     for (const auto& tc : stmt->constraints) {
@@ -2287,7 +2292,11 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             ec.elements.push_back({e.first, toLower(e.second)});
         }
         ec.wherePredicate = tc.excludeWhere;
-        g_engine.createExclusionConstraint(s.currentDB, ec);
+        DBStatus exclusionStatus = g_engine.createExclusionConstraint(s.currentDB, ec);
+        if (exclusionStatus != DBStatus::OK) {
+            std::cout << "CREATE TABLE exclusion constraint failed" << std::endl;
+            return true;
+        }
     }
     for (const auto& tc : stmt->constraints) {
         if (tc.name.empty()) continue;
@@ -2348,7 +2357,6 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cerr << "WARNING: sequence ownership registration failed: " << e.what() << std::endl;
     }
 
-    txn.recordCreate(DdlObjectKind::Table, tname);
     registerTemporaryTable();
     txn.commit();
     std::cout << "CREATE TABLE succeeded" << std::endl;
