@@ -1566,30 +1566,55 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string name = stmt->objectNames.front();
-    txn.recordDrop(DdlObjectKind::Schema, name);
 
+    // Validate dependencies without mutating the catalog.  The physical
+    // schema removal must win the race with catalog publication, otherwise a
+    // failed filesystem operation can leave a catalog namespace that no
+    // longer matches storage (or vice versa).
+    CatalogManager* catalogManager = nullptr;
+    CatalogManager::DropPlan catalogDropPlan;
+    bool hasCatalogDropPlan = false;
     try {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        catalogManager = &cat;
         const auto* ns = cat.findNamespaceByName(name);
         if (ns) {
-            auto behavior = stmt->cascade ? CatalogManager::DropBehavior::Cascade
-                                          : CatalogManager::DropBehavior::Restrict;
-            std::string err;
-            bool ok = cat.dropObject(PgClassOid_Namespace, ns->oid, behavior, &err);
-            if (!ok) {
-                std::cout << "ERROR: " << err << std::endl;
+            const auto behavior = stmt->cascade
+                ? CatalogManager::DropBehavior::Cascade
+                : CatalogManager::DropBehavior::Restrict;
+            catalogDropPlan = cat.planDrop(PgClassOid_Namespace, ns->oid, behavior);
+            if (!catalogDropPlan.ok()) {
+                std::cout << "ERROR: " << catalogDropPlan.error << std::endl;
                 return true;
             }
+            hasCatalogDropPlan = true;
         }
     } catch (const std::exception& e) {
-        std::cerr << "WARNING: catalog schema drop failed: " << e.what() << std::endl;
+        std::cerr << "WARNING: catalog schema drop check failed: " << e.what() << std::endl;
     }
 
+    // From this point on physical deletion may be partial (CASCADE can
+    // remove several relations), so every failure must be able to restore
+    // the pre-statement snapshot.
+    txn.enableSnapshotRollback();
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.dropSchema(s.currentDB, name, stmt->cascade);
     if (res != DBStatus::OK) {
         std::cout << "DROP SCHEMA failed" << std::endl;
         return true;
     }
+
+    // DROP SCHEMA can remove multiple relations and their side files.  If
+    // catalog post-processing fails, restore the transaction snapshot rather
+    // than exposing a partially dropped namespace.
+    if (hasCatalogDropPlan && catalogManager) {
+        std::string error;
+        if (!catalogManager->applyDropPlan(catalogDropPlan, &error)) {
+            std::cout << "DROP SCHEMA catalog cleanup failed: " << error << std::endl;
+            return true;
+        }
+    }
+    txn.recordDrop(DdlObjectKind::Schema, name);
     txn.commit();
     std::cout << "DROP SCHEMA succeeded" << std::endl;
     return false;

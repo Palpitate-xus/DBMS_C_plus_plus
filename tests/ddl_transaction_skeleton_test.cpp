@@ -208,6 +208,34 @@ static void test_catalog_drop_plan_is_deferred() {
     std::cout << "[DDL-TXN] catalog drop plan ordering OK" << std::endl;
 }
 
+static void test_schema_drop_plan_is_deferred() {
+    std::string db = testDbPath("ddl_txn_t_schema_drop_plan");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app", s));
+
+    auto& cat = g_engine.catalogService().get(db);
+    const auto* ns = cat.findNamespaceByName("app");
+    assert(ns != nullptr);
+    const auto plan = cat.planDrop(dbms::PgClassOid_Namespace, ns->oid,
+                                   dbms::CatalogManager::DropBehavior::Restrict);
+    assert(plan.ok());
+    assert(g_engine.schemaExists(db, "app"));
+    assert(cat.applyDropPlan(plan));
+    assert(!cat.findNamespaceByName("app"));
+    // Catalog planning is independent from physical storage.  The executor
+    // applies the plan only after StorageEngine::dropSchema succeeds.
+    assert(g_engine.schemaExists(db, "app"));
+
+    assert(g_engine.dropSchema(db, "app", false) == dbms::DBStatus::OK);
+    cleanup(db);
+    std::cout << "[DDL-TXN] schema catalog drop plan ordering OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_rollback_create();
@@ -217,6 +245,7 @@ int main() {
     test_executor_uses_transaction();
     test_alter_statement_rollback();
     test_catalog_drop_plan_is_deferred();
+    test_schema_drop_plan_is_deferred();
     std::cout << "[DDL-TXN] all passed" << std::endl;
     return 0;
 }

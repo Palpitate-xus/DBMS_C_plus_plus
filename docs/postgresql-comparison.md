@@ -71,7 +71,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 功能 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
 | CREATE/DROP/ALTER DATABASE | ✅ | ✅ | ✅ |
-| CREATE/DROP/ALTER SCHEMA | ✅ | ✅ | ✅ |
+| CREATE/DROP/ALTER SCHEMA | ✅ | ✅ | ✅（DROP SCHEMA 先物理删除、后应用 catalog 依赖计划） |
 | CREATE/DROP/ALTER TABLE (基础子命令；全量仍有缺口) | ✅ | ⚠️ | ⚠️ |
 | CREATE/DROP/ALTER VIEW | ✅ | ✅ | ✅ |
 | CREATE/DROP/ALTER MATERIALIZED VIEW | ✅ | ✅ | ✅ |

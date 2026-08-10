@@ -2261,19 +2261,26 @@ DBStatus StorageEngine::dropSchema(const std::string& dbname,
     if (cascade) {
         std::string prefix = schemaname + "__";
         auto dbPath = std::filesystem::path(dbname);
+        std::vector<std::string> tablesToDrop;
         for (const auto& entry : std::filesystem::directory_iterator(dbPath)) {
             if (!entry.is_regular_file()) continue;
             std::string name = entry.path().filename().string();
             if (name.size() > 3 && name.substr(name.size() - 3) == ".dt") {
                 std::string tname = name.substr(0, name.size() - 3);
                 if (tname.size() > prefix.size() && tname.substr(0, prefix.size()) == prefix) {
-                    dropTable(dbname, tname);
+                    tablesToDrop.push_back(std::move(tname));
                 }
             }
         }
+        for (const auto& tname : tablesToDrop) {
+            if (dropTable(dbname, tname) != DBStatus::OK) {
+                return DBStatus::INVALID_VALUE;
+            }
+        }
     }
-    std::filesystem::remove(path);
-    return DBStatus::OK;
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return ec ? DBStatus::INVALID_VALUE : DBStatus::OK;
 }
 
 DBStatus StorageEngine::renameSchema(const std::string& dbname,

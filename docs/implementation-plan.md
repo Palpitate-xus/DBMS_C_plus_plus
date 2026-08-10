@@ -320,7 +320,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 4.36 实现 `CREATE PROCEDURE` 语言运行时与事务控制 | 1.1.23 | 已保存并解析基础 procedure 定义；PL/pgSQL 运行时和 PostgreSQL 事务控制语义仍待后续。 |
 | ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL、USING/WITH CHECK 关系感知扫描、默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、INHERIT/NOINHERIT 和表 owner/角色属性绕过已落地；完整 owner ACL 组合和 `ALTER POLICY` 语义仍待后续。 |
 | ⚠️ 4.38 实现 `CREATE MATERIALIZED VIEW` `WITH [NO] DATA`、并发刷新 | 1.1.21, 4.10 | 已支持基础创建、列序、`WITH [NO] DATA` 和刷新；唯一索引要求、真正的 CONCURRENTLY 锁语义和 `pg_matview` 依赖追踪仍待后续。 |
-| ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 已接入；ALTER 多子命令失败可通过当前格式整库快照恢复，CREATE 失败清理和 DROP 依赖计划已覆盖主要单对象边界；完整跨对象依赖 undo、并发 DDL 锁和 PostgreSQL 隐式提交边界仍待后续。 |
+| ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 已接入；ALTER 多子命令失败可通过当前格式整库快照恢复，CREATE 失败清理以及 DROP TABLE/SCHEMA 的物理后再 catalog 依赖计划已覆盖主要单对象边界；完整跨对象依赖 undo、并发 DDL 锁和 PostgreSQL 隐式提交边界仍待后续。 |
 | ✅ 4.40 实现 `CREATE ASSERTION` 执行（如决定支持） | 5.9 | PG 本身未实现。本项目暂不支持Assertion，标记为完成（scope exclusion）。 |
 
 ### Phase 4 已完成内容（截至当前 commit）
