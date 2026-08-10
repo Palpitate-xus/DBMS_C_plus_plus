@@ -155,6 +155,31 @@ static void test_executor_uses_transaction() {
     std::cout << "[DDL-TXN] executor uses transaction OK" << std::endl;
 }
 
+static void test_alter_statement_rollback() {
+    std::string db = testDbPath("ddl_txn_t_alter_atomic");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE alter_atomic (id INT)", s));
+
+    // The first subcommand succeeds; the second one fails semantically.  A
+    // PostgreSQL-style statement boundary must remove the first change too.
+    bool err = ddl.executeSql(
+        "ALTER TABLE alter_atomic ADD COLUMN first_value INT, DROP COLUMN missing_value", s);
+    assert(err);
+    const auto table = g_engine.getTableSchema(db, "alter_atomic");
+    assert(table.len == 1);
+    assert(table.cols[0].dataName == "id");
+    assert(!fs::exists(db + ".txn_backup"));
+    assert(!g_engine.inTransaction());
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] ALTER statement rollback OK" << std::endl;
+}
+
 static void test_catalog_drop_plan_is_deferred() {
     std::string db = testDbPath("ddl_txn_t_drop_plan");
     cleanup(db);
@@ -190,6 +215,7 @@ int main() {
     test_create_table_post_action_rollback();
     test_wal_catalog_record();
     test_executor_uses_transaction();
+    test_alter_statement_rollback();
     test_catalog_drop_plan_is_deferred();
     std::cout << "[DDL-TXN] all passed" << std::endl;
     return 0;

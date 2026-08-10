@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态**：统一回归基线 PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-10）**：统一回归基线 PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -19,6 +19,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-10 | ALTER TABLE statement atomicity：DdlExecutor 现在为 ALTER 建立当前格式整库事务快照，失败时先结束行级事务状态，再关闭数据库缓存并恢复 schema、参数、索引、TOAST、catalog 与关系文件；成功提交后删除快照。新增“前一子命令成功、后一子命令失败”的整句回滚回归。DROP/ALTER 跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
 | 2026-08-09 | DDL 创建失败安全：`StorageEngine::createTable` 现在检查 schema/heap/分区/TOAST/主键/唯一索引及 `tlist.lst` 初始化结果，失败时清理已写入的 relation 文件、序列、缓存和清单项；DdlExecutor 在物理创建后立即登记表回滚记录，约束 metadata/EXCLUDE 后处理失败会撤销整张表；`DROP TABLE` 先生成只读依赖计划，物理删除成功后才应用 catalog 删除。新增损坏 heap、后处理失败与 drop plan 回归；完整 DROP/ALTER undo 和跨对象依赖事务语义仍待后续。 |
 | 2026-08-09 | `TRUNCATE` 架构收敛：新增 typed `TruncateStmt` 与 DdlExecutor 执行路径，删除 `main.cpp` 字符串处理；支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT` 预检，新增多表/FK/identity 回归。trigger、foreign table 与完整 transactional/locking 语义仍待后续。 |
 | 2026-08-09 | 表 owner 正式化：`TableSchema.owner` 与 schema 版本升级接入表所有者，CREATE/ALTER TABLE OWNER TO 同步维护 `pg_class.relowner`；RLS 普通模式按 PostgreSQL 语义让 owner 绕过，FORCE RLS 仍强制执行；OWNER TO 现在要求表所有者/超级用户且能 SET ROLE 到目标角色，并新增授权拒绝回归。 |
@@ -246,7 +247,7 @@
 | 1.1.1 | `ALTER DEFAULT PRIVILEGES` | 只解析 `GRANT` 路径；缺少完整 `REVOKE`、对象类型、角色继承、schema/default ACL 语义 | ⚠️ |
 | 1.1.2 | `ALTER SCHEMA` | 主要支持 `RENAME TO`；缺少 owner、权限、依赖重写 | ⚠️ |
 | 1.1.3 | `ALTER SYSTEM` | 只写项目 `dbms.conf` 中有限参数；不是 PG GUC 体系 | ⚠️ |
-| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（正式 schema/`pg_class.relowner`）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD/DROP CONSTRAINT（CHECK/UNIQUE/FK/PRIMARY KEY/EXCLUDE，EXCLUDE 已走 typed AST 并清理持久化状态）、TRIGGER/RLS/SET SCHEMA/分区（RLS、ATTACH/DETACH、trigger enable/disable 已走 typed AST）、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；仍缺 `ONLY`、真正 SET TABLESPACE 迁移、完整延迟约束/约束触发器语义 | 🔄 |
+| 1.1.4 | `ALTER TABLE` | 已支持 ADD/DROP COLUMN（含 `IF [NOT] EXISTS` 守卫）、ALTER COLUMN TYPE(整表改写+转换预校验)、OWNER TO（正式 schema/`pg_class.relowner`）、SET LOGGED/UNLOGGED（schema 标志位）、SET/RESET STORAGE、CLUSTER ON/SET WITHOUT CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT、SET/DROP DEFAULT/NOT NULL、RENAME COLUMN/CONSTRAINT（含 `IF EXISTS`）、ADD/DROP CONSTRAINT（CHECK/UNIQUE/FK/PRIMARY KEY/EXCLUDE，EXCLUDE 已走 typed AST 并清理持久化状态）、TRIGGER/RLS/SET SCHEMA/分区（RLS、ATTACH/DETACH、trigger enable/disable 已走 typed AST）、**INHERIT / NO INHERIT**（读写 `.<table>.inherits` 文件）、**ALTER COLUMN SET STATISTICS**（存为 `column_statistics:col=n` 选项）；ALTER 多子命令失败时已恢复整句快照；仍缺 `ONLY`、真正 SET TABLESPACE 迁移、完整延迟约束/约束触发器语义和跨对象依赖 undo | 🔄 |
 | 1.1.5 | `ALTER USER` / `ALTER ROLE` | 缺少真实 superuser/createdb/replication/bypassrls 权限位、连接限制、valid until、配置参数执行语义 | ⚠️ |
 | 1.1.6 | `ALTER VIEW` | 缺少 owner、options、column default、安全屏障、security invoker | ⚠️ |
 | 1.1.7 | `ANALYZE` | 有表/多列统计；缺少 PG 采样算法、统计对象、表达式统计、分区/继承精细规则、`VERBOSE` 输出、系统统计视图集成 | ⚠️ |
@@ -473,7 +474,7 @@
 | 9.3 | Isolation levels | 四级隔离名存在；Read Uncommitted 在 PG 中实际等同 Read Committed，本项目语义未必一致；Serializable 已覆盖关系限定的行级写偏差回滚，但仍是简化 SSI | ⚠️ |
 | 9.4 | SSI/predicate locks | 已有关系限定的行级 rw-conflict in/out、关系级 SIREAD 和空范围写偏差回归；仍缺 PostgreSQL 页/索引 predicate lock、精确索引范围推理和完整 SSI 图规则 | ⚠️ |
 | 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index；缺少子事务 ID、资源释放、错误状态恢复 | ⚠️ |
-| 9.6 | DDL transactions | 本项目 DDL 多处隐式提交；PG 大多数 DDL 可回滚 | 🔄 |
+| 9.6 | DDL transactions | ALTER 已具备当前格式整库快照回滚；CREATE 的失败清理和 DROP 的只读依赖计划已覆盖主要单对象边界；仍缺完整跨对象依赖 undo、并发 DDL 锁语义和 PostgreSQL 全部隐式提交边界 | 🔄 |
 | 9.7 | Lock manager | 有表/行/gap/page/advisory lock 简化；缺少 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、deadlock detector 精细语义、wait events | ⚠️ |
 | 9.8 | Crash safety | WAL 不是 redo log；事务开始复制目录备份，提交清 WAL。对大数据库、并发事务、部分页写、崩溃窗口的语义与 PG 差距巨大 | 🔄 |
 | 9.9 | Vacuum/freeze | 缺少 transaction wraparound、freeze map、visibility map、hint bits、all-visible/all-frozen | ⚠️ |

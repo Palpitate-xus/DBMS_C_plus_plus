@@ -1,12 +1,12 @@
 # DBMS 完整使用手册
 
-> 最后更新: 2026-08-09
+> 最后更新: 2026-08-10
 > 版本: v2 存储格式 / 生产化重构阶段
 > 回归基线: PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。
 
-> 路由说明：基础 `ALTER TABLE`、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、约束验证/延迟属性、`CREATE TABLE` 分区、RLS 可见性扫描和简单单表视图 `INSTEAD OF` DML 路径由统一执行链处理；触发器函数运行时和完整对象 owner/ACL 组合语义仍未完成。RLS 已支持默认 `WITH CHECK`、`PUBLIC` 角色、基础 `PERMISSIVE/RESTRICTIVE` 组合、表 owner 绕过、基于 `pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`。
+> 路由说明：基础 `ALTER TABLE`、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、约束验证/延迟属性、`CREATE TABLE` 分区、RLS 可见性扫描和简单单表视图 `INSTEAD OF` DML 路径由统一执行链处理；ALTER 多子命令失败会恢复整句当前格式快照；触发器函数运行时和完整对象 owner/ACL 组合语义仍未完成。RLS 已支持默认 `WITH CHECK`、`PUBLIC` 角色、基础 `PERMISSIVE/RESTRICTIVE` 组合、表 owner 绕过、基于 `pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`。
 
 ---
 

@@ -1,6 +1,6 @@
 # 生产化状态
 
-最后更新：2026-08-09
+最后更新：2026-08-10
 
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，125 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=127 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
@@ -12,7 +12,7 @@
 - 存储统一为 v2、8 KiB PostgreSQL 风格 heap page 和当前 schema 格式。
 - schema、sequence、trigger 读取路径只接受当前格式；旧格式回退和截断文件的部分解析已删除，损坏元数据 fail-closed，不会按默认值继续写入。
 - `CREATE TABLE` 的 schema、heap/partition、TOAST、主键/唯一索引和 `tlist.lst` 初始化现在检查失败并清理已写入的半成品；索引元数据写入失败不会遗留锁或缓存指针。
-- DDL executor 在物理表创建成功后立即登记事务回滚记录；约束 metadata、EXCLUDE 或后续 catalog 步骤失败时不会留下已发布的表对象。完整 DROP/ALTER 跨对象 undo 仍待补齐。
+- DDL executor 在物理表创建成功后立即登记事务回滚记录；约束 metadata、EXCLUDE 或后续 catalog 步骤失败时不会留下已发布的表对象。`ALTER TABLE` 现在在 DDL 事务中使用当前格式整库快照，后续子命令失败会恢复 schema、参数、索引、TOAST、catalog 和关系文件；完整 DROP/ALTER 跨对象依赖 undo 仍待补齐。
 - `DROP TABLE` 现在先生成只读 `CASCADE/RESTRICT` 依赖计划，物理删除成功后才应用 catalog 删除计划，避免物理失败时 catalog 先被移除。
 - 当前 schema 格式升级为 `0x44420009`，表名、列名、类型名和约束名字段统一保留 64 字节（最多 63 字节标识符），不再静默截断 15 字节以上的合法标识符；旧 schema 按设计拒绝读取。
 - `PageAllocator`、`PageWrapper`、TOAST 路径统一使用同一页格式。

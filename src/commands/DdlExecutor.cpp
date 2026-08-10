@@ -609,10 +609,20 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     checkAndImplicitCommit(s);
     const std::string tableName = resolveTableName(s, stmt->tableName);
 
-    // Validate the action set before making any change.  The storage
-    // primitives currently persist each subcommand independently, so a later
-    // semantic failure can still leave an earlier supported subcommand
-    // applied; full statement-atomic DDL remains a PostgreSQL-alignment gap.
+    // ALTER TABLE actions can rewrite schemas, indexes, parameters, and
+    // relation files directly; the row-level undo log cannot restore those
+    // changes.  Run the whole statement inside the DDL transaction so any
+    // later action failure restores the pre-statement database snapshot.
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
+    // Validate the action set before making any change.  The transaction
+    // snapshot below additionally protects failures that occur after a
+    // storage primitive has already persisted an earlier subcommand.
     for (const auto& sub : stmt->subCommands) {
         switch (sub.action) {
             case AlterTableStmt::Action::AddColumn:
@@ -654,6 +664,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     }
 
     for (const auto& sub : stmt->subCommands) {
+        txn.markSnapshotDirty();
         DBStatus status = DBStatus::OK;
         switch (sub.action) {
             case AlterTableStmt::Action::AddColumn: {
@@ -1066,6 +1077,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         }
     }
     std::cout << "ALTER TABLE succeeded" << std::endl;
+    txn.recordUpdate(DdlObjectKind::Table, tableName);
+    txn.commit();
     return false;
 }
 
@@ -2449,6 +2462,8 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cout << "DROP TABLE failed" << std::endl;
         return true;
     }
+    txn.enableSnapshotRollback();
+    txn.markSnapshotDirty();
     if (hasCatalogDropPlan && catalogManager) {
         std::string err;
         if (!catalogManager->applyDropPlan(catalogDropPlan, &err)) {

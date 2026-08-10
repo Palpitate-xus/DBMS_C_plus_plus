@@ -550,6 +550,12 @@ public:
     DBStatus commitTransaction();
     DBStatus rollbackTransaction();
 
+    // Restore/remove the current transaction's pre-change database snapshot.
+    // DDL uses this because schema/file rewrites are not represented by the
+    // row-level transaction undo log.
+    bool restoreTransactionBackup(const std::string& dbname);
+    void discardTransactionBackup(const std::string& dbname);
+
     // Two-phase commit (PREPARE TRANSACTION / COMMIT PREPARED / ROLLBACK PREPARED)
     DBStatus prepareTransaction(const std::string& xid);
     DBStatus commitPrepared(const std::string& xid);

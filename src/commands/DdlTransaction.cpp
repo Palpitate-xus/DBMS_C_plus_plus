@@ -75,6 +75,9 @@ void DdlTransaction::commit() {
     if (startedByUs_ && engine_.inTransaction()) {
         engine_.commitTransaction();
     }
+    if (startedByUs_) {
+        engine_.discardTransactionBackup(session_.currentDB);
+    }
     ops_.clear();
     committed_ = true;
 }
@@ -92,6 +95,16 @@ void DdlTransaction::rollback() {
     }
     if (startedByUs_ && engine_.inTransaction()) {
         engine_.rollbackTransaction();
+    }
+    if (startedByUs_) {
+        if (snapshotRollbackEnabled_ && snapshotDirty_ && !session_.currentDB.empty()) {
+            if (!engine_.restoreTransactionBackup(session_.currentDB)) {
+                std::cerr << "DDL rollback warning: failed to restore database snapshot for "
+                          << session_.currentDB << std::endl;
+            }
+        } else {
+            engine_.discardTransactionBackup(session_.currentDB);
+        }
     }
     ops_.clear();
     committed_ = false;

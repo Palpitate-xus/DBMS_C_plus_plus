@@ -18658,6 +18658,11 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
+    // CatalogManager is lazily persisted and may contain the latest DDL
+    // state only in memory.  Persist it before taking the transaction
+    // snapshot so a DDL rollback can safely evict/reload the catalog.
+    if (catalogService_) catalogService_->persistAll();
+
     // Flush all dirty pages so the on-disk files are up-to-date before backup
     auto tblNames = getTableNames(dbname);
     for (const auto& tn : tblNames) {
@@ -19127,6 +19132,30 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().constraintMode.clear();
     transactionContext().deferredChecks.clear();
     return DBStatus::OK;
+}
+
+bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
+    if (dbname.empty()) return false;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    const std::filesystem::path backup = dbPath(dbname).string() + ".txn_backup";
+    if (!std::filesystem::exists(backup) || !std::filesystem::is_directory(backup)) {
+        return false;
+    }
+
+    // DDL may have changed relation files and catalog state without creating
+    // row-level undo records.  Close every database-owned cache before
+    // replacing the directory so no stale file handles survive the restore.
+    if (catalogService_) catalogService_->evict(dbname);
+    closeDatabaseCaches(dbname);
+    const bool restored = physicalRestore(dbname, backup.string());
+    if (restored) std::filesystem::remove_all(backup);
+    return restored;
+}
+
+void StorageEngine::discardTransactionBackup(const std::string& dbname) {
+    if (dbname.empty()) return;
+    std::error_code ec;
+    std::filesystem::remove_all(dbPath(dbname).string() + ".txn_backup", ec);
 }
 
 // ========================================================================
