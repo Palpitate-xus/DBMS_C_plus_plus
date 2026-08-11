@@ -1680,6 +1680,29 @@ std::filesystem::path StorageEngine::viewsDir(const std::string& dbname) const {
     return dbPath(dbname) / ".views";
 }
 
+DBStatus StorageEngine::createCollation(const std::string& dbname,
+                                        const std::string& collationName,
+                                        const std::string& provider,
+                                        const std::string& locale) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    const auto path = dbPath(dbname) / ".collations";
+    if (std::filesystem::exists(path)) {
+        std::ifstream input(path);
+        if (!input) return DBStatus::IO_ERROR;
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.substr(0, line.find('|')) == collationName) {
+                return DBStatus::TABLE_ALREADY_EXISTS;
+            }
+        }
+    }
+    std::ofstream output(path, std::ios::app);
+    if (!output) return DBStatus::IO_ERROR;
+    output << collationName << '|' << provider << '|' << locale << '\n';
+    output.flush();
+    return output ? DBStatus::OK : DBStatus::IO_ERROR;
+}
+
 DBStatus StorageEngine::createView(const std::string& dbname,
                                     const std::string& viewname,
                                     const std::string& sql) {
@@ -1700,6 +1723,53 @@ DBStatus StorageEngine::dropView(const std::string& dbname,
     auto path = viewPath(dbname, viewname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::remove(path);
+    return DBStatus::OK;
+}
+
+DBStatus StorageEngine::dropCollation(const std::string& dbname,
+                                      const std::string& collationName) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    const auto path = dbPath(dbname) / ".collations";
+    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
+
+    std::ifstream input(path);
+    if (!input) return DBStatus::IO_ERROR;
+    std::vector<std::string> retained;
+    std::string line;
+    bool found = false;
+    while (std::getline(input, line)) {
+        const size_t separator = line.find('|');
+        const std::string name = line.substr(0, separator);
+        if (name == collationName) {
+            found = true;
+        } else {
+            retained.push_back(line);
+        }
+    }
+    if (!found) return DBStatus::TABLE_NOT_FOUND;
+
+    if (retained.empty()) {
+        std::error_code error;
+        if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
+        return DBStatus::OK;
+    }
+
+    const auto temporary = path.string() + ".tmp." +
+        std::to_string(static_cast<unsigned long long>(std::hash<std::thread::id>{}(
+            std::this_thread::get_id())));
+    {
+        std::ofstream output(temporary, std::ios::trunc);
+        if (!output) return DBStatus::IO_ERROR;
+        for (const auto& retainedLine : retained) output << retainedLine << '\n';
+        output.flush();
+        if (!output) return DBStatus::IO_ERROR;
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(temporary);
+        return DBStatus::IO_ERROR;
+    }
     return DBStatus::OK;
 }
 

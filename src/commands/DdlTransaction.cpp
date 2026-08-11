@@ -187,11 +187,29 @@ bool DdlTransaction::undoCreate(const RecordedOp& op) {
         case DdlObjectKind::Type:
             engine_.dropCompositeType(db, op.name);
             break;
+        case DdlObjectKind::View:
+            return engine_.dropView(db, op.name) == DBStatus::OK;
+        case DdlObjectKind::MaterializedView:
+            return engine_.dropMaterializedView(db, op.name) == DBStatus::OK;
+        case DdlObjectKind::Function: {
+            const bool hadUdf = engine_.udfExists(db, op.name);
+            const bool hadTvf = engine_.tvfExists(db, op.name);
+            if (!hadUdf && !hadTvf) return false;
+            bool removed = false;
+            if (hadUdf) removed = engine_.dropUDF(db, op.name) == DBStatus::OK || removed;
+            if (hadTvf) removed = engine_.dropTVF(db, op.name) == DBStatus::OK || removed;
+            return removed;
+        }
+        case DdlObjectKind::Procedure:
+            return engine_.dropProcedure(db, op.name) == DBStatus::OK;
+        case DdlObjectKind::Trigger:
+            return engine_.dropTrigger(db, op.name) == DBStatus::OK;
+        case DdlObjectKind::Policy:
+            if (op.extra.empty()) return false;
+            return engine_.dropPolicy(db, op.extra, op.name) == DBStatus::OK;
         case DdlObjectKind::Collation:
-            // Collation removal: handled explicitly via dropCollation call.
-            break;
+            return engine_.dropCollation(db, op.name) == DBStatus::OK;
         default:
-            // View / Function / Procedure 暂不支持自动撤销
             return false;
     }
     return true;

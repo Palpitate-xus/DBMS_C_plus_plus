@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-11）**: 生产化重构进行中；统一回归基线 PASS=130 FAIL=0（128 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；仅显式启用文件级 DDL 回滚时创建按事务 ID 隔离的物理快照，快照事务持有数据库级排他锁并支持重启恢复；这不代表已达到 PostgreSQL 生产级等价。
+> **当前状态（2026-08-11）**: 生产化重构进行中；统一回归基线 PASS=130 FAIL=0（128 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，显式启用文件级 DDL 回滚时创建按事务 ID 隔离的物理快照，快照事务持有数据库级排他锁并支持重启恢复；这不代表已达到 PostgreSQL 生产级等价。
 
 ## 功能特性
 

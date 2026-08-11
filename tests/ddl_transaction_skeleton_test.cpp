@@ -13,6 +13,7 @@
 #include "storage/WAL.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <atomic>
@@ -397,6 +398,88 @@ static void test_schema_drop_plan_is_deferred() {
     std::cout << "[DDL-TXN] schema catalog drop plan ordering OK" << std::endl;
 }
 
+static void test_auxiliary_object_rollback() {
+    std::string db = testDbPath("ddl_txn_t_auxiliary_objects");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlTransaction txn(s);
+    assert(txn.begin());
+
+    assert(g_engine.createView(db, "rollback_view", "SELECT id FROM rollback_tbl") ==
+           dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::View, "rollback_view");
+
+    dbms::TableSchema relation;
+    relation.tablename = "rollback_tbl";
+    relation.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+    relation.append(dbms::makeIntColumn("id", true, 2, true));
+    assert(g_engine.createTable(db, relation) == dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::Table, "rollback_tbl");
+
+    dbms::StorageEngine::Trigger trigger;
+    trigger.name = "rollback_trigger";
+    trigger.timing = "before";
+    trigger.event = "insert";
+    trigger.tableName = "rollback_tbl";
+    trigger.action = "SELECT 1";
+    trigger.forEachRow = true;
+    assert(g_engine.createTrigger(db, trigger) == dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::Trigger, trigger.name, trigger.tableName);
+
+    dbms::StorageEngine::RowPolicy policy;
+    policy.name = "rollback_policy";
+    policy.cmd = "ALL";
+    policy.usingExpr = "true";
+    policy.withCheckExpr = "true";
+    assert(g_engine.createPolicy(db, "rollback_tbl", policy) == dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::Policy, policy.name, "rollback_tbl");
+
+    assert(g_engine.createUDF(db, "rollback_udf", "x", "x + 1") == dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::Function, "rollback_udf");
+    assert(g_engine.createTVF(db, "rollback_tvf", "x", "SELECT x") == dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::Function, "rollback_tvf");
+
+    assert(g_engine.createProcedure(db, "rollback_proc", {}, {"SELECT 1"}) ==
+           dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::Procedure, "rollback_proc");
+
+    dbms::TableSchema materializedBacking;
+    materializedBacking.tablename = dbms::StorageEngine::materializedViewPrefix("rollback_mv");
+    materializedBacking.formatVersion = dbms::DATA_FILE_FORMAT_VERSION;
+    materializedBacking.append(dbms::makeIntColumn("id", true, 2, true));
+    assert(g_engine.createTable(db, materializedBacking) == dbms::DBStatus::OK);
+    std::filesystem::create_directories(g_engine.viewsDir(db));
+    {
+        std::ofstream mview(g_engine.viewsDir(db) / "rollback_mv.mview");
+        mview << "SELECT 1";
+    }
+    txn.recordCreate(dbms::DdlObjectKind::MaterializedView, "rollback_mv");
+
+    assert(g_engine.createCollation(db, "rollback_collation_a", "libc", "C") ==
+           dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::Collation, "rollback_collation_a");
+    assert(g_engine.createCollation(db, "rollback_collation_b", "libc", "C") ==
+           dbms::DBStatus::OK);
+    txn.recordCreate(dbms::DdlObjectKind::Collation, "rollback_collation_b");
+
+    txn.rollback();
+
+    assert(!g_engine.viewExists(db, "rollback_view"));
+    assert(!g_engine.tableExists(db, "rollback_tbl"));
+    assert(!g_engine.udfExists(db, "rollback_udf"));
+    assert(!g_engine.tvfExists(db, "rollback_tvf"));
+    assert(!g_engine.procedureExists(db, "rollback_proc"));
+    assert(!g_engine.isMaterializedView(db, "rollback_mv"));
+    assert(!std::filesystem::exists(db + "/.collations"));
+    assert(!g_engine.inTransaction());
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] auxiliary object rollback OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_rollback_create();
@@ -412,6 +495,7 @@ int main() {
     test_alter_statement_rollback();
     test_catalog_drop_plan_is_deferred();
     test_schema_drop_plan_is_deferred();
+    test_auxiliary_object_rollback();
     std::cout << "[DDL-TXN] all passed" << std::endl;
     return 0;
 }

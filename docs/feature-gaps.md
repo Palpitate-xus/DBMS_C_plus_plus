@@ -9,6 +9,8 @@ WAL 当前明确区分合法 LSN 0 与无效哨兵；恢复会忽略未初始化
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
 
+DDL CREATE 失败清理已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；当前仍缺显式外层事务跨语句 DDL undo、DROP/REPLACE 旧对象恢复、完整依赖图回滚和 PostgreSQL 隐式提交边界。
+
 表空间物理路由已在本轮收敛：关系文件统一放在 `pg_default` 数据库目录或
 `<LOCATION>/<DATABASE>/`，CREATE TABLE、ALTER TABLE SET TABLESPACE、重启读取和
 跨文件系统迁移均有回归覆盖；缺失 `.path` marker 不会回退到默认目录。剩余差距是

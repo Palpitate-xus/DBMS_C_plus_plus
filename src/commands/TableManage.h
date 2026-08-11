@@ -181,6 +181,11 @@ public:
                                  const std::string& tablename,
                                  const std::map<std::string, std::string>& changes);
 
+    // Collation support
+    DBStatus createCollation(const std::string& dbname, const std::string& collationName,
+                             const std::string& provider, const std::string& locale);
+    DBStatus dropCollation(const std::string& dbname, const std::string& collationName);
+
     // View support
     DBStatus createView(const std::string& dbname, const std::string& viewname, const std::string& sql);
     DBStatus dropView(const std::string& dbname, const std::string& viewname);
