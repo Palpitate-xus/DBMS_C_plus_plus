@@ -80,6 +80,11 @@ static bool isSessionTempPhysicalName(const std::string& name) {
     return true;
 }
 
+// Physical backups contain a complete database layout but are not active
+// databases. Mark them explicitly so startup recovery never replays their
+// WAL or follows their stale external-tablespace paths.
+static constexpr const char* kPhysicalBackupMarker = ".dbms_physical_backup";
+
 #include <algorithm>
 #include <cmath>
 #include <ctime>
@@ -95,6 +100,7 @@ static bool isSessionTempPhysicalName(const std::string& name) {
 #include <regex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -1090,7 +1096,10 @@ Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK) {
 // StorageEngine
 // ========================================================================
 StorageEngine::StorageEngine() {
-    recoverAllDatabases();
+    if (!recoverAllDatabases()) {
+        throw std::runtime_error(
+            "WAL crash recovery failed; startup aborted to protect data");
+    }
     cleanupStaleSessionTemporaryFiles();
     catalogService_ = std::make_unique<CatalogService>(*this);
     // Keep trigger WHEN semantics available for direct StorageEngine users
@@ -7487,7 +7496,10 @@ std::vector<std::string> StorageEngine::getDatabaseNames() const {
         if (dbname.empty() || dbname[0] == '.' ||
             dbname.find(".txn_backup") != std::string::npos ||
             dbname.find(".archive") != std::string::npos) continue;
-        try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
+        try {
+            if (std::filesystem::exists(dbPath(dbname) / kPhysicalBackupMarker) ||
+                !std::filesystem::exists(tableListPath(dbname))) continue;
+        } catch (...) { continue; }
         result.push_back(dbname);
     }
     return result;
@@ -18920,8 +18932,10 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
 // WAL crash recovery (page-image redo)
 // ========================================================================
 
-void StorageEngine::recoverAllDatabases() {
-    if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) return;
+bool StorageEngine::recoverAllDatabases() {
+    if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) {
+        return true;
+    }
 
     // A DDL snapshot is created before file-backed changes and is named with
     // its transaction ID. If the process dies before COMMIT cleanup, recover
@@ -18935,7 +18949,12 @@ void StorageEngine::recoverAllDatabases() {
         if (name.empty() || name[0] == '.' ||
             name.find(".txn_backup") != std::string::npos ||
             name.find(".archive") != std::string::npos) return false;
-        try { return std::filesystem::exists(tableListPath(name)); }
+        try {
+            if (std::filesystem::exists(dbPath(name) / kPhysicalBackupMarker)) {
+                return false;
+            }
+            return std::filesystem::exists(tableListPath(name));
+        }
         catch (...) { return false; }
     };
 
@@ -19022,11 +19041,7 @@ void StorageEngine::recoverAllDatabases() {
         } catch (...) { continue; }
         std::string dbname;
         try { dbname = entry.path().filename().string(); } catch (...) { continue; }
-        if (dbname.empty() || dbname[0] == '.' ||
-            dbname.find(".txn_backup") != std::string::npos ||
-            dbname.find(".archive") != std::string::npos) continue;
-        // Skip non-database directories (simple heuristic: must have tlist.lst)
-        try { if (!std::filesystem::exists(tableListPath(dbname))) continue; } catch (...) { continue; }
+        if (!isDatabaseDirectory(dbname)) continue;
 
         WALManager* wal = getWAL(dbname);
         if (!wal) continue;
@@ -19075,7 +19090,7 @@ void StorageEngine::recoverAllDatabases() {
         // before-images must be applied newest-to-oldest to restore the state
         // that existed before the transaction began.
         auto applyImageRecord = [&](const XLogRecord& rec, Lsn recordLsn,
-                                    bool undoUncommitted) {
+                                    bool undoUncommitted) -> bool {
             const uint8_t rmid = rec.rmid();
             const uint8_t info = rec.info();
             const uint64_t recXid = rec.header.xl_xid;
@@ -19099,7 +19114,7 @@ void StorageEngine::recoverAllDatabases() {
                     shouldApply = recXid == 0;
                 }
             }
-            if (!shouldApply) return;
+            if (!shouldApply) return true;
 
             if (rmid == RM_INDEX_ID) {
                 const char* p = rec.data.data();
@@ -19108,29 +19123,100 @@ void StorageEngine::recoverAllDatabases() {
                 uint64_t imageLen = 0;
                 constexpr uint32_t kMaxIndexPathLen = 4096;
                 constexpr uint64_t kMaxIndexWalImage = 256ULL * 1024ULL * 1024ULL;
-                if (p + sizeof(pathLen) <= end) {
-                    std::memcpy(&pathLen, p, sizeof(pathLen));
-                    p += sizeof(pathLen);
-                    if (pathLen != 0 && pathLen <= kMaxIndexPathLen &&
-                        p + pathLen <= end) {
-                        const std::string pathText(p, pathLen);
-                        p += pathLen;
-                        if (p + sizeof(imageLen) <= end) {
-                            std::memcpy(&imageLen, p, sizeof(imageLen));
-                            p += sizeof(imageLen);
-                            if (imageLen <= kMaxIndexWalImage &&
-                                imageLen <= static_cast<uint64_t>(end - p)) {
-                                redoIndexFileImage(std::filesystem::path(pathText), p,
-                                                   static_cast<size_t>(imageLen));
+                auto fail = [&](const char* reason) {
+                    std::cerr << "[recovery] " << dbname << " LSN " << recordLsn
+                              << ": invalid index WAL image (" << reason << ")\n";
+                    return false;
+                };
+                if (static_cast<size_t>(end - p) < sizeof(pathLen)) {
+                    return fail("missing path length");
+                }
+                std::memcpy(&pathLen, p, sizeof(pathLen));
+                p += sizeof(pathLen);
+                if (pathLen == 0 || pathLen > kMaxIndexPathLen ||
+                    static_cast<size_t>(end - p) < pathLen) {
+                    return fail("invalid path length");
+                }
+                const std::string pathText(p, pathLen);
+                p += pathLen;
+                if (static_cast<size_t>(end - p) < sizeof(imageLen)) {
+                    return fail("missing image length");
+                }
+                std::memcpy(&imageLen, p, sizeof(imageLen));
+                p += sizeof(imageLen);
+                const size_t trailingBytes = static_cast<size_t>(end - p) -
+                    std::min<uint64_t>(imageLen, static_cast<uint64_t>(end - p));
+                const char* trailing = p + static_cast<size_t>(
+                    std::min<uint64_t>(imageLen, static_cast<uint64_t>(end - p)));
+                const bool paddingIsZero = std::all_of(
+                    trailing, end, [](char byte) { return byte == 0; });
+                if (imageLen > kMaxIndexWalImage ||
+                    imageLen > static_cast<uint64_t>(end - p) ||
+                    trailingBytes > 7 || !paddingIsZero) {
+                    return fail("invalid image length");
+                }
+
+                const std::filesystem::path indexPath(pathText);
+                std::error_code pathEc;
+                const auto canonicalPath = std::filesystem::weakly_canonical(
+                    indexPath, pathEc);
+                if (pathEc) {
+                    return fail("path cannot be canonicalized");
+                }
+                std::error_code rootEc;
+                const auto databaseRoot = std::filesystem::weakly_canonical(
+                    dbPath(dbname), rootEc);
+                auto isWithinRoot = [](const std::filesystem::path& child,
+                                       const std::filesystem::path& root) {
+                    const auto relative = child.lexically_relative(root);
+                    if (relative.empty() || relative == ".") return false;
+                    const auto first = relative.begin();
+                    return first == relative.end() || first->string() != "..";
+                };
+                bool pathAllowed = !rootEc && isWithinRoot(canonicalPath, databaseRoot);
+                if (!pathAllowed && !rootEc) {
+                    const auto markerDir = dbPath(dbname) / "pg_tblspc";
+                    std::error_code markerEc;
+                    if (std::filesystem::exists(markerDir, markerEc) && !markerEc) {
+                        for (const auto& marker : std::filesystem::directory_iterator(
+                                 markerDir, std::filesystem::directory_options::skip_permission_denied)) {
+                            if (!marker.is_regular_file() ||
+                                marker.path().extension() != ".path") continue;
+                            std::ifstream markerIn(marker.path());
+                            std::string location;
+                            if (!std::getline(markerIn, location) || location.empty()) continue;
+                            std::error_code tablespaceEc;
+                            const auto tablespaceRoot = std::filesystem::weakly_canonical(
+                                std::filesystem::path(location) / dbname, tablespaceEc);
+                            if (!tablespaceEc && isWithinRoot(canonicalPath, tablespaceRoot)) {
+                                pathAllowed = true;
+                                break;
                             }
                         }
                     }
                 }
-                return;
+                if (!pathAllowed) {
+                    return fail("path escapes database directory");
+                }
+                const std::string filename = canonicalPath.filename().string();
+                const std::string extension = canonicalPath.extension().string();
+                const bool isIndexFile = extension == ".idx" ||
+                    extension == ".hidx" || extension == ".fti" ||
+                    extension == ".gin" || extension == ".gist" ||
+                    extension == ".spgist" || extension == ".brin" ||
+                    extension.rfind(".idx_", 0) == 0;
+                if (filename.empty() || !isIndexFile) {
+                    return fail("path is not an index relation");
+                }
+                if (!redoIndexFileImage(indexPath, p,
+                                        static_cast<size_t>(imageLen))) {
+                    return fail("index image write failed");
+                }
+                return true;
             }
 
             const bool force = info == XLOG_HEAP_PAGE_BEFORE;
-            RedoApplyRecord(rec,
+            const bool applied = RedoApplyRecord(rec,
                 [&, force, recordLsn](const std::string& tableName, uint32_t blockNum,
                                       uint32_t forkNum, const char* pageData,
                                       size_t pageLen) {
@@ -19146,15 +19232,34 @@ void StorageEngine::recoverAllDatabases() {
                    uint32_t, uint32_t, uint16_t, const char*, size_t) {
                     return true;
                 });
+            if (!applied) {
+                std::cerr << "[recovery] " << dbname << " LSN " << recordLsn
+                          << ": heap WAL image could not be parsed or applied\n";
+            }
+            return applied;
         };
 
+        bool recoveryOk = true;
         for (Lsn recordLsn : redoRecordLsns) {
             auto recOpt = wal->ReadRecord(recordLsn);
-            if (recOpt) applyImageRecord(*recOpt, recordLsn, false);
+            if (!recOpt || !applyImageRecord(*recOpt, recordLsn, false)) {
+                recoveryOk = false;
+                break;
+            }
         }
-        for (auto it = redoRecordLsns.rbegin(); it != redoRecordLsns.rend(); ++it) {
-            auto recOpt = wal->ReadRecord(*it);
-            if (recOpt) applyImageRecord(*recOpt, *it, true);
+        if (recoveryOk) {
+            for (auto it = redoRecordLsns.rbegin(); it != redoRecordLsns.rend(); ++it) {
+                auto recOpt = wal->ReadRecord(*it);
+                if (!recOpt || !applyImageRecord(*recOpt, *it, true)) {
+                    recoveryOk = false;
+                    break;
+                }
+            }
+        }
+        if (!recoveryOk) {
+            std::cerr << "[recovery] startup aborted for database " << dbname
+                      << " because WAL replay was incomplete\n";
+            return false;
         }
 
         // Flush recovered pages.
@@ -19179,6 +19284,7 @@ void StorageEngine::recoverAllDatabases() {
             }
         } catch (...) {}
     }
+    return true;
 }
 
 // ========================================================================
@@ -19406,6 +19512,15 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
                 }
             }
         }
+        {
+            const auto marker = dst / kPhysicalBackupMarker;
+            std::ofstream out(marker, std::ios::trunc);
+            if (!out) return false;
+            out << "DBMS_PHYSICAL_BACKUP_V1\n";
+            out.flush();
+            if (!out) return false;
+            if (!syncFile(marker)) return false;
+        }
         return true;
     } catch (const std::exception& e) {
         std::cerr << "[storage] physical backup failed for " << dbname
@@ -19425,6 +19540,7 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
         }
         std::filesystem::create_directories(dst);
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
+            if (entry.path().filename() == kPhysicalBackupMarker) continue;
             auto destPath = dst / entry.path().filename();
             if (entry.is_directory() && entry.path().filename() == "wal_archive") {
                 // Skip wal_archive in root, restore it separately

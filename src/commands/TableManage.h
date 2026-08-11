@@ -579,8 +579,9 @@ public:
     DBStatus rollbackToSavepoint(const std::string& name);
     DBStatus releaseSavepoint(const std::string& name);
 
-    // WAL crash recovery
-    void recoverAllDatabases();
+    // WAL crash recovery. A malformed or unapplied WAL image fails closed so
+    // callers cannot accidentally start against partially recovered data.
+    bool recoverAllDatabases();
 
     // Checkpoint: flush all dirty pages and write checkpoint record. Returns
     // false unless relation pages, checkpoint WAL, metadata, and requested
