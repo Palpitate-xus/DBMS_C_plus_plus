@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -97,7 +98,7 @@ private:
     bool readFromDisk(uint32_t pageId, char* buf);
     bool writeToDisk(uint32_t pageId, const char* buf);
     bool flushUnlocked();
-    size_t evictFrame();
+    std::optional<size_t> evictFrame();
 };
 
 } // namespace dbms

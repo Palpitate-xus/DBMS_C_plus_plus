@@ -5,7 +5,8 @@
 namespace dbms {
 
 BufferPool::BufferPool(const std::string& filename, size_t numFrames, size_t pageSize)
-    : filename_(filename), numFrames_(numFrames), pageSize_(pageSize), clockHand_(0) {
+    : filename_(filename), numFrames_(numFrames == 0 ? 1 : numFrames),
+      pageSize_(pageSize), clockHand_(0) {
     frames_.resize(numFrames_);
     for (size_t i = 0; i < numFrames_; ++i) {
         frames_[i].pageId = static_cast<uint32_t>(-1);
@@ -68,9 +69,9 @@ bool BufferPool::readFromDisk(uint32_t pageId, char* buf) {
     if (fd_ < 0) return false;
     off_t offset = static_cast<off_t>(pageId) * pageSize_;
     ssize_t n = ::pread(fd_, buf, pageSize_, offset);
+    if (n < 0) return false;
     if (n < static_cast<ssize_t>(pageSize_)) {
         // New page: zero-fill remainder
-        if (n < 0) n = 0;
         std::memset(buf + n, 0, pageSize_ - n);
     }
     return true;
@@ -85,51 +86,46 @@ bool BufferPool::writeToDisk(uint32_t pageId, const char* buf) {
     return n == static_cast<ssize_t>(pageSize_);
 }
 
-size_t BufferPool::evictFrame() {
+std::optional<size_t> BufferPool::evictFrame() {
     // Clock sweep: scan frames in circular order.
     //   pinCount  > 0  -> pinned, skip
     //   usageCount > 0 -> recently used, decrement and skip
     //   otherwise      -> evict this frame
-    const size_t start = clockHand_;
-    do {
-        size_t idx = clockHand_;
-        clockHand_ = (clockHand_ + 1) % numFrames_;
+    while (true) {
+        bool usageChanged = false;
+        const size_t start = clockHand_;
+        do {
+            size_t idx = clockHand_;
+            clockHand_ = (clockHand_ + 1) % numFrames_;
 
-        Frame& f = frames_[idx];
-        if (f.pinCount > 0) {
-            continue; // cannot evict pinned frame
-        }
-        if (f.usageCount > 0) {
-            f.usageCount--;
-            continue; // second chance
-        }
+            Frame& f = frames_[idx];
+            if (f.pinCount > 0) {
+                continue; // pinned pages are never evicted
+            }
+            if (f.usageCount > 0) {
+                f.usageCount--;
+                usageChanged = true;
+                continue; // second chance
+            }
 
-        // Evict
-        if (f.dirty) {
-            writeToDisk(f.pageId, f.data.data());
-        }
-        pageMap_.erase(f.pageId);
-        f.pageId = static_cast<uint32_t>(-1);
-        f.dirty = false;
-        f.pinCount = 0;
-        f.usageCount = 0;
-        return idx;
-    } while (clockHand_ != start);
+            // A dirty page must be written successfully before its only
+            // cached copy is discarded. Leave the frame and mapping intact
+            // on failure; checkpoint/fsync provides durable ordering.
+            if (f.dirty && !writeToDisk(f.pageId, f.data.data())) {
+                return std::nullopt;
+            }
+            pageMap_.erase(f.pageId);
+            f.pageId = static_cast<uint32_t>(-1);
+            f.dirty = false;
+            f.pinCount = 0;
+            f.usageCount = 0;
+            return idx;
+        } while (clockHand_ != start);
 
-    // All frames pinned or recently used: force evict the current hand.
-    // This should be extremely rare.
-    size_t idx = clockHand_;
-    clockHand_ = (clockHand_ + 1) % numFrames_;
-    Frame& f = frames_[idx];
-    if (f.dirty) {
-        writeToDisk(f.pageId, f.data.data());
+        // A second sweep is needed after usage counts receive their second
+        // chance.  If nothing changed, every frame is pinned.
+        if (!usageChanged) return std::nullopt;
     }
-    pageMap_.erase(f.pageId);
-    f.pageId = static_cast<uint32_t>(-1);
-    f.dirty = false;
-    f.pinCount = 0;
-    f.usageCount = 0;
-    return idx;
 }
 
 char* BufferPool::fetchPage(uint32_t pageId) {
@@ -146,7 +142,7 @@ char* BufferPool::fetchPage(uint32_t pageId) {
 
     ++misses_;
     // Need to load from disk
-    size_t idx;
+    size_t idx = static_cast<size_t>(-1);
     if (pageMap_.size() < numFrames_) {
         // Find a free frame
         idx = static_cast<size_t>(-1);
@@ -157,10 +153,14 @@ char* BufferPool::fetchPage(uint32_t pageId) {
             }
         }
         if (idx == static_cast<size_t>(-1)) {
-            idx = evictFrame(); // should not happen, but be safe
+            auto evicted = evictFrame();
+            if (!evicted) return nullptr;
+            idx = *evicted;
         }
     } else {
-        idx = evictFrame();
+        auto evicted = evictFrame();
+        if (!evicted) return nullptr;
+        idx = *evicted;
     }
 
     Frame& f = frames_[idx];
@@ -168,7 +168,12 @@ char* BufferPool::fetchPage(uint32_t pageId) {
     f.dirty = false;
     f.pinCount = 1;
     f.usageCount = 3;
-    readFromDisk(pageId, f.data.data());
+    if (!readFromDisk(pageId, f.data.data())) {
+        f.pageId = static_cast<uint32_t>(-1);
+        f.pinCount = 0;
+        f.usageCount = 0;
+        return nullptr;
+    }
     pageMap_[pageId] = idx;
     return f.data.data();
 }

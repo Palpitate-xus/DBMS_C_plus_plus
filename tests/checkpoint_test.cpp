@@ -7,12 +7,45 @@
 #include <fstream>
 #include <iostream>
 #include <cassert>
+#include <cstring>
 
 dbms::Config g_config;
 
 using namespace dbms;
 
 int main() {
+    // A pinned frame must not be force-evicted, and a dirty frame must survive
+    // a normal clock-sweep eviction and reload from disk.
+    {
+        const std::filesystem::path poolPath = "checkpoint_buffer_pool.dat";
+        std::filesystem::remove(poolPath);
+        BufferPool pool(poolPath.string(), 1, 128);
+        assert(pool.open());
+        char* page = pool.fetchPage(0);
+        assert(page != nullptr);
+        std::memcpy(page, "durable-page", 12);
+        pool.markDirty(0);
+        pool.unpinPage(0);
+
+        char* other = pool.fetchPage(1);
+        assert(other != nullptr);
+        pool.unpinPage(1);
+        char* reloaded = pool.fetchPage(0);
+        assert(reloaded != nullptr);
+        assert(std::memcmp(reloaded, "durable-page", 12) == 0);
+
+        // Keep page 0 pinned.  With a one-frame pool, fetching page 2 must
+        // fail closed instead of evicting the live page.
+        assert(pool.fetchPage(2) == nullptr);
+        pool.unpinPage(0);
+        assert(pool.fetchPage(2) != nullptr);
+        pool.unpinPage(2);
+        assert(pool.flush());
+        pool.close();
+        std::filesystem::remove(poolPath);
+        std::cout << "[CHECKPOINT] BufferPool eviction/pin safety OK\n";
+    }
+
     std::string dbname = "checkpoint_db";
     std::filesystem::remove_all(dbname);
     std::filesystem::remove_all(dbname + ".txn_backup");

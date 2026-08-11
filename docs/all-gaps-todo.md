@@ -24,6 +24,7 @@
 | 2026-08-11 | WAL 提交安全继续收口：`XLogFlush()` 返回 segment 同步结果；事务先刷盘 COMMIT WAL，再发布 CLOG committed，WAL 不可用或刷盘失败时 fail-closed 回滚。 |
 | 2026-08-11 | WAL 一致性继续收口：LSN 0 恢复为首个合法位置，`INVALID_LSN` 改用范围外哨兵；恢复识别未初始化页，多个 WAL writer 使用进程/文件锁和磁盘尾部刷新；新增首笔提交与崩溃恢复回归。 |
 | 2026-08-11 | Checkpoint/BufferPool 持久化错误继续收口：`pwrite/fsync` 失败保留 dirty 状态并传播到 checkpoint；checkpoint WAL、LSN 文件和 archive status 未成功时 fail-closed。WAL 截断仍未实现。 |
+| 2026-08-11 | BufferPool 淘汰安全继续收口：clock-sweep 不再强制淘汰 pinned 页；脏页写盘失败或页面读取失败时返回失败并保留缓存状态；新增一帧缓存淘汰/重载回归。 |
 | 2026-08-10 | DDL 物理/catalog 顺序与原子性继续收口：`DROP SCHEMA` 现在先规划 namespace 依赖，再删除物理 schema，最后应用 catalog 计划；catalog 后处理失败恢复当前格式快照。ALTER 多子命令失败也继续恢复整句快照，并新增 schema drop-plan 回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
 | 2026-08-09 | DDL 创建失败安全：`StorageEngine::createTable` 现在检查 schema/heap/分区/TOAST/主键/唯一索引及 `tlist.lst` 初始化结果，失败时清理已写入的 relation 文件、序列、缓存和清单项；DdlExecutor 在物理创建后立即登记表回滚记录，约束 metadata/EXCLUDE 后处理失败会撤销整张表；`DROP TABLE` 先生成只读依赖计划，物理删除成功后才应用 catalog 删除。新增损坏 heap、后处理失败与 drop plan 回归；完整 DROP/ALTER undo 和跨对象依赖事务语义仍待后续。 |
 | 2026-08-09 | `TRUNCATE` 架构收敛：新增 typed `TruncateStmt` 与 DdlExecutor 执行路径，删除 `main.cpp` 字符串处理；支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT` 预检，新增多表/FK/identity 回归。trigger、foreign table 与完整 transactional/locking 语义仍待后续。 |

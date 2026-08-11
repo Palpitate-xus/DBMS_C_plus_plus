@@ -17,7 +17,7 @@
 
 2026-08-11 增量审计：修正 WAL LSN 0 与 `INVALID_LSN` 冲突，恢复路径识别未初始化页的无效页 LSN；WAL append/flush 增加进程互斥、跨进程文件锁和磁盘尾部刷新，避免多个 backend 使用过期写指针。
 
-2026-08-11 增量审计：BufferPool/ PageAllocator 不再吞掉 `pwrite/fsync` 失败，checkpoint 只有在关系页、checkpoint WAL、checkpoint 元数据和归档状态均成功后才返回成功；WAL 截断仍保留为后续工作。
+2026-08-11 增量审计：BufferPool/PageAllocator 不再吞掉 `pwrite/fsync` 失败，checkpoint 只有在关系页、checkpoint WAL、checkpoint 元数据和归档状态均成功后才返回成功；clock-sweep 不再强制淘汰 pinned 页或丢弃写盘失败的 dirty 页；WAL 截断仍保留为后续工作。
 
 当前 schema 格式已升级为 `0x44420009`：固定标识符字段统一使用 64 字节容量，支持 PostgreSQL 63 字节级别的表名、列名、类型名和约束名；旧格式不迁移，必须重建数据库。
 

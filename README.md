@@ -84,7 +84,7 @@
 ### 存储引擎
 - **Slotted Page**：8192 字节页式存储，line pointer 数组管理记录位置
 - **页分配器**：空闲页链表管理，支持页复用
-- **Buffer Pool**：LRU 缓存，减少磁盘 I/O
+- **Buffer Pool**：clock-sweep 缓存，保护 pinned 页并在淘汰前保留脏页写盘失败状态
 - **页校验和**：Fletcher-16 校验，检测页损坏
 - **WAL 日志**：Write-Ahead Logging 支持崩溃恢复
 - **Checkpoint**：`CHECKPOINT` 命令刷盘所有脏页、写入 checkpoint WAL 记录并持久化 checkpoint LSN；当前保留 WAL 以支持恢复
@@ -513,7 +513,7 @@ show deadlocks;
 ├── PageWrapper.cpp          # 单一 v2 页格式实现
 ├── PageAllocator.h          # 页分配管理器
 ├── PageAllocator.cpp        # 页分配与空闲链表
-├── BufferPool.h             # LRU 缓冲池
+├── BufferPool.h             # clock-sweep 缓冲池
 ├── BufferPool.cpp           # 缓冲池实现（含 fsync）
 ├── BPTree.h                 # B+ 树索引头文件
 ├── BPTree.cpp               # B+ 树索引实现

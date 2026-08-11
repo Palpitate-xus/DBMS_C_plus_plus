@@ -196,7 +196,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 特性 | PG 18 | 本 DBMS | 状态 |
 |------|-------|---------|------|
 | Slotted page (8KB) | ✅ | ✅ | ✅ |
-| Buffer Pool (clock sweep) | ✅ | ✅ | ✅ |
+| Buffer Pool (clock sweep) | ✅ | ✅ | clock sweep、pinned 页保护、脏页写盘/读取失败 fail-closed；shared buffers 分片与完整并发 contention 语义仍有差距 |
 | Free Space Map | ✅ | ✅ | ✅ |
 | Visibility Map | ✅ | ✅ | ✅ |
 | TOAST (大字段压缩/线外存储) | ✅ | ⚠️ | relation/index + zlib 压缩；缺少 PG pointer/catalog 完整语义 |
