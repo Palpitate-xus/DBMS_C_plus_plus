@@ -578,6 +578,17 @@ public:
     // row-level transaction undo log.
     bool restoreTransactionBackup(const std::string& dbname);
     void discardTransactionBackup(const std::string& dbname);
+    // Mark the current DDL snapshot as covering a physical/catalog mutation.
+    // A transaction with a dirty DDL snapshot cannot create or roll back a
+    // savepoint because a single full-database image cannot represent a
+    // post-snapshot savepoint boundary safely.
+    void markTransactionBackupDirty();
+    // DDL transactions restore their pre-change image inside
+    // rollbackTransaction(), before row undo. Ordinary snapshot callers keep
+    // the historical manual-restore lifecycle unless this is enabled.
+    void restoreTransactionBackupBeforeRowUndo(bool enable);
+    bool hasTransactionBackup() const;
+    bool transactionBackupDirty() const;
 
     // Two-phase commit (PREPARE TRANSACTION / COMMIT PREPARED / ROLLBACK PREPARED)
     DBStatus prepareTransaction(const std::string& xid);
@@ -1359,6 +1370,9 @@ private:
         bool preserveBackupOnRollback = false;
         std::string txnDB;
         std::string txnBackupPath;
+        bool transactionBackupDirty = false;
+        bool restoreBackupBeforeRowUndo = false;
+        size_t ddlUndoSizeAtBackup = 0;
         uint64_t currentTxnId = 0;
         ReadView readView;
         IsolationLevel txnIsolationLevel = IsolationLevel::REPEATABLE_READ;

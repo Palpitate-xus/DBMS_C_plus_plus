@@ -24,6 +24,7 @@
 - 锁失败传播回归：`tests/lock_failure_propagation_test.cpp` 持有真实表级排他锁并在另一线程执行建索引，验证调用方收到 `LOCK_CONFLICT`、等待图清理且不会继续发布索引。
 - DDL 辅助对象回滚回归：`ddl_transaction_skeleton_test` 验证失败时撤销 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；collation 最后一个条目删除后物理文件也会清理。
 - DDL 外层事务回归：`ddl_transaction_skeleton_test` 验证多个 CREATE 跨语句由外层 `ROLLBACK` 逆序撤销，并验证 `ROLLBACK TO SAVEPOINT` 只撤销保存点后的 CREATE；含该内存 undo 队列的事务会拒绝 `PREPARE TRANSACTION`。
+- DDL DROP/REPLACE 回归：`ddl_transaction_skeleton_test` 验证 DROP TABLE 与 CREATE OR REPLACE VIEW 的变更前快照恢复，外层回滚先恢复对象再撤销同一事务中的新增行；快照已被 DDL 修改后另一条快照型 DDL 及 SAVEPOINT 会 fail-closed。
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。
 - `./scripts/build_tests.sh` 是唯一的完整测试编排实现，缓存生产对象后逐个测试独立链接运行，并自动执行两个 E2E；`run_all_tests_fast.sh` 仅捕获其成功输出并显示 PASS 计数，失败时原样打印完整编译/链接/运行日志。

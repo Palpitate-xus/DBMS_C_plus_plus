@@ -351,6 +351,50 @@ static void test_explicit_transaction_ddl_rollback_and_savepoint() {
     std::cout << "[DDL-TXN] explicit transaction DDL rollback and savepoint OK" << std::endl;
 }
 
+static void test_drop_and_replace_restore_before_outer_row_undo() {
+    const std::string db = testDbPath("ddl_txn_t_drop_restore");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE drop_restore (id INT PRIMARY KEY)", s));
+    assert(g_engine.insert(db, "drop_restore", {{"id", "1"}}) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("CREATE VIEW replace_restore AS SELECT id FROM drop_restore", s));
+    const std::string oldViewSql = g_engine.getViewSQL(db, "replace_restore");
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "drop_restore", {{"id", "2"}}) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("DROP TABLE drop_restore", s));
+    assert(!g_engine.tableExists(db, "drop_restore"));
+    assert(g_engine.savepoint("after_drop") == dbms::DBStatus::INVALID_VALUE);
+    // A second full-snapshot DDL statement is rejected rather than silently
+    // reusing the first statement's image and breaking atomicity.
+    assert(ddl.executeSql(
+        "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_restore", s));
+
+    // The snapshot is restored first, then the row undo removes id=2 from
+    // the restored table and the pre-transaction view definition survives.
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.tableExists(db, "drop_restore"));
+    const auto restoredId2 = g_engine.query(db, "drop_restore", {"=id 2"}, {"id"});
+    const auto restoredId1 = g_engine.query(db, "drop_restore", {"=id 1"}, {"id"});
+    assert(restoredId2.empty());
+    assert(restoredId1.size() == 1);
+    assert(g_engine.getViewSQL(db, "replace_restore") == oldViewSql);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE OR REPLACE VIEW replace_restore AS SELECT id FROM replace_restore", s));
+    assert(g_engine.getViewSQL(db, "replace_restore") != oldViewSql);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.getViewSQL(db, "replace_restore") == oldViewSql);
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] DROP/REPLACE restore before row undo OK" << std::endl;
+}
+
 static void test_alter_statement_rollback() {
     std::string db = testDbPath("ddl_txn_t_alter_atomic");
     cleanup(db);
@@ -527,6 +571,7 @@ int main() {
     test_wal_catalog_record();
     test_executor_uses_transaction();
     test_explicit_transaction_ddl_rollback_and_savepoint();
+    test_drop_and_replace_restore_before_outer_row_undo();
     test_alter_statement_rollback();
     test_catalog_drop_plan_is_deferred();
     test_schema_drop_plan_is_deferred();

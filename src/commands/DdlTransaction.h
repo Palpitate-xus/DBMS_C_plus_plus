@@ -65,8 +65,8 @@ public:
 
     // Opt in to physical snapshot restoration for DDL paths whose storage
     // primitives rewrite files outside the row-level undo log.
-    void enableSnapshotRollback();
-    void markSnapshotDirty() { snapshotDirty_ = true; }
+    bool enableSnapshotRollback();
+    void markSnapshotDirty();
 
     bool isActive() const { return active_; }
     bool isCommitted() const { return committed_; }
@@ -87,6 +87,7 @@ private:
     bool committed_ = false;
     bool snapshotRollbackEnabled_ = false;
     bool snapshotDirty_ = false;
+    bool snapshotCreatedByThis_ = false;
     std::vector<RecordedOp> ops_;
 
     std::string kindString(DdlObjectKind kind) const;

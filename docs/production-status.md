@@ -8,7 +8,7 @@
 
 锁 API 现在全部标记为 `[[nodiscard]]`，`TableManage` 的 DDL、DML、索引、扫描、TOAST、JOIN、聚合和 VACUUM 调用方均显式传播锁冲突；新增 `tests/lock_failure_propagation_test.cpp` 验证真实表锁竞争返回 `LOCK_CONFLICT` 并清理等待状态。
 
-DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation 的 CREATE 记录；这些 CREATE undo 会注册到显式外层事务，并按 SAVEPOINT 边界逆序回放；collation 的创建/删除文件操作统一收回 `StorageEngine`，删除采用临时文件替换并清理最后一个条目。`ddl_transaction_skeleton_test` 已覆盖对象清理、跨语句外层 ROLLBACK 和 SAVEPOINT。包含内存闭包式 DDL undo 的事务暂不允许 PREPARE TRANSACTION；DROP/REPLACE 的旧对象恢复和完整依赖图仍待补齐。
+DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation 的 CREATE 记录；这些 CREATE undo 会注册到显式外层事务，并按 SAVEPOINT 边界逆序回放。DROP/REPLACE 及文件级 DDL 在变更前建立事务快照，外层完整 `ROLLBACK` 先恢复快照，再回放行级 undo；快照已被 DDL 修改后不允许继续执行另一条快照型 DDL，也不允许创建或回滚 SAVEPOINT，避免用整库快照伪造错误的语句/子事务边界。`ddl_transaction_skeleton_test` 已覆盖对象清理、跨语句 CREATE/DROP/REPLACE 外层 ROLLBACK 和安全拒绝路径。包含内存闭包式 DDL undo 的事务暂不允许 PREPARE TRANSACTION；完整依赖图仍待补齐。
 
 本轮新增事务回归验证 INSERT、UPDATE、DELETE 的普通回滚和 `ROLLBACK TO SAVEPOINT` 会一致恢复主键、单列二级、复合、Hash 索引及 TOAST 线外值；索引写入失败会传播并回滚堆元组。事务 DELETE 保留死 tuple 到事务结束，savepoint 回滚清除 `xmax` 后仍可在同一事务提交并读取；提交后旧 UPDATE/DELETE 版本的 TOAST 块才回收。B+Tree/Hash 已接入索引文件 before/after WAL 镜像和恢复，但 GIN/GiST/SP-GiST/BRIN、原生 page-level WAL、跨访问方法原子提交和完整崩溃窗口仍未完成。
 

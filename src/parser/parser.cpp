@@ -2447,8 +2447,10 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
         return r;
     }
     size_t pos = 1; // skip CREATE
+    bool isReplace = false;
     if (match(tokens, pos, "or") && match(tokens, pos + 1, "replace")) {
         pos += 2;
+        isReplace = true;
     }
     if (match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
         pos += 3;
@@ -2476,6 +2478,7 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
         if (stmt) {
             auto* mvs = static_cast<CreateViewStmt*>(stmt.get());
             mvs->materialized = true;
+            mvs->replace = isReplace;
             mvs->command = SqlCommand::CreateMaterializedView;
         }
         r.success = true;
@@ -2499,6 +2502,7 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
             if (r.stmt && isUnique) static_cast<CreateIndexStmt*>(r.stmt.get())->unique = true;
         } else if (kw == "view") {
             r.stmt = parseCreateView(tokens, pos);
+            if (r.stmt) static_cast<CreateViewStmt*>(r.stmt.get())->replace = isReplace;
         } else if (kw == "database") {
             r.stmt = parseCreateDatabase(tokens, pos);
         } else if (kw == "schema") {

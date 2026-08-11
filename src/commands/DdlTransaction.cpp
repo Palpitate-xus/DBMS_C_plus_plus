@@ -30,18 +30,42 @@ DdlTransaction::~DdlTransaction() {
     if (active_ && !committed_) rollback();
 }
 
-void DdlTransaction::enableSnapshotRollback() {
+bool DdlTransaction::enableSnapshotRollback() {
     snapshotRollbackEnabled_ = true;
-    if (active_ && startedByUs_) {
+    if (!active_) return true;
+    if (!engine_.inTransaction()) return false;
+
+    if (active_) {
+        const bool hadBackup = engine_.hasTransactionBackup();
         engine_.preserveTransactionBackupOnRollback(true);
-        engine_.createTransactionBackup();
+        engine_.restoreTransactionBackupBeforeRowUndo(true);
+        const bool created = engine_.createTransactionBackup();
+        if (created && !hadBackup) snapshotCreatedByThis_ = true;
+        return created;
     }
+    return true;
+}
+
+void DdlTransaction::markSnapshotDirty() {
+    snapshotDirty_ = true;
+    engine_.markTransactionBackupDirty();
 }
 
 bool DdlTransaction::begin() {
     if (engine_.inTransaction()) {
+        if (snapshotRollbackEnabled_ && engine_.transactionBackupDirty()) {
+            // A full snapshot already contains an earlier physical DDL
+            // mutation. A second snapshot-scoped statement would need a
+            // nested image to preserve statement atomicity; reject it until
+            // object-level/nested DDL savepoints are implemented.
+            return false;
+        }
         active_ = true;
         startedByUs_ = false;
+        if (snapshotRollbackEnabled_ && !enableSnapshotRollback()) {
+            active_ = false;
+            return false;
+        }
         return true;
     }
     if (session_.currentDB.empty()) {
@@ -56,6 +80,10 @@ bool DdlTransaction::begin() {
     startedByUs_ = active_;
     if (startedByUs_) {
         engine_.preserveTransactionBackupOnRollback(snapshotRollbackEnabled_);
+        if (snapshotRollbackEnabled_) {
+            snapshotCreatedByThis_ = true;
+            engine_.restoreTransactionBackupBeforeRowUndo(true);
+        }
         if (snapshotRollbackEnabled_ && !engine_.createTransactionBackup()) {
             engine_.rollbackTransaction();
             active_ = false;
@@ -137,17 +165,25 @@ void DdlTransaction::rollback() {
         }
     }
     if (startedByUs_ && engine_.inTransaction()) {
-        engine_.rollbackTransaction();
-    }
-    if (startedByUs_) {
-        if (snapshotRollbackEnabled_ && snapshotDirty_ && !session_.currentDB.empty()) {
-            if (!engine_.restoreTransactionBackup(session_.currentDB)) {
-                std::cerr << "DDL rollback warning: failed to restore database snapshot for "
-                          << session_.currentDB << std::endl;
-            }
-        } else {
+        const DBStatus status = engine_.rollbackTransaction();
+        if (status != DBStatus::OK) {
+            std::cerr << "DDL rollback warning (SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
+        }
+    } else if (!startedByUs_ && engine_.inTransaction() &&
+               snapshotRollbackEnabled_ && snapshotDirty_ &&
+               !session_.currentDB.empty()) {
+        if (!engine_.restoreTransactionBackup(session_.currentDB)) {
+            std::cerr << "DDL rollback warning: failed to restore database snapshot for "
+                      << session_.currentDB << std::endl;
+        }
+    } else if (!startedByUs_ && engine_.inTransaction() &&
+               snapshotRollbackEnabled_ && !snapshotDirty_) {
+        if (snapshotCreatedByThis_) {
             engine_.discardTransactionBackup(session_.currentDB);
         }
+    } else if (startedByUs_) {
+        engine_.discardTransactionBackup(session_.currentDB);
     }
     ops_.clear();
     committed_ = false;

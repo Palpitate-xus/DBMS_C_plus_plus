@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-11）**: 生产化重构进行中；统一回归基线 PASS=130 FAIL=0（128 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，并挂接到显式外层事务及 SAVEPOINT 的回滚边界，显式启用文件级 DDL 回滚时创建按事务 ID 隔离的物理快照，快照事务持有数据库级排他锁并支持重启恢复；包含该内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
+> **当前状态（2026-08-11）**: 生产化重构进行中；统一回归基线 PASS=130 FAIL=0（128 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
 
 ## 功能特性
 

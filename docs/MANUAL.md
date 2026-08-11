@@ -6,7 +6,7 @@
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。WAL 的 LSN 0 是合法首位置，事务提交会先刷盘 COMMIT WAL，再发布 CLOG 可见性；WAL/fsync 失败时提交失败并回滚。
 
-> 路由说明：基础 `ALTER TABLE`、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、约束验证/延迟属性、`CREATE TABLE` 分区、RLS 可见性扫描和简单单表视图 `INSTEAD OF` DML 路径由统一执行链处理；ALTER 多子命令失败会恢复整句当前格式快照，`DROP TABLE/SCHEMA` 先完成物理删除再应用 catalog 依赖计划；普通事务提交/回滚会清理物理事务备份，DDL CREATE undo 会跨语句外层事务和 SAVEPOINT 回放；触发器函数运行时和完整对象 owner/ACL 组合语义仍未完成。含内存 DDL undo 的事务暂不支持 PREPARE TRANSACTION。RLS 已支持默认 `WITH CHECK`、`PUBLIC` 角色、基础 `PERMISSIVE/RESTRICTIVE` 组合、表 owner 绕过、基于 `pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`。
+> 路由说明：基础 `ALTER TABLE`、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、约束验证/延迟属性、`CREATE TABLE` 分区、RLS 可见性扫描和简单单表视图 `INSTEAD OF` DML 路径由统一执行链处理；ALTER 多子命令失败会恢复整句当前格式快照，DROP/REPLACE 在变更前建立快照，外层 `ROLLBACK` 先恢复对象再撤销行级变更；快照已被 DDL 修改后继续执行另一条快照型 DDL、创建或回滚 SAVEPOINT 会 fail-closed；普通事务提交/回滚会清理物理事务备份，DDL CREATE undo 会跨语句外层事务和 SAVEPOINT 回放；触发器函数运行时和完整对象 owner/ACL 组合语义仍未完成。含内存 DDL undo 的事务暂不支持 PREPARE TRANSACTION。RLS 已支持默认 `WITH CHECK`、`PUBLIC` 角色、基础 `PERMISSIVE/RESTRICTIVE` 组合、表 owner 绕过、基于 `pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`。
 
 ---
 

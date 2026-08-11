@@ -1556,6 +1556,7 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -1596,7 +1597,6 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     // From this point on physical deletion may be partial (CASCADE can
     // remove several relations), so every failure must be able to restore
     // the pre-statement snapshot.
-    txn.enableSnapshotRollback();
     txn.markSnapshotDirty();
     DBStatus res = g_engine.dropSchema(s.currentDB, name, stmt->cascade);
     if (res != DBStatus::OK) {
@@ -2430,6 +2430,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -2482,13 +2483,12 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cerr << "WARNING: catalog drop check failed: " << e.what() << std::endl;
     }
 
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.dropTable(s.currentDB, tname);
     if (res != DBStatus::OK) {
         std::cout << "DROP TABLE failed" << std::endl;
         return true;
     }
-    txn.enableSnapshotRollback();
-    txn.markSnapshotDirty();
     if (hasCatalogDropPlan && catalogManager) {
         std::string err;
         if (!catalogManager->applyDropPlan(catalogDropPlan, &err)) {
@@ -2645,6 +2645,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
     }
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -2746,6 +2747,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             return true;
         }
 
+        txn.markSnapshotDirty();
         DBStatus status = DBStatus::INVALID_VALUE;
         if (method == "composite") status = g_engine.dropCompositeIndex(s.currentDB, tableName, key);
         else if (method == "hash") status = g_engine.dropHashIndex(s.currentDB, tableName, key);
@@ -3043,6 +3045,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -3062,6 +3065,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                      << " because other objects depend on it" << std::endl;
             return true;
         }
+        txn.markSnapshotDirty();
         for (const auto& dep : defaultDeps) {
             DBStatus clearRes = g_engine.alterTableDropDefault(s.currentDB, dep.first, dep.second);
             if (clearRes != DBStatus::OK) {
@@ -3071,6 +3075,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
         }
     }
 
+    txn.markSnapshotDirty();
     txn.recordDrop(DdlObjectKind::Sequence, seqname);
 
     try {
@@ -3174,16 +3179,26 @@ bool DdlExecutor::executeDropCollation(const DropStmt* stmt, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP COLLATION name" << std::endl;
         return true;
     }
     std::string cname = resolveTableName(s, stmt->objectNames[0]);
+    txn.markSnapshotDirty();
     const DBStatus status = g_engine.dropCollation(s.currentDB, cname);
     if (status != DBStatus::OK) {
         std::cout << "Collation " << cname << " not found" << std::endl;
         return true;
     }
+    txn.recordDrop(DdlObjectKind::Collation, cname);
+    if (!txn.commit()) return true;
     std::cout << "DROP COLLATION succeeded" << std::endl;
     return false;
 }
@@ -3194,6 +3209,7 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -3204,6 +3220,7 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string name = stmt->objectNames.front();
+    txn.markSnapshotDirty();
     txn.recordDrop(DdlObjectKind::Domain, name);
     DBStatus res = g_engine.dropDomain(s.currentDB, name);
     if (res != DBStatus::OK) {
@@ -3365,6 +3382,7 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -3375,6 +3393,7 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string name = stmt->objectNames.front();
+    txn.markSnapshotDirty();
     txn.recordDrop(DdlObjectKind::Type, name);
     DBStatus res = g_engine.dropCompositeType(s.currentDB, name);
     if (res != DBStatus::OK) {
@@ -3407,6 +3426,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    if (stmt->replace) txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -3444,9 +3464,11 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     if (!checkOption.empty()) storeSql += "WITH_CHECK_OPTION:" + checkOption + "\n";
 
     if (stmt->replace && g_engine.viewExists(s.currentDB, viewname)) {
+        txn.markSnapshotDirty();
         g_engine.dropView(s.currentDB, viewname);
     }
 
+    if (stmt->replace) txn.markSnapshotDirty();
     DBStatus res = g_engine.createView(s.currentDB, viewname, storeSql);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         std::cout << "View " << viewname << " already exists" << std::endl;
@@ -3476,6 +3498,7 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -3549,8 +3572,10 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     }
 
     if (g_engine.tableExists(s.currentDB, backingTable)) {
+        txn.markSnapshotDirty();
         g_engine.dropTable(s.currentDB, backingTable);
     }
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.createTable(s.currentDB, tbl);
     if (res != DBStatus::OK) {
         std::cout << "CREATE MATERIALIZED VIEW: failed to create backing table" << std::endl;

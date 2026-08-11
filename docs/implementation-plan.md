@@ -11,7 +11,7 @@
 
 2026-08-11 增量审计：锁管理器 bool API 全部启用 `[[nodiscard]]`，存储层调用方不再忽略锁超时/死锁结果；DDL、DML、索引、扫描、TOAST、JOIN、聚合和 VACUUM 显式传播失败，双表 rename 使用 canonical lock order，并新增真实锁冲突传播回归。
 
-2026-08-11 增量审计：DDL CREATE undo 已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；现在会注册到显式外层事务，并按 SAVEPOINT 边界逆序回放；collation 的物理文件操作统一进入 `StorageEngine`，辅助对象、外层 ROLLBACK 和 SAVEPOINT 回归已纳入 `ddl_transaction_skeleton_test`。含内存闭包式 DDL undo 的事务暂不支持 PREPARE TRANSACTION；DROP/REPLACE 恢复和完整依赖 undo 仍是 4.39/16.5 缺口。
+2026-08-11 增量审计：DDL CREATE undo 已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；现在会注册到显式外层事务，并按 SAVEPOINT 边界逆序回放。DROP/REPLACE 及文件级 DDL 在变更前建立快照，外层 ROLLBACK 先恢复快照再回放行级 undo；快照污染后另一条快照型 DDL、SAVEPOINT 创建/回滚会 fail-closed。collation 的物理文件操作统一进入 `StorageEngine`，辅助对象、外层 CREATE/DROP/REPLACE ROLLBACK 和安全拒绝回归已纳入 `ddl_transaction_skeleton_test`。含内存闭包式 DDL undo 的事务暂不支持 PREPARE TRANSACTION；完整依赖 undo 仍是 4.39/16.5 缺口。
 
 2026-08-11 增量审计：UPDATE/DELETE 事务 undo 现在覆盖复合/Hash 索引与 TOAST 生命周期；UPDATE 回滚仅清理新版本独占的线外块，DELETE 在显式事务中保留死 tuple，普通回滚和 SAVEPOINT 回滚清除 `xmax` 并写入 heap WAL before/after image。旧 UPDATE/DELETE 版本的 TOAST 块在刷盘 COMMIT 后回收；B+Tree/Hash 已补充索引文件 before/after WAL 镜像，其他访问方法、原生 page-level WAL、跨访问方法原子提交和完整崩溃窗口仍待后续。
 

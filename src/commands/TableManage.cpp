@@ -20103,6 +20103,24 @@ void StorageEngine::registerDdlUndo(std::function<bool()> action) {
     transactionContext().ddlUndoActions.push_back(std::move(action));
 }
 
+void StorageEngine::markTransactionBackupDirty() {
+    if (!transactionContext().txnBackupPath.empty()) {
+        transactionContext().transactionBackupDirty = true;
+    }
+}
+
+void StorageEngine::restoreTransactionBackupBeforeRowUndo(bool enable) {
+    transactionContext().restoreBackupBeforeRowUndo = enable;
+}
+
+bool StorageEngine::hasTransactionBackup() const {
+    return !transactionContext().txnBackupPath.empty();
+}
+
+bool StorageEngine::transactionBackupDirty() const {
+    return transactionContext().transactionBackupDirty;
+}
+
 DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnapshot) {
     if (transactionContext().inTransaction) {
         // Commit existing transaction before starting a new one.
@@ -20174,6 +20192,9 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
 
     transactionContext().txnLog.clear();
     transactionContext().ddlUndoActions.clear();
+    transactionContext().transactionBackupDirty = false;
+    transactionContext().restoreBackupBeforeRowUndo = false;
+    transactionContext().ddlUndoSizeAtBackup = 0;
     transactionContext().inTransaction = true;
     transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnBackupPath.clear();
@@ -20227,6 +20248,8 @@ bool StorageEngine::createTransactionBackup() {
         }
     }
     context.txnBackupPath = backup.string();
+    context.transactionBackupDirty = false;
+    context.ddlUndoSizeAtBackup = context.ddlUndoActions.size();
     return true;
 }
 
@@ -20400,6 +20423,9 @@ DBStatus StorageEngine::commitTransaction() {
     }
     transactionContext().txnLog.clear();
     transactionContext().ddlUndoActions.clear();
+    transactionContext().transactionBackupDirty = false;
+    transactionContext().restoreBackupBeforeRowUndo = false;
+    transactionContext().ddlUndoSizeAtBackup = 0;
     discardTransactionBackup(transactionContext().txnDB);
     transactionContext().savepoints.clear();
     transactionContext().txnSubTxnIds.clear();
@@ -20425,6 +20451,26 @@ DBStatus StorageEngine::commitTransaction() {
 
 DBStatus StorageEngine::rollbackTransaction() {
     if (!transactionContext().inTransaction) return DBStatus::OK;
+
+    const std::string rollbackDb = transactionContext().txnDB;
+    const bool preserveBackup = transactionContext().preserveBackupOnRollback;
+    const bool hasBackup = preserveBackup &&
+        transactionContext().restoreBackupBeforeRowUndo &&
+        transactionContext().transactionBackupDirty &&
+        !transactionContext().txnBackupPath.empty();
+    const size_t ddlUndoReplaySize = hasBackup
+        ? transactionContext().ddlUndoSizeAtBackup
+        : transactionContext().ddlUndoActions.size();
+    bool snapshotRestoreOk = true;
+
+    // A DDL snapshot may have been taken in the middle of an explicit outer
+    // transaction. Restore it before row undo so the row log can replay from
+    // the same physical state captured by the snapshot. This also makes a
+    // full ROLLBACK restore DROP/REPLACE operations without reintroducing the
+    // rows that existed before the snapshot was taken.
+    if (hasBackup) {
+        snapshotRestoreOk = restoreTransactionBackup(rollbackDb);
+    }
 
     // Mark transaction as aborted in CLOG
     CommitLog* clog = getCommitLog(transactionContext().txnDB);
@@ -20727,8 +20773,13 @@ DBStatus StorageEngine::rollbackTransaction() {
     // same transaction still need that table to exist while their rows are
     // being removed.
     bool ddlUndoOk = true;
-    for (auto it = transactionContext().ddlUndoActions.rbegin();
-         it != transactionContext().ddlUndoActions.rend(); ++it) {
+    auto ddlUndoEnd = transactionContext().ddlUndoActions.rend();
+    auto ddlUndoBegin = transactionContext().ddlUndoActions.rbegin();
+    if (ddlUndoReplaySize < transactionContext().ddlUndoActions.size()) {
+        ddlUndoBegin = transactionContext().ddlUndoActions.rbegin() +
+                       (transactionContext().ddlUndoActions.size() - ddlUndoReplaySize);
+    }
+    for (auto it = ddlUndoBegin; it != ddlUndoEnd; ++it) {
         try {
             if (!(*it)()) ddlUndoOk = false;
         } catch (...) {
@@ -20782,13 +20833,14 @@ DBStatus StorageEngine::rollbackTransaction() {
         rollbackSessionTempTables(*this, *session, transactionContext().txnDB);
     }
 
-    const std::string rollbackDb = transactionContext().txnDB;
-    const bool preserveBackup = transactionContext().preserveBackupOnRollback;
     if (!preserveBackup) discardTransactionBackup(rollbackDb);
 
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().readOnly = false;
+    transactionContext().transactionBackupDirty = false;
+    transactionContext().restoreBackupBeforeRowUndo = false;
+    transactionContext().ddlUndoSizeAtBackup = 0;
     transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB.clear();
     transactionContext().constraintMode.clear();
@@ -20796,7 +20848,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().databaseExclusiveLock.reset();
     transactionContext().databaseSharedLock.reset();
     transactionContext().databaseTxnMutex.reset();
-    return ddlUndoOk ? DBStatus::OK : DBStatus::IO_ERROR;
+    return snapshotRestoreOk && ddlUndoOk ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
@@ -20823,6 +20875,9 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
         std::error_code ec;
         std::filesystem::remove_all(backup, ec);
         context.txnBackupPath.clear();
+        context.transactionBackupDirty = false;
+        context.restoreBackupBeforeRowUndo = false;
+        context.ddlUndoSizeAtBackup = 0;
     }
     return restored;
 }
@@ -20835,6 +20890,9 @@ void StorageEngine::discardTransactionBackup(const std::string& dbname) {
         std::filesystem::remove_all(context.txnBackupPath, ec);
         context.txnBackupPath.clear();
     }
+    context.transactionBackupDirty = false;
+    context.restoreBackupBeforeRowUndo = false;
+    context.ddlUndoSizeAtBackup = 0;
 }
 
 // ========================================================================
@@ -21064,6 +21122,12 @@ std::vector<std::string> StorageEngine::listPreparedTransactions() const {
 
 DBStatus StorageEngine::savepoint(const std::string& name) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    if (transactionContext().transactionBackupDirty) {
+        // A full DDL snapshot cannot safely describe a savepoint created
+        // after the physical mutation. Fail closed until object-level DDL
+        // savepoint images are available.
+        return DBStatus::INVALID_VALUE;
+    }
     transactionContext().savepoints[name] = {
         transactionContext().txnLog.size(),
         transactionContext().ddlUndoActions.size()
@@ -21073,6 +21137,7 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
 
 DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    if (transactionContext().transactionBackupDirty) return DBStatus::INVALID_VALUE;
     auto it = transactionContext().savepoints.find(name);
     if (it == transactionContext().savepoints.end()) return DBStatus::INVALID_VALUE;
     const size_t txnLogSpIdx = it->second.txnLogSize;

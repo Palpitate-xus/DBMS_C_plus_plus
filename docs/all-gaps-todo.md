@@ -9,7 +9,7 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
-2026-08-11 增量审计：`DdlTransaction` 的 CREATE undo 已注册到外层事务上下文，`ROLLBACK` 和 `ROLLBACK TO SAVEPOINT` 会在行 undo 后按逆序撤销跨语句新建对象；含内存闭包式 DDL undo 的事务暂不进入 `PREPARE TRANSACTION`。DROP/REPLACE 恢复、完整依赖图 undo 和全部 PostgreSQL 隐式提交边界仍待实现。
+2026-08-11 增量审计：`DdlTransaction` 的 CREATE undo 已注册到外层事务上下文；DROP/REPLACE 和文件级 DDL 在变更前建立快照，外层 `ROLLBACK` 先恢复快照再按事务日志撤销行变更，快照污染后的另一条快照型 DDL、SAVEPOINT 创建/回滚会 fail-closed。含内存闭包式 DDL undo 的事务暂不进入 `PREPARE TRANSACTION`；完整依赖图 undo 和全部 PostgreSQL 隐式提交边界仍待实现。
 
 当前 schema 格式为 `0x44420009`，标识符固定字段容量提升至 64 字节（最多 63 字节），避免旧 15 字节字段导致的约束/列名静默截断；旧 schema 不兼容，需重建。
 

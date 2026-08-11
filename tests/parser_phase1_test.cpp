@@ -163,8 +163,17 @@ int main() {
         auto* c = asCreateView(r.stmt);
         assert(c);
         assert(c->viewName == "v");
+        assert(!c->replace);
         assert(c->query && c->query->command == SqlCommand::Select);
         std::cout << "[PARSER P1] CREATE VIEW OK\n";
+    }
+
+    {
+        auto r = parser.parse("CREATE OR REPLACE VIEW v AS SELECT id FROM t");
+        assert(r.success);
+        auto* c = asCreateView(r.stmt);
+        assert(c && c->replace);
+        std::cout << "[PARSER P1] CREATE OR REPLACE VIEW OK\n";
     }
 
     // 8. ALTER TABLE
