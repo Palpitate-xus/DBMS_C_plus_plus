@@ -94,7 +94,9 @@ private:
     std::string segmentPath(uint64_t segNo) const;
     void loadSegment(uint64_t segNo) const;
     void refreshSegmentIfChanged(uint64_t segNo) const;
-    void saveSegment(uint64_t segNo);
+    // If heldLockFd is provided, the caller owns the .clog.lock exclusive
+    // lock and the segment may be saved as part of an atomic truncate.
+    bool saveSegment(uint64_t segNo, int heldLockFd = -1);
     void ensureSegment(uint64_t segNo) const;
 
     static uint64_t segmentNumber(TxnId xid);

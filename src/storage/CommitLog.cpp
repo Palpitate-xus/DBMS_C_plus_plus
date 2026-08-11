@@ -103,9 +103,9 @@ void CommitLog::ensureSegment(uint64_t segNo) const {
     loadSegment(segNo);
 }
 
-void CommitLog::saveSegment(uint64_t segNo) {
+bool CommitLog::saveSegment(uint64_t segNo, int heldLockFd) {
     auto it = segments_.find(segNo);
-    if (it == segments_.end() || !it->second.dirty) return;
+    if (it == segments_.end() || !it->second.dirty) return true;
 
     // A test or an administrative drop may remove the database directory
     // while an uncached owner still exists. Never recreate a dropped database
@@ -114,20 +114,30 @@ void CommitLog::saveSegment(uint64_t segNo) {
     if (!std::filesystem::is_directory(dataDir_) || !std::filesystem::is_directory(clogDir)) {
         it->second.dirty = false;
         it->second.pendingBits.clear();
-        return;
+        return true;
     }
 
     std::string path = segmentPath(segNo);
-    const std::string lockPath = (clogDir / ".clog.lock").string();
-    const int lockFd = ::open(lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (lockFd < 0 || ::flock(lockFd, LOCK_EX) != 0) {
-        if (lockFd >= 0) ::close(lockFd);
+    const bool ownsLock = heldLockFd < 0;
+    int lockFd = heldLockFd;
+    if (ownsLock) {
+        const std::string lockPath = (clogDir / ".clog.lock").string();
+        lockFd = ::open(lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (lockFd < 0 || ::flock(lockFd, LOCK_EX) != 0) {
+            if (lockFd >= 0) ::close(lockFd);
+            std::cerr << "[CLOG] Failed to lock segment: " << path << std::endl;
+            return false;
+        }
+    }
+    if (lockFd < 0) {
         std::cerr << "[CLOG] Failed to lock segment: " << path << std::endl;
-        return;
+        return false;
     }
     auto releaseLock = [&]() {
-        ::flock(lockFd, LOCK_UN);
-        ::close(lockFd);
+        if (ownsLock) {
+            ::flock(lockFd, LOCK_UN);
+            ::close(lockFd);
+        }
     };
 
     // Merge only the bits changed by this backend with the latest complete
@@ -157,7 +167,7 @@ void CommitLog::saveSegment(uint64_t segNo) {
     if (fd < 0) {
         releaseLock();
         std::cerr << "[CLOG] Failed to write segment: " << path << std::endl;
-        return;
+        return false;
     }
 
     const uint8_t* data = latest.data();
@@ -187,7 +197,7 @@ void CommitLog::saveSegment(uint64_t segNo) {
         std::filesystem::remove(tempPath, ec);
         releaseLock();
         std::cerr << "[CLOG] Failed to durably write segment: " << path << std::endl;
-        return;
+        return false;
     }
     releaseLock();
     it->second.data = std::move(latest);
@@ -196,6 +206,7 @@ void CommitLog::saveSegment(uint64_t segNo) {
     it->second.fileTime = std::filesystem::last_write_time(path, ec);
     it->second.fileTimeValid = !ec;
     it->second.dirty = false;
+    return true;
 }
 
 CommitLog::Status CommitLog::getStatus(TxnId xid) const {
@@ -266,19 +277,48 @@ void CommitLog::truncate(TxnId oldestXid) {
         }
     }
     for (uint64_t segNo : toRemove) {
-        saveSegment(segNo); // 刷盘后再删
-        segments_.erase(segNo);
-        std::string path = segmentPath(segNo);
-        try {
-            std::filesystem::remove(path);
-        } catch (...) {}
+        const std::filesystem::path clogDir = std::filesystem::path(dataDir_) / "pg_xact";
+        const std::string lockPath = (clogDir / ".clog.lock").string();
+        const int lockFd = ::open(lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (lockFd < 0 || ::flock(lockFd, LOCK_EX) != 0) {
+            if (lockFd >= 0) ::close(lockFd);
+            continue;
+        }
+
+        const bool saved = saveSegment(segNo, lockFd);
+        bool deleted = false;
+        bool removed = false;
+        if (saved) {
+            std::error_code ec;
+            deleted = std::filesystem::remove(segmentPath(segNo), ec) && !ec;
+            removed = deleted;
+            if (!removed && !ec) {
+                std::error_code existsEc;
+                removed = !std::filesystem::exists(segmentPath(segNo), existsEc) && !existsEc;
+            }
+            if (removed) {
+                const int dirFd = ::open(clogDir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+                if (dirFd < 0 || ::fsync(dirFd) != 0) removed = false;
+                if (dirFd >= 0) ::close(dirFd);
+            }
+        }
+        ::flock(lockFd, LOCK_UN);
+        ::close(lockFd);
+        if (saved && removed) {
+            segments_.erase(segNo);
+        } else if (saved && deleted) {
+            // The unlink happened but directory durability is uncertain. Keep
+            // the in-memory image authoritative for this backend.
+            auto it = segments_.find(segNo);
+            if (it != segments_.end()) it->second.fileTimeValid = false;
+        }
     }
 }
 
 void CommitLog::flush() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [segNo, _] : segments_) {
-        saveSegment(segNo);
+        (void)saveSegment(segNo);
     }
 }
 

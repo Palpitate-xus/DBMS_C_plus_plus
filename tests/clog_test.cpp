@@ -83,6 +83,49 @@ int main() {
         std::cout << "[CLOG TEST] cross-backend refresh OK\n";
     }
 
+    // Truncation removes only segments that are safely persisted, while
+    // retaining a segment if its durable save cannot acquire the file lock.
+    {
+        CommitLog clog(testDir);
+        const TxnId oldXid = 300;
+        const TxnId retainedXid = CommitLog::kXidsPerSegment + 300;
+        clog.setStatus(oldXid, CommitLog::Status::Committed);
+        clog.flush();
+        clog.setStatus(retainedXid, CommitLog::Status::Aborted);
+        clog.flush();
+        clog.truncate(CommitLog::kXidsPerSegment + 1);
+
+        CommitLog verifier(testDir);
+        assert(verifier.getStatus(oldXid) == CommitLog::Status::InProgress);
+        assert(verifier.getStatus(retainedXid) == CommitLog::Status::Aborted);
+        assert(!std::filesystem::exists(std::filesystem::path(testDir) / "pg_xact" / "0"));
+        std::cout << "[CLOG TEST] truncate OK\n";
+    }
+
+    {
+        const std::string failureDir = "clog_truncate_failure_dir";
+        std::filesystem::remove_all(failureDir);
+        std::filesystem::create_directories(failureDir);
+        CommitLog clog(failureDir);
+        clog.setStatus(400, CommitLog::Status::Committed);
+        clog.flush();
+        clog.setStatus(401, CommitLog::Status::Aborted);
+
+        const auto lockPath = std::filesystem::path(failureDir) / "pg_xact" / ".clog.lock";
+        std::filesystem::remove(lockPath);
+        std::filesystem::create_directory(lockPath);
+        clog.truncate(CommitLog::kXidsPerSegment + 1);
+
+        // The failed save must not make truncate delete the last durable
+        // image of the segment.
+        CommitLog verifier(failureDir);
+        assert(verifier.getStatus(400) == CommitLog::Status::Committed);
+        assert(verifier.getStatus(401) == CommitLog::Status::InProgress);
+        std::cout << "[CLOG TEST] truncate failure retention OK\n";
+
+        std::filesystem::remove_all(failureDir);
+    }
+
     std::filesystem::remove_all(testDir);
     std::cout << "[CLOG TEST] all passed\n";
     return 0;

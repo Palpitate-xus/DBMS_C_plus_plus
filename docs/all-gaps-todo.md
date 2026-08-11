@@ -24,6 +24,7 @@
 | 日期 | 摘要 |
 |------|------|
 | 2026-08-11 | CLOG 跨 backend 一致性补强：段保存使用 `.clog.lock` 文件锁和 pending bit 合并，避免独立 backend 的陈旧整段缓存互相覆盖；读端检测文件替换并刷新缓存，`clog_test` 新增 merge/refresh 回归。 |
+| 2026-08-11 | CLOG 截断安全补强：旧段在同一文件锁内完成保存、删除和目录 `fsync`，保存失败时保留段且删除/同步失败时不驱逐缓存；`clog_test` 新增正常截断与持久化失败保留回归。 |
 | 2026-08-11 | CLOG 崩溃安全收敛：`pg_xact` 段采用临时文件完整写入、段文件 `fsync`、原子 rename 与目录 `fsync`；写入失败保留 dirty 状态，数据库目录或 `pg_xact` 被删除时不重建旧路径，`clog_test` 持久化回归通过。 |
 | 2026-08-11 | SSI 页粒度收敛：非空索引谓词按命中 RID 登记 heap page SIREAD，顺序扫描登记实际扫描页，空结果保留关系级兜底；提交时页级读写覆盖参与危险结构检测，新增非相交页并发与跨页危险结构回归。索引范围 predicate lock、完整 SSI 图和安全快照仍待后续。 |
 | 2026-08-11 | 锁失败传播收敛：`LockManager` bool API 全部标记 `[[nodiscard]]`，`TableManage` 的 DDL/DML/索引/扫描/TOAST/JOIN/聚合/VACUUM 调用方显式返回 `LOCK_CONFLICT`、空结果或扫描失败；rename 按名称顺序获取双表锁，新增 `lock_failure_propagation_test` 验证真实表锁竞争 fail-closed。 |

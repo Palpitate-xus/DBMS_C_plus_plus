@@ -47,6 +47,7 @@
 - WAL 提交回归继续覆盖 COMMIT 记录与刷盘路径；`WALManager::XLogFlush()` 现在返回 segment 同步结果，提交在 WAL 不可用/刷盘失败时不会先发布 CLOG 可见性。
 - CLOG 持久化回归继续验证段重载；段写入现在完整写入临时文件、`fsync` 后原子替换并同步 `pg_xact` 目录，写失败不会提前清除 dirty 状态。
 - CLOG 跨 backend 回归验证两个独立 `CommitLog` 实例对同一段的按位合并，以及已打开读缓存发现外部段替换后刷新，不会丢失或永久读取旧事务状态。
+- CLOG 截断回归验证旧段正常回收，并在文件锁导致持久化失败时保留最后一个 durable segment image。
 - WAL 崩溃恢复回归覆盖首个合法 LSN 0、未初始化页 LSN、已提交插入/删除重做和未提交事务回滚；`redo_crash_recovery_test` 同时校验 heap 与主键 B+Tree，并覆盖同一事务连续插入两行后 before-image 逆序 undo 不会留下中间状态；多实例 WAL writer 的尾部刷新/锁也由 catalog snapshot 场景覆盖。
 - 新增 `recovery_integrity_test`：构造 CRC 正确但 payload 损坏或路径越界的索引 WAL 记录，验证恢复拒绝非法镜像、不会写出数据库目录外文件，并以异常中止启动；heap/index 应用失败均不再静默忽略。
 - Checkpoint 回归现在断言 checkpoint 真实成功；页刷盘、checkpoint WAL、checkpoint 文件 fsync 和 archive status 任一失败都会返回失败，不再伪报 `CHECKPOINT completed`。
