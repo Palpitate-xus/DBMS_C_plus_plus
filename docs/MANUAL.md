@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-08-11
 > 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
+> 回归基线: PASS=129 FAIL=0（127 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。WAL 的 LSN 0 是合法首位置，事务提交会先刷盘 COMMIT WAL，再发布 CLOG 可见性；WAL/fsync 失败时提交失败并回滚。
 
@@ -1042,7 +1042,7 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 
 ```bash
 ./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 安静运行统一回归：125 个 C++ 测试 + 2 个 E2E
+./scripts/run_all_tests_fast.sh # 安静运行统一回归：127 个 C++ 测试 + 2 个 E2E
 ./scripts/build_tests.sh        # 完整输出的规范测试入口：C++ 测试 + 2 个 E2E
 ```
 

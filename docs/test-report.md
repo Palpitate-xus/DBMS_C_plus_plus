@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-11
-> 自动测试套件基线：PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
+> 自动测试套件基线：PASS=129 FAIL=0（127 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -36,7 +36,9 @@
 - 新增 ALTER statement atomicity 回归：`ddl_transaction_skeleton_test` 验证多子命令中前一动作已落盘、后一动作失败时，整句 schema 会从 DDL 快照恢复，且事务快照不会残留。
 - 新增外置 tablespace 事务快照回归：表移动到自定义 tablespace 后，在事务内移回默认目录并回滚，快照恢复 schema 与外置 heap 数据；同一场景覆盖全新引擎读取。
 - 新增 DDL 提交失败回归：延迟 CHECK 使 `StorageEngine::commitTransaction()` 失败时，`DdlTransaction` 返回失败、清理事务状态，并恢复已执行的物理 `ALTER TABLE` 快照，调用方不会输出成功结果。
-- 新增事务快照生命周期回归：普通 COMMIT/ROLLBACK 后 `.txn_backup` 均被清理；前一事务的 deferred CHECK 导致隐式提交失败时，后续 `BEGIN` 返回错误且不会开启新事务。
+- 新增事务资源生命周期回归：普通 COMMIT/ROLLBACK 不会遗留整库快照；DDL 快照在 COMMIT/ROLLBACK 后清理；前一事务的 deferred CHECK 导致隐式提交失败时，后续 `BEGIN` 返回错误且不会开启新事务。
+- 新增 DDL 快照并发回归：文件级 DDL 快照使用事务 ID 独立命名，并持有数据库级排他锁；另一 backend 在快照事务结束前阻塞，避免物理恢复覆盖并发提交。
+- 新增 DDL 快照重启回归：模拟未完成的 `.txn_backup.<xid>`，新 `StorageEngine` 按无 COMMIT 证据恢复 DDL 前的 schema 并清理快照目录。
 - WAL 提交回归继续覆盖 COMMIT 记录与刷盘路径；`WALManager::XLogFlush()` 现在返回 segment 同步结果，提交在 WAL 不可用/刷盘失败时不会先发布 CLOG 可见性。
 - WAL 崩溃恢复回归覆盖首个合法 LSN 0、未初始化页 LSN、未提交插入回滚、已提交插入重做和已提交删除重做；多实例 WAL writer 的尾部刷新/锁也由 catalog snapshot 场景覆盖。
 - Checkpoint 回归现在断言 checkpoint 真实成功；页刷盘、checkpoint WAL、checkpoint 文件 fsync 和 archive status 任一失败都会返回失败，不再伪报 `CHECKPOINT completed`。

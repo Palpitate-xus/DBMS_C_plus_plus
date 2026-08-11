@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-11）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=127 FAIL=0（125 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-11）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=129 FAIL=0（127 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -13,7 +13,7 @@
 
 2026-08-11 增量审计：`DdlTransaction::commit()` 现在检查引擎提交状态；延迟约束或 SSI 提交失败会返回错误，并恢复已启用的 DDL 物理快照，防止 DDL 执行器把失败状态报告为成功。
 
-2026-08-11 增量审计：普通事务 COMMIT/ROLLBACK 现在清理 `.txn_backup`；DDL wrapper 通过事务上下文显式保留恢复所需的快照。`beginTransaction()` 不再忽略隐式提交失败，避免错误状态下继续打开新事务。
+2026-08-11 增量审计：整库物理快照改为 DDL 显式 opt-in，普通事务不再复制数据库；快照按事务 ID 隔离，DDL 快照事务持有数据库级排他锁，启动恢复依据 WAL 提交状态清理或恢复遗留快照。`beginTransaction()` 不再忽略隐式提交失败，避免错误状态下继续打开新事务。
 
 2026-08-11 增量审计：事务提交先写入并刷盘 COMMIT WAL 记录，再更新 CLOG committed 状态；`XLogFlush()` 传播 segment fsync 失败，WAL 不可用时回滚并返回 `IO_ERROR`，避免只发布内存提交状态。
 

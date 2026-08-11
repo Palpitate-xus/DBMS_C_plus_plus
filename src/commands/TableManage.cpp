@@ -18787,6 +18787,100 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
 
 void StorageEngine::recoverAllDatabases() {
     if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) return;
+
+    // A DDL snapshot is created before file-backed changes and is named with
+    // its transaction ID. If the process dies before COMMIT cleanup, recover
+    // it before opening relation caches: committed snapshots are disposable,
+    // while in-progress/aborted snapshots restore the pre-DDL database.
+    // DDL snapshots hold the database-wide exclusive transaction lock while
+    // alive, so restoring one cannot erase a concurrent committed transaction.
+    std::map<std::string, std::set<uint64_t>> committedXids;
+    std::set<std::pair<std::string, uint64_t>> preparedXids;
+    auto isDatabaseDirectory = [this](const std::string& name) {
+        if (name.empty() || name[0] == '.' ||
+            name.find(".txn_backup") != std::string::npos ||
+            name.find(".archive") != std::string::npos) return false;
+        try { return std::filesystem::exists(tableListPath(name)); }
+        catch (...) { return false; }
+    };
+
+    for (const auto& entry : std::filesystem::directory_iterator(
+             ".", std::filesystem::directory_options::skip_permission_denied)) {
+        std::string dbname;
+        try {
+            if (!entry.is_directory()) continue;
+            dbname = entry.path().filename().string();
+        } catch (...) { continue; }
+        if (!isDatabaseDirectory(dbname)) continue;
+        WALManager* wal = getWAL(dbname);
+        if (!wal || wal->currentWriteLsn() == 0) continue;
+        Lsn lsn = 0;
+        while (true) {
+            auto recOpt = wal->ReadRecord(lsn);
+            if (!recOpt || recOpt->header.xl_tot_len == 0) break;
+            const XLogRecord& rec = *recOpt;
+            if (rec.rmid() == RM_XACT_ID && rec.info() == XLOG_XACT_COMMIT &&
+                rec.data.size() >= sizeof(uint64_t)) {
+                uint64_t xid = 0;
+                std::memcpy(&xid, rec.data.data(), sizeof(xid));
+                committedXids[dbname].insert(xid);
+            }
+            lsn += rec.header.xl_tot_len;
+        }
+    }
+
+    const std::filesystem::path preparedDirPath = std::filesystem::path("info") / ".prepared";
+    if (std::filesystem::exists(preparedDirPath)) {
+        for (const auto& entry : std::filesystem::directory_iterator(preparedDirPath)) {
+            if (!entry.is_regular_file()) continue;
+            std::ifstream in(entry.path());
+            std::string line;
+            uint64_t xid = 0;
+            std::string dbname;
+            while (std::getline(in, line)) {
+                if (line.rfind("TXN_ID ", 0) == 0) {
+                    try { xid = std::stoull(line.substr(7)); } catch (...) { xid = 0; }
+                } else if (line.rfind("DBNAME ", 0) == 0) {
+                    dbname = line.substr(7);
+                }
+            }
+            if (xid != 0 && !dbname.empty()) preparedXids.emplace(dbname, xid);
+        }
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(
+             ".", std::filesystem::directory_options::skip_permission_denied)) {
+        std::string name;
+        try {
+            if (!entry.is_directory()) continue;
+            name = entry.path().filename().string();
+        } catch (...) { continue; }
+        constexpr const char* marker = ".txn_backup.";
+        const size_t markerPos = name.rfind(marker);
+        if (markerPos == std::string::npos) continue;
+        const std::string dbname = name.substr(0, markerPos);
+        const std::string xidText = name.substr(markerPos + std::strlen(marker));
+        if (!isDatabaseDirectory(dbname) || xidText.empty() ||
+            !std::all_of(xidText.begin(), xidText.end(),
+                         [](unsigned char c) { return std::isdigit(c) != 0; })) continue;
+        uint64_t xid = 0;
+        try { xid = std::stoull(xidText); } catch (...) { continue; }
+        if (preparedXids.count({dbname, xid})) continue;
+
+        const auto backup = entry.path();
+        if (committedXids[dbname].count(xid)) {
+            std::error_code ec;
+            std::filesystem::remove_all(backup, ec);
+            continue;
+        }
+
+        closeDatabaseCaches(dbname);
+        if (physicalRestore(dbname, backup.string())) {
+            std::error_code ec;
+            std::filesystem::remove_all(backup, ec);
+        }
+    }
+
     for (const auto& entry : std::filesystem::directory_iterator(".", std::filesystem::directory_options::skip_permission_denied)) {
         try {
             if (!entry.is_directory()) continue;
@@ -19435,7 +19529,7 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
 }
 
 // ========================================================================
-// Transaction support (Undo Log based rollback, no full-db snapshot)
+// Transaction support (row undo log with opt-in DDL snapshots)
 // ========================================================================
 
 static void applySessionTempTableCommitActions(StorageEngine& engine,
@@ -19476,7 +19570,50 @@ static void rollbackSessionTempTables(StorageEngine& engine,
     session.tempTablesCreatedInTransaction.clear();
 }
 
+namespace {
+
+std::mutex g_databaseTxnLocksMutex;
+std::map<std::string, std::shared_ptr<std::shared_mutex>> g_databaseTxnLocks;
+
+std::shared_ptr<std::shared_mutex> databaseTxnLockFor(const std::string& dbname) {
+    std::lock_guard<std::mutex> guard(g_databaseTxnLocksMutex);
+    auto& lock = g_databaseTxnLocks[dbname];
+    if (!lock) lock = std::make_shared<std::shared_mutex>();
+    return lock;
+}
+
+std::filesystem::path transactionBackupPath(const std::string& dbname, uint64_t xid) {
+    return std::filesystem::path(dbname + ".txn_backup." + std::to_string(xid));
+}
+
+} // anonymous namespace
+
 DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
+    return beginTransaction(dbname, false);
+}
+
+void StorageEngine::preserveTransactionBackupOnRollback(bool preserve) {
+    auto& context = transactionContext();
+    context.preserveBackupOnRollback = preserve;
+    if (!preserve || !context.inTransaction || !context.txnBackupPath.empty()) return;
+
+    // Legacy direct callers may opt in after BEGIN. Upgrade their shared
+    // database lock before taking the snapshot; the DDL wrapper uses the
+    // exclusive begin overload and therefore does not need an upgrade.
+    context.databaseSharedLock.reset();
+    if (!context.databaseExclusiveLock) {
+        context.databaseExclusiveLock = std::make_unique<std::unique_lock<std::shared_mutex>>(
+            *context.databaseTxnMutex);
+    }
+    if (!createTransactionBackup()) {
+        context.preserveBackupOnRollback = false;
+        context.databaseExclusiveLock.reset();
+        context.databaseSharedLock = std::make_unique<std::shared_lock<std::shared_mutex>>(
+            *context.databaseTxnMutex);
+    }
+}
+
+DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnapshot) {
     if (transactionContext().inTransaction) {
         // Commit existing transaction before starting a new one.
         // This matches PostgreSQL's implicit-commit-on-DDL behavior and
@@ -19486,6 +19623,16 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
+    auto& context = transactionContext();
+    context.databaseTxnMutex = databaseTxnLockFor(dbname);
+    if (ddlSnapshot) {
+        context.databaseExclusiveLock = std::make_unique<std::unique_lock<std::shared_mutex>>(
+            *context.databaseTxnMutex);
+    } else {
+        context.databaseSharedLock = std::make_unique<std::shared_lock<std::shared_mutex>>(
+            *context.databaseTxnMutex);
+    }
+
     // CatalogManager is lazily persisted and may contain the latest DDL
     // state only in memory.  Persist it before taking the transaction
     // snapshot so a DDL rollback can safely evict/reload the catalog.
@@ -19494,50 +19641,14 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     // Flush every loaded heap and index cache before taking the transaction
     // snapshot.  Otherwise a backup can contain older index pages than the
     // heap rows already visible through the in-memory caches.
-    auto tblNames = getTableNames(dbname);
-    if (!flushDatabaseCaches(dbname)) return DBStatus::IO_ERROR;
-
-    // Keep a complete physical backup for crash/DDL recovery.  This also
-    // captures external tablespaces; copying only dbPath(dbname) would make
-    // rollback restore catalog metadata without restoring the relation data.
-    std::filesystem::path backup = dbPath(dbname);
-    backup += ".txn_backup";
-    if (std::filesystem::exists(backup)) {
-        std::filesystem::remove_all(backup);
-    }
-    if (!physicalBackup(dbname, backup.string())) {
-        std::error_code ec;
-        std::filesystem::remove_all(backup, ec);
-        return DBStatus::INVALID_VALUE;
+    if (!flushDatabaseCaches(dbname)) {
+        context.databaseExclusiveLock.reset();
+        context.databaseSharedLock.reset();
+        context.databaseTxnMutex.reset();
+        return DBStatus::IO_ERROR;
     }
 
-    // UNLOGGED relations are intentionally empty after crash recovery. Remove
-    // every physical fork/index/TOAST file from the snapshot while retaining
-    // their schema and catalog metadata. The delimiter checks avoid treating
-    // a table named "t2" as a relation belonging to table "t".
-    for (const auto& tn : tblNames) {
-        TableSchema ts = getTableSchema(dbname, tn);
-        if (!ts.isUnlogged) continue;
-        std::filesystem::path relationBackup = backup;
-        if (!ts.tablespace.empty() && ts.tablespace != "pg_default") {
-            relationBackup /= "tablespaces";
-            relationBackup /= ts.tablespace;
-        }
-        if (!std::filesystem::exists(relationBackup)) continue;
-        for (const auto& entry : std::filesystem::directory_iterator(relationBackup)) {
-            if (isRelationPhysicalFileName(entry.path().filename().string(), tn)) {
-                std::error_code ec;
-                std::filesystem::remove_all(entry.path(), ec);
-                if (ec) {
-                    std::error_code cleanupEc;
-                    std::filesystem::remove_all(backup, cleanupEc);
-                    return DBStatus::INVALID_VALUE;
-                }
-            }
-        }
-    }
-
-    // Assign transaction ID and create ReadView (if needed)
+    // Assign transaction ID and create ReadView (if needed).
     transactionContext().currentTxnId = TxnIdGenerator::instance().nextTxId();
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
@@ -19573,8 +19684,58 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     transactionContext().txnLog.clear();
     transactionContext().inTransaction = true;
     transactionContext().preserveBackupOnRollback = false;
+    transactionContext().txnBackupPath.clear();
     transactionContext().txnDB = dbname;
     return DBStatus::OK;
+}
+
+bool StorageEngine::createTransactionBackup() {
+    auto& context = transactionContext();
+    if (!context.inTransaction || context.txnDB.empty() || context.currentTxnId == 0) {
+        return false;
+    }
+    if (!context.txnBackupPath.empty()) return true;
+    const std::string dbname = context.txnDB;
+    if (catalogService_) catalogService_->persistAll();
+
+    // The exclusive database lock is acquired by beginTransaction(..., true)
+    // before this copy starts. This prevents a physical restore from erasing
+    // another backend's committed changes.
+    const auto tables = getTableNames(dbname);
+    if (!flushDatabaseCaches(dbname)) return false;
+
+    const auto backup = transactionBackupPath(dbname, context.currentTxnId);
+    std::error_code ec;
+    std::filesystem::remove_all(backup, ec);
+    if (!physicalBackup(dbname, backup.string())) {
+        std::filesystem::remove_all(backup, ec);
+        return false;
+    }
+
+    // UNLOGGED relations are intentionally empty after crash recovery. Remove
+    // every physical fork/index/TOAST file from the snapshot while retaining
+    // their schema and catalog metadata.
+    for (const auto& tn : tables) {
+        TableSchema ts = getTableSchema(dbname, tn);
+        if (!ts.isUnlogged) continue;
+        std::filesystem::path relationBackup = backup;
+        if (!ts.tablespace.empty() && ts.tablespace != "pg_default") {
+            relationBackup /= "tablespaces";
+            relationBackup /= ts.tablespace;
+        }
+        if (!std::filesystem::exists(relationBackup)) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(relationBackup)) {
+            if (isRelationPhysicalFileName(entry.path().filename().string(), tn)) {
+                std::filesystem::remove_all(entry.path(), ec);
+                if (ec) {
+                    std::filesystem::remove_all(backup, ec);
+                    return false;
+                }
+            }
+        }
+    }
+    context.txnBackupPath = backup.string();
+    return true;
 }
 
 DBStatus StorageEngine::commitTransaction() {
@@ -19763,6 +19924,9 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().readOnly = false;
     transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB.clear();
+    transactionContext().databaseExclusiveLock.reset();
+    transactionContext().databaseSharedLock.reset();
+    transactionContext().databaseTxnMutex.reset();
     return DBStatus::OK;
 }
 
@@ -20120,13 +20284,22 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().txnDB.clear();
     transactionContext().constraintMode.clear();
     transactionContext().deferredChecks.clear();
+    transactionContext().databaseExclusiveLock.reset();
+    transactionContext().databaseSharedLock.reset();
+    transactionContext().databaseTxnMutex.reset();
     return DBStatus::OK;
 }
 
 bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
     if (dbname.empty()) return false;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    const std::filesystem::path backup = dbPath(dbname).string() + ".txn_backup";
+    auto& context = transactionContext();
+    std::filesystem::path backup = context.txnBackupPath;
+    if (backup.empty()) {
+        // No legacy snapshot format is created anymore. This fallback keeps
+        // the API fail-closed for callers that have no current transaction.
+        return false;
+    }
     if (!std::filesystem::exists(backup) || !std::filesystem::is_directory(backup)) {
         return false;
     }
@@ -20137,14 +20310,22 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
     if (catalogService_) catalogService_->evict(dbname);
     closeDatabaseCaches(dbname);
     const bool restored = physicalRestore(dbname, backup.string());
-    if (restored) std::filesystem::remove_all(backup);
+    if (restored) {
+        std::error_code ec;
+        std::filesystem::remove_all(backup, ec);
+        context.txnBackupPath.clear();
+    }
     return restored;
 }
 
 void StorageEngine::discardTransactionBackup(const std::string& dbname) {
     if (dbname.empty()) return;
+    auto& context = transactionContext();
     std::error_code ec;
-    std::filesystem::remove_all(dbPath(dbname).string() + ".txn_backup", ec);
+    if (!context.txnBackupPath.empty()) {
+        std::filesystem::remove_all(context.txnBackupPath, ec);
+        context.txnBackupPath.clear();
+    }
 }
 
 // ========================================================================
@@ -20268,12 +20449,18 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
 
     transactionContext().txnLog.clear();
     transactionContext().savepoints.clear();
+    std::error_code backupEc;
+    std::filesystem::remove_all(transactionBackupPath(savedDB, savedTxnId), backupEc);
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().readOnly = false;
+    transactionContext().txnBackupPath.clear();
     transactionContext().txnDB.clear();
+    transactionContext().databaseExclusiveLock.reset();
+    transactionContext().databaseSharedLock.reset();
+    transactionContext().databaseTxnMutex.reset();
 
     std::filesystem::remove(pfile);
     return DBStatus::OK;
@@ -20331,6 +20518,7 @@ DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
     // Temporarily restore state and use normal rollback
     transactionContext().currentTxnId = savedTxnId;
     transactionContext().txnDB = savedDB;
+    transactionContext().txnBackupPath = transactionBackupPath(savedDB, savedTxnId).string();
     transactionContext().txnIsolationLevel = savedIso;
     transactionContext().inTransaction = true;
     transactionContext().txnLog = std::move(savedLog);

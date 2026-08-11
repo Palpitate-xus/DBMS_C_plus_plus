@@ -30,6 +30,14 @@ DdlTransaction::~DdlTransaction() {
     if (active_ && !committed_) rollback();
 }
 
+void DdlTransaction::enableSnapshotRollback() {
+    snapshotRollbackEnabled_ = true;
+    if (active_ && startedByUs_) {
+        engine_.preserveTransactionBackupOnRollback(true);
+        engine_.createTransactionBackup();
+    }
+}
+
 bool DdlTransaction::begin() {
     if (engine_.inTransaction()) {
         active_ = true;
@@ -43,10 +51,17 @@ bool DdlTransaction::begin() {
         startedByUs_ = false;
         return true;
     }
-    DBStatus st = engine_.beginTransaction(session_.currentDB);
+    DBStatus st = engine_.beginTransaction(session_.currentDB, snapshotRollbackEnabled_);
     active_ = (st == DBStatus::OK);
     startedByUs_ = active_;
-    if (startedByUs_) engine_.preserveTransactionBackupOnRollback(true);
+    if (startedByUs_) {
+        engine_.preserveTransactionBackupOnRollback(snapshotRollbackEnabled_);
+        if (snapshotRollbackEnabled_ && !engine_.createTransactionBackup()) {
+            engine_.rollbackTransaction();
+            active_ = false;
+            startedByUs_ = false;
+        }
+    }
     return active_;
 }
 

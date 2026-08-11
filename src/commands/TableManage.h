@@ -16,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 
 #include "DateType.h"
@@ -543,18 +544,23 @@ public:
     bool inTransaction() const { return transactionContext().inTransaction; }
     bool isReadOnly() const { return transactionContext().readOnly; }
     void setReadOnly(bool ro) { transactionContext().readOnly = ro; }
-    // DDL transactions need the physical backup after row-level rollback so
-    // the DDL wrapper can restore file-backed changes. Ordinary transactions
-    // discard the backup as soon as rollback finishes.
-    void preserveTransactionBackupOnRollback(bool preserve) {
-        transactionContext().preserveBackupOnRollback = preserve;
-    }
+    // DDL transactions opt into a physical backup after acquiring the
+    // database-level snapshot lock; ordinary row transactions do not create
+    // a full-database backup.
+    void preserveTransactionBackupOnRollback(bool preserve);
     // Abort any open transaction and discard backend-local state when a
     // protocol connection terminates.
     void endBackendSession();
     DBStatus beginTransaction(const std::string& dbname);
+    // Start a transaction that will perform file-backed DDL and therefore
+    // needs an exclusive database snapshot lock.
+    DBStatus beginTransaction(const std::string& dbname, bool ddlSnapshot);
     DBStatus commitTransaction();
     DBStatus rollbackTransaction();
+
+    // Create the transaction's physical snapshot after the transaction has
+    // acquired its database lock. Ordinary row transactions do not need one.
+    bool createTransactionBackup();
 
     // Restore/remove the current transaction's pre-change database snapshot.
     // DDL uses this because schema/file rewrites are not represented by the
@@ -1333,6 +1339,7 @@ private:
         bool readOnly = false;
         bool preserveBackupOnRollback = false;
         std::string txnDB;
+        std::string txnBackupPath;
         uint64_t currentTxnId = 0;
         ReadView readView;
         IsolationLevel txnIsolationLevel = IsolationLevel::REPEATABLE_READ;
@@ -1347,6 +1354,9 @@ private:
         std::string lastvalDb;
         std::string lastvalSeq;
         int64_t lastvalValue = 0;
+        std::shared_ptr<std::shared_mutex> databaseTxnMutex;
+        std::unique_ptr<std::shared_lock<std::shared_mutex>> databaseSharedLock;
+        std::unique_ptr<std::unique_lock<std::shared_mutex>> databaseExclusiveLock;
     };
 
     mutable std::mutex transactionContextsMutex_;

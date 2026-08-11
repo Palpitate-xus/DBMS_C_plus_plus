@@ -2,7 +2,7 @@
 
 最后更新：2026-08-11
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，125 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=127 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，127 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=129 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
 本轮新增事务回归验证 INSERT、UPDATE、DELETE 的普通回滚和 `ROLLBACK TO SAVEPOINT` 会一致恢复主键、单列二级、复合、Hash 索引及 TOAST 线外值；索引写入失败会传播并回滚堆元组。事务 DELETE 保留死 tuple 到事务结束，savepoint 回滚清除 `xmax` 后仍可在同一事务提交并读取；提交后旧 UPDATE/DELETE 版本的 TOAST 块才回收。索引专用 WAL resource manager、跨访问方法原子提交和完整崩溃窗口仍未完成。
 
@@ -15,14 +15,14 @@
 - schema、sequence、trigger 读取路径只接受当前格式；旧格式回退和截断文件的部分解析已删除，损坏元数据 fail-closed，不会按默认值继续写入。
 - `CREATE TABLE` 的 schema、heap/partition、TOAST、主键/唯一索引和 `tlist.lst` 初始化现在检查失败并清理已写入的半成品；索引元数据写入失败不会遗留锁或缓存指针。
 - DDL executor 在物理表创建成功后立即登记事务回滚记录；约束 metadata、EXCLUDE 或后续 catalog 步骤失败时不会留下已发布的表对象。`ALTER TABLE` 现在在 DDL 事务中使用当前格式整库快照，后续子命令失败会恢复 schema、参数、索引、TOAST、catalog 和关系文件；事务快照同时包含外置 tablespace 的数据库子目录，并正确排除 UNLOGGED 关系的物理文件；完整 DROP/ALTER 跨对象依赖 undo 仍待补齐。
-- DDL 包装事务现在检查 `StorageEngine::commitTransaction()` 的最终状态；延迟约束或 SSI 导致提交失败时会向执行器传播失败，不再输出伪成功，并在本事务拥有物理快照时恢复 DDL 改动。跨对象依赖 undo、并发 DDL 锁和全部 PostgreSQL 隐式提交边界仍待补齐。
-- 普通事务的 `.txn_backup` 生命周期已收敛：成功提交和正常回滚都会清理备份；DDL wrapper 明确声明需要保留备份，避免测试/生产运行中累积孤儿快照；重新开始事务时不会吞掉前一事务的隐式提交错误。
+- DDL 包装事务现在检查 `StorageEngine::commitTransaction()` 的最终状态；延迟约束或 SSI 导致提交失败时会向执行器传播失败，不再输出伪成功，并在本事务拥有物理快照时恢复 DDL 改动。文件级 DDL 回滚只在显式启用时创建 `<db>.txn_backup.<xid>`，普通事务不再复制整库；快照事务持有数据库级排他锁，避免物理恢复覆盖并发提交。跨对象依赖 undo、全部 PostgreSQL 隐式提交边界仍待补齐。
+- 事务快照恢复已接入启动恢复：重启扫描 WAL 的提交证据，已提交快照直接清理，未完成快照恢复到 DDL 前状态，PREPARE TRANSACTION 的快照保留到 COMMIT/ROLLBACK PREPARED；快照恢复失败会保留现场供后续诊断，不伪报成功。
 - WAL 提交路径已收紧：`XLogFlush()` 返回并传播 segment `fsync` 失败；事务先成功写入并刷盘 COMMIT WAL 记录，再发布 CLOG committed 状态，WAL 不可用时 fail-closed 回滚，避免崩溃恢复缺少提交证据。
 - WAL LSN 语义已收敛：LSN 0 作为首个合法日志位置，`INVALID_LSN` 使用范围外哨兵；恢复逻辑明确跳过未初始化页的无效页 LSN。多个 WAL writer 通过进程互斥、WAL 文件锁和磁盘尾部刷新避免过期 LSN 覆盖日志。
 - INSERT 回滚覆盖复合/Hash 索引和 TOAST：普通事务与 SAVEPOINT 回滚按 `(key, RID)` 精确移除多值索引项，并为堆删除写入 WAL before/after image，避免回滚行在重启恢复时复活；Hash AM 的插入/删除失败会向上返回。
 - UPDATE/DELETE 回滚覆盖复合/Hash 索引和 TOAST：UPDATE 回滚只删除新版本独占的 TOAST 块并恢复旧索引键；DELETE 在显式事务内保留 heap tuple，普通回滚和 SAVEPOINT 回滚清除 `xmax` 并写入 WAL before/after image；提交后清理旧版本 TOAST，避免回滚后行或线外值丢失。
 - BufferPool/Checkpoint 刷盘已收紧：`pwrite/fsync` 失败会保留 dirty 状态并向 `PageAllocator`、`checkpoint()` 和交互式 `CHECKPOINT` 传播；clock-sweep 不再强制淘汰 pinned 页或丢弃无法写出的脏页，读取失败返回空指针；checkpoint 元数据和 archive status 未完成持久化时不会报告成功。WAL segment 截断仍未实现，当前保留日志用于恢复。
-- PageAllocator 与 B+Tree 已适配 BufferPool 的失败契约：heap header/page 和索引 node/header 读写遇到 I/O 失败会返回失败，不再直接解引用空页；B+Tree 打开时拒绝损坏的 order/header。事务快照创建前和 COMMIT WAL 发布前会统一刷已加载的 heap、B+Tree、TOAST index、Hash 缓存；索引专用 WAL resource manager、索引多页更新的完整原子提交和崩溃窗口仍未完成。
+- PageAllocator 与 B+Tree 已适配 BufferPool 的失败契约：heap header/page 和索引 node/header 读写遇到 I/O 失败会返回失败，不再直接解引用空页；B+Tree 打开时拒绝损坏的 order/header。DDL 快照创建前和 COMMIT WAL 发布前会统一刷已加载的 heap、B+Tree、TOAST index、Hash 缓存；索引专用 WAL resource manager、索引多页更新的完整原子提交和崩溃窗口仍未完成。
 - Hash/GIN/BRIN 独立索引文件现在使用严格格式校验；写入采用临时文件 + fsync + 原子 rename，写入失败保留 dirty 状态，截断、非法版本和尾随垃圾会拒绝打开。BRIN 当前格式按本项目策略重建，不兼容旧索引文件；StorageEngine 中各访问方法的完整 WAL-safe 增量维护仍未完成。
 - `StorageEngine::forEachRow()` 现在返回并传播 heap/partition 页面打开与读取失败；B-tree、复合、全文、GiST、SP-GiST、Hash、GIN、BRIN 构建以及 `REINDEX` 会在扫描失败时返回错误；全文/GiST/SP-GiST/GIN/BRIN 文件在完整扫描成功后才原子发布，B-tree/Hash 的 WAL-safe 构建仍未完成。过滤器、聚合、JOIN、FK/EXCLUDE 检查、`ANALYZE`、表重写、TOAST 写入和 Volcano 并行 page-range scan 现在也区分 I/O 失败与合法空结果；统计文件采用原子替换。BRIN 使用长度前缀格式保留带空格的边界值，损坏索引读取 fail-closed。索引增量维护的 WAL 语义仍未完成。
 - `DROP TABLE` 现在先生成只读 `CASCADE/RESTRICT` 依赖计划，物理删除成功后才应用 catalog 删除计划，避免物理失败时 catalog 先被移除。

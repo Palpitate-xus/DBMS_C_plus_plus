@@ -15,6 +15,9 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -165,6 +168,77 @@ static void test_begin_propagates_implicit_commit_failure() {
 
     cleanup(db);
     std::cout << "[DDL-TXN] implicit begin failure propagation OK" << std::endl;
+}
+
+static void test_snapshot_ddl_serializes_database_backends() {
+    std::string db = testDbPath("ddl_txn_t_snapshot_lock");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema tbl;
+    tbl.tablename = "snapshot_lock_tbl";
+    tbl.append(dbms::makeIntColumn("id", false, 2, true));
+    assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
+
+    // A file snapshot is only safe while the database is quiescent. The
+    // second backend must wait instead of committing data that a later
+    // physical restore could erase.
+    dbms::StorageEngine other;
+    Session s;
+    setupSession(s, db);
+    dbms::DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    assert(txn.begin());
+
+    std::atomic<bool> returned{false};
+    dbms::DBStatus otherStatus = dbms::DBStatus::INVALID_VALUE;
+    std::thread worker([&] {
+        otherStatus = other.beginTransaction(db);
+        returned = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assert(!returned.load());
+
+    txn.rollback();
+    worker.join();
+    assert(returned.load());
+    assert(otherStatus == dbms::DBStatus::OK);
+    assert(other.rollbackTransaction() == dbms::DBStatus::OK);
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] snapshot database lock serialization OK" << std::endl;
+}
+
+static void test_unfinished_snapshot_recovers_on_restart() {
+    const std::string db = testDbPath("ddl_txn_t_snapshot_recovery");
+    const std::string backup = db + ".txn_backup.900001";
+    cleanup(db);
+    cleanup(backup);
+
+    {
+        dbms::StorageEngine source;
+        assert(source.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+        dbms::TableSchema tbl;
+        tbl.tablename = "recovery_tbl";
+        tbl.append(dbms::makeIntColumn("id", false, 2, true));
+        assert(source.createTable(db, tbl) == dbms::DBStatus::OK);
+        assert(source.physicalBackup(db, backup));
+        assert(source.alterTableAddColumn(
+                   db, "recovery_tbl", dbms::makeIntColumn("after_crash", true, 0, false)) ==
+               dbms::DBStatus::OK);
+        assert(source.getTableSchema(db, "recovery_tbl").len == 2);
+    }
+
+    // No COMMIT record exists for the synthetic snapshot xid, so startup
+    // recovery must restore the pre-DDL image and remove the snapshot.
+    {
+        dbms::StorageEngine restarted;
+        assert(restarted.getTableSchema(db, "recovery_tbl").len == 1);
+        assert(!std::filesystem::exists(backup));
+    }
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] unfinished snapshot restart recovery OK" << std::endl;
 }
 
 static void test_create_table_post_action_rollback() {
@@ -330,6 +404,8 @@ int main() {
     test_commit_failure_is_propagated_and_restored();
     test_engine_transaction_backup_lifecycle();
     test_begin_propagates_implicit_commit_failure();
+    test_snapshot_ddl_serializes_database_backends();
+    test_unfinished_snapshot_recovers_on_restart();
     test_create_table_post_action_rollback();
     test_wal_catalog_record();
     test_executor_uses_transaction();

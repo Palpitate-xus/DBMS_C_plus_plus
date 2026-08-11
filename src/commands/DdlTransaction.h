@@ -65,7 +65,7 @@ public:
 
     // Opt in to physical snapshot restoration for DDL paths whose storage
     // primitives rewrite files outside the row-level undo log.
-    void enableSnapshotRollback() { snapshotRollbackEnabled_ = true; }
+    void enableSnapshotRollback();
     void markSnapshotDirty() { snapshotDirty_ = true; }
 
     bool isActive() const { return active_; }

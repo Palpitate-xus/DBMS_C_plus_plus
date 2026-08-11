@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-11（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线（2026-08-11）: PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
+> 测试基线（2026-08-11）: PASS=129 FAIL=0（127 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -27,7 +27,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|--------------|---------|------|
 | 代码量 | ~1.2M 行 | ~66K 行 | ~18x |
 | 开发团队 | 全球数百人/20+年 | 单人/数周 | — |
-| 测试覆盖 | ~2000+ 测试 | 125 C++ 单元测试 + 2 个 E2E | 以回归结果为准 |
+| 测试覆盖 | ~2000+ 测试 | 127 C++ 单元测试 + 2 个 E2E | 以回归结果为准 |
 | 功能完成度 | 不宣称生产级 | DDL/DML 核心已覆盖，高级特性和运维能力仍有缺口 | 以测试和代码路径为准 |
 
 ---
@@ -159,7 +159,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | ReadView + CLOG | ✅ | ✅ | ✅ |
 | 隔离级别 (RU/RC/RR/SI/SERIALIZABLE) | ✅ | ⚠️ | 框架有 |
 | WAL (Write-Ahead Log) | ✅ | ✅ | LSN 0 为首个合法位置；COMMIT WAL 记录先刷盘，失败时不发布 CLOG 可见性；多 writer 有进程/文件锁与磁盘尾部刷新；完整 WAL resource manager/恢复语义仍有差距 |
-| 事务物理快照生命周期 | ✅ | ✅ | 普通 COMMIT/ROLLBACK 清理 `.txn_backup`；DDL wrapper 在需要时保留并恢复快照 |
+| 事务物理快照生命周期 | ✅ | ✅ | 仅文件级 DDL 显式创建按 xid 命名快照；快照事务持有数据库级排他锁，启动恢复按 WAL 提交状态清理或恢复 |
 | Checkpoint | ✅ | ✅ | checkpoint WAL/LSN 与关系页刷盘失败会传播；完整 restartpoint、节流和 WAL 截断仍缺 |
 | SAVEPOINT | ✅ | ✅ | ✅ |
 | 表级锁 (共享/排他) | ✅ | ✅ | ✅ |

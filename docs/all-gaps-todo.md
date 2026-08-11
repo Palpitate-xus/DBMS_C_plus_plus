@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态（2026-08-11）**：统一回归基线 PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-11）**：统一回归基线 PASS=129 FAIL=0（127 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -28,7 +28,7 @@
 | 2026-08-11 | StorageEngine 索引调用链继续收口：`forEachRow()` 返回页面 I/O 失败，GIN/BRIN 构建完整扫描成功后才原子发布；BRIN 改为长度前缀二进制范围格式，读取损坏文件 fail-closed，并新增真实 DDL 索引查询回归。完整调用方错误传播、WAL-safe 增量维护和 PostgreSQL 泛化 opclass 仍待后续。 |
 | 2026-08-11 | 索引文件持久化继续收口：Hash/GIN/BRIN 独立索引改为严格格式校验，写入使用 fsync 后原子替换，截断/非法文件 fail-closed；BRIN 当前格式按不兼容旧数据策略重建。StorageEngine 访问方法的完整 WAL-safe 增量维护和 PostgreSQL 泛化 opclass 仍待后续。 |
 | 2026-08-11 | DDL 提交错误继续收口：`DdlTransaction` 检查引擎 commit 状态，延迟约束/SSI 失败会传播到 DDL executor，并恢复已启用的当前格式物理快照；新增提交失败与快照恢复回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
-| 2026-08-11 | 事务资源生命周期继续收口：普通 COMMIT/ROLLBACK 清理 `.txn_backup`，DDL wrapper 通过事务上下文保留恢复快照；`beginTransaction()` 传播前一事务的隐式提交失败，避免错误后继续建立新事务。 |
+| 2026-08-11 | 事务快照并发与恢复继续收口：普通事务不再无条件复制整库；文件级 DDL 快照按 xid 命名并持有数据库级排他锁，启动时按 WAL 提交状态清理/恢复遗留快照，PREPARE TRANSACTION 快照延迟到最终提交或回滚；`beginTransaction()` 传播前一事务的隐式提交失败。 |
 | 2026-08-11 | WAL 提交安全继续收口：`XLogFlush()` 返回 segment 同步结果；事务先刷盘 COMMIT WAL，再发布 CLOG committed，WAL 不可用或刷盘失败时 fail-closed 回滚。 |
 | 2026-08-11 | WAL 一致性继续收口：LSN 0 恢复为首个合法位置，`INVALID_LSN` 改用范围外哨兵；恢复识别未初始化页，多个 WAL writer 使用进程/文件锁和磁盘尾部刷新；新增首笔提交与崩溃恢复回归。 |
 | 2026-08-11 | Checkpoint/BufferPool 持久化错误继续收口：`pwrite/fsync` 失败保留 dirty 状态并传播到 checkpoint；checkpoint WAL、LSN 文件和 archive status 未成功时 fail-closed。WAL 截断仍未实现。 |
@@ -224,7 +224,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=127 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=129 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
