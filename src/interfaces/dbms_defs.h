@@ -24,7 +24,10 @@ constexpr TxnId  INVALID_TXN_ID  = 0;
 constexpr PageId INVALID_PAGE_ID = 0xFFFFFFFFu;
 constexpr RowId  INVALID_ROW_ID  = -1;
 constexpr Oid    INVALID_OID     = 0;
-constexpr Lsn    INVALID_LSN     = 0;
+// LSN 0 is the first valid WAL position.  Keep the invalid sentinel outside
+// the on-disk byte-offset range so the first record can be flushed and
+// committed normally.
+constexpr Lsn    INVALID_LSN     = UINT64_MAX;
 
 // ============================================================================
 // 行定位器 (ItemPointer / CTID)

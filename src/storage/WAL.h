@@ -118,7 +118,8 @@ public:
                    const std::vector<char>& data);
 
     // Ensure all records up to targetLsn are fsync'd to disk.
-    void XLogFlush(Lsn targetLsn);
+    // Returns false when the WAL stream or any segment cannot be synced.
+    bool XLogFlush(Lsn targetLsn);
 
     // Read a record at the given LSN. Returns nullopt if not found/malformed.
     std::optional<XLogRecord> ReadRecord(Lsn lsn) const;
@@ -181,8 +182,13 @@ private:
     }
 
     std::filesystem::path timelinePath() const { return walDir_ / "timeline"; }
+    std::filesystem::path lockPath() const { return walDir_ / "wal.lock"; }
     bool loadTimeline();
     bool persistTimeline();
+    bool refreshCurrentLsnFromDisk();
+
+    int acquireWalFileLock() const;
+    static void releaseWalFileLock(int fd);
 
     std::filesystem::path archiveStatusDir() const { return walDir_ / "archive_status"; }
     std::filesystem::path readyPath(uint32_t segNo) const;

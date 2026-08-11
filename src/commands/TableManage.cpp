@@ -18196,7 +18196,9 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
             Lsn currentLsn = 0;
             std::memcpy(&currentLsn, buf, sizeof(currentLsn));
             pa->unpinPage(pageId);
-            if (currentLsn >= recordLsn) return true;
+            // A freshly initialized page carries INVALID_LSN.  It must not
+            // compare as a newer page now that LSN 0 is a valid WAL position.
+            if (currentLsn != INVALID_LSN && currentLsn >= recordLsn) return true;
         }
     }
 
@@ -19131,6 +19133,23 @@ DBStatus StorageEngine::commitTransaction() {
         }
     }
 
+    // A transaction is not durable until its COMMIT record is present and
+    // flushed. Fail closed before publishing CLOG visibility: otherwise a
+    // WAL/fsync error could expose committed rows that crash recovery cannot
+    // reconstruct.
+    const std::string committingDb = transactionContext().txnDB;
+    const uint64_t committingTxnId = transactionContext().currentTxnId;
+    WALManager* wal = getWAL(committingDb);
+    if (!wal) {
+        rollbackTransaction();
+        return DBStatus::IO_ERROR;
+    }
+    const Lsn commitLsn = walXactCommit(committingDb, committingTxnId);
+    if (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn)) {
+        rollbackTransaction();
+        return DBStatus::IO_ERROR;
+    }
+
     // Update CLOG before clearing state
     CommitLog* clog = getCommitLog(transactionContext().txnDB);
     if (clog) clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Committed);
@@ -19153,15 +19172,6 @@ DBStatus StorageEngine::commitTransaction() {
         ssiOutEdges_.clear();
         ssiInEdges_.clear();
     }
-    // Write WAL COMMIT marker and flush WAL before clearing state.
-    WALManager* wal = getWAL(transactionContext().txnDB);
-    if (wal) {
-        Lsn commitLsn = walXactCommit(transactionContext().txnDB, transactionContext().currentTxnId);
-        if (commitLsn != INVALID_LSN) {
-            wal->XLogFlush(commitLsn);
-        }
-    }
-
     transactionContext().txnLog.clear();
     discardTransactionBackup(transactionContext().txnDB);
     transactionContext().savepoints.clear();
@@ -19553,11 +19563,13 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     }
     if (savedTxnId == 0 || savedDB.empty()) return DBStatus::INVALID_VALUE;
 
-    // WAL COMMIT PREPARED marker
+    // WAL COMMIT PREPARED marker. Keep the prepared transaction durable and
+    // retryable if WAL insertion or fsync fails.
     WALManager* wal = getWAL(savedDB);
-    if (wal) {
-        Lsn commitLsn = walXactCommit(savedDB, savedTxnId);
-        if (commitLsn != INVALID_LSN) wal->XLogFlush(commitLsn);
+    if (!wal) return DBStatus::IO_ERROR;
+    Lsn commitLsn = walXactCommit(savedDB, savedTxnId);
+    if (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn)) {
+        return DBStatus::IO_ERROR;
     }
 
     // Normal commit logic

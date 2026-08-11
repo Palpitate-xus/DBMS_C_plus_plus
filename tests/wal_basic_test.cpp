@@ -39,6 +39,22 @@ int main() {
 
     // Read and verify WAL records.
     std::filesystem::path walDir = std::filesystem::path(dbname) / "pg_wal";
+    // Two managers may be alive at once when the server embeds one engine per
+    // backend.  The second writer must refresh the on-disk tail instead of
+    // appending at the LSN captured when it was constructed.
+    WALManager staleWriter(walDir);
+    WALManager currentWriter(walDir);
+    assert(staleWriter.ensureOpen());
+    assert(currentWriter.ensureOpen());
+    std::vector<char> emptyPayload;
+    const Lsn firstSharedLsn = staleWriter.XLogInsert(
+        RM_CHECKPOINT_ID, XLOG_CHECKPOINT_ONLINE, 0, emptyPayload);
+    const Lsn secondSharedLsn = currentWriter.XLogInsert(
+        RM_CHECKPOINT_ID, XLOG_CHECKPOINT_ONLINE, 0, emptyPayload);
+    assert(firstSharedLsn != INVALID_LSN);
+    assert(secondSharedLsn > firstSharedLsn);
+    assert(currentWriter.XLogFlush(secondSharedLsn));
+
     WALManager wal(walDir);
     assert(wal.ensureOpen());
 
@@ -46,6 +62,8 @@ int main() {
     std::cerr << "[WAL BASIC] walDir exists=" << std::filesystem::exists(walDir)
               << " currentLsn=" << wal.currentWriteLsn() << "\n";
     assert(std::filesystem::exists(walDir));
+    assert(wal.XLogFlush(wal.currentWriteLsn()));
+    assert(!wal.XLogFlush(INVALID_LSN));
     bool foundSegment = false;
     for (const auto& entry : std::filesystem::directory_iterator(walDir)) {
         std::string name = entry.path().filename().string();

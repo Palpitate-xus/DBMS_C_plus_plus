@@ -88,7 +88,7 @@
 - **页校验和**：Fletcher-16 校验，检测页损坏
 - **WAL 日志**：Write-Ahead Logging 支持崩溃恢复
 - **Checkpoint**：`CHECKPOINT` 命令刷盘所有脏页并截断 WAL，加速重启恢复
-- **fsync 持久化**：WAL 写入、事务提交、Checkpoint 均调用 `fsync()` 保证数据落盘
+- **fsync 持久化**：WAL 写入、事务提交、Checkpoint 均调用 `fsync()`；事务只有在 COMMIT WAL 记录刷盘成功后才发布 CLOG 可见性，刷盘失败会 fail-closed 回滚
 - **VARCHAR 变长行**：`[定长数据 | 变长偏移数组 | 变长数据]` 格式，减少存储浪费
 - **溢出页**：单行数据超过页空间时，大字段（TEXT/BLOB/JSON）自动存放到溢出页
 - **MVCC 行格式**：每行开头为 PostgreSQL 风格 HeapTupleHeader（含 xmin/xmax/ctid、null bitmap 和对齐信息）
