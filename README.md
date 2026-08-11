@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-11）**: 生产化重构进行中；统一回归基线 PASS=131 FAIL=0（129 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
+> **当前状态（2026-08-11）**: 生产化重构进行中；统一回归基线 PASS=132 FAIL=0（130 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
 
 ## 功能特性
 
@@ -91,7 +91,7 @@
 - **Buffer Pool**：clock-sweep 缓存，保护 pinned 页并在淘汰前保留脏页写盘失败状态
 - **页校验和**：Fletcher-16 校验，检测页损坏
 - **WAL 日志**：Write-Ahead Logging 支持崩溃恢复
-- **Checkpoint**：`CHECKPOINT` 命令刷盘已加载的 heap/index 脏缓存、写入 checkpoint WAL 记录并持久化 checkpoint LSN；活动事务期间不会推进恢复起点，当前保留 WAL 以支持恢复
+- **Checkpoint**：`CHECKPOINT` 命令刷盘已加载的 heap/index 脏缓存、写入 checkpoint WAL 记录并持久化 checkpoint LSN；活动事务期间不会推进恢复起点，并在归档成功后回收 checkpoint 之前的 WAL 段
 - **fsync 持久化**：WAL、CLOG 段和事务提交、Checkpoint 均检查 `fsync()`；CLOG 段采用临时文件原子替换并持久化 `pg_xact` 目录，事务只有在 COMMIT WAL 记录刷盘成功后才发布 CLOG 可见性，刷盘失败会 fail-closed 回滚
 - **VARCHAR 变长行**：`[定长数据 | 变长偏移数组 | 变长数据]` 格式，减少存储浪费
 - **溢出页**：单行数据超过页空间时，大字段（TEXT/BLOB/JSON）自动存放到溢出页
@@ -652,7 +652,7 @@ Var Offset Array 每项 (4 bytes):
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与历史 Wave 记录（当前状态以 Gap 表为准） |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=131 FAIL=0） |
+| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=132 FAIL=0） |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 

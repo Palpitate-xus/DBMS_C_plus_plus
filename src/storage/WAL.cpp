@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
 
 namespace dbms {
@@ -31,6 +32,22 @@ uint32_t crc32c(const char* data, size_t len) {
 
 uint64_t alignLen(uint64_t len, uint64_t align) {
     return (len + align - 1) & ~(align - 1);
+}
+
+bool parseSegmentName(const std::string& name, uint32_t expectedTli,
+                     uint32_t& segNo) {
+    if (name.size() != 24) return false;
+    try {
+        const uint32_t tli = static_cast<uint32_t>(
+            std::stoull(name.substr(0, 8), nullptr, 16));
+        const uint32_t log = static_cast<uint32_t>(
+            std::stoull(name.substr(8, 8), nullptr, 16));
+        segNo = static_cast<uint32_t>(
+            std::stoull(name.substr(16, 8), nullptr, 16));
+        return tli == expectedTli && log == 0;
+    } catch (...) {
+        return false;
+    }
 }
 
 } // namespace
@@ -67,18 +84,12 @@ bool WALManager::refreshCurrentLsnFromDisk() {
     for (const auto& entry : std::filesystem::directory_iterator(walDir_, ec)) {
         if (ec) return false;
         std::string name = entry.path().filename().string();
-        if (name.size() != 24) continue;
-        try {
-            // Segment filename: TLI(8) + log(8) + seg(8) hex
-            uint32_t tli = static_cast<uint32_t>(
-                std::stoull(name.substr(0, 8), nullptr, 16));
-            uint32_t segNo = static_cast<uint32_t>(
-                std::stoull(name.substr(16, 8), nullptr, 16));
-            if (tli == timelineId_ && segNo >= maxSeg) {
-                maxSeg = segNo;
-                found = true;
-            }
-        } catch (...) {}
+        uint32_t segNo = 0;
+        if (!parseSegmentName(name, timelineId_, segNo)) continue;
+        if (segNo >= maxSeg) {
+            maxSeg = segNo;
+            found = true;
+        }
     }
     if (found) {
         auto path = segmentPath(maxSeg);
@@ -203,16 +214,9 @@ std::vector<uint32_t> WALManager::pendingArchiveSegments() const {
         std::string name = entry.path().filename().string();
         // Segment filename is 24 hex chars; .ready suffix makes it 30.
         if (name.size() != 30 || name.substr(24, 6) != ".ready") continue;
-        try {
-            uint32_t tli = static_cast<uint32_t>(
-                std::stoull(name.substr(0, 8), nullptr, 16));
-            if (tli != timelineId_) continue;
-            uint32_t segNo = static_cast<uint32_t>(
-                std::stoull(name.substr(16, 8), nullptr, 16));
-            if (!isSegmentArchived(segNo)) {
-                result.push_back(segNo);
-            }
-        } catch (...) {}
+        uint32_t segNo = 0;
+        if (!parseSegmentName(name.substr(0, 24), timelineId_, segNo)) continue;
+        if (!isSegmentArchived(segNo)) result.push_back(segNo);
     }
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
@@ -249,9 +253,98 @@ bool WALManager::markSegmentsReadyBefore(Lsn lsn) {
     if (!ensureOpen() || lsn == INVALID_LSN) return false;
     uint32_t endSeg = segmentNumber(lsn);
     for (uint32_t seg = 0; seg < endSeg; ++seg) {
+        std::error_code ec;
+        if (!std::filesystem::exists(segmentPath(seg), ec)) {
+            if (ec) return false;
+            continue;
+        }
         if (!markSegmentReadyForArchive(seg)) return false;
     }
     return true;
+}
+
+Lsn WALManager::earliestAvailableLsn() const {
+    if (!std::filesystem::is_directory(walDir_)) return 0;
+
+    std::error_code ec;
+    uint32_t firstSeg = std::numeric_limits<uint32_t>::max();
+    for (const auto& entry : std::filesystem::directory_iterator(
+             walDir_, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (ec) return 0;
+        std::error_code entryEc;
+        if (!entry.is_regular_file(entryEc) || entryEc) continue;
+        const std::string name = entry.path().filename().string();
+        uint32_t seg = 0;
+        if (!parseSegmentName(name, timelineId_, seg)) continue;
+        firstSeg = std::min(firstSeg, seg);
+    }
+    if (firstSeg == std::numeric_limits<uint32_t>::max()) return 0;
+    return static_cast<Lsn>(firstSeg) * kSegmentSize;
+}
+
+bool WALManager::truncateBefore(Lsn lsn) {
+    if (!ensureOpen() || lsn == INVALID_LSN || lsn > currentLsn_) return false;
+
+    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return false;
+
+    const uint32_t keepSeg = segmentNumber(lsn);
+    const uint32_t currentSeg = currentLsn_ == 0
+        ? 0
+        : segmentNumber(currentLsn_ - 1);
+    std::vector<uint32_t> candidates;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             walDir_, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (ec) {
+            releaseWalFileLock(walLock);
+            return false;
+        }
+        std::error_code entryEc;
+        if (!entry.is_regular_file(entryEc) || entryEc) continue;
+        const std::string name = entry.path().filename().string();
+        uint32_t seg = 0;
+        if (!parseSegmentName(name, timelineId_, seg)) continue;
+        if (seg < keepSeg && seg < currentSeg) candidates.push_back(seg);
+    }
+    std::sort(candidates.begin(), candidates.end());
+
+    // Preflight the complete removal set before unlinking anything. A
+    // partially archived range must not produce a partially truncated WAL.
+    for (uint32_t segNo : candidates) {
+        std::error_code statusEc;
+        if (!std::filesystem::exists(donePath(segNo), statusEc) || statusEc) {
+            releaseWalFileLock(walLock);
+            return false;
+        }
+    }
+
+    bool ok = true;
+    bool changed = false;
+    for (uint32_t segNo : candidates) {
+        std::error_code removeEc;
+        if (!std::filesystem::remove(segmentPath(segNo), removeEc) && removeEc) {
+            ok = false;
+            continue;
+        }
+        changed = true;
+
+        std::error_code markerEc;
+        std::filesystem::remove(readyPath(segNo), markerEc);
+        if (markerEc) ok = false;
+        markerEc.clear();
+        std::filesystem::remove(donePath(segNo), markerEc);
+        if (markerEc) ok = false;
+    }
+
+    if (changed) {
+        const int dirFd = ::open(walDir_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dirFd < 0 || ::fsync(dirFd) != 0) ok = false;
+        if (dirFd >= 0) ::close(dirFd);
+    }
+    releaseWalFileLock(walLock);
+    return ok;
 }
 
 void WALManager::advanceCurrentLsn(uint32_t len) {
@@ -428,8 +521,7 @@ std::optional<XLogRecord> WALManager::ReadRecord(Lsn lsn) const {
 
 std::optional<XLogRecord> WALManager::ReadNextRecord(Lsn lsn) const {
     if (lsn == 0) {
-        // First record is at LSN 0? Actually records start at 0, but header begins at 0.
-        return ReadRecord(0);
+        return ReadRecord(earliestAvailableLsn());
     }
     auto rec = ReadRecord(lsn);
     if (!rec) return std::nullopt;
@@ -437,7 +529,7 @@ std::optional<XLogRecord> WALManager::ReadNextRecord(Lsn lsn) const {
 }
 
 std::optional<Lsn> WALManager::findLastCheckpointLsn() const {
-    Lsn lsn = 0;
+    Lsn lsn = earliestAvailableLsn();
     std::optional<Lsn> lastCp;
     while (true) {
         auto rec = ReadRecord(lsn);

@@ -19189,7 +19189,7 @@ bool StorageEngine::recoverAllDatabases() {
         if (!isDatabaseDirectory(dbname)) continue;
         WALManager* wal = getWAL(dbname);
         if (!wal || wal->currentWriteLsn() == 0) continue;
-        Lsn lsn = 0;
+        Lsn lsn = wal->earliestAvailableLsn();
         while (true) {
             auto recOpt = wal->ReadRecord(lsn);
             if (!recOpt || recOpt->header.xl_tot_len == 0) break;
@@ -19269,7 +19269,7 @@ bool StorageEngine::recoverAllDatabases() {
         if (wal->currentWriteLsn() == 0) continue; // no WAL
 
         auto checkpointLsnOpt = wal->findLastCheckpointLsn();
-        Lsn redoLsn = checkpointLsnOpt.value_or(0);
+        Lsn redoLsn = checkpointLsnOpt.value_or(wal->earliestAvailableLsn());
 
         // Pass 1: collect committed transaction IDs and update CLOG.
         std::set<uint64_t> committedXids;
@@ -19642,9 +19642,9 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
 
     // Archive WAL before truncation
     if (!archiveWal(dbname)) return false;
-    // TODO: truncate WAL segments entirely before the checkpoint while keeping
-    // the checkpoint record. For now we keep WAL to simplify recovery.
-    return true;
+    // Only archived segments strictly before the checkpoint are reclaimable;
+    // the segment containing the checkpoint remains the recovery start.
+    return wal->truncateBefore(checkpointLsn);
 }
 
 // ========================================================================

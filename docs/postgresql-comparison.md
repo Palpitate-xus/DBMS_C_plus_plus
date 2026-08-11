@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-11（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线（2026-08-11）: PASS=131 FAIL=0（129 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性、WAL 损坏恢复和网络启动安全）
+> 测试基线（2026-08-11）: PASS=132 FAIL=0（130 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性、WAL 损坏恢复和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -162,7 +162,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 隔离级别 (RU/RC/RR/SI/SERIALIZABLE) | ✅ | ⚠️ | 框架有 |
 | WAL (Write-Ahead Log) | ✅ | ✅ | LSN 0 为首个合法位置；COMMIT WAL 记录先刷盘，失败时不发布 CLOG 可见性；CLOG 段采用文件锁、按位合并、原子替换并同步段文件和 `pg_xact` 目录，截断在保存和目录同步成功后才删除旧段；已提交 after-image 正序重做、未提交 before-image 逆序 undo；索引镜像严格校验并限制在数据库/已登记 tablespace 目录，恢复失败 fail-closed；物理备份有显式标记不会被误当活动数据库；多 writer 有进程/文件锁与磁盘尾部刷新；完整 WAL resource manager/恢复语义仍有差距 |
 | 事务物理快照生命周期 | ✅ | ✅ | 仅文件级 DDL 显式创建按 xid 命名快照；快照事务持有数据库级排他锁，启动恢复按 WAL 提交状态清理或恢复 |
-| Checkpoint | ✅ | ✅ | checkpoint WAL/LSN 与已加载 heap/index 缓存刷盘失败会传播；活动事务期间不推进恢复起点；完整 restartpoint、节流和 WAL 截断仍缺 |
+| Checkpoint | ✅ | ✅ | checkpoint WAL/LSN 与已加载 heap/index 缓存刷盘失败会传播；活动事务期间不推进恢复起点；已归档且早于 checkpoint 的完整 WAL 段会回收；完整 restartpoint、节流和 PITR 仍缺 |
 | SAVEPOINT | ✅ | ✅ | ✅ |
 | 表级锁 (共享/排他) | ✅ | ✅ | ✅ |
 | **行级锁** | ✅ | ✅ | ✅ (rowLockShared/Exclusive + NOWAIT) |
@@ -185,7 +185,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 - ✅ MVCC 快照隔离 (ReadView 可见性)
 - ✅ HOT 堆内更新
 - ✅ CLOG 提交日志 (位图 + 子事务可见性)
-- ✅ Checkpoint 持久化 (脏页刷盘 + WAL 截断)
+- ✅ Checkpoint 持久化 (脏页刷盘 + 归档后 WAL 段截断)
 - ✅ WAL 崩溃恢复 (已提交正序重做 + 未提交多次修改逆序回滚)
 - ❌ 多线程并发压力测试 (LockManager 已就绪但无多线程竞争测试)
 - ❌ 死锁检测端到端测试 (WFG 已实现但无并发触发测试)

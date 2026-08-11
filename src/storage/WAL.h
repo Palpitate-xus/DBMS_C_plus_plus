@@ -114,6 +114,9 @@ struct XLogBlockRef {
 // ============================================================================
 class WALManager {
 public:
+    // Segment size is part of the on-disk WAL format.
+    static constexpr uint64_t kSegmentSize = 16 * 1024 * 1024; // 16 MiB
+
     explicit WALManager(const std::filesystem::path& walDir);
     ~WALManager();
 
@@ -155,6 +158,14 @@ public:
     // Mark all complete segments strictly before lsn as ready for archiving.
     bool markSegmentsReadyBefore(Lsn lsn);
 
+    // Remove complete segments strictly before lsn after they have been
+    // archived. The segment containing lsn is always retained.
+    bool truncateBefore(Lsn lsn);
+
+    // Return the first segment still present on the current timeline. A new
+    // WAL directory, or an empty directory, starts at LSN 0.
+    Lsn earliestAvailableLsn() const;
+
     // Find the LSN of the latest checkpoint record, if any.
     std::optional<Lsn> findLastCheckpointLsn() const;
 
@@ -178,8 +189,6 @@ private:
     bool open_ = false;
     Lsn currentLsn_ = 0;
     uint32_t timelineId_ = 1;
-
-    static constexpr uint64_t kSegmentSize = 16 * 1024 * 1024; // 16 MiB
 
     uint32_t segmentNumber(Lsn lsn) const {
         return static_cast<uint32_t>(lsn / kSegmentSize);

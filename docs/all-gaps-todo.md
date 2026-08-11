@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态（2026-08-11）**：统一回归基线 PASS=131 FAIL=0（129 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-11）**：统一回归基线 PASS=132 FAIL=0（130 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -23,6 +23,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | WAL 生命周期补强：checkpoint 归档成功后只在同一 WAL 文件锁内回收早于 checkpoint 的完整段；未归档段保留，恢复从最早保留段扫描，重复 checkpoint 不会为已删除段重建 archive marker；新增 `wal_truncate_test`。 |
 | 2026-08-11 | CLOG 跨 backend 一致性补强：段保存使用 `.clog.lock` 文件锁和 pending bit 合并，避免独立 backend 的陈旧整段缓存互相覆盖；读端检测文件替换并刷新缓存，`clog_test` 新增 merge/refresh 回归。 |
 | 2026-08-11 | CLOG 截断安全补强：旧段在同一文件锁内完成保存、删除和目录 `fsync`，保存失败时保留段且删除/同步失败时不驱逐缓存；`clog_test` 新增正常截断与持久化失败保留回归。 |
 | 2026-08-11 | CLOG 崩溃安全收敛：`pg_xact` 段采用临时文件完整写入、段文件 `fsync`、原子 rename 与目录 `fsync`；写入失败保留 dirty 状态，数据库目录或 `pg_xact` 被删除时不重建旧路径，`clog_test` 持久化回归通过。 |
@@ -44,7 +45,7 @@
 | 2026-08-11 | 事务快照并发与恢复继续收口：普通事务不再无条件复制整库；文件级 DDL 快照按 xid 命名并持有数据库级排他锁，启动时按 WAL 提交状态清理/恢复遗留快照，PREPARE TRANSACTION 快照延迟到最终提交或回滚；`beginTransaction()` 传播前一事务的隐式提交失败。 |
 | 2026-08-11 | WAL 提交安全继续收口：`XLogFlush()` 返回 segment 同步结果；事务先刷盘 COMMIT WAL，再发布 CLOG committed，WAL 不可用或刷盘失败时 fail-closed 回滚。 |
 | 2026-08-11 | WAL 一致性继续收口：LSN 0 恢复为首个合法位置，`INVALID_LSN` 改用范围外哨兵；恢复识别未初始化页，多个 WAL writer 使用进程/文件锁和磁盘尾部刷新；新增首笔提交与崩溃恢复回归。 |
-| 2026-08-11 | Checkpoint/BufferPool 持久化错误继续收口：`pwrite/fsync` 失败保留 dirty 状态并传播到 checkpoint；checkpoint WAL、LSN 文件和 archive status 未成功时 fail-closed。WAL 截断仍未实现。 |
+| 2026-08-11 | Checkpoint/BufferPool 持久化错误继续收口：`pwrite/fsync` 失败保留 dirty 状态并传播到 checkpoint；checkpoint WAL、LSN 文件和 archive status 未成功时 fail-closed。WAL 段回收已接入归档后的 checkpoint 路径。 |
 | 2026-08-11 | BufferPool 淘汰安全继续收口：clock-sweep 不再强制淘汰 pinned 页；脏页写盘失败或页面读取失败时返回失败并保留缓存状态；新增一帧缓存淘汰/重载回归。 |
 | 2026-08-11 | 存储调用方错误契约继续收口：PageAllocator 与 B+Tree 检查 BufferPool 空页结果，root split 先写节点再发布 root header；B+Tree/Hash 已有文件级 WAL 镜像，原生 page-level、多访问方法原子提交和完整索引增量恢复仍待补齐。 |
 | 2026-08-10 | DDL 物理/catalog 顺序与原子性继续收口：`DROP SCHEMA` 现在先规划 namespace 依赖，再删除物理 schema，最后应用 catalog 计划；catalog 后处理失败恢复当前格式快照。ALTER 多子命令失败也继续恢复整句快照，并新增 schema drop-plan 回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
@@ -237,7 +238,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=131 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=132 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -282,7 +283,7 @@
 | 1.1.8 | `ABORT` | 已作为 `ROLLBACK` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
 | 1.1.9 | `BEGIN` / `START TRANSACTION` | AST 已结构化解析 isolation/read-only/write/deferrable 选项并接入执行；`DEFERRABLE` fail-closed，安全快照、时序约束和完整事务特性仍缺 | ⚠️ |
 | 1.1.10 | `CALL` | 只执行项目内字符串过程，参数替换简化；不是 PL/pgSQL/SQL procedure 运行时 | ⚠️ |
-| 1.1.11 | `CHECKPOINT` | 已刷已加载 heap/index 缓存、写 checkpoint WAL、持久化 checkpoint LSN 并传播写入/fsync/archive 失败；活动事务期间拒绝推进恢复起点；仍缺完整 restartpoint、节流和 WAL 截断 | ⚠️ |
+| 1.1.11 | `CHECKPOINT` | 已刷已加载 heap/index 缓存、写 checkpoint WAL、持久化 checkpoint LSN、归档并回收 checkpoint 前 WAL 段，传播写入/fsync/archive 失败；活动事务期间拒绝推进恢复起点；仍缺完整 restartpoint、节流和 PITR | ⚠️ |
 | 1.1.12 | `CLOSE` / `DECLARE` / `FETCH` | 游标把 SELECT 结果捕获到内存；缺少可滚动/二进制/holdable cursor、事务生命周期、portal 语义、`MOVE` | ⚠️ |
 | 1.1.13 | `COMMENT` | 主要支持 table/column；缺少 PG 支持的绝大多数对象 | ⚠️ |
 | 1.1.14 | `COMMIT` / `ROLLBACK` | 有基本事务；与 PG 的 MVCC、subtransaction、WAL crash safety 差距大 | ⚠️ |
@@ -504,7 +505,7 @@
 | 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index；缺少子事务 ID、资源释放、错误状态恢复 | ⚠️ |
 | 9.6 | DDL transactions | ALTER 已具备当前格式整库快照回滚；CREATE 的失败清理和 DROP 的只读依赖计划已覆盖主要单对象边界；仍缺完整跨对象依赖 undo、并发 DDL 锁语义和 PostgreSQL 全部隐式提交边界 | 🔄 |
 | 9.7 | Lock manager | 表/行/gap/page/advisory lock 已有 token 归属、重入/升级和双线程等待图死锁回归；仍缺 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、完整 deadlock detector 语义和 wait events | ⚠️ |
-| 9.8 | Crash safety | heap WAL 已支持 page before/after redo/undo，B+Tree/Hash 另有文件级 before/after 镜像；仍缺原生 page-level 索引 WAL、其他访问方法、WAL 截断/PITR、并发事务完整崩溃窗口和 PostgreSQL 恢复语义 | 🔄 |
+| 9.8 | Crash safety | heap WAL 已支持 page before/after redo/undo，B+Tree/Hash 另有文件级 before/after 镜像；仍缺原生 page-level 索引 WAL、其他访问方法、PITR、并发事务完整崩溃窗口和 PostgreSQL 恢复语义 | 🔄 |
 | 9.9 | Vacuum/freeze | 缺少 transaction wraparound、freeze map、visibility map、hint bits、all-visible/all-frozen | ⚠️ |
 
 ---
@@ -520,7 +521,7 @@
 | 10.3 | Page format | 有 4096 slotted page；PG 默认 8KB page，含 line pointer、tuple header、visibility 等复杂结构 | 🔄 |
 | 10.4 | Buffer manager | 有 BufferPool clock sweep、pin/usage、bgwriter/checkpointer/walwriter；刷盘错误现已传播，shared buffers 分片和完整 contention 语义仍缺 | ✅ |
 | 10.5 | WAL | 已有 record type、LSN、WAL segment、full page writes、redo routines、timeline、archive status；恢复支持提交 after-image 正序重做与未提交 before-image 逆序 undo；replication WAL sender、PITR 和完整 resource manager 仍缺 | 🔄 |
-| 10.6 | Checkpoint | 已写 checkpoint record/LSN 并检查关系页、WAL、元数据和归档状态持久化；仍缺完整 restartpoint、节流和 WAL 截断 | 🔄 |
+| 10.6 | Checkpoint | 已写 checkpoint record/LSN，检查关系页、WAL、元数据和归档状态持久化，并回收 checkpoint 前已归档 WAL 段；仍缺完整 restartpoint、节流和 PITR | 🔄 |
 | 10.7 | PITR | 缺失 | ❌ |
 | 10.8 | TOAST | 已有 TOAST relation/index、chunking 和 zlib compression；缺少 lz4/pglz、storage strategy、toast_tuple_target、out-of-line pointer/catalog 完整语义 | 🔄 |
 | 10.9 | Tablespace | 缺失 | ✅ |
