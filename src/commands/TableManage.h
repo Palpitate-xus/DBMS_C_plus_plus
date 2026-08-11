@@ -1072,6 +1072,11 @@ public:
     std::string readToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
     void deleteToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
     void deleteRowToast(const std::string& dbname, const std::string& tablename, int64_t rid);
+    void deleteToastForRow(const std::string& dbname, const std::string& tablename,
+                           const std::string& rowBuffer);
+    void deleteToastForRowExcept(const std::string& dbname, const std::string& tablename,
+                                 const std::string& rowBuffer,
+                                 const std::string& preservedRowBuffer);
     // Parse toast ID from marker string __TOAST__<id>
     static bool parseToastMarker(const std::string& val, uint64_t& toastId);
 

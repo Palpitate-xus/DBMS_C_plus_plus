@@ -1742,6 +1742,14 @@ static std::string buildHeapTupleHeader(const TableSchema& tbl,
     return header;
 }
 
+// Clear/set xmin on a mutable row buffer during rollback restoration.
+static void setRowXmin(char* rowBuffer, size_t len, uint32_t formatVersion, uint64_t xmin) {
+    if (len == 0) return;
+    if (!usesHeapTupleHeader(formatVersion) || len < sizeof(HeapTupleHeaderData)) return;
+    auto* htup = castHeapHeader(rowBuffer);
+    htup->t_fields.t_xmin = static_cast<uint32_t>(xmin);
+}
+
 // Set xmax on a mutable row buffer
 static void setRowXmax(char* rowBuffer, size_t len, uint32_t formatVersion, uint64_t xmax) {
     if (len == 0) return;
@@ -3619,7 +3627,24 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 const ReadView* readView,
                                 const std::vector<std::string>& targetPartitions) const {
     const ReadView* rv = readView;
-    if (!rv && transactionContext().inTransaction) rv = &transactionContext().readView;
+    ReadView autocommitView;
+    if (!rv && transactionContext().inTransaction) {
+        rv = &transactionContext().readView;
+    } else if (!rv) {
+        // Autocommit readers still need MVCC filtering: transactional DELETE
+        // retains the dead tuple until VACUUM, so a sequential scan must not
+        // expose a committed xmax merely because no explicit transaction is
+        // active on this backend.
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        autocommitView.creatorTxnId = 0;
+        autocommitView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        autocommitView.upLimitId = activeTransactions_.empty()
+            ? autocommitView.lowLimitId : *activeTransactions_.begin();
+        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.subTxnIds.clear();
+        autocommitView.commitLog = getCommitLog(dbname);
+        rv = &autocommitView;
+    }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -3814,7 +3839,21 @@ bool StorageEngine::forEachRowPageRange(
     PageAllocator* allocator = getPageAllocator(dbname, tablename);
     if (!allocator) return false;
 
+    ReadView autocommitView;
     const ReadView* rv = readView;
+    if (!rv && transactionContext().inTransaction) {
+        rv = &transactionContext().readView;
+    } else if (!rv) {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        autocommitView.creatorTxnId = 0;
+        autocommitView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        autocommitView.upLimitId = activeTransactions_.empty()
+            ? autocommitView.lowLimitId : *activeTransactions_.begin();
+        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.subTxnIds.clear();
+        autocommitView.commitLog = getCommitLog(dbname);
+        rv = &autocommitView;
+    }
     const uint32_t pageCount = allocator->numPages();
     const uint32_t lastPage = std::min(endPage, pageCount);
     const uint32_t fmtVer = tbl.formatVersion;
@@ -8246,11 +8285,41 @@ void StorageEngine::deleteRowToast(const std::string& dbname, const std::string&
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     std::string row;
     if (!readRowByRid(pa, rid, row, tbl)) return;
+    deleteToastForRow(dbname, tablename, row);
+}
+
+void StorageEngine::deleteToastForRow(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& rowBuffer) {
+    const TableSchema tbl = getTableSchema(dbname, tablename);
     for (size_t i = 0; i < tbl.len; ++i) {
         if (!tbl.cols[i].isVariableLength) continue;
-        std::string val = extractColumnValue(row, tbl, i);
+        const std::string val = extractColumnValue(rowBuffer, tbl, i);
         uint64_t toastId = 0;
         if (parseToastMarker(val, toastId)) {
+            deleteToast(dbname, tablename, toastId);
+        }
+    }
+}
+
+void StorageEngine::deleteToastForRowExcept(const std::string& dbname,
+                                             const std::string& tablename,
+                                             const std::string& rowBuffer,
+                                             const std::string& preservedRowBuffer) {
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    std::set<uint64_t> preservedIds;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (!tbl.cols[i].isVariableLength) continue;
+        uint64_t toastId = 0;
+        if (parseToastMarker(extractColumnValue(preservedRowBuffer, tbl, i), toastId)) {
+            preservedIds.insert(toastId);
+        }
+    }
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (!tbl.cols[i].isVariableLength) continue;
+        uint64_t toastId = 0;
+        if (parseToastMarker(extractColumnValue(rowBuffer, tbl, i), toastId) &&
+            !preservedIds.count(toastId)) {
             deleteToast(dbname, tablename, toastId);
         }
     }
@@ -13554,11 +13623,6 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         }
     }
 
-    // Delete TOAST entries for rows being deleted
-    for (int64_t rid : toDelete) {
-        deleteRowToast(dbname, tablename, rid);
-    }
-
     // Fire BEFORE DELETE triggers (row-level)
     // BEFORE DELETE triggers have access to OLD values (the row being deleted).
     // They cannot modify the row (deletion is immutable) but can perform side effects
@@ -13637,6 +13701,15 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         }
     }
 
+    // Delete TOAST entries only after BEFORE DELETE triggers succeed.  Keep
+    // old chunks until COMMIT in an explicit transaction so rollback can
+    // restore the logged tuple and its external values.
+    if (!(transactionContext().inTransaction && dbname == transactionContext().txnDB)) {
+        for (int64_t rid : toDelete) {
+            deleteRowToast(dbname, tablename, rid);
+        }
+    }
+
     // Delete rows via PageAllocator tombstones
     size_t delIdx = 0;
     for (int64_t rid : toDelete) {
@@ -13662,7 +13735,12 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                     page.update(slotId, mutableRow.data(), mutableRow.size());
                 }
             }
-            page.remove(slotId);
+            // Keep the line pointer and tuple body during an explicit
+            // transaction. Rollback can then clear xmax in place; VACUUM
+            // will reclaim the committed dead tuple later.
+            if (!(transactionContext().inTransaction && dbname == transactionContext().txnDB)) {
+                page.remove(slotId);
+            }
             pa->markDirty(pageId);
             Lsn lsn = walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
             if (lsn != INVALID_LSN) {
@@ -14276,13 +14354,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
 
-        // TOAST: prepare new external values before deleting the old chunks.
-        // A failed write must leave the old row's payload recoverable.
-        if (!prepareToastValues(dbname, tablename, tbl, rowValues)) {
-            lockManager_.unlock(tablename);
-            return DBStatus::IO_ERROR;
-        }
-        deleteRowToast(dbname, tablename, rid);
+        // Build a validation image before allocating TOAST chunks.  All
+        // constraint and foreign-key checks below must be able to fail
+        // without leaving newly allocated external values behind.
         uint64_t updateTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
         std::string newRow = buildRowBuffer(tbl, rowValues, updateTxnId);
         std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
@@ -14505,10 +14579,21 @@ DBStatus StorageEngine::update(const std::string& dbname,
             }
         }
 
+        // Allocate new external values only after every pre-write check has
+        // passed.  The old chunks remain reachable through txnLog until
+        // COMMIT; rollback removes only chunks referenced by the new row.
+        if (!prepareToastValues(dbname, tablename, tbl, rowValues)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        newRow = buildRowBuffer(tbl, rowValues, updateTxnId);
+        strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
+
         lockManager_.pageLockExclusive(dbname, tablename, pageId);
         char* pageBuf = pa->fetchPage(pageId);
         int64_t actualRid = rid;
         if (!pageBuf) {
+            deleteToastForRow(dbname, tablename, strippedNewRow);
             lockManager_.pageUnlock(dbname, tablename, pageId);
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
@@ -14577,6 +14662,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     }
                 }
                 if (!page.update(slotId, newRow.data(), newRow.size(), newSlotId)) {
+                    // prepareToastValues() may already have allocated chunks;
+                    // remove only the new row's chunks and retain the old row.
+                    deleteToastForRow(dbname, tablename, strippedNewRow);
                     pa->unpinPage(pageId);
                     lockManager_.pageUnlock(dbname, tablename, pageId);
                     lockManager_.unlock(tablename);
@@ -14614,6 +14702,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     transactionContext().txnLog.back().rowIdx = actualRid;
                 }
             }
+        }
+
+        // Outside an explicit transaction the heap update is now complete,
+        // so the old external values can be reclaimed safely.  In a
+        // transaction they remain reachable through txnLog until COMMIT.
+        if (!(transactionContext().inTransaction && dbname == transactionContext().txnDB)) {
+            deleteToastForRow(dbname, tablename, row);
         }
 
         // Update PK index if PK was updated or RID changed
@@ -19622,6 +19717,16 @@ DBStatus StorageEngine::commitTransaction() {
     CommitLog* clog = getCommitLog(transactionContext().txnDB);
     if (clog) clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Committed);
 
+    // Old UPDATE/DELETE row versions retain TOAST markers until the commit
+    // record is durable.  They are no longer reachable after COMMIT, so
+    // reclaim their chunks now; a cleanup failure only leaves garbage for
+    // VACUUM TOAST and cannot invalidate the committed row.
+    for (const auto& entry : transactionContext().txnLog) {
+        if (entry.op == TxnLogEntry::Op::Update || entry.op == TxnLogEntry::Op::Delete) {
+            deleteToastForRow(committingDb, entry.tableName, entry.rowData);
+        }
+    }
+
     // Update max committed txId
     TxnIdGenerator::instance().notifyCommit(transactionContext().currentTxnId);
     // Remove from active set
@@ -19776,6 +19881,8 @@ DBStatus StorageEngine::rollbackTransaction() {
             bool foundCurrent = false;
             if (pageBuf) {
                 PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+                walPageImage(transactionContext().txnDB, it->tableName, pageId,
+                             pageBuf, pa->pageSize(), true);
                 // Read current row data before restoring (needed to remove stale index entries)
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
@@ -19795,10 +19902,16 @@ DBStatus StorageEngine::rollbackTransaction() {
                         }
                     });
                 }
+                if (foundCurrent) {
+                    deleteToastForRowExcept(transactionContext().txnDB, it->tableName,
+                                            currentRow, it->rowData);
+                }
                 // Restore old row data
                 if (got && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
                     std::string fullRow = replaceRowData(
                         std::string(currentData, currentLen), it->rowData, tbl.formatVersion, tbl.len);
+                    setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
+                    setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else if (!got) {
                     std::string targetPk = extractPKValue(it->rowData, tbl);
@@ -19810,12 +19923,21 @@ DBStatus StorageEngine::rollbackTransaction() {
                         if (pk == targetPk) {
                             std::string fullRow = replaceRowData(
                                 std::string(data, len), it->rowData, tbl.formatVersion, tbl.len);
+                            setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
+                            setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                             page.update(sid, fullRow.data(), fullRow.size());
                             restored = true;
                         }
                     });
                 }
                 pa->markDirty(pageId);
+                Lsn lsn = walPageImage(transactionContext().txnDB, it->tableName,
+                                       pageId, pageBuf, pa->pageSize(), false);
+                if (lsn != INVALID_LSN) {
+                    setPageLsnAndChecksum(pageBuf, lsn);
+                    pa->markDirty(pageId);
+                }
+                pa->flush();
                 pa->unpinPage(pageId);
             }
             // Rebuild indexes: remove current (stale) values then insert restored values
@@ -19844,6 +19966,33 @@ DBStatus StorageEngine::rollbackTransaction() {
                 std::string val = extractColumnValue(it->rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
             }
+            for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
+                BPTree* compositeIdx = getCompositeIndexTree(
+                    transactionContext().txnDB, it->tableName, ci.name);
+                if (!compositeIdx) continue;
+                if (foundCurrent) {
+                    std::string currentKey = buildCompositeKey(currentRow, tbl, ci.columns);
+                    if (!currentKey.empty()) compositeIdx->removeMulti(currentKey, it->rowIdx);
+                }
+                std::string oldKey = buildCompositeKey(it->rowData, tbl, ci.columns);
+                if (!oldKey.empty()) compositeIdx->insertMulti(oldKey, it->rowIdx);
+            }
+            for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                HashIndex* hashIdx = getHashIndex(
+                    transactionContext().txnDB, it->tableName, colname);
+                if (!hashIdx) continue;
+                if (foundCurrent) {
+                    std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
+                    if (!currentVal.empty()) hashIdx->remove(currentVal, it->rowIdx);
+                }
+                std::string oldVal = extractColumnValue(it->rowData, tbl, colIdx);
+                if (!oldVal.empty()) hashIdx->insert(oldVal, it->rowIdx);
+            }
         } else if (it->op == TxnLogEntry::Op::Delete) {
             // Undo DELETE: restore the row by clearing tombstone and writing back old data
             uint32_t pageId; uint16_t slotId;
@@ -19851,20 +20000,28 @@ DBStatus StorageEngine::rollbackTransaction() {
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-                page.restore(slotId);
-                // The slot may have been reused by a later INSERT in the same txn.
-                // Overwrite with the logged old data (preserving any MVCC header).
+                walPageImage(transactionContext().txnDB, it->tableName, pageId,
+                             pageBuf, pa->pageSize(), true);
+                // Transactional DELETE keeps the tuple in place. Restore the
+                // payload and clear xmax so a later COMMIT of the surrounding
+                // transaction does not hide a row rolled back to this point.
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
                 size_t hdrLen = rowHeaderSize(tbl.formatVersion, tbl.len);
                 if (page.read(slotId, currentData, currentLen) && currentLen >= hdrLen) {
                     std::string fullRow = replaceRowData(
                         std::string(currentData, currentLen), it->rowData, tbl.formatVersion, tbl.len);
+                    setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
-                } else {
-                    page.update(slotId, it->rowData.data(), it->rowData.size());
                 }
                 pa->markDirty(pageId);
+                Lsn lsn = walPageImage(transactionContext().txnDB, it->tableName,
+                                       pageId, pageBuf, pa->pageSize(), false);
+                if (lsn != INVALID_LSN) {
+                    setPageLsnAndChecksum(pageBuf, lsn);
+                    pa->markDirty(pageId);
+                }
+                pa->flush();
                 pa->unpinPage(pageId);
             }
             // Re-add to indexes
@@ -19884,6 +20041,25 @@ DBStatus StorageEngine::rollbackTransaction() {
                 if (!secIdx) continue;
                 std::string val = extractColumnValue(it->rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
+            }
+            for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
+                BPTree* compositeIdx = getCompositeIndexTree(
+                    transactionContext().txnDB, it->tableName, ci.name);
+                if (!compositeIdx) continue;
+                std::string key = buildCompositeKey(it->rowData, tbl, ci.columns);
+                if (!key.empty()) compositeIdx->insertMulti(key, it->rowIdx);
+            }
+            for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                HashIndex* hashIdx = getHashIndex(
+                    transactionContext().txnDB, it->tableName, colname);
+                if (!hashIdx) continue;
+                std::string value = extractColumnValue(it->rowData, tbl, colIdx);
+                if (!value.empty()) hashIdx->insert(value, it->rowIdx);
             }
         }
     }
@@ -20273,6 +20449,8 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             bool foundCurrent = false;
             if (pageBuf) {
                 PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+                walPageImage(transactionContext().txnDB, entry.tableName, pageId,
+                             pageBuf, pa->pageSize(), true);
                 // Read current row data before restoring (needed to remove stale index entries)
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
@@ -20291,10 +20469,16 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                         }
                     });
                 }
+                if (foundCurrent) {
+                    deleteToastForRowExcept(transactionContext().txnDB, entry.tableName,
+                                            currentRow, entry.rowData);
+                }
                 // Restore old row data
                 if (page.read(slotId, currentData, currentLen) && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
                     std::string fullRow = replaceRowData(
                         std::string(currentData, currentLen), entry.rowData, tbl.formatVersion, tbl.len);
+                    setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
+                    setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else {
                     std::string targetPk = extractPKValue(entry.rowData, tbl);
@@ -20306,12 +20490,21 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                         if (pk == targetPk) {
                             std::string fullRow = replaceRowData(
                                 std::string(data, len), entry.rowData, tbl.formatVersion, tbl.len);
+                            setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
+                            setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                             page.update(sid, fullRow.data(), fullRow.size());
                             restored = true;
                         }
                     });
                 }
                 pa->markDirty(pageId);
+                Lsn lsn = walPageImage(transactionContext().txnDB, entry.tableName,
+                                       pageId, pageBuf, pa->pageSize(), false);
+                if (lsn != INVALID_LSN) {
+                    setPageLsnAndChecksum(pageBuf, lsn);
+                    pa->markDirty(pageId);
+                }
+                pa->flush();
                 pa->unpinPage(pageId);
             }
             // Rebuild indexes: remove current (stale) values then insert restored values
@@ -20340,14 +20533,59 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
             }
+            for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
+                BPTree* compositeIdx = getCompositeIndexTree(
+                    transactionContext().txnDB, entry.tableName, ci.name);
+                if (!compositeIdx) continue;
+                if (foundCurrent) {
+                    std::string currentKey = buildCompositeKey(currentRow, tbl, ci.columns);
+                    if (!currentKey.empty()) compositeIdx->removeMulti(currentKey, entry.rowIdx);
+                }
+                std::string oldKey = buildCompositeKey(entry.rowData, tbl, ci.columns);
+                if (!oldKey.empty()) compositeIdx->insertMulti(oldKey, entry.rowIdx);
+            }
+            for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                HashIndex* hashIdx = getHashIndex(
+                    transactionContext().txnDB, entry.tableName, colname);
+                if (!hashIdx) continue;
+                if (foundCurrent) {
+                    std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
+                    if (!currentVal.empty()) hashIdx->remove(currentVal, entry.rowIdx);
+                }
+                std::string oldVal = extractColumnValue(entry.rowData, tbl, colIdx);
+                if (!oldVal.empty()) hashIdx->insert(oldVal, entry.rowIdx);
+            }
         } else if (entry.op == TxnLogEntry::Op::Delete) {
             uint32_t pageId; uint16_t slotId;
             decodeRid(entry.rowIdx, pageId, slotId);
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
-                page.restore(slotId);
+                const char* currentData = nullptr;
+                size_t currentLen = 0;
+                walPageImage(transactionContext().txnDB, entry.tableName, pageId,
+                             pageBuf, pa->pageSize(), true);
+                if (page.read(slotId, currentData, currentLen) &&
+                    currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
+                    std::string fullRow = replaceRowData(
+                        std::string(currentData, currentLen), entry.rowData,
+                        tbl.formatVersion, tbl.len);
+                    setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
+                    page.update(slotId, fullRow.data(), fullRow.size());
+                }
                 pa->markDirty(pageId);
+                Lsn lsn = walPageImage(transactionContext().txnDB, entry.tableName,
+                                       pageId, pageBuf, pa->pageSize(), false);
+                if (lsn != INVALID_LSN) {
+                    setPageLsnAndChecksum(pageBuf, lsn);
+                    pa->markDirty(pageId);
+                }
+                pa->flush();
                 pa->unpinPage(pageId);
             }
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
@@ -20366,6 +20604,25 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 if (!secIdx) continue;
                 std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);
+            }
+            for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
+                BPTree* compositeIdx = getCompositeIndexTree(
+                    transactionContext().txnDB, entry.tableName, ci.name);
+                if (!compositeIdx) continue;
+                std::string key = buildCompositeKey(entry.rowData, tbl, ci.columns);
+                if (!key.empty()) compositeIdx->insertMulti(key, entry.rowIdx);
+            }
+            for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
+                size_t colIdx = tbl.len;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                HashIndex* hashIdx = getHashIndex(
+                    transactionContext().txnDB, entry.tableName, colname);
+                if (!hashIdx) continue;
+                std::string value = extractColumnValue(entry.rowData, tbl, colIdx);
+                if (!value.empty()) hashIdx->insert(value, entry.rowIdx);
             }
         }
     }

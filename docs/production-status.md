@@ -4,7 +4,7 @@
 
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，125 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=127 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
-本轮新增事务回归验证普通 INSERT 回滚和 `ROLLBACK TO SAVEPOINT` 会清理主键、单列二级、复合、Hash 索引及 TOAST 线外值；索引写入失败会传播并回滚堆元组。索引专用 WAL resource manager、跨访问方法原子提交和完整崩溃窗口仍未完成。
+本轮新增事务回归验证 INSERT、UPDATE、DELETE 的普通回滚和 `ROLLBACK TO SAVEPOINT` 会一致恢复主键、单列二级、复合、Hash 索引及 TOAST 线外值；索引写入失败会传播并回滚堆元组。事务 DELETE 保留死 tuple 到事务结束，savepoint 回滚清除 `xmax` 后仍可在同一事务提交并读取；提交后旧 UPDATE/DELETE 版本的 TOAST 块才回收。索引专用 WAL resource manager、跨访问方法原子提交和完整崩溃窗口仍未完成。
 
 本轮已完成的基础收敛：
 
@@ -20,6 +20,7 @@
 - WAL 提交路径已收紧：`XLogFlush()` 返回并传播 segment `fsync` 失败；事务先成功写入并刷盘 COMMIT WAL 记录，再发布 CLOG committed 状态，WAL 不可用时 fail-closed 回滚，避免崩溃恢复缺少提交证据。
 - WAL LSN 语义已收敛：LSN 0 作为首个合法日志位置，`INVALID_LSN` 使用范围外哨兵；恢复逻辑明确跳过未初始化页的无效页 LSN。多个 WAL writer 通过进程互斥、WAL 文件锁和磁盘尾部刷新避免过期 LSN 覆盖日志。
 - INSERT 回滚覆盖复合/Hash 索引和 TOAST：普通事务与 SAVEPOINT 回滚按 `(key, RID)` 精确移除多值索引项，并为堆删除写入 WAL before/after image，避免回滚行在重启恢复时复活；Hash AM 的插入/删除失败会向上返回。
+- UPDATE/DELETE 回滚覆盖复合/Hash 索引和 TOAST：UPDATE 回滚只删除新版本独占的 TOAST 块并恢复旧索引键；DELETE 在显式事务内保留 heap tuple，普通回滚和 SAVEPOINT 回滚清除 `xmax` 并写入 WAL before/after image；提交后清理旧版本 TOAST，避免回滚后行或线外值丢失。
 - BufferPool/Checkpoint 刷盘已收紧：`pwrite/fsync` 失败会保留 dirty 状态并向 `PageAllocator`、`checkpoint()` 和交互式 `CHECKPOINT` 传播；clock-sweep 不再强制淘汰 pinned 页或丢弃无法写出的脏页，读取失败返回空指针；checkpoint 元数据和 archive status 未完成持久化时不会报告成功。WAL segment 截断仍未实现，当前保留日志用于恢复。
 - PageAllocator 与 B+Tree 已适配 BufferPool 的失败契约：heap header/page 和索引 node/header 读写遇到 I/O 失败会返回失败，不再直接解引用空页；B+Tree 打开时拒绝损坏的 order/header。事务快照创建前和 COMMIT WAL 发布前会统一刷已加载的 heap、B+Tree、TOAST index、Hash 缓存；索引专用 WAL resource manager、索引多页更新的完整原子提交和崩溃窗口仍未完成。
 - Hash/GIN/BRIN 独立索引文件现在使用严格格式校验；写入采用临时文件 + fsync + 原子 rename，写入失败保留 dirty 状态，截断、非法版本和尾随垃圾会拒绝打开。BRIN 当前格式按本项目策略重建，不兼容旧索引文件；StorageEngine 中各访问方法的完整 WAL-safe 增量维护仍未完成。

@@ -124,6 +124,92 @@ static void test_insert_rollback_cleans_all_indexes() {
     std::cout << "[CONCURRENCY] INSERT rollback cleans secondary/composite/hash/TOAST state OK" << std::endl;
 }
 
+// UPDATE/DELETE rollback must restore the heap tuple, every index access
+// method, and the old TOAST value.  This also covers savepoint rollback,
+// because the savepoint path has separate heap and index undo code.
+static void test_update_delete_rollback_cleans_all_indexes() {
+    std::string db = testDbPath("update_delete_rollback_indexes");
+    if (g_engine.inTransaction()) {
+        try { g_engine.rollbackTransaction(); } catch (...) {}
+    }
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    dbms::TableSchema rollbackTable;
+    rollbackTable.tablename = "rollback_t";
+    rollbackTable.formatVersion = 2;
+    rollbackTable.append(dbms::makeIntColumn("id", false, 0, true));
+    rollbackTable.append(dbms::makeIntColumn("a", false, 0, false));
+    rollbackTable.append(dbms::makeIntColumn("b", false, 0, false));
+    rollbackTable.append(dbms::makeVarCharColumn("payload", false, 10000, false));
+    assert(g_engine.createTable(db, rollbackTable) == dbms::DBStatus::OK);
+    assert(g_engine.createIndex(db, "rollback_t", "a") == dbms::DBStatus::OK);
+    assert(g_engine.createCompositeIndex(db, "rollback_t", {"a", "b"}, "ab_idx") == dbms::DBStatus::OK);
+    assert(g_engine.createHashIndex(db, "rollback_t", "b") == dbms::DBStatus::OK);
+
+    const std::string originalPayload(10000, 'x');
+    const std::string updatedPayload(10000, 'y');
+    assert(g_engine.insert(db, "rollback_t", {{"id", "1"}, {"a", "7"}, {"b", "9"},
+                                               {"payload", originalPayload}}) == dbms::DBStatus::OK);
+    auto* hash = g_engine.getHashIndex(db, "rollback_t", "b");
+    auto* composite = g_engine.getCompositeIndexTree(db, "rollback_t", "ab_idx");
+    assert(hash && composite);
+    const auto originalCompositeValues = composite->allValues();
+    assert(originalCompositeValues.size() == 1);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.update(db, "rollback_t",
+                           {{"a", "8"}, {"b", "10"}, {"payload", updatedPayload}},
+                           {"=id 1"}) == dbms::DBStatus::OK);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    auto rows = g_engine.query(db, "rollback_t", {"=id 1"}, {"a", "b", "payload"});
+    assert(rows.size() == 1 && rows[0].find("7") != std::string::npos &&
+           rows[0].find("9") != std::string::npos && rows[0].find(originalPayload) != std::string::npos);
+    assert(g_engine.query(db, "rollback_t", {"=a 8"}, {"id"}).empty());
+    assert(g_engine.query(db, "rollback_t", {"=b 10"}, {"id"}).empty());
+    assert(hash->search("10").empty());
+    assert(hash->search("9").size() == 1);
+    assert(composite->allValues() == originalCompositeValues);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.savepoint("before_update") == dbms::DBStatus::OK);
+    assert(g_engine.update(db, "rollback_t",
+                           {{"a", "11"}, {"b", "12"}, {"payload", updatedPayload}},
+                           {"=id 1"}) == dbms::DBStatus::OK);
+    assert(g_engine.rollbackToSavepoint("before_update") == dbms::DBStatus::OK);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.query(db, "rollback_t", {"=a 11"}, {"id"}).empty());
+    assert(g_engine.query(db, "rollback_t", {"=b 12"}, {"id"}).empty());
+    assert(hash->search("12").empty());
+    assert(composite->allValues() == originalCompositeValues);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.remove(db, "rollback_t", {"=id 1"}) == dbms::DBStatus::OK);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.query(db, "rollback_t", {"=id 1"}, {"payload"}).size() == 1);
+    assert(hash->search("9").size() == 1);
+    assert(composite->allValues() == originalCompositeValues);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.savepoint("before_delete") == dbms::DBStatus::OK);
+    assert(g_engine.remove(db, "rollback_t", {"=id 1"}) == dbms::DBStatus::OK);
+    assert(g_engine.rollbackToSavepoint("before_delete") == dbms::DBStatus::OK);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+    rows = g_engine.query(db, "rollback_t", {"=id 1"}, {"payload"});
+    assert(rows.size() == 1 && rows[0].find(originalPayload) != std::string::npos);
+    assert(hash->search("9").size() == 1);
+    assert(composite->allValues() == originalCompositeValues);
+
+    {
+        dbms::StorageEngine reopened;
+        auto reopenedRows = reopened.query(db, "rollback_t", {"=id 1"}, {"payload"});
+        assert(reopenedRows.size() == 1 && reopenedRows[0].find(originalPayload) != std::string::npos);
+        auto* reopenedHash = reopened.getHashIndex(db, "rollback_t", "b");
+        assert(reopenedHash && reopenedHash->search("9").size() == 1);
+    }
+    cleanup(db);
+    std::cout << "[CONCURRENCY] UPDATE/DELETE rollback restores indexes and TOAST OK" << std::endl;
+}
+
 // Test 2: WAL 顺序写入性能
 static void test_wal_throughput() {
     std::string db = testDbPath("wal_perf");
@@ -320,6 +406,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_transaction_atomicity();
     test_insert_rollback_cleans_all_indexes();
+    test_update_delete_rollback_cleans_all_indexes();
     test_wal_throughput();
     test_indexed_lookup();
     test_checkpoint_recovery();

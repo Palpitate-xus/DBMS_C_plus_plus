@@ -7,6 +7,8 @@
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
+2026-08-11 增量审计：UPDATE/DELETE 事务 undo 现在覆盖复合/Hash 索引与 TOAST 生命周期；UPDATE 回滚仅清理新版本独占的线外块，DELETE 在显式事务中保留死 tuple，普通回滚和 SAVEPOINT 回滚清除 `xmax` 并写入 heap WAL before/after image。旧 UPDATE/DELETE 版本的 TOAST 块在刷盘 COMMIT 后回收；索引专用 WAL resource manager、跨访问方法原子提交和完整崩溃窗口仍待后续。
+
 2026-08-11 增量审计：事务/DDL 物理快照现在包含外置 tablespace 的数据库关系目录；UNLOGGED 关系的 heap、fork、索引和 TOAST 文件按崩溃语义从快照排除，空 tablespace 也可安全参与事务快照。
 
 2026-08-11 增量审计：`DdlTransaction::commit()` 现在检查引擎提交状态；延迟约束或 SSI 提交失败会返回错误，并恢复已启用的 DDL 物理快照，防止 DDL 执行器把失败状态报告为成功。
