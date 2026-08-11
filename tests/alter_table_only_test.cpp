@@ -41,6 +41,9 @@ static void test_set_tablespace() {
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE t (id INT)", s));
     assert(g_engine.insert(db, "t", {{"id", "42"}}) == dbms::DBStatus::OK);
+    size_t rows = 0;
+    g_engine.forEachRow(db, "t", [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
+    assert(rows == 1);
 
     auto res = g_engine.alterTableTablespace(db, "t", "my_space");
     assert(res == dbms::DBStatus::OK);
@@ -53,13 +56,41 @@ static void test_set_tablespace() {
     // A fresh engine must read the migrated relation, not create an empty
     // default-path file after restart.
     dbms::StorageEngine restarted;
-    size_t rows = 0;
+    rows = 0;
     restarted.forEachRow(db, "t", [&](uint32_t, uint16_t, const char* data, size_t len) {
         ++rows;
         assert(len > 0);
         (void)data;
     });
     assert(rows == 1);
+
+    // Transaction snapshots must include external tablespace files. Move the
+    // table during a transaction, abort, restore the snapshot, and verify the
+    // original custom relation is still readable.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.alterTableTablespace(db, "t", "pg_default") == dbms::DBStatus::OK);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.restoreTransactionBackup(db));
+    assert(g_engine.getTableSchema(db, "t").tablespace == "my_space");
+    rows = 0;
+    g_engine.forEachRow(db, "t", [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
+    assert(rows == 1);
+
+    // UNLOGGED relation files are intentionally absent from crash snapshots.
+    assert(!ddl.executeSql(
+        "CREATE TABLE u (id INT) TABLESPACE my_space", s));
+    assert(g_engine.insert(db, "u", {{"id", "9"}}) == dbms::DBStatus::OK);
+    assert(g_engine.alterTableSetLogged(db, "u", false) == dbms::DBStatus::OK);
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.alterTableTablespace(db, "u", "pg_default") == dbms::DBStatus::OK);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.restoreTransactionBackup(db));
+    auto unloggedSchema = g_engine.getTableSchema(db, "u");
+    assert(unloggedSchema.isUnlogged && unloggedSchema.tablespace == "my_space");
+    rows = 0;
+    g_engine.forEachRow(db, "u", [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
+    assert(rows == 0);
+    assert(g_engine.dropTable(db, "u") == dbms::DBStatus::OK);
 
     const std::string backup = db + "_backup";
     cleanup(backup);

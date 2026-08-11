@@ -1273,6 +1273,30 @@ std::filesystem::path StorageEngine::vmPath(const std::string& dbname,
     return relationDir(dbname, tablename) / (tablename + ".vm");
 }
 
+// Relation forks and access-method files share the table-name prefix, while
+// catalog sidecars (for example .stc and .params) remain in dbPath(). Keep
+// this predicate in one place so migration, snapshot filtering and DROP use
+// identical boundaries and never confuse table "t" with table "t2".
+static bool isRelationPhysicalFileName(const std::string& name,
+                                        const std::string& tablename) {
+    if (name == tablename + ".toast") return true;
+    if (name.rfind(tablename + "#", 0) != 0 &&
+        name.rfind(tablename + "_", 0) != 0 &&
+        name.rfind(tablename + ".", 0) != 0) {
+        return false;
+    }
+    const std::array<std::string, 9> suffixes = {
+        ".dt", ".fsm", ".vm", ".idx", ".hidx", ".fti", ".gin", ".gist", ".brin"};
+    for (const auto& suffix : suffixes) {
+        if (name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            return true;
+        }
+    }
+    return name == tablename + ".toastmeta" ||
+           name.rfind(tablename + ".idx_", 0) == 0;
+}
+
 std::filesystem::path StorageEngine::tableListPath(const std::string& dbname) const {
     return dbPath(dbname) / "tlist.lst";
 }
@@ -10247,6 +10271,11 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
         return DBStatus::OK;
     }
 
+    // The relation can have dirty pages in the shared buffer pool even when
+    // the SQL statement itself is outside an explicit transaction. Flush the
+    // owning allocator before moving its inode across tablespace directories.
+    if (PageAllocator* pa = getPageAllocator(dbname, tablename)) pa->flush();
+    closeDatabaseCaches(dbname);
     const auto oldDir = relationDir(dbname, tablename);
     const auto newDir = targetTablespace == "pg_default"
         ? dbPath(dbname)
@@ -10257,22 +10286,6 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-
-    auto isRelationFile = [&](const std::string& name) {
-        const std::string prefix = tablename;
-        if (name == prefix + ".toast") return true;
-        const std::array<std::string, 9> suffixes = {
-            ".dt", ".fsm", ".vm", ".idx", ".hidx", ".fti", ".gin", ".gist", ".brin"};
-        for (const auto& suffix : suffixes) {
-            if (name.size() >= prefix.size() + suffix.size() &&
-                name.compare(0, prefix.size(), prefix) == 0 &&
-                name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-                return true;
-            }
-        }
-        return name == prefix + ".toastmeta" ||
-               (name.rfind(prefix + ".idx_", 0) == 0);
-    };
 
     std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moved;
     auto rollbackMove = [&]() {
@@ -10295,7 +10308,7 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
         if (std::filesystem::exists(oldDir)) {
             for (const auto& entry : std::filesystem::directory_iterator(oldDir)) {
                 const auto name = entry.path().filename().string();
-                if (!isRelationFile(name)) continue;
+                if (!isRelationPhysicalFileName(name, tablename)) continue;
                 const auto destination = newDir / name;
                 if (std::filesystem::exists(destination)) {
                     rollbackMove();
@@ -18519,15 +18532,37 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
                 std::string location;
                 if (!std::getline(in, location) || location.empty()) return false;
                 auto relationRoot = std::filesystem::path(location) / dbname;
-                if (!std::filesystem::exists(relationRoot)) return false;
                 auto destination = tablespaceBackup / marker.path().stem();
                 std::filesystem::create_directories(tablespaceBackup);
-                std::filesystem::copy(relationRoot, destination,
-                    std::filesystem::copy_options::recursive);
+                if (std::filesystem::exists(destination)) {
+                    std::filesystem::remove_all(destination);
+                }
+                if (std::filesystem::exists(relationRoot)) {
+                    std::filesystem::create_directories(destination);
+                    for (const auto& relationEntry :
+                         std::filesystem::directory_iterator(relationRoot)) {
+                        const auto relationDestination =
+                            destination / relationEntry.path().filename();
+                        if (relationEntry.is_directory()) {
+                            std::filesystem::copy(relationEntry.path(), relationDestination,
+                                std::filesystem::copy_options::recursive |
+                                std::filesystem::copy_options::overwrite_existing);
+                        } else {
+                            std::filesystem::copy_file(relationEntry.path(), relationDestination,
+                                std::filesystem::copy_options::overwrite_existing);
+                        }
+                    }
+                } else {
+                    // A newly-created tablespace may not have a database
+                    // subdirectory until its first relation is created.
+                    std::filesystem::create_directories(destination);
+                }
             }
         }
         return true;
-    } catch (...) {
+    } catch (const std::exception& e) {
+        std::cerr << "[storage] physical backup failed for " << dbname
+                  << ": " << e.what() << std::endl;
         return false;
     }
 }
@@ -18904,29 +18939,43 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
         if (pa) pa->flush();
     }
 
-    // Keep a backup for crash recovery (recoverAllDatabases)
-    // Skip data/index files of UNLOGGED tables (they are truncated on crash)
-    std::set<std::string> unloggedFiles;
-    for (const auto& tn : tblNames) {
-        TableSchema ts = getTableSchema(dbname, tn);
-        if (ts.isUnlogged) {
-            unloggedFiles.insert(tn + ".dt");
-            unloggedFiles.insert(tn + ".idx");
-        }
-    }
+    // Keep a complete physical backup for crash/DDL recovery.  This also
+    // captures external tablespaces; copying only dbPath(dbname) would make
+    // rollback restore catalog metadata without restoring the relation data.
     std::filesystem::path backup = dbPath(dbname);
     backup += ".txn_backup";
     if (std::filesystem::exists(backup)) {
         std::filesystem::remove_all(backup);
     }
-    std::filesystem::create_directories(backup);
-    for (const auto& entry : std::filesystem::directory_iterator(dbPath(dbname))) {
-        if (unloggedFiles.count(entry.path().filename().string())) continue;
-        std::filesystem::path dest = backup / entry.path().filename();
-        if (entry.is_directory()) {
-            std::filesystem::copy(entry.path(), dest, std::filesystem::copy_options::recursive);
-        } else {
-            std::filesystem::copy(entry.path(), dest);
+    if (!physicalBackup(dbname, backup.string())) {
+        std::error_code ec;
+        std::filesystem::remove_all(backup, ec);
+        return DBStatus::INVALID_VALUE;
+    }
+
+    // UNLOGGED relations are intentionally empty after crash recovery. Remove
+    // every physical fork/index/TOAST file from the snapshot while retaining
+    // their schema and catalog metadata. The delimiter checks avoid treating
+    // a table named "t2" as a relation belonging to table "t".
+    for (const auto& tn : tblNames) {
+        TableSchema ts = getTableSchema(dbname, tn);
+        if (!ts.isUnlogged) continue;
+        std::filesystem::path relationBackup = backup;
+        if (!ts.tablespace.empty() && ts.tablespace != "pg_default") {
+            relationBackup /= "tablespaces";
+            relationBackup /= ts.tablespace;
+        }
+        if (!std::filesystem::exists(relationBackup)) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(relationBackup)) {
+            if (isRelationPhysicalFileName(entry.path().filename().string(), tn)) {
+                std::error_code ec;
+                std::filesystem::remove_all(entry.path(), ec);
+                if (ec) {
+                    std::error_code cleanupEc;
+                    std::filesystem::remove_all(backup, cleanupEc);
+                    return DBStatus::INVALID_VALUE;
+                }
+            }
         }
     }
 

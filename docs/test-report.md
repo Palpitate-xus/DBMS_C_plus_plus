@@ -1,6 +1,6 @@
 # DBMS 功能测试报告
 
-> 最后更新：2026-08-10
+> 最后更新：2026-08-11
 > 自动测试套件基线：PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
@@ -33,6 +33,7 @@
 - 新增数据库生命周期回归：`DROP DATABASE` 释放数据库级缓存后，同名重建不会继承旧 CLOG/WAL/page/index 状态。
 - 新增 typed `ALTER TABLE` 路由回归：验证 AST bridge 的 ADD COLUMN、DEFAULT、NOT NULL、RENAME COLUMN/TABLE，以及 `RENAME TO` 不再误判为列重命名。
 - 新增 ALTER statement atomicity 回归：`ddl_transaction_skeleton_test` 验证多子命令中前一动作已落盘、后一动作失败时，整句 schema 会从 DDL 快照恢复，且事务快照不会残留。
+- 新增外置 tablespace 事务快照回归：表移动到自定义 tablespace 后，在事务内移回默认目录并回滚，快照恢复 schema 与外置 heap 数据；同一场景覆盖全新引擎读取。
 - 新增 schema 格式完整性回归：截断 schema 与错误 magic 均 fail-closed，不会返回可写的部分 schema。
 - Docker 镜像构建：`docker build -t dbms-cpp:verification .` ✅（OpenSSL 真实 TLS）；Compose 配置检查 ✅。
 - CMake：当前验证环境未安装 `cmake`，配置/编译未执行。
@@ -934,5 +935,5 @@ heap、FSM/VM、索引、分区和 TOAST 文件位于 `<LOCATION>/<DATABASE>/`�
 
 ---
 
-*报告生成时间：2026-08-10*
+*报告生成时间：2026-08-11*
 *测试执行人：自动化测试脚本 + 人工验证*

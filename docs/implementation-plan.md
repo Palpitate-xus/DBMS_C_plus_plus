@@ -7,6 +7,8 @@
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
+2026-08-11 增量审计：事务/DDL 物理快照现在包含外置 tablespace 的数据库关系目录；UNLOGGED 关系的 heap、fork、索引和 TOAST 文件按崩溃语义从快照排除，空 tablespace 也可安全参与事务快照。
+
 当前 schema 格式已升级为 `0x44420009`：固定标识符字段统一使用 64 字节容量，支持 PostgreSQL 63 字节级别的表名、列名、类型名和约束名；旧格式不迁移，必须重建数据库。
 
 构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`。测试编排唯一由 `build_tests.sh` 负责，`run_all_tests_fast.sh` 仅是安静输出外壳，避免两套测试链接/桩选择逻辑漂移。
@@ -221,7 +223,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 3.9 实现 Snapshot 导出/导入、`subxip`、catalog snapshot | 9.2 | snapshot_export_import_test
 | ✅ 3.10 实现数据库目录与关系 fork 管理（当前实现） | 10.1 | 当前使用 StorageEngine 路径管理；旧 `ClusterLayout` 并行实现已删除
 | ⚠️ 3.11 实现 TOAST relation / index / compression / chunking | 10.8 | 当前 relation/index、zlib compression 和 chunking 已覆盖；PG pointer/catalog、lz4/pglz 与 storage strategy 仍缺
-| ✅ 3.12 实现 tablespace 物理路由与 `pg_tblspc` 符号链接 | 10.9, 1.1.30 | 关系文件统一路由到 `<location>/<database>/`；当前用 `.path` marker 表示位置，真实 PostgreSQL OID/符号链接布局仍待补齐
+| ✅ 3.12 实现 tablespace 物理路由与 `pg_tblspc` 符号链接 | 10.9, 1.1.30 | 关系文件统一路由到 `<location>/<database>/`；事务/DDL 快照包含外置关系，当前用 `.path` marker 表示位置，真实 PostgreSQL OID/符号链接布局仍待补齐
 | ✅ 3.13 实现 data page checksums | 10.10 | Page checksum in PgPage
 | ✅ 3.14 实现 storage parameters（fillfactor / autovacuum / toast …） | 10.11, 4.4 | fillfactor_test 覆盖
 

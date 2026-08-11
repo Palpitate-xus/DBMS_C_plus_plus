@@ -1,6 +1,6 @@
 # 功能缺失清单 (Feature Gaps)
 
-> 生成日期: 2026-08-10
+> 生成日期: 2026-08-11
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
 > 本 DBMS 当前状态（2026-08-10）: 生产化重构进行中，统一回归基线 PASS=127 FAIL=0（125 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移；ALTER TABLE 多子命令失败已具备整句快照回滚，DROP TABLE/SCHEMA 已采用物理删除后应用 catalog 计划，但完整 DDL 依赖事务语义仍在建设。
 
