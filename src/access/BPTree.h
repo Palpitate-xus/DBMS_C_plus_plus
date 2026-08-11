@@ -31,6 +31,9 @@ public:
     // Remove key. Returns false if key not found.
     bool remove(const std::string& key);
 
+    // Remove one exact key-value pair from a multi-value index.
+    bool removeMulti(const std::string& key, int64_t value);
+
     // Search for key. Returns true if found, sets value.
     bool search(const std::string& key, int64_t& value) const;
 
@@ -85,7 +88,8 @@ private:
     bool insertNonFull(uint32_t pageNum, const std::string& key, int64_t value);
     bool splitChild(uint32_t parentPage, int childIdx, uint32_t childPage);
 
-    bool removeFromNode(uint32_t pageNum, const std::string& key);
+    bool removeFromNode(uint32_t pageNum, const std::string& key,
+                        const std::optional<int64_t>& value);
     bool searchNode(uint32_t pageNum, const std::string& key, int64_t& value) const;
     bool collectRange(uint32_t pageNum, const std::string& startKey,
                       const std::string& endKey, std::vector<int64_t>& out) const;

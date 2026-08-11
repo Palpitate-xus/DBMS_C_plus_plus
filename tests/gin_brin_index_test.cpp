@@ -3,6 +3,7 @@
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
 #include <cassert>
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -205,7 +206,17 @@ static void test_btree_split_and_range() {
         for (int i = 0; i < 6000; ++i) assert(tree.insertMulti("same", i));
         auto matches = tree.searchMulti("same");
         assert(matches.size() == 6000);
+        assert(tree.removeMulti("same", 3000));
+        assert(!tree.removeMulti("same", 3000));
+        matches = tree.searchMulti("same");
+        assert(matches.size() == 5999);
+        assert(std::find(matches.begin(), matches.end(), 2999) != matches.end());
+        assert(std::find(matches.begin(), matches.end(), 3001) != matches.end());
         tree.close();
+        dbms::BPTree reopened(idx);
+        assert(reopened.open());
+        assert(reopened.searchMulti("same").size() == 5999);
+        reopened.close();
     }
     cleanup(idx);
     std::cout << "[BPTREE] root split/search/range OK" << std::endl;

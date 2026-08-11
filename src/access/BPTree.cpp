@@ -419,16 +419,22 @@ bool BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
 // ========================================================================
 bool BPTree::remove(const std::string& key) {
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    return removeFromNode(header_.rootPage, key);
+    return removeFromNode(header_.rootPage, key, std::nullopt);
 }
 
-bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key) {
+bool BPTree::removeMulti(const std::string& key, int64_t value) {
+    if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
+    return removeFromNode(header_.rootPage, key, value);
+}
+
+bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key,
+                            const std::optional<int64_t>& value) {
     auto nodeOpt = readNode(pageNum);
     if (!nodeOpt) return false;
     Node node = std::move(*nodeOpt);
     if (node.isLeaf) {
         for (size_t i = 0; i < node.numKeys; ++i) {
-            if (node.keys[i] == key) {
+            if (node.keys[i] == key && (!value || node.values[i] == *value)) {
                 node.keys.erase(node.keys.begin() + i);
                 node.values.erase(node.values.begin() + i);
                 node.numKeys--;
@@ -437,15 +443,14 @@ bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key) {
         }
         return false;
     }
-    size_t i = 0;
-    while (i < node.numKeys && key >= node.keys[i]) ++i;
-    if (i < node.children.size()) {
-        bool removed = removeFromNode(node.children[i], key);
-        if (removed) {
-            // Update key if first key of child changed (simplified)
-            // For a full implementation we'd handle underflow here
-        }
-        return removed;
+    // Equal separator keys can span multiple leaves after a split. Start at
+    // the leftmost possible child and visit every child whose separator is
+    // equal to the target, otherwise a duplicate RID could be missed.
+    size_t first = 0;
+    while (first < node.numKeys && key > node.keys[first]) ++first;
+    for (size_t i = first; i < node.children.size(); ++i) {
+        if (i > first && node.keys[i - 1] != key) break;
+        if (removeFromNode(node.children[i], key, value)) return true;
     }
     return false;
 }

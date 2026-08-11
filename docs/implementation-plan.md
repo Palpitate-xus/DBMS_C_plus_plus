@@ -19,7 +19,7 @@
 
 2026-08-11 增量审计：BufferPool/PageAllocator 不再吞掉 `pwrite/fsync` 失败，checkpoint 只有在关系页、checkpoint WAL、checkpoint 元数据和归档状态均成功后才返回成功；clock-sweep 不再强制淘汰 pinned 页或丢弃写盘失败的 dirty 页；WAL 截断仍保留为后续工作。
 
-2026-08-11 增量审计：PageAllocator 与 B+Tree 全面检查 BufferPool 的空页返回，heap header/page、index header/node 读取和写入失败均安全返回；B+Tree root split 先完成节点写入再发布 root header。
+2026-08-11 增量审计：PageAllocator 与 B+Tree 全面检查 BufferPool 的空页返回，heap header/page、index header/node 读取和写入失败均安全返回；B+Tree root split 先完成节点写入再发布 root header；多值索引新增 `(key, RID)` 精确删除，DML/级联/事务回滚不再按 key 误删同 key 的其他索引项。
 
 2026-08-11 增量审计：`forEachRow()` 的失败契约已传递到 B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建、`REINDEX` 以及 Volcano 顺序/索引扫描；这些路径不再把 heap I/O 失败当成空结果，全文/GiST/SP-GiST/GIN/BRIN 也在完整扫描后原子发布。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 和增量维护仍待后续。
 
@@ -726,7 +726,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
 | 🔄 6.1 实现 `amhandler`、support functions、opclass/opfamily、`amcostestimate`、`amvalidate` | 8.1, 16.7 | `IIndexAM` 接口 + `BPTreeIndexAM` + `HashIndexAM` 适配器已就绪；PG 完整 AM API 仍缺 |
-| ⚠️ 6.2 补全 B-tree（dedup、suffix truncation、visibility map 驱动 index-only scan） | 8.2 | 基础 B+Tree 已覆盖跨叶/内部节点分裂、重复键和范围扫描；PG 高级 B-tree 能力仍缺 |
+| ⚠️ 6.2 补全 B-tree（dedup、suffix truncation、visibility map 驱动 index-only scan） | 8.2 | 基础 B+Tree 已覆盖跨叶/内部节点分裂、重复键、范围扫描和多值 `(key, RID)` 精确删除；PG 高级 B-tree 能力、page deletion/合并和 WAL-safe 增量维护仍缺 |
 | ⚠️ 6.3 补全 Hash（WAL-safe bucket split、metapage/overflow page） | 8.3 | 基础 Hash 索引已就绪，WAL-safe bucket split 等 PG 语义仍缺 |
 | ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | 标准 `CREATE INDEX ... USING ...` 已由 typed DDL 路由到真实的简化实现；构建与扫描错误已 fail-closed，独立与 StorageEngine GIN/BRIN 文件已有严格校验和 fsync+原子替换，但泛化 opclass、WAL-safe 增量维护和 GiST 完整访问方法仍缺 |
 | ⚠️ 6.5 实现 `CREATE INDEX CONCURRENTLY` | 8.5, 1.1.20 | 当前以共享锁/简化路径支持 concurrently；PG 两阶段/invalid catalog/旧快照等待语义仍缺 |

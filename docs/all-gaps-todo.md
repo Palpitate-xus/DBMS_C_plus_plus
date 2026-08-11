@@ -19,6 +19,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | B+Tree 多值索引补齐 `(key, RID)` 精确删除：新增 `removeMulti`，索引适配器、DML 删除/更新、级联和事务回滚不再按 key 误删同 key 的其他行；跨叶重复键回归覆盖删除后邻近 RID 仍可检索。B-tree 的 page deletion、合并、WAL-safe 增量提交和并发维护仍待后续。 |
 | 2026-08-11 | 扫描失败契约继续向上收口：`filterRows`、查询/聚合/JOIN、FK/EXCLUDE/ON CONFLICT 检查、`ANALYZE`、ALTER/`VACUUM FULL` 表重写、TOAST/page 写入以及 Volcano 并行 page-range scan 均 fail-closed；统计文件改为原子替换，`ANALYZE` 失败不再报告成功。B-tree/Hash WAL-safe 构建、完整增量维护和剩余复杂 DML 原子 undo 仍待后续。 |
 | 2026-08-11 | StorageEngine 索引与执行器错误传播继续收口：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建和 `REINDEX` 检查 `forEachRow()` 失败；全文/GiST/SP-GiST/GIN/BRIN 在完整扫描后原子发布，Volcano 顺序/索引扫描 fail-closed。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 的完整错误传播仍待后续。 |
 | 2026-08-11 | StorageEngine 索引调用链继续收口：`forEachRow()` 返回页面 I/O 失败，GIN/BRIN 构建完整扫描成功后才原子发布；BRIN 改为长度前缀二进制范围格式，读取损坏文件 fail-closed，并新增真实 DDL 索引查询回归。完整调用方错误传播、WAL-safe 增量维护和 PostgreSQL 泛化 opclass 仍待后续。 |
@@ -464,7 +465,7 @@
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 8.1 | Access Method API | 缺少 `amhandler`、support functions、opclass/opfamily、amcostestimate、amvalidate | 🔄 |
-| 8.2 | B-tree | 基础文件 B+Tree 已修复跨叶/内部节点分裂、重复键查找和范围扫描；仍缺 dedup、suffix truncation、visibility map 驱动 index-only、skip scan 完整实现、NULLS FIRST/LAST 存储控制、collation/operator class | ⚠️ |
+| 8.2 | B-tree | 基础文件 B+Tree 已修复跨叶/内部节点分裂、重复键查找、范围扫描和多值 `(key, RID)` 精确删除；仍缺 dedup、suffix truncation、page deletion/合并、visibility map 驱动 index-only、skip scan 完整实现、NULLS FIRST/LAST 存储控制、collation/operator class | ⚠️ |
 | 8.3 | Hash | 简化 hash index；缺少 WAL-safe hash bucket split、metapage/overflow page 机制 | ⚠️ |
 | 8.4 | GIN/GiST/BRIN/SP-GiST | 多为特定数据/范围简化结构；缺少 PostgreSQL 泛化 opclass、consistent/union/picksplit/penalty 等方法 | ⚠️ |
 | 8.5 | Concurrent index | `concurrently` 多为标志或 sleep/yield 简化；缺少 PG 两阶段/三事务/invalid index catalog 状态/等待旧快照 | ⚠️ |

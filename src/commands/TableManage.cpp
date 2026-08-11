@@ -8171,7 +8171,7 @@ void StorageEngine::deleteToast(const std::string& dbname, const std::string& ta
         std::string key = toastIndexKey(toastId, seq);
         int64_t rid = -1;
         if (!idx->search(key, rid)) break;
-        idx->remove(key);
+        idx->removeMulti(key, rid);
         uint32_t pid = 0;
         uint16_t slotId = 0;
         decodeRid(rid, pid, slotId);
@@ -13354,7 +13354,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                         if (!sidx) continue;
                         std::string newVal = extractColumnValue(row, otbl, ici);
                         if (kv.second != newVal) {
-                            if (!kv.second.empty()) sidx->remove(kv.second);
+                            if (!kv.second.empty()) sidx->removeMulti(kv.second, sa.rid);
                             if (!newVal.empty()) sidx->insertMulti(newVal, sa.rid);
                         }
                     }
@@ -13407,7 +13407,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                         std::string row;
                         if (!readRowByRid(opa, ca.rid, row, otbl)) continue;
                         std::string val = extractColumnValue(row, otbl, ici);
-                        if (!val.empty()) sidx->remove(val);
+                        if (!val.empty()) sidx->removeMulti(val, ca.rid);
                     }
                 }
 
@@ -13591,10 +13591,12 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             if (colIdx >= tbl.len) continue;
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
             if (!secIdx) continue;
-            for (const auto& row : rowsToDelete) {
+            size_t rowIndex = 0;
+            for (int64_t rid : toDelete) {
+                const auto& row = rowsToDelete[rowIndex++];
                 if (row.empty()) continue;
                 std::string val = extractColumnValue(row, tbl, colIdx);
-                if (!val.empty()) secIdx->remove(val);
+                if (!val.empty()) secIdx->removeMulti(val, rid);
             }
         }
     }
@@ -13604,10 +13606,12 @@ DBStatus StorageEngine::remove(const std::string& dbname,
         for (const auto& ci : compIdxs) {
             BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
             if (!cidx) continue;
-            for (const auto& row : rowsToDelete) {
+            size_t rowIndex = 0;
+            for (int64_t rid : toDelete) {
+                const auto& row = rowsToDelete[rowIndex++];
                 if (row.empty()) continue;
                 std::string key = buildCompositeKey(row, tbl, ci.columns);
-                if (!key.empty()) cidx->remove(key);
+                if (!key.empty()) cidx->removeMulti(key, rid);
             }
         }
     }
@@ -14532,11 +14536,11 @@ DBStatus StorageEngine::update(const std::string& dbname,
             std::string newVal = extractColumnValue(strippedNewRow, tbl, colIdx);
             bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
             if (colChanged && oldVal != newVal) {
-                if (!oldVal.empty()) secIdx->remove(oldVal);
+                if (!oldVal.empty()) secIdx->removeMulti(oldVal, rid);
                 if (!newVal.empty()) secIdx->insert(newVal, actualRid);
             } else if (actualRid != rid && !newVal.empty()) {
                 // RID changed: update index entry with new RID
-                secIdx->remove(newVal);
+                secIdx->removeMulti(newVal, rid);
                 secIdx->insertMulti(newVal, actualRid);
             }
         }
@@ -14558,10 +14562,10 @@ DBStatus StorageEngine::update(const std::string& dbname,
             std::string newKey = buildCompositeKey(strippedNewRow, tbl, ci.columns);
             std::string oldKey = buildCompositeKey(row, tbl, ci.columns);
             if (oldKey != newKey) {
-                if (!oldKey.empty()) cidx->remove(oldKey);
+                if (!oldKey.empty()) cidx->removeMulti(oldKey, rid);
                 if (!newKey.empty()) cidx->insertMulti(newKey, actualRid);
             } else if (actualRid != rid && !newKey.empty()) {
-                cidx->remove(newKey);
+                cidx->removeMulti(newKey, rid);
                 cidx->insertMulti(newKey, actualRid);
             }
         }
@@ -19602,7 +19606,7 @@ DBStatus StorageEngine::rollbackTransaction() {
             for (const auto& kv : secIdxVals) {
                 BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, kv.first);
                 if (secIdx && !kv.second.empty()) {
-                    secIdx->remove(kv.second);
+                    secIdx->removeMulti(kv.second, it->rowIdx);
                 }
             }
         } else if (it->op == TxnLogEntry::Op::Update) {
@@ -19677,7 +19681,7 @@ DBStatus StorageEngine::rollbackTransaction() {
                 if (!secIdx) continue;
                 if (foundCurrent) {
                     std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
-                    if (!currentVal.empty()) secIdx->remove(currentVal);
+                    if (!currentVal.empty()) secIdx->removeMulti(currentVal, it->rowIdx);
                 }
                 std::string val = extractColumnValue(it->rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, it->rowIdx);
@@ -20059,7 +20063,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 std::string row;
                 if (readRowByRid(pa, entry.rowIdx, row, tbl)) {
                     std::string val = extractColumnValue(row, tbl, colIdx);
-                    if (!val.empty()) secIdx->remove(val);
+                    if (!val.empty()) secIdx->removeMulti(val, entry.rowIdx);
                 }
             }
             // Then remove the row from page
@@ -20142,7 +20146,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 if (!secIdx) continue;
                 if (foundCurrent) {
                     std::string currentVal = extractColumnValue(currentRow, tbl, colIdx);
-                    if (!currentVal.empty()) secIdx->remove(currentVal);
+                    if (!currentVal.empty()) secIdx->removeMulti(currentVal, entry.rowIdx);
                 }
                 std::string val = extractColumnValue(entry.rowData, tbl, colIdx);
                 if (!val.empty()) secIdx->insertMulti(val, entry.rowIdx);

@@ -21,19 +21,7 @@ bool BPTreeIndexAM::insert(const std::string& key, RowId rowId) {
 
 bool BPTreeIndexAM::remove(const std::string& key, RowId rowId) {
     if (!tree_ || !tree_->isOpen()) return false;
-    // BPTree 没有按 (key, rid) 精确删除的接口，先用 searchMulti 定位
-    auto rids = tree_->searchMulti(key);
-    bool found = false;
-    for (auto it = rids.begin(); it != rids.end(); ++it) {
-        if (*it == rowId) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) return false;
-    // BPTree::remove 按 key 删除全部；需要重建来精确删除单个 rid
-    // Phase 0 简化：直接 remove key（适用于 PK 索引），secondary 索引需后续增强
-    return tree_->remove(key);
+    return tree_->removeMulti(key, rowId);
 }
 
 std::vector<RowId> BPTreeIndexAM::search(const std::string& key) const {

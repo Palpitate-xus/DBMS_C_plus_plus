@@ -30,7 +30,7 @@
   `ALTER TABLE ... SET TABLESPACE` 支持同文件系统 rename 与跨文件系统 copy+remove，
   目标表空间不存在或运行时 marker 丢失时 fail-closed，不再静默创建默认目录空表。
 - TOAST 线外值已纳入 zlib 压缩：chunk header 保存压缩标记与原始长度，读取路径校验后解压；当前格式不兼容旧 TOAST chunk，符合本项目不保留旧数据兼容的策略。lz4/pglz、列级 storage strategy 和 `toast_tuple_target` 仍未完成。
-- B+Tree 已修复 root leaf 分裂、叶分裂中间键丢失、重复键跨叶查找和范围扫描重复返回；跨叶唯一键、跨内部节点重复键回归已纳入索引测试。PG B-tree 的 dedup、删除合并、opclass/collation 和完整并发构建语义仍未完成。
+- B+Tree 已修复 root leaf 分裂、叶分裂中间键丢失、重复键跨叶查找、范围扫描重复返回和多值索引按 `(key, RID)` 精确删除；跨叶唯一键、跨内部节点重复键及精确删除回归已纳入索引测试。PG B-tree 的 dedup、删除合并、opclass/collation 和完整并发构建语义仍未完成。
 - `DROP INDEX` 已迁移到 typed DDL：标准的 name-only、多名称、`IF EXISTS`、`CASCADE/RESTRICT` 语法维护物理索引、`pg_class` 和依赖关系；单列/Hash 索引持久化 SQL 名称到物理键的映射，旧 `ON table` 形式仅作为迁移期兼容语法保留。真正的 `CONCURRENTLY` 两阶段语义仍未完成。
 - `CREATE INDEX ... USING {hash,gin,gist,brin,spgist}` 已接入同一 typed AST/DdlExecutor，按访问方法调用真实的 StorageEngine 实现并登记索引名；非 PostgreSQL 的 `CREATE GIN INDEX` 等特殊分支已从 `main.cpp` 删除。各访问方法的 PostgreSQL opclass、WAL、并发构建和维护语义仍不完整。
 - 标准 `CREATE/UNIQUE INDEX` 的旧字符串解析块已从 `main.cpp` 删除（约 138 行）；分类为 `CreateIndex` 的语句现在只能由 parser + DdlExecutor 处理，解析失败会 fail-closed，不再存在第二套索引分发。
