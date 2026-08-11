@@ -1158,6 +1158,10 @@ private:
     Lsn walXactCommit(const std::string& dbname, uint64_t xid);
     Lsn walXactAbort(const std::string& dbname, uint64_t xid);
     Lsn walCheckpoint(const std::string& dbname, uint64_t nextXid);
+    Lsn walIndexFileImage(const std::string& dbname,
+                          const std::filesystem::path& indexPath,
+                          const std::vector<char>& image,
+                          bool beforeImage);
 
     // Mark a page as dirty and update its pd_lsn after a WAL record was written.
     void markPageDirtyAndLsn(PageAllocator* pa, uint32_t pageId, Lsn lsn, uint32_t formatVersion);
@@ -1168,6 +1172,8 @@ private:
                        Lsn recordLsn, bool force);
     bool redoXactCommit(uint64_t xid);
     bool redoXactAbort(uint64_t xid);
+    bool redoIndexFileImage(const std::filesystem::path& indexPath,
+                            const char* image, size_t imageLen);
 
     // B+ Tree primary key index
     std::filesystem::path indexPath(const std::string& dbname, const std::string& tablename) const;

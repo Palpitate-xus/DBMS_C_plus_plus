@@ -1128,8 +1128,20 @@ void StorageEngine::endBackendSession() {
 }
 
 StorageEngine::~StorageEngine() {
-    if (catalogService_) catalogService_->persistAll();
     stopBackgroundWorker();
+
+    // Flush loaded heaps and indexes through the same WAL-aware path used by
+    // transaction commit. This closes the crash window where an engine is
+    // destroyed with an active transaction: recovery can apply the
+    // before-image for uncommitted index changes instead of inheriting a file
+    // written directly by a B+Tree/Hash destructor.
+    if (catalogService_) catalogService_->persistAll();
+    for (const auto& dbname : getDatabaseNames()) {
+        flushDatabaseCaches(dbname);
+        if (auto* wal = getWAL(dbname)) {
+            wal->XLogFlush(wal->currentWriteLsn());
+        }
+    }
 }
 
 // ========================================================================
@@ -3442,6 +3454,21 @@ void StorageEngine::closeAllPageAllocators() {
     pageAllocators_.clear();
 }
 
+static bool readWholeBinaryFile(const std::filesystem::path& path,
+                                std::vector<char>& bytes) {
+    bytes.clear();
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return !ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size > static_cast<uintmax_t>(std::numeric_limits<size_t>::max())) return false;
+    bytes.resize(static_cast<size_t>(size));
+    if (bytes.empty()) return true;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    return in.good() || in.eof();
+}
+
 bool StorageEngine::flushDatabaseCaches(const std::string& dbname) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string tablePrefix = dbname + "/";
@@ -3449,23 +3476,48 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname) {
     const std::string toastPrefix = dbname + ":";
 
     bool ok = true;
+    auto flushWalLoggedIndex = [&](const std::filesystem::path& path,
+                                   bool dirty,
+                                   const std::function<bool()>& flush) {
+        if (!dirty) return true;
+        std::vector<char> before;
+        if (!readWholeBinaryFile(path, before)) return false;
+
+        WALManager* wal = getWAL(dbname);
+        if (!wal) return false;
+        const Lsn beforeLsn = walIndexFileImage(dbname, path, before, true);
+        if (beforeLsn == INVALID_LSN || !wal->XLogFlush(beforeLsn)) return false;
+
+        if (!flush()) return false;
+        std::vector<char> after;
+        if (!readWholeBinaryFile(path, after)) return false;
+        const Lsn afterLsn = walIndexFileImage(dbname, path, after, false);
+        if (afterLsn == INVALID_LSN || !wal->XLogFlush(afterLsn)) return false;
+        return true;
+    };
     for (const auto& [key, allocator] : pageAllocators_) {
         if (key.rfind(tablePrefix, 0) == 0 && allocator && !allocator->flush()) {
             ok = false;
         }
     }
     for (const auto& [key, index] : pkIndexCache_) {
-        if (key.rfind(tablePrefix, 0) == 0 && index && !index->flush()) {
+        if (key.rfind(tablePrefix, 0) == 0 && index &&
+            !flushWalLoggedIndex(index->filePath(), index->hasDirtyPages(),
+                                 [&] { return index->flush(); })) {
             ok = false;
         }
     }
     for (const auto& [key, index] : secondaryIndexCache_) {
-        if (key.rfind(tablePrefix, 0) == 0 && index && !index->flush()) {
+        if (key.rfind(tablePrefix, 0) == 0 && index &&
+            !flushWalLoggedIndex(index->filePath(), index->hasDirtyPages(),
+                                 [&] { return index->flush(); })) {
             ok = false;
         }
     }
     for (const auto& [key, index] : hashIndexCache_) {
-        if (key.rfind(hashPrefix, 0) == 0 && index && !index->flush()) {
+        if (key.rfind(hashPrefix, 0) == 0 && index &&
+            !flushWalLoggedIndex(index->filePath(), index->hasDirtyData(),
+                                 [&] { return index->flush(); })) {
             ok = false;
         }
     }
@@ -3475,7 +3527,9 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname) {
         }
     }
     for (const auto& [key, index] : toastIndexes_) {
-        if (key.rfind(toastPrefix, 0) == 0 && index && !index->flush()) {
+        if (key.rfind(toastPrefix, 0) == 0 && index &&
+            !flushWalLoggedIndex(index->filePath(), index->hasDirtyPages(),
+                                 [&] { return index->flush(); })) {
             ok = false;
         }
     }
@@ -18668,6 +18722,37 @@ Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& ta
                            transactionContext().inTransaction ? transactionContext().currentTxnId : 0, payload);
 }
 
+Lsn StorageEngine::walIndexFileImage(const std::string& dbname,
+                                     const std::filesystem::path& indexPath,
+                                     const std::vector<char>& image,
+                                     bool beforeImage) {
+    constexpr size_t kMaxIndexWalImage = 256ULL * 1024ULL * 1024ULL;
+    WALManager* wal = getWAL(dbname);
+    if (!wal || indexPath.empty() || image.size() > kMaxIndexWalImage) {
+        return INVALID_LSN;
+    }
+    const std::string pathText = indexPath.string();
+    if (pathText.size() > std::numeric_limits<uint32_t>::max()) return INVALID_LSN;
+
+    std::vector<char> payload;
+    const uint32_t pathLen = static_cast<uint32_t>(pathText.size());
+    const uint64_t imageLen = static_cast<uint64_t>(image.size());
+    payload.reserve(sizeof(pathLen) + pathText.size() + sizeof(imageLen) + image.size());
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&pathLen),
+                   reinterpret_cast<const char*>(&pathLen) + sizeof(pathLen));
+    payload.insert(payload.end(), pathText.begin(), pathText.end());
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&imageLen),
+                   reinterpret_cast<const char*>(&imageLen) + sizeof(imageLen));
+    payload.insert(payload.end(), image.begin(), image.end());
+    return wal->XLogInsert(
+        RM_INDEX_ID,
+        beforeImage ? XLOG_INDEX_FILE_BEFORE : XLOG_INDEX_FILE_AFTER,
+        transactionContext().inTransaction && transactionContext().txnDB == dbname
+            ? transactionContext().currentTxnId
+            : 0,
+        payload);
+}
+
 static void setPageLsnAndChecksum(char* buf, Lsn lsn) {
     if (!buf) return;
     std::memcpy(buf, &lsn, sizeof(lsn));
@@ -18767,6 +18852,18 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
     pa->markDirty(pageId);
     pa->unpinPage(pageId);
     return true;
+}
+
+bool StorageEngine::redoIndexFileImage(const std::filesystem::path& indexPath,
+                                       const char* image, size_t imageLen) {
+    if (indexPath.empty() || (!image && imageLen != 0)) return false;
+    if (imageLen == 0) {
+        std::error_code ec;
+        const bool removed = !std::filesystem::exists(indexPath, ec) ||
+                              std::filesystem::remove(indexPath, ec);
+        return removed && !ec;
+    }
+    return index_file::writeAtomically(indexPath, std::string(image, imageLen));
 }
 
 bool StorageEngine::redoXactCommit(uint64_t xid) {
@@ -18949,19 +19046,55 @@ void StorageEngine::recoverAllDatabases() {
                     } else if (info == XLOG_HEAP_PAGE_BEFORE) {
                         shouldApply = (recXid != 0 && !committedXids.count(recXid));
                     }
+                } else if (rmid == RM_INDEX_ID) {
+                    if (info == XLOG_INDEX_FILE_AFTER) {
+                        shouldApply = (recXid == 0 || committedXids.count(recXid));
+                    } else if (info == XLOG_INDEX_FILE_BEFORE) {
+                        // xid 0 is used by non-transactional/autocommit
+                        // maintenance. Replaying both images in WAL order
+                        // leaves the last complete file image after a crash.
+                        shouldApply = (recXid == 0 || !committedXids.count(recXid));
+                    }
                 }
                 if (shouldApply) {
-                    bool force = (info == XLOG_HEAP_PAGE_BEFORE);
-                    RedoApplyRecord(rec,
-                        [&, force](const std::string& tableName, uint32_t blockNum, uint32_t forkNum,
-                            const char* pageData, size_t pageLen) {
-                            (void)forkNum;
-                            return redoPageImage(dbname, tableName, blockNum, pageData, pageLen, lsn, force);
-                        },
-                        [](const std::string&, uint32_t, uint32_t, uint16_t, const char*, size_t) { return true; },
-                        [](const std::string&, uint32_t, uint32_t, uint16_t, uint64_t) { return true; },
-                        [](const std::string&, uint32_t, uint32_t, uint16_t,
-                           uint32_t, uint32_t, uint16_t, const char*, size_t) { return true; });
+                    if (rmid == RM_INDEX_ID) {
+                        const char* p = rec.data.data();
+                        const char* end = p + rec.data.size();
+                        uint32_t pathLen = 0;
+                        uint64_t imageLen = 0;
+                        constexpr uint32_t kMaxIndexPathLen = 4096;
+                        constexpr uint64_t kMaxIndexWalImage = 256ULL * 1024ULL * 1024ULL;
+                        if (p + sizeof(pathLen) <= end) {
+                            std::memcpy(&pathLen, p, sizeof(pathLen));
+                            p += sizeof(pathLen);
+                            if (pathLen != 0 && pathLen <= kMaxIndexPathLen &&
+                                p + pathLen <= end) {
+                                const std::string pathText(p, pathLen);
+                                p += pathLen;
+                                if (p + sizeof(imageLen) <= end) {
+                                    std::memcpy(&imageLen, p, sizeof(imageLen));
+                                    p += sizeof(imageLen);
+                                    if (imageLen <= kMaxIndexWalImage &&
+                                        imageLen <= static_cast<uint64_t>(end - p)) {
+                                        redoIndexFileImage(std::filesystem::path(pathText), p,
+                                                           static_cast<size_t>(imageLen));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        const bool force = (info == XLOG_HEAP_PAGE_BEFORE);
+                        RedoApplyRecord(rec,
+                            [&, force](const std::string& tableName, uint32_t blockNum, uint32_t forkNum,
+                                const char* pageData, size_t pageLen) {
+                                (void)forkNum;
+                                return redoPageImage(dbname, tableName, blockNum, pageData, pageLen, lsn, force);
+                            },
+                            [](const std::string&, uint32_t, uint32_t, uint16_t, const char*, size_t) { return true; },
+                            [](const std::string&, uint32_t, uint32_t, uint16_t, uint64_t) { return true; },
+                            [](const std::string&, uint32_t, uint32_t, uint16_t,
+                               uint32_t, uint32_t, uint16_t, const char*, size_t) { return true; });
+                    }
                 }
                 lsn += rec.header.xl_tot_len;
             }

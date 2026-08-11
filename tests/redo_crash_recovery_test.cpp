@@ -49,6 +49,10 @@ int main() {
         StorageEngine engine;
         auto rows = engine.query(dbname, "t", {}, {"id", "name"});
         assert(!rowContains(rows, "uncommitted"));
+        int64_t rid = 0;
+        auto* pk = engine.getPKIndex(dbname, "t");
+        assert(pk != nullptr);
+        assert(!pk->search("1", rid));
         std::cout << "[REDO CRASH] uncommitted insert rolled back by recovery OK\n";
     }
 
@@ -67,6 +71,10 @@ int main() {
         StorageEngine engine;
         auto rows = engine.query(dbname, "t", {}, {"id", "name"});
         assert(rowContains(rows, "committed"));
+        int64_t rid = 0;
+        auto* pk = engine.getPKIndex(dbname, "t");
+        assert(pk != nullptr);
+        assert(pk->search("2", rid));
         std::cout << "[REDO CRASH] committed insert recovered OK\n";
     }
 
@@ -82,6 +90,10 @@ int main() {
         StorageEngine engine;
         auto rows = engine.query(dbname, "t", {}, {"id", "name"});
         assert(!rowContains(rows, "committed"));
+        int64_t rid = 0;
+        auto* pk = engine.getPKIndex(dbname, "t");
+        assert(pk != nullptr);
+        assert(!pk->search("2", rid));
         std::cout << "[REDO CRASH] committed delete recovered OK\n";
     }
 

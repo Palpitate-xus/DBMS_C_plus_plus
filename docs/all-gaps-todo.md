@@ -19,9 +19,9 @@
 
 | 日期 | 摘要 |
 |------|------|
-| 2026-08-11 | UPDATE/DELETE 事务 undo 补强：普通回滚与 SAVEPOINT 回滚现在恢复复合/Hash 索引和 TOAST；UPDATE 只清理新版本独占的线外块，显式事务 DELETE 保留死 tuple，回滚清除 `xmax` 并写 heap WAL before/after image，提交后回收旧版本 TOAST。新增并发回归覆盖 UPDATE/DELETE、savepoint、重启和大字段。索引专用 WAL resource manager、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
-| 2026-08-11 | INSERT 事务原子性补强：主键、单列二级、复合、Hash 索引和 TOAST 均纳入普通回滚与 SAVEPOINT 回滚；多值索引按 `(key, RID)` 精确清理，SAVEPOINT 堆删除写入 WAL before/after image，Hash AM 传播写入失败，新增重启后空状态回归。索引专用 WAL resource manager、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
-| 2026-08-11 | 事务边界补齐已加载索引缓存刷盘：新增 B+Tree/Hash `flush()` 和 `flushDatabaseCaches()`，事务快照创建前及 COMMIT WAL 发布前统一刷 heap、B+Tree、TOAST index、Hash 缓存，避免备份或已提交状态遗漏脏索引页。索引专用 WAL resource manager、跨对象原子提交和崩溃窗口仍待后续。 |
+| 2026-08-11 | UPDATE/DELETE 事务 undo 补强：普通回滚与 SAVEPOINT 回滚现在恢复复合/Hash 索引和 TOAST；UPDATE 只清理新版本独占的线外块，显式事务 DELETE 保留死 tuple，回滚清除 `xmax` 并写 heap WAL before/after image，提交后回收旧版本 TOAST。新增并发回归覆盖 UPDATE/DELETE、savepoint、重启和大字段。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
+| 2026-08-11 | INSERT 事务原子性补强：主键、单列二级、复合、Hash 索引和 TOAST 均纳入普通回滚与 SAVEPOINT 回滚；多值索引按 `(key, RID)` 精确清理，SAVEPOINT 堆删除写入 WAL before/after image，Hash AM 传播写入失败，新增重启后空状态回归。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
+| 2026-08-11 | 事务边界补齐已加载索引缓存刷盘：新增 B+Tree/Hash `flush()` 和 `flushDatabaseCaches()`，事务快照创建前、COMMIT WAL 发布前及引擎退出时统一刷 heap、B+Tree、TOAST index、Hash 缓存；B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像。原生 page-level WAL、跨对象原子提交和其他访问方法的崩溃恢复仍待后续。 |
 | 2026-08-11 | B+Tree 多值索引补齐 `(key, RID)` 精确删除：新增 `removeMulti`，索引适配器、DML 删除/更新、级联和事务回滚不再按 key 误删同 key 的其他行；跨叶重复键回归覆盖删除后邻近 RID 仍可检索。B-tree 的 page deletion、合并、WAL-safe 增量提交和并发维护仍待后续。 |
 | 2026-08-11 | 扫描失败契约继续向上收口：`filterRows`、查询/聚合/JOIN、FK/EXCLUDE/ON CONFLICT 检查、`ANALYZE`、ALTER/`VACUUM FULL` 表重写、TOAST/page 写入以及 Volcano 并行 page-range scan 均 fail-closed；统计文件改为原子替换，`ANALYZE` 失败不再报告成功。B-tree/Hash WAL-safe 构建、完整增量维护和剩余复杂 DML 原子 undo 仍待后续。 |
 | 2026-08-11 | StorageEngine 索引与执行器错误传播继续收口：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建和 `REINDEX` 检查 `forEachRow()` 失败；全文/GiST/SP-GiST/GIN/BRIN 在完整扫描后原子发布，Volcano 顺序/索引扫描 fail-closed。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 的完整错误传播仍待后续。 |
@@ -33,7 +33,7 @@
 | 2026-08-11 | WAL 一致性继续收口：LSN 0 恢复为首个合法位置，`INVALID_LSN` 改用范围外哨兵；恢复识别未初始化页，多个 WAL writer 使用进程/文件锁和磁盘尾部刷新；新增首笔提交与崩溃恢复回归。 |
 | 2026-08-11 | Checkpoint/BufferPool 持久化错误继续收口：`pwrite/fsync` 失败保留 dirty 状态并传播到 checkpoint；checkpoint WAL、LSN 文件和 archive status 未成功时 fail-closed。WAL 截断仍未实现。 |
 | 2026-08-11 | BufferPool 淘汰安全继续收口：clock-sweep 不再强制淘汰 pinned 页；脏页写盘失败或页面读取失败时返回失败并保留缓存状态；新增一帧缓存淘汰/重载回归。 |
-| 2026-08-11 | 存储调用方错误契约继续收口：PageAllocator 与 B+Tree 检查 BufferPool 空页结果，root split 先写节点再发布 root header；索引多页更新的完整 WAL/原子提交仍待补齐。 |
+| 2026-08-11 | 存储调用方错误契约继续收口：PageAllocator 与 B+Tree 检查 BufferPool 空页结果，root split 先写节点再发布 root header；B+Tree/Hash 已有文件级 WAL 镜像，原生 page-level、多访问方法原子提交和完整索引增量恢复仍待补齐。 |
 | 2026-08-10 | DDL 物理/catalog 顺序与原子性继续收口：`DROP SCHEMA` 现在先规划 namespace 依赖，再删除物理 schema，最后应用 catalog 计划；catalog 后处理失败恢复当前格式快照。ALTER 多子命令失败也继续恢复整句快照，并新增 schema drop-plan 回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
 | 2026-08-09 | DDL 创建失败安全：`StorageEngine::createTable` 现在检查 schema/heap/分区/TOAST/主键/唯一索引及 `tlist.lst` 初始化结果，失败时清理已写入的 relation 文件、序列、缓存和清单项；DdlExecutor 在物理创建后立即登记表回滚记录，约束 metadata/EXCLUDE 后处理失败会撤销整张表；`DROP TABLE` 先生成只读依赖计划，物理删除成功后才应用 catalog 删除。新增损坏 heap、后处理失败与 drop plan 回归；完整 DROP/ALTER undo 和跨对象依赖事务语义仍待后续。 |
 | 2026-08-09 | `TRUNCATE` 架构收敛：新增 typed `TruncateStmt` 与 DdlExecutor 执行路径，删除 `main.cpp` 字符串处理；支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT` 预检，新增多表/FK/identity 回归。trigger、foreign table 与完整 transactional/locking 语义仍待后续。 |
@@ -491,7 +491,7 @@
 | 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index；缺少子事务 ID、资源释放、错误状态恢复 | ⚠️ |
 | 9.6 | DDL transactions | ALTER 已具备当前格式整库快照回滚；CREATE 的失败清理和 DROP 的只读依赖计划已覆盖主要单对象边界；仍缺完整跨对象依赖 undo、并发 DDL 锁语义和 PostgreSQL 全部隐式提交边界 | 🔄 |
 | 9.7 | Lock manager | 有表/行/gap/page/advisory lock 简化；缺少 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、deadlock detector 精细语义、wait events | ⚠️ |
-| 9.8 | Crash safety | WAL 不是 redo log；事务开始复制目录备份，提交清 WAL。对大数据库、并发事务、部分页写、崩溃窗口的语义与 PG 差距巨大 | 🔄 |
+| 9.8 | Crash safety | heap WAL 已支持 page before/after redo/undo，B+Tree/Hash 另有文件级 before/after 镜像；仍缺原生 page-level 索引 WAL、其他访问方法、WAL 截断/PITR、并发事务完整崩溃窗口和 PostgreSQL 恢复语义 | 🔄 |
 | 9.9 | Vacuum/freeze | 缺少 transaction wraparound、freeze map、visibility map、hint bits、all-visible/all-frozen | ⚠️ |
 
 ---

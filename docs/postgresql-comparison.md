@@ -13,7 +13,7 @@ ACL 回归现已覆盖表/列权限对会话用户、递归继承角色和 `PUBL
 
 RLS 回归现已覆盖默认 `WITH CHECK`、显式 `TO PUBLIC`、permissive/restrictive 策略组合、`INHERIT/NOINHERIT` 角色权限、表 owner 绕过、`pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`；复杂 owner/ACL 组合和完整 PostgreSQL policy catalog 语义仍有差距。
 
-事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；INSERT、UPDATE、DELETE 的普通回滚与 SAVEPOINT 回滚会恢复主键、二级、复合、Hash 索引和 TOAST，DELETE savepoint 回滚后可在同一事务提交并继续读取，重启后仍能读取旧大字段。TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。该实现匹配当前一连接一工作线程的运行模型；锁、提交日志、SSI 完整语义、索引专用 WAL 和 DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
+事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；INSERT、UPDATE、DELETE 的普通回滚与 SAVEPOINT 回滚会恢复主键、二级、复合、Hash 索引和 TOAST，DELETE savepoint 回滚后可在同一事务提交并继续读取，重启后仍能读取旧大字段。TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。B+Tree/Hash 刷盘现在记录完整文件 before/after WAL 镜像并参与崩溃恢复；原生 page-level 索引 WAL、其他访问方法、跨访问方法原子提交、锁、SSI 完整语义和 DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
 2026-08-09 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、INNER/CROSS JOIN DML、简单谓词 DELETE 已进入独立 AST 执行器，混合 DEFAULT、显式列、多行、字符串字面量、INSERT/UPDATE/DELETE 列投影及受限标量表达式 RETURNING、修改/删除回归和默认值存储语义有 parser/协议覆盖；高级 DML 和复杂表达式仍保留明确 legacy 回退。带表限定的表达式引用优先解析限定命名空间，避免 UPDATE FROM/DELETE USING 中同名列被错误绑定。legacy 文本执行器的协议结果捕获已改为线程局部路由，避免全局 `std::cout` 锁造成会话串行化。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
 
@@ -133,8 +133,8 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 
 | 访问方法 | PG 18 | 本 DBMS | 状态 |
 |----------|-------|---------|------|
-| B+ Tree | ✅ | ⚠️ | 基础文件 B+Tree 已覆盖跨叶/内部节点分裂、重复键、范围扫描和多值 `(key, RID)` 精确删除；事务边界会刷已加载索引缓存，但 PG 索引 WAL resource manager、dedup、page deletion/合并、opclass/collation、skip scan 和完整并发构建仍缺 |
-| Hash | ✅ | ✅ | ✅ |
+| B+ Tree | ✅ | ⚠️ | 基础文件 B+Tree 已覆盖跨叶/内部节点分裂、重复键、范围扫描和多值 `(key, RID)` 精确删除；事务刷盘、引擎退出和恢复支持完整文件 before/after WAL 镜像，但 PG 原生 page-level WAL、dedup、page deletion/合并、opclass/collation、skip scan 和完整并发构建仍缺 |
+| Hash | ✅ | ⚠️ | 基础 Hash 文件支持严格校验、原子持久化和完整文件 before/after WAL 镜像；PG WAL-safe bucket split、metapage/overflow page、并发维护和完整恢复语义仍缺 |
 | GIN | ✅ | ✅ (基础，独立/StorageEngine 文件均严格校验并原子持久化) | ⚠️ |
 | GiST | ✅ | ⚠️ | 已有简化文本/范围索引与真实 DDL 路由；缺完整树结构、opclass、WAL、并发构建和几何/全文语义 |
 | SP-GiST | ✅ | ✅ (Point quadtree, SPGiSTIndex.cpp) | ⚠️ |

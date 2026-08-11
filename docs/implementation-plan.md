@@ -7,7 +7,7 @@
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
-2026-08-11 增量审计：UPDATE/DELETE 事务 undo 现在覆盖复合/Hash 索引与 TOAST 生命周期；UPDATE 回滚仅清理新版本独占的线外块，DELETE 在显式事务中保留死 tuple，普通回滚和 SAVEPOINT 回滚清除 `xmax` 并写入 heap WAL before/after image。旧 UPDATE/DELETE 版本的 TOAST 块在刷盘 COMMIT 后回收；索引专用 WAL resource manager、跨访问方法原子提交和完整崩溃窗口仍待后续。
+2026-08-11 增量审计：UPDATE/DELETE 事务 undo 现在覆盖复合/Hash 索引与 TOAST 生命周期；UPDATE 回滚仅清理新版本独占的线外块，DELETE 在显式事务中保留死 tuple，普通回滚和 SAVEPOINT 回滚清除 `xmax` 并写入 heap WAL before/after image。旧 UPDATE/DELETE 版本的 TOAST 块在刷盘 COMMIT 后回收；B+Tree/Hash 已补充索引文件 before/after WAL 镜像，其他访问方法、原生 page-level WAL、跨访问方法原子提交和完整崩溃窗口仍待后续。
 
 2026-08-11 增量审计：事务/DDL 物理快照现在包含外置 tablespace 的数据库关系目录；UNLOGGED 关系的 heap、fork、索引和 TOAST 文件按崩溃语义从快照排除，空 tablespace 也可安全参与事务快照。
 
@@ -23,7 +23,7 @@
 
 2026-08-11 增量审计：PageAllocator 与 B+Tree 全面检查 BufferPool 的空页返回，heap header/page、index header/node 读取和写入失败均安全返回；B+Tree root split 先完成节点写入再发布 root header；多值索引新增 `(key, RID)` 精确删除，DML/级联/事务回滚不再按 key 误删同 key 的其他索引项。
 
-2026-08-11 增量审计：新增 B+Tree/Hash `flush()` 与 `StorageEngine::flushDatabaseCaches()`；事务 snapshot 创建前、COMMIT WAL 发布前统一刷已加载 heap、B+Tree、TOAST index 和 Hash 缓存，避免脏索引页落后于 heap 或事务快照。INSERT 回滚进一步覆盖复合/Hash/TOAST，并为 SAVEPOINT 回滚写入 heap WAL after-image；Hash AM 现在传播 mutation failure。索引专用 WAL resource manager 与跨索引原子提交仍待后续。
+2026-08-11 增量审计：新增 B+Tree/Hash `flush()` 与 `StorageEngine::flushDatabaseCaches()`；事务 snapshot 创建前、COMMIT WAL 发布前及引擎退出时统一刷已加载 heap、B+Tree、TOAST index 和 Hash 缓存，避免脏索引页落后于 heap 或事务快照。B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像；INSERT 回滚进一步覆盖复合/Hash/TOAST，并为 SAVEPOINT 回滚写入 heap WAL after-image；Hash AM 现在传播 mutation failure。其他访问方法的 WAL、跨访问方法原子提交和原生 page-level 增量恢复仍待后续。
 
 2026-08-11 增量审计：`forEachRow()` 的失败契约已传递到 B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建、`REINDEX` 以及 Volcano 顺序/索引扫描；这些路径不再把 heap I/O 失败当成空结果，全文/GiST/SP-GiST/GIN/BRIN 也在完整扫描后原子发布。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 和增量维护仍待后续。
 

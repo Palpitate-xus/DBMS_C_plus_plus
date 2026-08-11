@@ -44,6 +44,7 @@ constexpr uint8_t RM_XACT_ID     = 11;
 constexpr uint8_t RM_SMGR_ID     = 12;
 constexpr uint8_t RM_CHECKPOINT_ID = 13;
 constexpr uint8_t RM_CATALOG_ID    = 14; // DDL catalog changes
+constexpr uint8_t RM_INDEX_ID      = 15; // B-tree/Hash full-file images
 
 // XACT info flags
 constexpr uint8_t XLOG_XACT_COMMIT  = 0x00;
@@ -71,6 +72,12 @@ constexpr uint8_t XLOG_CHECKPOINT_ONLINE   = 0x01;
 constexpr uint8_t XLOG_CATALOG_CREATE = 0x00;
 constexpr uint8_t XLOG_CATALOG_DROP   = 0x01;
 constexpr uint8_t XLOG_CATALOG_UPDATE = 0x02;
+
+// INDEX info flags. The payload stores a path and the complete durable file
+// image. Full-file images are intentionally limited to the B-tree/Hash access
+// methods until page-level WAL exists for the remaining access methods.
+constexpr uint8_t XLOG_INDEX_FILE_BEFORE = 0x10;
+constexpr uint8_t XLOG_INDEX_FILE_AFTER  = 0x11;
 
 #pragma pack(push, 1)
 struct XLogRecHeader {

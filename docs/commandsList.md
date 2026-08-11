@@ -844,7 +844,7 @@ COMMIT;
 CHECKPOINT
 ```
 
-**说明** 强制将所有脏页刷盘，截断 WAL 日志，加速崩溃恢复。
+**说明** 强制将所有已加载的脏 heap/index 缓存刷盘并写入 checkpoint WAL 记录，加速崩溃恢复。当前版本保留 WAL 用于恢复，尚未实现 WAL 截断。
 
 **示例**
 ```sql

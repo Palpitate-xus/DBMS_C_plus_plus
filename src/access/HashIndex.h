@@ -35,6 +35,8 @@ public:
     void clear();
 
     bool isOpen() const { return loaded_; }
+    const std::filesystem::path& filePath() const { return filePath_; }
+    bool hasDirtyData() const { return dirty_; }
 
     size_t size() const { return map_.size(); }
 

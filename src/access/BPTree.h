@@ -53,6 +53,15 @@ public:
 
     bool isOpen() const { return bp_ != nullptr && bp_->isOpen(); }
 
+    const std::filesystem::path& filePath() const { return filePath_; }
+    bool hasDirtyPages() const {
+        if (!bp_ || !bp_->isOpen()) return false;
+        for (const auto& frame : bp_->getFrameInfo()) {
+            if (frame.dirty) return true;
+        }
+        return false;
+    }
+
     uint32_t rootPage() const { return header_.rootPage; }
 
     // Buffer pool stats

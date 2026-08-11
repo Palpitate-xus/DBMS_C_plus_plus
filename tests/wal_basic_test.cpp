@@ -77,6 +77,8 @@ int main() {
 
     bool foundBefore = false;
     bool foundAfter = false;
+    bool foundIndexBefore = false;
+    bool foundIndexAfter = false;
     bool foundCommit = false;
     Lsn lsn = 0;
     int recCount = 0;
@@ -101,14 +103,22 @@ int main() {
             assert(rec.data[sizeof(uint32_t)] == 't');
         } else if (rec.rmid() == RM_XACT_ID && rec.info() == XLOG_XACT_COMMIT) {
             foundCommit = true;
+        } else if (rec.rmid() == RM_INDEX_ID &&
+                   rec.info() == XLOG_INDEX_FILE_BEFORE) {
+            foundIndexBefore = true;
+        } else if (rec.rmid() == RM_INDEX_ID &&
+                   rec.info() == XLOG_INDEX_FILE_AFTER) {
+            foundIndexAfter = true;
         }
         lsn += rec.header.xl_tot_len;
     }
     std::cout << "[WAL BASIC] total records: " << recCount << "\n";
     assert(foundBefore);
     assert(foundAfter);
+    assert(foundIndexBefore);
+    assert(foundIndexAfter);
     assert(foundCommit);
-    std::cout << "[WAL BASIC] HEAP_PAGE_BEFORE / AFTER / XACT_COMMIT records found\n";
+    std::cout << "[WAL BASIC] HEAP/INDEX images and XACT_COMMIT records found\n";
 
     // Cleanup
     std::filesystem::remove_all(dbname);
