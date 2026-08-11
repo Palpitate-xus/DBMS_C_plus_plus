@@ -543,6 +543,12 @@ public:
     bool inTransaction() const { return transactionContext().inTransaction; }
     bool isReadOnly() const { return transactionContext().readOnly; }
     void setReadOnly(bool ro) { transactionContext().readOnly = ro; }
+    // DDL transactions need the physical backup after row-level rollback so
+    // the DDL wrapper can restore file-backed changes. Ordinary transactions
+    // discard the backup as soon as rollback finishes.
+    void preserveTransactionBackupOnRollback(bool preserve) {
+        transactionContext().preserveBackupOnRollback = preserve;
+    }
     // Abort any open transaction and discard backend-local state when a
     // protocol connection terminates.
     void endBackendSession();
@@ -1312,6 +1318,7 @@ private:
         std::map<uint64_t, std::vector<DeferredCheck>> deferredChecks;
         bool inTransaction = false;
         bool readOnly = false;
+        bool preserveBackupOnRollback = false;
         std::string txnDB;
         uint64_t currentTxnId = 0;
         ReadView readView;

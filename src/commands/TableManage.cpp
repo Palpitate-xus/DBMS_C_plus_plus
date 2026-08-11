@@ -18923,7 +18923,8 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
         // Commit existing transaction before starting a new one.
         // This matches PostgreSQL's implicit-commit-on-DDL behavior and
         // prevents transactionContext().txnDB from pointing to a stale database.
-        commitTransaction();
+        const DBStatus previousStatus = commitTransaction();
+        if (previousStatus != DBStatus::OK) return previousStatus;
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
@@ -19014,6 +19015,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
 
     transactionContext().txnLog.clear();
     transactionContext().inTransaction = true;
+    transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB = dbname;
     return DBStatus::OK;
 }
@@ -19161,6 +19163,7 @@ DBStatus StorageEngine::commitTransaction() {
     }
 
     transactionContext().txnLog.clear();
+    discardTransactionBackup(transactionContext().txnDB);
     transactionContext().savepoints.clear();
     transactionContext().txnSubTxnIds.clear();
     clearCatalogSnapshot();
@@ -19175,6 +19178,7 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().readOnly = false;
+    transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB.clear();
     return DBStatus::OK;
 }
@@ -19408,9 +19412,14 @@ DBStatus StorageEngine::rollbackTransaction() {
         rollbackSessionTempTables(*this, *session, transactionContext().txnDB);
     }
 
+    const std::string rollbackDb = transactionContext().txnDB;
+    const bool preserveBackup = transactionContext().preserveBackupOnRollback;
+    if (!preserveBackup) discardTransactionBackup(rollbackDb);
+
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().readOnly = false;
+    transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB.clear();
     transactionContext().constraintMode.clear();
     transactionContext().deferredChecks.clear();

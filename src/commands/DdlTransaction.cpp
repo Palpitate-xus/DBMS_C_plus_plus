@@ -46,6 +46,7 @@ bool DdlTransaction::begin() {
     DBStatus st = engine_.beginTransaction(session_.currentDB);
     active_ = (st == DBStatus::OK);
     startedByUs_ = active_;
+    if (startedByUs_) engine_.preserveTransactionBackupOnRollback(true);
     return active_;
 }
 

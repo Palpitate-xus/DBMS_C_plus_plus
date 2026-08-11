@@ -20,6 +20,7 @@
 | 日期 | 摘要 |
 |------|------|
 | 2026-08-11 | DDL 提交错误继续收口：`DdlTransaction` 检查引擎 commit 状态，延迟约束/SSI 失败会传播到 DDL executor，并恢复已启用的当前格式物理快照；新增提交失败与快照恢复回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
+| 2026-08-11 | 事务资源生命周期继续收口：普通 COMMIT/ROLLBACK 清理 `.txn_backup`，DDL wrapper 通过事务上下文保留恢复快照；`beginTransaction()` 传播前一事务的隐式提交失败，避免错误后继续建立新事务。 |
 | 2026-08-10 | DDL 物理/catalog 顺序与原子性继续收口：`DROP SCHEMA` 现在先规划 namespace 依赖，再删除物理 schema，最后应用 catalog 计划；catalog 后处理失败恢复当前格式快照。ALTER 多子命令失败也继续恢复整句快照，并新增 schema drop-plan 回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
 | 2026-08-09 | DDL 创建失败安全：`StorageEngine::createTable` 现在检查 schema/heap/分区/TOAST/主键/唯一索引及 `tlist.lst` 初始化结果，失败时清理已写入的 relation 文件、序列、缓存和清单项；DdlExecutor 在物理创建后立即登记表回滚记录，约束 metadata/EXCLUDE 后处理失败会撤销整张表；`DROP TABLE` 先生成只读依赖计划，物理删除成功后才应用 catalog 删除。新增损坏 heap、后处理失败与 drop plan 回归；完整 DROP/ALTER undo 和跨对象依赖事务语义仍待后续。 |
 | 2026-08-09 | `TRUNCATE` 架构收敛：新增 typed `TruncateStmt` 与 DdlExecutor 执行路径，删除 `main.cpp` 字符串处理；支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT` 预检，新增多表/FK/identity 回归。trigger、foreign table 与完整 transactional/locking 语义仍待后续。 |

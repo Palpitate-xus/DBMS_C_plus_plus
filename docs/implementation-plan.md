@@ -11,6 +11,8 @@
 
 2026-08-11 增量审计：`DdlTransaction::commit()` 现在检查引擎提交状态；延迟约束或 SSI 提交失败会返回错误，并恢复已启用的 DDL 物理快照，防止 DDL 执行器把失败状态报告为成功。
 
+2026-08-11 增量审计：普通事务 COMMIT/ROLLBACK 现在清理 `.txn_backup`；DDL wrapper 通过事务上下文显式保留恢复所需的快照。`beginTransaction()` 不再忽略隐式提交失败，避免错误状态下继续打开新事务。
+
 当前 schema 格式已升级为 `0x44420009`：固定标识符字段统一使用 64 字节容量，支持 PostgreSQL 63 字节级别的表名、列名、类型名和约束名；旧格式不迁移，必须重建数据库。
 
 构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`。测试编排唯一由 `build_tests.sh` 负责，`run_all_tests_fast.sh` 仅是安静输出外壳，避免两套测试链接/桩选择逻辑漂移。
@@ -324,7 +326,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 4.36 实现 `CREATE PROCEDURE` 语言运行时与事务控制 | 1.1.23 | 已保存并解析基础 procedure 定义；PL/pgSQL 运行时和 PostgreSQL 事务控制语义仍待后续。 |
 | ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL、USING/WITH CHECK 关系感知扫描、默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、INHERIT/NOINHERIT 和表 owner/角色属性绕过已落地；完整 owner ACL 组合和 `ALTER POLICY` 语义仍待后续。 |
 | ⚠️ 4.38 实现 `CREATE MATERIALIZED VIEW` `WITH [NO] DATA`、并发刷新 | 1.1.21, 4.10 | 已支持基础创建、列序、`WITH [NO] DATA` 和刷新；唯一索引要求、真正的 CONCURRENTLY 锁语义和 `pg_matview` 依赖追踪仍待后续。 |
-| ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 已接入并传播引擎提交失败；ALTER 多子命令失败和提交失败可通过当前格式整库快照恢复，CREATE 失败清理以及 DROP TABLE/SCHEMA 的物理后再 catalog 依赖计划已覆盖主要单对象边界；完整跨对象依赖 undo、并发 DDL 锁和 PostgreSQL 隐式提交边界仍待后续。 |
+| ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 已接入并传播引擎提交失败；普通事务备份生命周期已清理，ALTER 多子命令失败和提交失败可通过当前格式整库快照恢复，CREATE 失败清理以及 DROP TABLE/SCHEMA 的物理后再 catalog 依赖计划已覆盖主要单对象边界；完整跨对象依赖 undo、并发 DDL 锁和 PostgreSQL 隐式提交边界仍待后续。 |
 | ✅ 4.40 实现 `CREATE ASSERTION` 执行（如决定支持） | 5.9 | PG 本身未实现。本项目暂不支持Assertion，标记为完成（scope exclusion）。 |
 
 ### Phase 4 已完成内容（截至当前 commit）

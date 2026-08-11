@@ -117,6 +117,56 @@ static void test_commit_failure_is_propagated_and_restored() {
     std::cout << "[DDL-TXN] commit failure propagation and snapshot restore OK" << std::endl;
 }
 
+static void test_engine_transaction_backup_lifecycle() {
+    std::string db = testDbPath("ddl_txn_t_backup_lifecycle");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::TableSchema tbl;
+    tbl.tablename = "lifecycle_tbl";
+    tbl.append(dbms::makeIntColumn("id", false, 2, true));
+    assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "lifecycle_tbl", {{"id", "1"}}) == dbms::DBStatus::OK);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+    assert(!fs::exists(db + ".txn_backup"));
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "lifecycle_tbl", {{"id", "2"}}) == dbms::DBStatus::OK);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(!fs::exists(db + ".txn_backup"));
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] engine backup lifecycle OK" << std::endl;
+}
+
+static void test_begin_propagates_implicit_commit_failure() {
+    std::string db = testDbPath("ddl_txn_t_begin_failure");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE deferred_begin (id INT PRIMARY KEY, price INT, "
+        "CONSTRAINT chk_price CHECK (price > 0) DEFERRABLE INITIALLY DEFERRED)",
+        s));
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "deferred_begin", {{"id", "1"}, {"price", "0"}}) ==
+           dbms::DBStatus::OK);
+    // Starting another transaction must not swallow the failed implicit
+    // commit or open a fresh transaction after the deferred CHECK aborts.
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::INVALID_VALUE);
+    assert(!g_engine.inTransaction());
+    assert(!fs::exists(db + ".txn_backup"));
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] implicit begin failure propagation OK" << std::endl;
+}
+
 static void test_create_table_post_action_rollback() {
     std::string db = testDbPath("ddl_txn_t_post_action");
     cleanup(db);
@@ -278,6 +328,8 @@ int main() {
     test_rollback_create();
     test_commit_survives();
     test_commit_failure_is_propagated_and_restored();
+    test_engine_transaction_backup_lifecycle();
+    test_begin_propagates_implicit_commit_failure();
     test_create_table_post_action_rollback();
     test_wal_catalog_record();
     test_executor_uses_transaction();

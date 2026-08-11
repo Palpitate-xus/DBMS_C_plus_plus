@@ -159,6 +159,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | ReadView + CLOG | ✅ | ✅ | ✅ |
 | 隔离级别 (RU/RC/RR/SI/SERIALIZABLE) | ✅ | ⚠️ | 框架有 |
 | WAL (Write-Ahead Log) | ✅ | ✅ | ✅ |
+| 事务物理快照生命周期 | ✅ | ✅ | 普通 COMMIT/ROLLBACK 清理 `.txn_backup`；DDL wrapper 在需要时保留并恢复快照 |
 | Checkpoint | ✅ | ✅ | ✅ |
 | SAVEPOINT | ✅ | ✅ | ✅ |
 | 表级锁 (共享/排他) | ✅ | ✅ | ✅ |

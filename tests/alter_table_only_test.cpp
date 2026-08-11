@@ -68,6 +68,7 @@ static void test_set_tablespace() {
     // table during a transaction, abort, restore the snapshot, and verify the
     // original custom relation is still readable.
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    g_engine.preserveTransactionBackupOnRollback(true);
     assert(g_engine.alterTableTablespace(db, "t", "pg_default") == dbms::DBStatus::OK);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(g_engine.restoreTransactionBackup(db));
@@ -82,6 +83,7 @@ static void test_set_tablespace() {
     assert(g_engine.insert(db, "u", {{"id", "9"}}) == dbms::DBStatus::OK);
     assert(g_engine.alterTableSetLogged(db, "u", false) == dbms::DBStatus::OK);
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    g_engine.preserveTransactionBackupOnRollback(true);
     assert(g_engine.alterTableTablespace(db, "u", "pg_default") == dbms::DBStatus::OK);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(g_engine.restoreTransactionBackup(db));
