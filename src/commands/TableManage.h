@@ -357,8 +357,8 @@ public:
         // Multi-column stats: key = "col1,col2", value = joint stats
         std::map<std::string, ColumnStats> multiColStats;
     };
-    void analyzeTable(const std::string& dbname, const std::string& tablename);
-    void analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
+    bool analyzeTable(const std::string& dbname, const std::string& tablename);
+    bool analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
                             const std::vector<std::string>& colnames);
     // Functional dependency degrees for CREATE STATISTICS (dependencies kind).
     // Returns map keyed "left=>right" → degree in [0,1] for every ordered pair of
@@ -823,10 +823,11 @@ public:
                            const ReadView* readView = nullptr,
                            const std::vector<std::string>& targetPartitions = {}) const;
     // Scan a non-partitioned heap page range through the engine's shared
-    // read-only allocator. This is used by the parallel executor; the caller
-    // must only use it outside an active transaction so backend-local SSI
-    // state cannot be mutated from worker threads.
-    void forEachRowPageRange(const std::string& dbname, const std::string& tablename,
+    // read-only allocator. Returns false on allocator/page I/O failure. This
+    // is used by the parallel executor; the caller must only use it outside
+    // an active transaction so backend-local SSI state cannot be mutated from
+    // worker threads.
+    bool forEachRowPageRange(const std::string& dbname, const std::string& tablename,
                              uint32_t firstPage, uint32_t endPage,
                              const std::function<void(uint32_t pageId, uint16_t slotId,
                                                       const char* data, size_t len)>& callback,
@@ -1067,7 +1068,7 @@ public:
     std::filesystem::path toastDataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path toastIndexPath(const std::string& dbname, const std::string& tablename) const;
     uint64_t allocToastId(const std::string& dbname, const std::string& tablename);
-    void writeToast(const std::string& dbname, const std::string& tablename, uint64_t toastId, const std::string& data);
+    bool writeToast(const std::string& dbname, const std::string& tablename, uint64_t toastId, const std::string& data);
     std::string readToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
     void deleteToast(const std::string& dbname, const std::string& tablename, uint64_t toastId);
     void deleteRowToast(const std::string& dbname, const std::string& tablename, int64_t rid);
@@ -1075,7 +1076,7 @@ public:
     static bool parseToastMarker(const std::string& val, uint64_t& toastId);
 
     // Prepare values for insert/update: create TOAST entries for large var-len values
-    void prepareToastValues(const std::string& dbname, const std::string& tablename,
+    bool prepareToastValues(const std::string& dbname, const std::string& tablename,
                             const TableSchema& tbl, std::map<std::string, std::string>& values);
 
     // VACUUM orphaned TOAST files: remove toast entries no longer referenced by any row
@@ -1216,7 +1217,8 @@ private:
     ExclusionConstraint readExclusion(std::istream& in) const;
     bool checkExclusionConflict(const std::string& dbname, const std::string& tablename,
                                 const ExclusionConstraint& ec, const std::string& newRowBuffer,
-                                int64_t excludeRid = -1) const;
+                                int64_t excludeRid = -1,
+                                bool* scanFailed = nullptr) const;
 
     // Deferred constraint helpers
     struct DeferredCheck {
@@ -1231,7 +1233,8 @@ private:
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,
                                  const std::vector<Condition>& conds,
-                                 bool* usedIndex = nullptr);
+                                 bool* usedIndex = nullptr,
+                                 bool* scanFailed = nullptr);
 
 private:
     mutable LockManager lockManager_;

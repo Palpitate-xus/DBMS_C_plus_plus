@@ -1515,7 +1515,9 @@ bool loadConflictTargetRow(const std::string& currentDB,
                            const TableSchema& table,
                            const std::vector<std::string>& targetColumns,
                            const std::map<std::string, std::string>& targetValues,
-                           std::map<std::string, std::string>& rowValues) {
+                           std::map<std::string, std::string>& rowValues,
+                           bool* scanFailed = nullptr) {
+    if (scanFailed) *scanFailed = false;
     if (targetColumns.empty()) return false;
 
     std::vector<size_t> targetIndices;
@@ -1568,7 +1570,7 @@ bool loadConflictTargetRow(const std::string& currentDB,
     }
 
     bool found = false;
-    g_engine.forEachRow(currentDB, tableName,
+    if (!g_engine.forEachRow(currentDB, tableName,
                         [&](uint32_t, uint16_t, const char* data, size_t len) {
         if (found) return;
         const std::string rowBuffer(data, len);
@@ -1583,7 +1585,10 @@ bool loadConflictTargetRow(const std::string& currentDB,
         {
             found = captureRow(rowBuffer);
         }
-    });
+    })) {
+        if (scanFailed) *scanFailed = true;
+        return false;
+    }
     return found;
 }
 
@@ -1868,11 +1873,16 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                     targetValues[targetColumn] = targetValue->second;
                 }
                 std::map<std::string, std::string> targetRow;
+                bool targetScanFailed = false;
                 if (!targetValueUnavailable &&
                     loadConflictTargetRow(s.currentDB, resolvedTable, table,
                                           conflictTarget, targetValues,
-                                          targetRow)) {
+                                          targetRow, &targetScanFailed)) {
                     continue;
+                }
+                if (targetScanFailed) {
+                    std::cout << "ON CONFLICT target scan failed" << std::endl;
+                    return true;
                 }
                 // A target-specific DO NOTHING must not hide a duplicate
                 // raised by a different unique constraint.
@@ -1894,10 +1904,15 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 }
                 if (stmt.conflictWhere) {
                     std::map<std::string, std::string> targetRow;
+                    bool targetScanFailed = false;
                     if (!loadConflictTargetRow(s.currentDB, resolvedTable, table,
                                                 conflictTarget, targetValues,
-                                                targetRow)) {
+                                                targetRow, &targetScanFailed)) {
                         std::cout << "ON CONFLICT target row is unavailable" << std::endl;
+                        return true;
+                    }
+                    if (targetScanFailed) {
+                        std::cout << "ON CONFLICT target scan failed" << std::endl;
                         return true;
                     }
                     std::string whereValue;

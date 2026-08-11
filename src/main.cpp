@@ -1633,7 +1633,10 @@ static bool handleAnalyze(const string& sql, Session& s) {
             return false;
         }
         for (const auto& tname : tables) {
-            g_engine.analyzeTable(s.currentDB, tname);
+            if (!g_engine.analyzeTable(s.currentDB, tname)) {
+                cout << "ANALYZE failed for table " << tname << endl;
+                return true;
+            }
             cout << "Table " << tname << " analyzed" << endl;
         }
         return false;
@@ -1660,7 +1663,10 @@ static bool handleAnalyze(const string& sql, Session& s) {
             cout << "Multi-column analyze requires at least 2 columns" << endl;
             return true;
         }
-        g_engine.analyzeMultiColumn(s.currentDB, tname, colnames);
+        if (!g_engine.analyzeMultiColumn(s.currentDB, tname, colnames)) {
+            cout << "ANALYZE failed for table " << tname << endl;
+            return true;
+        }
         string key;
         for (size_t i = 0; i < colnames.size(); ++i) {
             if (i > 0) key += ",";
@@ -1670,7 +1676,10 @@ static bool handleAnalyze(const string& sql, Session& s) {
         return false;
     }
     string tname = afterTable;
-    g_engine.analyzeTable(s.currentDB, tname);
+    if (!g_engine.analyzeTable(s.currentDB, tname)) {
+        cout << "ANALYZE failed for table " << tname << endl;
+        return true;
+    }
     cout << "Table " << tname << " analyzed" << endl;
     return false;
 }

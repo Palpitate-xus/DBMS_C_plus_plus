@@ -71,6 +71,7 @@
 - **Hash 索引**：等值查询优化
 - **GIN/BRIN 索引**：基础倒排与块范围能力；独立及 StorageEngine 索引文件采用严格校验、fsync 和原子替换，损坏文件不会被当作空索引加载
 - **访问方法失败安全**：B+树/复合、Hash、全文、GiST、SP-GiST、GIN、BRIN 的构建和 `REINDEX` 会传播 heap 扫描失败；Volcano 顺序/索引扫描遇到页面 I/O 错误时 fail-closed
+- **存储操作失败安全**：过滤器、聚合、JOIN、FK/EXCLUDE、`ANALYZE`、表重写和 TOAST/page 写入会传播页面 I/O 错误；`ANALYZE` 统计文件采用原子替换，不会以半成品覆盖旧统计
 - **Fulltext 索引**：文本全文检索
 - **复合索引**：多列联合索引
 - **唯一性约束**：通过 B+ 树自动检测重复主键/唯一键

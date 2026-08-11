@@ -4,6 +4,7 @@
 #include "types/numeric.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -175,6 +176,7 @@ bool ParallelTableScanOp::open() {
     usedParallelWorkers_ = true;
     using Row = std::pair<int64_t, std::string>;
     std::vector<std::vector<Row>> local(static_cast<size_t>(activeWorkers));
+    std::atomic<bool> scanFailed{false};
     std::vector<std::thread> threads;
     threads.reserve(static_cast<size_t>(activeWorkers));
     for (int worker = 0; worker < activeWorkers; ++worker) {
@@ -182,19 +184,26 @@ bool ParallelTableScanOp::open() {
                                    static_cast<uint32_t>(activeWorkers);
         const uint32_t end = 1 + static_cast<uint32_t>(worker + 1) * (pageCount - 1) /
                                  static_cast<uint32_t>(activeWorkers);
-        threads.emplace_back([this, &local, worker, begin, end]() {
+        threads.emplace_back([this, &local, &scanFailed, worker, begin, end]() {
             auto& output = local[static_cast<size_t>(worker)];
-            engine_->forEachRowPageRange(
+            if (!engine_->forEachRowPageRange(
                 dbname_, tablename_, begin, end,
                 [this, &output](uint32_t pageId, uint16_t slotId,
                                 const char* data, size_t len) {
                     std::string row(data, len);
                     output.emplace_back(StorageEngine::encodeRid(pageId, slotId),
                                         std::move(row));
-                });
+                })) {
+                scanFailed.store(true, std::memory_order_relaxed);
+            }
         });
     }
     for (auto& thread : threads) thread.join();
+    if (scanFailed.load(std::memory_order_relaxed)) {
+        rows_.clear();
+        usedParallelWorkers_ = false;
+        return false;
+    }
     for (auto& part : local) {
         for (auto& row : part) {
             row.second = engine_->resolveToastValues(dbname_, tablename_, row.second, tbl_);

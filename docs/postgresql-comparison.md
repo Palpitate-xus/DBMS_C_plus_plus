@@ -168,7 +168,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | **Gap locks / predicate locks** | ✅ | ⚠️ | 有简化 gap lock 和关系级 SIREAD；缺页/索引粒度 predicate lock |
 | **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 行级 rw-conflict + 关系级 SIREAD 覆盖空范围读；缺精确 phantom 推理和完整 SSI 规则 |
 | **两阶段提交 (2PC)** | ✅ | ✅ | ✅ (prepareTransaction + COMMIT/ROLLBACK PREPARED) |
-| **并行查询** | ✅ | ⚠️ | 非分区 heap 已支持按 page range 并行扫描和确定性 Gather；事务内回退，parallel join/aggregate/GatherMerge/worker pool 仍缺 |
+| **并行查询** | ✅ | ⚠️ | 非分区 heap 已支持按 page range 并行扫描和确定性 Gather，page I/O 失败会传播到算子；事务内回退，parallel join/aggregate/GatherMerge/worker pool 仍缺 |
 | **JIT compilation (LLVM)** | ✅ | ❌ | 缺 |
 | **Async I/O (io_uring)** | ✅ (PG18) | ❌ | 缺 |
 | HOT Update | ✅ | ✅ | ✅ |
@@ -199,7 +199,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | Buffer Pool (clock sweep) | ✅ | ✅ | clock sweep、pinned 页保护、脏页写盘/读取失败 fail-closed；shared buffers 分片与完整并发 contention 语义仍有差距 |
 | Free Space Map | ✅ | ✅ | ✅ |
 | Visibility Map | ✅ | ✅ | ✅ |
-| TOAST (大字段压缩/线外存储) | ✅ | ⚠️ | relation/index + zlib 压缩；缺少 PG pointer/catalog 完整语义 |
+| TOAST (大字段压缩/线外存储) | ✅ | ⚠️ | relation/index + zlib 压缩，TOAST page/index 写入失败会 fail-closed；缺少 PG pointer/catalog 完整语义 |
 | 页校验和 | ✅ | ✅ | ✅ |
 | 溢出页 | ✅ | ✅ | ✅ |
 | 子事务日志 | ✅ | ✅ | ✅ |

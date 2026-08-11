@@ -2819,7 +2819,7 @@ static StorageEngine::ColumnStats parseStatsLine(const std::string& line) {
 }
 
 // Write a single ColumnStats entry
-static void writeStatsEntry(std::ofstream& ofs, const std::string& tname,
+static void writeStatsEntry(std::ostream& ofs, const std::string& tname,
                             const std::string& cname, const StorageEngine::ColumnStats& cs) {
     ofs << tname << " " << cname << " " << cs.cardinality
         << "|" << cs.minVal << "|" << cs.maxVal << "|";
@@ -2830,9 +2830,9 @@ static void writeStatsEntry(std::ofstream& ofs, const std::string& tname,
     ofs << "|" << mcvToString(cs.mcv) << "\n";
 }
 
-void StorageEngine::analyzeTable(const std::string& dbname,
-                                  const std::string& tablename) {
-    if (!tableExists(dbname, tablename)) return;
+bool StorageEngine::analyzeTable(const std::string& dbname,
+                                 const std::string& tablename) {
+    if (!tableExists(dbname, tablename)) return false;
     TableSchema tbl = getTableSchema(dbname, tablename);
 
     TableStats stats;
@@ -2841,7 +2841,7 @@ void StorageEngine::analyzeTable(const std::string& dbname,
     std::map<std::string, std::vector<std::string>> allVals;
     std::map<std::string, std::string> minVals, maxVals;
 
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         stats.rowCount++;
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -2855,7 +2855,7 @@ void StorageEngine::analyzeTable(const std::string& dbname,
                 maxVals[tbl.cols[i].dataName] = val;
             }
         }
-    });
+    })) return false;
 
     const size_t HIST_BUCKETS = 10;
     const size_t MCV_TOP_N = 10;
@@ -2937,28 +2937,29 @@ void StorageEngine::analyzeTable(const std::string& dbname,
     allStats[tablename] = stats;
 
     // Write back
-    std::ofstream ofs(spath);
+    std::ostringstream serialized;
     for (const auto& kv : allStats) {
-        ofs << kv.first << " __rows__ " << kv.second.rowCount << "||\n";
+        serialized << kv.first << " __rows__ " << kv.second.rowCount << "||\n";
         for (const auto& cv : kv.second.colStats) {
-            writeStatsEntry(ofs, kv.first, cv.first, cv.second);
+            writeStatsEntry(serialized, kv.first, cv.first, cv.second);
         }
         for (const auto& mv : kv.second.multiColStats) {
-            ofs << kv.first << " __multi__ " << mv.first << " " << mv.second.cardinality
+            serialized << kv.first << " __multi__ " << mv.first << " " << mv.second.cardinality
                 << "|" << mv.second.minVal << "|" << mv.second.maxVal << "|";
             for (size_t i = 0; i < mv.second.histogram.size(); ++i) {
-                if (i > 0) ofs << ";";
-                ofs << mv.second.histogram[i].first << "," << mv.second.histogram[i].second;
+                if (i > 0) serialized << ";";
+                serialized << mv.second.histogram[i].first << "," << mv.second.histogram[i].second;
             }
-            ofs << "|" << mcvToString(mv.second.mcv) << "\n";
+            serialized << "|" << mcvToString(mv.second.mcv) << "\n";
         }
     }
+    return index_file::writeAtomically(spath, serialized.str());
 }
 
-void StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
-                                        const std::vector<std::string>& colnames) {
-    if (!tableExists(dbname, tablename)) return;
-    if (colnames.size() < 2) return;
+bool StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
+                                       const std::vector<std::string>& colnames) {
+    if (!tableExists(dbname, tablename)) return false;
+    if (colnames.size() < 2) return false;
     TableSchema tbl = getTableSchema(dbname, tablename);
 
     // Build column index map
@@ -2967,7 +2968,7 @@ void StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::str
         colIdx[tbl.cols[i].dataName] = i;
     }
     for (const auto& c : colnames) {
-        if (colIdx.find(c) == colIdx.end()) return;
+        if (colIdx.find(c) == colIdx.end()) return false;
     }
 
     std::string colKey;
@@ -2980,7 +2981,7 @@ void StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::str
     std::map<std::string, std::string> minVals, maxVals;
     size_t rowCount = 0;
 
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         rowCount++;
         std::string row(data, len);
         std::string combined;
@@ -2991,7 +2992,7 @@ void StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::str
         distinctVals[combined]++;
         if (minVals.empty() || combined < minVals.begin()->first) minVals[combined] = combined;
         if (maxVals.empty() || combined > maxVals.rbegin()->first) maxVals[combined] = combined;
-    });
+    })) return false;
 
     StorageEngine::ColumnStats cs;
     cs.cardinality = distinctVals.size();
@@ -3033,22 +3034,23 @@ void StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::str
     allStats[tablename].multiColStats[colKey] = cs;
 
     // Write back
-    std::ofstream ofs(spath);
+    std::ostringstream serialized;
     for (const auto& kv : allStats) {
-        ofs << kv.first << " __rows__ " << kv.second.rowCount << "||\n";
+        serialized << kv.first << " __rows__ " << kv.second.rowCount << "||\n";
         for (const auto& cv : kv.second.colStats) {
-            writeStatsEntry(ofs, kv.first, cv.first, cv.second);
+            writeStatsEntry(serialized, kv.first, cv.first, cv.second);
         }
         for (const auto& mv : kv.second.multiColStats) {
-            ofs << kv.first << " __multi__ " << mv.first << " " << mv.second.cardinality
+            serialized << kv.first << " __multi__ " << mv.first << " " << mv.second.cardinality
                 << "|" << mv.second.minVal << "|" << mv.second.maxVal << "|";
             for (size_t i = 0; i < mv.second.histogram.size(); ++i) {
-                if (i > 0) ofs << ";";
-                ofs << mv.second.histogram[i].first << "," << mv.second.histogram[i].second;
+                if (i > 0) serialized << ";";
+                serialized << mv.second.histogram[i].first << "," << mv.second.histogram[i].second;
             }
-            ofs << "|" << mcvToString(mv.second.mcv) << "\n";
+            serialized << "|" << mcvToString(mv.second.mcv) << "\n";
         }
     }
+    return index_file::writeAtomically(spath, serialized.str());
 }
 
 std::map<std::string, double> StorageEngine::computeFunctionalDependencies(
@@ -3066,7 +3068,7 @@ std::map<std::string, double> StorageEngine::computeFunctionalDependencies(
 
     // Collect the projected values for each requested column, row by row.
     std::vector<std::vector<std::string>> rows; // rows[r][k] = value of colnames[k]
-    const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
+    if (!const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
         [&](uint32_t, uint16_t, const char* data, size_t len) {
             std::string row(data, len);
             std::vector<std::string> vals;
@@ -3076,7 +3078,7 @@ std::map<std::string, double> StorageEngine::computeFunctionalDependencies(
                     row, tbl, colIdx[c]));
             }
             rows.push_back(std::move(vals));
-        });
+        })) return result;
 
     size_t rowCount = rows.size();
     if (rowCount == 0) return result;
@@ -3115,7 +3117,7 @@ std::map<std::string, int64_t> StorageEngine::computeNDistinct(
         if (colIdx.find(c) == colIdx.end()) return result;
 
     std::vector<std::vector<std::string>> rows;
-    const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
+    if (!const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
         [&](uint32_t, uint16_t, const char* data, size_t len) {
             std::string row(data, len);
             std::vector<std::string> vals;
@@ -3124,7 +3126,7 @@ std::map<std::string, int64_t> StorageEngine::computeNDistinct(
                 vals.push_back(const_cast<StorageEngine*>(this)->extractColumnValue(
                     row, tbl, colIdx[c]));
             rows.push_back(std::move(vals));
-        });
+        })) return result;
     if (rows.empty()) return result;
 
     // Per-column distinct counts.
@@ -3161,7 +3163,7 @@ std::vector<std::pair<std::string, int64_t>> StorageEngine::computeMCVCombinatio
         if (colIdx.find(c) == colIdx.end()) return result;
 
     std::map<std::string, int64_t> counts;
-    const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
+    if (!const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename,
         [&](uint32_t, uint16_t, const char* data, size_t len) {
             std::string row(data, len);
             std::string disp = "(";
@@ -3172,7 +3174,7 @@ std::vector<std::pair<std::string, int64_t>> StorageEngine::computeMCVCombinatio
             }
             disp += ")";
             counts[disp]++;
-        });
+        })) return result;
 
     result.assign(counts.begin(), counts.end());
     std::sort(result.begin(), result.end(),
@@ -3755,14 +3757,14 @@ bool StorageEngine::forEachVisibleRow(
     return true;
 }
 
-void StorageEngine::forEachRowPageRange(
+bool StorageEngine::forEachRowPageRange(
     const std::string& dbname, const std::string& tablename,
     uint32_t firstPage, uint32_t endPage,
     const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
     const ReadView* readView) const {
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType != TableSchema::PartitionType::None || firstPage >= endPage)
-        return;
+        return true;
 
     // Workers share the engine's page allocator.  BufferPool operations are
     // internally synchronized and the page lock prevents a writer from
@@ -3770,7 +3772,7 @@ void StorageEngine::forEachRowPageRange(
     // shared allocator is important: a private file descriptor would miss
     // dirty pages that have not reached disk yet.
     PageAllocator* allocator = getPageAllocator(dbname, tablename);
-    if (!allocator) return;
+    if (!allocator) return false;
 
     const ReadView* rv = readView;
     const uint32_t pageCount = allocator->numPages();
@@ -3793,6 +3795,10 @@ void StorageEngine::forEachRowPageRange(
     for (uint32_t pid = std::max<uint32_t>(1, firstPage); pid < lastPage; ++pid) {
         lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = allocator->fetchPage(pid);
+        if (!buf) {
+            lockManager_.pageUnlock(dbname, tablename, pid);
+            return false;
+        }
         PageWrapper page(buf, allocator->pageSize(), tbl.formatVersion);
         page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
             emitRow(pid, sid, data, len);
@@ -3800,6 +3806,7 @@ void StorageEngine::forEachRowPageRange(
         allocator->unpinPage(pid);
         lockManager_.pageUnlock(dbname, tablename, pid);
     }
+    return true;
 }
 
 bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer,
@@ -3809,6 +3816,7 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
     uint16_t slotId = 0;
     decodeRid(rid, pageId, slotId);
     char* buf = pa->fetchPage(pageId);
+    if (!buf) return false;
     PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
     const char* data = nullptr;
     size_t len = 0;
@@ -3827,6 +3835,7 @@ bool StorageEngine::readVisibleRowByRid(PageAllocator* pa, int64_t rid,
     uint16_t slotId = 0;
     decodeRid(rid, pageId, slotId);
     char* buf = pa->fetchPage(pageId);
+    if (!buf) return false;
     PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
     const char* data = nullptr;
     size_t len = 0;
@@ -3855,6 +3864,7 @@ bool StorageEngine::isColumnNullByRid(const std::string& dbname,
     uint16_t slotId = 0;
     decodeRid(rid, pageId, slotId);
     char* buf = pa->fetchPage(pageId);
+    if (!buf) return false;
     PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
     const char* data = nullptr;
     size_t len = 0;
@@ -4047,14 +4057,17 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
     }
     if (existing.count(colname)) return DBStatus::OK; // already exists
     existing.insert(colname);
-    {
-        std::ofstream out(meta, std::ios::trunc);
-        for (const auto& c : existing) out << c << '\n';
-    }
 
     // Build hash index from existing data
     HashIndex* hidx = getHashIndex(dbname, tablename, colname);
     if (!hidx) return DBStatus::IO_ERROR;
+    const std::string cacheKey = dbname + "." + tablename + "." + colname;
+    auto discardIndex = [&]() {
+        hidx->close();
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        hashIndexCache_.erase(cacheKey);
+        std::filesystem::remove(hashIndexPath(dbname, tablename, colname));
+    };
     hidx->clear();
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -4068,8 +4081,20 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
                 break;
             }
         }
-    })) return DBStatus::IO_ERROR;
-    if (!hidx->close() || !hidx->open()) return DBStatus::IO_ERROR;
+    })) {
+        discardIndex();
+        return DBStatus::IO_ERROR;
+    }
+    if (!hidx->close() || !hidx->open()) {
+        discardIndex();
+        return DBStatus::IO_ERROR;
+    }
+    std::ostringstream serializedMeta;
+    for (const auto& c : existing) serializedMeta << c << '\n';
+    if (!index_file::writeAtomically(meta, serializedMeta.str())) {
+        discardIndex();
+        return DBStatus::IO_ERROR;
+    }
     return DBStatus::OK;
 }
 
@@ -5892,7 +5917,8 @@ static bool rangesOverlap(const std::string& a, const std::string& b) {
 
 bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std::string& tablename,
                                             const ExclusionConstraint& ec, const std::string& newRowBuffer,
-                                            int64_t excludeRid) const {
+                                            int64_t excludeRid, bool* scanFailed) const {
+    if (scanFailed) *scanFailed = false;
     if (ec.elements.empty()) return false;
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::map<std::string, std::string> newValues;
@@ -5917,7 +5943,7 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
     }
 
     bool conflict = false;
-    const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+    const bool scanOk = const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
         if (conflict) return;
         int64_t rid = static_cast<int64_t>(encodeRid(pid, sid));
         if (rid == excludeRid) return;
@@ -5964,6 +5990,10 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
         }
         if (allMatch) conflict = true;
     });
+    if (!scanOk) {
+        if (scanFailed) *scanFailed = true;
+        return false;
+    }
     return conflict;
 }
 
@@ -7956,7 +7986,7 @@ BPTree* StorageEngine::getToastIndex(const std::string& dbname,
     auto it = toastIndexes_.find(key);
     if (it != toastIndexes_.end()) return it->second.get();
     auto idx = std::make_unique<BPTree>(toastIndexPath(dbname, tablename).string());
-    idx->open();
+    if (!idx->open()) return nullptr;
     BPTree* ptr = idx.get();
     toastIndexes_[key] = std::move(idx);
     return ptr;
@@ -7986,11 +8016,11 @@ static std::string toastIndexKey(uint64_t toastId, uint32_t seq) {
     return "T" + std::to_string(toastId) + ":" + std::to_string(seq);
 }
 
-void StorageEngine::writeToast(const std::string& dbname, const std::string& tablename,
-                                uint64_t toastId, const std::string& data) {
+bool StorageEngine::writeToast(const std::string& dbname, const std::string& tablename,
+                               uint64_t toastId, const std::string& data) {
     PageAllocator* pa = getToastPageAllocator(dbname, tablename);
     BPTree* idx = getToastIndex(dbname, tablename);
-    if (!pa || !idx) return;
+    if (!pa || !idx) return false;
 
     uint8_t flags = 0;
     const std::string storedData = compressToastPayload(data, flags);
@@ -8014,13 +8044,16 @@ void StorageEngine::writeToast(const std::string& dbname, const std::string& tab
         for (uint32_t pid = (numPages == 0 ? 0 : 1); pid < numPages && !inserted; ++pid) {
             lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
             char* buf = pa->fetchPage(pid);
+            if (!buf) {
+                lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+                return false;
+            }
             PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
             if (page.canFit(row.size())) {
                 if (page.insert(row.data(), row.size(), slotId)) {
                     pa->markDirty(pid);
                     int64_t rid = encodeRid(pid, slotId);
-                    idx->insert(toastIndexKey(toastId, seq), rid);
-                    inserted = true;
+                    inserted = idx->insert(toastIndexKey(toastId, seq), rid);
                 }
             }
             pa->unpinPage(pid);
@@ -8030,19 +8063,26 @@ void StorageEngine::writeToast(const std::string& dbname, const std::string& tab
             uint32_t pid = pa->allocPage();
             lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
             char* buf = pa->fetchPage(pid);
+            if (!buf) {
+                lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
+                return false;
+            }
             PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
             if (page.insert(row.data(), row.size(), slotId)) {
                 pa->markDirty(pid);
                 int64_t rid = encodeRid(pid, slotId);
-                idx->insert(toastIndexKey(toastId, seq), rid);
+                inserted = idx->insert(toastIndexKey(toastId, seq), rid);
             }
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
         }
 
+        if (!inserted) return false;
+
         offset += len;
         ++seq;
     }
+    return true;
 }
 
 std::string StorageEngine::readToast(const std::string& dbname, const std::string& tablename,
@@ -8176,9 +8216,9 @@ void StorageEngine::deleteRowToast(const std::string& dbname, const std::string&
     }
 }
 
-void StorageEngine::prepareToastValues(const std::string& dbname, const std::string& tablename,
-                                        const TableSchema& tbl,
-                                        std::map<std::string, std::string>& values) {
+bool StorageEngine::prepareToastValues(const std::string& dbname, const std::string& tablename,
+                                       const TableSchema& tbl,
+                                       std::map<std::string, std::string>& values) {
     size_t threshold = toastThreshold(tbl.formatVersion);
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
@@ -8187,10 +8227,11 @@ void StorageEngine::prepareToastValues(const std::string& dbname, const std::str
         if (it == values.end()) continue;
         if (it->second.size() > threshold) {
             uint64_t toastId = allocToastId(dbname, tablename);
-            writeToast(dbname, tablename, toastId, it->second);
+            if (!writeToast(dbname, tablename, toastId, it->second)) return false;
             it->second = std::string(TOAST_PREFIX) + std::to_string(toastId);
         }
     }
+    return true;
 }
 
 std::string StorageEngine::resolveToastValues(const std::string& dbname,
@@ -8687,14 +8728,17 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     // is page based and variable-length rows may reference TOAST, so a raw
     // fixed-width file rewrite is neither safe nor format compatible.
     std::vector<std::map<std::string, std::string>> rows;
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         std::string row(data, len);
         std::map<std::string, std::string> values;
         for (size_t i = 0; i < tbl.len; ++i) {
             values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i, dbname);
         }
         rows.push_back(std::move(values));
-    });
+    })) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
 
     // ADD COLUMN without a default cannot satisfy NOT NULL for existing rows.
     // Reject before touching schema or data so the DDL remains failure-safe.
@@ -8853,26 +8897,32 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
 
     for (const auto& cn : hashCols) {
         HashIndex* hidx = getHashIndex(dbname, tablename, cn);
-        if (!hidx) continue;
+        if (!hidx) return DBStatus::IO_ERROR;
         hidx->clear();
         TableSchema rebuilt = getTableSchema(dbname, tablename);
         size_t colIdx = rebuilt.len;
         for (size_t i = 0; i < rebuilt.len; ++i) {
             if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
         }
-        if (colIdx >= rebuilt.len) continue;
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+        if (colIdx >= rebuilt.len) return DBStatus::INVALID_VALUE;
+        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
             std::string value = extractColumnValue(row, rebuilt, colIdx, dbname);
             if (!value.empty()) hidx->insert(value, encodeRid(pageId, slotId));
-        });
+        })) return DBStatus::IO_ERROR;
+        if (!hidx->close() || !hidx->open()) return DBStatus::IO_ERROR;
     }
-    for (const auto& cn : fullTextCols) createFullTextIndex(dbname, tablename, cn);
-    for (const auto& cn : ginCols) createGinIndex(dbname, tablename, cn);
-    for (const auto& cn : gistCols) createGiSTIndex(dbname, tablename, cn);
-    for (const auto& cn : spgistCols) createSPGiSTIndex(dbname, tablename, cn);
-    for (const auto& cn : brinCols) createBrinIndex(dbname, tablename, cn);
+    for (const auto& cn : fullTextCols)
+        if (createFullTextIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+    for (const auto& cn : ginCols)
+        if (createGinIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+    for (const auto& cn : gistCols)
+        if (createGiSTIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+    for (const auto& cn : spgistCols)
+        if (createSPGiSTIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+    for (const auto& cn : brinCols)
+        if (createBrinIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -8944,14 +8994,17 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     // Read logical rows before changing the column map.  This preserves page
     // headers, variable-length offsets, MVCC visibility, and TOAST values.
     std::vector<std::map<std::string, std::string>> rows;
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         std::string row(data, len);
         std::map<std::string, std::string> values;
         for (size_t i = 0; i < tbl.len; ++i) {
             if (i != dropIdx) values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i, dbname);
         }
         rows.push_back(std::move(values));
-    });
+    })) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
 
     for (size_t i = dropIdx; i + 1 < tbl.len; ++i) tbl.cols[i] = tbl.cols[i + 1];
     tbl.len--;
@@ -9073,26 +9126,32 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     if (indexStatus != DBStatus::OK) return indexStatus;
     for (const auto& cn : hashCols) {
         HashIndex* hidx = getHashIndex(dbname, tablename, cn);
-        if (!hidx) continue;
+        if (!hidx) return DBStatus::IO_ERROR;
         hidx->clear();
         TableSchema rebuilt = getTableSchema(dbname, tablename);
         size_t colIdx = rebuilt.len;
         for (size_t i = 0; i < rebuilt.len; ++i) {
             if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
         }
-        if (colIdx >= rebuilt.len) continue;
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+        if (colIdx >= rebuilt.len) return DBStatus::INVALID_VALUE;
+        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
             std::string value = extractColumnValue(row, rebuilt, colIdx, dbname);
             if (!value.empty()) hidx->insert(value, encodeRid(pageId, slotId));
-        });
+        })) return DBStatus::IO_ERROR;
+        if (!hidx->close() || !hidx->open()) return DBStatus::IO_ERROR;
     }
-    for (const auto& cn : fullTextCols) createFullTextIndex(dbname, tablename, cn);
-    for (const auto& cn : ginCols) createGinIndex(dbname, tablename, cn);
-    for (const auto& cn : gistCols) createGiSTIndex(dbname, tablename, cn);
-    for (const auto& cn : spgistCols) createSPGiSTIndex(dbname, tablename, cn);
-    for (const auto& cn : brinCols) createBrinIndex(dbname, tablename, cn);
+    for (const auto& cn : fullTextCols)
+        if (createFullTextIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+    for (const auto& cn : ginCols)
+        if (createGinIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+    for (const auto& cn : gistCols)
+        if (createGiSTIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+    for (const auto& cn : spgistCols)
+        if (createSPGiSTIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+    for (const auto& cn : brinCols)
+        if (createBrinIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -9157,14 +9216,17 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
 
     // 1. Collect all live rows BEFORE mutating the schema.
     std::vector<std::map<std::string, std::string>> rows;
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         std::string row(data, len);
         std::map<std::string, std::string> values;
         for (size_t i = 0; i < tbl.len; ++i) {
             values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
         }
         rows.push_back(std::move(values));
-    });
+    })) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
 
     // 2. Pre-validate convertibility — abort before touching any files if a
     //    value cannot be represented in the new type (no data loss on failure).
@@ -9951,11 +10013,14 @@ DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
     // NULL detection uses the empty-string convention (reliable for
     // variable-length / 8-byte columns; best-effort for narrow fixed ints).
     bool hasNull = false;
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         if (hasNull) return;
         std::string row(data, len);
         if (extractColumnValue(row, tbl, colIdx).empty()) hasNull = true;
-    });
+    })) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     if (hasNull) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
@@ -10120,7 +10185,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
     // PK columns must be unique across all rows.
     std::set<std::string> seen;
     bool violation = false;
-    forEachRow(dbname, tablename,
+    if (!forEachRow(dbname, tablename,
                [&](uint32_t, uint16_t, const char* data, size_t len) {
                    if (violation) return;
                    std::string row(data, len);
@@ -10132,7 +10197,10 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
                        key += '\x01';
                    }
                    if (!seen.insert(key).second) violation = true;  // duplicate key
-               });
+               })) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     if (violation) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;  // existing data violates the primary key
@@ -10157,13 +10225,18 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
         if (cit != pkIndexCache_.end()) { cit->second->close(); pkIndexCache_.erase(cit); }
         std::filesystem::remove(indexPath(dbname, tablename));
         BPTree* pkIdx = getPKIndex(dbname, tablename);
-        if (pkIdx) {
-            forEachRow(dbname, tablename,
+        if (!pkIdx) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        if (!forEachRow(dbname, tablename,
                        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
                            std::string row(data, len);
                            std::string pkVal = tbl.buildPKValue(row);
                            if (!pkVal.empty()) pkIdx->insert(pkVal, encodeRid(pageId, slotId));
-                       });
+                       })) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
         }
     }
     invalidateCatalogSchema(dbname, tablename);
@@ -11818,12 +11891,17 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             int64_t dummy;
             if (secIdx->search(it->second, dummy)) duplicate = true;
         } else {
-            forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            bool scanFailed = false;
+            if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
                 if (duplicate) return;
                 std::string row(data, len);
                 std::string existingVal = extractColumnValue(row, tbl, i);
                 if (existingVal == it->second) duplicate = true;
-            });
+            })) scanFailed = true;
+            if (scanFailed) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
         }
         if (duplicate) {
             lockManager_.unlock(tablename);
@@ -11854,7 +11932,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
         if (containsNull) continue;
         bool duplicate = false;
-        forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+        if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
             if (duplicate) return;
             std::string row(data, len);
             std::string existingKey;
@@ -11870,7 +11948,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 }
             }
             if (!existingContainsNull && existingKey == compositeKey) duplicate = true;
-        });
+        })) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
         if (duplicate) {
             lockManager_.unlock(tablename);
             return DBStatus::DUPLICATE_KEY;
@@ -12219,7 +12300,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     }
 
     // TOAST: offload large variable-length values to external storage
-    prepareToastValues(dbname, tablename, tbl, actualValues);
+    if (!prepareToastValues(dbname, tablename, tbl, actualValues)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
 
     // Build row buffer
     uint64_t creatorTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
@@ -12246,9 +12330,14 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // Check EXCLUDE constraints before writing
     auto excludeConstraints = getExclusionConstraints(dbname, tablename);
     for (const auto& ec : excludeConstraints) {
-        if (checkExclusionConflict(dbname, tablename, ec, strippedRow)) {
+        bool scanFailed = false;
+        if (checkExclusionConflict(dbname, tablename, ec, strippedRow, -1, &scanFailed)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
+        }
+        if (scanFailed) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
         }
     }
 
@@ -12293,7 +12382,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         } else {
             // Multi-column FK: scan reference table rows
             bool found = false;
-            forEachRow(dbname, fk.refTable, [&](uint32_t, uint16_t, const char* data, size_t len) {
+            if (!forEachRow(dbname, fk.refTable, [&](uint32_t, uint16_t, const char* data, size_t len) {
                 if (found) return;
                 std::string row(data, len);
                 bool match = true;
@@ -12314,7 +12403,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                     }
                 }
                 if (match) found = true;
-            });
+            })) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             if (!found) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;  // referenced key not found
@@ -12373,6 +12465,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     } else {
         pa = getPageAllocator(dbname, tablename);
     }
+    if (!pa) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     uint32_t pageId = 0;
     uint16_t slotId = 0;
     {
@@ -12389,6 +12485,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             if (candidate > 0 && candidate < numPages) {
                 lockManager_.pageLockExclusive(dbname, tablename, candidate);
                 char* buf = pa->fetchPage(candidate);
+                if (!buf) {
+                    lockManager_.pageUnlock(dbname, tablename, candidate);
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
+                }
                 PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
                 if (page.canFit(actualRowSize) &&
                     pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
@@ -12411,6 +12512,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
             lockManager_.pageLockExclusive(dbname, tablename, pid);
             char* buf = pa->fetchPage(pid);
+            if (!buf) {
+                lockManager_.pageUnlock(dbname, tablename, pid);
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             if (page.canFit(actualRowSize) &&
                 pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
@@ -12434,6 +12540,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             pageId = pa->allocPage();
             lockManager_.pageLockExclusive(dbname, tablename, pageId);
             char* buf = pa->fetchPage(pageId);
+            if (!buf) {
+                lockManager_.pageUnlock(dbname, tablename, pageId);
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
             walPageImage(dbname, tablename, pageId, buf, pa->pageSize(), true);
             if (!page.insert(rowBuffer.data(), actualRowSize, slotId)) {
@@ -12707,8 +12818,16 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
 std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                              const std::string& tablename,
                                              const std::vector<Condition>& conds,
-                                             bool* usedIndex) {
+                                             bool* usedIndex,
+                                             bool* scanFailed) {
     std::set<int64_t> ids;
+    if (usedIndex) *usedIndex = false;
+    if (scanFailed) *scanFailed = false;
+    auto failScan = [&]() {
+        ids.clear();
+        if (scanFailed) *scanFailed = true;
+        return ids;
+    };
     TableSchema tbl = getTableSchema(dbname, tablename);
 
     // Helper: a column with a non-binary collation cannot use binary indexes
@@ -12920,10 +13039,14 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             for (const auto& pname : targetParts) {
                 auto ppa = std::make_unique<PageAllocator>(
                     partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-                if (!ppa->open()) continue;
+                if (!ppa->open()) return failScan();
                 uint32_t np = ppa->numPages();
                 for (uint32_t pid = 1; pid < np; ++pid) {
                     char* buf = ppa->fetchPage(pid);
+                    if (!buf) {
+                        ppa->close();
+                        return failScan();
+                    }
                     PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         int64_t rid = encodeRid(pid, sid);
@@ -12941,7 +13064,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             return ids;
         }
     }
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
         int64_t rid = encodeRid(pageId, slotId);
         bool match = true;
         std::string row(data, len);
@@ -12949,7 +13072,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             if (!evalConditionOnRow(c, row, tbl)) { match = false; break; }
         }
         if (match) ids.insert(rid);
-    });
+    })) return failScan();
     return ids;
 }
 
@@ -13023,7 +13146,12 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
     } else {
-        toDelete = filterRows(dbname, tablename, conds);
+        bool scanFailed = false;
+        toDelete = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
+        if (scanFailed) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
     }
 
     // Structured DELETE ... USING performs the source-row match before this
@@ -13085,9 +13213,11 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                 std::vector<CascadeAction> cascadeActions;
                 std::vector<SetNullAction> setNullActions;
                 std::set<std::string> restrictTables;
+                bool dependencyScanFailed = false;
 
                 auto allTables = getTableNames(dbname);
                 for (const auto& otherTable : allTables) {
+                    if (dependencyScanFailed) break;
                     if (otherTable == tablename) continue;
                     TableSchema otherTbl = getTableSchema(dbname, otherTable);
                     for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
@@ -13107,7 +13237,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                         }
                         if (!allFound || fkColIndices.empty()) continue;
 
-                        forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
+                        if (!forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
                             std::string row(data, len);
                             // Build FK value map for this row
                             std::map<std::string, std::string> fkVals;
@@ -13136,8 +13266,16 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                                     restrictTables.insert(otherTable);
                                 }
                             }
-                        });
+                        })) {
+                            dependencyScanFailed = true;
+                            break;
+                        }
                     }
+                }
+
+                if (dependencyScanFailed) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
                 }
 
                 if (!restrictTables.empty()) {
@@ -13738,6 +13876,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
     const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
     auto conds = parseConditions(conditions);
     std::set<int64_t> matchIds;
+    bool scanFailed = false;
     if (enforceRls) {
         const bool scanOk = forEachVisibleRow(
             dbname, tablename, "UPDATE",
@@ -13753,9 +13892,17 @@ DBStatus StorageEngine::update(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
     } else {
-        matchIds = conds.empty()
-            ? [&](){ std::set<int64_t> s; forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) { s.insert(encodeRid(pid, sid)); }); return s; }()
-            : filterRows(dbname, tablename, conds);
+        if (conds.empty()) {
+            if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) {
+                matchIds.insert(encodeRid(pid, sid));
+            })) scanFailed = true;
+        } else {
+            matchIds = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
+        }
+        if (scanFailed) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
     }
 
     if (updateMatcher && !matchIds.empty()) {
@@ -14017,9 +14164,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
 
-        // TOAST: delete old toast entries, create new ones for large values
+        // TOAST: prepare new external values before deleting the old chunks.
+        // A failed write must leave the old row's payload recoverable.
+        if (!prepareToastValues(dbname, tablename, tbl, rowValues)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
         deleteRowToast(dbname, tablename, rid);
-        prepareToastValues(dbname, tablename, tbl, rowValues);
         uint64_t updateTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
         std::string newRow = buildRowBuffer(tbl, rowValues, updateTxnId);
         std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
@@ -14053,9 +14204,14 @@ DBStatus StorageEngine::update(const std::string& dbname,
         // Check EXCLUDE constraints before writing (exclude the row being updated).
         auto excludeConstraints = getExclusionConstraints(dbname, tablename);
         for (const auto& ec : excludeConstraints) {
-            if (checkExclusionConflict(dbname, tablename, ec, strippedNewRow, rid)) {
+            bool scanFailed = false;
+            if (checkExclusionConflict(dbname, tablename, ec, strippedNewRow, rid, &scanFailed)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
+            }
+            if (scanFailed) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
             }
         }
 
@@ -14085,7 +14241,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
 
             if (!oldPKVals.empty()) {
                 auto allTables = getTableNames(dbname);
+                bool dependencyScanFailed = false;
                 for (const auto& otherTable : allTables) {
+                    if (dependencyScanFailed) break;
                     if (otherTable == tablename) continue;
                     TableSchema otherTbl = getTableSchema(dbname, otherTable);
                     for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
@@ -14105,7 +14263,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                         }
                         if (!allFound || fkColIndices.empty()) continue;
 
-                        forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
+                        if (!forEachRow(dbname, otherTable, [&](uint32_t opid, uint16_t osid, const char* data, size_t len) {
                             std::string oRow(data, len);
                             // Build FK value map for this row
                             std::map<std::string, std::string> fkVals;
@@ -14140,8 +14298,15 @@ DBStatus StorageEngine::update(const std::string& dbname,
                                     restrictTables.insert(otherTable);
                                 }
                             }
-                        });
+                        })) {
+                            dependencyScanFailed = true;
+                            break;
+                        }
                     }
+                }
+                if (dependencyScanFailed) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
                 }
             }
 
@@ -14228,10 +14393,15 @@ DBStatus StorageEngine::update(const std::string& dbname,
             }
         }
 
+        lockManager_.pageLockExclusive(dbname, tablename, pageId);
         char* pageBuf = pa->fetchPage(pageId);
         int64_t actualRid = rid;
-        if (pageBuf) {
-            lockManager_.pageLockExclusive(dbname, tablename, pageId);
+        if (!pageBuf) {
+            lockManager_.pageUnlock(dbname, tablename, pageId);
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        {
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
             walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
             // Mark old row as updated (xmax) for PostgreSQL-style tuples.
@@ -14871,6 +15041,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     auto conds = parseConditions(conditions);
     std::vector<std::pair<int64_t, std::string>> matchRows;
     bool usedIndex = false;
+    bool scanFailed = false;
     if (enforceRls) {
         const auto targetParts = tbl.partitionType == TableSchema::PartitionType::None
             ? std::vector<std::string>{}
@@ -14886,31 +15057,35 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                 }
                 matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
             }, rv, targetParts);
-        if (!scanOk) matchRows.clear();
+        if (!scanOk) scanFailed = true;
     } else if (conds.empty()) {
-        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+        if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
-        });
+        })) scanFailed = true;
     } else if (tbl.partitionType != TableSchema::PartitionType::None) {
         // Partitioned table: use forEachRow with partition pruning + in-callback filtering
         auto targetParts = getTargetPartitions(tbl, conds);
         const ReadView* rv = transactionContext().inTransaction ? &transactionContext().readView : nullptr;
-        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+        if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             std::string row(data, len);
             bool match = true;
             for (const auto& c : conds) {
                 if (!evalConditionOnRow(c, row, tbl)) { match = false; break; }
             }
             if (match) matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
-        }, rv, targetParts);
+        }, rv, targetParts)) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds, &usedIndex);
+        auto ids = filterRows(dbname, tablename, conds, &usedIndex, &scanFailed);
         for (int64_t rid : ids) {
             std::string row;
             if (readRowByRid(pa, rid, row, tbl)) {
                 matchRows.emplace_back(rid, std::move(row));
             }
         }
+    }
+    if (scanFailed) {
+        lockManager_.unlock(tablename);
+        return result;
     }
 
     // Resolve TOAST markers in matched rows so downstream formatting sees
@@ -16233,18 +16408,23 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
 
     auto conds = parseConditions(conditions);
     std::vector<std::pair<int64_t, std::string>> matchRows;
+    bool scanFailed = false;
     if (conds.empty()) {
-        forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+        if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
-        });
+        })) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds);
+        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         for (int64_t rid : ids) {
             std::string row;
             if (readRowByRid(pa, rid, row, tbl)) {
                 matchRows.emplace_back(rid, std::move(row));
             }
         }
+    }
+    if (scanFailed) {
+        lockManager_.unlock(tablename);
+        return result;
     }
 
     // ORDER BY (multi-column)
@@ -16414,7 +16594,12 @@ std::vector<std::string> StorageEngine::aggregate(
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     auto conds = parseConditions(conditions);
-    auto ids = filterRows(dbname, tablename, conds);
+    bool scanFailed = false;
+    auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
+    if (scanFailed) {
+        lockManager_.unlock(tablename);
+        return result;
+    }
     std::vector<int64_t> matchIds(ids.begin(), ids.end());
 
     std::string rowResult;
@@ -16775,13 +16960,18 @@ std::vector<std::string> StorageEngine::groupAggregate(
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
+    bool scanFailed = false;
     if (conds.empty()) {
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
+        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
             matchIds.push_back(encodeRid(pageId, slotId));
-        });
+        })) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds);
+        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         matchIds.assign(ids.begin(), ids.end());
+    }
+    if (scanFailed) {
+        lockManager_.unlock(tablename);
+        return result;
     }
 
     // Read composite group key for each matching row
@@ -17132,13 +17322,18 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     auto conds = parseConditions(conditions);
     std::vector<int64_t> matchIds;
+    bool scanFailed = false;
     if (conds.empty()) {
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
+        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, [[maybe_unused]] const char* data, [[maybe_unused]] size_t len) {
             matchIds.push_back(encodeRid(pageId, slotId));
-        });
+        })) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds);
+        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         matchIds.assign(ids.begin(), ids.end());
+    }
+    if (scanFailed) {
+        lockManager_.unlock(tablename);
+        return result;
     }
 
     // Reuse the aggregate implementation for HAVING-style filters.
@@ -17560,15 +17755,23 @@ std::vector<std::string> StorageEngine::join(
 
     // Read all rows from left table
     std::vector<std::string> leftRows;
-    forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
         leftRows.emplace_back(data, len);
-    });
+    })) {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+        return result;
+    }
 
     // Read all rows from right table
     std::vector<std::string> rightRows;
-    forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
         rightRows.emplace_back(data, len);
-    });
+    })) {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+        return result;
+    }
 
     // Build column map for condition evaluation: colName -> {isLeft, colIdx}
     struct ColInfo { bool isLeft; size_t colIdx; };
@@ -17786,13 +17989,21 @@ std::vector<std::string> StorageEngine::leftJoin(
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
     std::vector<std::string> leftRows;
-    forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
         leftRows.emplace_back(data, len);
-    });
+    })) {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+        return result;
+    }
     std::vector<std::string> rightRows;
-    forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
         rightRows.emplace_back(data, len);
-    });
+    })) {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+        return result;
+    }
 
     struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
@@ -17928,13 +18139,21 @@ std::vector<std::string> StorageEngine::rightJoin(
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
     std::vector<std::string> leftRows;
-    forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
         leftRows.emplace_back(data, len);
-    });
+    })) {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+        return result;
+    }
     std::vector<std::string> rightRows;
-    forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
         rightRows.emplace_back(data, len);
-    });
+    })) {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+        return result;
+    }
 
     struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
@@ -18082,13 +18301,21 @@ std::vector<std::string> StorageEngine::crossJoin(
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
     std::vector<std::string> leftRows;
-    forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, leftTable, [&leftRows](uint32_t, uint16_t, const char* data, size_t len) {
         leftRows.emplace_back(data, len);
-    });
+    })) {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+        return result;
+    }
     std::vector<std::string> rightRows;
-    forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, rightTable, [&rightRows](uint32_t, uint16_t, const char* data, size_t len) {
         rightRows.emplace_back(data, len);
-    });
+    })) {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+        return result;
+    }
 
     auto conds = parseConditions(conditions);
 
@@ -18833,8 +19060,10 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::set<uint64_t> activeToastIds;
 
-    // Collect all toast IDs referenced by live rows
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    // Collect all toast IDs referenced by live rows.  Do not delete anything
+    // if the heap scan is incomplete: an I/O failure must not turn live toast
+    // files into false orphans.
+    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (!tbl.cols[i].isVariableLength) continue;
@@ -18844,7 +19073,7 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
                 activeToastIds.insert(toastId);
             }
         }
-    });
+    })) return 0;
 
     // Scan toast directory and remove orphaned files
     auto tdir = toastDir(dbname, tablename);
@@ -18879,15 +19108,18 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::vector<std::map<std::string, std::string>> rows;
 
-    // Collect all live rows
-    forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    // Collect all live rows before removing any physical relation files.
+    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         std::string row(data, len);
         std::map<std::string, std::string> values;
         for (size_t i = 0; i < tbl.len; ++i) {
             values[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
         }
         rows.push_back(std::move(values));
-    });
+    })) {
+        lockManager_.unlock(tablename);
+        return 0;
+    }
 
     std::string key = dbname + "/" + tablename;
     // Evict caches so new files will be created
