@@ -17,7 +17,6 @@ BufferPool::BufferPool(const std::string& filename, size_t numFrames, size_t pag
 }
 
 BufferPool::~BufferPool() {
-    flush();
     close();
 }
 
@@ -30,14 +29,10 @@ bool BufferPool::open() {
 void BufferPool::close() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (fd_ >= 0) {
-        // flush under lock
-        for (auto& frame : frames_) {
-            if (frame.dirty && frame.pageId != static_cast<uint32_t>(-1)) {
-                writeToDisk(frame.pageId, frame.data.data());
-                frame.dirty = false;
-            }
-        }
-        ::fsync(fd_);
+        // Flush under the same lock as close.  Destructors cannot propagate
+        // the error, but flushUnlocked still preserves dirty flags until the
+        // last write attempt rather than falsely declaring pages clean.
+        flushUnlocked();
         ::close(fd_);
         fd_ = -1;
     }
@@ -196,17 +191,31 @@ void BufferPool::unpinPage(uint32_t pageId) {
     }
 }
 
-void BufferPool::flush() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& frame : frames_) {
+bool BufferPool::flushUnlocked() {
+    if (fd_ < 0) return false;
+    bool ok = true;
+    std::vector<size_t> writtenFrames;
+    for (size_t index = 0; index < frames_.size(); ++index) {
+        auto& frame = frames_[index];
         if (frame.dirty && frame.pageId != static_cast<uint32_t>(-1)) {
-            writeToDisk(frame.pageId, frame.data.data());
-            frame.dirty = false;
+            if (writeToDisk(frame.pageId, frame.data.data())) {
+                writtenFrames.push_back(index);
+            } else {
+                ok = false;
+            }
         }
     }
-    if (fd_ >= 0) {
-        ::fsync(fd_);
+    if (::fsync(fd_) != 0) ok = false;
+    if (!ok) return false;
+    for (size_t index : writtenFrames) {
+        frames_[index].dirty = false;
     }
+    return ok;
+}
+
+bool BufferPool::flush() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return flushUnlocked();
 }
 
 std::vector<BufferPool::FrameInfo> BufferPool::getFrameInfo() const {

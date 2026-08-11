@@ -3302,12 +3302,12 @@ StorageEngine::ColumnStats StorageEngine::getMultiColumnStats(
 // WAL helpers
 // ========================================================================
 
-static void syncFile(const std::filesystem::path& path) {
+static bool syncFile(const std::filesystem::path& path) {
     int fd = ::open(path.c_str(), O_RDWR);
-    if (fd >= 0) {
-        ::fsync(fd);
-        ::close(fd);
-    }
+    if (fd < 0) return false;
+    const bool ok = ::fsync(fd) == 0;
+    ::close(fd);
+    return ok;
 }
 
 std::filesystem::path StorageEngine::indexPath(const std::string& dbname,
@@ -10274,7 +10274,12 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
     // The relation can have dirty pages in the shared buffer pool even when
     // the SQL statement itself is outside an explicit transaction. Flush the
     // owning allocator before moving its inode across tablespace directories.
-    if (PageAllocator* pa = getPageAllocator(dbname, tablename)) pa->flush();
+    if (PageAllocator* pa = getPageAllocator(dbname, tablename)) {
+        if (!pa->flush()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+    }
     closeDatabaseCaches(dbname);
     const auto oldDir = relationDir(dbname, tablename);
     const auto newDir = targetTablespace == "pg_default"
@@ -18422,48 +18427,44 @@ void StorageEngine::invalidateCatalogTableList(const std::string& dbname) {
 }
 
 // ========================================================================
-// Checkpoint: flush all dirty pages and truncate WAL
+// Checkpoint: flush all dirty pages and persist a checkpoint record.
 // ========================================================================
-void StorageEngine::checkpoint(const std::string& dbname) {
-    if (!databaseExists(dbname)) return;
+bool StorageEngine::checkpoint(const std::string& dbname) {
+    if (!databaseExists(dbname)) return false;
 
     // Flush all page allocators for this database
     auto tables = getTableNames(dbname);
     for (const auto& tname : tables) {
         PageAllocator* pa = getPageAllocator(dbname, tname);
-        if (pa) pa->flush();
+        if (pa && !pa->flush()) return false;
     }
 
     WALManager* wal = getWAL(dbname);
-    Lsn checkpointLsn = INVALID_LSN;
-    if (wal) {
-        uint64_t nextXid = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        checkpointLsn = walCheckpoint(dbname, nextXid);
-        if (checkpointLsn != INVALID_LSN) {
-            wal->XLogFlush(checkpointLsn);
-        }
-        lastCheckpointLsns_[dbname] = checkpointLsn;
+    if (!wal) return false;
+    uint64_t nextXid = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+    const Lsn checkpointLsn = walCheckpoint(dbname, nextXid);
+    if (checkpointLsn == INVALID_LSN || !wal->XLogFlush(checkpointLsn)) return false;
 
-        // Mark all fully-written segments before the checkpoint as ready for
-        // archiving. The current segment still contains the checkpoint record
-        // and is kept for recovery.
-        if (checkpointLsn != INVALID_LSN) {
-            wal->markSegmentsReadyBefore(checkpointLsn);
-        }
-    }
+    // Mark all fully-written segments before the checkpoint as ready for
+    // archiving. The current segment still contains the checkpoint record
+    // and is kept for recovery.
+    if (!wal->markSegmentsReadyBefore(checkpointLsn)) return false;
+    lastCheckpointLsns_[dbname] = checkpointLsn;
 
     // Persist checkpoint LSN for fast recovery startup.
     auto cpPath = checkpointPath(dbname);
     {
         std::ofstream cp(cpPath, std::ios::binary);
+        if (!cp) return false;
         uint64_t timestamp = static_cast<uint64_t>(std::time(nullptr));
         uint64_t maxTxId = TxnIdGenerator::instance().maxCommittedTxId();
         cp.write(reinterpret_cast<const char*>(&timestamp), sizeof(uint64_t));
         cp.write(reinterpret_cast<const char*>(&maxTxId), sizeof(uint64_t));
         uint64_t ckptLsnU64 = checkpointLsn;
         cp.write(reinterpret_cast<const char*>(&ckptLsnU64), sizeof(uint64_t));
+        if (!cp.good()) return false;
     }
-    syncFile(cpPath);
+    if (!syncFile(cpPath)) return false;
 
     // Persist catalog metadata so it matches the checkpoint.
     if (catalogService_) {
@@ -18471,23 +18472,25 @@ void StorageEngine::checkpoint(const std::string& dbname) {
     }
 
     // Archive WAL before truncation
-    archiveWal(dbname);
+    if (!archiveWal(dbname)) return false;
     // TODO: truncate WAL segments entirely before the checkpoint while keeping
     // the checkpoint record. For now we keep WAL to simplify recovery.
+    return true;
 }
 
 // ========================================================================
 // WAL archiving
 // ========================================================================
 
-void StorageEngine::archiveWal(const std::string& dbname) {
+bool StorageEngine::archiveWal(const std::string& dbname) {
     WALManager* wal = getWAL(dbname);
-    if (!wal) return;
+    if (!wal) return false;
     auto archiveDir = walArchiveDir(dbname);
     std::error_code ec;
     std::filesystem::create_directories(archiveDir, ec);
+    if (ec) return false;
     // Archive all segments that are marked .ready but not yet .done.
-    wal->archivePendingSegments(archiveDir);
+    return wal->archivePendingSegments(archiveDir);
 }
 
 // ========================================================================
@@ -18939,7 +18942,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     auto tblNames = getTableNames(dbname);
     for (const auto& tn : tblNames) {
         PageAllocator* pa = getPageAllocator(dbname, tn);
-        if (pa) pa->flush();
+        if (pa && !pa->flush()) return DBStatus::IO_ERROR;
     }
 
     // Keep a complete physical backup for crash/DDL recovery.  This also

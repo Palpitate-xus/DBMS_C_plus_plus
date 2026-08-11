@@ -59,7 +59,6 @@ bool PageAllocator::open() {
 
 void PageAllocator::close() {
     if (bp_) {
-        bp_->flush();
         bp_->close();
     }
 }
@@ -152,8 +151,8 @@ void PageAllocator::markDirty(uint32_t pageId) {
     if (isOpen()) bp_->markDirty(pageId);
 }
 
-void PageAllocator::flush() {
-    if (isOpen()) bp_->flush();
+bool PageAllocator::flush() {
+    return isOpen() && bp_->flush();
 }
 
 bool PageAllocator::readFileHeader(DataFileHeader& fh) {

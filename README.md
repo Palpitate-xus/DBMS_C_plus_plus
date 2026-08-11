@@ -87,8 +87,8 @@
 - **Buffer Pool**：LRU 缓存，减少磁盘 I/O
 - **页校验和**：Fletcher-16 校验，检测页损坏
 - **WAL 日志**：Write-Ahead Logging 支持崩溃恢复
-- **Checkpoint**：`CHECKPOINT` 命令刷盘所有脏页并截断 WAL，加速重启恢复
-- **fsync 持久化**：WAL 写入、事务提交、Checkpoint 均调用 `fsync()`；事务只有在 COMMIT WAL 记录刷盘成功后才发布 CLOG 可见性，刷盘失败会 fail-closed 回滚
+- **Checkpoint**：`CHECKPOINT` 命令刷盘所有脏页、写入 checkpoint WAL 记录并持久化 checkpoint LSN；当前保留 WAL 以支持恢复
+- **fsync 持久化**：WAL 写入、事务提交、Checkpoint 均检查 `fsync()`；事务只有在 COMMIT WAL 记录刷盘成功后才发布 CLOG 可见性，刷盘失败会 fail-closed 回滚
 - **VARCHAR 变长行**：`[定长数据 | 变长偏移数组 | 变长数据]` 格式，减少存储浪费
 - **溢出页**：单行数据超过页空间时，大字段（TEXT/BLOB/JSON）自动存放到溢出页
 - **MVCC 行格式**：每行开头为 PostgreSQL 风格 HeapTupleHeader（含 xmin/xmax/ctid、null bitmap 和对齐信息）
@@ -158,7 +158,7 @@
 | **MVCC 快照隔离** | ✅ PASS | 事务内 ReadView 可见性规则正确，未提交数据不可见 |
 | **HOT 堆内更新** | ✅ PASS | 更新不修改索引指针，减少 WAL 日志写入 |
 | **CLOG 提交日志** | ✅ PASS | 事务提交状态位图读写、提交顺序追踪、子事务可见性正确 |
-| **Checkpoint 持久化** | ✅ PASS | 脏页刷盘 + WAL 截断，重启后数据完整恢复 |
+| **Checkpoint 持久化** | ✅ PASS | 脏页刷盘 + checkpoint WAL/LSN 持久化，重启后数据完整恢复 |
 | **WAL 崩溃恢复** | ✅ PASS | 未提交事务回滚，已提交事务持久化 |
 
 **并发隔离验证示例**（基于 MVCC 快照隔离 + 锁机制）：

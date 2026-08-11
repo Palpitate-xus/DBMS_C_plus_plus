@@ -38,6 +38,7 @@
 - 新增事务快照生命周期回归：普通 COMMIT/ROLLBACK 后 `.txn_backup` 均被清理；前一事务的 deferred CHECK 导致隐式提交失败时，后续 `BEGIN` 返回错误且不会开启新事务。
 - WAL 提交回归继续覆盖 COMMIT 记录与刷盘路径；`WALManager::XLogFlush()` 现在返回 segment 同步结果，提交在 WAL 不可用/刷盘失败时不会先发布 CLOG 可见性。
 - WAL 崩溃恢复回归覆盖首个合法 LSN 0、未初始化页 LSN、未提交插入回滚、已提交插入重做和已提交删除重做；多实例 WAL writer 的尾部刷新/锁也由 catalog snapshot 场景覆盖。
+- Checkpoint 回归现在断言 checkpoint 真实成功；页刷盘、checkpoint WAL、checkpoint 文件 fsync 和 archive status 任一失败都会返回失败，不再伪报 `CHECKPOINT completed`。
 - 新增 schema 格式完整性回归：截断 schema 与错误 magic 均 fail-closed，不会返回可写的部分 schema。
 - Docker 镜像构建：`docker build -t dbms-cpp:verification .` ✅（OpenSSL 真实 TLS）；Compose 配置检查 ✅。
 - CMake：当前验证环境未安装 `cmake`，配置/编译未执行。
@@ -825,7 +826,7 @@ VACUUM t1;
 CHECKPOINT;
 ```
 
-**实际结果** ✅ `CHECKPOINT completed`
+**实际结果** ✅ `CHECKPOINT completed`（checkpoint WAL、LSN 文件和关系页刷盘均成功）
 
 ---
 

@@ -48,8 +48,8 @@ public:
     void unpinPage(uint32_t pageId);
     void markDirty(uint32_t pageId);
 
-    // Flush all dirty pages.
-    void flush();
+    // Flush all dirty pages and propagate write/fsync failures.
+    bool flush();
 
 private:
     std::string filename_;

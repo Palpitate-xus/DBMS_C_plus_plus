@@ -576,11 +576,13 @@ public:
     // WAL crash recovery
     void recoverAllDatabases();
 
-    // Checkpoint: flush all dirty pages and write checkpoint record
-    void checkpoint(const std::string& dbname);
+    // Checkpoint: flush all dirty pages and write checkpoint record. Returns
+    // false unless relation pages, checkpoint WAL, metadata, and requested
+    // archive status are all durable.
+    bool checkpoint(const std::string& dbname);
     // WAL archive directory
     std::filesystem::path walArchiveDir(const std::string& dbname) const { return dbPath(dbname).string() + ".archive"; }
-    void archiveWal(const std::string& dbname);
+    bool archiveWal(const std::string& dbname);
 
     // Physical backup / restore
     bool physicalBackup(const std::string& dbname, const std::string& backupPath);

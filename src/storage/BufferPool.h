@@ -47,8 +47,10 @@ public:
     // Unpin a page (allow eviction when pinCount reaches 0).
     void unpinPage(uint32_t pageId);
 
-    // Write all dirty pages to disk and fsync.
-    void flush();
+    // Write all dirty pages to disk and fsync.  Dirty frames remain dirty when
+    // a write or fsync fails so callers can retry instead of losing the only
+    // in-memory copy of the page.
+    bool flush();
 
     // Stats
     size_t hits() const { return hits_; }
@@ -94,6 +96,7 @@ private:
 
     bool readFromDisk(uint32_t pageId, char* buf);
     bool writeToDisk(uint32_t pageId, const char* buf);
+    bool flushUnlocked();
     size_t evictFrame();
 };
 

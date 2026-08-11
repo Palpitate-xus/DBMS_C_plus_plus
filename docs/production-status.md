@@ -17,6 +17,7 @@
 - 普通事务的 `.txn_backup` 生命周期已收敛：成功提交和正常回滚都会清理备份；DDL wrapper 明确声明需要保留备份，避免测试/生产运行中累积孤儿快照；重新开始事务时不会吞掉前一事务的隐式提交错误。
 - WAL 提交路径已收紧：`XLogFlush()` 返回并传播 segment `fsync` 失败；事务先成功写入并刷盘 COMMIT WAL 记录，再发布 CLOG committed 状态，WAL 不可用时 fail-closed 回滚，避免崩溃恢复缺少提交证据。
 - WAL LSN 语义已收敛：LSN 0 作为首个合法日志位置，`INVALID_LSN` 使用范围外哨兵；恢复逻辑明确跳过未初始化页的无效页 LSN。多个 WAL writer 通过进程互斥、WAL 文件锁和磁盘尾部刷新避免过期 LSN 覆盖日志。
+- BufferPool/Checkpoint 刷盘已收紧：`pwrite/fsync` 失败会保留 dirty 状态并向 `PageAllocator`、`checkpoint()` 和交互式 `CHECKPOINT` 传播；checkpoint 元数据和 archive status 未完成持久化时不会报告成功。WAL segment 截断仍未实现，当前保留日志用于恢复。
 - `DROP TABLE` 现在先生成只读 `CASCADE/RESTRICT` 依赖计划，物理删除成功后才应用 catalog 删除计划，避免物理失败时 catalog 先被移除。
 - `DROP SCHEMA` 现在同样先生成只读 namespace 依赖计划，物理 schema 删除成功后才应用 catalog 计划；若 catalog 后处理失败则恢复当前格式事务快照，避免 schema 目录与物理对象分裂。
 - 当前 schema 格式升级为 `0x44420009`，表名、列名、类型名和约束名字段统一保留 64 字节（最多 63 字节标识符），不再静默截断 15 字节以上的合法标识符；旧 schema 按设计拒绝读取。

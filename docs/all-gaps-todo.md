@@ -23,6 +23,7 @@
 | 2026-08-11 | 事务资源生命周期继续收口：普通 COMMIT/ROLLBACK 清理 `.txn_backup`，DDL wrapper 通过事务上下文保留恢复快照；`beginTransaction()` 传播前一事务的隐式提交失败，避免错误后继续建立新事务。 |
 | 2026-08-11 | WAL 提交安全继续收口：`XLogFlush()` 返回 segment 同步结果；事务先刷盘 COMMIT WAL，再发布 CLOG committed，WAL 不可用或刷盘失败时 fail-closed 回滚。 |
 | 2026-08-11 | WAL 一致性继续收口：LSN 0 恢复为首个合法位置，`INVALID_LSN` 改用范围外哨兵；恢复识别未初始化页，多个 WAL writer 使用进程/文件锁和磁盘尾部刷新；新增首笔提交与崩溃恢复回归。 |
+| 2026-08-11 | Checkpoint/BufferPool 持久化错误继续收口：`pwrite/fsync` 失败保留 dirty 状态并传播到 checkpoint；checkpoint WAL、LSN 文件和 archive status 未成功时 fail-closed。WAL 截断仍未实现。 |
 | 2026-08-10 | DDL 物理/catalog 顺序与原子性继续收口：`DROP SCHEMA` 现在先规划 namespace 依赖，再删除物理 schema，最后应用 catalog 计划；catalog 后处理失败恢复当前格式快照。ALTER 多子命令失败也继续恢复整句快照，并新增 schema drop-plan 回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
 | 2026-08-09 | DDL 创建失败安全：`StorageEngine::createTable` 现在检查 schema/heap/分区/TOAST/主键/唯一索引及 `tlist.lst` 初始化结果，失败时清理已写入的 relation 文件、序列、缓存和清单项；DdlExecutor 在物理创建后立即登记表回滚记录，约束 metadata/EXCLUDE 后处理失败会撤销整张表；`DROP TABLE` 先生成只读依赖计划，物理删除成功后才应用 catalog 删除。新增损坏 heap、后处理失败与 drop plan 回归；完整 DROP/ALTER undo 和跨对象依赖事务语义仍待后续。 |
 | 2026-08-09 | `TRUNCATE` 架构收敛：新增 typed `TruncateStmt` 与 DdlExecutor 执行路径，删除 `main.cpp` 字符串处理；支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT` 预检，新增多表/FK/identity 回归。trigger、foreign table 与完整 transactional/locking 语义仍待后续。 |
@@ -258,7 +259,7 @@
 | 1.1.8 | `ABORT` | 已作为 `ROLLBACK` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
 | 1.1.9 | `BEGIN` / `START TRANSACTION` | AST 已结构化解析 isolation/read-only/write/deferrable 选项并接入执行；`DEFERRABLE` fail-closed，安全快照、时序约束和完整事务特性仍缺 | ⚠️ |
 | 1.1.10 | `CALL` | 只执行项目内字符串过程，参数替换简化；不是 PL/pgSQL/SQL procedure 运行时 | ⚠️ |
-| 1.1.11 | `CHECKPOINT` | 刷页和清 WAL；没有真实 checkpoint LSN、redo pointer、WAL segment 管理 | ⚠️ |
+| 1.1.11 | `CHECKPOINT` | 已刷页、写 checkpoint WAL、持久化 checkpoint LSN 并传播写入/fsync/archive 失败；仍缺完整 restartpoint、节流和 WAL 截断 | ⚠️ |
 | 1.1.12 | `CLOSE` / `DECLARE` / `FETCH` | 游标把 SELECT 结果捕获到内存；缺少可滚动/二进制/holdable cursor、事务生命周期、portal 语义、`MOVE` | ⚠️ |
 | 1.1.13 | `COMMENT` | 主要支持 table/column；缺少 PG 支持的绝大多数对象 | ⚠️ |
 | 1.1.14 | `COMMIT` / `ROLLBACK` | 有基本事务；与 PG 的 MVCC、subtransaction、WAL crash safety 差距大 | ⚠️ |
@@ -494,9 +495,9 @@
 | 10.1 | Cluster layout | PG 有 base/global/pg_wal/pg_xact/pg_multixact 等；本项目以当前目录数据库子目录和表文件为主 | ✅ |
 | 10.2 | Relation forks | 缺少 main/fsm/vm/init forks | ✅ |
 | 10.3 | Page format | 有 4096 slotted page；PG 默认 8KB page，含 line pointer、tuple header、visibility 等复杂结构 | 🔄 |
-| 10.4 | Buffer manager | 有 LRU buffer pool；缺少 shared buffers、clock sweep、pin/lock/contention、bgwriter、checkpointer、walwriter | ✅ |
-| 10.5 | WAL | 缺少 record type、LSN、WAL segment、full page writes、redo routines、timeline、archive status、replication WAL sender | 🔄 |
-| 10.6 | Checkpoint | 简化刷盘/清 WAL；缺少 redo pointer、checkpoint record、restartpoint、checkpoint throttling | 🔄 |
+| 10.4 | Buffer manager | 有 BufferPool clock sweep、pin/usage、bgwriter/checkpointer/walwriter；刷盘错误现已传播，shared buffers 分片和完整 contention 语义仍缺 | ✅ |
+| 10.5 | WAL | 已有 record type、LSN、WAL segment、full page writes、redo routines、timeline、archive status；replication WAL sender、PITR 和完整 resource manager 仍缺 | 🔄 |
+| 10.6 | Checkpoint | 已写 checkpoint record/LSN 并检查关系页、WAL、元数据和归档状态持久化；仍缺完整 restartpoint、节流和 WAL 截断 | 🔄 |
 | 10.7 | PITR | 缺失 | ❌ |
 | 10.8 | TOAST | 已有 TOAST relation/index、chunking 和 zlib compression；缺少 lz4/pglz、storage strategy、toast_tuple_target、out-of-line pointer/catalog 完整语义 | 🔄 |
 | 10.9 | Tablespace | 缺失 | ✅ |

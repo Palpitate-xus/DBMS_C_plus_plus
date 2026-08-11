@@ -1779,7 +1779,10 @@ static bool handleRefreshMaterializedView(const string& sql, Session& s) {
 static bool handleCheckpoint(const string& sql, Session& s) {
     (void)sql;
     if (!checkDB(s)) return true;
-    g_engine.checkpoint(s.currentDB);
+    if (!g_engine.checkpoint(s.currentDB)) {
+        cout << "Checkpoint failed: durable page/WAL metadata was not confirmed" << endl;
+        return true;
+    }
     cout << "Checkpoint completed" << endl;
     log(s.username, "checkpoint", getTime());
     return false;

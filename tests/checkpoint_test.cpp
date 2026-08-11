@@ -34,7 +34,7 @@ int main() {
         assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
         assert(engine.commitTransaction() == DBStatus::OK);
 
-        engine.checkpoint(dbname);
+        assert(engine.checkpoint(dbname));
     }
 
     // Verify checkpoint file exists with LSN.
