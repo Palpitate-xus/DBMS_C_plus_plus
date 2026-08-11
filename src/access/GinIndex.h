@@ -17,7 +17,7 @@ public:
     ~GinIndex();
 
     bool open();
-    void close();
+    bool close();
 
     // Extract terms from a value and index them for the given rowId.
     // For arrays: each element is a term.
@@ -43,8 +43,8 @@ public:
 
 private:
     std::vector<std::string> extractTerms(const std::string& value) const;
-    void persist() const;
-    void load();
+    bool persist() const;
+    bool load();
 
     std::filesystem::path indexFile_;
     // term -> sorted set of RowIds

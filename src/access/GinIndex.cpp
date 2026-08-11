@@ -1,4 +1,5 @@
 #include "GinIndex.h"
+#include "IndexFileUtil.h"
 
 #include <algorithm>
 #include <cctype>
@@ -12,14 +13,19 @@ GinIndex::GinIndex(const std::filesystem::path& indexFile) : indexFile_(indexFil
 GinIndex::~GinIndex() { close(); }
 
 bool GinIndex::open() {
-    if (std::filesystem::exists(indexFile_)) {
-        load();
+    postings_.clear();
+    if (std::filesystem::exists(indexFile_) && !load()) {
+        postings_.clear();
+        return false;
     }
+    dirty_ = false;
     return true;
 }
 
-void GinIndex::close() {
-    if (dirty_) persist();
+bool GinIndex::close() {
+    if (dirty_ && !persist()) return false;
+    dirty_ = false;
+    return true;
 }
 
 std::vector<std::string> GinIndex::extractTerms(const std::string& value) const {
@@ -126,30 +132,33 @@ void GinIndex::rebuild(const std::vector<std::pair<std::string, RowId>>& allEntr
     dirty_ = true;
 }
 
-void GinIndex::persist() const {
-    std::ofstream ofs(indexFile_);
-    if (!ofs) return;
+bool GinIndex::persist() const {
+    std::ostringstream data;
     for (const auto& [term, rids] : postings_) {
-        ofs << term;
-        for (auto rid : rids) ofs << " " << rid;
-        ofs << "\n";
+        data << term;
+        for (auto rid : rids) data << " " << rid;
+        data << "\n";
     }
+    return index_file::writeAtomically(indexFile_, data.str());
 }
 
-void GinIndex::load() {
+bool GinIndex::load() {
     std::ifstream ifs(indexFile_);
-    if (!ifs) return;
+    if (!ifs) return false;
     std::string line;
     while (std::getline(ifs, line)) {
+        if (line.empty()) continue;
         std::istringstream iss(line);
         std::string term;
-        iss >> term;
-        if (term.empty()) continue;
+        if (!(iss >> term) || term.empty() || term.size() > 1'000'000) return false;
         RowId rid;
         while (iss >> rid) {
             postings_[term].insert(rid);
         }
+        if (!iss.eof()) return false;
     }
+    if (ifs.bad()) return false;
+    return true;
 }
 
 } // namespace dbms

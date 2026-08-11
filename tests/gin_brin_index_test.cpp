@@ -1,6 +1,7 @@
 #include "access/GinIndex.h"
 #include "access/BrinIndex.h"
 #include "access/BPTree.h"
+#include "access/HashIndex.h"
 #include <cassert>
 #include <cstdio>
 #include <filesystem>
@@ -73,8 +74,42 @@ static void test_gin_persistence() {
         assert(r.size() == 2);
         gin.close();
     }
+    {
+        std::ofstream out(idx, std::ios::trunc);
+        out << "broken posting not-a-row-id\n";
+    }
+    {
+        dbms::GinIndex broken(idx);
+        assert(!broken.open());
+    }
     cleanup(idx);
     std::cout << "[GIN] persistence OK" << std::endl;
+}
+
+static void test_hash_persistence_and_corruption() {
+    std::string idx = "/tmp/hash_index_test.idx";
+    cleanup(idx);
+    {
+        dbms::HashIndex hash(idx);
+        assert(hash.open());
+        hash.insert("alpha", 10);
+        hash.insert("alpha", 11);
+        assert(hash.close());
+    }
+    {
+        dbms::HashIndex hash(idx);
+        assert(hash.open());
+        assert((hash.search("alpha") == std::vector<int64_t>{10, 11}));
+        assert(hash.close());
+    }
+    {
+        std::ofstream out(idx, std::ios::binary | std::ios::trunc);
+        out << "truncated index";
+    }
+    dbms::HashIndex broken(idx);
+    assert(!broken.open());
+    cleanup(idx);
+    std::cout << "[HASH] durable persistence/corruption rejection OK" << std::endl;
 }
 
 static void test_brin_basic() {
@@ -94,7 +129,21 @@ static void test_brin_basic() {
     auto r2 = brin.searchRange("2000", "3000");
     assert(r2.empty());
 
-    brin.close();
+    assert(brin.close());
+    {
+        dbms::BrinIndex reopened(idx);
+        assert(reopened.open());
+        assert(!reopened.searchRange("1050", "1070").empty());
+        assert(reopened.close());
+    }
+    {
+        std::ofstream out(idx, std::ios::binary | std::ios::trunc);
+        out << "truncated brin";
+    }
+    {
+        dbms::BrinIndex broken(idx);
+        assert(!broken.open());
+    }
     cleanup(idx);
     std::cout << "[BRIN] basic OK" << std::endl;
 }
@@ -166,6 +215,7 @@ int main() {
     test_gin_basic();
     test_gin_remove();
     test_gin_persistence();
+    test_hash_persistence_and_corruption();
     test_brin_basic();
     test_brin_json_contains();
     test_btree_split_and_range();

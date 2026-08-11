@@ -24,7 +24,7 @@ public:
     ~BrinIndex();
 
     bool open();
-    void close();
+    bool close();
 
     void addValue(const std::string& value, RowId rowId);
 
@@ -36,8 +36,8 @@ public:
     const std::filesystem::path& path() const { return indexFile_; }
 
 private:
-    void persist() const;
-    void load();
+    bool persist() const;
+    bool load();
 
     std::filesystem::path indexFile_;
     static constexpr size_t BLOCK_SIZE = 128;

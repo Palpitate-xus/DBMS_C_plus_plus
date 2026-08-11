@@ -16,7 +16,7 @@ public:
     ~HashIndex() { close(); }
 
     bool open();
-    void close();
+    bool close();
 
     // Insert key->rid mapping (allows duplicates)
     void insert(const std::string& key, int64_t rid);
@@ -42,8 +42,8 @@ private:
     bool loaded_ = false;
     bool dirty_ = false;
 
-    void loadFromFile();
-    void saveToFile();
+    bool loadFromFile();
+    bool saveToFile();
 };
 
 } // namespace dbms

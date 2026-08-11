@@ -1,23 +1,52 @@
 #include "HashIndex.h"
+#include "IndexFileUtil.h"
 #include <algorithm>
 
 namespace dbms {
+
+namespace {
+constexpr uint32_t HASH_MAGIC = 0x48494458; // HIDX
+constexpr uint32_t HASH_VERSION = 1;
+constexpr size_t MAX_ENTRIES = 1'000'000;
+constexpr size_t MAX_KEY_LENGTH = 10'000;
+constexpr size_t MAX_VALUES_PER_KEY = 1'000'000;
+
+template <typename T>
+bool readExact(std::istream& in, T& value) {
+    in.read(reinterpret_cast<char*>(&value), sizeof(T));
+    return static_cast<bool>(in);
+}
+
+bool readBytes(std::istream& in, std::string& value, size_t length) {
+    if (length > MAX_KEY_LENGTH) return false;
+    value.resize(length);
+    if (length == 0) return true;
+    in.read(value.data(), static_cast<std::streamsize>(length));
+    return static_cast<bool>(in);
+}
+
+template <typename T>
+void appendBytes(std::string& out, const T& value) {
+    out.append(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+}
 
 HashIndex::HashIndex(const std::filesystem::path& indexFile)
     : filePath_(indexFile) {}
 
 bool HashIndex::open() {
     if (loaded_) return true;
-    loadFromFile();
+    if (!loadFromFile()) return false;
     loaded_ = true;
     return true;
 }
 
-void HashIndex::close() {
+bool HashIndex::close() {
     if (loaded_ && dirty_) {
-        saveToFile();
+        if (!saveToFile()) return false;
     }
     loaded_ = false;
+    return true;
 }
 
 void HashIndex::insert(const std::string& key, int64_t rid) {
@@ -52,46 +81,74 @@ void HashIndex::clear() {
     dirty_ = true;
 }
 
-void HashIndex::loadFromFile() {
+bool HashIndex::loadFromFile() {
     map_.clear();
     std::ifstream in(filePath_, std::ios::binary);
-    if (!in) return;
-    size_t count = 0;
-    in.read(reinterpret_cast<char*>(&count), sizeof(size_t));
-    for (size_t i = 0; i < count && in; ++i) {
-        size_t keyLen = 0;
-        in.read(reinterpret_cast<char*>(&keyLen), sizeof(size_t));
-        if (!in || keyLen > 10000) break;
-        std::string key(keyLen, '\0');
-        in.read(key.data(), static_cast<std::streamsize>(keyLen));
-        size_t valCount = 0;
-        in.read(reinterpret_cast<char*>(&valCount), sizeof(size_t));
-        if (!in || valCount > 1000000) break;
-        std::vector<int64_t> vals(valCount);
-        for (size_t j = 0; j < valCount && in; ++j) {
-            in.read(reinterpret_cast<char*>(&vals[j]), sizeof(int64_t));
+    if (!in) {
+        if (!std::filesystem::exists(filePath_)) {
+            dirty_ = false;
+            return true;
+        }
+        return false;
+    }
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint64_t count = 0;
+    if (!readExact(in, magic) || !readExact(in, version) ||
+        !readExact(in, count) || magic != HASH_MAGIC || version != HASH_VERSION ||
+        count > MAX_ENTRIES) {
+        map_.clear();
+        return false;
+    }
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t keyLen = 0;
+        uint64_t valCount = 0;
+        std::string key;
+        if (!readExact(in, keyLen) || keyLen > MAX_KEY_LENGTH ||
+            !readBytes(in, key, static_cast<size_t>(keyLen)) ||
+            !readExact(in, valCount) || valCount > MAX_VALUES_PER_KEY) {
+            map_.clear();
+            return false;
+        }
+        std::vector<int64_t> vals(static_cast<size_t>(valCount));
+        for (auto& value : vals) {
+            if (!readExact(in, value)) {
+                map_.clear();
+                return false;
+            }
         }
         map_[key] = std::move(vals);
     }
-    dirty_ = false;
-}
-
-void HashIndex::saveToFile() {
-    std::ofstream out(filePath_, std::ios::binary | std::ios::trunc);
-    if (!out) return;
-    size_t count = map_.size();
-    out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
-    for (const auto& [key, vals] : map_) {
-        size_t keyLen = key.size();
-        out.write(reinterpret_cast<const char*>(&keyLen), sizeof(size_t));
-        out.write(key.data(), static_cast<std::streamsize>(keyLen));
-        size_t valCount = vals.size();
-        out.write(reinterpret_cast<const char*>(&valCount), sizeof(size_t));
-        for (int64_t v : vals) {
-            out.write(reinterpret_cast<const char*>(&v), sizeof(int64_t));
-        }
+    if (in.peek() != std::char_traits<char>::eof()) {
+        map_.clear();
+        return false;
     }
     dirty_ = false;
+    return true;
+}
+
+bool HashIndex::saveToFile() {
+    if (map_.size() > MAX_ENTRIES) return false;
+    std::string bytes;
+    bytes.reserve(sizeof(uint32_t) * 2 + sizeof(uint64_t));
+    appendBytes(bytes, HASH_MAGIC);
+    appendBytes(bytes, HASH_VERSION);
+    const uint64_t count = map_.size();
+    appendBytes(bytes, count);
+    for (const auto& [key, vals] : map_) {
+        if (key.size() > MAX_KEY_LENGTH || vals.size() > MAX_VALUES_PER_KEY) return false;
+        const uint64_t keyLen = key.size();
+        appendBytes(bytes, keyLen);
+        bytes.append(key);
+        const uint64_t valCount = vals.size();
+        appendBytes(bytes, valCount);
+        for (int64_t v : vals) {
+            appendBytes(bytes, v);
+        }
+    }
+    if (!index_file::writeAtomically(filePath_, bytes)) return false;
+    dirty_ = false;
+    return true;
 }
 
 } // namespace dbms
