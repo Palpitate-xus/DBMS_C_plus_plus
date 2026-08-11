@@ -2,6 +2,7 @@
 
 #include "dbms_defs.h"
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -81,11 +82,18 @@ private:
     struct Segment {
         std::vector<uint8_t> data;
         bool dirty = false;
+        // Pending two-bit updates are merged with the latest on-disk segment
+        // while holding the process/file lock, so independent backends cannot
+        // overwrite each other's transaction states.
+        std::unordered_map<size_t, std::pair<uint8_t, uint8_t>> pendingBits;
+        std::filesystem::file_time_type fileTime{};
+        bool fileTimeValid = false;
     };
     mutable std::unordered_map<uint64_t, Segment> segments_;
 
     std::string segmentPath(uint64_t segNo) const;
     void loadSegment(uint64_t segNo) const;
+    void refreshSegmentIfChanged(uint64_t segNo) const;
     void saveSegment(uint64_t segNo);
     void ensureSegment(uint64_t segNo) const;
 

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <sys/file.h>
 #include <unistd.h>
 
 namespace dbms {
@@ -64,9 +65,38 @@ void CommitLog::loadSegment(uint64_t segNo) const {
                      static_cast<std::streamsize>(kSegmentFileSize));
             // 未读满则剩余保持为 0（InProgress）
         }
+        std::error_code ec;
+        seg.fileTime = std::filesystem::last_write_time(path, ec);
+        seg.fileTimeValid = !ec;
     }
 
     segments_[segNo] = std::move(seg);
+}
+
+void CommitLog::refreshSegmentIfChanged(uint64_t segNo) const {
+    auto it = segments_.find(segNo);
+    if (it == segments_.end() || it->second.dirty) return;
+
+    const std::string path = segmentPath(segNo);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec) {
+        if (it->second.fileTimeValid) {
+            it->second.data.assign(kSegmentFileSize, 0);
+            it->second.fileTimeValid = false;
+        }
+        return;
+    }
+
+    const auto stamp = std::filesystem::last_write_time(path, ec);
+    if (ec || (it->second.fileTimeValid && it->second.fileTime == stamp)) return;
+
+    std::vector<uint8_t> data(kSegmentFileSize, 0);
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) return;
+    ifs.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(kSegmentFileSize));
+    it->second.data = std::move(data);
+    it->second.fileTime = stamp;
+    it->second.fileTimeValid = true;
 }
 
 void CommitLog::ensureSegment(uint64_t segNo) const {
@@ -83,19 +113,54 @@ void CommitLog::saveSegment(uint64_t segNo) {
     const std::filesystem::path clogDir = std::filesystem::path(dataDir_) / "pg_xact";
     if (!std::filesystem::is_directory(dataDir_) || !std::filesystem::is_directory(clogDir)) {
         it->second.dirty = false;
+        it->second.pendingBits.clear();
         return;
     }
 
     std::string path = segmentPath(segNo);
+    const std::string lockPath = (clogDir / ".clog.lock").string();
+    const int lockFd = ::open(lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (lockFd < 0 || ::flock(lockFd, LOCK_EX) != 0) {
+        if (lockFd >= 0) ::close(lockFd);
+        std::cerr << "[CLOG] Failed to lock segment: " << path << std::endl;
+        return;
+    }
+    auto releaseLock = [&]() {
+        ::flock(lockFd, LOCK_UN);
+        ::close(lockFd);
+    };
+
+    // Merge only the bits changed by this backend with the latest complete
+    // segment.  Replacing a whole stale in-memory segment could erase a
+    // transaction status written by another backend between cache loads.
+    std::vector<uint8_t> latest(kSegmentFileSize, 0);
+    if (std::filesystem::exists(path)) {
+        std::ifstream ifs(path, std::ios::binary);
+        if (ifs) {
+            ifs.read(reinterpret_cast<char*>(latest.data()),
+                     static_cast<std::streamsize>(kSegmentFileSize));
+        }
+    }
+    if (it->second.pendingBits.empty()) {
+        latest = it->second.data;
+    } else {
+        for (const auto& [offset, update] : it->second.pendingBits) {
+            if (offset >= latest.size()) continue;
+            latest[offset] = static_cast<uint8_t>((latest[offset] & ~update.first) |
+                                                   (update.second & update.first));
+        }
+    }
+
     const std::string tempPath = path + ".tmp." + std::to_string(static_cast<unsigned long long>(::getpid())) +
                                  "." + std::to_string(reinterpret_cast<uintptr_t>(this));
     const int fd = ::open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
+        releaseLock();
         std::cerr << "[CLOG] Failed to write segment: " << path << std::endl;
         return;
     }
 
-    const uint8_t* data = it->second.data.data();
+    const uint8_t* data = latest.data();
     size_t remaining = kSegmentFileSize;
     bool ok = true;
     while (remaining > 0) {
@@ -118,10 +183,18 @@ void CommitLog::saveSegment(uint64_t segNo) {
         if (dirFd >= 0) ::close(dirFd);
     }
     if (!ok) {
-        std::filesystem::remove(tempPath);
+        std::error_code ec;
+        std::filesystem::remove(tempPath, ec);
+        releaseLock();
         std::cerr << "[CLOG] Failed to durably write segment: " << path << std::endl;
         return;
     }
+    releaseLock();
+    it->second.data = std::move(latest);
+    it->second.pendingBits.clear();
+    std::error_code ec;
+    it->second.fileTime = std::filesystem::last_write_time(path, ec);
+    it->second.fileTimeValid = !ec;
     it->second.dirty = false;
 }
 
@@ -131,6 +204,7 @@ CommitLog::Status CommitLog::getStatus(TxnId xid) const {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t segNo = segmentNumber(xid);
     ensureSegment(segNo);
+    refreshSegmentIfChanged(segNo);
 
     const Segment& seg = segments_[segNo];
     size_t off = byteOffset(xid);
@@ -151,6 +225,10 @@ void CommitLog::setStatus(TxnId xid, Status status) {
     uint8_t shift = shiftForXid(xid);
     uint8_t mask = static_cast<uint8_t>(0x03 << shift);
     seg.data[off] = static_cast<uint8_t>((seg.data[off] & ~mask) | (statusBits(status) << shift));
+    auto& pending = seg.pendingBits[off];
+    pending.first = static_cast<uint8_t>(pending.first | mask);
+    pending.second = static_cast<uint8_t>((pending.second & ~mask) |
+                                           (statusBits(status) << shift));
     seg.dirty = true;
 }
 
@@ -166,6 +244,10 @@ void CommitLog::setStatuses(const std::vector<std::pair<TxnId, Status>>& entries
             uint8_t shift = shiftForXid(xid);
             uint8_t mask = static_cast<uint8_t>(0x03 << shift);
             seg.data[off] = static_cast<uint8_t>((seg.data[off] & ~mask) | (statusBits(status) << shift));
+            auto& pending = seg.pendingBits[off];
+            pending.first = static_cast<uint8_t>(pending.first | mask);
+            pending.second = static_cast<uint8_t>((pending.second & ~mask) |
+                                                   (statusBits(status) << shift));
             seg.dirty = true;
         }
     }

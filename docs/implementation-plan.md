@@ -25,6 +25,8 @@
 
 2026-08-11 增量审计：CLOG 段改为临时文件完整写入、段文件 `fsync`、原子 rename 和 `pg_xact` 目录 `fsync`；写入失败不清除 dirty 状态，数据库目录或 `pg_xact` 被删除时不重建旧路径。
 
+2026-08-11 增量审计：CLOG 保存增加 `.clog.lock` 文件锁和按位 pending update 合并，独立 backend 不再用陈旧的整段缓存覆盖其他事务状态；读端发现段文件替换后会刷新缓存，并新增跨 backend merge/refresh 回归。
+
 2026-08-11 增量审计：修正 WAL LSN 0 与 `INVALID_LSN` 冲突，恢复路径识别未初始化页的无效页 LSN；WAL append/flush 增加进程互斥、跨进程文件锁和磁盘尾部刷新，避免多个 backend 使用过期写指针。
 
 2026-08-11 增量审计：BufferPool/PageAllocator 不再吞掉 `pwrite/fsync` 失败，checkpoint 只有在关系页、checkpoint WAL、checkpoint 元数据和归档状态均成功后才返回成功；clock-sweep 不再强制淘汰 pinned 页或丢弃写盘失败的 dirty 页；WAL 截断仍保留为后续工作。
