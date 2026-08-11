@@ -3,11 +3,13 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-10）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=127 FAIL=0（125 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-11）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=127 FAIL=0（125 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
 2026-08-11 增量审计：事务/DDL 物理快照现在包含外置 tablespace 的数据库关系目录；UNLOGGED 关系的 heap、fork、索引和 TOAST 文件按崩溃语义从快照排除，空 tablespace 也可安全参与事务快照。
+
+2026-08-11 增量审计：`DdlTransaction::commit()` 现在检查引擎提交状态；延迟约束或 SSI 提交失败会返回错误，并恢复已启用的 DDL 物理快照，防止 DDL 执行器把失败状态报告为成功。
 
 当前 schema 格式已升级为 `0x44420009`：固定标识符字段统一使用 64 字节容量，支持 PostgreSQL 63 字节级别的表名、列名、类型名和约束名；旧格式不迁移，必须重建数据库。
 
@@ -322,7 +324,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 4.36 实现 `CREATE PROCEDURE` 语言运行时与事务控制 | 1.1.23 | 已保存并解析基础 procedure 定义；PL/pgSQL 运行时和 PostgreSQL 事务控制语义仍待后续。 |
 | ⚠️ 4.37 实现 `CREATE POLICY` `WITH CHECK` 完整验证 | 1.1.22 | AST/DDL、USING/WITH CHECK 关系感知扫描、默认 WITH CHECK、PUBLIC、基础 PERMISSIVE/RESTRICTIVE 组合、INHERIT/NOINHERIT 和表 owner/角色属性绕过已落地；完整 owner ACL 组合和 `ALTER POLICY` 语义仍待后续。 |
 | ⚠️ 4.38 实现 `CREATE MATERIALIZED VIEW` `WITH [NO] DATA`、并发刷新 | 1.1.21, 4.10 | 已支持基础创建、列序、`WITH [NO] DATA` 和刷新；唯一索引要求、真正的 CONCURRENTLY 锁语义和 `pg_matview` 依赖追踪仍待后续。 |
-| ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 已接入；ALTER 多子命令失败可通过当前格式整库快照恢复，CREATE 失败清理以及 DROP TABLE/SCHEMA 的物理后再 catalog 依赖计划已覆盖主要单对象边界；完整跨对象依赖 undo、并发 DDL 锁和 PostgreSQL 隐式提交边界仍待后续。 |
+| ⚠️ 4.39 移除 DDL 隐式提交，实现 DDL 事务化 | 16.5, 9.6 | `DdlTransaction` RAII 已接入并传播引擎提交失败；ALTER 多子命令失败和提交失败可通过当前格式整库快照恢复，CREATE 失败清理以及 DROP TABLE/SCHEMA 的物理后再 catalog 依赖计划已覆盖主要单对象边界；完整跨对象依赖 undo、并发 DDL 锁和 PostgreSQL 隐式提交边界仍待后续。 |
 | ✅ 4.40 实现 `CREATE ASSERTION` 执行（如决定支持） | 5.9 | PG 本身未实现。本项目暂不支持Assertion，标记为完成（scope exclusion）。 |
 
 ### Phase 4 已完成内容（截至当前 commit）

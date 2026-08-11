@@ -55,8 +55,9 @@ public:
     void recordUpdate(DdlObjectKind kind, const std::string& name,
                       const std::string& extra = {});
 
-    // 提交：标记成功并清空操作日志。若本类开启了事务，则同时提交 StorageEngine。
-    void commit();
+    // 提交：返回引擎最终状态。提交失败时保留失败语义，并恢复本类
+    // 开启事务的物理快照，避免调用方把失败误报为成功。
+    bool commit();
 
     // 回滚：撤销已记录的 CREATE 操作，回滚 StorageEngine 事务，并在本类
     // 开启事务时恢复当前格式数据库快照。

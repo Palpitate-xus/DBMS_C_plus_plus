@@ -80,6 +80,43 @@ static void test_commit_survives() {
     std::cout << "[DDL-TXN] commit survives OK" << std::endl;
 }
 
+static void test_commit_failure_is_propagated_and_restored() {
+    std::string db = testDbPath("ddl_txn_t_commit_failure");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE deferred_tbl (id INT PRIMARY KEY, price INT, "
+        "CONSTRAINT chk_price CHECK (price > 0) DEFERRABLE INITIALLY DEFERRED)",
+        s));
+
+    dbms::DdlTransaction txn(s);
+    assert(txn.begin());
+    txn.enableSnapshotRollback();
+    txn.markSnapshotDirty();
+    dbms::Column extra = dbms::makeIntColumn("extra", false, 0, false);
+    assert(g_engine.alterTableAddColumn(db, "deferred_tbl", extra) == dbms::DBStatus::OK);
+    assert(g_engine.getTableSchema(db, "deferred_tbl").len == 3);
+    assert(g_engine.insert(db, "deferred_tbl", {{"id", "1"}, {"price", "0"},
+                                                  {"extra", "7"}}) == dbms::DBStatus::OK);
+
+    // The deferred CHECK aborts the engine transaction.  DdlTransaction must
+    // return failure and restore the physical DDL snapshot instead of letting
+    // the caller print a success message for a failed commit.
+    assert(!txn.commit());
+    assert(!txn.isActive());
+    assert(!txn.isCommitted());
+    assert(!g_engine.inTransaction());
+    assert(g_engine.getTableSchema(db, "deferred_tbl").len == 2);
+    assert(g_engine.query(db, "deferred_tbl", {"=id 1"}, {"price"}).empty());
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] commit failure propagation and snapshot restore OK" << std::endl;
+}
+
 static void test_create_table_post_action_rollback() {
     std::string db = testDbPath("ddl_txn_t_post_action");
     cleanup(db);
@@ -240,6 +277,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_rollback_create();
     test_commit_survives();
+    test_commit_failure_is_propagated_and_restored();
     test_create_table_post_action_rollback();
     test_wal_catalog_record();
     test_executor_uses_transaction();

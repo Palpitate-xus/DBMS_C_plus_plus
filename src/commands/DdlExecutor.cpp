@@ -1078,7 +1078,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     }
     std::cout << "ALTER TABLE succeeded" << std::endl;
     txn.recordUpdate(DdlObjectKind::Table, tableName);
-    txn.commit();
+    if (!txn.commit()) return true;
     return false;
 }
 
@@ -1545,7 +1545,7 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
     }
 
     txn.recordCreate(DdlObjectKind::Schema, name);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE SCHEMA succeeded" << std::endl;
     return false;
 }
@@ -1615,7 +1615,7 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
         }
     }
     txn.recordDrop(DdlObjectKind::Schema, name);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "DROP SCHEMA succeeded" << std::endl;
     return false;
 }
@@ -2162,7 +2162,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                                             effectiveSessionRole(s));
         }
         registerTemporaryTable();
-        txn.commit();
+        if (!txn.commit()) return true;
         return false;
     }
 
@@ -2182,7 +2182,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 std::cerr << "WARNING: CTAS catalog registration failed: " << e.what() << std::endl;
             }
             registerTemporaryTable();
-            txn.commit();
+            if (!txn.commit()) return true;
         }
         return err;
     }
@@ -2396,7 +2396,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     }
 
     registerTemporaryTable();
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE TABLE succeeded" << std::endl;
     return false;
 }
@@ -2498,7 +2498,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         if (stmt->cascade) dropOwnedSequences(s.currentDB, catalogLogicalName);
     }
     txn.recordDrop(DdlObjectKind::Table, tname);
-    txn.commit();
+    if (!txn.commit()) return true;
     if (droppingTemp) {
         s.tempTables.erase(logicalName);
         s.tempTableOnCommit.erase(logicalName);
@@ -2630,7 +2630,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     }
 
     txn.recordCreate(DdlObjectKind::Index, idxName, tname);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE INDEX succeeded" << std::endl;
     return false;
 }
@@ -2771,7 +2771,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         }
         txn.recordDrop(DdlObjectKind::Index, indexName, tableName);
     }
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "DROP INDEX succeeded" << std::endl;
     return false;
 }
@@ -2885,7 +2885,7 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     }
 
     txn.recordCreate(DdlObjectKind::Sequence, seqname);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE SEQUENCE succeeded" << std::endl;
     return false;
 }
@@ -3032,7 +3032,7 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         }
     }
 
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "ALTER SEQUENCE succeeded" << std::endl;
     return false;
 }
@@ -3095,7 +3095,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
         std::cout << "DROP SEQUENCE failed" << std::endl;
         return true;
     }
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "DROP SEQUENCE succeeded" << std::endl;
     return false;
 }
@@ -3131,7 +3131,7 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
         return true;
     }
     txn.recordCreate(DdlObjectKind::Domain, info.name);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE DOMAIN succeeded" << std::endl;
     return false;
 }
@@ -3172,7 +3172,7 @@ bool DdlExecutor::executeCreateCollation(const CreateObjectStmt* stmt, Session& 
     ofs << cname << "|" << provider << "|" << locale << "\n";
 
     txn.recordCreate(DdlObjectKind::Collation, cname);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE COLLATION succeeded" << std::endl;
     return false;
 }
@@ -3232,7 +3232,7 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
         std::cout << "DROP DOMAIN failed" << std::endl;
         return true;
     }
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "DROP DOMAIN succeeded" << std::endl;
     return false;
 }
@@ -3272,7 +3272,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             return true;
         }
         txn.recordCreate(DdlObjectKind::Type, et.name);
-        txn.commit();
+        if (!txn.commit()) return true;
         std::cout << "CREATE TYPE AS ENUM succeeded" << std::endl;
         return false;
     }
@@ -3288,7 +3288,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             return true;
         }
         txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
-        txn.commit();
+        if (!txn.commit()) return true;
         std::cout << "CREATE TYPE succeeded" << std::endl;
         return false;
     }
@@ -3316,7 +3316,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             return true;
         }
         txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
-        txn.commit();
+        if (!txn.commit()) return true;
         std::cout << "CREATE TYPE AS RANGE succeeded" << std::endl;
         return false;
     }
@@ -3344,7 +3344,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
             return true;
         }
         txn.recordCreate(DdlObjectKind::Type, stmt->objectName);
-        txn.commit();
+        if (!txn.commit()) return true;
         std::cout << "CREATE TYPE succeeded" << std::endl;
         return false;
     }
@@ -3376,7 +3376,7 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
         return true;
     }
     txn.recordCreate(DdlObjectKind::Type, ct.name);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE TYPE succeeded" << std::endl;
     return false;
 }
@@ -3414,7 +3414,7 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
         std::cout << "DROP TYPE failed" << std::endl;
         return true;
     }
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "DROP TYPE succeeded" << std::endl;
     return false;
 }
@@ -3480,7 +3480,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     }
 
     txn.recordCreate(DdlObjectKind::View, viewname);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE VIEW succeeded"
               << (baseTable.empty() ? "" : " (updatable)")
               << (checkOption.empty() ? "" : " [with check option " + checkOption + "]")
@@ -3619,7 +3619,7 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     }
 
     txn.recordCreate(DdlObjectKind::MaterializedView, viewname);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE MATERIALIZED VIEW succeeded: " << inserted << " rows" << std::endl;
     return false;
 }
@@ -3697,7 +3697,7 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
     }
 
     txn.recordCreate(DdlObjectKind::Trigger, stmt->triggerName, tname);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE TRIGGER succeeded" << std::endl;
     return false;
 }
@@ -3756,7 +3756,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     }
 
     txn.recordCreate(DdlObjectKind::Function, stmt->funcName);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE FUNCTION succeeded" << std::endl;
     return false;
 }
@@ -3807,7 +3807,7 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
     }
 
     txn.recordCreate(DdlObjectKind::Procedure, stmt->funcName);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE PROCEDURE succeeded" << std::endl;
     return false;
 }
@@ -3861,7 +3861,7 @@ bool DdlExecutor::executeCreatePolicy(const CreatePolicyStmt* stmt, Session& s) 
     }
 
     txn.recordCreate(DdlObjectKind::Policy, stmt->policyName, tname);
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "CREATE POLICY succeeded" << std::endl;
     return false;
 }
@@ -3906,7 +3906,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
         std::cout << "COMMENT ON " << objType << " not yet supported via AST bridge" << std::endl;
         return true;
     }
-    txn.commit();
+    if (!txn.commit()) return true;
     std::cout << "COMMENT succeeded" << std::endl;
     return false;
 }

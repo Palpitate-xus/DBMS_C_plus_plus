@@ -70,16 +70,30 @@ void DdlTransaction::recordUpdate(DdlObjectKind kind, const std::string& name,
     writeWal(op);
 }
 
-void DdlTransaction::commit() {
-    if (!active_) return;
+bool DdlTransaction::commit() {
+    if (!active_) return committed_;
+
     if (startedByUs_ && engine_.inTransaction()) {
-        engine_.commitTransaction();
+        const DBStatus status = engine_.commitTransaction();
+        if (status != DBStatus::OK) {
+            std::cerr << "DDL transaction commit failed (SQLSTATE "
+                      << sqlstateForDBStatus(status) << ")" << std::endl;
+            // StorageEngine rolls back row-level changes for deferred-check
+            // and SSI failures.  The wrapper still owns physical DDL changes
+            // and must restore its statement snapshot before reporting the
+            // failure to the executor.
+            rollback();
+            return false;
+        }
     }
+
     if (startedByUs_) {
         engine_.discardTransactionBackup(session_.currentDB);
     }
     ops_.clear();
     committed_ = true;
+    active_ = false;
+    return true;
 }
 
 void DdlTransaction::rollback() {

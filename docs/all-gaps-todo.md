@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态（2026-08-10）**：统一回归基线 PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-11）**：统一回归基线 PASS=127 FAIL=0（125 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -19,6 +19,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | DDL 提交错误继续收口：`DdlTransaction` 检查引擎 commit 状态，延迟约束/SSI 失败会传播到 DDL executor，并恢复已启用的当前格式物理快照；新增提交失败与快照恢复回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
 | 2026-08-10 | DDL 物理/catalog 顺序与原子性继续收口：`DROP SCHEMA` 现在先规划 namespace 依赖，再删除物理 schema，最后应用 catalog 计划；catalog 后处理失败恢复当前格式快照。ALTER 多子命令失败也继续恢复整句快照，并新增 schema drop-plan 回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
 | 2026-08-09 | DDL 创建失败安全：`StorageEngine::createTable` 现在检查 schema/heap/分区/TOAST/主键/唯一索引及 `tlist.lst` 初始化结果，失败时清理已写入的 relation 文件、序列、缓存和清单项；DdlExecutor 在物理创建后立即登记表回滚记录，约束 metadata/EXCLUDE 后处理失败会撤销整张表；`DROP TABLE` 先生成只读依赖计划，物理删除成功后才应用 catalog 删除。新增损坏 heap、后处理失败与 drop plan 回归；完整 DROP/ALTER undo 和跨对象依赖事务语义仍待后续。 |
 | 2026-08-09 | `TRUNCATE` 架构收敛：新增 typed `TruncateStmt` 与 DdlExecutor 执行路径，删除 `main.cpp` 字符串处理；支持 `ONLY`、多表、`RESTART/CONTINUE IDENTITY`、递归 FK `CASCADE` 和 statement-atomic `RESTRICT` 预检，新增多表/FK/identity 回归。trigger、foreign table 与完整 transactional/locking 语义仍待后续。 |
