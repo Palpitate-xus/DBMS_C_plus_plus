@@ -804,9 +804,11 @@ public:
         bool isVisible(const char* rowBuffer, size_t len, uint32_t formatVersion) const;
     };
 
-    // Row iteration (public for execution plan use)
+    // Row iteration (public for execution plan use). Returns false when the
+    // relation or any page cannot be opened/read; callers must not treat a
+    // failed scan as an empty relation.
     // targetPartitions: empty = all partitions; only effective for partitioned tables
-    void forEachRow(const std::string& dbname, const std::string& tablename,
+    bool forEachRow(const std::string& dbname, const std::string& tablename,
                     const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback,
                     const ReadView* readView = nullptr,
                     const std::vector<std::string>& targetPartitions = {}) const;

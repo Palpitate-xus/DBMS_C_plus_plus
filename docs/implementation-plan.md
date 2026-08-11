@@ -724,7 +724,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 6.1 实现 `amhandler`、support functions、opclass/opfamily、`amcostestimate`、`amvalidate` | 8.1, 16.7 | `IIndexAM` 接口 + `BPTreeIndexAM` + `HashIndexAM` 适配器已就绪；PG 完整 AM API 仍缺 |
 | ⚠️ 6.2 补全 B-tree（dedup、suffix truncation、visibility map 驱动 index-only scan） | 8.2 | 基础 B+Tree 已覆盖跨叶/内部节点分裂、重复键和范围扫描；PG 高级 B-tree 能力仍缺 |
 | ⚠️ 6.3 补全 Hash（WAL-safe bucket split、metapage/overflow page） | 8.3 | 基础 Hash 索引已就绪，WAL-safe bucket split 等 PG 语义仍缺 |
-| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | 标准 `CREATE INDEX ... USING ...` 已由 typed DDL 路由到真实的简化实现；独立 Hash/GIN/BRIN 文件已有严格校验和 fsync+原子替换，但泛化 opclass、WAL-safe 增量维护和 GiST 完整访问方法仍缺 |
+| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | 标准 `CREATE INDEX ... USING ...` 已由 typed DDL 路由到真实的简化实现；独立与 StorageEngine GIN/BRIN 文件已有严格校验和 fsync+原子替换，但泛化 opclass、WAL-safe 增量维护和 GiST 完整访问方法仍缺 |
 | ⚠️ 6.5 实现 `CREATE INDEX CONCURRENTLY` | 8.5, 1.1.20 | 当前以共享锁/简化路径支持 concurrently；PG 两阶段/invalid catalog/旧快照等待语义仍缺 |
 | ⚠️ 6.6 实现 expression/partial/include 索引的完整支持（dependency、immutable 检查） | 8.6 | expression/partial/include 基础路径已就绪；dependency、immutable 检查和 predicate implication 仍缺 |
 | ⚠️ 6.7 实现 index maintenance（page deletion、vacuum cleanup、`amcheck`、`REINDEX CONCURRENTLY`） | 8.7, 1.1.47 | REINDEX 基础已就绪；page deletion、vacuum cleanup、amcheck 和并发重建仍缺 |

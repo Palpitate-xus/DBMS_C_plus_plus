@@ -7,6 +7,7 @@
 #include "catalog/CatalogService.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include "test_utils.h"
@@ -153,6 +154,8 @@ static void test_drop_index_uses_sql_name() {
     setupSession(s, db);
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE drop_idx_tbl (id INT, value INT)", s));
+    assert(g_engine.insert(db, "drop_idx_tbl", {{"id", "1"}, {"value", "10"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "drop_idx_tbl", {{"id", "2"}, {"value", "20"}}) == dbms::DBStatus::OK);
     assert(!ddl.executeSql("CREATE INDEX idx_drop_value ON drop_idx_tbl (value)", s));
 
     auto named = g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_drop_value");
@@ -181,6 +184,18 @@ static void test_drop_index_uses_sql_name() {
     assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_gist")->accessMethod == "gist");
     assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_brin")->accessMethod == "brin");
     assert(g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_spgist")->accessMethod == "spgist");
+    assert(!g_engine.ginSearch(db, "drop_idx_tbl", "value", "10").empty());
+    assert(!g_engine.brinSearchRange(db, "drop_idx_tbl", "id", "=", "1").empty());
+    {
+        std::ofstream broken(db + "/drop_idx_tbl_value.gin", std::ios::trunc);
+        broken << "corrupt posting not-a-rid\n";
+    }
+    assert(g_engine.ginSearch(db, "drop_idx_tbl", "value", "10").empty());
+    {
+        std::ofstream broken(db + "/drop_idx_tbl_id.brin", std::ios::binary | std::ios::trunc);
+        broken << "corrupt brin";
+    }
+    assert(g_engine.brinSearchRange(db, "drop_idx_tbl", "id", "=", "1").empty());
     assert(!ddl.executeSql("DROP INDEX idx_gin, idx_gist, idx_brin, idx_spgist", s));
 
     cleanup(db);

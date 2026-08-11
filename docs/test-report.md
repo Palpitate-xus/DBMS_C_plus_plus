@@ -42,6 +42,7 @@
 - BufferPool 回归覆盖一帧缓存的脏页淘汰/重载与 pinned 页保护，确认缓存不足时返回失败而不是强制淘汰活动页。
 - GIN/BRIN/B+Tree 回归继续通过，并覆盖 root split/search/range；B+Tree 的 header/node I/O 失败现在 fail-closed，避免底层页读取失败升级为空指针崩溃。
 - Hash/GIN/BRIN 持久化回归新增原子 durable 写入、Hash 二进制格式重载和损坏文件拒绝；三种独立索引的关闭失败不再清除 dirty 状态。
+- StorageEngine GIN/BRIN 回归通过真实 DDL 构建后查询索引内容，验证 `forEachRow()` 页面失败契约、GIN 原子发布和 BRIN 二进制范围文件路径。
 - 新增 schema 格式完整性回归：截断 schema 与错误 magic 均 fail-closed，不会返回可写的部分 schema。
 - Docker 镜像构建：`docker build -t dbms-cpp:verification .` ✅（OpenSSL 真实 TLS）；Compose 配置检查 ✅。
 - CMake：当前验证环境未安装 `cmake`，配置/编译未执行。

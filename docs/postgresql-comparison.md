@@ -135,10 +135,10 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |----------|-------|---------|------|
 | B+ Tree | ✅ | ⚠️ | 基础文件 B+Tree 已覆盖跨叶/内部节点分裂、重复键和范围扫描；PG dedup、删除合并、opclass/collation、skip scan 和完整并发构建仍缺 |
 | Hash | ✅ | ✅ | ✅ |
-| GIN | ✅ | ✅ (基础, src/access/GinIndex.cpp) | ⚠️ |
+| GIN | ✅ | ✅ (基础，独立/StorageEngine 文件均严格校验并原子持久化) | ⚠️ |
 | GiST | ✅ | ❌ | 缺 |
 | SP-GiST | ✅ | ✅ (Point quadtree, SPGiSTIndex.cpp) | ⚠️ |
-| BRIN | ✅ | ✅ (块范围, BrinIndex.cpp) | ⚠️ |
+| BRIN | ✅ | ✅ (块范围，独立/StorageEngine 文件均严格校验并原子持久化) | ⚠️ |
 | **Bloom** | ✅ | ❌ | 缺 |
 | **覆盖索引 (INCLUDE)** | ✅ | ✅ | ✅ |
 | **部分索引 (WHERE)** | ✅ | ✅ | ✅ |

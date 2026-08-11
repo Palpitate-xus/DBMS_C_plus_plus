@@ -10,6 +10,7 @@
 #include "permissions.h"
 #include "utils/Session.h"
 #include "process/RuntimeStats.h"
+#include "access/IndexFileUtil.h"
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -3571,7 +3572,7 @@ static std::string ssiRelationKey(const std::string& dbname,
     return dbname + "\x1f" + tablename;
 }
 
-void StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
+bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
                                 const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
                                 const ReadView* readView,
                                 const std::vector<std::string>& targetPartitions) const {
@@ -3640,11 +3641,15 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 }
                 for (const auto& spname : subNames) {
                     auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname, spname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-                    if (!ppa->open()) continue;
+                    if (!ppa->open()) return false;
                     uint32_t np = ppa->numPages();
                     for (uint32_t pid = 1; pid < np; ++pid) {
                         lockManager_.pageLockShared(dbname, tablename, pid);
                         char* buf = ppa->fetchPage(pid);
+                        if (!buf) {
+                            lockManager_.pageUnlock(dbname, tablename, pid);
+                            return false;
+                        }
                         PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
                         page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
                             emitRow(pid, sid, data, len);
@@ -3656,11 +3661,15 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 }
             } else {
                 auto ppa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-                if (!ppa->open()) continue;
+                if (!ppa->open()) return false;
                 uint32_t np = ppa->numPages();
                 for (uint32_t pid = 1; pid < np; ++pid) {
                     lockManager_.pageLockShared(dbname, tablename, pid);
                     char* buf = ppa->fetchPage(pid);
+                    if (!buf) {
+                        lockManager_.pageUnlock(dbname, tablename, pid);
+                        return false;
+                    }
                     PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
                     page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
                         emitRow(pid, sid, data, len);
@@ -3671,15 +3680,19 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 ppa->close();
             }
         }
-        return;
+        return true;
     }
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
-    if (!pa) return;
+    if (!pa) return false;
     uint32_t np = pa->numPages();
     for (uint32_t pid = 1; pid < np; ++pid) {
         lockManager_.pageLockShared(dbname, tablename, pid);
         char* buf = pa->fetchPage(pid);
+        if (!buf) {
+            lockManager_.pageUnlock(dbname, tablename, pid);
+            return false;
+        }
         PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
         page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
             emitRow(pid, sid, data, len);
@@ -3687,6 +3700,7 @@ void StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         pa->unpinPage(pid);
         lockManager_.pageUnlock(dbname, tablename, pid);
     }
+    return true;
 }
 
 bool StorageEngine::forEachVisibleRow(
@@ -3702,8 +3716,7 @@ bool StorageEngine::forEachVisibleRow(
     // absent identity is still kept on the policy path and therefore cannot
     // bypass an enabled RLS table.
     if (!shouldEnforceRLS(tbl, user)) {
-        forEachRow(dbname, tablename, callback, readView, targetPartitions);
-        return true;
+        return forEachRow(dbname, tablename, callback, readView, targetPartitions);
     }
 
     const auto policies = getApplicablePolicies(dbname, tablename, command, user);
@@ -3718,7 +3731,7 @@ bool StorageEngine::forEachVisibleRow(
     };
     std::vector<VisibleRow> visible;
     bool evaluationError = false;
-    forEachRow(dbname, tablename,
+    if (!forEachRow(dbname, tablename,
                [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
         if (evaluationError) return;
         const std::string row(data, len);
@@ -3733,7 +3746,7 @@ bool StorageEngine::forEachVisibleRow(
         const bool allowed = evaluateRlsPolicies(
             policies, false, values, typeHints, dbname, user, evaluationError);
         if (allowed) visible.push_back({pageId, slotId, row});
-    }, readView, targetPartitions);
+    }, readView, targetPartitions)) return false;
 
     if (evaluationError) return false;
     for (const auto& row : visible) {
@@ -4043,7 +4056,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
     HashIndex* hidx = getHashIndex(dbname, tablename, colname);
     if (!hidx) return DBStatus::OK;
     hidx->clear();
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -4055,7 +4068,8 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
                 break;
             }
         }
-    });
+    })) return DBStatus::IO_ERROR;
+    if (!hidx->close() || !hidx->open()) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -6657,7 +6671,7 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
     if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     std::map<std::string, std::set<int64_t>> inverted;
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
         std::string val = extractColumnValue(row, tbl, colIdx);
@@ -6666,11 +6680,10 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
         for (const auto& k : keys) {
             if (!k.empty()) inverted[k].insert(rid);
         }
-    });
+    })) return DBStatus::IO_ERROR;
 
     auto path = ginIndexPath(dbname, tablename, colname);
-    std::ofstream out(path);
-    if (!out) return DBStatus::INVALID_VALUE;
+    std::ostringstream out;
     for (const auto& kv : inverted) {
         out << kv.first;
         for (int64_t rid : kv.second) {
@@ -6678,6 +6691,7 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
         }
         out << '\n';
     }
+    if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -6685,7 +6699,11 @@ DBStatus StorageEngine::dropGinIndex(const std::string& dbname,
                                       const std::string& tablename,
                                       const std::string& colname) {
     auto path = ginIndexPath(dbname, tablename, colname);
-    if (std::filesystem::exists(path)) std::filesystem::remove(path);
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec) && !std::filesystem::remove(path, ec)) {
+        return DBStatus::IO_ERROR;
+    }
+    if (ec) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -6705,18 +6723,21 @@ std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
     if (!in) return result;
     std::string line;
     while (std::getline(in, line)) {
+        if (line.empty()) return {};
         size_t sp = line.find(' ');
         std::string tok = (sp == std::string::npos) ? line : line.substr(0, sp);
+        if (tok.empty() || sp == std::string::npos) return {};
+        std::stringstream values(sp == std::string::npos ? std::string() : line.substr(sp + 1));
+        std::vector<int64_t> parsed;
+        int64_t rid = 0;
+        while (values >> rid) parsed.push_back(rid);
+        if (!values.eof()) return {};
         if (tok == key) {
-            if (sp != std::string::npos) {
-                std::string rest = line.substr(sp + 1);
-                std::stringstream ss(rest);
-                int64_t rid;
-                while (ss >> rid) result.push_back(rid);
-            }
+            result = std::move(parsed);
             break;
         }
     }
+    if (in.bad()) return {};
     return result;
 }
 
@@ -7008,6 +7029,46 @@ std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::strin
 // BRIN index (Block Range Index) - per-block min/max summary
 // ========================================================================
 
+namespace {
+constexpr uint32_t STORAGE_BRIN_MAGIC = 0x5342524e; // SBRN
+constexpr uint32_t STORAGE_BRIN_VERSION = 1;
+
+struct StorageBrinRange {
+    uint32_t pageStart = 0;
+    uint32_t pageEnd = 0;
+    std::string minValue;
+    std::string maxValue;
+};
+
+template <typename T>
+void appendStorageBrinBytes(std::string& out, const T& value) {
+    out.append(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+
+template <typename T>
+bool readStorageBrinBytes(const std::string& data, size_t& offset, T& value) {
+    if (offset > data.size() || data.size() - offset < sizeof(T)) return false;
+    std::memcpy(&value, data.data() + offset, sizeof(T));
+    offset += sizeof(T);
+    return true;
+}
+
+void appendStorageBrinString(std::string& out, const std::string& value) {
+    const uint64_t length = value.size();
+    appendStorageBrinBytes(out, length);
+    out.append(value);
+}
+
+bool readStorageBrinString(const std::string& data, size_t& offset, std::string& value) {
+    uint64_t length = 0;
+    if (!readStorageBrinBytes(data, offset, length) || length > data.size() - offset)
+        return false;
+    value.assign(data.data() + offset, static_cast<size_t>(length));
+    offset += static_cast<size_t>(length);
+    return true;
+}
+}
+
 std::filesystem::path StorageEngine::brinIndexPath(const std::string& dbname,
                                                    const std::string& tablename,
                                                    const std::string& colname) const {
@@ -7020,6 +7081,7 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                                          size_t pagesPerRange) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (pagesPerRange == 0) pagesPerRange = 64;
+    if (pagesPerRange > std::numeric_limits<uint32_t>::max()) return DBStatus::INVALID_VALUE;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -7028,11 +7090,46 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     auto path = brinIndexPath(dbname, tablename, colname);
-    std::ofstream out(path);
-    if (!out) return DBStatus::INVALID_VALUE;
+    std::vector<StorageBrinRange> ranges;
+    const uint32_t rangeWidth = static_cast<uint32_t>(pagesPerRange);
+
+    auto scanAllocator = [&](PageAllocator& allocator, const TableSchema& t) -> bool {
+        const uint32_t np = allocator.numPages();
+        for (uint64_t start = 1; start < np; start += rangeWidth) {
+            const uint32_t blockStart = static_cast<uint32_t>(start);
+            const uint32_t blockEnd = static_cast<uint32_t>(std::min<uint64_t>(
+                start + rangeWidth - 1, static_cast<uint64_t>(np - 1)));
+            bool hasValue = false;
+            std::string rangeMin;
+            std::string rangeMax;
+            for (uint32_t pid = blockStart; pid <= blockEnd; ++pid) {
+                char* buf = allocator.fetchPage(pid);
+                if (!buf) return false;
+                PageWrapper page(buf, allocator.pageSize(), t.formatVersion);
+                page.forEachLive([&](uint16_t, const char* data, size_t len) {
+                    if (len <= MVCC_HEADER_SIZE) return;
+                    std::string row = stripRowHeader(data, len, t.formatVersion, t.len);
+                    if (row.empty()) return;
+                    std::string val = extractColumnValue(row, t, colIdx);
+                    if (!hasValue) {
+                        rangeMin = rangeMax = std::move(val);
+                        hasValue = true;
+                    } else {
+                        if (val < rangeMin) rangeMin = val;
+                        if (val > rangeMax) rangeMax = val;
+                    }
+                });
+                allocator.unpinPage(pid);
+                if (pid == blockEnd) break;
+            }
+            if (hasValue) ranges.push_back({blockStart, blockEnd,
+                                             std::move(rangeMin), std::move(rangeMax)});
+        }
+        return true;
+    };
 
     // If table is partitioned, scan partition files; otherwise scan main data file
-    auto scanTable = [&](const std::string& actualTableName) {
+    auto scanTable = [&](const std::string& actualTableName) -> bool {
         TableSchema t = getTableSchema(dbname, actualTableName);
         if (t.partitionType != TableSchema::PartitionType::None) {
             std::vector<std::string> partNames;
@@ -7046,51 +7143,28 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
             for (const auto& pname : partNames) {
                 auto ppa = std::make_unique<PageAllocator>(
                     partitionDataPath(dbname, actualTableName, pname).string(), t.rowSize(), pageSizeForFormatVersion(t.formatVersion), t.formatVersion);
-                if (!ppa->open()) continue;
-                uint32_t np = ppa->numPages();
-                for (uint32_t blockStart = 1; blockStart < np; blockStart += static_cast<uint32_t>(pagesPerRange)) {
-                    uint32_t blockEnd = std::min(blockStart + static_cast<uint32_t>(pagesPerRange) - 1, np - 1);
-                    bool hasValue = false;
-                    std::string rangeMin, rangeMax;
-                    for (uint32_t pid = blockStart; pid <= blockEnd; ++pid) {
-                        char* buf = ppa->fetchPage(pid);
-                        PageWrapper page(buf, ppa->pageSize(), t.formatVersion);
-                        page.forEachLive([&](uint16_t, const char* data, size_t len) {
-                            if (len <= MVCC_HEADER_SIZE) return;
-                            std::string row(data, len);
-                            std::string val = extractColumnValue(row, t, colIdx);
-                            if (!hasValue) { rangeMin = rangeMax = val; hasValue = true; }
-                            else { if (val < rangeMin) rangeMin = val; if (val > rangeMax) rangeMax = val; }
-                        });
-                    }
-                    if (hasValue) out << blockStart << ' ' << blockEnd << ' ' << rangeMin << ' ' << rangeMax << '\n';
-                }
+                if (!ppa->open() || !scanAllocator(*ppa, t)) return false;
             }
         } else {
             auto pa = std::make_unique<PageAllocator>(dataPath(dbname, actualTableName).string(), t.rowSize(), pageSizeForFormatVersion(t.formatVersion), t.formatVersion);
-            if (!pa->open()) return;
-            uint32_t np = pa->numPages();
-            for (uint32_t blockStart = 1; blockStart < np; blockStart += static_cast<uint32_t>(pagesPerRange)) {
-                uint32_t blockEnd = std::min(blockStart + static_cast<uint32_t>(pagesPerRange) - 1, np - 1);
-                bool hasValue = false;
-                std::string rangeMin, rangeMax;
-                for (uint32_t pid = blockStart; pid <= blockEnd; ++pid) {
-                    char* buf = pa->fetchPage(pid);
-                    PageWrapper page(buf, pa->pageSize(), t.formatVersion);
-                    page.forEachLive([&](uint16_t, const char* data, size_t len) {
-                        if (len <= MVCC_HEADER_SIZE) return;
-                        std::string row(data, len);
-                        std::string val = extractColumnValue(row, t, colIdx);
-                        if (!hasValue) { rangeMin = rangeMax = val; hasValue = true; }
-                        else { if (val < rangeMin) rangeMin = val; if (val > rangeMax) rangeMax = val; }
-                    });
-                }
-                if (hasValue) out << blockStart << ' ' << blockEnd << ' ' << rangeMin << ' ' << rangeMax << '\n';
-            }
+            if (!pa->open() || !scanAllocator(*pa, t)) return false;
         }
+        return true;
     };
 
-    scanTable(tablename);
+    if (!scanTable(tablename)) return DBStatus::IO_ERROR;
+    std::string bytes;
+    appendStorageBrinBytes(bytes, STORAGE_BRIN_MAGIC);
+    appendStorageBrinBytes(bytes, STORAGE_BRIN_VERSION);
+    const uint64_t rangeCount = ranges.size();
+    appendStorageBrinBytes(bytes, rangeCount);
+    for (const auto& range : ranges) {
+        appendStorageBrinBytes(bytes, range.pageStart);
+        appendStorageBrinBytes(bytes, range.pageEnd);
+        appendStorageBrinString(bytes, range.minValue);
+        appendStorageBrinString(bytes, range.maxValue);
+    }
+    if (!index_file::writeAtomically(path, bytes)) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -7098,7 +7172,11 @@ DBStatus StorageEngine::dropBrinIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
     auto path = brinIndexPath(dbname, tablename, colname);
-    if (std::filesystem::exists(path)) std::filesystem::remove(path);
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec) && !std::filesystem::remove(path, ec)) {
+        return DBStatus::IO_ERROR;
+    }
+    if (ec) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -7113,14 +7191,30 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
     const std::string& op, const std::string& value) const {
     std::vector<std::pair<uint32_t, uint32_t>> result;
     auto path = brinIndexPath(dbname, tablename, colname);
-    std::ifstream in(path);
+    std::ifstream in(path, std::ios::binary);
     if (!in) return result;
-    std::string line;
-    while (std::getline(in, line)) {
-        std::stringstream ss(line);
-        uint32_t pstart, pend;
-        std::string rangeMin, rangeMax;
-        if (!(ss >> pstart >> pend >> rangeMin >> rangeMax)) continue;
+    const std::string data((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    if (in.bad()) return {};
+    size_t offset = 0;
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint64_t rangeCount = 0;
+    if (!readStorageBrinBytes(data, offset, magic) ||
+        !readStorageBrinBytes(data, offset, version) ||
+        !readStorageBrinBytes(data, offset, rangeCount) ||
+        magic != STORAGE_BRIN_MAGIC || version != STORAGE_BRIN_VERSION ||
+        rangeCount > data.size() / 24) return {};
+    for (uint64_t i = 0; i < rangeCount; ++i) {
+        uint32_t pstart = 0;
+        uint32_t pend = 0;
+        std::string rangeMin;
+        std::string rangeMax;
+        if (!readStorageBrinBytes(data, offset, pstart) ||
+            !readStorageBrinBytes(data, offset, pend) ||
+            !readStorageBrinString(data, offset, rangeMin) ||
+            !readStorageBrinString(data, offset, rangeMax) ||
+            pstart == 0 || pend < pstart) return {};
         bool mayMatch = false;
         if (op == "=") {
             mayMatch = (rangeMin <= value && value <= rangeMax);
@@ -7135,6 +7229,7 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
         }
         if (mayMatch) result.push_back({pstart, pend});
     }
+    if (offset != data.size()) return {};
     return result;
 }
 
