@@ -1,8 +1,12 @@
 #include "CommitLog.h"
 
+#include <cerrno>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <unistd.h>
 
 namespace dbms {
 
@@ -83,14 +87,41 @@ void CommitLog::saveSegment(uint64_t segNo) {
     }
 
     std::string path = segmentPath(segNo);
-    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
-    if (!ofs) {
+    const std::string tempPath = path + ".tmp." + std::to_string(static_cast<unsigned long long>(::getpid())) +
+                                 "." + std::to_string(reinterpret_cast<uintptr_t>(this));
+    const int fd = ::open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) {
         std::cerr << "[CLOG] Failed to write segment: " << path << std::endl;
         return;
     }
-    ofs.write(reinterpret_cast<const char*>(it->second.data.data()),
-              static_cast<std::streamsize>(kSegmentFileSize));
-    ofs.flush();
+
+    const uint8_t* data = it->second.data.data();
+    size_t remaining = kSegmentFileSize;
+    bool ok = true;
+    while (remaining > 0) {
+        const ssize_t written = ::write(fd, data, remaining);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            ok = false;
+            break;
+        }
+        data += written;
+        remaining -= static_cast<size_t>(written);
+    }
+    if (ok && ::fsync(fd) != 0) ok = false;
+    if (::close(fd) != 0) ok = false;
+
+    if (ok && ::rename(tempPath.c_str(), path.c_str()) != 0) ok = false;
+    if (ok) {
+        const int dirFd = ::open(clogDir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dirFd < 0 || ::fsync(dirFd) != 0) ok = false;
+        if (dirFd >= 0) ::close(dirFd);
+    }
+    if (!ok) {
+        std::filesystem::remove(tempPath);
+        std::cerr << "[CLOG] Failed to durably write segment: " << path << std::endl;
+        return;
+    }
     it->second.dirty = false;
 }
 

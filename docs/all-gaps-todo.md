@@ -23,6 +23,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | CLOG 崩溃安全收敛：`pg_xact` 段采用临时文件完整写入、段文件 `fsync`、原子 rename 与目录 `fsync`；写入失败保留 dirty 状态，数据库目录或 `pg_xact` 被删除时不重建旧路径，`clog_test` 持久化回归通过。 |
 | 2026-08-11 | SSI 页粒度收敛：非空索引谓词按命中 RID 登记 heap page SIREAD，顺序扫描登记实际扫描页，空结果保留关系级兜底；提交时页级读写覆盖参与危险结构检测，新增非相交页并发与跨页危险结构回归。索引范围 predicate lock、完整 SSI 图和安全快照仍待后续。 |
 | 2026-08-11 | 锁失败传播收敛：`LockManager` bool API 全部标记 `[[nodiscard]]`，`TableManage` 的 DDL/DML/索引/扫描/TOAST/JOIN/聚合/VACUUM 调用方显式返回 `LOCK_CONFLICT`、空结果或扫描失败；rename 按名称顺序获取双表锁，新增 `lock_failure_propagation_test` 验证真实表锁竞争 fail-closed。 |
 | 2026-08-11 | DDL CREATE undo 收敛：`DdlTransaction` 新增 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation 的撤销路径；collation 文件读写统一进入 `StorageEngine`，新增辅助对象回滚回归。显式外层事务跨语句 DDL、DROP/REPLACE 旧对象恢复和完整依赖 undo 仍待后续。 |
