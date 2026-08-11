@@ -1448,7 +1448,7 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                                           const std::string& partitionName,
                                           const std::string& partitionSpec) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
@@ -1606,7 +1606,7 @@ DBStatus StorageEngine::detachPartition(const std::string& dbname,
                                           const std::string& partitionName) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
@@ -3812,7 +3812,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     if (!ppa->open()) return false;
                     uint32_t np = ppa->numPages();
                     for (uint32_t pid = 1; pid < np; ++pid) {
-                        lockManager_.pageLockShared(dbname, tablename, pid);
+                        if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
                         char* buf = ppa->fetchPage(pid);
                         if (!buf) {
                             lockManager_.pageUnlock(dbname, tablename, pid);
@@ -3832,7 +3832,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 if (!ppa->open()) return false;
                 uint32_t np = ppa->numPages();
                 for (uint32_t pid = 1; pid < np; ++pid) {
-                    lockManager_.pageLockShared(dbname, tablename, pid);
+                    if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
                     char* buf = ppa->fetchPage(pid);
                     if (!buf) {
                         lockManager_.pageUnlock(dbname, tablename, pid);
@@ -3855,7 +3855,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     if (!pa) return false;
     uint32_t np = pa->numPages();
     for (uint32_t pid = 1; pid < np; ++pid) {
-        lockManager_.pageLockShared(dbname, tablename, pid);
+        if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
         char* buf = pa->fetchPage(pid);
         if (!buf) {
             lockManager_.pageUnlock(dbname, tablename, pid);
@@ -3973,7 +3973,7 @@ bool StorageEngine::forEachRowPageRange(
     };
 
     for (uint32_t pid = std::max<uint32_t>(1, firstPage); pid < lastPage; ++pid) {
-        lockManager_.pageLockShared(dbname, tablename, pid);
+        if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
         char* buf = allocator->fetchPage(pid);
         if (!buf) {
             lockManager_.pageUnlock(dbname, tablename, pid);
@@ -6283,9 +6283,9 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
                                      bool concurrently) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (concurrently) {
-        lockManager_.lockShared(tablename);
+        if (!lockManager_.lockShared(tablename)) return DBStatus::LOCK_CONFLICT;
     } else {
-        lockManager_.lockMetadata(tablename);
+        if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -6403,7 +6403,7 @@ DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& 
                                    const std::string& colname) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
 
     // Update metadata: remove lines matching this column/expression
@@ -6458,9 +6458,9 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
                                               bool concurrently) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (concurrently) {
-        lockManager_.lockShared(tablename);
+        if (!lockManager_.lockShared(tablename)) return DBStatus::LOCK_CONFLICT;
     } else {
-        lockManager_.lockMetadata(tablename);
+        if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -8225,7 +8225,7 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
         uint32_t numPages = pa->numPages();
         uint16_t slotId = 0;
         for (uint32_t pid = (numPages == 0 ? 0 : 1); pid < numPages && !inserted; ++pid) {
-            lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
+            if (!lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid)) return false;
             char* buf = pa->fetchPage(pid);
             if (!buf) {
                 lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
@@ -8244,7 +8244,7 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
         }
         if (!inserted) {
             uint32_t pid = pa->allocPage();
-            lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
+            if (!lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid)) return false;
             char* buf = pa->fetchPage(pid);
             if (!buf) {
                 lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
@@ -8284,7 +8284,7 @@ std::string StorageEngine::readToast(const std::string& dbname, const std::strin
         uint16_t slotId = 0;
         decodeRid(rid, pid, slotId);
 
-        lockManager_.pageLockShared(dbname, tablename + ".toast", pid);
+        if (!lockManager_.pageLockShared(dbname, tablename + ".toast", pid)) return "";
         char* buf = pa->fetchPage(pid);
         if (!buf) {
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
@@ -8358,7 +8358,7 @@ void StorageEngine::deleteToast(const std::string& dbname, const std::string& ta
         uint32_t pid = 0;
         uint16_t slotId = 0;
         decodeRid(rid, pid, slotId);
-        lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid);
+        if (!lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid)) return;
         char* buf = pa->fetchPage(pid);
         if (buf) {
             PageWrapper page(buf, pa->pageSize(), DATA_FILE_FORMAT_VERSION);
@@ -8732,7 +8732,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     // Keep the schema readable until every physical path has been resolved;
     // custom tablespace paths are derived from the schema itself.
@@ -8812,7 +8812,7 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
                                        const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -8912,7 +8912,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockExclusive(tablename);
+    if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     Column validatedCol = col;
@@ -9145,7 +9145,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockExclusive(tablename);
+    if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t dropIdx = tbl.len;
@@ -9415,7 +9415,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockExclusive(tablename);
+    if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -9532,7 +9532,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_COL_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (oldName == newName) return DBStatus::OK;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -9755,8 +9755,16 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
-    lockManager_.lockMetadata(oldName);
-    lockManager_.lockMetadata(newName);
+    // Always acquire the two relation locks in name order.  Rename is a
+    // multi-relation operation; a canonical order prevents two concurrent
+    // cross-renames from forming an avoidable lock cycle.
+    const std::string& firstLock = oldName <= newName ? oldName : newName;
+    const std::string& secondLock = oldName <= newName ? newName : oldName;
+    if (!lockManager_.lockMetadata(firstLock)) return DBStatus::LOCK_CONFLICT;
+    if (!lockManager_.lockMetadata(secondLock)) {
+        lockManager_.unlock(firstLock);
+        return DBStatus::LOCK_CONFLICT;
+    }
     closeDatabaseCaches(dbname);
 
     TableSchema renamedSchema = getTableSchema(dbname, oldName);
@@ -10015,7 +10023,7 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
     const auto ownerAccount = authCatalog().getAuthIdByName(owner);
     if (!ownerAccount) return DBStatus::INVALID_ARGUMENT;
 
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     TableSchema tbl = getTableSchema(dbname, tablename);
     tbl.owner = owner;
     {
@@ -10058,7 +10066,7 @@ DBStatus StorageEngine::alterTableSetDefault(const std::string& dbname,
                                               const std::string& colName,
                                               const std::string& defaultValue) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -10083,7 +10091,7 @@ DBStatus StorageEngine::alterTableDropDefault(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::string& colName) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -10108,7 +10116,7 @@ DBStatus StorageEngine::alterTableSetLogged(const std::string& dbname,
                                              const std::string& tablename,
                                              bool logged) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     TableSchema tbl = getTableSchema(dbname, tablename);
     tbl.isUnlogged = !logged;
     {
@@ -10147,7 +10155,7 @@ DBStatus StorageEngine::alterTableSetReplicaIdentity(
         return DBStatus::INVALID_ARGUMENT;
     }
 
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     try {
         auto& catalog = catalogService().get(dbname);
         const auto* relation = catalog.resolveRelation(tablename, {"public"});
@@ -10176,7 +10184,7 @@ DBStatus StorageEngine::alterTableSetConstraintDeferrability(
     const std::string& dbname, const std::string& tablename,
     const std::string& constraintName, bool deferrable, bool initiallyDeferred) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t match = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -10210,7 +10218,7 @@ DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -10253,7 +10261,7 @@ DBStatus StorageEngine::alterTableDropNotNull(const std::string& dbname,
                                                const std::string& tablename,
                                                const std::string& colName) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     size_t colIdx = tbl.len;
@@ -10281,7 +10289,7 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
                                                         const std::string& expr) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     // Find the first column referenced in the expression
@@ -10320,7 +10328,7 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
                                                          const std::vector<std::string>& colNames) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::vector<size_t> colIndices;
@@ -10364,7 +10372,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
     (void)name;  // PK constraint name is not separately persisted
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -10475,7 +10483,7 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
             return DBStatus::TABLE_NOT_FOUND;
         }
     }
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.fkLen >= MAX_COLUMNS) {
@@ -10522,7 +10530,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
                                                   const std::string& name) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     bool found = false;
@@ -10599,7 +10607,7 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (oldName == newName) return DBStatus::OK;
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -10662,7 +10670,7 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
             (targetTablespace + ".path");
         if (!std::filesystem::exists(marker)) return DBStatus::INVALID_VALUE;
     }
-    lockManager_.lockMetadata(tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     const std::string oldTablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
@@ -12029,7 +12037,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                                 std::vector<std::map<std::string, std::string>>* insertedRows) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockExclusive(tablename);
+    if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -12696,7 +12704,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             FreeSpaceMap* fsm = getFSM(dbname, tablename);
             uint32_t candidate = fsm->findPage(minPercent, 1);
             if (candidate > 0 && candidate < numPages) {
-                lockManager_.pageLockExclusive(dbname, tablename, candidate);
+                if (!lockManager_.pageLockExclusive(dbname, tablename, candidate)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::LOCK_CONFLICT;
+                }
                 char* buf = pa->fetchPage(candidate);
                 if (!buf) {
                     lockManager_.pageUnlock(dbname, tablename, candidate);
@@ -12723,7 +12734,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
         // Fallback: sequential scan
         for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
-            lockManager_.pageLockExclusive(dbname, tablename, pid);
+            if (!lockManager_.pageLockExclusive(dbname, tablename, pid)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::LOCK_CONFLICT;
+            }
             char* buf = pa->fetchPage(pid);
             if (!buf) {
                 lockManager_.pageUnlock(dbname, tablename, pid);
@@ -12751,7 +12765,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
         if (!inserted) {
             pageId = pa->allocPage();
-            lockManager_.pageLockExclusive(dbname, tablename, pageId);
+            if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::LOCK_CONFLICT;
+            }
             char* buf = pa->fetchPage(pageId);
             if (!buf) {
                 lockManager_.pageUnlock(dbname, tablename, pageId);
@@ -12784,32 +12801,6 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
-    // For PostgreSQL-style tuples, set ctid to point to self after insertion.
-    if (usesHeapTupleHeader(tbl.formatVersion)) {
-        lockManager_.pageLockExclusive(dbname, tablename, pageId);
-        char* buf = pa->fetchPage(pageId);
-        if (buf) {
-            PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-            const char* data = nullptr;
-            size_t len = 0;
-            if (page.read(slotId, data, len)) {
-                ItemPointer selfCtid{ pageId, static_cast<OffsetNumber>(slotId + 1) };
-                // Mutable copy: rewrite tuple with updated ctid
-                std::string mutableRow(data, len);
-                setRowCtid(mutableRow.data(), mutableRow.size(), tbl.formatVersion, selfCtid);
-                page.update(slotId, mutableRow.data(), mutableRow.size());
-                pa->markDirty(pageId);
-                Lsn lsn = walPageImage(dbname, tablename, pageId, buf, pa->pageSize(), false);
-                if (lsn != INVALID_LSN) {
-                    setPageLsnAndChecksum(buf, lsn);
-                    pa->markDirty(pageId);
-                }
-            }
-            pa->unpinPage(pageId);
-        }
-        lockManager_.pageUnlock(dbname, tablename, pageId);
-    }
-
     // Log for transaction rollback
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         logTxnInsert(tablename, rid);
@@ -12829,6 +12820,13 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
         // Embedded callers may use insert() outside an explicit transaction.
         // Remove every index entry for this RID before removing the heap row.
+        // Acquire the page lock before any cleanup mutation.  If it cannot be
+        // acquired, leave the tuple and indexes untouched rather than
+        // returning with a partially cleaned row.
+        if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::LOCK_CONFLICT;
+        }
         const std::string pkVal = extractPKValue(strippedRow, tbl);
         if (tbl.hasPrimaryKey()) {
             if (BPTree* idx = getPKIndex(dbname, tablename); idx && !pkVal.empty()) {
@@ -12864,7 +12862,6 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
         }
         deleteRowToast(dbname, tablename, rid);
-        lockManager_.pageLockExclusive(dbname, tablename, pageId);
         if (char* pageBuf = pa->fetchPage(pageId)) {
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
             walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
@@ -12882,6 +12879,36 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     };
+
+    // For PostgreSQL-style tuples, set ctid to point to self after insertion.
+    // Keep this inside the atomic cleanup scope: a page-lock failure after the
+    // heap insert must remove the just-created tuple rather than return while
+    // leaving an unindexed row behind.
+    if (usesHeapTupleHeader(tbl.formatVersion)) {
+        if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
+            return abortIndexUpdate();
+        }
+        char* buf = pa->fetchPage(pageId);
+        if (buf) {
+            PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
+            const char* data = nullptr;
+            size_t len = 0;
+            if (page.read(slotId, data, len)) {
+                ItemPointer selfCtid{ pageId, static_cast<OffsetNumber>(slotId + 1) };
+                std::string mutableRow(data, len);
+                setRowCtid(mutableRow.data(), mutableRow.size(), tbl.formatVersion, selfCtid);
+                page.update(slotId, mutableRow.data(), mutableRow.size());
+                pa->markDirty(pageId);
+                Lsn lsn = walPageImage(dbname, tablename, pageId, buf, pa->pageSize(), false);
+                if (lsn != INVALID_LSN) {
+                    setPageLsnAndChecksum(buf, lsn);
+                    pa->markDirty(pageId);
+                }
+            }
+            pa->unpinPage(pageId);
+        }
+        lockManager_.pageUnlock(dbname, tablename, pageId);
+    }
 
     // Update B+ tree PK index.
     {
@@ -13404,7 +13431,7 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                                 const DeleteMatcher& deleteMatcher) {
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    lockManager_.lockIntentExclusive(tablename);
+    if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
@@ -13461,7 +13488,15 @@ DBStatus StorageEngine::remove(const std::string& dbname,
 
     // Acquire row-level exclusive locks on rows to be deleted
     for (int64_t rid : toDelete) {
-        lockManager_.rowLockExclusive(tablename, rid);
+        if (!lockManager_.rowLockExclusive(tablename, rid)) {
+            if (transactionContext().inTransaction) {
+                rollbackTransaction();
+            } else {
+                lockManager_.unlockAll();
+                lockManager_.unlockAllGaps();
+            }
+            return DBStatus::LOCK_CONFLICT;
+        }
     }
 
     // Check foreign key references and apply ON DELETE actions
@@ -13572,8 +13607,15 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                 // Acquire locks on referenced tables in alphabetical order
                 std::vector<std::string> sortedTables(cascadeTables.begin(), cascadeTables.end());
                 std::sort(sortedTables.begin(), sortedTables.end());
+                std::vector<std::string> acquiredTables;
                 for (const auto& t : sortedTables) {
-                    lockManager_.lockIntentExclusive(t);
+                    if (!lockManager_.lockIntentExclusive(t)) {
+                        for (const auto& acquired : acquiredTables) lockManager_.unlock(acquired);
+                        lockManager_.unlock(tablename);
+                        if (transactionContext().inTransaction) rollbackTransaction();
+                        return DBStatus::LOCK_CONFLICT;
+                    }
+                    acquiredTables.push_back(t);
                 }
 
                 // Apply SET NULL: set FK column to NULL
@@ -13824,7 +13866,16 @@ DBStatus StorageEngine::remove(const std::string& dbname,
 
         uint32_t pageId; uint16_t slotId;
         decodeRid(rid, pageId, slotId);
-        lockManager_.pageLockExclusive(dbname, tablename, pageId);
+        if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
+            if (transactionContext().inTransaction) {
+                lockManager_.unlock(tablename);
+                rollbackTransaction();
+            } else {
+                lockManager_.unlockAll();
+                lockManager_.unlockAllGaps();
+            }
+            return DBStatus::LOCK_CONFLICT;
+        }
         char* pageBuf = pa->fetchPage(pageId);
         if (pageBuf) {
             PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
@@ -14163,7 +14214,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
         return status;
     }
 
-    lockManager_.lockIntentExclusive(tablename);
+    if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
@@ -14229,7 +14280,8 @@ DBStatus StorageEngine::update(const std::string& dbname,
             if (transactionContext().inTransaction) {
                 rollbackTransaction();
             } else {
-                lockManager_.unlock(tablename);
+                lockManager_.unlockAll();
+                lockManager_.unlockAllGaps();
             }
             return DBStatus::LOCK_CONFLICT;
         }
@@ -14611,8 +14663,15 @@ DBStatus StorageEngine::update(const std::string& dbname,
             for (const auto& sa : updateSetNullActions) affectedTables.insert(sa.table);
             std::vector<std::string> sortedTables(affectedTables.begin(), affectedTables.end());
             std::sort(sortedTables.begin(), sortedTables.end());
+            std::vector<std::string> acquiredTables;
             for (const auto& t : sortedTables) {
-                lockManager_.lockIntentExclusive(t);
+                if (!lockManager_.lockIntentExclusive(t)) {
+                    for (const auto& acquired : acquiredTables) lockManager_.unlock(acquired);
+                    lockManager_.unlock(tablename);
+                    if (transactionContext().inTransaction) rollbackTransaction();
+                    return DBStatus::LOCK_CONFLICT;
+                }
+                acquiredTables.push_back(t);
             }
 
             // Apply ON UPDATE SET NULL
@@ -14693,7 +14752,17 @@ DBStatus StorageEngine::update(const std::string& dbname,
         newRow = buildRowBuffer(tbl, rowValues, updateTxnId);
         strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
 
-        lockManager_.pageLockExclusive(dbname, tablename, pageId);
+        if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
+            deleteToastForRow(dbname, tablename, strippedNewRow);
+            if (transactionContext().inTransaction) {
+                lockManager_.unlock(tablename);
+                rollbackTransaction();
+            } else {
+                lockManager_.unlockAll();
+                lockManager_.unlockAllGaps();
+            }
+            return DBStatus::LOCK_CONFLICT;
+        }
         char* pageBuf = pa->fetchPage(pageId);
         int64_t actualRid = rid;
         if (!pageBuf) {
@@ -15328,12 +15397,12 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return result;
     if (transactionContext().inTransaction) {
         if (forUpdate) {
-            lockManager_.lockIntentExclusive(tablename);
+            if (!lockManager_.lockIntentExclusive(tablename)) return result;
         } else {
-            lockManager_.lockIntentShared(tablename);
+            if (!lockManager_.lockIntentShared(tablename)) return result;
         }
     } else {
-        lockManager_.lockShared(tablename);
+        if (!lockManager_.lockShared(tablename)) return result;
     }
 
     // READ COMMITTED: refresh snapshot before each query
@@ -15423,7 +15492,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                 if (skipLocked) {
                     continue; // skip locked rows
                 }
-                lockManager_.unlock(tablename);
+                rollbackTransaction();
                 return result;
             }
             lockedRows.push_back(std::move(mr));
@@ -15438,12 +15507,18 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
             }
             std::sort(pkVals.begin(), pkVals.end());
             for (size_t i = 1; i < pkVals.size(); ++i) {
-                lockManager_.lockGap(tablename, pkVals[i-1], pkVals[i]);
+                if (!lockManager_.lockGap(tablename, pkVals[i-1], pkVals[i])) {
+                    rollbackTransaction();
+                    return result;
+                }
             }
             if (!pkVals.empty()) {
                 // Lock gap before first and after last
-                lockManager_.lockGap(tablename, "", pkVals.front());
-                lockManager_.lockGap(tablename, pkVals.back(), "~");
+                if (!lockManager_.lockGap(tablename, "", pkVals.front()) ||
+                    !lockManager_.lockGap(tablename, pkVals.back(), "~")) {
+                    rollbackTransaction();
+                    return result;
+                }
             }
         }
     }
@@ -16708,7 +16783,7 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                                                    const std::vector<OrderBySpec>& orderBy) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
-    lockManager_.lockShared(tablename);
+    if (!lockManager_.lockShared(tablename)) return result;
 
     if (transactionContext().inTransaction && transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED) {
         refreshReadView();
@@ -16899,7 +16974,7 @@ std::vector<std::string> StorageEngine::aggregate(
     const std::vector<AggItem>& items) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
-    lockManager_.lockShared(tablename);
+    if (!lockManager_.lockShared(tablename)) return result;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
@@ -17252,7 +17327,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
     const std::vector<std::string>& havingConds) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
-    lockManager_.lockShared(tablename);
+    if (!lockManager_.lockShared(tablename)) return result;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -17614,7 +17689,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
     const std::vector<std::string>& havingConds) {
     std::vector<std::string> result;
     if (!tableExists(dbname, tablename)) return result;
-    lockManager_.lockShared(tablename);
+    if (!lockManager_.lockShared(tablename)) return result;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -18054,11 +18129,17 @@ std::vector<std::string> StorageEngine::join(
 
     // Lock both tables in alphabetical order to avoid deadlock
     if (leftTable < rightTable) {
-        lockManager_.lockShared(leftTable);
-        lockManager_.lockShared(rightTable);
+        if (!lockManager_.lockShared(leftTable)) return result;
+        if (!lockManager_.lockShared(rightTable)) {
+            lockManager_.unlock(leftTable);
+            return result;
+        }
     } else {
-        lockManager_.lockShared(rightTable);
-        lockManager_.lockShared(leftTable);
+        if (!lockManager_.lockShared(rightTable)) return result;
+        if (!lockManager_.lockShared(leftTable)) {
+            lockManager_.unlock(rightTable);
+            return result;
+        }
     }
 
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
@@ -18289,11 +18370,17 @@ std::vector<std::string> StorageEngine::leftJoin(
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
 
     if (leftTable < rightTable) {
-        lockManager_.lockShared(leftTable);
-        lockManager_.lockShared(rightTable);
+        if (!lockManager_.lockShared(leftTable)) return result;
+        if (!lockManager_.lockShared(rightTable)) {
+            lockManager_.unlock(leftTable);
+            return result;
+        }
     } else {
-        lockManager_.lockShared(rightTable);
-        lockManager_.lockShared(leftTable);
+        if (!lockManager_.lockShared(rightTable)) return result;
+        if (!lockManager_.lockShared(leftTable)) {
+            lockManager_.unlock(rightTable);
+            return result;
+        }
     }
 
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
@@ -18439,11 +18526,17 @@ std::vector<std::string> StorageEngine::rightJoin(
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
 
     if (leftTable < rightTable) {
-        lockManager_.lockShared(leftTable);
-        lockManager_.lockShared(rightTable);
+        if (!lockManager_.lockShared(leftTable)) return result;
+        if (!lockManager_.lockShared(rightTable)) {
+            lockManager_.unlock(leftTable);
+            return result;
+        }
     } else {
-        lockManager_.lockShared(rightTable);
-        lockManager_.lockShared(leftTable);
+        if (!lockManager_.lockShared(rightTable)) return result;
+        if (!lockManager_.lockShared(leftTable)) {
+            lockManager_.unlock(rightTable);
+            return result;
+        }
     }
 
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
@@ -18601,11 +18694,17 @@ std::vector<std::string> StorageEngine::crossJoin(
     if (!tableExists(dbname, leftTable) || !tableExists(dbname, rightTable)) return result;
 
     if (leftTable < rightTable) {
-        lockManager_.lockShared(leftTable);
-        lockManager_.lockShared(rightTable);
+        if (!lockManager_.lockShared(leftTable)) return result;
+        if (!lockManager_.lockShared(rightTable)) {
+            lockManager_.unlock(leftTable);
+            return result;
+        }
     } else {
-        lockManager_.lockShared(rightTable);
-        lockManager_.lockShared(leftTable);
+        if (!lockManager_.lockShared(rightTable)) return result;
+        if (!lockManager_.lockShared(leftTable)) {
+            lockManager_.unlock(rightTable);
+            return result;
+        }
     }
 
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
@@ -19601,9 +19700,9 @@ size_t StorageEngine::vacuum(const std::string& dbname,
                              bool concurrent) {
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
     if (concurrent) {
-        lockManager_.lockShared(tablename);
+        if (!lockManager_.lockShared(tablename)) return 0;
     } else {
-        lockManager_.lockExclusive(tablename);
+        if (!lockManager_.lockExclusive(tablename)) return 0;
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -19720,7 +19819,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                                  const std::string& tablename) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
-    lockManager_.lockExclusive(tablename);
+    if (!lockManager_.lockExclusive(tablename)) return 0;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::vector<std::map<std::string, std::string>> rows;

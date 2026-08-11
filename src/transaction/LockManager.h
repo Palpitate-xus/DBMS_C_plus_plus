@@ -19,15 +19,15 @@ public:
     enum class LockMode { Shared, Exclusive, IntentShared, IntentExclusive, Metadata };
 
     // Acquire shared lock. Returns true on success, false if deadlock detected.
-    bool lockShared(const std::string& table);
+    [[nodiscard]] bool lockShared(const std::string& table);
     // Acquire exclusive lock. Returns true on success, false if deadlock detected.
-    bool lockExclusive(const std::string& table);
+    [[nodiscard]] bool lockExclusive(const std::string& table);
     // Acquire intent shared lock (used before row-level shared locks).
-    bool lockIntentShared(const std::string& table);
+    [[nodiscard]] bool lockIntentShared(const std::string& table);
     // Acquire intent exclusive lock (used before row-level exclusive locks).
-    bool lockIntentExclusive(const std::string& table);
+    [[nodiscard]] bool lockIntentExclusive(const std::string& table);
     // Acquire metadata lock (used for DDL operations like ALTER TABLE / DROP TABLE).
-    bool lockMetadata(const std::string& table);
+    [[nodiscard]] bool lockMetadata(const std::string& table);
 
     // Release all locks held for a table
     void unlock(const std::string& table);
@@ -71,11 +71,11 @@ public:
     // ========================================================================
     // Row-level locking
     // ========================================================================
-    bool rowLockShared(const std::string& table, int64_t rid);
-    bool rowLockExclusive(const std::string& table, int64_t rid);
+    [[nodiscard]] bool rowLockShared(const std::string& table, int64_t rid);
+    [[nodiscard]] bool rowLockExclusive(const std::string& table, int64_t rid);
     // Non-blocking variants: return false immediately if lock cannot be acquired
-    bool rowLockSharedNoWait(const std::string& table, int64_t rid);
-    bool rowLockExclusiveNoWait(const std::string& table, int64_t rid);
+    [[nodiscard]] bool rowLockSharedNoWait(const std::string& table, int64_t rid);
+    [[nodiscard]] bool rowLockExclusiveNoWait(const std::string& table, int64_t rid);
     void rowUnlock(const std::string& table, int64_t rid);
     void rowUnlockAll(const std::string& table);
     std::vector<int64_t> lockedRows(const std::string& table) const;
@@ -84,7 +84,7 @@ public:
     // Gap locking (simplified: prevents INSERT in a key range)
     // ========================================================================
     // Lock a gap (range) on a table. Returns true if acquired, false if blocked.
-    bool lockGap(const std::string& table, const std::string& leftKey, const std::string& rightKey);
+    [[nodiscard]] bool lockGap(const std::string& table, const std::string& leftKey, const std::string& rightKey);
     // Check if a key falls within any held gap lock
     bool isGapLocked(const std::string& table, const std::string& key) const;
     // Release all gap locks for a table held by current thread
@@ -96,8 +96,8 @@ public:
     // Page-level locking (used inside table-level locks for finer granularity)
     // Resource format: "page:dbname:tablename:pageId"
     // ========================================================================
-    bool pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const;
-    bool pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const;
+    [[nodiscard]] bool pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const;
+    [[nodiscard]] bool pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const;
     void pageUnlock(const std::string& dbname, const std::string& table, uint32_t pageId) const;
     void pageUnlockAll(const std::string& dbname, const std::string& table) const;
     void pageUnlockAll() const;

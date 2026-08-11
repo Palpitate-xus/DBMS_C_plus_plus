@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-11（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线（2026-08-11）: PASS=129 FAIL=0（127 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性、WAL 损坏恢复和网络启动安全）
+> 测试基线（2026-08-11）: PASS=130 FAIL=0（128 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性、WAL 损坏恢复和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -13,7 +13,7 @@ ACL 回归现已覆盖表/列权限对会话用户、递归继承角色和 `PUBL
 
 RLS 回归现已覆盖默认 `WITH CHECK`、显式 `TO PUBLIC`、permissive/restrictive 策略组合、`INHERIT/NOINHERIT` 角色权限、表 owner 绕过、`pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`；复杂 owner/ACL 组合和完整 PostgreSQL policy catalog 语义仍有差距。
 
-事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；INSERT、UPDATE、DELETE 的普通回滚与 SAVEPOINT 回滚会恢复主键、二级、复合、Hash 索引和 TOAST，DELETE savepoint 回滚后可在同一事务提交并继续读取，重启后仍能读取旧大字段。`lock_manager_concurrency_test` 进一步验证表锁重入/升级、row/page token 归属和双线程 wait-for graph 死锁受害者释放。TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。B+Tree/Hash 刷盘现在记录完整文件 before/after WAL 镜像并参与崩溃恢复；原生 page-level 索引 WAL、其他访问方法、跨访问方法原子提交、完整 PostgreSQL 锁模式和 SSI 语义、DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
+事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；INSERT、UPDATE、DELETE 的普通回滚与 SAVEPOINT 回滚会恢复主键、二级、复合、Hash 索引和 TOAST，DELETE savepoint 回滚后可在同一事务提交并继续读取，重启后仍能读取旧大字段。`lock_manager_concurrency_test` 进一步验证表锁重入/升级、row/page token 归属和双线程 wait-for graph 死锁受害者释放，`lock_failure_propagation_test` 验证存储层建索引遇到真实表锁竞争时 fail-closed。TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。B+Tree/Hash 刷盘现在记录完整文件 before/after WAL 镜像并参与崩溃恢复；原生 page-level 索引 WAL、其他访问方法、跨访问方法原子提交、完整 PostgreSQL 锁模式和 SSI 语义、DEFERRABLE 安全快照仍是差距，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
 2026-08-09 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、INNER/CROSS JOIN DML、简单谓词 DELETE 已进入独立 AST 执行器，混合 DEFAULT、显式列、多行、字符串字面量、INSERT/UPDATE/DELETE 列投影及受限标量表达式 RETURNING、修改/删除回归和默认值存储语义有 parser/协议覆盖；高级 DML 和复杂表达式仍保留明确 legacy 回退。带表限定的表达式引用优先解析限定命名空间，避免 UPDATE FROM/DELETE USING 中同名列被错误绑定。legacy 文本执行器的协议结果捕获已改为线程局部路由，避免全局 `std::cout` 锁造成会话串行化。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
 
@@ -27,7 +27,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|--------------|---------|------|
 | 代码量 | ~1.2M 行 | ~66K 行 | ~18x |
 | 开发团队 | 全球数百人/20+年 | 单人/数周 | — |
-| 测试覆盖 | ~2000+ 测试 | 127 C++ 单元测试 + 2 个 E2E | 以回归结果为准 |
+| 测试覆盖 | ~2000+ 测试 | 128 C++ 单元测试 + 2 个 E2E | 以回归结果为准 |
 | 功能完成度 | 不宣称生产级 | DDL/DML 核心已覆盖，高级特性和运维能力仍有缺口 | 以测试和代码路径为准 |
 
 ---
