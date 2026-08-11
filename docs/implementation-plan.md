@@ -21,6 +21,8 @@
 
 2026-08-11 增量审计：PageAllocator 与 B+Tree 全面检查 BufferPool 的空页返回，heap header/page、index header/node 读取和写入失败均安全返回；B+Tree root split 先完成节点写入再发布 root header。
 
+2026-08-11 增量审计：`forEachRow()` 的失败契约已传递到 B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建、`REINDEX` 以及 Volcano 顺序/索引扫描；这些路径不再把 heap I/O 失败当成空结果，全文/GiST/SP-GiST/GIN/BRIN 也在完整扫描后原子发布。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 和增量维护仍待后续。
+
 当前 schema 格式已升级为 `0x44420009`：固定标识符字段统一使用 64 字节容量，支持 PostgreSQL 63 字节级别的表名、列名、类型名和约束名；旧格式不迁移，必须重建数据库。
 
 构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`。测试编排唯一由 `build_tests.sh` 负责，`run_all_tests_fast.sh` 仅是安静输出外壳，避免两套测试链接/桩选择逻辑漂移。
@@ -724,7 +726,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | 🔄 6.1 实现 `amhandler`、support functions、opclass/opfamily、`amcostestimate`、`amvalidate` | 8.1, 16.7 | `IIndexAM` 接口 + `BPTreeIndexAM` + `HashIndexAM` 适配器已就绪；PG 完整 AM API 仍缺 |
 | ⚠️ 6.2 补全 B-tree（dedup、suffix truncation、visibility map 驱动 index-only scan） | 8.2 | 基础 B+Tree 已覆盖跨叶/内部节点分裂、重复键和范围扫描；PG 高级 B-tree 能力仍缺 |
 | ⚠️ 6.3 补全 Hash（WAL-safe bucket split、metapage/overflow page） | 8.3 | 基础 Hash 索引已就绪，WAL-safe bucket split 等 PG 语义仍缺 |
-| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | 标准 `CREATE INDEX ... USING ...` 已由 typed DDL 路由到真实的简化实现；独立与 StorageEngine GIN/BRIN 文件已有严格校验和 fsync+原子替换，但泛化 opclass、WAL-safe 增量维护和 GiST 完整访问方法仍缺 |
+| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | 标准 `CREATE INDEX ... USING ...` 已由 typed DDL 路由到真实的简化实现；构建与扫描错误已 fail-closed，独立与 StorageEngine GIN/BRIN 文件已有严格校验和 fsync+原子替换，但泛化 opclass、WAL-safe 增量维护和 GiST 完整访问方法仍缺 |
 | ⚠️ 6.5 实现 `CREATE INDEX CONCURRENTLY` | 8.5, 1.1.20 | 当前以共享锁/简化路径支持 concurrently；PG 两阶段/invalid catalog/旧快照等待语义仍缺 |
 | ⚠️ 6.6 实现 expression/partial/include 索引的完整支持（dependency、immutable 检查） | 8.6 | expression/partial/include 基础路径已就绪；dependency、immutable 检查和 predicate implication 仍缺 |
 | ⚠️ 6.7 实现 index maintenance（page deletion、vacuum cleanup、`amcheck`、`REINDEX CONCURRENTLY`） | 8.7, 1.1.47 | REINDEX 基础已就绪；page deletion、vacuum cleanup、amcheck 和并发重建仍缺 |

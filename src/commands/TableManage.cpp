@@ -4054,7 +4054,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
 
     // Build hash index from existing data
     HashIndex* hidx = getHashIndex(dbname, tablename, colname);
-    if (!hidx) return DBStatus::OK;
+    if (!hidx) return DBStatus::IO_ERROR;
     hidx->clear();
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -6135,8 +6135,9 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
+    const std::string physicalIndexKey = isExpression ? expression : actualColname;
 
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
         // Partial index: skip rows not matching WHERE condition
@@ -6150,7 +6151,16 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
             if (isExpression) val = evalExpr(val, exprFunc);
             idx->insertMulti(val, encodeRid(pageId, slotId));
         }
-    });
+    })) {
+        idx->close();
+        lockManager_.unlock(tablename);
+        {
+            std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+            secondaryIndexCache_.erase(dbname + "/" + tablename + "/" + physicalIndexKey);
+        }
+        std::filesystem::remove(secondaryIndexPath(dbname, tablename, physicalIndexKey));
+        return DBStatus::IO_ERROR;
+    }
 
     // Record in metadata
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
@@ -6277,8 +6287,9 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
+    const std::string physicalIndexKey = dbname + "/" + tablename + "/C/" + indexName;
 
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
         // Partial index: skip rows not matching WHERE condition
@@ -6291,7 +6302,17 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         if (!key.empty()) {
             idx->insertMulti(key, encodeRid(pageId, slotId));
         }
-    });
+    })) {
+        idx->close();
+        lockManager_.unlock(tablename);
+        {
+            std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+            secondaryIndexCache_.erase(physicalIndexKey);
+        }
+        std::filesystem::remove(relationDir(dbname, tablename) /
+                                (tablename + ".idx_" + indexName));
+        return DBStatus::IO_ERROR;
+    }
 
     // Record in metadata: C:indexName:col1:col2:...:INCLUDE:inc1,inc2[:WHERE:cond]
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
@@ -6389,16 +6410,14 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     std::filesystem::remove(pkPath);
     BPTree* pkIdx = getPKIndex(dbname, tablename);
     if (!pkIdx) return DBStatus::INVALID_VALUE;
-    if (tbl.hasPrimaryKey()) {
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+    if (tbl.hasPrimaryKey() && !forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
             std::string pkVal = tbl.buildPKValue(row);
             if (!pkVal.empty()) {
                 pkIdx->insert(pkVal, encodeRid(pageId, slotId));
             }
-        });
-    }
+        })) return DBStatus::IO_ERROR;
 
     // 2. Rebuild secondary indexes
     auto singleCols = getIndexedColumns(dbname, tablename);
@@ -6414,20 +6433,20 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         }
         std::filesystem::remove(idxPath);
         BPTree* idx = getSecondaryIndex(dbname, tablename, colname);
-        if (!idx) continue;
+        if (!idx) return DBStatus::IO_ERROR;
         size_t colIdx = tbl.len;
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
         }
-        if (colIdx >= tbl.len) continue;
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+        if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
+        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
             std::string val = extractColumnValue(row, tbl, colIdx);
             if (!val.empty()) {
                 idx->insertMulti(val, encodeRid(pageId, slotId));
             }
-        });
+        })) return DBStatus::IO_ERROR;
     }
 
     // 3. Rebuild composite indexes
@@ -6444,15 +6463,15 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         }
         std::filesystem::remove(p);
         BPTree* idx = getCompositeIndexTree(dbname, tablename, ci.name);
-        if (!idx) continue;
-        forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+        if (!idx) return DBStatus::IO_ERROR;
+        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
             std::string key = buildCompositeKey(row, tbl, ci.columns);
             if (!key.empty()) {
                 idx->insertMulti(key, encodeRid(pageId, slotId));
             }
-        });
+        })) return DBStatus::IO_ERROR;
     }
 
     return DBStatus::OK;
@@ -6497,7 +6516,7 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
     if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     std::map<std::string, std::set<int64_t>> inverted;
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
         std::string val = extractColumnValue(row, tbl, colIdx);
@@ -6506,11 +6525,10 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
         for (const auto& tok : tokens) {
             inverted[tok].insert(rid);
         }
-    });
+    })) return DBStatus::IO_ERROR;
 
     auto path = fullTextIndexPath(dbname, tablename, colname);
-    std::ofstream out(path);
-    if (!out) return DBStatus::INVALID_VALUE;
+    std::ostringstream out;
     for (const auto& kv : inverted) {
         out << kv.first;
         for (int64_t rid : kv.second) {
@@ -6518,6 +6536,7 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
         }
         out << '\n';
     }
+    if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -6787,10 +6806,9 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
     if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     auto path = giSTIndexPath(dbname, tablename, colname);
-    std::ofstream out(path);
-    if (!out) return DBStatus::INVALID_VALUE;
+    std::ostringstream out;
 
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
         std::string val = extractColumnValue(row, tbl, colIdx);
@@ -6800,7 +6818,8 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
         // For multi-value (array), min=min element, max=max element.
         // For text, we store the value itself (prefix containment).
         out << rid << ' ' << val << ' ' << val << '\n';
-    });
+    })) return DBStatus::IO_ERROR;
+    if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -6896,16 +6915,16 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
     if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     auto path = spGiSTIndexPath(dbname, tablename, colname);
-    std::ofstream out(path);
-    if (!out) return DBStatus::INVALID_VALUE;
+    std::ostringstream out;
 
-    forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
         std::string val = extractColumnValue(row, tbl, colIdx);
         int64_t rid = encodeRid(pageId, slotId);
         out << rid << ' ' << val << '\n';
-    });
+    })) return DBStatus::IO_ERROR;
+    if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 

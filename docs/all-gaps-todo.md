@@ -19,6 +19,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | StorageEngine 索引与执行器错误传播继续收口：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建和 `REINDEX` 检查 `forEachRow()` 失败；全文/GiST/SP-GiST/GIN/BRIN 在完整扫描后原子发布，Volcano 顺序/索引扫描 fail-closed。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 的完整错误传播仍待后续。 |
 | 2026-08-11 | StorageEngine 索引调用链继续收口：`forEachRow()` 返回页面 I/O 失败，GIN/BRIN 构建完整扫描成功后才原子发布；BRIN 改为长度前缀二进制范围格式，读取损坏文件 fail-closed，并新增真实 DDL 索引查询回归。完整调用方错误传播、WAL-safe 增量维护和 PostgreSQL 泛化 opclass 仍待后续。 |
 | 2026-08-11 | 索引文件持久化继续收口：Hash/GIN/BRIN 独立索引改为严格格式校验，写入使用 fsync 后原子替换，截断/非法文件 fail-closed；BRIN 当前格式按不兼容旧数据策略重建。StorageEngine 访问方法的完整 WAL-safe 增量维护和 PostgreSQL 泛化 opclass 仍待后续。 |
 | 2026-08-11 | DDL 提交错误继续收口：`DdlTransaction` 检查引擎 commit 状态，延迟约束/SSI 失败会传播到 DDL executor，并恢复已启用的当前格式物理快照；新增提交失败与快照恢复回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |

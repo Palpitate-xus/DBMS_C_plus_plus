@@ -84,12 +84,15 @@ bool TableScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
     lastRid_ = 0;
-    engine_->forEachRow(dbname_, tablename_,
+    if (!engine_->forEachRow(dbname_, tablename_,
         [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
             std::string row(data, len);
             row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
             rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
-        });
+        })) {
+        rows_.clear();
+        return false;
+    }
     pos_ = 0;
     if (!statsRecorded_) {
         recordTableScan(dbname_, tablename_, rows_.size(), false, true);
@@ -134,7 +137,7 @@ bool ParallelTableScanOp::open() {
     lastRid_ = 0;
 
     auto appendSequential = [this]() {
-        engine_->forEachRow(dbname_, tablename_,
+        return engine_->forEachRow(dbname_, tablename_,
             [this](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
                 std::string row(data, len);
                 row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
@@ -152,7 +155,7 @@ bool ParallelTableScanOp::open() {
     // threads.  Partitioned relations also need their existing routing path.
     if (workers_ <= 1 || engine_->inTransaction() ||
         tbl_.partitionType != TableSchema::PartitionType::None) {
-        appendSequential();
+        if (!appendSequential()) return false;
         recordScan();
         return true;
     }
@@ -164,7 +167,7 @@ bool ParallelTableScanOp::open() {
     }
     const int activeWorkers = std::min<int>(workers_, static_cast<int>(pageCount - 1));
     if (activeWorkers <= 1) {
-        appendSequential();
+        if (!appendSequential()) return false;
         recordScan();
         return true;
     }
@@ -269,12 +272,13 @@ bool IndexScanOp::next(std::string& outRow) {
     // Actually, getPageAllocator is not const, so we need a non-const engine
     std::string row;
     bool ok = false;
-    engine_->forEachRow(dbname_, tablename_, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+    bool scanOk = engine_->forEachRow(dbname_, tablename_, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
         if (!ok && StorageEngine::encodeRid(pid, sid) == rids_[pos_]) {
             row.assign(data, len);
             ok = true;
         }
     });
+    if (!scanOk) return false;
     if (!ok) { ++pos_; return next(outRow); }
     outRow = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
     ++pos_;

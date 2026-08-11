@@ -136,7 +136,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | B+ Tree | ✅ | ⚠️ | 基础文件 B+Tree 已覆盖跨叶/内部节点分裂、重复键和范围扫描；PG dedup、删除合并、opclass/collation、skip scan 和完整并发构建仍缺 |
 | Hash | ✅ | ✅ | ✅ |
 | GIN | ✅ | ✅ (基础，独立/StorageEngine 文件均严格校验并原子持久化) | ⚠️ |
-| GiST | ✅ | ❌ | 缺 |
+| GiST | ✅ | ⚠️ | 已有简化文本/范围索引与真实 DDL 路由；缺完整树结构、opclass、WAL、并发构建和几何/全文语义 |
 | SP-GiST | ✅ | ✅ (Point quadtree, SPGiSTIndex.cpp) | ⚠️ |
 | BRIN | ✅ | ✅ (块范围，独立/StorageEngine 文件均严格校验并原子持久化) | ⚠️ |
 | **Bloom** | ✅ | ❌ | 缺 |
@@ -323,7 +323,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 ### 🔴 严重缺失 (生产级必需)
 1. **并行查询** — 已有非分区 heap page-range 多 worker scan；事务安全回退，parallel join/aggregate、GatherMerge、worker pool 和 parallel-aware planner 仍缺
 2. **JIT 编译** — 表达式求值仍为解释执行, 无 LLVM 后端
-3. **索引 GiST** — 全文搜索/几何最近邻索引缺失 (仅有 SP-GiST)
+3. **完整 GiST 索引** — 当前仅有简化文本/范围实现；全文/几何最近邻、opclass、WAL 和并发语义仍缺
 4. **Gap locks / predicate locks** — 无法完全防止幻读
 5. **SSI (Serializable Snapshot Isolation)** — 已覆盖关系限定的行级写偏差回滚及空谓词的关系级 SIREAD，但页/索引级 predicate lock 和完整冲突规则仍未实现
 6. **Bitmap scan** — 等值多索引 Bitmap AND/OR 已接入；范围 bitmap 和并行路径仍缺
@@ -334,7 +334,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 2. **复杂子查询 executor** — 简单子查询走 volcano, 关联子查询回退 legacy
 3. **UNION/INTERSECT/EXCEPT executor** — 组合语义已统一进入 Volcano，复杂 operand 的 producer 仍待 AST 全量下推；类型合并和结构化列结果也仍缺
 4. **GROUP BY/aggregate 完整语义** — 普通聚合与 `GroupAggregateOp` 已覆盖基础路径；复杂目标、`GROUPING()`/`GROUPING_ID`、类型推导和完整排序作用域仍待迁移
-5. **GiST 索引** — 全文搜索基础架构缺
+5. **GiST 索引完整语义** — 基础文本/范围文件已存在，但全文搜索、几何最近邻、opclass 与并发维护仍缺
 6. **TOAST 完整语义** — 当前线外值使用 zlib 压缩；lz4/pglz、压缩策略、`toast_tuple_target` 和 PG pointer/catalog 仍待完成
 7. **后台 stats_collector** — 已有 `RuntimeStats` 在执行/存储边界收集进程内数据库和表计数，并接入 `SHOW STATUS`/`pg_stat_database`/`pg_stat_tables`，Volcano 扫描算子也会记录顺序/索引扫描及索引取行；后台采样线程、持久化和完整索引维度仍缺
 8. **PL/pgSQL 运行时** — 存储过程解释执行缺
