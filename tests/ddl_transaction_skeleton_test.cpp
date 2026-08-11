@@ -317,6 +317,40 @@ static void test_executor_uses_transaction() {
     std::cout << "[DDL-TXN] executor uses transaction OK" << std::endl;
 }
 
+static void test_explicit_transaction_ddl_rollback_and_savepoint() {
+    const std::string db = testDbPath("ddl_txn_t_outer_transaction");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("CREATE TABLE outer_first (id INT PRIMARY KEY)", s));
+    assert(!ddl.executeSql("CREATE TABLE outer_second (id INT PRIMARY KEY)", s));
+    assert(g_engine.tableExists(db, "outer_first"));
+    assert(g_engine.tableExists(db, "outer_second"));
+    assert(g_engine.prepareTransaction("ddl_prepare_rejected") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(!g_engine.tableExists(db, "outer_first"));
+    assert(!g_engine.tableExists(db, "outer_second"));
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("CREATE TABLE savepoint_first (id INT PRIMARY KEY)", s));
+    assert(g_engine.savepoint("after_first") == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("CREATE TABLE savepoint_second (id INT PRIMARY KEY)", s));
+    assert(g_engine.rollbackToSavepoint("after_first") == dbms::DBStatus::OK);
+    assert(g_engine.tableExists(db, "savepoint_first"));
+    assert(!g_engine.tableExists(db, "savepoint_second"));
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.tableExists(db, "savepoint_first"));
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] explicit transaction DDL rollback and savepoint OK" << std::endl;
+}
+
 static void test_alter_statement_rollback() {
     std::string db = testDbPath("ddl_txn_t_alter_atomic");
     cleanup(db);
@@ -492,6 +526,7 @@ int main() {
     test_create_table_post_action_rollback();
     test_wal_catalog_record();
     test_executor_uses_transaction();
+    test_explicit_transaction_ddl_rollback_and_savepoint();
     test_alter_statement_rollback();
     test_catalog_drop_plan_is_deferred();
     test_schema_drop_plan_is_deferred();

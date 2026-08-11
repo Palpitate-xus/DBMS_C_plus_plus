@@ -11,7 +11,7 @@
 
 2026-08-11 增量审计：锁管理器 bool API 全部启用 `[[nodiscard]]`，存储层调用方不再忽略锁超时/死锁结果；DDL、DML、索引、扫描、TOAST、JOIN、聚合和 VACUUM 显式传播失败，双表 rename 使用 canonical lock order，并新增真实锁冲突传播回归。
 
-2026-08-11 增量审计：DDL CREATE undo 已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；collation 的物理文件操作统一进入 `StorageEngine`，辅助对象回滚回归已纳入 `ddl_transaction_skeleton_test`。显式外层事务跨语句 DDL、DROP/REPLACE 恢复和完整依赖 undo 仍是 4.39/16.5 缺口。
+2026-08-11 增量审计：DDL CREATE undo 已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；现在会注册到显式外层事务，并按 SAVEPOINT 边界逆序回放；collation 的物理文件操作统一进入 `StorageEngine`，辅助对象、外层 ROLLBACK 和 SAVEPOINT 回归已纳入 `ddl_transaction_skeleton_test`。含内存闭包式 DDL undo 的事务暂不支持 PREPARE TRANSACTION；DROP/REPLACE 恢复和完整依赖 undo 仍是 4.39/16.5 缺口。
 
 2026-08-11 增量审计：UPDATE/DELETE 事务 undo 现在覆盖复合/Hash 索引与 TOAST 生命周期；UPDATE 回滚仅清理新版本独占的线外块，DELETE 在显式事务中保留死 tuple，普通回滚和 SAVEPOINT 回滚清除 `xmax` 并写入 heap WAL before/after image。旧 UPDATE/DELETE 版本的 TOAST 块在刷盘 COMMIT 后回收；B+Tree/Hash 已补充索引文件 before/after WAL 镜像，其他访问方法、原生 page-level WAL、跨访问方法原子提交和完整崩溃窗口仍待后续。
 
@@ -711,7 +711,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ❌ 5.23 实现 Async I/O（AIO） | 7.7 | 当前没有 io_uring/AIO executor；旧 GUC/stub 表述已移除 |
 | ⚠️ 5.24 实现 `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` 子事务完整语义 | 1.1.49, 9.5 | 基础事务日志位置与回滚路径已就绪；资源/锁/目录快照及完整 PostgreSQL 子事务语义仍待补齐 |
 | ✅ 5.25 实现 `COMMIT`/`ROLLBACK` `AND [NO] CHAIN`、全局事务状态 | 1.1.14, 1.1.38, 1.1.8 | 本次新增 AND CHAIN/NO CHAIN 语法 |
-| ✅ 5.26 实现 `PREPARE TRANSACTION` / `COMMIT PREPARED` 完整语义 | 1.1.15 | 基础 two-phase commit 已就绪 |
+| ⚠️ 5.26 实现 `PREPARE TRANSACTION` / `COMMIT PREPARED` 完整语义 | 1.1.15 | 基础 two-phase commit 已就绪；含内存闭包式 DDL undo 的事务会拒绝 PREPARE，完整持久化 DDL undo 仍待实现 |
 | ⚠️ 5.27 实现 `COPY` `STDIN/STDOUT`、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH` | 1.1.16 | 当前仅基础 COPY/CSV 路径可用，binary/program/freeze/header 语义仍缺。 |
 | ⚠️ 5.28 实现 `ANALYZE` PG 采样算法、统计对象、表达式统计、系统统计视图集成 | 1.1.7 | 已有基础统计收集和部分统计对象；PG 采样算法、表达式统计和系统统计视图集成仍缺。 |
 | ⚠️ 5.29 实现 `CALL` PL/pgSQL/SQL procedure 运行时 | 1.1.10 | 基础定义路径存在，但 PL/pgSQL procedure runtime 尚未实现。 |

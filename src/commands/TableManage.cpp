@@ -20098,6 +20098,11 @@ void StorageEngine::preserveTransactionBackupOnRollback(bool preserve) {
     }
 }
 
+void StorageEngine::registerDdlUndo(std::function<bool()> action) {
+    if (!action || !transactionContext().inTransaction) return;
+    transactionContext().ddlUndoActions.push_back(std::move(action));
+}
+
 DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnapshot) {
     if (transactionContext().inTransaction) {
         // Commit existing transaction before starting a new one.
@@ -20168,6 +20173,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     captureCatalogSnapshot();
 
     transactionContext().txnLog.clear();
+    transactionContext().ddlUndoActions.clear();
     transactionContext().inTransaction = true;
     transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnBackupPath.clear();
@@ -20393,6 +20399,7 @@ DBStatus StorageEngine::commitTransaction() {
         ssiInEdges_.clear();
     }
     transactionContext().txnLog.clear();
+    transactionContext().ddlUndoActions.clear();
     discardTransactionBackup(transactionContext().txnDB);
     transactionContext().savepoints.clear();
     transactionContext().txnSubTxnIds.clear();
@@ -20715,6 +20722,21 @@ DBStatus StorageEngine::rollbackTransaction() {
         }
     }
 
+    // DDL wrappers register CREATE undo actions in the outer transaction.
+    // Replay them only after row undo: INSERTs into a table created in the
+    // same transaction still need that table to exist while their rows are
+    // being removed.
+    bool ddlUndoOk = true;
+    for (auto it = transactionContext().ddlUndoActions.rbegin();
+         it != transactionContext().ddlUndoActions.rend(); ++it) {
+        try {
+            if (!(*it)()) ddlUndoOk = false;
+        } catch (...) {
+            ddlUndoOk = false;
+        }
+    }
+    transactionContext().ddlUndoActions.clear();
+
     // Write WAL ABORT marker after undo.
     WALManager* wal = getWAL(transactionContext().txnDB);
     if (wal) {
@@ -20774,7 +20796,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().databaseExclusiveLock.reset();
     transactionContext().databaseSharedLock.reset();
     transactionContext().databaseTxnMutex.reset();
-    return DBStatus::OK;
+    return ddlUndoOk ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
@@ -20830,6 +20852,12 @@ static std::filesystem::path preparedPath(const std::string& xid) {
 DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     if (xid.empty()) return DBStatus::INVALID_VALUE;
+    if (!transactionContext().ddlUndoActions.empty()) {
+        // DDL undo callbacks are backend-local closures. Do not prepare a
+        // transaction whose rollback semantics cannot survive this backend's
+        // in-memory context; callers must commit/rollback it directly.
+        return DBStatus::INVALID_VALUE;
+    }
 
     std::filesystem::path pdir = preparedDir();
     if (!std::filesystem::exists(pdir)) {
@@ -21036,7 +21064,10 @@ std::vector<std::string> StorageEngine::listPreparedTransactions() const {
 
 DBStatus StorageEngine::savepoint(const std::string& name) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
-    transactionContext().savepoints[name] = transactionContext().txnLog.size();
+    transactionContext().savepoints[name] = {
+        transactionContext().txnLog.size(),
+        transactionContext().ddlUndoActions.size()
+    };
     return DBStatus::OK;
 }
 
@@ -21044,11 +21075,15 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     auto it = transactionContext().savepoints.find(name);
     if (it == transactionContext().savepoints.end()) return DBStatus::INVALID_VALUE;
-    size_t spIdx = it->second;
-    if (spIdx > transactionContext().txnLog.size()) return DBStatus::INVALID_VALUE;
+    const size_t txnLogSpIdx = it->second.txnLogSize;
+    const size_t ddlSpIdx = it->second.ddlUndoSize;
+    if (txnLogSpIdx > transactionContext().txnLog.size() ||
+        ddlSpIdx > transactionContext().ddlUndoActions.size()) {
+        return DBStatus::INVALID_VALUE;
+    }
 
     // Undo entries from end back to savepoint
-    for (size_t i = transactionContext().txnLog.size(); i > spIdx; --i) {
+    for (size_t i = transactionContext().txnLog.size(); i > txnLogSpIdx; --i) {
         auto& entry = transactionContext().txnLog[i - 1];
         PageAllocator* pa = getPageAllocator(transactionContext().txnDB, entry.tableName);
         TableSchema tbl = getTableSchema(transactionContext().txnDB, entry.tableName);
@@ -21303,14 +21338,29 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             }
         }
     }
-    transactionContext().txnLog.resize(spIdx);
+    transactionContext().txnLog.resize(txnLogSpIdx);
+
+    // DDL CREATE undo actions follow the same savepoint boundary. Row undo
+    // above runs first so a newly-created relation remains available while
+    // its rows are being removed.
+    bool ddlUndoOk = true;
+    for (size_t i = transactionContext().ddlUndoActions.size(); i > ddlSpIdx; --i) {
+        try {
+            if (!transactionContext().ddlUndoActions[i - 1]()) ddlUndoOk = false;
+        } catch (...) {
+            ddlUndoOk = false;
+        }
+    }
+    transactionContext().ddlUndoActions.resize(ddlSpIdx);
 
     // Remove all savepoints created after this one
     for (auto sit = transactionContext().savepoints.begin(); sit != transactionContext().savepoints.end(); ) {
-        if (sit->second > spIdx) sit = transactionContext().savepoints.erase(sit);
+        if (sit->second.txnLogSize > txnLogSpIdx || sit->second.ddlUndoSize > ddlSpIdx) {
+            sit = transactionContext().savepoints.erase(sit);
+        }
         else ++sit;
     }
-    return DBStatus::OK;
+    return ddlUndoOk ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::releaseSavepoint(const std::string& name) {

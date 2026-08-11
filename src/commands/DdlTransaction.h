@@ -9,7 +9,7 @@
 //
 // 当前仍是渐进式实现：完整跨对象依赖 undo、并发 DDL 锁和全部
 // PostgreSQL 隐式提交边界仍待补齐；当前格式快照用于保护已接入的
-// statement-level DDL 失败路径。
+// statement-level DDL 失败路径，CREATE undo 会挂接到外层事务及 SAVEPOINT。
 // ============================================================================
 
 #pragma once
@@ -91,6 +91,8 @@ private:
 
     std::string kindString(DdlObjectKind kind) const;
     bool undoCreate(const RecordedOp& op);
+    static bool undoCreate(StorageEngine& engine, const std::string& db,
+                           const RecordedOp& op);
     void writeWal(const RecordedOp& op);
 };
 

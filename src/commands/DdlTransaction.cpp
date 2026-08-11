@@ -105,6 +105,19 @@ bool DdlTransaction::commit() {
 
     if (startedByUs_) {
         engine_.discardTransactionBackup(session_.currentDB);
+    } else if (engine_.inTransaction()) {
+        // A DDL wrapper is statement-scoped, while the engine transaction may
+        // span many statements. Preserve CREATE undo actions in that outer
+        // transaction so COMMIT/ROLLBACK and SAVEPOINT see the complete DDL
+        // history instead of only the last statement.
+        const std::string db = session_.currentDB;
+        for (const auto& op : ops_) {
+            if (op.op != RecordedOp::Op::Create) continue;
+            const std::string undoDb = db.empty() ? op.extra : db;
+            engine_.registerDdlUndo([engine = &engine_, undoDb, op]() {
+                return DdlTransaction::undoCreate(*engine, undoDb, op);
+            });
+        }
     }
     ops_.clear();
     committed_ = true;
@@ -162,53 +175,58 @@ std::string DdlTransaction::kindString(DdlObjectKind kind) const {
 }
 
 bool DdlTransaction::undoCreate(const RecordedOp& op) {
-    const std::string& db = session_.currentDB.empty() ? op.extra : session_.currentDB;
+    const std::string db = session_.currentDB.empty() ? op.extra : session_.currentDB;
+    return undoCreate(engine_, db, op);
+}
+
+bool DdlTransaction::undoCreate(StorageEngine& engine, const std::string& db,
+                                const RecordedOp& op) {
     if (db.empty() && op.kind != DdlObjectKind::Database) return false;
 
     switch (op.kind) {
         case DdlObjectKind::Database:
-            engine_.dropDatabase(op.name);
+            engine.dropDatabase(op.name);
             break;
         case DdlObjectKind::Schema:
-            engine_.dropSchema(db, op.name, true);
+            engine.dropSchema(db, op.name, true);
             break;
         case DdlObjectKind::Table:
-            engine_.dropTable(db, op.name);
+            engine.dropTable(db, op.name);
             break;
         case DdlObjectKind::Index:
             if (op.extra.empty()) return false;
-            return engine_.dropIndex(db, op.extra, op.name) == DBStatus::OK;
+            return engine.dropIndex(db, op.extra, op.name) == DBStatus::OK;
         case DdlObjectKind::Sequence:
-            engine_.dropSequence(db, op.name);
+            engine.dropSequence(db, op.name);
             break;
         case DdlObjectKind::Domain:
-            engine_.dropDomain(db, op.name);
+            engine.dropDomain(db, op.name);
             break;
         case DdlObjectKind::Type:
-            engine_.dropCompositeType(db, op.name);
+            engine.dropCompositeType(db, op.name);
             break;
         case DdlObjectKind::View:
-            return engine_.dropView(db, op.name) == DBStatus::OK;
+            return engine.dropView(db, op.name) == DBStatus::OK;
         case DdlObjectKind::MaterializedView:
-            return engine_.dropMaterializedView(db, op.name) == DBStatus::OK;
+            return engine.dropMaterializedView(db, op.name) == DBStatus::OK;
         case DdlObjectKind::Function: {
-            const bool hadUdf = engine_.udfExists(db, op.name);
-            const bool hadTvf = engine_.tvfExists(db, op.name);
+            const bool hadUdf = engine.udfExists(db, op.name);
+            const bool hadTvf = engine.tvfExists(db, op.name);
             if (!hadUdf && !hadTvf) return false;
             bool removed = false;
-            if (hadUdf) removed = engine_.dropUDF(db, op.name) == DBStatus::OK || removed;
-            if (hadTvf) removed = engine_.dropTVF(db, op.name) == DBStatus::OK || removed;
+            if (hadUdf) removed = engine.dropUDF(db, op.name) == DBStatus::OK || removed;
+            if (hadTvf) removed = engine.dropTVF(db, op.name) == DBStatus::OK || removed;
             return removed;
         }
         case DdlObjectKind::Procedure:
-            return engine_.dropProcedure(db, op.name) == DBStatus::OK;
+            return engine.dropProcedure(db, op.name) == DBStatus::OK;
         case DdlObjectKind::Trigger:
-            return engine_.dropTrigger(db, op.name) == DBStatus::OK;
+            return engine.dropTrigger(db, op.name) == DBStatus::OK;
         case DdlObjectKind::Policy:
             if (op.extra.empty()) return false;
-            return engine_.dropPolicy(db, op.extra, op.name) == DBStatus::OK;
+            return engine.dropPolicy(db, op.extra, op.name) == DBStatus::OK;
         case DdlObjectKind::Collation:
-            return engine_.dropCollation(db, op.name) == DBStatus::OK;
+            return engine.dropCollation(db, op.name) == DBStatus::OK;
         default:
             return false;
     }

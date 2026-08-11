@@ -563,6 +563,12 @@ public:
     DBStatus commitTransaction();
     DBStatus rollbackTransaction();
 
+    // Register an undo action for DDL performed inside an already-open
+    // transaction. The action is replayed in reverse order by ROLLBACK and
+    // discarded by COMMIT. DDLTransaction owns the action's captured state;
+    // the engine only owns its lifetime within the current backend txn.
+    void registerDdlUndo(std::function<bool()> action);
+
     // Create the transaction's physical snapshot after the transaction has
     // acquired its database lock. Ordinary row transactions do not need one.
     bool createTransactionBackup();
@@ -1357,7 +1363,12 @@ private:
         ReadView readView;
         IsolationLevel txnIsolationLevel = IsolationLevel::REPEATABLE_READ;
         std::vector<TxnLogEntry> txnLog;
-        std::map<std::string, size_t> savepoints; // name -> txnLog index
+        std::vector<std::function<bool()>> ddlUndoActions;
+        struct SavepointState {
+            size_t txnLogSize = 0;
+            size_t ddlUndoSize = 0;
+        };
+        std::map<std::string, SavepointState> savepoints;
         std::vector<uint64_t> txnSubTxnIds;       // current transaction's subtransaction IDs
         std::optional<CatalogSnapshot> catalogSnapshot;
         std::set<std::string> txnReadRids;        // relation-qualified RIDs
