@@ -8786,6 +8786,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         }
     }
     createCompleted = true;
+    dbms::resetRuntimeTableStats(dbname, tblWithVersion.tablename);
     return DBStatus::OK;
 }
 
@@ -8874,6 +8875,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     }
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, tablename);
+    dbms::resetRuntimeTableStats(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -8973,6 +8975,7 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     }
 
     lockManager_.unlock(tablename);
+    dbms::resetRuntimeTableStats(dbname, tablename);
     return DBStatus::OK;
 }
 

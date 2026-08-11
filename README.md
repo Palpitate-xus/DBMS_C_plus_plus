@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-11）**: 生产化重构进行中；统一回归基线 PASS=130 FAIL=0（128 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
+> **当前状态（2026-08-11）**: 生产化重构进行中；统一回归基线 PASS=131 FAIL=0（129 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
 
 ## 功能特性
 
@@ -97,7 +97,7 @@
 - **MVCC 行格式**：每行开头为 PostgreSQL 风格 HeapTupleHeader（含 xmin/xmax/ctid、null bitmap 和对齐信息）
 - **统计信息**：`ANALYZE TABLE` 收集行数、列基数、最小/最大值、MCV（最常出现值）、多列统计
 - **SQL 可观测性**：`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表提供线程安全的调用次数及耗时聚合；统计当前为进程内生命周期
-- **运行时统计**：共享 `RuntimeStats` 在 SQL、StorageEngine 和 Volcano 扫描算子边界记录数据库查询/失败/事务、顺序扫描、索引扫描及 DML 计数，供 `SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 使用；当前为进程内统计
+- **运行时统计**：共享 `RuntimeStats` 在 SQL、StorageEngine 和 Volcano 扫描算子边界记录数据库查询/失败/事务、顺序扫描、索引扫描及 DML 计数，供 `SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 使用；完整扫描建立的有效 live-row 估计会参与 Join 成本与 EXPLAIN，关系重建/截断会使旧估计失效；当前为进程内统计
 - **VACUUM**：`VACUUM [tablename]` 回收已删除行占用的空间，页压缩并归还空页
 - **自动 VACUUM**：可配置阈值，死行数达到阈值时自动触发
 
@@ -651,7 +651,7 @@ Var Offset Array 每项 (4 bytes):
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与历史 Wave 记录（当前状态以 Gap 表为准） |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=130 FAIL=0） |
+| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=131 FAIL=0） |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 

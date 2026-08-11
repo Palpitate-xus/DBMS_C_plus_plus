@@ -74,6 +74,7 @@ void recordTableScan(const std::string& dbname, const std::string& tablename,
     }
     if (completeScan) {
         stats.nLiveTup = static_cast<int64_t>(rowsRead);
+        stats.liveTupEstimateValid = true;
     } else if (stats.nLiveTup < static_cast<int64_t>(rowsRead)) {
         // A filtered scan gives only a lower bound. Never reduce a value
         // learned from a complete scan based on that lower bound.
@@ -89,6 +90,9 @@ void recordTableMutation(const std::string& dbname, const std::string& tablename
     switch (mutation) {
         case TableMutation::Insert:
             stats.nTupIns += rowCount;
+            // Keep the historical display value as a lower bound even before
+            // an exact scan; the planner consults liveTupEstimateValid and
+            // will not use this value until its provenance is exact.
             stats.nLiveTup += static_cast<int64_t>(rowCount);
             break;
         case TableMutation::Update:
@@ -96,7 +100,8 @@ void recordTableMutation(const std::string& dbname, const std::string& tablename
             break;
         case TableMutation::Delete:
             stats.nTupDel += rowCount;
-            stats.nLiveTup = std::max<int64_t>(0, stats.nLiveTup - static_cast<int64_t>(rowCount));
+            stats.nLiveTup = std::max<int64_t>(
+                0, stats.nLiveTup - static_cast<int64_t>(rowCount));
             break;
     }
 }
@@ -117,6 +122,25 @@ std::vector<RuntimeTableStats> getRuntimeTableStats(const std::string& dbFilter)
         if (dbFilter.empty() || key.first == dbFilter) result.push_back(stats);
     }
     return result;
+}
+
+bool getRuntimeLiveRowEstimate(const std::string& dbname,
+                               const std::string& tablename,
+                               uint64_t& rows) {
+    std::lock_guard<std::mutex> lock(g_runtimeStatsMutex);
+    const auto it = g_tableStats.find({dbname, tablename});
+    if (it == g_tableStats.end() || !it->second.liveTupEstimateValid ||
+        it->second.nLiveTup < 0) {
+        return false;
+    }
+    rows = static_cast<uint64_t>(it->second.nLiveTup);
+    return true;
+}
+
+void resetRuntimeTableStats(const std::string& dbname,
+                            const std::string& tablename) {
+    std::lock_guard<std::mutex> lock(g_runtimeStatsMutex);
+    g_tableStats.erase({dbname, tablename});
 }
 
 void resetRuntimeStats() {

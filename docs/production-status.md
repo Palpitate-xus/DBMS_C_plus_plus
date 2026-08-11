@@ -2,7 +2,7 @@
 
 最后更新：2026-08-11
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，128 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=130 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，129 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=131 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
 本轮并发安全审计修复了 `LockManager` 的真实生命周期问题：等待 row/page 锁时不再持有可能被清除的 map 元素引用；批量解锁只释放当前线程拥有的 token；表锁重入不会重复锁底层 `shared_mutex`，共享锁升级会先平衡自身 token；等待图在等待期间持续刷新并检测双线程死锁。新增 `tests/lock_manager_concurrency_test.cpp`，验证死锁受害者释放、重入/升级、row token 归属和清理；页/索引粒度 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 仍未完成。
 
@@ -84,7 +84,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 - 事务上下文已从共享 `StorageEngine` 实例移为连接工作线程局部：事务 ID、快照、回滚日志、savepoint、隔离级别、延迟约束和 `lastval` 不再在协议连接之间互相覆盖；连接断开时会回滚未完成事务并丢弃 backend 上下文。全局锁管理器和提交状态仍用于跨 backend 协调。双连接协议回归已验证未提交行隔离、回滚恢复、断开回滚和提交后可见性。
 - TCL 路由已收敛到事务 AST：`BEGIN`/`START TRANSACTION` 的隔离级别与 READ ONLY/WRITE 选项、`SAVEPOINT`、`ROLLBACK TO` 和 `RELEASE` 不再依赖固定字符串偏移；分类顺序已修复，`ROLLBACK TO`/`COMMIT PREPARED`/`ROLLBACK PREPARED` 不会被通用前缀吞掉。`DEFERRABLE` 在执行层明确拒绝，避免静默宣称未实现语义。
 - SQL 统计已从 `main.cpp` 提取为线程安全 `process/SqlStats` 模块，交互式与 PostgreSQL 协议入口共用；字符串/数字常量和空白归一化后聚合，`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。统计当前仅驻留内存，持久化、上限/淘汰和完整 PostgreSQL 扩展字段仍未完成。
-- 运行时统计已从显示层下沉到线程安全 `process/RuntimeStats`：SQL 执行、失败、提交/回滚，以及 StorageEngine 和 Volcano 扫描算子的顺序扫描、索引扫描和实际 DML 行数会进入共享计数器；`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 不再输出固定零值。统计仍仅驻留内存，索引访问方法细分、历史持久化和后台采样线程仍未完成。
+- 运行时统计已从显示层下沉到线程安全 `process/RuntimeStats`：SQL 执行、失败、提交/回滚，以及 StorageEngine 和 Volcano 扫描算子的顺序扫描、索引扫描和实际 DML 行数会进入共享计数器；完整可见表扫描建立的 live-row 估计会反馈给 Join 成本和 EXPLAIN，部分/索引扫描只保留展示用下界，表重建/截断会清除旧关系身份的估计；`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 不再输出固定零值。统计仍仅驻留内存，索引访问方法细分、历史持久化和后台采样线程仍未完成。
 - 构建质量收敛：修复 planner 的 merge join cost 参数错误，清理 parser 未使用参数和测试冗余 helper；legacy 输出捕获已从全局重定向改为线程局部路由；`./scripts/build.sh` 在 `-Wall -Wextra` 下通过且无编译警告，完整回归与 OpenSSL Docker 构建均通过。
 
 启动安全边界：非空但 magic/版本不匹配的数据文件会直接拒绝打开，不会被清零或按新格式覆盖。部署时必须将数据目录初始化为当前格式，并通过备份恢复或 SQL 导入完成升级。

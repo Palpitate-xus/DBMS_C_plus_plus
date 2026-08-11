@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-11
-> 自动测试套件基线：PASS=130 FAIL=0（128 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
+> 自动测试套件基线：PASS=131 FAIL=0（129 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -84,6 +84,7 @@
 - SQL 统计模块回归：`tests/sql_stats_test.cpp` 验证字符串/数字常量归一化、引号标识符区分、调用次数与耗时聚合、数据库过滤及 reset。
 - 运行时统计模块回归：`tests/runtime_stats_test.cpp` 验证并发 SQL 计数、失败/提交/回滚计数、表扫描和实际 DML 行数统计及 reset。
 - 协议运行时统计回归：`postgres_protocol_test.py` 通过真实 PostgreSQL wire 查询验证 `pg_stat_database`/`pg_stat_tables` 返回数据库查询、表 DML 及 Volcano 索引扫描/取行计数，而非固定零值。
+- Planner 统计反馈回归：`tests/planner_runtime_stats_test.cpp` 验证完整扫描 live-row 估计参与 Hash/Nested Loop Join 选型和 EXPLAIN，未取得精确证据时回退物理行数，重建同名表后旧估计不会泄漏。
 - DML AST 回归：`parser_phase1_test.cpp`、`dml_semantics_test.cpp` 与 `dml_returning_test.cpp` 验证 `INSERT` 多行 AST、混合 `DEFAULT` 位置、`DEFAULT VALUES` 区分、简单单表 INSERT SELECT（含 WHERE/列表达式）、无 target 或显式匹配主键/唯一约束 target 的 `ON CONFLICT DO NOTHING`、单列及复合主键/唯一约束冲突的常量或只引用 `excluded` 的 evaluator 标量 `DO UPDATE`、目标行/`excluded` 受限 `WHERE`、复合 UNIQUE 中 NULL 不互相冲突、不同唯一约束冲突不会被错误忽略、以当前目标行列值为输入的受限标量表达式 UPDATE、单源表 `UPDATE ... FROM`、单源表 `DELETE ... USING`、INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、窄版 MERGE、INSERT/UPDATE/DELETE 的受限标量表达式 RETURNING 以及 DML 尾随垃圾 fail-closed；协议 E2E 验证普通单表 INSERT 的多行/表达式/DEFAULT、显式 NULL 不被默认值覆盖、字符串大小写保留、常量及行级表达式 UPDATE、简单谓词 DELETE、INSERT/UPDATE/DELETE 的列投影和受限标量表达式 `RETURNING`、INSERT SELECT/冲突处理返回结果和 `INSERT 0 N` command tag。
 
 ---
@@ -939,7 +940,7 @@ heap、FSM/VM、索引、分区和 TOAST 文件位于 `<LOCATION>/<DATABASE>/`�
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景、128 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过；分组 Volcano 单元与主 SQL 手工回归也通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景、129 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过；分组 Volcano 单元与主 SQL 手工回归也通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）

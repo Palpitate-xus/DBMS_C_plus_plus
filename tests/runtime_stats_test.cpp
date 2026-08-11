@@ -1,5 +1,6 @@
 #include "process/RuntimeStats.h"
 
+#include <algorithm>
 #include <cassert>
 #include <iostream>
 #include <thread>
@@ -28,6 +29,9 @@ int main() {
     dbms::recordTableMutation("db1", "users", dbms::TableMutation::Insert, 3);
     dbms::recordTableMutation("db1", "users", dbms::TableMutation::Update, 2);
     dbms::recordTableMutation("db1", "users", dbms::TableMutation::Delete, 1);
+    dbms::recordTableScan("db1", "partial", 7, false, false);
+    uint64_t estimatedRows = 0;
+    assert(!dbms::getRuntimeLiveRowEstimate("db1", "partial", estimatedRows));
     dbms::recordTableScan("db1", "users", 2, false, true);
     dbms::recordTableScan("db1", "users", 1, true, false);
 
@@ -40,15 +44,23 @@ int main() {
     assert(db1[0].tupReturned == workers * queriesPerWorker);
 
     const auto tables = dbms::getRuntimeTableStats("db1");
-    assert(tables.size() == 1);
-    assert(tables[0].seqScan == 1);
-    assert(tables[0].seqTupRead == 2);
-    assert(tables[0].idxScan == 1);
-    assert(tables[0].idxTupFetch == 1);
-    assert(tables[0].nTupIns == 3);
-    assert(tables[0].nTupUpd == 2);
-    assert(tables[0].nTupDel == 1);
-    assert(tables[0].nLiveTup == 2);
+    assert(tables.size() == 2);
+    const auto users = std::find_if(
+        tables.begin(), tables.end(), [](const auto& table) {
+            return table.relname == "users";
+        });
+    assert(users != tables.end());
+    assert(users->seqScan == 1);
+    assert(users->seqTupRead == 2);
+    assert(users->idxScan == 1);
+    assert(users->idxTupFetch == 1);
+    assert(users->nTupIns == 3);
+    assert(users->nTupUpd == 2);
+    assert(users->nTupDel == 1);
+    assert(users->nLiveTup == 2);
+    assert(users->liveTupEstimateValid);
+    assert(dbms::getRuntimeLiveRowEstimate("db1", "users", estimatedRows));
+    assert(estimatedRows == 2);
 
     dbms::resetRuntimeStats();
     assert(dbms::getRuntimeDatabaseStats().empty());

@@ -2430,6 +2430,20 @@ static double estimateJoinCost(size_t leftRows, size_t rightRows,
     return leftRows * rightRows;  // fallback (worst case cartesian)
 }
 
+// Runtime statistics are useful only after an exact complete scan (and are
+// invalidated when a relation is recreated/truncated).  Keep the durable
+// storage count as the authoritative fallback so a partial/index scan can
+// never make the planner choose a path from a lower-bound estimate.
+static size_t plannerRowEstimate(StorageEngine* engine,
+                                 const std::string& dbname,
+                                 const std::string& tablename) {
+    uint64_t rows = 0;
+    if (getRuntimeLiveRowEstimate(dbname, tablename, rows)) {
+        return static_cast<size_t>(rows);
+    }
+    return engine->getTableRowCount(dbname, tablename);
+}
+
 OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbname,
                                    const std::string& leftTable, const std::string& rightTable,
                                    const std::string& leftCol, const std::string& rightCol,
@@ -2439,8 +2453,8 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     (void)selectCols;
 
     // Get table sizes for join ordering optimization
-    size_t leftRows = engine->getTableRowCount(dbname, leftTable);
-    size_t rightRows = engine->getTableRowCount(dbname, rightTable);
+    size_t leftRows = plannerRowEstimate(engine, dbname, leftTable);
+    size_t rightRows = plannerRowEstimate(engine, dbname, rightTable);
 
     // Check if join keys are indexed (candidate for MergeJoin)
     auto leftIdxCols = engine->getIndexedColumns(dbname, leftTable);
@@ -2551,7 +2565,8 @@ static CostEstimate explainOp(Operator* op, int indent,
     CostEstimate est;
 
     if (auto* pscan = dynamic_cast<ParallelTableScanOp*>(op)) {
-        double rows = static_cast<double>(engine->getTableRowCount(dbname, pscan->tableName()));
+        double rows = static_cast<double>(plannerRowEstimate(
+            engine, dbname, pscan->tableName()));
         est.rows = rows;
         est.cost = rows / std::max(1, pscan->workers());
         out += prefix + "ParallelTableScan(table=" + pscan->tableName() +
@@ -2559,7 +2574,8 @@ static CostEstimate explainOp(Operator* op, int indent,
                costRowsStr(est, opts) + "\n";
 
     } else if (auto* scan = dynamic_cast<TableScanOp*>(op)) {
-        double rows = static_cast<double>(engine->getTableRowCount(dbname, scan->tableName()));
+        double rows = static_cast<double>(plannerRowEstimate(
+            engine, dbname, scan->tableName()));
         est.rows = rows;
         est.cost = rows * 1.0;
         out += prefix + "TableScan(table=" + scan->tableName() + ")" +
@@ -2576,7 +2592,8 @@ static CostEstimate explainOp(Operator* op, int indent,
         }
         auto stats = engine->getColumnStats(dbname, idx->tableName(), idx->colName());
         if (stats.cardinality > 0) {
-            rows = static_cast<double>(engine->getTableRowCount(dbname, idx->tableName()))
+            rows = static_cast<double>(plannerRowEstimate(
+                engine, dbname, idx->tableName()))
                    / static_cast<double>(stats.cardinality);
             if (rows < 1.0) rows = 1.0;
         }
@@ -2805,7 +2822,8 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
     CostEstimate est;
 
     if (auto* pscan = dynamic_cast<ParallelTableScanOp*>(op)) {
-        double rows = static_cast<double>(engine->getTableRowCount(dbname, pscan->tableName()));
+        double rows = static_cast<double>(plannerRowEstimate(
+            engine, dbname, pscan->tableName()));
         est.rows = rows;
         est.cost = rows / std::max(1, pscan->workers());
         json += "\"nodeType\":\"Gather\",";
@@ -2815,7 +2833,8 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         json += "\"children\":[]";
 
     } else if (auto* scan = dynamic_cast<TableScanOp*>(op)) {
-        double rows = static_cast<double>(engine->getTableRowCount(dbname, scan->tableName()));
+        double rows = static_cast<double>(plannerRowEstimate(
+            engine, dbname, scan->tableName()));
         est.rows = rows;
         est.cost = rows * 1.0;
         json += "\"nodeType\":\"TableScan\",";
@@ -2834,7 +2853,8 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         }
         auto stats = engine->getColumnStats(dbname, idx->tableName(), idx->colName());
         if (stats.cardinality > 0) {
-            rows = static_cast<double>(engine->getTableRowCount(dbname, idx->tableName()))
+            rows = static_cast<double>(plannerRowEstimate(
+                engine, dbname, idx->tableName()))
                    / static_cast<double>(stats.cardinality);
             if (rows < 1.0) rows = 1.0;
         }

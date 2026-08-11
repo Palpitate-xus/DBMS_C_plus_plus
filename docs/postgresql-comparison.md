@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-11（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线（2026-08-11）: PASS=130 FAIL=0（128 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性、WAL 损坏恢复和网络启动安全）
+> 测试基线（2026-08-11）: PASS=131 FAIL=0（129 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、数据库生命周期、schema 格式完整性、WAL 损坏恢复和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -19,7 +19,7 @@ RLS 回归现已覆盖默认 `WITH CHECK`、显式 `TO PUBLIC`、permissive/rest
 
 DDL CREATE undo 回归已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；CREATE 记录现在还会进入外层事务及 SAVEPOINT 的逆序回滚队列，变更前物理快照可让外层 `ROLLBACK` 恢复 DROP/REPLACE 旧对象并在之后执行行 undo。整库快照污染后的另一条快照型 DDL 和 SAVEPOINT 会安全拒绝，完整依赖 undo 和全部 PostgreSQL 隐式提交边界仍与 PostgreSQL 有差距。
 
-SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlStats`，`SHOW STATEMENTS`/`pg_stat_statements` 风格查询可按归一化 SQL 聚合耗时；当前仍是进程内统计，缺少持久化、完整字段和扩展生命周期。
+SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlStats`，`SHOW STATEMENTS`/`pg_stat_statements` 风格查询可按归一化 SQL 聚合耗时；`RuntimeStats` 的完整扫描 live-row 估计也会反馈给 Join 成本与 EXPLAIN，并在关系重建/截断时失效；当前仍是进程内统计，缺少持久化、完整字段和扩展生命周期。
 
 ---
 
@@ -29,7 +29,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|--------------|---------|------|
 | 代码量 | ~1.2M 行 | ~66K 行 | ~18x |
 | 开发团队 | 全球数百人/20+年 | 单人/数周 | — |
-| 测试覆盖 | ~2000+ 测试 | 128 C++ 单元测试 + 2 个 E2E | 以回归结果为准 |
+| 测试覆盖 | ~2000+ 测试 | 129 C++ 单元测试 + 2 个 E2E | 以回归结果为准 |
 | 功能完成度 | 不宣称生产级 | DDL/DML 核心已覆盖，高级特性和运维能力仍有缺口 | 以测试和代码路径为准 |
 
 ---

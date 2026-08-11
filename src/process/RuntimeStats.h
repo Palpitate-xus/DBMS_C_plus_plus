@@ -31,6 +31,10 @@ struct RuntimeTableStats {
     uint64_t nTupUpd = 0;
     uint64_t nTupDel = 0;
     int64_t nLiveTup = 0;
+    // True only when nLiveTup was established by a complete visible scan or
+    // adjusted from such a scan by subsequent mutations. A filtered/index
+    // scan is only a lower bound and must not feed planner row estimates.
+    bool liveTupEstimateValid = false;
 };
 
 // Record one complete SQL statement. elapsedMs is measured by the caller;
@@ -54,6 +58,19 @@ std::vector<RuntimeDatabaseStats> getRuntimeDatabaseStats(
     const std::string& dbFilter = "");
 std::vector<RuntimeTableStats> getRuntimeTableStats(
     const std::string& dbFilter = "");
+
+// Return a process-local row estimate only when its provenance is exact
+// enough for planning. Callers must fall back to durable catalog/storage
+// counts when this returns false.
+bool getRuntimeLiveRowEstimate(const std::string& dbname,
+                               const std::string& tablename,
+                               uint64_t& rows);
+
+// Drop relation-local process statistics when a relation is recreated or
+// truncated. This prevents a same-name relation from inheriting stale row
+// estimates from a previous physical identity.
+void resetRuntimeTableStats(const std::string& dbname,
+                            const std::string& tablename);
 
 void resetRuntimeStats();
 
