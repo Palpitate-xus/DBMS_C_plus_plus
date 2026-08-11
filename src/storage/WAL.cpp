@@ -91,6 +91,9 @@ bool WALManager::refreshCurrentLsnFromDisk() {
 }
 
 int WALManager::acquireWalFileLock() const {
+    std::error_code ec;
+    std::filesystem::create_directories(walDir_, ec);
+    if (ec) return -1;
     int fd = ::open(lockPath().c_str(), O_RDWR | O_CREAT, 0644);
     if (fd < 0) return -1;
     if (::flock(fd, LOCK_EX) != 0) {

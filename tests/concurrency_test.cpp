@@ -67,6 +67,63 @@ static void test_transaction_atomicity() {
     std::cout << "[CONCURRENCY] transaction atomicity OK" << std::endl;
 }
 
+// INSERT rollback must remove every access-method entry and any TOAST chunks,
+// including entries created after a savepoint.  This is a regression test for
+// the transaction boundary rather than only for the heap page.
+static void test_insert_rollback_cleans_all_indexes() {
+    std::string db = testDbPath("insert_rollback_indexes");
+    if (g_engine.inTransaction()) {
+        try { g_engine.rollbackTransaction(); } catch (...) {}
+    }
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    dbms::TableSchema rollbackTable;
+    rollbackTable.tablename = "rollback_t";
+    rollbackTable.formatVersion = 2;
+    rollbackTable.append(dbms::makeIntColumn("id", false, 0, true));
+    rollbackTable.append(dbms::makeIntColumn("a", false, 0, false));
+    rollbackTable.append(dbms::makeIntColumn("b", false, 0, false));
+    rollbackTable.append(dbms::makeVarCharColumn("payload", false, 10000, false));
+    assert(g_engine.createTable(db, rollbackTable) == dbms::DBStatus::OK);
+    assert(g_engine.createIndex(db, "rollback_t", "a") == dbms::DBStatus::OK);
+    assert(g_engine.createCompositeIndex(db, "rollback_t", {"a", "b"}, "ab_idx") == dbms::DBStatus::OK);
+    assert(g_engine.createHashIndex(db, "rollback_t", "b") == dbms::DBStatus::OK);
+
+    const std::string payload(10000, 'x');
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "rollback_t", {{"id", "1"}, {"a", "7"}, {"b", "9"},
+                                               {"payload", payload}}) == dbms::DBStatus::OK);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+
+    assert(g_engine.query(db, "rollback_t", {"=id 1"}, {"id"}).empty());
+    assert(g_engine.query(db, "rollback_t", {"=a 7"}, {"id"}).empty());
+    assert(g_engine.query(db, "rollback_t", {"=b 9"}, {"id"}).empty());
+    auto* hash = g_engine.getHashIndex(db, "rollback_t", "b");
+    assert(hash && hash->search("9").empty());
+    auto* composite = g_engine.getCompositeIndexTree(db, "rollback_t", "ab_idx");
+    assert(composite && composite->allValues().empty());
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.savepoint("before_insert") == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "rollback_t", {{"id", "2"}, {"a", "8"}, {"b", "10"},
+                                               {"payload", payload}}) == dbms::DBStatus::OK);
+    assert(g_engine.rollbackToSavepoint("before_insert") == dbms::DBStatus::OK);
+    assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
+    assert(g_engine.query(db, "rollback_t", {}, {"id"}).empty());
+    assert(hash->search("10").empty());
+    assert(composite->allValues().empty());
+
+    // Verify the on-disk index/heap state after reopening the database.
+    {
+        dbms::StorageEngine reopened;
+        assert(reopened.query(db, "rollback_t", {}, {"id"}).empty());
+        auto* reopenedHash = reopened.getHashIndex(db, "rollback_t", "b");
+        assert(reopenedHash && reopenedHash->search("9").empty());
+    }
+    cleanup(db);
+    std::cout << "[CONCURRENCY] INSERT rollback cleans secondary/composite/hash/TOAST state OK" << std::endl;
+}
+
 // Test 2: WAL 顺序写入性能
 static void test_wal_throughput() {
     std::string db = testDbPath("wal_perf");
@@ -262,6 +319,7 @@ static void test_mvcc_snapshot() {
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_transaction_atomicity();
+    test_insert_rollback_cleans_all_indexes();
     test_wal_throughput();
     test_indexed_lookup();
     test_checkpoint_recovery();

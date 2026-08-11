@@ -19,6 +19,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | INSERT 事务原子性补强：主键、单列二级、复合、Hash 索引和 TOAST 均纳入普通回滚与 SAVEPOINT 回滚；多值索引按 `(key, RID)` 精确清理，SAVEPOINT 堆删除写入 WAL before/after image，Hash AM 传播写入失败，新增重启后空状态回归。索引专用 WAL resource manager、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | 事务边界补齐已加载索引缓存刷盘：新增 B+Tree/Hash `flush()` 和 `flushDatabaseCaches()`，事务快照创建前及 COMMIT WAL 发布前统一刷 heap、B+Tree、TOAST index、Hash 缓存，避免备份或已提交状态遗漏脏索引页。索引专用 WAL resource manager、跨对象原子提交和崩溃窗口仍待后续。 |
 | 2026-08-11 | B+Tree 多值索引补齐 `(key, RID)` 精确删除：新增 `removeMulti`，索引适配器、DML 删除/更新、级联和事务回滚不再按 key 误删同 key 的其他行；跨叶重复键回归覆盖删除后邻近 RID 仍可检索。B-tree 的 page deletion、合并、WAL-safe 增量提交和并发维护仍待后续。 |
 | 2026-08-11 | 扫描失败契约继续向上收口：`filterRows`、查询/聚合/JOIN、FK/EXCLUDE/ON CONFLICT 检查、`ANALYZE`、ALTER/`VACUUM FULL` 表重写、TOAST/page 写入以及 Volcano 并行 page-range scan 均 fail-closed；统计文件改为原子替换，`ANALYZE` 失败不再报告成功。B-tree/Hash WAL-safe 构建、完整增量维护和剩余复杂 DML 原子 undo 仍待后续。 |

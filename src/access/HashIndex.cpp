@@ -54,21 +54,24 @@ bool HashIndex::flush() {
     return !dirty_ || saveToFile();
 }
 
-void HashIndex::insert(const std::string& key, int64_t rid) {
+bool HashIndex::insert(const std::string& key, int64_t rid) {
+    if (!loaded_) return false;
     map_[key].push_back(rid);
     dirty_ = true;
+    return true;
 }
 
-void HashIndex::remove(const std::string& key, int64_t rid) {
+bool HashIndex::remove(const std::string& key, int64_t rid) {
+    if (!loaded_) return false;
     auto it = map_.find(key);
-    if (it == map_.end()) return;
+    if (it == map_.end()) return false;
     auto& vec = it->second;
     auto vit = std::find(vec.begin(), vec.end(), rid);
-    if (vit != vec.end()) {
-        vec.erase(vit);
-        if (vec.empty()) map_.erase(it);
-        dirty_ = true;
-    }
+    if (vit == vec.end()) return false;
+    vec.erase(vit);
+    if (vec.empty()) map_.erase(it);
+    dirty_ = true;
+    return true;
 }
 
 std::vector<int64_t> HashIndex::search(const std::string& key) const {

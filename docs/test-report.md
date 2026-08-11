@@ -19,6 +19,7 @@
 - Semi/Anti/Existence/Quantified/Scalar 回归：`tests/volcano_select_phase51_test.cpp` 验证未关联 `IN`/`NOT IN`、inner 过滤、重复键、NULL 语义、`QuantifiedSubqueryFilterOp` 的 `ANY`/`ALL` 空集与 NULL 语义、`ExistenceFilterOp` 的 `EXISTS`/`NOT EXISTS` 及 `ScalarSubqueryProjectOp` 的 0/1 行与 cardinality error；协议 E2E 验证真实 PostgreSQL 查询路径及 NULL 结果。
 - 普通聚合结构化回归：`tests/volcano_select_phase51_test.cpp` 验证带过滤条件的隐式空 grouping set；协议 E2E 验证主 SQL `COUNT(*)`/`SUM()` 已走统一聚合计划路径。
 - TOAST 回归：`tests/toast_test.cpp` 验证大值插入/更新/删除、zlib 压缩后的物理体积和解压读取。
+- INSERT 回滚回归：`tests/concurrency_test.cpp` 验证普通 `ROLLBACK` 与 `ROLLBACK TO SAVEPOINT` 清理主键、单列二级、复合、Hash 索引和 TOAST；同一测试在新 `StorageEngine` 重启后再次检查堆与 Hash 索引为空。
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。
 - `./scripts/build_tests.sh` 是唯一的完整测试编排实现，缓存生产对象后逐个测试独立链接运行，并自动执行两个 E2E；`run_all_tests_fast.sh` 仅捕获其成功输出并显示 PASS 计数，失败时原样打印完整编译/链接/运行日志。

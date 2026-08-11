@@ -15,8 +15,7 @@ HashIndexAM::~HashIndexAM() {
 
 bool HashIndexAM::insert(const std::string& key, RowId rowId) {
     if (!index_ || !index_->isOpen()) return false;
-    index_->insert(key, rowId);
-    return true;
+    return index_->insert(key, rowId);
 }
 
 bool HashIndexAM::remove(const std::string& key, RowId rowId) {
@@ -30,8 +29,7 @@ bool HashIndexAM::remove(const std::string& key, RowId rowId) {
         }
     }
     if (!found) return false;
-    index_->remove(key, rowId);
-    return true;
+    return index_->remove(key, rowId);
 }
 
 std::vector<RowId> HashIndexAM::search(const std::string& key) const {

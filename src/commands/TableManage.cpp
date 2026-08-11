@@ -12642,15 +12642,83 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         logTxnInsert(tablename, rid);
     }
 
-    // Update B+ tree PK index
+    // Index writes are part of the INSERT atomicity boundary.  A failed
+    // access-method mutation must never leave a heap tuple without a matching
+    // index entry (or leave a stale entry after a non-transactional INSERT).
+    auto abortIndexUpdate = [&]() -> DBStatus {
+        if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+            // The INSERT is already in txnLog.  Release the table lock before
+            // rolling back so rollback can acquire any required page locks.
+            lockManager_.unlock(tablename);
+            DBStatus rollbackStatus = rollbackTransaction();
+            return rollbackStatus == DBStatus::OK ? DBStatus::IO_ERROR : rollbackStatus;
+        }
+
+        // Embedded callers may use insert() outside an explicit transaction.
+        // Remove every index entry for this RID before removing the heap row.
+        const std::string pkVal = extractPKValue(strippedRow, tbl);
+        if (tbl.hasPrimaryKey()) {
+            if (BPTree* idx = getPKIndex(dbname, tablename); idx && !pkVal.empty()) {
+                idx->remove(pkVal);
+            }
+        }
+        for (const auto& colname : getIndexedColumns(dbname, tablename)) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            if (BPTree* idx = getSecondaryIndex(dbname, tablename, colname); idx) {
+                const std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+                if (!val.empty()) idx->removeMulti(val, rid);
+            }
+        }
+        for (const auto& ci : getCompositeIndexes(dbname, tablename)) {
+            if (BPTree* idx = getCompositeIndexTree(dbname, tablename, ci.name); idx) {
+                const std::string key = buildCompositeKey(strippedRow, tbl, ci.columns);
+                if (!key.empty()) idx->removeMulti(key, rid);
+            }
+        }
+        for (const auto& colname : getHashIndexedColumns(dbname, tablename)) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            if (HashIndex* idx = getHashIndex(dbname, tablename, colname); idx) {
+                const std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+                if (!val.empty()) idx->remove(val, rid);
+            }
+        }
+        deleteRowToast(dbname, tablename, rid);
+        lockManager_.pageLockExclusive(dbname, tablename, pageId);
+        if (char* pageBuf = pa->fetchPage(pageId)) {
+            PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+            walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), true);
+            page.remove(slotId);
+            pa->markDirty(pageId);
+            Lsn lsn = walPageImage(dbname, tablename, pageId, pageBuf, pa->pageSize(), false);
+            if (lsn != INVALID_LSN) {
+                setPageLsnAndChecksum(pageBuf, lsn);
+                pa->markDirty(pageId);
+            }
+            pa->flush();
+            pa->unpinPage(pageId);
+        }
+        lockManager_.pageUnlock(dbname, tablename, pageId);
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    };
+
+    // Update B+ tree PK index.
     {
         BPTree* idx = getPKIndex(dbname, tablename);
-        if (idx) {
-            std::string pkVal = extractPKValue(strippedRow, tbl);
-            if (!pkVal.empty()) idx->insert(pkVal, rid);
+        std::string pkVal = extractPKValue(strippedRow, tbl);
+        if (tbl.hasPrimaryKey() && !pkVal.empty() && (!idx || !idx->insert(pkVal, rid))) {
+            return abortIndexUpdate();
         }
     }
-    // Update secondary indexes
+    // Update secondary indexes.
     {
         auto indexedCols = getIndexedColumns(dbname, tablename);
         for (const auto& colname : indexedCols) {
@@ -12658,26 +12726,26 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) continue;
+            if (colIdx >= tbl.len) return abortIndexUpdate();
             BPTree* secIdx = getSecondaryIndex(dbname, tablename, colname);
-            if (secIdx) {
-                std::string val = extractColumnValue(strippedRow, tbl, colIdx);
-                if (!val.empty()) secIdx->insertMulti(val, rid);
+            std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+            if (!secIdx || (!val.empty() && !secIdx->insertMulti(val, rid))) {
+                return abortIndexUpdate();
             }
         }
     }
-    // Update composite indexes
+    // Update composite indexes.
     {
         auto compIdxs = getCompositeIndexes(dbname, tablename);
         for (const auto& ci : compIdxs) {
             BPTree* cidx = getCompositeIndexTree(dbname, tablename, ci.name);
-            if (cidx) {
-                std::string key = buildCompositeKey(strippedRow, tbl, ci.columns);
-                if (!key.empty()) cidx->insertMulti(key, rid);
+            std::string key = buildCompositeKey(strippedRow, tbl, ci.columns);
+            if (!cidx || (!key.empty() && !cidx->insertMulti(key, rid))) {
+                return abortIndexUpdate();
             }
         }
     }
-    // Update hash indexes
+    // Update hash indexes.
     {
         auto hashCols = getHashIndexedColumns(dbname, tablename);
         for (const auto& colname : hashCols) {
@@ -12685,11 +12753,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) continue;
+            if (colIdx >= tbl.len) return abortIndexUpdate();
             HashIndex* hidx = getHashIndex(dbname, tablename, colname);
-            if (hidx) {
-                std::string val = extractColumnValue(strippedRow, tbl, colIdx);
-                if (!val.empty()) hidx->insert(val, rid);
+            std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+            if (!hidx || (!val.empty() && !hidx->insert(val, rid))) {
+                return abortIndexUpdate();
             }
         }
     }
@@ -19618,11 +19686,15 @@ DBStatus StorageEngine::rollbackTransaction() {
             uint32_t pageId; uint16_t slotId;
             decodeRid(it->rowIdx, pageId, slotId);
             // Read row data before removing so index entries can be cleaned up.
+            std::string insertedRow;
             std::string pkVal;
             std::map<std::string, std::string> secIdxVals;
+            std::map<std::string, std::string> compositeIdxVals;
+            std::map<std::string, std::string> hashIdxVals;
             {
                 std::string row;
                 if (readRowByRid(pa, it->rowIdx, row, tbl)) {
+                    insertedRow = row;
                     pkVal = extractPKValue(row, tbl);
                     auto indexedCols = getIndexedColumns(transactionContext().txnDB, it->tableName);
                     for (const auto& colname : indexedCols) {
@@ -19634,13 +19706,38 @@ DBStatus StorageEngine::rollbackTransaction() {
                             secIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
                         }
                     }
+                    for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, it->tableName)) {
+                        std::string key = buildCompositeKey(row, tbl, ci.columns);
+                        if (!key.empty()) compositeIdxVals[ci.name] = key;
+                    }
+                    for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
+                        size_t colIdx = tbl.len;
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+                        }
+                        if (colIdx < tbl.len) {
+                            std::string value = extractColumnValue(row, tbl, colIdx);
+                            if (!value.empty()) hashIdxVals[colname] = value;
+                        }
+                    }
                 }
+            }
+            if (!insertedRow.empty()) {
+                deleteRowToast(transactionContext().txnDB, it->tableName, it->rowIdx);
             }
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+                walPageImage(transactionContext().txnDB, it->tableName, pageId,
+                             pageBuf, pa->pageSize(), true);
                 page.remove(slotId);
                 pa->markDirty(pageId);
+                Lsn lsn = walPageImage(transactionContext().txnDB, it->tableName,
+                                       pageId, pageBuf, pa->pageSize(), false);
+                if (lsn != INVALID_LSN) {
+                    setPageLsnAndChecksum(pageBuf, lsn);
+                    pa->markDirty(pageId);
+                }
                 pa->flush();
                 pa->unpinPage(pageId);
             }
@@ -19654,6 +19751,20 @@ DBStatus StorageEngine::rollbackTransaction() {
                 BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, it->tableName, kv.first);
                 if (secIdx && !kv.second.empty()) {
                     secIdx->removeMulti(kv.second, it->rowIdx);
+                }
+            }
+            for (const auto& kv : compositeIdxVals) {
+                BPTree* compositeIdx = getCompositeIndexTree(
+                    transactionContext().txnDB, it->tableName, kv.first);
+                if (compositeIdx && !kv.second.empty()) {
+                    compositeIdx->removeMulti(kv.second, it->rowIdx);
+                }
+            }
+            for (const auto& kv : hashIdxVals) {
+                HashIndex* hashIdx = getHashIndex(
+                    transactionContext().txnDB, it->tableName, kv.first);
+                if (hashIdx && !kv.second.empty()) {
+                    hashIdx->remove(kv.second, it->rowIdx);
                 }
             }
         } else if (it->op == TxnLogEntry::Op::Update) {
@@ -20090,11 +20201,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         TableSchema tbl = getTableSchema(transactionContext().txnDB, entry.tableName);
         if (entry.op == TxnLogEntry::Op::Insert) {
             // Remove from indexes first (row still exists)
+            std::string insertedRow;
+            if (readRowByRid(pa, entry.rowIdx, insertedRow, tbl)) {
+                deleteRowToast(transactionContext().txnDB, entry.tableName, entry.rowIdx);
+            }
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
             if (pkIdx) {
-                std::string row;
-                if (readRowByRid(pa, entry.rowIdx, row, tbl)) {
-                    std::string pkVal = extractPKValue(row, tbl);
+                if (!insertedRow.empty()) {
+                    std::string pkVal = extractPKValue(insertedRow, tbl);
                     if (!pkVal.empty()) pkIdx->remove(pkVal);
                 }
             }
@@ -20107,11 +20221,30 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 if (colIdx >= tbl.len) continue;
                 BPTree* secIdx = getSecondaryIndex(transactionContext().txnDB, entry.tableName, colname);
                 if (!secIdx) continue;
-                std::string row;
-                if (readRowByRid(pa, entry.rowIdx, row, tbl)) {
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                if (!insertedRow.empty()) {
+                    std::string val = extractColumnValue(insertedRow, tbl, colIdx);
                     if (!val.empty()) secIdx->removeMulti(val, entry.rowIdx);
                 }
+            }
+            for (const auto& ci : getCompositeIndexes(transactionContext().txnDB, entry.tableName)) {
+                if (insertedRow.empty()) continue;
+                std::string key = buildCompositeKey(insertedRow, tbl, ci.columns);
+                if (key.empty()) continue;
+                BPTree* compositeIdx = getCompositeIndexTree(
+                    transactionContext().txnDB, entry.tableName, ci.name);
+                if (compositeIdx) compositeIdx->removeMulti(key, entry.rowIdx);
+            }
+            for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
+                if (insertedRow.empty()) continue;
+                size_t colIdx = tbl.len;
+                for (size_t j = 0; j < tbl.len; ++j) {
+                    if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
+                }
+                if (colIdx >= tbl.len) continue;
+                std::string value = extractColumnValue(insertedRow, tbl, colIdx);
+                HashIndex* hashIdx = getHashIndex(
+                    transactionContext().txnDB, entry.tableName, colname);
+                if (hashIdx && !value.empty()) hashIdx->remove(value, entry.rowIdx);
             }
             // Then remove the row from page
             uint32_t pageId; uint16_t slotId;
@@ -20119,8 +20252,17 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             char* pageBuf = pa->fetchPage(pageId);
             if (pageBuf) {
                 PageWrapper page(pageBuf, pa->pageSize(), tbl.formatVersion);
+                walPageImage(transactionContext().txnDB, entry.tableName, pageId,
+                             pageBuf, pa->pageSize(), true);
                 page.remove(slotId);
                 pa->markDirty(pageId);
+                Lsn lsn = walPageImage(transactionContext().txnDB, entry.tableName,
+                                       pageId, pageBuf, pa->pageSize(), false);
+                if (lsn != INVALID_LSN) {
+                    setPageLsnAndChecksum(pageBuf, lsn);
+                    pa->markDirty(pageId);
+                }
+                pa->flush();
                 pa->unpinPage(pageId);
             }
         } else if (entry.op == TxnLogEntry::Op::Update) {

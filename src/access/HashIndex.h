@@ -21,10 +21,10 @@ public:
     bool flush();
 
     // Insert key->rid mapping (allows duplicates)
-    void insert(const std::string& key, int64_t rid);
+    bool insert(const std::string& key, int64_t rid);
 
     // Remove one occurrence of rid for key
-    void remove(const std::string& key, int64_t rid);
+    bool remove(const std::string& key, int64_t rid);
 
     // Search: return all rids matching key
     std::vector<int64_t> search(const std::string& key) const;
