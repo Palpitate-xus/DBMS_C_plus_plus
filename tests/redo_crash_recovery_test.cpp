@@ -42,6 +42,9 @@ int main() {
         vals["id"] = "1";
         vals["name"] = "uncommitted";
         assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
+        vals["id"] = "3";
+        vals["name"] = "uncommitted-again";
+        assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
         // No commit/rollback - simulate crash by destroying engine.
     }
 
@@ -49,10 +52,12 @@ int main() {
         StorageEngine engine;
         auto rows = engine.query(dbname, "t", {}, {"id", "name"});
         assert(!rowContains(rows, "uncommitted"));
+        assert(!rowContains(rows, "uncommitted-again"));
         int64_t rid = 0;
         auto* pk = engine.getPKIndex(dbname, "t");
         assert(pk != nullptr);
         assert(!pk->search("1", rid));
+        assert(!pk->search("3", rid));
         assert(engine.checkpoint(dbname));
         std::cout << "[REDO CRASH] uncommitted insert rolled back by recovery OK\n";
     }

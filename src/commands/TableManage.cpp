@@ -19037,12 +19037,14 @@ void StorageEngine::recoverAllDatabases() {
 
         // Pass 1: collect committed transaction IDs and update CLOG.
         std::set<uint64_t> committedXids;
+        std::vector<Lsn> redoRecordLsns;
         {
             Lsn lsn = redoLsn;
             while (true) {
                 auto recOpt = wal->ReadRecord(lsn);
-                if (!recOpt) break;
+                if (!recOpt || recOpt->header.xl_tot_len == 0) break;
                 const XLogRecord& rec = *recOpt;
+                redoRecordLsns.push_back(lsn);
                 uint8_t rmid = rec.rmid();
                 uint8_t info = rec.info();
                 if (rmid == RM_XACT_ID && info == XLOG_XACT_COMMIT) {
@@ -19067,75 +19069,92 @@ void StorageEngine::recoverAllDatabases() {
             }
         }
 
-        // Pass 2: replay page images belonging to committed or non-transactional ops.
-        {
-            Lsn lsn = redoLsn;
-            while (true) {
-                auto recOpt = wal->ReadRecord(lsn);
-                if (!recOpt) break;
-                const XLogRecord& rec = *recOpt;
-                uint8_t rmid = rec.rmid();
-                uint8_t info = rec.info();
-                uint64_t recXid = rec.header.xl_xid;
-                bool shouldApply = false;
-                if (rmid == RM_HEAP_ID) {
-                    if (info == XLOG_HEAP_PAGE_AFTER) {
-                        shouldApply = (recXid == 0 || committedXids.count(recXid));
-                    } else if (info == XLOG_HEAP_PAGE_BEFORE) {
-                        shouldApply = (recXid != 0 && !committedXids.count(recXid));
-                    }
-                } else if (rmid == RM_INDEX_ID) {
-                    if (info == XLOG_INDEX_FILE_AFTER) {
-                        shouldApply = (recXid == 0 || committedXids.count(recXid));
-                    } else if (info == XLOG_INDEX_FILE_BEFORE) {
-                        // xid 0 is used by non-transactional/autocommit
-                        // maintenance. Replaying both images in WAL order
-                        // leaves the last complete file image after a crash.
-                        shouldApply = (recXid == 0 || !committedXids.count(recXid));
-                    }
+        // Pass 2: replay committed/non-transactional images in WAL order.
+        // Uncommitted before-images are intentionally deferred to the reverse
+        // pass below. If one transaction changes a page more than once, its
+        // before-images must be applied newest-to-oldest to restore the state
+        // that existed before the transaction began.
+        auto applyImageRecord = [&](const XLogRecord& rec, Lsn recordLsn,
+                                    bool undoUncommitted) {
+            const uint8_t rmid = rec.rmid();
+            const uint8_t info = rec.info();
+            const uint64_t recXid = rec.header.xl_xid;
+            bool shouldApply = false;
+            if (undoUncommitted) {
+                shouldApply = recXid != 0 && !committedXids.count(recXid) &&
+                              ((rmid == RM_HEAP_ID && info == XLOG_HEAP_PAGE_BEFORE) ||
+                               (rmid == RM_INDEX_ID && info == XLOG_INDEX_FILE_BEFORE));
+            } else if (rmid == RM_HEAP_ID) {
+                if (info == XLOG_HEAP_PAGE_AFTER) {
+                    shouldApply = recXid == 0 || committedXids.count(recXid);
+                } else if (info == XLOG_HEAP_PAGE_BEFORE) {
+                    // xid 0 is used by non-transactional maintenance. Its
+                    // before/after pair is replayed in WAL order.
+                    shouldApply = recXid == 0;
                 }
-                if (shouldApply) {
-                    if (rmid == RM_INDEX_ID) {
-                        const char* p = rec.data.data();
-                        const char* end = p + rec.data.size();
-                        uint32_t pathLen = 0;
-                        uint64_t imageLen = 0;
-                        constexpr uint32_t kMaxIndexPathLen = 4096;
-                        constexpr uint64_t kMaxIndexWalImage = 256ULL * 1024ULL * 1024ULL;
-                        if (p + sizeof(pathLen) <= end) {
-                            std::memcpy(&pathLen, p, sizeof(pathLen));
-                            p += sizeof(pathLen);
-                            if (pathLen != 0 && pathLen <= kMaxIndexPathLen &&
-                                p + pathLen <= end) {
-                                const std::string pathText(p, pathLen);
-                                p += pathLen;
-                                if (p + sizeof(imageLen) <= end) {
-                                    std::memcpy(&imageLen, p, sizeof(imageLen));
-                                    p += sizeof(imageLen);
-                                    if (imageLen <= kMaxIndexWalImage &&
-                                        imageLen <= static_cast<uint64_t>(end - p)) {
-                                        redoIndexFileImage(std::filesystem::path(pathText), p,
-                                                           static_cast<size_t>(imageLen));
-                                    }
-                                }
+            } else if (rmid == RM_INDEX_ID) {
+                if (info == XLOG_INDEX_FILE_AFTER) {
+                    shouldApply = recXid == 0 || committedXids.count(recXid);
+                } else if (info == XLOG_INDEX_FILE_BEFORE) {
+                    shouldApply = recXid == 0;
+                }
+            }
+            if (!shouldApply) return;
+
+            if (rmid == RM_INDEX_ID) {
+                const char* p = rec.data.data();
+                const char* end = p + rec.data.size();
+                uint32_t pathLen = 0;
+                uint64_t imageLen = 0;
+                constexpr uint32_t kMaxIndexPathLen = 4096;
+                constexpr uint64_t kMaxIndexWalImage = 256ULL * 1024ULL * 1024ULL;
+                if (p + sizeof(pathLen) <= end) {
+                    std::memcpy(&pathLen, p, sizeof(pathLen));
+                    p += sizeof(pathLen);
+                    if (pathLen != 0 && pathLen <= kMaxIndexPathLen &&
+                        p + pathLen <= end) {
+                        const std::string pathText(p, pathLen);
+                        p += pathLen;
+                        if (p + sizeof(imageLen) <= end) {
+                            std::memcpy(&imageLen, p, sizeof(imageLen));
+                            p += sizeof(imageLen);
+                            if (imageLen <= kMaxIndexWalImage &&
+                                imageLen <= static_cast<uint64_t>(end - p)) {
+                                redoIndexFileImage(std::filesystem::path(pathText), p,
+                                                   static_cast<size_t>(imageLen));
                             }
                         }
-                    } else {
-                        const bool force = (info == XLOG_HEAP_PAGE_BEFORE);
-                        RedoApplyRecord(rec,
-                            [&, force](const std::string& tableName, uint32_t blockNum, uint32_t forkNum,
-                                const char* pageData, size_t pageLen) {
-                                (void)forkNum;
-                                return redoPageImage(dbname, tableName, blockNum, pageData, pageLen, lsn, force);
-                            },
-                            [](const std::string&, uint32_t, uint32_t, uint16_t, const char*, size_t) { return true; },
-                            [](const std::string&, uint32_t, uint32_t, uint16_t, uint64_t) { return true; },
-                            [](const std::string&, uint32_t, uint32_t, uint16_t,
-                               uint32_t, uint32_t, uint16_t, const char*, size_t) { return true; });
                     }
                 }
-                lsn += rec.header.xl_tot_len;
+                return;
             }
+
+            const bool force = info == XLOG_HEAP_PAGE_BEFORE;
+            RedoApplyRecord(rec,
+                [&, force, recordLsn](const std::string& tableName, uint32_t blockNum,
+                                      uint32_t forkNum, const char* pageData,
+                                      size_t pageLen) {
+                    (void)forkNum;
+                    return redoPageImage(dbname, tableName, blockNum, pageData,
+                                         pageLen, recordLsn, force);
+                },
+                [](const std::string&, uint32_t, uint32_t, uint16_t,
+                   const char*, size_t) { return true; },
+                [](const std::string&, uint32_t, uint32_t, uint16_t,
+                   uint64_t) { return true; },
+                [](const std::string&, uint32_t, uint32_t, uint16_t,
+                   uint32_t, uint32_t, uint16_t, const char*, size_t) {
+                    return true;
+                });
+        };
+
+        for (Lsn recordLsn : redoRecordLsns) {
+            auto recOpt = wal->ReadRecord(recordLsn);
+            if (recOpt) applyImageRecord(*recOpt, recordLsn, false);
+        }
+        for (auto it = redoRecordLsns.rbegin(); it != redoRecordLsns.rend(); ++it) {
+            auto recOpt = wal->ReadRecord(*it);
+            if (recOpt) applyImageRecord(*recOpt, *it, true);
         }
 
         // Flush recovered pages.

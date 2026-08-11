@@ -40,7 +40,7 @@
 - 新增 DDL 快照并发回归：文件级 DDL 快照使用事务 ID 独立命名，并持有数据库级排他锁；另一 backend 在快照事务结束前阻塞，避免物理恢复覆盖并发提交。
 - 新增 DDL 快照重启回归：模拟未完成的 `.txn_backup.<xid>`，新 `StorageEngine` 按无 COMMIT 证据恢复 DDL 前的 schema 并清理快照目录。
 - WAL 提交回归继续覆盖 COMMIT 记录与刷盘路径；`WALManager::XLogFlush()` 现在返回 segment 同步结果，提交在 WAL 不可用/刷盘失败时不会先发布 CLOG 可见性。
-- WAL 崩溃恢复回归覆盖首个合法 LSN 0、未初始化页 LSN、未提交插入回滚、已提交插入重做和已提交删除重做；`redo_crash_recovery_test` 同时校验 heap 与主键 B+Tree 的未提交回滚、已提交插入恢复和已提交删除恢复；多实例 WAL writer 的尾部刷新/锁也由 catalog snapshot 场景覆盖。
+- WAL 崩溃恢复回归覆盖首个合法 LSN 0、未初始化页 LSN、已提交插入/删除重做和未提交事务回滚；`redo_crash_recovery_test` 同时校验 heap 与主键 B+Tree，并覆盖同一事务连续插入两行后 before-image 逆序 undo 不会留下中间状态；多实例 WAL writer 的尾部刷新/锁也由 catalog snapshot 场景覆盖。
 - Checkpoint 回归现在断言 checkpoint 真实成功；页刷盘、checkpoint WAL、checkpoint 文件 fsync 和 archive status 任一失败都会返回失败，不再伪报 `CHECKPOINT completed`。
 - Checkpoint 活动事务回归验证：活动事务期间不会推进数据库恢复起点；事务结束后 checkpoint 才刷已加载 heap/index 缓存并成功持久化 checkpoint WAL/LSN。
 - BufferPool 回归覆盖一帧缓存的脏页淘汰/重载与 pinned 页保护，确认缓存不足时返回失败而不是强制淘汰活动页。

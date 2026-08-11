@@ -22,6 +22,7 @@
 | 2026-08-11 | UPDATE/DELETE 事务 undo 补强：普通回滚与 SAVEPOINT 回滚现在恢复复合/Hash 索引和 TOAST；UPDATE 只清理新版本独占的线外块，显式事务 DELETE 保留死 tuple，回滚清除 `xmax` 并写 heap WAL before/after image，提交后回收旧版本 TOAST。新增并发回归覆盖 UPDATE/DELETE、savepoint、重启和大字段。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | INSERT 事务原子性补强：主键、单列二级、复合、Hash 索引和 TOAST 均纳入普通回滚与 SAVEPOINT 回滚；多值索引按 `(key, RID)` 精确清理，SAVEPOINT 堆删除写入 WAL before/after image，Hash AM 传播写入失败，新增重启后空状态回归。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | 事务边界补齐已加载索引缓存刷盘：新增 B+Tree/Hash `flush()` 和 `flushDatabaseCaches()`，事务快照创建前、COMMIT WAL 发布前及引擎退出时统一刷 heap、B+Tree、TOAST index、Hash 缓存；B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像。原生 page-level WAL、跨对象原子提交和其他访问方法的崩溃恢复仍待后续。 |
+| 2026-08-11 | WAL 恢复顺序补强：已提交/非事务 page image 按 WAL 正序重做，未提交事务的 page before-image 按逆序 undo；新增同一事务连续写入多行后的崩溃回归，避免恢复到中间页状态。原生 page-level 索引 WAL、跨对象原子提交和其他访问方法的崩溃恢复仍待后续。 |
 | 2026-08-11 | B+Tree 多值索引补齐 `(key, RID)` 精确删除：新增 `removeMulti`，索引适配器、DML 删除/更新、级联和事务回滚不再按 key 误删同 key 的其他行；跨叶重复键回归覆盖删除后邻近 RID 仍可检索。B-tree 的 page deletion、合并、WAL-safe 增量提交和并发维护仍待后续。 |
 | 2026-08-11 | 扫描失败契约继续向上收口：`filterRows`、查询/聚合/JOIN、FK/EXCLUDE/ON CONFLICT 检查、`ANALYZE`、ALTER/`VACUUM FULL` 表重写、TOAST/page 写入以及 Volcano 并行 page-range scan 均 fail-closed；统计文件改为原子替换，`ANALYZE` 失败不再报告成功。B-tree/Hash WAL-safe 构建、完整增量维护和剩余复杂 DML 原子 undo 仍待后续。 |
 | 2026-08-11 | StorageEngine 索引与执行器错误传播继续收口：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建和 `REINDEX` 检查 `forEachRow()` 失败；全文/GiST/SP-GiST/GIN/BRIN 在完整扫描后原子发布，Volcano 顺序/索引扫描 fail-closed。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 的完整错误传播仍待后续。 |
@@ -506,7 +507,7 @@
 | 10.2 | Relation forks | 缺少 main/fsm/vm/init forks | ✅ |
 | 10.3 | Page format | 有 4096 slotted page；PG 默认 8KB page，含 line pointer、tuple header、visibility 等复杂结构 | 🔄 |
 | 10.4 | Buffer manager | 有 BufferPool clock sweep、pin/usage、bgwriter/checkpointer/walwriter；刷盘错误现已传播，shared buffers 分片和完整 contention 语义仍缺 | ✅ |
-| 10.5 | WAL | 已有 record type、LSN、WAL segment、full page writes、redo routines、timeline、archive status；replication WAL sender、PITR 和完整 resource manager 仍缺 | 🔄 |
+| 10.5 | WAL | 已有 record type、LSN、WAL segment、full page writes、redo routines、timeline、archive status；恢复支持提交 after-image 正序重做与未提交 before-image 逆序 undo；replication WAL sender、PITR 和完整 resource manager 仍缺 | 🔄 |
 | 10.6 | Checkpoint | 已写 checkpoint record/LSN 并检查关系页、WAL、元数据和归档状态持久化；仍缺完整 restartpoint、节流和 WAL 截断 | 🔄 |
 | 10.7 | PITR | 缺失 | ❌ |
 | 10.8 | TOAST | 已有 TOAST relation/index、chunking 和 zlib compression；缺少 lz4/pglz、storage strategy、toast_tuple_target、out-of-line pointer/catalog 完整语义 | 🔄 |

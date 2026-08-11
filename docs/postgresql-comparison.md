@@ -158,7 +158,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | MVCC (快照隔离) | ✅ | ✅ | ✅ |
 | ReadView + CLOG | ✅ | ✅ | ✅ |
 | 隔离级别 (RU/RC/RR/SI/SERIALIZABLE) | ✅ | ⚠️ | 框架有 |
-| WAL (Write-Ahead Log) | ✅ | ✅ | LSN 0 为首个合法位置；COMMIT WAL 记录先刷盘，失败时不发布 CLOG 可见性；多 writer 有进程/文件锁与磁盘尾部刷新；完整 WAL resource manager/恢复语义仍有差距 |
+| WAL (Write-Ahead Log) | ✅ | ✅ | LSN 0 为首个合法位置；COMMIT WAL 记录先刷盘，失败时不发布 CLOG 可见性；已提交 after-image 正序重做、未提交 before-image 逆序 undo；多 writer 有进程/文件锁与磁盘尾部刷新；完整 WAL resource manager/恢复语义仍有差距 |
 | 事务物理快照生命周期 | ✅ | ✅ | 仅文件级 DDL 显式创建按 xid 命名快照；快照事务持有数据库级排他锁，启动恢复按 WAL 提交状态清理或恢复 |
 | Checkpoint | ✅ | ✅ | checkpoint WAL/LSN 与已加载 heap/index 缓存刷盘失败会传播；活动事务期间不推进恢复起点；完整 restartpoint、节流和 WAL 截断仍缺 |
 | SAVEPOINT | ✅ | ✅ | ✅ |
@@ -184,7 +184,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 - ✅ HOT 堆内更新
 - ✅ CLOG 提交日志 (位图 + 子事务可见性)
 - ✅ Checkpoint 持久化 (脏页刷盘 + WAL 截断)
-- ✅ WAL 崩溃恢复 (未提交回滚 + 已提交持久化)
+- ✅ WAL 崩溃恢复 (已提交正序重做 + 未提交多次修改逆序回滚)
 - ❌ 多线程并发压力测试 (LockManager 已就绪但无多线程竞争测试)
 - ❌ 死锁检测端到端测试 (WFG 已实现但无并发触发测试)
 - ❌ 隔离级别验证测试 (框架有但无跨级别对比)

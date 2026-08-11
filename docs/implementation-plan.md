@@ -23,6 +23,8 @@
 
 2026-08-11 增量审计：checkpoint 现在按数据库跟踪活动事务；活动事务存在时拒绝推进恢复起点，事务结束后通过统一 WAL-aware 缓存刷盘路径持久化已加载 heap 与索引，避免活动事务的崩溃恢复证据被 checkpoint 跳过。
 
+2026-08-11 增量审计：恢复第二阶段改为已提交/非事务 page image 按 WAL 正序重做，未提交事务 page before-image 按逆序 undo；新增同一事务连续写入多行后的重启回归，确认不会恢复到中间页状态。
+
 2026-08-11 增量审计：PageAllocator 与 B+Tree 全面检查 BufferPool 的空页返回，heap header/page、index header/node 读取和写入失败均安全返回；B+Tree root split 先完成节点写入再发布 root header；多值索引新增 `(key, RID)` 精确删除，DML/级联/事务回滚不再按 key 误删同 key 的其他索引项。
 
 2026-08-11 增量审计：新增 B+Tree/Hash `flush()` 与 `StorageEngine::flushDatabaseCaches()`；事务 snapshot 创建前、COMMIT WAL 发布前及引擎退出时统一刷已加载 heap、B+Tree、TOAST index 和 Hash 缓存，避免脏索引页落后于 heap 或事务快照。B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像；INSERT 回滚进一步覆盖复合/Hash/TOAST，并为 SAVEPOINT 回滚写入 heap WAL after-image；Hash AM 现在传播 mutation failure。其他访问方法的 WAL、跨访问方法原子提交和原生 page-level 增量恢复仍待后续。
@@ -260,7 +262,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - 资源管理器：HEAP（10）、XACT（11）、SMGR（12）、CHECKPOINT（13）；支持 HEAP_PAGE_BEFORE / HEAP_PAGE_AFTER、XACT_COMMIT / XACT_ABORT、CHECKPOINT_SHUTDOWN 等记录类型。
   - 采用 page-image WAL：insert/update/delete 在修改前写 before-image（undo），修改后写 after-image（redo）并更新页面 LSN 与 checksum。
   - `StorageEngine` 集成 WAL：事务 commit 写 XACT_COMMIT 并 flush；rollback 先按 before-image 回滚再写 XACT_ABORT；`checkpoint()` 写 CHECKPOINT 记录并持久化 checkpoint LSN。
-  - 崩溃恢复 `recoverAllDatabases()`：两趟扫描——第一趟收集已提交/已中止事务并更新 CLOG，第二趟按提交状态应用 after-image（redo）或 before-image（undo）。
+  - 崩溃恢复 `recoverAllDatabases()`：第一趟收集已提交/已中止事务并更新 CLOG；第二阶段先按 WAL 正序应用已提交/非事务 after-image（redo），再按逆序应用未提交事务 before-image（undo）。
   - **Timeline 与归档状态**：WALManager 支持 timeline ID（`setTimeline` / `timelineId`），持久化到 `pg_wal/timeline`；`pg_wal/archive_status/` 下维护 `.ready` / `.done` 文件，`checkpoint()` 自动将已完成 segment 标记为 `.ready`，`archivePendingSegments()` 按 segment 归档到 `wal_archive`。
   - 新增测试：`tests/wal_basic_test.cpp`、`tests/wal_full_page_write_test.cpp`、`tests/checkpoint_test.cpp`、`tests/redo_crash_recovery_test.cpp`、`tests/wal_timeline_archive_test.cpp`。
 
