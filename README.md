@@ -61,6 +61,7 @@
 - `SAVEPOINT spname` / `ROLLBACK TO [SAVEPOINT] spname` / `RELEASE [SAVEPOINT] spname` 通过事务 AST 统一解析
 - **MVCC 快照隔离**：每行使用 PostgreSQL 风格 HeapTupleHeader，事务内读取基于 ReadView 的可见性规则
 - **隔离级别**：支持 `READ UNCOMMITTED` / `READ COMMITTED` / `REPEATABLE READ` / `SERIALIZABLE`
+- **SERIALIZABLE 读覆盖**：非空索引谓词和顺序扫描登记 heap page SIREAD，空谓词保留关系级兜底；非相交页与跨页危险结构已有回归，完整索引范围 predicate lock/SSI 仍在建设中
 - **全局事务 ID 生成器**：单调递增 64 位 txId，持久化到 `.txnid` 文件
 - **HOT 更新**：堆内元组直接更新（不更新索引指针），减少 WAL 写入与索引维护开销
 - **CLOG (Commit Log)**：事务提交状态位图，加速可见性判断与故障恢复

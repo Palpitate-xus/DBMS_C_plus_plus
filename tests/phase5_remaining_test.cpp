@@ -96,10 +96,89 @@ static void test_ssi_empty_predicate() {
     std::cout << "[P5.43] empty predicate SIREAD abort OK" << std::endl;
 }
 
+static void createWideSsiTable(dbms::StorageEngine& engine, const std::string& db) {
+    assert(engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    dbms::TableSchema items;
+    items.tablename = "items";
+    items.append(dbms::makeIntColumn("id", false, 2));
+    // Keep each attribute below the TOAST threshold while making the tuple
+    // larger than a page can pack twice. This gives each row a distinct heap
+    // page without testing the unrelated TOAST path.
+    items.append(dbms::makeVarCharColumn("payload_a", false, 1500));
+    items.append(dbms::makeVarCharColumn("payload_b", false, 1500));
+    items.append(dbms::makeVarCharColumn("payload_c", false, 1500));
+    assert(engine.createTable(db, items) == dbms::DBStatus::OK);
+    const std::string payload(1500, 'x');
+    for (int id = 1; id <= 4; ++id) {
+        assert(engine.insert(db, "items", {{"id", std::to_string(id)},
+                                            {"payload_a", payload},
+                                            {"payload_b", payload},
+                                            {"payload_c", payload}}) ==
+               dbms::DBStatus::OK);
+    }
+    assert(engine.createIndex(db, "items", "id") == dbms::DBStatus::OK);
+}
+
+// Non-empty indexed predicates should retain page-level SIREAD coverage,
+// allowing transactions on physically disjoint pages to commit concurrently.
+static void test_ssi_disjoint_pages() {
+    const std::string db = testDbPath("ssi_disjoint_pages");
+    cleanupTestDb("ssi_disjoint_pages");
+    {
+        dbms::StorageEngine first;
+        dbms::StorageEngine second;
+        createWideSsiTable(first, db);
+        first.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        second.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        assert(first.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(second.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(first.query(db, "items", {"=id 1"}, {"id"}).size() == 1);
+        assert(second.query(db, "items", {"=id 3"}, {"id"}).size() == 1);
+        assert(first.update(db, "items", {{"payload_a", "first"}}, {"=id 1"}) == dbms::DBStatus::OK);
+        assert(second.update(db, "items", {{"payload_a", "third"}}, {"=id 3"}) == dbms::DBStatus::OK);
+        assert(first.commitTransaction() == dbms::DBStatus::OK);
+        assert(second.commitTransaction() == dbms::DBStatus::OK);
+    }
+    cleanupTestDb("ssi_disjoint_pages");
+    std::cout << "[P5.43] disjoint-page SIREAD concurrency OK" << std::endl;
+}
+
+// A cross-page dangerous structure must still abort one transaction after
+// relation-level false positives have been removed from non-empty predicates.
+static void test_ssi_cross_page_conflict() {
+    const std::string db = testDbPath("ssi_cross_page");
+    cleanupTestDb("ssi_cross_page");
+    {
+        dbms::StorageEngine first;
+        dbms::StorageEngine second;
+        createWideSsiTable(first, db);
+
+        first.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        second.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        assert(first.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(second.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(first.query(db, "items", {"=id 1"}, {"id"}).size() == 1);
+        assert(second.query(db, "items", {"=id 2"}, {"id"}).size() == 1);
+        assert(first.update(db, "items", {{"payload_a", "second"}}, {"=id 2"}) == dbms::DBStatus::OK);
+        assert(second.update(db, "items", {{"payload_a", "first"}}, {"=id 1"}) == dbms::DBStatus::OK);
+
+        const dbms::DBStatus firstCommit = first.commitTransaction();
+        const dbms::DBStatus secondCommit = second.commitTransaction();
+        const bool oneAborted = firstCommit == dbms::DBStatus::SERIALIZATION_FAILURE ||
+                                secondCommit == dbms::DBStatus::SERIALIZATION_FAILURE;
+        assert(oneAborted);
+        assert(firstCommit == dbms::DBStatus::OK || secondCommit == dbms::DBStatus::OK);
+    }
+    cleanupTestDb("ssi_cross_page");
+    std::cout << "[P5.43] cross-page SSI dangerous structure OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_ssi_locks();
     test_ssi_empty_predicate();
+    test_ssi_disjoint_pages();
+    test_ssi_cross_page_conflict();
     std::cout << "[P5_REMAINING] all passed" << std::endl;
     return 0;
 }

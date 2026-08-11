@@ -840,7 +840,8 @@ public:
     bool forEachRow(const std::string& dbname, const std::string& tablename,
                     const std::function<void(uint32_t pageId, uint16_t slotId, const char* data, size_t len)>& callback,
                     const ReadView* readView = nullptr,
-                    const std::vector<std::string>& targetPartitions = {}) const;
+                    const std::vector<std::string>& targetPartitions = {},
+                    bool registerRelationSiread = true) const;
     // Relation-aware scan that applies the current session's RLS SELECT/command
     // policies before invoking the callback. Returns false when a policy cannot
     // be parsed or evaluated; callers must treat that as a statement error or
@@ -1339,6 +1340,11 @@ private:
     // locks are implemented.
     static std::map<uint64_t, std::set<std::string>> ssiReadRelations_;
     static std::map<uint64_t, std::set<std::string>> ssiWriteRelations_;
+    // Page-level SIREAD coverage for non-empty scans. Relation markers remain
+    // the fallback for empty predicates and callers that cannot expose page
+    // provenance safely.
+    static std::map<uint64_t, std::set<std::string>> ssiReadPages_;
+    static std::map<uint64_t, std::set<std::string>> ssiWritePages_;
     static std::map<uint64_t, std::set<uint64_t>> ssiOutEdges_; // T1 -> {T2} means T1 read something written by T2
     static std::map<uint64_t, std::set<uint64_t>> ssiInEdges_;  // T2 -> {T1} means T1 read something written by T2
 
@@ -1389,6 +1395,8 @@ private:
         std::set<std::string> txnWrittenRids;     // relation-qualified RIDs
         std::set<std::string> txnReadRelations;  // coarse SIREAD relation coverage
         std::set<std::string> txnWrittenRelations;
+        std::set<std::string> txnReadPages;       // relation-qualified page SIREAD
+        std::set<std::string> txnWrittenPages;
         std::string lastvalDb;
         std::string lastvalSeq;
         int64_t lastvalValue = 0;

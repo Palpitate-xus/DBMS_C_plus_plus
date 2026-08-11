@@ -4,7 +4,7 @@
 
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，129 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=131 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
-本轮并发安全审计修复了 `LockManager` 的真实生命周期问题：等待 row/page 锁时不再持有可能被清除的 map 元素引用；批量解锁只释放当前线程拥有的 token；表锁重入不会重复锁底层 `shared_mutex`，共享锁升级会先平衡自身 token；等待图在等待期间持续刷新并检测双线程死锁。新增 `tests/lock_manager_concurrency_test.cpp`，验证死锁受害者释放、重入/升级、row token 归属和清理；页/索引粒度 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 仍未完成。
+本轮并发安全审计修复了 `LockManager` 的真实生命周期问题：等待 row/page 锁时不再持有可能被清除的 map 元素引用；批量解锁只释放当前线程拥有的 token；表锁重入不会重复锁底层 `shared_mutex`，共享锁升级会先平衡自身 token；等待图在等待期间持续刷新并检测双线程死锁。新增 `tests/lock_manager_concurrency_test.cpp`，验证死锁受害者释放、重入/升级、row token 归属和清理；真正的索引范围 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 规则仍未完成。
 
 锁 API 现在全部标记为 `[[nodiscard]]`，`TableManage` 的 DDL、DML、索引、扫描、TOAST、JOIN、聚合和 VACUUM 调用方均显式传播锁冲突；新增 `tests/lock_failure_propagation_test.cpp` 验证真实表锁竞争返回 `LOCK_CONFLICT` 并清理等待状态。
 
@@ -71,7 +71,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 - 聚合执行已统一到可复用的 `GroupAggregateOp` 计划节点：无 GROUP BY 的普通聚合与常见 `GROUP BY`、`HAVING`、`ROLLUP/CUBE/GROUPING SETS` 均消费过滤后的 Volcano 子计划；复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域和并行聚合仍待完成。
 - 未关联单列 `IN`/`NOT IN` 已下推到 Volcano `SemiJoinOp`（anti 模式）；未关联单表 `EXISTS`/`NOT EXISTS` 已下推到 `ExistenceFilterOp`；单个未关联标量目标已下推到 init-plan + `ScalarSubqueryProjectOp`，严格处理 NULL 和多行 cardinality error；单列未关联 `ANY`/`ALL` 已下推到 `QuantifiedSubqueryFilterOp`，严格处理 NULL/空集三值逻辑。相关行为均有单测与协议回归；关联/复杂标量、row comparison 和复杂组合仍保留 legacy fallback。
 - 多个等值索引条件已由 `BitmapHeapScanOp`/`BitmapOrHeapScanOp` 执行候选 RID 的 AND/OR 组合，再统一 heap fetch 和原谓词重检；范围 bitmap、并行 bitmap 和真正 block bitmap 扫描尚未完成。
-- SERIALIZABLE 事务对关系级读取登记 SIREAD 覆盖，即使谓词返回空集也会参与 rw-conflict 检测；该粒度是保守安全边界，页/索引级 predicate lock 和完整 SSI 冲突图仍未完成。
+- SERIALIZABLE 事务对非空索引谓词登记命中页、对顺序扫描登记实际扫描页，并保留空集/无法安全暴露页来源时的关系级 SIREAD 兜底；提交时页级覆盖参与 rw-conflict 检测，非相交页可并发提交，跨页危险结构仍会返回 serialization failure。真正的索引范围 predicate lock、完整 SSI 冲突图和安全快照仍未完成。
 - 扩展查询已支持文本及常用类型二进制参数/结果（bool/int2/int4/int8/oid/float4/float8/text/varchar/date/time/timestamp/timestamptz/uuid/numeric；日期时间按当前引擎秒精度存储，numeric 使用 PostgreSQL base-10000 wire 格式并以精确 decimal 文本保存）、`Parse` 参数描述、`Bind` 数量/格式/NULL 校验、`Describe`/`Close` 生命周期、`$n` 字面量绑定和基础 portal `Execute maxRows` 分批返回（含 `PortalSuspended`）；常见单表列会返回 catalog/table schema 驱动的 OID、长度、属性号和表 OID，复杂表达式仍回退为 text。数组等复杂类型的二进制 I/O、完整 RowDescription 类型推导以及 holdable/scrollable cursor 等完整 portal 语义仍待实现。
 - 表/列 ACL 检查已统一解析会话用户自身、递归继承角色和 `PUBLIC` 授权；`NOINHERIT` 用户不会自动获得成员角色的 ACL/RLS 权限，原始成员关系仍单独供 `pg_hba.conf` 角色匹配使用；真实协议和策略回归验证了继承与拒绝边界。RLS 现已通过关系感知扫描统一应用到查询、更新、删除及结构化 DML 来源关系，并实现默认 `WITH CHECK`、显式 `TO PUBLIC`、基础 `PERMISSIVE/RESTRICTIVE` 组合、表 owner 绕过、基于 `pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`；无适用策略默认拒绝，策略求值失败安全回退。对象全集 owner/依赖、完整 ACL item/继承语义、schema/database/function ACL 和完整 ACL 组合语义仍待补齐。
 - `ALTER TABLE ... OWNER TO` 已收紧为表所有者/超级用户操作，并要求当前会话能够 `SET ROLE` 到目标角色；`SET ROLE` 按原始成员关系授权，`NOINHERIT` 不会错误阻止显式切换。`current_user`、RLS、结构化 DML ACL 和 CREATE TABLE owner 均使用当前有效角色；完整对象 owner 传播和 ACL 组合仍待补齐。
@@ -91,6 +91,6 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 
 数据兼容边界：旧 schema、旧 4 KiB 数据页和旧行头不会被读取或迁移。升级前必须导出 SQL，或删除并重建数据目录。
 
-仍不能称为生产就绪的主要原因包括：SSI 目前已增加关系级 SIREAD 以覆盖空范围读，但页/索引粒度 predicate lock 和完整 rw-conflict 规则仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding 和结构化执行结果，owner/依赖和完整 ACL 组合语义仍不完整；表空间仍缺权限/owner、ALTER TABLESPACE 完整语义及 PostgreSQL OID/符号链接布局；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。后台 writer/checkpointer 与 DDL/database lifecycle 的文件缓存并发访问已加锁并纳入回归验证。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
+仍不能称为生产就绪的主要原因包括：SSI 目前已增加页级 SIREAD 和空范围关系级兜底，但索引范围 predicate lock、完整 rw-conflict 规则和安全快照仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding 和结构化执行结果，owner/依赖和完整 ACL 组合语义仍不完整；表空间仍缺权限/owner、ALTER TABLESPACE 完整语义及 PostgreSQL OID/符号链接布局；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。后台 writer/checkpointer 与 DDL/database lifecycle 的文件缓存并发访问已加锁并纳入回归验证。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
 
 验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`；两个 E2E 已由统一测试入口自动执行。DML AST 路径另由 parser 单测和协议 E2E 覆盖。Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。

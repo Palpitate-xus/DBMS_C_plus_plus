@@ -93,28 +93,29 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P0-4: Gap Locks / Predicate Locks
 - **类别**: 并发控制 / 隔离性
-- **现状**: 已有行级锁、表级锁、简化 gap 锁和关系级 SIREAD 覆盖；仍无 PostgreSQL 页/索引粒度 predicate lock
+- **现状**: 已有行级锁、表级锁、简化 gap 锁；SERIALIZABLE 非空索引谓词和顺序扫描已登记页级 SIREAD，空结果/无法安全暴露页来源的谓词保留关系级兜底；仍无 PostgreSQL 真正的索引范围 predicate lock
 - **PG 参考**: `gap_lock`, `predicate_lock`, `SIReadLock`
 - **影响**: 空范围读和索引范围的可串行化保护仍不完整，存在幻读风险
 - **实现路径**:
   1. 在 `LockManager` 中增加 `GapLock` 结构：`(table, gapRange, mode)`
   2. ✅ 增加关系级 SIREAD 覆盖，保护空范围读
-  3. 实现 `PredicateLock(table, snapshot, predicate)` 的页/索引粒度版本
-  4. 在 `IndexScanOp` 遍历时获取 Gap 锁
-  5. 增加 `serializable` 隔离级别下的 predicate lock 检查
+  3. ✅ 增加 heap page 级 SIREAD 覆盖，区分非相交页的读写
+  4. 实现 `PredicateLock(table, snapshot, predicate)` 的索引范围版本
+  5. 在 `IndexScanOp` 遍历时获取 Gap 锁
+  6. 增加 `serializable` 隔离级别下的 predicate lock 检查
 - **预估工作量**: 1-2 周
 - **相关文件**: `src/transaction/LockManager.cpp`, `src/transaction/LockManager.h`
 
 ### P0-5: SSI (Serializable Snapshot Isolation)
 - **类别**: 并发控制 / 隔离级别
-- **现状**: SERIALIZABLE 已跟踪关系限定的行级读写集合，并增加保守的关系级 SIREAD 覆盖空结果/谓词读；真实写偏差与空谓词回归可返回 SERIALIZATION_FAILURE，仍不等价于 PostgreSQL 完整 SSI
+- **现状**: SERIALIZABLE 已跟踪关系限定的行级读写集合、非空扫描的页级 SIREAD 和空结果/不安全谓词读的关系级兜底；真实写偏差、空谓词、跨页危险结构和非相交页并发回归可返回正确结果，仍不等价于 PostgreSQL 完整 SSI
 - **PG 参考**: `SERIALIZABLE` + `SIREAD` + `SERIALIZATION_FAILURE`
-- **影响**: 页/索引粒度 predicate lock、精确 phantom 推理和完整 rw-conflict 图规则仍缺失；当前关系级覆盖会牺牲部分串行化并发度
+- **影响**: 精确索引范围 phantom 推理、完整 rw-conflict 图规则和安全快照仍缺失；空结果关系级兜底仍会牺牲部分串行化并发度
 - **实现路径**:
   1. ✅ 实现行级读写集合与关系级 SIREAD 跟踪
-  2. ✅ 在 `COMMIT` 时将行级/关系级覆盖纳入序列化冲突检测
+  2. ✅ 在 `COMMIT` 时将行级/页级/关系级覆盖纳入序列化冲突检测
   3. ✅ 冲突时返回 `SERIALIZATION_FAILURE` 错误码
-  4. 增加页/索引粒度 predicate lock、完整 rw-conflict 图和 `serialization_failure_retries` GUC
+  4. 增加索引范围 predicate lock、完整 rw-conflict 图和 `serialization_failure_retries` GUC
 - **预估工作量**: 1-2 周
 - **相关文件**: `src/transaction/LockManager.cpp`, `src/commands/TableManage.cpp`
 

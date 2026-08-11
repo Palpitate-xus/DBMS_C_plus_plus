@@ -123,6 +123,8 @@ std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadSets_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWriteSets_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadRelations_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWriteRelations_;
+std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadPages_;
+std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWritePages_;
 std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiOutEdges_;
 std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiInEdges_;
 
@@ -1183,6 +1185,8 @@ StorageEngine::~StorageEngine() {
             ssiWriteSets_.erase(xid);
             ssiReadRelations_.erase(xid);
             ssiWriteRelations_.erase(xid);
+            ssiReadPages_.erase(xid);
+            ssiWritePages_.erase(xid);
             ssiOutEdges_.erase(xid);
             ssiInEdges_.erase(xid);
             for (auto& entry : ssiInEdges_) entry.second.erase(xid);
@@ -3793,10 +3797,17 @@ static std::string ssiRelationKey(const std::string& dbname,
     return dbname + "\x1f" + tablename;
 }
 
+static std::string ssiPageKey(const std::string& dbname,
+                              const std::string& tablename,
+                              uint32_t pageId) {
+    return dbname + "\x1f" + tablename + "\x1fpage\x1f" + std::to_string(pageId);
+}
+
 bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
                                 const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
                                 const ReadView* readView,
-                                const std::vector<std::string>& targetPartitions) const {
+                                const std::vector<std::string>& targetPartitions,
+                                bool registerRelationSiread) const {
     const ReadView* rv = readView;
     ReadView autocommitView;
     if (!rv && transactionContext().inTransaction) {
@@ -3823,7 +3834,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     // scan returns no rows.  It is conservative (and therefore may reduce
     // serializable concurrency), but it closes the correctness hole where a
     // concurrent INSERT could otherwise evade row-level SSI tracking.
-    if (transactionContext().inTransaction &&
+    if (registerRelationSiread && transactionContext().inTransaction &&
         transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         const std::string relation = ssiRelationKey(dbname, tablename);
         transactionContext().txnReadRelations.insert(relation);
@@ -3845,9 +3856,12 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         if (this->transactionContext().inTransaction && this->transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
             int64_t rid = this->encodeRid(pid, sid);
             std::string key = ssiRidKey(dbname, tablename, rid);
+            std::string page = ssiPageKey(dbname, tablename, pid);
             this->transactionContext().txnReadRids.insert(key);
+            this->transactionContext().txnReadPages.insert(page);
             std::lock_guard<std::mutex> lock(ssiMutex_);
             ssiReadSets_[this->transactionContext().currentTxnId].insert(std::move(key));
+            ssiReadPages_[this->transactionContext().currentTxnId].insert(std::move(page));
         }
         size_t off = dataOffset(fmtVer, natts);
         if (usesHeapTupleHeader(fmtVer)) {
@@ -13222,6 +13236,34 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         return false;
     };
 
+    auto registerPageSiread = [&](uint32_t pageId) {
+        if (!transactionContext().inTransaction ||
+            transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE) return;
+        const std::string page = ssiPageKey(dbname, tablename, pageId);
+        transactionContext().txnReadPages.insert(page);
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiReadPages_[transactionContext().currentTxnId].insert(page);
+    };
+
+    auto finishSerializablePredicateRead = [&]() {
+        if (!transactionContext().inTransaction ||
+            transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE) return;
+        if (ids.empty()) {
+            const std::string relation = ssiRelationKey(dbname, tablename);
+            transactionContext().txnReadRelations.insert(relation);
+            std::lock_guard<std::mutex> lock(ssiMutex_);
+            ssiReadRelations_[transactionContext().currentTxnId].insert(relation);
+            return;
+        }
+        for (int64_t rid : ids) {
+            uint32_t pageId = 0;
+            uint16_t slotId = 0;
+            decodeRid(rid, pageId, slotId);
+            (void)slotId;
+            registerPageSiread(pageId);
+        }
+    };
+
     // Try full-text index for CONTAINS conditions
     for (const auto& c : conds) {
         if (c.op == "contains") {
@@ -13245,6 +13287,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                         for (auto r : toRemove) ids.erase(r);
                     }
                     if (usedIndex) *usedIndex = true;
+                    finishSerializablePredicateRead();
                     return ids;
                 }
             }
@@ -13339,6 +13382,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     for (auto r : toRemove) ids.erase(r);
                 }
                 if (usedIndex) *usedIndex = true;
+                finishSerializablePredicateRead();
                 return ids;
             }
         }
@@ -13367,6 +13411,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                         for (auto r : toRemove) ids.erase(r);
                     }
                     if (usedIndex) *usedIndex = true;
+                    finishSerializablePredicateRead();
                     return ids;
                 }
             }
@@ -13407,6 +13452,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     for (auto r : toRemove) ids.erase(r);
                 }
                 if (usedIndex) *usedIndex = true;
+                finishSerializablePredicateRead();
                 return ids;
             }
         }
@@ -13423,6 +13469,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 if (!ppa->open()) return failScan();
                 uint32_t np = ppa->numPages();
                 for (uint32_t pid = 1; pid < np; ++pid) {
+                    registerPageSiread(pid);
                     char* buf = ppa->fetchPage(pid);
                     if (!buf) {
                         ppa->close();
@@ -13442,6 +13489,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 }
                 ppa->close();
             }
+            finishSerializablePredicateRead();
             return ids;
         }
     }
@@ -13453,7 +13501,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             if (!evalConditionOnRow(c, row, tbl)) { match = false; break; }
         }
         if (match) ids.insert(rid);
-    })) return failScan();
+    }, nullptr, {}, false)) return failScan();
+    finishSerializablePredicateRead();
     return ids;
 }
 
@@ -19980,11 +20029,17 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx) {
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        decodeRid(rowIdx, pageId, slotId);
+        std::string page = ssiPageKey(transactionContext().txnDB, tableName, pageId);
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
+        transactionContext().txnWrittenPages.insert(page);
         std::lock_guard<std::mutex> lock(ssiMutex_);
         ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
         ssiWriteRelations_[transactionContext().currentTxnId].insert(std::move(relation));
+        ssiWritePages_[transactionContext().currentTxnId].insert(std::move(page));
     }
 }
 
@@ -19994,11 +20049,17 @@ void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        decodeRid(rowIdx, pageId, slotId);
+        std::string page = ssiPageKey(transactionContext().txnDB, tableName, pageId);
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
+        transactionContext().txnWrittenPages.insert(page);
         std::lock_guard<std::mutex> lock(ssiMutex_);
         ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
         ssiWriteRelations_[transactionContext().currentTxnId].insert(std::move(relation));
+        ssiWritePages_[transactionContext().currentTxnId].insert(std::move(page));
     }
 }
 
@@ -20008,11 +20069,17 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        decodeRid(rowIdx, pageId, slotId);
+        std::string page = ssiPageKey(transactionContext().txnDB, tableName, pageId);
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
+        transactionContext().txnWrittenPages.insert(page);
         std::lock_guard<std::mutex> lock(ssiMutex_);
         ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
         ssiWriteRelations_[transactionContext().currentTxnId].insert(std::move(relation));
+        ssiWritePages_[transactionContext().currentTxnId].insert(std::move(page));
     }
 }
 
@@ -20173,11 +20240,15 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         ssiWriteSets_[transactionContext().currentTxnId].clear();
         ssiReadRelations_[transactionContext().currentTxnId].clear();
         ssiWriteRelations_[transactionContext().currentTxnId].clear();
+        ssiReadPages_[transactionContext().currentTxnId].clear();
+        ssiWritePages_[transactionContext().currentTxnId].clear();
     }
     transactionContext().txnReadRids.clear();
     transactionContext().txnWrittenRids.clear();
     transactionContext().txnReadRelations.clear();
     transactionContext().txnWrittenRelations.clear();
+    transactionContext().txnReadPages.clear();
+    transactionContext().txnWrittenPages.clear();
     if (transactionContext().txnIsolationLevel != IsolationLevel::READ_UNCOMMITTED) {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
@@ -20277,10 +20348,22 @@ DBStatus StorageEngine::commitTransaction() {
             if (hasOutgoing) break;
         }
 
+        for (const auto& [otherTxId, otherWritePages] : ssiWritePages_) {
+            if (otherTxId == transactionContext().currentTxnId) continue;
+            for (const auto& page : transactionContext().txnReadPages) {
+                if (otherWritePages.count(page)) {
+                    hasOutgoing = true;
+                    ssiOutEdges_[transactionContext().currentTxnId].insert(otherTxId);
+                    ssiInEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                    break;
+                }
+            }
+            if (hasOutgoing) break;
+        }
+
         // Relation-level SIREAD coverage catches empty scans and predicates
-        // whose result set did not contain a row.  It is intentionally coarse:
-        // false positives are preferable to allowing a phantom through while
-        // fine-grained predicate/page locks are still absent.
+        // whose result set did not contain a row. It is the conservative
+        // fallback; non-empty scans use page coverage above.
         for (const auto& [otherTxId, otherWriteRelations] : ssiWriteRelations_) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& relation : transactionContext().txnReadRelations) {
@@ -20298,6 +20381,19 @@ DBStatus StorageEngine::commitTransaction() {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& rid : transactionContext().txnWrittenRids) {
                 if (otherReadSet.count(rid)) {
+                    hasIncoming = true;
+                    ssiInEdges_[transactionContext().currentTxnId].insert(otherTxId);
+                    ssiOutEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                    break;
+                }
+            }
+            if (hasIncoming) break;
+        }
+
+        for (const auto& [otherTxId, otherReadPages] : ssiReadPages_) {
+            if (otherTxId == transactionContext().currentTxnId) continue;
+            for (const auto& page : transactionContext().txnWrittenPages) {
+                if (otherReadPages.count(page)) {
                     hasIncoming = true;
                     ssiInEdges_[transactionContext().currentTxnId].insert(otherTxId);
                     ssiOutEdges_[otherTxId].insert(transactionContext().currentTxnId);
@@ -20327,6 +20423,8 @@ DBStatus StorageEngine::commitTransaction() {
             ssiWriteSets_.erase(abortedId);
             ssiReadRelations_.erase(abortedId);
             ssiWriteRelations_.erase(abortedId);
+            ssiReadPages_.erase(abortedId);
+            ssiWritePages_.erase(abortedId);
             ssiOutEdges_.erase(abortedId);
             for (auto& [k, v] : ssiInEdges_) v.erase(abortedId);
             ssiInEdges_.erase(abortedId);
@@ -20335,6 +20433,8 @@ DBStatus StorageEngine::commitTransaction() {
             transactionContext().txnWrittenRids.clear();
             transactionContext().txnReadRelations.clear();
             transactionContext().txnWrittenRelations.clear();
+            transactionContext().txnReadPages.clear();
+            transactionContext().txnWrittenPages.clear();
             // rollbackTransaction() performs its own SSI cleanup and must
             // acquire ssiMutex_.  Release the detection lock first to avoid
             // self-deadlocking on the serialization-failure path.
@@ -20351,6 +20451,8 @@ DBStatus StorageEngine::commitTransaction() {
         transactionContext().txnWrittenRids.clear();
         transactionContext().txnReadRelations.clear();
         transactionContext().txnWrittenRelations.clear();
+        transactionContext().txnReadPages.clear();
+        transactionContext().txnWrittenPages.clear();
     }
 
     // Run deferred CHECK constraints queued for this transaction before committing.
@@ -20421,6 +20523,8 @@ DBStatus StorageEngine::commitTransaction() {
         ssiWriteSets_.clear();
         ssiReadRelations_.clear();
         ssiWriteRelations_.clear();
+        ssiReadPages_.clear();
+        ssiWritePages_.clear();
         ssiOutEdges_.clear();
         ssiInEdges_.clear();
     }
@@ -20813,6 +20917,8 @@ DBStatus StorageEngine::rollbackTransaction() {
             ssiWriteSets_.clear();
             ssiReadRelations_.clear();
             ssiWriteRelations_.clear();
+            ssiReadPages_.clear();
+            ssiWritePages_.clear();
             ssiOutEdges_.clear();
             ssiInEdges_.clear();
         } else {
@@ -20820,6 +20926,8 @@ DBStatus StorageEngine::rollbackTransaction() {
             ssiWriteSets_.erase(transactionContext().currentTxnId);
             ssiReadRelations_.erase(transactionContext().currentTxnId);
             ssiWriteRelations_.erase(transactionContext().currentTxnId);
+            ssiReadPages_.erase(transactionContext().currentTxnId);
+            ssiWritePages_.erase(transactionContext().currentTxnId);
             ssiOutEdges_.erase(transactionContext().currentTxnId);
             for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
             ssiInEdges_.erase(transactionContext().currentTxnId);
@@ -20830,6 +20938,8 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().txnWrittenRids.clear();
     transactionContext().txnReadRelations.clear();
     transactionContext().txnWrittenRelations.clear();
+    transactionContext().txnReadPages.clear();
+    transactionContext().txnWrittenPages.clear();
 
     if (Session* session = currentSession();
         session && session->currentDB == transactionContext().txnDB) {
@@ -20975,6 +21085,8 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         ssiWriteSets_.erase(transactionContext().currentTxnId);
         ssiReadRelations_.erase(transactionContext().currentTxnId);
         ssiWriteRelations_.erase(transactionContext().currentTxnId);
+        ssiReadPages_.erase(transactionContext().currentTxnId);
+        ssiWritePages_.erase(transactionContext().currentTxnId);
         ssiOutEdges_.erase(transactionContext().currentTxnId);
         for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
         ssiInEdges_.erase(transactionContext().currentTxnId);
@@ -20984,6 +21096,8 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().txnWrittenRids.clear();
     transactionContext().txnReadRelations.clear();
     transactionContext().txnWrittenRelations.clear();
+    transactionContext().txnReadPages.clear();
+    transactionContext().txnWrittenPages.clear();
 
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
