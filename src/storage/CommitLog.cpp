@@ -76,7 +76,8 @@ void CommitLog::saveSegment(uint64_t segNo) {
     // A test or an administrative drop may remove the database directory
     // while an uncached owner still exists. Never recreate a dropped database
     // or write stale CLOG state into a later same-name database.
-    if (!std::filesystem::is_directory(dataDir_)) {
+    const std::filesystem::path clogDir = std::filesystem::path(dataDir_) / "pg_xact";
+    if (!std::filesystem::is_directory(dataDir_) || !std::filesystem::is_directory(clogDir)) {
         it->second.dirty = false;
         return;
     }
