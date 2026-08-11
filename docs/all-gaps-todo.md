@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态（2026-08-11）**：统一回归基线 PASS=128 FAIL=0（126 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-11）**：统一回归基线 PASS=129 FAIL=0（127 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -19,6 +19,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | `LockManager` 并发安全收敛：修复 row/page 等待路径的 map 元素生命周期风险，批量解锁只释放当前线程拥有的锁 token，表锁重入不重复获取底层 mutex，共享锁升级平衡物理 token，等待期间持续刷新 wait-for graph 并检测双线程死锁；新增真实线程回归 `lock_manager_concurrency_test`。页/索引 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 规则仍待后续。 |
 | 2026-08-11 | UPDATE/DELETE 事务 undo 补强：普通回滚与 SAVEPOINT 回滚现在恢复复合/Hash 索引和 TOAST；UPDATE 只清理新版本独占的线外块，显式事务 DELETE 保留死 tuple，回滚清除 `xmax` 并写 heap WAL before/after image，提交后回收旧版本 TOAST。新增并发回归覆盖 UPDATE/DELETE、savepoint、重启和大字段。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | INSERT 事务原子性补强：主键、单列二级、复合、Hash 索引和 TOAST 均纳入普通回滚与 SAVEPOINT 回滚；多值索引按 `(key, RID)` 精确清理，SAVEPOINT 堆删除写入 WAL before/after image，Hash AM 传播写入失败，新增重启后空状态回归。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | 事务边界补齐已加载索引缓存刷盘：新增 B+Tree/Hash `flush()` 和 `flushDatabaseCaches()`，事务快照创建前、COMMIT WAL 发布前及引擎退出时统一刷 heap、B+Tree、TOAST index、Hash 缓存；B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像。原生 page-level WAL、跨对象原子提交和其他访问方法的崩溃恢复仍待后续。 |
@@ -226,7 +227,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=128 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=129 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -492,7 +493,7 @@
 | 9.4 | SSI/predicate locks | 已有关系限定的行级 rw-conflict in/out、关系级 SIREAD 和空范围写偏差回归；仍缺 PostgreSQL 页/索引 predicate lock、精确索引范围推理和完整 SSI 图规则 | ⚠️ |
 | 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index；缺少子事务 ID、资源释放、错误状态恢复 | ⚠️ |
 | 9.6 | DDL transactions | ALTER 已具备当前格式整库快照回滚；CREATE 的失败清理和 DROP 的只读依赖计划已覆盖主要单对象边界；仍缺完整跨对象依赖 undo、并发 DDL 锁语义和 PostgreSQL 全部隐式提交边界 | 🔄 |
-| 9.7 | Lock manager | 有表/行/gap/page/advisory lock 简化；缺少 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、deadlock detector 精细语义、wait events | ⚠️ |
+| 9.7 | Lock manager | 表/行/gap/page/advisory lock 已有 token 归属、重入/升级和双线程等待图死锁回归；仍缺 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、完整 deadlock detector 语义和 wait events | ⚠️ |
 | 9.8 | Crash safety | heap WAL 已支持 page before/after redo/undo，B+Tree/Hash 另有文件级 before/after 镜像；仍缺原生 page-level 索引 WAL、其他访问方法、WAL 截断/PITR、并发事务完整崩溃窗口和 PostgreSQL 恢复语义 | 🔄 |
 | 9.9 | Vacuum/freeze | 缺少 transaction wraparound、freeze map、visibility map、hint bits、all-visible/all-frozen | ⚠️ |
 

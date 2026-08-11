@@ -112,6 +112,13 @@ private:
         bool metadata = false;
         std::vector<std::thread::id> holders;  // threads currently holding this lock
         std::map<std::thread::id, LockMode> holderModes; // mode per holder
+        // A thread may acquire the same logical table lock through nested
+        // executor paths. Keep one underlying mutex token per thread and
+        // balance nested calls with this count.
+        std::map<std::thread::id, size_t> holderCounts;
+        // Prevent row/page lock entries from being erased while a waiter
+        // still owns a pointer to the state outside the registry mutex.
+        size_t waiters = 0;
     };
     std::map<std::string, LockState> locks_;
     mutable std::mutex globalMutex_;

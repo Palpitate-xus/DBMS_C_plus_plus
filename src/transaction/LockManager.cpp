@@ -106,11 +106,12 @@ static bool isCompatible(LockManager::LockMode requested, LockManager::LockMode 
             return false;
         case LockManager::LockMode::IntentShared:
             return held == LockManager::LockMode::Shared ||
-                   held == LockManager::LockMode::IntentShared ||
-                   held == LockManager::LockMode::IntentExclusive;
+                   held == LockManager::LockMode::IntentShared;
         case LockManager::LockMode::IntentExclusive:
-            return held == LockManager::LockMode::IntentShared ||
-                   held == LockManager::LockMode::IntentExclusive;
+            // IntentExclusive uses the underlying exclusive mutex in this
+            // manager, so claiming compatibility with IS/IX would allow the
+            // wait graph to say "compatible" while shared_mutex blocks.
+            return false;
         case LockManager::LockMode::Metadata:
             return false;
     }
@@ -129,130 +130,143 @@ static const char* modeToStr(LockManager::LockMode mode) {
 }
 
 bool LockManager::acquireLock(const std::string& table, LockMode mode) {
-    std::thread::id self = std::this_thread::get_id();
-    bool needWait = false;
-    {
-        std::lock_guard<std::mutex> guard(globalMutex_);
-        auto& state = locks_[table];
-        // Check compatibility with all holders
+    const std::thread::id self = std::this_thread::get_id();
+
+    auto isSharedMode = [](LockMode value) {
+        return value == LockMode::Shared || value == LockMode::IntentShared;
+    };
+    auto isReusable = [&](LockMode held, LockMode requested) {
+        if (held == LockMode::Exclusive || held == LockMode::Metadata) return true;
+        if (held == LockMode::IntentExclusive) {
+            return requested == LockMode::Shared ||
+                   requested == LockMode::IntentShared ||
+                   requested == LockMode::IntentExclusive;
+        }
+        return isSharedMode(held) && isSharedMode(requested);
+    };
+
+    auto releasePhysical = [&](LockState& state) {
+        auto modeIt = state.holderModes.find(self);
+        if (modeIt == state.holderModes.end()) return;
+        switch (modeIt->second) {
+            case LockMode::Shared:
+                state.mtx.unlock_shared();
+                --state.sharedCount;
+                break;
+            case LockMode::Exclusive:
+                state.mtx.unlock();
+                state.exclusive = false;
+                break;
+            case LockMode::IntentShared:
+                state.mtx.unlock_shared();
+                --state.intentSharedCount;
+                break;
+            case LockMode::IntentExclusive:
+                state.mtx.unlock();
+                --state.intentExclusiveCount;
+                break;
+            case LockMode::Metadata:
+                state.mtx.unlock();
+                state.metadata = false;
+                break;
+        }
+        state.holders.erase(std::remove(state.holders.begin(), state.holders.end(), self),
+                            state.holders.end());
+        state.holderModes.erase(modeIt);
+        state.holderCounts.erase(self);
+    };
+
+    auto acquirePhysical = [&](LockState& state) {
+        switch (mode) {
+            case LockMode::Shared:
+                state.mtx.lock_shared();
+                ++state.sharedCount;
+                break;
+            case LockMode::Exclusive:
+                state.mtx.lock();
+                state.exclusive = true;
+                break;
+            case LockMode::IntentShared:
+                state.mtx.lock_shared();
+                ++state.intentSharedCount;
+                break;
+            case LockMode::IntentExclusive:
+                state.mtx.lock();
+                ++state.intentExclusiveCount;
+                break;
+            case LockMode::Metadata:
+                state.mtx.lock();
+                state.metadata = true;
+                break;
+        }
+        state.holders.push_back(self);
+        state.holderModes[self] = mode;
+        state.holderCounts[self] = 1;
+        removeWaitEdges(self);
+    };
+
+    auto inspect = [&](LockState& state) {
+        // Replace, rather than accumulate, this waiter's outgoing edges. This
+        // matters when a lock is released and a different transaction takes
+        // its place before the next polling pass.
+        removeWaitEdges(self);
         bool compatible = true;
         for (const auto& holder : state.holders) {
-            auto it = state.holderModes.find(holder);
-            LockMode heldMode = (it != state.holderModes.end()) ? it->second : LockMode::Shared;
-            if (!isCompatible(mode, heldMode, holder == self)) {
+            if (holder == self) continue;
+            const auto it = state.holderModes.find(holder);
+            const LockMode held = it == state.holderModes.end()
+                ? LockMode::Shared : it->second;
+            if (!isCompatible(mode, held, false)) {
                 compatible = false;
-                if (holder != self) addWaitEdge(self, holder);
+                addWaitEdge(self, holder);
             }
         }
-        if (!compatible) {
-            needWait = true;
-        } else {
-            // Fast path: compatible, acquire immediately
-            if (mode == LockMode::Shared) {
-                state.mtx.lock_shared();
-                state.sharedCount++;
-            } else if (mode == LockMode::Exclusive) {
-                state.mtx.lock();
-                state.exclusive = true;
-            } else if (mode == LockMode::IntentShared) {
-                state.mtx.lock_shared();
-                state.intentSharedCount++;
-            } else if (mode == LockMode::IntentExclusive) {
-                state.mtx.lock();
-                state.intentExclusiveCount++;
-            } else if (mode == LockMode::Metadata) {
-                state.mtx.lock();
-                state.metadata = true;
+        return compatible;
+    };
+
+    const auto waitStart = std::chrono::steady_clock::now();
+    const auto deadlockCheckAt = waitStart +
+        std::chrono::milliseconds(std::max(0, deadlockTimeoutMs_));
+    while (true) {
+        bool cycle = false;
+        {
+            std::lock_guard<std::mutex> guard(globalMutex_);
+            auto& state = locks_[table];
+
+            auto selfMode = state.holderModes.find(self);
+            if (selfMode != state.holderModes.end()) {
+                if (isReusable(selfMode->second, mode)) {
+                    ++state.holderCounts[self];
+                    return true;
+                }
+                // Upgrade from a shared/intent lock. Drop this thread's
+                // physical token before waiting for the stronger mode so it
+                // cannot wait on itself.
+                releasePhysical(state);
             }
-            state.holders.push_back(self);
-            state.holderModes[self] = mode;
-            return true;
-        }
-    }
-    // Slow path: incompatible — apply deadlock_timeout then recheck / detect deadlock
-    if (needWait) {
-        if (deadlockTimeoutMs_ > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(deadlockTimeoutMs_));
-        }
-        std::lock_guard<std::mutex> guard(globalMutex_);
-        auto& state = locks_[table];
-        bool stillIncompatible = false;
-        for (const auto& holder : state.holders) {
-            auto it = state.holderModes.find(holder);
-            LockMode heldMode = (it != state.holderModes.end()) ? it->second : LockMode::Shared;
-            if (!isCompatible(mode, heldMode, holder == self)) {
-                stillIncompatible = true;
-                if (holder != self) addWaitEdge(self, holder);
+
+            if (inspect(state)) {
+                acquirePhysical(state);
+                return true;
             }
+            cycle = std::chrono::steady_clock::now() >= deadlockCheckAt &&
+                    hasCycle(self);
         }
-        if (!stillIncompatible) {
-            // Lock became available during deadlock_timeout sleep
-            if (mode == LockMode::Shared) {
-                state.mtx.lock_shared();
-                state.sharedCount++;
-            } else if (mode == LockMode::Exclusive) {
-                state.mtx.lock();
-                state.exclusive = true;
-            } else if (mode == LockMode::IntentShared) {
-                state.mtx.lock_shared();
-                state.intentSharedCount++;
-            } else if (mode == LockMode::IntentExclusive) {
-                state.mtx.lock();
-                state.intentExclusiveCount++;
-            } else if (mode == LockMode::Metadata) {
-                state.mtx.lock();
-                state.metadata = true;
-            }
-            state.holders.push_back(self);
-            state.holderModes[self] = mode;
-            return true;
-        }
-        if (hasCycle(self)) {
+        if (cycle) {
             removeWaitEdges(self);
             return false;
         }
-    }
-    // Block waiting for the lock with optional lock_timeout
-    auto& state = locks_[table];
-    if (lockTimeoutMs_ > 0) {
-        auto start = std::chrono::steady_clock::now();
-        while (true) {
-            bool acquired = false;
-            if (mode == LockMode::Shared || mode == LockMode::IntentShared) {
-                acquired = state.mtx.try_lock_shared();
-            } else {
-                acquired = state.mtx.try_lock();
-            }
-            if (acquired) break;
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start).count();
+
+        if (lockTimeoutMs_ > 0) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - waitStart).count();
             if (elapsed >= lockTimeoutMs_) {
                 removeWaitEdges(self);
                 return false;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-    } else {
-        if (mode == LockMode::Shared || mode == LockMode::IntentShared) {
-            state.mtx.lock_shared();
-        } else {
-            state.mtx.lock();
-        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    {
-        std::lock_guard<std::mutex> guard(globalMutex_);
-        switch (mode) {
-            case LockMode::Shared: state.sharedCount++; break;
-            case LockMode::Exclusive: state.exclusive = true; break;
-            case LockMode::IntentShared: state.intentSharedCount++; break;
-            case LockMode::IntentExclusive: state.intentExclusiveCount++; break;
-            case LockMode::Metadata: state.metadata = true; break;
-        }
-        state.holders.push_back(self);
-        state.holderModes[self] = mode;
-        removeWaitEdges(self);
-    }
-    return true;
 }
 
 bool LockManager::lockShared(const std::string& table) {
@@ -286,16 +300,18 @@ void LockManager::unlock(const std::string& table) {
     auto it = locks_.find(table);
     if (it == locks_.end()) return;
     auto& state = it->second;
-    // Remove self from holders list
-    auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-    if (hit != state.holders.end()) state.holders.erase(hit);
+    auto countIt = state.holderCounts.find(self);
     auto modeIt = state.holderModes.find(self);
-    LockMode mode = (modeIt != state.holderModes.end()) ? modeIt->second : LockMode::Shared;
-    if (modeIt != state.holderModes.end()) state.holderModes.erase(modeIt);
+    if (countIt == state.holderCounts.end() || modeIt == state.holderModes.end()) return;
+    if (countIt->second > 1) {
+        --countIt->second;
+        return;
+    }
+    const LockMode mode = modeIt->second;
     switch (mode) {
         case LockMode::Shared:
             state.mtx.unlock_shared();
-            state.sharedCount--;
+            --state.sharedCount;
             break;
         case LockMode::Exclusive:
             state.mtx.unlock();
@@ -314,6 +330,10 @@ void LockManager::unlock(const std::string& table) {
             state.metadata = false;
             break;
     }
+    state.holders.erase(std::remove(state.holders.begin(), state.holders.end(), self),
+                        state.holders.end());
+    state.holderModes.erase(modeIt);
+    state.holderCounts.erase(countIt);
 }
 
 void LockManager::unlockAll() {
@@ -323,9 +343,6 @@ void LockManager::unlockAll() {
         removeWaitEdges(self);
         for (auto& kv : locks_) {
             auto& state = kv.second;
-            // Remove self from holders
-            auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-            if (hit != state.holders.end()) state.holders.erase(hit);
             auto modeIt = state.holderModes.find(self);
             if (modeIt != state.holderModes.end()) {
                 switch (modeIt->second) {
@@ -351,6 +368,9 @@ void LockManager::unlockAll() {
                         break;
                 }
                 state.holderModes.erase(modeIt);
+                state.holderCounts.erase(self);
+                state.holders.erase(std::remove(state.holders.begin(), state.holders.end(), self),
+                                    state.holders.end());
             }
         }
     }
@@ -360,16 +380,20 @@ void LockManager::unlockAll() {
         for (auto it = rowLocks_.begin(); it != rowLocks_.end(); ) {
             auto& state = it->second;
             auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-            if (hit != state.holders.end()) state.holders.erase(hit);
+            if (hit == state.holders.end()) {
+                ++it;
+                continue;
+            }
+            state.holders.erase(hit);
             if (state.exclusive) {
                 state.mtx.unlock();
                 state.exclusive = false;
-            }
-            while (state.sharedCount > 0) {
+            } else {
                 state.mtx.unlock_shared();
-                state.sharedCount--;
+                --state.sharedCount;
             }
-            if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+            if (state.sharedCount == 0 && !state.exclusive &&
+                state.holders.empty() && state.waiters == 0) {
                 it = rowLocks_.erase(it);
             } else {
                 ++it;
@@ -382,16 +406,20 @@ void LockManager::unlockAll() {
         for (auto it = pageLocks_.begin(); it != pageLocks_.end(); ) {
             auto& state = it->second;
             auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-            if (hit != state.holders.end()) state.holders.erase(hit);
+            if (hit == state.holders.end()) {
+                ++it;
+                continue;
+            }
+            state.holders.erase(hit);
             if (state.exclusive) {
                 state.mtx.unlock();
                 state.exclusive = false;
-            }
-            while (state.sharedCount > 0) {
+            } else {
                 state.mtx.unlock_shared();
-                state.sharedCount--;
+                --state.sharedCount;
             }
-            if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+            if (state.sharedCount == 0 && !state.exclusive &&
+                state.holders.empty() && state.waiters == 0) {
                 it = pageLocks_.erase(it);
             } else {
                 ++it;
@@ -429,38 +457,37 @@ static std::string makeRowKey(const std::string& table, int64_t rid) {
 bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
     std::string key = makeRowKey(table, rid);
+    LockState* state = nullptr;
     {
         std::lock_guard<std::mutex> guard(rowMutex_);
-        auto& state = rowLocks_[key];
+        auto& current = rowLocks_[key];
         // Already holding shared or exclusive lock on this row
-        if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
-            // The underlying shared_mutex is acquired once per holder.  A
-            // repeated read in the same transaction is re-entrant and must
-            // not increment sharedCount without acquiring another mutex
-            // token; doing so makes unlockAll() unlock the same mutex more
-            // times than it was locked.
+        if (std::find(current.holders.begin(), current.holders.end(), self) !=
+            current.holders.end()) {
             return true;
         }
-        if (!state.exclusive && state.holders.empty()) {
-            state.mtx.lock_shared();
-            state.sharedCount++;
-            state.holders.push_back(self);
+        if (!current.exclusive) {
+            current.mtx.lock_shared();
+            ++current.sharedCount;
+            current.holders.push_back(self);
             return true;
         }
-        if (state.exclusive && !state.holders.empty()) {
-            addWaitEdge(self, state.holders[0]);
-            if (hasCycle(self)) {
-                removeWaitEdges(self);
-                return false;
-            }
+        for (const auto& holder : current.holders) {
+            if (holder != self) addWaitEdge(self, holder);
         }
+        if (hasCycle(self)) {
+            removeWaitEdges(self);
+            return false;
+        }
+        ++current.waiters;
+        state = &current;
     }
-    auto& state = rowLocks_[key];
-    state.mtx.lock_shared();
+    state->mtx.lock_shared();
     {
         std::lock_guard<std::mutex> guard(rowMutex_);
-        state.sharedCount++;
-        state.holders.push_back(self);
+        --state->waiters;
+        ++state->sharedCount;
+        state->holders.push_back(self);
         removeWaitEdges(self);
     }
     return true;
@@ -469,24 +496,25 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
 bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
     std::string key = makeRowKey(table, rid);
+    LockState* state = nullptr;
     {
         std::lock_guard<std::mutex> guard(rowMutex_);
-        auto& state = rowLocks_[key];
+        auto& current = rowLocks_[key];
         // Already holding exclusive lock on this row
-        if (state.exclusive && state.holders.size() == 1 && state.holders[0] == self) {
+        if (current.exclusive && current.holders.size() == 1 && current.holders[0] == self) {
             return true;
         }
         // Upgrade our own shared row lock before acquiring the exclusive
         // mutex.  Calling lock() while this thread still owns a shared lock
         // self-deadlocks even when no other transaction is present.
-        if (!state.exclusive && state.sharedCount > 0 &&
-            state.holders.size() == 1 && state.holders[0] == self) {
-            state.mtx.unlock_shared();
-            state.sharedCount = 0;
-            state.holders.clear();
-            state.mtx.lock();
-            state.exclusive = true;
-            state.holders.push_back(self);
+        if (!current.exclusive && current.sharedCount > 0 &&
+            current.holders.size() == 1 && current.holders[0] == self) {
+            current.mtx.unlock_shared();
+            current.sharedCount = 0;
+            current.holders.clear();
+            current.mtx.lock();
+            current.exclusive = true;
+            current.holders.push_back(self);
             removeWaitEdges(self);
             return true;
         }
@@ -495,32 +523,34 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
         // entering the normal wait path; the statement/transaction will
         // retain its snapshot and either acquire the exclusive lock or be
         // rejected by deadlock detection.
-        auto selfHolder = std::find(state.holders.begin(), state.holders.end(), self);
-        if (!state.exclusive && selfHolder != state.holders.end()) {
-            state.mtx.unlock_shared();
-            state.sharedCount--;
-            state.holders.erase(selfHolder);
+        auto selfHolder = std::find(current.holders.begin(), current.holders.end(), self);
+        if (!current.exclusive && selfHolder != current.holders.end()) {
+            current.mtx.unlock_shared();
+            --current.sharedCount;
+            current.holders.erase(selfHolder);
         }
-        if (state.sharedCount == 0 && !state.exclusive) {
-            state.mtx.lock();
-            state.exclusive = true;
-            state.holders.push_back(self);
+        if (current.sharedCount == 0 && !current.exclusive) {
+            current.mtx.lock();
+            current.exclusive = true;
+            current.holders.push_back(self);
             return true;
         }
-        for (const auto& holder : state.holders) {
+        for (const auto& holder : current.holders) {
             if (holder != self) addWaitEdge(self, holder);
         }
         if (hasCycle(self)) {
             removeWaitEdges(self);
             return false;
         }
+        ++current.waiters;
+        state = &current;
     }
-    auto& state = rowLocks_[key];
-    state.mtx.lock();
+    state->mtx.lock();
     {
         std::lock_guard<std::mutex> guard(rowMutex_);
-        state.exclusive = true;
-        state.holders.push_back(self);
+        --state->waiters;
+        state->exclusive = true;
+        state->holders.push_back(self);
         removeWaitEdges(self);
     }
     return true;
@@ -579,16 +609,18 @@ void LockManager::rowUnlock(const std::string& table, int64_t rid) {
     if (it == rowLocks_.end()) return;
     auto& state = it->second;
     auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-    if (hit != state.holders.end()) state.holders.erase(hit);
+    if (hit == state.holders.end()) return;
+    state.holders.erase(hit);
     if (state.exclusive) {
         state.mtx.unlock();
         state.exclusive = false;
-    } else if (state.sharedCount > 0) {
+    } else {
         state.mtx.unlock_shared();
-        state.sharedCount--;
+        --state.sharedCount;
     }
     // Clean up empty lock state
-    if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+    if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
+        state.waiters == 0) {
         rowLocks_.erase(it);
     }
 }
@@ -602,16 +634,17 @@ void LockManager::rowUnlockAll(const std::string& table) {
         if (it->first.find(prefix) != 0) { ++it; continue; }
         auto& state = it->second;
         auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-        if (hit != state.holders.end()) state.holders.erase(hit);
+        if (hit == state.holders.end()) { ++it; continue; }
+        state.holders.erase(hit);
         if (state.exclusive) {
             state.mtx.unlock();
             state.exclusive = false;
-        }
-        while (state.sharedCount > 0) {
+        } else {
             state.mtx.unlock_shared();
-            state.sharedCount--;
+            --state.sharedCount;
         }
-        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
+            state.waiters == 0) {
             it = rowLocks_.erase(it);
         } else {
             ++it;
@@ -768,33 +801,34 @@ static std::string makePageKey(const std::string& dbname, const std::string& tab
 bool LockManager::pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const {
     std::thread::id self = std::this_thread::get_id();
     std::string key = makePageKey(dbname, table, pageId);
+    LockState* state = nullptr;
     {
         std::lock_guard<std::mutex> guard(pageMutex_);
-        auto& state = const_cast<LockState&>(pageLocks_[key]);
-        if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
-            state.sharedCount++;
+        auto& current = const_cast<LockManager*>(this)->pageLocks_[key];
+        if (std::find(current.holders.begin(), current.holders.end(), self) !=
+            current.holders.end()) return true;
+        if (!current.exclusive) {
+            current.mtx.lock_shared();
+            ++current.sharedCount;
+            current.holders.push_back(self);
             return true;
         }
-        if (!state.exclusive && state.holders.empty()) {
-            state.mtx.lock_shared();
-            state.sharedCount++;
-            state.holders.push_back(self);
-            return true;
+        for (const auto& holder : current.holders) {
+            if (holder != self) const_cast<LockManager*>(this)->addWaitEdge(self, holder);
         }
-        if (state.exclusive && !state.holders.empty()) {
-            const_cast<LockManager*>(this)->addWaitEdge(self, state.holders[0]);
-            if (const_cast<LockManager*>(this)->hasCycle(self)) {
-                const_cast<LockManager*>(this)->removeWaitEdges(self);
-                return false;
-            }
+        if (const_cast<LockManager*>(this)->hasCycle(self)) {
+            const_cast<LockManager*>(this)->removeWaitEdges(self);
+            return false;
         }
+        ++current.waiters;
+        state = &current;
     }
-    auto& state = const_cast<LockState&>(pageLocks_[key]);
-    state.mtx.lock_shared();
+    state->mtx.lock_shared();
     {
         std::lock_guard<std::mutex> guard(pageMutex_);
-        state.sharedCount++;
-        state.holders.push_back(self);
+        --state->waiters;
+        ++state->sharedCount;
+        state->holders.push_back(self);
         const_cast<LockManager*>(this)->removeWaitEdges(self);
     }
     return true;
@@ -803,32 +837,52 @@ bool LockManager::pageLockShared(const std::string& dbname, const std::string& t
 bool LockManager::pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const {
     std::thread::id self = std::this_thread::get_id();
     std::string key = makePageKey(dbname, table, pageId);
+    LockState* state = nullptr;
     {
         std::lock_guard<std::mutex> guard(pageMutex_);
-        auto& state = const_cast<LockState&>(pageLocks_[key]);
-        if (state.exclusive && state.holders.size() == 1 && state.holders[0] == self) {
+        auto& current = const_cast<LockManager*>(this)->pageLocks_[key];
+        if (current.exclusive && current.holders.size() == 1 && current.holders[0] == self) {
             return true;
         }
-        if (state.sharedCount == 0 && !state.exclusive) {
-            state.mtx.lock();
-            state.exclusive = true;
-            state.holders.push_back(self);
+        auto selfHolder = std::find(current.holders.begin(), current.holders.end(), self);
+        if (!current.exclusive && selfHolder != current.holders.end() &&
+            current.sharedCount == 1) {
+            current.mtx.unlock_shared();
+            current.sharedCount = 0;
+            current.holders.clear();
+            current.mtx.lock();
+            current.exclusive = true;
+            current.holders.push_back(self);
+            const_cast<LockManager*>(this)->removeWaitEdges(self);
             return true;
         }
-        for (const auto& holder : state.holders) {
+        if (!current.exclusive && selfHolder != current.holders.end()) {
+            current.mtx.unlock_shared();
+            --current.sharedCount;
+            current.holders.erase(selfHolder);
+        }
+        if (current.sharedCount == 0 && !current.exclusive) {
+            current.mtx.lock();
+            current.exclusive = true;
+            current.holders.push_back(self);
+            return true;
+        }
+        for (const auto& holder : current.holders) {
             if (holder != self) const_cast<LockManager*>(this)->addWaitEdge(self, holder);
         }
         if (const_cast<LockManager*>(this)->hasCycle(self)) {
             const_cast<LockManager*>(this)->removeWaitEdges(self);
             return false;
         }
+        ++current.waiters;
+        state = &current;
     }
-    auto& state = const_cast<LockState&>(pageLocks_[key]);
-    state.mtx.lock();
+    state->mtx.lock();
     {
         std::lock_guard<std::mutex> guard(pageMutex_);
-        state.exclusive = true;
-        state.holders.push_back(self);
+        --state->waiters;
+        state->exclusive = true;
+        state->holders.push_back(self);
         const_cast<LockManager*>(this)->removeWaitEdges(self);
     }
     return true;
@@ -843,15 +897,17 @@ void LockManager::pageUnlock(const std::string& dbname, const std::string& table
     if (it == pageLocks_.end()) return;
     auto& state = const_cast<LockState&>(it->second);
     auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-    if (hit != state.holders.end()) state.holders.erase(hit);
+    if (hit == state.holders.end()) return;
+    state.holders.erase(hit);
     if (state.exclusive) {
         state.mtx.unlock();
         state.exclusive = false;
-    } else if (state.sharedCount > 0) {
+    } else {
         state.mtx.unlock_shared();
-        state.sharedCount--;
+        --state.sharedCount;
     }
-    if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+    if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
+        state.waiters == 0) {
         pageLocks_.erase(it);
     }
 }
@@ -865,16 +921,17 @@ void LockManager::pageUnlockAll(const std::string& dbname, const std::string& ta
         if (it->first.find(prefix) != 0) { ++it; continue; }
         auto& state = const_cast<LockState&>(it->second);
         auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-        if (hit != state.holders.end()) state.holders.erase(hit);
+        if (hit == state.holders.end()) { ++it; continue; }
+        state.holders.erase(hit);
         if (state.exclusive) {
             state.mtx.unlock();
             state.exclusive = false;
-        }
-        while (state.sharedCount > 0) {
+        } else {
             state.mtx.unlock_shared();
-            state.sharedCount--;
+            --state.sharedCount;
         }
-        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
+            state.waiters == 0) {
             it = pageLocks_.erase(it);
         } else {
             ++it;
@@ -889,16 +946,17 @@ void LockManager::pageUnlockAll() const {
     for (auto it = pageLocks_.begin(); it != pageLocks_.end(); ) {
         auto& state = const_cast<LockState&>(it->second);
         auto hit = std::find(state.holders.begin(), state.holders.end(), self);
-        if (hit != state.holders.end()) state.holders.erase(hit);
+        if (hit == state.holders.end()) { ++it; continue; }
+        state.holders.erase(hit);
         if (state.exclusive) {
             state.mtx.unlock();
             state.exclusive = false;
-        }
-        while (state.sharedCount > 0) {
+        } else {
             state.mtx.unlock_shared();
-            state.sharedCount--;
+            --state.sharedCount;
         }
-        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty()) {
+        if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
+            state.waiters == 0) {
             it = pageLocks_.erase(it);
         } else {
             ++it;
