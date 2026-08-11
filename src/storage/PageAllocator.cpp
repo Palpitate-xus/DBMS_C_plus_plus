@@ -30,6 +30,10 @@ bool PageAllocator::open() {
 
     // Check if page 0 exists and has valid magic
     char* buf = bp_->fetchPage(0);
+    if (!buf) {
+        bp_->close();
+        return false;
+    }
     DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(buf);
     if (fh->magic != DATA_FILE_MAGIC) {
         if (existingFile) {
@@ -71,6 +75,7 @@ uint32_t PageAllocator::allocPage() {
     if (!isOpen()) return 0;
 
     char* fhBuf = bp_->fetchPage(0);
+    if (!fhBuf) return 0;
     DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
     uint32_t pageId = 0;
 
@@ -78,6 +83,10 @@ uint32_t PageAllocator::allocPage() {
         // Reuse a page from the free list
         pageId = fh->freeListHead;
         char* pageBuf = bp_->fetchPage(pageId);
+        if (!pageBuf) {
+            bp_->unpinPage(0);
+            return 0;
+        }
         PageWrapper page(pageBuf, pageSize_, formatVersion_);
         uint32_t nextFree = page.nextPage();
         bp_->unpinPage(pageId);
@@ -90,6 +99,11 @@ uint32_t PageAllocator::allocPage() {
 
         // Initialize the new page
         char* newBuf = bp_->fetchPage(pageId);
+        if (!newBuf) {
+            fh->numPages--;
+            bp_->unpinPage(0);
+            return 0;
+        }
         PageWrapper newPage(newBuf, pageSize_, formatVersion_);
         newPage.init(pageId);
         bp_->markDirty(pageId);
@@ -106,10 +120,15 @@ void PageAllocator::freePage(uint32_t pageId) {
 
     // Read file header
     char* fhBuf = bp_->fetchPage(0);
+    if (!fhBuf) return;
     DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
 
     // Initialize the freed page and link it to free list
     char* pageBuf = bp_->fetchPage(pageId);
+    if (!pageBuf) {
+        bp_->unpinPage(0);
+        return;
+    }
     PageWrapper page(pageBuf, pageSize_, formatVersion_);
     page.init(pageId);
     page.setNextPage(fh->freeListHead);
@@ -125,6 +144,7 @@ void PageAllocator::freePage(uint32_t pageId) {
 uint32_t PageAllocator::numPages() const {
     if (!isOpen()) return 0;
     char* fhBuf = const_cast<BufferPool*>(bp_.get())->fetchPage(0);
+    if (!fhBuf) return 0;
     DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
     uint32_t n = fh->numPages;
     bp_->unpinPage(0);

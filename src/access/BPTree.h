@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -73,20 +74,20 @@ private:
         uint32_t nextLeaf = 0;           // leaf node: next sibling page
     };
 
-    void writeHeader();
-    void readHeader();
+    bool writeHeader();
+    bool readHeader();
 
-    void writeNode(uint32_t pageNum, const Node& node);
-    Node readNode(uint32_t pageNum) const;
+    bool writeNode(uint32_t pageNum, const Node& node);
+    std::optional<Node> readNode(uint32_t pageNum) const;
 
     uint32_t allocPage();
 
     bool insertNonFull(uint32_t pageNum, const std::string& key, int64_t value);
-    void splitChild(uint32_t parentPage, int childIdx, uint32_t childPage);
+    bool splitChild(uint32_t parentPage, int childIdx, uint32_t childPage);
 
     bool removeFromNode(uint32_t pageNum, const std::string& key);
     bool searchNode(uint32_t pageNum, const std::string& key, int64_t& value) const;
-    void collectRange(uint32_t pageNum, const std::string& startKey,
+    bool collectRange(uint32_t pageNum, const std::string& startKey,
                       const std::string& endKey, std::vector<int64_t>& out) const;
 
     static void serializeNode(char* buf, const Node& node, uint16_t order);

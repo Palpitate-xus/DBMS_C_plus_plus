@@ -19,6 +19,8 @@
 
 2026-08-11 增量审计：BufferPool/PageAllocator 不再吞掉 `pwrite/fsync` 失败，checkpoint 只有在关系页、checkpoint WAL、checkpoint 元数据和归档状态均成功后才返回成功；clock-sweep 不再强制淘汰 pinned 页或丢弃写盘失败的 dirty 页；WAL 截断仍保留为后续工作。
 
+2026-08-11 增量审计：PageAllocator 与 B+Tree 全面检查 BufferPool 的空页返回，heap header/page、index header/node 读取和写入失败均安全返回；B+Tree root split 先完成节点写入再发布 root header。
+
 当前 schema 格式已升级为 `0x44420009`：固定标识符字段统一使用 64 字节容量，支持 PostgreSQL 63 字节级别的表名、列名、类型名和约束名；旧格式不迁移，必须重建数据库。
 
 构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`。测试编排唯一由 `build_tests.sh` 负责，`run_all_tests_fast.sh` 仅是安静输出外壳，避免两套测试链接/桩选择逻辑漂移。
