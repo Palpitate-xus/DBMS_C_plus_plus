@@ -95,6 +95,7 @@ static void test_hash_persistence_and_corruption() {
         assert(hash.open());
         hash.insert("alpha", 10);
         hash.insert("alpha", 11);
+        assert(hash.flush());
         assert(hash.close());
     }
     {
@@ -212,6 +213,7 @@ static void test_btree_split_and_range() {
         assert(matches.size() == 5999);
         assert(std::find(matches.begin(), matches.end(), 2999) != matches.end());
         assert(std::find(matches.begin(), matches.end(), 3001) != matches.end());
+        assert(tree.flush());
         tree.close();
         dbms::BPTree reopened(idx);
         assert(reopened.open());

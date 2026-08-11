@@ -125,6 +125,10 @@ void BPTree::close() {
     }
 }
 
+bool BPTree::flush() {
+    return bp_ && bp_->isOpen() && bp_->flush();
+}
+
 bool BPTree::writeHeader() {
     if (!bp_ || !bp_->isOpen()) return false;
     char* buf = bp_->fetchPage(0);

@@ -42,6 +42,7 @@
 - BufferPool 回归覆盖一帧缓存的脏页淘汰/重载与 pinned 页保护，确认缓存不足时返回失败而不是强制淘汰活动页。
 - GIN/BRIN/B+Tree 回归继续通过，并覆盖 root split/search/range；B+Tree 的 header/node I/O 失败现在 fail-closed，避免底层页读取失败升级为空指针崩溃。
 - B+Tree 多值索引回归补充 `(key, RID)` 精确删除：删除 6000 条跨叶重复键中的单个 RID 后，其余相邻 RID 仍可检索，重复删除会正确失败；`BPTreeIndexAM` 与 DML/事务回滚路径统一使用精确删除。
+- 事务索引刷盘回归通过：B+Tree/Hash `flush()` 和事务边界统一缓存刷盘路径已接入；`redo_crash_recovery_test` 验证未提交插入回滚、已提交插入恢复和已提交删除恢复仍通过。
 - Hash/GIN/BRIN 持久化回归新增原子 durable 写入、Hash 二进制格式重载和损坏文件拒绝；三种独立索引的关闭失败不再清除 dirty 状态。
 - StorageEngine GIN/BRIN 回归通过真实 DDL 构建后查询索引内容，验证 `forEachRow()` 页面失败契约、GIN 原子发布和 BRIN 二进制范围文件路径。
 - 索引/执行器错误传播回归通过：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建与 `REINDEX` 不再吞掉 heap 扫描失败，Volcano 顺序扫描和索引扫描遇到页面读取失败时 fail-closed；`volcano_select_phase51_test` 通过。

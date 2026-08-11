@@ -49,6 +49,11 @@ bool HashIndex::close() {
     return true;
 }
 
+bool HashIndex::flush() {
+    if (!loaded_) return false;
+    return !dirty_ || saveToFile();
+}
+
 void HashIndex::insert(const std::string& key, int64_t rid) {
     map_[key].push_back(rid);
     dirty_ = true;

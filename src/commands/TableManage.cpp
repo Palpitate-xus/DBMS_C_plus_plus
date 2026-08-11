@@ -3434,6 +3434,46 @@ void StorageEngine::closeAllPageAllocators() {
     pageAllocators_.clear();
 }
 
+bool StorageEngine::flushDatabaseCaches(const std::string& dbname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    const std::string tablePrefix = dbname + "/";
+    const std::string hashPrefix = dbname + ".";
+    const std::string toastPrefix = dbname + ":";
+
+    bool ok = true;
+    for (const auto& [key, allocator] : pageAllocators_) {
+        if (key.rfind(tablePrefix, 0) == 0 && allocator && !allocator->flush()) {
+            ok = false;
+        }
+    }
+    for (const auto& [key, index] : pkIndexCache_) {
+        if (key.rfind(tablePrefix, 0) == 0 && index && !index->flush()) {
+            ok = false;
+        }
+    }
+    for (const auto& [key, index] : secondaryIndexCache_) {
+        if (key.rfind(tablePrefix, 0) == 0 && index && !index->flush()) {
+            ok = false;
+        }
+    }
+    for (const auto& [key, index] : hashIndexCache_) {
+        if (key.rfind(hashPrefix, 0) == 0 && index && !index->flush()) {
+            ok = false;
+        }
+    }
+    for (const auto& [key, allocator] : toastPageAllocators_) {
+        if (key.rfind(toastPrefix, 0) == 0 && allocator && !allocator->flush()) {
+            ok = false;
+        }
+    }
+    for (const auto& [key, index] : toastIndexes_) {
+        if (key.rfind(toastPrefix, 0) == 0 && index && !index->flush()) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string tablePrefix = dbname + "/";
@@ -19288,12 +19328,11 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     // snapshot so a DDL rollback can safely evict/reload the catalog.
     if (catalogService_) catalogService_->persistAll();
 
-    // Flush all dirty pages so the on-disk files are up-to-date before backup
+    // Flush every loaded heap and index cache before taking the transaction
+    // snapshot.  Otherwise a backup can contain older index pages than the
+    // heap rows already visible through the in-memory caches.
     auto tblNames = getTableNames(dbname);
-    for (const auto& tn : tblNames) {
-        PageAllocator* pa = getPageAllocator(dbname, tn);
-        if (pa && !pa->flush()) return DBStatus::IO_ERROR;
-    }
+    if (!flushDatabaseCaches(dbname)) return DBStatus::IO_ERROR;
 
     // Keep a complete physical backup for crash/DDL recovery.  This also
     // captures external tablespaces; copying only dbPath(dbname) would make
@@ -19492,6 +19531,14 @@ DBStatus StorageEngine::commitTransaction() {
     // reconstruct.
     const std::string committingDb = transactionContext().txnDB;
     const uint64_t committingTxnId = transactionContext().currentTxnId;
+    // Index pages are not yet represented by a WAL resource manager.  Until
+    // that is implemented, force all loaded heap/index caches durable before
+    // publishing the COMMIT record so a committed transaction cannot expose
+    // a dirty in-memory index that is absent from its files.
+    if (!flushDatabaseCaches(committingDb)) {
+        rollbackTransaction();
+        return DBStatus::IO_ERROR;
+    }
     WALManager* wal = getWAL(committingDb);
     if (!wal) {
         rollbackTransaction();

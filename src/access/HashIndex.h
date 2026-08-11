@@ -17,6 +17,8 @@ public:
 
     bool open();
     bool close();
+    // Persist the current in-memory mapping without closing the index.
+    bool flush();
 
     // Insert key->rid mapping (allows duplicates)
     void insert(const std::string& key, int64_t rid);

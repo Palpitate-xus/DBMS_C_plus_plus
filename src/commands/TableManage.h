@@ -1116,6 +1116,7 @@ private:
     mutable std::recursive_mutex cacheMutex_;
     mutable std::map<std::string, std::unique_ptr<PageAllocator>> pageAllocators_;
     void closeAllPageAllocators();
+    bool flushDatabaseCaches(const std::string& dbname);
     void closeDatabaseCaches(const std::string& dbname);
 
     // Free Space Map + Visibility Map (fork files)

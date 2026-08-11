@@ -19,6 +19,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | 事务边界补齐已加载索引缓存刷盘：新增 B+Tree/Hash `flush()` 和 `flushDatabaseCaches()`，事务快照创建前及 COMMIT WAL 发布前统一刷 heap、B+Tree、TOAST index、Hash 缓存，避免备份或已提交状态遗漏脏索引页。索引专用 WAL resource manager、跨对象原子提交和崩溃窗口仍待后续。 |
 | 2026-08-11 | B+Tree 多值索引补齐 `(key, RID)` 精确删除：新增 `removeMulti`，索引适配器、DML 删除/更新、级联和事务回滚不再按 key 误删同 key 的其他行；跨叶重复键回归覆盖删除后邻近 RID 仍可检索。B-tree 的 page deletion、合并、WAL-safe 增量提交和并发维护仍待后续。 |
 | 2026-08-11 | 扫描失败契约继续向上收口：`filterRows`、查询/聚合/JOIN、FK/EXCLUDE/ON CONFLICT 检查、`ANALYZE`、ALTER/`VACUUM FULL` 表重写、TOAST/page 写入以及 Volcano 并行 page-range scan 均 fail-closed；统计文件改为原子替换，`ANALYZE` 失败不再报告成功。B-tree/Hash WAL-safe 构建、完整增量维护和剩余复杂 DML 原子 undo 仍待后续。 |
 | 2026-08-11 | StorageEngine 索引与执行器错误传播继续收口：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建和 `REINDEX` 检查 `forEachRow()` 失败；全文/GiST/SP-GiST/GIN/BRIN 在完整扫描后原子发布，Volcano 顺序/索引扫描 fail-closed。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 的完整错误传播仍待后续。 |

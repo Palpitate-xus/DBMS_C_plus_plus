@@ -24,6 +24,8 @@ public:
     // Open or create index file
     bool open();
     void close();
+    // Flush all dirty index pages and fsync the index file.
+    bool flush();
 
     // Insert key-value pair. Returns false if key already exists.
     bool insert(const std::string& key, int64_t value);
