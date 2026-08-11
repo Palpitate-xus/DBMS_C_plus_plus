@@ -42,6 +42,7 @@
 - WAL 提交回归继续覆盖 COMMIT 记录与刷盘路径；`WALManager::XLogFlush()` 现在返回 segment 同步结果，提交在 WAL 不可用/刷盘失败时不会先发布 CLOG 可见性。
 - WAL 崩溃恢复回归覆盖首个合法 LSN 0、未初始化页 LSN、未提交插入回滚、已提交插入重做和已提交删除重做；`redo_crash_recovery_test` 同时校验 heap 与主键 B+Tree 的未提交回滚、已提交插入恢复和已提交删除恢复；多实例 WAL writer 的尾部刷新/锁也由 catalog snapshot 场景覆盖。
 - Checkpoint 回归现在断言 checkpoint 真实成功；页刷盘、checkpoint WAL、checkpoint 文件 fsync 和 archive status 任一失败都会返回失败，不再伪报 `CHECKPOINT completed`。
+- Checkpoint 活动事务回归验证：活动事务期间不会推进数据库恢复起点；事务结束后 checkpoint 才刷已加载 heap/index 缓存并成功持久化 checkpoint WAL/LSN。
 - BufferPool 回归覆盖一帧缓存的脏页淘汰/重载与 pinned 页保护，确认缓存不足时返回失败而不是强制淘汰活动页。
 - GIN/BRIN/B+Tree 回归继续通过，并覆盖 root split/search/range；B+Tree 的 header/node I/O 失败现在 fail-closed，避免底层页读取失败升级为空指针崩溃。
 - B+Tree 多值索引回归补充 `(key, RID)` 精确删除：删除 6000 条跨叶重复键中的单个 RID 后，其余相邻 RID 仍可检索，重复删除会正确失败；`BPTreeIndexAM` 与 DML/事务回滚路径统一使用精确删除。

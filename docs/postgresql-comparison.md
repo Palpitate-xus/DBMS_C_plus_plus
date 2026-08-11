@@ -160,7 +160,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 隔离级别 (RU/RC/RR/SI/SERIALIZABLE) | ✅ | ⚠️ | 框架有 |
 | WAL (Write-Ahead Log) | ✅ | ✅ | LSN 0 为首个合法位置；COMMIT WAL 记录先刷盘，失败时不发布 CLOG 可见性；多 writer 有进程/文件锁与磁盘尾部刷新；完整 WAL resource manager/恢复语义仍有差距 |
 | 事务物理快照生命周期 | ✅ | ✅ | 仅文件级 DDL 显式创建按 xid 命名快照；快照事务持有数据库级排他锁，启动恢复按 WAL 提交状态清理或恢复 |
-| Checkpoint | ✅ | ✅ | checkpoint WAL/LSN 与关系页刷盘失败会传播；完整 restartpoint、节流和 WAL 截断仍缺 |
+| Checkpoint | ✅ | ✅ | checkpoint WAL/LSN 与已加载 heap/index 缓存刷盘失败会传播；活动事务期间不推进恢复起点；完整 restartpoint、节流和 WAL 截断仍缺 |
 | SAVEPOINT | ✅ | ✅ | ✅ |
 | 表级锁 (共享/排他) | ✅ | ✅ | ✅ |
 | **行级锁** | ✅ | ✅ | ✅ (rowLockShared/Exclusive + NOWAIT) |

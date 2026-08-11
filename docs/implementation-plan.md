@@ -21,6 +21,8 @@
 
 2026-08-11 增量审计：BufferPool/PageAllocator 不再吞掉 `pwrite/fsync` 失败，checkpoint 只有在关系页、checkpoint WAL、checkpoint 元数据和归档状态均成功后才返回成功；clock-sweep 不再强制淘汰 pinned 页或丢弃写盘失败的 dirty 页；WAL 截断仍保留为后续工作。
 
+2026-08-11 增量审计：checkpoint 现在按数据库跟踪活动事务；活动事务存在时拒绝推进恢复起点，事务结束后通过统一 WAL-aware 缓存刷盘路径持久化已加载 heap 与索引，避免活动事务的崩溃恢复证据被 checkpoint 跳过。
+
 2026-08-11 增量审计：PageAllocator 与 B+Tree 全面检查 BufferPool 的空页返回，heap header/page、index header/node 读取和写入失败均安全返回；B+Tree root split 先完成节点写入再发布 root header；多值索引新增 `(key, RID)` 精确删除，DML/级联/事务回滚不再按 key 误删同 key 的其他索引项。
 
 2026-08-11 增量审计：新增 B+Tree/Hash `flush()` 与 `StorageEngine::flushDatabaseCaches()`；事务 snapshot 创建前、COMMIT WAL 发布前及引擎退出时统一刷已加载 heap、B+Tree、TOAST index 和 Hash 缓存，避免脏索引页落后于 heap 或事务快照。B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像；INSERT 回滚进一步覆盖复合/Hash/TOAST，并为 SAVEPOINT 回滚写入 heap WAL after-image；Hash AM 现在传播 mutation failure。其他访问方法的 WAL、跨访问方法原子提交和原生 page-level 增量恢复仍待后续。

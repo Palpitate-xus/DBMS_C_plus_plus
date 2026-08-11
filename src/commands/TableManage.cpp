@@ -111,6 +111,7 @@ static void setPageLsnAndChecksum(char* buf, Lsn lsn);
 // Global active transaction tracking
 std::mutex StorageEngine::globalTxnMutex_;
 std::set<uint64_t> StorageEngine::activeTransactions_;
+std::map<uint64_t, std::string> StorageEngine::activeTransactionDatabases_;
 std::mutex StorageEngine::ssiMutex_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadSets_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWriteSets_;
@@ -1140,6 +1141,43 @@ StorageEngine::~StorageEngine() {
         flushDatabaseCaches(dbname);
         if (auto* wal = getWAL(dbname)) {
             wal->XLogFlush(wal->currentWriteLsn());
+        }
+    }
+
+    // A process crash normally ends the whole process, but tests and embedded
+    // callers can destroy an engine and construct another one in the same
+    // process. Do not leave this engine's abandoned xids in the process-wide
+    // active-transaction registry; recovery will still classify their WAL as
+    // uncommitted in the next engine instance.
+    std::vector<uint64_t> abandonedXids;
+    {
+        std::lock_guard<std::mutex> lock(transactionContextsMutex_);
+        for (const auto& [worker, context] : transactionContexts_) {
+            (void)worker;
+            if (context && context->inTransaction && context->currentTxnId != 0) {
+                abandonedXids.push_back(context->currentTxnId);
+            }
+        }
+        transactionContexts_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        for (uint64_t xid : abandonedXids) {
+            activeTransactions_.erase(xid);
+            activeTransactionDatabases_.erase(xid);
+        }
+    }
+    if (!abandonedXids.empty()) {
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        for (uint64_t xid : abandonedXids) {
+            ssiReadSets_.erase(xid);
+            ssiWriteSets_.erase(xid);
+            ssiReadRelations_.erase(xid);
+            ssiWriteRelations_.erase(xid);
+            ssiOutEdges_.erase(xid);
+            ssiInEdges_.erase(xid);
+            for (auto& entry : ssiInEdges_) entry.second.erase(xid);
+            for (auto& entry : ssiOutEdges_) entry.second.erase(xid);
         }
     }
 }
@@ -19207,11 +19245,21 @@ void StorageEngine::invalidateCatalogTableList(const std::string& dbname) {
 bool StorageEngine::checkpoint(const std::string& dbname) {
     if (!databaseExists(dbname)) return false;
 
-    // Flush all page allocators for this database
-    auto tables = getTableNames(dbname);
-    for (const auto& tname : tables) {
-        PageAllocator* pa = getPageAllocator(dbname, tname);
-        if (pa && !pa->flush()) return false;
+    // Do not advance the recovery start point while a transaction for this
+    // database is active.  A checkpoint must not make an uncommitted heap or
+    // index image unreachable from recovery; the background checkpointer can
+    // retry after the transaction ends.
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        for (const auto& [xid, activeDb] : activeTransactionDatabases_) {
+            (void)xid;
+            if (activeDb == dbname) return false;
+        }
+    }
+
+    // Flush all loaded heap and index caches through the WAL-aware path.
+    if (!flushDatabaseCaches(dbname)) {
+        return false;
     }
 
     WALManager* wal = getWAL(dbname);
@@ -19786,6 +19834,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.insert(transactionContext().currentTxnId);
+        activeTransactionDatabases_[transactionContext().currentTxnId] = dbname;
     }
     // Initialize SSI tracking
     {
@@ -19988,10 +20037,9 @@ DBStatus StorageEngine::commitTransaction() {
     // reconstruct.
     const std::string committingDb = transactionContext().txnDB;
     const uint64_t committingTxnId = transactionContext().currentTxnId;
-    // Index pages are not yet represented by a WAL resource manager.  Until
-    // that is implemented, force all loaded heap/index caches durable before
-    // publishing the COMMIT record so a committed transaction cannot expose
-    // a dirty in-memory index that is absent from its files.
+    // Force all loaded heap/index caches durable before publishing the COMMIT
+    // record so a committed transaction cannot expose a dirty in-memory index
+    // that is absent from its files.
     if (!flushDatabaseCaches(committingDb)) {
         rollbackTransaction();
         return DBStatus::IO_ERROR;
@@ -20028,6 +20076,7 @@ DBStatus StorageEngine::commitTransaction() {
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.erase(transactionContext().currentTxnId);
+        activeTransactionDatabases_.erase(transactionContext().currentTxnId);
         noActiveTransactions = activeTransactions_.empty();
     }
     if (noActiveTransactions) {
@@ -20075,6 +20124,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.erase(transactionContext().currentTxnId);
+        activeTransactionDatabases_.erase(transactionContext().currentTxnId);
         noActiveTransactions = activeTransactions_.empty();
     }
 
@@ -20519,6 +20569,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.erase(transactionContext().currentTxnId);
+        activeTransactionDatabases_.erase(transactionContext().currentTxnId);
     }
 
     // Clear transaction state but KEEP locks (2PC semantics)
@@ -20578,6 +20629,7 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         activeTransactions_.erase(savedTxnId);
+        activeTransactionDatabases_.erase(savedTxnId);
     }
 
     transactionContext().txnLog.clear();

@@ -1304,6 +1304,7 @@ private:
     // Global active transaction tracking (for ReadView)
     static std::mutex globalTxnMutex_;
     static std::set<uint64_t> activeTransactions_;
+    static std::map<uint64_t, std::string> activeTransactionDatabases_;
     // Global SSI conflict tracking: txId -> set of txIds that it has rw-conflict with
     static std::mutex ssiMutex_;
     static std::map<uint64_t, std::set<std::string>> ssiReadSets_;   // txId -> relation-qualified RIDs read

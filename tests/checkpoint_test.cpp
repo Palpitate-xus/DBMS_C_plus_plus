@@ -65,6 +65,12 @@ int main() {
         std::map<std::string, std::string> vals;
         vals["id"] = "1";
         assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
+        assert(!engine.checkpoint(dbname));
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+
+        assert(engine.beginTransaction(dbname) == DBStatus::OK);
+        vals["id"] = "1";
+        assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
         assert(engine.commitTransaction() == DBStatus::OK);
 
         assert(engine.checkpoint(dbname));

@@ -269,7 +269,7 @@
 | 1.1.8 | `ABORT` | 已作为 `ROLLBACK` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
 | 1.1.9 | `BEGIN` / `START TRANSACTION` | AST 已结构化解析 isolation/read-only/write/deferrable 选项并接入执行；`DEFERRABLE` fail-closed，安全快照、时序约束和完整事务特性仍缺 | ⚠️ |
 | 1.1.10 | `CALL` | 只执行项目内字符串过程，参数替换简化；不是 PL/pgSQL/SQL procedure 运行时 | ⚠️ |
-| 1.1.11 | `CHECKPOINT` | 已刷页、写 checkpoint WAL、持久化 checkpoint LSN 并传播写入/fsync/archive 失败；仍缺完整 restartpoint、节流和 WAL 截断 | ⚠️ |
+| 1.1.11 | `CHECKPOINT` | 已刷已加载 heap/index 缓存、写 checkpoint WAL、持久化 checkpoint LSN 并传播写入/fsync/archive 失败；活动事务期间拒绝推进恢复起点；仍缺完整 restartpoint、节流和 WAL 截断 | ⚠️ |
 | 1.1.12 | `CLOSE` / `DECLARE` / `FETCH` | 游标把 SELECT 结果捕获到内存；缺少可滚动/二进制/holdable cursor、事务生命周期、portal 语义、`MOVE` | ⚠️ |
 | 1.1.13 | `COMMENT` | 主要支持 table/column；缺少 PG 支持的绝大多数对象 | ⚠️ |
 | 1.1.14 | `COMMIT` / `ROLLBACK` | 有基本事务；与 PG 的 MVCC、subtransaction、WAL crash safety 差距大 | ⚠️ |

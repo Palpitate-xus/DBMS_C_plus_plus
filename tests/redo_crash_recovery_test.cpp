@@ -53,6 +53,7 @@ int main() {
         auto* pk = engine.getPKIndex(dbname, "t");
         assert(pk != nullptr);
         assert(!pk->search("1", rid));
+        assert(engine.checkpoint(dbname));
         std::cout << "[REDO CRASH] uncommitted insert rolled back by recovery OK\n";
     }
 
