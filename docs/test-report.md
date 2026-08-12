@@ -47,6 +47,7 @@
 - 新增外置 tablespace 事务快照回归：表移动到自定义 tablespace 后，在事务内移回默认目录并回滚，快照恢复 schema 与外置 heap 数据；同一场景覆盖全新引擎读取。
 - 新增 DDL 提交失败回归：延迟 CHECK 使 `StorageEngine::commitTransaction()` 失败时，`DdlTransaction` 返回失败、清理事务状态，并恢复已执行的物理 `ALTER TABLE` 快照，调用方不会输出成功结果。
 - DDL 隐式提交错误传播回归：`deferrable_test` 在延迟 CHECK 失败的显式事务中执行 `CREATE DATABASE`，确认隐式提交失败后 DDL 不继续执行、事务清理且目标数据库不存在。
+- DDL 隐式提交入口审计：规范执行器和 legacy DDL 分发共用失败即停止的提交守卫，避免兼容路径吞掉 `commitTransaction()` 错误。
 - 新增事务资源生命周期回归：普通 COMMIT/ROLLBACK 不会遗留整库快照；DDL 快照在 COMMIT/ROLLBACK 后清理；前一事务的 deferred CHECK 导致隐式提交失败时，后续 `BEGIN` 返回错误且不会开启新事务。
 - 新增 DDL 快照并发回归：文件级 DDL 快照使用事务 ID 独立命名，并持有数据库级排他锁；另一 backend 在快照事务结束前阻塞，避免物理恢复覆盖并发提交。
 - 新增 DDL 快照重启回归：模拟未完成的 `.txn_backup.<xid>`，新 `StorageEngine` 按无 COMMIT 证据恢复 DDL 前的 schema 并清理快照目录。

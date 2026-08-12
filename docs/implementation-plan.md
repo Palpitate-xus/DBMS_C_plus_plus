@@ -7,6 +7,8 @@
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
+2026-08-12 增量审计：规范 DDL 执行器与 `main.cpp` legacy 兼容分发统一使用隐式提交失败守卫；提交失败会输出 SQLSTATE 并停止后续 DDL，避免不同入口产生不一致的成功结果。
+
 2026-08-11 增量审计：`LockManager` 修复 row/page 等待路径的资源生命周期、按线程锁 token 归属、表锁重入与共享锁升级，并在等待期间持续检测 wait-for graph；新增双线程死锁、重入/升级和 row token 竞争回归。完整 PostgreSQL 锁模式矩阵、页/索引 predicate lock 和 wait events 仍待后续。
 
 2026-08-11 增量审计：锁管理器 bool API 全部启用 `[[nodiscard]]`，存储层调用方不再忽略锁超时/死锁结果；DDL、DML、索引、扫描、TOAST、JOIN、聚合和 VACUUM 显式传播失败，双表 rename 使用 canonical lock order，并新增真实锁冲突传播回归。

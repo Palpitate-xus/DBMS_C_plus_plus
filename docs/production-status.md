@@ -23,7 +23,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 - schema、sequence、trigger 读取路径只接受当前格式；旧格式回退和截断文件的部分解析已删除，损坏元数据 fail-closed，不会按默认值继续写入。
 - `CREATE TABLE` 的 schema、heap/partition、TOAST、主键/唯一索引和 `tlist.lst` 初始化现在检查失败并清理已写入的半成品；索引元数据写入失败不会遗留锁或缓存指针。
 - DDL executor 在物理表创建成功后立即登记事务回滚记录；约束 metadata、EXCLUDE 或后续 catalog 步骤失败时不会留下已发布的表对象。`ALTER TABLE` 现在在 DDL 事务中使用当前格式整库快照，后续子命令失败会恢复 schema、参数、索引、TOAST、catalog 和关系文件；事务快照同时包含外置 tablespace 的数据库子目录，并正确排除 UNLOGGED 关系的物理文件；完整 DROP/ALTER 跨对象依赖 undo 仍待补齐。
-- DDL 的隐式提交现在检查并传播 `commitTransaction()` 失败；WAL/CLOG/fsync、延迟约束或 SSI 提交失败时不会继续执行后续 DDL，也不会输出伪成功。`deferrable_test` 覆盖延迟 CHECK 阻断 `CREATE DATABASE` 隐式提交的路径。
+- DDL 的规范执行器和 legacy 兼容分发现在都检查并传播 `commitTransaction()` 失败；WAL/CLOG/fsync、延迟约束或 SSI 提交失败时不会继续执行后续 DDL，也不会输出伪成功。`deferrable_test` 覆盖延迟 CHECK 阻断 `CREATE DATABASE` 隐式提交的路径；legacy DDL 共用同一提交守卫。
 - DDL 包装事务现在检查 `StorageEngine::commitTransaction()` 的最终状态；延迟约束或 SSI 导致提交失败时会向执行器传播失败，不再输出伪成功，并在本事务拥有物理快照时恢复 DDL 改动。文件级 DDL 回滚只在显式启用时创建 `<db>.txn_backup.<xid>`，普通事务不再复制整库；快照事务持有数据库级排他锁，避免物理恢复覆盖并发提交。跨对象依赖 undo、全部 PostgreSQL 隐式提交边界仍待补齐。
 - 事务快照恢复已接入启动恢复：重启扫描 WAL 的提交证据，已提交快照直接清理，未完成快照恢复到 DDL 前状态，PREPARE TRANSACTION 的快照保留到 COMMIT/ROLLBACK PREPARED；快照恢复失败会保留现场供后续诊断，不伪报成功。
 - WAL 提交路径已收紧：`XLogFlush()` 返回并传播 segment `fsync` 失败；事务先成功写入并刷盘 COMMIT WAL 记录，再发布 CLOG committed 状态，WAL 不可用时 fail-closed 回滚，避免崩溃恢复缺少提交证据。CLOG 段现在通过临时文件原子替换、段文件 `fsync` 和 `pg_xact` 目录 `fsync` 持久化，写入失败保留 dirty 状态供重试；文件锁和按位合并避免独立 backend 的整段缓存互相覆盖，已打开的读缓存会按文件时间戳刷新；CLOG 截断在保存或目录 `fsync` 失败时保留段，不会先删后报错。

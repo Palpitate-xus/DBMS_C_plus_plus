@@ -1035,6 +1035,22 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
     return false;
 }
 
+// Legacy DDL dispatch still handles a small set of compatibility statements
+// that are not routed through DdlExecutor. Keep its implicit-commit contract
+// identical to the typed DDL path: a failed commit must abort the statement.
+static bool commitBeforeLegacyDdl() {
+    if (!g_engine.inTransaction()) return true;
+
+    const DBStatus status = g_engine.commitTransaction();
+    if (status != DBStatus::OK) {
+        cout << "ERROR: implicit DDL commit failed (SQLSTATE "
+             << dbms::sqlstateForDBStatus(status) << ")" << endl;
+        return false;
+    }
+    cout << "Note: DDL caused implicit commit of open transaction" << endl;
+    return true;
+}
+
 static bool handleCommitTransaction(const string& sql, Session& s) {
     (void)sql;
     auto res = g_engine.commitTransaction();
@@ -9294,10 +9310,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
         if (sql.substr(7, 8) == "database") {
             if (!checkAdmin(s)) return true;
-            if (g_engine.inTransaction()) {
-                g_engine.commitTransaction();
-                cout << "Note: DDL caused implicit commit of open transaction" << endl;
-            }
+            if (!commitBeforeLegacyDdl()) return true;
             string rest = trim(sql.substr(16));
             string dbname = rest;
             string charset = "utf8";
@@ -9337,10 +9350,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
             // DDL implicitly commits any open transaction (PostgreSQL behavior)
-            if (g_engine.inTransaction()) {
-                g_engine.commitTransaction();
-                cout << "Note: DDL caused implicit commit of open transaction" << endl;
-            }
+            if (!commitBeforeLegacyDdl()) return true;
             size_t restOff = tableKeywordPos + 6;
             string rest = trim(sql.substr(restOff));
             // Determine table name end: stop at first '(', " as ", or space
@@ -11432,10 +11442,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
     if (sql.substr(0, 4) == "drop") {
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
-        if (g_engine.inTransaction()) {
-            g_engine.commitTransaction();
-            cout << "Note: DDL caused implicit commit of open transaction" << endl;
-        }
+        if (!commitBeforeLegacyDdl()) return true;
         vector<string> tokens = tokenize(sql.substr(4));
         if (tokens.size() < 2) {
             cout << "SQL syntax error" << endl;
