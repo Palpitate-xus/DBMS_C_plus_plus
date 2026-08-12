@@ -37,7 +37,14 @@ struct ProcessInfo {
 // Protocol: PostgreSQL Frontend/Backend protocol 3.0. The server handles
 // SSLRequest negotiation, startup/authentication, simple Query messages and
 // the Parse/Bind/Execute/Sync extended-query flow.
-void startServer(int port, bool allowPlaintext = false);
+// Blocks until SIGINT/SIGTERM or requestServerShutdown() is received. Returns
+// false when startup or the accept loop fails, so callers can fail closed.
+bool startServer(int port, bool allowPlaintext = false);
+
+// Request a graceful server shutdown. The listening socket and active client
+// sockets are interrupted, then startServer() joins all connection workers.
+void requestServerShutdown();
+bool serverShutdownRequested();
 
 // Transport policy used by startup and unit tests. A server may listen only
 // when TLS is ready or plaintext was explicitly enabled.

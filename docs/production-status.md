@@ -2,7 +2,7 @@
 
 最后更新：2026-08-12
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，133 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=135 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，134 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=136 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
 复制管理器本轮完成线程安全收敛：复制槽查询改为返回受锁保护的值快照，standby、primary conninfo、同步复制和 slot active 状态统一受同一把锁保护；slot 名称/类型/plugin 组合在创建时校验，并提供显式激活/停用 API。新增并发回归覆盖状态写入、slot 生命周期和快照读取；这仍是进程内管理层，不代表已经具备 PostgreSQL 级真实 WAL sender/receiver、流复制或 PITR。
 
@@ -64,6 +64,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 - 修复 `DROP DATABASE` 未释放数据库级 page/index/TOAST/WAL/CLOG/catalog 缓存的问题；新增同名数据库重建回归测试，防止旧缓存迟写入新数据库。
 - CLOG 刷盘在数据库目录或 `pg_xact` 子目录已被删除时不会重建目录或把旧事务状态写入同名新数据库；段更新采用原子替换，避免截断写入留下半段状态文件。
 - 网络服务默认 fail-closed：证书/私钥缺失、OpenSSL 不可用或 TLS 初始化失败时拒绝启动；明文只能通过显式 `--insecure` 开启，且仅用于本地开发。
+- 网络服务生命周期已收紧：启动失败通过返回值传播，端口占用不会伪报成功；`SIGINT`/`SIGTERM` 和显式 shutdown 请求会停止监听、唤醒活动连接并 join 所有客户端 worker，不再永久 detached。`network_server_lifecycle_test` 覆盖端口冲突和优雅退出。
 - 删除运行时自动生成自签名证书的 shell 调用，避免私钥落盘位置和命令参数不可控；部署必须显式提供 TLS 材料。
 - 网络服务已切换到 PostgreSQL Frontend/Backend protocol 3.0 核心路径：支持 SSLRequest 协商、StartupMessage、catalog SCRAM-SHA-256、参数状态、简单 Query，以及 Parse/Bind/Execute/Sync 基础流程；协议回归由 `tests/postgres_protocol_test.py` 覆盖真实 SCRAM 握手。
 - legacy `execute()` 的协议结果捕获已改为线程局部 `process/OutputCapture` multiplexing；移除网络入口对全局 `std::cout` 缓冲区和 `g_outputCaptureMutex` 的依赖，协议会话不再因文本捕获而全局串行化，并有多线程无串扰回归。

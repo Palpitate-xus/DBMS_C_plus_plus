@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-12）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=135 FAIL=0（133 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-12）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=136 FAIL=0（134 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -37,6 +37,8 @@
 2026-08-12 增量审计：WAL 归档先同步源段，再用临时文件完整复制、文件/目录 `fsync` 和原子 rename 发布归档段；`.ready`/`.done` 状态采用原子发布并在同一 WAL 文件锁内更新，失败保留可重试状态；timeline 元数据初始化/切换也不再吞掉持久化错误。
 
 2026-08-12 增量审计：ReplicationManager 的复制槽查询改为锁内值快照，slot 定义在创建时校验，slot active 与 standby/conninfo/sync 状态统一加锁，并新增显式激活/停用 API；新增复制管理器并发回归。真实 WAL sender/receiver、逻辑解码、PITR 和端到端故障切换仍待实现。
+
+2026-08-12 增量审计：网络服务启动/accept 失败现在向主程序传播非零状态；SIGINT/SIGTERM 和显式 shutdown 请求会停止监听、关闭活动连接并 join 客户端 worker，新增端口冲突与优雅退出回归。连接池、TLS、认证和协议完整语义仍按 Phase 7 缺口推进。
 
 2026-08-12 文档清理：移除未引用且内容落后的根目录 `MANUAL.md`，`docs/MANUAL.md` 作为唯一完整使用手册；README、生产状态和测试报告均已同步入口。
 

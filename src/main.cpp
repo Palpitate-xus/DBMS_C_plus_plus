@@ -15385,8 +15385,7 @@ int main(int argc, char* argv[]) {
                 return 2;
             }
         }
-        dbms::startServer(port, allowPlaintext);
-        return 0;
+        return dbms::startServer(port, allowPlaintext) ? 0 : 1;
     }
 
     Session s;

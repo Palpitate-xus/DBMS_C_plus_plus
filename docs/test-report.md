@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-12
-> 自动测试套件基线：PASS=135 FAIL=0（133 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
+> 自动测试套件基线：PASS=136 FAIL=0（134 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -73,6 +73,7 @@
 - Docker 镜像构建：`docker build -t dbms-cpp:verification .` ✅（OpenSSL 真实 TLS）；Compose 配置检查 ✅。
 - CMake：当前验证环境未安装 `cmake`，配置/编译未执行。
 - 网络启动安全边界：无 TLS 证书/私钥时默认拒绝启动；明文仅由显式 `--insecure` 开关启用。
+- 网络服务生命周期回归：`tests/network_server_lifecycle_test.cpp` 验证端口占用时 `startServer()` 返回失败、显式 shutdown 停止监听并等待客户端 worker，活动连接槽位最终归零。
 - 网络连接容量回归：accept 路径原子预留 `maxConnections` 槽位，认证失败和 TLS 握手失败均释放槽位。
 - 网络输出并发回归：`tests/network_security_test.cpp` 并发创建 4 个线程局部输出捕获，每个线程写入 32 行并验证没有其他会话内容串入。
 - 角色 DDL 回归：`CREATE/ALTER/DROP ROLE`、`CREATE/ALTER/DROP USER` 统一走 Catalog/AST 路径，混合大小写密码通过真实验证。

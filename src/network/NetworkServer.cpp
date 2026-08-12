@@ -26,8 +26,12 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <poll.h>
 #include <random>
+#include <set>
+#include <signal.h>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -56,6 +60,56 @@ static std::map<uint64_t, ProcessInfo> g_processList;
 static uint64_t g_nextProcessId = 1;
 static std::mutex g_roleConnectionMutex;
 static std::unordered_map<std::string, int> g_roleConnections;
+static std::atomic<bool> g_serverStopRequested{false};
+static std::atomic<int> g_listenFd{-1};
+static std::mutex g_clientFdMutex;
+static std::set<int> g_clientFds;
+
+void registerClientFd(int fd) {
+    std::lock_guard<std::mutex> lock(g_clientFdMutex);
+    g_clientFds.insert(fd);
+}
+
+void unregisterClientFd(int fd) {
+    std::lock_guard<std::mutex> lock(g_clientFdMutex);
+    g_clientFds.erase(fd);
+}
+
+void shutdownActiveClients() {
+    std::lock_guard<std::mutex> lock(g_clientFdMutex);
+    for (const int fd : g_clientFds) {
+        ::shutdown(fd, SHUT_RDWR);
+    }
+}
+
+void serverSignalHandler(int) {
+    g_serverStopRequested.store(true, std::memory_order_relaxed);
+}
+
+struct ServerSignalGuard {
+    struct sigaction oldTerm{};
+    struct sigaction oldInt{};
+    bool installed = false;
+
+    bool install() {
+        struct sigaction action{};
+        action.sa_handler = serverSignalHandler;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = 0;
+        if (::sigaction(SIGTERM, &action, &oldTerm) != 0 ||
+            ::sigaction(SIGINT, &action, &oldInt) != 0) {
+            return false;
+        }
+        installed = true;
+        return true;
+    }
+
+    ~ServerSignalGuard() {
+        if (!installed) return;
+        ::sigaction(SIGTERM, &oldTerm, nullptr);
+        ::sigaction(SIGINT, &oldInt, nullptr);
+    }
+};
 
 ServerStats& getServerStats() {
     return g_stats;
@@ -1581,7 +1635,20 @@ std::string environmentOr(const char* name, const char* fallback) {
 
 } // namespace
 
-void startServer(int port, bool allowPlaintext) {
+void requestServerShutdown() {
+    g_serverStopRequested.store(true, std::memory_order_relaxed);
+    const int listenFd = g_listenFd.load(std::memory_order_relaxed);
+    if (listenFd >= 0) ::shutdown(listenFd, SHUT_RDWR);
+    shutdownActiveClients();
+}
+
+bool serverShutdownRequested() {
+    return g_serverStopRequested.load(std::memory_order_relaxed);
+}
+
+bool startServer(int port, bool allowPlaintext) {
+    g_serverStopRequested.store(false, std::memory_order_relaxed);
+
     // TLS is fail-closed. Certificate paths are deployment configuration, not
     // generated at runtime, so a fresh server cannot accidentally expose a
     // private key or downgrade an authenticated connection to plaintext.
@@ -1598,18 +1665,18 @@ void startServer(int port, bool allowPlaintext) {
         std::cerr << "TLS certificate/key not found (DBMS_TLS_CERT=" << certFile
                   << ", DBMS_TLS_KEY=" << keyFile
                   << "); refusing to start without --insecure" << std::endl;
-        return;
+        return false;
     }
 
     if (!isServerTransportAllowed(tlsCtx.enabled(), allowPlaintext)) {
         std::cerr << "TLS is unavailable; refusing to start without --insecure" << std::endl;
-        return;
+        return false;
     }
 
     int serverFd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (serverFd < 0) {
         std::cerr << "Failed to create socket" << std::endl;
-        return;
+        return false;
     }
 
     int opt = 1;
@@ -1623,14 +1690,22 @@ void startServer(int port, bool allowPlaintext) {
     if (::bind(serverFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "Failed to bind to port " << port << std::endl;
         ::close(serverFd);
-        return;
+        return false;
     }
 
     if (::listen(serverFd, 10) < 0) {
         std::cerr << "Failed to listen" << std::endl;
         ::close(serverFd);
-        return;
+        return false;
     }
+
+    ServerSignalGuard signalGuard;
+    if (!signalGuard.install()) {
+        std::cerr << "Failed to install server signal handlers" << std::endl;
+        ::close(serverFd);
+        return false;
+    }
+    g_listenFd.store(serverFd, std::memory_order_relaxed);
 
     std::cout << "DBMS server listening on port " << port;
     if (tlsCtx.enabled()) {
@@ -1640,11 +1715,46 @@ void startServer(int port, bool allowPlaintext) {
     }
     std::cout << std::endl;
 
-    while (true) {
+    struct Worker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    std::vector<std::unique_ptr<Worker>> workers;
+    auto reapWorkers = [&]() {
+        for (auto it = workers.begin(); it != workers.end();) {
+            if (!(*it)->done->load(std::memory_order_acquire)) {
+                ++it;
+                continue;
+            }
+            (*it)->thread.join();
+            it = workers.erase(it);
+        }
+    };
+
+    bool acceptLoopHealthy = true;
+    while (!serverShutdownRequested()) {
+        reapWorkers();
+        struct pollfd listenPoll{};
+        listenPoll.fd = serverFd;
+        listenPoll.events = POLLIN;
+        const int pollResult = ::poll(&listenPoll, 1, 250);
+        if (pollResult < 0) {
+            if (errno == EINTR) continue;
+            std::cerr << "Listen poll failed: " << std::strerror(errno) << std::endl;
+            acceptLoopHealthy = false;
+            break;
+        }
+        if (pollResult == 0 || serverShutdownRequested()) continue;
         sockaddr_in clientAddr{};
         socklen_t clientLen = sizeof(clientAddr);
         int clientFd = ::accept(serverFd, reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
-        if (clientFd < 0) continue;
+        if (clientFd < 0) {
+            if (serverShutdownRequested() || errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            std::cerr << "Accept failed: " << std::strerror(errno) << std::endl;
+            acceptLoopHealthy = false;
+            break;
+        }
 
         if (!tryReserveConnectionSlot()) {
             // Refuse immediately. A rejected connection must not consume a
@@ -1658,20 +1768,43 @@ void startServer(int port, bool allowPlaintext) {
         std::string clientHost = inet_ntoa(clientAddr.sin_addr);
         clientHost += ":" + std::to_string(ntohs(clientAddr.sin_port));
 
-        std::thread([clientFd, &tlsCtx, allowPlaintext, clientHost]() {
-            struct SlotGuard {
-                ~SlotGuard() { releaseConnectionSlot(); }
-            } slotGuard;
-            SecureSocket socket;
-            if (!establishClientTransport(clientFd, tlsCtx, allowPlaintext, socket)) {
-                std::cerr << "client transport negotiation failed" << std::endl;
-                return;
-            }
-            handleClient(std::move(socket), clientHost);
-        }).detach();
+        registerClientFd(clientFd);
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        try {
+            auto worker = std::make_unique<Worker>();
+            worker->done = done;
+            worker->thread = std::thread([clientFd, &tlsCtx, allowPlaintext, clientHost, done]() {
+                struct SlotGuard {
+                    ~SlotGuard() { releaseConnectionSlot(); }
+                } slotGuard;
+                SecureSocket socket;
+                if (!establishClientTransport(clientFd, tlsCtx, allowPlaintext, socket)) {
+                    if (socket.fd < 0) ::close(clientFd);
+                    std::cerr << "client transport negotiation failed" << std::endl;
+                } else {
+                    handleClient(std::move(socket), clientHost);
+                }
+                unregisterClientFd(clientFd);
+                done->store(true, std::memory_order_release);
+            });
+            workers.push_back(std::move(worker));
+        } catch (...) {
+            unregisterClientFd(clientFd);
+            ::shutdown(clientFd, SHUT_RDWR);
+            ::close(clientFd);
+            releaseConnectionSlot();
+            std::cerr << "Failed to create client worker" << std::endl;
+            acceptLoopHealthy = false;
+            requestServerShutdown();
+            break;
+        }
     }
 
+    g_listenFd.store(-1, std::memory_order_relaxed);
     ::close(serverFd);
+    shutdownActiveClients();
+    for (auto& worker : workers) worker->thread.join();
+    return acceptLoopHealthy;
 }
 
 } // namespace dbms
