@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-12（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线（2026-08-12）: PASS=137 FAIL=0（135 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend 锁注册表、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）
+> 测试基线（2026-08-12）: PASS=137 FAIL=0（135 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -164,7 +164,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 事务物理快照生命周期 | ✅ | ✅ | 仅文件级 DDL 显式创建按 xid 命名快照；快照事务持有数据库级排他锁，启动恢复按 WAL 提交状态清理或恢复 |
 | Checkpoint | ✅ | ✅ | checkpoint WAL/LSN 与已加载 heap/index 缓存刷盘失败会传播；活动事务期间不推进恢复起点；已归档且早于 checkpoint 的完整 WAL 段会回收；完整 restartpoint、节流和 PITR 仍缺 |
 | SAVEPOINT | ✅ | ✅ | ✅ |
-| 表级锁 (共享/排他) | ✅ | ✅ | ✅ |
+| 表级锁 (共享/排他) | ✅ | ✅ | ✅（进程内注册表 + 跨进程 `flock` 表级协调） |
 | **行级锁** | ✅ | ✅ | ✅ (rowLockShared/Exclusive + NOWAIT) |
 | **Deadlock detection** | ✅ | ✅ | ✅ (wait-for graph + cycle detection + log) |
 | **Gap locks / predicate locks** | ✅ | ⚠️ | 有简化 gap lock、heap page SIREAD 和空范围关系级兜底；缺真正索引范围 predicate lock |

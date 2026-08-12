@@ -1,12 +1,22 @@
 #include "LockManager.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <fcntl.h>
+#include <filesystem>
+#include <sys/file.h>
+#include <unistd.h>
 
 namespace dbms {
 
 LockManager& LockManager::global() {
     static LockManager manager;
     return manager;
+}
+
+LockManager::~LockManager() {
+    std::lock_guard<std::mutex> guard(globalMutex_);
+    for (auto& entry : locks_) releaseProcessLock(entry.second);
 }
 
 LockManager::ThreadSettings& LockManager::threadSettings() const {
@@ -25,6 +35,70 @@ std::string LockManager::resourceKey(const std::string& resource) const {
 
 std::string LockManager::rowResourceKey(const std::string& table, int64_t rid) const {
     return resourceKey(table + ":" + std::to_string(rid));
+}
+
+std::string LockManager::processLockPath(const std::string& table) const {
+    const std::string& dbname = threadSettings().resourceNamespace;
+    if (dbname.empty()) return {};
+    std::filesystem::path path(dbname);
+    path /= ".lockmgr";
+    // Resource names can originate from SQL or from the low-level API. Encode
+    // every byte so a name can never escape the lock directory or collide with
+    // a different path spelling (for example, "a/b" versus "a_b").
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string encoded = "tbl-";
+    encoded.reserve(table.size() * 2 + 4);
+    for (const unsigned char byte : table) {
+        encoded.push_back(hex[byte >> 4]);
+        encoded.push_back(hex[byte & 0x0f]);
+    }
+    path /= encoded + ".lock";
+    return path.string();
+}
+
+LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
+    LockState& state, const std::string& table, LockMode mode) {
+    const bool exclusive = mode != LockMode::Shared && mode != LockMode::IntentShared;
+    if (state.processLockFd >= 0) {
+        if (state.processLockMode == LockMode::Shared && exclusive) {
+            if (!state.holders.empty()) return ProcessLockResult::Busy;
+            if (::flock(state.processLockFd, LOCK_EX | LOCK_NB) != 0) {
+                if (errno == EWOULDBLOCK || errno == EAGAIN) return ProcessLockResult::Busy;
+                return ProcessLockResult::Error;
+            }
+            state.processLockMode = LockMode::Exclusive;
+        }
+        return ProcessLockResult::Acquired;
+    }
+
+    const std::string path = processLockPath(table);
+    if (path.empty()) return ProcessLockResult::Acquired;
+    std::error_code ec;
+    const auto databasePath = std::filesystem::path(path).parent_path().parent_path();
+    if (!std::filesystem::is_directory(databasePath, ec) || ec) {
+        return ProcessLockResult::Error;
+    }
+    ec.clear();
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    if (ec) return ProcessLockResult::Error;
+    const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) return ProcessLockResult::Error;
+    const int operation = exclusive ? LOCK_EX : LOCK_SH;
+    if (::flock(fd, operation | LOCK_NB) != 0) {
+        const bool busy = errno == EWOULDBLOCK || errno == EAGAIN;
+        ::close(fd);
+        return busy ? ProcessLockResult::Busy : ProcessLockResult::Error;
+    }
+    state.processLockFd = fd;
+    state.processLockMode = exclusive ? LockMode::Exclusive : LockMode::Shared;
+    return ProcessLockResult::Acquired;
+}
+
+void LockManager::releaseProcessLock(LockState& state) {
+    if (state.processLockFd < 0) return;
+    (void)::flock(state.processLockFd, LOCK_UN);
+    ::close(state.processLockFd);
+    state.processLockFd = -1;
 }
 
 // ========================================================================
@@ -266,17 +340,31 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                 // physical token before waiting for the stronger mode so it
                 // cannot wait on itself.
                 releasePhysical(state);
+                if (state.holders.empty()) releaseProcessLock(state);
             }
 
             if (inspect(state)) {
-                acquirePhysical(state);
-                return true;
+                const auto processResult = tryAcquireProcessLock(state, table, mode);
+                if (processResult == ProcessLockResult::Acquired) {
+                    acquirePhysical(state);
+                    return true;
+                }
+                if (processResult == ProcessLockResult::Error) {
+                    removeWaitEdges(self);
+                    if (state.holders.empty()) releaseProcessLock(state);
+                    return false;
+                }
             }
             cycle = std::chrono::steady_clock::now() >= deadlockCheckAt &&
                     hasCycle(self);
         }
         if (cycle) {
             removeWaitEdges(self);
+            std::lock_guard<std::mutex> guard(globalMutex_);
+            auto it = locks_.find(resourceKey(table));
+            if (it != locks_.end() && it->second.holders.empty()) {
+                releaseProcessLock(it->second);
+            }
             return false;
         }
 
@@ -285,6 +373,11 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                 std::chrono::steady_clock::now() - waitStart).count();
             if (elapsed >= threadSettings().lockTimeoutMs) {
                 removeWaitEdges(self);
+                std::lock_guard<std::mutex> guard(globalMutex_);
+                auto it = locks_.find(resourceKey(table));
+                if (it != locks_.end() && it->second.holders.empty()) {
+                    releaseProcessLock(it->second);
+                }
                 return false;
             }
         }
@@ -357,6 +450,7 @@ void LockManager::unlock(const std::string& table) {
                         state.holders.end());
     state.holderModes.erase(modeIt);
     state.holderCounts.erase(countIt);
+    if (state.holders.empty()) releaseProcessLock(state);
 }
 
 void LockManager::unlockAll() {
@@ -394,6 +488,7 @@ void LockManager::unlockAll() {
                 state.holderCounts.erase(self);
                 state.holders.erase(std::remove(state.holders.begin(), state.holders.end(), self),
                                     state.holders.end());
+                if (state.holders.empty()) releaseProcessLock(state);
             }
         }
     }

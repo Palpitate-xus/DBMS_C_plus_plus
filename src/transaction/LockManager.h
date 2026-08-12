@@ -21,7 +21,7 @@ class LockManager {
 public:
     enum class LockMode { Shared, Exclusive, IntentShared, IntentExclusive, Metadata };
 
-    ~LockManager() = default;
+    ~LockManager();
 
     // StorageEngine backends in one process coordinate through one registry.
     // Standalone instances remain available for isolated low-level users.
@@ -116,6 +116,8 @@ public:
     void pageUnlockAll() const;
 
 private:
+    enum class ProcessLockResult { Acquired, Busy, Error };
+
     struct ThreadSettings {
         std::string resourceNamespace;
         int lockTimeoutMs = 0;
@@ -138,6 +140,11 @@ private:
         // Prevent row/page lock entries from being erased while a waiter
         // still owns a pointer to the state outside the registry mutex.
         size_t waiters = 0;
+        // One process-wide advisory lock protects all local holders of this
+        // resource. It is acquired on first local ownership and released
+        // after the last local token leaves the state.
+        int processLockFd = -1;
+        LockMode processLockMode = LockMode::Shared;
     };
     std::map<std::string, LockState> locks_;
     mutable std::mutex globalMutex_;
@@ -182,6 +189,11 @@ private:
     std::string resourceKey(const std::string& resource) const;
     std::string rowResourceKey(const std::string& table, int64_t rid) const;
     ThreadSettings& threadSettings() const;
+    ProcessLockResult tryAcquireProcessLock(LockState& state,
+                                             const std::string& table,
+                                             LockMode mode);
+    void releaseProcessLock(LockState& state);
+    std::string processLockPath(const std::string& table) const;
 
     // Record that 'waiter' is waiting for 'holder'
     void addWaitEdge(std::thread::id waiter, std::thread::id holder);

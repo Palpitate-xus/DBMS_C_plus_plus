@@ -10,6 +10,8 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <sys/wait.h>
+#include <unistd.h>
 
 int main() {
     const std::string dbA = testDbPath("cross_backend_lock_a");
@@ -113,6 +115,38 @@ int main() {
     configured.join();
     unconfigured.join();
     assert(waitedAndAcquired.load());
+
+    // A separately forked process must observe the same database-scoped
+    // advisory lock, and can acquire it after the parent releases it.
+    first.getLockManager().setResourceNamespace(dbA);
+    assert(first.getLockManager().lockExclusive("items"));
+    pid_t child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        dbms::LockManager childManager;
+        childManager.setResourceNamespace(dbA);
+        childManager.setLockTimeout(75);
+        const bool acquired = childManager.lockShared("items");
+        ::_exit(acquired ? 1 : 0);
+    }
+    int childStatus = 0;
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
+    first.getLockManager().unlock("items");
+
+    child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        dbms::LockManager childManager;
+        childManager.setResourceNamespace(dbA);
+        childManager.setLockTimeout(500);
+        const bool acquired = childManager.lockExclusive("items");
+        if (acquired) childManager.unlock("items");
+        ::_exit(acquired ? 0 : 1);
+    }
+    childStatus = 0;
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
 
     cleanupTestDb("cross_backend_lock_a");
     cleanupTestDb("cross_backend_lock_b");

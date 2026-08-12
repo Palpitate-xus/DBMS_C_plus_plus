@@ -19742,6 +19742,9 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
             std::filesystem::create_directories(dst);
         }
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
+            // Advisory lock files are runtime coordination state, not database
+            // contents. Never copy them into a backup snapshot.
+            if (entry.path().filename() == ".lockmgr") continue;
             auto destPath = dst / entry.path().filename();
             if (entry.is_directory()) {
                 std::filesystem::copy(entry.path(), destPath,
@@ -19829,6 +19832,7 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
         std::filesystem::create_directories(dst);
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
             if (entry.path().filename() == kPhysicalBackupMarker) continue;
+            if (entry.path().filename() == ".lockmgr") continue;
             auto destPath = dst / entry.path().filename();
             if (entry.is_directory() && entry.path().filename() == "wal_archive") {
                 // Skip wal_archive in root, restore it separately
