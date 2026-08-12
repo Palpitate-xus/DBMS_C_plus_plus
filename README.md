@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-12）**: 生产化重构进行中；统一回归基线 PASS=134 FAIL=0（132 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
+> **当前状态（2026-08-12）**: 生产化重构进行中；统一回归基线 PASS=135 FAIL=0（133 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
 
 ## 功能特性
 
@@ -193,7 +193,7 @@ select * from users where id = 10;  -- 现在能看到
   `<location>/<database>/`，`SET TABLESPACE` 会迁移 heap、fork、索引、分区和 TOAST
   文件；重启时不会静默回退到默认目录。
 - **COMMIT/ROLLBACK AND [NO] CHAIN**
-- **复制管理**: ReplicationManager (slots, standby, sync, promote)
+- **复制管理**: ReplicationManager（slot 快照、定义校验、激活/停用、standby、sync、promote；真实流复制/PITR 仍未完成）
 - **大对象**: LargeObjectManager (CRUD + import/export)
 - **多进程后端**: ProcessManager (10 种后端类型)
 - **扩展生态框架**: EXTENSION, FDW, PL, custom types/operators
@@ -653,7 +653,7 @@ Var Offset Array 每项 (4 bytes):
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与历史 Wave 记录（当前状态以 Gap 表为准） |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=134 FAIL=0） |
+| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=135 FAIL=0） |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 

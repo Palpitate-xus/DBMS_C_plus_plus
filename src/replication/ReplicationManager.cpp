@@ -1,7 +1,7 @@
 #include "ReplicationManager.h"
 
 #include <algorithm>
-#include <filesystem>
+#include <cctype>
 
 namespace dbms {
 
@@ -10,10 +10,22 @@ ReplicationManager& ReplicationManager::instance() {
     return mgr;
 }
 
+bool ReplicationManager::validSlotDefinition(const std::string& name,
+                                             const std::string& type,
+                                             const std::string& plugin) {
+    if (name.empty() || name.size() > 63) return false;
+    for (unsigned char c : name) {
+        if (!(std::isalnum(c) || c == '_' || c == '-')) return false;
+    }
+    if (type != "physical" && type != "logical") return false;
+    return type == "physical" ? plugin.empty() : !plugin.empty();
+}
+
 bool ReplicationManager::createReplicationSlot(const std::string& name,
                                                const std::string& type,
                                                const std::string& plugin) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!validSlotDefinition(name, type, plugin)) return false;
     if (slots_.count(name)) return false;
     ReplicationSlot slot;
     slot.name = name;
@@ -33,11 +45,28 @@ bool ReplicationManager::dropReplicationSlot(const std::string& name) {
     return true;
 }
 
-ReplicationManager::ReplicationSlot* ReplicationManager::findSlot(const std::string& name) {
+std::optional<ReplicationManager::ReplicationSlot>
+ReplicationManager::findSlot(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = slots_.find(name);
-    if (it != slots_.end()) return &it->second;
-    return nullptr;
+    if (it == slots_.end()) return std::nullopt;
+    return it->second;
+}
+
+bool ReplicationManager::activateReplicationSlot(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = slots_.find(name);
+    if (it == slots_.end() || it->second.active) return false;
+    it->second.active = true;
+    return true;
+}
+
+bool ReplicationManager::deactivateReplicationSlot(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = slots_.find(name);
+    if (it == slots_.end() || !it->second.active) return false;
+    it->second.active = false;
+    return true;
 }
 
 std::vector<ReplicationManager::ReplicationSlot> ReplicationManager::listSlots() const {
@@ -54,6 +83,41 @@ bool ReplicationManager::promote() {
     if (standbyMode_ == StandbyMode::None) return false;
     standbyMode_ = StandbyMode::None;  // No longer a standby = promoted
     return true;
+}
+
+void ReplicationManager::setStandbyMode(StandbyMode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    standbyMode_ = mode;
+}
+
+ReplicationManager::StandbyMode ReplicationManager::standbyMode() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return standbyMode_;
+}
+
+void ReplicationManager::setPrimaryConnInfo(const std::string& conninfo) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    primaryConnInfo_ = conninfo;
+}
+
+std::string ReplicationManager::primaryConnInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return primaryConnInfo_;
+}
+
+void ReplicationManager::setSyncReplication(bool on) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    syncReplication_ = on;
+}
+
+bool ReplicationManager::syncReplication() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return syncReplication_;
+}
+
+bool ReplicationManager::isActiveStandby() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return standbyMode_ != StandbyMode::None;
 }
 
 } // namespace dbms

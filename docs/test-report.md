@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-12
-> 自动测试套件基线：PASS=134 FAIL=0（132 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
+> 自动测试套件基线：PASS=135 FAIL=0（133 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 ---
@@ -21,6 +21,7 @@
 - TOAST 回归：`tests/toast_test.cpp` 验证大值插入/更新/删除、zlib 压缩后的物理体积和解压读取。
 - 事务回滚回归：`tests/concurrency_test.cpp` 验证 INSERT、UPDATE、DELETE 的普通 `ROLLBACK` 与 `ROLLBACK TO SAVEPOINT` 一致恢复主键、单列二级、复合、Hash 索引和 TOAST；DELETE savepoint 回滚后在同一事务提交仍可读，UPDATE/DELETE 场景在新 `StorageEngine` 重启后再次校验堆、Hash 与大字段内容。
 - 锁管理器并发回归：`tests/lock_manager_concurrency_test.cpp` 使用真实双线程验证等待图死锁只释放一个受害者、表锁重入与共享锁升级、row/page token 归属、等待期间资源生命周期和批量清理；重复运行 10 次通过。
+- 复制管理器并发回归：`tests/replication_concurrency_test.cpp` 验证复制槽激活/停用、值快照读取、standby/conninfo/sync 状态并发写入及 slot 生命周期；复制槽定义校验和 active slot 禁止删除也有覆盖。
 - 锁失败传播回归：`tests/lock_failure_propagation_test.cpp` 持有真实表级排他锁并在另一线程执行建索引，验证调用方收到 `LOCK_CONFLICT`、等待图清理且不会继续发布索引。
 - DDL 辅助对象回滚回归：`ddl_transaction_skeleton_test` 验证失败时撤销 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；collation 最后一个条目删除后物理文件也会清理。
 - DDL 外层事务回归：`ddl_transaction_skeleton_test` 验证多个 CREATE 跨语句由外层 `ROLLBACK` 逆序撤销，并验证 `ROLLBACK TO SAVEPOINT` 只撤销保存点后的 CREATE；含该内存 undo 队列的事务会拒绝 `PREPARE TRANSACTION`。
@@ -947,7 +948,7 @@ heap、FSM/VM、索引、分区和 TOAST 文件位于 `<LOCATION>/<DATABASE>/`�
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景、132 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过；分组 Volcano 单元与主 SQL 手工回归也通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景、133 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过；分组 Volcano 单元与主 SQL 手工回归也通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）

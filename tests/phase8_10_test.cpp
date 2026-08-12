@@ -13,9 +13,9 @@
 // === Phase 8: ReplicationManager ===
 static void test_streaming_replication() {
     auto& repl = dbms::ReplicationManager::instance();
-    repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::HotStandy);
+    repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::HotStandby);
     assert(repl.isActiveStandby());
-    assert(repl.standbyMode() == dbms::ReplicationManager::StandbyMode::HotStandy);
+    assert(repl.standbyMode() == dbms::ReplicationManager::StandbyMode::HotStandby);
     repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::None);
     assert(!repl.isActiveStandby());
     std::cout << "[P8] streaming replication OK" << std::endl;
@@ -42,21 +42,21 @@ static void test_replication_slots() {
     assert(repl.createReplicationSlot("test_slot", "physical"));
     assert(repl.createReplicationSlot("log_slot", "logical", "test_decoding"));
 
-    auto* s = repl.findSlot("test_slot");
-    assert(s != nullptr);
+    auto s = repl.findSlot("test_slot");
+    assert(s.has_value());
     assert(s->slotType == "physical");
 
     auto slots = repl.listSlots();
     assert(slots.size() == 2);
 
     assert(repl.dropReplicationSlot("test_slot"));
-    assert(repl.findSlot("test_slot") == nullptr);
+    assert(!repl.findSlot("test_slot").has_value());
     std::cout << "[P8] replication slots OK" << std::endl;
 }
 
 static void test_promote() {
     auto& repl = dbms::ReplicationManager::instance();
-    repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::HotStandy);
+    repl.setStandbyMode(dbms::ReplicationManager::StandbyMode::HotStandby);
     assert(repl.promote());
     assert(repl.standbyMode() == dbms::ReplicationManager::StandbyMode::None);
     std::cout << "[P8] failover promote OK" << std::endl;

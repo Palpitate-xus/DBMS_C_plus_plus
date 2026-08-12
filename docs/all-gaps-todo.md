@@ -5,11 +5,13 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态（2026-08-12）**：统一回归基线 PASS=134 FAIL=0（132 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-12）**：统一回归基线 PASS=135 FAIL=0（133 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
 2026-08-12 增量审计：WAL 归档先同步源段，再用临时文件完整复制、文件/目录 `fsync` 和原子 rename 发布归档段；`.ready`/`.done` 状态采用原子发布并在同一 WAL 文件锁内更新，失败保留可重试状态；timeline 元数据初始化/切换也不再吞掉持久化错误。
+
+2026-08-12 增量审计：ReplicationManager 的复制槽查询改为锁内值快照，slot 定义在创建时校验，slot active 与 standby/conninfo/sync 状态统一加锁，并新增显式激活/停用 API；新增复制管理器并发回归。真实 WAL sender/receiver、逻辑解码、PITR 和端到端故障切换仍待实现。
 
 2026-08-11 增量审计：`DdlTransaction` 的 CREATE undo 已注册到外层事务上下文；DROP/REPLACE 和文件级 DDL 在变更前建立快照，外层 `ROLLBACK` 先恢复快照再按事务日志撤销行变更，快照污染后的另一条快照型 DDL、SAVEPOINT 创建/回滚会 fail-closed。含内存闭包式 DDL undo 的事务暂不进入 `PREPARE TRANSACTION`；完整依赖图 undo 和全部 PostgreSQL 隐式提交边界仍待实现。
 
@@ -26,6 +28,7 @@
 | 日期 | 摘要 |
 |------|------|
 | 2026-08-11 | Catalog 持久化安全补强：系统 catalog 改用临时文件 + 文件/目录 `fsync` + 原子替换，`CatalogManager`/`CatalogService` 返回持久化结果；checkpoint、事务快照和关键 DDL 路径失败时 fail-closed，新增 `catalog_persistence_failure_test`。 |
+| 2026-08-12 | ReplicationManager 状态安全补强：slot 查询改为锁内值快照，创建时校验名称/类型/plugin，active/standby/conninfo/sync 状态统一加锁，新增激活/停用 API 和 `replication_concurrency_test`；真实流复制/PITR 仍待实现。 |
 | 2026-08-12 | WAL 归档安全补强：源段先 `fsync`，归档文件通过临时文件完整复制、文件/目录 `fsync` 和原子 rename 发布；`.ready`/`.done` 在 WAL 文件锁内原子更新，归档失败保留可重试状态；timeline 元数据持久化失败向上返回；新增 `wal_archive_failure_test`。 |
 | 2026-08-11 | WAL 生命周期补强：checkpoint 归档成功后只在同一 WAL 文件锁内回收早于 checkpoint 的完整段；未归档段保留，恢复从最早保留段扫描，重复 checkpoint 不会为已删除段重建 archive marker；新增 `wal_truncate_test`。 |
 | 2026-08-11 | CLOG 跨 backend 一致性补强：段保存使用 `.clog.lock` 文件锁和 pending bit 合并，避免独立 backend 的陈旧整段缓存互相覆盖；读端检测文件替换并刷新缓存，`clog_test` 新增 merge/refresh 回归。 |
@@ -242,7 +245,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=134 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=135 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 
@@ -263,7 +266,7 @@
 | 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI 已有行级/页级写偏差检测与空范围关系级 SIREAD，索引范围粒度及完整子事务仍 ❌ |
 | 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
 | 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；运行时 pg_hba、SCRAM 和基础 wire protocol 已接入，完整 ACL、channel binding 和协议语义仍待完善 |
-| 复制/HA | 0 | WAL archive 1 项 | 全部 ❌ | `src/replication/` 仅有 README；流复制/逻辑复制/PITR 全缺 |
+| 复制/HA | 复制槽/standby/promote 管理层 | WAL archive、slot 状态与配置框架 | 真实流复制/逻辑解码/PITR ❌ | `ReplicationManager` 已具备线程安全值快照、slot 定义校验和生命周期 API；尚未接入 WAL sender/receiver |
 | 监控/诊断 | 子集 | 子集 | 大量 ❌ | RuntimeStats 已接入 pg_stat_database/pg_stat_tables/pg_stat_activity/locks/statements 风格子集；pg_stat_io/wait events 缺 |
 | 扩展/生态 | 0 | 0 | 全部 ❌ | EXTENSION/FDW/PL 全缺；event trigger/rule 仅 parser classify stub |
 
@@ -553,22 +556,22 @@
 
 ## 12. 复制、高可用、备份恢复差距
 
-> **已完成进展（2026-06-21）**：`src/replication/` 仅有 README，流复制/逻辑复制/PITR/复制槽/发布订阅全 ❌（Phase 8）。唯一有进展的是 12.8：WAL 已支持 timeline + `archive_status`(.ready/.done) + `archivePendingSegments()`（Phase 3.6），但连续归档/recovery.signal/PITR 仍 ❌。
+> **当前进展（2026-08-12）**：`ReplicationManager` 已提供线程安全的复制槽值快照、名称/类型/plugin 校验、激活/停用和 standby/sync/primary conninfo 状态管理，并通过并发回归验证；WAL 归档具备 `.ready`/`.done` 原子状态和失败重试保护。真实 WAL sender/receiver、逻辑解码、发布订阅运行时、连续归档、recovery.signal 和 PITR 仍未完成。
 
 | # | PostgreSQL 能力 | 差距描述 | 状态 |
 |---|----------------|---------|------|
-| 12.1 | Physical streaming replication | 缺失 | ❌ |
-| 12.2 | Standby/hot standby/read-only replica | 缺失 | ❌ |
-| 12.3 | Replication slots | 缺失 | ❌ |
-| 12.4 | Synchronous replication | 缺失 | ❌ |
-| 12.5 | Cascading replication | 缺失 | ❌ |
-| 12.6 | Logical decoding | 缺失 | ❌ |
-| 12.7 | Publication/subscription | 缺失 | ❌ |
+| 12.1 | Physical streaming replication | 有 ReplicationManager/WAL shipping 配置框架，无 WAL sender/receiver 和端到端复制 | ⚠️ |
+| 12.2 | Standby/hot standby/read-only replica | 有 standby 状态与 promote 管理 API，无恢复应用器和只读执行边界 | ⚠️ |
+| 12.3 | Replication slots | 有物理/逻辑 slot 的定义校验、线程安全快照、激活/停用/删除保护；未接入 WAL 保留和持久化 | ⚠️ |
+| 12.4 | Synchronous replication | 有进程内开关配置，无同步确认/quorum 语义 | ⚠️ |
+| 12.5 | Cascading replication | 有 slot/config 框架，无级联 WAL 转发 | ⚠️ |
+| 12.6 | Logical decoding | 有 logical slot/plugin 字段，无 WAL 解码器和输出插件 | ❌ |
+| 12.7 | Publication/subscription | 有 AST/框架记录，无复制 worker 和变更传输运行时 | ❌ |
 | 12.8 | WAL shipping/archive recovery | 有 WAL archive 目录函数，但无连续归档/PITR/timeline/recovery.signal | ⚠️ |
 | 12.9 | pg_basebackup | 缺失 | ❌ |
 | 12.10 | Incremental backup / pg_combinebackup | 缺失 | ❌ |
 | 12.11 | SQL dump/restore | 有 `DUMP DATABASE` / `RESTORE DATABASE` 简化；不是 `pg_dump/pg_restore` 格式和对象依赖顺序 | ⚠️ |
-| 12.12 | Failover/promote | 缺失 | ❌ |
+| 12.12 | Failover/promote | 有进程内 `promote()` 状态切换，无真实故障检测、timeline 切换和复制一致性证明 | ⚠️ |
 
 ---
 
@@ -678,9 +681,9 @@
 - 支持 PostgreSQL wire protocol、libpq — **核心已启动，完整兼容性未完成**
 - 实现 pg_hba.conf、SCRAM-SHA-256 — **基础运行时决策、SCRAM、角色/数据库组匹配已实现；完整认证方法未完成**
 
-### Phase 7：复制/PITR ❌ 未启动
-- 在 WAL 稳定后实现 streaming replication、logical decoding、PITR — **未启动**
-- 实现复制槽、发布订阅、级联复制 — **未启动**
+### Phase 8：复制/PITR 🔄 框架已接入
+- ReplicationManager 已覆盖 slot/standby/sync/promote 的线程安全管理层；真实 streaming replication、logical decoding、PITR — **待实现**
+- 复制槽、发布订阅、级联复制目前仅有定义/配置框架，缺少 WAL 传输、复制 worker 和故障恢复运行时 — **待实现**
 
 ### Phase 8：扩展/FDW/PL ❌ 未启动
 - 实现扩展加载框架、过程语言和外部表生态 — **未启动**
