@@ -53,9 +53,9 @@ int main() {
         gateCv.wait(lock, [&] { return held; });
     }
 
-    second.getLockManager().setLockTimeout(50);
     std::thread waiter([&] {
         second.getLockManager().setResourceNamespace(dbA);
+        second.getLockManager().setLockTimeout(50);
         blocked = !second.getLockManager().lockShared("items");
     });
     waiter.join();
@@ -72,6 +72,47 @@ int main() {
     }
     gateCv.notify_all();
     holder.join();
+
+    // Wait policies belong to the backend thread, not to the shared
+    // registry. A short timeout configured by one backend must not cause an
+    // unconfigured backend to abort its wait before the holder releases.
+    std::mutex policyMutex;
+    std::condition_variable policyCv;
+    bool policyHeld = false;
+    bool policyRelease = false;
+    std::thread configured([&] {
+        first.getLockManager().setResourceNamespace(dbA);
+        first.getLockManager().setLockTimeout(25);
+        assert(first.getLockManager().lockExclusive("items"));
+        {
+            std::lock_guard<std::mutex> lock(policyMutex);
+            policyHeld = true;
+        }
+        policyCv.notify_all();
+        std::unique_lock<std::mutex> lock(policyMutex);
+        policyCv.wait(lock, [&] { return policyRelease; });
+        first.getLockManager().unlock("items");
+    });
+    {
+        std::unique_lock<std::mutex> lock(policyMutex);
+        policyCv.wait(lock, [&] { return policyHeld; });
+    }
+
+    std::atomic<bool> waitedAndAcquired{false};
+    std::thread unconfigured([&] {
+        second.getLockManager().setResourceNamespace(dbA);
+        waitedAndAcquired = second.getLockManager().lockShared("items");
+        if (waitedAndAcquired) second.getLockManager().unlock("items");
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(75));
+    {
+        std::lock_guard<std::mutex> lock(policyMutex);
+        policyRelease = true;
+    }
+    policyCv.notify_all();
+    configured.join();
+    unconfigured.join();
+    assert(waitedAndAcquired.load());
 
     cleanupTestDb("cross_backend_lock_a");
     cleanupTestDb("cross_backend_lock_b");

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <set>
@@ -19,7 +21,7 @@ class LockManager {
 public:
     enum class LockMode { Shared, Exclusive, IntentShared, IntentExclusive, Metadata };
 
-    ~LockManager();
+    ~LockManager() = default;
 
     // StorageEngine backends in one process coordinate through one registry.
     // Standalone instances remain available for isolated low-level users.
@@ -114,6 +116,12 @@ public:
     void pageUnlockAll() const;
 
 private:
+    struct ThreadSettings {
+        std::string resourceNamespace;
+        int lockTimeoutMs = 0;
+        int deadlockTimeoutMs = 0;
+    };
+
     struct LockState {
         std::shared_mutex mtx;
         int sharedCount = 0;
@@ -159,18 +167,21 @@ private:
     std::vector<DeadlockEntry> deadlockLog_;
     mutable std::mutex deadlockMutex_;
 
-    // Timeout configuration
-    int lockTimeoutMs_ = 0;
-    int deadlockTimeoutMs_ = 0;
-
-    inline static thread_local std::unordered_map<const LockManager*, std::string>
-        resourceNamespaces_;
+    // Resource state is shared by the process-wide manager, but namespace and
+    // wait policy are backend/thread-local. The numeric instance id avoids
+    // stale thread-local entries if a short-lived standalone manager address
+    // is reused by a later object.
+    inline static std::atomic<uint64_t> nextInstanceId_{1};
+    const uint64_t instanceId_ = nextInstanceId_.fetch_add(1);
+    inline static thread_local std::unordered_map<uint64_t, ThreadSettings>
+        threadSettings_;
 
     // Internal acquire with mode
     bool acquireLock(const std::string& table, LockMode mode);
 
     std::string resourceKey(const std::string& resource) const;
     std::string rowResourceKey(const std::string& table, int64_t rid) const;
+    ThreadSettings& threadSettings() const;
 
     // Record that 'waiter' is waiting for 'holder'
     void addWaitEdge(std::thread::id waiter, std::thread::id holder);

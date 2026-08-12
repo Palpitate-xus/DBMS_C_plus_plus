@@ -9,18 +9,16 @@ LockManager& LockManager::global() {
     return manager;
 }
 
-LockManager::~LockManager() {
-    resourceNamespaces_.erase(this);
+LockManager::ThreadSettings& LockManager::threadSettings() const {
+    return threadSettings_[instanceId_];
 }
 
 void LockManager::setResourceNamespace(const std::string& dbname) const {
-    resourceNamespaces_[this] = dbname;
+    threadSettings().resourceNamespace = dbname;
 }
 
 std::string LockManager::resourceKey(const std::string& resource) const {
-    auto it = resourceNamespaces_.find(this);
-    const std::string resourceNamespace =
-        it == resourceNamespaces_.end() ? std::string{} : it->second;
+    const std::string& resourceNamespace = threadSettings().resourceNamespace;
     if (resourceNamespace.empty()) return resource;
     return resourceNamespace + '\x1f' + resource;
 }
@@ -44,11 +42,11 @@ void LockManager::removeWaitEdges(std::thread::id waiter) {
 }
 
 void LockManager::setLockTimeout(int ms) {
-    lockTimeoutMs_ = ms > 0 ? ms : 0;
+    threadSettings().lockTimeoutMs = ms > 0 ? ms : 0;
 }
 
 void LockManager::setDeadlockTimeout(int ms) {
-    deadlockTimeoutMs_ = ms > 0 ? ms : 0;
+    threadSettings().deadlockTimeoutMs = ms > 0 ? ms : 0;
 }
 
 static std::string tidToString(std::thread::id tid) {
@@ -251,7 +249,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
 
     const auto waitStart = std::chrono::steady_clock::now();
     const auto deadlockCheckAt = waitStart +
-        std::chrono::milliseconds(std::max(0, deadlockTimeoutMs_));
+        std::chrono::milliseconds(std::max(0, threadSettings().deadlockTimeoutMs));
     while (true) {
         bool cycle = false;
         {
@@ -282,10 +280,10 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
             return false;
         }
 
-        if (lockTimeoutMs_ > 0) {
+        if (threadSettings().lockTimeoutMs > 0) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - waitStart).count();
-            if (elapsed >= lockTimeoutMs_) {
+            if (elapsed >= threadSettings().lockTimeoutMs) {
                 removeWaitEdges(self);
                 return false;
             }

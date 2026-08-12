@@ -166,7 +166,7 @@
 | **Checkpoint 持久化** | ✅ PASS | 脏页刷盘 + checkpoint WAL/LSN 持久化，重启后数据完整恢复 |
 | **WAL 崩溃恢复** | ✅ PASS | 已提交记录正序重做，未提交事务的多次 page before-image 逆序回滚 |
 | **恢复完整性保护** | ✅ PASS | 损坏索引 WAL 镜像、非法索引路径和应用失败均 fail-closed，中止启动并输出 LSN 诊断 |
-| **锁管理器并发安全** | ✅ PASS | 双线程死锁检测只释放一个受害者；表锁重入/升级、行/页锁 token 归属、跨 backend 共享和跨 database 隔离均经真实线程回归 |
+| **锁管理器并发安全** | ✅ PASS | 双线程死锁检测只释放一个受害者；表锁重入/升级、行/页锁 token 归属、跨 backend 共享、跨 database 隔离和 backend-local 超时均经真实线程回归 |
 | **锁失败传播** | ✅ PASS | 表锁冲突时 StorageEngine DDL 返回 `LOCK_CONFLICT`，不会继续执行或留下等待边 |
 
 **并发隔离验证示例**（基于 MVCC 快照隔离 + 锁机制）：

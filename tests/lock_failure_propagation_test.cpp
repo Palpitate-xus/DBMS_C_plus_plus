@@ -22,11 +22,11 @@ int main() {
     table.append(dbms::makeIntColumn("id", false, 0, true));
     assert(engine.createTable(db, table) == dbms::DBStatus::OK);
 
-    engine.getLockManager().setLockTimeout(50);
     assert(engine.getLockManager().lockExclusive("items"));
 
     std::atomic<dbms::DBStatus> createIndexStatus{dbms::DBStatus::OK};
     std::thread ddl([&] {
+        engine.getLockManager().setLockTimeout(50);
         createIndexStatus = engine.createIndex(db, "items", "id");
     });
     ddl.join();
