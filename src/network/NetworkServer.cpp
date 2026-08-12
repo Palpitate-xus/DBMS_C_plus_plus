@@ -61,6 +61,7 @@ static uint64_t g_nextProcessId = 1;
 static std::mutex g_roleConnectionMutex;
 static std::unordered_map<std::string, int> g_roleConnections;
 static std::atomic<bool> g_serverStopRequested{false};
+static volatile sig_atomic_t g_signalStopRequested = 0;
 static std::atomic<int> g_listenFd{-1};
 static std::mutex g_clientFdMutex;
 static std::set<int> g_clientFds;
@@ -83,7 +84,7 @@ void shutdownActiveClients() {
 }
 
 void serverSignalHandler(int) {
-    g_serverStopRequested.store(true, std::memory_order_relaxed);
+    g_signalStopRequested = 1;
 }
 
 struct ServerSignalGuard {
@@ -1643,11 +1644,13 @@ void requestServerShutdown() {
 }
 
 bool serverShutdownRequested() {
-    return g_serverStopRequested.load(std::memory_order_relaxed);
+    return g_signalStopRequested != 0 ||
+           g_serverStopRequested.load(std::memory_order_relaxed);
 }
 
 bool startServer(int port, bool allowPlaintext) {
     g_serverStopRequested.store(false, std::memory_order_relaxed);
+    g_signalStopRequested = 0;
 
     // TLS is fail-closed. Certificate paths are deployment configuration, not
     // generated at runtime, so a fresh server cannot accidentally expose a
@@ -1784,6 +1787,10 @@ bool startServer(int port, bool allowPlaintext) {
                 } else {
                     handleClient(std::move(socket), clientHost);
                 }
+                // Close before removing the descriptor from the shutdown
+                // registry. Otherwise a new accept could reuse this fd and
+                // the SecureSocket destructor would close the new client.
+                socket.close();
                 unregisterClientFd(clientFd);
                 done->store(true, std::memory_order_release);
             });
