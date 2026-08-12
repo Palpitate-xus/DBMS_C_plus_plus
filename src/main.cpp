@@ -1085,8 +1085,10 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
         log(s.username, "commit prepared " + xid, getTime());
     } else if (res == DBStatus::TABLE_NOT_FOUND) {
         cout << "Prepared transaction not found" << endl;
+        return true;
     } else {
         cout << "COMMIT PREPARED failed" << endl;
+        return true;
     }
     return false;
 }
@@ -1128,8 +1130,10 @@ static bool handleRollbackPrepared(const string& sql, Session& s) {
         log(s.username, "rollback prepared " + xid, getTime());
     } else if (res == DBStatus::TABLE_NOT_FOUND) {
         cout << "Prepared transaction not found" << endl;
+        return true;
     } else {
         cout << "ROLLBACK PREPARED failed" << endl;
+        return true;
     }
     return false;
 }

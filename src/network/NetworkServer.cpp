@@ -546,6 +546,16 @@ std::string lowerProtocolText(std::string value) {
     return value;
 }
 
+bool startsWithSqlPhrase(const std::string& sql, const std::string& phrase) {
+    const std::string lower = lowerProtocolText(trimText(sql));
+    if (lower.size() < phrase.size() || lower.compare(0, phrase.size(), phrase) != 0) {
+        return false;
+    }
+    return lower.size() == phrase.size() ||
+           std::isspace(static_cast<unsigned char>(lower[phrase.size()])) ||
+           lower[phrase.size()] == ';';
+}
+
 std::string protocolRelationFromQuery(const std::string& sql) {
     const std::string lower = lowerProtocolText(sql);
     size_t from = lower.find(" from ");
@@ -821,7 +831,16 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
 
 bool isTransactionRecoveryCommand(const std::string& sql) {
     const std::string keyword = firstSqlKeyword(sql);
-    return keyword == "commit" || keyword == "end" || keyword == "rollback";
+    // PREPARE TRANSACTION completion is a separate two-phase command and is
+    // not a local recovery operation. In particular, do not rewrite
+    // COMMIT/ROLLBACK PREPARED as an ordinary COMMIT/ROLLBACK while a backend
+    // is in the failed-transaction state.
+    if (startsWithSqlPhrase(sql, "commit prepared") ||
+        startsWithSqlPhrase(sql, "rollback prepared")) {
+        return false;
+    }
+    return keyword == "commit" || keyword == "end" || keyword == "rollback" ||
+           keyword == "abort";
 }
 
 // PostgreSQL treats COMMIT in an aborted transaction as a rollback.  Preserve

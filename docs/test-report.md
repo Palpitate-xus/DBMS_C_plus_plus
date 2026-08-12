@@ -98,6 +98,7 @@
 - ALTER TABLE typed 清理回归：`tests/ddl_bridge_routing_test.cpp` 验证基础动作在删除 `main.cpp` 重复分支后仍由 typed bridge 执行；`tests/ddl_ast_bridge_test.cpp` 进一步验证 CLUSTER、REPLICA IDENTITY、VALIDATE/ALTER CONSTRAINT 的 catalog、索引归属和持久化结果。
 - 协议错误恢复回归：验证扩展查询错误后的 Bind/Execute 被忽略至 Sync、Sync 后连接可继续查询，以及事务外错误返回 `ReadyForQuery('I')`。
 - 协议失败事务回归：验证显式事务中的语句错误返回 `ReadyForQuery('E')`/`25P02`、普通命令被拒绝、失败状态下 `COMMIT` 不提交先前 INSERT 而执行完整回滚，以及 `ROLLBACK TO SAVEPOINT` 可恢复外层事务。
+- 协议两阶段命令边界回归：验证失败事务中的 `COMMIT PREPARED`/`ROLLBACK PREPARED` 不会被改写为本地恢复命令，未知 prepared transaction 返回错误。
 - 协议 backend 隔离回归：双连接验证事务 ID/快照不串线，未提交行不可见，ROLLBACK 后状态清理，连接断开回滚未完成事务，COMMIT 后新事务可见；另覆盖 `START TRANSACTION` 选项与 `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` 路由。
 - SQL 统计模块回归：`tests/sql_stats_test.cpp` 验证字符串/数字常量归一化、引号标识符区分、调用次数与耗时聚合、数据库过滤及 reset。
 - 运行时统计模块回归：`tests/runtime_stats_test.cpp` 验证并发 SQL 计数、失败/提交/回滚计数、表扫描和实际 DML 行数统计及 reset。

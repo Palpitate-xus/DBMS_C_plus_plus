@@ -5,7 +5,7 @@
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线（2026-08-12）: PASS=137 FAIL=0（135 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）
 
-协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、显式失败事务的 `25P02`/`ReadyForQuery('E')`、失败状态下 `COMMIT` 转完整回滚和 `ROLLBACK TO SAVEPOINT` 恢复、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
+协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、显式失败事务的 `25P02`/`ReadyForQuery('E')`、失败状态下 `COMMIT` 转完整回滚、`ROLLBACK TO SAVEPOINT` 恢复及 `COMMIT/ROLLBACK PREPARED` 边界、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
 ACL 回归现已覆盖表/列权限对会话用户、递归继承角色和 `PUBLIC` 的解析；`NOINHERIT` 会话角色不会自动获得成员角色权限，原始成员关系与有效权限关系已分开；角色授权可通过真实 PostgreSQL 协议生效。表 owner 已进入正式 schema/`pg_class.relowner`，并参与 RLS owner bypass；表级 `GRANT OPTION` 已支持独立撤销和基础授权链 `RESTRICT/CASCADE`，完整 ACL 对象范围和对象 owner 传播仍未达到 PostgreSQL 语义。
 

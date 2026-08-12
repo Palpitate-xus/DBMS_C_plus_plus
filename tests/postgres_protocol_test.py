@@ -402,6 +402,24 @@ def transaction_error_state_recovery(sock):
     assert data_row_values(simple_query(sock, "SELECT id FROM t WHERE id = 42")) == []
 
 
+def prepared_transaction_error_boundaries(sock):
+    # Two-phase completion commands are not substitutes for local transaction
+    # recovery. They must remain rejected while the backend is in 25P02.
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    failed = simple_query(sock, "INSERT INTO t VALUES (43, 44)")
+    assert any(kind == b"E" for kind, _ in failed), failed
+    prepared = simple_query(sock, "COMMIT PREPARED 'missing_protocol_xid'")
+    assert any(kind == b"E" for kind, _ in prepared), prepared
+    assert prepared[-1] == (b"Z", b"E"), prepared
+    assert simple_query(sock, "ROLLBACK")[-1] == (b"Z", b"I")
+
+    # Outside a transaction, an unknown prepared transaction is an execution
+    # error rather than a successful command with informational output.
+    missing = simple_query(sock, "ROLLBACK PREPARED 'missing_protocol_xid'")
+    assert any(kind == b"E" for kind, _ in missing), missing
+    assert missing[-1] == (b"Z", b"I"), missing
+
+
 def main():
     if not os.path.exists(DBMS_MAIN):
         raise SystemExit("run scripts/build.sh first")
@@ -826,6 +844,7 @@ def main():
         extended_query_portal_pagination(sock)
         extended_query_error_recovery(sock)
         transaction_error_state_recovery(sock)
+        prepared_transaction_error_boundaries(sock)
         error_messages = simple_query(sock, "SELECT * FROM protocol_missing_table")
         assert any(kind == b"E" for kind, _ in error_messages)
         assert error_messages[-1] == (b"Z", b"I")
