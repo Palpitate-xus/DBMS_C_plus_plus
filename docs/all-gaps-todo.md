@@ -307,7 +307,7 @@
 | 1.1.11 | `CHECKPOINT` | 已刷已加载 heap/index 缓存、写 checkpoint WAL、持久化 checkpoint LSN、归档并回收 checkpoint 前 WAL 段，传播写入/fsync/archive 失败；活动事务期间拒绝推进恢复起点；仍缺完整 restartpoint、节流和 PITR | ⚠️ |
 | 1.1.12 | `CLOSE` / `DECLARE` / `FETCH` | 游标把 SELECT 结果捕获到内存；缺少可滚动/二进制/holdable cursor、事务生命周期、portal 语义、`MOVE` | ⚠️ |
 | 1.1.13 | `COMMENT` | 主要支持 table/column；缺少 PG 支持的绝大多数对象 | ⚠️ |
-| 1.1.14 | `COMMIT` / `ROLLBACK` | 有基本事务；与 PG 的 MVCC、subtransaction、WAL crash safety 差距大 | ⚠️ |
+| 1.1.14 | `COMMIT` / `ROLLBACK` | 有基本事务；协议失败事务中的 `COMMIT` 已按 PostgreSQL 语义转为完整回滚，但与 PG 的 MVCC、subtransaction、WAL crash safety 仍差距大 | ⚠️ |
 | 1.1.15 | `COMMIT PREPARED` / `PREPARE TRANSACTION` / `ROLLBACK PREPARED` | 有二阶段入口，但没有 PG 的全局事务状态目录、崩溃恢复/锁/资源完整语义 | ⚠️ |
 | 1.1.16 | `COPY` | 文件 CSV 导入导出；缺少 `STDIN/STDOUT` 协议、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH`、encoding/options 完整矩阵和权限模型 | ⚠️ |
 | 1.1.17 | `CREATE DATABASE` | 创建目录；缺少 template、owner、locale/collation provider、encoding、tablespace、OID/catalog 语义 | ⚠️ |
@@ -342,7 +342,7 @@
 | 1.1.46 | `REFRESH MATERIALIZED VIEW` | 从 backing 表 schema 推导视图列、按源表 schema 顺序重跑 SELECT（修复 `SELECT *` 解析为 `["*"]` 与投影错位 bug）；支持 `CONCURRENTLY`（同步刷新）与 `WITH NO DATA`（清空）；缺少 PG 真正并发刷新条件和锁语义 | ⚠️ |
 | 1.1.47 | `REINDEX` | 基本 `REINDEX TABLE`；缺少 index/schema/database/system、`CONCURRENTLY`、tablespace、verbose | ⚠️ |
 | 1.1.48 | `RESET` | 支持 `RESET ROLE`/`RESET ALL` 等；缺少完整 GUC 语义 | ⚠️ |
-| 1.1.49 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 名称与路由已由事务 AST 统一处理；回滚基于 txn log index，并会释放保存点后新增的表/row/page/gap 锁、恢复保存点前锁模式；仍缺 PG 子事务 ID、资源/错误状态完整语义 | ⚠️ |
+| 1.1.49 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 名称与路由已由事务 AST 统一处理；回滚基于 txn log index，并会释放保存点后新增的表/row/page/gap 锁、恢复保存点前锁模式；协议失败状态可由 `ROLLBACK TO SAVEPOINT` 清除；仍缺 PG 子事务 ID、资源/错误状态完整语义 | ⚠️ |
 | 1.1.50 | `SECURITY LABEL` | 保存 label 文件；缺少 provider、对象类型全集、SELinux/sepgsql 集成 | ⚠️ |
 | 1.1.51 | `SELECT` | 支持大量子集；复杂 grammar、类型推断、表达式、函数、子查询、锁、并行、planner/rewrite 差距最大 | ⚠️ |
 | 1.1.52 | `SET` / `SHOW` | 项目参数和少量 session 状态；不是 PG GUC 全体系 | ⚠️ |

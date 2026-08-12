@@ -824,6 +824,22 @@ bool isTransactionRecoveryCommand(const std::string& sql) {
     return keyword == "commit" || keyword == "end" || keyword == "rollback";
 }
 
+// PostgreSQL treats COMMIT in an aborted transaction as a rollback.  Preserve
+// the chain option while routing it through the normal rollback executor so
+// session-local objects, undo records, WAL and locks are all cleaned up by one
+// transaction boundary.
+std::string rollbackCommandForAbortedTransaction(const std::string& sql) {
+    const std::string lower = lowerProtocolText(trimText(sql));
+    if (firstSqlKeyword(sql) != "commit" && firstSqlKeyword(sql) != "end") {
+        return sql;
+    }
+    if (lower.find("and chain") != std::string::npos) return "ROLLBACK AND CHAIN";
+    if (lower.find("and no chain") != std::string::npos) {
+        return "ROLLBACK AND NO CHAIN";
+    }
+    return "ROLLBACK";
+}
+
 QueryResult transactionAbortedResult() {
     QueryResult result;
     result.error = true;
@@ -1236,7 +1252,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             return transactionAbortedResult();
         }
         const bool wasInTransaction = g_engine.inTransaction();
-        QueryResult result = executeProtocolQuery(sql, session);
+        const std::string effectiveSql = transactionFailed
+                                             ? rollbackCommandForAbortedTransaction(sql)
+                                             : sql;
+        QueryResult result = executeProtocolQuery(effectiveSql, session);
         if (result.error && wasInTransaction) {
             transactionFailed = true;
         } else if (!result.error && isTransactionRecoveryCommand(sql)) {

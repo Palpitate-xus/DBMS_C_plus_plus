@@ -371,6 +371,37 @@ def extended_query_error_recovery(sock):
     assert any(kind == b"C" for kind, _ in messages)
 
 
+def transaction_error_state_recovery(sock):
+    # An error inside an explicit transaction must make the transaction
+    # rollback-only. COMMIT is PostgreSQL-compatible shorthand for rollback in
+    # this state; it must not publish the earlier INSERT.
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO t VALUES (41)"))
+    failed = simple_query(sock, "INSERT INTO t VALUES (41, 42)")
+    assert any(kind == b"E" for kind, _ in failed), failed
+    assert failed[-1] == (b"Z", b"E"), failed
+    aborted = simple_query(sock, "SELECT id FROM t WHERE id = 41")
+    assert any(kind == b"E" for kind, _ in aborted), aborted
+    assert aborted[-1] == (b"Z", b"E"), aborted
+    committed = simple_query(sock, "COMMIT")
+    assert committed[-1] == (b"Z", b"I"), committed
+    assert data_row_values(simple_query(sock, "SELECT id FROM t WHERE id = 41")) == []
+
+    # ROLLBACK TO SAVEPOINT is also a legal recovery command and clears the
+    # failed state while retaining the surrounding transaction.
+    assert simple_query(sock, "BEGIN")[-1] == (b"Z", b"T")
+    assert any(kind == b"C" for kind, _ in simple_query(sock, "SAVEPOINT tx_error"))
+    assert any(kind == b"C" for kind, _ in simple_query(
+        sock, "INSERT INTO t VALUES (42)"))
+    failed = simple_query(sock, "INSERT INTO t VALUES (42, 43)")
+    assert any(kind == b"E" for kind, _ in failed)
+    recovered = simple_query(sock, "ROLLBACK TO SAVEPOINT tx_error")
+    assert recovered[-1] == (b"Z", b"T"), recovered
+    assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
+    assert data_row_values(simple_query(sock, "SELECT id FROM t WHERE id = 42")) == []
+
+
 def main():
     if not os.path.exists(DBMS_MAIN):
         raise SystemExit("run scripts/build.sh first")
@@ -794,6 +825,7 @@ def main():
         extended_query_numeric_binary_parameter(sock)
         extended_query_portal_pagination(sock)
         extended_query_error_recovery(sock)
+        transaction_error_state_recovery(sock)
         error_messages = simple_query(sock, "SELECT * FROM protocol_missing_table")
         assert any(kind == b"E" for kind, _ in error_messages)
         assert error_messages[-1] == (b"Z", b"I")

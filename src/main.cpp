@@ -1052,18 +1052,18 @@ static bool commitBeforeLegacyDdl() {
 }
 
 static bool handleCommitTransaction(const string& sql, Session& s) {
-    (void)sql;
     auto res = g_engine.commitTransaction();
     if (res != DBStatus::OK) {
         cout << "Commit failed" << endl;
         return true;
     }
     // COMMIT AND [NO] CHAIN: if AND CHAIN, immediately start a new transaction.
-    if (sql.size() >= 16 && sql.substr(7, 9) == "and chain") {
+    const string lowerSql = toLowerSql(trim(sql));
+    if (lowerSql.find("and chain") != string::npos) {
         g_engine.beginTransaction(s.currentDB);
         cout << "Transaction committed (and chain)" << endl;
         log(s.username, "commit and chain", getTime());
-    } else if (sql.size() >= 18 && sql.substr(7, 11) == "and no chain") {
+    } else if (lowerSql.find("and no chain") != string::npos) {
         cout << "Transaction committed (and no chain)" << endl;
         log(s.username, "commit and no chain", getTime());
     } else {
@@ -1092,18 +1092,21 @@ static bool handleCommitPrepared(const string& sql, Session& s) {
 }
 
 static bool handleRollbackTransaction(const string& sql, Session& s) {
-    (void)sql;
     auto res = g_engine.rollbackTransaction();
     if (res != DBStatus::OK) {
         cout << "Rollback failed" << endl;
         return true;
     }
     // ROLLBACK AND [NO] CHAIN
-    if (sql.size() >= 19 && sql.substr(9, 10) == "and no chain") {
+    const string lowerSql = toLowerSql(trim(sql));
+    if (lowerSql.find("and no chain") != string::npos) {
         cout << "Transaction rolled back (and no chain)" << endl;
         log(s.username, "rollback and no chain", getTime());
-    } else if (sql.size() >= 17 && sql.substr(9, 8) == "and chain") {
-        g_engine.beginTransaction(s.currentDB);
+    } else if (lowerSql.find("and chain") != string::npos) {
+        if (g_engine.beginTransaction(s.currentDB) != DBStatus::OK) {
+            cout << "Rollback chain failed" << endl;
+            return true;
+        }
         cout << "Transaction rolled back (and chain)" << endl;
         log(s.username, "rollback and chain", getTime());
     } else {

@@ -18,6 +18,8 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 
 本轮补强保存点资源边界：保存点记录当前 backend 的表锁递归深度、row/page 锁 token 和 gap token；`ROLLBACK TO SAVEPOINT` 会释放保存点之后新增的锁，并恢复保存点前被升级的锁模式。真实锁回归覆盖 token 释放和共享/排他模式恢复；真正 PostgreSQL 子事务 ID、错误状态和完整资源隔离仍未完成。
 
+本轮修复协议失败事务的提交边界：显式事务中的语句错误会进入 `ReadyForQuery('E')`/`25P02` 状态，普通后续语句被拒绝；此时收到 `COMMIT` 会按 PostgreSQL 语义执行完整回滚而不会发布此前写入，`ROLLBACK TO SAVEPOINT` 成功后可恢复到事务中。该状态目前仍由协议 backend 维护，尚未演进为完整 PostgreSQL 子事务 ID/错误状态目录。
+
 本轮已完成的基础收敛：
 
 - 删除未接入的 `ClusterLayout` 和旧 4 KiB `Page` 实现。
