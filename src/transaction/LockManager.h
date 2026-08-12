@@ -94,7 +94,8 @@ public:
     std::vector<int64_t> lockedRows(const std::string& table) const;
 
     // ========================================================================
-    // Gap locking (simplified: prevents INSERT in a key range)
+    // Gap locking (precise in-process range check plus conservative
+    // cross-process per-table coordination)
     // ========================================================================
     // Lock a gap (range) on a table. Returns true if acquired, false if blocked.
     [[nodiscard]] bool lockGap(const std::string& table, const std::string& leftKey, const std::string& rightKey);
@@ -106,7 +107,8 @@ public:
     void unlockAllGaps();
 
     // ========================================================================
-    // Page-level locking (used inside table-level locks for finer granularity)
+    // Page-level locking (used inside table-level locks for finer granularity;
+    // coordinated across processes when dbname names an existing database)
     // Resource format: "page:dbname:tablename:pageId"
     // ========================================================================
     [[nodiscard]] bool pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const;
@@ -164,6 +166,11 @@ private:
         std::thread::id holder;
     };
     std::map<std::string, std::vector<GapLock>> gapLocks_;
+    // Gap ranges are kept precise in-process. Across processes, one advisory
+    // file per table conservatively protects the table's gap-lock registry;
+    // this prevents phantom writes without pretending to implement a shared
+    // persistent predicate-lock index.
+    std::map<std::string, int> gapProcessLockFds_;
     mutable std::mutex gapMutex_;
 
     // Wait-for graph: thread A waits for thread B to release a lock
@@ -189,11 +196,21 @@ private:
     std::string resourceKey(const std::string& resource) const;
     std::string rowResourceKey(const std::string& table, int64_t rid) const;
     ThreadSettings& threadSettings() const;
+    std::string processLockPath(const std::string& resourceNamespace,
+                                const std::string& kind,
+                                const std::string& resource) const;
+    ProcessLockResult tryAcquireProcessLock(LockState& state,
+                                             const std::string& resourceNamespace,
+                                             const std::string& kind,
+                                             const std::string& resource,
+                                             LockMode mode);
     ProcessLockResult tryAcquireProcessLock(LockState& state,
                                              const std::string& table,
                                              LockMode mode);
     void releaseProcessLock(LockState& state);
-    std::string processLockPath(const std::string& table) const;
+    bool tryAcquireGapProcessLock(const std::string& table);
+    void releaseGapProcessLock(const std::string& resourceKey);
+    bool isGapProcessLocked(const std::string& table) const;
 
     // Record that 'waiter' is waiting for 'holder'
     void addWaitEdge(std::thread::id waiter, std::thread::id holder);

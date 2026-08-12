@@ -148,6 +148,54 @@ int main() {
     assert(::waitpid(child, &childStatus, 0) == child);
     assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
 
+    // Row and page locks use the same cross-process coordination layer.
+    assert(first.getLockManager().rowLockExclusive("items", 7));
+    child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        dbms::LockManager childManager;
+        childManager.setResourceNamespace(dbA);
+        childManager.setLockTimeout(75);
+        const bool acquired = childManager.rowLockShared("items", 7);
+        ::_exit(acquired ? 1 : 0);
+    }
+    childStatus = 0;
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
+    first.getLockManager().rowUnlock("items", 7);
+
+    assert(first.getLockManager().pageLockExclusive(dbA, "items", 3));
+    child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        dbms::LockManager childManager;
+        childManager.setLockTimeout(75);
+        const bool acquired = childManager.pageLockShared(dbA, "items", 3);
+        ::_exit(acquired ? 1 : 0);
+    }
+    childStatus = 0;
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
+    first.getLockManager().pageUnlock(dbA, "items", 3);
+
+    assert(first.getLockManager().lockGap("items", "", "~"));
+    child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        dbms::LockManager childManager;
+        childManager.setResourceNamespace(dbA);
+        const bool blocked = childManager.isGapLocked("items", "42");
+        const bool rejected = !childManager.lockGap("items", "", "~");
+        ::_exit(blocked && rejected ? 0 : 1);
+    }
+    childStatus = 0;
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
+    first.getLockManager().unlockGaps("items");
+
+    assert(first.getLockManager().lockGap("items", "", "~"));
+    first.getLockManager().unlockGaps("items");
+
     cleanupTestDb("cross_backend_lock_a");
     cleanupTestDb("cross_backend_lock_b");
     std::cout << "[CROSS BACKEND LOCK] shared registry and database isolation OK\n";

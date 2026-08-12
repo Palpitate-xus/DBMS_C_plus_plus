@@ -8,7 +8,7 @@
 
 本轮并发安全审计修复了 `LockManager` 的真实生命周期问题：等待 row/page 锁时不再持有可能被清除的 map 元素引用；批量解锁只释放当前线程拥有的 token；表锁重入不会重复锁底层 `shared_mutex`，共享锁升级会先平衡自身 token；等待图在等待期间持续刷新并检测双线程死锁。新增 `tests/lock_manager_concurrency_test.cpp`，验证死锁受害者释放、重入/升级、row token 归属和清理；真正的索引范围 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 规则仍未完成。
 
-2026-08-12 增量审计：`StorageEngine` 实例现在引用进程级 `LockManager` 注册表，独立 embedded backend 对同一数据库的表、行和 gap 资源可见；表/行/gap key 使用数据库 namespace，避免不同数据库的同名表误冲突。锁资源注册表全局共享，但 namespace、lock timeout 和 deadlock timeout 按 backend 线程隔离，避免一个连接改变另一个连接的等待策略。表级锁新增数据库目录下的 `flock` 协调，独立进程对同一数据库同名表的冲突和释放后获取已有 fork 回归；锁文件采用安全编码命名，且不会进入物理备份。跨进程 row/page/gap 低级锁、完整 PostgreSQL heavyweight/lightweight lock 矩阵、索引 predicate lock 和 wait event 仍未完成。
+2026-08-12 增量审计：`StorageEngine` 实例现在引用进程级 `LockManager` 注册表，独立 embedded backend 对同一数据库的表、行和 gap 资源可见；表/行/gap key 使用数据库 namespace，避免不同数据库的同名表误冲突。锁资源注册表全局共享，但 namespace、lock timeout 和 deadlock timeout 按 backend 线程隔离，避免一个连接改变另一个连接的等待策略。表、row、page 锁新增数据库目录下安全编码文件的跨进程 `flock` 协调，gap 锁以每表保守互斥协调跨进程 predicate-lock 注册，独立进程冲突、释放后获取和 gap 阻塞已有 fork 回归；锁文件不会进入物理备份。仍未完成的是完整 PostgreSQL heavyweight/lightweight lock 矩阵、索引 predicate lock 和 wait event。
 
 锁 API 现在全部标记为 `[[nodiscard]]`，`TableManage` 的 DDL、DML、索引、扫描、TOAST、JOIN、聚合和 VACUUM 调用方均显式传播锁冲突；新增 `tests/lock_failure_propagation_test.cpp` 验证真实表锁竞争返回 `LOCK_CONFLICT` 并清理等待状态。
 

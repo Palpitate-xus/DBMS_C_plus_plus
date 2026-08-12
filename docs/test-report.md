@@ -23,7 +23,7 @@
 - 普通聚合结构化回归：`tests/volcano_select_phase51_test.cpp` 验证带过滤条件的隐式空 grouping set；协议 E2E 验证主 SQL `COUNT(*)`/`SUM()` 已走统一聚合计划路径。
 - TOAST 回归：`tests/toast_test.cpp` 验证大值插入/更新/删除、zlib 压缩后的物理体积和解压读取。
 - 事务回滚回归：`tests/concurrency_test.cpp` 验证 INSERT、UPDATE、DELETE 的普通 `ROLLBACK` 与 `ROLLBACK TO SAVEPOINT` 一致恢复主键、单列二级、复合、Hash 索引和 TOAST；DELETE savepoint 回滚后在同一事务提交仍可读，UPDATE/DELETE 场景在新 `StorageEngine` 重启后再次校验堆、Hash 与大字段内容。
-- 锁管理器并发回归：`tests/lock_manager_concurrency_test.cpp` 使用真实双线程验证等待图死锁只释放一个受害者、表锁重入与共享锁升级、row/page token 归属、等待期间资源生命周期和批量清理；`tests/cross_backend_lock_test.cpp` 验证独立 `StorageEngine` backend 共享同一锁注册表、隔离不同数据库的同名表、backend-local 超时策略，以及独立 fork 进程对同一数据库表锁的阻塞与释放后获取；重复运行 10 次通过。
+- 锁管理器并发回归：`tests/lock_manager_concurrency_test.cpp` 使用真实双线程验证等待图死锁只释放一个受害者、表锁重入与共享锁升级、row/page token 归属、等待期间资源生命周期和批量清理；`tests/cross_backend_lock_test.cpp` 验证独立 `StorageEngine` backend 共享同一锁注册表、隔离不同数据库的同名表、backend-local 超时策略，以及独立 fork 进程对同一数据库的表/row/page 锁阻塞、释放后获取和 gap 锁阻塞；重复运行 10 次通过。
 - 复制管理器并发回归：`tests/replication_concurrency_test.cpp` 验证复制槽激活/停用、值快照读取、standby/conninfo/sync 状态并发写入及 slot 生命周期；复制槽定义校验和 active slot 禁止删除也有覆盖。
 - 锁失败传播回归：`tests/lock_failure_propagation_test.cpp` 持有真实表级排他锁并在另一线程执行建索引，验证调用方收到 `LOCK_CONFLICT`、等待图清理且不会继续发布索引。
 - DDL 辅助对象回滚回归：`ddl_transaction_skeleton_test` 验证失败时撤销 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；collation 最后一个条目删除后物理文件也会清理。

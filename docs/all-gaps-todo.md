@@ -51,7 +51,7 @@
 | 2026-08-11 | 锁失败传播收敛：`LockManager` bool API 全部标记 `[[nodiscard]]`，`TableManage` 的 DDL/DML/索引/扫描/TOAST/JOIN/聚合/VACUUM 调用方显式返回 `LOCK_CONFLICT`、空结果或扫描失败；rename 按名称顺序获取双表锁，新增 `lock_failure_propagation_test` 验证真实表锁竞争 fail-closed。 |
 | 2026-08-11 | DDL CREATE undo 收敛：`DdlTransaction` 新增 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation 的撤销路径；collation 文件读写统一进入 `StorageEngine`，新增辅助对象回滚回归。显式外层事务跨语句 DDL、DROP/REPLACE 旧对象恢复和完整依赖 undo 仍待后续。 |
 | 2026-08-11 | `LockManager` 并发安全收敛：修复 row/page 等待路径的 map 元素生命周期风险，批量解锁只释放当前线程拥有的锁 token，表锁重入不重复获取底层 mutex，共享锁升级平衡物理 token，等待期间持续刷新 wait-for graph 并检测双线程死锁；新增真实线程回归 `lock_manager_concurrency_test`。页/索引 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 规则仍待后续。 |
-| 2026-08-12 | `StorageEngine` backend 统一引用进程级 `LockManager`；表、行、gap 资源按数据库 namespace 隔离，独立 backend 对同库资源可见且不同数据库同名表不冲突；namespace、lock timeout 和 deadlock timeout 按 backend 线程隔离；表级锁新增数据库目录内安全编码文件的跨进程 `flock` 协调，物理备份排除运行时锁目录，`cross_backend_lock_test` 已覆盖 fork 进程竞争。跨进程 row/page/gap 低级锁、完整 PostgreSQL 锁模式矩阵和索引 predicate lock 仍待后续。 |
+| 2026-08-12 | `StorageEngine` backend 统一引用进程级 `LockManager`；表、行、gap 资源按数据库 namespace 隔离，独立 backend 对同库资源可见且不同数据库同名表不冲突；namespace、lock timeout 和 deadlock timeout 按 backend 线程隔离；表、row、page 锁新增数据库目录内安全编码文件的跨进程 `flock` 协调，gap 锁以每表保守互斥协调跨进程 predicate-lock 注册，物理备份排除运行时锁目录，`cross_backend_lock_test` 已覆盖 fork 进程竞争、释放后获取和 gap 阻塞。完整 PostgreSQL 锁模式矩阵、索引 predicate lock 和 wait events 仍待后续。 |
 | 2026-08-11 | UPDATE/DELETE 事务 undo 补强：普通回滚与 SAVEPOINT 回滚现在恢复复合/Hash 索引和 TOAST；UPDATE 只清理新版本独占的线外块，显式事务 DELETE 保留死 tuple，回滚清除 `xmax` 并写 heap WAL before/after image，提交后回收旧版本 TOAST。新增并发回归覆盖 UPDATE/DELETE、savepoint、重启和大字段。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | INSERT 事务原子性补强：主键、单列二级、复合、Hash 索引和 TOAST 均纳入普通回滚与 SAVEPOINT 回滚；多值索引按 `(key, RID)` 精确清理，SAVEPOINT 堆删除写入 WAL before/after image，Hash AM 传播写入失败，新增重启后空状态回归。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | 事务边界补齐已加载索引缓存刷盘：新增 B+Tree/Hash `flush()` 和 `flushDatabaseCaches()`，事务快照创建前、COMMIT WAL 发布前及引擎退出时统一刷 heap、B+Tree、TOAST index、Hash 缓存；B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像。原生 page-level WAL、跨对象原子提交和其他访问方法的崩溃恢复仍待后续。 |
@@ -525,7 +525,7 @@
 | 9.4 | SSI/predicate locks | 已有行级/页级 rw-conflict in/out、空范围关系级 SIREAD，以及非相交页/跨页危险结构回归；仍缺 PostgreSQL 索引范围 predicate lock、精确 phantom 推理和完整 SSI 图规则 | ⚠️ |
 | 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index；缺少子事务 ID、资源释放、错误状态恢复 | ⚠️ |
 | 9.6 | DDL transactions | ALTER 已具备当前格式整库快照回滚；CREATE 的失败清理和 DROP 的只读依赖计划已覆盖主要单对象边界；仍缺完整跨对象依赖 undo、并发 DDL 锁语义和 PostgreSQL 全部隐式提交边界 | 🔄 |
-| 9.7 | Lock manager | 表/行/gap/page/advisory lock 已有 token 归属、重入/升级和双线程等待图死锁回归；仍缺 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、完整 deadlock detector 语义和 wait events | ⚠️ |
+| 9.7 | Lock manager | 表/行/gap/page/advisory lock 已有 token 归属、重入/升级、跨 backend/跨进程低级锁协调和双线程等待图死锁回归；gap 跨进程采用每表保守互斥，仍缺 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、完整 deadlock detector 语义、索引 predicate lock 和 wait events | ⚠️ |
 | 9.8 | Crash safety | heap WAL 已支持 page before/after redo/undo，B+Tree/Hash 另有文件级 before/after 镜像；仍缺原生 page-level 索引 WAL、其他访问方法、PITR、并发事务完整崩溃窗口和 PostgreSQL 恢复语义 | 🔄 |
 | 9.9 | Vacuum/freeze | 缺少 transaction wraparound、freeze map、visibility map、hint bits、all-visible/all-frozen | ⚠️ |
 
