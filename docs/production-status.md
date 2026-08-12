@@ -93,6 +93,8 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 - SQL 统计已从 `main.cpp` 提取为线程安全 `process/SqlStats` 模块，交互式与 PostgreSQL 协议入口共用；字符串/数字常量和空白归一化后聚合，`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。统计当前仅驻留内存，持久化、上限/淘汰和完整 PostgreSQL 扩展字段仍未完成。
 - 运行时统计已从显示层下沉到线程安全 `process/RuntimeStats`：SQL 执行、失败、提交/回滚，以及 StorageEngine 和 Volcano 扫描算子的顺序扫描、索引扫描和实际 DML 行数会进入共享计数器；完整可见表扫描建立的 live-row 估计会反馈给 Join 成本和 EXPLAIN，部分/索引扫描只保留展示用下界，表重建/截断会清除旧关系身份的估计；`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 不再输出固定零值。统计仍仅驻留内存，索引访问方法细分、历史持久化和后台采样线程仍未完成。
 - 构建质量收敛：修复 planner 的 merge join cost 参数错误，清理 parser 未使用参数和测试冗余 helper；legacy 输出捕获已从全局重定向改为线程局部路由；`./scripts/build.sh` 在 `-Wall -Wextra` 下通过且无编译警告，完整回归与 OpenSSL Docker 构建均通过。
+- 构建缓存现在按编译配置、源码清单、生产源码和头文件内容计算 SHA-256 签名；测试对象另按全部测试源计算独立签名，不再仅依赖 mtime。Git 回滚、工作区恢复或复制数据目录后会安全失效并重编译，避免测试链接到过期对象，也不会因测试改动无谓重编译生产主程序。
+- PostgreSQL 协议 E2E 测试不再把服务端 stdout/stderr 连接到无人消费的管道，避免长流程输出填满 pipe 后阻塞服务；协议和窗口 E2E 的超时可通过环境变量覆盖，默认值适配慢速持久化/CI 环境，避免把正常慢执行误判为随机失败。
 
 启动安全边界：非空但 magic/版本不匹配的数据文件会直接拒绝打开，不会被清零或按新格式覆盖。部署时必须将数据目录初始化为当前格式，并通过备份恢复或 SQL 导入完成升级。
 

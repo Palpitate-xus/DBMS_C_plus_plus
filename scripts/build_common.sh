@@ -168,6 +168,34 @@ dbms_cache_signature() {
         printf '%s\n' "${DBMS_LDFLAGS[@]}"
         printf '%s\n' "$DBMS_TLS_SOURCE"
         printf '%s\n' "$DBMS_HAS_ZLIB"
+        printf 'manifest\n'
+        sha256sum -- "$DBMS_MANIFEST"
+
+        # Timestamps are not a safe cache validity boundary: a Git checkout,
+        # restore, or copied workspace can leave an older source with a newer
+        # mtime than the object file. Include the actual production inputs so
+        # stale objects can never be reused after source content changes.
+        local source header
+        for source in "${DBMS_MANIFEST_SOURCES[@]}" "$DBMS_TLS_SOURCE"; do
+            printf 'source %s\n' "$source"
+            sha256sum -- "${DBMS_SOURCE_DIR}/${source}"
+        done
+        while IFS= read -r header; do
+            printf 'header %s\n' "${header#"${DBMS_SOURCE_DIR}/"}"
+            sha256sum -- "$header"
+        done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' \) -print | sort)
+    } | sha256sum | awk '{print $1}'
+}
+
+dbms_test_cache_signature() {
+    {
+        printf 'production\n%s\n' "$(dbms_cache_signature)"
+        local test_file
+        while IFS= read -r test_file; do
+            printf 'test %s\n' "${test_file#"${DBMS_SOURCE_DIR}/"}"
+            sha256sum -- "$test_file"
+        done < <(find "${DBMS_SOURCE_DIR}/tests" -maxdepth 1 -type f \
+            \( -name '*_test.cpp' -o -name 'test_stubs.cpp' \) -print | sort)
     } | sha256sum | awk '{print $1}'
 }
 
@@ -177,8 +205,20 @@ dbms_cache_needs_rebuild() {
     [[ ! -f "$marker" || "$(<"$marker")" != "$(dbms_cache_signature)" ]]
 }
 
+dbms_test_cache_needs_rebuild() {
+    local cache_dir="${1:?cache directory is required}"
+    local marker="${cache_dir}/.test-build-config.sha256"
+    [[ ! -f "$marker" || "$(<"$marker")" != "$(dbms_test_cache_signature)" ]]
+}
+
 dbms_write_cache_signature() {
     local cache_dir="${1:?cache directory is required}"
     mkdir -p "$cache_dir"
     printf '%s\n' "$(dbms_cache_signature)" > "${cache_dir}/.build-config.sha256"
+}
+
+dbms_write_test_cache_signature() {
+    local cache_dir="${1:?cache directory is required}"
+    mkdir -p "$cache_dir"
+    printf '%s\n' "$(dbms_test_cache_signature)" > "${cache_dir}/.test-build-config.sha256"
 }

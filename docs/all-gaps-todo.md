@@ -38,6 +38,8 @@
 | 2026-08-11 | Catalog 持久化安全补强：系统 catalog 改用临时文件 + 文件/目录 `fsync` + 原子替换，`CatalogManager`/`CatalogService` 返回持久化结果；checkpoint、事务快照和关键 DDL 路径失败时 fail-closed，新增 `catalog_persistence_failure_test`。 |
 | 2026-08-12 | ReplicationManager 状态安全补强：slot 查询改为锁内值快照，创建时校验名称/类型/plugin，active/standby/conninfo/sync 状态统一加锁，新增激活/停用 API 和 `replication_concurrency_test`；真实流复制/PITR 仍待实现。 |
 | 2026-08-12 | WAL 归档安全补强：源段先 `fsync`，归档文件通过临时文件完整复制、文件/目录 `fsync` 和原子 rename 发布；`.ready`/`.done` 在 WAL 文件锁内原子更新，归档失败保留可重试状态；timeline 元数据持久化失败向上返回；新增 `wal_archive_failure_test`。 |
+| 2026-08-12 | 构建缓存安全补强：生产缓存签名纳入 manifest、生产源码和头文件内容，测试缓存另纳入全部测试源，不再只按 mtime 判断对象是否新鲜；新增回滚/恢复场景验证，避免过期对象造成假失败或假通过。 |
+| 2026-08-12 | 协议 E2E 测试稳定性补强：服务进程输出改为丢弃而非连接到无人消费的 pipe，避免长 SQL 流程填满管道后阻塞服务；协议/窗口测试超时改为可配置且默认适配慢速持久化环境。 |
 | 2026-08-11 | WAL 生命周期补强：checkpoint 归档成功后只在同一 WAL 文件锁内回收早于 checkpoint 的完整段；未归档段保留，恢复从最早保留段扫描，重复 checkpoint 不会为已删除段重建 archive marker；新增 `wal_truncate_test`。 |
 | 2026-08-11 | CLOG 跨 backend 一致性补强：段保存使用 `.clog.lock` 文件锁和 pending bit 合并，避免独立 backend 的陈旧整段缓存互相覆盖；读端检测文件替换并刷新缓存，`clog_test` 新增 merge/refresh 回归。 |
 | 2026-08-11 | CLOG 截断安全补强：旧段在同一文件锁内完成保存、删除和目录 `fsync`，保存失败时保留段且删除/同步失败时不驱逐缓存；`clog_test` 新增正常截断与持久化失败保留回归。 |

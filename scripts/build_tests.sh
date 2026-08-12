@@ -20,7 +20,7 @@ dbms_main_sources
 cd "${SRC_DIR}"
 mkdir -p "${BUILD_DIR}"
 CACHE_INVALID=0
-if dbms_cache_needs_rebuild "${BUILD_DIR}"; then
+if dbms_test_cache_needs_rebuild "${BUILD_DIR}"; then
     CACHE_INVALID=1
     echo "[test-build] Build configuration changed; invalidating cached objects"
 fi
@@ -132,5 +132,5 @@ if [ "$FAILED" -ne 0 ]; then
     exit 1
 fi
 
-dbms_write_cache_signature "${BUILD_DIR}"
+dbms_write_test_cache_signature "${BUILD_DIR}"
 echo "[test-build] All tests passed"

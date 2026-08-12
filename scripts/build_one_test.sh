@@ -19,7 +19,7 @@ dbms_print_tls_status inc
 
 mkdir -p build/obj
 CACHE_INVALID=0
-if dbms_cache_needs_rebuild build/obj; then
+if dbms_test_cache_needs_rebuild build/obj; then
     CACHE_INVALID=1
     echo "[inc] build configuration changed; invalidating cached objects"
 fi
@@ -75,4 +75,4 @@ g++ "${DBMS_CXXFLAGS[@]}" "${link[@]}" "build/obj/$test_name.o" "${DBMS_LDFLAGS[
 
 echo "[inc] running build/$test_name"
 dbms_run_isolated_test "$test_name" "${SRC_DIR}/build/$test_name"
-dbms_write_cache_signature build/obj
+dbms_write_test_cache_signature build/obj

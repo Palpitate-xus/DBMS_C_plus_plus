@@ -13,6 +13,7 @@ import sys
 import tempfile
 
 DBMS_MAIN = os.path.join(os.path.dirname(__file__), "..", "dbms_main")
+COMMAND_TIMEOUT = float(os.environ.get("DBMS_WINDOW_TEST_TIMEOUT", "30"))
 
 
 def scram_verifier(password, salt=b"0123456789abcdef", iterations=4096):
@@ -36,7 +37,7 @@ def run_sql(sql):
         input=script,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=COMMAND_TIMEOUT,
     )
     return proc.stdout.splitlines(), proc.stderr.splitlines(), proc.returncode
 

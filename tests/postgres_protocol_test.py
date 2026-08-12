@@ -14,6 +14,8 @@ import time
 
 
 DBMS_MAIN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dbms_main"))
+SOCKET_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_TEST_TIMEOUT", "10"))
+STARTUP_TIMEOUT = float(os.environ.get("DBMS_PROTOCOL_STARTUP_TIMEOUT", "15"))
 
 
 def frame(body):
@@ -390,14 +392,16 @@ def main():
         process = subprocess.Popen(
             [DBMS_MAIN, "--server", str(port), "--insecure"],
             cwd=work_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            # The protocol test deliberately drives many commands.  Do not
+            # leave a child stdout/stderr PIPE unread: once its buffer fills,
+            # the server blocks while the client waits for ReadyForQuery.
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
         sock = socket.socket()
-        sock.settimeout(2)
-        deadline = time.time() + 5
+        sock.settimeout(SOCKET_TIMEOUT)
+        deadline = time.time() + STARTUP_TIMEOUT
         while True:
             try:
                 sock.connect(("127.0.0.1", port))
@@ -843,7 +847,7 @@ def main():
         # A backend's transaction state must not leak through the shared
         # StorageEngine into another protocol connection.
         peer_sock = socket.socket()
-        peer_sock.settimeout(2)
+        peer_sock.settimeout(SOCKET_TIMEOUT)
         peer_sock.connect(("127.0.0.1", port))
         startup(peer_sock, "alice", "info")
         assert any(kind == b"C" for kind, _ in simple_query(
@@ -893,7 +897,7 @@ def main():
         # Disconnecting a backend must abort its open transaction and discard
         # its context before the worker thread can be reused.
         leaked_sock = socket.socket()
-        leaked_sock.settimeout(2)
+        leaked_sock.settimeout(SOCKET_TIMEOUT)
         leaked_sock.connect(("127.0.0.1", port))
         startup(leaked_sock, "alice", "info")
         assert simple_query(leaked_sock, "BEGIN")[-1] == (b"Z", b"T")
@@ -903,7 +907,7 @@ def main():
         time.sleep(0.1)
 
         observer_sock = socket.socket()
-        observer_sock.settimeout(2)
+        observer_sock.settimeout(SOCKET_TIMEOUT)
         observer_sock.connect(("127.0.0.1", port))
         startup(observer_sock, "alice", "info")
         peer_temp_after_disconnect = simple_query(observer_sock, "SELECT id FROM peer_temp")
@@ -917,7 +921,7 @@ def main():
         sock.close()
 
         role_sock = socket.socket()
-        role_sock.settimeout(2)
+        role_sock.settimeout(SOCKET_TIMEOUT)
         role_sock.connect(("127.0.0.1", port))
         startup(role_sock, "bob", "info", password="bObPass9!")
         role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
@@ -941,7 +945,7 @@ def main():
         # In explicit plaintext mode the server must answer the PostgreSQL
         # SSLRequest with 'N' and continue with the normal startup packet.
         plain_sock = socket.socket()
-        plain_sock.settimeout(2)
+        plain_sock.settimeout(SOCKET_TIMEOUT)
         plain_sock.connect(("127.0.0.1", port))
         plain_sock.sendall(frame(struct.pack("!I", 80877103)))
         assert read_exact(plain_sock, 1) == b"N"
