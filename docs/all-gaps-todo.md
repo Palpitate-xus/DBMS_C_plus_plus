@@ -342,7 +342,7 @@
 | 1.1.46 | `REFRESH MATERIALIZED VIEW` | 从 backing 表 schema 推导视图列、按源表 schema 顺序重跑 SELECT（修复 `SELECT *` 解析为 `["*"]` 与投影错位 bug）；支持 `CONCURRENTLY`（同步刷新）与 `WITH NO DATA`（清空）；缺少 PG 真正并发刷新条件和锁语义 | ⚠️ |
 | 1.1.47 | `REINDEX` | 基本 `REINDEX TABLE`；缺少 index/schema/database/system、`CONCURRENTLY`、tablespace、verbose | ⚠️ |
 | 1.1.48 | `RESET` | 支持 `RESET ROLE`/`RESET ALL` 等；缺少完整 GUC 语义 | ⚠️ |
-| 1.1.49 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 名称与路由已由事务 AST 统一处理，回滚仍基于 txn log index；缺少 PG 子事务资源/锁/错误状态完整语义 | ⚠️ |
+| 1.1.49 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 名称与路由已由事务 AST 统一处理；回滚基于 txn log index，并会释放保存点后新增的表/row/page/gap 锁、恢复保存点前锁模式；仍缺 PG 子事务 ID、资源/错误状态完整语义 | ⚠️ |
 | 1.1.50 | `SECURITY LABEL` | 保存 label 文件；缺少 provider、对象类型全集、SELinux/sepgsql 集成 | ⚠️ |
 | 1.1.51 | `SELECT` | 支持大量子集；复杂 grammar、类型推断、表达式、函数、子查询、锁、并行、planner/rewrite 差距最大 | ⚠️ |
 | 1.1.52 | `SET` / `SHOW` | 项目参数和少量 session 状态；不是 PG GUC 全体系 | ⚠️ |
@@ -520,10 +520,10 @@
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 9.1 | Tuple versioning | 项目行头只有 creator txid/rollback ptr 常量，实际可见性主要看创建 txid；缺少 `xmin/xmax`、ctid chain、多版本更新、HOT update | 🔄 |
-| 9.2 | Snapshot | 有 ReadView；缺少 PG snapshot export/import、subxip、catalog snapshot、logical decoding snapshot | 🔄 |
+| 9.2 | Snapshot | 有 ReadView、snapshot export/import 二进制校验、subxip 可见性和事务内 catalog snapshot；仍缺 logical decoding snapshot、完整跨集群快照生命周期 | 🔄 |
 | 9.3 | Isolation levels | 四级隔离名存在；Read Uncommitted 在 PG 中实际等同 Read Committed，本项目语义未必一致；Serializable 已覆盖关系限定的行级写偏差回滚，但仍是简化 SSI | ⚠️ |
 | 9.4 | SSI/predicate locks | 已有行级/页级 rw-conflict in/out、空范围关系级 SIREAD，以及非相交页/跨页危险结构回归；仍缺 PostgreSQL 索引范围 predicate lock、精确 phantom 推理和完整 SSI 图规则 | ⚠️ |
-| 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index；缺少子事务 ID、资源释放、错误状态恢复 | ⚠️ |
+| 9.5 | Savepoint/subtransaction | Savepoint 基于 txn log index，并记录/恢复表、row/page/gap 锁检查点；仍缺少 PostgreSQL 子事务 ID、完整资源隔离和错误状态恢复 | ⚠️ |
 | 9.6 | DDL transactions | ALTER 已具备当前格式整库快照回滚；CREATE 的失败清理和 DROP 的只读依赖计划已覆盖主要单对象边界；仍缺完整跨对象依赖 undo、并发 DDL 锁语义和 PostgreSQL 全部隐式提交边界 | 🔄 |
 | 9.7 | Lock manager | 表/行/gap/page/advisory lock 已有 token 归属、重入/升级、跨 backend/跨进程低级锁协调和双线程等待图死锁回归；gap 跨进程采用每表保守互斥，仍缺 PG 重量级锁、轻量锁、spinlock、lock modes 全矩阵、完整 deadlock detector 语义、索引 predicate lock 和 wait events | ⚠️ |
 | 9.8 | Crash safety | heap WAL 已支持 page before/after redo/undo，B+Tree/Hash 另有文件级 before/after 镜像；仍缺原生 page-level 索引 WAL、其他访问方法、PITR、并发事务完整崩溃窗口和 PostgreSQL 恢复语义 | 🔄 |

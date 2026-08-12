@@ -1391,6 +1391,7 @@ private:
         struct SavepointState {
             size_t txnLogSize = 0;
             size_t ddlUndoSize = 0;
+            LockManager::LockCheckpoint lockCheckpoint;
         };
         std::map<std::string, SavepointState> savepoints;
         std::vector<uint64_t> txnSubTxnIds;       // current transaction's subtransaction IDs

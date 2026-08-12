@@ -81,6 +81,21 @@ public:
     };
     std::vector<LockHoldInfo> getLockHolds() const;
 
+    // Transaction savepoints need to release locks acquired after the
+    // checkpoint. The keys are opaque to callers and must only be passed back
+    // to the same LockManager instance from the same backend thread.
+    struct LockCheckpoint {
+        std::map<std::string, size_t> tableCounts;
+        std::map<std::string, LockMode> tableModes;
+        std::set<std::string> rowLocks;
+        std::map<std::string, LockMode> rowModes;
+        std::set<std::string> pageLocks;
+        std::map<std::string, LockMode> pageModes;
+        std::map<std::string, size_t> gapCounts;
+    };
+    LockCheckpoint captureCheckpoint() const;
+    void rollbackToCheckpoint(const LockCheckpoint& checkpoint);
+
     // ========================================================================
     // Row-level locking
     // ========================================================================
@@ -147,6 +162,9 @@ private:
         // after the last local token leaves the state.
         int processLockFd = -1;
         LockMode processLockMode = LockMode::Shared;
+        std::string processLockNamespace;
+        std::string processLockKind;
+        std::string processLockResource;
     };
     std::map<std::string, LockState> locks_;
     mutable std::mutex globalMutex_;

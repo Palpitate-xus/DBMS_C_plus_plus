@@ -6,6 +6,7 @@
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -127,6 +128,74 @@ int main() {
     manager.pageUnlockAll();
     manager.unlockAll();
     std::cout << "[LOCK] row token ownership and cleanup OK\n";
+
+    // Savepoint-style lock checkpoints retain pre-savepoint locks but release
+    // every table/row/page/gap token acquired afterward.
+    std::filesystem::create_directories("checkpoint_db");
+    LockManager checkpointManager;
+    assert(checkpointManager.lockShared("before_savepoint"));
+    assert(checkpointManager.rowLockShared("checkpoint_rows", 1));
+    assert(checkpointManager.pageLockShared("checkpoint_db", "checkpoint_pages", 1));
+    assert(checkpointManager.lockGap("checkpoint_gaps", "", "~"));
+    const auto checkpoint = checkpointManager.captureCheckpoint();
+    assert(checkpointManager.lockExclusive("before_savepoint"));
+    assert(checkpointManager.rowLockExclusive("checkpoint_rows", 1));
+    assert(checkpointManager.pageLockExclusive("checkpoint_db", "checkpoint_pages", 1));
+    assert(checkpointManager.lockExclusive("after_savepoint"));
+    assert(checkpointManager.rowLockExclusive("checkpoint_rows", 2));
+    assert(checkpointManager.pageLockExclusive("checkpoint_db", "checkpoint_pages", 2));
+    assert(checkpointManager.lockGap("checkpoint_gaps", "1", "2"));
+    checkpointManager.rollbackToCheckpoint(checkpoint);
+
+    assert(!checkpointManager.lockedTables().empty());
+    std::atomic<bool> restoredSharedMode{false};
+    std::atomic<bool> restoredRowSharedMode{false};
+    std::atomic<bool> restoredPageSharedMode{false};
+    std::thread restoredSharedReader([&] {
+        checkpointManager.setLockTimeout(100);
+        restoredSharedMode = checkpointManager.lockShared("before_savepoint");
+        if (restoredSharedMode) checkpointManager.unlock("before_savepoint");
+        restoredRowSharedMode = checkpointManager.rowLockShared("checkpoint_rows", 1);
+        if (restoredRowSharedMode) checkpointManager.rowUnlock("checkpoint_rows", 1);
+        restoredPageSharedMode = checkpointManager.pageLockShared(
+            "checkpoint_db", "checkpoint_pages", 1);
+        if (restoredPageSharedMode) {
+            checkpointManager.pageUnlock("checkpoint_db", "checkpoint_pages", 1);
+        }
+    });
+    restoredSharedReader.join();
+    assert(restoredSharedMode.load());
+    assert(restoredRowSharedMode.load());
+    assert(restoredPageSharedMode.load());
+    assert(checkpointManager.lockedRows("checkpoint_rows").size() == 1);
+    assert(checkpointManager.lockedRows("checkpoint_rows").front() == 1);
+    assert(checkpointManager.lockGap("checkpoint_gaps", "2", "3"));
+    checkpointManager.unlockGaps("checkpoint_gaps");
+
+    std::atomic<bool> postSavepointTableAcquired{false};
+    std::atomic<bool> postSavepointRowAcquired{false};
+    std::atomic<bool> postSavepointPageAcquired{false};
+    std::thread postSavepointWaiter([&] {
+        checkpointManager.setLockTimeout(100);
+        postSavepointTableAcquired = checkpointManager.lockExclusive("after_savepoint");
+        if (postSavepointTableAcquired) checkpointManager.unlock("after_savepoint");
+        postSavepointRowAcquired = checkpointManager.rowLockExclusive("checkpoint_rows", 2);
+        if (postSavepointRowAcquired) checkpointManager.rowUnlock("checkpoint_rows", 2);
+        postSavepointPageAcquired = checkpointManager.pageLockExclusive(
+            "checkpoint_db", "checkpoint_pages", 2);
+        if (postSavepointPageAcquired) {
+            checkpointManager.pageUnlock("checkpoint_db", "checkpoint_pages", 2);
+        }
+    });
+    postSavepointWaiter.join();
+    assert(postSavepointTableAcquired.load());
+    assert(postSavepointRowAcquired.load());
+    assert(postSavepointPageAcquired.load());
+    checkpointManager.rowUnlock("checkpoint_rows", 1);
+    checkpointManager.pageUnlock("checkpoint_db", "checkpoint_pages", 1);
+    checkpointManager.unlock("before_savepoint");
+    std::filesystem::remove_all("checkpoint_db");
+    std::cout << "[LOCK] savepoint checkpoint releases post-savepoint tokens OK\n";
 
     std::cout << "[LOCK] all passed\n";
     return 0;

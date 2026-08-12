@@ -80,7 +80,7 @@ SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议
 
 ACL 检查已统一覆盖会话用户、递归继承角色、`PUBLIC` 和表 owner 隐含权限；`NOINHERIT` 不自动继承成员角色权限，`SET ROLE` 使用原始成员关系并切换 ACL/RLS 的有效角色；`ALTER TABLE ... OWNER TO` 已检查表所有者和目标角色可切换性，表 owner 可执行表级 GRANT/REVOKE；角色 ADMIN OPTION 和表级 GRANT OPTION 的基础授权/撤销/级联已接入。完整对象 owner、ACL item 继承和 schema/database/function ACL 仍列为后续安全缺口。
 
-事务运行时补强了 backend 隔离：共享 `StorageEngine` 的事务执行上下文改为当前连接工作线程局部，避免事务 ID、快照、回滚日志、savepoint、隔离级别和 `lastval` 在连接之间泄漏；连接结束时回滚未完成事务并清理上下文；跨 backend 的锁管理和提交状态仍保持全局协调，后续继续补齐更完整的 session/statement 生命周期语义。
+事务运行时补强了 backend 隔离：共享 `StorageEngine` 的事务执行上下文改为当前连接工作线程局部，避免事务 ID、快照、回滚日志、savepoint、隔离级别和 `lastval` 在连接之间泄漏；连接结束时回滚未完成事务并清理上下文；保存点现在记录并恢复表/row/page/gap 锁检查点，回滚不会泄漏保存点后的锁；跨 backend 的锁管理和提交状态仍保持全局协调，真正 PostgreSQL 子事务 ID/错误状态语义仍待补齐。
 
 TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START TRANSACTION` 的 isolation/read-only/deferrable 选项及 savepoint 名称，执行器消费 AST；修复 `ROLLBACK TO`、`COMMIT PREPARED`、`ROLLBACK PREPARED` 被通用前缀提前匹配的问题。`DEFERRABLE` 仍在执行层 fail-closed 拒绝，待安全快照语义完成后再开放。
 
@@ -733,7 +733,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ⚠️ 5.21 实现并行查询（Gather/Gather Merge、parallel scan/join/aggregate） | 7.5 | `ParallelTableScanOp` 已实现非分区 heap page-range scan、确定性 Gather 和 `max_parallel_workers_per_gather`；parallel join/aggregate/GatherMerge/worker pool 仍缺 |
 | ❌ 5.22 实现 JIT（LLVM） | 7.6 | 当前没有 LLVM backend；旧 GUC/stub 表述已移除 |
 | ❌ 5.23 实现 Async I/O（AIO） | 7.7 | 当前没有 io_uring/AIO executor；旧 GUC/stub 表述已移除 |
-| ⚠️ 5.24 实现 `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` 子事务完整语义 | 1.1.49, 9.5 | 基础事务日志位置与回滚路径已就绪；资源/锁/目录快照及完整 PostgreSQL 子事务语义仍待补齐 |
+| ⚠️ 5.24 实现 `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` 子事务完整语义 | 1.1.49, 9.5 | 基础事务日志、保存点锁检查点（表/row/page/gap token 释放与锁模式恢复）已就绪；目录快照、PostgreSQL 子事务 ID/错误状态和完整子事务语义仍待补齐 |
 | ✅ 5.25 实现 `COMMIT`/`ROLLBACK` `AND [NO] CHAIN`、全局事务状态 | 1.1.14, 1.1.38, 1.1.8 | 本次新增 AND CHAIN/NO CHAIN 语法 |
 | ⚠️ 5.26 实现 `PREPARE TRANSACTION` / `COMMIT PREPARED` 完整语义 | 1.1.15 | 基础 two-phase commit 已就绪；含内存闭包式 DDL undo 的事务会拒绝 PREPARE，完整持久化 DDL undo 仍待实现 |
 | ⚠️ 5.27 实现 `COPY` `STDIN/STDOUT`、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH` | 1.1.16 | 当前仅基础 COPY/CSV 路径可用，binary/program/freeze/header 语义仍缺。 |

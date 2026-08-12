@@ -21346,7 +21346,8 @@ DBStatus StorageEngine::savepoint(const std::string& name) {
     }
     transactionContext().savepoints[name] = {
         transactionContext().txnLog.size(),
-        transactionContext().ddlUndoActions.size()
+        transactionContext().ddlUndoActions.size(),
+        lockManager_.captureCheckpoint()
     };
     return DBStatus::OK;
 }
@@ -21633,6 +21634,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         }
     }
     transactionContext().ddlUndoActions.resize(ddlSpIdx);
+    lockManager_.rollbackToCheckpoint(it->second.lockCheckpoint);
 
     // Remove all savepoints created after this one
     for (auto sit = transactionContext().savepoints.begin(); sit != transactionContext().savepoints.end(); ) {

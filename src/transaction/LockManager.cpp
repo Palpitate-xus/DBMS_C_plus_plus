@@ -86,6 +86,12 @@ LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
                 return ProcessLockResult::Error;
             }
             state.processLockMode = LockMode::Exclusive;
+        } else if (state.processLockMode == LockMode::Exclusive && !exclusive) {
+            if (::flock(state.processLockFd, LOCK_SH | LOCK_NB) != 0) {
+                if (errno == EWOULDBLOCK || errno == EAGAIN) return ProcessLockResult::Busy;
+                return ProcessLockResult::Error;
+            }
+            state.processLockMode = LockMode::Shared;
         }
         return ProcessLockResult::Acquired;
     }
@@ -110,6 +116,9 @@ LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
     }
     state.processLockFd = fd;
     state.processLockMode = exclusive ? LockMode::Exclusive : LockMode::Shared;
+    state.processLockNamespace = resourceNamespace;
+    state.processLockKind = kind;
+    state.processLockResource = resource;
     return ProcessLockResult::Acquired;
 }
 
@@ -124,6 +133,9 @@ void LockManager::releaseProcessLock(LockState& state) {
     (void)::flock(state.processLockFd, LOCK_UN);
     ::close(state.processLockFd);
     state.processLockFd = -1;
+    state.processLockNamespace.clear();
+    state.processLockKind.clear();
+    state.processLockResource.clear();
 }
 
 bool LockManager::tryAcquireGapProcessLock(const std::string& table) {
@@ -1023,6 +1035,250 @@ std::vector<LockManager::LockHoldInfo> LockManager::getLockHolds() const {
         }
     }
     return result;
+}
+
+LockManager::LockCheckpoint LockManager::captureCheckpoint() const {
+    const std::thread::id self = std::this_thread::get_id();
+    LockCheckpoint checkpoint;
+    {
+        std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(globalMutex_));
+        for (const auto& [key, state] : locks_) {
+            const auto it = state.holderCounts.find(self);
+            const auto mode = state.holderModes.find(self);
+            if (it != state.holderCounts.end() && mode != state.holderModes.end()) {
+                checkpoint.tableCounts[key] = it->second;
+                checkpoint.tableModes[key] = mode->second;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(rowMutex_));
+        for (const auto& [key, state] : rowLocks_) {
+            if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
+                checkpoint.rowLocks.insert(key);
+                checkpoint.rowModes[key] = state.exclusive ? LockMode::Exclusive : LockMode::Shared;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(pageMutex_));
+        for (const auto& [key, state] : pageLocks_) {
+            if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
+                checkpoint.pageLocks.insert(key);
+                checkpoint.pageModes[key] = state.exclusive ? LockMode::Exclusive : LockMode::Shared;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(gapMutex_));
+        for (const auto& [key, gaps] : gapLocks_) {
+            size_t count = 0;
+            for (const auto& gap : gaps) if (gap.holder == self) ++count;
+            if (count > 0) checkpoint.gapCounts[key] = count;
+        }
+    }
+    return checkpoint;
+}
+
+void LockManager::rollbackToCheckpoint(const LockCheckpoint& checkpoint) {
+    const std::thread::id self = std::this_thread::get_id();
+    removeWaitEdges(self);
+
+    {
+        std::lock_guard<std::mutex> guard(globalMutex_);
+        for (auto& [key, state] : locks_) {
+            const auto holder = state.holderCounts.find(self);
+            if (holder == state.holderCounts.end()) continue;
+            const auto saved = checkpoint.tableCounts.find(key);
+            const size_t target = saved == checkpoint.tableCounts.end() ? 0 : saved->second;
+            const auto modeIt = state.holderModes.find(self);
+            if (modeIt == state.holderModes.end()) continue;
+            const auto savedMode = checkpoint.tableModes.find(key);
+            const LockMode targetMode = savedMode == checkpoint.tableModes.end()
+                ? modeIt->second : savedMode->second;
+            if (holder->second <= target && modeIt->second == targetMode) continue;
+            if (target == 0) {
+                switch (modeIt->second) {
+                    case LockMode::Shared:
+                        state.mtx.unlock_shared();
+                        --state.sharedCount;
+                        break;
+                    case LockMode::Exclusive:
+                        state.mtx.unlock();
+                        state.exclusive = false;
+                        break;
+                    case LockMode::IntentShared:
+                        state.mtx.unlock_shared();
+                        --state.intentSharedCount;
+                        break;
+                    case LockMode::IntentExclusive:
+                        state.mtx.unlock();
+                        --state.intentExclusiveCount;
+                        break;
+                    case LockMode::Metadata:
+                        state.mtx.unlock();
+                        state.metadata = false;
+                        break;
+                }
+                state.holders.erase(std::remove(state.holders.begin(), state.holders.end(), self),
+                                    state.holders.end());
+                state.holderModes.erase(self);
+                state.holderCounts.erase(self);
+                if (state.holders.empty()) releaseProcessLock(state);
+            } else {
+                // If a later operation upgraded the logical mode, restore the
+                // savepoint's mode before retaining its original depth.
+                if (modeIt->second != targetMode) {
+                    const auto processResult = tryAcquireProcessLock(
+                        state, state.processLockNamespace, state.processLockKind,
+                        state.processLockResource, targetMode);
+                    if (processResult != ProcessLockResult::Acquired) continue;
+                    const LockMode currentMode = modeIt->second;
+                    switch (currentMode) {
+                        case LockMode::Shared: state.mtx.unlock_shared(); --state.sharedCount; break;
+                        case LockMode::Exclusive: state.mtx.unlock(); state.exclusive = false; break;
+                        case LockMode::IntentShared: state.mtx.unlock_shared(); --state.intentSharedCount; break;
+                        case LockMode::IntentExclusive: state.mtx.unlock(); --state.intentExclusiveCount; break;
+                        case LockMode::Metadata: state.mtx.unlock(); state.metadata = false; break;
+                    }
+                    switch (targetMode) {
+                        case LockMode::Shared: state.mtx.lock_shared(); ++state.sharedCount; break;
+                        case LockMode::Exclusive: state.mtx.lock(); state.exclusive = true; break;
+                        case LockMode::IntentShared: state.mtx.lock_shared(); ++state.intentSharedCount; break;
+                        case LockMode::IntentExclusive: state.mtx.lock(); ++state.intentExclusiveCount; break;
+                        case LockMode::Metadata: state.mtx.lock(); state.metadata = true; break;
+                    }
+                    modeIt->second = targetMode;
+                }
+                holder->second = target;
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(rowMutex_);
+        for (auto it = rowLocks_.begin(); it != rowLocks_.end(); ) {
+            auto& state = it->second;
+            const auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+            const auto saved = checkpoint.rowLocks.find(it->first);
+            if (hit == state.holders.end()) {
+                ++it;
+                continue;
+            }
+            if (saved != checkpoint.rowLocks.end()) {
+                const LockMode currentMode = state.exclusive ? LockMode::Exclusive : LockMode::Shared;
+                const LockMode targetMode = checkpoint.rowModes.at(it->first);
+                if (currentMode != targetMode) {
+                    const auto processResult = tryAcquireProcessLock(
+                        state, state.processLockNamespace, state.processLockKind,
+                        state.processLockResource, targetMode);
+                    if (processResult != ProcessLockResult::Acquired) {
+                        ++it;
+                        continue;
+                    }
+                    if (currentMode == LockMode::Exclusive) {
+                        state.mtx.unlock(); state.exclusive = false;
+                    } else {
+                        state.mtx.unlock_shared(); --state.sharedCount;
+                    }
+                    if (targetMode == LockMode::Exclusive) {
+                        state.mtx.lock(); state.exclusive = true;
+                    } else {
+                        state.mtx.lock_shared(); ++state.sharedCount;
+                    }
+                }
+                ++it;
+                continue;
+            }
+            state.holders.erase(hit);
+            if (state.exclusive) {
+                state.mtx.unlock();
+                state.exclusive = false;
+            } else {
+                state.mtx.unlock_shared();
+                --state.sharedCount;
+            }
+            if (state.holders.empty()) releaseProcessLock(state);
+            if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
+                state.waiters == 0) it = rowLocks_.erase(it);
+            else ++it;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(pageMutex_);
+        for (auto it = pageLocks_.begin(); it != pageLocks_.end(); ) {
+            auto& state = it->second;
+            const auto hit = std::find(state.holders.begin(), state.holders.end(), self);
+            const auto saved = checkpoint.pageLocks.find(it->first);
+            if (hit == state.holders.end()) {
+                ++it;
+                continue;
+            }
+            if (saved != checkpoint.pageLocks.end()) {
+                const LockMode currentMode = state.exclusive ? LockMode::Exclusive : LockMode::Shared;
+                const LockMode targetMode = checkpoint.pageModes.at(it->first);
+                if (currentMode != targetMode) {
+                    const auto processResult = tryAcquireProcessLock(
+                        state, state.processLockNamespace, state.processLockKind,
+                        state.processLockResource, targetMode);
+                    if (processResult != ProcessLockResult::Acquired) {
+                        ++it;
+                        continue;
+                    }
+                    if (currentMode == LockMode::Exclusive) {
+                        state.mtx.unlock(); state.exclusive = false;
+                    } else {
+                        state.mtx.unlock_shared(); --state.sharedCount;
+                    }
+                    if (targetMode == LockMode::Exclusive) {
+                        state.mtx.lock(); state.exclusive = true;
+                    } else {
+                        state.mtx.lock_shared(); ++state.sharedCount;
+                    }
+                }
+                ++it;
+                continue;
+            }
+            state.holders.erase(hit);
+            if (state.exclusive) {
+                state.mtx.unlock();
+                state.exclusive = false;
+            } else {
+                state.mtx.unlock_shared();
+                --state.sharedCount;
+            }
+            if (state.holders.empty()) releaseProcessLock(state);
+            if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
+                state.waiters == 0) it = pageLocks_.erase(it);
+            else ++it;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(gapMutex_);
+        for (auto it = gapLocks_.begin(); it != gapLocks_.end(); ) {
+            const size_t target = checkpoint.gapCounts.count(it->first)
+                ? checkpoint.gapCounts.at(it->first) : 0;
+            size_t kept = 0;
+            auto& gaps = it->second;
+            gaps.erase(std::remove_if(gaps.begin(), gaps.end(),
+                [&self, target, &kept](const GapLock& gap) {
+                    if (gap.holder != self) return false;
+                    if (kept < target) {
+                        ++kept;
+                        return false;
+                    }
+                    return true;
+                }), gaps.end());
+            if (gaps.empty()) {
+                releaseGapProcessLock(it->first);
+                it = gapLocks_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 }
 
 // ========================================================================
