@@ -1043,11 +1043,11 @@ SET AUTO_VACUUM_THRESHOLD = 1000;
 完整测试套件运行方式：
 
 ```bash
-./scripts/build.sh              # 编译
-./scripts/run_all_tests_fast.sh # 安静运行统一回归：133 个 C++ 测试 + 2 个 E2E
-./scripts/build_tests.sh        # 完整输出的规范测试入口：C++ 测试 + 2 个 E2E
+./scripts/build.sh              # 编译生产二进制
+./scripts/run_all_tests_fast.sh # 自包含地构建并安静运行统一回归：133 个 C++ 测试 + 2 个 E2E
+./scripts/build_tests.sh        # 自包含地构建并运行完整输出的规范测试入口
 ```
 
-`build_tests.sh` 是唯一负责生产对象编译、测试链接、桩对象选择和 E2E 调度的测试实现；`run_all_tests_fast.sh` 只是它的安静输出外壳，成功时输出计数，失败时保留完整诊断。上述 shell 入口共享 `scripts/build_common.sh` 的编译配置；`scripts/build_one_test.sh <test_name>` 可用于单测试增量编译，编译配置变化会自动使对象缓存失效。
+`build_tests.sh` 是唯一负责生产二进制、生产对象编译、测试链接、桩对象选择和 E2E 调度的测试实现；即使项目根目录没有 `dbms_main`，它也会先通过共享构建逻辑生成当前二进制。`run_all_tests_fast.sh` 只是它的安静输出外壳，成功时输出计数，失败时保留完整诊断。上述 shell 入口共享 `scripts/build_common.sh` 的编译配置；`scripts/build_one_test.sh <test_name>` 可用于单测试增量编译，编译配置变化会自动使对象缓存失效。
 
-每个 C++ 测试执行完毕后自动清理数据库目录（`__t_*` 前缀）。窗口函数 E2E 测试使用临时工作目录和临时管理员账号，结束后自动删除，不依赖或污染项目根目录。
+每个 C++ 测试都在独立的临时工作目录中执行，测试结束后自动删除；因此 `.txnid`、WAL、catalog、日志和 `__t_*` 数据库不会跨测试共享。窗口函数 E2E 测试使用临时工作目录和临时管理员账号，结束后自动删除，不依赖或污染项目根目录。

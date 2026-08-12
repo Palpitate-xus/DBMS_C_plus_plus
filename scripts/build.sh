@@ -13,9 +13,5 @@ fi
 dbms_main_sources
 
 dbms_print_tls_status build
-echo "[build] Compiling..."
 cd "${SRC_DIR}"
-g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_PRODUCTION_INCLUDES[@]}" \
-    "${DBMS_MAIN_SOURCES[@]}" -o dbms_main "${DBMS_LDFLAGS[@]}"
-
-echo "[build] Success: ./dbms_main"
+dbms_build_main

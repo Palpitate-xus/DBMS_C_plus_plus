@@ -11,6 +11,9 @@
 - OS: Linux 6.8.0-117-generic
 - Compiler: g++ -std=c++17 -O2 -pthread
 - 标准编译命令：`./scripts/build.sh`；规范测试入口：`./scripts/build_tests.sh`；`./scripts/run_all_tests_fast.sh` 是只改变输出形式的安静外壳
+- `build_tests.sh` 会在测试前检查 `dbms_main` 的源码、头文件、manifest 和构建配置指纹；二进制缺失或过期时自动原子重建，因此完整回归不依赖调用者预先执行 `build.sh`。
+- 生产二进制构建失败时，`build_tests.sh` 会立即 fail-closed，拒绝运行任何可能过期的 E2E 二进制。
+- 每个 C++ 测试在独立临时工作目录中运行，回收目录后才进入下一项；顺序回归不再共享 `.txnid`、WAL、catalog 或后台 worker 的相对路径状态。
 - 本轮构建质量检查：主程序在 `-Wall -Wextra` 下无编译警告；修复 join cost 参数错误及 parser/测试中的未使用代码。
 - schema 格式回归：当前格式 `0x44420009`，长表名、列名和约束名可完整写入/读取；旧格式仍按 fail-closed 策略拒绝。
 - 窗口函数端到端测试：由统一回归入口执行 `tests/window_e2e_test.py`（13 用例，包含 Volcano `WindowAgg` 排名/偏移、窗口聚合、`ROWS/RANGE/GROUPS` frame/exclusion、OFFSET 和命名窗口路径，使用隔离临时目录和临时管理员账号）
@@ -28,7 +31,7 @@
 - DDL DROP/REPLACE 回归：`ddl_transaction_skeleton_test` 验证 DROP TABLE 与 CREATE OR REPLACE VIEW 的变更前快照恢复，外层回滚先恢复对象再撤销同一事务中的新增行；快照已被 DDL 修改后另一条快照型 DDL 及 SAVEPOINT 会 fail-closed。
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。
-- `./scripts/build_tests.sh` 是唯一的完整测试编排实现，缓存生产对象后逐个测试独立链接运行，并自动执行两个 E2E；`run_all_tests_fast.sh` 仅捕获其成功输出并显示 PASS 计数，失败时原样打印完整编译/链接/运行日志。
+- `./scripts/build_tests.sh` 是唯一的完整测试编排实现，会先通过 `build_common.sh` 的共享逻辑检查并构建 `dbms_main`，再缓存生产对象、逐个测试独立链接运行，并自动执行两个 E2E；因此不依赖调用者预先运行 `build.sh`。`run_all_tests_fast.sh` 仅捕获其成功输出并显示 PASS 计数，失败时原样打印完整编译/链接/运行日志。
 - 文档一致性检查确认根目录旧版 `MANUAL.md` 已移除，`docs/MANUAL.md` 是唯一受 README 与测试/部署文档引用的完整手册。
 - PostgreSQL 协议 E2E 覆盖普通顶层多行 DML 和写 CTE 的 statement atomicity：批量 INSERT 或 CTE INSERT 后续行冲突时，前序行不会残留；成功的 `WITH ... RETURNING` 结果也能通过协议返回。
 - PostgreSQL 协议 E2E 覆盖 typed `CREATE TEMP/TEMPORARY TABLE`：临时表在所属会话内持续可用、遮蔽同名永久表，不同 backend 可创建同名临时表，其他会话不可见，断开连接后对象被清理。

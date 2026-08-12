@@ -15,6 +15,7 @@ fi
 dbms_test_project_sources
 
 dbms_print_tls_status test-build
+dbms_main_sources
 
 cd "${SRC_DIR}"
 mkdir -p "${BUILD_DIR}"
@@ -48,6 +49,11 @@ compile_source() {
 
 PROJECT_OBJECTS=()
 FAILED=0
+if ! dbms_build_main; then
+    echo "[test-build] Production binary is unavailable; refusing to run tests" >&2
+    exit 1
+fi
+
 for source in "${DBMS_PROJECT_SOURCES[@]}"; do
     if object="$(compile_source "$source")"; then
         PROJECT_OBJECTS+=("$object")
@@ -102,7 +108,7 @@ for test_file in tests/*_test.cpp; do
         FAILED=1
         continue
     fi
-    if "$binary"; then
+    if dbms_run_isolated_test "$name" "$binary"; then
         echo "[test-build] ${name} PASSED"
     else
         echo "[test-build] ${name} FAILED"

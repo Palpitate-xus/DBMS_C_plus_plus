@@ -15,6 +15,12 @@
 
 2026-08-12 文档清理：删除未引用且与当前实现分叉的根目录旧版 `MANUAL.md`，统一以 `docs/MANUAL.md` 作为完整使用手册，避免重复文档继续漂移。
 
+2026-08-12 构建入口修复：`build_tests.sh` 现在先通过 `build_common.sh` 按源码、头文件、manifest 和配置指纹检查并原子构建 `dbms_main`，完整测试不再依赖调用者预先运行 `build.sh`；E2E 的生产二进制前置条件已纳入统一入口。
+
+2026-08-12 构建失败边界收紧：生产二进制构建失败时 `build_tests.sh` 立即 fail-closed，不再继续执行可能对应旧二进制的 E2E。
+
+2026-08-12 测试隔离修复：每个 C++ 测试在独立临时工作目录运行并在结束后回收，统一消除 `.txnid`、WAL、catalog、日志和后台 worker 相对路径造成的顺序污染；`build_one_test.sh` 复用同一隔离逻辑。
+
 2026-08-11 增量审计：`DdlTransaction` 的 CREATE undo 已注册到外层事务上下文；DROP/REPLACE 和文件级 DDL 在变更前建立快照，外层 `ROLLBACK` 先恢复快照再按事务日志撤销行变更，快照污染后的另一条快照型 DDL、SAVEPOINT 创建/回滚会 fail-closed。含内存闭包式 DDL undo 的事务暂不进入 `PREPARE TRANSACTION`；完整依赖图 undo 和全部 PostgreSQL 隐式提交边界仍待实现。
 
 2026-08-11 增量审计：`RuntimeStats` 对完整可见表扫描建立带来源有效性的 live-row 估计，`QueryPlanner` 将其用于 Join 成本和 EXPLAIN 行数估计；部分/索引扫描不会提升为精确 planner 证据，表重建/截断会清除同名关系的旧估计。后台采样线程、历史持久化、按访问方法细分和更深统计反馈仍待实现。

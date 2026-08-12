@@ -74,5 +74,5 @@ echo "[inc] linking build/$test_name"
 g++ "${DBMS_CXXFLAGS[@]}" "${link[@]}" "build/obj/$test_name.o" "${DBMS_LDFLAGS[@]}" -o "build/$test_name"
 
 echo "[inc] running build/$test_name"
-"build/$test_name"
+dbms_run_isolated_test "$test_name" "${SRC_DIR}/build/$test_name"
 dbms_write_cache_signature build/obj

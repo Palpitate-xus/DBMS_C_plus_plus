@@ -68,6 +68,72 @@ dbms_main_sources() {
     DBMS_MAIN_SOURCES=("${DBMS_MANIFEST_SOURCES[@]}" "$DBMS_TLS_SOURCE")
 }
 
+dbms_main_needs_rebuild() {
+    local binary="${DBMS_SOURCE_DIR}/dbms_main"
+    local stamp="${DBMS_SOURCE_DIR}/build/.dbms_main-build-config.sha256"
+    local source header
+
+    [[ ! -x "$binary" ]] && return 0
+    [[ ! -f "$stamp" || "$(<"$stamp")" != "$(dbms_cache_signature)" ]] && return 0
+    [[ "${DBMS_MANIFEST}" -nt "$binary" ]] && return 0
+
+    for source in "${DBMS_MAIN_SOURCES[@]}"; do
+        [[ "${DBMS_SOURCE_DIR}/${source}" -nt "$binary" ]] && return 0
+    done
+    while IFS= read -r header; do
+        [[ "$header" -nt "$binary" ]] && return 0
+    done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' \) -print)
+    return 1
+}
+
+dbms_build_main() {
+    local binary="${DBMS_SOURCE_DIR}/dbms_main"
+    local stamp="${DBMS_SOURCE_DIR}/build/.dbms_main-build-config.sha256"
+    local temporary_binary="${DBMS_SOURCE_DIR}/build/.dbms_main.tmp.$$"
+
+    mkdir -p "${DBMS_SOURCE_DIR}/build"
+    if ! dbms_main_needs_rebuild; then
+        echo "[build] dbms_main is up to date"
+        return 0
+    fi
+
+    echo "[build] Compiling production binary..."
+    if ! (cd "${DBMS_SOURCE_DIR}" && \
+        g++ "${DBMS_CXXFLAGS[@]}" "${DBMS_PRODUCTION_INCLUDES[@]}" \
+            "${DBMS_MAIN_SOURCES[@]}" -o "$temporary_binary" "${DBMS_LDFLAGS[@]}"); then
+        rm -f -- "$temporary_binary"
+        echo "[build] Production binary compilation failed" >&2
+        return 1
+    fi
+    if ! mv -f -- "$temporary_binary" "$binary"; then
+        rm -f -- "$temporary_binary"
+        echo "[build] Could not publish production binary" >&2
+        return 1
+    fi
+    printf '%s\n' "$(dbms_cache_signature)" > "${stamp}.tmp"
+    if ! mv -f -- "${stamp}.tmp" "$stamp"; then
+        rm -f -- "${stamp}.tmp"
+        echo "[build] Could not publish production build stamp" >&2
+        return 1
+    fi
+    echo "[build] Success: ./dbms_main"
+}
+
+dbms_run_isolated_test() {
+    local name="${1:?test name is required}"
+    local binary="${2:?test binary is required}"
+    local work_dir
+    local status=0
+
+    work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dbms-test-${name}.XXXXXX")" || return 1
+    (cd "$work_dir" && "$binary") || status=$?
+    if ! rm -rf -- "$work_dir"; then
+        echo "[test-build] Could not clean isolated directory: ${work_dir}" >&2
+        status=1
+    fi
+    return "$status"
+}
+
 dbms_test_project_sources() {
     DBMS_PROJECT_SOURCES=()
     local source
