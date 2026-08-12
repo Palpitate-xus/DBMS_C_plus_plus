@@ -88,11 +88,37 @@ int main() {
         return 1;
     }
 
+    // A COMMIT WAL record must not be reported as a successful live commit
+    // when CLOG cannot be durably published. The engine must undo the row,
+    // append an ABORT record after the already-written COMMIT, and leave no
+    // active transaction behind. Recovery uses the later ABORT to avoid
+    // replaying the failed commit.
+    const std::string failureDb = "clog_commit_failure_db";
+    std::filesystem::remove_all(failureDb);
+    if (engine.createDatabase(failureDb) != DBStatus::OK) return 1;
+    TableSchema failureTable;
+    failureTable.tablename = "t";
+    failureTable.append(makeIntColumn("id", false, 0, true));
+    if (engine.createTable(failureDb, failureTable) != DBStatus::OK) return 1;
+    if (engine.beginTransaction(failureDb) != DBStatus::OK) return 1;
+    if (engine.insert(failureDb, "t", {{"id", "1"}}) != DBStatus::OK) return 1;
+    (void)engine.getCommitLog(failureDb); // materialize the in-memory CLOG
+    std::filesystem::remove_all(std::filesystem::path(failureDb) / "pg_xact");
+    if (engine.commitTransaction() != DBStatus::IO_ERROR) return 1;
+    if (engine.inTransaction()) return 1;
+    if (!engine.query(failureDb, "t", {"=id 1"}, {"id"}).empty()) return 1;
+    {
+        StorageEngine recovered;
+        if (!recovered.query(failureDb, "t", {"=id 1"}, {"id"}).empty()) return 1;
+    }
+    std::cout << "[CLOG INTEGRATION TEST] commit persistence failure fails closed\n";
+
     std::cout << "[CLOG INTEGRATION TEST] passed\n";
 
     // Cleanup
     std::filesystem::remove_all(dbname);
     std::filesystem::remove_all(dbname + ".txn_backup");
+    std::filesystem::remove_all(failureDb);
     std::filesystem::remove_all(".txnid");
     return 0;
 }

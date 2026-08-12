@@ -26,7 +26,7 @@ CommitLog::~CommitLog() {
     // merely because destruction is flushing an obsolete commit log.
     std::error_code ec;
     if (!dataDir_.empty() && std::filesystem::exists(dataDir_, ec) && !ec) {
-        flush();
+        (void)flush();
     }
 }
 
@@ -113,17 +113,17 @@ bool CommitLog::saveSegment(uint64_t segNo, int heldLockFd) {
     auto it = segments_.find(segNo);
     if (it == segments_.end() || !it->second.dirty) return true;
 
+    const std::string path = segmentPath(segNo);
+
     // A test or an administrative drop may remove the database directory
     // while an uncached owner still exists. Never recreate a dropped database
     // or write stale CLOG state into a later same-name database.
     const std::filesystem::path clogDir = std::filesystem::path(dataDir_) / "pg_xact";
     if (!std::filesystem::is_directory(dataDir_) || !std::filesystem::is_directory(clogDir)) {
-        it->second.dirty = false;
-        it->second.pendingBits.clear();
-        return true;
+        std::cerr << "[CLOG] Missing data directory while flushing segment: " << path << std::endl;
+        return false;
     }
 
-    std::string path = segmentPath(segNo);
     const bool ownsLock = heldLockFd < 0;
     int lockFd = heldLockFd;
     if (ownsLock) {
@@ -249,7 +249,7 @@ void CommitLog::setStatus(TxnId xid, Status status) {
     seg.dirty = true;
 }
 
-void CommitLog::setStatuses(const std::vector<std::pair<TxnId, Status>>& entries) {
+bool CommitLog::setStatuses(const std::vector<std::pair<TxnId, Status>>& entries) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& [xid, status] : entries) {
@@ -268,7 +268,7 @@ void CommitLog::setStatuses(const std::vector<std::pair<TxnId, Status>>& entries
             seg.dirty = true;
         }
     }
-    flush();
+    return flush();
 }
 
 void CommitLog::truncate(TxnId oldestXid) {
@@ -321,11 +321,13 @@ void CommitLog::truncate(TxnId oldestXid) {
     }
 }
 
-void CommitLog::flush() {
+bool CommitLog::flush() {
     std::lock_guard<std::mutex> lock(mutex_);
+    bool ok = true;
     for (const auto& [segNo, _] : segments_) {
-        (void)saveSegment(segNo);
+        if (!saveSegment(segNo)) ok = false;
     }
+    return ok;
 }
 
 const char* CommitLog::statusName(Status s) {

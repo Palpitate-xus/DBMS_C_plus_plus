@@ -92,7 +92,7 @@
 - **页校验和**：Fletcher-16 校验，检测页损坏
 - **WAL 日志**：Write-Ahead Logging 支持崩溃恢复
 - **Checkpoint**：`CHECKPOINT` 命令刷盘已加载的 heap/index 脏缓存、写入 checkpoint WAL 记录并持久化 checkpoint LSN；活动事务期间不会推进恢复起点，并在归档成功后回收 checkpoint 之前的 WAL 段
-- **fsync 持久化**：WAL、CLOG 段和事务提交、Checkpoint 均检查 `fsync()`；CLOG 段采用临时文件原子替换并持久化 `pg_xact` 目录，事务只有在 COMMIT WAL 记录刷盘成功后才发布 CLOG 可见性，刷盘失败会 fail-closed 回滚
+- **fsync 持久化**：WAL、CLOG 段和事务提交、Checkpoint 均检查 `fsync()`；CLOG 段采用临时文件原子替换并持久化 `pg_xact` 目录，事务只有在 COMMIT WAL 和 CLOG 状态都成功刷盘后才报告提交成功，CLOG 刷盘失败会追加 ABORT WAL、回滚并 fail-closed
 - **Catalog 持久化**：系统 catalog 使用临时文件、文件 `fsync`、原子替换和目录 `fsync`；checkpoint 与 DDL 事务快照在 catalog 持久化失败时 fail-closed
 - **VARCHAR 变长行**：`[定长数据 | 变长偏移数组 | 变长数据]` 格式，减少存储浪费
 - **溢出页**：单行数据超过页空间时，大字段（TEXT/BLOB/JSON）自动存放到溢出页

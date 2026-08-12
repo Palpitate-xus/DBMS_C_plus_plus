@@ -26,7 +26,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 - DDL 的规范执行器和 legacy 兼容分发现在都检查并传播 `commitTransaction()` 失败；WAL/CLOG/fsync、延迟约束或 SSI 提交失败时不会继续执行后续 DDL，也不会输出伪成功。`deferrable_test` 覆盖延迟 CHECK 阻断 `CREATE DATABASE` 隐式提交的路径；legacy DDL 共用同一提交守卫。
 - DDL 包装事务现在检查 `StorageEngine::commitTransaction()` 的最终状态；延迟约束或 SSI 导致提交失败时会向执行器传播失败，不再输出伪成功，并在本事务拥有物理快照时恢复 DDL 改动。文件级 DDL 回滚只在显式启用时创建 `<db>.txn_backup.<xid>`，普通事务不再复制整库；快照事务持有数据库级排他锁，避免物理恢复覆盖并发提交。跨对象依赖 undo、全部 PostgreSQL 隐式提交边界仍待补齐。
 - 事务快照恢复已接入启动恢复：重启扫描 WAL 的提交证据，已提交快照直接清理，未完成快照恢复到 DDL 前状态，PREPARE TRANSACTION 的快照保留到 COMMIT/ROLLBACK PREPARED；快照恢复失败会保留现场供后续诊断，不伪报成功。
-- WAL 提交路径已收紧：`XLogFlush()` 返回并传播 segment `fsync` 失败；事务先成功写入并刷盘 COMMIT WAL 记录，再发布 CLOG committed 状态，WAL 不可用时 fail-closed 回滚，避免崩溃恢复缺少提交证据。CLOG 段现在通过临时文件原子替换、段文件 `fsync` 和 `pg_xact` 目录 `fsync` 持久化，写入失败保留 dirty 状态供重试；文件锁和按位合并避免独立 backend 的整段缓存互相覆盖，已打开的读缓存会按文件时间戳刷新；CLOG 截断在保存或目录 `fsync` 失败时保留段，不会先删后报错。
+- WAL/CLOG 提交路径已收紧：`XLogFlush()` 和 `CommitLog::flush()` 都返回并传播 segment/目录 `fsync` 失败；事务先刷盘 COMMIT WAL，再刷盘 CLOG committed 状态，CLOG 不可用时追加 ABORT WAL、执行 undo 并 fail-closed，避免运行时报告成功而恢复重新提交。CLOG 段现在通过临时文件原子替换、段文件 `fsync` 和 `pg_xact` 目录 `fsync` 持久化，写入失败保留 dirty 状态供重试；文件锁和按位合并避免独立 backend 的整段缓存互相覆盖，已打开的读缓存会按文件时间戳刷新；CLOG 截断在保存或目录 `fsync` 失败时保留段，不会先删后报错。
 - Catalog 持久化现在使用临时文件、文件 `fsync`、原子 rename 和目录 `fsync`；checkpoint、事务快照创建和关键 DDL 路径会检查 catalog 持久化结果，失败时 fail-closed，不再把半写 catalog 报告为成功。
 - WAL 归档现在先对源段 `fsync`，再以临时文件完整复制并 `fsync` 后原子替换归档文件，最后原子发布 `.done` 并同步 `archive_status` 目录；归档或状态发布失败时保留可重试的 `.ready` 状态，不会把未完整归档的段交给截断路径。
 - WAL LSN 语义已收敛：LSN 0 作为首个合法日志位置，`INVALID_LSN` 使用范围外哨兵；恢复逻辑明确跳过未初始化页的无效页 LSN。已提交/非事务 page image 按 WAL 正序重做，未提交事务的 before-image 按逆序 undo，避免同一事务多次修改后恢复到中间状态。多个 WAL writer 通过进程互斥、WAL 文件锁和磁盘尾部刷新避免过期 LSN 覆盖日志。

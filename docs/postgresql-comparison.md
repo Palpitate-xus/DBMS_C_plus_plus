@@ -160,7 +160,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | MVCC (快照隔离) | ✅ | ✅ | ✅ |
 | ReadView + CLOG | ✅ | ✅ | ✅ |
 | 隔离级别 (RU/RC/RR/SI/SERIALIZABLE) | ✅ | ⚠️ | 框架有 |
-| WAL (Write-Ahead Log) | ✅ | ✅ | LSN 0 为首个合法位置；COMMIT WAL 记录先刷盘，失败时不发布 CLOG 可见性；CLOG 段采用文件锁、按位合并、原子替换并同步段文件和 `pg_xact` 目录，截断在保存和目录同步成功后才删除旧段；已提交 after-image 正序重做、未提交 before-image 逆序 undo；索引镜像严格校验并限制在数据库/已登记 tablespace 目录，恢复失败 fail-closed；物理备份有显式标记不会被误当活动数据库；多 writer 有进程/文件锁与磁盘尾部刷新；完整 WAL resource manager/恢复语义仍有差距 |
+| WAL (Write-Ahead Log) | ✅ | ✅ | LSN 0 为首个合法位置；COMMIT WAL 记录和 CLOG 状态均刷盘成功后才报告提交，CLOG 失败会追加 ABORT WAL 并回滚；CLOG 段采用文件锁、按位合并、原子替换并同步段文件和 `pg_xact` 目录，截断在保存和目录同步成功后才删除旧段；已提交 after-image 正序重做、未提交 before-image 逆序 undo；索引镜像严格校验并限制在数据库/已登记 tablespace 目录，恢复失败 fail-closed；物理备份有显式标记不会被误当活动数据库；多 writer 有进程/文件锁与磁盘尾部刷新；完整 WAL resource manager/恢复语义仍有差距 |
 | 事务物理快照生命周期 | ✅ | ✅ | 仅文件级 DDL 显式创建按 xid 命名快照；快照事务持有数据库级排他锁，启动恢复按 WAL 提交状态清理或恢复 |
 | Checkpoint | ✅ | ✅ | checkpoint WAL/LSN 与已加载 heap/index 缓存刷盘失败会传播；活动事务期间不推进恢复起点；已归档且早于 checkpoint 的完整 WAL 段会回收；完整 restartpoint、节流和 PITR 仍缺 |
 | SAVEPOINT | ✅ | ✅ | ✅ |

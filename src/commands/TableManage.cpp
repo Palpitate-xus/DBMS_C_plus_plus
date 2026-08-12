@@ -19252,6 +19252,11 @@ bool StorageEngine::recoverAllDatabases() {
                 uint64_t xid = 0;
                 std::memcpy(&xid, rec.data.data(), sizeof(xid));
                 committedXids[dbname].insert(xid);
+            } else if (rec.rmid() == RM_XACT_ID && rec.info() == XLOG_XACT_ABORT &&
+                       rec.data.size() >= sizeof(uint64_t)) {
+                uint64_t xid = 0;
+                std::memcpy(&xid, rec.data.data(), sizeof(xid));
+                committedXids[dbname].erase(xid);
             }
             lsn += rec.header.xl_tot_len;
         }
@@ -19348,6 +19353,7 @@ bool StorageEngine::recoverAllDatabases() {
                     if (rec.data.size() >= sizeof(uint64_t)) {
                         uint64_t xid = 0;
                         std::memcpy(&xid, rec.data.data(), sizeof(xid));
+                        committedXids.erase(xid);
                         CommitLog* clog = getCommitLog(dbname);
                         if (clog) clog->setStatus(xid, CommitLog::Status::Aborted);
                     }
@@ -19356,6 +19362,14 @@ bool StorageEngine::recoverAllDatabases() {
                 }
                 lsn += rec.header.xl_tot_len;
             }
+        }
+
+        // Make the visibility decisions durable before replaying heap/index
+        // images. Recovery must fail closed if CLOG cannot be persisted.
+        if (CommitLog* clog = getCommitLog(dbname); clog && !clog->flush()) {
+            std::cerr << "[recovery] failed to persist CLOG for database "
+                      << dbname << std::endl;
+            return false;
         }
 
         // Pass 2: replay committed/non-transactional images in WAL order.
@@ -20549,9 +20563,18 @@ DBStatus StorageEngine::commitTransaction() {
         return DBStatus::IO_ERROR;
     }
 
-    // Update CLOG before clearing state
+    // Update and durably publish CLOG before clearing transaction state. WAL
+    // alone is sufficient to reconstruct status after a crash, but the live
+    // backend must never report a successful commit after CLOG persistence
+    // failed.
     CommitLog* clog = getCommitLog(transactionContext().txnDB);
-    if (clog) clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Committed);
+    if (clog) {
+        clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Committed);
+        if (!clog->flush()) {
+            rollbackTransaction();
+            return DBStatus::IO_ERROR;
+        }
+    }
 
     // Old UPDATE/DELETE row versions retain TOAST markers until the commit
     // record is durable.  They are no longer reachable after COMMIT, so
@@ -20635,9 +20658,15 @@ DBStatus StorageEngine::rollbackTransaction() {
         snapshotRestoreOk = restoreTransactionBackup(rollbackDb);
     }
 
-    // Mark transaction as aborted in CLOG
+    // Mark transaction as aborted in CLOG. Continue rollback even if the
+    // status cannot be persisted, but report the durability failure after all
+    // in-memory and physical undo work has completed.
+    bool clogOk = true;
     CommitLog* clog = getCommitLog(transactionContext().txnDB);
-    if (clog) clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Aborted);
+    if (clog) {
+        clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Aborted);
+        clogOk = clog->flush();
+    }
 
     // Remove from active set (aborted, not committed)
     bool noActiveTransactions = false;
@@ -20953,8 +20982,13 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     // Write WAL ABORT marker after undo.
     WALManager* wal = getWAL(transactionContext().txnDB);
+    bool abortWalOk = true;
     if (wal) {
-        walXactAbort(transactionContext().txnDB, transactionContext().currentTxnId);
+        const Lsn abortLsn = walXactAbort(transactionContext().txnDB,
+                                           transactionContext().currentTxnId);
+        abortWalOk = abortLsn != INVALID_LSN && wal->XLogFlush(abortLsn);
+    } else {
+        abortWalOk = false;
     }
 
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
@@ -21017,7 +21051,8 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().databaseExclusiveLock.reset();
     transactionContext().databaseSharedLock.reset();
     transactionContext().databaseTxnMutex.reset();
-    return snapshotRestoreOk && ddlUndoOk ? DBStatus::OK : DBStatus::IO_ERROR;
+    return snapshotRestoreOk && ddlUndoOk && clogOk && abortWalOk
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {

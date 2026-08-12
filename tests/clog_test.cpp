@@ -16,7 +16,7 @@ int main() {
         clog.setStatus(1, CommitLog::Status::Committed);
         clog.setStatus(2, CommitLog::Status::Aborted);
         clog.setStatus(3, CommitLog::Status::InProgress);
-        clog.flush();
+        assert(clog.flush());
 
         assert(clog.getStatus(1) == CommitLog::Status::Committed);
         assert(clog.getStatus(2) == CommitLog::Status::Aborted);
@@ -40,7 +40,7 @@ int main() {
             entries.emplace_back(i, (i % 2 == 0) ? CommitLog::Status::Committed
                                                  : CommitLog::Status::Aborted);
         }
-        clog.setStatuses(entries);
+        assert(clog.setStatuses(entries));
         for (TxnId i = 10; i < 20; ++i) {
             auto expected = (i % 2 == 0) ? CommitLog::Status::Committed
                                          : CommitLog::Status::Aborted;
@@ -59,8 +59,8 @@ int main() {
         assert(second.getStatus(101) == CommitLog::Status::InProgress);
         first.setStatus(100, CommitLog::Status::Committed);
         second.setStatus(101, CommitLog::Status::Aborted);
-        first.flush();
-        second.flush();
+        assert(first.flush());
+        assert(second.flush());
 
         CommitLog verifier(testDir);
         assert(verifier.getStatus(100) == CommitLog::Status::Committed);
@@ -75,10 +75,10 @@ int main() {
         CommitLog writer(testDir);
         assert(observer.getStatus(200) == CommitLog::Status::InProgress);
         writer.setStatus(200, CommitLog::Status::Committed);
-        writer.flush();
+        assert(writer.flush());
         assert(observer.getStatus(200) == CommitLog::Status::Committed);
         writer.setStatus(201, CommitLog::Status::Aborted);
-        writer.flush();
+        assert(writer.flush());
         assert(observer.getStatus(201) == CommitLog::Status::Aborted);
         std::cout << "[CLOG TEST] cross-backend refresh OK\n";
     }
@@ -90,9 +90,9 @@ int main() {
         const TxnId oldXid = 300;
         const TxnId retainedXid = CommitLog::kXidsPerSegment + 300;
         clog.setStatus(oldXid, CommitLog::Status::Committed);
-        clog.flush();
+        assert(clog.flush());
         clog.setStatus(retainedXid, CommitLog::Status::Aborted);
-        clog.flush();
+        assert(clog.flush());
         clog.truncate(CommitLog::kXidsPerSegment + 1);
 
         CommitLog verifier(testDir);
@@ -108,7 +108,7 @@ int main() {
         std::filesystem::create_directories(failureDir);
         CommitLog clog(failureDir);
         clog.setStatus(400, CommitLog::Status::Committed);
-        clog.flush();
+        assert(clog.flush());
         clog.setStatus(401, CommitLog::Status::Aborted);
 
         const auto lockPath = std::filesystem::path(failureDir) / "pg_xact" / ".clog.lock";

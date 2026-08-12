@@ -27,6 +27,8 @@
 
 2026-08-11 增量审计：CLOG 段改为临时文件完整写入、段文件 `fsync`、原子 rename 和 `pg_xact` 目录 `fsync`；写入失败不清除 dirty 状态，数据库目录或 `pg_xact` 被删除时不重建旧路径。
 
+2026-08-12 增量审计：`CommitLog::flush()`/`setStatuses()` 现在返回并传播持久化失败；事务提交在 COMMIT WAL 后刷 CLOG，CLOG 失败会追加 ABORT WAL 并回滚，恢复扫描按最终 WAL 状态判定，新增删除 `pg_xact` 后提交与重启回归。
+
 2026-08-11 增量审计：CLOG 保存增加 `.clog.lock` 文件锁和按位 pending update 合并，独立 backend 不再用陈旧的整段缓存覆盖其他事务状态；读端发现段文件替换后会刷新缓存，并新增跨 backend merge/refresh 回归。
 2026-08-11 增量审计：CLOG 截断在同一文件锁内完成脏段持久化、旧段删除和目录 `fsync`；保存失败时保留缓存和段文件，删除或目录同步未完成时不驱逐缓存，避免 I/O 失败造成不可恢复的数据丢失。
 

@@ -33,7 +33,7 @@ namespace dbms {
 //   auto s = clog.getStatus(xid);
 //
 // 注意：
-//   - 调用方负责在事务提交/回滚时调用 setStatus
+//   - 调用方负责在事务提交/回滚时调用 setStatus，并检查 flush() 结果
 //   - 调用方定期进行 truncate 以回收旧段文件
 // ============================================================================
 
@@ -63,14 +63,14 @@ public:
     // 设置单个事务状态
     void setStatus(TxnId xid, Status status);
 
-    // 批量设置并持久化
-    void setStatuses(const std::vector<std::pair<TxnId, Status>>& entries);
+    // 批量设置并持久化；失败时保留脏状态供后续重试
+    [[nodiscard]] bool setStatuses(const std::vector<std::pair<TxnId, Status>>& entries);
 
     // 删除所有 <= oldestXid 的段文件（VACUUM / checkpoint 后调用）
     void truncate(TxnId oldestXid);
 
-    // 将所有脏段刷盘
-    void flush();
+    // 将所有脏段刷盘；任何段或目录 fsync 失败都会返回 false，且脏状态保留
+    [[nodiscard]] bool flush();
 
     // 解析状态为可读字符串
     static const char* statusName(Status s);

@@ -53,6 +53,7 @@
 - 新增 DDL 快照重启回归：模拟未完成的 `.txn_backup.<xid>`，新 `StorageEngine` 按无 COMMIT 证据恢复 DDL 前的 schema 并清理快照目录。
 - WAL 提交回归继续覆盖 COMMIT 记录与刷盘路径；`WALManager::XLogFlush()` 现在返回 segment 同步结果，提交在 WAL 不可用/刷盘失败时不会先发布 CLOG 可见性。
 - CLOG 持久化回归继续验证段重载；段写入现在完整写入临时文件、`fsync` 后原子替换并同步 `pg_xact` 目录，写失败不会提前清除 dirty 状态。
+- CLOG 提交故障回归：删除事务的 `pg_xact` 目录后，提交返回 `IO_ERROR`，行级修改被撤销并追加 ABORT WAL；新 `StorageEngine` 重启恢复也不会重新出现该行。
 - CLOG 跨 backend 回归验证两个独立 `CommitLog` 实例对同一段的按位合并，以及已打开读缓存发现外部段替换后刷新，不会丢失或永久读取旧事务状态。
 - CLOG 截断回归验证旧段正常回收，并在文件锁导致持久化失败时保留最后一个 durable segment image。
 - WAL 截断回归验证未归档段不会删除、已归档且早于保留 LSN 的段会回收、最早保留段可被恢复扫描发现，并且后续 checkpoint 不会为已删除段重建 archive marker。
