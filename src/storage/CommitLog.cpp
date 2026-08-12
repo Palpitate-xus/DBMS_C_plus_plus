@@ -21,7 +21,13 @@ CommitLog::CommitLog(const std::string& dataDir)
 }
 
 CommitLog::~CommitLog() {
-    flush();
+    // A database may have been removed by an embedded caller while this
+    // cache entry was still alive. Do not recreate the deleted directory
+    // merely because destruction is flushing an obsolete commit log.
+    std::error_code ec;
+    if (!dataDir_.empty() && std::filesystem::exists(dataDir_, ec) && !ec) {
+        flush();
+    }
 }
 
 std::string CommitLog::segmentPath(uint64_t segNo) const {

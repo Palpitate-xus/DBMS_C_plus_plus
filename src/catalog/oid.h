@@ -42,7 +42,7 @@ public:
     Oid peekNext() const;
 
     // 显式持久化当前计数器（通常在事务提交时调用）
-    void persist();
+    bool persist();
 
     // 设置下一个 OID（用于恢复或测试）
     void setNext(Oid next);

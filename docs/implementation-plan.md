@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-11）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=132 FAIL=0（130 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-11）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=133 FAIL=0（131 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -33,6 +33,8 @@
 2026-08-11 增量审计：BufferPool/PageAllocator 不再吞掉 `pwrite/fsync` 失败，checkpoint 只有在关系页、checkpoint WAL、checkpoint 元数据和归档状态均成功后才返回成功；clock-sweep 不再强制淘汰 pinned 页或丢弃写盘失败的 dirty 页；checkpoint 归档后已接入 WAL 段安全回收，恢复从最早保留段扫描。
 
 2026-08-11 增量审计：checkpoint 现在按数据库跟踪活动事务；活动事务存在时拒绝推进恢复起点，事务结束后通过统一 WAL-aware 缓存刷盘路径持久化已加载 heap 与索引，避免活动事务的崩溃恢复证据被 checkpoint 跳过。
+
+2026-08-11 增量审计：Catalog 系统表持久化改为临时文件完整写入、文件/目录 `fsync` 与原子 rename；OID 计数器和 CatalogService 传播失败，checkpoint、DDL 快照和关键 DDL 更新不再吞掉 catalog I/O 错误。
 
 2026-08-11 增量审计：恢复第二阶段改为已提交/非事务 page image 按 WAL 正序重做，未提交事务 page before-image 按逆序 undo；新增同一事务连续写入多行后的重启回归，确认不会恢复到中间页状态。
 

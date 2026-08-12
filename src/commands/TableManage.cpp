@@ -1147,11 +1147,19 @@ StorageEngine::~StorageEngine() {
     // destroyed with an active transaction: recovery can apply the
     // before-image for uncommitted index changes instead of inheriting a file
     // written directly by a B+Tree/Hash destructor.
-    if (catalogService_) catalogService_->persistAll();
+    if (catalogService_ && !catalogService_->persistAll()) {
+        std::cerr << "[storage] failed to persist catalog during engine shutdown" << std::endl;
+    }
     for (const auto& dbname : getDatabaseNames()) {
-        flushDatabaseCaches(dbname);
+        if (!flushDatabaseCaches(dbname)) {
+            std::cerr << "[storage] failed to flush caches for database " << dbname
+                      << " during engine shutdown" << std::endl;
+        }
         if (auto* wal = getWAL(dbname)) {
-            wal->XLogFlush(wal->currentWriteLsn());
+            if (!wal->XLogFlush(wal->currentWriteLsn())) {
+                std::cerr << "[storage] failed to flush WAL for database " << dbname
+                          << " during engine shutdown" << std::endl;
+            }
         }
     }
 
@@ -1244,11 +1252,14 @@ void StorageEngine::backgroundWorkerLoop() {
 
 void StorageEngine::backgroundWalFlush() {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    pruneMissingDatabaseCaches();
     // walwriter: fsync all WAL managers up to their current write LSN.
     for (auto& kv : walManagers_) {
         WALManager* wal = kv.second.get();
         if (wal) {
-            wal->XLogFlush(wal->currentWriteLsn());
+            if (!wal->XLogFlush(wal->currentWriteLsn())) {
+                std::cerr << "[background] WAL flush failed for " << kv.first << std::endl;
+            }
         }
     }
 }
@@ -3722,6 +3733,36 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
             ++it;
         }
     }
+}
+
+void StorageEngine::pruneMissingDatabaseCaches() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    std::set<std::string> stale;
+    const auto collectDatabase = [&stale, this](const std::string& key,
+                                                char separator) {
+        const size_t pos = key.find(separator);
+        const std::string dbname = pos == std::string::npos ? key : key.substr(0, pos);
+        if (!dbname.empty() && !databaseExists(dbname)) stale.insert(dbname);
+    };
+    for (const auto& [dbname, _] : commitLogs_) {
+        if (!databaseExists(dbname)) stale.insert(dbname);
+    }
+    for (const auto& [dbname, _] : walManagers_) {
+        if (!databaseExists(dbname)) stale.insert(dbname);
+    }
+    for (const auto& [dbname, _] : lastCheckpointLsns_) {
+        if (!databaseExists(dbname)) stale.insert(dbname);
+    }
+    for (const auto& [key, _] : pageAllocators_) collectDatabase(key, '/');
+    for (const auto& [key, _] : fsmCache_) collectDatabase(key, '/');
+    for (const auto& [key, _] : vmCache_) collectDatabase(key, '/');
+    for (const auto& [key, _] : pkIndexCache_) collectDatabase(key, '/');
+    for (const auto& [key, _] : secondaryIndexCache_) collectDatabase(key, '/');
+    for (const auto& [key, _] : hashIndexCache_) collectDatabase(key, '.');
+    for (const auto& [key, _] : toastPageAllocators_) collectDatabase(key, ':');
+    for (const auto& [key, _] : toastIndexes_) collectDatabase(key, ':');
+    for (const auto& [key, _] : spGiSTCache_) collectDatabase(key, '/');
+    for (const auto& dbname : stale) closeDatabaseCaches(dbname);
 }
 
 FreeSpaceMap* StorageEngine::getFSM(const std::string& dbname,
@@ -7596,6 +7637,12 @@ bool StorageEngine::tableExists(const std::string& dbname,
 
 DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::string& charset) {
     if (databaseExists(dbname)) return DBStatus::TABLE_ALREADY_EXISTS;
+    // Embedded callers and tests may remove a database directory directly.
+    // Drop every file-backed cache before reusing the name; otherwise the
+    // background WAL writer keeps stale descriptors and the new database can
+    // inherit in-memory pages from its predecessor.
+    pruneMissingDatabaseCaches();
+    if (catalogService_) catalogService_->evict(dbname);
     std::filesystem::create_directory(dbPath(dbname));
     {
         std::ofstream f(tableListPath(dbname), std::ios::binary);
@@ -10137,7 +10184,10 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
-            catalog.persistAll();
+            if (!catalog.persistAll()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
         }
     } catch (...) {
         lockManager_.unlock(tablename);
@@ -10253,7 +10303,10 @@ DBStatus StorageEngine::alterTableSetReplicaIdentity(
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
-            catalog.persistAll();
+            if (!catalog.persistAll()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
         }
     } catch (...) {
         lockManager_.unlock(tablename);
@@ -19636,9 +19689,7 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     if (!syncFile(cpPath)) return false;
 
     // Persist catalog metadata so it matches the checkpoint.
-    if (catalogService_) {
-        catalogService_->persistAll();
-    }
+    if (catalogService_ && !catalogService_->persistAll()) return false;
 
     // Archive WAL before truncation
     if (!archiveWal(dbname)) return false;
@@ -20214,7 +20265,12 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     // CatalogManager is lazily persisted and may contain the latest DDL
     // state only in memory.  Persist it before taking the transaction
     // snapshot so a DDL rollback can safely evict/reload the catalog.
-    if (catalogService_) catalogService_->persistAll();
+    if (catalogService_ && !catalogService_->persistAll()) {
+        context.databaseExclusiveLock.reset();
+        context.databaseSharedLock.reset();
+        context.databaseTxnMutex.reset();
+        return DBStatus::IO_ERROR;
+    }
 
     // Flush every loaded heap and index cache before taking the transaction
     // snapshot.  Otherwise a backup can contain older index pages than the
@@ -20283,7 +20339,7 @@ bool StorageEngine::createTransactionBackup() {
     }
     if (!context.txnBackupPath.empty()) return true;
     const std::string dbname = context.txnDB;
-    if (catalogService_) catalogService_->persistAll();
+    if (catalogService_ && !catalogService_->persistAll()) return false;
 
     // The exclusive database lock is acquired by beginTransaction(..., true)
     // before this copy starts. This prevents a physical restore from erasing

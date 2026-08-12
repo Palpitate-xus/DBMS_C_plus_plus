@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <set>
 #include <functional>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace dbms {
 
@@ -85,6 +87,53 @@ static std::vector<std::string> splitByComma(const std::string& s) {
     return parts;
 }
 
+static bool writeCatalogFileAtomically(
+    const std::filesystem::path& target,
+    const std::function<void(std::ostream&)>& writer) {
+    const std::filesystem::path temp = target.string() + ".tmp." +
+        std::to_string(static_cast<unsigned long long>(::getpid()));
+    std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    writer(out);
+    out.flush();
+    if (!out.good()) {
+        out.close();
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    out.close();
+    if (!out) {
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+
+    const int fileFd = ::open(temp.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fileFd < 0 || ::fsync(fileFd) != 0) {
+        if (fileFd >= 0) ::close(fileFd);
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    ::close(fileFd);
+
+    std::error_code ec;
+    std::filesystem::rename(temp, target, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+
+    const int dirFd = ::open(target.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd < 0 || ::fsync(dirFd) != 0) {
+        if (dirFd >= 0) ::close(dirFd);
+        return false;
+    }
+    ::close(dirFd);
+    return true;
+}
+
 // ============================================================================
 // 构造函数 / 析构函数
 // ============================================================================
@@ -97,7 +146,7 @@ CatalogManager::CatalogManager(const std::string& dbPath)
 }
 
 CatalogManager::~CatalogManager() {
-    persistAll();
+    (void)persistAll();
 }
 
 // ============================================================================
@@ -1089,22 +1138,25 @@ std::string CatalogManager::catalogFilePath(const std::string& tablename) const 
     return dbPath_ + "/pg_" + tablename + ".cat";
 }
 
-void CatalogManager::persistAll() {
+bool CatalogManager::persistAll() {
     std::lock_guard<std::mutex> lock(mutex_);
+    bool ok = true;
+    auto persist = [&](const char* name,
+                       const std::function<void(std::ostream&)>& writer) {
+        if (!writeCatalogFileAtomically(catalogFilePath(name), writer)) ok = false;
+    };
 
     // pg_namespace
-    {
-        std::ofstream out(catalogFilePath("namespace"));
+    persist("namespace", [&](std::ostream& out) {
         for (const auto& r : namespaces_) {
             writeOid(out, r.oid); out << ',';
             writeString(out, r.nspname); out << ',';
             writeOid(out, r.nspowner); out << '\n';
         }
-    }
+    });
 
     // pg_class
-    {
-        std::ofstream out(catalogFilePath("class"));
+    persist("class", [&](std::ostream& out) {
         for (const auto& r : classes_) {
             writeOid(out, r.oid); out << ',';
             writeString(out, r.relname); out << ',';
@@ -1120,11 +1172,10 @@ void CatalogManager::persistAll() {
             out << (r.relisshared ? 't' : 'f');
             out << '\n';
         }
-    }
+    });
 
     // pg_attribute
-    {
-        std::ofstream out(catalogFilePath("attribute"));
+    persist("attribute", [&](std::ostream& out) {
         for (const auto& r : attributes_) {
             writeOid(out, r.attrelid); out << ',';
             writeString(out, r.attname); out << ',';
@@ -1138,11 +1189,10 @@ void CatalogManager::persistAll() {
             out << r.attalign;
             out << '\n';
         }
-    }
+    });
 
     // pg_type
-    {
-        std::ofstream out(catalogFilePath("type"));
+    persist("type", [&](std::ostream& out) {
         for (const auto& r : types_) {
             writeOid(out, r.oid); out << ',';
             writeString(out, r.typname); out << ',';
@@ -1154,11 +1204,10 @@ void CatalogManager::persistAll() {
             writeOid(out, r.typarray);
             out << '\n';
         }
-    }
+    });
 
     // pg_proc
-    {
-        std::ofstream out(catalogFilePath("proc"));
+    persist("proc", [&](std::ostream& out) {
         for (const auto& r : procs_) {
             writeOid(out, r.oid); out << ',';
             writeString(out, r.proname); out << ',';
@@ -1170,11 +1219,10 @@ void CatalogManager::persistAll() {
             out << r.provolatile;
             out << '\n';
         }
-    }
+    });
 
     // pg_depend
-    {
-        std::ofstream out(catalogFilePath("depend"));
+    persist("depend", [&](std::ostream& out) {
         for (const auto& r : depends_) {
             writeOid(out, r.classid); out << ',';
             writeOid(out, r.objid); out << ',';
@@ -1185,11 +1233,10 @@ void CatalogManager::persistAll() {
             out << r.deptype;
             out << '\n';
         }
-    }
+    });
 
     // pg_authid
-    {
-        std::ofstream out(catalogFilePath("authid"));
+    persist("authid", [&](std::ostream& out) {
         for (const auto& r : authIds_) {
             writeOid(out, r.oid); out << ',';
             writeString(out, r.rolname); out << ',';
@@ -1205,11 +1252,10 @@ void CatalogManager::persistAll() {
             writeString(out, r.rolvaliduntil);
             out << '\n';
         }
-    }
+    });
 
     // pg_auth_members
-    {
-        std::ofstream out(catalogFilePath("authmembers"));
+    persist("authmembers", [&](std::ostream& out) {
         for (const auto& r : authMembers_) {
             writeOid(out, r.oid); out << ',';
             writeOid(out, r.roleid); out << ',';
@@ -1218,11 +1264,10 @@ void CatalogManager::persistAll() {
             out << (r.admin_option ? 't' : 'f');
             out << '\n';
         }
-    }
+    });
 
     // pg_description
-    {
-        std::ofstream out(catalogFilePath("description"));
+    persist("description", [&](std::ostream& out) {
         for (const auto& r : descriptions_) {
             writeOid(out, r.objoid); out << ',';
             writeOid(out, r.classoid); out << ',';
@@ -1230,9 +1275,10 @@ void CatalogManager::persistAll() {
             writeString(out, r.description);
             out << '\n';
         }
-    }
+    });
 
-    oidGen_->persist();
+    if (!oidGen_->persist()) ok = false;
+    return ok;
 }
 
 void CatalogManager::loadAll() {

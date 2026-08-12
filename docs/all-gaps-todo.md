@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态（2026-08-11）**：统一回归基线 PASS=132 FAIL=0（130 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-11）**：统一回归基线 PASS=133 FAIL=0（131 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -23,6 +23,7 @@
 
 | 日期 | 摘要 |
 |------|------|
+| 2026-08-11 | Catalog 持久化安全补强：系统 catalog 改用临时文件 + 文件/目录 `fsync` + 原子替换，`CatalogManager`/`CatalogService` 返回持久化结果；checkpoint、事务快照和关键 DDL 路径失败时 fail-closed，新增 `catalog_persistence_failure_test`。 |
 | 2026-08-11 | WAL 生命周期补强：checkpoint 归档成功后只在同一 WAL 文件锁内回收早于 checkpoint 的完整段；未归档段保留，恢复从最早保留段扫描，重复 checkpoint 不会为已删除段重建 archive marker；新增 `wal_truncate_test`。 |
 | 2026-08-11 | CLOG 跨 backend 一致性补强：段保存使用 `.clog.lock` 文件锁和 pending bit 合并，避免独立 backend 的陈旧整段缓存互相覆盖；读端检测文件替换并刷新缓存，`clog_test` 新增 merge/refresh 回归。 |
 | 2026-08-11 | CLOG 截断安全补强：旧段在同一文件锁内完成保存、删除和目录 `fsync`，保存失败时保留段且删除/同步失败时不驱逐缓存；`clog_test` 新增正常截断与持久化失败保留回归。 |
@@ -238,7 +239,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=132 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=133 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 

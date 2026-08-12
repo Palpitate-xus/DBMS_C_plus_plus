@@ -9,7 +9,7 @@ namespace fs = std::filesystem;
 CatalogService::CatalogService(const StorageEngine& engine) : engine_(engine) {}
 
 CatalogService::~CatalogService() {
-    persistAll();
+    (void)persistAll();
 }
 
 static fs::path catalogDirForDb(const StorageEngine& engine, const std::string& dbname) {
@@ -37,11 +37,22 @@ void CatalogService::evict(const std::string& dbname) {
     cache_.erase(dbname);
 }
 
-void CatalogService::persistAll() {
+bool CatalogService::persistAll() {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& kv : cache_) {
-        if (kv.second) kv.second->persistAll();
+    bool ok = true;
+    for (auto it = cache_.begin(); it != cache_.end();) {
+        // Embedded callers and tests may remove a database directory outside
+        // DROP DATABASE. Never let an orphaned catalog cache make an
+        // unrelated checkpoint or transaction fail, and never recreate the
+        // removed database from stale in-memory metadata.
+        if (!engine_.databaseExists(it->first)) {
+            it = cache_.erase(it);
+            continue;
+        }
+        if (it->second && !it->second->persistAll()) ok = false;
+        ++it;
     }
+    return ok;
 }
 
 bool CatalogService::has(const std::string& dbname) const {

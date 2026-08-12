@@ -1153,6 +1153,7 @@ private:
     void closeAllPageAllocators();
     bool flushDatabaseCaches(const std::string& dbname);
     void closeDatabaseCaches(const std::string& dbname);
+    void pruneMissingDatabaseCaches();
 
     // Free Space Map + Visibility Map (fork files)
     mutable std::map<std::string, std::unique_ptr<FreeSpaceMap>> fsmCache_;

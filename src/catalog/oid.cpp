@@ -50,7 +50,7 @@ Oid OidGenerator::allocate() {
     Oid oid = nextOid_.fetch_add(1, std::memory_order_relaxed);
     // Lazy persist: write every 100 allocations
     if (oid % 100 == 0) {
-        persist();
+        (void)persist();
     }
     return oid;
 }
@@ -58,7 +58,7 @@ Oid OidGenerator::allocate() {
 Oid OidGenerator::allocateBatch(uint32_t count) {
     if (count == 0) return kInvalidOid;
     Oid start = nextOid_.fetch_add(count, std::memory_order_relaxed);
-    persist();
+    (void)persist();
     return start;
 }
 
@@ -66,12 +66,13 @@ Oid OidGenerator::peekNext() const {
     return nextOid_.load(std::memory_order_relaxed);
 }
 
-void OidGenerator::persist() {
+bool OidGenerator::persist() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ofstream out(persistPath_);
-    if (out) {
-        out << nextOid_.load(std::memory_order_relaxed) << "\n";
-    }
+    if (!out) return false;
+    out << nextOid_.load(std::memory_order_relaxed) << "\n";
+    out.flush();
+    return out.good();
 }
 
 void OidGenerator::setNext(Oid next) {
@@ -79,7 +80,7 @@ void OidGenerator::setNext(Oid next) {
         std::lock_guard<std::mutex> lock(mutex_);
         nextOid_.store(next, std::memory_order_relaxed);
     }
-    persist();
+    (void)persist();
 }
 
 void OidGenerator::deallocate(Oid oid) {

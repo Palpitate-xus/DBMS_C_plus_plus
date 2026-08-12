@@ -488,7 +488,7 @@ bool WALManager::XLogFlush(Lsn targetLsn) {
     std::lock_guard<std::mutex> processLock(walProcessMutex);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
-    uint32_t startSeg = segmentNumber(0);
+    uint32_t startSeg = segmentNumber(earliestAvailableLsn());
     uint32_t endSeg = segmentNumber(targetLsn);
     for (uint32_t seg = startSeg; seg <= endSeg; ++seg) {
         if (!syncSegment(seg)) {

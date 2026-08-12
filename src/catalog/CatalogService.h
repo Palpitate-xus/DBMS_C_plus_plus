@@ -42,7 +42,7 @@ public:
     void evict(const std::string& dbname);
 
     // Persist all cached catalogs.
-    void persistAll();
+    bool persistAll();
 
     // Test/debug: is `dbname` currently cached?
     bool has(const std::string& dbname) const;
