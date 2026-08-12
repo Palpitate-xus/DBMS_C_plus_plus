@@ -546,12 +546,17 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
 // Transaction helpers
 // ----------------------------------------------------------------------------
 
-void DdlExecutor::checkAndImplicitCommit(Session& s) {
+bool DdlExecutor::checkAndImplicitCommit(Session& s) {
     (void)s;
-    if (g_engine.inTransaction()) {
-        g_engine.commitTransaction();
-        std::cout << "Note: DDL caused implicit commit of open transaction" << std::endl;
+    if (!g_engine.inTransaction()) return true;
+    const DBStatus status = g_engine.commitTransaction();
+    if (status != DBStatus::OK) {
+        std::cout << "ERROR: implicit DDL commit failed (SQLSTATE "
+                  << sqlstateForDBStatus(status) << ")" << std::endl;
+        return false;
     }
+    std::cout << "Note: DDL caused implicit commit of open transaction" << std::endl;
+    return true;
 }
 
 // ALTER TABLE is deliberately executed from the typed AST.  Keep the
@@ -606,7 +611,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         [](const auto& sub) { return sub.action == AlterTableStmt::Action::Owner; });
     if (!ownerOnly && !checkAdmin(s)) return true;
 
-    checkAndImplicitCommit(s);
+    if (!checkAndImplicitCommit(s)) return true;
     const std::string tableName = resolveTableName(s, stmt->tableName);
 
     // ALTER TABLE actions can rewrite schemas, indexes, parameters, and
@@ -1089,7 +1094,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
 bool DdlExecutor::executeCreateDatabase(const CreateObjectStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
-    checkAndImplicitCommit(s);
+    if (!checkAndImplicitCommit(s)) return true;
     std::string dbname = stmt->objectName;
     if (dbname.empty()) {
         std::cout << "SQL syntax error: CREATE DATABASE name" << std::endl;
@@ -1110,7 +1115,7 @@ bool DdlExecutor::executeCreateDatabase(const CreateObjectStmt* stmt, Session& s
 bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
-    checkAndImplicitCommit(s);
+    if (!checkAndImplicitCommit(s)) return true;
     if (stmt->objectNames.empty()) {
         std::cout << "SQL syntax error: DROP DATABASE name" << std::endl;
         return true;
@@ -1467,7 +1472,7 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
         }
     }
 
-    checkAndImplicitCommit(s);
+    if (!checkAndImplicitCommit(s)) return true;
     for (const auto& name : targets) {
         const DBStatus result = g_engine.truncateTable(s.currentDB, name);
         if (result != DBStatus::OK) {

@@ -165,6 +165,36 @@ static void test_deferred_check_on_update() {
     std::cout << "[DEFERRABLE] deferred check on update blocks commit OK" << std::endl;
 }
 
+static void test_ddl_implicit_commit_failure_is_propagated() {
+    std::string db = testDbPath("deferrable_t7");
+    std::string targetDb = testDbPath("implicit_commit_target");
+    cleanup(db);
+    cleanup(targetDb);
+
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE t (id INT PRIMARY KEY, price INT, "
+        "CONSTRAINT chk_price CHECK (price > 0) DEFERRABLE INITIALLY DEFERRED)",
+        s));
+
+    assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"price", "0"}}) == dbms::DBStatus::OK);
+
+    // CREATE DATABASE has an implicit-commit boundary.  The deferred CHECK
+    // must fail that boundary and prevent the database creation from running.
+    assert(ddl.executeSql("CREATE DATABASE " + targetDb, s));
+    assert(!g_engine.inTransaction());
+    assert(!g_engine.databaseExists(targetDb));
+    assert(g_engine.query(db, "t", {"=id 1"}, {"price"}).empty());
+
+    cleanup(db);
+    cleanup(targetDb);
+    std::cout << "[DEFERRABLE] implicit DDL commit failure propagates OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_immediate_check_still_fails_at_insert();
@@ -173,6 +203,7 @@ int main() {
     test_set_constraints_immediate_via_engine();
     test_set_constraints_all_deferred_via_engine();
     test_deferred_check_on_update();
+    test_ddl_implicit_commit_failure_is_propagated();
     std::cout << "[DEFERRABLE] all passed" << std::endl;
     return 0;
 }
