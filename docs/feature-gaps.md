@@ -1,10 +1,10 @@
 # 功能缺失清单 (Feature Gaps)
 
-> 生成日期: 2026-08-11
+> 生成日期: 2026-08-12
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
-> 本 DBMS 当前状态（2026-08-11）: 生产化重构进行中，统一回归基线 PASS=133 FAIL=0（131 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移；事务提交现在先保证 COMMIT WAL 刷盘再发布 CLOG 可见性，文件级 DDL 快照按 xid 隔离并受数据库级排他锁保护，但完整 DDL 依赖事务语义仍在建设。
+> 本 DBMS 当前状态（2026-08-12）: 生产化重构进行中，统一回归基线 PASS=134 FAIL=0（132 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，旧数据不迁移；事务提交现在先保证 COMMIT WAL 刷盘再发布 CLOG 可见性，文件级 DDL 快照按 xid 隔离并受数据库级排他锁保护，但完整 DDL 依赖事务语义仍在建设。
 
-WAL 当前明确区分合法 LSN 0 与无效哨兵；恢复会忽略未初始化页的无效页 LSN，多个 WAL writer 通过进程/文件锁和磁盘尾部刷新串行化追加。heap 使用 page before/after image，B+Tree/Hash 使用完整索引文件 before/after image；GIN/GiST/SP-GiST/BRIN、原生 page-level 索引 WAL、归档、PITR 和完整 PostgreSQL 恢复语义仍属于差距。
+WAL 当前明确区分合法 LSN 0 与无效哨兵；恢复会忽略未初始化页的无效页 LSN，多个 WAL writer 通过进程/文件锁和磁盘尾部刷新串行化追加。heap 使用 page before/after image，B+Tree/Hash 使用完整索引文件 before/after image；归档复制采用临时文件、文件/目录 `fsync` 和原子状态发布，失败保留 `.ready` 供重试；GIN/GiST/SP-GiST/BRIN、原生 page-level 索引 WAL、PITR 和完整 PostgreSQL 恢复语义仍属于差距。
 
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。

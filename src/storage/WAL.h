@@ -210,6 +210,11 @@ private:
     std::filesystem::path readyPath(uint32_t segNo) const;
     std::filesystem::path donePath(uint32_t segNo) const;
 
+    bool markSegmentReadyForArchiveLocked(uint32_t segNo);
+    bool markSegmentArchivedLocked(uint32_t segNo);
+    bool archiveSegmentLocked(uint32_t segNo,
+                              const std::filesystem::path& archiveDir);
+
     void advanceCurrentLsn(uint32_t len);
 
     uint32_t computeCrc(const char* data, size_t len) const;

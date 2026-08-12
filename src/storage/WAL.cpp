@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <system_error>
 
 namespace dbms {
 
@@ -32,6 +33,92 @@ uint32_t crc32c(const char* data, size_t len) {
 
 uint64_t alignLen(uint64_t len, uint64_t align) {
     return (len + align - 1) & ~(align - 1);
+}
+
+bool syncFileDescriptor(int fd) {
+    return fd >= 0 && ::fsync(fd) == 0;
+}
+
+bool syncDirectory(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool ok = syncFileDescriptor(fd);
+    ::close(fd);
+    return ok;
+}
+
+std::filesystem::path temporaryPath(const std::filesystem::path& target) {
+    return target.string() + ".tmp." +
+        std::to_string(static_cast<unsigned long long>(::getpid()));
+}
+
+bool writeEmptyFileAtomically(const std::filesystem::path& target) {
+    const auto temp = temporaryPath(target);
+    const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return false;
+    const bool synced = syncFileDescriptor(fd);
+    ::close(fd);
+    if (!synced) {
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, target, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    return syncDirectory(target.parent_path());
+}
+
+bool copyFileAtomically(const std::filesystem::path& source,
+                        const std::filesystem::path& target) {
+    const int sourceFd = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
+    if (sourceFd < 0) return false;
+    const auto temp = temporaryPath(target);
+    const int targetFd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (targetFd < 0) {
+        ::close(sourceFd);
+        return false;
+    }
+
+    bool ok = true;
+    char buffer[1024 * 1024];
+    while (ok) {
+        const ssize_t readCount = ::read(sourceFd, buffer, sizeof(buffer));
+        if (readCount == 0) break;
+        if (readCount < 0) {
+            ok = false;
+            break;
+        }
+        ssize_t written = 0;
+        while (written < readCount) {
+            const ssize_t n = ::write(targetFd, buffer + written,
+                                      static_cast<size_t>(readCount - written));
+            if (n <= 0) {
+                ok = false;
+                break;
+            }
+            written += n;
+        }
+    }
+    if (ok) ok = syncFileDescriptor(targetFd);
+    ::close(targetFd);
+    ::close(sourceFd);
+    if (!ok) {
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::rename(temp, target, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    return syncDirectory(target.parent_path());
 }
 
 bool parseSegmentName(const std::string& name, uint32_t expectedTli,
@@ -63,11 +150,12 @@ bool WALManager::ensureOpen() {
     std::filesystem::create_directories(walDir_, ec);
     if (ec) return false;
     std::filesystem::create_directories(archiveStatusDir(), ec);
+    if (ec) return false;
 
     // Load or infer timeline ID.
-    loadTimeline();
+    if (!loadTimeline()) return false;
     if (!std::filesystem::exists(timelinePath())) {
-        persistTimeline();
+        if (!persistTimeline()) return false;
     }
 
     if (!refreshCurrentLsnFromDisk()) return false;
@@ -160,18 +248,35 @@ bool WALManager::loadTimeline() {
 
 bool WALManager::persistTimeline() {
     auto path = timelinePath();
-    std::ofstream ofs(path, std::ios::binary);
-    if (!ofs) return false;
-    uint32_t tli = timelineId_;
-    ofs.write(reinterpret_cast<const char*>(&tli), sizeof(tli));
-    return ofs.good();
+    const auto temp = temporaryPath(path);
+    const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return false;
+    const uint32_t tli = timelineId_;
+    const ssize_t written = ::write(fd, &tli, sizeof(tli));
+    const bool ok = written == static_cast<ssize_t>(sizeof(tli)) && syncFileDescriptor(fd);
+    ::close(fd);
+    if (!ok) {
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, path, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    return syncDirectory(path.parent_path());
 }
 
 bool WALManager::setTimeline(uint32_t tli) {
     if (tli == 0) return false;
     if (!ensureOpen()) return false;
+    const uint32_t previousTli = timelineId_;
     timelineId_ = tli;
-    return persistTimeline();
+    if (persistTimeline()) return true;
+    timelineId_ = previousTli;
+    return false;
 }
 
 std::filesystem::path WALManager::readyPath(uint32_t segNo) const {
@@ -188,18 +293,42 @@ std::filesystem::path WALManager::donePath(uint32_t segNo) const {
 
 bool WALManager::markSegmentReadyForArchive(uint32_t segNo) {
     if (!ensureOpen()) return false;
+    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return false;
+    const bool ok = markSegmentReadyForArchiveLocked(segNo);
+    releaseWalFileLock(walLock);
+    return ok;
+}
+
+bool WALManager::markSegmentReadyForArchiveLocked(uint32_t segNo) {
     std::error_code ec;
     std::filesystem::create_directories(archiveStatusDir(), ec);
-    std::ofstream ofs(readyPath(segNo), std::ios::binary);
-    return ofs.good();
+    if (ec) return false;
+    return writeEmptyFileAtomically(readyPath(segNo));
 }
 
 bool WALManager::markSegmentArchived(uint32_t segNo) {
     if (!ensureOpen()) return false;
+    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return false;
+    const bool ok = markSegmentArchivedLocked(segNo);
+    releaseWalFileLock(walLock);
+    return ok;
+}
+
+bool WALManager::markSegmentArchivedLocked(uint32_t segNo) {
     std::error_code ec;
+    if (!writeEmptyFileAtomically(donePath(segNo))) return false;
     std::filesystem::remove(readyPath(segNo), ec);
-    std::ofstream ofs(donePath(segNo), std::ios::binary);
-    return ofs.good();
+    if (ec) return false;
+    if (syncDirectory(archiveStatusDir())) return true;
+
+    // Keep the operation retryable if the final marker-directory sync fails.
+    // A later archiver can verify/copy the segment again and complete cleanup.
+    (void)writeEmptyFileAtomically(readyPath(segNo));
+    return false;
 }
 
 bool WALManager::isSegmentArchived(uint32_t segNo) const {
@@ -216,7 +345,9 @@ std::vector<uint32_t> WALManager::pendingArchiveSegments() const {
         if (name.size() != 30 || name.substr(24, 6) != ".ready") continue;
         uint32_t segNo = 0;
         if (!parseSegmentName(name.substr(0, 24), timelineId_, segNo)) continue;
-        if (!isSegmentArchived(segNo)) result.push_back(segNo);
+        // A ready marker remains retryable even if a previous process managed
+        // to publish .done but failed while durably removing .ready.
+        result.push_back(segNo);
     }
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
@@ -225,42 +356,60 @@ std::vector<uint32_t> WALManager::pendingArchiveSegments() const {
 
 bool WALManager::archiveSegment(uint32_t segNo, const std::filesystem::path& archiveDir) {
     if (!ensureOpen()) return false;
+    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return false;
+    const bool ok = archiveSegmentLocked(segNo, archiveDir);
+    releaseWalFileLock(walLock);
+    return ok;
+}
+
+bool WALManager::archiveSegmentLocked(uint32_t segNo,
+                                      const std::filesystem::path& archiveDir) {
     auto src = segmentPath(segNo);
-    if (!std::filesystem::exists(src)) return false;
+    std::error_code sourceEc;
+    if (!std::filesystem::is_regular_file(src, sourceEc) || sourceEc) return false;
     std::error_code ec;
     std::filesystem::create_directories(archiveDir, ec);
     if (ec) return false;
     auto dst = archiveDir / src.filename();
-    try {
-        std::filesystem::copy_file(src, dst,
-            std::filesystem::copy_options::overwrite_existing);
-    } catch (...) {
-        return false;
-    }
-    return markSegmentArchived(segNo);
+    if (!syncDirectory(archiveDir)) return false;
+    if (!syncSegment(segNo)) return false;
+    if (!copyFileAtomically(src, dst)) return false;
+    return markSegmentArchivedLocked(segNo);
 }
 
 bool WALManager::archivePendingSegments(const std::filesystem::path& archiveDir) {
+    if (!ensureOpen()) return false;
+    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return false;
     auto pending = pendingArchiveSegments();
     bool ok = true;
     for (uint32_t segNo : pending) {
-        if (!archiveSegment(segNo, archiveDir)) ok = false;
+        if (!archiveSegmentLocked(segNo, archiveDir)) ok = false;
     }
+    releaseWalFileLock(walLock);
     return ok;
 }
 
 bool WALManager::markSegmentsReadyBefore(Lsn lsn) {
     if (!ensureOpen() || lsn == INVALID_LSN) return false;
+    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return false;
     uint32_t endSeg = segmentNumber(lsn);
+    bool ok = true;
     for (uint32_t seg = 0; seg < endSeg; ++seg) {
         std::error_code ec;
         if (!std::filesystem::exists(segmentPath(seg), ec)) {
-            if (ec) return false;
+            if (ec) ok = false;
             continue;
         }
-        if (!markSegmentReadyForArchive(seg)) return false;
+        if (!markSegmentReadyForArchiveLocked(seg)) ok = false;
     }
-    return true;
+    releaseWalFileLock(walLock);
+    return ok;
 }
 
 Lsn WALManager::earliestAvailableLsn() const {
@@ -477,7 +626,7 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
     uint32_t newSeg = segmentNumber(currentLsn_);
     if (newSeg != prevSeg) {
         // The previous segment is now complete; mark it ready for archiving.
-        markSegmentReadyForArchive(prevSeg);
+        markSegmentReadyForArchiveLocked(prevSeg);
     }
     releaseWalFileLock(walLock);
     return recLsn;
