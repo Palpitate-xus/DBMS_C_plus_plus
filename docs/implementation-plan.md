@@ -38,6 +38,8 @@
 
 2026-08-12 增量审计：ReplicationManager 的复制槽查询改为锁内值快照，slot 定义在创建时校验，slot active 与 standby/conninfo/sync 状态统一加锁，并新增显式激活/停用 API；新增复制管理器并发回归。真实 WAL sender/receiver、逻辑解码、PITR 和端到端故障切换仍待实现。
 
+2026-08-12 文档清理：移除未引用且内容落后的根目录 `MANUAL.md`，`docs/MANUAL.md` 作为唯一完整使用手册；README、生产状态和测试报告均已同步入口。
+
 2026-08-11 增量审计：Catalog 系统表持久化改为临时文件完整写入、文件/目录 `fsync` 与原子 rename；OID 计数器和 CatalogService 传播失败，checkpoint、DDL 快照和关键 DDL 更新不再吞掉 catalog I/O 错误。
 
 2026-08-11 增量审计：恢复第二阶段改为已提交/非事务 page image 按 WAL 正序重做，未提交事务 page before-image 按逆序 undo；新增同一事务连续写入多行后的重启回归，确认不会恢复到中间页状态。

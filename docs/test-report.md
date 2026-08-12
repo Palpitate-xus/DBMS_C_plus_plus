@@ -29,6 +29,7 @@
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。
 - `./scripts/build_tests.sh` 是唯一的完整测试编排实现，缓存生产对象后逐个测试独立链接运行，并自动执行两个 E2E；`run_all_tests_fast.sh` 仅捕获其成功输出并显示 PASS 计数，失败时原样打印完整编译/链接/运行日志。
+- 文档一致性检查确认根目录旧版 `MANUAL.md` 已移除，`docs/MANUAL.md` 是唯一受 README 与测试/部署文档引用的完整手册。
 - PostgreSQL 协议 E2E 覆盖普通顶层多行 DML 和写 CTE 的 statement atomicity：批量 INSERT 或 CTE INSERT 后续行冲突时，前序行不会残留；成功的 `WITH ... RETURNING` 结果也能通过协议返回。
 - PostgreSQL 协议 E2E 覆盖 typed `CREATE TEMP/TEMPORARY TABLE`：临时表在所属会话内持续可用、遮蔽同名永久表，不同 backend 可创建同名临时表，其他会话不可见，断开连接后对象被清理。
 - PostgreSQL 协议 E2E 额外覆盖 `ON COMMIT DELETE ROWS` 与 `ON COMMIT DROP`：提交后分别保留空表和删除临时表；parser 单测覆盖 `PRESERVE/DELETE/DROP` AST 状态。

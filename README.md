@@ -649,7 +649,7 @@ Var Offset Array 每项 (4 bytes):
 | 文件 | 说明 |
 |------|------|
 | [README.md](README.md) | 项目总览与功能特性 |
-| [MANUAL.md](docs/MANUAL.md) | 完整使用手册 (25 章, 覆盖全部 SQL 语法) |
+| [docs/MANUAL.md](docs/MANUAL.md) | 唯一完整使用手册（25 章，覆盖当前 SQL 语法与明确能力边界） |
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与历史 Wave 记录（当前状态以 Gap 表为准） |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |

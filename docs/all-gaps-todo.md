@@ -13,6 +13,8 @@
 
 2026-08-12 增量审计：ReplicationManager 的复制槽查询改为锁内值快照，slot 定义在创建时校验，slot active 与 standby/conninfo/sync 状态统一加锁，并新增显式激活/停用 API；新增复制管理器并发回归。真实 WAL sender/receiver、逻辑解码、PITR 和端到端故障切换仍待实现。
 
+2026-08-12 文档清理：删除未引用且与当前实现分叉的根目录旧版 `MANUAL.md`，统一以 `docs/MANUAL.md` 作为完整使用手册，避免重复文档继续漂移。
+
 2026-08-11 增量审计：`DdlTransaction` 的 CREATE undo 已注册到外层事务上下文；DROP/REPLACE 和文件级 DDL 在变更前建立快照，外层 `ROLLBACK` 先恢复快照再按事务日志撤销行变更，快照污染后的另一条快照型 DDL、SAVEPOINT 创建/回滚会 fail-closed。含内存闭包式 DDL undo 的事务暂不进入 `PREPARE TRANSACTION`；完整依赖图 undo 和全部 PostgreSQL 隐式提交边界仍待实现。
 
 2026-08-11 增量审计：`RuntimeStats` 对完整可见表扫描建立带来源有效性的 live-row 估计，`QueryPlanner` 将其用于 Join 成本和 EXPLAIN 行数估计；部分/索引扫描不会提升为精确 planner 证据，表重建/截断会清除同名关系的旧估计。后台采样线程、历史持久化、按访问方法细分和更深统计反馈仍待实现。
