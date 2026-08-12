@@ -17,21 +17,156 @@ LockManager& LockManager::global() {
 LockManager::~LockManager() {
     {
         std::lock_guard<std::mutex> guard(globalMutex_);
-        for (auto& entry : locks_) releaseProcessLock(entry.second);
+        for (auto& entry : locks_) {
+            entry.second.suspendedTransactions.clear();
+            releaseProcessLock(entry.second);
+        }
     }
     {
         std::lock_guard<std::mutex> guard(rowMutex_);
-        for (auto& entry : rowLocks_) releaseProcessLock(entry.second);
+        for (auto& entry : rowLocks_) {
+            entry.second.suspendedTransactions.clear();
+            releaseProcessLock(entry.second);
+        }
     }
     {
         std::lock_guard<std::mutex> guard(pageMutex_);
-        for (auto& entry : pageLocks_) releaseProcessLock(entry.second);
+        for (auto& entry : pageLocks_) {
+            entry.second.suspendedTransactions.clear();
+            releaseProcessLock(entry.second);
+        }
     }
     {
         std::lock_guard<std::mutex> guard(gapMutex_);
+        preparedGapLocks_.clear();
         for (const auto& entry : gapProcessLockFds_) {
             (void)::flock(entry.second, LOCK_UN);
             ::close(entry.second);
+        }
+    }
+}
+
+bool LockManager::suspendCurrentLocksForPrepared(uint64_t txnId) {
+    if (txnId == 0) return false;
+    const std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> globalGuard(globalMutex_);
+    std::lock_guard<std::mutex> rowGuard(rowMutex_);
+    std::lock_guard<std::mutex> pageGuard(pageMutex_);
+    std::lock_guard<std::mutex> gapGuard(gapMutex_);
+
+    auto suspendTable = [&](LockState& state) {
+        auto modeIt = state.holderModes.find(self);
+        if (modeIt == state.holderModes.end()) return;
+        const LockMode mode = modeIt->second;
+        switch (mode) {
+            case LockMode::Shared: state.mtx.unlock_shared(); --state.sharedCount; break;
+            case LockMode::Exclusive: state.mtx.unlock(); state.exclusive = false; break;
+            case LockMode::IntentShared: state.mtx.unlock_shared(); --state.intentSharedCount; break;
+            case LockMode::IntentExclusive: state.mtx.unlock(); --state.intentExclusiveCount; break;
+            case LockMode::Metadata: state.mtx.unlock(); state.metadata = false; break;
+        }
+        state.holders.erase(std::remove(state.holders.begin(), state.holders.end(), self),
+                            state.holders.end());
+        state.holderModes.erase(self);
+        state.holderCounts.erase(self);
+        state.suspendedTransactions[txnId] = mode;
+    };
+    for (auto& [key, state] : locks_) suspendTable(state);
+
+    auto suspendSimple = [&](auto& registry) {
+        for (auto& [key, state] : registry) {
+            const auto holder = std::find(state.holders.begin(), state.holders.end(), self);
+            if (holder == state.holders.end()) continue;
+            const LockMode mode = state.exclusive ? LockMode::Exclusive : LockMode::Shared;
+            if (state.exclusive) {
+                state.mtx.unlock();
+                state.exclusive = false;
+            } else {
+                state.mtx.unlock_shared();
+                --state.sharedCount;
+            }
+            state.holders.erase(holder);
+            state.suspendedTransactions[txnId] = mode;
+        }
+    };
+    suspendSimple(rowLocks_);
+    suspendSimple(pageLocks_);
+
+    for (auto it = gapLocks_.begin(); it != gapLocks_.end(); ) {
+        auto& gaps = it->second;
+        const bool owned = std::any_of(gaps.begin(), gaps.end(),
+                                       [&](const GapLock& gap) { return gap.holder == self; });
+        if (owned) {
+            preparedGapLocks_[it->first][txnId] = LockMode::Exclusive;
+            gaps.erase(std::remove_if(gaps.begin(), gaps.end(),
+                                      [&](const GapLock& gap) { return gap.holder == self; }),
+                        gaps.end());
+        }
+        if (gaps.empty()) {
+            // Keep the advisory fd open in gapProcessLockFds_; it is now owned
+            // by preparedGapLocks_ and must survive this backend transition.
+            it = gapLocks_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    removeWaitEdges(self);
+    return true;
+}
+
+void LockManager::releasePreparedLocks(uint64_t txnId) {
+    if (txnId == 0) return;
+    {
+        std::lock_guard<std::mutex> guard(globalMutex_);
+        for (auto it = locks_.begin(); it != locks_.end(); ) {
+            it->second.suspendedTransactions.erase(txnId);
+            if (it->second.suspendedTransactions.empty() && it->second.holders.empty()) {
+                releaseProcessLock(it->second);
+            }
+            ++it;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(rowMutex_);
+        for (auto it = rowLocks_.begin(); it != rowLocks_.end(); ) {
+            it->second.suspendedTransactions.erase(txnId);
+            if (it->second.suspendedTransactions.empty() && it->second.holders.empty()) {
+                releaseProcessLock(it->second);
+                if (it->second.waiters == 0) it = rowLocks_.erase(it);
+                else ++it;
+            } else {
+                ++it;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(pageMutex_);
+        for (auto it = pageLocks_.begin(); it != pageLocks_.end(); ) {
+            it->second.suspendedTransactions.erase(txnId);
+            if (it->second.suspendedTransactions.empty() && it->second.holders.empty()) {
+                releaseProcessLock(it->second);
+                if (it->second.waiters == 0) it = pageLocks_.erase(it);
+                else ++it;
+            } else {
+                ++it;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(gapMutex_);
+        for (auto it = preparedGapLocks_.begin(); it != preparedGapLocks_.end(); ) {
+            it->second.erase(txnId);
+            if (!it->second.empty()) {
+                ++it;
+                continue;
+            }
+            auto fd = gapProcessLockFds_.find(it->first);
+            if (fd != gapProcessLockFds_.end()) {
+                (void)::flock(fd->second, LOCK_UN);
+                ::close(fd->second);
+                gapProcessLockFds_.erase(fd);
+            }
+            it = preparedGapLocks_.erase(it);
         }
     }
 }
@@ -77,6 +212,7 @@ std::string LockManager::processLockPath(const std::string& resourceNamespace,
 LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
     LockState& state, const std::string& resourceNamespace,
     const std::string& kind, const std::string& resource, LockMode mode) {
+    if (!state.suspendedTransactions.empty()) return ProcessLockResult::Busy;
     const bool exclusive = mode != LockMode::Shared && mode != LockMode::IntentShared;
     if (state.processLockFd >= 0) {
         if (state.processLockMode == LockMode::Shared && exclusive) {
@@ -129,6 +265,10 @@ LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
 }
 
 void LockManager::releaseProcessLock(LockState& state) {
+    // A prepared transaction owns the advisory lock even after its backend
+    // thread has released the local mutex token. Only COMMIT/ROLLBACK
+    // PREPARED may release it.
+    if (!state.suspendedTransactions.empty()) return;
     if (state.processLockFd < 0) return;
     (void)::flock(state.processLockFd, LOCK_UN);
     ::close(state.processLockFd);
@@ -143,6 +283,7 @@ bool LockManager::tryAcquireGapProcessLock(const std::string& table) {
                                              "gap", table);
     if (path.empty()) return true;
     const std::string key = resourceKey(table);
+    if (preparedGapLocks_.find(key) != preparedGapLocks_.end()) return false;
     if (gapProcessLockFds_.find(key) != gapProcessLockFds_.end()) return true;
     std::error_code ec;
     const auto databasePath = std::filesystem::path(path).parent_path().parent_path();
@@ -161,6 +302,7 @@ bool LockManager::tryAcquireGapProcessLock(const std::string& table) {
 }
 
 void LockManager::releaseGapProcessLock(const std::string& key) {
+    if (preparedGapLocks_.find(key) != preparedGapLocks_.end()) return;
     auto it = gapProcessLockFds_.find(key);
     if (it == gapProcessLockFds_.end()) return;
     (void)::flock(it->second, LOCK_UN);
@@ -170,6 +312,7 @@ void LockManager::releaseGapProcessLock(const std::string& key) {
 
 bool LockManager::isGapProcessLocked(const std::string& table) const {
     const std::string key = resourceKey(table);
+    if (preparedGapLocks_.find(key) != preparedGapLocks_.end()) return true;
     if (gapProcessLockFds_.find(key) != gapProcessLockFds_.end()) return false;
     const std::string path = processLockPath(threadSettings().resourceNamespace,
                                              "gap", table);

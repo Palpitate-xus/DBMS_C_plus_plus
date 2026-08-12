@@ -2138,7 +2138,7 @@ static bool handlePrepare(const string& sql, Session& s) {
         } else {
             cout << "PREPARE TRANSACTION failed" << endl;
         }
-        return false;
+        return res != DBStatus::OK;
     }
     size_t fromPos = rest.find(" from ");
     if (fromPos == string::npos) {

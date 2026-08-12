@@ -3,7 +3,7 @@
 > 生成日期: 2026-08-12（更新反映存储格式硬切与当前代码状态）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线（2026-08-12）: PASS=137 FAIL=0（135 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）
+> 测试基线（2026-08-12）: PASS=138 FAIL=0（136 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、跨 backend 2PC、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）
 
 协议回归现已覆盖扩展查询错误后的 ignore-until-Sync 恢复、事务外 `ReadyForQuery('I')` 状态、显式失败事务的 `25P02`/`ReadyForQuery('E')`、失败状态下 `COMMIT` 转完整回滚、`ROLLBACK TO SAVEPOINT` 恢复及 `COMMIT/ROLLBACK PREPARED` 边界、文本/binary 整数、numeric 及 date/time/timestamp/UUID 参数与结果、statement/portal 的 Describe/Close 生命周期、基础 portal `maxRows` 分页及常见单表 RowDescription 元数据；这只补齐了错误状态机与参数路径的一部分，数组等复杂类型 I/O、复杂表达式的完整类型映射、内部秒精度之外的时间精度、holdable/scrollable portal 和扩展消息仍与 PostgreSQL 有差距。
 
@@ -13,7 +13,7 @@ ACL 回归现已覆盖表/列权限对会话用户、递归继承角色和 `PUBL
 
 RLS 回归现已覆盖默认 `WITH CHECK`、显式 `TO PUBLIC`、permissive/restrictive 策略组合、`INHERIT/NOINHERIT` 角色权限、表 owner 绕过、`pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`；复杂 owner/ACL 组合和完整 PostgreSQL policy catalog 语义仍有差距。
 
-事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；INSERT、UPDATE、DELETE 的普通回滚与 SAVEPOINT 回滚会恢复主键、二级、复合、Hash 索引和 TOAST，DDL CREATE undo 也会跨语句外层 ROLLBACK 并遵守 SAVEPOINT 边界；保存点检查点会释放保存点之后新增的表/row/page/gap 锁并恢复之前的锁模式；变更前 DDL 快照可恢复外层 DROP/REPLACE，并在恢复后继续撤销同一事务的行变更。快照已污染后 SAVEPOINT 会安全拒绝，DELETE savepoint 回滚后可在同一事务提交并继续读取，重启后仍能读取旧大字段。SERIALIZABLE 现在对非空索引谓词和顺序扫描登记 heap page SIREAD，空谓词保留关系级兜底，非相交页并发和跨页危险结构已有真实回归。`lock_manager_concurrency_test` 进一步验证表锁重入/升级、row/page token 归属、保存点锁检查点和双线程 wait-for graph 死锁受害者释放，`cross_backend_lock_test` 验证独立 `StorageEngine` backend 共享同库表锁、隔离跨库同名表，并通过 fork 验证表/row/page 锁竞争、释放后获取和 gap 阻塞，`lock_failure_propagation_test` 验证存储层建索引遇到真实表锁竞争时 fail-closed。TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。B+Tree/Hash 刷盘现在记录完整文件 before/after WAL 镜像并参与崩溃恢复；原生 page-level 索引 WAL、索引范围 predicate lock、其他访问方法、跨访问方法原子提交、完整 PostgreSQL 锁模式和 SSI 语义、DEFERRABLE 安全快照仍是差距，含内存闭包式 DDL undo 的事务暂不支持 PREPARE TRANSACTION，不能据此宣称完整 PostgreSQL 事务语义已完成。
+事务回归现已覆盖两个协议 backend 的事务上下文隔离：每个连接线程拥有独立的事务 ID、快照、回滚日志和 savepoint 状态，未提交数据不会被另一连接读取；INSERT、UPDATE、DELETE 的普通回滚与 SAVEPOINT 回滚会恢复主键、二级、复合、Hash 索引和 TOAST，DDL CREATE undo 也会跨语句外层 ROLLBACK 并遵守 SAVEPOINT 边界；保存点检查点会释放保存点之后新增的表/row/page/gap 锁并恢复之前的锁模式；变更前 DDL 快照可恢复外层 DROP/REPLACE，并在恢复后继续撤销同一事务的行变更。快照已污染后 SAVEPOINT 会安全拒绝，DELETE savepoint 回滚后可在同一事务提交并继续读取，重启后仍能读取旧大字段。SERIALIZABLE 现在对非空索引谓词和顺序扫描登记 heap page SIREAD，空谓词保留关系级兜底，非相交页并发和跨页危险结构已有真实回归。`lock_manager_concurrency_test` 进一步验证表锁重入/升级、row/page token 归属、保存点锁检查点和双线程 wait-for graph 死锁受害者释放，`cross_backend_lock_test` 验证独立 `StorageEngine` backend 共享同库表锁、隔离跨库同名表，并通过 fork 验证表/row/page 锁竞争、释放后获取和 gap 阻塞，`lock_failure_propagation_test` 验证存储层建索引遇到真实表锁竞争时 fail-closed。新增 `prepared_transaction_test` 验证 PREPARE 前刷出 backend 私有 heap/index 缓存、prepared 元数据原子 durable 发布、跨 backend 锁保留、提交可见性和回滚不可见性。TCL 解析已结构化保留隔离级别、只读模式和保存点名称，并修复特定回滚命令的前缀分类问题。B+Tree/Hash 刷盘现在记录完整文件 before/after WAL 镜像并参与崩溃恢复；原生 page-level 索引 WAL、索引范围 predicate lock、其他访问方法、跨访问方法原子提交、完整 PostgreSQL 锁模式和 SSI 语义、DEFERRABLE 安全快照仍是差距，含内存闭包式 DDL undo 的事务暂不支持 PREPARE TRANSACTION，不能据此宣称完整 PostgreSQL 事务语义已完成。
 
 2026-08-09 质量验证补充：主程序在 `-Wall -Wextra` 下无编译警告；快速回归、独立测试、窗口函数 E2E、协议 E2E 和 OpenSSL Docker 构建均通过。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、INNER/CROSS JOIN DML、简单谓词 DELETE 已进入独立 AST 执行器，混合 DEFAULT、显式列、多行、字符串字面量、INSERT/UPDATE/DELETE 列投影及受限标量表达式 RETURNING、修改/删除回归和默认值存储语义有 parser/协议覆盖；高级 DML 和复杂表达式仍保留明确 legacy 回退。带表限定的表达式引用优先解析限定命名空间，避免 UPDATE FROM/DELETE USING 中同名列被错误绑定。legacy 文本执行器的协议结果捕获已改为线程局部路由，避免全局 `std::cout` 锁造成会话串行化。该结果只说明当前实现可重复验证，不改变下文列出的 PostgreSQL 语义与运维差距。
 
@@ -124,7 +124,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ⚠️ 普通聚合与 `GroupAggregateOp` 已消费过滤后的 Volcano 子计划，覆盖常见聚合与基础 grouping sets | ⚠️ 复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍缺 |
 | GROUPING_ID | ✅ | ❌ | 缺 |
 | FOR UPDATE/SHARE/NOWAIT/SKIP LOCKED | ✅ | ✅ | ✅ (行级锁 + 死锁检测) |
-| **PREPARE TRANSACTION (2PC)** | ✅ | ⚠️ | 基础 `prepareTransaction` + `COMMIT/ROLLBACK PREPARED`；含内存闭包式 DDL undo 的事务会被拒绝，避免 prepared 状态丢失回滚动作 |
+| **PREPARE TRANSACTION (2PC)** | ✅ | ⚠️ | PREPARE 前刷 heap/index，prepared 元数据原子 durable 发布并写 PREPARE WAL；表/row/page/gap 锁可跨 backend 保留和释放；全局 prepared 目录、跨进程恢复和 in-doubt 决策仍缺 |
 | VALUES | ✅ | ✅ | ✅ |
 | **Array subscript [n:m]** | ✅ | ❌ | 缺 |
 | **JSON path / SQL/JSON** | ✅ | ❌ | 缺 |
@@ -170,7 +170,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | **Deadlock detection** | ✅ | ✅ | ✅ (wait-for graph + cycle detection + log) |
 | **Gap locks / predicate locks** | ✅ | ⚠️ | 有精确进程内 gap range、每表保守跨进程协调、heap page SIREAD 和空范围关系级兜底；缺真正索引范围 predicate lock |
 | **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 行级/页级 rw-conflict + 关系级空范围兜底；已验证非相交页并发和跨页危险结构，缺精确 phantom 推理与完整 SSI 规则 |
-| **两阶段提交 (2PC)** | ✅ | ⚠️ | 基础 `prepareTransaction` + `COMMIT/ROLLBACK PREPARED`；包含内存 DDL undo 的事务会拒绝 PREPARE |
+| **两阶段提交 (2PC)** | ✅ | ⚠️ | 基础 `prepareTransaction` + `COMMIT/ROLLBACK PREPARED` 已覆盖 durable prepared 记录、PREPARE WAL、跨 backend 锁所有权和提交/回滚回归；包含内存 DDL undo 的事务会拒绝 PREPARE，PG 全局目录与崩溃后 in-doubt 语义仍缺 |
 | **并行查询** | ✅ | ⚠️ | 非分区 heap 已支持按 page range 并行扫描和确定性 Gather，page I/O 失败会传播到算子；事务内回退，parallel join/aggregate/GatherMerge/worker pool 仍缺 |
 | **JIT compilation (LLVM)** | ✅ | ❌ | 缺 |
 | **Async I/O (io_uring)** | ✅ (PG18) | ❌ | 缺 |

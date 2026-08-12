@@ -2,7 +2,7 @@
 
 最后更新：2026-08-12
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，135 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=137 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，136 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=138 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
 复制管理器本轮完成线程安全收敛：复制槽查询改为返回受锁保护的值快照，standby、primary conninfo、同步复制和 slot active 状态统一受同一把锁保护；slot 名称/类型/plugin 组合在创建时校验，并提供显式激活/停用 API。新增并发回归覆盖状态写入、slot 生命周期和快照读取；这仍是进程内管理层，不代表已经具备 PostgreSQL 级真实 WAL sender/receiver、流复制或 PITR。
 
@@ -20,7 +20,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 
 本轮修复协议失败事务的提交边界：显式事务中的语句错误会进入 `ReadyForQuery('E')`/`25P02` 状态，普通后续语句被拒绝；此时收到 `COMMIT` 会按 PostgreSQL 语义执行完整回滚而不会发布此前写入，`ROLLBACK TO SAVEPOINT` 成功后可恢复到事务中。该状态目前仍由协议 backend 维护，尚未演进为完整 PostgreSQL 子事务 ID/错误状态目录。
 
-本轮进一步收紧两阶段命令边界：`COMMIT PREPARED`/`ROLLBACK PREPARED` 不会被失败事务状态误改写为本地 `COMMIT`/`ROLLBACK`；未知 prepared transaction 现在返回执行错误，不再以成功响应吞掉失败。完整 2PC 全局目录、锁保留和崩溃恢复语义仍未完成。
+本轮进一步收紧两阶段命令边界：`COMMIT PREPARED`/`ROLLBACK PREPARED` 不会被失败事务状态误改写为本地 `COMMIT`/`ROLLBACK`；未知 prepared transaction 现在返回执行错误，不再以成功响应吞掉失败。PREPARE 现在先刷出 backend 私有 heap/index 缓存，prepared 元数据使用临时文件、文件/目录 `fsync` 和原子 rename 发布，并写入并刷盘 PREPARE WAL；表、row、page、gap 的本地 mutex token 会安全转移，进程级 advisory lock 按 xid 保留，由任一 backend 的 COMMIT/ROLLBACK PREPARED 释放。`prepared_transaction_test` 已验证跨 backend 锁阻塞、提交可见性、回滚不可见性和事务内禁止完成 prepared transaction。完整 2PC 全局目录、跨进程 prepared 资源恢复和崩溃后 in-doubt 决策语义仍未完成。
 
 本轮已完成的基础收敛：
 

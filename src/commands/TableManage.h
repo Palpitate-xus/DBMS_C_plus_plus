@@ -1182,6 +1182,7 @@ private:
                      bool beforeImage);
     Lsn walXactCommit(const std::string& dbname, uint64_t xid);
     Lsn walXactAbort(const std::string& dbname, uint64_t xid);
+    Lsn walXactPrepare(const std::string& dbname, uint64_t xid);
     Lsn walCheckpoint(const std::string& dbname, uint64_t nextXid);
     Lsn walIndexFileImage(const std::string& dbname,
                           const std::filesystem::path& indexPath,

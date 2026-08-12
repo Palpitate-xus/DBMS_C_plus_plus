@@ -96,6 +96,14 @@ public:
     LockCheckpoint captureCheckpoint() const;
     void rollbackToCheckpoint(const LockCheckpoint& checkpoint);
 
+    // PREPARE TRANSACTION transfers the durable/advisory part of the lock
+    // ownership out of the backend thread. The local mutex token is released
+    // by the preparing thread, while the process lock remains held and is
+    // tagged with the prepared transaction ID. Completion may then release
+    // those locks from any backend thread without cross-thread mutex unlocks.
+    [[nodiscard]] bool suspendCurrentLocksForPrepared(uint64_t txnId);
+    void releasePreparedLocks(uint64_t txnId);
+
     // ========================================================================
     // Row-level locking
     // ========================================================================
@@ -165,6 +173,7 @@ private:
         std::string processLockNamespace;
         std::string processLockKind;
         std::string processLockResource;
+        std::map<uint64_t, LockMode> suspendedTransactions;
     };
     std::map<std::string, LockState> locks_;
     mutable std::mutex globalMutex_;
@@ -189,6 +198,7 @@ private:
     // this prevents phantom writes without pretending to implement a shared
     // persistent predicate-lock index.
     std::map<std::string, int> gapProcessLockFds_;
+    std::map<std::string, std::map<uint64_t, LockMode>> preparedGapLocks_;
     mutable std::mutex gapMutex_;
 
     // Wait-for graph: thread A waits for thread B to release a lock

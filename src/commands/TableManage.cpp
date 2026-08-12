@@ -12,6 +12,7 @@
 #include "process/RuntimeStats.h"
 #include "access/IndexFileUtil.h"
 #include <cmath>
+#include <cctype>
 #include <limits>
 #include <mutex>
 #include <unordered_map>
@@ -19104,6 +19105,15 @@ Lsn StorageEngine::walXactAbort(const std::string& dbname, uint64_t xid) {
     return wal->XLogInsert(RM_XACT_ID, XLOG_XACT_ABORT, xid, payload);
 }
 
+Lsn StorageEngine::walXactPrepare(const std::string& dbname, uint64_t xid) {
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return INVALID_LSN;
+    std::vector<char> payload;
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&xid),
+                   reinterpret_cast<const char*>(&xid) + sizeof(xid));
+    return wal->XLogInsert(RM_XACT_ID, XLOG_XACT_PREPARE, xid, payload);
+}
+
 Lsn StorageEngine::walCheckpoint(const std::string& dbname, uint64_t nextXid) {
     WALManager* wal = getWAL(dbname);
     if (!wal) return INVALID_LSN;
@@ -21119,14 +21129,171 @@ static std::filesystem::path preparedPath(const std::string& xid) {
     return preparedDir() / xid;
 }
 
+static bool validPreparedXid(const std::string& xid) {
+    if (xid.empty() || xid.size() > 200) return false;
+    for (const unsigned char c : xid) {
+        if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.' || c == ':')) return false;
+    }
+    return true;
+}
+
+static bool writePreparedFileAtomically(const std::filesystem::path& target,
+                                        const std::string& contents) {
+    const auto parent = target.parent_path();
+    const auto temp = target.string() + ".tmp." + std::to_string(::getpid());
+    const int fd = ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    bool ok = true;
+    size_t offset = 0;
+    while (offset < contents.size()) {
+        const ssize_t written = ::write(fd, contents.data() + offset,
+                                        contents.size() - offset);
+        if (written <= 0) { ok = false; break; }
+        offset += static_cast<size_t>(written);
+    }
+    if (ok && ::fsync(fd) != 0) ok = false;
+    if (::close(fd) != 0) ok = false;
+    if (!ok) {
+        std::error_code ec;
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, target, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    const int dirFd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd < 0) return false;
+    const bool durable = ::fsync(dirFd) == 0;
+    ::close(dirFd);
+    return durable;
+}
+
+static bool removePreparedFileDurably(const std::filesystem::path& target) {
+    std::error_code ec;
+    if (std::filesystem::exists(target, ec) &&
+        !std::filesystem::remove(target, ec)) return false;
+    if (ec) return false;
+    const int dirFd = ::open(target.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd < 0) return false;
+    const bool durable = ::fsync(dirFd) == 0;
+    ::close(dirFd);
+    return durable;
+}
+
+struct PreparedTransactionRecord {
+    uint64_t txnId = 0;
+    std::string dbname;
+    IsolationLevel isolation = IsolationLevel::REPEATABLE_READ;
+    struct LogEntry {
+        enum class Op { Insert, Update, Delete } op;
+        std::string tableName;
+        int64_t rowIdx = 0;
+        std::string rowData;
+    };
+    std::vector<LogEntry> log;
+};
+
+static bool readPreparedRecord(const std::filesystem::path& path,
+                               PreparedTransactionRecord& record) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    std::string line;
+    bool hasTxnId = false;
+    bool hasDbname = false;
+    bool hasIsolation = false;
+    while (std::getline(input, line)) {
+        try {
+            if (line.rfind("TXN_ID ", 0) == 0) {
+                if (hasTxnId) return false;
+                record.txnId = std::stoull(line.substr(7));
+                hasTxnId = true;
+            } else if (line.rfind("DBNAME ", 0) == 0) {
+                if (hasDbname) return false;
+                record.dbname = line.substr(7);
+                hasDbname = true;
+            } else if (line.rfind("ISOLATION ", 0) == 0) {
+                if (hasIsolation) return false;
+                const int value = std::stoi(line.substr(10));
+                if (value < static_cast<int>(IsolationLevel::READ_UNCOMMITTED) ||
+                    value > static_cast<int>(IsolationLevel::SERIALIZABLE)) return false;
+                record.isolation = static_cast<IsolationLevel>(value);
+                hasIsolation = true;
+            } else if (line.rfind("READONLY ", 0) == 0) {
+                const std::string value = line.substr(9);
+                if (value != "0" && value != "1") return false;
+            } else if (line.rfind("LOCK ", 0) == 0) {
+                const size_t resourceEnd = line.find(' ', 5);
+                if (resourceEnd == std::string::npos || resourceEnd == 5 ||
+                    line.substr(resourceEnd + 1).empty()) return false;
+            } else if (line.rfind("LOG ", 0) == 0) {
+                size_t pos = 4;
+                const size_t opEnd = line.find(' ', pos);
+                if (opEnd == std::string::npos) return false;
+                const std::string op = line.substr(pos, opEnd - pos);
+                pos = opEnd + 1;
+                const size_t tableEnd = line.find(' ', pos);
+                if (tableEnd == std::string::npos) return false;
+                const std::string table = line.substr(pos, tableEnd - pos);
+                pos = tableEnd + 1;
+                const size_t ridEnd = line.find(' ', pos);
+                if (ridEnd == std::string::npos) return false;
+                PreparedTransactionRecord::LogEntry entry;
+                if (op == "INSERT") entry.op = PreparedTransactionRecord::LogEntry::Op::Insert;
+                else if (op == "UPDATE") entry.op = PreparedTransactionRecord::LogEntry::Op::Update;
+                else if (op == "DELETE") entry.op = PreparedTransactionRecord::LogEntry::Op::Delete;
+                else return false;
+                entry.tableName = table;
+                entry.rowIdx = std::stoll(line.substr(pos, ridEnd - pos));
+                const std::string hex = line.substr(ridEnd + 1);
+                if (hex.size() % 2 != 0) return false;
+                for (size_t i = 0; i < hex.size(); i += 2) {
+                    const auto nibble = [](char c) -> int {
+                        if (c >= '0' && c <= '9') return c - '0';
+                        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                        return -1;
+                    };
+                    const int high = nibble(hex[i]);
+                    const int low = nibble(hex[i + 1]);
+                    if (high < 0 || low < 0) return false;
+                    entry.rowData.push_back(static_cast<char>((high << 4) | low));
+                }
+                record.log.push_back(std::move(entry));
+            } else if (!line.empty()) {
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+    }
+    if (!input.eof()) return false;
+    return hasTxnId && hasDbname && hasIsolation && record.txnId != 0 &&
+           !record.dbname.empty() && record.dbname.find('\n') == std::string::npos &&
+           record.dbname.find('\r') == std::string::npos &&
+           record.dbname.find('/') == std::string::npos &&
+           record.dbname.find('\\') == std::string::npos &&
+           record.dbname != "." && record.dbname != "..";
+}
+
 DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
-    if (xid.empty()) return DBStatus::INVALID_VALUE;
+    if (!validPreparedXid(xid)) return DBStatus::INVALID_VALUE;
     if (!transactionContext().ddlUndoActions.empty()) {
         // DDL undo callbacks are backend-local closures. Do not prepare a
         // transaction whose rollback semantics cannot survive this backend's
         // in-memory context; callers must commit/rollback it directly.
         return DBStatus::INVALID_VALUE;
+    }
+
+    // The preparing backend may own dirty heap, index, FSM or visibility-map
+    // pages that a different backend will never see in its private caches.
+    // PREPARE is therefore the hand-off boundary: publish all physical
+    // effects before the prepared record can be completed elsewhere.
+    if (!flushDatabaseCaches(transactionContext().txnDB)) {
+        return DBStatus::IO_ERROR;
     }
 
     std::filesystem::path pdir = preparedDir();
@@ -21136,36 +21303,49 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     std::filesystem::path pfile = preparedPath(xid);
     if (std::filesystem::exists(pfile)) return DBStatus::DUPLICATE_KEY;
 
-    std::ofstream ofs(pfile, std::ios::binary);
-    if (!ofs) return DBStatus::INVALID_VALUE;
+    std::ostringstream prepared;
 
     // Transaction metadata
-    ofs << "TXN_ID " << transactionContext().currentTxnId << "\n";
-    ofs << "DBNAME " << transactionContext().txnDB << "\n";
-    ofs << "ISOLATION " << static_cast<int>(transactionContext().txnIsolationLevel) << "\n";
-    ofs << "READONLY " << (transactionContext().readOnly ? 1 : 0) << "\n";
+    prepared << "TXN_ID " << transactionContext().currentTxnId << "\n";
+    prepared << "DBNAME " << transactionContext().txnDB << "\n";
+    prepared << "ISOLATION " << static_cast<int>(transactionContext().txnIsolationLevel) << "\n";
+    prepared << "READONLY " << (transactionContext().readOnly ? 1 : 0) << "\n";
 
     // Held locks (resource mode)
     auto locks = lockManager_.getLockHolds();
     for (const auto& lk : locks) {
-        ofs << "LOCK " << lk.resource << " " << lk.mode << "\n";
+        prepared << "LOCK " << lk.resource << " " << lk.mode << "\n";
     }
 
     // Transaction log
     for (const auto& entry : transactionContext().txnLog) {
-        ofs << "LOG ";
-        if (entry.op == TxnLogEntry::Op::Insert) ofs << "INSERT";
-        else if (entry.op == TxnLogEntry::Op::Update) ofs << "UPDATE";
-        else if (entry.op == TxnLogEntry::Op::Delete) ofs << "DELETE";
-        ofs << " " << entry.tableName << " " << entry.rowIdx << " ";
+        prepared << "LOG ";
+        if (entry.op == TxnLogEntry::Op::Insert) prepared << "INSERT";
+        else if (entry.op == TxnLogEntry::Op::Update) prepared << "UPDATE";
+        else if (entry.op == TxnLogEntry::Op::Delete) prepared << "DELETE";
+        prepared << " " << entry.tableName << " " << entry.rowIdx << " ";
         for (unsigned char c : entry.rowData) {
             char buf[3];
             snprintf(buf, sizeof(buf), "%02x", c);
-            ofs << buf;
+            prepared << buf;
         }
-        ofs << "\n";
+        prepared << "\n";
     }
-    ofs.close();
+    if (!writePreparedFileAtomically(pfile, prepared.str())) {
+        return DBStatus::IO_ERROR;
+    }
+    const Lsn prepareLsn = walXactPrepare(transactionContext().txnDB,
+                                           transactionContext().currentTxnId);
+    WALManager* wal = getWAL(transactionContext().txnDB);
+    if (prepareLsn == INVALID_LSN || !wal || !wal->XLogFlush(prepareLsn)) {
+        (void)removePreparedFileDurably(pfile);
+        return DBStatus::IO_ERROR;
+    }
+
+    if (!lockManager_.suspendCurrentLocksForPrepared(transactionContext().currentTxnId)) {
+        (void)removePreparedFileDurably(pfile);
+        return DBStatus::LOCK_CONFLICT;
+    }
 
     // Remove from active set (prepared txns are not active for ReadView)
     {
@@ -21201,34 +21381,47 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().readOnly = false;
+    // The database transaction mutex is a backend-local implementation lock;
+    // it cannot be unlocked safely by COMMIT/ROLLBACK PREPARED on another
+    // thread. Physical table/row/page/gap ownership has already been
+    // transferred by LockManager, so release this session lock at PREPARE.
+    transactionContext().databaseExclusiveLock.reset();
+    transactionContext().databaseSharedLock.reset();
+    transactionContext().databaseTxnMutex.reset();
+    transactionContext().txnBackupPath.clear();
+    transactionContext().transactionBackupDirty = false;
+    transactionContext().restoreBackupBeforeRowUndo = false;
+    transactionContext().ddlUndoSizeAtBackup = 0;
+    transactionContext().preserveBackupOnRollback = false;
     transactionContext().txnDB.clear();
     return DBStatus::OK;
 }
 
 DBStatus StorageEngine::commitPrepared(const std::string& xid) {
+    if (transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    if (!validPreparedXid(xid)) return DBStatus::INVALID_VALUE;
     std::filesystem::path pfile = preparedPath(xid);
     if (!std::filesystem::exists(pfile)) return DBStatus::TABLE_NOT_FOUND;
 
-    uint64_t savedTxnId = 0;
-    std::string savedDB;
-    {
-        std::ifstream ifs(pfile, std::ios::binary);
-        std::string line;
-        while (std::getline(ifs, line)) {
-            if (line.substr(0, 6) == "TXN_ID") savedTxnId = std::stoull(line.substr(7));
-            else if (line.substr(0, 6) == "DBNAME") savedDB = line.substr(7);
-        }
-    }
-    if (savedTxnId == 0 || savedDB.empty()) return DBStatus::INVALID_VALUE;
+    PreparedTransactionRecord record;
+    if (!readPreparedRecord(pfile, record)) return DBStatus::CORRUPTED_DATA;
+    const uint64_t savedTxnId = record.txnId;
+    const std::string& savedDB = record.dbname;
 
     // WAL COMMIT PREPARED marker. Keep the prepared transaction durable and
     // retryable if WAL insertion or fsync fails.
+    if (!flushDatabaseCaches(savedDB)) return DBStatus::IO_ERROR;
     WALManager* wal = getWAL(savedDB);
     if (!wal) return DBStatus::IO_ERROR;
     Lsn commitLsn = walXactCommit(savedDB, savedTxnId);
     if (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn)) {
         return DBStatus::IO_ERROR;
     }
+
+    CommitLog* clog = getCommitLog(savedDB);
+    if (!clog) return DBStatus::IO_ERROR;
+    clog->setStatus(savedTxnId, CommitLog::Status::Committed);
+    if (!clog->flush()) return DBStatus::IO_ERROR;
 
     // Normal commit logic
     TxnIdGenerator::instance().notifyCommit(savedTxnId);
@@ -21242,8 +21435,7 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     transactionContext().savepoints.clear();
     std::error_code backupEc;
     std::filesystem::remove_all(transactionBackupPath(savedDB, savedTxnId), backupEc);
-    lockManager_.unlockAll();
-    lockManager_.unlockAllGaps();
+    lockManager_.releasePreparedLocks(savedTxnId);
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().readOnly = false;
@@ -21253,71 +21445,47 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     transactionContext().databaseSharedLock.reset();
     transactionContext().databaseTxnMutex.reset();
 
-    std::filesystem::remove(pfile);
-    return DBStatus::OK;
+    return removePreparedFileDurably(pfile) ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::rollbackPrepared(const std::string& xid) {
+    if (transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    if (!validPreparedXid(xid)) return DBStatus::INVALID_VALUE;
     std::filesystem::path pfile = preparedPath(xid);
     if (!std::filesystem::exists(pfile)) return DBStatus::TABLE_NOT_FOUND;
 
-    uint64_t savedTxnId = 0;
-    std::string savedDB;
-    IsolationLevel savedIso = IsolationLevel::REPEATABLE_READ;
-    std::vector<TxnLogEntry> savedLog;
-
-    {
-        std::ifstream ifs(pfile, std::ios::binary);
-        std::string line;
-        while (std::getline(ifs, line)) {
-            if (line.substr(0, 6) == "TXN_ID") {
-                savedTxnId = std::stoull(line.substr(7));
-            } else if (line.substr(0, 6) == "DBNAME") {
-                savedDB = line.substr(7);
-            } else if (line.substr(0, 9) == "ISOLATION") {
-                savedIso = static_cast<IsolationLevel>(std::stoi(line.substr(10)));
-            } else if (line.substr(0, 3) == "LOG") {
-                size_t pos = 4;
-                size_t sp = line.find(' ', pos);
-                std::string opStr = line.substr(pos, sp - pos);
-                pos = sp + 1;
-                sp = line.find(' ', pos);
-                std::string tbl = line.substr(pos, sp - pos);
-                pos = sp + 1;
-                sp = line.find(' ', pos);
-                int64_t rid = std::stoll(line.substr(pos, sp - pos));
-                pos = sp + 1;
-                std::string hexData = line.substr(pos);
-                std::string rowData;
-                for (size_t i = 0; i + 1 < hexData.size(); i += 2) {
-                    rowData.push_back(static_cast<char>(std::stoi(hexData.substr(i, 2), nullptr, 16)));
-                }
-                TxnLogEntry entry;
-                if (opStr == "INSERT") entry.op = TxnLogEntry::Op::Insert;
-                else if (opStr == "UPDATE") entry.op = TxnLogEntry::Op::Update;
-                else if (opStr == "DELETE") entry.op = TxnLogEntry::Op::Delete;
-                entry.tableName = tbl;
-                entry.rowIdx = rid;
-                entry.rowData = rowData;
-                savedLog.push_back(entry);
-            }
-        }
-    }
-
-    if (savedTxnId == 0 || savedDB.empty()) return DBStatus::INVALID_VALUE;
+    PreparedTransactionRecord record;
+    if (!readPreparedRecord(pfile, record)) return DBStatus::CORRUPTED_DATA;
+    const uint64_t savedTxnId = record.txnId;
+    const std::string& savedDB = record.dbname;
 
     // Temporarily restore state and use normal rollback
     transactionContext().currentTxnId = savedTxnId;
     transactionContext().txnDB = savedDB;
     transactionContext().txnBackupPath = transactionBackupPath(savedDB, savedTxnId).string();
-    transactionContext().txnIsolationLevel = savedIso;
+    transactionContext().txnIsolationLevel = record.isolation;
     transactionContext().inTransaction = true;
-    transactionContext().txnLog = std::move(savedLog);
+    transactionContext().txnLog.clear();
+    transactionContext().txnLog.reserve(record.log.size());
+    for (const auto& entry : record.log) {
+        TxnLogEntry restored;
+        if (entry.op == PreparedTransactionRecord::LogEntry::Op::Insert) {
+            restored.op = TxnLogEntry::Op::Insert;
+        } else if (entry.op == PreparedTransactionRecord::LogEntry::Op::Update) {
+            restored.op = TxnLogEntry::Op::Update;
+        } else {
+            restored.op = TxnLogEntry::Op::Delete;
+        }
+        restored.tableName = entry.tableName;
+        restored.rowIdx = entry.rowIdx;
+        restored.rowData = entry.rowData;
+        transactionContext().txnLog.push_back(std::move(restored));
+    }
 
     DBStatus res = rollbackTransaction();
-
-    std::filesystem::remove(pfile);
-    return res;
+    if (res != DBStatus::OK) return res;
+    lockManager_.releasePreparedLocks(savedTxnId);
+    return removePreparedFileDurably(pfile) ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 std::vector<std::string> StorageEngine::listPreparedTransactions() const {
