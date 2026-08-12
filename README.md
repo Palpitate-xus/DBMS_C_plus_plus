@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-12）**: 生产化重构进行中；统一回归基线 PASS=136 FAIL=0（134 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
+> **当前状态（2026-08-12）**: 生产化重构进行中；统一回归基线 PASS=137 FAIL=0（135 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；DDL CREATE undo 已覆盖主要辅助对象，变更前建立的物理快照可恢复显式外层事务中的 DROP/REPLACE，并在恢复后再执行行级 undo；已污染 DDL 快照的事务暂不允许继续执行另一条快照型 DDL、创建/回滚 SAVEPOINT，包含内存 undo 的事务暂不支持 PREPARE TRANSACTION；这不代表已达到 PostgreSQL 生产级等价。
 
 ## 功能特性
 
@@ -166,7 +166,7 @@
 | **Checkpoint 持久化** | ✅ PASS | 脏页刷盘 + checkpoint WAL/LSN 持久化，重启后数据完整恢复 |
 | **WAL 崩溃恢复** | ✅ PASS | 已提交记录正序重做，未提交事务的多次 page before-image 逆序回滚 |
 | **恢复完整性保护** | ✅ PASS | 损坏索引 WAL 镜像、非法索引路径和应用失败均 fail-closed，中止启动并输出 LSN 诊断 |
-| **锁管理器并发安全** | ✅ PASS | 双线程死锁检测只释放一个受害者；表锁重入/升级、行/页锁 token 归属与清理均经真实线程回归 |
+| **锁管理器并发安全** | ✅ PASS | 双线程死锁检测只释放一个受害者；表锁重入/升级、行/页锁 token 归属、跨 backend 共享和跨 database 隔离均经真实线程回归 |
 | **锁失败传播** | ✅ PASS | 表锁冲突时 StorageEngine DDL 返回 `LOCK_CONFLICT`，不会继续执行或留下等待边 |
 
 **并发隔离验证示例**（基于 MVCC 快照隔离 + 锁机制）：
@@ -655,7 +655,7 @@ Var Offset Array 每项 (4 bytes):
 | [implementation-plan.md](docs/implementation-plan.md) | 实施计划与历史 Wave 记录（当前状态以 Gap 表为准） |
 | [all-gaps-todo.md](docs/all-gaps-todo.md) | Gap 追踪与进度备注 |
 | [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=136 FAIL=0） |
+| [test-report.md](docs/test-report.md) | 自动测试报告（当前回归基线 PASS=137 FAIL=0） |
 | [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
 | [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
 

@@ -1280,7 +1280,10 @@ private:
                                  bool* scanFailed = nullptr);
 
 private:
-    mutable LockManager lockManager_;
+    // Lock ownership is process-wide so independently constructed embedded
+    // backends coordinate exactly like protocol workers. The resource
+    // namespace is set from the database operation before table/row/gap locks.
+    LockManager& lockManager_;
 
     // Advisory locks (session-level, non-persistent)
     mutable std::mutex advisoryMutex_;

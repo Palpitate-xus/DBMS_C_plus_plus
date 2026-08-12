@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态（2026-08-12）**：统一回归基线 PASS=136 FAIL=0（134 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-12）**：统一回归基线 PASS=137 FAIL=0（135 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -51,6 +51,7 @@
 | 2026-08-11 | 锁失败传播收敛：`LockManager` bool API 全部标记 `[[nodiscard]]`，`TableManage` 的 DDL/DML/索引/扫描/TOAST/JOIN/聚合/VACUUM 调用方显式返回 `LOCK_CONFLICT`、空结果或扫描失败；rename 按名称顺序获取双表锁，新增 `lock_failure_propagation_test` 验证真实表锁竞争 fail-closed。 |
 | 2026-08-11 | DDL CREATE undo 收敛：`DdlTransaction` 新增 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation 的撤销路径；collation 文件读写统一进入 `StorageEngine`，新增辅助对象回滚回归。显式外层事务跨语句 DDL、DROP/REPLACE 旧对象恢复和完整依赖 undo 仍待后续。 |
 | 2026-08-11 | `LockManager` 并发安全收敛：修复 row/page 等待路径的 map 元素生命周期风险，批量解锁只释放当前线程拥有的锁 token，表锁重入不重复获取底层 mutex，共享锁升级平衡物理 token，等待期间持续刷新 wait-for graph 并检测双线程死锁；新增真实线程回归 `lock_manager_concurrency_test`。页/索引 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 规则仍待后续。 |
+| 2026-08-12 | `StorageEngine` backend 统一引用进程级 `LockManager`；表、行、gap 资源按数据库 namespace 隔离，独立 backend 对同库资源可见且不同数据库同名表不冲突；新增 `cross_backend_lock_test`。跨进程锁注册表、完整 PostgreSQL 锁模式矩阵和索引 predicate lock 仍待后续。 |
 | 2026-08-11 | UPDATE/DELETE 事务 undo 补强：普通回滚与 SAVEPOINT 回滚现在恢复复合/Hash 索引和 TOAST；UPDATE 只清理新版本独占的线外块，显式事务 DELETE 保留死 tuple，回滚清除 `xmax` 并写 heap WAL before/after image，提交后回收旧版本 TOAST。新增并发回归覆盖 UPDATE/DELETE、savepoint、重启和大字段。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | INSERT 事务原子性补强：主键、单列二级、复合、Hash 索引和 TOAST 均纳入普通回滚与 SAVEPOINT 回滚；多值索引按 `(key, RID)` 精确清理，SAVEPOINT 堆删除写入 WAL before/after image，Hash AM 传播写入失败，新增重启后空状态回归。B+Tree/Hash 已具备文件级 WAL 镜像，其他访问方法、跨访问方法原子提交和完整崩溃窗口仍待后续。 |
 | 2026-08-11 | 事务边界补齐已加载索引缓存刷盘：新增 B+Tree/Hash `flush()` 和 `flushDatabaseCaches()`，事务快照创建前、COMMIT WAL 发布前及引擎退出时统一刷 heap、B+Tree、TOAST index、Hash 缓存；B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像。原生 page-level WAL、跨对象原子提交和其他访问方法的崩溃恢复仍待后续。 |
@@ -258,7 +259,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=136 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=137 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 

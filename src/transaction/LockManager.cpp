@@ -4,6 +4,31 @@
 
 namespace dbms {
 
+LockManager& LockManager::global() {
+    static LockManager manager;
+    return manager;
+}
+
+LockManager::~LockManager() {
+    resourceNamespaces_.erase(this);
+}
+
+void LockManager::setResourceNamespace(const std::string& dbname) const {
+    resourceNamespaces_[this] = dbname;
+}
+
+std::string LockManager::resourceKey(const std::string& resource) const {
+    auto it = resourceNamespaces_.find(this);
+    const std::string resourceNamespace =
+        it == resourceNamespaces_.end() ? std::string{} : it->second;
+    if (resourceNamespace.empty()) return resource;
+    return resourceNamespace + '\x1f' + resource;
+}
+
+std::string LockManager::rowResourceKey(const std::string& table, int64_t rid) const {
+    return resourceKey(table + ":" + std::to_string(rid));
+}
+
 // ========================================================================
 // Wait-for graph helpers
 // ========================================================================
@@ -231,7 +256,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
         bool cycle = false;
         {
             std::lock_guard<std::mutex> guard(globalMutex_);
-            auto& state = locks_[table];
+            auto& state = locks_[resourceKey(table)];
 
             auto selfMode = state.holderModes.find(self);
             if (selfMode != state.holderModes.end()) {
@@ -297,7 +322,7 @@ void LockManager::unlock(const std::string& table) {
     std::thread::id self = std::this_thread::get_id();
     std::lock_guard<std::mutex> guard(globalMutex_);
     removeWaitEdges(self);
-    auto it = locks_.find(table);
+    auto it = locks_.find(resourceKey(table));
     if (it == locks_.end()) return;
     auto& state = it->second;
     auto countIt = state.holderCounts.find(self);
@@ -450,13 +475,9 @@ std::vector<std::string> LockManager::lockedTables() const {
 // Row-level locking
 // ========================================================================
 
-static std::string makeRowKey(const std::string& table, int64_t rid) {
-    return table + ":" + std::to_string(rid);
-}
-
 bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
-    std::string key = makeRowKey(table, rid);
+    std::string key = rowResourceKey(table, rid);
     LockState* state = nullptr;
     {
         std::lock_guard<std::mutex> guard(rowMutex_);
@@ -495,7 +516,7 @@ bool LockManager::rowLockShared(const std::string& table, int64_t rid) {
 
 bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
-    std::string key = makeRowKey(table, rid);
+    std::string key = rowResourceKey(table, rid);
     LockState* state = nullptr;
     {
         std::lock_guard<std::mutex> guard(rowMutex_);
@@ -558,7 +579,7 @@ bool LockManager::rowLockExclusive(const std::string& table, int64_t rid) {
 
 bool LockManager::rowLockSharedNoWait(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
-    std::string key = makeRowKey(table, rid);
+    std::string key = rowResourceKey(table, rid);
     std::lock_guard<std::mutex> guard(rowMutex_);
     auto& state = rowLocks_[key];
     if (std::find(state.holders.begin(), state.holders.end(), self) != state.holders.end()) {
@@ -575,7 +596,7 @@ bool LockManager::rowLockSharedNoWait(const std::string& table, int64_t rid) {
 
 bool LockManager::rowLockExclusiveNoWait(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
-    std::string key = makeRowKey(table, rid);
+    std::string key = rowResourceKey(table, rid);
     std::lock_guard<std::mutex> guard(rowMutex_);
     auto& state = rowLocks_[key];
     if (state.exclusive && state.holders.size() == 1 && state.holders[0] == self) {
@@ -602,7 +623,7 @@ bool LockManager::rowLockExclusiveNoWait(const std::string& table, int64_t rid) 
 
 void LockManager::rowUnlock(const std::string& table, int64_t rid) {
     std::thread::id self = std::this_thread::get_id();
-    std::string key = makeRowKey(table, rid);
+    std::string key = rowResourceKey(table, rid);
     std::lock_guard<std::mutex> guard(rowMutex_);
     removeWaitEdges(self);
     auto it = rowLocks_.find(key);
@@ -629,7 +650,7 @@ void LockManager::rowUnlockAll(const std::string& table) {
     std::thread::id self = std::this_thread::get_id();
     std::lock_guard<std::mutex> guard(rowMutex_);
     removeWaitEdges(self);
-    std::string prefix = table + ":";
+    std::string prefix = resourceKey(table + ":");
     for (auto it = rowLocks_.begin(); it != rowLocks_.end(); ) {
         if (it->first.find(prefix) != 0) { ++it; continue; }
         auto& state = it->second;
@@ -654,7 +675,7 @@ void LockManager::rowUnlockAll(const std::string& table) {
 
 std::vector<int64_t> LockManager::lockedRows(const std::string& table) const {
     std::vector<int64_t> result;
-    std::string prefix = table + ":";
+    std::string prefix = resourceKey(table + ":");
     std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(rowMutex_));
     for (const auto& kv : rowLocks_) {
         if (kv.first.find(prefix) != 0) continue;
@@ -677,13 +698,13 @@ bool LockManager::lockGap(const std::string& table, const std::string& leftKey, 
     std::thread::id self = std::this_thread::get_id();
     std::lock_guard<std::mutex> guard(gapMutex_);
     // Simplified: always succeed (no deadlock detection for gap locks)
-    gapLocks_[table].push_back({leftKey, rightKey, self});
+    gapLocks_[resourceKey(table)].push_back({leftKey, rightKey, self});
     return true;
 }
 
 bool LockManager::isGapLocked(const std::string& table, const std::string& key) const {
     std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(gapMutex_));
-    auto it = gapLocks_.find(table);
+    auto it = gapLocks_.find(resourceKey(table));
     if (it == gapLocks_.end()) return false;
     std::thread::id self = std::this_thread::get_id();
     for (const auto& gl : it->second) {
@@ -696,7 +717,7 @@ bool LockManager::isGapLocked(const std::string& table, const std::string& key) 
 void LockManager::unlockGaps(const std::string& table) {
     std::thread::id self = std::this_thread::get_id();
     std::lock_guard<std::mutex> guard(gapMutex_);
-    auto it = gapLocks_.find(table);
+    auto it = gapLocks_.find(resourceKey(table));
     if (it == gapLocks_.end()) return;
     auto& vec = it->second;
     vec.erase(std::remove_if(vec.begin(), vec.end(),

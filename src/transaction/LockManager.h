@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace dbms {
@@ -17,6 +18,16 @@ namespace dbms {
 class LockManager {
 public:
     enum class LockMode { Shared, Exclusive, IntentShared, IntentExclusive, Metadata };
+
+    ~LockManager();
+
+    // StorageEngine backends in one process coordinate through one registry.
+    // Standalone instances remain available for isolated low-level users.
+    static LockManager& global();
+
+    // Table, row and gap resources are database-scoped. An empty namespace
+    // preserves the low-level API's historical unqualified resource behavior.
+    void setResourceNamespace(const std::string& dbname) const;
 
     // Acquire shared lock. Returns true on success, false if deadlock detected.
     [[nodiscard]] bool lockShared(const std::string& table);
@@ -152,8 +163,14 @@ private:
     int lockTimeoutMs_ = 0;
     int deadlockTimeoutMs_ = 0;
 
+    inline static thread_local std::unordered_map<const LockManager*, std::string>
+        resourceNamespaces_;
+
     // Internal acquire with mode
     bool acquireLock(const std::string& table, LockMode mode);
+
+    std::string resourceKey(const std::string& resource) const;
+    std::string rowResourceKey(const std::string& table, int64_t rid) const;
 
     // Record that 'waiter' is waiting for 'holder'
     void addWaitEdge(std::thread::id waiter, std::thread::id holder);

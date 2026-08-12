@@ -1097,7 +1097,8 @@ Column makeIntervalColumn(const std::string& name, bool isNull, bool isPK) {
 // ========================================================================
 // StorageEngine
 // ========================================================================
-StorageEngine::StorageEngine() {
+StorageEngine::StorageEngine()
+    : lockManager_(LockManager::global()) {
     if (!recoverAllDatabases()) {
         throw std::runtime_error(
             "WAL crash recovery failed; startup aborted to protect data");
@@ -7632,6 +7633,7 @@ std::vector<std::string> StorageEngine::getDatabaseNames() const {
 
 bool StorageEngine::tableExists(const std::string& dbname,
                                  const std::string& tablename) const {
+    lockManager_.setResourceNamespace(dbname);
     return std::filesystem::exists(schemaPath(dbname, tablename));
 }
 
@@ -20399,6 +20401,7 @@ bool StorageEngine::createTransactionBackup() {
 
 DBStatus StorageEngine::commitTransaction() {
     if (!transactionContext().inTransaction) return DBStatus::OK;
+    lockManager_.setResourceNamespace(transactionContext().txnDB);
 
     // SSI conflict detection for Serializable isolation
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
@@ -20637,6 +20640,7 @@ DBStatus StorageEngine::commitTransaction() {
 
 DBStatus StorageEngine::rollbackTransaction() {
     if (!transactionContext().inTransaction) return DBStatus::OK;
+    lockManager_.setResourceNamespace(transactionContext().txnDB);
 
     const std::string rollbackDb = transactionContext().txnDB;
     const bool preserveBackup = transactionContext().preserveBackupOnRollback;
