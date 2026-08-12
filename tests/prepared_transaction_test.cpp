@@ -1,6 +1,7 @@
 #include "commands/TableManage.h"
 #include "test_utils.h"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <filesystem>
@@ -56,11 +57,45 @@ void test_cross_backend_prepare_completion() {
     std::cout << "[PREPARED-TXN] cross-backend commit/rollback and lock ownership OK\n";
 }
 
+void test_prepared_survives_engine_restart() {
+    const std::string db = testDbPath("prepared_restart");
+    cleanup(db);
+
+    {
+        dbms::StorageEngine source;
+        assert(source.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+        dbms::TableSchema table;
+        table.tablename = "restart_rows";
+        table.append(dbms::makeIntColumn("id", false, 2, true));
+        assert(source.createTable(db, table) == dbms::DBStatus::OK);
+        assert(source.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(source.insert(db, "restart_rows", {{"id", "7"}}) == dbms::DBStatus::OK);
+        assert(source.prepareTransaction("prepared_restart_commit") == dbms::DBStatus::OK);
+    }
+
+    {
+        dbms::StorageEngine restarted;
+        const auto prepared = restarted.listPreparedTransactions();
+        assert(std::find(prepared.begin(), prepared.end(),
+                         "prepared_restart_commit") != prepared.end());
+        // The prepared row is still in-progress after restart. The explicit
+        // second phase must be required before it becomes visible.
+        assert(restarted.query(db, "restart_rows", {}, {"id"}).empty());
+        assert(restarted.query(db, "restart_rows", {"=id 7"}, {"id"}).empty());
+        assert(restarted.commitPrepared("prepared_restart_commit") == dbms::DBStatus::OK);
+        assert(restarted.query(db, "restart_rows", {}, {"id"}).size() == 1);
+    }
+
+    cleanup(db);
+    std::cout << "[PREPARED-TXN] restart preserves in-doubt transaction OK\n";
+}
+
 } // namespace
 
 int main() {
     cleanupAllTestData();
     test_cross_backend_prepare_completion();
+    test_prepared_survives_engine_restart();
     finalCleanupTestData();
     return 0;
 }

@@ -280,10 +280,14 @@ static std::string toLowerUtf8(const std::string& s) {
 bool StorageEngine::ReadView::isVisible(uint64_t rowTxnId) const {
     if (rowTxnId == 0) return true;              // non-transactional rows always visible
     if (rowTxnId == creatorTxnId) return true;   // inserted by current transaction
+    // Prepared transactions are retained in the active xid set across a
+    // process restart. Check that set before age-based snapshot shortcuts:
+    // a prepared xid may be numerically older than this snapshot's xmin but
+    // must remain invisible until COMMIT PREPARED.
+    if (activeTxnIds.count(rowTxnId)) return false;
+    if (subTxnIds.count(rowTxnId)) return false;
     if (rowTxnId < upLimitId) return true;       // all older xids committed
     if (rowTxnId >= lowLimitId) return false;    // all newer xids not started
-    if (activeTxnIds.count(rowTxnId)) return false; // still in progress
-    if (subTxnIds.count(rowTxnId)) return false; // subtransaction in progress
 
     // For xids in [upLimitId, lowLimitId) that are no longer active,
     // consult CLOG to distinguish committed vs aborted.
@@ -325,13 +329,13 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
         xminVisible = false;
     } else if (xmin == creatorTxnId) {
         xminVisible = true;
+    } else if (activeTxnIds.count(xmin)) {
+        xminVisible = false; // transaction is still in progress
     } else if (subTxnIds.count(xmin)) {
         xminVisible = false; // subtransaction in progress
     } else if (xmin < upLimitId) {
         xminVisible = true;
     } else if (xmin >= lowLimitId) {
-        xminVisible = false;
-    } else if (activeTxnIds.count(xmin)) {
         xminVisible = false;
     } else if (commitLog) {
         auto s = commitLog->getStatus(static_cast<TxnId>(xmin));
@@ -349,8 +353,8 @@ bool StorageEngine::ReadView::isVisible(const char* rowBuffer, size_t len, uint3
     bool xmaxVisible = false; // true means row is still visible (delete not committed)
     if (xmax == creatorTxnId) {
         xmaxVisible = false; // current tx deleted it
-    } else if (subTxnIds.count(xmax)) {
-        xmaxVisible = true; // subtransaction in progress, delete not committed
+    } else if (activeTxnIds.count(xmax) || subTxnIds.count(xmax)) {
+        xmaxVisible = true; // prepared/in-progress delete is not committed
     } else if (xmaxComm) {
         xmaxVisible = false;
     } else if (xmax < upLimitId) {
@@ -4134,9 +4138,10 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
     return true;
 }
 
-bool StorageEngine::readVisibleRowByRid(PageAllocator* pa, int64_t rid,
-                                         std::string& rowBuffer,
-                                         const TableSchema& tbl) const {
+bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator* pa,
+                                         int64_t rid, std::string& rowBuffer,
+                                         const TableSchema& tbl,
+                                         const ReadView* readView) const {
     if (!pa) return false;
     uint32_t pageId = 0;
     uint16_t slotId = 0;
@@ -4148,9 +4153,23 @@ bool StorageEngine::readVisibleRowByRid(PageAllocator* pa, int64_t rid,
     size_t len = 0;
     const bool ok = page.read(slotId, data, len);
     bool visible = ok;
-    if (visible && transactionContext().inTransaction) {
-        visible = transactionContext().readView.isVisible(
-            data, len, tbl.formatVersion);
+    ReadView autocommitView;
+    const ReadView* rv = readView;
+    if (!rv && transactionContext().inTransaction) {
+        rv = &transactionContext().readView;
+    } else if (!rv) {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        autocommitView.creatorTxnId = 0;
+        autocommitView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        autocommitView.upLimitId = activeTransactions_.empty()
+            ? autocommitView.lowLimitId : *activeTransactions_.begin();
+        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.subTxnIds.clear();
+        autocommitView.commitLog = getCommitLog(dbname);
+        rv = &autocommitView;
+    }
+    if (visible && rv) {
+        visible = rv->isVisible(data, len, tbl.formatVersion);
     }
     if (visible) {
         rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
@@ -15591,6 +15610,22 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
+    ReadView autocommitView;
+    const ReadView* queryView = nullptr;
+    if (transactionContext().inTransaction) {
+        queryView = &transactionContext().readView;
+    } else {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        autocommitView.creatorTxnId = 0;
+        autocommitView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
+        autocommitView.upLimitId = activeTransactions_.empty()
+            ? autocommitView.lowLimitId : *activeTransactions_.begin();
+        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.subTxnIds.clear();
+        autocommitView.commitLog = getCommitLog(dbname);
+        queryView = &autocommitView;
+    }
+
     // RLS policies are expression ASTs, not legacy index-condition strings.
     // Keep user predicates separate and apply policy visibility through the
     // relation-aware scan below; converting a policy such as
@@ -15636,7 +15671,7 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
         auto ids = filterRows(dbname, tablename, conds, &usedIndex, &scanFailed);
         for (int64_t rid : ids) {
             std::string row;
-            if (readRowByRid(pa, rid, row, tbl)) {
+            if (readVisibleRowByRid(dbname, pa, rid, row, tbl, queryView)) {
                 matchRows.emplace_back(rid, std::move(row));
             }
         }
@@ -19218,6 +19253,8 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
 // WAL crash recovery (page-image redo)
 // ========================================================================
 
+static bool removePreparedFileDurably(const std::filesystem::path& target);
+
 bool StorageEngine::recoverAllDatabases() {
     if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) {
         return true;
@@ -19229,8 +19266,12 @@ bool StorageEngine::recoverAllDatabases() {
     // while in-progress/aborted snapshots restore the pre-DDL database.
     // DDL snapshots hold the database-wide exclusive transaction lock while
     // alive, so restoring one cannot erase a concurrent committed transaction.
-    std::map<std::string, std::set<uint64_t>> committedXids;
-    std::set<std::pair<std::string, uint64_t>> preparedXids;
+    std::map<std::string, std::set<uint64_t>> committedXidsByDb;
+    std::map<std::string, std::set<uint64_t>> abortedXidsByDb;
+    std::map<std::string, std::set<uint64_t>> preparedWalXidsByDb;
+    std::map<std::string, std::map<uint64_t, uint8_t>> xactWalStateByDb;
+    std::set<std::pair<std::string, uint64_t>> inDoubtPreparedXids;
+    std::map<std::pair<std::string, uint64_t>, std::filesystem::path> preparedFiles;
     auto isDatabaseDirectory = [this](const std::string& name) {
         if (name.empty() || name[0] == '.' ||
             name.find(".txn_backup") != std::string::npos ||
@@ -19259,16 +19300,58 @@ bool StorageEngine::recoverAllDatabases() {
             auto recOpt = wal->ReadRecord(lsn);
             if (!recOpt || recOpt->header.xl_tot_len == 0) break;
             const XLogRecord& rec = *recOpt;
-            if (rec.rmid() == RM_XACT_ID && rec.info() == XLOG_XACT_COMMIT &&
-                rec.data.size() >= sizeof(uint64_t)) {
+            if (rec.rmid() == RM_XACT_ID &&
+                (rec.info() == XLOG_XACT_PREPARE ||
+                 rec.info() == XLOG_XACT_COMMIT ||
+                 rec.info() == XLOG_XACT_ABORT)) {
+                if (rec.data.size() < sizeof(uint64_t)) {
+                    std::cerr << "[recovery] malformed transaction WAL record in "
+                              << dbname << std::endl;
+                    return false;
+                }
                 uint64_t xid = 0;
                 std::memcpy(&xid, rec.data.data(), sizeof(xid));
-                committedXids[dbname].insert(xid);
-            } else if (rec.rmid() == RM_XACT_ID && rec.info() == XLOG_XACT_ABORT &&
-                       rec.data.size() >= sizeof(uint64_t)) {
-                uint64_t xid = 0;
-                std::memcpy(&xid, rec.data.data(), sizeof(xid));
-                committedXids[dbname].erase(xid);
+                if (xid == 0) {
+                    std::cerr << "[recovery] transaction WAL record has xid 0 in "
+                              << dbname << std::endl;
+                    return false;
+                }
+                auto& walState = xactWalStateByDb[dbname][xid];
+                if (rec.info() == XLOG_XACT_PREPARE) {
+                    if (walState != 0) {
+                        std::cerr << "[recovery] duplicate or out-of-order PREPARE WAL for "
+                                  << dbname << ":" << xid << std::endl;
+                        return false;
+                    }
+                    walState = 0x01;
+                    preparedWalXidsByDb[dbname].insert(xid);
+                } else if (rec.info() == XLOG_XACT_COMMIT) {
+                    if ((walState & 0x04) != 0 || (walState & 0x02) != 0) {
+                        std::cerr << "[recovery] contradictory COMMIT WAL for "
+                              << dbname << ":" << xid << std::endl;
+                        return false;
+                    }
+                    walState |= 0x02;
+                    committedXidsByDb[dbname].insert(xid);
+                    abortedXidsByDb[dbname].erase(xid);
+                    preparedWalXidsByDb[dbname].erase(xid);
+                } else {
+                    // A normal transaction whose CLOG publication failed
+                    // emits COMMIT WAL first and ABORT WAL after undo. That
+                    // terminal ABORT is intentional. A prepared transaction
+                    // is different: PREPARE -> COMMIT -> ABORT would make its
+                    // durable second phase ambiguous and must fail closed.
+                    if ((walState & 0x04) != 0 ||
+                        ((walState & 0x02) != 0 && (walState & 0x01) != 0)) {
+                        std::cerr << "[recovery] contradictory ABORT WAL for "
+                              << dbname << ":" << xid << std::endl;
+                        return false;
+                    }
+                    walState |= 0x04;
+                    abortedXidsByDb[dbname].insert(xid);
+                    committedXidsByDb[dbname].erase(xid);
+                    preparedWalXidsByDb[dbname].erase(xid);
+                }
             }
             lsn += rec.header.xl_tot_len;
         }
@@ -19277,19 +19360,115 @@ bool StorageEngine::recoverAllDatabases() {
     const std::filesystem::path preparedDirPath = std::filesystem::path("info") / ".prepared";
     if (std::filesystem::exists(preparedDirPath)) {
         for (const auto& entry : std::filesystem::directory_iterator(preparedDirPath)) {
-            if (!entry.is_regular_file()) continue;
+            if (!entry.is_regular_file()) {
+                std::cerr << "[recovery] non-file entry in prepared directory: "
+                          << entry.path() << std::endl;
+                return false;
+            }
+            const std::string filename = entry.path().filename().string();
+            // A crash between fsync(temp) and rename leaves an unreferenced
+            // temporary file. It cannot represent a prepared transaction:
+            // the target name is the durable transaction identifier.
+            if (filename.find(".tmp.") != std::string::npos) {
+                std::error_code ec;
+                if (!std::filesystem::remove(entry.path(), ec) || ec) return false;
+                continue;
+            }
+            if (filename.empty() || filename.size() > 200 ||
+                !std::all_of(filename.begin(), filename.end(), [](unsigned char c) {
+                    return std::isalnum(c) || c == '_' || c == '-' || c == '.' || c == ':';
+                })) {
+                std::cerr << "[recovery] invalid prepared transaction filename: "
+                          << entry.path() << std::endl;
+                return false;
+            }
             std::ifstream in(entry.path());
             std::string line;
             uint64_t xid = 0;
             std::string dbname;
+            bool hasXid = false;
+            bool hasDbname = false;
             while (std::getline(in, line)) {
                 if (line.rfind("TXN_ID ", 0) == 0) {
-                    try { xid = std::stoull(line.substr(7)); } catch (...) { xid = 0; }
+                    if (hasXid) return false;
+                    try {
+                        size_t consumed = 0;
+                        xid = std::stoull(line.substr(7), &consumed);
+                        if (consumed != line.size() - 7 || xid == 0) return false;
+                    } catch (...) { return false; }
+                    hasXid = true;
                 } else if (line.rfind("DBNAME ", 0) == 0) {
+                    if (hasDbname) return false;
                     dbname = line.substr(7);
+                    if (dbname.empty() || dbname.find('/') != std::string::npos ||
+                        dbname.find('\\') != std::string::npos ||
+                        dbname.find('\n') != std::string::npos ||
+                        dbname.find('\r') != std::string::npos) return false;
+                    hasDbname = true;
                 }
             }
-            if (xid != 0 && !dbname.empty()) preparedXids.emplace(dbname, xid);
+            if (!in.eof() || !hasXid || !hasDbname || !isDatabaseDirectory(dbname)) {
+                std::cerr << "[recovery] invalid prepared metadata: "
+                          << entry.path() << std::endl;
+                return false;
+            }
+            const auto key = std::make_pair(dbname, xid);
+            if (!preparedFiles.emplace(key, entry.path()).second) {
+                std::cerr << "[recovery] duplicate prepared transaction metadata for xid "
+                          << xid << std::endl;
+                return false;
+            }
+        }
+    }
+
+    // A durable PREPARE WAL record without a durable prepared description is
+    // not recoverable: the data must neither be silently committed nor
+    // silently undone. Conversely, every prepared description must have a
+    // matching PREPARE WAL record. Terminal COMMIT/ABORT records are allowed
+    // to coexist with metadata because cleanup may have been interrupted.
+    for (const auto& [dbname, xids] : preparedWalXidsByDb) {
+        for (uint64_t xid : xids) {
+            if (!preparedFiles.count({dbname, xid})) {
+                std::cerr << "[recovery] PREPARE WAL has no prepared metadata for "
+                          << dbname << ":" << xid << std::endl;
+                return false;
+            }
+        }
+    }
+    for (const auto& [key, path] : preparedFiles) {
+        (void)path;
+        const auto& dbname = key.first;
+        const uint64_t xid = key.second;
+        const bool hasCommit = committedXidsByDb[dbname].count(xid) != 0;
+        const bool hasAbort = abortedXidsByDb[dbname].count(xid) != 0;
+        const bool hasPrepare = preparedWalXidsByDb[dbname].count(xid) != 0;
+        if (hasCommit && hasAbort) {
+            std::cerr << "[recovery] prepared transaction has both COMMIT and ABORT WAL: "
+                      << dbname << ":" << xid << std::endl;
+            return false;
+        }
+        if (hasPrepare && (hasCommit || hasAbort)) {
+            std::cerr << "[recovery] prepared transaction has contradictory WAL state: "
+                      << dbname << ":" << xid << std::endl;
+            return false;
+        }
+        if (!hasCommit && !hasAbort) {
+            // The prepared metadata remains authoritative after the PREPARE
+            // WAL segment has been recycled by a checkpoint. Keep all page
+            // before-images untouched until an explicit completion command.
+            inDoubtPreparedXids.emplace(dbname, xid);
+        }
+    }
+
+    // Prepared transactions survive backend/process restart. Keep their xids
+    // in the same global active set used by ReadView construction so an old
+    // prepared xid cannot be classified as committed merely because it is
+    // below the next transaction boundary. Completion removes this entry.
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        for (const auto& [dbname, xid] : inDoubtPreparedXids) {
+            activeTransactions_.insert(xid);
+            activeTransactionDatabases_[xid] = dbname;
         }
     }
 
@@ -19310,10 +19489,10 @@ bool StorageEngine::recoverAllDatabases() {
                          [](unsigned char c) { return std::isdigit(c) != 0; })) continue;
         uint64_t xid = 0;
         try { xid = std::stoull(xidText); } catch (...) { continue; }
-        if (preparedXids.count({dbname, xid})) continue;
+        if (inDoubtPreparedXids.count({dbname, xid})) continue;
 
         const auto backup = entry.path();
-        if (committedXids[dbname].count(xid)) {
+        if (committedXidsByDb[dbname].count(xid)) {
             std::error_code ec;
             std::filesystem::remove_all(backup, ec);
             continue;
@@ -19342,7 +19521,7 @@ bool StorageEngine::recoverAllDatabases() {
         Lsn redoLsn = checkpointLsnOpt.value_or(wal->earliestAvailableLsn());
 
         // Pass 1: collect committed transaction IDs and update CLOG.
-        std::set<uint64_t> committedXids;
+        std::set<uint64_t> committedXids = committedXidsByDb[dbname];
         std::vector<Lsn> redoRecordLsns;
         {
             Lsn lsn = redoLsn;
@@ -19397,6 +19576,7 @@ bool StorageEngine::recoverAllDatabases() {
             bool shouldApply = false;
             if (undoUncommitted) {
                 shouldApply = recXid != 0 && !committedXids.count(recXid) &&
+                              !inDoubtPreparedXids.count({dbname, recXid}) &&
                               ((rmid == RM_HEAP_ID && info == XLOG_HEAP_PAGE_BEFORE) ||
                                (rmid == RM_INDEX_ID && info == XLOG_INDEX_FILE_BEFORE));
             } else if (rmid == RM_HEAP_ID) {
@@ -19560,6 +19740,22 @@ bool StorageEngine::recoverAllDatabases() {
             std::cerr << "[recovery] startup aborted for database " << dbname
                       << " because WAL replay was incomplete\n";
             return false;
+        }
+
+        // COMMIT/ROLLBACK PREPARED may have made its terminal WAL record
+        // durable immediately before a crash, but failed before deleting the
+        // prepared metadata. Once redo/undo is complete, remove only those
+        // terminal records. In-doubt records remain discoverable for an
+        // explicit administrative decision.
+        for (const auto& [key, preparedPath] : preparedFiles) {
+            if (key.first != dbname) continue;
+            if (!committedXidsByDb[dbname].count(key.second) &&
+                !abortedXidsByDb[dbname].count(key.second)) continue;
+            if (!removePreparedFileDurably(preparedPath)) {
+                std::cerr << "[recovery] failed to remove terminal prepared metadata: "
+                          << preparedPath << std::endl;
+                return false;
+            }
         }
 
         // Flush recovered pages.

@@ -1562,7 +1562,8 @@ bool loadConflictTargetRow(const std::string& currentDB,
             if (index->search(targetValue, rid)) {
                 std::string rowBuffer;
                 PageAllocator* allocator = g_engine.getPageAllocator(currentDB, tableName);
-                if (allocator && g_engine.readVisibleRowByRid(allocator, rid, rowBuffer, table)) {
+                if (allocator && g_engine.readVisibleRowByRid(
+                        currentDB, allocator, rid, rowBuffer, table)) {
                     return captureRow(rowBuffer);
                 }
             }
