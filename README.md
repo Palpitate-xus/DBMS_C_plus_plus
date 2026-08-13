@@ -547,7 +547,6 @@ show deadlocks;
 ├── logs.h                   # 操作日志记录
 ├── permissions.h            # 用户认证与权限查询
 ├── sha256.h                 # SHA-256 哈希实现
-├── set.h                    # 集合数据结构
 ├── info/pg_catalog/pg_authid.cat # 角色与 SCRAM 凭据 catalog
 ├── dbms.log                 # 运行日志
 ├── slow_query.log           # 慢查询日志

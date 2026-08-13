@@ -63,6 +63,7 @@
 | 2026-08-13 | SqlStats 持久化收敛：新增共享 `StatsPersistence` 锁/原子发布基础设施，按数据库写入版本化 `.sql_stats` 快照，StorageEngine 在启动、checkpoint、shutdown 和数据库生命周期边界加载/发布；跨 backend 增量合并、严格数值/长度/尾随数据校验和 `sql_stats_test` 重载/损坏回归已接入。 |
 | 2026-08-13 | SqlStats 内存边界收敛：`pg_stat_statements.max` 默认 5000，支持 `SET [GLOBAL]` 调整；进程记录、快照加载和多 backend 持久化合并都执行调用次数/耗时/key 的确定性淘汰，新增上限回归。 |
 | 2026-08-13 | 配置架构清理：确认 `src/common/GUC.{h,cpp}` 没有任何生产/测试调用方，仅保留一套实际使用的 `Config` + `main.cpp` SET/SHOW/RESET 路径；删除死模块并从生产 manifest 移除，修正文档中的旧 GUC 注册表描述。 |
+| 2026-08-13 | 冗余代码清理：确认 `src/common/set.h` 是未被任何源码、测试或构建入口引用的旧红黑树样例，删除该无调用方文件并同步 README 目录说明。 |
 | 2026-08-13 | 执行器架构清理：删除无调用方的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为唯一 Volcano 生命周期契约；修正文档中已不存在的 `src/optimizer/` 路径。`IndexScanOp` 按 RID 直接回表并复用 page lock/MVCC，避免每个索引命中扫描全表；Volcano 专项与全量回归覆盖该边界。 |
 | 2026-08-13 | RLS/Volcano 安全边界修复：RLS 生效时禁用索引、bitmap、并行访问路径，所有结构化 SELECT 统一经 `forEachVisibleRow(..., "SELECT")` 评估 USING 策略；新增索引存在时阻止 RLS 绕过的专项回归。 |
 | 2026-08-13 | Volcano 访问方法收敛：删除未具备 visibility map/heap 可见性证明的伪 `IndexOnlyScanOp`；IndexScan 与 Bitmap AND/OR 统一使用 page lock、MVCC、SSI 保护的 RID heap fetch，并传播锁/I/O 失败。真正 index-only scan 仍待 visibility map。 |
