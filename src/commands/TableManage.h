@@ -937,6 +937,10 @@ public:
     // RLS current user (thread-local, for transparent policy application inside engine)
     static void setRLSUser(const std::string& user) { rlsCurrentUser_ = user; }
     static std::string getRLSUser() { return rlsCurrentUser_; }
+    // Whether the current session must apply row policies for this relation.
+    // Query planning uses this to prevent an access method from bypassing the
+    // relation-aware SELECT policy boundary.
+    bool rlsAppliesTo(const std::string& dbname, const std::string& tablename) const;
 
     // Partition pruning: given conditions, return partition names to scan
     // (empty = all partitions, only applicable for partitioned tables)

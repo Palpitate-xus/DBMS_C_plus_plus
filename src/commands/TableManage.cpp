@@ -4063,6 +4063,12 @@ bool StorageEngine::forEachVisibleRow(
     return true;
 }
 
+bool StorageEngine::rlsAppliesTo(const std::string& dbname,
+                                  const std::string& tablename) const {
+    return shouldEnforceRLS(getTableSchema(dbname, tablename),
+                             StorageEngine::getRLSUser());
+}
+
 bool StorageEngine::forEachRowPageRange(
     const std::string& dbname, const std::string& tablename,
     uint32_t firstPage, uint32_t endPage,

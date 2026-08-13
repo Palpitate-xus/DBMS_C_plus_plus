@@ -95,6 +95,42 @@ static void test_where_index_scan() {
     std::cout << "[VOLCANO-5.1] index scan OK (" << rows.size() << " rows)" << std::endl;
 }
 
+// -------- Test 2b: RLS is enforced before access-path selection --------
+static void test_rls_blocks_index_bypass() {
+    std::string db = testDbPath("volc_rls");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE t (id INT PRIMARY KEY, owner VARCHAR(20))", s));
+    assert(!ddl.executeSql("CREATE INDEX ON t(owner)", s));
+    insertRow(db, "t", {{"id", "1"}, {"owner", "testuser"}});
+    insertRow(db, "t", {{"id", "2"}, {"owner", "otheruser"}});
+    assert(!ddl.executeSql(
+        "CREATE POLICY owner_only ON t FOR SELECT USING (owner = current_user)", s));
+    assert(g_engine.enableRowLevelSecurity(db, "t", true) == dbms::DBStatus::OK);
+    dbms::StorageEngine::setRLSUser("testuser");
+
+    dbms::PlanContext ctx;
+    ctx.dbname = db;
+    ctx.tablename = "t";
+    ctx.selectCols = {"id"};
+    ctx.conds = dbms::StorageEngine::parseConditions({"=owner testuser"});
+    auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    auto* project = dynamic_cast<dbms::ProjectOp*>(plan.get());
+    assert(project);
+    auto* filter = dynamic_cast<dbms::FilterOp*>(project->child());
+    assert(filter);
+    assert(dynamic_cast<dbms::TableScanOp*>(filter->child()) != nullptr);
+    const auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    assert(rows == std::vector<std::string>{"1 "});
+
+    dbms::StorageEngine::setRLSUser("");
+    cleanup(db);
+    std::cout << "[VOLCANO-5.1] RLS policy boundary blocks index bypass OK" << std::endl;
+}
+
 // -------- Test 3: ORDER BY + LIMIT --------
 static void test_order_by_limit() {
     std::string db = testDbPath("volc_ord");
@@ -714,6 +750,7 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_full_scan();
     test_where_index_scan();
+    test_rls_blocks_index_bypass();
     test_order_by_limit();
     test_distinct();
     test_projection();

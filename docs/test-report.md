@@ -76,6 +76,7 @@
 - StorageEngine GIN/BRIN 回归通过真实 DDL 构建后查询索引内容，验证 `forEachRow()` 页面失败契约、GIN 原子发布和 BRIN 二进制范围文件路径。
 - 索引/执行器错误传播回归通过：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建与 `REINDEX` 不再吞掉 heap 扫描失败，Volcano 顺序扫描和索引扫描遇到页面读取失败时 fail-closed；`volcano_select_phase51_test` 通过。
 - 执行器架构清理回归：删除未使用的 `IExpr`/`PlanNode`/`IExecutionPlanner` 接口后，Volcano 算子仍统一实现 `IOperator`；`IndexScanOp` 改用带 page shared lock 和 MVCC 检查的直接 RID 回表，`volcano_select_phase51_test` 的索引、bitmap 和组合算子路径全部通过。
+- RLS 访问路径回归：带 `owner` 索引的启用 RLS 表，Volcano 计划强制选择策略感知 `TableScanOp`，只返回当前用户可见行；索引绕过测试通过。
 - 统计/查询/DML 错误传播回归通过：`ANALYZE` 失败不发布半成品统计文件，过滤器、聚合、JOIN、FK/EXCLUDE 检查、ON CONFLICT 目标扫描、表重写和 TOAST/page 写入路径不再把页面 I/O 失败当成空结果或成功；Volcano 并行 page-range scan 会向算子返回失败。
 - 新增 schema 格式完整性回归：截断 schema 与错误 magic 均 fail-closed，不会返回可写的部分 schema。
 - Docker 镜像构建：`docker build -t dbms-cpp:verification .` ✅（OpenSSL 真实 TLS）；Compose 配置检查 ✅。

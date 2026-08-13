@@ -59,6 +59,7 @@
 | 2026-08-13 | SSI 索引谓词收敛：单列主键/二级 B+Tree 的 `=、<、<=、>、>=` 谓词登记事务级逻辑 SIREAD，INSERT/UPDATE/DELETE 登记对应索引键，COMMIT 按 B+Tree 固定宽度顺序检测谓词/写键重叠并纳入 dangerous-structure；`phase5_remaining_test` 通过。物理索引范围 predicate lock、复合/表达式/部分索引、其他访问方法、完整 SSI 图和安全快照仍待后续。 |
 | 2026-08-13 | B+Tree 键边界收敛：插入、查找、多值查找、删除和范围扫描公共 API 统一按当前 20 字节固定键规范化；长键截断、重开索引和范围端点回归由 `gin_brin_index_test` 验证。旧索引文件按当前格式重建，不保留历史索引兼容。 |
 | 2026-08-13 | 执行器架构清理：删除无调用方的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为唯一 Volcano 生命周期契约；修正文档中已不存在的 `src/optimizer/` 路径。`IndexScanOp` 按 RID 直接回表并复用 page lock/MVCC，避免每个索引命中扫描全表；Volcano 专项与全量回归覆盖该边界。 |
+| 2026-08-13 | RLS/Volcano 安全边界修复：RLS 生效时禁用索引、bitmap、并行访问路径，所有结构化 SELECT 统一经 `forEachVisibleRow(..., "SELECT")` 评估 USING 策略；新增索引存在时阻止 RLS 绕过的专项回归。 |
 | 2026-08-11 | 锁失败传播收敛：`LockManager` bool API 全部标记 `[[nodiscard]]`，`TableManage` 的 DDL/DML/索引/扫描/TOAST/JOIN/聚合/VACUUM 调用方显式返回 `LOCK_CONFLICT`、空结果或扫描失败；rename 按名称顺序获取双表锁，新增 `lock_failure_propagation_test` 验证真实表锁竞争 fail-closed。 |
 | 2026-08-11 | DDL CREATE undo 收敛：`DdlTransaction` 新增 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation 的撤销路径；collation 文件读写统一进入 `StorageEngine`，新增辅助对象回滚回归。显式外层事务跨语句 DDL、DROP/REPLACE 旧对象恢复和完整依赖 undo 仍待后续。 |
 | 2026-08-11 | `LockManager` 并发安全收敛：修复 row/page 等待路径的 map 元素生命周期风险，批量解锁只释放当前线程拥有的锁 token，表锁重入不重复获取底层 mutex，共享锁升级平衡物理 token，等待期间持续刷新 wait-for graph 并检测双线程死锁；新增真实线程回归 `lock_manager_concurrency_test`。页/索引 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 规则仍待后续。 |

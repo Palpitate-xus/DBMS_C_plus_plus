@@ -85,12 +85,16 @@ bool TableScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
     lastRid_ = 0;
-    if (!engine_->forEachRow(dbname_, tablename_,
-        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
-            std::string row(data, len);
-            row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
-            rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
-        })) {
+    const auto appendRow = [&](uint32_t pageId, uint16_t slotId,
+                               const char* data, size_t len) {
+        std::string row(data, len);
+        row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+        rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
+    };
+    const bool scanOk = engine_->rlsAppliesTo(dbname_, tablename_)
+        ? engine_->forEachVisibleRow(dbname_, tablename_, "SELECT", appendRow)
+        : engine_->forEachRow(dbname_, tablename_, appendRow);
+    if (!scanOk) {
         rows_.clear();
         return false;
     }
@@ -2146,13 +2150,17 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
 
     // Choose between IndexScan, IndexOnlyScan, and TableScan
     std::vector<StorageEngine::Condition> remainingConds = ctx.conds;
-    const bool useBitmap = canUseBitmapHeapScan(engine, ctx);
+    // RLS is a relation-level security boundary.  Do not let an index,
+    // bitmap, or parallel access path duplicate policy evaluation: use the
+    // policy-aware TableScanOp and keep user predicates above it.
+    const bool rlsApplies = engine->rlsAppliesTo(ctx.dbname, ctx.tablename);
+    const bool useBitmap = !rlsApplies && canUseBitmapHeapScan(engine, ctx);
     if (useBitmap) {
         // Keep all predicates for FilterOp's heap recheck.  The bitmap node
         // only narrows the candidate RID set; it is not a correctness filter.
         root = std::make_unique<BitmapHeapScanOp>(
             engine, ctx.dbname, ctx.tablename, ctx.conds);
-    } else if (!remainingConds.empty()) {
+    } else if (!rlsApplies && !remainingConds.empty()) {
         for (const auto& c : remainingConds) {
             if (c.op == "=") {
                 // Check if column has primary key index
@@ -2231,7 +2239,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
     }
 
     if (!root) {
-        if (parallelWorkers_ > 1) {
+        if (!rlsApplies && parallelWorkers_ > 1) {
             root = std::make_unique<ParallelTableScanOp>(
                 engine, ctx.dbname, ctx.tablename, parallelWorkers_);
         } else {
@@ -2377,7 +2385,8 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
 OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
     StorageEngine* engine, const PlanContext& ctx,
     const std::vector<std::vector<StorageEngine::Condition>>& branches) {
-    if (!canUseBitmapOrScan(engine, ctx, branches)) return nullptr;
+    if (engine->rlsAppliesTo(ctx.dbname, ctx.tablename) ||
+        !canUseBitmapOrScan(engine, ctx, branches)) return nullptr;
 
     OpPtr root = std::make_unique<BitmapOrHeapScanOp>(
         engine, ctx.dbname, ctx.tablename, branches);

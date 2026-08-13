@@ -61,6 +61,7 @@
 2026-08-13 增量审计：B+Tree 的插入、查找、多值查找、删除和范围扫描公共 API 统一调用固定 20 字节键规范化；长键截断、范围端点和重开索引语义通过 `gin_brin_index_test` 回归，避免内存键与磁盘键排序不一致。当前格式不兼容旧索引文件，需按现行 schema/index 格式重建。
 
 2026-08-13 增量审计：删除未被调用的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为实际 Volcano 算子唯一接口；`IndexScanOp` 改为在 page shared lock 与 MVCC 检查内按 RID 直接回表，避免每个索引命中重新扫描整张 heap。`volcano_select_phase51_test` 通过。
+2026-08-13 安全边界修复：Volcano SELECT 在 RLS 生效的关系上统一走 `forEachVisibleRow(..., "SELECT")`，禁用索引/bitmap/并行访问路径，避免计划选择绕过策略；新增 `volcano_select_phase51_test` 的索引 RLS 回归。
 
 2026-08-11 增量审计：`forEachRow()` 的失败契约已传递到 B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建、`REINDEX` 以及 Volcano 顺序/索引扫描；这些路径不再把 heap I/O 失败当成空结果，全文/GiST/SP-GiST/GIN/BRIN 也在完整扫描后原子发布。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 和增量维护仍待后续。
 
