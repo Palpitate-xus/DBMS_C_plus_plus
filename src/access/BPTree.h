@@ -51,6 +51,11 @@ public:
     // Get all values in key order
     std::vector<int64_t> allValues() const;
 
+    // Use the same fixed-width ordering as on-disk index keys.  SSI
+    // predicate coverage must compare values in index order, not in the
+    // variable-width order of the SQL literals.
+    static std::string normalizeKeyForComparison(const std::string& key);
+
     bool isOpen() const { return bp_ != nullptr && bp_->isOpen(); }
 
     const std::filesystem::path& filePath() const { return filePath_; }

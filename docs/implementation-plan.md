@@ -94,7 +94,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 |------|--------------|-----------|
 | DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、`VALIDATE/ALTER CONSTRAINT` 和 CREATE TRIGGER 已桥接；触发器 action runtime、完整延迟约束语义仍待补齐 |
 | 复杂查询执行 | 部分完成 | Volcano 基础算子和集合组合节点已验证；复杂集合 operand、子查询、窗口和 grouping producer 仍有 legacy 回退 |
-| Serializable / SSI | 部分完成 | 非空索引谓词/顺序扫描已记录页级 SIREAD，空范围保留关系级兜底；已验证非相交页并发与跨页危险结构，索引范围 predicate lock、安全快照和完整 rw-conflict 规则仍未完成 |
+| Serializable / SSI | 部分完成 | 非空索引谓词/顺序扫描已记录页级 SIREAD，单列主键/二级 B+Tree 比较谓词新增逻辑索引 SIREAD 与写键重叠检测，空范围保留关系级兜底；物理索引范围 predicate lock、安全快照和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
 | PostgreSQL wire protocol / SCRAM | 部分完成 | 已有 Startup/SSLRequest/Query/Parse-Bind-Execute/Describe/Close framing、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果、基础 portal maxRows 分页、catalog SCRAM 和基础 pg_hba 运行时决策；数组等复杂类型 I/O、完整 RowDescription 类型映射、结构化结果、holdable/scrollable portal 和 libpq 全语义仍未完成 |
 | 复制、逻辑解码、PITR、pg_basebackup | 部分完成 | 有 WAL/归档/ReplicationManager 框架，但缺完整端到端故障切换与恢复证明 |
@@ -754,7 +754,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 5.40 实现 `SET`/`SHOW`/`RESET` 完整 GUC 语义 | 1.1.52, 1.1.48 | handleSetCommand 已就绪 |
 | ✅ 5.41 实现 `SET ROLE` / `SET SESSION AUTHORIZATION` 完整语义 | 1.1.54, 1.1.55 | SET ROLE 已就绪 |
 | ✅ 5.42 实现 `SET TRANSACTION` deferrable 完整语义 | 1.1.56 | SET TRANSACTION 已就绪 |
-| 🔄 5.43 实现 SSI / predicate locks / SIREAD lock / rw-conflict | 9.4 | 已验证行级/页级 rw-conflict、空范围关系级 SIREAD、非相交页并发和跨页危险结构；索引范围 predicate lock、安全快照与完整 SSI 规则待实现 |
+| 🔄 5.43 实现 SSI / predicate locks / SIREAD lock / rw-conflict | 9.4 | 已验证行级/页级 rw-conflict、空范围关系级 SIREAD、单列 B+Tree 逻辑谓词重叠、非相交页并发和跨页危险结构；物理索引范围 predicate lock、安全快照与完整 SSI 规则待实现 |
 
 ---
 

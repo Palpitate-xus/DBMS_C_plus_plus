@@ -18,6 +18,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
+#include <tuple>
 
 #include "DateType.h"
 #include "table_schema.h"
@@ -1313,6 +1314,14 @@ private:
     void logTxnInsert(const std::string& tableName, int64_t rowIdx);
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
     void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
+    struct SsiIndexPredicate;
+    struct SsiIndexKey;
+    void recordSsiIndexPredicate(const std::string& dbname, const std::string& tablename,
+                                 const Condition& condition, const TableSchema& tbl);
+    void recordSsiIndexKeys(const std::string& dbname, const std::string& tablename,
+                            const std::string& rowData, const TableSchema& tbl);
+    static bool ssiIndexPredicateMatches(const SsiIndexPredicate& predicate,
+                                         const SsiIndexKey& key);
 
     // Savepoint support
 
@@ -1351,6 +1360,31 @@ private:
     // provenance safely.
     static std::map<uint64_t, std::set<std::string>> ssiReadPages_;
     static std::map<uint64_t, std::set<std::string>> ssiWritePages_;
+    struct SsiIndexPredicate {
+        std::string dbname;
+        std::string tablename;
+        std::string indexName;
+        std::string op;
+        std::string value;
+        bool operator<(const SsiIndexPredicate& other) const {
+            return std::tie(dbname, tablename, indexName, op, value) <
+                   std::tie(other.dbname, other.tablename, other.indexName,
+                            other.op, other.value);
+        }
+    };
+    struct SsiIndexKey {
+        std::string dbname;
+        std::string tablename;
+        std::string indexName;
+        std::string value;
+        bool operator<(const SsiIndexKey& other) const {
+            return std::tie(dbname, tablename, indexName, value) <
+                   std::tie(other.dbname, other.tablename, other.indexName,
+                            other.value);
+        }
+    };
+    static std::map<uint64_t, std::set<SsiIndexPredicate>> ssiReadIndexPredicates_;
+    static std::map<uint64_t, std::set<SsiIndexKey>> ssiWriteIndexKeys_;
     static std::map<uint64_t, std::set<uint64_t>> ssiOutEdges_; // T1 -> {T2} means T1 read something written by T2
     static std::map<uint64_t, std::set<uint64_t>> ssiInEdges_;  // T2 -> {T1} means T1 read something written by T2
 
@@ -1407,6 +1441,8 @@ private:
         std::set<std::string> txnWrittenRelations;
         std::set<std::string> txnReadPages;       // relation-qualified page SIREAD
         std::set<std::string> txnWrittenPages;
+        std::set<SsiIndexPredicate> txnReadIndexPredicates;
+        std::set<SsiIndexKey> txnWrittenIndexKeys;
         std::string lastvalDb;
         std::string lastvalSeq;
         int64_t lastvalValue = 0;

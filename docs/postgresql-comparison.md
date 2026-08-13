@@ -168,8 +168,8 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | **行级锁** | ✅ | ✅ | ✅（rowLockShared/Exclusive + NOWAIT；数据库 namespace 下跨进程 `flock` 协调） |
 | **页级锁** | ✅ | ⚠️ | ✅（进程内 token + 数据库 namespace 下跨进程 `flock` 协调） |
 | **Deadlock detection** | ✅ | ✅ | ✅ (wait-for graph + cycle detection + log) |
-| **Gap locks / predicate locks** | ✅ | ⚠️ | 有精确进程内 gap range、每表保守跨进程协调、heap page SIREAD 和空范围关系级兜底；缺真正索引范围 predicate lock |
-| **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 行级/页级 rw-conflict + 关系级空范围兜底；已验证非相交页并发和跨页危险结构，缺精确 phantom 推理与完整 SSI 规则 |
+| **Gap locks / predicate locks** | ✅ | ⚠️ | 有精确进程内 gap range、每表保守跨进程协调、heap page SIREAD、单列 B+Tree 逻辑谓词和空范围关系级兜底；缺真正物理索引范围 predicate lock |
+| **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 行级/页级 rw-conflict + 单列 B+Tree 逻辑谓词 + 关系级空范围兜底；已验证非相交页并发和跨页危险结构，复合/其他访问方法 phantom 推理与完整 SSI 规则仍缺 |
 | **两阶段提交 (2PC)** | ✅ | ⚠️ | 基础 `prepareTransaction` + `COMMIT/ROLLBACK PREPARED` 已覆盖 durable prepared 记录、PREPARE WAL、跨 backend 锁所有权和提交/回滚回归；包含内存 DDL undo 的事务会拒绝 PREPARE，PG 全局目录与崩溃后 in-doubt 语义仍缺 |
 | **并行查询** | ✅ | ⚠️ | 非分区 heap 已支持按 page range 并行扫描和确定性 Gather，page I/O 失败会传播到算子；事务内回退，parallel join/aggregate/GatherMerge/worker pool 仍缺 |
 | **JIT compilation (LLVM)** | ✅ | ❌ | 缺 |

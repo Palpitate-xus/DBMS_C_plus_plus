@@ -67,7 +67,7 @@
 - 新增 `recovery_integrity_test`：构造 CRC 正确但 payload 损坏或路径越界的索引 WAL 记录，验证恢复拒绝非法镜像、不会写出数据库目录外文件，并以异常中止启动；heap/index 应用失败均不再静默忽略。
 - Checkpoint 回归现在断言 checkpoint 真实成功；页刷盘、checkpoint WAL、checkpoint 文件 fsync 和 archive status 任一失败都会返回失败，不再伪报 `CHECKPOINT completed`。
 - Checkpoint 活动事务回归验证：活动事务期间不会推进数据库恢复起点；事务结束后 checkpoint 才刷已加载 heap/index 缓存并成功持久化 checkpoint WAL/LSN。
-- SSI 页粒度回归：`phase5_remaining_test` 验证非空索引谓词按 heap page 登记 SIREAD，非相交页事务可同时提交；跨页读写危险结构仍有一个事务返回 `SERIALIZATION_FAILURE`，空谓词关系级保护继续生效。
+- SSI 回归：`phase5_remaining_test` 验证非空索引谓词按 heap page 登记 SIREAD，单列主键/二级 B+Tree 比较谓词登记逻辑索引范围并与写键进行重叠检测，非相交页事务可同时提交；跨页读写危险结构仍有一个事务返回 `SERIALIZATION_FAILURE`，空谓词关系级保护继续生效。复合/表达式/部分索引、其他访问方法的物理 predicate lock 和完整 SSI 规则仍未完成。
 - BufferPool 回归覆盖一帧缓存的脏页淘汰/重载与 pinned 页保护，确认缓存不足时返回失败而不是强制淘汰活动页。
 - GIN/BRIN/B+Tree 回归继续通过，并覆盖 root split/search/range；B+Tree 的 header/node I/O 失败现在 fail-closed，避免底层页读取失败升级为空指针崩溃。
 - B+Tree 多值索引回归补充 `(key, RID)` 精确删除：删除 6000 条跨叶重复键中的单个 RID 后，其余相邻 RID 仍可检索，重复删除会正确失败；`BPTreeIndexAM` 与 DML/事务回滚路径统一使用精确删除。

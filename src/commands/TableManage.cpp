@@ -126,6 +126,10 @@ std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadRelations_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWriteRelations_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadPages_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWritePages_;
+std::map<uint64_t, std::set<StorageEngine::SsiIndexPredicate>>
+    StorageEngine::ssiReadIndexPredicates_;
+std::map<uint64_t, std::set<StorageEngine::SsiIndexKey>>
+    StorageEngine::ssiWriteIndexKeys_;
 std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiOutEdges_;
 std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiInEdges_;
 
@@ -1201,6 +1205,8 @@ StorageEngine::~StorageEngine() {
             ssiWriteRelations_.erase(xid);
             ssiReadPages_.erase(xid);
             ssiWritePages_.erase(xid);
+            ssiReadIndexPredicates_.erase(xid);
+            ssiWriteIndexKeys_.erase(xid);
             ssiOutEdges_.erase(xid);
             ssiInEdges_.erase(xid);
             for (auto& entry : ssiInEdges_) entry.second.erase(xid);
@@ -13312,6 +13318,13 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     };
     TableSchema tbl = getTableSchema(dbname, tablename);
 
+    // Record logical index predicates independently of the physical access
+    // path.  Range conditions may still use a heap scan today, but their
+    // serializable read dependency must cover matching future index keys.
+    for (const auto& condition : conds) {
+        recordSsiIndexPredicate(dbname, tablename, condition, tbl);
+    }
+
     // Helper: a column with a non-binary collation cannot use binary indexes
     // for equality/range lookup because the index keys are stored binary.
     auto columnNeedsCollation = [&](const std::string& colName) -> bool {
@@ -15134,6 +15147,14 @@ DBStatus StorageEngine::update(const std::string& dbname,
                 secIdx->removeMulti(newVal, rid);
                 secIdx->insertMulti(newVal, actualRid);
             }
+        }
+
+        // A changed indexed value is a write to both the old and new logical
+        // key.  The old key is recorded before the heap mutation by
+        // logTxnUpdate; record the new key after the index maintenance so SSI
+        // also detects a concurrent predicate that covers the new value.
+        if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+            recordSsiIndexKeys(dbname, tablename, strippedNewRow, tbl);
         }
 
         // Update composite indexes
@@ -20434,9 +20455,117 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
 // Transaction logging helpers
 // ========================================================================
 
+bool StorageEngine::ssiIndexPredicateMatches(const SsiIndexPredicate& predicate,
+                                             const SsiIndexKey& key) {
+    if (predicate.dbname != key.dbname || predicate.tablename != key.tablename ||
+        predicate.indexName != key.indexName) {
+        return false;
+    }
+    const std::string lhs = BPTree::normalizeKeyForComparison(key.value);
+    const std::string rhs = BPTree::normalizeKeyForComparison(predicate.value);
+    if (predicate.op == "=") return lhs == rhs;
+    if (predicate.op == ">") return lhs > rhs;
+    if (predicate.op == ">=") return lhs >= rhs;
+    if (predicate.op == "<") return lhs < rhs;
+    if (predicate.op == "<=") return lhs <= rhs;
+    return false;
+}
+
+void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
+                                            const std::string& tablename,
+                                            const Condition& condition,
+                                            const TableSchema& tbl) {
+    if (!transactionContext().inTransaction ||
+        transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE ||
+        (condition.op != "=" && condition.op != ">" && condition.op != ">=" &&
+         condition.op != "<" && condition.op != "<=")) {
+        return;
+    }
+
+    size_t columnIndex = tbl.len;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == condition.colName) {
+            columnIndex = i;
+            break;
+        }
+    }
+    if (columnIndex >= tbl.len ||
+        (!tbl.cols[columnIndex].collation.empty() &&
+         !collation::isBinary(tbl.cols[columnIndex].collation))) {
+        return;
+    }
+
+    std::vector<std::string> indexNames;
+    if (tbl.pkColIndices.size() == 1 && tbl.pkColIndices.front() == columnIndex) {
+        indexNames.push_back("pk:" + condition.colName);
+    }
+    if (getSecondaryIndex(dbname, tablename, condition.colName)) {
+        indexNames.push_back("idx:" + condition.colName);
+    }
+    if (indexNames.empty() || condition.value.empty()) return;
+
+    const SsiIndexPredicate predicateBase{
+        dbname, tablename, "", condition.op, condition.value};
+    std::lock_guard<std::mutex> lock(ssiMutex_);
+    for (const auto& indexName : indexNames) {
+        SsiIndexPredicate predicate = predicateBase;
+        predicate.indexName = indexName;
+        transactionContext().txnReadIndexPredicates.insert(predicate);
+        ssiReadIndexPredicates_[transactionContext().currentTxnId].insert(std::move(predicate));
+    }
+}
+
+void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& rowData,
+                                       const TableSchema& tbl) {
+    if (!transactionContext().inTransaction ||
+        transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, std::string>> keys;
+    if (tbl.pkColIndices.size() == 1) {
+        const size_t columnIndex = tbl.pkColIndices.front();
+        if (columnIndex < tbl.len) {
+            const std::string value = extractColumnValueStatic(rowData, tbl, columnIndex);
+            if (!value.empty()) {
+                keys.emplace_back("pk:" + tbl.cols[columnIndex].dataName, value);
+            }
+        }
+    }
+    for (const auto& columnName : getIndexedColumns(dbname, tablename)) {
+        BPTree* index = getSecondaryIndex(dbname, tablename, columnName);
+        if (!index) continue;
+        size_t columnIndex = tbl.len;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == columnName) {
+                columnIndex = i;
+                break;
+            }
+        }
+        if (columnIndex >= tbl.len) continue;
+        const std::string value = extractColumnValueStatic(rowData, tbl, columnIndex);
+        if (!value.empty()) keys.emplace_back("idx:" + columnName, value);
+    }
+
+    if (keys.empty()) return;
+    std::lock_guard<std::mutex> lock(ssiMutex_);
+    for (const auto& [indexName, value] : keys) {
+        SsiIndexKey key{dbname, tablename, indexName, value};
+        transactionContext().txnWrittenIndexKeys.insert(key);
+        ssiWriteIndexKeys_[transactionContext().currentTxnId].insert(std::move(key));
+    }
+}
+
 void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx) {
     transactionContext().txnLog.push_back({TxnLogEntry::Op::Insert, tableName, rowIdx, ""});
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
+        TableSchema tbl = getTableSchema(transactionContext().txnDB, tableName);
+        std::string row;
+        if (readRowByRid(getPageAllocator(transactionContext().txnDB, tableName), rowIdx, row, tbl)) {
+            recordSsiIndexKeys(transactionContext().txnDB, tableName, row, tbl);
+        }
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
         uint32_t pageId = 0;
@@ -20457,6 +20586,8 @@ void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
     transactionContext().txnLog.push_back({TxnLogEntry::Op::Update, tableName, rowIdx, oldRowData});
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
+        TableSchema tbl = getTableSchema(transactionContext().txnDB, tableName);
+        recordSsiIndexKeys(transactionContext().txnDB, tableName, oldRowData, tbl);
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
         uint32_t pageId = 0;
@@ -20477,6 +20608,8 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
                                   const std::string& oldRowData) {
     transactionContext().txnLog.push_back({TxnLogEntry::Op::Delete, tableName, rowIdx, oldRowData});
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
+        TableSchema tbl = getTableSchema(transactionContext().txnDB, tableName);
+        recordSsiIndexKeys(transactionContext().txnDB, tableName, oldRowData, tbl);
         std::string key = ssiRidKey(transactionContext().txnDB, tableName, rowIdx);
         std::string relation = ssiRelationKey(transactionContext().txnDB, tableName);
         uint32_t pageId = 0;
@@ -20657,6 +20790,8 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         ssiWriteRelations_[transactionContext().currentTxnId].clear();
         ssiReadPages_[transactionContext().currentTxnId].clear();
         ssiWritePages_[transactionContext().currentTxnId].clear();
+        ssiReadIndexPredicates_[transactionContext().currentTxnId].clear();
+        ssiWriteIndexKeys_[transactionContext().currentTxnId].clear();
     }
     transactionContext().txnReadRids.clear();
     transactionContext().txnWrittenRids.clear();
@@ -20664,6 +20799,8 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().txnWrittenRelations.clear();
     transactionContext().txnReadPages.clear();
     transactionContext().txnWrittenPages.clear();
+    transactionContext().txnReadIndexPredicates.clear();
+    transactionContext().txnWrittenIndexKeys.clear();
     if (transactionContext().txnIsolationLevel != IsolationLevel::READ_UNCOMMITTED) {
         std::lock_guard<std::mutex> lock(globalTxnMutex_);
         transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
@@ -20780,6 +20917,22 @@ DBStatus StorageEngine::commitTransaction() {
             if (hasOutgoing) break;
         }
 
+        for (const auto& [otherTxId, otherWriteKeys] : ssiWriteIndexKeys_) {
+            if (otherTxId == transactionContext().currentTxnId) continue;
+            for (const auto& predicate : transactionContext().txnReadIndexPredicates) {
+                for (const auto& key : otherWriteKeys) {
+                    if (ssiIndexPredicateMatches(predicate, key)) {
+                        hasOutgoing = true;
+                        ssiOutEdges_[transactionContext().currentTxnId].insert(otherTxId);
+                        ssiInEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                        break;
+                    }
+                }
+                if (hasOutgoing) break;
+            }
+            if (hasOutgoing) break;
+        }
+
         // Relation-level SIREAD coverage catches empty scans and predicates
         // whose result set did not contain a row. It is the conservative
         // fallback; non-empty scans use page coverage above.
@@ -20822,6 +20975,22 @@ DBStatus StorageEngine::commitTransaction() {
             if (hasIncoming) break;
         }
 
+        for (const auto& [otherTxId, otherReadPredicates] : ssiReadIndexPredicates_) {
+            if (otherTxId == transactionContext().currentTxnId) continue;
+            for (const auto& key : transactionContext().txnWrittenIndexKeys) {
+                for (const auto& predicate : otherReadPredicates) {
+                    if (ssiIndexPredicateMatches(predicate, key)) {
+                        hasIncoming = true;
+                        ssiInEdges_[transactionContext().currentTxnId].insert(otherTxId);
+                        ssiOutEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                        break;
+                    }
+                }
+                if (hasIncoming) break;
+            }
+            if (hasIncoming) break;
+        }
+
         for (const auto& [otherTxId, otherReadRelations] : ssiReadRelations_) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& relation : transactionContext().txnWrittenRelations) {
@@ -20844,6 +21013,8 @@ DBStatus StorageEngine::commitTransaction() {
             ssiWriteRelations_.erase(abortedId);
             ssiReadPages_.erase(abortedId);
             ssiWritePages_.erase(abortedId);
+            ssiReadIndexPredicates_.erase(abortedId);
+            ssiWriteIndexKeys_.erase(abortedId);
             ssiOutEdges_.erase(abortedId);
             for (auto& [k, v] : ssiInEdges_) v.erase(abortedId);
             ssiInEdges_.erase(abortedId);
@@ -20854,6 +21025,8 @@ DBStatus StorageEngine::commitTransaction() {
             transactionContext().txnWrittenRelations.clear();
             transactionContext().txnReadPages.clear();
             transactionContext().txnWrittenPages.clear();
+            transactionContext().txnReadIndexPredicates.clear();
+            transactionContext().txnWrittenIndexKeys.clear();
             // rollbackTransaction() performs its own SSI cleanup and must
             // acquire ssiMutex_.  Release the detection lock first to avoid
             // self-deadlocking on the serialization-failure path.
@@ -20872,6 +21045,8 @@ DBStatus StorageEngine::commitTransaction() {
         transactionContext().txnWrittenRelations.clear();
         transactionContext().txnReadPages.clear();
         transactionContext().txnWrittenPages.clear();
+        transactionContext().txnReadIndexPredicates.clear();
+        transactionContext().txnWrittenIndexKeys.clear();
     }
 
     // Run deferred CHECK constraints queued for this transaction before committing.
@@ -20953,6 +21128,8 @@ DBStatus StorageEngine::commitTransaction() {
         ssiWriteRelations_.clear();
         ssiReadPages_.clear();
         ssiWritePages_.clear();
+        ssiReadIndexPredicates_.clear();
+        ssiWriteIndexKeys_.clear();
         ssiOutEdges_.clear();
         ssiInEdges_.clear();
     }
@@ -21362,6 +21539,8 @@ DBStatus StorageEngine::rollbackTransaction() {
             ssiWriteRelations_.clear();
             ssiReadPages_.clear();
             ssiWritePages_.clear();
+            ssiReadIndexPredicates_.clear();
+            ssiWriteIndexKeys_.clear();
             ssiOutEdges_.clear();
             ssiInEdges_.clear();
         } else {
@@ -21371,6 +21550,8 @@ DBStatus StorageEngine::rollbackTransaction() {
             ssiWriteRelations_.erase(transactionContext().currentTxnId);
             ssiReadPages_.erase(transactionContext().currentTxnId);
             ssiWritePages_.erase(transactionContext().currentTxnId);
+            ssiReadIndexPredicates_.erase(transactionContext().currentTxnId);
+            ssiWriteIndexKeys_.erase(transactionContext().currentTxnId);
             ssiOutEdges_.erase(transactionContext().currentTxnId);
             for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
             ssiInEdges_.erase(transactionContext().currentTxnId);
@@ -21383,6 +21564,8 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().txnWrittenRelations.clear();
     transactionContext().txnReadPages.clear();
     transactionContext().txnWrittenPages.clear();
+    transactionContext().txnReadIndexPredicates.clear();
+    transactionContext().txnWrittenIndexKeys.clear();
 
     if (Session* session = currentSession();
         session && session->currentDB == transactionContext().txnDB) {
@@ -21772,6 +21955,8 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         ssiWriteRelations_.erase(transactionContext().currentTxnId);
         ssiReadPages_.erase(transactionContext().currentTxnId);
         ssiWritePages_.erase(transactionContext().currentTxnId);
+        ssiReadIndexPredicates_.erase(transactionContext().currentTxnId);
+        ssiWriteIndexKeys_.erase(transactionContext().currentTxnId);
         ssiOutEdges_.erase(transactionContext().currentTxnId);
         for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
         ssiInEdges_.erase(transactionContext().currentTxnId);
@@ -21783,6 +21968,8 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().txnWrittenRelations.clear();
     transactionContext().txnReadPages.clear();
     transactionContext().txnWrittenPages.clear();
+    transactionContext().txnReadIndexPredicates.clear();
+    transactionContext().txnWrittenIndexKeys.clear();
 
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;

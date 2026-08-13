@@ -21,6 +21,10 @@ std::string BPTree::normalizeKey(const std::string& s) {
     return k;
 }
 
+std::string BPTree::normalizeKeyForComparison(const std::string& key) {
+    return normalizeKey(key);
+}
+
 // ========================================================================
 // Node serialization: pack into BP_PAGE_SIZE bytes
 // ========================================================================
