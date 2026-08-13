@@ -35,6 +35,7 @@ struct Config {
     int maxParallelWorkersPerGather = 0; // 0 disables parallel heap scans
     bool autoExplainEnabled = false; // auto_explain: log query plan for slow queries
     double autoExplainThresholdMs = 100.0; // threshold for auto_explain
+    size_t sqlStatsMaxEntries = 5000; // bounded pg_stat_statements-style entries
 
     // Load from file; returns true on success.
     bool load(const std::string& filename);

@@ -1,5 +1,6 @@
 #include "process/SqlStats.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
@@ -31,6 +32,23 @@ int main() {
 
     auto all = dbms::getSqlStats();
     assert(all.size() == 2);
+
+    assert(dbms::setSqlStatsMaxEntries(2));
+    dbms::resetSqlStats();
+    dbms::recordSqlStat("SELECT * FROM t1", 1.0, "db1");
+    dbms::recordSqlStat("SELECT * FROM t2", 2.0, "db1");
+    dbms::recordSqlStat("SELECT * FROM t2", 2.0, "db1");
+    dbms::recordSqlStat("SELECT * FROM t3", 3.0, "db1");
+    auto bounded = dbms::getSqlStats("db1");
+    assert(bounded.size() == 2);
+    assert(std::find_if(bounded.begin(), bounded.end(), [](const auto& entry) {
+               return entry.sql == "SELECT * FROM t1";
+           }) == bounded.end());
+    assert(dbms::setSqlStatsMaxEntries(5000));
+
+    dbms::resetSqlStats();
+    dbms::recordSqlStat(first, 2.0, "db1");
+    dbms::recordSqlStat(second, 4.0, "db1");
 
     const std::filesystem::path persisted = "sql_stats_persist_test.bin";
     std::filesystem::remove(persisted);

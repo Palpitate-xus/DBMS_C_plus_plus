@@ -277,14 +277,15 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-1: pg_stat_statements
 - **类别**: 可观测性 / SQL 统计
-- **现状**: 已有线程安全的 SQL 统计模块，`SHOW STATEMENTS` 和 `pg_stat_statements` 风格虚拟表可查询调用次数、总/最小/最大/平均耗时；常量与空白会归一化，主程序和 PostgreSQL 协议入口共用同一实现。当前格式的 `.sql_stats` 已在 checkpoint/引擎关闭时以 sidecar flock、临时文件、fsync 和原子 rename 持久化，并在启动时严格校验加载；仍缺大小上限/淘汰策略、reset 权限和完整扩展/catalog 语义。
+- **现状**: 已有线程安全的 SQL 统计模块，`SHOW STATEMENTS` 和 `pg_stat_statements` 风格虚拟表可查询调用次数、总/最小/最大/平均耗时；常量与空白会归一化，主程序和 PostgreSQL 协议入口共用同一实现。当前格式的 `.sql_stats` 已在 checkpoint/引擎关闭时以 sidecar flock、临时文件、fsync 和原子 rename 持久化，并在启动时严格校验加载；`pg_stat_statements.max` 默认限制为 5000 条，超限按调用次数/耗时确定性淘汰；仍缺 reset 权限和完整扩展/catalog 语义。
 - **PG 参考**: `pg_stat_statements` extension
 - **影响**: 基础热点识别已可用，但重启后统计丢失，无法作为 PostgreSQL 完整监控扩展直接使用
 - **实现路径**:
   1. ✅ 实现线程安全 `SqlStats`：key=数据库+归一化 SQL，value=call_count/total/min/max/mean
   2. ✅ 在交互式和 PostgreSQL 协议 SQL 入口收集统计
   3. ✅ 提供 `SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表
-  4. 补充 `pg_stat_statements.max`/淘汰、reset 权限和 rows/blocks 等 PostgreSQL 字段
+  4. ✅ 增加 `pg_stat_statements.max` 上限与确定性淘汰
+  5. 补充 reset 权限和 rows/blocks 等 PostgreSQL 字段
 - **预估工作量**: 2-3 天
 - **相关文件**: `src/common/Config.cpp`, `src/main.cpp`
 

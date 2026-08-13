@@ -33,8 +33,14 @@ std::map<std::string, SqlStatEntry>& persistedSqlStatsMap() {
 
 constexpr std::string_view kSqlStatsMagic = "DBMS_SQL_STATS_V1";
 constexpr uint32_t kSqlStatsVersion = 1;
+constexpr size_t kDefaultSqlStatsMaxEntries = 5000;
 constexpr uint64_t kMaxSqlStatsEntries = 1'000'000;
 constexpr uint32_t kMaxSqlStatsString = 16 * 1024 * 1024;
+
+size_t& sqlStatsMaxEntries() {
+    static size_t value = kDefaultSqlStatsMaxEntries;
+    return value;
+}
 
 bool isIdentifierChar(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
@@ -225,6 +231,28 @@ SqlStatEntry mergeEntry(const SqlStatEntry& disk, const SqlStatEntry& current,
     return merged;
 }
 
+bool isLessUsed(const std::pair<const std::string, SqlStatEntry>& left,
+                const std::pair<const std::string, SqlStatEntry>& right) {
+    if (left.second.calls != right.second.calls) {
+        return left.second.calls < right.second.calls;
+    }
+    if (left.second.totalTimeMs != right.second.totalTimeMs) {
+        return left.second.totalTimeMs < right.second.totalTimeMs;
+    }
+    // Evict the lexicographically greater key to make ties reproducible.
+    return left.first > right.first;
+}
+
+void trimSqlStatsLocked(std::map<std::string, SqlStatEntry>& entries) {
+    while (entries.size() > sqlStatsMaxEntries()) {
+        auto victim = entries.begin();
+        for (auto it = std::next(entries.begin()); it != entries.end(); ++it) {
+            if (isLessUsed(*it, *victim)) victim = it;
+        }
+        entries.erase(victim);
+    }
+}
+
 } // namespace
 
 std::string normalizeSqlForStats(const std::string& sql) {
@@ -282,6 +310,7 @@ void recordSqlStat(const std::string& sql, double elapsedMs,
     ++entry.calls;
     entry.totalTimeMs += elapsedMs;
     entry.meanTimeMs = entry.totalTimeMs / static_cast<double>(entry.calls);
+    trimSqlStatsLocked(sqlStatsMap());
 }
 
 std::vector<SqlStatEntry> getSqlStats(const std::string& dbFilter) {
@@ -295,6 +324,20 @@ std::vector<SqlStatEntry> getSqlStats(const std::string& dbFilter) {
         return a.sql < b.sql;
     });
     return result;
+}
+
+bool setSqlStatsMaxEntries(size_t maxEntries) {
+    if (maxEntries == 0 || maxEntries > kMaxSqlStatsEntries) return false;
+    std::lock_guard<std::mutex> lock(sqlStatsMutex());
+    sqlStatsMaxEntries() = maxEntries;
+    trimSqlStatsLocked(sqlStatsMap());
+    trimSqlStatsLocked(persistedSqlStatsMap());
+    return true;
+}
+
+size_t getSqlStatsMaxEntries() {
+    std::lock_guard<std::mutex> lock(sqlStatsMutex());
+    return sqlStatsMaxEntries();
 }
 
 bool loadSqlStats(const std::string& dbname, const std::filesystem::path& path) {
@@ -318,6 +361,8 @@ bool loadSqlStats(const std::string& dbname, const std::filesystem::path& path) 
         persistedSqlStatsMap()[key] = entry;
         sqlStatsMap()[key] = entry;
     }
+    trimSqlStatsLocked(persistedSqlStatsMap());
+    trimSqlStatsLocked(sqlStatsMap());
     return true;
 }
 
@@ -346,7 +391,7 @@ bool persistSqlStats(const std::string& dbname, const std::filesystem::path& pat
         if (const auto it = onDisk.find(key); it != onDisk.end()) disk = it->second;
         merged[key] = mergeEntry(disk, current, baseline);
     }
-    if (merged.size() > kMaxSqlStatsEntries) return false;
+    trimSqlStatsLocked(merged);
     if (!publishStatsSnapshot(path, [&](const std::filesystem::path& temporary) {
             return writeSnapshot(temporary, dbname, merged);
         })) return false;

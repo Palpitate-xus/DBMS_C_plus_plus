@@ -1094,7 +1094,7 @@ SHOW STATUS;
 
 ### pg_stat_database / pg_stat_tables
 
-**说明** `pg_stat_database` 提供数据库级查询、事务和返回行计数；`pg_stat_tables` 提供当前数据库表的顺序扫描、索引扫描、索引取行、DML 行数及近似存活行数。数据由共享 `RuntimeStats` 在 SQL/执行器/存储边界实时更新，重启后清空。
+**说明** `pg_stat_database` 提供数据库级查询、事务和返回行计数；`pg_stat_tables` 提供当前数据库表的顺序扫描、索引扫描、索引取行、DML 行数及近似存活行数。数据由共享 `RuntimeStats` 在 SQL/执行器/存储边界实时更新，并以当前格式 `.runtime_stats` 快照在 checkpoint/重启时保留；关系重建或删除不会复用旧统计。
 
 **示例**
 ```sql
@@ -1112,6 +1112,9 @@ SELECT * FROM pg_catalog.pg_stat_tables;
 ```sql
 SHOW VARIABLES;
 ```
+
+`pg_stat_statements.max` 控制 SQL 归一化统计条目上限，默认 5000，可通过
+`SET [GLOBAL] pg_stat_statements.max = N` 设置为 1–1,000,000；超过上限时按调用次数、耗时和 key 确定性淘汰低使用率条目。
 
 ---
 

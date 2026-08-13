@@ -65,6 +65,13 @@ bool Config::load(const std::string& filename) {
             autoExplainEnabled = (val == "1" || val == "true" || val == "on");
         } else if (key == "auto_explain_threshold_ms") {
             try { autoExplainThresholdMs = std::stod(val); } catch (...) {}
+        } else if (key == "pg_stat_statements.max") {
+            try {
+                const auto parsed = std::stoull(val);
+                if (parsed > 0 && parsed <= 1000000) {
+                    sqlStatsMaxEntries = static_cast<size_t>(parsed);
+                }
+            } catch (...) {}
         }
     }
     return true;
@@ -92,7 +99,8 @@ void Config::printAll() const {
               << "enable_merge_join " << (enableMergeJoin ? "on" : "off") << "\n"
               << "max_parallel_workers_per_gather " << maxParallelWorkersPerGather << "\n"
               << "auto_explain " << (autoExplainEnabled ? "on" : "off") << "\n"
-              << "auto_explain_threshold_ms " << autoExplainThresholdMs << "\n";
+              << "auto_explain_threshold_ms " << autoExplainThresholdMs << "\n"
+              << "pg_stat_statements.max " << sqlStatsMaxEntries << "\n";
 }
 
 bool Config::save(const std::string& filename) const {
@@ -120,7 +128,8 @@ bool Config::save(const std::string& filename) const {
         << "enable_merge_join=" << (enableMergeJoin ? "on" : "off") << "\n"
         << "max_parallel_workers_per_gather=" << maxParallelWorkersPerGather << "\n"
         << "auto_explain=" << (autoExplainEnabled ? "on" : "off") << "\n"
-        << "auto_explain_threshold_ms=" << autoExplainThresholdMs << "\n";
+        << "auto_explain_threshold_ms=" << autoExplainThresholdMs << "\n"
+        << "pg_stat_statements.max=" << sqlStatsMaxEntries << "\n";
     return true;
 }
 

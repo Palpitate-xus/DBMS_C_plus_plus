@@ -113,7 +113,7 @@
 - 协议失败事务回归：验证显式事务中的语句错误返回 `ReadyForQuery('E')`/`25P02`、普通命令被拒绝、失败状态下 `COMMIT` 不提交先前 INSERT 而执行完整回滚，以及 `ROLLBACK TO SAVEPOINT` 可恢复外层事务。
 - 协议两阶段命令边界回归：验证失败事务中的 `COMMIT PREPARED`/`ROLLBACK PREPARED` 不会被改写为本地恢复命令，未知 prepared transaction 返回错误。
 - 协议 backend 隔离回归：双连接验证事务 ID/快照不串线，未提交行不可见，ROLLBACK 后状态清理，连接断开回滚未完成事务，COMMIT 后新事务可见；另覆盖 `START TRANSACTION` 选项与 `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` 路由。
-- SQL 统计模块回归：`tests/sql_stats_test.cpp` 验证字符串/数字常量归一化、引号标识符区分、调用次数与耗时聚合、数据库过滤、当前格式快照重载、尾随数据损坏拒绝及 reset。
+- SQL 统计模块回归：`tests/sql_stats_test.cpp` 验证字符串/数字常量归一化、引号标识符区分、调用次数与耗时聚合、数据库过滤、`pg_stat_statements.max` 确定性淘汰、当前格式快照重载、尾随数据损坏拒绝及 reset。
 - 运行时统计模块回归：`tests/runtime_stats_test.cpp` 验证并发 SQL 计数、失败/提交/回滚计数、表扫描和实际 DML 行数统计及 reset。
 - 协议运行时统计回归：`postgres_protocol_test.py` 通过真实 PostgreSQL wire 查询验证 `pg_stat_database`/`pg_stat_tables` 返回数据库查询、表 DML 及 Volcano 索引扫描/取行计数，而非固定零值。
 - Planner 统计反馈回归：`tests/planner_runtime_stats_test.cpp` 验证完整扫描 live-row 估计参与 Hash/Nested Loop Join 选型和 EXPLAIN，未取得精确证据时回退物理行数，重建同名表后旧估计不会泄漏。

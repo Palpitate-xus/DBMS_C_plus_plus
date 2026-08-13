@@ -31,6 +31,12 @@ std::vector<SqlStatEntry> getSqlStats(const std::string& dbFilter = "");
 
 void resetSqlStats();
 
+// Bound the process-wide normalized statement table. Entries with the fewest
+// calls are evicted first; ties are resolved deterministically by total time
+// and key so concurrent backends converge on the same durable set.
+bool setSqlStatsMaxEntries(size_t maxEntries);
+size_t getSqlStatsMaxEntries();
+
 // Durable per-database statistics. Malformed snapshots are rejected so the
 // caller can fail closed during database startup.
 bool loadSqlStats(const std::string& dbname,

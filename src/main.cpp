@@ -72,6 +72,18 @@ using dbms::DBStatus;
 using dbms::StorageEngine;
 using dbms::TableSchema;
 
+dbms::Config g_config;
+
+namespace {
+// Load configuration before the process-global StorageEngine opens databases,
+// so bounded statistics snapshots use the configured limit from first load.
+[[maybe_unused]] const bool g_initialConfigLoaded = [] {
+    g_config.load("dbms.conf");
+    dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries);
+    return true;
+}();
+}
+
 StorageEngine g_engine;
 
 // ========================================================================
@@ -1324,6 +1336,20 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
             }
             g_config.maxParallelWorkersPerGather = workers;
             dbms::QueryPlanner::setParallelWorkers(workers);
+            ok = true;
+        } catch (...) {}
+    } else if (param == "pg_stat_statements.max") {
+        try {
+            const auto maxEntries = std::stoull(val);
+            if (maxEntries == 0 || maxEntries > 1000000) {
+                cout << "Invalid value for parameter " << param << endl;
+                return true;
+            }
+            if (!dbms::setSqlStatsMaxEntries(static_cast<size_t>(maxEntries))) {
+                cout << "Invalid value for parameter " << param << endl;
+                return true;
+            }
+            g_config.sqlStatsMaxEntries = static_cast<size_t>(maxEntries);
             ok = true;
         } catch (...) {}
     } else if (param == "auto_explain") {
@@ -8863,6 +8889,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (!checkAdmin(s)) return true;
                     if (g_config.load("dbms.conf")) {
                         g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
+                        if (!dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries)) {
+                            cout << "f" << endl;
+                            return false;
+                        }
                         dbms::QueryPlanner::setParallelWorkers(
                             g_config.maxParallelWorkersPerGather);
                         cout << "t" << endl;
@@ -15396,8 +15426,6 @@ bool execute(const std::string& rawSql, Session& s) {
 // ========================================================================
 // Main
 // ========================================================================
-dbms::Config g_config;
-
 int main(int argc, char* argv[]) {
     // Set locale for Unicode support
     std::setlocale(LC_CTYPE, "");
@@ -15420,6 +15448,7 @@ int main(int argc, char* argv[]) {
     if (g_config.load("dbms.conf")) {
         g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
         g_checkpointInterval = g_config.checkpointInterval;
+        dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries);
         g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs);
         g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
     }

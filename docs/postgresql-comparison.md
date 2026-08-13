@@ -316,7 +316,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | information_schema | ✅ | ⚠️ 基础 | |
 | pg_stat_* views | ✅ | ⚠️ | 有运行时数据库/表/SQL 统计及若干虚拟统计视图，字段和生命周期不完整 |
 | pg_locks / pg_stat_activity | ✅ | ⚠️ | 有风格子集，完整 backend/wait 语义仍缺 |
-| **pg_stat_statements** | ✅ | ⚠️ | 有归一化聚合和当前格式数据库快照持久化，缺上限/淘汰和完整扩展语义 |
+| **pg_stat_statements** | ✅ | ⚠️ | 有归一化聚合、当前格式数据库快照持久化及 `pg_stat_statements.max` 确定性淘汰，缺 reset 权限和完整扩展语义 |
 | **auto_explain** | ✅ | ❌ | 缺 |
 
 ---
