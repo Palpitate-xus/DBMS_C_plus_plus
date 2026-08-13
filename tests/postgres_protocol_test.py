@@ -154,6 +154,13 @@ def data_row_values(messages):
     return values
 
 
+def setting_value(messages, name):
+    for row in data_row_values(messages):
+        if row and row[0] == name.encode():
+            return row[1]
+    raise AssertionError("setting %s was not returned" % name)
+
+
 def row_description_fields(messages):
     for kind, body in messages:
         if kind != b"T":
@@ -942,6 +949,13 @@ def main():
         assert simple_query(sock, "COMMIT")[-1] == (b"Z", b"I")
         assert data_row_values(simple_query(sock, "SELECT id FROM t WHERE id >= 20")) == [[b"20"]]
 
+        # Session settings must stay local to the connection.  pg_settings
+        # exposes the effective value for the current backend.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "SET statement_timeout = 123"))
+        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+                             "statement_timeout") == b"123"
+
         peer_sock.sendall(typed(b"X"))
         peer_sock.close()
 
@@ -966,15 +980,43 @@ def main():
         assert simple_query(observer_sock, "BEGIN")[-1] == (b"Z", b"T")
         assert data_row_values(simple_query(observer_sock, "SELECT id FROM t")) == [[b"1"], [b"3"], [b"20"]]
         assert simple_query(observer_sock, "ROLLBACK")[-1] == (b"Z", b"I")
+        role_sock = socket.socket()
+        role_sock.settimeout(SOCKET_TIMEOUT)
+        role_sock.connect(("127.0.0.1", port))
+        startup(role_sock, "bob", "info", password="bObPass9!")
+        # A newly opened backend gets the configured default, not another
+        # backend's session override.
+        assert setting_value(simple_query(role_sock, "SELECT * FROM pg_settings"),
+                             "statement_timeout") == b"0"
+        assert any(kind == b"C" for kind, _ in simple_query(
+            role_sock, "SET statement_timeout = 456"))
+        assert setting_value(simple_query(role_sock, "SELECT * FROM pg_settings"),
+                             "statement_timeout") == b"456"
+        assert setting_value(simple_query(observer_sock, "SELECT * FROM pg_settings"),
+                             "statement_timeout") == b"0"
+        assert any(kind == b"E" for kind, _ in simple_query(
+            role_sock, "SET GLOBAL audit_level = 2"))
+        assert any(kind == b"E" for kind, _ in simple_query(
+            role_sock, "SET enable_seq_scan = off"))
+
+        # Planner-affecting global changes invalidate the old EXPLAIN entry.
+        first_plan = simple_query(observer_sock, "EXPLAIN SELECT * FROM t")
+        assert not any(b"[plan cache hit]" in row[0]
+                       for row in data_row_values(first_plan))
+        second_plan = simple_query(observer_sock, "EXPLAIN SELECT * FROM t")
+        assert any(b"[plan cache hit]" in row[0]
+                   for row in data_row_values(second_plan))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            observer_sock, "SET GLOBAL enable_seq_scan = off"))
+        third_plan = simple_query(observer_sock, "EXPLAIN SELECT * FROM t")
+        assert not any(b"[plan cache hit]" in row[0]
+                       for row in data_row_values(third_plan))
+
         observer_sock.sendall(typed(b"X"))
         observer_sock.close()
         sock.sendall(typed(b"X"))
         sock.close()
 
-        role_sock = socket.socket()
-        role_sock.settimeout(SOCKET_TIMEOUT)
-        role_sock.connect(("127.0.0.1", port))
-        startup(role_sock, "bob", "info", password="bObPass9!")
         role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
         assert role_rows == [[b"1"], [b"3"], [b"20"]], role_rows
         default_role_rows = data_row_values(simple_query(

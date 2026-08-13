@@ -62,6 +62,7 @@
 | 2026-08-13 | RuntimeStats 持久化收敛：新增版本化 `.runtime_stats` 快照，StorageEngine 在启动、checkpoint、shutdown 和数据库生命周期边界加载/发布；sidecar `flock`、增量合并、文件/目录 `fsync`、原子 rename 和损坏数据 fail-closed 已接入，`runtime_stats_test` 覆盖重载和损坏文件。 |
 | 2026-08-13 | SqlStats 持久化收敛：新增共享 `StatsPersistence` 锁/原子发布基础设施，按数据库写入版本化 `.sql_stats` 快照，StorageEngine 在启动、checkpoint、shutdown 和数据库生命周期边界加载/发布；跨 backend 增量合并、严格数值/长度/尾随数据校验和 `sql_stats_test` 重载/损坏回归已接入。 |
 | 2026-08-13 | SqlStats 内存边界收敛：`pg_stat_statements.max` 默认 5000，支持 `SET [GLOBAL]` 调整；进程记录、快照加载和多 backend 持久化合并都执行调用次数/耗时/key 的确定性淘汰，新增上限回归。 |
+| 2026-08-13 | SET/plan cache 生产边界收敛：普通 `SET` 的 statement/lock/deadlock timeout 改为 backend-local，进程级参数要求管理员 `SET GLOBAL`/`ALTER SYSTEM`；协议回归覆盖跨连接隔离、权限拒绝和 planner 参数变化后的 EXPLAIN cache miss；缓存键纳入 work_mem、join/scan 开关及并行 worker，并使用配置容量而非硬编码上限。 |
 | 2026-08-13 | 配置架构清理：确认 `src/common/GUC.{h,cpp}` 没有任何生产/测试调用方，仅保留一套实际使用的 `Config` + `main.cpp` SET/SHOW/RESET 路径；删除死模块并从生产 manifest 移除，修正文档中的旧 GUC 注册表描述。 |
 | 2026-08-13 | 冗余代码清理：确认 `src/common/set.h` 是未被任何源码、测试或构建入口引用的旧红黑树样例，删除该无调用方文件并同步 README 目录说明。 |
 | 2026-08-13 | 执行器架构清理：删除无调用方的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为唯一 Volcano 生命周期契约；修正文档中已不存在的 `src/optimizer/` 路径。`IndexScanOp` 按 RID 直接回表并复用 page lock/MVCC，避免每个索引命中扫描全表；Volcano 专项与全量回归覆盖该边界。 |
@@ -364,7 +365,7 @@
 | 1.1.49 | `SAVEPOINT` / `ROLLBACK TO` / `RELEASE` | 名称与路由已由事务 AST 统一处理；回滚基于 txn log index，并会释放保存点后新增的表/row/page/gap 锁、恢复保存点前锁模式；协议失败状态可由 `ROLLBACK TO SAVEPOINT` 清除；仍缺 PG 子事务 ID、资源/错误状态完整语义 | ⚠️ |
 | 1.1.50 | `SECURITY LABEL` | 保存 label 文件；缺少 provider、对象类型全集、SELinux/sepgsql 集成 | ⚠️ |
 | 1.1.51 | `SELECT` | 支持大量子集；复杂 grammar、类型推断、表达式、函数、子查询、锁、并行、planner/rewrite 差距最大 | ⚠️ |
-| 1.1.52 | `SET` / `SHOW` | 项目参数和少量 session 状态；不是 PG GUC 全体系 | ⚠️ |
+| 1.1.52 | `SET` / `SHOW` | 普通 `SET` 已隔离 statement/lock/deadlock timeout；进程参数要求管理员 `SET GLOBAL`/`ALTER SYSTEM`，SHOW/RESET 仍非 PG GUC 全体系 | ⚠️ |
 | 1.1.53 | `SET CONSTRAINTS` | CHECK 约束支持 `DEFERRABLE INITIALLY DEFERRED`，延迟队列在 commit 时验证；`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效，per-transaction 自动清除；仍缺 constraint trigger 语义 | ⚠️ |
 | 1.1.54 | `SET ROLE` | 已按 `pg_auth_members` 原始成员关系检查目标角色，SET ROLE 后 ACL/RLS/current_user 使用有效角色；仍缺 role stack、完整 session authorization 联动和角色成员生命周期语义 | ⚠️ |
 | 1.1.55 | `SET SESSION AUTHORIZATION` | 已支持管理员切换 session user；缺少 PostgreSQL 角色继承、SET ROLE 完整权限矩阵和会话安全上下文完整语义 | ⚠️ |

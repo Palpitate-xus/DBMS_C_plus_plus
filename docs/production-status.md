@@ -4,6 +4,14 @@
 
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，136 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=138 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
+2026-08-13 配置作用域与计划缓存收敛：普通 `SET` 只修改当前 `Session` 的
+`statement_timeout`、`lock_timeout` 和 `deadlock_timeout`；进程级参数必须通过管理员
+`SET GLOBAL` 或 `ALTER SYSTEM SET` 修改，非管理员和误用普通 `SET` 均 fail-closed。
+协议 backend 启动时显式复制全局默认 timeout，并将锁管理器的 timeout/resource namespace
+绑定到当前 backend。`EXPLAIN` plan cache 纳入 `work_mem`、seq/hash/merge join、并行 worker
+等 planner 设置，缓存开关和配置容量生效，配置变化会清空旧缓存；协议 E2E 新增跨连接隔离、权限和
+缓存失效回归。完整 PostgreSQL GUC 体系、真正 per-query planner context 仍未完成。
+
 2026-08-13 Volcano 执行失败边界：新增 `PlanExecutionResult` 与 `executePlanChecked()`，将正常 EOF 和 `open()`/`next()` 失败分离；排序、分页、去重、集合、连接、窗口、聚合及子查询物化算子会向根节点传播子算子错误。主 SQL 的集合操作、普通 Volcano SELECT、聚合、窗口和派生子查询入口已检查执行结果并 fail-closed；旧空结果兼容入口已删除，契约回归验证失败不会被误报为空结果。
 
 2026-08-13 运行时统计持久化：`RuntimeStats` 增加当前格式版本化 `.runtime_stats` 快照，在 checkpoint 和引擎关闭时通过 sidecar `flock`、临时文件、文件/目录 `fsync` 和原子 rename 发布；启动严格校验 magic、版本、长度、数据库归属和尾随字节，损坏文件 fail-closed。多个 backend 按已加载基线做增量合并，DROP/重建关系不会恢复旧统计；新增持久化、重载和损坏文件回归。

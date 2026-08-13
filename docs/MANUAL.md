@@ -1016,18 +1016,18 @@ CREATE SUBSCRIPTION mysub CONNECTION 'host=primary' PUBLICATION mypub;
 ## 25. GUC 参数配置
 
 ```sql
--- 设置参数
-SET search_path TO public, myschema;
+-- 当前连接参数
 SET timezone = 'Asia/Shanghai';
 SET statement_timeout = 30000;
+SET lock_timeout = 1000;
+SET deadlock_timeout = 1000;
 
 -- 重置
 RESET search_path;
 RESET ALL;
 
--- 查看
-SHOW search_path;
-SHOW ALL;
+-- 查看运行时参数
+SHOW VARIABLES;
 
 -- 事务隔离级别
 SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
@@ -1036,11 +1036,11 @@ SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
 
 -- ALTER SYSTEM (持久化)
 ALTER SYSTEM SET work_mem = '64MB';
-ALTER SYSTEM RESET work_mem;
+-- 当前版本只支持 ALTER SYSTEM SET；如需恢复默认值请删除/修改 dbms.conf
 
 -- AUTO_VACUUM
-SET AUTO_VACUUM = ON;
-SET AUTO_VACUUM_THRESHOLD = 1000;
+SET GLOBAL AUTO_VACUUM = ON;
+SET GLOBAL AUTO_VACUUM_THRESHOLD = 1000;
 ```
 
 ---

@@ -8,6 +8,7 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -105,6 +106,39 @@ static std::map<std::string, CachedPlanEntry> g_queryPlanCache;
 static std::mutex g_planCacheMutex;
 static size_t g_planCacheHits = 0;
 static size_t g_planCacheMisses = 0;
+
+static void clearPlanCache() {
+    std::lock_guard<std::mutex> lock(g_planCacheMutex);
+    g_queryPlanCache.clear();
+    g_planCacheHits = 0;
+    g_planCacheMisses = 0;
+}
+
+static void trimPlanCacheLocked() {
+    while (g_queryPlanCache.size() > g_config.queryPlanCacheSize) {
+        auto oldest = g_queryPlanCache.begin();
+        for (auto it = g_queryPlanCache.begin(); it != g_queryPlanCache.end(); ++it) {
+            if (it->second.cachedAt < oldest->second.cachedAt) oldest = it;
+        }
+        g_queryPlanCache.erase(oldest);
+    }
+}
+
+// A plan is valid only for the planner settings that produced it. Keep this
+// explicit instead of relying on schema invalidation, because SET/ALTER
+// SYSTEM can change plan selection without changing catalog metadata.
+static std::string planCacheSettingsKey() {
+    return ":cfg=" + std::to_string(g_config.workMemKb) +
+           ":seq=" + (g_config.enableSeqScan ? "1" : "0") +
+           ":hash=" + (g_config.enableHashJoin ? "1" : "0") +
+           ":merge=" + (g_config.enableMergeJoin ? "1" : "0") +
+           ":parallel=" + std::to_string(g_config.maxParallelWorkersPerGather) +
+           ":planner_parallel=" + std::to_string(dbms::QueryPlanner::parallelWorkers());
+}
+
+static void invalidatePlanCacheForConfigChange() {
+    clearPlanCache();
+}
 
 struct SlowQueryEntry {
     std::string timestamp;
@@ -1258,6 +1292,10 @@ static bool handleResetCommand(const string& sql, Session& s) {
         s.currentRole.clear();
         s.timezoneOffsetMinutes = 0;
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+        s.lockTimeoutMs = g_config.lockTimeoutMs;
+        s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
+        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
         s.constraintsDeferred = false;
         resetIsolation();
         cout << "RESET ALL" << endl;
@@ -1270,6 +1308,18 @@ static bool handleResetCommand(const string& sql, Session& s) {
     }
     if (rest == "statement_timeout" || rest == "statement_timeout_ms") {
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (rest == "lock_timeout" || rest == "lock_timeout_ms") {
+        s.lockTimeoutMs = g_config.lockTimeoutMs;
+        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
+        cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (rest == "deadlock_timeout" || rest == "deadlock_timeout_ms") {
+        s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
         cout << "RESET " << rest << endl;
         return false;
     }
@@ -1286,6 +1336,40 @@ static bool handleResetCommand(const string& sql, Session& s) {
 // SET / RESET / ALTER SYSTEM command helpers
 // ========================================================================
 static bool applyConfigParam(const string& param, const string& val, bool isGlobal, Session& s) {
+    if (isGlobal && !checkAdmin(s)) return true;
+
+    // Only settings represented in Session may be changed with ordinary SET.
+    // Silently writing process-global state here would make one connection
+    // change the behavior of every other connection.
+    if (!isGlobal) {
+        try {
+            if (param == "statement_timeout_ms" || param == "statement_timeout") {
+                const int timeout = std::stoi(val);
+                if (timeout < 0) throw std::invalid_argument("negative timeout");
+                s.statementTimeoutMs = timeout;
+            } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
+                const int timeout = std::stoi(val);
+                if (timeout < 0) throw std::invalid_argument("negative timeout");
+                s.lockTimeoutMs = timeout;
+                g_engine.getLockManager().setLockTimeout(timeout);
+            } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
+                const int timeout = std::stoi(val);
+                if (timeout < 0) throw std::invalid_argument("negative timeout");
+                s.deadlockTimeoutMs = timeout;
+                g_engine.getLockManager().setDeadlockTimeout(timeout);
+            } else {
+                cout << "Parameter " << param
+                     << " is process-global; use SET GLOBAL or ALTER SYSTEM" << endl;
+                return true;
+            }
+        } catch (...) {
+            cout << "Invalid value for parameter " << param << endl;
+            return true;
+        }
+        cout << "Set " << param << " = " << val << " (session)" << endl;
+        return false;
+    }
+
     bool ok = false;
     if (param == "max_connections") {
         try { g_config.maxConnections = std::stoi(val); ok = true; } catch (...) {}
@@ -1358,9 +1442,21 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     } else if (param == "auto_explain_threshold_ms" || param == "auto_explain_threshold") {
         try { g_config.autoExplainThresholdMs = std::stod(val); ok = true; } catch (...) {}
     } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
-        try { g_config.lockTimeoutMs = std::stoi(val); g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs); ok = true; } catch (...) {}
+        try {
+            g_config.lockTimeoutMs = std::stoi(val);
+            if (g_config.lockTimeoutMs < 0) throw std::invalid_argument("negative timeout");
+            s.lockTimeoutMs = g_config.lockTimeoutMs;
+            g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs);
+            ok = true;
+        } catch (...) {}
     } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
-        try { g_config.deadlockTimeoutMs = std::stoi(val); g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs); ok = true; } catch (...) {}
+        try {
+            g_config.deadlockTimeoutMs = std::stoi(val);
+            if (g_config.deadlockTimeoutMs < 0) throw std::invalid_argument("negative timeout");
+            s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+            g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
+            ok = true;
+        } catch (...) {}
     } else {
         cout << "Unknown parameter: " << param << endl;
         return true;
@@ -1369,15 +1465,19 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
         cout << "Invalid value for parameter " << param << endl;
         return true;
     }
-    if (isGlobal) {
-        if (!g_config.save("dbms.conf")) {
-            cout << "Failed to persist configuration" << endl;
-            return true;
-        }
-        cout << "Set global " << param << " = " << val << endl;
-    } else {
-        cout << "Set " << param << " = " << val << " (session)" << endl;
+    if (param == "statement_timeout_ms" || param == "statement_timeout") {
+        s.statementTimeoutMs = g_config.statementTimeoutMs;
+        s.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
     }
+    g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
+    g_checkpointInterval = g_config.checkpointInterval;
+    dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
+    invalidatePlanCacheForConfigChange();
+    if (!g_config.save("dbms.conf")) {
+        cout << "Failed to persist configuration" << endl;
+        return true;
+    }
+    cout << "Set global " << param << " = " << val << endl;
     return false;
 }
 
@@ -1526,31 +1626,6 @@ static bool handleSetCommand(const string& sql, Session& s) {
             return false;
         }
         return applyConfigParam(param, val, isGlobal, s);
-    }
-
-    // set auto_vacuum = on / off / threshold N (legacy compat)
-    if (sql.substr(0, 15) == "set auto_vacuum") {
-        string rest = trim(sql.substr(15));
-        if (rest == "= on" || rest == "on" || rest == "= 1" || rest == "1") {
-            g_config.autoVacuumEnabled = true;
-            cout << "auto_vacuum set to ON" << endl;
-        } else if (rest == "= off" || rest == "off" || rest == "= 0" || rest == "0") {
-            g_config.autoVacuumEnabled = false;
-            cout << "auto_vacuum set to OFF" << endl;
-        } else if (rest.substr(0, 10) == "threshold " || rest.substr(0, 12) == "= threshold ") {
-            size_t off = (rest.substr(0, 10) == "threshold ") ? 10 : 12;
-            try {
-                g_config.autoVacuumThreshold = std::stoi(trim(rest.substr(off)));
-                cout << "auto_vacuum_threshold set to " << g_config.autoVacuumThreshold << endl;
-            } catch (...) {
-                cout << "Invalid threshold value" << endl;
-                return true;
-            }
-        } else {
-            cout << "Usage: SET auto_vacuum = ON|OFF|THRESHOLD N" << endl;
-            return true;
-        }
-        return false;
     }
 
     cout << "SQL syntax error: unsupported SET command" << endl;
@@ -2428,6 +2503,8 @@ static bool handleExplain(const string& sql, Session& s) {
     ctx.havingConds = havingConds;
     if (structuredQuantified) ctx.quantifiedSubqueries.push_back(std::move(quantifiedSubquery));
 
+    const bool usePlanCache = g_config.enableQueryPlanCache &&
+                              g_config.queryPlanCacheSize > 0;
     string cacheKey = s.currentDB + "::" + inner;
     if (opts.buffers) cacheKey += ":B";
     if (opts.verbose) cacheKey += ":V";
@@ -2437,9 +2514,10 @@ static bool handleExplain(const string& sql, Session& s) {
     if (opts.costs) cacheKey += ":C";
     if (opts.settings) cacheKey += ":S";
     cacheKey += ":P" + std::to_string(dbms::QueryPlanner::parallelWorkers());
+    cacheKey += planCacheSettingsKey();
     string planOutput;
     bool cacheHit = false;
-    {
+    if (usePlanCache) {
         std::lock_guard<std::mutex> lock(g_planCacheMutex);
         auto it = g_queryPlanCache.find(cacheKey);
         if (it != g_queryPlanCache.end() && it->second.dbname == s.currentDB) {
@@ -2459,9 +2537,10 @@ static bool handleExplain(const string& sql, Session& s) {
         } else {
             planOutput = dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB, opts);
         }
-        {
+        if (usePlanCache) {
             std::lock_guard<std::mutex> lock(g_planCacheMutex);
-            if (g_queryPlanCache.size() >= 100) {
+            trimPlanCacheLocked();
+            if (g_queryPlanCache.size() >= g_config.queryPlanCacheSize) {
                 auto oldest = g_queryPlanCache.begin();
                 for (auto it = g_queryPlanCache.begin(); it != g_queryPlanCache.end(); ++it) {
                     if (it->second.cachedAt < oldest->second.cachedAt) oldest = it;
@@ -11398,11 +11477,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
     }
 
     if (sql.substr(0, 16) == "clear plan cache") {
-        std::lock_guard<std::mutex> lock(g_planCacheMutex);
-        size_t cleared = g_queryPlanCache.size();
-        g_queryPlanCache.clear();
-        g_planCacheHits = 0;
-        g_planCacheMisses = 0;
+        size_t cleared = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_planCacheMutex);
+            cleared = g_queryPlanCache.size();
+            g_queryPlanCache.clear();
+            g_planCacheHits = 0;
+            g_planCacheMisses = 0;
+        }
         cout << "Cleared " << cleared << " plan cache entries" << endl;
         return false;
     }
@@ -12670,84 +12752,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return handleDropPolicy(sql, s);
     }
 
-    // SET variable = value
-    if (sql.substr(0, 4) == "set ") {
-        string rest = trim(sql.substr(4));
-        size_t eqPos = rest.find('=');
-        if (eqPos == string::npos) {
-            cout << "SQL syntax error: SET var=value" << endl;
-            return true;
-        }
-        string var = trim(rest.substr(0, eqPos));
-        string val = trim(rest.substr(eqPos + 1));
-        if (var == "slow_query_threshold") {
-            try {
-                g_slowQueryThresholdMs = std::stod(val);
-                cout << "slow_query_threshold set to " << g_slowQueryThresholdMs << "ms" << endl;
-            } catch (...) {
-                cout << "Invalid value for slow_query_threshold" << endl;
-                return true;
-            }
-        } else if (var == "checkpoint_interval") {
-            try {
-                g_checkpointInterval = std::stoi(val);
-                cout << "checkpoint_interval set to " << g_checkpointInterval << endl;
-            } catch (...) {
-                cout << "Invalid value for checkpoint_interval" << endl;
-                return true;
-            }
-        } else if (var == "statement_timeout") {
-            try {
-                s.statementTimeoutMs = std::stoi(val);
-                cout << "statement_timeout set to " << s.statementTimeoutMs << "ms" << endl;
-            } catch (...) {
-                cout << "Invalid value for statement_timeout" << endl;
-                return true;
-            }
-        } else if (var == "password_policy_level") {
-            try {
-                g_config.passwordPolicyLevel = std::stoi(val);
-                cout << "password_policy_level set to " << g_config.passwordPolicyLevel << endl;
-            } catch (...) {
-                cout << "Invalid value for password_policy_level" << endl;
-                return true;
-            }
-        } else if (var == "audit_level") {
-            try {
-                g_config.auditLevel = std::stoi(val);
-                cout << "audit_level set to " << g_config.auditLevel << endl;
-            } catch (...) {
-                cout << "Invalid value for audit_level" << endl;
-                return true;
-            }
-        } else if (var == "lock_timeout") {
-            try {
-                int ms = std::stoi(val);
-                g_config.lockTimeoutMs = ms;
-                g_engine.getLockManager().setLockTimeout(ms);
-                cout << "lock_timeout set to " << ms << "ms" << endl;
-            } catch (...) {
-                cout << "Invalid value for lock_timeout" << endl;
-                return true;
-            }
-        } else if (var == "deadlock_timeout") {
-            try {
-                int ms = std::stoi(val);
-                g_config.deadlockTimeoutMs = ms;
-                g_engine.getLockManager().setDeadlockTimeout(ms);
-                cout << "deadlock_timeout set to " << ms << "ms" << endl;
-            } catch (...) {
-                cout << "Invalid value for deadlock_timeout" << endl;
-                return true;
-            }
-        } else {
-            cout << "Unknown variable: " << var << endl;
-            return true;
-        }
-        return false;
-    }
-
-
     // DISCARD ALL: reset session state
     if (sql == "discard all") {
         // Drop all session-owned temporary tables.
@@ -12756,7 +12760,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
         s.preparedStmts.clear();
         // Reset session variables
         s.timezoneOffsetMinutes = 0;
-        s.statementTimeoutMs = 0;
+        s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+        s.lockTimeoutMs = g_config.lockTimeoutMs;
+        s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
+        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
         s.isolationLevel = 2; // REPEATABLE READ default
         cout << "Session state discarded" << endl;
         return false;
@@ -13467,9 +13475,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "shared_buffers " << g_config.bufferPoolFrames << " 8kB" << endl;
                 cout << "work_mem " << g_config.workMemKb << " kB" << endl;
                 cout << "checkpoint_timeout " << g_config.checkpointInterval << " s" << endl;
-                cout << "statement_timeout " << g_config.statementTimeoutMs << " ms" << endl;
-                cout << "lock_timeout " << g_config.lockTimeoutMs << " ms" << endl;
-                cout << "deadlock_timeout " << g_config.deadlockTimeoutMs << " ms" << endl;
+                cout << "statement_timeout " << s.statementTimeoutMs << " ms" << endl;
+                cout << "lock_timeout " << s.lockTimeoutMs << " ms" << endl;
+                cout << "deadlock_timeout " << s.deadlockTimeoutMs << " ms" << endl;
                 cout << "slow_query_threshold_ms " << g_config.slowQueryThresholdMs << " ms" << endl;
                 cout << "enable_seq_scan " << (g_config.enableSeqScan ? "on" : "off") << " " << endl;
                 cout << "enable_hash_join " << (g_config.enableHashJoin ? "on" : "off") << " " << endl;
@@ -15473,6 +15481,10 @@ int main(int argc, char* argv[]) {
     Session s;
     s.statementTimeoutMs = g_config.statementTimeoutMs;
     s.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
+    s.lockTimeoutMs = g_config.lockTimeoutMs;
+    s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+    g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
+    g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
     // Register WHEN condition evaluator for triggers
     g_engine.setWhenConditionEvaluator(
         [&](const std::string& condition,

@@ -22,6 +22,8 @@ struct Session {
     std::set<std::string> tempTablesCreatedInTransaction;
     int statementTimeoutMs = 0; // 0 = disabled
     int defaultStatementTimeoutMs = 0; // RESET statement_timeout target
+    int lockTimeoutMs = 0; // 0 = no timeout
+    int deadlockTimeoutMs = 1000; // milliseconds before deadlock detection
     int timezoneOffsetMinutes = 0; // Session timezone offset from UTC (e.g. +480 for Asia/Shanghai)
     std::string currentRole;      // SET ROLE target (empty = use original user)
     std::string originalRole;     // Session user's role (set at login)

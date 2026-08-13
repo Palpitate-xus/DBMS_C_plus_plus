@@ -1517,28 +1517,36 @@ CLEAR PLAN CACHE;
 
 ---
 
-### SET (变量)
+### SET / SET GLOBAL（运行时参数）
 
 **语法**
 ```sql
 SET variable_name = value
+SET GLOBAL variable_name = value
 ```
 
 **支持的变量**
 | 变量名 | 类型 | 说明 |
 |--------|------|------|
-| `slow_query_threshold` | `DOUBLE` | 慢查询阈值（毫秒） |
-| `checkpoint_interval` | `INT` | 自动 checkpoint 间隔（SQL 条数） |
-| `statement_timeout` | `INT` | 语句超时（毫秒） |
-| `password_policy_level` | `INT` | 密码强度策略（0-3） |
-| `audit_level` | `INT` | 审计日志级别（0-3） |
+普通 `SET` 只修改当前连接的会话状态：
+
+| 参数 | 类型 | 作用域 |
+|------|------|--------|
+| `statement_timeout` | `INT` | 当前会话，毫秒 |
+| `lock_timeout` | `INT` | 当前会话，毫秒 |
+| `deadlock_timeout` | `INT` | 当前会话，毫秒 |
+
+慢查询、checkpoint、planner、审计、自动维护和统计上限等进程级参数必须使用
+`SET GLOBAL`（管理员）或 `ALTER SYSTEM SET`，避免一个连接污染其他连接。
 
 **示例**
 ```sql
-SET slow_query_threshold = 100.0;
-SET checkpoint_interval = 100;
 SET statement_timeout = 5000;
-SET audit_level = 2;
+SET lock_timeout = 1000;
+SET GLOBAL slow_query_threshold = 100.0;
+SET GLOBAL checkpoint_interval = 100;
+SET GLOBAL audit_level = 2;
+ALTER SYSTEM SET work_mem = 65536;
 ```
 
 ---
@@ -1562,14 +1570,14 @@ SET TIMEZONE = '+08:00';
 
 **语法**
 ```sql
-SET AUTO_VACUUM = value
+SET GLOBAL AUTO_VACUUM = value
 ```
 
 **说明** 设置自动 VACUUM 阈值（死行数达到该值时触发）。
 
 **示例**
 ```sql
-SET AUTO_VACUUM = 1000;
+SET GLOBAL AUTO_VACUUM_THRESHOLD = 1000;
 ```
 
 ---

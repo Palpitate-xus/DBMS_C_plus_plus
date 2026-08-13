@@ -167,7 +167,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 1.4 补全 `SELECT` grammar（join、where、group、window、cte） | 6.1~6.8 | — |
 | 🔄 1.5 补全 `INSERT/UPDATE/DELETE/MERGE` AST 路径 | 1.1.35, 1.1.41, 1.1.44, 1.1.58, 6.10~6.13 | AST 已完整建模；普通 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费；INSERT 高级子句、外连接/复杂 JOIN、复杂/子查询/窗口 RETURNING、复杂 UPDATE/DELETE 和 MERGE 完整 WHEN 语义仍待迁移 |
 | ✅ 1.6 补全 DDL AST（`CREATE`/`ALTER`/`DROP` 各对象） | 1.1.3, 1.1.4, 1.1.6, 1.1.17, 1.1.24~1.1.33 等 | — |
-| ✅ 1.7 补全 `SET`/`SHOW`/`RESET` GUC 框架 | 1.1.48, 1.1.52, 1.1.56 | 当前由 `Config` + 统一命令处理路径提供；未接入的旧 `GUCRegistry` 已移除 |
+| 🔄 1.7 补全 `SET`/`SHOW`/`RESET` GUC 框架 | 1.1.48, 1.1.52, 1.1.56 | 当前由 `Config` + 统一命令处理路径提供；普通 SET 的已支持会话 timeout 已隔离，进程参数要求 `SET GLOBAL`/`ALTER SYSTEM`；未接入的旧 `GUCRegistry` 已移除，完整 PG GUC 语义仍待补齐 |
 | ✅ 1.8 补全 `VALUES` 作为通用 query expression | 1.1.60 | — |
 | ✅ 1.9 补全 `EXPLAIN` AST（支持所有语句类型） | 1.1.39 | — |
 | ✅ 1.10 移除或标记非 PG 语法（`USE DATABASE`、`REPLACE INTO` 等） | 15.1~15.9 | 可先做兼容模式开关 |
@@ -188,7 +188,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - ✅ 简单 Utility：`VALUES`、`USE DATABASE`、`LISTEN`、`NOTIFY`、`UNLISTEN`、`DO`、`IMPORT FOREIGN SCHEMA`
   - ✅ 游标命令：`DECLARE`、`FETCH`、`MOVE`、`CLOSE`
   - ✅ 事务命令：`BEGIN`/`START TRANSACTION`、`COMMIT`/`END`、`COMMIT PREPARED`、`ROLLBACK`/`ABORT`、`ROLLBACK PREPARED`、`SAVEPOINT`、`RELEASE SAVEPOINT`、`ROLLBACK TO SAVEPOINT`
-  - ✅ 配置命令：`SET`（ROLE / SESSION AUTHORIZATION / CONSTRAINTS / TRANSACTION ISOLATION / TIMEZONE / 通用参数 / auto_vacuum）、`RESET`（ROLE / ALL / 参数）、`ALTER SYSTEM SET`
+  - ✅ 配置命令：`SET`（ROLE / SESSION AUTHORIZATION / CONSTRAINTS / TRANSACTION ISOLATION / TIMEZONE / 会话 timeout / `SET GLOBAL` 进程参数）、`RESET`（ROLE / ALL / timeout 参数）、`ALTER SYSTEM SET`
   - ✅ Utility 命令：`ANALYZE`、`VACUUM`（含 FULL / CONCURRENTLY）、`CHECKPOINT`、`TRUNCATE`、`LOCK TABLE`、`COMMENT ON`（TABLE / COLUMN）、`SECURITY LABEL`、`REFRESH MATERIALIZED VIEW`、`REINDEX`
 - **接口收敛**：`IOperator`、`Operator`、`IIndexAM`、BPTreeIndexAM / HashIndexAM 适配器仍由真实执行路径使用；`IStorageEngine` 未接入执行器，已删除而不是继续保留伪实现（Phase 0）。
 
@@ -760,7 +760,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 5.37 实现 `DISCARD` 完整语义 | 1.1.36 | DISCARD ALL 已就绪 |
 | ✅ 5.38 实现 `SECURITY LABEL` provider、对象类型全集 | 1.1.50 | 基础 SECURITY LABEL 已就绪 |
 | ✅ 5.39 实现 `ALTER SYSTEM` PG GUC 体系 | 1.1.3 | handleAlterSystem 已就绪 |
-| ✅ 5.40 实现 `SET`/`SHOW`/`RESET` 完整 GUC 语义 | 1.1.52, 1.1.48 | handleSetCommand 已就绪 |
+| 🔄 5.40 实现 `SET`/`SHOW`/`RESET` 完整 GUC 语义 | 1.1.52, 1.1.48 | 已完成配置作用域隔离、管理员 `SET GLOBAL`、planner cache invalidation；完整 GUC 注册、类型、来源和 RESET 语义仍待实现 |
 | ✅ 5.41 实现 `SET ROLE` / `SET SESSION AUTHORIZATION` 完整语义 | 1.1.54, 1.1.55 | SET ROLE 已就绪 |
 | ✅ 5.42 实现 `SET TRANSACTION` deferrable 完整语义 | 1.1.56 | SET TRANSACTION 已就绪 |
 | 🔄 5.43 实现 SSI / predicate locks / SIREAD lock / rw-conflict | 9.4 | 已验证行级/页级 rw-conflict、空范围关系级 SIREAD、单列 B+Tree 逻辑谓词重叠、非相交页并发和跨页危险结构；物理索引范围 predicate lock、安全快照与完整 SSI 规则待实现 |
@@ -887,7 +887,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 | ✅ 11.6 清理 `UPDATE/DELETE ... LIMIT` 死代码 | 15.6 | MySQL-only syntax was unreachable after parser fail-closed routing; use PostgreSQL CTE/subquery patterns |
 | ✅ 11.7 `AUTO_INCREMENT` → 映射为 `serial` / `identity` | 15.7 | GENERATED AS IDENTITY / SERIAL type mapping |
 | ✅ 11.8 `DATETIME`, `TINYINT`, `BLOB`, `NCHAR/NVARCHAR` → 映射为 PG 类型 | 15.8 | type_registry has MySQL→PG type aliases |
-| ✅ 11.9 `SET GLOBAL` → 映射为 `ALTER SYSTEM` / GUC reload | 15.9 | SET parameter = value routes to GUC |
+| 🔄 11.9 `SET GLOBAL` → 映射为 `ALTER SYSTEM` / GUC reload | 15.9 | 已支持管理员 `SET GLOBAL`、配置持久化与 reload；普通 `SET` 仅覆盖已建模的会话 timeout，完整 PG GUC 来源/权限/RESET 语义仍待实现 |
 
 ---
 

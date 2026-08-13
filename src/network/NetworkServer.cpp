@@ -14,6 +14,7 @@
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
+#include "Config.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -42,6 +43,7 @@
 
 // External globals from main.cpp
 extern dbms::StorageEngine g_engine;
+extern dbms::Config g_config;
 
 // Forward declare execute() and logSlowQuery() from main.cpp
 extern bool execute(const std::string& rawSql, Session& s);
@@ -1228,6 +1230,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     session.currentDB = (dbIt == startup.parameters.end() || dbIt->second.empty())
                             ? "info" : dbIt->second;
     session.originalRole = username;
+    session.statementTimeoutMs = g_config.statementTimeoutMs;
+    session.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
+    session.lockTimeoutMs = g_config.lockTimeoutMs;
+    session.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+    g_engine.getLockManager().setResourceNamespace(session.currentDB);
+    g_engine.getLockManager().setLockTimeout(session.lockTimeoutMs);
+    g_engine.getLockManager().setDeadlockTimeout(session.deadlockTimeoutMs);
 
     if (!g_engine.databaseExists(session.currentDB)) {
         protocol.sendErrorResponse("FATAL", "3D000", "database \"" + session.currentDB + "\" does not exist");
