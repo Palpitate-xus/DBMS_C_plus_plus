@@ -60,6 +60,8 @@
 
 2026-08-13 增量审计：B+Tree 的插入、查找、多值查找、删除和范围扫描公共 API 统一调用固定 20 字节键规范化；长键截断、范围端点和重开索引语义通过 `gin_brin_index_test` 回归，避免内存键与磁盘键排序不一致。当前格式不兼容旧索引文件，需按现行 schema/index 格式重建。
 
+2026-08-13 增量审计：删除未被调用的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为实际 Volcano 算子唯一接口；`IndexScanOp` 改为在 page shared lock 与 MVCC 检查内按 RID 直接回表，避免每个索引命中重新扫描整张 heap。`volcano_select_phase51_test` 通过。
+
 2026-08-11 增量审计：`forEachRow()` 的失败契约已传递到 B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建、`REINDEX` 以及 Volcano 顺序/索引扫描；这些路径不再把 heap I/O 失败当成空结果，全文/GiST/SP-GiST/GIN/BRIN 也在完整扫描后原子发布。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 和增量维护仍待后续。
 
 2026-08-11 增量审计：扫描失败契约已继续传递到 `filterRows`、查询/聚合/JOIN、FK/EXCLUDE/ON CONFLICT 检查、`ANALYZE`、ALTER/`VACUUM FULL` 表重写、TOAST/page 写入和 Volcano 并行 page-range scan；`ANALYZE` 统计文件改为临时文件 fsync 后原子替换。B-tree/Hash WAL-safe 构建、完整增量维护和复杂 DML 的跨对象 undo 仍待后续。
@@ -95,7 +97,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | 能力 | 当前真实状态 | 证据/边界 |
 |------|--------------|-----------|
 | DDL AST bridge | 部分完成 | 核心 CREATE/DROP、`PARTITION BY`/`PARTITION OF`、基础 ALTER TABLE、CHECK/PRIMARY KEY/UNIQUE/FK/EXCLUDE 约束增删、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、`VALIDATE/ALTER CONSTRAINT` 和 CREATE TRIGGER 已桥接；触发器 action runtime、完整延迟约束语义仍待补齐 |
-| 复杂查询执行 | 部分完成 | Volcano 基础算子和集合组合节点已验证；复杂集合 operand、子查询、窗口和 grouping producer 仍有 legacy 回退 |
+| 复杂查询执行 | 部分完成 | Volcano 基础算子和集合组合节点已验证；算子统一位于 `src/executor/` 并遵守 `IOperator`，索引回表按 RID 直接读取；复杂集合 operand、子查询、窗口和 grouping producer 仍有 legacy 回退 |
 | Serializable / SSI | 部分完成 | 非空索引谓词/顺序扫描已记录页级 SIREAD，单列主键/二级 B+Tree 比较谓词新增逻辑索引 SIREAD 与写键重叠检测，空范围保留关系级兜底；物理索引范围 predicate lock、安全快照和完整 rw-conflict 规则仍未完成 |
 | 并行查询、JIT、异步 I/O | 未完成 | 当前为 planner/GUC/架构级占位，不能按生产能力宣称 |
 | PostgreSQL wire protocol / SCRAM | 部分完成 | 已有 Startup/SSLRequest/Query/Parse-Bind-Execute/Describe/Close framing、文本及常用标量、numeric 与 date/time/timestamp/uuid 二进制参数/结果、基础 portal maxRows 分页、catalog SCRAM 和基础 pg_hba 运行时决策；数组等复杂类型 I/O、完整 RowDescription 类型映射、结构化结果、holdable/scrollable portal 和 libpq 全语义仍未完成 |
@@ -138,7 +140,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 ### Phase 0 已完成内容
 
 - **删除未接入的 `IStorageEngine`**：审计确认该接口没有运行时消费者；原适配层中的 `query()` 恒返回空数组，`update()`/`remove()` 恒返回 0，部分事务和索引方法忽略参数。已删除 `src/interfaces/storage_engine.h`、继承关系和整组伪 wrapper，避免错误被静默吞掉。后续如需要稳定抽象，必须先由真实执行路径驱动接口设计。
-- **算子迁移到 `src/executor/`**：`ExecutionPlan.h` / `ExecutionPlan.cpp` 从 `src/optimizer/` 移动到 `src/executor/`；`build.sh`、`build_tests.sh`、`CMakeLists.txt` 同步更新源文件与 include 路径。
+- **算子迁移到 `src/executor/`**：历史上已将 `ExecutionPlan.h` / `ExecutionPlan.cpp` 从 `src/optimizer/` 移动至 `src/executor/`；当前源码、构建 manifest 和文档均以 `src/executor/` 为准，`IOperator` 是实际生命周期接口。完整 Path/RelOptInfo 优化器仍是后续工作。
 - **基础类型统一**：
   - 将原 `OpResult` 枚举合并到 `DBStatus`，扩展 `DBStatus` 包含 `TABLE_NOT_FOUND`、`DATABASE_NOT_FOUND`、`TABLE_ALREADY_EXISTS`、`INVALID_VALUE`、`NULL_NOT_ALLOWED`、`SYNTAX_ERROR`、`DUPLICATE_KEY`、`LOCK_CONFLICT`、`SERIALIZATION_FAILURE`。
   - 保留 `using OpResult = DBStatus;` 作为兼容别名。

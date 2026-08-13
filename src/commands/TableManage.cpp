@@ -4153,13 +4153,21 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid, std::string& ro
 bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator* pa,
                                          int64_t rid, std::string& rowBuffer,
                                          const TableSchema& tbl,
-                                         const ReadView* readView) const {
-    if (!pa) return false;
+                                         const ReadView* readView,
+                                         bool* readFailed) const {
+    if (readFailed) *readFailed = false;
+    if (!pa) {
+        if (readFailed) *readFailed = true;
+        return false;
+    }
     uint32_t pageId = 0;
     uint16_t slotId = 0;
     decodeRid(rid, pageId, slotId);
     char* buf = pa->fetchPage(pageId);
-    if (!buf) return false;
+    if (!buf) {
+        if (readFailed) *readFailed = true;
+        return false;
+    }
     PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
     const char* data = nullptr;
     size_t len = 0;
@@ -4187,6 +4195,40 @@ bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator
         rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
     }
     pa->unpinPage(pageId);
+    return visible;
+}
+
+bool StorageEngine::readIndexedRowByRid(const std::string& dbname,
+                                        const std::string& tablename,
+                                        int64_t rid, std::string& rowBuffer,
+                                        const TableSchema& tbl,
+                                        const ReadView* readView,
+                                        bool* readFailed) const {
+    if (readFailed) *readFailed = false;
+    uint32_t pageId = 0;
+    uint16_t slotId = 0;
+    decodeRid(rid, pageId, slotId);
+    (void)slotId;
+    if (!lockManager_.pageLockShared(dbname, tablename, pageId)) {
+        if (readFailed) *readFailed = true;
+        return false;
+    }
+    PageAllocator* allocator = getPageAllocator(dbname, tablename);
+    const bool visible = readVisibleRowByRid(
+        dbname, allocator, rid, rowBuffer, tbl, readView, readFailed);
+    lockManager_.pageUnlock(dbname, tablename, pageId);
+    if (visible && transactionContext().inTransaction &&
+        transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE &&
+        dbname == transactionContext().txnDB) {
+        transactionContext().hasRead = true;
+        const std::string key = ssiRidKey(dbname, tablename, rid);
+        const std::string page = ssiPageKey(dbname, tablename, pageId);
+        transactionContext().txnReadRids.insert(key);
+        transactionContext().txnReadPages.insert(page);
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiReadSets_[transactionContext().currentTxnId].insert(key);
+        ssiReadPages_[transactionContext().currentTxnId].insert(page);
+    }
     return visible;
 }
 

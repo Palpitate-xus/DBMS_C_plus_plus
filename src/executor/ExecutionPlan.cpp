@@ -275,23 +275,22 @@ bool IndexScanOp::open() {
 }
 
 bool IndexScanOp::next(std::string& outRow) {
-    if (pos_ >= rids_.size()) return false;
-    // readRowByRid is const but getPageAllocator is mutable
-    // Use the mutable getter through const_cast workaround
-    // Actually, getPageAllocator is not const, so we need a non-const engine
-    std::string row;
-    bool ok = false;
-    bool scanOk = engine_->forEachRow(dbname_, tablename_, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
-        if (!ok && StorageEngine::encodeRid(pid, sid) == rids_[pos_]) {
-            row.assign(data, len);
-            ok = true;
+    // Fetch indexed tuples directly. Scanning every heap tuple for each RID
+    // turns an index lookup into O(index_matches * table_rows), which is
+    // unacceptable for production workloads.
+    while (pos_ < rids_.size()) {
+        const int64_t rid = rids_[pos_++];
+        std::string row;
+        bool readFailed = false;
+        if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr,
+                                          &readFailed)) {
+            if (readFailed) return false;
+            continue;
         }
-    });
-    if (!scanOk) return false;
-    if (!ok) { ++pos_; return next(outRow); }
-    outRow = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
-    ++pos_;
-    return true;
+        outRow = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
+        return true;
+    }
+    return false;
 }
 
 void IndexScanOp::close() {

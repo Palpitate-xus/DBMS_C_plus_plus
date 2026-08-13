@@ -9,6 +9,11 @@ WAL 当前明确区分合法 LSN 0 与无效哨兵；恢复会忽略未初始化
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
 
+执行器架构当前以 `src/executor/ExecutionPlan.{h,cpp}` 为唯一 Volcano 算子实现，
+`src/interfaces/executor.h` 只保留实际使用的 `IOperator` 契约；未接入的旧计划/表达式
+接口已删除。索引回表按 RID 直接读取并复用 page lock/MVCC 边界，但复杂 SQL producer
+仍可能通过明确的 legacy/materialized-row 适配边界进入算子树。
+
 DDL CREATE 失败清理已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；显式外层事务的 CREATE undo 及变更前快照恢复已接入 StorageEngine 事务上下文，外层 `ROLLBACK` 可恢复 DROP/REPLACE 并继续清理行级变更。为避免复用整库快照破坏语句原子性，快照已污染后另一条快照型 DDL 会 fail-closed；当前仍缺完整依赖图回滚、DDL 后 SAVEPOINT 的完整子事务语义和 PostgreSQL 隐式提交边界；含内存闭包式 DDL undo 的事务暂不支持 PREPARE TRANSACTION。
 
 表空间物理路由已在本轮收敛：关系文件统一放在 `pg_default` 数据库目录或

@@ -866,7 +866,15 @@ public:
     bool readRowByRid(PageAllocator* pa, int64_t rid, std::string& rowBuffer, const TableSchema& tbl) const;
     bool readVisibleRowByRid(const std::string& dbname, PageAllocator* pa, int64_t rid,
                               std::string& rowBuffer, const TableSchema& tbl,
-                              const ReadView* readView = nullptr) const;
+                              const ReadView* readView = nullptr,
+                              bool* readFailed = nullptr) const;
+    // Direct index fetch with the same page-lock and MVCC boundary as a heap
+    // scan. The executor uses this instead of scanning all heap rows per RID.
+    bool readIndexedRowByRid(const std::string& dbname, const std::string& tablename,
+                             int64_t rid, std::string& rowBuffer,
+                             const TableSchema& tbl,
+                             const ReadView* readView = nullptr,
+                             bool* readFailed = nullptr) const;
 
     // Schema helpers (public for execution plan use)
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);

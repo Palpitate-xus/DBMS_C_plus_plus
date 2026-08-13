@@ -58,6 +58,7 @@
 | 2026-08-11 | CLOG 崩溃安全收敛：`pg_xact` 段采用临时文件完整写入、段文件 `fsync`、原子 rename 与目录 `fsync`；写入失败保留 dirty 状态，数据库目录或 `pg_xact` 被删除时不重建旧路径，`clog_test` 持久化回归通过。 |
 | 2026-08-13 | SSI 索引谓词收敛：单列主键/二级 B+Tree 的 `=、<、<=、>、>=` 谓词登记事务级逻辑 SIREAD，INSERT/UPDATE/DELETE 登记对应索引键，COMMIT 按 B+Tree 固定宽度顺序检测谓词/写键重叠并纳入 dangerous-structure；`phase5_remaining_test` 通过。物理索引范围 predicate lock、复合/表达式/部分索引、其他访问方法、完整 SSI 图和安全快照仍待后续。 |
 | 2026-08-13 | B+Tree 键边界收敛：插入、查找、多值查找、删除和范围扫描公共 API 统一按当前 20 字节固定键规范化；长键截断、重开索引和范围端点回归由 `gin_brin_index_test` 验证。旧索引文件按当前格式重建，不保留历史索引兼容。 |
+| 2026-08-13 | 执行器架构清理：删除无调用方的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为唯一 Volcano 生命周期契约；修正文档中已不存在的 `src/optimizer/` 路径。`IndexScanOp` 按 RID 直接回表并复用 page lock/MVCC，避免每个索引命中扫描全表；Volcano 专项与全量回归覆盖该边界。 |
 | 2026-08-11 | 锁失败传播收敛：`LockManager` bool API 全部标记 `[[nodiscard]]`，`TableManage` 的 DDL/DML/索引/扫描/TOAST/JOIN/聚合/VACUUM 调用方显式返回 `LOCK_CONFLICT`、空结果或扫描失败；rename 按名称顺序获取双表锁，新增 `lock_failure_propagation_test` 验证真实表锁竞争 fail-closed。 |
 | 2026-08-11 | DDL CREATE undo 收敛：`DdlTransaction` 新增 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation 的撤销路径；collation 文件读写统一进入 `StorageEngine`，新增辅助对象回滚回归。显式外层事务跨语句 DDL、DROP/REPLACE 旧对象恢复和完整依赖 undo 仍待后续。 |
 | 2026-08-11 | `LockManager` 并发安全收敛：修复 row/page 等待路径的 map 元素生命周期风险，批量解锁只释放当前线程拥有的锁 token，表锁重入不重复获取底层 mutex，共享锁升级平衡物理 token，等待期间持续刷新 wait-for graph 并检测双线程死锁；新增真实线程回归 `lock_manager_concurrency_test`。页/索引 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 规则仍待后续。 |
@@ -285,7 +286,7 @@
 | DDL 对象模型 | 基础 | 简化→中量（模块+测试） | 仍有架构缺口 | CatalogService 已接入运行时；pg_class/attribute/type/proc/depend/namespace + OID/依赖 CASCADE/RESTRICT 的主要 DDL 路径可验证，但 DML 全量目录化、owner/ACL、对象全集依赖和 legacy 分发拆分仍缺 |
 | 约束 | 6 类 | 5 类 | 1 类 ❌ | DEFAULT/GENERATED STORED/IDENTITY/CHECK 已接入 INSERT/UPDATE 执行路径（ExprHelper + ExprEvaluator）；DEFERRABLE 延迟队列+提交时检查已实现；EXCLUDE 执行检查已实现；constraint trigger 仍 ⚠️ |
 | DQL/查询 | 大量 | 中量 | 大量 | SELECT 已解析为 AST（CTE/JOIN/SET OPS）；执行仍走旧 switch/case |
-| 优化器/执行器 | 简化 | 中量 | 大量 ❌ | `src/optimizer/` 仍为空；Path/RelOptInfo 框架未建（Phase 5 未启动） |
+| 优化器/执行器 | 简化 | 中量 | 大量 ❌ | Volcano 算子已统一位于 `src/executor/`，但完整 Path/RelOptInfo/cost-based planner 框架仍未建 |
 | 索引 | 6 种 | 简化 | 大量 ❌ | IIndexAM 适配器已统一；AM API/opclass/concurrent/维护仍 ❌ |
 | 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI 已有行级/页级写偏差检测与空范围关系级 SIREAD，索引范围粒度及完整子事务仍 ❌ |
 | 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
@@ -490,7 +491,7 @@
 
 ## 7. 查询优化器和执行器差距
 
-> **已完成进展（2026-06-21）**：解析/分析层已分层（Parser → AST，`src/parser/`），`execute()` 不再是纯字符串分发器，DDL 经 `DdlExecutor` 驱动；7.1 由 ❌ 上调为 🔄。但**优化器框架尚未建立**：`src/optimizer/` 目录为空，无 `Path`/`RelOptInfo`/`PlannerInfo` 框架（Phase 5 未启动），故 7.2~7.4 仍为 ⚠️/❌，7.5/7.6/7.7（并行/JIT/AIO）仍 ❌。
+> **已完成进展（2026-08-13）**：解析/分析层已分层（Parser → AST，`src/parser/`），Volcano 算子统一位于 `src/executor/` 并通过 `IOperator` 接口执行；`execute()` 不再是纯字符串分发器，DDL 经 `DdlExecutor` 驱动，复杂路径仍有明确 legacy/materialized-row 边界。完整 Path/RelOptInfo/PlannerInfo cost-based planner 框架仍未建立，故 7.2~7.4 仍为 ⚠️/❌，7.5/7.6/7.7（并行/JIT/AIO）仍 ❌。
 
 | # | PostgreSQL 能力 | 差距描述 | 状态 |
 |---|----------------|---------|------|
@@ -664,7 +665,7 @@
 | 16.7 | **扩展系统** — 没有插件加载框架、Hook 系统、共享内存扩展 | EXTENSION、FDW、PL、自定义类型 | 极高 | ❌ Phase 10 待办 |
 | 16.8 | **多进程模型** — 项目是多线程 server，PG 是多进程 backend + shared memory | 连接隔离、崩溃恢复、共享内存 | 高 | ❌ Phase 9 待办 |
 | 16.9 | **Buffer Manager** — 缺少 shared buffers、clock sweep、pin/lock、bgwriter、walwriter | I/O 性能、并发、恢复 | 高 | ✅ `BufferPool`(clock sweep + pin/usage) + bgwriter/checkpointer/walwriter 后台线程已实现（Phase 3.3/3.4） |
-| 16.10 | **Cost-based Planner 框架** — 缺少 path/relation/statistics 框架 | 查询优化质量、并行查询、自适应优化 | 极高 | ❌ `src/optimizer/` 为空，Phase 5 未启动 |
+| 16.10 | **Cost-based Planner 框架** — 缺少 path/relation/statistics 框架 | 查询优化质量、并行查询、自适应优化 | 极高 | ❌ Volcano 执行器已在 `src/executor/`，但 Path/RelOptInfo/PlannerInfo 框架仍未建立 |
 
 ---
 
