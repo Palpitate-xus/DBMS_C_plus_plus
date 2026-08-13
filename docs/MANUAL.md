@@ -1,6 +1,6 @@
 # DBMS 完整使用手册
 
-> 最后更新: 2026-08-12
+> 最后更新: 2026-08-13
 > 版本: v2 存储格式 / 生产化重构阶段
 > 回归基线: PASS=138 FAIL=0（136 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
 
@@ -50,6 +50,11 @@
 
 # 方式二: CMake
 cmake -S . -B build && cmake --build build -j$(nproc)
+
+# CMake 标准完整回归（等价于 scripts/build_tests.sh）
+cmake --build build --target check
+# 或
+ctest --test-dir build --output-on-failure
 ```
 
 ### 运行

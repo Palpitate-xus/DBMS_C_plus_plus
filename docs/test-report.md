@@ -1,6 +1,6 @@
 # DBMS 功能测试报告
 
-> 最后更新：2026-08-12
+> 最后更新：2026-08-13
 > 自动测试套件基线：PASS=138 FAIL=0（136 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
@@ -31,7 +31,8 @@
 - DDL 外层事务回归：`ddl_transaction_skeleton_test` 验证多个 CREATE 跨语句由外层 `ROLLBACK` 逆序撤销，并验证 `ROLLBACK TO SAVEPOINT` 只撤销保存点后的 CREATE；含该内存 undo 队列的事务会拒绝 `PREPARE TRANSACTION`。
 - 2PC 跨 backend/跨进程重启回归：`prepared_transaction_test` 由独立子进程创建 prepared 事务，验证 PREPARE 前刷出 heap/index 缓存、prepared 文件 durable 原子发布、表/row/page/gap 锁在另一进程完成前持续阻塞、重启后锁 ownership 重建、`COMMIT PREPARED` 后数据可见、`ROLLBACK PREPARED` 后数据不可见、顺序/索引条件查询均不可见，以及事务内拒绝完成 prepared transaction。
 - DDL DROP/REPLACE 回归：`ddl_transaction_skeleton_test` 验证 DROP TABLE 与 CREATE OR REPLACE VIEW 的变更前快照恢复，外层回滚先恢复对象再撤销同一事务中的新增行；快照已被 DDL 修改后另一条快照型 DDL 及 SAVEPOINT 会 fail-closed。
-- CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
+- CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，并在配置阶段校验源文件存在性、重复项和 `src/main.cpp` 入口，避免生产源文件列表漂移。
+- CMake 现在提供 `check`/CTest 标准入口；它们调用唯一的 `scripts/build_tests.sh` 完整测试编排器，不再复制 standalone test 的链接、stub 选择或 E2E 调度逻辑。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。
 - `./scripts/build_tests.sh` 是唯一的完整测试编排实现，会先通过 `build_common.sh` 的共享逻辑检查并构建 `dbms_main`，再缓存生产对象、逐个测试独立链接运行，并自动执行两个 E2E；因此不依赖调用者预先运行 `build.sh`。`run_all_tests_fast.sh` 仅捕获其成功输出并显示 PASS 计数，失败时原样打印完整编译/链接/运行日志。
 - 文档一致性检查确认根目录旧版 `MANUAL.md` 已移除，`docs/MANUAL.md` 是唯一受 README 与测试/部署文档引用的完整手册。

@@ -1,12 +1,38 @@
 cmake_minimum_required(VERSION 3.16)
 project(DBMS_C_plus_plus VERSION 0.1.0 LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 所有子目录加入头文件搜索路径
-include_directories(
+# Single source of truth for production translation units. The shell build and
+# test scripts consume the same manifest, so adding/removing a module cannot
+# silently make the build entry points disagree.
+file(STRINGS "${CMAKE_SOURCE_DIR}/cmake/dbms_sources.txt" DBMS_SOURCES)
+
+list(FILTER DBMS_SOURCES EXCLUDE REGEX "^[[:space:]]*$")
+list(FILTER DBMS_SOURCES EXCLUDE REGEX "^[[:space:]]*#")
+list(LENGTH DBMS_SOURCES DBMS_SOURCE_COUNT)
+list(REMOVE_DUPLICATES DBMS_SOURCES)
+list(LENGTH DBMS_SOURCES DBMS_UNIQUE_SOURCE_COUNT)
+if(NOT DBMS_SOURCE_COUNT EQUAL DBMS_UNIQUE_SOURCE_COUNT)
+    message(FATAL_ERROR "cmake/dbms_sources.txt contains duplicate production sources")
+endif()
+list(FILTER DBMS_SOURCES INCLUDE REGEX "^src/")
+if(NOT "src/main.cpp" IN_LIST DBMS_SOURCES)
+    message(FATAL_ERROR "cmake/dbms_sources.txt must contain src/main.cpp")
+endif()
+foreach(DBMS_SOURCE IN LISTS DBMS_SOURCES)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/${DBMS_SOURCE}")
+        message(FATAL_ERROR "Manifest source does not exist: ${DBMS_SOURCE}")
+    endif()
+endforeach()
+
+add_executable(dbms_main ${DBMS_SOURCES})
+
+target_include_directories(dbms_main PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/common
     ${CMAKE_SOURCE_DIR}/src/storage
@@ -24,13 +50,6 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/process
 )
 
-# Single source of truth for production translation units. The shell build and
-# test scripts consume the same manifest, so adding/removing a module cannot
-# silently make the build entry points disagree.
-file(STRINGS "${CMAKE_SOURCE_DIR}/cmake/dbms_sources.txt" DBMS_SOURCES)
-
-add_executable(dbms_main ${DBMS_SOURCES})
-
 target_compile_options(dbms_main PRIVATE
     -O2
     -pthread
@@ -41,6 +60,26 @@ target_compile_options(dbms_main PRIVATE
 target_link_libraries(dbms_main PRIVATE
     pthread
 )
+
+# Keep one complete test orchestrator. The shell runner owns the intentionally
+# standalone test linking/stub policy and the two protocol E2E tests; CMake
+# exposes it as a normal build/check/CTest entry instead of reimplementing a
+# second, potentially divergent test harness.
+add_custom_target(check
+    COMMAND "${CMAKE_SOURCE_DIR}/scripts/build_tests.sh"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    USES_TERMINAL
+    COMMENT "Building and running the complete DBMS regression suite"
+)
+add_custom_target(test-suite DEPENDS check)
+if(BUILD_TESTING)
+    add_test(
+        NAME dbms_full_regression
+        COMMAND "${CMAKE_SOURCE_DIR}/scripts/build_tests.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(dbms_full_regression PROPERTIES TIMEOUT 1800)
+endif()
 
 # TOAST compression is part of the current storage format. Old uncompressed
 # TOAST files are intentionally not supported by this production format.

@@ -1,6 +1,6 @@
 # 生产化状态
 
-最后更新：2026-08-12
+最后更新：2026-08-13
 
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，136 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=138 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
@@ -61,7 +61,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 - 删除确认无引用的 helper 和重复的 parser/聚合辅助代码。
 - 删除未被执行器使用的 `IStorageEngine` 伪适配层；`StorageEngine` 不再提供会静默返回空结果、0 或伪成功的接口 wrapper。
 - 统一构建源文件清单为 `cmake/dbms_sources.txt`；CMake、主程序脚本和测试脚本不再各自维护生产源列表。
-- 四个 shell 构建/测试入口统一复用 `scripts/build_common.sh` 的编译选项、include、TLS 检测和链接库；生产二进制和测试对象都记录配置指纹，编译参数、TLS 模式或源码变化会自动触发重建。测试编排唯一由 `build_tests.sh` 负责，且会自包含地构建 E2E 所需的 `dbms_main`；`run_all_tests_fast.sh` 仅提供安静输出并在失败时保留完整诊断。
+- 四个 shell 构建/测试入口统一复用 `scripts/build_common.sh` 的编译选项、include、TLS 检测和链接库；生产二进制和测试对象都记录配置指纹，编译参数、TLS 模式或源码变化会自动触发重建。测试编排唯一由 `build_tests.sh` 负责，且会自包含地构建 E2E 所需的 `dbms_main`；`run_all_tests_fast.sh` 仅提供安静输出并在失败时保留完整诊断。CMake 现在提供 `check`/CTest 标准入口，直接调用同一编排器并在配置阶段校验 manifest 源文件、重复项和入口文件。
 - 生产二进制构建失败时测试入口立即 fail-closed，不会继续运行旧的 `dbms_main` 或报告混合版本结果。
 - 测试运行时隔离已收敛：每个独立 C++ 测试使用临时工作目录，退出后回收其 WAL、catalog、`.txnid`、日志和测试数据库；`build_one_test.sh` 与完整入口共享同一隔离函数。
 - DDL bridge 对已归属 AST 路径的解析失败改为 fail-closed，不再把语法错误交给 legacy 分发；`DdlExecutor` 解析失败也明确返回错误。
