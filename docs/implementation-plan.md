@@ -303,6 +303,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - 采用 page-image WAL：insert/update/delete 在修改前写 before-image（undo），修改后写 after-image（redo）并更新页面 LSN 与 checksum。
   - `StorageEngine` 集成 WAL：事务 commit 写 XACT_COMMIT 并 flush；rollback 先按 before-image 回滚再写 XACT_ABORT；`checkpoint()` 写 CHECKPOINT 记录并持久化 checkpoint LSN。
   - 崩溃恢复 `recoverAllDatabases()`：第一趟收集已提交/已中止事务并更新 CLOG；第二阶段先按 WAL 正序应用已提交/非事务 after-image（redo），再按逆序应用未提交事务 before-image（undo）。
+  - WAL/恢复输入 fail-closed：记录长度、8 字节对齐、CRC、`xl_prev` 链和 segment 尾部严格校验；heap page image 必须通过页面结构校验，恢复只允许连续 page ID，损坏 WAL 不会触发无界分配。
   - **Timeline 与归档状态**：WALManager 支持 timeline ID（`setTimeline` / `timelineId`），持久化到 `pg_wal/timeline`；`pg_wal/archive_status/` 下维护 `.ready` / `.done` 文件，`checkpoint()` 自动将已完成 segment 标记为 `.ready`，`archivePendingSegments()` 按 segment 归档到 `wal_archive`。
   - checkpoint 归档成功后，`truncateBefore()` 在同一 WAL 文件锁内回收 checkpoint 之前的已归档完整 segment；恢复扫描从最早保留 segment 开始，避免回收后仍固定读取 LSN 0。
   - 新增测试：`tests/wal_basic_test.cpp`、`tests/wal_full_page_write_test.cpp`、`tests/checkpoint_test.cpp`、`tests/redo_crash_recovery_test.cpp`、`tests/wal_timeline_archive_test.cpp`、`tests/wal_truncate_test.cpp`。

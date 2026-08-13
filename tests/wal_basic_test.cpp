@@ -57,6 +57,7 @@ int main() {
 
     WALManager wal(walDir);
     assert(wal.ensureOpen());
+    assert(wal.XLogFlush(0));
 
     // Verify WAL directory and segment file exist.
     std::cerr << "[WAL BASIC] walDir exists=" << std::filesystem::exists(walDir)
@@ -81,11 +82,16 @@ int main() {
     bool foundIndexAfter = false;
     bool foundCommit = false;
     Lsn lsn = 0;
+    Lsn previousLsn = 0;
+    bool firstRecord = true;
     int recCount = 0;
     while (true) {
         auto recOpt = wal.ReadRecord(lsn);
         if (!recOpt) break;
         const XLogRecord& rec = *recOpt;
+        assert(rec.header.xl_prev == (firstRecord ? 0 : previousLsn));
+        firstRecord = false;
+        previousLsn = lsn;
         ++recCount;
         std::cerr << "[WAL BASIC] record rmid=" << (int)rec.rmid()
                   << " info=" << (int)rec.info()

@@ -90,7 +90,7 @@
 - **页分配器**：空闲页链表管理，支持页复用
 - **Buffer Pool**：clock-sweep 缓存，保护 pinned 页并在淘汰前保留脏页写盘失败状态
 - **页完整性**：Fletcher-16 heap page 校验和 + FNV 文件头校验；布局、line pointer、页数和截断边界均 fail-closed，损坏页不会暴露给执行层
-- **WAL 日志**：Write-Ahead Logging 支持崩溃恢复
+- **WAL 日志**：Write-Ahead Logging 支持崩溃恢复；记录长度/CRC/对齐/`xl_prev` 链和 heap page image 严格校验，损坏输入 fail-closed
 - **Checkpoint**：`CHECKPOINT` 命令刷盘已加载的 heap/index 脏缓存、写入 checkpoint WAL 记录并持久化 checkpoint LSN；活动事务期间不会推进恢复起点，并在归档成功后回收 checkpoint 之前的 WAL 段
 - **fsync 持久化**：WAL、CLOG 段和事务提交、Checkpoint 均检查 `fsync()`；CLOG 段采用临时文件原子替换并持久化 `pg_xact` 目录，事务只有在 COMMIT WAL 和 CLOG 状态都成功刷盘后才报告提交成功，CLOG 刷盘失败会追加 ABORT WAL、回滚并 fail-closed
 - **Catalog 持久化**：系统 catalog 使用临时文件、文件 `fsync`、原子替换和目录 `fsync`；checkpoint 与 DDL 事务快照在 catalog 持久化失败时 fail-closed

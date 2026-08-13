@@ -116,6 +116,9 @@ class WALManager {
 public:
     // Segment size is part of the on-disk WAL format.
     static constexpr uint64_t kSegmentSize = 16 * 1024 * 1024; // 16 MiB
+    // A single record may span segments, but it must remain bounded so a
+    // damaged length field cannot force unbounded recovery allocation.
+    static constexpr uint32_t kMaxRecordPayload = 256 * 1024 * 1024;
 
     explicit WALManager(const std::filesystem::path& walDir);
     ~WALManager();
@@ -202,6 +205,8 @@ private:
     bool loadTimeline();
     bool persistTimeline();
     bool refreshCurrentLsnFromDisk();
+    bool validateRecordsOnDisk() const;
+    std::optional<Lsn> lastRecordLsn() const;
 
     int acquireWalFileLock() const;
     static void releaseWalFileLock(int fd);

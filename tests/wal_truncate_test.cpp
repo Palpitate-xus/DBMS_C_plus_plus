@@ -4,7 +4,6 @@
 #include "WAL.h"
 #include <cassert>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 
 using namespace dbms;
@@ -15,17 +14,17 @@ int main() {
     std::filesystem::remove_all(walDir);
 
     WALManager wal(walDir);
+    assert(wal.ensureOpen());
+    // Build two complete valid segments.  Empty segment files are not valid
+    // WAL and must be rejected by the startup integrity scan.
+    const std::vector<char> payload(WALManager::kSegmentSize - sizeof(XLogRecHeader), 'x');
+    assert(wal.XLogInsert(RM_CHECKPOINT_ID, XLOG_CHECKPOINT_ONLINE, 1, payload) != INVALID_LSN);
+    assert(wal.XLogInsert(RM_CHECKPOINT_ID, XLOG_CHECKPOINT_ONLINE, 1, {'y'}) != INVALID_LSN);
+    assert(wal.XLogFlush(wal.currentWriteLsn()));
     const auto segment0 = wal.segmentPath(0);
     const auto segment1 = wal.segmentPath(1);
-    std::filesystem::create_directories(walDir);
-    {
-        std::ofstream(segment0).close();
-        std::ofstream(segment1).close();
-        std::filesystem::resize_file(segment0, WALManager::kSegmentSize);
-        std::filesystem::resize_file(segment1, WALManager::kSegmentSize);
-    }
-
-    assert(wal.ensureOpen());
+    assert(std::filesystem::exists(segment0));
+    assert(std::filesystem::exists(segment1));
     assert(wal.earliestAvailableLsn() == 0);
     assert(wal.markSegmentReadyForArchive(0));
     assert(!wal.truncateBefore(WALManager::kSegmentSize));

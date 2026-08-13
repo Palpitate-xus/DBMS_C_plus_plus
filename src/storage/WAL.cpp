@@ -160,6 +160,10 @@ bool WALManager::ensureOpen() {
 
     if (!refreshCurrentLsnFromDisk()) return false;
     open_ = true;
+    if (!validateRecordsOnDisk()) {
+        open_ = false;
+        return false;
+    }
     return true;
 }
 
@@ -187,6 +191,45 @@ bool WALManager::refreshCurrentLsnFromDisk() {
         currentLsn_ = static_cast<Lsn>(maxSeg) * kSegmentSize + size;
     }
     return true;
+}
+
+bool WALManager::validateRecordsOnDisk() const {
+    Lsn lsn = earliestAvailableLsn();
+    std::optional<Lsn> previous;
+    while (lsn < currentLsn_) {
+        auto rec = ReadRecord(lsn);
+        if (!rec) return false;
+        if (previous) {
+            if (rec->header.xl_prev != *previous) return false;
+        } else if ((lsn == 0 && rec->header.xl_prev != 0) ||
+                   (lsn != 0 && rec->header.xl_prev >= lsn)) {
+            // The first retained record may point to a segment already
+            // truncated from this WAL directory, but never forward into the
+            // retained stream.
+            return false;
+        }
+        previous = lsn;
+        const Lsn next = lsn + rec->header.xl_tot_len;
+        if (next <= lsn || next > currentLsn_) return false;
+        lsn = next;
+    }
+    return lsn == currentLsn_;
+}
+
+std::optional<Lsn> WALManager::lastRecordLsn() const {
+    if (currentLsn_ == 0) return std::nullopt;
+    if (!validateRecordsOnDisk()) return std::nullopt;
+    Lsn lsn = earliestAvailableLsn();
+    std::optional<Lsn> previous;
+    while (lsn < currentLsn_) {
+        auto rec = ReadRecord(lsn);
+        if (!rec) return std::nullopt;
+        previous = lsn;
+        const Lsn next = lsn + rec->header.xl_tot_len;
+        if (next <= lsn || next > currentLsn_) return std::nullopt;
+        lsn = next;
+    }
+    return lsn == currentLsn_ ? previous : std::nullopt;
 }
 
 int WALManager::acquireWalFileLock() const {
@@ -506,12 +549,14 @@ uint32_t WALManager::computeCrc(const char* data, size_t len) const {
 
 bool WALManager::verifyCrc(const XLogRecord& rec) const {
     uint32_t totLen = rec.header.xl_tot_len;
+    if (totLen < sizeof(XLogRecHeader) ||
+        totLen != sizeof(XLogRecHeader) + rec.data.size()) return false;
     std::string buf;
     buf.reserve(totLen);
     XLogRecHeader headerCopy = rec.header;
     headerCopy.xl_crc = 0;
     buf.append(reinterpret_cast<const char*>(&headerCopy), sizeof(XLogRecHeader));
-    buf.append(rec.data.data(), rec.data.size());
+    if (!rec.data.empty()) buf.append(rec.data.data(), rec.data.size());
     uint32_t expected = computeCrc(buf.data(), buf.size());
     return expected == rec.header.xl_crc;
 }
@@ -596,12 +641,27 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
         return INVALID_LSN;
     }
 
+    if (data.size() > kMaxRecordPayload ||
+        data.size() > std::numeric_limits<uint32_t>::max() - sizeof(XLogRecHeader)) {
+        releaseWalFileLock(walLock);
+        return INVALID_LSN;
+    }
     uint32_t payloadLen = static_cast<uint32_t>(data.size());
-    uint32_t totalLen = static_cast<uint32_t>(
-        alignLen(sizeof(XLogRecHeader) + payloadLen, MAXALIGN));
+    const uint64_t alignedLen = alignLen(sizeof(XLogRecHeader) + payloadLen, MAXALIGN);
+    if (alignedLen > std::numeric_limits<uint32_t>::max()) {
+        releaseWalFileLock(walLock);
+        return INVALID_LSN;
+    }
+    uint32_t totalLen = static_cast<uint32_t>(alignedLen);
+
+    const auto previousLsn = lastRecordLsn();
+    if (currentLsn_ != 0 && !previousLsn) {
+        releaseWalFileLock(walLock);
+        return INVALID_LSN;
+    }
 
     XLogRecHeader header;
-    header.xl_prev = 0;
+    header.xl_prev = previousLsn.value_or(0);
     header.xl_tot_len = totalLen;
     header.xl_info = (static_cast<uint32_t>(rmid) << 8) | info;
     header.xl_xid = xid;
@@ -637,8 +697,29 @@ bool WALManager::XLogFlush(Lsn targetLsn) {
     std::lock_guard<std::mutex> processLock(walProcessMutex);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
+    if (targetLsn > currentLsn_) {
+        releaseWalFileLock(walLock);
+        return false;
+    }
+    Lsn endLsn = targetLsn;
+    if (targetLsn < currentLsn_) {
+        const auto record = ReadRecord(targetLsn);
+        if (!record) {
+            releaseWalFileLock(walLock);
+            return false;
+        }
+        endLsn = targetLsn + record->header.xl_tot_len;
+        if (endLsn <= targetLsn || endLsn > currentLsn_) {
+            releaseWalFileLock(walLock);
+            return false;
+        }
+    }
+    if (endLsn == 0) {
+        releaseWalFileLock(walLock);
+        return true;
+    }
     uint32_t startSeg = segmentNumber(earliestAvailableLsn());
-    uint32_t endSeg = segmentNumber(targetLsn);
+    uint32_t endSeg = segmentNumber(endLsn - 1);
     for (uint32_t seg = startSeg; seg <= endSeg; ++seg) {
         if (!syncSegment(seg)) {
             releaseWalFileLock(walLock);
@@ -650,18 +731,22 @@ bool WALManager::XLogFlush(Lsn targetLsn) {
 }
 
 std::optional<XLogRecord> WALManager::ReadRecord(Lsn lsn) const {
-    if (!open_ || lsn >= currentLsn_) return std::nullopt;
+    if (!open_ || lsn >= currentLsn_ || (lsn % MAXALIGN) != 0) return std::nullopt;
     XLogRecHeader header;
     if (!readBytes(lsn, reinterpret_cast<char*>(&header), sizeof(header))) {
         return std::nullopt;
     }
-    if (header.xl_tot_len < sizeof(header) || header.xl_tot_len > 1u << 30) {
+    if (header.xl_tot_len < sizeof(header) ||
+        header.xl_tot_len > sizeof(header) + kMaxRecordPayload + MAXALIGN - 1 ||
+        (header.xl_tot_len % MAXALIGN) != 0 ||
+        static_cast<uint64_t>(header.xl_tot_len) > currentLsn_ - lsn) {
         return std::nullopt;
     }
     XLogRecord rec;
     rec.header = header;
     rec.data.resize(header.xl_tot_len - sizeof(header));
-    if (!readBytes(lsn + sizeof(header), rec.data.data(), rec.data.size())) {
+    if (!rec.data.empty() &&
+        !readBytes(lsn + sizeof(header), rec.data.data(), rec.data.size())) {
         return std::nullopt;
     }
     if (!verifyCrc(rec)) return std::nullopt;
@@ -674,7 +759,9 @@ std::optional<XLogRecord> WALManager::ReadNextRecord(Lsn lsn) const {
     }
     auto rec = ReadRecord(lsn);
     if (!rec) return std::nullopt;
-    return ReadRecord(lsn + rec->header.xl_tot_len);
+    const Lsn next = lsn + rec->header.xl_tot_len;
+    if (next < lsn) return std::nullopt;
+    return ReadRecord(next);
 }
 
 std::optional<Lsn> WALManager::findLastCheckpointLsn() const {
@@ -722,19 +809,19 @@ namespace {
 //   [HEAP_UPDATE:] uint32_t newBlockNum, uint32_t newForkNum, uint16_t newSlotId
 
 bool readU32(const char*& p, const char* end, uint32_t& out) {
-    if (p + sizeof(uint32_t) > end) return false;
+    if (p > end || static_cast<size_t>(end - p) < sizeof(uint32_t)) return false;
     std::memcpy(&out, p, sizeof(out));
     p += sizeof(out);
     return true;
 }
 bool readU16(const char*& p, const char* end, uint16_t& out) {
-    if (p + sizeof(uint16_t) > end) return false;
+    if (p > end || static_cast<size_t>(end - p) < sizeof(uint16_t)) return false;
     std::memcpy(&out, p, sizeof(out));
     p += sizeof(out);
     return true;
 }
 bool readU64(const char*& p, const char* end, uint64_t& out) {
-    if (p + sizeof(uint64_t) > end) return false;
+    if (p > end || static_cast<size_t>(end - p) < sizeof(uint64_t)) return false;
     std::memcpy(&out, p, sizeof(out));
     p += sizeof(out);
     return true;
@@ -742,7 +829,7 @@ bool readU64(const char*& p, const char* end, uint64_t& out) {
 bool readString(const char*& p, const char* end, std::string& out) {
     uint32_t len = 0;
     if (!readU32(p, end, len)) return false;
-    if (p + len > end) return false;
+    if (p > end || static_cast<size_t>(end - p) < len) return false;
     out.assign(p, len);
     p += len;
     return true;
@@ -783,12 +870,12 @@ bool RedoApplyRecord(const XLogRecord& rec,
         if (info == XLOG_HEAP_PAGE_BEFORE || info == XLOG_HEAP_PAGE_AFTER) {
             uint32_t pageLen = 0;
             if (!readU32(p, end, pageLen)) return false;
-            if (p + pageLen > end) return false;
+            if (p > end || static_cast<size_t>(end - p) < pageLen) return false;
             return redoPageImage(tableName, blockNum, forkNum, p, pageLen);
         } else if (info == XLOG_HEAP_INSERT) {
             uint32_t rowLen = 0;
             if (!readU32(p, end, rowLen)) return false;
-            if (p + rowLen > end) return false;
+            if (p > end || static_cast<size_t>(end - p) < rowLen) return false;
             return redoInsert(tableName, blockNum, forkNum, slotId, p, rowLen);
         } else if (info == XLOG_HEAP_DELETE) {
             uint64_t xmax = 0;
@@ -802,7 +889,7 @@ bool RedoApplyRecord(const XLogRecord& rec,
             if (!readU32(p, end, newFork)) return false;
             if (!readU16(p, end, newSlot)) return false;
             if (!readU32(p, end, rowLen)) return false;
-            if (p + rowLen > end) return false;
+            if (p > end || static_cast<size_t>(end - p) < rowLen) return false;
             return redoUpdate(tableName, blockNum, forkNum, slotId, newBlock, newFork, newSlot, p, rowLen);
         }
         return false;

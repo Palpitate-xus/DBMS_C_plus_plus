@@ -9,6 +9,10 @@
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
+2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、对齐、CRC、`xl_prev` 链和 segment 尾部严格校验；
+恢复拒绝 checksum/layout 非法的 heap page image、非连续 page ID 和损坏记录，避免无界 page 分配或
+把恶意/损坏 WAL 数据写入关系。新增 WAL 链/长度、截断 segment、损坏 heap image 回归。
+
 2026-08-12 增量审计：WAL 归档先同步源段，再用临时文件完整复制、文件/目录 `fsync` 和原子 rename 发布归档段；`.ready`/`.done` 状态采用原子发布并在同一 WAL 文件锁内更新，失败保留可重试状态；timeline 元数据初始化/切换也不再吞掉持久化错误。
 
 2026-08-12 增量审计：2PC prepared 记录改为临时文件 + 文件/目录 `fsync` + 原子 rename，并写入/刷盘 `XLOG_XACT_PREPARE`；PREPARE 前统一刷出 heap/index 缓存，避免完成 prepared transaction 的另一 backend 读到旧私有缓存。表、row、page、gap 锁的本地 mutex token 与进程 advisory lock 分离，prepared xid 保留 advisory 所有权并允许任一 backend 完成时安全释放；跨 backend 提交/回滚与锁阻塞新增真实回归。全局 prepared 目录、跨进程恢复和崩溃后 in-doubt 决策仍是 1.1.15 缺口。

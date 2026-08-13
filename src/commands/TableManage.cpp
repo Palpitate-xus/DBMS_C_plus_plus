@@ -8485,6 +8485,7 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
         }
         if (!inserted) {
             uint32_t pid = pa->allocPage();
+            if (pid == 0) return false;
             if (!lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid)) return false;
             char* buf = pa->fetchPage(pid);
             if (!buf) {
@@ -13056,6 +13057,10 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
         if (!inserted) {
             pageId = pa->allocPage();
+            if (pageId == 0) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
             if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::LOCK_CONFLICT;
@@ -19350,7 +19355,9 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
                                   Lsn recordLsn, bool force) {
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     if (!pa) return false;
-    if (pa->pageSize() != pageLen) return false;
+    if (pageId == 0 || pa->pageSize() != pageLen || !pageData) return false;
+    PgPage image(const_cast<char*>(pageData));
+    if (!image.isValid()) return false;
 
     // Skip if page already has a newer or equal LSN, unless forced (undo).
     if (!force && pageId < pa->numPages()) {
@@ -19365,9 +19372,11 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
         }
     }
 
-    // Ensure the page exists.
-    while (pageId >= pa->numPages()) {
-        pa->allocPage();
+    // WAL page images are emitted by the sequential allocator.  A gap would
+    // require an unbounded allocation loop and indicates missing/corrupt WAL.
+    if (pageId > pa->numPages()) return false;
+    if (pageId == pa->numPages() && pa->allocPage() != pageId) {
+        return false;
     }
 
     // Write the page image directly through the buffer pool.

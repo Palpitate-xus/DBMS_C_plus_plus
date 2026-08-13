@@ -203,7 +203,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | Free Space Map | ✅ | ✅ | ✅ |
 | Visibility Map | ✅ | ✅ | ✅ |
 | TOAST (大字段压缩/线外存储) | ✅ | ⚠️ | relation/index + zlib 压缩，TOAST page/index 写入失败会 fail-closed；缺少 PG pointer/catalog 完整语义 |
-| 页校验和 | ✅ | ✅ | ✅ |
+| 页校验和 | ✅ | ✅ | 页面/文件头 checksum、布局、WAL page image 均 fail-closed；损坏 WAL/非法 page ID 拒绝恢复 |
 | 溢出页 | ✅ | ✅ | ✅ |
 | 子事务日志 | ✅ | ✅ | ✅ |
 | **TOAST 压缩 (lz4/pglz)** | ✅ | ⚠️ zlib | 已有压缩标记/解压；lz4/pglz、压缩策略和 `toast_tuple_target` 仍缺 |
