@@ -4,6 +4,10 @@
 > 自动测试套件基线：PASS=138 FAIL=0（136 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
+本轮新增 Volcano 执行失败契约回归：合成 `open()` 失败必须由
+`executePlanChecked()` 返回 `ok=false` 和错误信息，不能与合法空结果混淆；兼容包装的
+迁移期行为也被明确固定。
+
 ---
 
 ## 测试环境

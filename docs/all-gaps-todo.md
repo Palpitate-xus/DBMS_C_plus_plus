@@ -58,6 +58,7 @@
 | 2026-08-11 | CLOG 崩溃安全收敛：`pg_xact` 段采用临时文件完整写入、段文件 `fsync`、原子 rename 与目录 `fsync`；写入失败保留 dirty 状态，数据库目录或 `pg_xact` 被删除时不重建旧路径，`clog_test` 持久化回归通过。 |
 | 2026-08-13 | SSI 索引谓词收敛：单列主键/二级 B+Tree 的 `=、<、<=、>、>=` 谓词登记事务级逻辑 SIREAD，INSERT/UPDATE/DELETE 登记对应索引键，COMMIT 按 B+Tree 固定宽度顺序检测谓词/写键重叠并纳入 dangerous-structure；`phase5_remaining_test` 通过。物理索引范围 predicate lock、复合/表达式/部分索引、其他访问方法、完整 SSI 图和安全快照仍待后续。 |
 | 2026-08-13 | B+Tree 键边界收敛：插入、查找、多值查找、删除和范围扫描公共 API 统一按当前 20 字节固定键规范化；长键截断、重开索引和范围端点回归由 `gin_brin_index_test` 验证。旧索引文件按当前格式重建，不保留历史索引兼容。 |
+| 2026-08-13 | Volcano 执行失败边界收敛：新增 `PlanExecutionResult`/`executePlanChecked()`，显式区分 EOF 与 `open()`/`next()` 失败；物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口检查结果，`volcano_select_phase51_test` 新增失败契约回归。兼容 `executePlan()` 暂保留，新的生产调用方不得使用。 |
 | 2026-08-13 | 执行器架构清理：删除无调用方的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为唯一 Volcano 生命周期契约；修正文档中已不存在的 `src/optimizer/` 路径。`IndexScanOp` 按 RID 直接回表并复用 page lock/MVCC，避免每个索引命中扫描全表；Volcano 专项与全量回归覆盖该边界。 |
 | 2026-08-13 | RLS/Volcano 安全边界修复：RLS 生效时禁用索引、bitmap、并行访问路径，所有结构化 SELECT 统一经 `forEachVisibleRow(..., "SELECT")` 评估 USING 策略；新增索引存在时阻止 RLS 绕过的专项回归。 |
 | 2026-08-13 | Volcano 访问方法收敛：删除未具备 visibility map/heap 可见性证明的伪 `IndexOnlyScanOp`；IndexScan 与 Bitmap AND/OR 统一使用 page lock、MVCC、SSI 保护的 RID heap fetch，并传播锁/I/O 失败。真正 index-only scan 仍待 visibility map。 |

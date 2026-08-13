@@ -22,6 +22,11 @@ public:
     // 获取下一行；返回 true 表示有数据，false 表示流结束
     virtual bool next(std::string& out) = 0;
 
+    // 错误状态与正常 EOF 分离。调用方必须在 next/open 返回 false 后
+    // 检查该状态，不能把页面 I/O、锁冲突或策略求值失败当成空结果。
+    virtual bool hasError() const { return false; }
+    virtual std::string errorMessage() const { return {}; }
+
     // 关闭：释放资源
     virtual void close() = 0;
 

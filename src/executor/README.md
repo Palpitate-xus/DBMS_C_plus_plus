@@ -6,6 +6,11 @@
 `src/executor/ExecutionPlan.h/.cpp`，并通过 `src/interfaces/executor.h` 的
 `IOperator` 生命周期接口接入 Volcano 执行模型。
 
+生产入口必须使用 `QueryPlanner::executePlanChecked()` 并检查
+`PlanExecutionResult::ok/error`；`next()` 返回 `false` 只表示没有更多行，调用方还
+必须检查 `hasError()`。旧的 `executePlan()` 仅作为迁移期兼容包装，失败时返回空行集合，
+不得用于新的生产路径。
+
 ## 未来迁移计划
 
 `QueryPlanner::buildSelectPlan()` 负责生成当前结构化计划；启用 RLS 的关系统一

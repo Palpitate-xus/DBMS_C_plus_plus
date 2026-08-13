@@ -35,11 +35,42 @@ public:
         return false;
     }
 
+    bool hasError() const override { return error_; }
+    std::string errorMessage() const override { return errorMessage_; }
+
     // Clean up resources
     void close() override = 0;
+
+protected:
+    void clearError() {
+        error_ = false;
+        errorMessage_.clear();
+    }
+    void setError(std::string message) {
+        error_ = true;
+        if (errorMessage_.empty()) errorMessage_ = std::move(message);
+    }
+    bool propagateChildError(const Operator* child, const std::string& fallback) {
+        if (child && child->hasError()) {
+            setError(child->errorMessage().empty() ? fallback : child->errorMessage());
+        } else {
+            setError(fallback);
+        }
+        return false;
+    }
+
+private:
+    bool error_ = false;
+    std::string errorMessage_;
 };
 
 using OpPtr = std::unique_ptr<Operator>;
+
+struct PlanExecutionResult {
+    std::vector<std::string> rows;
+    bool ok = true;
+    std::string error;
+};
 
 // MaterializedRows: adapter for result rows produced by a legacy or external
 // executor.  It lets higher-level operators consume those rows through the
@@ -361,7 +392,6 @@ public:
     bool open() override;
     bool next(std::string& outRow) override;
     void close() override;
-    const std::string& errorMessage() const { return errorMessage_; }
     Operator* outerChild() const { return outer_.get(); }
     Operator* innerChild() const { return inner_.get(); }
     const std::string& innerColumn() const { return innerColumn_; }
@@ -375,7 +405,6 @@ private:
     std::string innerColumn_;
     std::string scalarValue_;
     bool scalarIsNull_ = true;
-    std::string errorMessage_;
 };
 
 // ========================================================================
@@ -810,7 +839,11 @@ public:
                                    const std::string& dbname,
                                    const ExplainOptions& opts);
 
-    // Execute a plan built by buildSelectPlan and return result rows.
+    // Checked production entry point: EOF and execution failure are distinct.
+    static PlanExecutionResult executePlanChecked(OpPtr plan);
+
+    // Compatibility convenience for already-tested callers. New production
+    // call sites must use executePlanChecked() and inspect ok/error.
     static std::vector<std::string> executePlan(OpPtr plan);
 
     // Parallel query support: number of worker threads (0 = disabled).

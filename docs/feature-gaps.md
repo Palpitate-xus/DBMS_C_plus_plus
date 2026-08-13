@@ -12,7 +12,9 @@ WAL 当前明确区分合法 LSN 0 与无效哨兵；恢复会忽略未初始化
 执行器架构当前以 `src/executor/ExecutionPlan.{h,cpp}` 为唯一 Volcano 算子实现，
 `src/interfaces/executor.h` 只保留实际使用的 `IOperator` 契约；未接入的旧计划/表达式
 接口已删除。索引回表按 RID 直接读取并复用 page lock/MVCC 边界，但复杂 SQL producer
-仍可能通过明确的 legacy/materialized-row 适配边界进入算子树。
+仍可能通过明确的 legacy/materialized-row 适配边界进入算子树。执行入口已提供
+`executePlanChecked()`，显式区分 EOF 与执行失败；兼容 `executePlan()` 仍存在，待所有
+测试和 legacy producer 完成迁移后删除。
 
 DDL CREATE 失败清理已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；显式外层事务的 CREATE undo 及变更前快照恢复已接入 StorageEngine 事务上下文，外层 `ROLLBACK` 可恢复 DROP/REPLACE 并继续清理行级变更。为避免复用整库快照破坏语句原子性，快照已污染后另一条快照型 DDL 会 fail-closed；当前仍缺完整依赖图回滚、DDL 后 SAVEPOINT 的完整子事务语义和 PostgreSQL 隐式提交边界；含内存闭包式 DDL undo 的事务暂不支持 PREPARE TRANSACTION。
 

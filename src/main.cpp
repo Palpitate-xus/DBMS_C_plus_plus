@@ -3227,7 +3227,12 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
         else if (split.kind == SetOperationKind::Except) type = dbms::SetOperationType::Except;
         auto plan = dbms::QueryPlanner::buildSetOperationPlan(
             std::move(leftPlan.plan), std::move(rightPlan.plan), type, split.all);
-        auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+        auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+        if (!execution.ok) {
+            cout << "ERROR: " << execution.error << endl;
+            return true;
+        }
+        auto rows = std::move(execution.rows);
         cout << leftPlan.header << endl;
         for (const auto& row : rows) cout << row << endl;
         return false;
@@ -3264,7 +3269,12 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
         std::make_unique<dbms::MaterializedRowsOp>(std::move(leftRows)),
         std::make_unique<dbms::MaterializedRowsOp>(std::move(rightRows)),
         type, split.all);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+    if (!execution.ok) {
+        cout << "ERROR: " << execution.error << endl;
+        return true;
+    }
+    auto rows = std::move(execution.rows);
     cout << header << endl;
     for (const auto& row : rows) cout << row << endl;
     return false;
@@ -6152,7 +6162,9 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
             ctx.orderByAsc = orderBy[0].ascending;
         }
         auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-        answers = dbms::QueryPlanner::executePlan(std::move(plan));
+        auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+        if (!execution.ok) return {};
+        answers = std::move(execution.rows);
     }
 
     size_t limitVal = 0, offsetVal = 0;
@@ -14099,9 +14111,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 string row;
                 while (scalarPlan->next(row)) outAnswers.push_back(row);
+                if (scalarPlan->hasError()) {
+                    volcanoExecutionError = true;
+                    cout << "ERROR: " << scalarPlan->errorMessage() << endl;
+                    scalarPlan->close();
+                    return true;
+                }
                 scalarPlan->close();
             } else {
-                outAnswers = dbms::QueryPlanner::executePlan(std::move(plan));
+                auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+                if (!execution.ok) {
+                    volcanoExecutionError = true;
+                    cout << "ERROR: " << execution.error << endl;
+                    return true;
+                }
+                outAnswers = std::move(execution.rows);
             }
             return true;
         };
@@ -14193,7 +14217,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     ctx.conds = dbms::StorageEngine::parseConditions(volcanoGroupConditions.front());
                 }
                 auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-                answers = dbms::QueryPlanner::executePlan(std::move(plan));
+                auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+                if (!execution.ok) {
+                    cout << "ERROR: " << execution.error << endl;
+                    return true;
+                }
+                answers = std::move(execution.rows);
             } else if (isGroupingSets) {
                 if (condTokens.empty()) {
                     answers = g_engine.groupAggregateSets(s.currentDB, tname, {}, pureAgg, groupByCols, groupingSets, havingConds);
@@ -14288,8 +14317,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     ctx.conds = dbms::StorageEngine::parseConditions(
                         volcanoAggregateConditions.front());
                 }
-                answers = dbms::QueryPlanner::executePlan(
+                auto execution = dbms::QueryPlanner::executePlanChecked(
                     dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx));
+                if (!execution.ok) {
+                    cout << "ERROR: " << execution.error << endl;
+                    return true;
+                }
+                answers = std::move(execution.rows);
             } else if (condTokens.empty()) {
                 answers = g_engine.aggregate(s.currentDB, tname, {}, pureAgg);
             } else {
@@ -14402,7 +14436,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     ctx.conds = dbms::StorageEngine::parseConditions(volcanoWindowGroups.front());
                 }
                 auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-                vector<string> windowAnswers = dbms::QueryPlanner::executePlan(std::move(plan));
+                auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+                if (!execution.ok) {
+                    cout << "ERROR: " << execution.error << endl;
+                    return true;
+                }
+                vector<string> windowAnswers = std::move(execution.rows);
                 for (const auto& itemRaw : splitSelectColumns(columns)) cout << trim(itemRaw) << ' ';
                 cout << '\n';
                 for (const auto& row : windowAnswers) {

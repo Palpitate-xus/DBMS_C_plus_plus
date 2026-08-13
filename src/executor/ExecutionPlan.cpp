@@ -96,6 +96,7 @@ bool TableScanOp::open() {
         : engine_->forEachRow(dbname_, tablename_, appendRow);
     if (!scanOk) {
         rows_.clear();
+        setError("table scan failed");
         return false;
     }
     pos_ = 0;
@@ -160,7 +161,10 @@ bool ParallelTableScanOp::open() {
     // threads.  Partitioned relations also need their existing routing path.
     if (workers_ <= 1 || engine_->inTransaction() ||
         tbl_.partitionType != TableSchema::PartitionType::None) {
-        if (!appendSequential()) return false;
+        if (!appendSequential()) {
+            setError("parallel scan fallback failed");
+            return false;
+        }
         recordScan();
         return true;
     }
@@ -172,7 +176,10 @@ bool ParallelTableScanOp::open() {
     }
     const int activeWorkers = std::min<int>(workers_, static_cast<int>(pageCount - 1));
     if (activeWorkers <= 1) {
-        if (!appendSequential()) return false;
+        if (!appendSequential()) {
+            setError("parallel scan fallback failed");
+            return false;
+        }
         recordScan();
         return true;
     }
@@ -206,6 +213,7 @@ bool ParallelTableScanOp::open() {
     if (scanFailed.load(std::memory_order_relaxed)) {
         rows_.clear();
         usedParallelWorkers_ = false;
+        setError("parallel page scan failed");
         return false;
     }
     for (auto& part : local) {
@@ -288,7 +296,10 @@ bool IndexScanOp::next(std::string& outRow) {
         bool readFailed = false;
         if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr,
                                           &readFailed)) {
-            if (readFailed) return false;
+            if (readFailed) {
+                setError("indexed heap fetch failed");
+                return false;
+            }
             continue;
         }
         outRow = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
@@ -396,6 +407,7 @@ bool BitmapHeapScanOp::open() {
                                           &readFailed)) {
             if (readFailed) {
                 rows_.clear();
+                setError("bitmap heap fetch failed");
                 return false;
             }
             continue;
@@ -477,6 +489,7 @@ bool BitmapOrHeapScanOp::open() {
                                           &readFailed)) {
             if (readFailed) {
                 rows_.clear();
+                setError("bitmap heap fetch failed");
                 return false;
             }
             continue;
@@ -553,6 +566,7 @@ bool FilterOp::next(std::string& outRow) {
         }
         if (match) return true;
     }
+    if (child_->hasError()) return propagateChildError(child_.get(), "filter child failed");
     return false;
 }
 
@@ -667,6 +681,7 @@ bool QuantifiedSubqueryFilterOp::open() {
             StorageEngine::extractColumnValueStatic(row, innerTbl_, innerIdx),
             inner_->lastColumnIsNull(innerIdx)});
     }
+    if (inner_->hasError()) return propagateChildError(inner_.get(), "quantified subquery failed");
     inner_->close();
     return outer_->open();
 }
@@ -711,6 +726,7 @@ bool QuantifiedSubqueryFilterOp::next(std::string& outRow) {
         if (hasUnknown) result = false; // UNKNOWN is filtered from WHERE.
         if (result) return true;
     }
+    if (outer_->hasError()) return propagateChildError(outer_.get(), "quantified outer scan failed");
     return false;
 }
 
@@ -730,12 +746,14 @@ bool ExistenceFilterOp::open() {
     if (!inner_->open()) return false;
     std::string row;
     const bool innerHasRow = inner_->next(row);
+    if (inner_->hasError()) return propagateChildError(inner_.get(), "existence subquery failed");
     inner_->close();
 
     const bool keepRows = anti_ ? !innerHasRow : innerHasRow;
     if (!keepRows) return true;
     if (!outer_->open()) return false;
     while (outer_->next(row)) rows_.push_back(row);
+    if (outer_->hasError()) return propagateChildError(outer_.get(), "existence outer scan failed");
     outer_->close();
     return true;
 }
@@ -756,9 +774,9 @@ void ExistenceFilterOp::close() {
 // ========================================================================
 
 bool ScalarSubqueryProjectOp::open() {
+    clearError();
     scalarValue_.clear();
     scalarIsNull_ = true;
-    errorMessage_.clear();
 
     size_t innerIdx = innerTbl_.len;
     for (size_t i = 0; i < innerTbl_.len; ++i) {
@@ -768,7 +786,7 @@ bool ScalarSubqueryProjectOp::open() {
         }
     }
     if (innerIdx >= innerTbl_.len) {
-        errorMessage_ = "scalar subquery column does not exist";
+        setError("scalar subquery column does not exist");
         return false;
     }
     if (!inner_->open()) return false;
@@ -783,18 +801,25 @@ bool ScalarSubqueryProjectOp::open() {
         }
         if (inner_->next(row)) {
             inner_->close();
-            errorMessage_ =
-                "more than one row returned by a subquery used as an expression";
+            setError("more than one row returned by a subquery used as an expression");
             return false;
+        }
+        if (inner_->hasError()) {
+            inner_->close();
+            return propagateChildError(inner_.get(), "scalar subquery failed");
         }
     }
     inner_->close();
+    if (inner_->hasError()) return propagateChildError(inner_.get(), "scalar subquery failed");
     return outer_->open();
 }
 
 bool ScalarSubqueryProjectOp::next(std::string& outRow) {
     std::string row;
-    if (!outer_->next(row)) return false;
+    if (!outer_->next(row)) {
+        if (outer_->hasError()) return propagateChildError(outer_.get(), "scalar outer scan failed");
+        return false;
+    }
 
     outRow.clear();
     for (const auto& target : targets_) {
@@ -810,7 +835,7 @@ bool ScalarSubqueryProjectOp::next(std::string& outRow) {
                 }
             }
             if (outerIdx >= outerTbl_.len) {
-                errorMessage_ = "scalar projection column does not exist";
+                setError("scalar projection column does not exist");
                 return false;
             }
             const bool isNull = rawColumnIsNull(row, outerTbl_, outerIdx);
@@ -841,7 +866,10 @@ bool ProjectOp::open() {
 
 bool ProjectOp::next(std::string& outRow) {
     std::string raw;
-    if (!child_->next(raw)) return false;
+    if (!child_->next(raw)) {
+        if (child_->hasError()) return propagateChildError(child_.get(), "projection child failed");
+        return false;
+    }
     outRow = formatRow(raw, tbl_, selectCols_);
     return true;
 }
@@ -943,6 +971,7 @@ bool WindowOp::open() {
         }
         input.push_back(std::move(row));
     }
+    if (child_->hasError()) return propagateChildError(child_.get(), "window child failed");
     child_->close();
 
     std::vector<std::vector<std::string>> computed(
@@ -1319,6 +1348,7 @@ bool SortOp::open() {
     if (!child_->open()) return false;
     std::string row;
     while (child_->next(row)) buffer_.push_back(std::move(row));
+    if (child_->hasError()) return propagateChildError(child_.get(), "sort child failed");
     child_->close();
 
     size_t sortIdx = tbl_.len;
@@ -1382,7 +1412,10 @@ bool LimitOp::open() {
 
 bool LimitOp::next(std::string& outRow) {
     if (count_ >= limit_) return false;
-    if (!child_->next(outRow)) return false;
+    if (!child_->next(outRow)) {
+        if (child_->hasError()) return propagateChildError(child_.get(), "limit child failed");
+        return false;
+    }
     ++count_;
     return true;
 }
@@ -1400,11 +1433,14 @@ bool OffsetOp::open() {
     if (!child_->open()) return false;
     std::string ignored;
     while (skipped_ < offset_ && child_->next(ignored)) ++skipped_;
+    if (child_->hasError()) return propagateChildError(child_.get(), "offset child failed");
     return true;
 }
 
 bool OffsetOp::next(std::string& outRow) {
-    return child_->next(outRow);
+    if (child_->next(outRow)) return true;
+    if (child_->hasError()) return propagateChildError(child_.get(), "offset child failed");
+    return false;
 }
 
 void OffsetOp::close() {
@@ -1427,6 +1463,7 @@ bool DistinctOp::next(std::string& outRow) {
     while (child_->next(outRow)) {
         if (seen_.insert(outRow).second) return true;
     }
+    if (child_->hasError()) return propagateChildError(child_.get(), "distinct child failed");
     return false;
 }
 
@@ -1457,6 +1494,8 @@ bool SetOperationOp::open() {
     std::string row;
     while (left_->next(row)) leftRows.push_back(row);
     while (right_->next(row)) rightRows.push_back(row);
+    if (left_->hasError()) return propagateChildError(left_.get(), "set operation left child failed");
+    if (right_->hasError()) return propagateChildError(right_.get(), "set operation right child failed");
 
     if (type_ == SetOperationType::Union) {
         if (all_) {
@@ -1535,6 +1574,7 @@ bool NestedLoopJoinOp::open() {
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
     if (!left_->open()) return false;
     hasLeft_ = left_->next(curLeftRow_);
+    if (left_->hasError()) return propagateChildError(left_.get(), "nested-loop left child failed");
     return right_->open();
 }
 
@@ -1595,6 +1635,7 @@ bool NestedLoopJoinOp::next(std::string& outRow) {
         }
         right_->close();
         hasLeft_ = left_->next(curLeftRow_);
+        if (left_->hasError()) return propagateChildError(left_.get(), "nested-loop left child failed");
         if (hasLeft_) right_->open();
     }
     return false;
@@ -1641,11 +1682,13 @@ bool HashJoinOp::open() {
         std::string key = extractJoinKey(rightRow, rightTbl_, rightCol_);
         rightHash_[key].push_back(std::move(rightRow));
     }
+    if (right_->hasError()) return propagateChildError(right_.get(), "hash join right child failed");
     right_->close();
 
     // Start left table iteration
     if (!left_->open()) return false;
     hasLeft_ = left_->next(curLeftRow_);
+    if (left_->hasError()) return propagateChildError(left_.get(), "hash join left child failed");
     matchPos_ = 0;
     curRightMatches_.clear();
     return true;
@@ -1662,6 +1705,7 @@ bool HashJoinOp::next(std::string& outRow) {
 
         // Move to next left row
         hasLeft_ = left_->next(curLeftRow_);
+        if (left_->hasError()) return propagateChildError(left_.get(), "hash join left child failed");
         if (!hasLeft_) break;
 
         std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
@@ -1704,11 +1748,13 @@ bool MergeJoinOp::open() {
     if (!left_->open()) return false;
     std::string row;
     while (left_->next(row)) leftRows_.push_back(std::move(row));
+    if (left_->hasError()) return propagateChildError(left_.get(), "merge join left child failed");
     left_->close();
 
     // Read all right rows
     if (!right_->open()) return false;
     while (right_->next(row)) rightRows_.push_back(std::move(row));
+    if (right_->hasError()) return propagateChildError(right_.get(), "merge join right child failed");
     right_->close();
 
     // Sort both by join key
@@ -1781,6 +1827,7 @@ bool GroupAggregateOp::open() {
         }
         input.push_back(std::move(row));
     }
+    if (child_->hasError()) return propagateChildError(child_.get(), "aggregate child failed");
     child_->close();
 
     auto columnIndex = [&](const std::string& name) {
@@ -2960,16 +3007,35 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
     return result;
 }
 
-std::vector<std::string> QueryPlanner::executePlan(OpPtr plan) {
-    std::vector<std::string> results;
-    if (!plan) return results;
-    if (!plan->open()) return results;
+PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan) {
+    PlanExecutionResult result;
+    if (!plan) {
+        result.ok = false;
+        result.error = "executor received a null plan";
+        return result;
+    }
+    if (!plan->open()) {
+        result.ok = false;
+        result.error = plan->errorMessage();
+        if (result.error.empty()) result.error = "executor failed to open plan";
+        plan->close();
+        return result;
+    }
     std::string row;
     while (plan->next(row)) {
-        results.push_back(row);
+        result.rows.push_back(row);
+    }
+    if (plan->hasError()) {
+        result.ok = false;
+        result.error = plan->errorMessage();
+        if (result.error.empty()) result.error = "executor failed while reading plan";
     }
     plan->close();
-    return results;
+    return result;
+}
+
+std::vector<std::string> QueryPlanner::executePlan(OpPtr plan) {
+    return executePlanChecked(std::move(plan)).rows;
 }
 
 // Check if an index provides the required pathkey ordering.

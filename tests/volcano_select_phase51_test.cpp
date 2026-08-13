@@ -31,6 +31,31 @@ static void insertRow(const std::string& db, const std::string& tname,
     assert(g_engine.insert(db, tname, vals) == dbms::DBStatus::OK);
 }
 
+class FailingOperator final : public dbms::Operator {
+public:
+    bool open() override {
+        setError("synthetic executor failure");
+        return false;
+    }
+    bool next(std::string&) override { return false; }
+    void close() override {}
+};
+
+static void test_checked_execution_failure() {
+    auto result = dbms::QueryPlanner::executePlanChecked(
+        std::make_unique<FailingOperator>());
+    assert(!result.ok);
+    assert(result.rows.empty());
+    assert(result.error == "synthetic executor failure");
+
+    // The old convenience API remains source-compatible, but callers that
+    // need to distinguish an empty result from execution failure must use the
+    // checked API above.
+    assert(dbms::QueryPlanner::executePlan(
+               std::make_unique<FailingOperator>()).empty());
+    std::cout << "[VOLCANO-5.1] checked execution failure propagation OK" << std::endl;
+}
+
 // Build a condition string in the format expected by parseConditions:
 // operator-first (e.g. "=age 30"), which is the modifyViewLogic output format.
 static std::string makeCond(const std::string& col, const std::string& op,
@@ -751,6 +776,7 @@ static void test_semi_and_anti_join() {
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
+    test_checked_execution_failure();
     test_full_scan();
     test_where_index_scan();
     test_rls_blocks_index_bypass();
