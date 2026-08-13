@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
 #include <thread>
 #include <vector>
 
@@ -61,6 +63,43 @@ int main() {
     assert(users->liveTupEstimateValid);
     assert(dbms::getRuntimeLiveRowEstimate("db1", "users", estimatedRows));
     assert(estimatedRows == 2);
+
+    const std::filesystem::path persisted = "runtime_stats_persist_test.bin";
+    std::filesystem::remove(persisted);
+    std::filesystem::remove(persisted.string() + ".lock");
+    assert(dbms::persistRuntimeStats("db1", persisted));
+    dbms::resetRuntimeStats();
+    assert(dbms::loadRuntimeStats("db1", persisted));
+    const auto restoredDb = dbms::getRuntimeDatabaseStats("db1");
+    assert(restoredDb.size() == 1);
+    assert(restoredDb[0].queries == workers * queriesPerWorker + 3);
+    const auto restoredTables = dbms::getRuntimeTableStats("db1");
+    assert(restoredTables.size() == 2);
+    const auto restoredUsers = std::find_if(
+        restoredTables.begin(), restoredTables.end(), [](const auto& table) {
+            return table.relname == "users";
+        });
+    assert(restoredUsers != restoredTables.end());
+    assert(restoredUsers->nLiveTup == 2);
+
+    dbms::resetRuntimeTableStats("db1", "users");
+    assert(dbms::persistRuntimeStats("db1", persisted));
+    dbms::resetRuntimeStats();
+    assert(dbms::loadRuntimeStats("db1", persisted));
+    const auto afterDropTables = dbms::getRuntimeTableStats("db1");
+    assert(std::find_if(
+               afterDropTables.begin(), afterDropTables.end(), [](const auto& table) {
+                   return table.relname == "users";
+               }) == afterDropTables.end());
+
+    {
+        std::ofstream corrupt(persisted, std::ios::binary | std::ios::trunc);
+        corrupt << "corrupt";
+    }
+    dbms::resetRuntimeStats();
+    assert(!dbms::loadRuntimeStats("db1", persisted));
+    std::filesystem::remove(persisted);
+    std::filesystem::remove(persisted.string() + ".lock");
 
     dbms::resetRuntimeStats();
     assert(dbms::getRuntimeDatabaseStats().empty());

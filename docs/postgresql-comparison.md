@@ -19,7 +19,7 @@ RLS 回归现已覆盖默认 `WITH CHECK`、显式 `TO PUBLIC`、permissive/rest
 
 DDL CREATE undo 回归已覆盖 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；CREATE 记录现在还会进入外层事务及 SAVEPOINT 的逆序回滚队列，变更前物理快照可让外层 `ROLLBACK` 恢复 DROP/REPLACE 旧对象并在之后执行行 undo。整库快照污染后的另一条快照型 DDL 和 SAVEPOINT 会安全拒绝，完整依赖 undo 和全部 PostgreSQL 隐式提交边界仍与 PostgreSQL 有差距。
 
-SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlStats`，`SHOW STATEMENTS`/`pg_stat_statements` 风格查询可按归一化 SQL 聚合耗时；`RuntimeStats` 的完整扫描 live-row 估计也会反馈给 Join 成本与 EXPLAIN，并在关系重建/截断时失效；当前仍是进程内统计，缺少持久化、完整字段和扩展生命周期。
+SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlStats`，`SHOW STATEMENTS`/`pg_stat_statements` 风格查询可按归一化 SQL 聚合耗时；`RuntimeStats` 的完整扫描 live-row 估计也会反馈给 Join 成本与 EXPLAIN，并在关系重建/截断时失效。当前格式的数据库级统计快照已在 checkpoint/引擎关闭时持久化并在启动时严格加载；仍缺完整字段、后台采样和扩展生命周期。
 
 ---
 
@@ -246,7 +246,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | Background workers | ✅ | ⚠️ 框架 | 11 种类型 |
 | WALWriter / BgWriter / Checkpointer | ✅ | ✅ | ✅ |
 | Autovacuum | ✅ | ⚠️ 框架 | |
-| Stats collector | ✅ | ⚠️ | 有 RuntimeStats 事件计数子集（含顺序/索引扫描与索引取行），后台采样/持久化和完整索引维度仍缺 |
+| Stats collector | ✅ | ⚠️ | 有 RuntimeStats 事件计数子集（含顺序/索引扫描与索引取行）及当前格式持久化快照；后台采样和完整索引维度仍缺 |
 | **连接池** | ✅ (外部) | ✅ | ✅ |
 | **最大连接数** | ✅ | ✅ | ✅ |
 | **pg_stat_activity** | ✅ | ⚠️ | 有进程列表风格子集，完整 backend 状态和 wait event 语义仍缺 |
@@ -339,7 +339,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 4. **GROUP BY/aggregate 完整语义** — 普通聚合与 `GroupAggregateOp` 已覆盖基础路径；复杂目标、`GROUPING()`/`GROUPING_ID`、类型推导和完整排序作用域仍待迁移
 5. **GiST 索引完整语义** — 基础文本/范围文件已存在，但全文搜索、几何最近邻、opclass 与并发维护仍缺
 6. **TOAST 完整语义** — 当前线外值使用 zlib 压缩；lz4/pglz、压缩策略、`toast_tuple_target` 和 PG pointer/catalog 仍待完成
-7. **后台 stats_collector** — 已有 `RuntimeStats` 在执行/存储边界收集进程内数据库和表计数，并接入 `SHOW STATUS`/`pg_stat_database`/`pg_stat_tables`，Volcano 扫描算子也会记录顺序/索引扫描及索引取行；后台采样线程、持久化和完整索引维度仍缺
+7. **后台 stats_collector** — 已有 `RuntimeStats` 在执行/存储边界收集数据库和表计数，并接入 `SHOW STATUS`/`pg_stat_database`/`pg_stat_tables`，Volcano 扫描算子也会记录顺序/索引扫描及索引取行；当前格式快照已持久化，后台采样线程和完整索引维度仍缺
 8. **PL/pgSQL 运行时** — 存储过程解释执行缺
 9. **并行 Vacuum** — Autovacuum 已工作但非并行
 

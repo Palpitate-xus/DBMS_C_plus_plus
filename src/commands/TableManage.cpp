@@ -1114,6 +1114,12 @@ StorageEngine::StorageEngine()
     }
     cleanupStaleSessionTemporaryFiles();
     catalogService_ = std::make_unique<CatalogService>(*this);
+    for (const auto& dbname : getDatabaseNames()) {
+        if (!loadRuntimeStats(dbname, dbPath(dbname) / ".runtime_stats")) {
+            throw std::runtime_error(
+                "runtime statistics are corrupt or cannot be locked for database " + dbname);
+        }
+    }
     // Keep trigger WHEN semantics available for direct StorageEngine users
     // (unit tests and embedded callers) as well as the interactive frontend.
     // main.cpp installs a richer session-aware evaluator at startup, but the
@@ -1161,6 +1167,10 @@ StorageEngine::~StorageEngine() {
         std::cerr << "[storage] failed to persist catalog during engine shutdown" << std::endl;
     }
     for (const auto& dbname : getDatabaseNames()) {
+        if (!persistRuntimeStats(dbname, dbPath(dbname) / ".runtime_stats")) {
+            std::cerr << "[storage] failed to persist runtime statistics for database "
+                      << dbname << " during engine shutdown" << std::endl;
+        }
         if (!flushDatabaseCaches(dbname)) {
             std::cerr << "[storage] failed to flush caches for database " << dbname
                       << " during engine shutdown" << std::endl;
@@ -7725,6 +7735,7 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     // inherit in-memory pages from its predecessor.
     pruneMissingDatabaseCaches();
     if (catalogService_) catalogService_->evict(dbname);
+    resetRuntimeDatabaseStats(dbname);
     std::filesystem::create_directory(dbPath(dbname));
     {
         std::ofstream f(tableListPath(dbname), std::ios::binary);
@@ -7761,6 +7772,10 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     // directory still exists.
     if (catalogService_) catalogService_->evict(dbname);
     closeDatabaseCaches(dbname);
+    resetRuntimeDatabaseStats(dbname);
+    std::error_code statsEc;
+    std::filesystem::remove(dbPath(dbname) / ".runtime_stats", statsEc);
+    std::filesystem::remove(dbPath(dbname) / ".runtime_stats.lock", statsEc);
     std::filesystem::remove_all(dbPath(dbname));
     return DBStatus::OK;
 }
@@ -20114,6 +20129,7 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
 
     // Persist catalog metadata so it matches the checkpoint.
     if (catalogService_ && !catalogService_->persistAll()) return false;
+    if (!persistRuntimeStats(dbname, dbPath(dbname) / ".runtime_stats")) return false;
 
     // Archive WAL before truncation
     if (!archiveWal(dbname)) return false;
@@ -20150,9 +20166,14 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
             std::filesystem::create_directories(dst);
         }
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
-            // Advisory lock files are runtime coordination state, not database
-            // contents. Never copy them into a backup snapshot.
-            if (entry.path().filename() == ".lockmgr") continue;
+            // Advisory lock and interrupted temporary files are runtime
+            // coordination state, not database contents. Never copy them
+            // into a backup snapshot.
+            const auto filename = entry.path().filename().string();
+            if (filename == ".lockmgr" || filename == ".runtime_stats.lock" ||
+                filename.rfind(".runtime_stats.tmp.", 0) == 0) {
+                continue;
+            }
             auto destPath = dst / entry.path().filename();
             if (entry.is_directory()) {
                 std::filesystem::copy(entry.path(), destPath,
@@ -20239,8 +20260,12 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
         }
         std::filesystem::create_directories(dst);
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
-            if (entry.path().filename() == kPhysicalBackupMarker) continue;
-            if (entry.path().filename() == ".lockmgr") continue;
+            const auto filename = entry.path().filename().string();
+            if (filename == kPhysicalBackupMarker || filename == ".lockmgr" ||
+                filename == ".runtime_stats.lock" ||
+                filename.rfind(".runtime_stats.tmp.", 0) == 0) {
+                continue;
+            }
             auto destPath = dst / entry.path().filename();
             if (entry.is_directory() && entry.path().filename() == "wal_archive") {
                 // Skip wal_archive in root, restore it separately

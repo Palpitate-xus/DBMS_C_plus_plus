@@ -1,14 +1,16 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 namespace dbms {
 
-// Runtime counters are process-local and reset on restart.  They are updated
-// at the execution/storage boundaries rather than by the SQL display layer so
-// SHOW and pg_stat_* views observe the same data from every entry point.
+// Runtime counters are updated at execution/storage boundaries rather than by
+// the SQL display layer so SHOW and pg_stat_* views observe the same data from
+// every entry point. The current process keeps a live copy; StorageEngine
+// persists each database snapshot at checkpoint/shutdown boundaries.
 struct RuntimeDatabaseStats {
     std::string dbname;
     uint64_t queries = 0;
@@ -71,6 +73,16 @@ bool getRuntimeLiveRowEstimate(const std::string& dbname,
 // estimates from a previous physical identity.
 void resetRuntimeTableStats(const std::string& dbname,
                             const std::string& tablename);
+
+// Durable per-database statistics.  The file is a versioned current-format
+// artifact, protected by a sidecar flock and published atomically.  Loading
+// malformed data returns false; callers must not continue as if it were a
+// valid snapshot.
+bool loadRuntimeStats(const std::string& dbname,
+                      const std::filesystem::path& path);
+bool persistRuntimeStats(const std::string& dbname,
+                         const std::filesystem::path& path);
+void resetRuntimeDatabaseStats(const std::string& dbname);
 
 void resetRuntimeStats();
 

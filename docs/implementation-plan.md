@@ -62,6 +62,8 @@
 
 2026-08-13 增量审计：Volcano 执行器新增 `PlanExecutionResult` checked contract，`IOperator` 显式区分 EOF 与错误；Sort/Limit/Offset/Distinct/SetOperation/Join/Window/Aggregate/子查询物化路径传播子算子失败，主 SQL 入口迁移到 checked API。测试调用方已全部迁移，旧 `executePlan()` 空结果兼容入口删除；`volcano_select_phase51_test` 覆盖合成失败契约。
 
+2026-08-13 增量审计：`RuntimeStats` 增加版本化 `.runtime_stats` 持久化快照，接入 StorageEngine 启动、checkpoint、shutdown、CREATE/DROP DATABASE 生命周期；采用 sidecar `flock`、增量合并、临时文件 fsync、原子 rename 和严格损坏校验。`runtime_stats_test` 新增重载与损坏文件 fail-closed 回归，统计不再因正常重启自动丢失。
+
 2026-08-13 增量审计：删除未被调用的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为实际 Volcano 算子唯一接口；`IndexScanOp` 改为在 page shared lock 与 MVCC 检查内按 RID 直接回表，避免每个索引命中重新扫描整张 heap。`volcano_select_phase51_test` 通过。
 2026-08-13 安全边界修复：Volcano SELECT 在 RLS 生效的关系上统一走 `forEachVisibleRow(..., "SELECT")`，禁用索引/bitmap/并行访问路径，避免计划选择绕过策略；新增 `volcano_select_phase51_test` 的索引 RLS 回归。
 

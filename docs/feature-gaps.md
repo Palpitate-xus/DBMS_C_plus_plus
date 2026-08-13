@@ -223,14 +223,14 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P1-6: 后台统计收集器 (Stats Collector)
 - **类别**: 可观测性 / 运行时统计
-- **现状**: 已有线程安全 `process/RuntimeStats`，在 SQL 执行、StorageEngine、Volcano 顺序/索引扫描算子和 DML 边界记录数据库/表级运行时计数；`SHOW STATUS`、`pg_stat_database`、`pg_stat_tables` 已消费真实进程内数据，协议回归覆盖 `idx_scan`/`idx_tup_fetch`。完整可见表扫描得到的 live-row 估计现在会安全反馈给 Join 成本与 EXPLAIN，部分/索引扫描不会伪造精确估计，表重建/截断会使旧估计失效。仍无独立后台采样线程、持久化、按索引方法的完整分类和 planner 深度反馈。
+- **现状**: 已有线程安全 `process/RuntimeStats`，在 SQL 执行、StorageEngine、Volcano 顺序/索引扫描算子和 DML 边界记录数据库/表级运行时计数；`SHOW STATUS`、`pg_stat_database`、`pg_stat_tables` 已消费真实数据，协议回归覆盖 `idx_scan`/`idx_tup_fetch`。当前格式的 `.runtime_stats` 已在 checkpoint/引擎关闭时以 sidecar flock、临时文件、fsync 和原子 rename 持久化，并在启动时严格校验加载；多 backend 采用增量合并，关系重建/删除不会继承旧估计。仍无独立后台采样线程、按索引方法的完整分类和 planner 深度反馈。
 - **PG 参考**: `pg_stat_database`, `pg_stat_user_tables`, `pg_stat_activity`
-- **影响**: 基础运行监控已可用，但重启丢失，统计维度和 planner 反馈仍不足以替代 PostgreSQL 的完整 collector
+- **影响**: 基础运行监控已可用且正常 checkpoint/重启可保留当前快照；统计维度、后台采样和 planner 反馈仍不足以替代 PostgreSQL 的完整 collector
 - **实现路径**:
   1. ✅ 共享 `RuntimeStats` 在执行器/存储边界记录数据库和表级计数，包含顺序扫描、索引扫描和索引取行
   2. ✅ 实现 `pg_stat_*` 统计子集 + `SHOW STATUS` 运行时字段
   3. ✅ 在 `QueryPlanner` 中使用带来源有效性的运行时 live-row 估计做 Join 成本与 EXPLAIN 行数估计，未知时回退物理计数
-  4. 补充独立后台采样线程、持久化、按索引方法细分和 `stats_collector` GUC
+  4. 补充独立后台采样线程、按索引方法细分和 `stats_collector` GUC
 - **预估工作量**: 1 周
 - **相关文件**: `src/process/RuntimeStats.{h,cpp}`, `src/main.cpp`, `src/network/NetworkServer.cpp`, `src/commands/TableManage.cpp`
 

@@ -6,6 +6,8 @@
 
 2026-08-13 Volcano 执行失败边界：新增 `PlanExecutionResult` 与 `executePlanChecked()`，将正常 EOF 和 `open()`/`next()` 失败分离；排序、分页、去重、集合、连接、窗口、聚合及子查询物化算子会向根节点传播子算子错误。主 SQL 的集合操作、普通 Volcano SELECT、聚合、窗口和派生子查询入口已检查执行结果并 fail-closed；旧空结果兼容入口已删除，契约回归验证失败不会被误报为空结果。
 
+2026-08-13 运行时统计持久化：`RuntimeStats` 增加当前格式版本化 `.runtime_stats` 快照，在 checkpoint 和引擎关闭时通过 sidecar `flock`、临时文件、文件/目录 `fsync` 和原子 rename 发布；启动严格校验 magic、版本、长度、数据库归属和尾随字节，损坏文件 fail-closed。多个 backend 按已加载基线做增量合并，DROP/重建关系不会恢复旧统计；新增持久化、重载和损坏文件回归。
+
 2026-08-13 SSI 增量审计：SERIALIZABLE 对单列主键/二级 B+Tree 的 `=、<、<=、>、>=` 谓词新增事务级逻辑 SIREAD 记录；INSERT/UPDATE/DELETE 同步登记对应索引键，提交时按 B+Tree 固定宽度顺序检测读谓词与写键重叠，并纳入双向 dangerous-structure 判断。该能力补齐了精确索引谓词的逻辑覆盖，但不等同于 PostgreSQL 的物理索引 predicate lock；复合/表达式/部分索引、其他访问方法、安全快照和完整 SSI 图规则仍待实现。
 
 2026-08-13 B+Tree 键边界收敛：插入、查找、多值查找、删除和范围扫描的公共 API 统一按 20 字节固定键规范化；长键截断、重开索引后的比较和范围端点不再因调用方是否预先填充而产生不同结果。新增长键持久化/重开回归；旧索引文件按当前格式重新创建，不提供历史索引兼容。
