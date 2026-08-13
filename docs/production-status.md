@@ -167,5 +167,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 
 仍不能称为生产就绪的主要原因包括：SSI 目前已增加页级 SIREAD 和空范围关系级兜底，但索引范围 predicate lock、完整 rw-conflict 规则和安全快照仍不完整；当前 wire protocol 仍缺完整类型/错误/扩展消息语义、channel binding 和结构化执行结果，owner/依赖和完整 ACL 组合语义仍不完整；表空间仍缺权限/owner、ALTER TABLESPACE 完整语义及 PostgreSQL OID/符号链接布局；并行执行、流复制/PITR、完整系统目录接入、审计/可观测性和系统化故障注入测试也仍不完整。后台 writer/checkpointer 与 DDL/database lifecycle 的文件缓存并发访问已加锁并纳入回归验证。网络连接容量现在通过原子槽位预留控制并发 accept，TLS 握手失败和认证失败都会释放槽位。后续改动必须以代码路径、回归测试和故障恢复验证为准，不能只以功能清单宣称完成。
 
+2026-08-13 parser 数值选项继续 fail-closed：`CREATE FUNCTION` 的 `COST/ROWS`、角色 `CONNECTION LIMIT` 和 `ALTER TABLE ... SET STATISTICS` 现在拒绝缺失、非法、非有限、越界或不允许的值，不再吞异常后使用 AST 默认值。
+
 验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`；两个 E2E 已由统一测试入口自动执行。DML AST 路径另由 parser 单测和协议 E2E 覆盖。Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。
 - SQL 解析边界继续收敛：`LIMIT/OFFSET/FETCH` 的无符号计数现在要求完整十进制整数，非法值、缺失值和不完整 FETCH 子句均返回解析错误，不再被异常吞掉后静默变成默认的“无限制”。`FETCH FIRST/NEXT` 省略 count 时按 PostgreSQL 语法默认 1 行处理。

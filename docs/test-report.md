@@ -1012,3 +1012,4 @@ heap、FSM/VM、索引、分区和 TOAST 文件位于 `<LOCATION>/<DATABASE>/`�
 *报告生成时间：2026-08-12*
 *测试执行人：自动化测试脚本 + 人工验证*
 - Parser 边界回归：`parser_phase1_test` 新增非法 `LIMIT/OFFSET/FETCH`、负数、缺失计数以及省略 FETCH count 的测试；非法计数 fail-closed，省略 count 默认 1。
+- Parser 数值选项回归：同一测试新增非法函数 `COST/ROWS`、角色 `CONNECTION LIMIT` 和列统计目标测试，确认解析失败不会产生默认 AST。

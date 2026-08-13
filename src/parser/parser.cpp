@@ -1,6 +1,7 @@
 #include "parser.h"
 #include <cctype>
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <set>
@@ -28,6 +29,37 @@ static bool parseNonNegativeInteger(const std::string& token, size_t& value) {
             return false;
         }
         value = static_cast<size_t>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool parseSignedInteger(const std::string& token, int& value) {
+    if (token.empty()) return false;
+    size_t first = token[0] == '-' || token[0] == '+' ? 1 : 0;
+    if (first == token.size()) return false;
+    for (size_t i = first; i < token.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(token[i]))) return false;
+    }
+    try {
+        size_t consumed = 0;
+        const long long parsed = std::stoll(token, &consumed, 10);
+        if (consumed != token.size() || parsed < std::numeric_limits<int>::min() ||
+            parsed > std::numeric_limits<int>::max()) return false;
+        value = static_cast<int>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool parsePositiveDouble(const std::string& token, double& value) {
+    try {
+        size_t consumed = 0;
+        const double parsed = std::stod(token, &consumed);
+        if (consumed != token.size() || !std::isfinite(parsed) || parsed <= 0.0) return false;
+        value = parsed;
         return true;
     } catch (...) {
         return false;
@@ -2659,7 +2691,8 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
     } else {
         r.stmt = std::make_unique<CreateTableStmt>();
     }
-    r.success = true;
+    r.success = r.stmt != nullptr;
+    if (!r.success) r.error = "invalid CREATE statement";
     return r;
 }
 
@@ -2827,7 +2860,8 @@ ParseResult SQLParser::parseDrop(const std::string& sql) {
     } else {
         r.stmt = std::make_unique<DropStmt>(SqlCommand::DropTable);
     }
-    r.success = true;
+    r.success = r.stmt != nullptr;
+    if (!r.success) r.error = "invalid DROP statement";
     return r;
 }
 
@@ -2988,7 +3022,8 @@ ParseResult SQLParser::parseAlter(const std::string& sql) {
     } else {
         r.stmt = std::make_unique<AlterTableStmt>();
     }
-    r.success = true;
+    r.success = r.stmt != nullptr;
+    if (!r.success) r.error = "invalid ALTER statement";
     return r;
 }
 
@@ -4995,7 +5030,10 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
             std::string rtype;
             while (pos < tokens.size() && !match(tokens, pos, "as") &&
                    !match(tokens, pos, "language") && !match(tokens, pos, "immutable") &&
-                   !match(tokens, pos, "stable") && !match(tokens, pos, "volatile")) {
+                   !match(tokens, pos, "stable") && !match(tokens, pos, "volatile") &&
+                   !match(tokens, pos, "strict") && !match(tokens, pos, "security") &&
+                   !match(tokens, pos, "parallel") && !match(tokens, pos, "cost") &&
+                   !match(tokens, pos, "rows") && !match(tokens, pos, "set")) {
                 if (!rtype.empty()) rtype += " ";
                 rtype += tokens[pos++];
             }
@@ -5022,14 +5060,16 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
             else if (match(tokens, pos, "restricted")) { stmt->parallelRestricted = true; ++pos; }
             else if (match(tokens, pos, "unsafe")) { stmt->parallelUnsafe = true; ++pos; }
         }
-        else if (match(tokens, pos, "cost") && pos + 1 < tokens.size()) {
+        else if (match(tokens, pos, "cost")) {
             ++pos;
-            try { stmt->cost = std::stod(tokens[pos]); } catch (...) {}
+            if (pos >= tokens.size()) return nullptr;
+            if (!parsePositiveDouble(tokens[pos], stmt->cost)) return nullptr;
             ++pos;
         }
-        else if (match(tokens, pos, "rows") && pos + 1 < tokens.size()) {
+        else if (match(tokens, pos, "rows")) {
             ++pos;
-            try { stmt->rows = std::stod(tokens[pos]); } catch (...) {}
+            if (pos >= tokens.size()) return nullptr;
+            if (!parsePositiveDouble(tokens[pos], stmt->rows)) return nullptr;
             ++pos;
         }
         else if (match(tokens, pos, "set") && pos + 2 < tokens.size()) {
@@ -5253,8 +5293,11 @@ StmtPtr SQLParser::parseCreateRole(const std::vector<std::string>& tokens, size_
         else if (kw == "noreplication") { stmt->replication = false; ++pos; }
         else if (kw == "bypassrls") { stmt->bypassrls = true; ++pos; }
         else if (kw == "nobypassrls") { stmt->bypassrls = false; ++pos; }
-        else if (kw == "connection" && pos + 2 < tokens.size() && toLower(tokens[pos + 1]) == "limit") {
-            try { stmt->connectionLimit = std::stoi(tokens[pos + 2]); } catch (...) {}
+        else if (kw == "connection") {
+            if (pos + 2 >= tokens.size() || toLower(tokens[pos + 1]) != "limit") return nullptr;
+            if (!parseSignedInteger(tokens[pos + 2], stmt->connectionLimit) || stmt->connectionLimit < -1) {
+                return nullptr;
+            }
             pos += 3;
         } else if (kw == "password") {
             ++pos;
@@ -6773,9 +6816,11 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     ++pos;
                     sub.action = AlterTableStmt::Action::SetStatistics;
                     if (pos < tokens.size()) {
-                        try { sub.statisticsTarget = std::stoi(tokens[pos]); } catch (...) {}
+                        int target = 0;
+                        if (!parseSignedInteger(tokens[pos], target) || target < 0) return nullptr;
+                        sub.statisticsTarget = target;
                         ++pos;
-                    }
+                    } else return nullptr;
                 }
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "drop") {
                 ++pos;

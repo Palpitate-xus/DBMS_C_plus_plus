@@ -241,6 +241,11 @@ int main() {
         std::cout << "[PARSER P1] LIMIT/FETCH OK\n";
     }
 
+    assert(!parser.parse("CREATE FUNCTION f() RETURNS int COST nope AS 'SELECT 1'").success);
+    assert(!parser.parse("CREATE FUNCTION f() RETURNS int ROWS -1 AS 'SELECT 1'").success);
+    assert(!parser.parse("CREATE ROLE r CONNECTION LIMIT nope").success);
+    assert(!parser.parse("ALTER TABLE t ALTER COLUMN c SET STATISTICS nope").success);
+
     // 12. Function calls: schema-qualified, named args, window
     {
         auto r = parser.parse("SELECT pg_catalog.now(), f(a => 1, b => 2), row_number() OVER (PARTITION BY x ORDER BY y DESC) FROM t");
