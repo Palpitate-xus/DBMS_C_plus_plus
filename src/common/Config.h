@@ -1,12 +1,7 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
-#include <map>
-#include <fstream>
-#include <iostream>
-#include <sstream>
-#include <algorithm>
-#include <cctype>
 
 namespace dbms {
 
@@ -37,12 +32,20 @@ struct Config {
     double autoExplainThresholdMs = 100.0; // threshold for auto_explain
     size_t sqlStatsMaxEntries = 5000; // bounded pg_stat_statements-style entries
 
-    // Load from file; returns true on success.
+    // Load from file; returns true only when the file is absent or every
+    // recognized setting is valid. A present but malformed file is rejected
+    // without modifying the current configuration object.
     bool load(const std::string& filename);
-    // Save current values to file
+    // Save current values to file after validating all values.
     bool save(const std::string& filename) const;
-    // Dump current values for SHOW VARIABLES
+    // Apply one runtime parameter to a candidate configuration. The object is
+    // unchanged when the parameter is unknown or invalid.
+    bool setParameter(const std::string& name, const std::string& value);
+    // Dump current values for SHOW VARIABLES.
     void printAll() const;
+
+    // Validate the complete runtime configuration independently of file I/O.
+    bool validate() const;
 };
 
 } // namespace dbms

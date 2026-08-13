@@ -1538,6 +1538,9 @@ SET GLOBAL variable_name = value
 
 慢查询、checkpoint、planner、审计、自动维护和统计上限等进程级参数必须使用
 `SET GLOBAL`（管理员）或 `ALTER SYSTEM SET`，避免一个连接污染其他连接。
+参数也可以写入工作目录的 `dbms.conf`；服务启动和 `pg_reload_conf()` 对配置文件采用严格
+fail-closed 校验。未知键、重复键、非法布尔值、数值尾随字符、越界值或非有限浮点值都会
+拒绝加载，不会用坏值覆盖当前运行配置。
 
 **示例**
 ```sql

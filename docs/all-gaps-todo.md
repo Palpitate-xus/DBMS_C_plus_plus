@@ -5,7 +5,7 @@
 > 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
-> **当前真实状态（2026-08-13）**：统一回归基线 PASS=138 FAIL=0（136 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
+> **当前真实状态（2026-08-13）**：统一回归基线 PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
@@ -63,6 +63,7 @@
 | 2026-08-13 | SqlStats 持久化收敛：新增共享 `StatsPersistence` 锁/原子发布基础设施，按数据库写入版本化 `.sql_stats` 快照，StorageEngine 在启动、checkpoint、shutdown 和数据库生命周期边界加载/发布；跨 backend 增量合并、严格数值/长度/尾随数据校验和 `sql_stats_test` 重载/损坏回归已接入。 |
 | 2026-08-13 | SqlStats 内存边界收敛：`pg_stat_statements.max` 默认 5000，支持 `SET [GLOBAL]` 调整；进程记录、快照加载和多 backend 持久化合并都执行调用次数/耗时/key 的确定性淘汰，新增上限回归。 |
 | 2026-08-13 | SET/plan cache 生产边界收敛：普通 `SET` 的 statement/lock/deadlock timeout 改为 backend-local，进程级参数要求管理员 `SET GLOBAL`/`ALTER SYSTEM`；协议回归覆盖跨连接隔离、权限拒绝和 planner 参数变化后的 EXPLAIN cache miss；缓存键纳入 work_mem、join/scan 开关及并行 worker，并使用配置容量而非硬编码上限。 |
+| 2026-08-13 | Config fail-closed：配置文件与 `SET GLOBAL` 统一严格校验未知键、布尔值、数值尾随字符、范围和有限浮点；加载失败不修改当前配置，保存采用临时文件 + fsync + 原子 rename + 目录 fsync；新增 `config_test`。 |
 | 2026-08-13 | 配置架构清理：确认 `src/common/GUC.{h,cpp}` 没有任何生产/测试调用方，仅保留一套实际使用的 `Config` + `main.cpp` SET/SHOW/RESET 路径；删除死模块并从生产 manifest 移除，修正文档中的旧 GUC 注册表描述。 |
 | 2026-08-13 | 冗余代码清理：确认 `src/common/set.h` 是未被任何源码、测试或构建入口引用的旧红黑树样例，删除该无调用方文件并同步 README 目录说明。 |
 | 2026-08-13 | 执行器架构清理：删除无调用方的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为唯一 Volcano 生命周期契约；修正文档中已不存在的 `src/optimizer/` 路径。`IndexScanOp` 按 RID 直接回表并复用 page lock/MVCC，避免每个索引命中扫描全表；Volcano 专项与全量回归覆盖该边界。 |
@@ -279,7 +280,7 @@
 
 2026-08-08 网络执行边界收敛：新增线程局部 `process/OutputCapture` multiplexing，将协议入口和主程序内部临时输出捕获从全局 `std::cout.rdbuf()`/互斥锁迁移到当前线程；移除所有生产路径的全局输出重定向，并新增多线程无串扰回归。结构化执行结果仍需继续替代 legacy 文本输出。
 
-历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=138 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
+历史记录中的全量套件结果不再作为当前状态。当前统一回归基线为 **PASS=139 FAIL=0**；Phase 0–16 仍有生产级缺口，详见 `docs/feature-gaps.md`。
 
 ---
 

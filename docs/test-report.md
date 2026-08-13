@@ -1,7 +1,7 @@
 # DBMS 功能测试报告
 
 > 最后更新：2026-08-13
-> 自动测试套件基线：PASS=138 FAIL=0（136 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
+> 自动测试套件基线：PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 本轮新增 Volcano 执行失败契约回归：合成 `open()` 失败必须由
@@ -14,6 +14,9 @@
 本轮新增协议配置边界回归：不同 backend 的 `statement_timeout` 会话值互不污染，非管理员
 不能执行 `SET GLOBAL`，进程级参数不能通过普通 `SET` 修改；planner 参数变化后旧 `EXPLAIN`
 缓存不会被复用。
+
+本轮新增配置文件回归：非法键和值、非有限浮点、越界整数和损坏配置加载均拒绝；候选配置
+失败不会污染当前对象，成功保存使用临时文件、`fsync` 和原子替换。
 
 ---
 

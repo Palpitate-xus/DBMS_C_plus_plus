@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-13）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=138 FAIL=0（136 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-13）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=139 FAIL=0（137 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。2026-08-13 又将 Volcano 执行入口收敛为 checked result：EOF 与 open/next 失败分离，物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口不再把执行失败当成空结果，并删除旧的空结果兼容执行入口。2PC prepared 记录已具备原子 durable 发布、PREPARE WAL、准备前缓存刷盘、跨 backend 锁所有权转移、重启后表/row/page/gap 锁 ownership 重建、in-doubt xid 保留和索引回表可见性过滤；普通事务 CLOG 故障的 COMMIT→ABORT 序列也保持兼容。全局 prepared 目录和崩溃后 in-doubt 决策仍待实现。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -167,7 +167,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 1.4 补全 `SELECT` grammar（join、where、group、window、cte） | 6.1~6.8 | — |
 | 🔄 1.5 补全 `INSERT/UPDATE/DELETE/MERGE` AST 路径 | 1.1.35, 1.1.41, 1.1.44, 1.1.58, 6.10~6.13 | AST 已完整建模；普通 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费；INSERT 高级子句、外连接/复杂 JOIN、复杂/子查询/窗口 RETURNING、复杂 UPDATE/DELETE 和 MERGE 完整 WHEN 语义仍待迁移 |
 | ✅ 1.6 补全 DDL AST（`CREATE`/`ALTER`/`DROP` 各对象） | 1.1.3, 1.1.4, 1.1.6, 1.1.17, 1.1.24~1.1.33 等 | — |
-| 🔄 1.7 补全 `SET`/`SHOW`/`RESET` GUC 框架 | 1.1.48, 1.1.52, 1.1.56 | 当前由 `Config` + 统一命令处理路径提供；普通 SET 的已支持会话 timeout 已隔离，进程参数要求 `SET GLOBAL`/`ALTER SYSTEM`；未接入的旧 `GUCRegistry` 已移除，完整 PG GUC 语义仍待补齐 |
+| 🔄 1.7 补全 `SET`/`SHOW`/`RESET` GUC 框架 | 1.1.48, 1.1.52, 1.1.56 | 当前由 `Config` + 统一命令处理路径提供；已补严格解析、候选加载和原子持久化，普通 SET 的已支持会话 timeout 已隔离；完整 PG GUC 语义仍待补齐，未接入的旧 `GUCRegistry` 已移除 |
 | ✅ 1.8 补全 `VALUES` 作为通用 query expression | 1.1.60 | — |
 | ✅ 1.9 补全 `EXPLAIN` AST（支持所有语句类型） | 1.1.39 | — |
 | ✅ 1.10 移除或标记非 PG 语法（`USE DATABASE`、`REPLACE INTO` 等） | 15.1~15.9 | 可先做兼容模式开关 |

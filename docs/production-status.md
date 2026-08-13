@@ -2,7 +2,7 @@
 
 最后更新：2026-08-13
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，136 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=138 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，137 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=139 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
 2026-08-13 配置作用域与计划缓存收敛：普通 `SET` 只修改当前 `Session` 的
 `statement_timeout`、`lock_timeout` 和 `deadlock_timeout`；进程级参数必须通过管理员
@@ -11,6 +11,12 @@
 绑定到当前 backend。`EXPLAIN` plan cache 纳入 `work_mem`、seq/hash/merge join、并行 worker
 等 planner 设置，缓存开关和配置容量生效，配置变化会清空旧缓存；协议 E2E 新增跨连接隔离、权限和
 缓存失效回归。完整 PostgreSQL GUC 体系、真正 per-query planner context 仍未完成。
+
+2026-08-13 配置持久化边界收敛：`Config` 现在对未知键、重复等号、非法布尔值、尾随字符、
+负数/越界整数和非有限浮点值 fail-closed；加载使用候选对象，失败不会污染现有运行配置；
+保存先校验，再通过临时文件、文件 `fsync`、原子 rename 和目录 `fsync` 发布。`SET GLOBAL`
+和 `pg_reload_conf()` 复用同一严格解析边界，新增配置专项回归。真正的完整 PostgreSQL
+GUC 类型/来源/权限矩阵仍未完成。
 
 2026-08-13 Volcano 执行失败边界：新增 `PlanExecutionResult` 与 `executePlanChecked()`，将正常 EOF 和 `open()`/`next()` 失败分离；排序、分页、去重、集合、连接、窗口、聚合及子查询物化算子会向根节点传播子算子错误。主 SQL 的集合操作、普通 Volcano SELECT、聚合、窗口和派生子查询入口已检查执行结果并 fail-closed；旧空结果兼容入口已删除，契约回归验证失败不会被误报为空结果。
 

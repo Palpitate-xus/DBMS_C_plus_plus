@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <filesystem>
 #include <future>
 #include <iomanip>
 #include <iostream>
@@ -8,7 +9,6 @@
 #include <mutex>
 #include <set>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -78,8 +78,11 @@ dbms::Config g_config;
 namespace {
 // Load configuration before the process-global StorageEngine opens databases,
 // so bounded statistics snapshots use the configured limit from first load.
-[[maybe_unused]] const bool g_initialConfigLoaded = [] {
-    g_config.load("dbms.conf");
+const bool g_initialConfigLoadOk = [] {
+    if (std::filesystem::exists("dbms.conf") && !g_config.load("dbms.conf")) {
+        std::cerr << "FATAL: invalid dbms.conf; refusing to start" << std::endl;
+        return false;
+    }
     dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries);
     return true;
 }();
@@ -93,6 +96,21 @@ StorageEngine g_engine;
 double g_slowQueryThresholdMs = 100.0;
 static constexpr size_t MAX_SLOW_LOG_ENTRIES = 100;
 int g_checkpointInterval = 30;  // auto checkpoint every N SQLs
+
+static void invalidatePlanCacheForConfigChange();
+
+static bool installReloadedConfig(const dbms::Config& next) {
+    if (!next.validate() ||
+        !dbms::setSqlStatsMaxEntries(next.sqlStatsMaxEntries)) {
+        return false;
+    }
+    g_config = next;
+    g_slowQueryThresholdMs = next.slowQueryThresholdMs;
+    g_checkpointInterval = next.checkpointInterval;
+    dbms::QueryPlanner::setParallelWorkers(next.maxParallelWorkersPerGather);
+    invalidatePlanCacheForConfigChange();
+    return true;
+}
 
 // ========================================================================
 // Query plan cache
@@ -1342,138 +1360,72 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     // Silently writing process-global state here would make one connection
     // change the behavior of every other connection.
     if (!isGlobal) {
-        try {
-            if (param == "statement_timeout_ms" || param == "statement_timeout") {
-                const int timeout = std::stoi(val);
-                if (timeout < 0) throw std::invalid_argument("negative timeout");
-                s.statementTimeoutMs = timeout;
-            } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
-                const int timeout = std::stoi(val);
-                if (timeout < 0) throw std::invalid_argument("negative timeout");
-                s.lockTimeoutMs = timeout;
-                g_engine.getLockManager().setLockTimeout(timeout);
-            } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
-                const int timeout = std::stoi(val);
-                if (timeout < 0) throw std::invalid_argument("negative timeout");
-                s.deadlockTimeoutMs = timeout;
-                g_engine.getLockManager().setDeadlockTimeout(timeout);
-            } else {
-                cout << "Parameter " << param
-                     << " is process-global; use SET GLOBAL or ALTER SYSTEM" << endl;
-                return true;
-            }
-        } catch (...) {
+        dbms::Config candidate = g_config;
+        if (!candidate.setParameter(param, val)) {
             cout << "Invalid value for parameter " << param << endl;
+            return true;
+        }
+        if (param == "statement_timeout_ms" || param == "statement_timeout") {
+            s.statementTimeoutMs = candidate.statementTimeoutMs;
+        } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
+            s.lockTimeoutMs = candidate.lockTimeoutMs;
+            g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
+        } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
+            s.deadlockTimeoutMs = candidate.deadlockTimeoutMs;
+            g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
+        } else {
+            cout << "Parameter " << param
+                 << " is process-global; use SET GLOBAL or ALTER SYSTEM" << endl;
             return true;
         }
         cout << "Set " << param << " = " << val << " (session)" << endl;
         return false;
     }
 
-    bool ok = false;
-    if (param == "max_connections") {
-        try { g_config.maxConnections = std::stoi(val); ok = true; } catch (...) {}
-    } else if (param == "slow_query_threshold_ms" || param == "slow_query_threshold") {
-        try { g_config.slowQueryThresholdMs = std::stod(val); ok = true; } catch (...) {}
-    } else if (param == "checkpoint_interval") {
-        try { g_config.checkpointInterval = std::stoi(val); ok = true; } catch (...) {}
-    } else if (param == "statement_timeout_ms" || param == "statement_timeout") {
-        try { g_config.statementTimeoutMs = std::stoi(val); s.statementTimeoutMs = g_config.statementTimeoutMs; ok = true; } catch (...) {}
-    } else if (param == "buffer_pool_frames") {
-        try { g_config.bufferPoolFrames = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
-    } else if (param == "enable_query_plan_cache") {
-        g_config.enableQueryPlanCache = (val == "1" || val == "true" || val == "on");
-        ok = true;
-    } else if (param == "query_plan_cache_size") {
-        try { g_config.queryPlanCacheSize = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
-    } else if (param == "password_policy_level") {
-        try { g_config.passwordPolicyLevel = std::stoi(val); ok = true; } catch (...) {}
-    } else if (param == "audit_level") {
-        try { g_config.auditLevel = std::stoi(val); ok = true; } catch (...) {}
-    } else if (param == "auto_vacuum") {
-        g_config.autoVacuumEnabled = (val == "1" || val == "true" || val == "on");
-        ok = true;
-    } else if (param == "auto_vacuum_threshold") {
-        try { g_config.autoVacuumThreshold = std::stoi(val); ok = true; } catch (...) {}
-    } else if (param == "auto_analyze") {
-        g_config.autoAnalyzeEnabled = (val == "1" || val == "true" || val == "on");
-        ok = true;
-    } else if (param == "auto_analyze_threshold") {
-        try { g_config.autoAnalyzeThreshold = std::stoi(val); ok = true; } catch (...) {}
-    } else if (param == "work_mem_kb" || param == "work_mem") {
-        try { g_config.workMemKb = static_cast<size_t>(std::stoull(val)); ok = true; } catch (...) {}
-    } else if (param == "enable_seq_scan") {
-        g_config.enableSeqScan = (val == "1" || val == "true" || val == "on");
-        ok = true;
-    } else if (param == "enable_hash_join") {
-        g_config.enableHashJoin = (val == "1" || val == "true" || val == "on");
-        ok = true;
-    } else if (param == "enable_merge_join") {
-        g_config.enableMergeJoin = (val == "1" || val == "true" || val == "on");
-        ok = true;
-    } else if (param == "max_parallel_workers_per_gather") {
-        try {
-            int workers = std::stoi(val);
-            if (workers < 0 || workers > 128) {
-                cout << "Invalid value for parameter " << param << endl;
-                return true;
-            }
-            g_config.maxParallelWorkersPerGather = workers;
-            dbms::QueryPlanner::setParallelWorkers(workers);
-            ok = true;
-        } catch (...) {}
-    } else if (param == "pg_stat_statements.max") {
-        try {
-            const auto maxEntries = std::stoull(val);
-            if (maxEntries == 0 || maxEntries > 1000000) {
-                cout << "Invalid value for parameter " << param << endl;
-                return true;
-            }
-            if (!dbms::setSqlStatsMaxEntries(static_cast<size_t>(maxEntries))) {
-                cout << "Invalid value for parameter " << param << endl;
-                return true;
-            }
-            g_config.sqlStatsMaxEntries = static_cast<size_t>(maxEntries);
-            ok = true;
-        } catch (...) {}
-    } else if (param == "auto_explain") {
-        g_config.autoExplainEnabled = (val == "1" || val == "true" || val == "on");
-        ok = true;
-    } else if (param == "auto_explain_threshold_ms" || param == "auto_explain_threshold") {
-        try { g_config.autoExplainThresholdMs = std::stod(val); ok = true; } catch (...) {}
-    } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
-        try {
-            g_config.lockTimeoutMs = std::stoi(val);
-            if (g_config.lockTimeoutMs < 0) throw std::invalid_argument("negative timeout");
-            s.lockTimeoutMs = g_config.lockTimeoutMs;
-            g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs);
-            ok = true;
-        } catch (...) {}
-    } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
-        try {
-            g_config.deadlockTimeoutMs = std::stoi(val);
-            if (g_config.deadlockTimeoutMs < 0) throw std::invalid_argument("negative timeout");
-            s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
-            g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
-            ok = true;
-        } catch (...) {}
-    } else {
-        cout << "Unknown parameter: " << param << endl;
+    const dbms::Config previous = g_config;
+    const int previousSessionStatementTimeoutMs = s.statementTimeoutMs;
+    const int previousSessionDefaultStatementTimeoutMs = s.defaultStatementTimeoutMs;
+    const int previousSessionLockTimeoutMs = s.lockTimeoutMs;
+    const int previousSessionDeadlockTimeoutMs = s.deadlockTimeoutMs;
+    dbms::Config candidate = previous;
+    if (!candidate.setParameter(param, val)) {
+        cout << "Invalid value or unknown parameter: " << param << endl;
         return true;
     }
-    if (!ok) {
+
+    if (candidate.sqlStatsMaxEntries != previous.sqlStatsMaxEntries &&
+        !dbms::setSqlStatsMaxEntries(candidate.sqlStatsMaxEntries)) {
         cout << "Invalid value for parameter " << param << endl;
         return true;
     }
+    g_config = candidate;
     if (param == "statement_timeout_ms" || param == "statement_timeout") {
         s.statementTimeoutMs = g_config.statementTimeoutMs;
         s.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
+    } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
+        s.lockTimeoutMs = g_config.lockTimeoutMs;
+        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
+    } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
+        s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
     }
     g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
     g_checkpointInterval = g_config.checkpointInterval;
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
     invalidatePlanCacheForConfigChange();
     if (!g_config.save("dbms.conf")) {
+        g_config = previous;
+        dbms::setSqlStatsMaxEntries(previous.sqlStatsMaxEntries);
+        g_slowQueryThresholdMs = previous.slowQueryThresholdMs;
+        g_checkpointInterval = previous.checkpointInterval;
+        dbms::QueryPlanner::setParallelWorkers(previous.maxParallelWorkersPerGather);
+        s.statementTimeoutMs = previousSessionStatementTimeoutMs;
+        s.defaultStatementTimeoutMs = previousSessionDefaultStatementTimeoutMs;
+        s.lockTimeoutMs = previousSessionLockTimeoutMs;
+        s.deadlockTimeoutMs = previousSessionDeadlockTimeoutMs;
+        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
+        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
+        invalidatePlanCacheForConfigChange();
         cout << "Failed to persist configuration" << endl;
         return true;
     }
@@ -8966,14 +8918,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 if (func == "pg_reload_conf") {
                     if (!checkAdmin(s)) return true;
-                    if (g_config.load("dbms.conf")) {
-                        g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
-                        if (!dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries)) {
-                            cout << "f" << endl;
-                            return false;
-                        }
-                        dbms::QueryPlanner::setParallelWorkers(
-                            g_config.maxParallelWorkersPerGather);
+                    dbms::Config reloaded = g_config;
+                    if (std::filesystem::exists("dbms.conf") &&
+                        reloaded.load("dbms.conf") && installReloadedConfig(reloaded)) {
                         cout << "t" << endl;
                     } else {
                         cout << "f" << endl;
@@ -15438,6 +15385,8 @@ int main(int argc, char* argv[]) {
     // Set locale for Unicode support
     std::setlocale(LC_CTYPE, "");
 
+    if (!g_initialConfigLoadOk) return 1;
+
     // Trigger actions run in the session that is currently executing SQL.
     // Install this before entering server mode; the old registration lived
     // after the server-mode early return, making triggers silently no-op for
@@ -15452,14 +15401,18 @@ int main(int argc, char* argv[]) {
         return failed;
     });
 
-    // Load runtime configuration
-    if (g_config.load("dbms.conf")) {
-        g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
-        g_checkpointInterval = g_config.checkpointInterval;
-        dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries);
-        g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs);
-        g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
+    // The static initializer loaded and validated dbms.conf before the
+    // StorageEngine was constructed. Install only its runtime side effects
+    // here; a malformed present file has already caused startup to fail.
+    if (!g_config.validate() ||
+        !dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries)) {
+        std::cerr << "FATAL: invalid runtime configuration" << std::endl;
+        return 1;
     }
+    g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
+    g_checkpointInterval = g_config.checkpointInterval;
+    g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs);
+    g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
 
     // Server mode: ./dbms_main --server PORT [--insecure]
