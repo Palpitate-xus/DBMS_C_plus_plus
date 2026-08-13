@@ -1,10 +1,8 @@
 #include "RuntimeStats.h"
+#include "StatsPersistence.h"
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
-#include <cstdio>
-#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -13,7 +11,6 @@
 #include <set>
 #include <stdexcept>
 #include <string_view>
-#include <unistd.h>
 
 namespace dbms {
 namespace {
@@ -51,39 +48,6 @@ std::set<std::pair<std::string, std::string>>& removedRuntimeTables() {
 constexpr std::string_view kStatsMagic = "DBMS_RUNTIME_STATS_V1";
 constexpr uint32_t kStatsVersion = 1;
 
-class FileLock {
-public:
-    explicit FileLock(const std::filesystem::path& path) {
-        fd_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0600);
-        if (fd_ < 0) return;
-        struct flock lock{};
-        lock.l_type = F_WRLCK;
-        lock.l_whence = SEEK_SET;
-        int result = 0;
-        do {
-            result = ::fcntl(fd_, F_SETLKW, &lock);
-        } while (result != 0 && errno == EINTR);
-        if (result != 0) {
-            ::close(fd_);
-            fd_ = -1;
-        }
-    }
-    ~FileLock() {
-        if (fd_ >= 0) {
-            struct flock lock{};
-            lock.l_type = F_UNLCK;
-            lock.l_whence = SEEK_SET;
-            ::fcntl(fd_, F_SETLK, &lock);
-            ::close(fd_);
-        }
-    }
-    bool ok() const { return fd_ >= 0; }
-    FileLock(const FileLock&) = delete;
-    FileLock& operator=(const FileLock&) = delete;
-private:
-    int fd_ = -1;
-};
-
 template <typename T>
 bool writeValue(std::ostream& out, T value) {
     out.write(reinterpret_cast<const char*>(&value), sizeof(value));
@@ -109,22 +73,6 @@ bool readString(std::istream& in, std::string& value) {
     value.assign(length, '\0');
     in.read(value.data(), static_cast<std::streamsize>(length));
     return in.good();
-}
-
-bool syncFile(const std::filesystem::path& path) {
-    const int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) return false;
-    const bool ok = ::fsync(fd) == 0;
-    ::close(fd);
-    return ok;
-}
-
-bool syncDirectory(const std::filesystem::path& path) {
-    const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd < 0) return false;
-    const bool ok = ::fsync(fd) == 0;
-    ::close(fd);
-    return ok;
 }
 
 bool writeDatabaseStats(std::ostream& out, const RuntimeDatabaseStats& s) {
@@ -379,7 +327,7 @@ bool loadRuntimeStats(const std::string& dbname,
     if (dbname.empty()) return false;
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) return true;
-    FileLock lock(path.string() + ".lock");
+    StatsFileLock lock(path);
     if (!lock.ok()) return false;
     DurableStatsSnapshot snapshot;
     if (!readSnapshot(path, dbname, snapshot)) return false;
@@ -401,7 +349,7 @@ bool persistRuntimeStats(const std::string& dbname,
     std::error_code ec;
     if (!parent.empty()) std::filesystem::create_directories(parent, ec);
     if (ec) return false;
-    FileLock lock(path.string() + ".lock");
+    StatsFileLock lock(path);
     if (!lock.ok()) return false;
 
     std::lock_guard<std::mutex> guard(runtimeStatsMutex());
@@ -448,15 +396,9 @@ bool persistRuntimeStats(const std::string& dbname,
             return a.relname < b.relname;
         });
 
-    const auto temporary = path.string() + ".tmp." + std::to_string(::getpid());
-    if (!writeSnapshot(temporary, snapshot) || !syncFile(temporary)) {
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
-    if (::rename(temporary.c_str(), path.c_str()) != 0 || !syncDirectory(parent.empty() ? "." : parent)) {
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
+    if (!publishStatsSnapshot(path, [&](const std::filesystem::path& temporary) {
+            return writeSnapshot(temporary, snapshot);
+        })) return false;
     persistedDatabaseStatsMap()[dbname] = snapshot.database;
     for (auto it = persistedTableStatsMap().begin(); it != persistedTableStatsMap().end();) {
         if (it->first.first == dbname) it = persistedTableStatsMap().erase(it);

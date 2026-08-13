@@ -60,6 +60,7 @@
 | 2026-08-13 | B+Tree 键边界收敛：插入、查找、多值查找、删除和范围扫描公共 API 统一按当前 20 字节固定键规范化；长键截断、重开索引和范围端点回归由 `gin_brin_index_test` 验证。旧索引文件按当前格式重建，不保留历史索引兼容。 |
 | 2026-08-13 | Volcano 执行失败边界收敛：新增 `PlanExecutionResult`/`executePlanChecked()`，显式区分 EOF 与 `open()`/`next()` 失败；物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口检查结果，测试调用方全部迁移，旧 `executePlan()` 空结果兼容入口删除；`volcano_select_phase51_test` 覆盖失败契约。 |
 | 2026-08-13 | RuntimeStats 持久化收敛：新增版本化 `.runtime_stats` 快照，StorageEngine 在启动、checkpoint、shutdown 和数据库生命周期边界加载/发布；sidecar `flock`、增量合并、文件/目录 `fsync`、原子 rename 和损坏数据 fail-closed 已接入，`runtime_stats_test` 覆盖重载和损坏文件。 |
+| 2026-08-13 | SqlStats 持久化收敛：新增共享 `StatsPersistence` 锁/原子发布基础设施，按数据库写入版本化 `.sql_stats` 快照，StorageEngine 在启动、checkpoint、shutdown 和数据库生命周期边界加载/发布；跨 backend 增量合并、严格数值/长度/尾随数据校验和 `sql_stats_test` 重载/损坏回归已接入。 |
 | 2026-08-13 | 执行器架构清理：删除无调用方的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为唯一 Volcano 生命周期契约；修正文档中已不存在的 `src/optimizer/` 路径。`IndexScanOp` 按 RID 直接回表并复用 page lock/MVCC，避免每个索引命中扫描全表；Volcano 专项与全量回归覆盖该边界。 |
 | 2026-08-13 | RLS/Volcano 安全边界修复：RLS 生效时禁用索引、bitmap、并行访问路径，所有结构化 SELECT 统一经 `forEachVisibleRow(..., "SELECT")` 评估 USING 策略；新增索引存在时阻止 RLS 绕过的专项回归。 |
 | 2026-08-13 | Volcano 访问方法收敛：删除未具备 visibility map/heap 可见性证明的伪 `IndexOnlyScanOp`；IndexScan 与 Bitmap AND/OR 统一使用 page lock、MVCC、SSI 保护的 RID heap fetch，并传播锁/I/O 失败。真正 index-only scan 仍待 visibility map。 |
@@ -612,7 +613,7 @@
 |---|------|---------|------|
 | 13.1 | `pg_catalog` | 只实现了若干虚拟表/兼容查询；缺少几百个 catalog/view/function | 🔄 |
 | 13.2 | `information_schema` | 只有子集；缺少 SQL 标准完整 views、权限过滤 | ⚠️ |
-| 13.3 | `pg_stat_*` | 有线程安全 `RuntimeStats`/`SqlStats` 及 pg_stat_database/pg_stat_tables/pg_stat_statements/pg_stat_activity/pg_locks/pg_buffercache 风格子集；RuntimeStats 当前格式快照已持久化，仍缺 pg_stat_io、progress views、replication views、wait events、backend memory contexts | ⚠️ |
+| 13.3 | `pg_stat_*` | 有线程安全 `RuntimeStats`/`SqlStats` 及 pg_stat_database/pg_stat_tables/pg_stat_statements/pg_stat_activity/pg_locks/pg_buffercache 风格子集；RuntimeStats/SqlStats 当前格式快照已持久化，仍缺 pg_stat_io、progress views、replication views、wait events、backend memory contexts | ⚠️ |
 | 13.4 | 日志 | 有 slow log/auto_explain/audit；缺少 PG logging collector、CSV/JSON logs、log_line_prefix、server log GUC 全集 | ❌ |
 | 13.5 | 进程模型 | 项目多线程 server；PG 是多进程 backend + shared memory 架构 | ❌ |
 | 13.6 | 工具链 | 缺少 `psql` 元命令、libpq、pg_dump、pg_restore、pg_upgrade、initdb、createdb/dropdb、pg_ctl、pgbench | ❌ |

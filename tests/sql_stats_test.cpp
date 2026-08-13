@@ -2,6 +2,8 @@
 
 #include <cassert>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 
 int main() {
@@ -29,8 +31,29 @@ int main() {
 
     auto all = dbms::getSqlStats();
     assert(all.size() == 2);
+
+    const std::filesystem::path persisted = "sql_stats_persist_test.bin";
+    std::filesystem::remove(persisted);
+    std::filesystem::remove(persisted.string() + ".lock");
+    assert(dbms::persistSqlStats("db1", persisted));
+    dbms::resetSqlStats();
+    assert(dbms::loadSqlStats("db1", persisted));
+    auto restored = dbms::getSqlStats("db1");
+    assert(restored.size() == 1);
+    assert(restored[0].calls == 2);
+    assert(std::abs(restored[0].totalTimeMs - 6.0) < 1e-9);
+
+    {
+        std::ofstream corrupt(persisted, std::ios::binary | std::ios::app);
+        corrupt << "trailing-corruption";
+    }
+    dbms::resetSqlStats();
+    assert(!dbms::loadSqlStats("db1", persisted));
+    std::filesystem::remove(persisted);
+    std::filesystem::remove(persisted.string() + ".lock");
+
     dbms::resetSqlStats();
     assert(dbms::getSqlStats().empty());
-    std::cout << "[SQL-STATS] normalization, aggregation and reset OK\n";
+    std::cout << "[SQL-STATS] normalization, aggregation, persistence and reset OK\n";
     return 0;
 }

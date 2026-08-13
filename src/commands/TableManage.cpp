@@ -10,6 +10,7 @@
 #include "permissions.h"
 #include "utils/Session.h"
 #include "process/RuntimeStats.h"
+#include "process/SqlStats.h"
 #include "access/IndexFileUtil.h"
 #include <cmath>
 #include <cctype>
@@ -1119,6 +1120,10 @@ StorageEngine::StorageEngine()
             throw std::runtime_error(
                 "runtime statistics are corrupt or cannot be locked for database " + dbname);
         }
+        if (!loadSqlStats(dbname, dbPath(dbname) / ".sql_stats")) {
+            throw std::runtime_error(
+                "SQL statistics are corrupt or cannot be locked for database " + dbname);
+        }
     }
     // Keep trigger WHEN semantics available for direct StorageEngine users
     // (unit tests and embedded callers) as well as the interactive frontend.
@@ -1169,6 +1174,10 @@ StorageEngine::~StorageEngine() {
     for (const auto& dbname : getDatabaseNames()) {
         if (!persistRuntimeStats(dbname, dbPath(dbname) / ".runtime_stats")) {
             std::cerr << "[storage] failed to persist runtime statistics for database "
+                      << dbname << " during engine shutdown" << std::endl;
+        }
+        if (!persistSqlStats(dbname, dbPath(dbname) / ".sql_stats")) {
+            std::cerr << "[storage] failed to persist SQL statistics for database "
                       << dbname << " during engine shutdown" << std::endl;
         }
         if (!flushDatabaseCaches(dbname)) {
@@ -7736,6 +7745,7 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     pruneMissingDatabaseCaches();
     if (catalogService_) catalogService_->evict(dbname);
     resetRuntimeDatabaseStats(dbname);
+    resetSqlDatabaseStats(dbname);
     std::filesystem::create_directory(dbPath(dbname));
     {
         std::ofstream f(tableListPath(dbname), std::ios::binary);
@@ -7773,9 +7783,12 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     if (catalogService_) catalogService_->evict(dbname);
     closeDatabaseCaches(dbname);
     resetRuntimeDatabaseStats(dbname);
+    resetSqlDatabaseStats(dbname);
     std::error_code statsEc;
     std::filesystem::remove(dbPath(dbname) / ".runtime_stats", statsEc);
     std::filesystem::remove(dbPath(dbname) / ".runtime_stats.lock", statsEc);
+    std::filesystem::remove(dbPath(dbname) / ".sql_stats", statsEc);
+    std::filesystem::remove(dbPath(dbname) / ".sql_stats.lock", statsEc);
     std::filesystem::remove_all(dbPath(dbname));
     return DBStatus::OK;
 }
@@ -20130,6 +20143,7 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     // Persist catalog metadata so it matches the checkpoint.
     if (catalogService_ && !catalogService_->persistAll()) return false;
     if (!persistRuntimeStats(dbname, dbPath(dbname) / ".runtime_stats")) return false;
+    if (!persistSqlStats(dbname, dbPath(dbname) / ".sql_stats")) return false;
 
     // Archive WAL before truncation
     if (!archiveWal(dbname)) return false;
@@ -20171,7 +20185,9 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
             // into a backup snapshot.
             const auto filename = entry.path().filename().string();
             if (filename == ".lockmgr" || filename == ".runtime_stats.lock" ||
-                filename.rfind(".runtime_stats.tmp.", 0) == 0) {
+                filename == ".sql_stats.lock" ||
+                filename.rfind(".runtime_stats.tmp.", 0) == 0 ||
+                filename.rfind(".sql_stats.tmp.", 0) == 0) {
                 continue;
             }
             auto destPath = dst / entry.path().filename();
@@ -20262,8 +20278,9 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
             const auto filename = entry.path().filename().string();
             if (filename == kPhysicalBackupMarker || filename == ".lockmgr" ||
-                filename == ".runtime_stats.lock" ||
-                filename.rfind(".runtime_stats.tmp.", 0) == 0) {
+                filename == ".runtime_stats.lock" || filename == ".sql_stats.lock" ||
+                filename.rfind(".runtime_stats.tmp.", 0) == 0 ||
+                filename.rfind(".sql_stats.tmp.", 0) == 0) {
                 continue;
             }
             auto destPath = dst / entry.path().filename();

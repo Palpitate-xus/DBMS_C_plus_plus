@@ -1,14 +1,15 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 namespace dbms {
 
-// Process-wide SQL statistics shared by the interactive and protocol entry
-// points.  The storage is intentionally in-memory; persistence and bounded
-// eviction are separate operational features and are not implied here.
+// SQL statistics shared by the interactive and protocol entry points. The
+// current process keeps a live copy; StorageEngine persists each database
+// snapshot at checkpoint/shutdown boundaries.
 struct SqlStatEntry {
     std::string sql;
     uint64_t calls = 0;
@@ -29,5 +30,13 @@ void recordSqlStat(const std::string& sql, double elapsedMs,
 std::vector<SqlStatEntry> getSqlStats(const std::string& dbFilter = "");
 
 void resetSqlStats();
+
+// Durable per-database statistics. Malformed snapshots are rejected so the
+// caller can fail closed during database startup.
+bool loadSqlStats(const std::string& dbname,
+                  const std::filesystem::path& path);
+bool persistSqlStats(const std::string& dbname,
+                     const std::filesystem::path& path);
+void resetSqlDatabaseStats(const std::string& dbname);
 
 } // namespace dbms

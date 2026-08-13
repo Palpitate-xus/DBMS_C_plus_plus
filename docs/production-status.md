@@ -8,6 +8,8 @@
 
 2026-08-13 运行时统计持久化：`RuntimeStats` 增加当前格式版本化 `.runtime_stats` 快照，在 checkpoint 和引擎关闭时通过 sidecar `flock`、临时文件、文件/目录 `fsync` 和原子 rename 发布；启动严格校验 magic、版本、长度、数据库归属和尾随字节，损坏文件 fail-closed。多个 backend 按已加载基线做增量合并，DROP/重建关系不会恢复旧统计；新增持久化、重载和损坏文件回归。
 
+2026-08-13 SQL 统计持久化：`SqlStats` 复用共享的统计快照发布基础设施，按数据库写入版本化 `.sql_stats`；checkpoint、shutdown 和启动加载均接入，跨 backend 按已加载基线增量合并，magic/版本/数据库归属/长度/数值/尾随字节严格校验，损坏文件 fail-closed；新增重载与尾随数据拒绝回归。
+
 2026-08-13 SSI 增量审计：SERIALIZABLE 对单列主键/二级 B+Tree 的 `=、<、<=、>、>=` 谓词新增事务级逻辑 SIREAD 记录；INSERT/UPDATE/DELETE 同步登记对应索引键，提交时按 B+Tree 固定宽度顺序检测读谓词与写键重叠，并纳入双向 dangerous-structure 判断。该能力补齐了精确索引谓词的逻辑覆盖，但不等同于 PostgreSQL 的物理索引 predicate lock；复合/表达式/部分索引、其他访问方法、安全快照和完整 SSI 图规则仍待实现。
 
 2026-08-13 B+Tree 键边界收敛：插入、查找、多值查找、删除和范围扫描的公共 API 统一按 20 字节固定键规范化；长键截断、重开索引后的比较和范围端点不再因调用方是否预先填充而产生不同结果。新增长键持久化/重开回归；旧索引文件按当前格式重新创建，不提供历史索引兼容。
@@ -116,8 +118,8 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 - 协议错误状态已收敛：扩展查询在 Parse/Bind/Execute 错误后进入 PostgreSQL 的 ignore-until-Sync 状态；事务外简单查询错误返回 `ReadyForQuery('I')`，连接可在 Sync/错误响应后继续使用。数组等复杂类型、完整类型映射、二进制扩展消息语义仍未完成。
 - 事务上下文已从共享 `StorageEngine` 实例移为连接工作线程局部：事务 ID、快照、回滚日志、savepoint、隔离级别、延迟约束和 `lastval` 不再在协议连接之间互相覆盖；连接断开时会回滚未完成事务并丢弃 backend 上下文。全局锁管理器和提交状态仍用于跨 backend 协调。双连接协议回归已验证未提交行隔离、回滚恢复、断开回滚和提交后可见性。
 - TCL 路由已收敛到事务 AST：`BEGIN`/`START TRANSACTION` 的隔离级别与 READ ONLY/WRITE 选项、`SAVEPOINT`、`ROLLBACK TO` 和 `RELEASE` 不再依赖固定字符串偏移；分类顺序已修复，`ROLLBACK TO`/`COMMIT PREPARED`/`ROLLBACK PREPARED` 不会被通用前缀吞掉。`DEFERRABLE` 在执行层明确拒绝，避免静默宣称未实现语义。
-- SQL 统计已从 `main.cpp` 提取为线程安全 `process/SqlStats` 模块，交互式与 PostgreSQL 协议入口共用；字符串/数字常量和空白归一化后聚合，`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。统计当前仅驻留内存，持久化、上限/淘汰和完整 PostgreSQL 扩展字段仍未完成。
-- 运行时统计已从显示层下沉到线程安全 `process/RuntimeStats`：SQL 执行、失败、提交/回滚，以及 StorageEngine 和 Volcano 扫描算子的顺序扫描、索引扫描和实际 DML 行数会进入共享计数器；完整可见表扫描建立的 live-row 估计会反馈给 Join 成本和 EXPLAIN，部分/索引扫描只保留展示用下界，表重建/截断会清除旧关系身份的估计；`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 不再输出固定零值。统计仍仅驻留内存，索引访问方法细分、历史持久化和后台采样线程仍未完成。
+- SQL 统计已从 `main.cpp` 提取为线程安全 `process/SqlStats` 模块，交互式与 PostgreSQL 协议入口共用；字符串/数字常量和空白归一化后聚合，`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。当前格式 `.sql_stats` 已在 checkpoint/引擎关闭时持久化并在启动时严格加载；上限/淘汰、reset 权限和完整 PostgreSQL 扩展字段仍未完成。
+- 运行时统计已从显示层下沉到线程安全 `process/RuntimeStats`：SQL 执行、失败、提交/回滚，以及 StorageEngine 和 Volcano 扫描算子的顺序扫描、索引扫描和实际 DML 行数会进入共享计数器；完整可见表扫描建立的 live-row 估计会反馈给 Join 成本和 EXPLAIN，部分/索引扫描只保留展示用下界，表重建/截断会清除旧关系身份的估计；`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 不再输出固定零值。当前格式 `.runtime_stats` 已持久化，索引访问方法细分和后台采样线程仍未完成。
 - 构建质量收敛：修复 planner 的 merge join cost 参数错误，清理 parser 未使用参数和测试冗余 helper；legacy 输出捕获已从全局重定向改为线程局部路由；`./scripts/build.sh` 在 `-Wall -Wextra` 下通过且无编译警告，完整回归与 OpenSSL Docker 构建均通过。
 - 构建缓存现在按编译配置、源码清单、生产源码和头文件内容计算 SHA-256 签名；测试对象另按全部测试源计算独立签名，不再仅依赖 mtime。Git 回滚、工作区恢复或复制数据目录后会安全失效并重编译，避免测试链接到过期对象，也不会因测试改动无谓重编译生产主程序。
 - PostgreSQL 协议 E2E 测试不再把服务端 stdout/stderr 连接到无人消费的管道，避免长流程输出填满 pipe 后阻塞服务；协议和窗口 E2E 的超时可通过环境变量覆盖，默认值适配慢速持久化/CI 环境，避免把正常慢执行误判为随机失败。

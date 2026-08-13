@@ -81,7 +81,7 @@ Snapshot export/import 已升级为数据库绑定的 v2 格式，并限制为 R
 
 协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；显式事务失败后普通命令返回 `25P02`，`COMMIT` 按 PostgreSQL 语义走完整回滚，`ROLLBACK TO SAVEPOINT` 可恢复事务；legacy `execute()` 的文本结果捕获已迁移到线程局部 `process/OutputCapture`，避免全局 `std::cout` 重定向串行化网络会话；完整参数绑定和类型化结果仍列为协议缺口。
 
-SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议入口共同使用，按数据库及归一化 SQL 聚合调用次数和耗时；`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。持久化、大小上限和完整 PostgreSQL 统计字段仍列为后续缺口。
+SQL 可观测性已统一：`process/SqlStats` 被交互式和 PostgreSQL 协议入口共同使用，按数据库及归一化 SQL 聚合调用次数和耗时；`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表可查询。当前格式的 `.sql_stats` 已接入启动、checkpoint、shutdown 持久化，并复用共享的锁/原子发布基础设施；大小上限、淘汰、权限和完整 PostgreSQL 统计字段仍列为后续缺口。
 
 运行时统计已统一到 `process/RuntimeStats`：SQL 执行、StorageEngine、Volcano 顺序/索引扫描算子和 DML 边界共享记录数据库/表级计数，`SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 已读取真实进程内数据；完整扫描建立的有效 live-row 估计现在参与 Join 成本和 EXPLAIN，未知估计回退物理计数，重建/截断会清除旧关系估计。后台采样线程、持久化、按索引方法细分和更深的 planner 反馈仍列为后续缺口。
 
