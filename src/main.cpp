@@ -9322,67 +9322,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 6) == "domain") {
-            if (!checkAdmin(s)) return true;
-            if (!checkDB(s)) return true;
-            string rest = trim(sql.substr(14));
-            // Parse: domain_name AS base_type [DEFAULT 'val'] [CHECK (expr)]
-            size_t asPos = rest.find(" as ");
-            if (asPos == string::npos) {
-                cout << "SQL syntax error: CREATE DOMAIN name AS type" << endl;
-                return true;
-            }
-            string dname = trim(rest.substr(0, asPos));
-            string afterAs = trim(rest.substr(asPos + 4));
-            size_t defPos = findTopLevelSqlKeyword(afterAs, "default");
-            size_t constraintPos = findTopLevelSqlKeyword(afterAs, "constraint");
-            size_t checkPos = findTopLevelSqlKeyword(afterAs, "check");
-            size_t typeEnd = afterAs.size();
-            if (defPos != string::npos) typeEnd = std::min(typeEnd, defPos);
-            if (constraintPos != string::npos) typeEnd = std::min(typeEnd, constraintPos);
-            if (checkPos != string::npos) typeEnd = std::min(typeEnd, checkPos);
-            string baseType = trim(afterAs.substr(0, typeEnd));
-            string defVal;
-            if (defPos != string::npos) {
-                size_t defStart = defPos + 7;
-                size_t defEnd = afterAs.size();
-                if (constraintPos != string::npos && constraintPos > defPos) defEnd = std::min(defEnd, constraintPos);
-                if (checkPos != string::npos && checkPos > defPos) defEnd = std::min(defEnd, checkPos);
-                defVal = stripQuotes(trim(afterAs.substr(defStart, defEnd - defStart)));
-            }
-            string checkExpr;
-            string constraintName;
-            if (checkPos != string::npos) {
-                size_t constraintNameStart = (constraintPos == string::npos) ? string::npos : constraintPos + 10;
-                string beforeCheck = (constraintNameStart == string::npos || constraintNameStart > checkPos)
-                    ? ""
-                    : trim(afterAs.substr(constraintNameStart, checkPos - constraintNameStart));
-                if (startsWithKeyword(beforeCheck, "constraint")) {
-                    constraintName = firstCompatNameToken(trim(beforeCheck.substr(10)));
-                } else if (!beforeCheck.empty()) {
-                    constraintName = firstCompatNameToken(beforeCheck);
-                }
-                size_t lp = afterAs.find('(', checkPos);
-                size_t rp = (lp == string::npos) ? string::npos : findMatchingParen(afterAs, lp);
-                if (lp != string::npos && rp != string::npos) {
-                    checkExpr = trim(afterAs.substr(lp + 1, rp - lp - 1));
-                }
-            }
-            dbms::StorageEngine::DomainInfo info;
-            info.name = dname;
-            info.baseType = baseType;
-            info.defaultValue = defVal;
-            info.checkExpr = checkExpr;
-            info.constraintName = constraintName;
-            auto res = g_engine.createDomain(s.currentDB, info);
-            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
-                cout << "Domain " << dname << " already exists" << endl;
-                return true;
-            }
-            cout << "Domain " << dname << " created" << endl;
-            return false;
-        }
-
         if (sql.substr(7, 8) == "database") {
             if (!checkAdmin(s)) return true;
             if (!commitBeforeLegacyDdl()) return true;
@@ -9865,33 +9804,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 8) == "sequence") {
-            if (!checkAdmin(s)) return true;
-            if (!checkDB(s)) return true;
-            string rest = trim(sql.substr(16));
-            string seqName = rest;
-            int64_t start = 1, increment = 1;
-            size_t startPos = rest.find("start with");
-            if (startPos != string::npos) {
-                seqName = trim(rest.substr(0, startPos));
-                string numStr = trim(rest.substr(startPos + 10));
-                try { start = std::stoll(numStr); } catch (...) {}
-            }
-            size_t incPos = rest.find("increment by");
-            if (incPos != string::npos) {
-                if (startPos == string::npos) seqName = trim(rest.substr(0, incPos));
-                string numStr = trim(rest.substr(incPos + 12));
-                try { increment = std::stoll(numStr); } catch (...) {}
-            }
-            auto res = g_engine.createSequence(s.currentDB, seqName, start, increment);
-            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
-                cout << "Sequence " << seqName << " already exists" << endl;
-                return true;
-            }
-            cout << "Sequence " << seqName << " created" << endl;
-            return false;
-        }
-
         bool orReplace = false;
         size_t createOffset = 7;
         if (sql.substr(7, 10) == "or replace") {
@@ -10053,18 +9965,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return false;
         }
 
-        if (sql.substr(7, 6) == "schema") {
-            if (!checkAdmin(s)) return true;
-            if (!checkDB(s)) return true;
-            string schemaname = trim(sql.substr(14));
-            auto res = g_engine.createSchema(s.currentDB, schemaname);
-            if (res != DBStatus::OK) {
-                cout << "Create schema failed" << endl;
-                return true;
-            }
-            cout << "Schema " << schemaname << " created" << endl;
-            return false;
-        }
     }
 
     if (sql.substr(0, 5) == "alter") {

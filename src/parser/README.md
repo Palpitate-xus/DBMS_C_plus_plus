@@ -7,6 +7,9 @@ SQL 解析主入口已拆到 `src/parser/`，由递归下降 parser 生成 typed
 typed DDL 的列类型转换必须成功才会进入存储层；未知类型和非法类型修饰符 fail-closed，
 不会再由执行器静默降级为 `varchar`。
 
+标准 `DOMAIN`、`SEQUENCE`、`SCHEMA` 的创建和删除也只有 parser → `DdlExecutor` →
+`StorageEngine` 一条路由；主入口中不再保留这些命令的旧字符串实现。
+
 - `DdlExecutor` 消费已迁移的 DDL AST 子集
 - `DmlExecutor` 消费普通单表 `INSERT VALUES/DEFAULT VALUES`、受限行级表达式 UPDATE、来源 INNER/CROSS JOIN 的结构化 `UPDATE ... FROM`/`DELETE ... USING`、单源表 `UPDATE ... FROM`、单源表 `DELETE ... USING` 和简单单表 `DELETE`
 - `execute()` 中的字符串解析仅保留尚未完成 AST 迁移的高级 DML/DQL 与兼容路径

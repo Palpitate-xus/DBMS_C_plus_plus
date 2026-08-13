@@ -25,6 +25,10 @@
 
 2026-08-13 构建入口收敛：CMake 新增 `check`/CTest 标准回归入口，直接调用唯一的 `build_tests.sh` 编排器；配置阶段校验生产 manifest 的重复项、文件存在性和 `src/main.cpp` 入口，避免 CMake 与 shell 测试策略继续分叉。
 
+2026-08-13 DDL 路由收敛：删除 `main.cpp` 中已被 typed bridge 完整覆盖的 `CREATE/DROP DOMAIN`、
+`CREATE/DROP SEQUENCE` 和 `CREATE/DROP SCHEMA` 字符串分支；标准对象创建/删除现在只保留
+parser → `DdlExecutor` → `StorageEngine` 路径。高级对象与复杂 DML 的 legacy/fail-closed 边界仍在。
+
 2026-08-13 Snapshot 边界收敛：snapshot export/import 升级为数据库绑定的 v2 二进制格式，拒绝版本错误、长度/尾随字节、非法或重复 XID；仅允许 REPEATABLE READ/SERIALIZABLE 事务在首次读写前导入，重复、跨数据库和导入后写入替换均 fail-closed。完整 logical decoding snapshot、跨集群生命周期和安全快照语义仍待实现。
 
 2026-08-12 测试隔离修复：每个 C++ 测试在独立临时工作目录运行并在结束后回收，统一消除 `.txnid`、WAL、catalog、日志和后台 worker 相对路径造成的顺序污染；`build_one_test.sh` 复用同一隔离逻辑。

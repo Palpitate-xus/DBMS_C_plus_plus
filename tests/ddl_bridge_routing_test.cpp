@@ -106,6 +106,43 @@ static void test_unknown_column_type_fails_closed() {
     std::cout << "[DDL-ROUTE] unknown column types fail closed" << std::endl;
 }
 
+static void test_bridge_handles_domain_sequence_schema() {
+    const std::string db = testDbPath("ddl_route_objects");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    auto run = [&](const std::string& sql) {
+        bool handled = false;
+        const auto command = dbms::SQLParser::classify(sql);
+        const bool error = dbms::tryDdlBridge(sql, command, s, handled);
+        assert(handled);
+        assert(!error);
+    };
+
+    run("CREATE DOMAIN route_text AS VARCHAR(12) CHECK (length(VALUE) <= 12)");
+    const auto domain = g_engine.getDomain(db, "route_text");
+    assert(domain.name == "route_text");
+    assert(domain.baseType == "VARCHAR(12)");
+
+    run("CREATE SEQUENCE route_seq START 7 INCREMENT 2");
+    assert(g_engine.sequenceExists(db, "route_seq"));
+
+    run("CREATE SCHEMA route_schema");
+    assert(g_engine.schemaExists(db, "route_schema"));
+
+    run("DROP DOMAIN route_text");
+    run("DROP SEQUENCE route_seq");
+    run("DROP SCHEMA route_schema");
+    assert(g_engine.getDomain(db, "route_text").name.empty());
+    assert(!g_engine.sequenceExists(db, "route_seq"));
+    assert(!g_engine.schemaExists(db, "route_schema"));
+
+    cleanup(db);
+    std::cout << "[DDL-ROUTE] domain/sequence/schema use typed bridge" << std::endl;
+}
+
 static void test_supported_serial_type_mapping() {
     const std::string db = testDbPath("ddl_route_serial");
     cleanup(db);
@@ -246,6 +283,7 @@ int main() {
     test_bridge_falls_back_for_unhandled();
     test_bridge_fails_closed_on_parse_error();
     test_unknown_column_type_fails_closed();
+    test_bridge_handles_domain_sequence_schema();
     test_supported_serial_type_mapping();
     test_bridge_handles_ctas();
     test_bridge_handles_typed_alter_table();
