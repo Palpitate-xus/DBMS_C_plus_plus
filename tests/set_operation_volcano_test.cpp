@@ -15,6 +15,12 @@
 
 extern dbms::StorageEngine g_engine;
 
+static std::vector<std::string> executePlanRows(dbms::OpPtr plan) {
+    auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+    assert(result.ok);
+    return std::move(result.rows);
+}
+
 static std::string normalized(const std::string& row) {
     return row.substr(0, row.find_last_not_of(' ') + 1);
 }
@@ -32,7 +38,7 @@ static std::vector<std::string> executeSet(const std::string& db,
                                            bool all) {
     auto plan = dbms::QueryPlanner::buildSetOperationPlan(
         planFor(db, "left_values"), planFor(db, "right_values"), type, all);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     for (auto& row : rows) row = normalized(row);
     return rows;
 }
@@ -72,7 +78,7 @@ int main() {
         std::make_unique<dbms::MaterializedRowsOp>(std::vector<std::string>{"1", "1", "2"}),
         std::make_unique<dbms::MaterializedRowsOp>(std::vector<std::string>{"2", "3"}),
         dbms::SetOperationType::Union, false);
-    auto materializedRows = dbms::QueryPlanner::executePlan(std::move(materializedPlan));
+    auto materializedRows = executePlanRows(std::move(materializedPlan));
     for (auto& row : materializedRows) row = normalized(row);
     assert(materializedRows == std::vector<std::string>({"1", "2", "3"}));
 
@@ -84,7 +90,7 @@ int main() {
     distinctCtx.tablename = "distinct_values";
     distinctCtx.selectCols = {"grp"};
     distinctCtx.distinct = true;
-    auto distinctRows = dbms::QueryPlanner::executePlan(
+    auto distinctRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, distinctCtx));
     assert(distinctRows.size() == 1);
 

@@ -56,7 +56,7 @@ static void test_rollback_and_chain_parser() {
 }
 
 static void test_explain_analyze_timing() {
-    // Verify that QueryPlanner::executePlan returns rows (used by EXPLAIN ANALYZE)
+    // Verify that the checked Volcano execution contract returns rows.
     std::string db = testDbPath("p5_ea");
     cleanup(db);
     assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);

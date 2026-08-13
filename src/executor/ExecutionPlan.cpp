@@ -3034,10 +3034,6 @@ PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan) {
     return result;
 }
 
-std::vector<std::string> QueryPlanner::executePlan(OpPtr plan) {
-    return executePlanChecked(std::move(plan)).rows;
-}
-
 // Check if an index provides the required pathkey ordering.
 static bool indexProvidesOrdering(StorageEngine* engine, const std::string& dbname,
                                    const std::string& tablename,

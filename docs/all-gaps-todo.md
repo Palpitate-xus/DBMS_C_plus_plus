@@ -58,7 +58,7 @@
 | 2026-08-11 | CLOG 崩溃安全收敛：`pg_xact` 段采用临时文件完整写入、段文件 `fsync`、原子 rename 与目录 `fsync`；写入失败保留 dirty 状态，数据库目录或 `pg_xact` 被删除时不重建旧路径，`clog_test` 持久化回归通过。 |
 | 2026-08-13 | SSI 索引谓词收敛：单列主键/二级 B+Tree 的 `=、<、<=、>、>=` 谓词登记事务级逻辑 SIREAD，INSERT/UPDATE/DELETE 登记对应索引键，COMMIT 按 B+Tree 固定宽度顺序检测谓词/写键重叠并纳入 dangerous-structure；`phase5_remaining_test` 通过。物理索引范围 predicate lock、复合/表达式/部分索引、其他访问方法、完整 SSI 图和安全快照仍待后续。 |
 | 2026-08-13 | B+Tree 键边界收敛：插入、查找、多值查找、删除和范围扫描公共 API 统一按当前 20 字节固定键规范化；长键截断、重开索引和范围端点回归由 `gin_brin_index_test` 验证。旧索引文件按当前格式重建，不保留历史索引兼容。 |
-| 2026-08-13 | Volcano 执行失败边界收敛：新增 `PlanExecutionResult`/`executePlanChecked()`，显式区分 EOF 与 `open()`/`next()` 失败；物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口检查结果，`volcano_select_phase51_test` 新增失败契约回归。兼容 `executePlan()` 暂保留，新的生产调用方不得使用。 |
+| 2026-08-13 | Volcano 执行失败边界收敛：新增 `PlanExecutionResult`/`executePlanChecked()`，显式区分 EOF 与 `open()`/`next()` 失败；物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口检查结果，测试调用方全部迁移，旧 `executePlan()` 空结果兼容入口删除；`volcano_select_phase51_test` 覆盖失败契约。 |
 | 2026-08-13 | 执行器架构清理：删除无调用方的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为唯一 Volcano 生命周期契约；修正文档中已不存在的 `src/optimizer/` 路径。`IndexScanOp` 按 RID 直接回表并复用 page lock/MVCC，避免每个索引命中扫描全表；Volcano 专项与全量回归覆盖该边界。 |
 | 2026-08-13 | RLS/Volcano 安全边界修复：RLS 生效时禁用索引、bitmap、并行访问路径，所有结构化 SELECT 统一经 `forEachVisibleRow(..., "SELECT")` 评估 USING 策略；新增索引存在时阻止 RLS 绕过的专项回归。 |
 | 2026-08-13 | Volcano 访问方法收敛：删除未具备 visibility map/heap 可见性证明的伪 `IndexOnlyScanOp`；IndexScan 与 Bitmap AND/OR 统一使用 page lock、MVCC、SSI 保护的 RID heap fetch，并传播锁/I/O 失败。真正 index-only scan 仍待 visibility map。 |
@@ -201,7 +201,7 @@
 > - 🔄 4.19-4.21 函数/聚合/窗口（核心集就绪，缺高级特性）, 4.27 ALTER TABLE（本次新增 INHERIT/STATISTICS，缺 ONLY/延迟约束队列）
 
 > **Phase 5（Planner/执行器/DQL/DML）**：核心完成，高级标注 🔄
-> - ✅ 5.1 火山模型算子树（12 个 Operator + QueryPlanner::buildSelectPlan + executePlan）
+> - ✅ 5.1 火山模型算子树（12 个 Operator + QueryPlanner::buildSelectPlan + executePlanChecked）
 > - ✅ 5.8 INSERT DEFAULT VALUES（StorageEngine::insertDefaultValues + main.cpp 路径）
 > - ✅ 5.19 EXPLAIN ANALYZE 改为通过算子树执行并返回实际 rows + 时间
 > - ✅ 5.25 COMMIT/ROLLBACK AND [NO] CHAIN
@@ -738,7 +738,7 @@
 - **2026-08-09**：ALTER TABLE EXCLUDE typed 收口：parser 保留命名 EXCLUDE 约束，`DdlExecutor` 负责 ADD/DROP、约束名冲突校验、`.exclusions` 与约束元数据清理；删除 `main.cpp` 的专用 EXCLUDE 字符串解析/执行分支，新增 bridge 增删与冲突行为回归。GiST 加速、多元素/表达式元素和完整 operator class 语义仍待后续。
 - **2026-08-09**：ALTER TABLE 元数据动作 typed 化：删除 `main.cpp` 中约 300 行 `table_options`/`constraint_option` 字符串旁路；`CLUSTER`、`REPLICA IDENTITY`、`VALIDATE CONSTRAINT`、`ALTER CONSTRAINT` 统一进入 parser → DdlExecutor → StorageEngine，新增索引归属、`pg_class.relreplident`、约束 deferrability/validation 回归。
 
-- **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlan 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
+- **2026-07-02**：PASS=112 FAIL=0（含新增 volcano_select_phase51_test）。volcano 算子树 SELECT 执行路径已实现：单表 SELECT 经 QueryPlanner::buildSelectPlan + executePlanChecked 执行（含 Project/Filter/Sort/Limit/Distinct/IndexScan/TableScan）；复杂语义（FOR UPDATE / DISTINCT ON / NOWAIT / 继承）回退 g_engine.query()。全量 PASS=112。
 - **2026-06-21**：PASS=98  — Phase 0~3 完成，Phase 4 进行中（Wave 0~2 完成）。
 
 ---

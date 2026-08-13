@@ -15,6 +15,11 @@ static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) st
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser"; s.permission = 1; s.currentDB = db;
 }
+static std::vector<std::string> executePlanRows(dbms::OpPtr plan) {
+    auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+    assert(result.ok);
+    return std::move(result.rows);
+}
 
 static void test_pathkey_with_indexed_order() {
     std::string db = testDbPath("eq_pk_test");
@@ -36,7 +41,7 @@ static void test_pathkey_with_indexed_order() {
     assert(plan);
 
     // Execute and verify
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     // No data inserted; should return empty.
     assert(rows.empty());
 

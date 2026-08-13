@@ -5,7 +5,7 @@
 
 > 当前审计（2026-08-13）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=138 FAIL=0（136 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
-本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。2026-08-13 又将 Volcano 执行入口收敛为 checked result：EOF 与 open/next 失败分离，物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口不再把执行失败当成空结果。2PC prepared 记录已具备原子 durable 发布、PREPARE WAL、准备前缓存刷盘、跨 backend 锁所有权转移、重启后表/row/page/gap 锁 ownership 重建、in-doubt xid 保留和索引回表可见性过滤；普通事务 CLOG 故障的 COMMIT→ABORT 序列也保持兼容。全局 prepared 目录和崩溃后 in-doubt 决策仍待实现。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
+本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。2026-08-13 又将 Volcano 执行入口收敛为 checked result：EOF 与 open/next 失败分离，物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口不再把执行失败当成空结果，并删除旧的空结果兼容执行入口。2PC prepared 记录已具备原子 durable 发布、PREPARE WAL、准备前缓存刷盘、跨 backend 锁所有权转移、重启后表/row/page/gap 锁 ownership 重建、in-doubt xid 保留和索引回表可见性过滤；普通事务 CLOG 故障的 COMMIT→ABORT 序列也保持兼容。全局 prepared 目录和崩溃后 in-doubt 决策仍待实现。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
 2026-08-12 增量审计：规范 DDL 执行器与 `main.cpp` legacy 兼容分发统一使用隐式提交失败守卫；提交失败会输出 SQLSTATE 并停止后续 DDL，避免不同入口产生不一致的成功结果。
 
@@ -60,7 +60,7 @@
 
 2026-08-13 增量审计：B+Tree 的插入、查找、多值查找、删除和范围扫描公共 API 统一调用固定 20 字节键规范化；长键截断、范围端点和重开索引语义通过 `gin_brin_index_test` 回归，避免内存键与磁盘键排序不一致。当前格式不兼容旧索引文件，需按现行 schema/index 格式重建。
 
-2026-08-13 增量审计：Volcano 执行器新增 `PlanExecutionResult` checked contract，`IOperator` 显式区分 EOF 与错误；Sort/Limit/Offset/Distinct/SetOperation/Join/Window/Aggregate/子查询物化路径传播子算子失败，主 SQL 入口迁移到 checked API。`volcano_select_phase51_test` 新增合成失败契约回归；兼容 `executePlan()` 暂保留但不应用于新的生产调用方。
+2026-08-13 增量审计：Volcano 执行器新增 `PlanExecutionResult` checked contract，`IOperator` 显式区分 EOF 与错误；Sort/Limit/Offset/Distinct/SetOperation/Join/Window/Aggregate/子查询物化路径传播子算子失败，主 SQL 入口迁移到 checked API。测试调用方已全部迁移，旧 `executePlan()` 空结果兼容入口删除；`volcano_select_phase51_test` 覆盖合成失败契约。
 
 2026-08-13 增量审计：删除未被调用的 `IExpr`、`PlanNode`、`IExecutionPlanner` 旧接口，`IOperator` 成为实际 Volcano 算子唯一接口；`IndexScanOp` 改为在 page shared lock 与 MVCC 检查内按 RID 直接回表，避免每个索引命中重新扫描整张 heap。`volcano_select_phase51_test` 通过。
 2026-08-13 安全边界修复：Volcano SELECT 在 RLS 生效的关系上统一走 `forEachVisibleRow(..., "SELECT")`，禁用索引/bitmap/并行访问路径，避免计划选择绕过策略；新增 `volcano_select_phase51_test` 的索引 RLS 回归。
@@ -719,7 +719,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| ✅ 5.1 建立 path/relation/statistics 框架（`QueryPlanner` + `PlanContext` + Volcano 算子） | 16.10, 7.2 | 已落地 Volcano 模型算子树：TableScan/IndexScan/Filter/Project/Sort/Limit/Distinct/NestedLoopJoin/HashJoin/MergeJoin/Aggregate。未完成 visibility-map 证明前不提供伪 `IndexOnlyScan`；`QueryPlanner::executePlan` 作为执行入口。 |
+| ✅ 5.1 建立 path/relation/statistics 框架（`QueryPlanner` + `PlanContext` + Volcano 算子） | 16.10, 7.2 | 已落地 Volcano 模型算子树：TableScan/IndexScan/Filter/Project/Sort/Limit/Distinct/NestedLoopJoin/HashJoin/MergeJoin/Aggregate。未完成 visibility-map 证明前不提供伪 `IndexOnlyScan`；`QueryPlanner::executePlanChecked` 是唯一执行入口。 |
 | ✅ 5.2 实现等价类（equivalence classes）、pathkeys、参数化路径 | 7.2 | EquivalenceClass + PathKey structs + buildSelectPlan overload + index-provided ordering detection |
 | ✅ 5.3 实现 join search / join reordering（cost-based DP） | 6.2, 7.2 | estimateJoinCost for NLJ/Merge/Hash; cost-based algorithm selection + size-based join order swap |
 | ✅ 5.4 实现 bitmap heap scan、bitmap and/or、多索引组合 | 7.4 | Bitmap AND/OR 和 IndexScan（PK/secondary）统一通过受保护的 RID heap fetch；过滤条件在 `buildSelectPlan` 中保留为 recheck。 |

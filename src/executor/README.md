@@ -8,8 +8,7 @@
 
 生产入口必须使用 `QueryPlanner::executePlanChecked()` 并检查
 `PlanExecutionResult::ok/error`；`next()` 返回 `false` 只表示没有更多行，调用方还
-必须检查 `hasError()`。旧的 `executePlan()` 仅作为迁移期兼容包装，失败时返回空行集合，
-不得用于新的生产路径。
+必须检查 `hasError()`。旧的空结果兼容执行入口已删除，避免执行失败被误用为空结果。
 
 ## 未来迁移计划
 

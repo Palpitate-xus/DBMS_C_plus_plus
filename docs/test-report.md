@@ -5,8 +5,8 @@
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
 本轮新增 Volcano 执行失败契约回归：合成 `open()` 失败必须由
-`executePlanChecked()` 返回 `ok=false` 和错误信息，不能与合法空结果混淆；兼容包装的
-迁移期行为也被明确固定。
+`executePlanChecked()` 返回 `ok=false` 和错误信息，不能与合法空结果混淆；所有测试调用
+方均使用 checked contract，旧空结果兼容入口已删除。
 
 ---
 

@@ -842,10 +842,6 @@ public:
     // Checked production entry point: EOF and execution failure are distinct.
     static PlanExecutionResult executePlanChecked(OpPtr plan);
 
-    // Compatibility convenience for already-tested callers. New production
-    // call sites must use executePlanChecked() and inspect ok/error.
-    static std::vector<std::string> executePlan(OpPtr plan);
-
     // Parallel query support: number of worker threads (0 = disabled).
     static int parallelWorkers() { return parallelWorkers_; }
     static void setParallelWorkers(int n) { parallelWorkers_ = n < 0 ? 0 : n; }

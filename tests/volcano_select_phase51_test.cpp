@@ -1,5 +1,5 @@
 // Phase 5.1 test: verify SELECT execution produces correct results through
-// the volcano operator tree (QueryPlanner::buildSelectPlan + executePlan).
+// the volcano operator tree (QueryPlanner::buildSelectPlan + executePlanChecked).
 //
 // Strategy: populate a table, then build a PlanContext and execute via the
 // operator tree. Compare the row count and sort order with the same query
@@ -31,6 +31,12 @@ static void insertRow(const std::string& db, const std::string& tname,
     assert(g_engine.insert(db, tname, vals) == dbms::DBStatus::OK);
 }
 
+static std::vector<std::string> executePlanRows(dbms::OpPtr plan) {
+    auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+    assert(result.ok);
+    return std::move(result.rows);
+}
+
 class FailingOperator final : public dbms::Operator {
 public:
     bool open() override {
@@ -48,11 +54,6 @@ static void test_checked_execution_failure() {
     assert(result.rows.empty());
     assert(result.error == "synthetic executor failure");
 
-    // The old convenience API remains source-compatible, but callers that
-    // need to distinguish an empty result from execution failure must use the
-    // checked API above.
-    assert(dbms::QueryPlanner::executePlan(
-               std::make_unique<FailingOperator>()).empty());
     std::cout << "[VOLCANO-5.1] checked execution failure propagation OK" << std::endl;
 }
 
@@ -80,7 +81,7 @@ static void test_full_scan() {
     ctx.dbname = db; ctx.tablename = "t";
 
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert(rows.size() == 3);
 
     // Compare with legacy path
@@ -114,7 +115,7 @@ static void test_where_index_scan() {
     ctx.selectCols = {"name"};
 
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert(rows.size() == 2);  // alice + carol
     const std::set<std::string> expectedNames = {"alice ", "carol "};
     assert((std::set<std::string>(rows.begin(), rows.end()) == expectedNames));
@@ -151,7 +152,7 @@ static void test_rls_blocks_index_bypass() {
     auto* filter = dynamic_cast<dbms::FilterOp*>(project->child());
     assert(filter);
     assert(dynamic_cast<dbms::TableScanOp*>(filter->child()) != nullptr);
-    const auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    const auto rows = executePlanRows(std::move(plan));
     assert(rows == std::vector<std::string>{"1 "});
 
     dbms::StorageEngine::setRLSUser("");
@@ -177,7 +178,7 @@ static void test_order_by_limit() {
     ctx.orderByCol = "id"; ctx.orderByAsc = true; ctx.limit = 2;
 
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert(rows.size() == 2);
 
     // Verify ascending order (parse first column from each row).
@@ -194,7 +195,7 @@ static void test_order_by_limit() {
     auto* offset = dynamic_cast<dbms::OffsetOp*>(
         dynamic_cast<dbms::LimitOp*>(offsetPlan.get())->child());
     assert(offset && offset->offset() == 1);
-    auto offsetRows = dbms::QueryPlanner::executePlan(std::move(offsetPlan));
+    auto offsetRows = executePlanRows(std::move(offsetPlan));
     assert(offsetRows.size() == 2);
     assert(extractId(offsetRows[0]) == 2);
     assert(extractId(offsetRows[1]) == 3);
@@ -220,7 +221,7 @@ static void test_distinct() {
     ctx.dbname = db; ctx.tablename = "t"; ctx.distinct = true;
 
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert(rows.size() == 2);  // distinct removes the duplicate
 
     cleanup(db);
@@ -244,7 +245,7 @@ static void test_projection() {
     ctx.selectCols = {"id", "name"};
 
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert(rows.size() == 2);
     // Each row should have only id and name (space-separated).
     for (const auto& r : rows) {
@@ -279,7 +280,7 @@ static void test_like_filter() {
     ctx.dbname = db; ctx.tablename = "t"; ctx.conds = conds;
 
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert(rows.size() == 1);
 
     cleanup(db);
@@ -311,7 +312,7 @@ static void test_bitmap_and() {
     auto* filter = dynamic_cast<dbms::FilterOp*>(project->child());
     assert(filter);
     assert(dynamic_cast<dbms::BitmapHeapScanOp*>(filter->child()) != nullptr);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert(rows.size() == 1);
     assert(rows[0].find("1") != std::string::npos);
 
@@ -344,7 +345,7 @@ static void test_bitmap_or() {
     auto* project = dynamic_cast<dbms::ProjectOp*>(plan.get());
     assert(project);
     assert(dynamic_cast<dbms::BitmapOrHeapScanOp*>(project->child()) != nullptr);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert(rows.size() == 3);
 
     cleanup(db);
@@ -381,7 +382,7 @@ static void test_parallel_scan() {
 
     dbms::QueryPlanner::setParallelWorkers(0);
     auto sequentialPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-    auto sequentialRows = dbms::QueryPlanner::executePlan(std::move(sequentialPlan));
+    auto sequentialRows = executePlanRows(std::move(sequentialPlan));
     assert(parallelRows == sequentialRows);
 
     // Transaction-local visibility/SSI state must stay on the backend
@@ -445,7 +446,7 @@ static void test_window_agg() {
     auto* window = dynamic_cast<dbms::WindowOp*>(plan.get());
     assert(window);
     assert(window->functions().size() == 4);
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     const std::vector<std::string> expected = {
         "1 1 1 1 NULL", "2 3 2 2 20", "3 2 2 2 10",
         "4 1 1 1 NULL", "5 2 2 2 10"
@@ -460,7 +461,7 @@ static void test_window_agg() {
     dbms::PlanContext defaultFrameCtx = ctx;
     defaultFrameCtx.windowFunctions = {defaultSum};
     defaultFrameCtx.windowTargets = {{false, "id", 0}, {true, "", 0}};
-    auto defaultFrameRows = dbms::QueryPlanner::executePlan(
+    auto defaultFrameRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, defaultFrameCtx));
     assert((defaultFrameRows == std::vector<std::string>{
         "1 10", "2 50", "3 50", "4 10", "5 30"
@@ -473,7 +474,7 @@ static void test_window_agg() {
     rangeSum.frameEndOffset = 0;
     dbms::PlanContext rangeCtx = defaultFrameCtx;
     rangeCtx.windowFunctions = {rangeSum};
-    auto rangeRows = dbms::QueryPlanner::executePlan(
+    auto rangeRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, rangeCtx));
     assert((rangeRows == std::vector<std::string>{
         "1 10", "2 50", "3 50", "4 10", "5 30"
@@ -486,7 +487,7 @@ static void test_window_agg() {
     groupsSum.frameEndOffset = 0;
     dbms::PlanContext groupsCtx = defaultFrameCtx;
     groupsCtx.windowFunctions = {groupsSum};
-    auto groupsRows = dbms::QueryPlanner::executePlan(
+    auto groupsRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, groupsCtx));
     assert((groupsRows == std::vector<std::string>{
         "1 10", "2 50", "3 50", "4 10", "5 30"
@@ -499,7 +500,7 @@ static void test_window_agg() {
     excludedSum.frameExclusion = "current row";
     dbms::PlanContext excludedFrameCtx = defaultFrameCtx;
     excludedFrameCtx.windowFunctions = {excludedSum};
-    auto excludedFrameRows = dbms::QueryPlanner::executePlan(
+    auto excludedFrameRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, excludedFrameCtx));
     assert((excludedFrameRows == std::vector<std::string>{
         "1 40", "2 30", "3 30", "4 20", "5 10"
@@ -530,7 +531,7 @@ static void test_window_agg() {
         {false, "id", 0}, {true, "", 0}, {true, "", 1},
         {true, "", 2}, {true, "", 3}, {true, "", 4}, {true, "", 5}
     };
-    auto analyticRows = dbms::QueryPlanner::executePlan(
+    auto analyticRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, analyticCtx));
     assert((analyticRows == std::vector<std::string>{
         "1 1 10 10 1 0.0000 0.3333",
@@ -574,7 +575,7 @@ static void test_group_aggregate() {
     };
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
     assert(dynamic_cast<dbms::GroupAggregateOp*>(plan.get()));
-    auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
+    auto rows = executePlanRows(std::move(plan));
     assert((rows == std::vector<std::string>{
         "A 3 35 11.666667 5 20", "B 1 7 7.000000 7 7"
     }));
@@ -586,13 +587,13 @@ static void test_group_aggregate() {
     plainCtx.aggregateItems = {{"count", "*", {}}, {"sum", "score", {}}};
     auto plainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, plainCtx);
     assert(dynamic_cast<dbms::GroupAggregateOp*>(plainPlan.get()));
-    auto plainRows = dbms::QueryPlanner::executePlan(std::move(plainPlan));
+    auto plainRows = executePlanRows(std::move(plainPlan));
     assert((plainRows == std::vector<std::string>{"3 35"}));
 
     dbms::PlanContext havingCtx = ctx;
     havingCtx.aggregateItems = {{"count", "*", {}}};
     havingCtx.havingConds = {"count(*) > 1"};
-    auto havingRows = dbms::QueryPlanner::executePlan(
+    auto havingRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, havingCtx));
     assert((havingRows == std::vector<std::string>{"A 3"}));
 
@@ -603,7 +604,7 @@ static void test_group_aggregate() {
     auto setsPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, setsCtx);
     auto* group = dynamic_cast<dbms::GroupAggregateOp*>(setsPlan.get());
     assert(group && group->groupingSetCount() == 3);
-    auto setsRows = dbms::QueryPlanner::executePlan(std::move(setsPlan));
+    auto setsRows = executePlanRows(std::move(setsPlan));
     assert((setsRows == std::vector<std::string>{
         "A X 2", "A Y 1", "B X 1", "A NULL 3", "B NULL 1", "NULL NULL 4"
     }));
@@ -649,7 +650,7 @@ static void test_semi_and_anti_join() {
     auto inPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, inCtx);
     auto* inProject = dynamic_cast<dbms::ProjectOp*>(inPlan.get());
     assert(inProject && dynamic_cast<dbms::SemiJoinOp*>(inProject->child()));
-    auto inRows = dbms::QueryPlanner::executePlan(std::move(inPlan));
+    auto inRows = executePlanRows(std::move(inPlan));
     assert((inRows == std::vector<std::string>{"2 ", "3 "}));
 
     dbms::PlanContext antiCtx = inCtx;
@@ -659,13 +660,13 @@ static void test_semi_and_anti_join() {
     assert(antiProject);
     auto* anti = dynamic_cast<dbms::SemiJoinOp*>(antiProject->child());
     assert(anti && anti->isAnti());
-    auto antiRows = dbms::QueryPlanner::executePlan(std::move(antiPlan));
+    auto antiRows = executePlanRows(std::move(antiPlan));
     assert((antiRows == std::vector<std::string>{"1 ", "4 "}));
 
     dbms::PlanContext nullAntiCtx = inCtx;
     nullAntiCtx.semiJoins = {{db, "inner_t", "id", "id",
                               dbms::StorageEngine::parseConditions({"=enabled 1"}), true}};
-    auto nullAntiRows = dbms::QueryPlanner::executePlan(
+    auto nullAntiRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, nullAntiCtx));
     assert(nullAntiRows.empty());
 
@@ -681,7 +682,7 @@ static void test_semi_and_anti_join() {
     assert(anyProject);
     auto* anyFilter = dynamic_cast<dbms::QuantifiedSubqueryFilterOp*>(anyProject->child());
     assert(anyFilter && !anyFilter->isAll() && anyFilter->op() == ">");
-    auto anyRows = dbms::QueryPlanner::executePlan(std::move(anyPlan));
+    auto anyRows = executePlanRows(std::move(anyPlan));
     assert((anyRows == std::vector<std::string>{"3 ", "4 "}));
     auto quantifiedExplainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, anyCtx);
     const auto quantifiedExplain = dbms::QueryPlanner::explain(
@@ -695,7 +696,7 @@ static void test_semi_and_anti_join() {
     dbms::PlanContext allCtx = anyCtx;
     allCtx.quantifiedSubqueries = {{
         db, "clean_inner_t", "id", "id", ">", {}, true}};
-    auto allRows = dbms::QueryPlanner::executePlan(
+    auto allRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, allCtx));
     assert((allRows == std::vector<std::string>{"4 "}));
 
@@ -703,11 +704,11 @@ static void test_semi_and_anti_join() {
     emptyAnyCtx.quantifiedSubqueries = {{
         db, "inner_t", "id", "id", ">",
         dbms::StorageEngine::parseConditions({"=enabled 9"}), false}};
-    assert(dbms::QueryPlanner::executePlan(
+    assert(executePlanRows(
                dbms::QueryPlanner::buildSelectPlan(&g_engine, emptyAnyCtx)).empty());
     dbms::PlanContext emptyAllCtx = emptyAnyCtx;
     emptyAllCtx.quantifiedSubqueries[0].all = true;
-    auto emptyAllRows = dbms::QueryPlanner::executePlan(
+    auto emptyAllRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, emptyAllCtx));
     assert((emptyAllRows == std::vector<std::string>{"1 ", "2 ", "3 ", "4 "}));
 
@@ -722,7 +723,7 @@ static void test_semi_and_anti_join() {
     assert(existsProject);
     auto* exists = dynamic_cast<dbms::ExistenceFilterOp*>(existsProject->child());
     assert(exists && !exists->isAnti());
-    auto existsRows = dbms::QueryPlanner::executePlan(std::move(existsPlan));
+    auto existsRows = executePlanRows(std::move(existsPlan));
     assert((existsRows == std::vector<std::string>{"1 ", "2 ", "3 ", "4 "}));
 
     dbms::PlanContext notExistsCtx = existsCtx;
@@ -733,7 +734,7 @@ static void test_semi_and_anti_join() {
     assert(notExistsProject);
     auto* notExists = dynamic_cast<dbms::ExistenceFilterOp*>(notExistsProject->child());
     assert(notExists && notExists->isAnti());
-    auto notExistsRows = dbms::QueryPlanner::executePlan(std::move(notExistsPlan));
+    auto notExistsRows = executePlanRows(std::move(notExistsPlan));
     assert((notExistsRows == std::vector<std::string>{"1 ", "2 ", "3 ", "4 "}));
 
     auto explainPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, existsCtx);
@@ -752,13 +753,13 @@ static void test_semi_and_anti_join() {
     auto scalarPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx);
     auto* scalar = dynamic_cast<dbms::ScalarSubqueryProjectOp*>(scalarPlan.get());
     assert(scalar);
-    auto scalarRows = dbms::QueryPlanner::executePlan(std::move(scalarPlan));
+    auto scalarRows = executePlanRows(std::move(scalarPlan));
     assert((scalarRows == std::vector<std::string>{
         "1 2 ", "2 2 ", "3 2 ", "4 2 "}));
 
     scalarCtx.scalarSubquery.innerConds =
         dbms::StorageEngine::parseConditions({"=id 9"});
-    auto nullScalarRows = dbms::QueryPlanner::executePlan(
+    auto nullScalarRows = executePlanRows(
         dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx));
     assert((nullScalarRows == std::vector<std::string>{
         "1 NULL ", "2 NULL ", "3 NULL ", "4 NULL "}));
