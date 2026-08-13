@@ -7,8 +7,11 @@ SQL 解析主入口已拆到 `src/parser/`，由递归下降 parser 生成 typed
 typed DDL 的列类型转换必须成功才会进入存储层；未知类型和非法类型修饰符 fail-closed，
 不会再由执行器静默降级为 `varchar`。
 
-标准 `DOMAIN`、`SEQUENCE`、`SCHEMA` 的创建和删除也只有 parser → `DdlExecutor` →
-`StorageEngine` 一条路由；主入口中不再保留这些命令的旧字符串实现。
+标准 `DOMAIN`、`SEQUENCE`、`SCHEMA`、数据库和角色/用户的创建、删除也只有
+parser → `DdlExecutor` → `StorageEngine` 一条路由；主入口中不再保留这些命令的旧字符串实现。
+
+`ALTER SEQUENCE` 的选项变更同样由 typed bridge 执行；只有尚未完成目录/文件原子改名的
+`RENAME TO` 明确保留在兼容路径，不能误称为已完成迁移。
 
 - `DdlExecutor` 消费已迁移的 DDL AST 子集
 - `DmlExecutor` 消费普通单表 `INSERT VALUES/DEFAULT VALUES`、受限行级表达式 UPDATE、来源 INNER/CROSS JOIN 的结构化 `UPDATE ... FROM`/`DELETE ... USING`、单源表 `UPDATE ... FROM`、单源表 `DELETE ... USING` 和简单单表 `DELETE`

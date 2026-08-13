@@ -436,6 +436,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateIndex:
         case dbms::SqlCommand::DropIndex:
         case dbms::SqlCommand::CreateSequence:
+        case dbms::SqlCommand::AlterSequence:
         case dbms::SqlCommand::DropSequence:
         case dbms::SqlCommand::CreateDomain:
         case dbms::SqlCommand::DropDomain:
@@ -535,6 +536,16 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         }
         if (!supported) {
             // Leave the command to main.cpp's still-supported legacy handlers.
+            handled = false;
+            return false;
+        }
+    }
+    if (parsedCmd == dbms::SqlCommand::AlterSequence) {
+        const auto* alter = dynamic_cast<const dbms::AlterObjectStmt*>(r.stmt.get());
+        // RENAME TO still depends on the legacy compatibility metadata file;
+        // keep that one unsupported shape on its explicit compatibility path
+        // until sequence names and catalog OIDs are renamed atomically.
+        if (!alter || alter->subCommand.find("rename") != std::string::npos) {
             handled = false;
             return false;
         }

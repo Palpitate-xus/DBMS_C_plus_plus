@@ -7011,38 +7011,6 @@ static bool renameExplicitRole(const string& oldName, const string& newName) {
     return renameUser(oldName, newName);
 }
 
-static bool handleCreateGroup(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    string rest = trim(sql.substr(12)); // after "create group"
-    if (rest.empty()) {
-        cout << "SQL syntax error: CREATE GROUP group_name [WITH USER user,...]" << endl;
-        return true;
-    }
-    vector<string> tokens = tokenize(rest);
-    if (tokens.empty()) {
-        cout << "SQL syntax error: CREATE GROUP group_name [WITH USER user,...]" << endl;
-        return true;
-    }
-    string groupName = tokens[0];
-    int res = createRole(groupName);
-    if (res == -1) {
-        cout << "error: group already exists" << endl;
-        return true;
-    }
-    size_t userPos = findTopLevelKeyword(rest, "user");
-    if (userPos != string::npos) {
-        string userList = trim(rest.substr(userPos + 4));
-        for (auto userName : splitTopLevelComma(userList)) {
-            userName = stripQuotes(trim(userName));
-            if (!userName.empty()) {
-                grantRoleToUser(groupName, userName, false, effectiveSessionRole(s));
-            }
-        }
-    }
-    cout << "CREATE GROUP succeeded" << endl;
-    return false;
-}
-
 static bool handleAlterGroup(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     string rest = trim(sql.substr(11)); // after "alter group"
@@ -7172,56 +7140,6 @@ static bool handleAlterRole(const string& sql, Session& s) {
     }
     authCatalog().persistAll();
     cout << "Role " << roleName << " altered" << endl;
-    return false;
-}
-
-static bool handleDropGroup(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    string rest = trim(sql.substr(10)); // after "drop group"
-    bool ifExists = false;
-    if (startsWithKeyword(rest, "if exists")) {
-        ifExists = true;
-        rest = trim(rest.substr(9));
-    }
-    string groupName = firstCompatNameToken(stripTrailingDropBehavior(rest));
-    if (groupName.empty()) {
-        cout << "SQL syntax error: DROP GROUP group_name" << endl;
-        return true;
-    }
-    if (!dropRole(groupName)) {
-        if (ifExists) {
-            cout << "Group " << groupName << " does not exist, skipping" << endl;
-            return false;
-        }
-        cout << "Group " << groupName << " not exist" << endl;
-        return true;
-    }
-    cout << "Group dropped" << endl;
-    return false;
-}
-
-static bool handleDropRoleGlobal(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    string rest = trim(sql.substr(9)); // after "drop role"
-    bool ifExists = false;
-    if (startsWithKeyword(rest, "if exists")) {
-        ifExists = true;
-        rest = trim(rest.substr(9));
-    }
-    string roleName = firstCompatNameToken(stripTrailingDropBehavior(rest));
-    if (roleName.empty()) {
-        cout << "SQL syntax error: DROP ROLE role_name" << endl;
-        return true;
-    }
-    if (!dropRole(roleName)) {
-        if (ifExists) {
-            cout << "Role " << roleName << " does not exist, skipping" << endl;
-            return false;
-        }
-        cout << "Role " << roleName << " not exist" << endl;
-        return true;
-    }
-    cout << "Role dropped" << endl;
     return false;
 }
 
@@ -7826,36 +7744,6 @@ static bool handleDropPolicy(const string& sql, Session& s) {
     return false;
 }
 
-static bool handleDropDatabaseGlobal(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    string rest = trim(sql.substr(13)); // after "drop database"
-    bool ifExists = false;
-    if (startsWithKeyword(rest, "if exists")) {
-        ifExists = true;
-        rest = trim(rest.substr(9));
-    }
-    string dbname = firstCompatNameToken(stripTrailingDropBehavior(rest));
-    if (dbname.empty()) {
-        cout << "SQL syntax error: DROP DATABASE name" << endl;
-        return true;
-    }
-    auto res = g_engine.dropDatabase(dbname);
-    if (res == DBStatus::DATABASE_NOT_FOUND) {
-        if (ifExists) {
-            cout << "Database " << dbname << " does not exist, skipping" << endl;
-            return false;
-        }
-        cout << "Database " << dbname << " not exist" << endl;
-        return true;
-    }
-    auto dbOptions = loadDatabaseOptions();
-    if (dbOptions.erase(dbname) > 0) saveDatabaseOptions(dbOptions);
-    if (s.currentDB == dbname) s.currentDB.clear();
-    cout << "Database dropped" << endl;
-    log(s.username, "database dropped", getTime());
-    return false;
-}
-
 static bool handleCreateTablespace(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     string rest = trim(sql.substr(17));
@@ -8182,67 +8070,6 @@ static bool handleDropStatistics(const string& sql, Session& s) {
     return !allOk;
 }
 
-static bool handleCreateCollation(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
-    string rest = trim(sql.substr(16));
-    bool ifNotExists = false;
-    if (rest.substr(0, 13) == "if not exists") {
-        ifNotExists = true;
-        rest = trim(rest.substr(13));
-    }
-    string name;
-    string options;
-    size_t parenPos = rest.find('(');
-    size_t fromPos = findTopLevelKeyword(rest, "from");
-    if (fromPos != string::npos && (parenPos == string::npos || fromPos < parenPos)) {
-        name = trim(rest.substr(0, fromPos));
-        options = "from=" + trim(rest.substr(fromPos + 4));
-    } else if (parenPos != string::npos) {
-        name = trim(rest.substr(0, parenPos));
-        size_t rp = rest.rfind(')');
-        if (rp == string::npos || rp <= parenPos) {
-            cout << "SQL syntax error: CREATE COLLATION name (...)" << endl;
-            return true;
-        }
-        options = trim(rest.substr(parenPos + 1, rp - parenPos - 1));
-    } else {
-        cout << "SQL syntax error: CREATE COLLATION name (...) | FROM existing" << endl;
-        return true;
-    }
-    if (name.empty()) {
-        cout << "SQL syntax error: CREATE COLLATION requires a name" << endl;
-        return true;
-    }
-    auto collations = loadCollations(s.currentDB);
-    if (collations.count(name)) {
-        if (ifNotExists) {
-            cout << "Collation " << name << " already exists, skipping" << endl;
-            return false;
-        }
-        cout << "Collation " << name << " already exists" << endl;
-        return true;
-    }
-    string provider = "default";
-    string locale = "";
-    for (auto item : splitTopLevelComma(options)) {
-        size_t eq = item.find('=');
-        if (eq == string::npos) continue;
-        string key = trim(item.substr(0, eq));
-        string val = stripQuotes(trim(item.substr(eq + 1)));
-        if (key == "provider") provider = val;
-        else if (key == "locale" || key == "lc_collate") locale = val;
-    }
-    collations[name] = {name, provider, locale, s.username, options,
-                        inferCollationBehavior(name, options)};
-    if (!saveCollations(s.currentDB, collations)) {
-        cout << "Create collation failed" << endl;
-        return true;
-    }
-    cout << "Collation " << name << " created" << endl;
-    return false;
-}
-
 static bool handleAlterCollation(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -8288,35 +8115,6 @@ static bool handleAlterCollation(const string& sql, Session& s) {
     }
     cout << "SQL syntax error: ALTER COLLATION name RENAME TO newname | OWNER TO user | REFRESH VERSION" << endl;
     return true;
-}
-
-static bool handleDropCollation(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
-    string rest = trim(sql.substr(14));
-    bool ifExists = false;
-    if (rest.substr(0, 9) == "if exists") {
-        ifExists = true;
-        rest = trim(rest.substr(9));
-    }
-    auto collations = loadCollations(s.currentDB);
-    bool allOk = true;
-    for (auto name : splitTopLevelComma(rest)) {
-        name = trim(name);
-        if (name.empty()) continue;
-        auto it = collations.find(name);
-        if (it == collations.end()) {
-            if (!ifExists) {
-                cout << "Collation " << name << " not exist" << endl;
-                allOk = false;
-            }
-            continue;
-        }
-        collations.erase(it);
-        cout << "Collation " << name << " dropped" << endl;
-    }
-    saveCollations(s.currentDB, collations);
-    return !allOk;
 }
 
 static bool handleCreateCast(const string& sql, Session& s) {
@@ -9220,9 +9018,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (sql.substr(7, 4) == "cast") {
             return handleCreateCast(sql, s);
         }
-        if (sql.substr(7, 9) == "collation") {
-            return handleCreateCollation(sql, s);
-        }
         if (sql.substr(7, 10) == "conversion") {
             return handleCreateConversion(sql, s);
         }
@@ -9235,125 +9030,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (isCompatObjectCreate(sql)) {
             return handleCreateCompatObject(sql, s);
         }
-        if (sql.substr(7, 5) == "group") {
-            return handleCreateGroup(sql, s);
-        }
-        if (sql.substr(7, 4) == "user") {
-            if (!checkAdmin(s)) return true;
-            string rest = trim(sql.substr(12));
-            vector<string> parts;
-            stringstream ss(rest);
-            string part;
-            while (ss >> part) parts.push_back(part);
-            if (parts.size() < 3) {
-                cout << "SQL syntax error" << endl;
-                return true;
-            }
-            user temp;
-            temp.username = parts[0];
-            temp.permission = parts[2];
-            // Preserve password case from raw SQL (sqlProcessor lowercases everything)
-            {
-                string rawRest = rawSql;
-                size_t p = 0;
-                while (p < rawRest.size() && isspace(static_cast<unsigned char>(rawRest[p]))) ++p;
-                rawRest = rawRest.substr(p);
-                string lraw = toLower(rawRest);
-                size_t cuPos = lraw.find("create user");
-                if (cuPos != string::npos) rawRest = rawRest.substr(cuPos + 11);
-                rawRest = trim(rawRest);
-                vector<string> rawParts;
-                stringstream rss(rawRest);
-                string rp;
-                while (rss >> rp) rawParts.push_back(rp);
-                if (rawParts.size() >= 2) temp.password = rawParts[1];
-                else temp.password = parts[1];
-            }
-            if (permissionQuery(temp.username) != -1) {
-                cout << "error: user already exist" << endl;
-                log(s.username, "error: user already exist", getTime());
-                return true;
-            }
-            // Password strength check
-            if (g_config.passwordPolicyLevel > 0) {
-                int score = checkPasswordStrength(temp.password);
-                std::string strength = passwordStrengthMessage(score);
-                if (g_config.passwordPolicyLevel >= 3 && score < 80) {
-                    cout << "ERROR: password too weak (" << strength << ", score=" << score
-                         << "). Require strong password (score>=80)." << endl;
-                    return true;
-                }
-                if (g_config.passwordPolicyLevel >= 2 && score < 50) {
-                    cout << "ERROR: password too weak (" << strength << ", score=" << score
-                         << "). Require medium password (score>=50)." << endl;
-                    return true;
-                }
-                if (g_config.passwordPolicyLevel >= 1) {
-                    cout << "Password strength: " << strength << " (score=" << score << ")" << endl;
-                }
-            }
-            if (createUser(temp) != 0) {
-                cout << "ERROR: could not create user" << endl;
-                return true;
-            }
-            cout << "create user  " << temp.username << "  succeeded" << endl;
-            return false;
-        }
-
-        if (sql.substr(7, 4) == "role") {
-            if (!checkAdmin(s)) return true;
-            string rest = trim(sql.substr(12));
-            if (rest.empty()) {
-                cout << "SQL syntax error: CREATE ROLE role_name" << endl;
-                return true;
-            }
-            string roleName = rest;
-            // Check if role name conflicts with existing user
-            if (permissionQuery(roleName) != -1) {
-                cout << "error: role name conflicts with existing user" << endl;
-                return true;
-            }
-            int res = createRole(roleName);
-            if (res == -1) {
-                cout << "error: role already exists" << endl;
-                return true;
-            }
-            cout << "CREATE ROLE succeeded" << endl;
-            return false;
-        }
-
-        if (sql.substr(7, 8) == "database") {
-            if (!checkAdmin(s)) return true;
-            if (!commitBeforeLegacyDdl()) return true;
-            string rest = trim(sql.substr(16));
-            string dbname = rest;
-            string charset = "utf8";
-            size_t csPos1 = rest.find(" character set ");
-            size_t csPos2 = rest.find(" charset ");
-            size_t csPos = string::npos;
-            size_t csOffset = 0;
-            if (csPos1 != string::npos) {
-                csPos = csPos1;
-                csOffset = 15;
-            } else if (csPos2 != string::npos) {
-                csPos = csPos2;
-                csOffset = 9;
-            }
-            if (csPos != string::npos) {
-                dbname = trim(rest.substr(0, csPos));
-                charset = trim(rest.substr(csPos + csOffset));
-            }
-            auto res = g_engine.createDatabase(dbname, charset);
-            if (res == DBStatus::TABLE_ALREADY_EXISTS) {
-                cout << "Failed:Database " << dbname << " already exists" << endl;
-                log(s.username, "create database error", getTime());
-            } else {
-                cout << "Create Database succeeded (charset=" << charset << ")" << endl;
-                log(s.username, "create database succeeded", getTime());
-            }
-            return res != DBStatus::OK;
-        }
-
         bool isUnlogged = false;
         size_t tableKeywordPos = 7;
         if (sql.size() > 16 && sql.substr(7, 9) == "unlogged ") {
@@ -11372,18 +11048,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return false;
     }
 
-    if (startsWithKeyword(sql, "drop database")) {
-        return handleDropDatabaseGlobal(sql, s);
-    }
-
-    if (startsWithKeyword(sql, "drop role")) {
-        return handleDropRoleGlobal(sql, s);
-    }
-
-    if (startsWithKeyword(sql, "drop group")) {
-        return handleDropGroup(sql, s);
-    }
-
     if (sql.substr(0, 15) == "drop tablespace") {
         return handleDropTablespace(sql, s);
     }
@@ -11394,10 +11058,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 9) == "drop cast") {
         return handleDropCast(sql, s);
-    }
-
-    if (sql.substr(0, 14) == "drop collation") {
-        return handleDropCollation(sql, s);
     }
 
     if (sql.substr(0, 15) == "drop conversion") {
@@ -11486,73 +11146,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return true;
             }
             cout << "Table dropped" << endl;
-            return false;
-        }
-        if (op == "domain") {
-            auto res = g_engine.dropDomain(s.currentDB, name);
-            if (res == DBStatus::TABLE_NOT_FOUND) {
-                cout << "Domain " << name << " not exist" << endl;
-                return true;
-            }
-            cout << "Domain dropped" << endl;
-            return false;
-        }
-        if (op == "type") {
-            auto res = g_engine.dropCompositeType(s.currentDB, name);
-            if (res == DBStatus::TABLE_NOT_FOUND) {
-                cout << "Type " << name << " not exist" << endl;
-                return true;
-            }
-            cout << "Type dropped" << endl;
-            return false;
-        }
-        if (op == "sequence") {
-            auto res = g_engine.dropSequence(s.currentDB, name);
-            if (res == DBStatus::TABLE_NOT_FOUND) {
-                cout << "Sequence " << name << " not exist" << endl;
-                return true;
-            }
-            cout << "Sequence dropped" << endl;
-            return false;
-        }
-        if (op == "user") {
-            if (!deleteUser(name)) {
-                cout << "User " << name << " not exist" << endl;
-                return true;
-            }
-            cout << "User dropped" << endl;
-            return false;
-        }
-        if (op == "role") {
-            if (!dropRole(name)) {
-                cout << "Role " << name << " not exist" << endl;
-                return true;
-            }
-            cout << "Role dropped" << endl;
-            return false;
-        }
-        if (op == "schema") {
-            bool cascade = false;
-            if (tokens.size() >= 3 && tokens[2] == "cascade") cascade = true;
-            auto res = g_engine.dropSchema(s.currentDB, name, cascade);
-            if (res == DBStatus::TABLE_NOT_FOUND) {
-                cout << "Schema " << name << " not exist" << endl;
-                return true;
-            }
-            cout << "Schema " << name << " dropped" << (cascade ? " (cascade)" : "") << endl;
-            return false;
-        }
-        if (op == "database") {
-            auto res = g_engine.dropDatabase(name);
-            if (res == DBStatus::DATABASE_NOT_FOUND) {
-                cout << "Database " << name << " not exist" << endl;
-                return true;
-            }
-            auto dbOptions = loadDatabaseOptions();
-            if (dbOptions.erase(name) > 0) saveDatabaseOptions(dbOptions);
-            if (s.currentDB == name) s.currentDB.clear();
-            cout << "Database dropped" << endl;
-            log(s.username, "database dropped", getTime());
             return false;
         }
         if (op == "fulltext") {

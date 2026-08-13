@@ -21,8 +21,10 @@
 本轮新增 typed DDL 类型边界回归：未知列类型和非法类型修饰符在物理变更前拒绝，不再
 静默降级为 `varchar`；合法 `SERIAL`、`NCHAR`、`BINARY` 映射及自动序列仍保持可用。
 
-本轮新增 DDL 路由收敛回归：`CREATE/DROP DOMAIN`、`CREATE/DROP SEQUENCE` 和
-`CREATE/DROP SCHEMA` 均通过 typed bridge 执行，确认标准入口不再依赖 `main.cpp` 旧字符串分支。
+本轮新增 DDL 路由收敛回归：`CREATE/DROP DOMAIN`、`CREATE/DROP SEQUENCE`、
+`CREATE/DROP SCHEMA`、角色/用户和数据库均通过 typed bridge 执行，确认标准入口不再依赖
+`main.cpp` 旧字符串分支。
+同时验证 `ALTER SEQUENCE ... RESTART ... INCREMENT BY ...` 由 typed bridge 执行并保持序列值语义。
 
 ---
 

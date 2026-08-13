@@ -126,8 +126,16 @@ static void test_bridge_handles_domain_sequence_schema() {
     assert(domain.name == "route_text");
     assert(domain.baseType == "VARCHAR(12)");
 
+    assert(dbms::SQLParser::classify("CREATE SEQUENCE route_seq") ==
+           dbms::SqlCommand::CreateSequence);
     run("CREATE SEQUENCE route_seq START 7 INCREMENT 2");
     assert(g_engine.sequenceExists(db, "route_seq"));
+
+    assert(dbms::SQLParser::classify("ALTER SEQUENCE route_seq RESTART") ==
+           dbms::SqlCommand::AlterSequence);
+    run("ALTER SEQUENCE route_seq RESTART WITH 20 INCREMENT BY 3");
+    assert(g_engine.nextval(db, "route_seq") == 20);
+    assert(g_engine.nextval(db, "route_seq") == 23);
 
     run("CREATE SCHEMA route_schema");
     assert(g_engine.schemaExists(db, "route_schema"));

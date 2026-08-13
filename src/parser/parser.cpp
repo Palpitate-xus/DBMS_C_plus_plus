@@ -330,7 +330,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 9) == "database ") return SqlCommand::CreateDatabase;
         if (rest.substr(0, 7) == "schema ") return SqlCommand::CreateSchema;
         if (rest.substr(0, 12) == "tablespace ") return SqlCommand::CreateTablespace;
-        if (rest.substr(0, 11) == "sequence ") return SqlCommand::CreateSequence;
+        if (rest.substr(0, 9) == "sequence ") return SqlCommand::CreateSequence;
         if (rest.substr(0, 7) == "domain ") return SqlCommand::CreateDomain;
         if (rest.substr(0, 5) == "type ") return SqlCommand::CreateType;
         if (rest.substr(0, 13) == "materialized ") return SqlCommand::CreateMaterializedView;
@@ -387,7 +387,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 9) == "database ") return SqlCommand::DropDatabase;
         if (rest.substr(0, 7) == "schema ") return SqlCommand::DropSchema;
         if (rest.substr(0, 12) == "tablespace ") return SqlCommand::DropTablespace;
-        if (rest.substr(0, 11) == "sequence ") return SqlCommand::DropSequence;
+        if (rest.substr(0, 9) == "sequence ") return SqlCommand::DropSequence;
         if (rest.substr(0, 7) == "domain ") return SqlCommand::DropDomain;
         if (rest.substr(0, 5) == "type ") return SqlCommand::DropType;
         if (rest.substr(0, 13) == "materialized ") return SqlCommand::DropMaterializedView;
@@ -446,7 +446,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 9) == "database ") return SqlCommand::AlterDatabase;
         if (rest.substr(0, 7) == "schema ") return SqlCommand::AlterSchema;
         if (rest.substr(0, 12) == "tablespace ") return SqlCommand::AlterTablespace;
-        if (rest.substr(0, 11) == "sequence ") return SqlCommand::AlterSequence;
+        if (rest.substr(0, 9) == "sequence ") return SqlCommand::AlterSequence;
         if (rest.substr(0, 7) == "domain ") return SqlCommand::AlterDomain;
         if (rest.substr(0, 5) == "type ") return SqlCommand::AlterType;
         if (rest.substr(0, 13) == "materialized ") return SqlCommand::AlterMaterializedView;

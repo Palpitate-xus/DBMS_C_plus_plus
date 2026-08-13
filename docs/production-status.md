@@ -5,9 +5,14 @@
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，137 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=139 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
 2026-08-13 DDL 路由收敛：删除 `src/main.cpp` 中已被 typed bridge 完整覆盖的旧字符串实现，
-包括 `CREATE DOMAIN`、`CREATE SEQUENCE` 和 `CREATE SCHEMA`。这些命令现在只有
-parser → `DdlExecutor` → `StorageEngine` 一条标准执行链；新增真实 bridge 路由回归，验证创建、
-查询和删除均不再依赖 legacy 分支。未迁移的高级对象命令仍保留明确的兼容边界。
+包括 `CREATE/DROP DOMAIN`、`CREATE/DROP SEQUENCE`、`CREATE/DROP SCHEMA`、数据库、角色/用户/组
+和排序规则的标准路径。这些命令现在只有 parser → `DdlExecutor` → `StorageEngine` 一条标准
+执行链；新增真实 bridge 路由回归，验证创建、查询和删除均不再依赖 legacy 分支。未迁移的
+高级对象命令仍保留明确的兼容边界。
+
+2026-08-13 序列变更路由收敛：`ALTER SEQUENCE` 的 `RESTART`、`INCREMENT`、边界、缓存、
+循环和 `OWNED BY` 选项现在进入 typed `DdlExecutor` bridge；仅保留依赖旧兼容元数据文件的
+`RENAME TO` 在 legacy 路径。新增真实路由回归验证重启和增量值，避免同一命令在两套实现间漂移。
 
 2026-08-13 配置作用域与计划缓存收敛：普通 `SET` 只修改当前 `Session` 的
 `statement_timeout`、`lock_timeout` 和 `deadlock_timeout`；进程级参数必须通过管理员
