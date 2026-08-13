@@ -280,7 +280,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 3.2 实现 relation forks（main / fsm / vm / init） | 10.2 | fork 文件由 PageAllocator 管理
 | ✅ 3.3 实现 shared buffers、clock sweep、pin/lock | 16.9, 10.4 | BufferPool clock sweep + Shared Engine
 | ✅ 3.4 实现 bgwriter / checkpointer / walwriter | 10.4, 10.6 | StorageEngine bg worker thread
-| ✅ 3.5 实现真实 WAL record / LSN / segment / FPI | 16.3, 10.5 | WAL.cpp 37 行 + LSN tracking
+| ✅ 3.5 实现真实 WAL record / LSN / segment / FPI | 16.3, 10.5 | `WAL.cpp` 的 record/LSN/segment/FPI 实现、严格记录校验与 LSN tracking
 | ✅ 3.6 实现 redo routines、timeline、archive status | 10.5, 12.8 | WAL timeline + archive_status/ + restore_command
 | ✅ 3.7 实现 tuple `xmin/xmax`、ctid chain、HOT update | 16.4, 9.1 | HOT update test in src/commands
 | ✅ 3.8 实现 CLOG / `pg_xact`、visibility map、hint bits | 9.9, 10.2 | CommitLog + vis map integration
