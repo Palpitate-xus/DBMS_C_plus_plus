@@ -22,7 +22,6 @@ src/network/NetworkServer.cpp
 src/network/PostgresProtocol.cpp
 src/network/PostgresNumeric.cpp
 src/common/Config.cpp
-src/common/GUC.cpp
 src/parser/parser.cpp
 src/catalog/catalog.cpp
 src/catalog/oid.cpp

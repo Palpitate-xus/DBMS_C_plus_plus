@@ -167,7 +167,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 1.4 补全 `SELECT` grammar（join、where、group、window、cte） | 6.1~6.8 | — |
 | 🔄 1.5 补全 `INSERT/UPDATE/DELETE/MERGE` AST 路径 | 1.1.35, 1.1.41, 1.1.44, 1.1.58, 6.10~6.13 | AST 已完整建模；普通 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费；INSERT 高级子句、外连接/复杂 JOIN、复杂/子查询/窗口 RETURNING、复杂 UPDATE/DELETE 和 MERGE 完整 WHEN 语义仍待迁移 |
 | ✅ 1.6 补全 DDL AST（`CREATE`/`ALTER`/`DROP` 各对象） | 1.1.3, 1.1.4, 1.1.6, 1.1.17, 1.1.24~1.1.33 等 | — |
-| ✅ 1.7 补全 `SET`/`SHOW`/`RESET` GUC 框架 | 1.1.48, 1.1.52, 1.1.56 | 需先定义 GUC 变量表 |
+| ✅ 1.7 补全 `SET`/`SHOW`/`RESET` GUC 框架 | 1.1.48, 1.1.52, 1.1.56 | 当前由 `Config` + 统一命令处理路径提供；未接入的旧 `GUCRegistry` 已移除 |
 | ✅ 1.8 补全 `VALUES` 作为通用 query expression | 1.1.60 | — |
 | ✅ 1.9 补全 `EXPLAIN` AST（支持所有语句类型） | 1.1.39 | — |
 | ✅ 1.10 移除或标记非 PG 语法（`USE DATABASE`、`REPLACE INTO` 等） | 15.1~15.9 | 可先做兼容模式开关 |

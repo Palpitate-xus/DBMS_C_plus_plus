@@ -69,7 +69,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
   3. ⚠️ 已有确定性 Gather，仍需 GatherMerge、并行 HashJoin/Aggregate
   4. ✅ 增加 `max_parallel_workers_per_gather` 配置入口
 - **预估工作量**: 2-3 周
-- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `src/common/Config.{h,cpp}`, `src/common/GUC.cpp`
+- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `src/common/Config.{h,cpp}`
 
 ### P0-2: JIT 编译 (LLVM)
 - **类别**: 性能 / 表达式求值
