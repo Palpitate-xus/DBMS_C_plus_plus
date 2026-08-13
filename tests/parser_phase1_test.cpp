@@ -229,6 +229,15 @@ int main() {
         assert(r2.success);
         auto* s2 = asSelect(r2.stmt);
         assert(s2 && s2->fetchFirst && s2->limit == 5);
+
+        assert(!parser.parse("SELECT * FROM t LIMIT nope").success);
+        assert(!parser.parse("SELECT * FROM t LIMIT -1").success);
+        assert(!parser.parse("SELECT * FROM t OFFSET").success);
+        assert(!parser.parse("SELECT * FROM t FETCH FIRST nope ROWS ONLY").success);
+        auto r3 = parser.parse("SELECT * FROM t FETCH FIRST ROWS ONLY");
+        assert(r3.success);
+        auto* s3 = asSelect(r3.stmt);
+        assert(s3 && s3->limit == 1);
         std::cout << "[PARSER P1] LIMIT/FETCH OK\n";
     }
 

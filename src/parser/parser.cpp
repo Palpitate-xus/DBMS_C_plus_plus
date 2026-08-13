@@ -2,6 +2,7 @@
 #include <cctype>
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <set>
 #include <sstream>
 
@@ -13,6 +14,24 @@ static std::string stripQuotes(const std::string& s) {
         return s.substr(1, s.size() - 2);
     }
     return s;
+}
+
+static bool parseNonNegativeInteger(const std::string& token, size_t& value) {
+    if (token.empty()) return false;
+    for (unsigned char c : token) {
+        if (!std::isdigit(c)) return false;
+    }
+    try {
+        size_t consumed = 0;
+        const unsigned long long parsed = std::stoull(token, &consumed, 10);
+        if (consumed != token.size() || parsed > std::numeric_limits<size_t>::max()) {
+            return false;
+        }
+        value = static_cast<size_t>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 // ============================================================================
@@ -1878,13 +1897,20 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     // LIMIT / OFFSET / FETCH
     if (pos < tokens.size() && toLower(tokens[pos]) == "limit") {
         ++pos;
-        if (pos < tokens.size()) {
-            if (toLower(tokens[pos]) == "all") {
-                ++pos;
-            } else {
-                try { stmt->limit = std::stoull(tokens[pos]); } catch (...) {}
-                ++pos;
+        if (pos >= tokens.size()) {
+            r.error = "LIMIT requires a non-negative integer or ALL";
+            return r;
+        }
+        if (toLower(tokens[pos]) == "all") {
+            ++pos;
+        } else {
+            size_t limit = 0;
+            if (!parseNonNegativeInteger(tokens[pos], limit)) {
+                r.error = "LIMIT requires a non-negative integer or ALL";
+                return r;
             }
+            stmt->limit = limit;
+            ++pos;
         }
         if (pos < tokens.size() && toLower(tokens[pos]) == "with") {
             ++pos;
@@ -1895,25 +1921,56 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     }
     if (pos < tokens.size() && toLower(tokens[pos]) == "offset") {
         ++pos;
-        if (pos < tokens.size()) {
-            try { stmt->offset = std::stoull(tokens[pos]); } catch (...) {}
-            ++pos;
+        if (pos >= tokens.size()) {
+            r.error = "OFFSET requires a non-negative integer";
+            return r;
         }
+        size_t offset = 0;
+        if (!parseNonNegativeInteger(tokens[pos], offset)) {
+            r.error = "OFFSET requires a non-negative integer";
+            return r;
+        }
+        stmt->offset = offset;
+        ++pos;
     }
     // FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }
     if (pos < tokens.size() && toLower(tokens[pos]) == "fetch") {
         ++pos;
-        if (pos < tokens.size() && (toLower(tokens[pos]) == "first" || toLower(tokens[pos]) == "next")) {
+        if (pos >= tokens.size() || (toLower(tokens[pos]) != "first" && toLower(tokens[pos]) != "next")) {
+            r.error = "FETCH requires FIRST or NEXT";
+            return r;
+        }
+        ++pos;
+        stmt->fetchFirst = true;
+
+        if (pos < tokens.size() && (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) {
+            stmt->limit = 1;
+        } else {
+            if (pos >= tokens.size()) {
+                r.error = "FETCH requires a non-negative integer count";
+                return r;
+            }
+            size_t limit = 0;
+            if (!parseNonNegativeInteger(tokens[pos], limit)) {
+                r.error = "FETCH requires a non-negative integer count";
+                return r;
+            }
+            stmt->limit = limit;
             ++pos;
-            stmt->fetchFirst = true;
         }
-        if (pos < tokens.size()) {
-            try { stmt->limit = std::stoull(tokens[pos]); ++pos; } catch (...) {}
+
+        if (pos >= tokens.size() || (toLower(tokens[pos]) != "row" && toLower(tokens[pos]) != "rows")) {
+            r.error = "FETCH count must be followed by ROW or ROWS";
+            return r;
         }
-        if (pos < tokens.size() && (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) ++pos;
-        if (pos < tokens.size() && toLower(tokens[pos]) == "only") ++pos;
-        if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "with" && toLower(tokens[pos + 1]) == "ties") {
+        ++pos;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+            ++pos;
+        } else if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "with" && toLower(tokens[pos + 1]) == "ties") {
             stmt->withTies = true; pos += 2;
+        } else {
+            r.error = "FETCH requires ONLY or WITH TIES";
+            return r;
         }
     }
 

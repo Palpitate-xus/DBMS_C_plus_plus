@@ -911,3 +911,4 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 
 *生成日期：2026-08-09*
 *来源：all-gaps-todo.md — 逐条映射，无一遗漏*
+- 2026-08-13 parser 输入边界加固：`LIMIT/OFFSET/FETCH` 计数采用完整无符号十进制校验，拒绝异常、负数、溢出、缺失计数和不完整 FETCH 子句；新增 parser 回归覆盖，省略 FETCH count 按 PostgreSQL 语义默认为 1。
