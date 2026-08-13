@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dbms_defs.h"
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cassert>
@@ -150,6 +151,7 @@ public:
     static uint16_t computeChecksum(const char* data, size_t len);
     void writeChecksum();
     bool verifyChecksum() const;
+    bool isValid() const;
 
     // ------------------------------------------------------------------------
     // 行计数

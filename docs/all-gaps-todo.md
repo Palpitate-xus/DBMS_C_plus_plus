@@ -35,6 +35,11 @@
 OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲突和失败通过 DDL 快照恢复。序列
 缓存耗尽时的 PostgreSQL 错误级语义仍待补齐。
 
+2026-08-13 堆页完整性边界收紧：当前格式文件头和 heap page 在打开/读取时做结构校验与校验和校验，
+损坏、截断和非整页文件 fail-closed；页压缩保留 special space。`rowSize` 作为文件头元数据校验，
+不对可由 TOAST 外部化的逻辑行宽设置页容量上限。新增损坏页与压缩布局测试，
+不保留 checksum=0 或旧页格式兼容。
+
 2026-08-13 Snapshot 边界收敛：snapshot export/import 升级为数据库绑定的 v2 二进制格式，拒绝版本错误、长度/尾随字节、非法或重复 XID；仅允许 REPEATABLE READ/SERIALIZABLE 事务在首次读写前导入，重复、跨数据库和导入后写入替换均 fail-closed。完整 logical decoding snapshot、跨集群生命周期和安全快照语义仍待实现。
 
 2026-08-12 测试隔离修复：每个 C++ 测试在独立临时工作目录运行并在结束后回收，统一消除 `.txnid`、WAL、catalog、日志和后台 worker 相对路径造成的顺序污染；`build_one_test.sh` 复用同一隔离逻辑。

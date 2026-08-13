@@ -26,6 +26,7 @@
 `main.cpp` 旧字符串分支。
 同时验证 `ALTER SEQUENCE ... RESTART ... INCREMENT BY ...` 和 `RENAME TO` 由 typed bridge
 执行；重命名保持 catalog OID、更新 `nextval` 默认表达式，重启后新名称可用且冲突不会破坏原对象。
+存储完整性回归还验证了损坏 heap page、损坏/截断边界被拒绝，以及 page compaction 不覆盖 special space。
 
 ---
 

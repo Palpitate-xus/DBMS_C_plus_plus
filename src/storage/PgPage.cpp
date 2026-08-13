@@ -21,17 +21,66 @@ uint16_t PgPage::computeChecksum(const char* data, size_t len) {
 void PgPage::writeChecksum() {
     PageHeaderData* h = header();
     h->pd_checksum = 0;
-    h->pd_checksum = computeChecksum(buf_, PAGE_SIZE);
+    const uint16_t computed = computeChecksum(buf_, PAGE_SIZE);
+    // Zero is reserved for an unchecked/corrupt page in the current format.
+    // Normalize the rare legitimate zero result so a valid page can never be
+    // mistaken for an uninitialized page.
+    h->pd_checksum = computed == 0 ? 0xFFFF : computed;
 }
 
 bool PgPage::verifyChecksum() const {
     const PageHeaderData* h = header();
     uint16_t saved = h->pd_checksum;
-    if (saved == 0) return true; // unchecked / legacy
-    const_cast<PageHeaderData*>(h)->pd_checksum = 0;
-    uint16_t computed = computeChecksum(buf_, PAGE_SIZE);
-    const_cast<PageHeaderData*>(h)->pd_checksum = saved;
-    return saved == computed;
+    if (saved == 0) return false;
+    uint8_t sum1 = 0;
+    uint8_t sum2 = 0;
+    const auto* bytes = reinterpret_cast<const uint8_t*>(buf_);
+    constexpr size_t checksumOffset = offsetof(PageHeaderData, pd_checksum);
+    for (size_t i = 0; i < PAGE_SIZE; ++i) {
+        const uint8_t value = (i == checksumOffset || i == checksumOffset + 1)
+            ? 0 : bytes[i];
+        sum1 = static_cast<uint8_t>((sum1 + value) % 255);
+        sum2 = static_cast<uint8_t>((sum2 + sum1) % 255);
+    }
+    const uint16_t computed = (static_cast<uint16_t>(sum2) << 8) | sum1;
+    return saved == (computed == 0 ? 0xFFFF : computed);
+}
+
+bool PgPage::isValid() const {
+    const PageHeaderData* h = header();
+    const uint16_t expectedPageSizeVersion =
+        static_cast<uint16_t>((PAGE_SIZE / 512) << 8) | PG_PAGE_LAYOUT_VERSION;
+    if (!verifyChecksum() || h->pd_pagesize_version != expectedPageSizeVersion ||
+        h->pd_lower < sizeof(PageHeaderData) || h->pd_lower > h->pd_upper ||
+        h->pd_upper > h->pd_special || h->pd_special > PAGE_SIZE ||
+        ((h->pd_lower - sizeof(PageHeaderData)) % sizeof(ItemIdData)) != 0) {
+        return false;
+    }
+
+    const uint16_t slots = numLinePointers();
+    for (uint16_t i = 1; i <= slots; ++i) {
+        const ItemIdData* id = itemId(i);
+        const uint16_t flags = getLpFlags(id);
+        const uint16_t off = getLpOff(id);
+        const uint16_t len = getLpLen(id);
+        if (flags == LP_UNUSED) {
+            // A removed tuple may retain its location for transaction
+            // rollback; an unused slot created by compaction is zeroed.
+            if ((off != 0 || len != 0) &&
+                (len == 0 || off < h->pd_upper ||
+                 static_cast<size_t>(off) + len > h->pd_special)) return false;
+        } else if (flags == LP_NORMAL) {
+            if (len == 0 || off < h->pd_upper ||
+                static_cast<size_t>(off) + len > h->pd_special) return false;
+        } else if (flags == LP_REDIRECT) {
+            if (len != 0 || off == 0 || off > slots) return false;
+        } else if (flags == LP_DEAD) {
+            if (len != 0 || off != 0) return false;
+        } else {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ============================================================================
@@ -132,8 +181,6 @@ bool PgPage::remove(OffsetNumber linePtr) {
     }
 
     setLpFlags(id, LP_UNUSED);
-    setLpOff(id, 0);
-    setLpLen(id, 0);
 
     header()->pd_flags |= PD_HAS_FREE_LINES;
     writeChecksum();
@@ -151,11 +198,9 @@ bool PgPage::restore(OffsetNumber linePtr) {
 
     ItemIdData* id = itemId(linePtr);
     if (getLpFlags(id) != LP_UNUSED) return false;
+    if (getLpLen(id) == 0) return false;
 
     setLpFlags(id, LP_NORMAL);
-    // Note: lp_off and lp_len should still hold valid data from before remove.
-    // If they were zeroed by remove, the caller must rewrite the data.
-
     writeChecksum();
     return true;
 }
@@ -302,7 +347,10 @@ void PgPage::compact() {
               });
 
     // 重新排列数据
-    uint16_t newUpper = static_cast<uint16_t>(PAGE_SIZE);
+    // Keep the reserved special space outside the heap tuple area.  Starting
+    // at PAGE_SIZE would place compacted tuples over the free-list pointer
+    // stored in the final four bytes and makes the page structurally invalid.
+    uint16_t newUpper = h->pd_special;
     for (uint16_t i = 0; i < liveCount; ++i) {
         newUpper -= items[i].len;
         std::memmove(buf_ + newUpper, buf_ + items[i].off, items[i].len);

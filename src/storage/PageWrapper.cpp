@@ -51,6 +51,8 @@ bool PageWrapper::canFit(size_t len) const { return PgPage(buf_).canFit(len); }
 
 bool PageWrapper::verifyChecksum() const { return PgPage(buf_).verifyChecksum(); }
 
+bool PageWrapper::isValid() const { return PgPage(buf_).isValid(); }
+
 void PageWrapper::writeChecksum() { PgPage(buf_).writeChecksum(); }
 
 uint32_t PageWrapper::nextPage() const { return PgPage(buf_).nextPage(); }

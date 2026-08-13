@@ -30,6 +30,7 @@ public:
     size_t freeSpace() const;
     bool canFit(size_t len) const;
     bool verifyChecksum() const;
+    bool isValid() const;
     void writeChecksum();
     uint32_t nextPage() const;
     void setNextPage(uint32_t next);

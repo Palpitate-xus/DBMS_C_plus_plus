@@ -47,6 +47,8 @@ GUC 类型/来源/权限矩阵仍未完成。
 
 2026-08-13 B+Tree 键边界收敛：插入、查找、多值查找、删除和范围扫描的公共 API 统一按 20 字节固定键规范化；长键截断、重开索引后的比较和范围端点不再因调用方是否预先填充而产生不同结果。新增长键持久化/重开回归；旧索引文件按当前格式重新创建，不提供历史索引兼容。
 
+2026-08-13 堆页损坏边界收紧：`PageAllocator` 现在校验当前格式文件头的 magic、版本、页数、`rowSize` 元数据、空闲链表范围和 FNV 校验和；页读取同时校验页 checksum、页布局边界、line pointer 和 special space，任何损坏均 fail-closed，不再把坏页交给执行层。`rowSize` 可超过单页容量，由 TEXT/BYTEA/TOAST 等逻辑处理路径负责外部化，文件头校验不错误限制其大小。文件截断/非整页文件拒绝打开；页压缩修正为保留末尾 special space，避免压缩后覆盖 free-list 元数据。新增损坏页和压缩布局回归；本格式不接受 checksum 为 0 的未校验页。
+
 2026-08-13 执行器架构与索引回表收敛：删除未被任何生产/测试代码使用的 `IExpr`、`PlanNode` 和 `IExecutionPlanner` 伪接口，保留 `IOperator` 作为 Volcano 算子唯一生命周期契约；修正 `src/executor/README.md` 对已不存在 `src/optimizer/` 的过时描述。`IndexScanOp` 现在按 RID 直接读取目标 heap tuple，在统一 page shared lock 和 MVCC 可见性边界内完成回表，不再对每个索引命中重新扫描整张表；锁冲突和页面读取失败会终止扫描并向上层传播。
 
 2026-08-13 RLS 与 Volcano 安全边界收敛：结构化 SELECT 发现当前关系需要 RLS 时，统一使用 `forEachVisibleRow(..., "SELECT")` 的策略感知扫描，并禁用索引、bitmap、并行访问路径，避免访问方法绕过 USING 策略；新增索引存在时的 RLS 绕过回归。

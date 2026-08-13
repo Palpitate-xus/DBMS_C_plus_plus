@@ -221,7 +221,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 - **存储引擎 / heap storage（当前重构状态）**：
   - ✅ schema/sequence/trigger 读取只接受当前格式；旧格式回退、EOF 宽容解析已删除，截断或错误 magic 通过 `schema_format_test.cpp` 验证为 fail-closed。
   - ✅ 删除未接入的 ClusterLayout 和旧 Page（4KB）实现，避免并行存储架构继续漂移
-  - ✅ 数据页统一为 PgPage（8KB）+ PageWrapper v2；旧页格式不读取、不迁移
+  - ✅ 数据页统一为 PgPage（8KB）+ PageWrapper v2；文件头/页布局/checksum/line pointer 严格校验，坏页和截断文件 fail-closed；旧页格式不读取、不迁移
   - ✅ 数据库/表空间路径管理、关系文件路径（含 fork：main/fsm/vm/init）
   - ✅ Shared Buffers：BufferPool 实现 clock sweep、pin/usage count、dirty page flush
   - ✅ Free Space Map / Visibility Map：fork 文件管理，已集成到 insert/update/delete/vacuum 路径
@@ -288,7 +288,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 | ✅ 3.10 实现数据库目录与关系 fork 管理（当前实现） | 10.1 | 当前使用 StorageEngine 路径管理；旧 `ClusterLayout` 并行实现已删除
 | ⚠️ 3.11 实现 TOAST relation / index / compression / chunking | 10.8 | 当前 relation/index、zlib compression 和 chunking 已覆盖；PG pointer/catalog、lz4/pglz 与 storage strategy 仍缺
 | ✅ 3.12 实现 tablespace 物理路由与 `pg_tblspc` 符号链接 | 10.9, 1.1.30 | 关系文件统一路由到 `<location>/<database>/`；事务/DDL 快照包含外置关系，当前用 `.path` marker 表示位置，真实 PostgreSQL OID/符号链接布局仍待补齐
-| ✅ 3.13 实现 data page checksums | 10.10 | Page checksum in PgPage
+| ✅ 3.13 实现 data page checksums | 10.10 | PgPage checksum + DataFileHeader checksum/layout validation；损坏页、坏文件头、截断和 compaction special-space 回归
 | ✅ 3.14 实现 storage parameters（fillfactor / autovacuum / toast …） | 10.11, 4.4 | fillfactor_test 覆盖
 
 ### Phase 3 已完成内容（基础能力已关闭，PG 完整语义仍在补齐）

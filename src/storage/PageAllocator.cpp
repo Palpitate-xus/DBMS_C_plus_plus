@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <iostream>
+#include <limits>
 
 namespace dbms {
 
@@ -13,16 +14,20 @@ PageAllocator::~PageAllocator() {
 }
 
 bool PageAllocator::open() {
-    if (pageSize_ != PgPage::PAGE_SIZE || formatVersion_ != DATA_FILE_FORMAT_VERSION) {
+    if (pageSize_ != PgPage::PAGE_SIZE || formatVersion_ != DATA_FILE_FORMAT_VERSION ||
+        rowSize_ > std::numeric_limits<uint32_t>::max()) {
         std::cerr << "[storage] unsupported heap format: pageSize=" << pageSize_
-                  << ", formatVersion=" << formatVersion_ << std::endl;
+                  << ", formatVersion=" << formatVersion_ << ", rowSize=" << rowSize_ << std::endl;
         return false;
     }
-    bool existingFile = false;
-    try {
-        existingFile = std::filesystem::exists(filename_) &&
-                       std::filesystem::file_size(filename_) != 0;
-    } catch (...) {
+    std::error_code fileEc;
+    const bool fileExists = std::filesystem::exists(filename_, fileEc);
+    if (fileEc) return false;
+    const uintmax_t fileBytes = fileExists ? std::filesystem::file_size(filename_, fileEc) : 0;
+    if (fileEc) return false;
+    const bool existingFile = fileBytes != 0;
+    if (existingFile && (fileBytes < pageSize_ || fileBytes % pageSize_ != 0)) {
+        std::cerr << "[storage] truncated or misaligned heap file: " << filename_ << std::endl;
         return false;
     }
     if (bp_->isOpen()) return true;
@@ -49,14 +54,15 @@ bool PageAllocator::open() {
         fh->freeListHead = 0;
         fh->rowSize = static_cast<uint32_t>(rowSize_);
         fh->formatVersion = DATA_FILE_FORMAT_VERSION;
+        fh->headerChecksum = computeDataFileHeaderChecksum(*fh);
         bp_->markDirty(0);
-    } else if (fh->formatVersion != DATA_FILE_FORMAT_VERSION) {
-        std::cerr << "[storage] unsupported data file format version: "
-                  << fh->formatVersion << std::endl;
+    } else if (!validateFileHeader(*fh)) {
+        std::cerr << "[storage] invalid heap file header: " << filename_ << std::endl;
         bp_->unpinPage(0);
         bp_->close();
         return false;
     }
+    numPages_ = fh->numPages;
     bp_->unpinPage(0);
     return true;
 }
@@ -65,6 +71,7 @@ void PageAllocator::close() {
     if (bp_) {
         bp_->close();
     }
+    numPages_ = 0;
 }
 
 bool PageAllocator::isOpen() const {
@@ -82,7 +89,11 @@ uint32_t PageAllocator::allocPage() {
     if (fh->freeListHead != 0) {
         // Reuse a page from the free list
         pageId = fh->freeListHead;
-        char* pageBuf = bp_->fetchPage(pageId);
+        if (pageId >= fh->numPages || pageId >= numPages_) {
+            bp_->unpinPage(0);
+            return 0;
+        }
+        char* pageBuf = fetchPage(pageId);
         if (!pageBuf) {
             bp_->unpinPage(0);
             return 0;
@@ -91,9 +102,17 @@ uint32_t PageAllocator::allocPage() {
         uint32_t nextFree = page.nextPage();
         bp_->unpinPage(pageId);
 
+        if (nextFree >= fh->numPages) {
+            bp_->unpinPage(0);
+            return 0;
+        }
         fh->freeListHead = nextFree;
     } else {
         // Extend file with a new page
+        if (fh->numPages == std::numeric_limits<uint32_t>::max()) {
+            bp_->unpinPage(0);
+            return 0;
+        }
         pageId = fh->numPages;
         fh->numPages++;
 
@@ -108,8 +127,10 @@ uint32_t PageAllocator::allocPage() {
         newPage.init(pageId);
         bp_->markDirty(pageId);
         bp_->unpinPage(pageId);
+        numPages_ = fh->numPages;
     }
 
+    fh->headerChecksum = computeDataFileHeaderChecksum(*fh);
     bp_->markDirty(0);
     bp_->unpinPage(0);
     return pageId;
@@ -123,8 +144,13 @@ void PageAllocator::freePage(uint32_t pageId) {
     if (!fhBuf) return;
     DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
 
+    if (pageId >= numPages_) {
+        bp_->unpinPage(0);
+        return;
+    }
+
     // Initialize the freed page and link it to free list
-    char* pageBuf = bp_->fetchPage(pageId);
+    char* pageBuf = fetchPage(pageId);
     if (!pageBuf) {
         bp_->unpinPage(0);
         return;
@@ -137,27 +163,26 @@ void PageAllocator::freePage(uint32_t pageId) {
 
     // Update free list head
     fh->freeListHead = pageId;
+    fh->headerChecksum = computeDataFileHeaderChecksum(*fh);
     bp_->markDirty(0);
     bp_->unpinPage(0);
 }
 
 uint32_t PageAllocator::numPages() const {
-    if (!isOpen()) return 0;
-    char* fhBuf = const_cast<BufferPool*>(bp_.get())->fetchPage(0);
-    if (!fhBuf) return 0;
-    DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
-    uint32_t n = fh->numPages;
-    bp_->unpinPage(0);
-    return n;
+    return isOpen() ? numPages_ : 0;
 }
 
 char* PageAllocator::fetchPage(uint32_t pageId) {
     if (!isOpen()) return nullptr;
+    if (pageId >= numPages_) return nullptr;
     char* buf = bp_->fetchPage(pageId);
     if (buf && pageId >= 1) {
         PageWrapper page(buf, pageSize_, formatVersion_);
-        if (!page.verifyChecksum()) {
-            std::cerr << "[CHECKSUM ERROR] Page " << pageId << " checksum mismatch" << std::endl;
+        if (!page.isValid()) {
+            std::cerr << "[storage] invalid heap page " << pageId
+                      << "; refusing to expose corrupted data" << std::endl;
+            bp_->invalidatePage(pageId);
+            return nullptr;
         }
     }
     return buf;
@@ -175,20 +200,18 @@ bool PageAllocator::flush() {
     return isOpen() && bp_->flush();
 }
 
-bool PageAllocator::readFileHeader(DataFileHeader& fh) {
-    if (!isOpen()) return false;
-    char* buf = bp_->fetchPage(0);
-    std::memcpy(&fh, buf, sizeof(DataFileHeader));
-    bp_->unpinPage(0);
-    return true;
-}
-
-void PageAllocator::writeFileHeader(const DataFileHeader& fh) {
-    if (!isOpen()) return;
-    char* buf = bp_->fetchPage(0);
-    std::memcpy(buf, &fh, sizeof(DataFileHeader));
-    bp_->markDirty(0);
-    bp_->unpinPage(0);
+bool PageAllocator::validateFileHeader(const DataFileHeader& fh) const {
+    if (fh.magic != DATA_FILE_MAGIC || fh.formatVersion != DATA_FILE_FORMAT_VERSION ||
+        fh.numPages == 0 || fh.freeListHead >= fh.numPages ||
+        fh.headerChecksum != computeDataFileHeaderChecksum(fh)) {
+        return false;
+    }
+    std::error_code ec;
+    const uintmax_t bytes = std::filesystem::file_size(filename_, ec);
+    if (ec || bytes < pageSize_ || bytes % pageSize_ != 0) return false;
+    const uintmax_t diskPages = bytes / pageSize_;
+    return diskPages == fh.numPages &&
+           fh.numPages <= std::numeric_limits<uint32_t>::max();
 }
 
 } // namespace dbms

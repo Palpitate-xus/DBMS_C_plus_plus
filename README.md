@@ -89,7 +89,7 @@
 - **Slotted Page**：8192 字节页式存储，line pointer 数组管理记录位置
 - **页分配器**：空闲页链表管理，支持页复用
 - **Buffer Pool**：clock-sweep 缓存，保护 pinned 页并在淘汰前保留脏页写盘失败状态
-- **页校验和**：Fletcher-16 校验，检测页损坏
+- **页完整性**：Fletcher-16 heap page 校验和 + FNV 文件头校验；布局、line pointer、页数和截断边界均 fail-closed，损坏页不会暴露给执行层
 - **WAL 日志**：Write-Ahead Logging 支持崩溃恢复
 - **Checkpoint**：`CHECKPOINT` 命令刷盘已加载的 heap/index 脏缓存、写入 checkpoint WAL 记录并持久化 checkpoint LSN；活动事务期间不会推进恢复起点，并在归档成功后回收 checkpoint 之前的 WAL 段
 - **fsync 持久化**：WAL、CLOG 段和事务提交、Checkpoint 均检查 `fsync()`；CLOG 段采用临时文件原子替换并持久化 `pg_xact` 目录，事务只有在 COMMIT WAL 和 CLOG 状态都成功刷盘后才报告提交成功，CLOG 刷盘失败会追加 ABORT WAL、回滚并 fail-closed
@@ -591,22 +591,25 @@ dbname/
 
 ## 页格式
 
-数据页（8192 字节）：
+数据页（8192 字节，当前 v2 格式）：
 
 ```
-+--------------+------------------+-------------+---------------+--------+
-| Header(20B)  | Slot Array       | Free Space  | Record Data   |        |
-|              | (grows down)     |             | (grows up)    |        |
-+--------------+------------------+-------------+---------------+--------+
-0              sizeof(Header)     freeOffset    dataOffset      PAGE_SIZE
++----------------------+------------------+-------------+------------------+----------+
+| PageHeaderData (24B) | ItemIdData[]     | Free Space  | Tuple Data       | Special  |
+|                      | (pd_lower 前)    |             | (向低地址增长)  | 4B       |
++----------------------+------------------+-------------+------------------+----------+
+0                      pd_lower           pd_upper    pd_special        8192
 
 Header:
-  - pageId (4B): 页号
-  - numSlots (2B): slot 数量
-  - freeOffset (2B): 空闲空间起始偏移
-  - dataOffset (2B): 数据区起始偏移
-  - checksum (2B): Fletcher-16 页校验和
-  - nextPage (4B): 空闲页链表指针
+  - pd_lsn (8B), pd_checksum (2B): LSN 与 Fletcher-16 校验和
+  - pd_flags/pd_lower/pd_upper/pd_special (2B each): 页面状态和边界
+  - pd_pagesize_version (2B): 8 KiB + 当前布局版本
+  - pd_prune_xid (4B): VACUUM/HOT 元数据
+  - special space 末尾 4B：空闲页链表 nextPage
+
+文件头页额外保存 magic、页数、空闲链表头、rowSize、格式版本和 FNV 校验和；`rowSize`
+是逻辑行宽元数据，TEXT/BYTEA 等大值可由 TOAST 外部化，不受单页容量限制。
+打开/读取时严格验证；checksum 为 0、截断文件、非法页边界和坏 line pointer 均拒绝。
 ```
 
 ## 行格式

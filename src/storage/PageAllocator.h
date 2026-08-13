@@ -56,11 +56,9 @@ private:
     size_t rowSize_;
     size_t pageSize_;
     uint32_t formatVersion_;
+    uint32_t numPages_ = 0;
     std::unique_ptr<BufferPool> bp_;
-
-    // Read/write the file header stored in page 0.
-    bool readFileHeader(DataFileHeader& fh);
-    void writeFileHeader(const DataFileHeader& fh);
+    bool validateFileHeader(const DataFileHeader& fh) const;
 };
 
 } // namespace dbms
