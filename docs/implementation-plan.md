@@ -410,7 +410,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - ✅ 序列文件新格式（10 字段）并兼容旧两字段格式；`nextval`/`currval`/`lastval`/`setval` 实现 cache 批量分配、cycle 回绕、min/max 边界。
   - ✅ `CREATE SEQUENCE` 选项解析（`parseCreateSequence`）与 `DdlExecutor::executeCreateSequence` 落地；`ALTER SEQUENCE` 新增 `DdlExecutor::executeAlterSequence`。
   - ✅ `OWNED BY table.column` 在序列文件中记录所有者，并在 `pg_depend` 注册序列对表的 auto 依赖；`DROP TABLE ... CASCADE` 时删除被拥有的序列文件。
-  - ✅ 新增 `tests/sequence_full_test.cpp`：基本 START/INCREMENT、min/max/cycle、cache、ALTER SEQUENCE、OWNED BY + DROP TABLE CASCADE、IDENTITY 回归。
+  - ✅ 新增 `tests/sequence_full_test.cpp`：基本 START/INCREMENT、min/max/cycle、cache、ALTER SEQUENCE（含 RENAME TO）、OWNED BY + DROP TABLE CASCADE、IDENTITY 回归。
 - **Wave 4 DDL 完整化 — DOMAIN 约束执行（4.34，本次完成）**：
   - ✅ `Column` 新增 `domainName` 字段；`columnDefToColumn` 在表创建时识别 domain 类型，将列的底层存储类型解析为 domain 的 base type，同时保留 domain 名称用于约束执行。
   - ✅ 若列未指定 DEFAULT 而 domain 有 DEFAULT，则继承 domain DEFAULT。

@@ -333,6 +333,22 @@ bool CatalogManager::updateClass(Oid oid, const PgClassRow& row) {
     return true;
 }
 
+bool CatalogManager::renameClass(Oid oid, const std::string& newName) {
+    if (newName.empty()) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = classByOid_.find(oid);
+    if (it == classByOid_.end() || it->second >= classes_.size()) return false;
+    const size_t idx = it->second;
+    const PgClassRow& current = classes_[idx];
+    const std::string newKey = classNameKey(current.relnamespace, newName);
+    auto collision = classByName_.find(newKey);
+    if (collision != classByName_.end() && collision->second != idx) return false;
+    classByName_.erase(classNameKey(current.relnamespace, current.relname));
+    classes_[idx].relname = newName;
+    classByName_[newKey] = idx;
+    return true;
+}
+
 bool CatalogManager::dropClassUnlocked(Oid oid) {
     auto it = classByOid_.find(oid);
     if (it == classByOid_.end() || it->second >= classes_.size()) return false;

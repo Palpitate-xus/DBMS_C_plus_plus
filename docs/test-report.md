@@ -24,7 +24,8 @@
 本轮新增 DDL 路由收敛回归：`CREATE/DROP DOMAIN`、`CREATE/DROP SEQUENCE`、
 `CREATE/DROP SCHEMA`、角色/用户和数据库均通过 typed bridge 执行，确认标准入口不再依赖
 `main.cpp` 旧字符串分支。
-同时验证 `ALTER SEQUENCE ... RESTART ... INCREMENT BY ...` 由 typed bridge 执行并保持序列值语义。
+同时验证 `ALTER SEQUENCE ... RESTART ... INCREMENT BY ...` 和 `RENAME TO` 由 typed bridge
+执行；重命名保持 catalog OID、更新 `nextval` 默认表达式，重启后新名称可用且冲突不会破坏原对象。
 
 ---
 

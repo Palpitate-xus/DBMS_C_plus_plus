@@ -30,9 +30,10 @@
 分支；标准对象创建/删除现在只保留 parser → `DdlExecutor` → `StorageEngine` 路径。高级对象与
 复杂 DML 的 legacy/fail-closed 边界仍在。
 
-2026-08-13 `ALTER SEQUENCE` 路由收敛：常规选项变更已接入 typed bridge 并由
-`DdlExecutor::executeAlterSequence` 执行；`RENAME TO` 仍依赖旧兼容元数据与非原子文件改名，
-因此保留为显式 legacy 边界，待序列 catalog/OID 原子改名后再删除。
+2026-08-13 `ALTER SEQUENCE` 路由收敛：所有已实现选项（包括 `RESTART`、`INCREMENT`、
+边界、缓存、循环、`OWNED BY` 和 `RENAME TO`）均由 typed bridge 执行。重命名保留原 catalog
+OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲突和失败通过 DDL 快照恢复。序列
+缓存耗尽时的 PostgreSQL 错误级语义仍待补齐。
 
 2026-08-13 Snapshot 边界收敛：snapshot export/import 升级为数据库绑定的 v2 二进制格式，拒绝版本错误、长度/尾随字节、非法或重复 XID；仅允许 REPEATABLE READ/SERIALIZABLE 事务在首次读写前导入，重复、跨数据库和导入后写入替换均 fail-closed。完整 logical decoding snapshot、跨集群生命周期和安全快照语义仍待实现。
 

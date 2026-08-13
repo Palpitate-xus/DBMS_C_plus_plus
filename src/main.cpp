@@ -8318,121 +8318,6 @@ static bool handleDropConversion(const string& sql, Session& s) {
     return !allOk;
 }
 
-static bool handleAlterSequence(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
-    string rest = trim(sql.substr(14)); // after "alter sequence"
-    bool ifExists = false;
-    if (startsWithKeyword(rest, "if exists")) {
-        ifExists = true;
-        rest = trim(rest.substr(9));
-    }
-    vector<string> tokens = tokenize(rest);
-    if (tokens.empty()) {
-        cout << "SQL syntax error: ALTER SEQUENCE name [RESTART [WITH] n] [INCREMENT BY n]" << endl;
-        return true;
-    }
-    string seqName = tokens[0];
-    if (!g_engine.sequenceExists(s.currentDB, seqName)) {
-        if (ifExists) {
-            cout << "Sequence " << seqName << " does not exist, skipping" << endl;
-            return false;
-        }
-        cout << "Sequence " << seqName << " not exist" << endl;
-        return true;
-    }
-    if (tokens.size() >= 4 && tokens[1] == "rename" && tokens[2] == "to") {
-        string newName = tokens[3];
-        if (g_engine.sequenceExists(s.currentDB, newName)) {
-            cout << "Sequence " << newName << " already exists" << endl;
-            return true;
-        }
-        auto oldPath = g_engine.dbPath(s.currentDB) / (seqName + ".seq");
-        auto newPath = g_engine.dbPath(s.currentDB) / (newName + ".seq");
-        try {
-            std::filesystem::rename(oldPath, newPath);
-        } catch (...) {
-            cout << "Rename sequence failed" << endl;
-            return true;
-        }
-        auto objects = loadCompatObjects(s.currentDB);
-        auto oldKey = compatObjectKey("sequence_option", seqName);
-        auto it = objects.find(oldKey);
-        if (it != objects.end()) {
-            auto info = it->second;
-            objects.erase(it);
-            info.name = newName;
-            info.definition = sql;
-            objects[compatObjectKey("sequence_option", newName)] = info;
-            saveCompatObjects(s.currentDB, objects);
-        }
-        cout << "Sequence " << seqName << " renamed to " << newName << endl;
-        return false;
-    }
-
-    bool hasRestart = false;
-    bool hasIncrement = false;
-    int64_t restart = 1;
-    int64_t increment = 1;
-    for (size_t i = 1; i < tokens.size(); ++i) {
-        if (tokens[i] == "restart") {
-            size_t j = i + 1;
-            if (j < tokens.size() && tokens[j] == "with") ++j;
-            if (j >= tokens.size()) {
-                cout << "SQL syntax error: ALTER SEQUENCE RESTART requires a value" << endl;
-                return true;
-            }
-            try {
-                restart = stoll(tokens[j]);
-                hasRestart = true;
-            } catch (...) {
-                cout << "Invalid restart value" << endl;
-                return true;
-            }
-            i = j;
-        } else if (tokens[i] == "increment") {
-            size_t j = i + 1;
-            if (j < tokens.size() && tokens[j] == "by") ++j;
-            if (j >= tokens.size()) {
-                cout << "SQL syntax error: ALTER SEQUENCE INCREMENT BY requires a value" << endl;
-                return true;
-            }
-            try {
-                increment = stoll(tokens[j]);
-                hasIncrement = true;
-            } catch (...) {
-                cout << "Invalid increment value" << endl;
-                return true;
-            }
-            i = j;
-        }
-    }
-    auto objects = loadCompatObjects(s.currentDB);
-    string options;
-    if (hasRestart) options += "restart=" + to_string(restart);
-    if (hasIncrement) {
-        if (!options.empty()) options += ";";
-        options += "increment=" + to_string(increment);
-    }
-    objects[compatObjectKey("sequence_option", seqName)] =
-        {"sequence_option", seqName, s.username, sql, options};
-    saveCompatObjects(s.currentDB, objects);
-
-    if (!hasRestart && !hasIncrement) {
-        cout << "Sequence " << seqName << " options recorded" << endl;
-        return false;
-    }
-    auto res = g_engine.alterSequence(s.currentDB, seqName,
-                                      hasRestart, restart,
-                                      hasIncrement, increment);
-    if (res != DBStatus::OK) {
-        cout << "Alter sequence failed" << endl;
-        return true;
-    }
-    cout << "Sequence " << seqName << " altered" << endl;
-    return false;
-}
-
 static bool checkTablePermission(Session& s, const string& tname,
                                  dbms::StorageEngine::TablePrivilege priv) {
     if (sessionIsAdmin(s)) return true; // admin bypass
@@ -9661,9 +9546,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         if (tokens[0] == "statistics") {
             return handleAlterStatistics(sql, s);
-        }
-        if (tokens[0] == "sequence") {
-            return handleAlterSequence(sql, s);
         }
         if (tokens[0] == "role") {
             return handleAlterRole(sql, s);

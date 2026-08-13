@@ -11354,6 +11354,41 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::renameSequence(const std::string& dbname,
+                                       const std::string& oldName,
+                                       const std::string& newName) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (oldName.empty() || newName.empty() || oldName == "." || newName == "." ||
+        oldName == ".." || newName == ".." ||
+        !validStoredIdentifier(oldName, MAX_TABLE_NAME_LEN) ||
+        !validStoredIdentifier(newName, MAX_TABLE_NAME_LEN) ||
+        oldName.find('/') != std::string::npos || newName.find('/') != std::string::npos ||
+        oldName.find('\\') != std::string::npos || newName.find('\\') != std::string::npos) {
+        return DBStatus::INVALID_VALUE;
+    }
+
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    const auto oldPath = sequencePath(dbname, oldName);
+    const auto newPath = sequencePath(dbname, newName);
+    if (!std::filesystem::exists(oldPath)) return DBStatus::TABLE_NOT_FOUND;
+    if (std::filesystem::exists(newPath)) return DBStatus::TABLE_ALREADY_EXISTS;
+
+    std::error_code ec;
+    std::filesystem::rename(oldPath, newPath, ec);
+    if (ec) return DBStatus::IO_ERROR;
+
+    const int dirFd = ::open(std::filesystem::path(dbname).c_str(),
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd < 0 || ::fsync(dirFd) != 0) {
+        if (dirFd >= 0) ::close(dirFd);
+        std::error_code rollbackEc;
+        std::filesystem::rename(newPath, oldPath, rollbackEc);
+        return DBStatus::IO_ERROR;
+    }
+    ::close(dirFd);
+    return DBStatus::OK;
+}
+
 DBStatus StorageEngine::dropSequence(const std::string& dbname,
                                       const std::string& seqname) {
     auto path = sequencePath(dbname, seqname);

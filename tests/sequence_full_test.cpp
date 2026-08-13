@@ -1,8 +1,9 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
-#include "catalog/type_registry.h"
 #include "catalog/CatalogService.h"
+#include "parser/parser.h"
+#include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -106,6 +107,67 @@ static void test_sequence_alter() {
     std::cout << "[SEQUENCE] alter OK" << std::endl;
 }
 
+static void test_sequence_rename() {
+    std::string db = testDbPath("seq_rename");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(!ddl.executeSql("CREATE SEQUENCE s_old", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE t (id INT DEFAULT nextval('s_old'), name VARCHAR(20))", s));
+    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    assert(publicNamespace != nullptr);
+    const auto* oldRelation = catalog.findClassByName("s_old", publicNamespace->oid);
+    assert(oldRelation != nullptr);
+    const dbms::Oid sequenceOid = oldRelation->oid;
+
+    dbms::SQLParser parser;
+    const auto parsedRename = parser.parse("ALTER SEQUENCE s_old RENAME TO s_new");
+    assert(parsedRename.success && parsedRename.stmt);
+    assert(parsedRename.stmt->command == dbms::SqlCommand::AlterSequence);
+    const auto* renameAst = dynamic_cast<const dbms::AlterObjectStmt*>(
+        parsedRename.stmt.get());
+    assert(renameAst != nullptr);
+    assert(renameAst->subCommand == "RENAME TO s_new");
+
+    assert(!ddl.executeSql("ALTER SEQUENCE s_old RENAME TO s_new", s));
+    assert(!g_engine.sequenceExists(db, "s_old"));
+    assert(g_engine.sequenceExists(db, "s_new"));
+    assert(catalog.findClassByName("s_old", publicNamespace->oid) == nullptr);
+    const auto* newRelation = catalog.findClassByName("s_new", publicNamespace->oid);
+    assert(newRelation != nullptr && newRelation->oid == sequenceOid);
+
+    const auto schema = g_engine.getTableSchema(db, "t");
+    assert(schema.cols[0].defaultValue.find("s_new") != std::string::npos);
+    assert(g_engine.insert(db, "t", {{"name", "a"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"name", "b"}}) == dbms::DBStatus::OK);
+
+    dbms::StorageEngine restarted;
+    assert(restarted.sequenceExists(db, "s_new"));
+    assert(!restarted.sequenceExists(db, "s_old"));
+    const auto& restartedCatalog = restarted.catalogService().get(db);
+    const auto* restartedPublic = restartedCatalog.findNamespaceByName("public");
+    assert(restartedPublic != nullptr);
+    const auto* restartedRelation = restartedCatalog.findClassByName(
+        "s_new", restartedPublic->oid);
+    assert(restartedRelation != nullptr && restartedRelation->oid == sequenceOid);
+    assert(restarted.getTableSchema(db, "t").cols[0].defaultValue.find("s_new") !=
+           std::string::npos);
+    assert(restarted.nextval(db, "s_new") == 3);
+
+    assert(!ddl.executeSql("CREATE SEQUENCE s_taken", s));
+    assert(ddl.executeSql("ALTER SEQUENCE s_new RENAME TO s_taken", s));
+    assert(g_engine.sequenceExists(db, "s_new"));
+    assert(g_engine.sequenceExists(db, "s_taken"));
+    cleanup(db);
+    std::cout << "[SEQUENCE] rename/catalog/default/restart OK" << std::endl;
+}
+
 static void test_sequence_owned_by_drop_table() {
     std::string db = testDbPath("seq_owned");
     cleanup(db);
@@ -161,6 +223,7 @@ int main() {
     test_sequence_min_max_cycle();
     test_sequence_cache();
     test_sequence_alter();
+    test_sequence_rename();
     test_sequence_owned_by_drop_table();
     test_sequence_identity_still_works();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;

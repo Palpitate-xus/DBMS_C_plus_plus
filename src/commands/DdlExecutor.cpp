@@ -540,16 +540,6 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
             return false;
         }
     }
-    if (parsedCmd == dbms::SqlCommand::AlterSequence) {
-        const auto* alter = dynamic_cast<const dbms::AlterObjectStmt*>(r.stmt.get());
-        // RENAME TO still depends on the legacy compatibility metadata file;
-        // keep that one unsupported shape on its explicit compatibility path
-        // until sequence names and catalog OIDs are renamed atomically.
-        if (!alter || alter->subCommand.find("rename") != std::string::npos) {
-            handled = false;
-            return false;
-        }
-    }
     dbms::DdlExecutor ddlExec;
     return ddlExec.execute(r.stmt, s); // false=success, true=error
 }
@@ -2138,6 +2128,30 @@ static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
     return deps;
 }
 
+static std::string renameNextvalSequenceReference(const std::string& expression,
+                                                  const std::string& oldName,
+                                                  const std::string& newName) {
+    std::string lowerExpression = expression;
+    std::transform(lowerExpression.begin(), lowerExpression.end(), lowerExpression.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const std::string referenced = extractNextvalSequence(expression);
+    if (referenced.empty()) return expression;
+    std::string bare = referenced;
+    const size_t dot = bare.rfind('.');
+    if (dot != std::string::npos) bare = bare.substr(dot + 1);
+    if (referenced != oldName && bare != oldName) return expression;
+
+    std::string replacement = newName;
+    if (dot != std::string::npos) replacement = referenced.substr(0, dot + 1) + newName;
+    const size_t nextvalPos = lowerExpression.find("nextval");
+    const size_t literalStart = expression.find('\'', nextvalPos);
+    if (literalStart == std::string::npos) return expression;
+    const size_t literalEnd = expression.find('\'', literalStart + 1);
+    if (literalEnd == std::string::npos) return expression;
+    return expression.substr(0, literalStart + 1) + replacement +
+           expression.substr(literalEnd);
+}
+
 bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!stmt) return false;
     if (!checkAdmin(s)) return true;
@@ -2991,6 +3005,7 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -3006,6 +3021,67 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         std::istringstream iss(rest);
         std::string tok;
         while (iss >> tok) tokens.push_back(tok);
+    }
+
+    if (!tokens.empty() && toLower(tokens[0]) == "rename") {
+        if (tokens.size() != 3 || toLower(tokens[1]) != "to" || tokens[2].empty()) {
+            std::cout << "SQL syntax error: ALTER SEQUENCE name RENAME TO new_name" << std::endl;
+            return true;
+        }
+        const std::string newName = tokens[2];
+        txn.markSnapshotDirty();
+        if (g_engine.renameSequence(s.currentDB, seqname, newName) != DBStatus::OK) {
+            std::cout << "ALTER SEQUENCE RENAME failed" << std::endl;
+            return true;
+        }
+
+        try {
+            dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+            const auto* seqRel = cat.resolveRelation(seqname, {"public"});
+            if (!seqRel || !cat.renameClass(seqRel->oid, newName) || !cat.persistAll()) {
+                std::cout << "ALTER SEQUENCE RENAME catalog update failed" << std::endl;
+                return true;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "ALTER SEQUENCE RENAME catalog update failed: " << e.what() << std::endl;
+            return true;
+        }
+
+        const auto dependencies = findDefaultNextvalDeps(s.currentDB, seqname);
+        for (const auto& [tableName, columnName] : dependencies) {
+            const auto table = g_engine.getTableSchema(s.currentDB, tableName);
+            size_t columnIndex = table.len;
+            for (size_t i = 0; i < table.len; ++i) {
+                if (table.cols[i].dataName == columnName) {
+                    columnIndex = i;
+                    break;
+                }
+            }
+            if (columnIndex >= table.len) {
+                std::cout << "ALTER SEQUENCE RENAME dependency update failed" << std::endl;
+                return true;
+            }
+            const std::string updatedDefault = renameNextvalSequenceReference(
+                table.cols[columnIndex].defaultValue, seqname, newName);
+            if (g_engine.alterTableSetDefault(s.currentDB, tableName, columnName,
+                                              updatedDefault) != DBStatus::OK) {
+                std::cout << "ALTER SEQUENCE RENAME dependency update failed" << std::endl;
+                return true;
+            }
+        }
+        if (auto it = s.sequenceLastValues.find(seqname); it != s.sequenceLastValues.end()) {
+            s.sequenceLastValues[newName] = it->second;
+            s.sequenceLastValues.erase(it);
+        }
+        if (!txn.commit()) return true;
+        std::cout << "ALTER SEQUENCE succeeded" << std::endl;
+        return false;
+    }
+    for (const auto& token : tokens) {
+        if (toLower(token) == "rename" || toLower(token) == "to") {
+            std::cout << "SQL syntax error: ALTER SEQUENCE name RENAME TO new_name" << std::endl;
+            return true;
+        }
     }
 
     auto lower = [](const std::string& str) {
@@ -3087,6 +3163,7 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         }
     }
 
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.alterSequence(s.currentDB, seqname, info);
     if (res != DBStatus::OK) {
         std::cout << "ALTER SEQUENCE failed" << std::endl;

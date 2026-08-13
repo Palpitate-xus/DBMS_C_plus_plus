@@ -161,6 +161,8 @@ public:
                             bool hasIncrement, int64_t increment);
     DBStatus alterSequence(const std::string& dbname, const std::string& seqname,
                             const dbms::SequenceInfo& info);
+    DBStatus renameSequence(const std::string& dbname, const std::string& oldName,
+                            const std::string& newName);
     DBStatus dropSequence(const std::string& dbname, const std::string& seqname);
     int64_t nextval(const std::string& dbname, const std::string& seqname);
     int64_t currval(const std::string& dbname, const std::string& seqname);

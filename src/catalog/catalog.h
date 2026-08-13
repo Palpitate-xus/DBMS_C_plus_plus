@@ -86,6 +86,10 @@ public:
     const PgClassRow* findClass(Oid oid) const;
     const PgClassRow* findClassByName(const std::string& name, Oid nspOid) const;
     bool updateClass(Oid oid, const PgClassRow& row);
+    // Rename a relation while preserving its OID and dependency records.
+    // PostgreSQL object identity is OID-based; a name change must not create
+    // a new pg_class row or sever existing dependencies.
+    bool renameClass(Oid oid, const std::string& newName);
     bool dropClass(Oid oid);
     std::vector<PgClassRow> listClasses() const;
 

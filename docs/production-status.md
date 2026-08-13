@@ -11,8 +11,9 @@
 高级对象命令仍保留明确的兼容边界。
 
 2026-08-13 序列变更路由收敛：`ALTER SEQUENCE` 的 `RESTART`、`INCREMENT`、边界、缓存、
-循环和 `OWNED BY` 选项现在进入 typed `DdlExecutor` bridge；仅保留依赖旧兼容元数据文件的
-`RENAME TO` 在 legacy 路径。新增真实路由回归验证重启和增量值，避免同一命令在两套实现间漂移。
+循环、`OWNED BY` 和 `RENAME TO` 均由 typed `DdlExecutor` bridge 执行。重命名通过
+`StorageEngine` 原子改名并同步目录、保留 catalog OID、更新 `nextval` 默认表达式和依赖关系；
+冲突或中途失败由 DDL 快照回滚。新增真实路由回归验证重启、增量、重命名、重启持久化和冲突保持。
 
 2026-08-13 配置作用域与计划缓存收敛：普通 `SET` 只修改当前 `Session` 的
 `statement_timeout`、`lock_timeout` 和 `deadlock_timeout`；进程级参数必须通过管理员
