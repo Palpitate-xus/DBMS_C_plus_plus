@@ -12,6 +12,8 @@
 
 2026-08-13 RLS 与 Volcano 安全边界收敛：结构化 SELECT 发现当前关系需要 RLS 时，统一使用 `forEachVisibleRow(..., "SELECT")` 的策略感知扫描，并禁用索引、bitmap、并行访问路径，避免访问方法绕过 USING 策略；新增索引存在时的 RLS 绕过回归。
 
+2026-08-13 Volcano 访问方法安全边界收敛：删除未具备 visibility map、heap 可见性和 NULL 位图证明的伪 `IndexOnlyScanOp`，所有等值索引路径统一回表并复用 page lock/MVCC/SSI；Bitmap AND/OR 也改用相同的受保护 RID 回表，并传播锁冲突和页面 I/O 失败。visibility-map 驱动的真正 index-only scan 仍明确标记为未实现。
+
 复制管理器本轮完成线程安全收敛：复制槽查询改为返回受锁保护的值快照，standby、primary conninfo、同步复制和 slot active 状态统一受同一把锁保护；slot 名称/类型/plugin 组合在创建时校验，并提供显式激活/停用 API。新增并发回归覆盖状态写入、slot 生命周期和快照读取；这仍是进程内管理层，不代表已经具备 PostgreSQL 级真实 WAL sender/receiver、流复制或 PITR。
 
 本轮并发安全审计修复了 `LockManager` 的真实生命周期问题：等待 row/page 锁时不再持有可能被清除的 map 元素引用；批量解锁只释放当前线程拥有的 token；表锁重入不会重复锁底层 `shared_mutex`，共享锁升级会先平衡自身 token；等待图在等待期间持续刷新并检测双线程死锁。新增 `tests/lock_manager_concurrency_test.cpp`，验证死锁受害者释放、重入/升级、row token 归属和清理；真正的物理索引范围 predicate lock、完整 PostgreSQL 锁模式矩阵和 SSI 规则仍未完成。

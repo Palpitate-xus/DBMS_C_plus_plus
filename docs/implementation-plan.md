@@ -717,10 +717,10 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| ✅ 5.1 建立 path/relation/statistics 框架（`QueryPlanner` + `PlanContext` + 12 个火山算子） | 16.10, 7.2 | 已落地 volcano 模型算子树：TableScan/IndexScan/IndexOnlyScan/Filter/Project/Sort/Limit/Distinct/NestedLoopJoin/HashJoin/MergeJoin/Aggregate。`QueryPlanner::executePlan` 作为执行入口。本次新增 Phase 5.1 执行路径。 |
+| ✅ 5.1 建立 path/relation/statistics 框架（`QueryPlanner` + `PlanContext` + Volcano 算子） | 16.10, 7.2 | 已落地 Volcano 模型算子树：TableScan/IndexScan/Filter/Project/Sort/Limit/Distinct/NestedLoopJoin/HashJoin/MergeJoin/Aggregate。未完成 visibility-map 证明前不提供伪 `IndexOnlyScan`；`QueryPlanner::executePlan` 作为执行入口。 |
 | ✅ 5.2 实现等价类（equivalence classes）、pathkeys、参数化路径 | 7.2 | EquivalenceClass + PathKey structs + buildSelectPlan overload + index-provided ordering detection |
 | ✅ 5.3 实现 join search / join reordering（cost-based DP） | 6.2, 7.2 | estimateJoinCost for NLJ/Merge/Hash; cost-based algorithm selection + size-based join order swap |
-| ✅ 5.4 实现 bitmap heap scan、bitmap and/or、多索引组合 | 7.4 | IndexOnlyScanOp (covering index), IndexScanOp (PK/secondary); filter pushdown in buildSelectPlan |
+| ✅ 5.4 实现 bitmap heap scan、bitmap and/or、多索引组合 | 7.4 | Bitmap AND/OR 和 IndexScan（PK/secondary）统一通过受保护的 RID heap fetch；过滤条件在 `buildSelectPlan` 中保留为 recheck。 |
 | ✅ 5.5 实现 skip scan、index condition recheck、lossy pages | 8.2, 7.4 | FilterOp indexConditionRecheck + canUseSkipScan in QueryPlanner |
 | ⚠️ 5.6 实现 CTE `MATERIALIZED/NOT MATERIALIZED`、可写 CTE 快照、递归检测 | 6.4 | parser 已解析 CTE；当前 executor 有字符串化 CTE/递归子集，但 materialization 选项与 PostgreSQL writable-CTE snapshot 仍未完整实现 |
 | 🔄 5.7 实现 `MERGE` 完整 WHEN 分支 | 1.1.44, 6.13 | 窄版单源表 MATCHED UPDATE/DO NOTHING + NOT MATCHED INSERT/DO NOTHING 已由 `DmlExecutor` 执行；多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query、RETURNING 和完整并发/事务语义仍待迁移 |

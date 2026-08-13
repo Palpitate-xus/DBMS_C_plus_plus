@@ -127,7 +127,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P0-6: Bitmap Index/Heap Scan
 - **类别**: 执行器 / 索引组合
-- **现状**: `BitmapHeapScanOp` 和 `BitmapOrHeapScanOp` 已接入 planner：对等值 B-tree/Hash/PK 索引执行候选 RID 的 AND/OR 组合，再统一 heap fetch 与原谓词重检；范围 bitmap、并行 bitmap 和真正 block bitmap 仍缺
+- **现状**: `BitmapHeapScanOp` 和 `BitmapOrHeapScanOp` 已接入 planner：对等值 B-tree/Hash/PK 索引执行候选 RID 的 AND/OR 组合，再通过带 page lock/MVCC/SSI 边界的 RID heap fetch 与原谓词重检；范围 bitmap、并行 bitmap、真正 block bitmap 和 visibility-map 驱动 index-only scan 仍缺
 - **PG 参考**: `BitmapIndexScan`, `BitmapHeapScan`, `BitmapAnd`, `BitmapOr`
 - **影响**: 多索引 WHERE 条件性能差（如 `WHERE a=1 AND b=2` 有两个索引时）
 - **实现路径**:

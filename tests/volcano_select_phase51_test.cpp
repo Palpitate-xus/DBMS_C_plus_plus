@@ -86,10 +86,13 @@ static void test_where_index_scan() {
 
     dbms::PlanContext ctx;
     ctx.dbname = db; ctx.tablename = "t"; ctx.conds = conds;
+    ctx.selectCols = {"name"};
 
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
     auto rows = dbms::QueryPlanner::executePlan(std::move(plan));
     assert(rows.size() == 2);  // alice + carol
+    const std::set<std::string> expectedNames = {"alice ", "carol "};
+    assert((std::set<std::string>(rows.begin(), rows.end()) == expectedNames));
 
     cleanup(db);
     std::cout << "[VOLCANO-5.1] index scan OK (" << rows.size() << " rows)" << std::endl;

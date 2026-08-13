@@ -302,121 +302,6 @@ void IndexScanOp::close() {
     statsRecorded_ = false;
 }
 
-// ========================================================================
-// IndexOnlyScanOp: covering index scan (no row lookup)
-// ========================================================================
-IndexOnlyScanOp::IndexOnlyScanOp(StorageEngine* engine, const std::string& dbname,
-                                  const std::string& tablename,
-                                  const std::vector<std::string>& indexCols,
-                                  const std::string& filterValue,
-                                  const std::string& compositeIndexName)
-    : engine_(engine), dbname_(dbname), tablename_(tablename),
-      indexCols_(indexCols), filterValue_(filterValue),
-      compositeIndexName_(compositeIndexName) {}
-
-bool IndexOnlyScanOp::open() {
-    tbl_ = engine_->getTableSchema(dbname_, tablename_);
-    rids_.clear();
-    if (!compositeIndexName_.empty()) {
-        BPTree* idx = engine_->getCompositeIndexTree(dbname_, tablename_, compositeIndexName_);
-        if (idx) rids_ = idx->searchMulti(filterValue_);
-    } else if (indexCols_.size() == 1) {
-        // Single-column index (or PK)
-        const std::string& cname = indexCols_[0];
-        bool isPK = false;
-        for (size_t i = 0; i < tbl_.len; ++i) {
-            if (tbl_.cols[i].dataName == cname && tbl_.cols[i].isPrimaryKey) {
-                isPK = true; break;
-            }
-        }
-        if (isPK) {
-            BPTree* idx = engine_->getPKIndex(dbname_, tablename_);
-            if (idx) {
-                int64_t rid = 0;
-                if (idx->search(filterValue_, rid)) rids_.push_back(rid);
-            }
-        } else {
-            BPTree* idx = engine_->getSecondaryIndex(dbname_, tablename_, cname);
-            if (idx) rids_ = idx->searchMulti(filterValue_);
-        }
-    }
-    pos_ = 0;
-    if (!statsRecorded_) {
-        recordTableScan(dbname_, tablename_, rids_.size(), true, false);
-        statsRecorded_ = true;
-    }
-    return true;
-}
-
-bool IndexOnlyScanOp::next(std::string& outRow) {
-    if (pos_ >= rids_.size()) return false;
-    // Build a virtual row containing only the index column values (no disk I/O for row data)
-    // Decompose filterValue_ into column values
-    std::vector<std::string> colVals;
-    size_t start = 0;
-    for (size_t i = 0; i < indexCols_.size(); ++i) {
-        size_t sep = filterValue_.find('\x01', start);
-        if (sep == std::string::npos) {
-            colVals.push_back(filterValue_.substr(start));
-            break;
-        }
-        colVals.push_back(filterValue_.substr(start, sep - start));
-        start = sep + 1;
-    }
-    while (colVals.size() < indexCols_.size()) colVals.push_back("");
-
-    // Build a row buffer with only the index columns populated
-    std::map<std::string, std::string> vals;
-    for (size_t i = 0; i < indexCols_.size() && i < colVals.size(); ++i) {
-        vals[indexCols_[i]] = colVals[i];
-    }
-    // Construct row buffer matching the table schema (other cols empty)
-    std::string row(tbl_.rowSize(), '\0');
-    size_t fixedOffset = 0;
-    for (size_t i = 0; i < tbl_.len; ++i) {
-        const Column& col = tbl_.cols[i];
-        if (col.isVariableLength) continue;
-        auto it = vals.find(col.dataName);
-        if (it != vals.end() && !it->second.empty()) {
-            if (col.dataType == "int" || col.dataType == "tinyint" || col.dataType == "long") {
-                int64_t v = StorageEngine::parseInt(it->second);
-                std::memcpy(row.data() + fixedOffset, &v, col.dsize);
-            } else if (col.dataType == "char") {
-                size_t copyLen = std::min(it->second.size(), col.dsize);
-                std::memcpy(row.data() + fixedOffset, it->second.data(), copyLen);
-            }
-        }
-        fixedOffset += col.dsize;
-    }
-    // For variable-length columns, append values at end
-    size_t varCount = tbl_.varColCount();
-    size_t arrPos = tbl_.fixedDataSize();
-    size_t dataPos = arrPos + varCount * 4;
-    std::string finalRow = row.substr(0, dataPos);
-    finalRow.resize(dataPos);
-    size_t varIdx = 0;
-    for (size_t i = 0; i < tbl_.len; ++i) {
-        const Column& col = tbl_.cols[i];
-        if (!col.isVariableLength) continue;
-        auto it = vals.find(col.dataName);
-        std::string val = (it != vals.end()) ? it->second : "";
-        uint16_t offset = static_cast<uint16_t>(finalRow.size());
-        uint16_t length = static_cast<uint16_t>(val.size());
-        std::memcpy(finalRow.data() + arrPos + varIdx * 4, &offset, sizeof(uint16_t));
-        std::memcpy(finalRow.data() + arrPos + varIdx * 4 + 2, &length, sizeof(uint16_t));
-        finalRow += val;
-        ++varIdx;
-    }
-    outRow = std::move(finalRow);
-    ++pos_;
-    return true;
-}
-
-void IndexOnlyScanOp::close() {
-    rids_.clear();
-    statsRecorded_ = false;
-}
-
 static bool collectEqualityIndexCandidates(
     StorageEngine* engine, const std::string& dbname,
     const std::string& tablename, const TableSchema& tbl,
@@ -504,11 +389,17 @@ bool BitmapHeapScanOp::open() {
     if (indexedPredicates < 2 || !initialized) return false;
     rids_.assign(matched.begin(), matched.end());
 
-    PageAllocator* allocator = engine_->getPageAllocator(dbname_, tablename_);
-    if (!allocator) return true;
+    bool readFailed = false;
     for (int64_t rid : rids_) {
         std::string row;
-        if (!engine_->readRowByRid(allocator, rid, row, tbl_)) continue;
+        if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr,
+                                          &readFailed)) {
+            if (readFailed) {
+                rows_.clear();
+                return false;
+            }
+            continue;
+        }
         rows_.push_back(engine_->resolveToastValues(dbname_, tablename_, row, tbl_));
     }
     if (!statsRecorded_) {
@@ -579,11 +470,17 @@ bool BitmapOrHeapScanOp::open() {
         unionRids.insert(matched.begin(), matched.end());
     }
 
-    PageAllocator* allocator = engine_->getPageAllocator(dbname_, tablename_);
-    if (!allocator) return true;
+    bool readFailed = false;
     for (int64_t rid : unionRids) {
         std::string row;
-        if (!engine_->readRowByRid(allocator, rid, row, tbl_)) continue;
+        if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr,
+                                          &readFailed)) {
+            if (readFailed) {
+                rows_.clear();
+                return false;
+            }
+            continue;
+        }
         row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
 
         bool matches = false;
@@ -2148,7 +2045,7 @@ static bool canUseBitmapOrScan(
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ctx) {
     OpPtr root;
 
-    // Choose between IndexScan, IndexOnlyScan, and TableScan
+    // Choose between the protected IndexScan and TableScan paths.
     std::vector<StorageEngine::Condition> remainingConds = ctx.conds;
     // RLS is a relation-level security boundary.  Do not let an index,
     // bitmap, or parallel access path duplicate policy evaluation: use the
@@ -2179,50 +2076,11 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                     }
                 }
                 if (isPK || hasSecIdx) {
-                    // Check if IndexOnlyScan is applicable:
-                    // SELECT contains only the indexed column (or is a covering composite index)
-                    bool useIndexOnly = false;
-                    std::vector<std::string> indexCols = {c.colName};
-                    std::string compIdxName;
-                    if (!ctx.selectCols.empty()) {
-                        // All select cols must be in index cols
-                        bool allInIdx = true;
-                        for (const auto& sc : ctx.selectCols) {
-                            if (sc != c.colName) {
-                                // Check composite index covering
-                                auto compIdxs = engine->getCompositeIndexes(ctx.dbname, ctx.tablename);
-                                bool covered = false;
-                                for (const auto& ci : compIdxs) {
-                                    if (ci.columns.empty() || ci.columns[0] != c.colName) continue;
-                                    bool allCovered = true;
-                                    for (const auto& nm : ctx.selectCols) {
-                                        bool found = false;
-                                        for (const auto& cc : ci.columns) {
-                                            if (cc == nm) { found = true; break; }
-                                        }
-                                        if (!found) { allCovered = false; break; }
-                                    }
-                                    if (allCovered) {
-                                        indexCols = ci.columns;
-                                        compIdxName = ci.name;
-                                        covered = true;
-                                        break;
-                                    }
-                                }
-                                allInIdx = covered;
-                                break;
-                            }
-                        }
-                        useIndexOnly = allInIdx;
-                    }
-
-                    if (useIndexOnly) {
-                        root = std::make_unique<IndexOnlyScanOp>(engine, ctx.dbname, ctx.tablename,
-                                                                  indexCols, c.value, compIdxName);
-                    } else {
-                        root = std::make_unique<IndexScanOp>(engine, ctx.dbname, ctx.tablename,
-                                                              c.colName, c.value);
-                    }
+                    // Every indexed path must recheck the heap tuple under
+                    // the same lock/MVCC boundary. A visibility-map-backed
+                    // index-only scan is not implemented yet.
+                    root = std::make_unique<IndexScanOp>(engine, ctx.dbname, ctx.tablename,
+                                                          c.colName, c.value);
                     // Remove this condition from Filter since IndexScan handles it
                     auto it = remainingConds.begin();
                     while (it != remainingConds.end()) {
