@@ -66,6 +66,8 @@
 
 构建入口已进一步收敛：四个 shell 入口复用 `scripts/build_common.sh`，统一编译参数、TLS 分支、链接库和对象缓存配置指纹；CMake 与脚本继续共享 `cmake/dbms_sources.txt`，并在配置阶段校验 manifest。测试编排唯一由 `build_tests.sh` 负责，`run_all_tests_fast.sh` 仅是安静输出外壳；CMake `check`/CTest 直接调用同一编排器，避免两套测试链接/桩选择逻辑漂移。
 
+Snapshot export/import 已升级为数据库绑定的 v2 格式，并限制为 REPEATABLE READ/SERIALIZABLE 事务的首次读写边界；版本、长度、尾随字节和 XID 列表均严格校验，导入后以及任何读写后均 fail-closed。该改动只收紧本项目已有快照 API，不声称实现 logical decoding 或跨集群快照生命周期。
+
 顶层 DML statement atomicity 已收敛：普通 `INSERT`、`UPDATE`、`DELETE`、`MERGE`、`REPLACE` 以及包含写 CTE 的 `WITH` 语句在无显式事务时由 `execute()` 建立内部事务并在成功后提交，错误或异常自动回滚；递归触发器、视图 action、CTE 和兼容性辅助 SQL 复用外层边界，协议层可返回简单 `WITH ... RETURNING` 结果。该机制修复批量 DML 中途失败留下部分写入的问题，但不扩大复杂 DML 的 PostgreSQL 语义覆盖范围。
 
 协议运行时补强了扩展查询错误状态机：Parse/Bind/Execute 错误后直到 Sync 前忽略后续消息，并区分事务外错误的 `ReadyForQuery('I')` 状态；显式事务失败后普通命令返回 `25P02`，`COMMIT` 按 PostgreSQL 语义走完整回滚，`ROLLBACK TO SAVEPOINT` 可恢复事务；legacy `execute()` 的文本结果捕获已迁移到线程局部 `process/OutputCapture`，避免全局 `std::cout` 重定向串行化网络会话；完整参数绑定和类型化结果仍列为协议缺口。

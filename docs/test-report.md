@@ -33,6 +33,7 @@
 - DDL DROP/REPLACE 回归：`ddl_transaction_skeleton_test` 验证 DROP TABLE 与 CREATE OR REPLACE VIEW 的变更前快照恢复，外层回滚先恢复对象再撤销同一事务中的新增行；快照已被 DDL 修改后另一条快照型 DDL 及 SAVEPOINT 会 fail-closed。
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，并在配置阶段校验源文件存在性、重复项和 `src/main.cpp` 入口，避免生产源文件列表漂移。
 - CMake 现在提供 `check`/CTest 标准入口；它们调用唯一的 `scripts/build_tests.sh` 完整测试编排器，不再复制 standalone test 的链接、stub 选择或 E2E 调度逻辑。
+- `snapshot_export_import_test` 现在覆盖 v2 快照数据库绑定、版本/长度/尾随字节/XID 校验、重复导入、跨数据库导入，以及首次读写后拒绝替换快照；`DELETE`/`TRUNCATE` 也会阻止事务中途导入快照。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。
 - `./scripts/build_tests.sh` 是唯一的完整测试编排实现，会先通过 `build_common.sh` 的共享逻辑检查并构建 `dbms_main`，再缓存生产对象、逐个测试独立链接运行，并自动执行两个 E2E；因此不依赖调用者预先运行 `build.sh`。`run_all_tests_fast.sh` 仅捕获其成功输出并显示 PASS 计数，失败时原样打印完整编译/链接/运行日志。
 - 文档一致性检查确认根目录旧版 `MANUAL.md` 已移除，`docs/MANUAL.md` 是唯一受 README 与测试/部署文档引用的完整手册。

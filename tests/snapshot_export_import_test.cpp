@@ -26,7 +26,8 @@ int main() {
     // Test 1: Snapshot struct roundtrip
     {
         Snapshot s;
-        s.version = 1;
+        s.version = 2;
+        s.database = "snapshot_ei_db";
         s.xmin = 10;
         s.xmax = 100;
         s.curCid = 5;
@@ -38,6 +39,7 @@ int main() {
         assert(opt.has_value());
         Snapshot t = *opt;
         assert(t.version == s.version);
+        assert(t.database == s.database);
         assert(t.xmin == s.xmin);
         assert(t.xmax == s.xmax);
         assert(t.curCid == s.curCid);
@@ -49,6 +51,8 @@ int main() {
     // Test 2: Reject invalid magic
     {
         Snapshot s;
+        s.version = 2;
+        s.database = "snapshot_ei_db";
         s.xmin = 1; s.xmax = 2;
         std::string bytes = s.exportToBytes();
         bytes[0] = 0xFF; // corrupt magic
@@ -60,12 +64,36 @@ int main() {
     // Test 3: Reject truncated data
     {
         Snapshot s;
+        s.version = 2;
+        s.database = "snapshot_ei_db";
         s.activeXids = {1, 2, 3};
         std::string bytes = s.exportToBytes();
         bytes.resize(bytes.size() - 8);
         auto opt = Snapshot::importFromBytes(bytes);
         assert(!opt.has_value());
         std::cout << "[SNAPSHOT EI] truncated data rejected OK\n";
+    }
+
+    // Test 3b: Reject unsupported versions, trailing bytes, and invalid XIDs.
+    {
+        Snapshot s;
+        s.version = 2;
+        s.database = "snapshot_ei_db";
+        s.xmin = 1;
+        s.xmax = 2;
+        std::string bytes = s.exportToBytes();
+        assert(!bytes.empty());
+        bytes[4] = 3;
+        assert(!Snapshot::importFromBytes(bytes).has_value());
+
+        bytes = s.exportToBytes();
+        bytes.push_back('\0');
+        assert(!Snapshot::importFromBytes(bytes).has_value());
+
+        Snapshot invalid = s;
+        invalid.activeXids = {0};
+        assert(invalid.exportToBytes().empty());
+        std::cout << "[SNAPSHOT EI] malformed payloads rejected OK\n";
     }
 
     // Test 4: StorageEngine export/import with visibility.
@@ -76,6 +104,7 @@ int main() {
         StorageEngine engine1;
         StorageEngine engine2;
         StorageEngine engine3;
+        StorageEngine engine4;
 
         DBStatus r = engine1.createDatabase(dbname);
         if (r != DBStatus::OK) {
@@ -124,8 +153,13 @@ int main() {
         bool ok = engine2.importSnapshot(snapBytes);
         assert(ok);
 
+        // A snapshot is database-scoped and can only be installed before the
+        // importing transaction has read or written anything.
+        assert(!engine2.importSnapshot(snapBytes));
+
         rows = engine2.query(dbname, "t", {}, {"id", "name"});
         assert(!rowContains(rows, "alice"));
+        assert(!engine2.importSnapshot(snapBytes));
 
         engine1.commitTransaction();
 
@@ -138,6 +172,23 @@ int main() {
         assert(!rowContains(rows, "alice"));
 
         engine2.commitTransaction();
+
+        // A transaction that has already written cannot replace its snapshot.
+        assert(engine4.beginTransaction(dbname) == DBStatus::OK);
+        vals["id"] = "2";
+        vals["name"] = "bob";
+        assert(engine4.insert(dbname, "t", vals) == DBStatus::OK);
+        assert(!engine4.importSnapshot(snapBytes));
+        assert(engine4.rollbackTransaction() == DBStatus::OK);
+
+        // A snapshot from another database must be rejected even when the
+        // receiving transaction has not executed a statement yet.
+        const std::string otherDb = "snapshot_ei_other_db";
+        assert(engine1.createDatabase(otherDb) == DBStatus::OK);
+        assert(engine1.beginTransaction(otherDb) == DBStatus::OK);
+        assert(!engine1.importSnapshot(snapBytes));
+        assert(engine1.rollbackTransaction() == DBStatus::OK);
+        std::filesystem::remove_all(otherDb);
 
         // Engine3 with fresh snapshot sees committed row
         r = engine3.beginTransaction(dbname);

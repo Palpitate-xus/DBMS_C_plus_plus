@@ -1381,6 +1381,9 @@ private:
         bool readOnly = false;
         bool preserveBackupOnRollback = false;
         std::string txnDB;
+        bool snapshotImported = false;
+        bool hasRead = false;
+        bool hasWrite = false;
         std::string txnBackupPath;
         bool transactionBackupDirty = false;
         bool restoreBackupBeforeRowUndo = false;

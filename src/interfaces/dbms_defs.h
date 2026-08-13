@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <vector>
@@ -70,33 +71,57 @@ enum class IsolationLevel {
 };
 
 struct Snapshot {
-    uint32_t version = 1;            // 序列化格式版本
+    uint32_t version = 2;            // 序列化格式版本
+    std::string database;            // exporting transaction's database
     TxnId xmin = 0;                  // 所有小于 xid 的事务已提交/回滚
     TxnId xmax = 0;                  // 所有大于等于 xid 的事务未开始或活跃
     std::vector<TxnId> activeXids;   // 活跃事务列表
     std::vector<TxnId> subxip;       // 子事务进行中列表
     TxnId curCid = 0;                // 当前命令ID
 
-    // 二进制序列化（小端，稳定格式 v1）
+    // 二进制序列化（小端，稳定格式 v2）
     std::string exportToBytes() const;
 
     // 反序列化；失败返回 std::nullopt
     static std::optional<Snapshot> importFromBytes(const std::string& bytes);
 };
 
-// Snapshot v1 二进制格式（小端）：
+// Snapshot v2 二进制格式（小端）：
 // [0]   uint32 magic = 0x534E4150  // "SNAP"
-// [4]   uint32 version = 1
-// [8]   uint64 xmin
-// [16]  uint64 xmax
-// [24]  uint64 curCid
-// [32]  uint32 activeXids count (N)
-// [36]  uint32 subxip count (M)
-// [40]  N * uint64 activeXids
-// [40+N*8] M * uint64 subxip
+// [4]   uint32 version = 2
+// [8]   uint32 database byte length (D)
+// [12]  D bytes database name
+// [12+D] uint64 xmin
+// [20+D] uint64 xmax
+// [28+D] uint64 curCid
+// [36+D] uint32 activeXids count (N)
+// [40+D] uint32 subxip count (M)
+// [44+D] N * uint64 activeXids
+// [44+D+N*8] M * uint64 subxip
 inline std::string Snapshot::exportToBytes() const {
+    constexpr uint32_t kCurrentVersion = 2;
+    constexpr size_t kMaxDatabaseBytes = 1024;
+    if (version != kCurrentVersion || database.size() > kMaxDatabaseBytes ||
+        activeXids.size() > UINT32_MAX || subxip.size() > UINT32_MAX) {
+        return {};
+    }
+
+    auto validXidList = [](const std::vector<TxnId>& xids) {
+        TxnId previous = 0;
+        for (TxnId xid : xids) {
+            if (xid == INVALID_TXN_ID || (previous != 0 && xid <= previous)) return false;
+            previous = xid;
+        }
+        return true;
+    };
+    if (database.find('\0') != std::string::npos ||
+        !validXidList(activeXids) || !validXidList(subxip)) return {};
+    for (TxnId xid : subxip) {
+        if (std::binary_search(activeXids.begin(), activeXids.end(), xid)) return {};
+    }
+
     std::string out;
-    out.reserve(40 + (activeXids.size() + subxip.size()) * sizeof(TxnId));
+    out.reserve(44 + database.size() + (activeXids.size() + subxip.size()) * sizeof(TxnId));
 
     auto appendU32 = [&out](uint32_t v) {
         out.append(reinterpret_cast<const char*>(&v), sizeof(v));
@@ -106,7 +131,9 @@ inline std::string Snapshot::exportToBytes() const {
     };
 
     appendU32(0x534E4150u); // "SNAP"
-    appendU32(version);
+    appendU32(kCurrentVersion);
+    appendU32(static_cast<uint32_t>(database.size()));
+    out.append(database);
     appendU64(xmin);
     appendU64(xmax);
     appendU64(curCid);
@@ -118,7 +145,9 @@ inline std::string Snapshot::exportToBytes() const {
 }
 
 inline std::optional<Snapshot> Snapshot::importFromBytes(const std::string& bytes) {
-    if (bytes.size() < 40) return std::nullopt;
+    constexpr uint32_t kCurrentVersion = 2;
+    constexpr size_t kMaxDatabaseBytes = 1024;
+    if (bytes.size() < 12) return std::nullopt;
     size_t pos = 0;
 
     auto readU32 = [&bytes, &pos]() -> uint32_t {
@@ -137,23 +166,54 @@ inline std::optional<Snapshot> Snapshot::importFromBytes(const std::string& byte
     uint32_t magic = readU32();
     if (magic != 0x534E4150u) return std::nullopt;
     uint32_t version = readU32();
-    if (version != 1) return std::nullopt;
+    if (version != kCurrentVersion) return std::nullopt;
+
+    uint32_t databaseLength = readU32();
+    if (databaseLength == 0 || databaseLength > kMaxDatabaseBytes ||
+        databaseLength > bytes.size() - pos) return std::nullopt;
 
     Snapshot snap;
     snap.version = version;
+    snap.database.assign(bytes.data() + pos, databaseLength);
+    pos += databaseLength;
+    if (snap.database.find('\0') != std::string::npos) return std::nullopt;
+    if (bytes.size() - pos < 32) return std::nullopt;
     snap.xmin = readU64();
     snap.xmax = readU64();
     snap.curCid = readU64();
     uint32_t activeCount = readU32();
     uint32_t subCount = readU32();
 
-    size_t needed = static_cast<size_t>(activeCount + subCount) * sizeof(TxnId);
+    if (snap.xmin == INVALID_TXN_ID || snap.xmax < snap.xmin) return std::nullopt;
+    if (activeCount > (bytes.size() - pos) / sizeof(TxnId) ||
+        subCount > (bytes.size() - pos -
+                    static_cast<size_t>(activeCount) * sizeof(TxnId)) / sizeof(TxnId)) {
+        return std::nullopt;
+    }
+    size_t needed = (static_cast<size_t>(activeCount) + static_cast<size_t>(subCount)) * sizeof(TxnId);
     if (bytes.size() - pos < needed) return std::nullopt;
 
     snap.activeXids.resize(activeCount);
     for (uint32_t i = 0; i < activeCount; ++i) snap.activeXids[i] = readU64();
     snap.subxip.resize(subCount);
     for (uint32_t i = 0; i < subCount; ++i) snap.subxip[i] = readU64();
+    if (pos != bytes.size()) return std::nullopt;
+
+    TxnId previous = 0;
+    for (TxnId xid : snap.activeXids) {
+        if (xid == INVALID_TXN_ID || (previous != 0 && xid <= previous)) {
+            return std::nullopt;
+        }
+        previous = xid;
+    }
+    previous = 0;
+    for (TxnId xid : snap.subxip) {
+        if (xid == INVALID_TXN_ID || (previous != 0 && xid <= previous) ||
+            std::binary_search(snap.activeXids.begin(), snap.activeXids.end(), xid)) {
+            return std::nullopt;
+        }
+        previous = xid;
+    }
     return snap;
 }
 

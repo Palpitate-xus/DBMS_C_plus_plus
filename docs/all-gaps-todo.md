@@ -25,6 +25,8 @@
 
 2026-08-13 构建入口收敛：CMake 新增 `check`/CTest 标准回归入口，直接调用唯一的 `build_tests.sh` 编排器；配置阶段校验生产 manifest 的重复项、文件存在性和 `src/main.cpp` 入口，避免 CMake 与 shell 测试策略继续分叉。
 
+2026-08-13 Snapshot 边界收敛：snapshot export/import 升级为数据库绑定的 v2 二进制格式，拒绝版本错误、长度/尾随字节、非法或重复 XID；仅允许 REPEATABLE READ/SERIALIZABLE 事务在首次读写前导入，重复、跨数据库和导入后写入替换均 fail-closed。完整 logical decoding snapshot、跨集群生命周期和安全快照语义仍待实现。
+
 2026-08-12 测试隔离修复：每个 C++ 测试在独立临时工作目录运行并在结束后回收，统一消除 `.txnid`、WAL、catalog、日志和后台 worker 相对路径造成的顺序污染；`build_one_test.sh` 复用同一隔离逻辑。
 
 2026-08-11 增量审计：`DdlTransaction` 的 CREATE undo 已注册到外层事务上下文；DROP/REPLACE 和文件级 DDL 在变更前建立快照，外层 `ROLLBACK` 先恢复快照再按事务日志撤销行变更，快照污染后的另一条快照型 DDL、SAVEPOINT 创建/回滚会 fail-closed。含内存闭包式 DDL undo 的事务暂不进入 `PREPARE TRANSACTION`；完整依赖图 undo 和全部 PostgreSQL 隐式提交边界仍待实现。

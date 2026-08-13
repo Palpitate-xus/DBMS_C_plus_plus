@@ -3855,6 +3855,9 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 const ReadView* readView,
                                 const std::vector<std::string>& targetPartitions,
                                 bool registerRelationSiread) const {
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        transactionContext().hasRead = true;
+    }
     const ReadView* rv = readView;
     ReadView autocommitView;
     if (!rv && transactionContext().inTransaction) {
@@ -4059,6 +4062,9 @@ bool StorageEngine::forEachRowPageRange(
     uint32_t firstPage, uint32_t endPage,
     const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
     const ReadView* readView) const {
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        transactionContext().hasRead = true;
+    }
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType != TableSchema::PartitionType::None || firstPage >= endPage)
         return true;
@@ -8965,6 +8971,9 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
 
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
                                        const std::string& tablename) {
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        transactionContext().hasWrite = true;
+    }
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -12197,6 +12206,9 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                                 const std::string& tablename,
                                 const std::map<std::string, std::string>& values,
                                 std::vector<std::map<std::string, std::string>>* insertedRows) {
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        transactionContext().hasWrite = true;
+    }
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -13626,6 +13638,9 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                                 const std::vector<std::string>& conditions,
                                 std::vector<std::map<std::string, std::string>>* deletedRows,
                                 const DeleteMatcher& deleteMatcher) {
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        transactionContext().hasWrite = true;
+    }
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -14276,6 +14291,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                                     std::map<std::string, std::string>&)>& updateResolver,
                                 const std::function<bool(
                                     const std::map<std::string, std::string>&)>& updateMatcher) {
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        transactionContext().hasWrite = true;
+    }
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
@@ -15580,6 +15598,10 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
                                                int timezoneOffsetMinutes,
                                                const std::vector<std::string>& distinctOnCols) {
     std::vector<std::string> result;
+
+    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+        transactionContext().hasRead = true;
+    }
 
     // information_schema virtual tables
     if (dbname == "information_schema") {
@@ -19903,30 +19925,41 @@ void StorageEngine::refreshReadView() {
 // Snapshot export/import
 // ========================================================================
 std::string StorageEngine::exportSnapshot() const {
-    if (!transactionContext().inTransaction) return "";
+    const auto& context = transactionContext();
+    if (!context.inTransaction || context.txnDB.empty() ||
+        (context.txnIsolationLevel != IsolationLevel::REPEATABLE_READ &&
+         context.txnIsolationLevel != IsolationLevel::SERIALIZABLE)) return "";
     Snapshot snap;
-    snap.version = 1;
-    snap.xmin = transactionContext().readView.upLimitId;
-    snap.xmax = transactionContext().readView.lowLimitId;
+    snap.version = 2;
+    snap.database = context.txnDB;
+    snap.xmin = context.readView.upLimitId;
+    snap.xmax = context.readView.lowLimitId;
     snap.curCid = 0; // command id not tracked yet
-    snap.activeXids.assign(transactionContext().readView.activeTxnIds.begin(), transactionContext().readView.activeTxnIds.end());
-    snap.subxip.assign(transactionContext().readView.subTxnIds.begin(), transactionContext().readView.subTxnIds.end());
+    snap.activeXids.assign(context.readView.activeTxnIds.begin(), context.readView.activeTxnIds.end());
+    snap.subxip.assign(context.readView.subTxnIds.begin(), context.readView.subTxnIds.end());
     return snap.exportToBytes();
 }
 
 bool StorageEngine::importSnapshot(const std::string& bytes) {
-    if (!transactionContext().inTransaction) return false;
+    auto& context = transactionContext();
+    if (!context.inTransaction || context.txnDB.empty() || context.snapshotImported ||
+        context.hasRead || context.hasWrite || !context.txnLog.empty() ||
+        !context.ddlUndoActions.empty() || !context.txnBackupPath.empty() ||
+        (context.txnIsolationLevel != IsolationLevel::REPEATABLE_READ &&
+         context.txnIsolationLevel != IsolationLevel::SERIALIZABLE)) return false;
     auto snapOpt = Snapshot::importFromBytes(bytes);
     if (!snapOpt) return false;
     const Snapshot& snap = *snapOpt;
-    transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
-    transactionContext().readView.upLimitId = snap.xmin;
-    transactionContext().readView.lowLimitId = snap.xmax;
-    transactionContext().readView.activeTxnIds.clear();
-    transactionContext().readView.activeTxnIds.insert(snap.activeXids.begin(), snap.activeXids.end());
-    transactionContext().readView.subTxnIds.clear();
-    transactionContext().readView.subTxnIds.insert(snap.subxip.begin(), snap.subxip.end());
-    transactionContext().readView.commitLog = getCommitLog(transactionContext().txnDB);
+    if (snap.database != context.txnDB) return false;
+    context.readView.creatorTxnId = context.currentTxnId;
+    context.readView.upLimitId = snap.xmin;
+    context.readView.lowLimitId = snap.xmax;
+    context.readView.activeTxnIds.clear();
+    context.readView.activeTxnIds.insert(snap.activeXids.begin(), snap.activeXids.end());
+    context.readView.subTxnIds.clear();
+    context.readView.subTxnIds.insert(snap.subxip.begin(), snap.subxip.end());
+    context.readView.commitLog = getCommitLog(context.txnDB);
+    context.snapshotImported = true;
     return true;
 }
 
@@ -20647,6 +20680,9 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     captureCatalogSnapshot();
 
     transactionContext().txnLog.clear();
+    transactionContext().snapshotImported = false;
+    transactionContext().hasRead = false;
+    transactionContext().hasWrite = false;
     transactionContext().ddlUndoActions.clear();
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
@@ -21307,6 +21343,9 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().txnLog.clear();
+    transactionContext().snapshotImported = false;
+    transactionContext().hasRead = false;
+    transactionContext().hasWrite = false;
     transactionContext().savepoints.clear();
     transactionContext().txnSubTxnIds.clear();
     clearCatalogSnapshot();
@@ -21720,6 +21759,9 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
 
     // Clear transaction state but KEEP locks (2PC semantics)
     transactionContext().txnLog.clear();
+    transactionContext().snapshotImported = false;
+    transactionContext().hasRead = false;
+    transactionContext().hasWrite = false;
     transactionContext().savepoints.clear();
 
     {
