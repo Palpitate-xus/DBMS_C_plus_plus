@@ -135,7 +135,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 
 | 访问方法 | PG 18 | 本 DBMS | 状态 |
 |----------|-------|---------|------|
-| B+ Tree | ✅ | ⚠️ | 基础文件 B+Tree 已覆盖跨叶/内部节点分裂、重复键、范围扫描和多值 `(key, RID)` 精确删除；事务刷盘、引擎退出和恢复支持完整文件 before/after WAL 镜像，但 PG 原生 page-level WAL、dedup、page deletion/合并、opclass/collation、skip scan 和完整并发构建仍缺 |
+| B+ Tree | ✅ | ⚠️ | 基础文件 B+Tree 已覆盖跨叶/内部节点分裂、重复键、范围扫描和多值 `(key, RID)` 精确删除；公共键 API 统一按当前 20 字节固定格式规范化，长键/重开索引已有回归；事务刷盘、引擎退出和恢复支持完整文件 before/after WAL 镜像，但 PG 原生 page-level WAL、dedup、page deletion/合并、opclass/collation、skip scan 和完整并发构建仍缺 |
 | Hash | ✅ | ⚠️ | 基础 Hash 文件支持严格校验、原子持久化和完整文件 before/after WAL 镜像；PG WAL-safe bucket split、metapage/overflow page、并发维护和完整恢复语义仍缺 |
 | GIN | ✅ | ✅ (基础，独立/StorageEngine 文件均严格校验并原子持久化) | ⚠️ |
 | GiST | ✅ | ⚠️ | 已有简化文本/范围索引与真实 DDL 路由；缺完整树结构、opclass、WAL、并发构建和几何/全文语义 |

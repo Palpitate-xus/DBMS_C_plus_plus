@@ -27,7 +27,9 @@ public:
     // Flush all dirty index pages and fsync the index file.
     bool flush();
 
-    // Insert key-value pair. Returns false if key already exists.
+    // Insert key-value pair. Keys are normalized to BP_KEY_LEN bytes; values
+    // beyond that boundary are truncated consistently by every public API.
+    // Returns false if the normalized key already exists.
     bool insert(const std::string& key, int64_t value);
 
     // Remove key. Returns false if key not found.
@@ -36,7 +38,8 @@ public:
     // Remove one exact key-value pair from a multi-value index.
     bool removeMulti(const std::string& key, int64_t value);
 
-    // Search for key. Returns true if found, sets value.
+    // Search for a key using the same fixed-width ordering as the on-disk tree.
+    // Returns true if found, sets value.
     bool search(const std::string& key, int64_t& value) const;
 
     // Multi-value search: returns all values for a key (allows duplicates)

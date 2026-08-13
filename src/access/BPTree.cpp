@@ -61,10 +61,11 @@ void BPTree::deserializeNode(const char* buf, Node& node, uint16_t /*order*/) {
     node.children.clear();
     size_t pos = 3;
     for (size_t i = 0; i < node.numKeys; ++i) {
-        std::string k(buf + pos, BP_KEY_LEN);
-        auto nul = k.find('\0');
-        if (nul != std::string::npos) k.resize(nul);
-        node.keys.push_back(k);
+        // Keep keys fixed-width in memory as well as on disk.  Public
+        // operations normalize their input before descending the tree;
+        // retaining the padding here makes comparisons, separators, and
+        // range boundaries use one ordering after a reopen.
+        node.keys.emplace_back(buf + pos, BP_KEY_LEN);
         pos += BP_KEY_LEN;
     }
     if (node.isLeaf) {
@@ -196,7 +197,7 @@ std::optional<BPTree::Node> BPTree::readNode(uint32_t pageNum) const {
 // ========================================================================
 bool BPTree::search(const std::string& key, int64_t& value) const {
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    return searchNode(header_.rootPage, key, value);
+    return searchNode(header_.rootPage, normalizeKey(key), value);
 }
 
 bool BPTree::searchNode(uint32_t pageNum, const std::string& key, int64_t& value) const {
@@ -226,6 +227,7 @@ bool BPTree::searchNode(uint32_t pageNum, const std::string& key, int64_t& value
 // ========================================================================
 bool BPTree::insert(const std::string& key, int64_t value) {
     if (!bp_ || !bp_->isOpen()) return false;
+    const std::string normalizedKey = normalizeKey(key);
     if (header_.rootPage == 0) {
         // Create root leaf
         uint32_t root = allocPage();
@@ -233,7 +235,7 @@ bool BPTree::insert(const std::string& key, int64_t value) {
         Node node;
         node.isLeaf = 1;
         node.numKeys = 1;
-        node.keys.push_back(key);
+        node.keys.push_back(normalizedKey);
         node.values.push_back(value);
         node.nextLeaf = 0;
         if (!writeNode(root, node)) return false;
@@ -243,7 +245,7 @@ bool BPTree::insert(const std::string& key, int64_t value) {
 
     // Check if key already exists
     int64_t dummy;
-    if (search(key, dummy)) return false;
+    if (search(normalizedKey, dummy)) return false;
 
     auto rootOpt = readNode(header_.rootPage);
     if (!rootOpt) return false;
@@ -263,7 +265,7 @@ bool BPTree::insert(const std::string& key, int64_t value) {
         if (!writeHeader()) return false;
         // Re-read root after split
     }
-    return insertNonFull(header_.rootPage, key, value);
+    return insertNonFull(header_.rootPage, normalizedKey, value);
 }
 
 // ========================================================================
@@ -272,6 +274,7 @@ bool BPTree::insert(const std::string& key, int64_t value) {
 std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
     std::vector<int64_t> results;
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return results;
+    const std::string normalizedKey = normalizeKey(key);
     auto nodeOpt = readNode(header_.rootPage);
     if (!nodeOpt) return results;
     Node node = std::move(*nodeOpt);
@@ -280,7 +283,7 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
         // Descend to the leftmost possible leaf for this key.  Equal keys
         // may span multiple leaves after a split; using >= here would start
         // at the rightmost equal separator and silently miss earlier rows.
-        while (i < node.numKeys && key > node.keys[i]) ++i;
+        while (i < node.numKeys && normalizedKey > node.keys[i]) ++i;
         if (i >= node.children.size()) return results;
         auto next = readNode(node.children[i]);
         if (!next) return {};
@@ -289,7 +292,7 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
     // Scan leaf for matching keys (including duplicates)
     while (true) {
         for (size_t i = 0; i < node.numKeys; ++i) {
-            if (node.keys[i] == key) {
+            if (node.keys[i] == normalizedKey) {
                 results.push_back(node.values[i]);
             }
         }
@@ -303,13 +306,14 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
 
 bool BPTree::insertMulti(const std::string& key, int64_t value) {
     if (!bp_ || !bp_->isOpen()) return false;
+    const std::string normalizedKey = normalizeKey(key);
     if (header_.rootPage == 0) {
         uint32_t root = allocPage();
         if (root == 0) return false;
         Node node;
         node.isLeaf = 1;
         node.numKeys = 1;
-        node.keys.push_back(key);
+        node.keys.push_back(normalizedKey);
         node.values.push_back(value);
         node.nextLeaf = 0;
         if (!writeNode(root, node)) return false;
@@ -332,7 +336,7 @@ bool BPTree::insertMulti(const std::string& key, int64_t value) {
         header_.rootPage = newRoot;
         if (!writeHeader()) return false;
     }
-    return insertNonFull(header_.rootPage, key, value);
+    return insertNonFull(header_.rootPage, normalizedKey, value);
 }
 
 bool BPTree::insertNonFull(uint32_t pageNum, const std::string& key, int64_t value) {
@@ -427,12 +431,12 @@ bool BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
 // ========================================================================
 bool BPTree::remove(const std::string& key) {
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    return removeFromNode(header_.rootPage, key, std::nullopt);
+    return removeFromNode(header_.rootPage, normalizeKey(key), std::nullopt);
 }
 
 bool BPTree::removeMulti(const std::string& key, int64_t value) {
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
-    return removeFromNode(header_.rootPage, key, value);
+    return removeFromNode(header_.rootPage, normalizeKey(key), value);
 }
 
 bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key,
@@ -469,7 +473,9 @@ bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key,
 std::vector<int64_t> BPTree::rangeScan(const std::string& startKey, const std::string& endKey) const {
     std::vector<int64_t> result;
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return result;
-    if (!collectRange(header_.rootPage, startKey, endKey, result)) return {};
+    const std::string normalizedStart = normalizeKey(startKey);
+    const std::string normalizedEnd = normalizeKey(endKey);
+    if (!collectRange(header_.rootPage, normalizedStart, normalizedEnd, result)) return {};
     return result;
 }
 

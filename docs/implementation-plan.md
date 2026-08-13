@@ -58,6 +58,8 @@
 
 2026-08-11 增量审计：新增 B+Tree/Hash `flush()` 与 `StorageEngine::flushDatabaseCaches()`；事务 snapshot 创建前、COMMIT WAL 发布前及引擎退出时统一刷已加载 heap、B+Tree、TOAST index 和 Hash 缓存，避免脏索引页落后于 heap 或事务快照。B+Tree/Hash 刷盘记录完整文件 before/after WAL 镜像，恢复按提交状态选择镜像；INSERT 回滚进一步覆盖复合/Hash/TOAST，并为 SAVEPOINT 回滚写入 heap WAL after-image；Hash AM 现在传播 mutation failure。其他访问方法的 WAL、跨访问方法原子提交和原生 page-level 增量恢复仍待后续。
 
+2026-08-13 增量审计：B+Tree 的插入、查找、多值查找、删除和范围扫描公共 API 统一调用固定 20 字节键规范化；长键截断、范围端点和重开索引语义通过 `gin_brin_index_test` 回归，避免内存键与磁盘键排序不一致。当前格式不兼容旧索引文件，需按现行 schema/index 格式重建。
+
 2026-08-11 增量审计：`forEachRow()` 的失败契约已传递到 B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建、`REINDEX` 以及 Volcano 顺序/索引扫描；这些路径不再把 heap I/O 失败当成空结果，全文/GiST/SP-GiST/GIN/BRIN 也在完整扫描后原子发布。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 和增量维护仍待后续。
 
 2026-08-11 增量审计：扫描失败契约已继续传递到 `filterRows`、查询/聚合/JOIN、FK/EXCLUDE/ON CONFLICT 检查、`ANALYZE`、ALTER/`VACUUM FULL` 表重写、TOAST/page 写入和 Volcano 并行 page-range scan；`ANALYZE` 统计文件改为临时文件 fsync 后原子替换。B-tree/Hash WAL-safe 构建、完整增量维护和复杂 DML 的跨对象 undo 仍待后续。

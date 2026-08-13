@@ -221,6 +221,34 @@ static void test_btree_split_and_range() {
         reopened.close();
     }
     cleanup(idx);
+
+    // Every public key operation must use the same fixed-width representation
+    // after reopening.  This also verifies that range endpoints are inclusive
+    // and that a key longer than BP_KEY_LEN follows the documented truncation
+    // rule instead of becoming an unreachable entry.
+    {
+        dbms::BPTree tree(idx);
+        assert(tree.open());
+        const std::string longKey = "01234567890123456789-truncated";
+        assert(tree.insertMulti(longKey, 7));
+        int64_t value = -1;
+        assert(tree.search(longKey, value));
+        assert(value == 7);
+        assert(tree.search("01234567890123456789", value));
+        assert(value == 7);
+        assert(tree.rangeScan(longKey, longKey).size() == 1);
+        assert(tree.removeMulti(longKey, 7));
+        assert(tree.searchMulti(longKey).empty());
+        assert(tree.flush());
+        tree.close();
+
+        dbms::BPTree reopened(idx);
+        assert(reopened.open());
+        assert(reopened.insertMulti(longKey, 8));
+        assert(reopened.searchMulti("01234567890123456789").size() == 1);
+        reopened.close();
+    }
+    cleanup(idx);
     std::cout << "[BPTREE] root split/search/range OK" << std::endl;
 }
 
