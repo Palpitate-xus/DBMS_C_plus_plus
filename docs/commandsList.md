@@ -1542,6 +1542,10 @@ SET GLOBAL variable_name = value
 fail-closed 校验。未知键、重复键、非法布尔值、数值尾随字符、越界值或非有限浮点值都会
 拒绝加载，不会用坏值覆盖当前运行配置。
 
+typed DDL 的列类型也采用 fail-closed 边界：未知类型或非法类型修饰符会在 CREATE/ALTER
+真正写入关系文件前报错，不会自动改写为 `varchar`；当前已支持的别名和 `serial` 自动序列
+按既有存储工厂映射。
+
 **示例**
 ```sql
 SET statement_timeout = 5000;

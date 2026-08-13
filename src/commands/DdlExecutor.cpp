@@ -17,6 +17,7 @@
 #include <iostream>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 
 extern dbms::StorageEngine g_engine;
 
@@ -677,8 +678,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "SQL syntax error: ADD COLUMN requires name and type" << std::endl;
                     return true;
                 }
-                status = g_engine.alterTableAddColumn(
-                    s.currentDB, tableName, columnDefToColumn(sub.colDef, s.currentDB));
+                Column column;
+                std::string typeError;
+                if (!columnDefToColumn(sub.colDef, s.currentDB, column, typeError)) {
+                    std::cout << "Invalid column type: " << typeError << std::endl;
+                    return true;
+                }
+                status = g_engine.alterTableAddColumn(s.currentDB, tableName, column);
                 if (status == DBStatus::TABLE_ALREADY_EXISTS && sub.ifNotExists) {
                     std::cout << "NOTICE: column already exists, skipping" << std::endl;
                     break;
@@ -748,8 +754,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     status = g_engine.alterTableDropNotNull(s.currentDB, tableName, sub.name);
                 } else if (!sub.dataType.empty()) {
                     ColumnDef cd = columnDefFromAlterType(sub.name, sub.dataType);
+                    Column column;
+                    std::string error;
+                    if (!columnDefToColumn(cd, s.currentDB, column, error)) {
+                        std::cout << "Invalid column type: " << error << std::endl;
+                        return true;
+                    }
                     status = g_engine.alterTableAlterColumnType(
-                        s.currentDB, tableName, sub.name, columnDefToColumn(cd, s.currentDB));
+                        s.currentDB, tableName, sub.name, column);
                 } else {
                     std::cout << "ALTER COLUMN subcommand is unsupported" << std::endl;
                     return true;
@@ -1629,8 +1641,14 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
 // CREATE / DROP TABLE
 // ----------------------------------------------------------------------------
 
-Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbname) {
-    Column col;
+bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbname,
+                                    Column& col, std::string& error) {
+    error.clear();
+    if (cd.name.empty() || cd.typeName.empty()) {
+        error = "column name and type are required";
+        return false;
+    }
+    col = Column{};
     col.dataName = cd.name;
     col.isNull = cd.isNull;
     col.isPrimaryKey = cd.isPrimaryKey;
@@ -1645,6 +1663,7 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
     std::string baseType = toLower(cd.typeName);
     std::string domainName;
     std::string domainCheck;
+    std::vector<std::string> domainTypeMods;
     std::vector<std::string> enumValues;
     if (!dbname.empty()) {
         auto dom = g_engine.getDomain(dbname, baseType);
@@ -1654,7 +1673,13 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
             if (col.defaultValue.empty() && !dom.defaultValue.empty()) {
                 col.defaultValue = dom.defaultValue;
             }
-            baseType = toLower(dom.baseType);
+            // Domain base types may carry modifiers (for example VARCHAR(50)).
+            // Normalize that specification before applying the normal typed
+            // column mapping; otherwise a valid domain would be mistaken for
+            // an unknown type.
+            ColumnDef domainType = columnDefFromAlterType("", dom.baseType);
+            baseType = toLower(domainType.typeName);
+            domainTypeMods = std::move(domainType.typeMods);
         }
         auto et = g_engine.getEnumType(dbname, baseType);
         if (!et.name.empty()) {
@@ -1674,15 +1699,40 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
     else if (baseType == "bool") baseType = "boolean";
     else if (baseType == "datetime") baseType = "timestamp";
 
+    const auto& typeMods = cd.typeMods.empty() ? domainTypeMods : cd.typeMods;
     int typeMod1 = 0, typeMod2 = 0;
-    if (!cd.typeMods.empty()) {
-        try { typeMod1 = std::stoi(cd.typeMods[0]); } catch (...) {}
+    if (!typeMods.empty()) {
+        try {
+            size_t consumed = 0;
+            typeMod1 = std::stoi(typeMods[0], &consumed);
+            if (consumed != typeMods[0].size()) throw std::invalid_argument("trailing type modifier");
+        } catch (...) {
+            error = "invalid type modifier '" + typeMods[0] + "'";
+            return false;
+        }
     }
-    if (cd.typeMods.size() > 1) {
-        try { typeMod2 = std::stoi(cd.typeMods[1]); } catch (...) {}
+    if (typeMods.size() > 1) {
+        try {
+            size_t consumed = 0;
+            typeMod2 = std::stoi(typeMods[1], &consumed);
+            if (consumed != typeMods[1].size()) throw std::invalid_argument("trailing type modifier");
+        } catch (...) {
+            error = "invalid type modifier '" + typeMods[1] + "'";
+            return false;
+        }
     }
 
-    if (baseType == "int2" || baseType == "smallint") {
+    bool knownType = true;
+    if (baseType == "smallserial") {
+        col = makeIntColumn(cd.name, cd.isNull, 0, cd.isPrimaryKey);
+        col.isAutoIncrement = true;
+    } else if (baseType == "serial") {
+        col = makeIntColumn(cd.name, cd.isNull, 2, cd.isPrimaryKey);
+        col.isAutoIncrement = true;
+    } else if (baseType == "bigserial") {
+        col = makeIntColumn(cd.name, cd.isNull, 3, cd.isPrimaryKey);
+        col.isAutoIncrement = true;
+    } else if (baseType == "int2" || baseType == "smallint") {
         col = makeIntColumn(cd.name, cd.isNull, 0, cd.isPrimaryKey);
     } else if (baseType == "int4" || baseType == "integer" || baseType == "int") {
         col = makeIntColumn(cd.name, cd.isNull, 2, cd.isPrimaryKey);
@@ -1713,6 +1763,9 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
         col = makeTimestamptzColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "time") {
         col = makeTimeColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "timetz") {
+        col = makeTimeColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+        col.dataType = "timetz";
     } else if (baseType == "interval") {
         col = makeIntervalColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "json") {
@@ -1725,6 +1778,14 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
         col = makeUuidColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "bytea" || baseType == "blob") {
         col = makeBlobColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+    } else if (baseType == "binary") {
+        size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 1;
+        col = makeBinaryColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
+    } else if (baseType == "varbinary") {
+        size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 255;
+        col = makeVarBinaryColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
+    } else if (baseType == "pg_lsn") {
+        col = makePgLsnColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "point") {
         col = makePointColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "inet") {
@@ -1777,15 +1838,19 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
         col = makeVarCharColumn(cd.name, cd.isNull, 1024, cd.isPrimaryKey);
         col.dataType = baseType;
     } else {
-        // Unknown type: fall back to varchar so the table can still be created
-        col = makeVarCharColumn(cd.name, cd.isNull, 255, cd.isPrimaryKey);
+        knownType = false;
+    }
+
+    if (!knownType) {
+        error = "unknown type '" + cd.typeName + "'";
+        return false;
     }
 
     // Factory functions replace the whole Column; restore metadata they don't set.
     col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
     col.generatedExpr = cd.generatedExpr;
     col.generatedKind = cd.generatedKind;
-    col.isAutoIncrement = cd.isGeneratedIdentity;
+    col.isAutoIncrement = col.isAutoIncrement || cd.isGeneratedIdentity;
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;
     col.enumValues = enumValues;
@@ -1828,7 +1893,7 @@ Column DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& db
     }
     // COLLATE determined after the storage type is assigned above.
     if (!cd.collation.empty()) col.collation = cd.collation;
-    return col;
+    return true;
 }
 
 ForeignKey DdlExecutor::tableConstraintToForeignKey(const TableConstraint& tc) {
@@ -2227,7 +2292,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     }
 
     for (const auto& cd : stmt->columns) {
-        tbl.append(columnDefToColumn(cd, s.currentDB));
+        Column column;
+        std::string typeError;
+        if (!columnDefToColumn(cd, s.currentDB, column, typeError)) {
+            std::cout << "Invalid column type: " << typeError << std::endl;
+            return true;
+        }
+        tbl.append(column);
     }
 
     // CREATE TABLE name OF composite_type — derive columns from the type's fields.
@@ -2262,7 +2333,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             } else {
                 cd.typeName = trim(ts);
             }
-            tbl.append(columnDefToColumn(cd, s.currentDB));
+            Column column;
+            std::string typeError;
+            if (!columnDefToColumn(cd, s.currentDB, column, typeError)) {
+                std::cout << "Invalid column type: " << typeError << std::endl;
+                return true;
+            }
+            tbl.append(column);
         }
     }
 

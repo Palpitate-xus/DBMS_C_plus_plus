@@ -18,6 +18,12 @@
 和 `pg_reload_conf()` 复用同一严格解析边界，新增配置专项回归。真正的完整 PostgreSQL
 GUC 类型/来源/权限矩阵仍未完成。
 
+2026-08-13 DDL 类型边界收紧：typed DDL 的列类型转换不再把未知类型静默降级为
+`varchar(255)`；CREATE TABLE、ADD COLUMN、ALTER COLUMN TYPE、`CREATE TABLE OF` 等路径在
+物理变更前统一拒绝未知类型和非法类型修饰符，并补齐 `serial`/`smallserial`/`bigserial`、
+`nchar`/`nvarchar`、`binary`/`varbinary`、`timetz`、`pg_lsn` 的现有存储工厂映射。专项回归
+验证失败不会创建关系或改变既有 schema。自定义类型的完整 catalog/type I/O 语义仍未完成。
+
 2026-08-13 Volcano 执行失败边界：新增 `PlanExecutionResult` 与 `executePlanChecked()`，将正常 EOF 和 `open()`/`next()` 失败分离；排序、分页、去重、集合、连接、窗口、聚合及子查询物化算子会向根节点传播子算子错误。主 SQL 的集合操作、普通 Volcano SELECT、聚合、窗口和派生子查询入口已检查执行结果并 fail-closed；旧空结果兼容入口已删除，契约回归验证失败不会被误报为空结果。
 
 2026-08-13 运行时统计持久化：`RuntimeStats` 增加当前格式版本化 `.runtime_stats` 快照，在 checkpoint 和引擎关闭时通过 sidecar `flock`、临时文件、文件/目录 `fsync` 和原子 rename 发布；启动严格校验 magic、版本、长度、数据库归属和尾随字节，损坏文件 fail-closed。多个 backend 按已加载基线做增量合并，DROP/重建关系不会恢复旧统计；新增持久化、重载和损坏文件回归。

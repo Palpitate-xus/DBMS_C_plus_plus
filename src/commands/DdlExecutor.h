@@ -71,7 +71,11 @@ private:
     bool executeAlterTable(const AlterTableStmt* stmt, Session& s);
 
     // 辅助：AST -> StorageEngine 结构转换
-    static Column columnDefToColumn(const ColumnDef& cd, const std::string& dbname = "");
+    // Convert a typed AST column definition without semantic fallback.  The
+    // caller must reject the statement when conversion fails; silently
+    // changing an unknown type into varchar would corrupt the schema contract.
+    static bool columnDefToColumn(const ColumnDef& cd, const std::string& dbname,
+                                  Column& out, std::string& error);
     static ForeignKey tableConstraintToForeignKey(const TableConstraint& tc);
 
     // 事务隐式提交（PG 语义；后续 Wave 5 移除）。返回 false 表示

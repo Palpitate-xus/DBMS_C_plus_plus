@@ -84,6 +84,54 @@ static void test_bridge_fails_closed_on_parse_error() {
     std::cout << "[DDL-ROUTE] parse errors fail closed" << std::endl;
 }
 
+static void test_unknown_column_type_fails_closed() {
+    const std::string db = testDbPath("ddl_route_unknown_type");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+
+    assert(ddl.executeSql("CREATE TABLE bad_type (id definitely_not_a_type)", s));
+    assert(!g_engine.tableExists(db, "bad_type"));
+
+    assert(!ddl.executeSql("CREATE TABLE good_type (id INT)", s));
+    assert(ddl.executeSql("ALTER TABLE good_type ADD COLUMN broken definitely_not_a_type", s));
+    const auto schema = g_engine.getTableSchema(db, "good_type");
+    assert(schema.len == 1);
+    assert(schema.cols[0].dataName == "id");
+
+    cleanup(db);
+    std::cout << "[DDL-ROUTE] unknown column types fail closed" << std::endl;
+}
+
+static void test_supported_serial_type_mapping() {
+    const std::string db = testDbPath("ddl_route_serial");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql(
+        "CREATE TABLE serial_t (id SERIAL PRIMARY KEY, label NCHAR(4), raw BINARY(4))", s));
+
+    const auto schema = g_engine.getTableSchema(db, "serial_t");
+    assert(schema.len == 3);
+    assert(schema.cols[0].isAutoIncrement);
+    assert(schema.cols[1].dataType == "char");
+    assert(schema.cols[2].dataType == "binary");
+    assert(g_engine.insert(db, "serial_t", {{"label", "a"}, {"raw", "0102"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "serial_t", {{"label", "b"}, {"raw", "0304"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.query(db, "serial_t", {}, {"id"}).size() == 2);
+
+    cleanup(db);
+    std::cout << "[DDL-ROUTE] supported SERIAL/type mappings OK" << std::endl;
+}
+
 static void test_bridge_handles_ctas() {
     std::string db = testDbPath("ddl_route_t3");
     cleanup(db);
@@ -197,6 +245,8 @@ int main() {
     test_bridge_handles_create_table();
     test_bridge_falls_back_for_unhandled();
     test_bridge_fails_closed_on_parse_error();
+    test_unknown_column_type_fails_closed();
+    test_supported_serial_type_mapping();
     test_bridge_handles_ctas();
     test_bridge_handles_typed_alter_table();
     test_bridge_handles_catalog_auth_ddl();
