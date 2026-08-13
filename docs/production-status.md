@@ -20,7 +20,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 
 本轮修复协议失败事务的提交边界：显式事务中的语句错误会进入 `ReadyForQuery('E')`/`25P02` 状态，普通后续语句被拒绝；此时收到 `COMMIT` 会按 PostgreSQL 语义执行完整回滚而不会发布此前写入，`ROLLBACK TO SAVEPOINT` 成功后可恢复到事务中。该状态目前仍由协议 backend 维护，尚未演进为完整 PostgreSQL 子事务 ID/错误状态目录。
 
-本轮进一步收紧两阶段命令边界：`COMMIT PREPARED`/`ROLLBACK PREPARED` 不会被失败事务状态误改写为本地 `COMMIT`/`ROLLBACK`；未知 prepared transaction 现在返回执行错误，不再以成功响应吞掉失败。PREPARE 现在先刷出 backend 私有 heap/index 缓存，prepared 元数据使用临时文件、文件/目录 `fsync` 和原子 rename 发布，并写入并刷盘 PREPARE WAL；表、row、page、gap 的本地 mutex token 会安全转移，进程级 advisory lock 按 xid 保留，由任一 backend 的 COMMIT/ROLLBACK PREPARED 释放。启动恢复现在区分 committed、aborted、prepared 和普通未决 xid：仍处于 prepared 的 xid 会注册回全局 ReadView 活跃集合，顺序扫描和索引回表都拒绝泄露其行；终结 WAL 已落盘但元数据清理中断时会在 redo/undo 后安全清理。普通事务 CLOG 故障产生的 COMMIT→ABORT 序列仍被允许。`prepared_transaction_test` 已验证跨 backend 锁阻塞、提交可见性、重启后保持 in-doubt、索引条件不可见、回滚不可见性和事务内禁止完成 prepared transaction。完整 2PC 全局目录、跨进程 prepared 资源恢复和崩溃后 in-doubt 决策语义仍未完成。
+本轮进一步收紧两阶段命令边界：`COMMIT PREPARED`/`ROLLBACK PREPARED` 不会被失败事务状态误改写为本地 `COMMIT`/`ROLLBACK`；未知 prepared transaction 现在返回执行错误，不再以成功响应吞掉失败。PREPARE 现在先刷出 backend 私有 heap/index 缓存，prepared 元数据使用临时文件、文件/目录 `fsync` 和原子 rename 发布，并写入并刷盘 PREPARE WAL；表、row、page、gap 的本地 mutex token 会安全转移，进程级 advisory lock 按 xid 保留，由任一 backend 的 COMMIT/ROLLBACK PREPARED 释放。prepared 文件保存结构化锁资源，启动恢复会在服务可用前重建表/row/page/gap 的本地与跨进程 advisory ownership；任何资源无法完整恢复都会 fail-closed。启动恢复现在区分 committed、aborted、prepared 和普通未决 xid：仍处于 prepared 的 xid 会注册回全局 ReadView 活跃集合，顺序扫描和索引回表都拒绝泄露其行；终结 WAL 已落盘但元数据清理中断时会在 redo/undo 后安全清理。普通事务 CLOG 故障产生的 COMMIT→ABORT 序列仍被允许。`prepared_transaction_test` 已通过独立进程验证跨 backend 锁阻塞、四类锁跨重启恢复、提交可见性、索引条件不可见、回滚不可见性和事务内禁止完成 prepared transaction。完整 2PC 全局目录和崩溃后 in-doubt 决策语义仍未完成。
 
 本轮已完成的基础收敛：
 

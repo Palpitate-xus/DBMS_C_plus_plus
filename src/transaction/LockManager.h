@@ -81,6 +81,24 @@ public:
     };
     std::vector<LockHoldInfo> getLockHolds() const;
 
+    // Structured lock ownership persisted in a prepared transaction record.
+    // Unlike LockHoldInfo, this representation does not expose internal
+    // namespace separators or thread IDs and can be reconstructed by a new
+    // process after the preparing backend exits.
+    struct PreparedLockInfo {
+        enum class Kind { Table, Row, Page, Gap };
+        Kind kind = Kind::Table;
+        std::string dbname;
+        std::string table;
+        int64_t rid = 0;
+        uint32_t pageId = 0;
+        std::string leftKey;
+        std::string rightKey;
+        LockMode mode = LockMode::Exclusive;
+    };
+    [[nodiscard]] bool getPreparedLockInfos(
+        std::vector<PreparedLockInfo>& result) const;
+
     // Transaction savepoints need to release locks acquired after the
     // checkpoint. The keys are opaque to callers and must only be passed back
     // to the same LockManager instance from the same backend thread.
@@ -102,6 +120,9 @@ public:
     // tagged with the prepared transaction ID. Completion may then release
     // those locks from any backend thread without cross-thread mutex unlocks.
     [[nodiscard]] bool suspendCurrentLocksForPrepared(uint64_t txnId);
+    [[nodiscard]] bool restorePreparedLocks(
+        uint64_t txnId, const std::string& dbname,
+        const std::vector<PreparedLockInfo>& locks);
     void releasePreparedLocks(uint64_t txnId);
 
     // ========================================================================
@@ -222,6 +243,8 @@ private:
     bool acquireLock(const std::string& table, LockMode mode);
 
     std::string resourceKey(const std::string& resource) const;
+    static std::string resourceKeyForNamespace(const std::string& resourceNamespace,
+                                               const std::string& resource);
     std::string rowResourceKey(const std::string& table, int64_t rid) const;
     ThreadSettings& threadSettings() const;
     std::string processLockPath(const std::string& resourceNamespace,
@@ -231,12 +254,15 @@ private:
                                              const std::string& resourceNamespace,
                                              const std::string& kind,
                                              const std::string& resource,
-                                             LockMode mode);
+                                             LockMode mode,
+                                             bool restoringPrepared = false);
     ProcessLockResult tryAcquireProcessLock(LockState& state,
                                              const std::string& table,
                                              LockMode mode);
     void releaseProcessLock(LockState& state);
     bool tryAcquireGapProcessLock(const std::string& table);
+    bool tryAcquireGapProcessLock(const std::string& resourceNamespace,
+                                  const std::string& table);
     void releaseGapProcessLock(const std::string& resourceKey);
     bool isGapProcessLocked(const std::string& table) const;
 

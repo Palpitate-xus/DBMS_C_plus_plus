@@ -29,7 +29,7 @@
 - 锁失败传播回归：`tests/lock_failure_propagation_test.cpp` 持有真实表级排他锁并在另一线程执行建索引，验证调用方收到 `LOCK_CONFLICT`、等待图清理且不会继续发布索引。
 - DDL 辅助对象回滚回归：`ddl_transaction_skeleton_test` 验证失败时撤销 view、materialized view、UDF/TVF、procedure、trigger、RLS policy 和 collation；collation 最后一个条目删除后物理文件也会清理。
 - DDL 外层事务回归：`ddl_transaction_skeleton_test` 验证多个 CREATE 跨语句由外层 `ROLLBACK` 逆序撤销，并验证 `ROLLBACK TO SAVEPOINT` 只撤销保存点后的 CREATE；含该内存 undo 队列的事务会拒绝 `PREPARE TRANSACTION`。
-- 2PC 跨 backend/重启回归：`prepared_transaction_test` 验证 PREPARE 前刷出 heap/index 缓存、prepared 文件 durable 原子发布、prepared 表锁在另一 backend 完成前持续阻塞、`COMMIT PREPARED` 后数据可见、`ROLLBACK PREPARED` 后数据不可见、重启后 prepared xid 仍被列出且顺序/索引条件查询均不可见，以及事务内拒绝完成 prepared transaction。
+- 2PC 跨 backend/跨进程重启回归：`prepared_transaction_test` 由独立子进程创建 prepared 事务，验证 PREPARE 前刷出 heap/index 缓存、prepared 文件 durable 原子发布、表/row/page/gap 锁在另一进程完成前持续阻塞、重启后锁 ownership 重建、`COMMIT PREPARED` 后数据可见、`ROLLBACK PREPARED` 后数据不可见、顺序/索引条件查询均不可见，以及事务内拒绝完成 prepared transaction。
 - DDL DROP/REPLACE 回归：`ddl_transaction_skeleton_test` 验证 DROP TABLE 与 CREATE OR REPLACE VIEW 的变更前快照恢复，外层回滚先恢复对象再撤销同一事务中的新增行；快照已被 DDL 修改后另一条快照型 DDL 及 SAVEPOINT 会 fail-closed。
 - CMake 与脚本构建共同读取 `cmake/dbms_sources.txt`，避免生产源文件列表漂移。
 - `scripts/build.sh`、`build_tests.sh`、`build_one_test.sh` 和 `run_all_tests_fast.sh` 共同读取 `scripts/build_common.sh`；本轮验证了配置指纹失效与增量单测入口。

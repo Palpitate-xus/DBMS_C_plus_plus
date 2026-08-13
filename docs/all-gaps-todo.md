@@ -13,7 +13,7 @@
 
 2026-08-12 增量审计：2PC prepared 记录改为临时文件 + 文件/目录 `fsync` + 原子 rename，并写入/刷盘 `XLOG_XACT_PREPARE`；PREPARE 前统一刷出 heap/index 缓存，避免完成 prepared transaction 的另一 backend 读到旧私有缓存。表、row、page、gap 锁的本地 mutex token 与进程 advisory lock 分离，prepared xid 保留 advisory 所有权并允许任一 backend 完成时安全释放；跨 backend 提交/回滚与锁阻塞新增真实回归。全局 prepared 目录、跨进程恢复和崩溃后 in-doubt 决策仍是 1.1.15 缺口。
 
-2026-08-12 增量审计：启动恢复现在保留 PREPARE 后未终结 xid，注册回全局活跃事务集合，并让顺序扫描、索引回表和 DML conflict-target 回表共用可见性检查；prepared 记录重启后不会被错误 undo 或通过索引泄露。已终结但尚未删除的 prepared 元数据会在 redo/undo 后 durable 清理；普通事务 CLOG 故障使用的 COMMIT→ABORT 序列保持合法。真正的跨进程 prepared 锁重建、全局目录和 in-doubt 自动决策仍待实现。
+2026-08-12 增量审计：启动恢复现在保留 PREPARE 后未终结 xid，注册回全局活跃事务集合，并让顺序扫描、索引回表和 DML conflict-target 回表共用可见性检查；prepared 记录重启后不会被错误 undo 或通过索引泄露。结构化 prepared 元数据现在保存表/row/page/gap 锁，独立进程启动时会重建本地与 advisory ownership，资源恢复失败则 fail-closed；已终结但尚未删除的 prepared 元数据会在 redo/undo 后 durable 清理；普通事务 CLOG 故障使用的 COMMIT→ABORT 序列保持合法。全局 prepared 目录和 in-doubt 自动决策仍待实现。
 
 2026-08-12 增量审计：ReplicationManager 的复制槽查询改为锁内值快照，slot 定义在创建时校验，slot active 与 standby/conninfo/sync 状态统一加锁，并新增显式激活/停用 API；新增复制管理器并发回归。真实 WAL sender/receiver、逻辑解码、PITR 和端到端故障切换仍待实现。
 
@@ -40,7 +40,7 @@
 | 日期 | 摘要 |
 |------|------|
 | 2026-08-11 | Catalog 持久化安全补强：系统 catalog 改用临时文件 + 文件/目录 `fsync` + 原子替换，`CatalogManager`/`CatalogService` 返回持久化结果；checkpoint、事务快照和关键 DDL 路径失败时 fail-closed，新增 `catalog_persistence_failure_test`。 |
-| 2026-08-12 | 2PC prepared 边界补强：PREPARE 前刷 heap/index 缓存，prepared 文件原子 durable 发布并写入 PREPARE WAL；prepared 锁可跨 backend 保留和释放；启动恢复保留 in-doubt xid 并统一过滤顺序/索引可见性，终结后清理残留元数据，新增 `prepared_transaction_test` 覆盖提交/回滚、重启、锁阻塞和索引回表；全局 prepared 目录、跨进程恢复和 in-doubt 决策仍待实现。 |
+| 2026-08-12 | 2PC prepared 边界补强：PREPARE 前刷 heap/index 缓存，prepared 文件原子 durable 发布并写入 PREPARE WAL；prepared 锁可跨 backend 保留和释放；启动恢复重建表/row/page/gap 锁 ownership，保留 in-doubt xid 并统一过滤顺序/索引可见性，终结后清理残留元数据，新增独立进程 `prepared_transaction_test` 覆盖提交/回滚、重启、四类锁阻塞和索引回表；全局 prepared 目录和 in-doubt 决策仍待实现。 |
 | 2026-08-12 | ReplicationManager 状态安全补强：slot 查询改为锁内值快照，创建时校验名称/类型/plugin，active/standby/conninfo/sync 状态统一加锁，新增激活/停用 API 和 `replication_concurrency_test`；真实流复制/PITR 仍待实现。 |
 | 2026-08-12 | WAL 归档安全补强：源段先 `fsync`，归档文件通过临时文件完整复制、文件/目录 `fsync` 和原子 rename 发布；`.ready`/`.done` 在 WAL 文件锁内原子更新，归档失败保留可重试状态；timeline 元数据持久化失败向上返回；新增 `wal_archive_failure_test`。 |
 | 2026-08-12 | 构建缓存安全补强：生产缓存签名纳入 manifest、生产源码和头文件内容，测试缓存另纳入全部测试源，不再只按 mtime 判断对象是否新鲜；新增回滚/恢复场景验证，避免过期对象造成假失败或假通过。 |
@@ -313,7 +313,7 @@
 | 1.1.12 | `CLOSE` / `DECLARE` / `FETCH` | 游标把 SELECT 结果捕获到内存；缺少可滚动/二进制/holdable cursor、事务生命周期、portal 语义、`MOVE` | ⚠️ |
 | 1.1.13 | `COMMENT` | 主要支持 table/column；缺少 PG 支持的绝大多数对象 | ⚠️ |
 | 1.1.14 | `COMMIT` / `ROLLBACK` | 有基本事务；协议失败事务中的 `COMMIT` 已按 PostgreSQL 语义转为完整回滚，但与 PG 的 MVCC、subtransaction、WAL crash safety 仍差距大 | ⚠️ |
-| 1.1.15 | `COMMIT PREPARED` / `PREPARE TRANSACTION` / `ROLLBACK PREPARED` | prepared 元数据已 durable 原子发布并写 PREPARE WAL；PREPARE 前刷 heap/index，表/row/page/gap 锁可跨 backend 保留和释放；重启会保留 in-doubt xid 并阻止顺序/索引回表泄露，损坏/矛盾 WAL fail-closed；仍没有 PG 的全局 prepared 目录、跨进程锁重建和 in-doubt 决策语义 | ⚠️ |
+| 1.1.15 | `COMMIT PREPARED` / `PREPARE TRANSACTION` / `ROLLBACK PREPARED` | prepared 元数据已 durable 原子发布并写 PREPARE WAL；PREPARE 前刷 heap/index，表/row/page/gap 锁可跨 backend 与重启恢复；重启会保留 in-doubt xid 并阻止顺序/索引回表泄露，损坏/矛盾 WAL 或锁资源恢复失败均 fail-closed；仍没有 PG 的全局 prepared 目录和 in-doubt 决策语义 | ⚠️ |
 | 1.1.16 | `COPY` | 文件 CSV 导入导出；缺少 `STDIN/STDOUT` 协议、binary copy、`PROGRAM`、`FREEZE`、`HEADER MATCH`、encoding/options 完整矩阵和权限模型 | ⚠️ |
 | 1.1.17 | `CREATE DATABASE` | 创建目录；缺少 template、owner、locale/collation provider、encoding、tablespace、OID/catalog 语义 | ⚠️ |
 | 1.1.18 | `CREATE DOMAIN` | 支持 base/default/check；缺少多约束、全表 revalidation、依赖/权限/类型系统深度集成 | ⚠️ |

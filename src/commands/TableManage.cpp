@@ -19253,7 +19253,81 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
 // WAL crash recovery (page-image redo)
 // ========================================================================
 
+struct PreparedTransactionRecord {
+    static constexpr int CURRENT_FORMAT = 2;
+    uint64_t txnId = 0;
+    std::string dbname;
+    IsolationLevel isolation = IsolationLevel::REPEATABLE_READ;
+    struct LogEntry {
+        enum class Op { Insert, Update, Delete } op;
+        std::string tableName;
+        int64_t rowIdx = 0;
+        std::string rowData;
+    };
+    std::vector<LogEntry> log;
+    std::vector<LockManager::PreparedLockInfo> locks;
+};
+
+static bool readPreparedRecord(const std::filesystem::path& path,
+                               PreparedTransactionRecord& record);
 static bool removePreparedFileDurably(const std::filesystem::path& target);
+
+static std::string preparedHexEncode(const std::string& value) {
+    if (value.empty()) return "-";
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(value.size() * 2);
+    for (const unsigned char byte : value) {
+        result.push_back(hex[byte >> 4]);
+        result.push_back(hex[byte & 0x0f]);
+    }
+    return result;
+}
+
+static bool preparedHexDecode(const std::string& value, std::string& result) {
+    if (value == "-") {
+        result.clear();
+        return true;
+    }
+    if ((value.size() & 1U) != 0) return false;
+    result.clear();
+    result.reserve(value.size() / 2);
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < value.size(); i += 2) {
+        const int high = nibble(value[i]);
+        const int low = nibble(value[i + 1]);
+        if (high < 0 || low < 0) return false;
+        result.push_back(static_cast<char>((high << 4) | low));
+    }
+    return true;
+}
+
+static const char* preparedLockModeName(LockManager::LockMode mode) {
+    switch (mode) {
+        case LockManager::LockMode::Shared: return "shared";
+        case LockManager::LockMode::Exclusive: return "exclusive";
+        case LockManager::LockMode::IntentShared: return "IS";
+        case LockManager::LockMode::IntentExclusive: return "IX";
+        case LockManager::LockMode::Metadata: return "MDL";
+    }
+    return nullptr;
+}
+
+static bool parsePreparedLockMode(const std::string& value,
+                                  LockManager::LockMode& mode) {
+    if (value == "shared") mode = LockManager::LockMode::Shared;
+    else if (value == "exclusive") mode = LockManager::LockMode::Exclusive;
+    else if (value == "IS") mode = LockManager::LockMode::IntentShared;
+    else if (value == "IX") mode = LockManager::LockMode::IntentExclusive;
+    else if (value == "MDL") mode = LockManager::LockMode::Metadata;
+    else return false;
+    return true;
+}
 
 bool StorageEngine::recoverAllDatabases() {
     if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) {
@@ -19272,6 +19346,8 @@ bool StorageEngine::recoverAllDatabases() {
     std::map<std::string, std::map<uint64_t, uint8_t>> xactWalStateByDb;
     std::set<std::pair<std::string, uint64_t>> inDoubtPreparedXids;
     std::map<std::pair<std::string, uint64_t>, std::filesystem::path> preparedFiles;
+    std::map<std::pair<std::string, uint64_t>,
+             std::vector<LockManager::PreparedLockInfo>> preparedLocksByTxn;
     auto isDatabaseDirectory = [this](const std::string& name) {
         if (name.empty() || name[0] == '.' ||
             name.find(".txn_backup") != std::string::npos ||
@@ -19412,12 +19488,20 @@ bool StorageEngine::recoverAllDatabases() {
                           << entry.path() << std::endl;
                 return false;
             }
+            PreparedTransactionRecord record;
+            if (!readPreparedRecord(entry.path(), record) ||
+                record.txnId != xid || record.dbname != dbname) {
+                std::cerr << "[recovery] invalid prepared transaction record: "
+                          << entry.path() << std::endl;
+                return false;
+            }
             const auto key = std::make_pair(dbname, xid);
             if (!preparedFiles.emplace(key, entry.path()).second) {
                 std::cerr << "[recovery] duplicate prepared transaction metadata for xid "
                           << xid << std::endl;
                 return false;
             }
+            preparedLocksByTxn.emplace(key, std::move(record.locks));
         }
     }
 
@@ -19469,6 +19553,22 @@ bool StorageEngine::recoverAllDatabases() {
         for (const auto& [dbname, xid] : inDoubtPreparedXids) {
             activeTransactions_.insert(xid);
             activeTransactionDatabases_[xid] = dbname;
+        }
+    }
+
+    // Rebuild local and process-wide lock ownership before opening service
+    // traffic. The prepared file is the durable source of truth after the
+    // original backend/process has exited; failure to reacquire every lock is
+    // unsafe because another backend could have modified the in-doubt data.
+    for (const auto& [key, path] : preparedFiles) {
+        (void)path;
+        if (!inDoubtPreparedXids.count(key)) continue;
+        const auto lockIt = preparedLocksByTxn.find(key);
+        if (lockIt == preparedLocksByTxn.end() ||
+            !lockManager_.restorePreparedLocks(key.second, key.first, lockIt->second)) {
+            std::cerr << "[recovery] failed to restore prepared locks for "
+                      << key.first << ":" << key.second << std::endl;
+            return false;
         }
     }
 
@@ -21379,19 +21479,6 @@ static bool removePreparedFileDurably(const std::filesystem::path& target) {
     return durable;
 }
 
-struct PreparedTransactionRecord {
-    uint64_t txnId = 0;
-    std::string dbname;
-    IsolationLevel isolation = IsolationLevel::REPEATABLE_READ;
-    struct LogEntry {
-        enum class Op { Insert, Update, Delete } op;
-        std::string tableName;
-        int64_t rowIdx = 0;
-        std::string rowData;
-    };
-    std::vector<LogEntry> log;
-};
-
 static bool readPreparedRecord(const std::filesystem::path& path,
                                PreparedTransactionRecord& record) {
     std::ifstream input(path, std::ios::binary);
@@ -21399,12 +21486,25 @@ static bool readPreparedRecord(const std::filesystem::path& path,
     std::string line;
     bool hasTxnId = false;
     bool hasDbname = false;
+    bool hasFormat = false;
     bool hasIsolation = false;
     while (std::getline(input, line)) {
         try {
-            if (line.rfind("TXN_ID ", 0) == 0) {
+            if (line.rfind("PREPARED_FORMAT ", 0) == 0) {
+                const std::string value = line.substr(std::string("PREPARED_FORMAT ").size());
+                size_t consumed = 0;
+                const long long format = std::stoll(value, &consumed);
+                if (hasFormat || consumed != value.size() ||
+                    format != PreparedTransactionRecord::CURRENT_FORMAT) {
+                    return false;
+                }
+                hasFormat = true;
+            } else if (line.rfind("TXN_ID ", 0) == 0) {
                 if (hasTxnId) return false;
-                record.txnId = std::stoull(line.substr(7));
+                const std::string value = line.substr(7);
+                size_t consumed = 0;
+                record.txnId = std::stoull(value, &consumed);
+                if (consumed != value.size()) return false;
                 hasTxnId = true;
             } else if (line.rfind("DBNAME ", 0) == 0) {
                 if (hasDbname) return false;
@@ -21421,9 +21521,51 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                 const std::string value = line.substr(9);
                 if (value != "0" && value != "1") return false;
             } else if (line.rfind("LOCK ", 0) == 0) {
-                const size_t resourceEnd = line.find(' ', 5);
-                if (resourceEnd == std::string::npos || resourceEnd == 5 ||
-                    line.substr(resourceEnd + 1).empty()) return false;
+                std::istringstream lockLine(line.substr(5));
+                std::string kind;
+                if (!(lockLine >> kind)) return false;
+                LockManager::PreparedLockInfo lock;
+                std::string mode;
+                std::string encodedTable;
+                if (kind == "TABLE") {
+                    if (!(lockLine >> mode >> encodedTable) ||
+                        !parsePreparedLockMode(mode, lock.mode) ||
+                        !preparedHexDecode(encodedTable, lock.table)) return false;
+                    lock.kind = LockManager::PreparedLockInfo::Kind::Table;
+                } else if (kind == "ROW") {
+                    std::string rid;
+                    if (!(lockLine >> mode >> encodedTable >> rid) ||
+                        !parsePreparedLockMode(mode, lock.mode) ||
+                        !preparedHexDecode(encodedTable, lock.table)) return false;
+                    size_t consumed = 0;
+                    lock.rid = std::stoll(rid, &consumed);
+                    if (consumed != rid.size()) return false;
+                    lock.kind = LockManager::PreparedLockInfo::Kind::Row;
+                } else if (kind == "PAGE") {
+                    std::string pageId;
+                    if (!(lockLine >> mode >> encodedTable >> pageId) ||
+                        !parsePreparedLockMode(mode, lock.mode) ||
+                        !preparedHexDecode(encodedTable, lock.table)) return false;
+                    size_t consumed = 0;
+                    const auto parsed = std::stoull(pageId, &consumed);
+                    if (consumed != pageId.size() || parsed > UINT32_MAX) return false;
+                    lock.pageId = static_cast<uint32_t>(parsed);
+                    lock.kind = LockManager::PreparedLockInfo::Kind::Page;
+                } else if (kind == "GAP") {
+                    std::string encodedLeft;
+                    std::string encodedRight;
+                    if (!(lockLine >> encodedTable >> encodedLeft >> encodedRight) ||
+                        !preparedHexDecode(encodedTable, lock.table) ||
+                        !preparedHexDecode(encodedLeft, lock.leftKey) ||
+                        !preparedHexDecode(encodedRight, lock.rightKey)) return false;
+                    lock.kind = LockManager::PreparedLockInfo::Kind::Gap;
+                    lock.mode = LockManager::LockMode::Exclusive;
+                } else {
+                    return false;
+                }
+                if (lockLine >> mode) return false;
+                lock.dbname = record.dbname;
+                record.locks.push_back(std::move(lock));
             } else if (line.rfind("LOG ", 0) == 0) {
                 size_t pos = 4;
                 const size_t opEnd = line.find(' ', pos);
@@ -21466,7 +21608,7 @@ static bool readPreparedRecord(const std::filesystem::path& path,
         }
     }
     if (!input.eof()) return false;
-    return hasTxnId && hasDbname && hasIsolation && record.txnId != 0 &&
+    return hasFormat && hasTxnId && hasDbname && hasIsolation && record.txnId != 0 &&
            !record.dbname.empty() && record.dbname.find('\n') == std::string::npos &&
            record.dbname.find('\r') == std::string::npos &&
            record.dbname.find('/') == std::string::npos &&
@@ -21502,15 +21644,41 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     std::ostringstream prepared;
 
     // Transaction metadata
+    prepared << "PREPARED_FORMAT " << PreparedTransactionRecord::CURRENT_FORMAT << "\n";
     prepared << "TXN_ID " << transactionContext().currentTxnId << "\n";
     prepared << "DBNAME " << transactionContext().txnDB << "\n";
     prepared << "ISOLATION " << static_cast<int>(transactionContext().txnIsolationLevel) << "\n";
     prepared << "READONLY " << (transactionContext().readOnly ? 1 : 0) << "\n";
 
-    // Held locks (resource mode)
-    auto locks = lockManager_.getLockHolds();
-    for (const auto& lk : locks) {
-        prepared << "LOCK " << lk.resource << " " << lk.mode << "\n";
+    // Held locks use a versioned, structured representation. A new process
+    // must be able to reacquire the same advisory resources after restart;
+    // thread IDs and internal namespace separators are not durable data.
+    std::vector<LockManager::PreparedLockInfo> locks;
+    if (!lockManager_.getPreparedLockInfos(locks)) return DBStatus::CORRUPTED_DATA;
+    for (const auto& lock : locks) {
+        const char* mode = preparedLockModeName(lock.mode);
+        if (!mode || lock.dbname != transactionContext().txnDB || lock.table.empty()) {
+            return DBStatus::CORRUPTED_DATA;
+        }
+        switch (lock.kind) {
+            case LockManager::PreparedLockInfo::Kind::Table:
+                prepared << "LOCK TABLE " << mode << " "
+                         << preparedHexEncode(lock.table) << "\n";
+                break;
+            case LockManager::PreparedLockInfo::Kind::Row:
+                prepared << "LOCK ROW " << mode << " "
+                         << preparedHexEncode(lock.table) << " " << lock.rid << "\n";
+                break;
+            case LockManager::PreparedLockInfo::Kind::Page:
+                prepared << "LOCK PAGE " << mode << " "
+                         << preparedHexEncode(lock.table) << " " << lock.pageId << "\n";
+                break;
+            case LockManager::PreparedLockInfo::Kind::Gap:
+                prepared << "LOCK GAP " << preparedHexEncode(lock.table) << " "
+                         << preparedHexEncode(lock.leftKey) << " "
+                         << preparedHexEncode(lock.rightKey) << "\n";
+                break;
+        }
     }
 
     // Transaction log

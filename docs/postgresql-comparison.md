@@ -124,7 +124,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | ✅ | ⚠️ 普通聚合与 `GroupAggregateOp` 已消费过滤后的 Volcano 子计划，覆盖常见聚合与基础 grouping sets | ⚠️ 复杂目标、`GROUPING()`/`GROUPING_ID`、完整排序作用域仍缺 |
 | GROUPING_ID | ✅ | ❌ | 缺 |
 | FOR UPDATE/SHARE/NOWAIT/SKIP LOCKED | ✅ | ✅ | ✅ (行级锁 + 死锁检测) |
-| **PREPARE TRANSACTION (2PC)** | ✅ | ⚠️ | PREPARE 前刷 heap/index，prepared 元数据原子 durable 发布并写 PREPARE WAL；表/row/page/gap 锁可跨 backend 保留和释放；重启保留 in-doubt xid 并统一过滤索引回表可见性；全局 prepared 目录、跨进程恢复和 in-doubt 决策仍缺 |
+| **PREPARE TRANSACTION (2PC)** | ✅ | ⚠️ | PREPARE 前刷 heap/index，prepared 元数据原子 durable 发布并写 PREPARE WAL；表/row/page/gap 锁可跨 backend 与重启恢复；重启保留 in-doubt xid 并统一过滤索引回表可见性；全局 prepared 目录和 in-doubt 决策仍缺 |
 | VALUES | ✅ | ✅ | ✅ |
 | **Array subscript [n:m]** | ✅ | ❌ | 缺 |
 | **JSON path / SQL/JSON** | ✅ | ❌ | 缺 |

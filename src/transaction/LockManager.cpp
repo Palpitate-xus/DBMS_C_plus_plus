@@ -171,6 +171,92 @@ void LockManager::releasePreparedLocks(uint64_t txnId) {
     }
 }
 
+bool LockManager::restorePreparedLocks(
+    uint64_t txnId, const std::string& dbname,
+    const std::vector<PreparedLockInfo>& locks) {
+    if (txnId == 0 || dbname.empty()) return false;
+
+    auto modeIsShared = [](LockMode mode) {
+        return mode == LockMode::Shared || mode == LockMode::IntentShared;
+    };
+    auto canAddPrepared = [&](const LockState& state, LockMode mode) {
+        if (!state.holders.empty()) return false;
+        for (const auto& [existingXid, existingMode] : state.suspendedTransactions) {
+            if (existingXid == txnId) {
+                if (existingMode != mode) return false;
+                continue;
+            }
+            if (!modeIsShared(existingMode) || !modeIsShared(mode)) return false;
+        }
+        return true;
+    };
+
+    std::lock_guard<std::mutex> globalGuard(globalMutex_);
+    std::lock_guard<std::mutex> rowGuard(rowMutex_);
+    std::lock_guard<std::mutex> pageGuard(pageMutex_);
+    std::lock_guard<std::mutex> gapGuard(gapMutex_);
+
+    for (const auto& lock : locks) {
+        if (lock.dbname != dbname || lock.table.empty()) {
+            return false;
+        }
+        if (lock.kind == PreparedLockInfo::Kind::Table) {
+            const std::string key = resourceKeyForNamespace(dbname, lock.table);
+            auto& state = locks_[key];
+            if (!canAddPrepared(state, lock.mode)) {
+                return false;
+            }
+            if (state.suspendedTransactions.count(txnId)) continue;
+            const auto result = tryAcquireProcessLock(
+                state, dbname, "table", lock.table, lock.mode, true);
+            if (result != ProcessLockResult::Acquired) {
+                return false;
+            }
+            state.suspendedTransactions[txnId] = lock.mode;
+        } else if (lock.kind == PreparedLockInfo::Kind::Row) {
+            const std::string resource = lock.table + ":" + std::to_string(lock.rid);
+            const std::string key = resourceKeyForNamespace(dbname, resource);
+            auto& state = rowLocks_[key];
+            if (!canAddPrepared(state, lock.mode)) {
+                return false;
+            }
+            if (state.suspendedTransactions.count(txnId)) continue;
+            const auto result = tryAcquireProcessLock(
+                state, dbname, "row", key, lock.mode, true);
+            if (result != ProcessLockResult::Acquired) {
+                return false;
+            }
+            state.suspendedTransactions[txnId] = lock.mode;
+        } else if (lock.kind == PreparedLockInfo::Kind::Page) {
+            const std::string key = "page:" + dbname + ":" + lock.table + ":" +
+                                    std::to_string(lock.pageId);
+            auto& state = pageLocks_[key];
+            if (!canAddPrepared(state, lock.mode)) {
+                return false;
+            }
+            if (state.suspendedTransactions.count(txnId)) continue;
+            const auto result = tryAcquireProcessLock(
+                state, dbname, "page", key, lock.mode, true);
+            if (result != ProcessLockResult::Acquired) {
+                return false;
+            }
+            state.suspendedTransactions[txnId] = lock.mode;
+        } else {
+            if (lock.mode != LockMode::Exclusive) {
+                return false;
+            }
+            const std::string key = resourceKeyForNamespace(dbname, lock.table);
+            const auto existing = preparedGapLocks_.find(key);
+            if (existing != preparedGapLocks_.end() && existing->second.count(txnId)) continue;
+            if (!tryAcquireGapProcessLock(dbname, lock.table)) {
+                return false;
+            }
+            preparedGapLocks_[key][txnId] = LockMode::Exclusive;
+        }
+    }
+    return true;
+}
+
 LockManager::ThreadSettings& LockManager::threadSettings() const {
     return threadSettings_[instanceId_];
 }
@@ -180,7 +266,11 @@ void LockManager::setResourceNamespace(const std::string& dbname) const {
 }
 
 std::string LockManager::resourceKey(const std::string& resource) const {
-    const std::string& resourceNamespace = threadSettings().resourceNamespace;
+    return resourceKeyForNamespace(threadSettings().resourceNamespace, resource);
+}
+
+std::string LockManager::resourceKeyForNamespace(const std::string& resourceNamespace,
+                                                 const std::string& resource) {
     if (resourceNamespace.empty()) return resource;
     return resourceNamespace + '\x1f' + resource;
 }
@@ -211,9 +301,21 @@ std::string LockManager::processLockPath(const std::string& resourceNamespace,
 
 LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
     LockState& state, const std::string& resourceNamespace,
-    const std::string& kind, const std::string& resource, LockMode mode) {
-    if (!state.suspendedTransactions.empty()) return ProcessLockResult::Busy;
+    const std::string& kind, const std::string& resource, LockMode mode,
+    bool restoringPrepared) {
     const bool exclusive = mode != LockMode::Shared && mode != LockMode::IntentShared;
+    if (!state.suspendedTransactions.empty() && !restoringPrepared) {
+        // Prepared shared locks may coexist. Any prepared exclusive-like lock
+        // blocks every new local/process owner until its second phase ends.
+        for (const auto& [preparedXid, preparedMode] : state.suspendedTransactions) {
+            (void)preparedXid;
+            const bool preparedExclusive = preparedMode != LockMode::Shared &&
+                                           preparedMode != LockMode::IntentShared;
+            if (preparedExclusive || exclusive) return ProcessLockResult::Busy;
+        }
+        if (state.processLockFd < 0) return ProcessLockResult::Error;
+        return ProcessLockResult::Acquired;
+    }
     if (state.processLockFd >= 0) {
         if (state.processLockMode == LockMode::Shared && exclusive) {
             if (!state.holders.empty()) return ProcessLockResult::Busy;
@@ -279,10 +381,14 @@ void LockManager::releaseProcessLock(LockState& state) {
 }
 
 bool LockManager::tryAcquireGapProcessLock(const std::string& table) {
-    const std::string path = processLockPath(threadSettings().resourceNamespace,
-                                             "gap", table);
+    return tryAcquireGapProcessLock(threadSettings().resourceNamespace, table);
+}
+
+bool LockManager::tryAcquireGapProcessLock(const std::string& resourceNamespace,
+                                           const std::string& table) {
+    const std::string path = processLockPath(resourceNamespace, "gap", table);
     if (path.empty()) return true;
-    const std::string key = resourceKey(table);
+    const std::string key = resourceKeyForNamespace(resourceNamespace, table);
     if (preparedGapLocks_.find(key) != preparedGapLocks_.end()) return false;
     if (gapProcessLockFds_.find(key) != gapProcessLockFds_.end()) return true;
     std::error_code ec;
@@ -1178,6 +1284,96 @@ std::vector<LockManager::LockHoldInfo> LockManager::getLockHolds() const {
         }
     }
     return result;
+}
+
+bool LockManager::getPreparedLockInfos(
+    std::vector<PreparedLockInfo>& result) const {
+    result.clear();
+    const std::thread::id self = std::this_thread::get_id();
+    const auto& settings = threadSettings();
+    if (settings.resourceNamespace.empty()) return false;
+
+    const auto stripNamespace = [&](const std::string& key, std::string& resource) {
+        const std::string prefix = settings.resourceNamespace + '\x1f';
+        if (key.rfind(prefix, 0) != 0) return false;
+        resource = key.substr(prefix.size());
+        return !resource.empty();
+    };
+
+    {
+        std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(globalMutex_));
+        for (const auto& [key, state] : locks_) {
+            if (!state.holderModes.count(self)) continue;
+            const std::string resource = state.processLockResource.empty()
+                ? key : state.processLockResource;
+            if (resource.empty()) return false;
+            result.push_back({PreparedLockInfo::Kind::Table, settings.resourceNamespace,
+                              resource, 0, 0, {}, {}, state.holderModes.at(self)});
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(rowMutex_));
+        for (const auto& [key, state] : rowLocks_) {
+            if (std::find(state.holders.begin(), state.holders.end(), self) == state.holders.end()) {
+                continue;
+            }
+            std::string resource;
+            if (!stripNamespace(state.processLockResource.empty() ? key : state.processLockResource,
+                                resource)) return false;
+            const size_t separator = resource.rfind(':');
+            if (separator == std::string::npos || separator == 0 || separator + 1 == resource.size()) {
+                return false;
+            }
+            int64_t rid = 0;
+            try {
+                size_t consumed = 0;
+                rid = std::stoll(resource.substr(separator + 1), &consumed);
+                if (consumed != resource.size() - separator - 1) return false;
+            } catch (...) { return false; }
+            result.push_back({PreparedLockInfo::Kind::Row, settings.resourceNamespace,
+                              resource.substr(0, separator), rid, 0, {}, {},
+                              state.exclusive ? LockMode::Exclusive : LockMode::Shared});
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(pageMutex_));
+        const std::string prefix = "page:" + settings.resourceNamespace + ":";
+        for (const auto& [key, state] : pageLocks_) {
+            if (std::find(state.holders.begin(), state.holders.end(), self) == state.holders.end()) {
+                continue;
+            }
+            const std::string resource = state.processLockResource.empty()
+                ? key : state.processLockResource;
+            if (resource.rfind(prefix, 0) != 0) return false;
+            const size_t separator = resource.rfind(':');
+            if (separator == std::string::npos || separator <= prefix.size() ||
+                separator + 1 == resource.size()) return false;
+            uint32_t pageId = 0;
+            try {
+                size_t consumed = 0;
+                const auto parsed = std::stoull(resource.substr(separator + 1), &consumed);
+                if (consumed != resource.size() - separator - 1 || parsed > UINT32_MAX) return false;
+                pageId = static_cast<uint32_t>(parsed);
+            } catch (...) { return false; }
+            result.push_back({PreparedLockInfo::Kind::Page, settings.resourceNamespace,
+                              resource.substr(prefix.size(), separator - prefix.size()), 0,
+                              pageId, {}, {}, state.exclusive ? LockMode::Exclusive : LockMode::Shared});
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(const_cast<std::mutex&>(gapMutex_));
+        const std::string prefix = settings.resourceNamespace + '\x1f';
+        for (const auto& [key, gaps] : gapLocks_) {
+            for (const auto& gap : gaps) {
+                if (gap.holder != self) continue;
+                if (key.rfind(prefix, 0) != 0) return false;
+                result.push_back({PreparedLockInfo::Kind::Gap, settings.resourceNamespace,
+                                  key.substr(prefix.size()), 0, 0, gap.leftKey, gap.rightKey,
+                                  LockMode::Exclusive});
+            }
+        }
+    }
+    return true;
 }
 
 LockManager::LockCheckpoint LockManager::captureCheckpoint() const {
