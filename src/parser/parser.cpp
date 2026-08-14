@@ -1,4 +1,5 @@
 #include "parser.h"
+#include <charconv>
 #include <cctype>
 #include <algorithm>
 #include <cmath>
@@ -52,6 +53,14 @@ static bool parseSignedInteger(const std::string& token, int& value) {
     } catch (...) {
         return false;
     }
+}
+
+static bool parseInt64Token(const std::string& token, int64_t& value) {
+    if (token.empty()) return false;
+    const char* begin = token.data();
+    const char* end = begin + token.size();
+    const auto result = std::from_chars(begin, end, value);
+    return result.ec == std::errc{} && result.ptr == end;
 }
 
 static bool parsePositiveDouble(const std::string& token, double& value) {
@@ -4682,6 +4691,7 @@ StmtPtr SQLParser::parseCreateSequence(const std::vector<std::string>& tokens, s
     if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
         stmt->ifNotExists = true; pos += 3;
     }
+    if (pos >= tokens.size() || tokens[pos] == ";") return nullptr;
     if (pos < tokens.size()) {
         stmt->objectName = tokens[pos++];
         if (pos < tokens.size() && tokens[pos] == ".") {
@@ -4699,37 +4709,35 @@ StmtPtr SQLParser::parseCreateSequence(const std::vector<std::string>& tokens, s
         return "";
     };
     auto numericOption = [&](const std::string& key, size_t skip) {
-        if (pos + skip < tokens.size()) {
-            try {
-                stmt->options[key] = tokens[pos + skip];
-                pos += skip + 1;
-            } catch (...) {
-                ++pos;
-            }
-        } else {
-            ++pos;
-        }
+        if (pos + skip >= tokens.size() || tokens[pos + skip] == ";") return false;
+        int64_t ignored = 0;
+        if (!parseInt64Token(tokens[pos + skip], ignored)) return false;
+        stmt->options[key] = tokens[pos + skip];
+        pos += skip + 1;
+        return true;
     };
 
     while (pos < tokens.size() && tokens[pos] != ";") {
         std::string tok = lower(tokens[pos]);
         if (tok == "start") {
-            if (peek(1) == "with") numericOption("start", 2);
-            else numericOption("start", 1);
+            if (peek(1) == "with") {
+                if (!numericOption("start", 2)) return nullptr;
+            } else if (!numericOption("start", 1)) return nullptr;
         } else if (tok == "increment") {
-            if (peek(1) == "by") numericOption("increment", 2);
-            else numericOption("increment", 1);
+            if (peek(1) == "by") {
+                if (!numericOption("increment", 2)) return nullptr;
+            } else if (!numericOption("increment", 1)) return nullptr;
         } else if (tok == "minvalue") {
-            numericOption("minvalue", 1);
+            if (!numericOption("minvalue", 1)) return nullptr;
         } else if (tok == "maxvalue") {
-            numericOption("maxvalue", 1);
+            if (!numericOption("maxvalue", 1)) return nullptr;
         } else if (tok == "cache") {
-            numericOption("cache", 1);
+            if (!numericOption("cache", 1)) return nullptr;
         } else if (tok == "no") {
             if (peek(1) == "minvalue") { stmt->options["nominvalue"] = "1"; pos += 2; }
             else if (peek(1) == "maxvalue") { stmt->options["nomaxvalue"] = "1"; pos += 2; }
             else if (peek(1) == "cycle") { stmt->options["cycle"] = "no"; pos += 2; }
-            else ++pos;
+            else return nullptr;
         } else if (tok == "cycle") {
             stmt->options["cycle"] = "yes"; ++pos;
         } else if (tok == "owned") {
@@ -4747,11 +4755,11 @@ StmtPtr SQLParser::parseCreateSequence(const std::vector<std::string>& tokens, s
                         pos += 3;
                     }
                 } else {
-                    pos += 2;
+                    return nullptr;
                 }
-            } else ++pos;
+            } else return nullptr;
         } else {
-            ++pos;
+            return nullptr;
         }
     }
     return stmt;

@@ -217,6 +217,29 @@ static void test_sequence_identity_still_works() {
     std::cout << "[SEQUENCE] identity still works OK" << std::endl;
 }
 
+static void test_sequence_numeric_input_fails_closed() {
+    std::string db = testDbPath("seq_invalid_numeric");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    dbms::SQLParser parser;
+
+    assert(!parser.parse("CREATE SEQUENCE bad START nope").success);
+    assert(ddl.executeSql("CREATE SEQUENCE bad START nope", s));
+    assert(!g_engine.sequenceExists(db, "bad"));
+
+    assert(!ddl.executeSql("CREATE SEQUENCE good START 1", s));
+    assert(ddl.executeSql("ALTER SEQUENCE good INCREMENT nope", s));
+    assert(ddl.executeSql("ALTER SEQUENCE good CACHE", s));
+    assert(g_engine.nextval(db, "good") == 1);
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] invalid numeric options fail closed OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_sequence_basic();
@@ -226,6 +249,7 @@ int main() {
     test_sequence_rename();
     test_sequence_owned_by_drop_table();
     test_sequence_identity_still_works();
+    test_sequence_numeric_input_fails_closed();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;
 }

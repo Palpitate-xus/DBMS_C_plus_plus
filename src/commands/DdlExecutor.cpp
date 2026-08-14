@@ -11,6 +11,7 @@
 #include "common/scram_sha256.h"
 #include "permissions.h"
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -50,6 +51,14 @@ std::string stripQuotes(const std::string& s) {
         return s.substr(1, s.size() - 2);
     }
     return s;
+}
+
+bool parseInt64Strict(const std::string& token, int64_t& value) {
+    if (token.empty()) return false;
+    const char* begin = token.data();
+    const char* end = begin + token.size();
+    const auto result = std::from_chars(begin, end, value);
+    return result.ec == std::errc{} && result.ptr == end;
 }
 
 std::string canonicalRoleName(const std::string& raw) {
@@ -2904,23 +2913,28 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     dbms::SequenceInfo info;
     auto opt = stmt->options.find("start");
     if (opt != stmt->options.end()) {
-        try { info.start = std::stoll(opt->second); info.startSpecified = true; } catch (...) {}
+        if (!parseInt64Strict(opt->second, info.start)) return true;
+        info.startSpecified = true;
     }
     opt = stmt->options.find("increment");
     if (opt != stmt->options.end()) {
-        try { info.increment = std::stoll(opt->second); info.incrementSpecified = true; } catch (...) {}
+        if (!parseInt64Strict(opt->second, info.increment)) return true;
+        info.incrementSpecified = true;
     }
     opt = stmt->options.find("minvalue");
     if (opt != stmt->options.end()) {
-        try { info.minValue = std::stoll(opt->second); info.hasMinValue = true; } catch (...) {}
+        if (!parseInt64Strict(opt->second, info.minValue)) return true;
+        info.hasMinValue = true;
     }
     opt = stmt->options.find("maxvalue");
     if (opt != stmt->options.end()) {
-        try { info.maxValue = std::stoll(opt->second); info.hasMaxValue = true; } catch (...) {}
+        if (!parseInt64Strict(opt->second, info.maxValue)) return true;
+        info.hasMaxValue = true;
     }
     opt = stmt->options.find("cache");
     if (opt != stmt->options.end()) {
-        try { info.cache = std::stoll(opt->second); info.cacheSpecified = true; } catch (...) {}
+        if (!parseInt64Strict(opt->second, info.cache)) return true;
+        info.cacheSpecified = true;
     }
     opt = stmt->options.find("cycle");
     if (opt != stmt->options.end()) {
@@ -3092,40 +3106,35 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
 
     for (size_t i = 0; i < tokens.size(); ++i) {
         std::string tok = lower(tokens[i]);
+        auto readValue = [&](int64_t& target, const char* name) {
+            if (i + 1 >= tokens.size() || !parseInt64Strict(tokens[i + 1], target)) {
+                std::cout << "SQL syntax error: invalid " << name << " value" << std::endl;
+                return false;
+            }
+            ++i;
+            return true;
+        };
         if (tok == "restart") {
             info.startSpecified = true;
             if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "with") {
-                if (i + 2 < tokens.size()) {
-                    try { info.start = std::stoll(tokens[i + 2]); } catch (...) {}
-                    i += 2;
-                } else ++i;
-            } else if (i + 1 < tokens.size()) {
-                try { info.start = std::stoll(tokens[i + 1]); } catch (...) {}
                 ++i;
-            }
+                if (!readValue(info.start, "RESTART")) return true;
+            } else if (!readValue(info.start, "RESTART")) return true;
         } else if (tok == "increment") {
             info.incrementSpecified = true;
             if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "by") {
-                if (i + 2 < tokens.size()) {
-                    try { info.increment = std::stoll(tokens[i + 2]); } catch (...) {}
-                    i += 2;
-                } else ++i;
-            } else if (i + 1 < tokens.size()) {
-                try { info.increment = std::stoll(tokens[i + 1]); } catch (...) {}
                 ++i;
-            }
-        } else if (tok == "minvalue" && i + 1 < tokens.size()) {
+                if (!readValue(info.increment, "INCREMENT")) return true;
+            } else if (!readValue(info.increment, "INCREMENT")) return true;
+        } else if (tok == "minvalue") {
             info.hasMinValue = true;
-            try { info.minValue = std::stoll(tokens[i + 1]); } catch (...) {}
-            ++i;
-        } else if (tok == "maxvalue" && i + 1 < tokens.size()) {
+            if (!readValue(info.minValue, "MINVALUE")) return true;
+        } else if (tok == "maxvalue") {
             info.hasMaxValue = true;
-            try { info.maxValue = std::stoll(tokens[i + 1]); } catch (...) {}
-            ++i;
-        } else if (tok == "cache" && i + 1 < tokens.size()) {
+            if (!readValue(info.maxValue, "MAXVALUE")) return true;
+        } else if (tok == "cache") {
             info.cacheSpecified = true;
-            try { info.cache = std::stoll(tokens[i + 1]); } catch (...) {}
-            ++i;
+            if (!readValue(info.cache, "CACHE")) return true;
         } else if (tok == "no" && i + 1 < tokens.size()) {
             std::string next = lower(tokens[i + 1]);
             if (next == "minvalue") { info.noMinValue = true; ++i; }
@@ -3160,6 +3169,9 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
             } else {
                 i += 1;
             }
+        } else {
+            std::cout << "SQL syntax error: unsupported ALTER SEQUENCE option " << tokens[i] << std::endl;
+            return true;
         }
     }
 
