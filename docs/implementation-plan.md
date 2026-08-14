@@ -914,3 +914,4 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 - 2026-08-13 parser 输入边界加固：`LIMIT/OFFSET/FETCH` 计数采用完整无符号十进制校验，拒绝异常、负数、溢出、缺失计数和不完整 FETCH 子句；新增 parser 回归覆盖，省略 FETCH count 按 PostgreSQL 语义默认为 1。
 - 2026-08-13 parser 数值选项加固：函数 `COST/ROWS`、角色 `CONNECTION LIMIT` 和 `ALTER TABLE ... SET STATISTICS` 使用严格的完整数字、有限值和范围校验；解析器分发器传播子解析失败，避免非法输入静默成功。
 - 2026-08-13 sequence DDL 输入加固：`CREATE/ALTER SEQUENCE` 的数值选项使用完整 int64 校验，缺失、溢出和未知选项 fail-closed；`sequence_full_test` 新增回归。
+- 2026-08-13 DDL 冗余清理：删除已被 typed DDL bridge 遮蔽的 `main.cpp` `ALTER ROLE/ALTER USER` 重复执行器，保留未迁移的 `ALTER GROUP`/数据库/域等兼容路径。

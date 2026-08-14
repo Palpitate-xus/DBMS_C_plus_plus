@@ -7060,89 +7060,6 @@ static bool handleAlterGroup(const string& sql, Session& s) {
     return false;
 }
 
-static bool handleAlterRole(const string& sql, Session& s) {
-    if (!checkAdmin(s)) return true;
-    string rest = trim(sql.substr(10)); // after "alter role"
-    vector<string> tokens = tokenize(rest);
-    if (tokens.size() < 2) {
-        cout << "SQL syntax error: ALTER ROLE role_name [WITH] option [...] | RENAME TO newname" << endl;
-        return true;
-    }
-    string roleName = tokens[0];
-    if (!roleExists(roleName) && permissionQuery(roleName) == -1) {
-        cout << "Role " << roleName << " not exist" << endl;
-        return true;
-    }
-    if (tokens.size() >= 4 && tokens[1] == "rename" && tokens[2] == "to") {
-        string newName = tokens[3];
-        bool isUser = (permissionQuery(roleName) != -1);
-        if (roleExists(newName) || permissionQuery(newName) != -1) {
-            cout << "Role " << newName << " already exists" << endl;
-            return true;
-        }
-        bool ok = isUser ? renameUser(roleName, newName) : renameExplicitRole(roleName, newName);
-        if (!ok) {
-            cout << "Rename role failed" << endl;
-            return true;
-        }
-        cout << "Role " << roleName << " renamed to " << newName << endl;
-        return false;
-    }
-    const auto current = authCatalog().getAuthIdByName(roleName);
-    if (!current) {
-        cout << "Role " << roleName << " not exist" << endl;
-        return true;
-    }
-    dbms::PgAuthIdRow updated = *current;
-    bool changed = false;
-    for (size_t i = 1; i < tokens.size(); ++i) {
-        const string option = toLower(tokens[i]);
-        if (option == "with") continue;
-        if (option == "superuser") updated.rolsuper = true;
-        else if (option == "nosuperuser") updated.rolsuper = false;
-        else if (option == "createdb") updated.rolcreatedb = true;
-        else if (option == "nocreatedb") updated.rolcreatedb = false;
-        else if (option == "createrole") updated.rolcreaterole = true;
-        else if (option == "nocreaterole") updated.rolcreaterole = false;
-        else if (option == "login") updated.rolcanlogin = true;
-        else if (option == "nologin") updated.rolcanlogin = false;
-        else if (option == "inherit") updated.rolinherit = true;
-        else if (option == "noinherit") updated.rolinherit = false;
-        else if (option == "replication") updated.rolreplication = true;
-        else if (option == "noreplication") updated.rolreplication = false;
-        else if (option == "bypassrls") updated.rolbypassrls = true;
-        else if (option == "nobypassrls") updated.rolbypassrls = false;
-        else if (option == "connection" && i + 2 < tokens.size() &&
-                 toLower(tokens[i + 1]) == "limit") {
-            try {
-                updated.rolconnlimit = stoi(tokens[i + 2]);
-            } catch (...) {
-                cout << "invalid connection limit" << endl;
-                return true;
-            }
-            i += 2;
-        } else if (option == "valid" && i + 2 < tokens.size() &&
-                   toLower(tokens[i + 1]) == "until") {
-            updated.rolvaliduntil = stripQuotes(tokens[i + 2]);
-            i += 2;
-        } else if (option == "password" && i + 1 < tokens.size()) {
-            const string password = stripQuotes(tokens[++i]);
-            updated.rolpassword = dbms::scram::makeRandomVerifier(password);
-        } else {
-            cout << "unsupported ALTER ROLE option: " << tokens[i] << endl;
-            return true;
-        }
-        changed = true;
-    }
-    if (!changed || !authCatalog().updateAuthId(current->oid, updated)) {
-        cout << "Alter role failed" << endl;
-        return true;
-    }
-    authCatalog().persistAll();
-    cout << "Role " << roleName << " altered" << endl;
-    return false;
-}
-
 struct DatabaseOptionInfo {
     string name;
     string owner;
@@ -9546,9 +9463,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         if (tokens[0] == "statistics") {
             return handleAlterStatistics(sql, s);
-        }
-        if (tokens[0] == "role") {
-            return handleAlterRole(sql, s);
         }
         if (tokens[0] == "group") {
             return handleAlterGroup(sql, s);

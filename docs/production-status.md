@@ -171,5 +171,7 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 
 2026-08-13 sequence DDL 输入边界收紧：`CREATE/ALTER SEQUENCE` 的 `START`、`INCREMENT`、`MINVALUE`、`MAXVALUE`、`CACHE` 等整数选项现在要求完整 int64 数字；缺失值、溢出值和未知选项在 parser/executor 两层 fail-closed，不再静默使用默认序列参数。
 
+2026-08-13 DDL 路由继续收敛：删除 `main.cpp` 中已被 `tryDdlBridge → DdlExecutor` 完整遮蔽的 `ALTER ROLE/ALTER USER` 字符串执行器（约 100 行）；`ALTER GROUP` 等尚未迁移的兼容路径仍保留。
+
 验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`；两个 E2E 已由统一测试入口自动执行。DML AST 路径另由 parser 单测和协议 E2E 覆盖。Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。
 - SQL 解析边界继续收敛：`LIMIT/OFFSET/FETCH` 的无符号计数现在要求完整十进制整数，非法值、缺失值和不完整 FETCH 子句均返回解析错误，不再被异常吞掉后静默变成默认的“无限制”。`FETCH FIRST/NEXT` 省略 count 时按 PostgreSQL 语法默认 1 行处理。

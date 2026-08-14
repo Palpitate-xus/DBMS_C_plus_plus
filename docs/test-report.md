@@ -1014,3 +1014,4 @@ heap、FSM/VM、索引、分区和 TOAST 文件位于 `<LOCATION>/<DATABASE>/`�
 - Parser 边界回归：`parser_phase1_test` 新增非法 `LIMIT/OFFSET/FETCH`、负数、缺失计数以及省略 FETCH count 的测试；非法计数 fail-closed，省略 count 默认 1。
 - Parser 数值选项回归：同一测试新增非法函数 `COST/ROWS`、角色 `CONNECTION LIMIT` 和列统计目标测试，确认解析失败不会产生默认 AST。
 - Sequence DDL 边界回归：`sequence_full_test` 新增非法 `CREATE SEQUENCE START`、`ALTER SEQUENCE INCREMENT/CACHE` 测试，确认不会创建或改变序列，合法序列、缓存、重命名、依赖和重启行为保持通过。
+- DDL 清理回归：`ddl_bridge_routing_test` 验证 `ALTER ROLE/ALTER USER` 继续由 typed bridge 执行；删除 main.cpp 中不可达的重复角色执行器后路径保持一致。
