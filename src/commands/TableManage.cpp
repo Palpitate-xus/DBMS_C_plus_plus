@@ -4397,6 +4397,20 @@ std::filesystem::path namedIndexMetaPath(const StorageEngine& engine,
                                          const std::string& tablename) {
     return engine.dbPath(dbname) / (tablename + ".idxnames");
 }
+
+bool readIndexMetadata(const std::filesystem::path& path, std::string& contents) {
+    std::error_code error;
+    if (!std::filesystem::exists(path, error)) return !error;
+    if (!std::filesystem::is_regular_file(path, error) || error) return false;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    contents.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    return !input.bad();
+}
+
+bool writeIndexMetadata(const std::filesystem::path& path, const std::string& contents) {
+    return index_file::writeAtomically(path, contents);
+}
 }
 
 bool StorageEngine::registerIndexName(const std::string& dbname,
@@ -4404,24 +4418,29 @@ bool StorageEngine::registerIndexName(const std::string& dbname,
                                       const std::string& indexName,
                                       const std::string& accessMethod,
                                       const std::string& key) {
-    if (indexName.empty() || tablename.empty() || accessMethod.empty() || key.empty()) return false;
+    if (indexName.empty() || tablename.empty() || accessMethod.empty() || key.empty() ||
+        indexName.find_first_of("\t\r\n") != std::string::npos ||
+        accessMethod.find_first_of("\t\r\n") != std::string::npos ||
+        key.find_first_of("\t\r\n") != std::string::npos) return false;
     std::vector<NamedIndexInfo> entries;
-    std::ifstream in(namedIndexMetaPath(*this, dbname, tablename));
+    std::string contents;
+    const auto path = namedIndexMetaPath(*this, dbname, tablename);
+    if (!readIndexMetadata(path, contents)) return false;
+    std::istringstream in(contents);
     std::string name;
     while (std::getline(in, name, '\t')) {
         NamedIndexInfo entry;
         entry.name = name;
         if (!std::getline(in, entry.accessMethod, '\t') ||
-            !std::getline(in, entry.key)) break;
+            !std::getline(in, entry.key)) return false;
         if (entry.name != indexName) entries.push_back(std::move(entry));
     }
     entries.push_back({indexName, accessMethod, key});
-    std::ofstream out(namedIndexMetaPath(*this, dbname, tablename), std::ios::trunc);
-    if (!out) return false;
+    std::ostringstream serialized;
     for (const auto& entry : entries) {
-        out << entry.name << '\t' << entry.accessMethod << '\t' << entry.key << '\n';
+        serialized << entry.name << '\t' << entry.accessMethod << '\t' << entry.key << '\n';
     }
-    return static_cast<bool>(out);
+    return writeIndexMetadata(path, serialized.str());
 }
 
 std::optional<StorageEngine::NamedIndexInfo> StorageEngine::getNamedIndex(
@@ -4443,7 +4462,9 @@ bool StorageEngine::unregisterIndexName(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& indexName) {
     const auto path = namedIndexMetaPath(*this, dbname, tablename);
-    std::ifstream in(path);
+    std::string contents;
+    if (!readIndexMetadata(path, contents)) return false;
+    std::istringstream in(contents);
     std::vector<NamedIndexInfo> entries;
     std::string name;
     bool removed = false;
@@ -4451,16 +4472,16 @@ bool StorageEngine::unregisterIndexName(const std::string& dbname,
         NamedIndexInfo entry;
         entry.name = name;
         if (!std::getline(in, entry.accessMethod, '\t') ||
-            !std::getline(in, entry.key)) break;
+            !std::getline(in, entry.key)) return false;
         if (entry.name == indexName) { removed = true; continue; }
         entries.push_back(std::move(entry));
     }
     if (!in && entries.empty() && !removed) return false;
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) return false;
+    std::ostringstream serialized;
     for (const auto& entry : entries) {
-        out << entry.name << '\t' << entry.accessMethod << '\t' << entry.key << '\n';
+        serialized << entry.name << '\t' << entry.accessMethod << '\t' << entry.key << '\n';
     }
+    if (!writeIndexMetadata(path, serialized.str())) return false;
     return removed;
 }
 
@@ -6627,7 +6648,10 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
             lockManager_.unlock(tablename);
             return DBStatus::OK; // same direction, nothing to do
         }
-        dropIndex(dbname, tablename, actualColname);
+        if (dropIndex(dbname, tablename, actualColname) != DBStatus::OK) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
     }
 
     // Build index from existing data using page-based iteration
@@ -6638,6 +6662,15 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         return DBStatus::INVALID_VALUE;
     }
     const std::string physicalIndexKey = isExpression ? expression : actualColname;
+    const auto discardPhysicalIndex = [&]() {
+        idx->close();
+        {
+            std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+            secondaryIndexCache_.erase(dbname + "/" + tablename + "/" + physicalIndexKey);
+        }
+        std::error_code error;
+        std::filesystem::remove(secondaryIndexPath(dbname, tablename, physicalIndexKey), error);
+    };
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -6654,39 +6687,41 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
             idx->insertMulti(val, encodeRid(pageId, slotId));
         }
     })) {
-        idx->close();
+        discardPhysicalIndex();
         lockManager_.unlock(tablename);
-        {
-            std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-            secondaryIndexCache_.erase(dbname + "/" + tablename + "/" + physicalIndexKey);
-        }
-        std::filesystem::remove(secondaryIndexPath(dbname, tablename, physicalIndexKey));
         return DBStatus::IO_ERROR;
     }
 
     // Record in metadata
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    std::ofstream out(meta, std::ios::out | std::ios::app);
-    if (!out) {
+    std::string existingMetadata;
+    if (!readIndexMetadata(meta, existingMetadata)) {
+        discardPhysicalIndex();
         lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
+        return DBStatus::IO_ERROR;
     }
+    std::ostringstream serialized;
     if (isExpression) {
-        out << "EXPR:" << expression;
+        serialized << "EXPR:" << expression;
     } else {
-        out << actualColname << (ascending ? "" : ":DESC");
+        serialized << actualColname << (ascending ? "" : ":DESC");
     }
     if (!includeCols.empty()) {
-        out << ":INCLUDE:";
+        serialized << ":INCLUDE:";
         for (size_t i = 0; i < includeCols.size(); ++i) {
-            if (i > 0) out << ",";
-            out << includeCols[i];
+            if (i > 0) serialized << ",";
+            serialized << includeCols[i];
         }
     }
     if (!whereCondition.empty()) {
-        out << ":WHERE:" << whereCondition;
+        serialized << ":WHERE:" << whereCondition;
     }
-    out << '\n';
+    serialized << '\n';
+    if (!writeIndexMetadata(meta, existingMetadata + serialized.str())) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -6696,43 +6731,66 @@ DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& 
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
-    std::filesystem::remove(secondaryIndexPath(dbname, tablename, colname));
 
     // Update metadata: remove lines matching this column/expression
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    std::vector<std::string> lines;
-    {
-        std::ifstream in(meta);
-        std::string line;
-        while (std::getline(in, line)) {
-            if (line.empty()) continue;
-            bool match = false;
-            if (line.substr(0, 5) == "EXPR:") {
-                // Expression index: match "EXPR:colname" or "EXPR:expression"
-                size_t endPos = line.find(':');
-                if (endPos == std::string::npos) endPos = line.size();
-                // Check if the expression part matches colname
-                size_t exprEnd = line.find(":INCLUDE:");
-                if (exprEnd == std::string::npos) exprEnd = line.find(":WHERE:");
-                if (exprEnd == std::string::npos) exprEnd = line.size();
-                std::string expr = line.substr(5, exprEnd - 5);
-                if (expr == colname) match = true;
-            } else {
-                // Regular index: extract column name (before :DESC, :INCLUDE, :WHERE)
-                size_t wherePos = line.find(":WHERE:");
-                std::string base = (wherePos != std::string::npos) ? line.substr(0, wherePos) : line;
-                size_t includePos = base.find(":INCLUDE");
-                base = (includePos != std::string::npos) ? base.substr(0, includePos) : base;
-                size_t descPos = base.find(":DESC");
-                std::string idxCol = (descPos != std::string::npos) ? base.substr(0, descPos) : base;
-                if (idxCol == colname) match = true;
-            }
-            if (!match) lines.push_back(line);
-        }
+    std::string existingMetadata;
+    if (!readIndexMetadata(meta, existingMetadata)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
     }
-    {
-        std::ofstream out(meta, std::ios::out);
-        for (const auto& l : lines) out << l << '\n';
+    std::vector<std::string> lines;
+    bool found = false;
+    std::istringstream in(existingMetadata);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        bool match = false;
+        if (line.substr(0, 5) == "EXPR:") {
+            // Expression index: match "EXPR:colname" or "EXPR:expression"
+            size_t exprEnd = line.find(":INCLUDE:");
+            if (exprEnd == std::string::npos) exprEnd = line.find(":WHERE:");
+            if (exprEnd == std::string::npos) exprEnd = line.size();
+            std::string expr = line.substr(5, exprEnd - 5);
+            if (expr == colname) match = true;
+        } else {
+            // Regular index: extract column name (before :DESC, :INCLUDE, :WHERE)
+            size_t wherePos = line.find(":WHERE:");
+            std::string base = (wherePos != std::string::npos) ? line.substr(0, wherePos) : line;
+            size_t includePos = base.find(":INCLUDE");
+            base = (includePos != std::string::npos) ? base.substr(0, includePos) : base;
+            size_t descPos = base.find(":DESC");
+            std::string idxCol = (descPos != std::string::npos) ? base.substr(0, descPos) : base;
+            if (idxCol == colname) match = true;
+        }
+        if (match) found = true;
+        else lines.push_back(line);
+    }
+    if (!found) {
+        lockManager_.unlock(tablename);
+        return DBStatus::TABLE_NOT_FOUND;
+    }
+
+    std::ostringstream retained;
+    for (const auto& retainedLine : lines) retained << retainedLine << '\n';
+    if (!writeIndexMetadata(meta, retained.str())) {
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+
+    const auto physicalPath = secondaryIndexPath(dbname, tablename, colname);
+    std::error_code error;
+    if (std::filesystem::exists(physicalPath, error) &&
+        !std::filesystem::is_regular_file(physicalPath, error)) {
+        writeIndexMetadata(meta, existingMetadata);
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+    std::filesystem::remove(physicalPath, error);
+    if (error) {
+        writeIndexMetadata(meta, existingMetadata);
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
     }
     // Remove from cache
     std::string key = dbname + "/" + tablename + "/" + colname;
@@ -6790,6 +6848,16 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
     const std::string physicalIndexKey = dbname + "/" + tablename + "/C/" + indexName;
+    const auto discardPhysicalIndex = [&]() {
+        idx->close();
+        {
+            std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+            secondaryIndexCache_.erase(physicalIndexKey);
+        }
+        std::error_code error;
+        std::filesystem::remove(relationDir(dbname, tablename) /
+                                (tablename + ".idx_" + indexName), error);
+    };
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -6805,33 +6873,38 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
             idx->insertMulti(key, encodeRid(pageId, slotId));
         }
     })) {
-        idx->close();
+        discardPhysicalIndex();
         lockManager_.unlock(tablename);
-        {
-            std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-            secondaryIndexCache_.erase(physicalIndexKey);
-        }
-        std::filesystem::remove(relationDir(dbname, tablename) /
-                                (tablename + ".idx_" + indexName));
         return DBStatus::IO_ERROR;
     }
 
     // Record in metadata: C:indexName:col1:col2:...:INCLUDE:inc1,inc2[:WHERE:cond]
     std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    std::ofstream out(meta, std::ios::out | std::ios::app);
-    out << "C:" << indexName;
-    for (const auto& c : colnames) out << ":" << c;
+    std::string existingMetadata;
+    if (!readIndexMetadata(meta, existingMetadata)) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+    std::ostringstream serialized;
+    serialized << "C:" << indexName;
+    for (const auto& c : colnames) serialized << ":" << c;
     if (!includeCols.empty()) {
-        out << ":INCLUDE:";
+        serialized << ":INCLUDE:";
         for (size_t i = 0; i < includeCols.size(); ++i) {
-            if (i > 0) out << ",";
-            out << includeCols[i];
+            if (i > 0) serialized << ",";
+            serialized << includeCols[i];
         }
     }
     if (!whereCondition.empty()) {
-        out << ":WHERE:" << whereCondition;
+        serialized << ":WHERE:" << whereCondition;
     }
-    out << '\n';
+    serialized << '\n';
+    if (!writeIndexMetadata(meta, existingMetadata + serialized.str())) {
+        discardPhysicalIndex();
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -6841,6 +6914,9 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
                                             const std::string& indexName) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    const std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
+    std::string existingMetadata;
+    if (!readIndexMetadata(meta, existingMetadata)) return DBStatus::IO_ERROR;
     // Verify the composite index actually exists
     auto compIdxs = getCompositeIndexes(dbname, tablename);
     bool found = false;
@@ -6848,44 +6924,39 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
         if (ci.name == indexName) { found = true; break; }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
-    std::filesystem::path p = relationDir(dbname, tablename) / (tablename + ".idx_" + indexName);
-    std::filesystem::remove(p);
 
-    // Rewrite metadata without this composite index
-    auto singleCols = getIndexedColumns(dbname, tablename);
-    // compIdxs already fetched above; filter out the dropped one
+    // Preserve every remaining metadata line, including INCLUDE/WHERE
+    // options, instead of reconstructing a lossy subset from parsed fields.
+    std::ostringstream retained;
+    std::istringstream input(existingMetadata);
+    std::string line;
+    bool removedMetadata = false;
+    while (std::getline(input, line)) {
+        const std::string prefix = "C:" + indexName;
+        const bool isTarget = line.rfind(prefix, 0) == 0 &&
+            (line.size() == prefix.size() || line[prefix.size()] == ':');
+        if (isTarget) {
+            removedMetadata = true;
+            continue;
+        }
+        if (!line.empty()) retained << line << '\n';
+    }
+    if (!removedMetadata || !writeIndexMetadata(meta, retained.str())) {
+        return removedMetadata ? DBStatus::IO_ERROR : DBStatus::TABLE_NOT_FOUND;
+    }
 
-    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    {
-        std::ofstream out(meta, std::ios::out);
-        // Rewrite single-column entries (filter out those only in composite)
-        for (const auto& c : singleCols) {
-            // Check if this column is in any remaining composite index
-            bool inComposite = false;
-            for (const auto& ci : compIdxs) {
-                if (ci.name == indexName) continue;
-                for (const auto& cc : ci.columns) {
-                    if (cc == c) { inComposite = true; break; }
-                }
-                if (inComposite) break;
-            }
-            // Also check if it was in the dropped composite
-            bool inDropped = false;
-            for (const auto& ci : compIdxs) {
-                if (ci.name != indexName) continue;
-                for (const auto& cc : ci.columns) {
-                    if (cc == c) { inDropped = true; break; }
-                }
-            }
-            if (!inDropped || inComposite) out << c << '\n';
-        }
-        // Rewrite composite entries
-        for (const auto& ci : compIdxs) {
-            if (ci.name == indexName) continue;
-            out << "C:" << ci.name;
-            for (const auto& c : ci.columns) out << ":" << c;
-            out << '\n';
-        }
+    const auto physicalPath = relationDir(dbname, tablename) /
+                              (tablename + ".idx_" + indexName);
+    std::error_code error;
+    if (std::filesystem::exists(physicalPath, error) &&
+        !std::filesystem::is_regular_file(physicalPath, error)) {
+        writeIndexMetadata(meta, existingMetadata);
+        return DBStatus::IO_ERROR;
+    }
+    std::filesystem::remove(physicalPath, error);
+    if (error) {
+        writeIndexMetadata(meta, existingMetadata);
+        return DBStatus::IO_ERROR;
     }
     // Remove from cache
     std::string key = dbname + "/" + tablename + "/C/" + indexName;

@@ -51,6 +51,9 @@ domain 创建使用原子发布。
 本轮补强 `DROP TABLE ... CASCADE` 回归：构造 catalog 依赖表及其索引，验证 CASCADE 同时清理
 依赖表的物理关系和索引 sidecar，再删除依赖 catalog 行；RESTRICT 预检仍不产生任何修改。
 
+本轮新增索引 sidecar 故障回归：`.secidx` 或 `.idxnames` 被目录占用时，`CREATE INDEX` 返回错误，
+不会留下物理索引或名称映射；索引元数据改写采用原子发布，复合索引删除保留剩余元数据选项。
+
 本轮修复 `planner_runtime_stats_test` 的后台 writer 清理竞态：测试 teardown 通过 `dropDatabase()` 释放
 数据库缓存与 WAL 所有权后再清理目录；专项测试和完整回归均通过，最终基线保持 `PASS=139 FAIL=0`。
 

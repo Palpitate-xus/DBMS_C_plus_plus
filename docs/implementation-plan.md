@@ -15,6 +15,8 @@
 
 2026-08-14 增量审计：`DROP TABLE CASCADE` 的 catalog 依赖计划现在同步生成并执行从属表、序列和索引的物理删除动作；物理清理完成前不应用 catalog 计划，新增依赖表+索引残留回归，完整依赖图与视图/函数等对象目录化仍待补齐。
 
+2026-08-14 增量审计：索引 `.secidx`/`.idxnames` sidecar 改为 regular-file 预检和原子发布；CREATE INDEX 发布失败清理物理索引，DROP INDEX 传播 sidecar 失败，复合索引删除不再丢失 INCLUDE/WHERE 元数据，新增目录占用故障回归。
+
 2026-08-12 增量审计：规范 DDL 执行器与 `main.cpp` legacy 兼容分发统一使用隐式提交失败守卫；提交失败会输出 SQLSTATE 并停止后续 DDL，避免不同入口产生不一致的成功结果。
 
 2026-08-11 增量审计：`LockManager` 修复 row/page 等待路径的资源生命周期、按线程锁 token 归属、表锁重入与共享锁升级，并在等待期间持续检测 wait-for graph；新增双线程死锁、重入/升级和 row token 竞争回归。完整 PostgreSQL 锁模式矩阵、页/索引 predicate lock 和 wait events 仍待后续。

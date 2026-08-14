@@ -17,6 +17,8 @@
 
 2026-08-14 DROP CASCADE 物理一致性收敛：表依赖计划中的从属表、序列和索引现在先完成物理清理，再应用 catalog 删除；物理元数据无法解析或清理失败会 fail-closed 并由快照恢复，避免留下 orphan relation 文件。
 
+2026-08-14 索引 sidecar 一致性收敛：`.secidx` 和 `.idxnames` 使用原子发布与 regular-file 边界；索引元数据发布失败不再留下物理索引或伪报成功，复合索引删除保留完整选项。并发构建、索引 WAL 和完整 AM 语义仍待后续。
+
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、对齐、CRC、`xl_prev` 链和 segment 尾部严格校验；

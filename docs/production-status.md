@@ -18,6 +18,8 @@
 
 2026-08-14 CASCADE 物理一致性收紧：`DROP TABLE ... CASCADE` 先根据只读依赖计划解析从属表、序列和各类索引的物理删除动作，无法解析索引物理元数据时 fail-closed；物理动作完成后才发布 catalog 删除计划，动作失败由 DDL 快照恢复，避免 catalog 已删而关系文件残留。
 
+2026-08-14 索引 sidecar 持久化收紧：`.secidx` 与 `.idxnames` 统一使用 regular-file 校验、原子发布和错误传播；CREATE INDEX 元数据发布失败会清理已生成的物理索引，DROP INDEX 元数据失败不会伪报成功，复合索引删除保留 INCLUDE/WHERE 等原始选项。
+
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、8 字节对齐、CRC、记录链和 segment 尾部在打开时严格验证；`xl_prev` 保留截断历史时允许指向已删除 segment，但禁止指向当前保留流的未来位置。恢复 heap page image 必须通过当前 8 KiB 页 checksum/layout 校验，page ID 只能连续扩展一页，非法 page image、越界 page ID 和损坏 WAL 均 fail-closed，避免无界分配或把损坏页写入关系。`XLogFlush` 只接受当前 WAL 流中的有效记录位置，并同步覆盖记录所在完整 segment。
 
 2026-08-13 DDL 路由收敛：删除 `src/main.cpp` 中已被 typed bridge 完整覆盖的旧字符串实现，

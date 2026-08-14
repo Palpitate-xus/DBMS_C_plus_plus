@@ -373,6 +373,34 @@ static void test_domain_storage_errors_are_not_success() {
     std::cout << "[DDL] domain storage errors propagate OK" << std::endl;
 }
 
+static void test_index_metadata_failures_are_not_success() {
+    const std::string secidxDb = testDbPath("index_secidx_storage_error");
+    cleanup(secidxDb);
+    assert(g_engine.createDatabase(secidxDb, "utf8") == dbms::DBStatus::OK);
+    Session secidxSession;
+    setupSession(secidxSession, secidxDb);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT)", secidxSession));
+    std::filesystem::create_directory(std::filesystem::path(secidxDb) / "t.secidx");
+    assert(ddl.executeSql("CREATE INDEX t_id_idx ON t (id)", secidxSession));
+    assert(g_engine.getIndexedColumns(secidxDb, "t").empty());
+    cleanup(secidxDb);
+
+    const std::string namesDb = testDbPath("index_names_storage_error");
+    cleanup(namesDb);
+    assert(g_engine.createDatabase(namesDb, "utf8") == dbms::DBStatus::OK);
+    Session namesSession;
+    setupSession(namesSession, namesDb);
+    assert(!ddl.executeSql("CREATE TABLE t (id INT)", namesSession));
+    std::filesystem::create_directory(std::filesystem::path(namesDb) / "t.idxnames");
+    assert(ddl.executeSql("CREATE INDEX t_id_idx ON t (id)", namesSession));
+    assert(g_engine.getIndexedColumns(namesDb, "t").empty());
+    assert(!g_engine.getNamedIndex(namesDb, "t", "t_id_idx").has_value());
+    cleanup(namesDb);
+
+    std::cout << "[DDL] index metadata storage errors propagate OK" << std::endl;
+}
+
 int main() {
     cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
@@ -387,6 +415,7 @@ int main() {
     test_long_identifiers_round_trip();
     test_database_storage_errors_are_not_success();
     test_domain_storage_errors_are_not_success();
+    test_index_metadata_failures_are_not_success();
     std::cout << "[DDL] all passed" << std::endl;
     return 0;
 }

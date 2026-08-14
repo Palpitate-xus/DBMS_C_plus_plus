@@ -3013,7 +3013,10 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             std::cout << "DROP INDEX failed" << std::endl;
             return true;
         }
-        g_engine.unregisterIndexName(s.currentDB, tableName, indexName);
+        if (named && !g_engine.unregisterIndexName(s.currentDB, tableName, indexName)) {
+            std::cout << "DROP INDEX metadata cleanup failed" << std::endl;
+            return true;
+        }
 
         if (indexOid != INVALID_OID) {
             auto behavior = stmt->cascade ? CatalogManager::DropBehavior::Cascade
