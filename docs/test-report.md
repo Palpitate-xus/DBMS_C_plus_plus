@@ -1,6 +1,6 @@
 # DBMS 功能测试报告
 
-> 最后更新：2026-08-13
+> 最后更新：2026-08-14
 > 自动测试套件基线：PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
@@ -27,6 +27,13 @@
 同时验证 `ALTER SEQUENCE ... RESTART ... INCREMENT BY ...` 和 `RENAME TO` 由 typed bridge
 执行；重命名保持 catalog OID、更新 `nextval` 默认表达式，重启后新名称可用且冲突不会破坏原对象。
 存储完整性回归还验证了损坏 heap page、损坏/截断边界被拒绝，以及 page compaction 不覆盖 special space。
+
+本轮新增序列持久化回归：`sequence_full_test` 验证失败的 `ALTER SEQUENCE` 不会遗留启动恢复快照，
+重启后 `nextval` 保持已提交状态；序列文件拒绝尾随字段、非法 cycle/范围/cache，写入使用原子发布，
+`INT64` 正负边界、`currval`、`setval` 和非循环耗尽行为均通过。
+
+本轮新增 DDL 会话生命周期回归：typed `DdlExecutor` 执行结束后恢复原线程局部会话指针，避免局部
+`Session` 销毁后后续嵌入式存储调用解引用悬空指针；完整序列专项测试通过。
 
 ---
 
@@ -990,7 +997,7 @@ heap、FSM/VM、索引、分区和 TOAST 文件位于 `<LOCATION>/<DATABASE>/`�
 
 ## 15. 结论
 
-本次测试覆盖的历史手册场景、133 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过；分组 Volcano 单元与主 SQL 手工回归也通过。系统在以下方面表现稳定：
+本次测试覆盖的历史手册场景、137 个独立 C++ 回归测试、PostgreSQL 协议 E2E 和窗口函数 E2E 均通过；分组 Volcano 单元与主 SQL 手工回归也通过。系统在以下方面表现稳定：
 
 - ✅ 基本 CRUD（CREATE/INSERT/SELECT/UPDATE/DELETE/DROP）
 - ✅ **POINT 数据类型**与空间运算符（`<<` / `>>` / `<^` / `>^` / `<@`）
@@ -1009,7 +1016,7 @@ heap、FSM/VM、索引、分区和 TOAST 文件位于 `<LOCATION>/<DATABASE>/`�
 
 ---
 
-*报告生成时间：2026-08-12*
+*报告生成时间：2026-08-14*
 *测试执行人：自动化测试脚本 + 人工验证*
 - Parser 边界回归：`parser_phase1_test` 新增非法 `LIMIT/OFFSET/FETCH`、负数、缺失计数以及省略 FETCH count 的测试；非法计数 fail-closed，省略 count 默认 1。
 - Parser 数值选项回归：同一测试新增非法函数 `COST/ROWS`、角色 `CONNECTION LIMIT` 和列统计目标测试，确认解析失败不会产生默认 AST。

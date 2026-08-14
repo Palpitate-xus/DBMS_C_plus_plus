@@ -349,7 +349,12 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
 
 bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
     if (!stmt) return false;
+    Session* previousSession = currentSession();
     setCurrentSession(&s);
+    struct SessionGuard {
+        Session* previous;
+        ~SessionGuard() { setCurrentSession(previous); }
+    } sessionGuard{previousSession};
     switch (stmt->command) {
         case SqlCommand::CreateTable:
             return executeCreateTable(dynamic_cast<const CreateTableStmt*>(stmt.get()), s);

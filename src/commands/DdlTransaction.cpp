@@ -164,12 +164,19 @@ void DdlTransaction::rollback() {
             }
         }
     }
-    if (startedByUs_ && engine_.inTransaction()) {
-        const DBStatus status = engine_.rollbackTransaction();
-        if (status != DBStatus::OK) {
-            std::cerr << "DDL rollback warning (SQLSTATE "
-                      << sqlstateForDBStatus(status) << ")" << std::endl;
+    if (startedByUs_) {
+        if (engine_.inTransaction()) {
+            const DBStatus status = engine_.rollbackTransaction();
+            if (status != DBStatus::OK) {
+                std::cerr << "DDL rollback warning (SQLSTATE "
+                          << sqlstateForDBStatus(status) << ")" << std::endl;
+            }
         }
+        // rollbackTransaction restores row-level state, but the DDL wrapper
+        // owns the physical snapshot created in begin(). Leaving it behind
+        // makes the next process startup mistake an already-rolled-back
+        // statement for an in-progress DDL and restore stale files.
+        engine_.discardTransactionBackup(session_.currentDB);
     } else if (!startedByUs_ && engine_.inTransaction() &&
                snapshotRollbackEnabled_ && snapshotDirty_ &&
                !session_.currentDB.empty()) {
@@ -182,8 +189,6 @@ void DdlTransaction::rollback() {
         if (snapshotCreatedByThis_) {
             engine_.discardTransactionBackup(session_.currentDB);
         }
-    } else if (startedByUs_) {
-        engine_.discardTransactionBackup(session_.currentDB);
     }
     ops_.clear();
     committed_ = false;

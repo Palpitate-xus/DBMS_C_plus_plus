@@ -1,8 +1,12 @@
 # 生产化状态
 
-最后更新：2026-08-13
+最后更新：2026-08-14
 
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，137 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=139 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
+
+2026-08-14 序列持久化与边界安全收紧：用户序列状态写入统一使用临时文件、文件/目录 `fsync` 和原子 rename；读取严格拒绝尾随字段、非法 cycle 标志、零增量、无效范围和非法 cache。`nextval` 的 cache 批量计算、`currval`、`setval`、创建/修改序列均使用 checked int64 算术，`INT64` 上下界和耗尽序列不会触发未定义行为；重启后状态保持，损坏元数据 fail-closed。旧序列文件不作为兼容格式接受。
+
+2026-08-14 DDL 生命周期安全修复：DDL 回滚现在会清理自身创建的物理快照，避免失败的 `ALTER SEQUENCE` 在下次启动被误恢复为旧数据库状态；typed `DdlExecutor` 以作用域守卫恢复线程局部 `Session*`，避免会话销毁后嵌入式 `nextval` 解引用悬空指针。重启、损坏序列文件、整数边界和失败 DDL 快照均有回归覆盖。
 
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、8 字节对齐、CRC、记录链和 segment 尾部在打开时严格验证；`xl_prev` 保留截断历史时允许指向已删除 segment，但禁止指向当前保留流的未来位置。恢复 heap page image 必须通过当前 8 KiB 页 checksum/layout 校验，page ID 只能连续扩展一页，非法 page image、越界 page ID 和损坏 WAL 均 fail-closed，避免无界分配或把损坏页写入关系。`XLogFlush` 只接受当前 WAL 流中的有效记录位置，并同步覆盖记录所在完整 segment。
 

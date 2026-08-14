@@ -99,6 +99,7 @@ static constexpr const char* kPhysicalBackupMarker = ".dbms_physical_backup";
 #include <iostream>
 #include <locale>
 #include <memory>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -11213,6 +11214,25 @@ static std::filesystem::path sequencePath(const std::string& dbname, const std::
     return std::filesystem::path(dbname) / (seqname + ".seq");
 }
 
+static bool checkedAdd(int64_t lhs, int64_t rhs, int64_t& result) {
+    return !__builtin_add_overflow(lhs, rhs, &result);
+}
+
+static bool checkedSub(int64_t lhs, int64_t rhs, int64_t& result) {
+    return !__builtin_sub_overflow(lhs, rhs, &result);
+}
+
+static bool checkedMul(int64_t lhs, int64_t rhs, int64_t& result) {
+    return !__builtin_mul_overflow(lhs, rhs, &result);
+}
+
+static void sequencePredecessor(int64_t value, int64_t increment,
+                                int64_t& predecessor) {
+    // Equality is an explicit exhausted marker when value-increment is not
+    // representable (for example INT64_MAX with a positive increment).
+    if (!checkedSub(value, increment, predecessor)) predecessor = value;
+}
+
 // New sequence file format (space-separated):
 // start increment min max cache cycle nextValue lastAllocated ownedTable ownedColumn
 static bool readSequenceFile(const std::filesystem::path& path,
@@ -11232,6 +11252,22 @@ static bool readSequenceFile(const std::filesystem::path& path,
             return false;
         }
         ifs.clear();
+        std::string extra;
+        if (ifs >> extra) return false;
+        if (cycleFlag != 0 && cycleFlag != 1) return false;
+        if (increment == 0 || minV > maxV || start < minV || start > maxV || cache < 1) {
+            return false;
+        }
+        if (nextV < minV || nextV > maxV) {
+            return false;
+        }
+        if (lastAlloc < minV || lastAlloc > maxV) {
+            int64_t initialPredecessor = 0;
+            if (!checkedSub(start, increment, initialPredecessor)) {
+                initialPredecessor = start;
+            }
+            if (lastAlloc != initialPredecessor) return false;
+        }
         info = dbms::SequenceInfo{};
         info.start = start;
         info.increment = increment;
@@ -11249,21 +11285,22 @@ static bool readSequenceFile(const std::filesystem::path& path,
     return true;
 }
 
-static void writeSequenceFile(const std::filesystem::path& path,
+static bool writeSequenceFile(const std::filesystem::path& path,
                               const dbms::SequenceInfo& info,
                               int64_t nextValue,
                               int64_t lastAllocated) {
-    std::ofstream ofs(path);
-    ofs << info.start << " "
-        << info.increment << " "
-        << info.minValue << " "
-        << info.maxValue << " "
-        << info.cache << " "
-        << (info.cycle ? 1 : 0) << " "
-        << nextValue << " "
-        << lastAllocated << " "
-        << info.ownedByTable << " "
-        << info.ownedByColumn << "\n";
+    std::ostringstream serialized;
+    serialized << info.start << " "
+               << info.increment << " "
+               << info.minValue << " "
+               << info.maxValue << " "
+               << info.cache << " "
+               << (info.cycle ? 1 : 0) << " "
+               << nextValue << " "
+               << lastAllocated << " "
+               << info.ownedByTable << " "
+               << info.ownedByColumn << "\n";
+    return index_file::writeAtomically(path, serialized.str());
 }
 
 DBStatus StorageEngine::createSequence(const std::string& dbname,
@@ -11290,8 +11327,10 @@ DBStatus StorageEngine::createSequence(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     if (applied.cache < 1) return DBStatus::INVALID_VALUE;
     int64_t nextValue = applied.start;
-    int64_t lastAllocated = applied.start - applied.increment;
-    writeSequenceFile(path, applied, nextValue, lastAllocated);
+    int64_t lastAllocated = 0;
+    sequencePredecessor(applied.start, applied.increment, lastAllocated);
+    if (!writeSequenceFile(path, applied, nextValue, lastAllocated))
+        return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -11321,15 +11360,16 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     if (info.startSpecified) {
         merged.start = info.start;
         nextValue = info.start;
-        lastAllocated = info.start - merged.increment;
+        sequencePredecessor(info.start, merged.increment, lastAllocated);
     }
     if (info.incrementSpecified) {
         merged.increment = info.increment;
+        if (merged.increment == 0) return DBStatus::INVALID_VALUE;
         // Recompute defaults for the new direction.
         merged.hasMinValue = false; merged.noMinValue = false;
         merged.hasMaxValue = false; merged.noMaxValue = false;
         merged.applyDefaults();
-        lastAllocated = nextValue - merged.increment;
+        sequencePredecessor(nextValue, merged.increment, lastAllocated);
     }
     if (info.hasMinValue) { merged.minValue = info.minValue; merged.hasMinValue = true; merged.noMinValue = false; }
     if (info.noMinValue) { merged.noMinValue = true; merged.hasMinValue = false; }
@@ -11348,10 +11388,11 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         // PG adjusts nextValue to be within bounds when ALTER changes bounds.
         if (merged.increment > 0) nextValue = merged.minValue;
         else nextValue = merged.maxValue;
-        lastAllocated = nextValue - merged.increment;
+        sequencePredecessor(nextValue, merged.increment, lastAllocated);
     }
     if (merged.cache < 1) return DBStatus::INVALID_VALUE;
-    writeSequenceFile(path, merged, nextValue, lastAllocated);
+    if (!writeSequenceFile(path, merged, nextValue, lastAllocated))
+        return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -11409,13 +11450,21 @@ int64_t StorageEngine::nextval(const std::string& dbname,
 
     auto allocateBatch = [&](int64_t from) {
         // Allocate 'cache' values starting from 'from' in the direction of increment.
-        int64_t end = from + (info.cache - 1) * info.increment;
+        int64_t count = 0;
+        int64_t delta = 0;
+        int64_t end = 0;
+        if (!checkedSub(info.cache, 1, count) ||
+            !checkedMul(count, info.increment, delta) ||
+            !checkedAdd(from, delta, end)) {
+            return std::optional<int64_t>{
+                (info.increment > 0) ? info.maxValue : info.minValue};
+        }
         if (info.increment > 0) {
             if (end > info.maxValue) end = info.maxValue;
         } else {
             if (end < info.minValue) end = info.minValue;
         }
-        return end;
+        return std::optional<int64_t>{end};
     };
 
     auto needAllocation = [&]() {
@@ -11424,26 +11473,43 @@ int64_t StorageEngine::nextval(const std::string& dbname,
     };
 
     if (needAllocation()) {
-        lastAllocated = allocateBatch(nextValue);
+        const auto end = allocateBatch(nextValue);
+        if (!end) return 0;
+        lastAllocated = *end;
     }
 
     int64_t result = nextValue;
-    nextValue += info.increment;
-
-    bool exhausted = (info.increment > 0) ? (nextValue > info.maxValue) : (nextValue < info.minValue);
-    if (exhausted) {
+    int64_t advanced = 0;
+    if (!checkedAdd(nextValue, info.increment, advanced)) {
+        // There is no representable value beyond the current boundary. Keep
+        // the boundary stable for non-cycling sequences, or wrap atomically
+        // for cycling sequences, without invoking signed-overflow UB.
         if (info.cycle) {
             nextValue = (info.increment > 0) ? info.minValue : info.maxValue;
-            lastAllocated = nextValue - info.increment; // force allocation next call
+            sequencePredecessor(nextValue, info.increment, lastAllocated);
         } else {
-            // Leave nextValue at boundary + increment so subsequent calls stay at boundary.
-            // PG would error, but for simplicity keep returning the boundary value.
-            nextValue -= info.increment;
-            result = nextValue;
+            nextValue = result;
+            lastAllocated = result;
+        }
+    } else {
+        nextValue = advanced;
+        const bool exhausted = (info.increment > 0)
+            ? (nextValue > info.maxValue) : (nextValue < info.minValue);
+        if (exhausted) {
+            if (info.cycle) {
+                nextValue = (info.increment > 0) ? info.minValue : info.maxValue;
+                sequencePredecessor(nextValue, info.increment, lastAllocated);
+            } else {
+                // Keep returning the boundary rather than deriving it from
+                // an out-of-range nextValue (which can itself overflow for
+                // INT64_MIN with a negative increment).
+                nextValue = result;
+                lastAllocated = result;
+            }
         }
     }
 
-    writeSequenceFile(path, info, nextValue, lastAllocated);
+    if (!writeSequenceFile(path, info, nextValue, lastAllocated)) return 0;
     transactionContext().lastvalDb = dbname;
     transactionContext().lastvalSeq = seqname;
     transactionContext().lastvalValue = result;
@@ -11460,7 +11526,9 @@ int64_t StorageEngine::currval(const std::string& dbname,
     dbms::SequenceInfo info;
     int64_t nextValue, lastAllocated;
     if (!readSequenceFile(path, info, nextValue, lastAllocated)) return 0;
-    return nextValue - info.increment;
+    if (nextValue == lastAllocated) return nextValue;
+    int64_t result = 0;
+    return checkedSub(nextValue, info.increment, result) ? result : 0;
 }
 
 int64_t StorageEngine::lastval() const {
@@ -11477,9 +11545,24 @@ int64_t StorageEngine::setval(const std::string& dbname,
     if (!readSequenceFile(path, info, nextValue, lastAllocated)) return 0;
     if (value < info.minValue) value = info.minValue;
     if (value > info.maxValue) value = info.maxValue;
-    nextValue = isCalled ? value + info.increment : value;
-    lastAllocated = nextValue - info.increment;
-    writeSequenceFile(path, info, nextValue, lastAllocated);
+    if (isCalled) {
+        int64_t advanced = 0;
+        const bool representable = checkedAdd(value, info.increment, advanced);
+        const bool outside = representable &&
+            ((info.increment > 0 && advanced > info.maxValue) ||
+             (info.increment < 0 && advanced < info.minValue));
+        if (!representable || outside) {
+            nextValue = info.cycle
+                ? ((info.increment > 0) ? info.minValue : info.maxValue)
+                : value;
+        } else {
+            nextValue = advanced;
+        }
+    } else {
+        nextValue = value;
+    }
+    sequencePredecessor(nextValue, info.increment, lastAllocated);
+    if (!writeSequenceFile(path, info, nextValue, lastAllocated)) return 0;
     return value;
 }
 

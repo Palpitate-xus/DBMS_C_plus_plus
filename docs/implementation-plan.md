@@ -3,7 +3,7 @@
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 
-> 当前审计（2026-08-13）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=139 FAIL=0（137 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
+> 当前审计（2026-08-14）：生产化重构进行中。已删除未接入的旧页式存储/迁移路径，统一使用 v2/8 KiB heap page；旧数据不兼容。文档中的历史 Wave 记录仅表示当时提交，不等于当前生产就绪。当前统一回归基线为 PASS=139 FAIL=0（137 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）。普通单表 INSERT、受限行级标量表达式 UPDATE、单源表 UPDATE FROM、单源表 DELETE USING、来源 INNER/CROSS JOIN 的 UPDATE FROM/DELETE USING、简单谓词 DELETE、窄版 MERGE，以及普通单表 INSERT/UPDATE/DELETE 的列投影和受限标量表达式 RETURNING 已由 `DmlExecutor` 消费 AST，其余 DML 仍按明确回退边界逐步迁移。
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。2026-08-13 又将 Volcano 执行入口收敛为 checked result：EOF 与 open/next 失败分离，物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口不再把执行失败当成空结果，并删除旧的空结果兼容执行入口。2PC prepared 记录已具备原子 durable 发布、PREPARE WAL、准备前缓存刷盘、跨 backend 锁所有权转移、重启后表/row/page/gap 锁 ownership 重建、in-doubt xid 保留和索引回表可见性过滤；普通事务 CLOG 故障的 COMMIT→ABORT 序列也保持兼容。全局 prepared 目录和崩溃后 in-doubt 决策仍待实现。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
@@ -408,7 +408,7 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
   - ✅ 新增 `tests/constraint_expr_test.cpp` 覆盖 ExprHelper 基本功能、DEFAULT 字面量/表达式、GENERATED STORED、CHECK insert/update、GENERATED IDENTITY；新增 `tests/generated_columns_test.cpp` 覆盖 STORED/VIRTUAL 生成列、拒绝用户写入、UPDATE 重算、VIRTUAL 标量函数。
 - **Wave 4 DDL 完整化 — SEQUENCE 完整语义（4.33，已完成）**：
   - ✅ 扩展 `SequenceInfo` 结构：支持 `START`、`INCREMENT`、`MINVALUE`/`NO MINVALUE`、`MAXVALUE`/`NO MAXVALUE`、`CACHE`、`CYCLE`/`NO CYCLE`、`OWNED BY`。
-  - ✅ 序列文件新格式（10 字段）并兼容旧两字段格式；`nextval`/`currval`/`lastval`/`setval` 实现 cache 批量分配、cycle 回绕、min/max 边界。
+  - ✅ 序列文件当前格式（10 字段）严格校验；不兼容旧两字段格式。`nextval`/`currval`/`lastval`/`setval` 实现 cache 批量分配、cycle 回绕、min/max 边界，并对持久化失败和 int64 溢出 fail-closed。
   - ✅ `CREATE SEQUENCE` 选项解析（`parseCreateSequence`）与 `DdlExecutor::executeCreateSequence` 落地；`ALTER SEQUENCE` 新增 `DdlExecutor::executeAlterSequence`。
   - ✅ `OWNED BY table.column` 在序列文件中记录所有者，并在 `pg_depend` 注册序列对表的 auto 依赖；`DROP TABLE ... CASCADE` 时删除被拥有的序列文件。
   - ✅ 新增 `tests/sequence_full_test.cpp`：基本 START/INCREMENT、min/max/cycle、cache、ALTER SEQUENCE（含 RENAME TO）、OWNED BY + DROP TABLE CASCADE、IDENTITY 回归。
@@ -915,3 +915,4 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 - 2026-08-13 parser 数值选项加固：函数 `COST/ROWS`、角色 `CONNECTION LIMIT` 和 `ALTER TABLE ... SET STATISTICS` 使用严格的完整数字、有限值和范围校验；解析器分发器传播子解析失败，避免非法输入静默成功。
 - 2026-08-13 sequence DDL 输入加固：`CREATE/ALTER SEQUENCE` 的数值选项使用完整 int64 校验，缺失、溢出和未知选项 fail-closed；`sequence_full_test` 新增回归。
 - 2026-08-13 DDL 冗余清理：删除已被 typed DDL bridge 遮蔽的 `main.cpp` `ALTER ROLE/ALTER USER` 重复执行器，保留未迁移的 `ALTER GROUP`/数据库/域等兼容路径。
+- 2026-08-14 序列与 DDL 生命周期加固：序列状态使用原子 durable 发布并拒绝损坏/尾随字段；`nextval`/`currval`/`setval` 及边界初始化使用 checked int64 算术。修复失败 DDL 回滚遗留启动快照、typed DDL 悬空 `Session*`，新增重启、损坏文件、正负边界和会话生命周期回归。

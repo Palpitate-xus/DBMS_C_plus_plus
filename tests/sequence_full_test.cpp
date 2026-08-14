@@ -6,7 +6,9 @@
 #include "catalog/type_registry.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -236,8 +238,50 @@ static void test_sequence_numeric_input_fails_closed() {
     assert(ddl.executeSql("ALTER SEQUENCE good CACHE", s));
     assert(g_engine.nextval(db, "good") == 1);
 
+    dbms::StorageEngine restarted;
+    assert(restarted.nextval(db, "good") == 2);
+
+    const auto corruptPath = std::filesystem::path(db) / "corrupt.seq";
+    {
+        std::ofstream out(corruptPath);
+        out << "1 1 1 2 1 0 1 0 owned col trailing\n";
+    }
+    assert(restarted.nextval(db, "corrupt") == 0);
+
     cleanup(db);
     std::cout << "[SEQUENCE] invalid numeric options fail closed OK" << std::endl;
+}
+
+static void test_sequence_integer_boundaries() {
+    std::string db = testDbPath("seq_boundaries");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    dbms::SequenceInfo upper;
+    upper.start = std::numeric_limits<int64_t>::max();
+    upper.increment = 1;
+    upper.maxValue = std::numeric_limits<int64_t>::max();
+    assert(g_engine.createSequence(db, "upper", upper) == dbms::DBStatus::OK);
+    assert(g_engine.nextval(db, "upper") == std::numeric_limits<int64_t>::max());
+    assert(g_engine.nextval(db, "upper") == std::numeric_limits<int64_t>::max());
+    assert(g_engine.currval(db, "upper") == std::numeric_limits<int64_t>::max());
+    assert(g_engine.setval(db, "upper", std::numeric_limits<int64_t>::max()) ==
+           std::numeric_limits<int64_t>::max());
+
+    dbms::SequenceInfo lower;
+    lower.start = -std::numeric_limits<int64_t>::max();
+    lower.increment = -1;
+    lower.minValue = -std::numeric_limits<int64_t>::max();
+    lower.maxValue = -1;
+    assert(g_engine.createSequence(db, "lower", lower) == dbms::DBStatus::OK);
+    assert(g_engine.nextval(db, "lower") == -std::numeric_limits<int64_t>::max());
+    assert(g_engine.nextval(db, "lower") == -std::numeric_limits<int64_t>::max());
+    assert(g_engine.setval(db, "lower", -std::numeric_limits<int64_t>::max()) ==
+           -std::numeric_limits<int64_t>::max());
+    assert(g_engine.nextval(db, "lower") == -std::numeric_limits<int64_t>::max());
+
+    cleanup(db);
+    std::cout << "[SEQUENCE] integer boundaries OK" << std::endl;
 }
 
 int main() {
@@ -250,6 +294,7 @@ int main() {
     test_sequence_owned_by_drop_table();
     test_sequence_identity_still_works();
     test_sequence_numeric_input_fails_closed();
+    test_sequence_integer_boundaries();
     std::cout << "[SEQUENCE_FULL] all passed" << std::endl;
     return 0;
 }
