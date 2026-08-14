@@ -15,7 +15,16 @@
 extern dbms::StorageEngine g_engine;
 
 static void cleanup(const std::string& db) {
-    if (std::filesystem::exists(db)) std::filesystem::remove_all(db);
+    // Route teardown through StorageEngine so the background writer cannot
+    // recreate files while a raw remove_all() is deleting the database.
+    if (g_engine.databaseExists(db)) {
+        const auto status = g_engine.dropDatabase(db);
+        assert(status == dbms::DBStatus::OK ||
+               status == dbms::DBStatus::DATABASE_NOT_FOUND);
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(db, ec);
+    assert(!ec);
 }
 
 static void setupSession(Session& session, const std::string& db) {

@@ -3485,18 +3485,6 @@ StorageEngine::ColumnStats StorageEngine::getMultiColumnStats(
     return {};
 }
 
-// ========================================================================
-// WAL helpers
-// ========================================================================
-
-static bool syncFile(const std::filesystem::path& path) {
-    int fd = ::open(path.c_str(), O_RDWR);
-    if (fd < 0) return false;
-    const bool ok = ::fsync(fd) == 0;
-    ::close(fd);
-    return ok;
-}
-
 std::filesystem::path StorageEngine::indexPath(const std::string& dbname,
                                                 const std::string& tablename) const {
     return relationDir(dbname, tablename) / (tablename + ".idx");
@@ -7747,19 +7735,24 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     if (catalogService_) catalogService_->evict(dbname);
     resetRuntimeDatabaseStats(dbname);
     resetSqlDatabaseStats(dbname);
-    std::filesystem::create_directory(dbPath(dbname));
-    {
-        std::ofstream f(tableListPath(dbname), std::ios::binary);
+    std::error_code ec;
+    if (!std::filesystem::create_directory(dbPath(dbname), ec) || ec) {
+        return DBStatus::IO_ERROR;
     }
-    {
-        std::ofstream f(dbPath(dbname) / ".charset");
-        f << charset;
+    auto failCreateDatabase = [&]() {
+        std::error_code cleanupEc;
+        std::filesystem::remove_all(dbPath(dbname), cleanupEc);
+        return DBStatus::IO_ERROR;
+    };
+    if (!index_file::writeAtomically(tableListPath(dbname), "") ||
+        !index_file::writeAtomically(dbPath(dbname) / ".charset", charset + "\n")) {
+        return failCreateDatabase();
     }
     // Every database has the PostgreSQL-compatible public schema. Persist it
     // as a normal schema marker so schema validation is consistent for DDL,
     // default privileges, and future catalog-backed namespace operations.
-    {
-        std::ofstream f(dbPath(dbname) / ".schema_public");
+    if (!index_file::writeAtomically(dbPath(dbname) / ".schema_public", "")) {
+        return failCreateDatabase();
     }
     return DBStatus::OK;
 }
@@ -7785,13 +7778,19 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     closeDatabaseCaches(dbname);
     resetRuntimeDatabaseStats(dbname);
     resetSqlDatabaseStats(dbname);
-    std::error_code statsEc;
-    std::filesystem::remove(dbPath(dbname) / ".runtime_stats", statsEc);
-    std::filesystem::remove(dbPath(dbname) / ".runtime_stats.lock", statsEc);
-    std::filesystem::remove(dbPath(dbname) / ".sql_stats", statsEc);
-    std::filesystem::remove(dbPath(dbname) / ".sql_stats.lock", statsEc);
-    std::filesystem::remove_all(dbPath(dbname));
-    return DBStatus::OK;
+    bool cleanupOk = true;
+    const auto removeStatFile = [&](const std::filesystem::path& path) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        if (ec) cleanupOk = false;
+    };
+    removeStatFile(dbPath(dbname) / ".runtime_stats");
+    removeStatFile(dbPath(dbname) / ".runtime_stats.lock");
+    removeStatFile(dbPath(dbname) / ".sql_stats");
+    removeStatFile(dbPath(dbname) / ".sql_stats.lock");
+    std::error_code removeEc;
+    std::filesystem::remove_all(dbPath(dbname), removeEc);
+    return cleanupOk && !removeEc ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identifier fields
@@ -20254,18 +20253,17 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
 
     // Persist checkpoint LSN for fast recovery startup.
     auto cpPath = checkpointPath(dbname);
-    {
-        std::ofstream cp(cpPath, std::ios::binary);
-        if (!cp) return false;
-        uint64_t timestamp = static_cast<uint64_t>(std::time(nullptr));
-        uint64_t maxTxId = TxnIdGenerator::instance().maxCommittedTxId();
-        cp.write(reinterpret_cast<const char*>(&timestamp), sizeof(uint64_t));
-        cp.write(reinterpret_cast<const char*>(&maxTxId), sizeof(uint64_t));
-        uint64_t ckptLsnU64 = checkpointLsn;
-        cp.write(reinterpret_cast<const char*>(&ckptLsnU64), sizeof(uint64_t));
-        if (!cp.good()) return false;
-    }
-    if (!syncFile(cpPath)) return false;
+    uint64_t timestamp = static_cast<uint64_t>(std::time(nullptr));
+    uint64_t maxTxId = TxnIdGenerator::instance().maxCommittedTxId();
+    uint64_t ckptLsnU64 = checkpointLsn;
+    std::string checkpointBytes(sizeof(timestamp) + sizeof(maxTxId) + sizeof(ckptLsnU64), '\0');
+    size_t offset = 0;
+    std::memcpy(checkpointBytes.data() + offset, &timestamp, sizeof(timestamp));
+    offset += sizeof(timestamp);
+    std::memcpy(checkpointBytes.data() + offset, &maxTxId, sizeof(maxTxId));
+    offset += sizeof(maxTxId);
+    std::memcpy(checkpointBytes.data() + offset, &ckptLsnU64, sizeof(ckptLsnU64));
+    if (!index_file::writeAtomically(cpPath, checkpointBytes)) return false;
 
     // Persist catalog metadata so it matches the checkpoint.
     if (catalogService_ && !catalogService_->persistAll()) return false;
@@ -20375,14 +20373,9 @@ bool StorageEngine::physicalBackup(const std::string& dbname, const std::string&
                 }
             }
         }
-        {
-            const auto marker = dst / kPhysicalBackupMarker;
-            std::ofstream out(marker, std::ios::trunc);
-            if (!out) return false;
-            out << "DBMS_PHYSICAL_BACKUP_V1\n";
-            out.flush();
-            if (!out) return false;
-            if (!syncFile(marker)) return false;
+        const auto marker = dst / kPhysicalBackupMarker;
+        if (!index_file::writeAtomically(marker, "DBMS_PHYSICAL_BACKUP_V1\n")) {
+            return false;
         }
         return true;
     } catch (const std::exception& e) {

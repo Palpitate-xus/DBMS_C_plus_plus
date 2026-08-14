@@ -916,3 +916,5 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 - 2026-08-13 sequence DDL 输入加固：`CREATE/ALTER SEQUENCE` 的数值选项使用完整 int64 校验，缺失、溢出和未知选项 fail-closed；`sequence_full_test` 新增回归。
 - 2026-08-13 DDL 冗余清理：删除已被 typed DDL bridge 遮蔽的 `main.cpp` `ALTER ROLE/ALTER USER` 重复执行器，保留未迁移的 `ALTER GROUP`/数据库/域等兼容路径。
 - 2026-08-14 序列与 DDL 生命周期加固：序列状态使用原子 durable 发布并拒绝损坏/尾随字段；`nextval`/`currval`/`setval` 及边界初始化使用 checked int64 算术。修复失败 DDL 回滚遗留启动快照、typed DDL 悬空 `Session*`，新增重启、损坏文件、正负边界和会话生命周期回归。
+- 2026-08-14 数据库生命周期持久化加固：数据库初始化文件、checkpoint 元数据和物理备份标记统一原子发布并传播 I/O 失败；创建数据库失败会清理半成品，新增初始化文件完整性、checkpoint 精确格式和尾随数据回归。
+- 2026-08-14 后台 writer 生命周期回归：`planner_runtime_stats_test` 的 teardown 改用 `StorageEngine::dropDatabase()` 获取缓存/WAL 生命周期锁，修复后台 flush 与裸目录删除的竞态；专项及完整回归最终均为 PASS。

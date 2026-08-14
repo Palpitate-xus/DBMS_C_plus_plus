@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 
 extern dbms::StorageEngine g_engine;
@@ -11,6 +12,15 @@ int main() {
     std::filesystem::remove_all(dbname);
 
     assert(g_engine.createDatabase(dbname) == dbms::DBStatus::OK);
+    assert(std::filesystem::is_regular_file(std::filesystem::path(dbname) / "tlist.lst"));
+    assert(std::filesystem::is_regular_file(std::filesystem::path(dbname) / ".charset"));
+    assert(std::filesystem::is_regular_file(std::filesystem::path(dbname) / ".schema_public"));
+    {
+        std::ifstream charset(std::filesystem::path(dbname) / ".charset");
+        std::string value;
+        assert(std::getline(charset, value));
+        assert(value == "utf8");
+    }
     auto* oldClog = g_engine.getCommitLog(dbname);
     assert(oldClog != nullptr);
     oldClog->setStatus(42, dbms::CommitLog::Status::Committed);

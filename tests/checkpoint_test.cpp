@@ -79,6 +79,7 @@ int main() {
     // Verify checkpoint file exists with LSN.
     std::filesystem::path cpPath = std::filesystem::path(dbname) / "checkpoint";
     assert(std::filesystem::exists(cpPath));
+    assert(std::filesystem::file_size(cpPath) == 3 * sizeof(uint64_t));
     {
         std::ifstream cp(cpPath, std::ios::binary);
         uint64_t timestamp = 0, maxTxId = 0, ckptLsn = 0;
@@ -86,6 +87,7 @@ int main() {
         cp.read(reinterpret_cast<char*>(&maxTxId), sizeof(maxTxId));
         cp.read(reinterpret_cast<char*>(&ckptLsn), sizeof(ckptLsn));
         assert(cp.gcount() == static_cast<std::streamsize>(sizeof(ckptLsn)));
+        assert(cp.peek() == std::char_traits<char>::eof());
         assert(ckptLsn > 0);
         std::cout << "[CHECKPOINT] checkpoint file contains LSN " << ckptLsn << "\n";
     }
