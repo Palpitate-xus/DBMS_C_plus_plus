@@ -5,7 +5,7 @@
 > **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
-> **当前状态（2026-08-13）**: 生产化重构进行中；统一回归基线 PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；PREPARE TRANSACTION 已在准备阶段刷出 heap/index 缓存、原子发布 prepared 元数据并记录 PREPARE WAL，跨 backend/进程完成时保留并恢复表/row/page/gap 锁；含内存 undo 的事务仍拒绝 PREPARE，完整 2PC 全局目录/in-doubt 决策语义仍未完成；这不代表已达到 PostgreSQL 生产级等价。
+> **当前状态（2026-08-14）**: 生产化重构进行中；统一回归基线 PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；数据库初始化、checkpoint 和物理备份标记采用原子持久化，生命周期清理失败会显式返回错误；PREPARE TRANSACTION 已在准备阶段刷出 heap/index 缓存、原子发布 prepared 元数据并记录 PREPARE WAL，跨 backend/进程完成时保留并恢复表/row/page/gap 锁；含内存 undo 的事务仍拒绝 PREPARE，完整 2PC 全局目录/in-doubt 决策语义仍未完成；这不代表已达到 PostgreSQL 生产级等价。
 
 ## 功能特性
 
