@@ -19,6 +19,8 @@
 
 2026-08-14 索引 sidecar 一致性收敛：`.secidx` 和 `.idxnames` 使用原子发布与 regular-file 边界；索引元数据发布失败不再留下物理索引或伪报成功，复合索引删除保留完整选项。并发构建、索引 WAL 和完整 AM 语义仍待后续。
 
+2026-08-14 索引冗余清理：删除未接入生产路径的 `IIndexAM`/BPTree/Hash 适配器和独立 GIN/BRIN 实现；测试改覆盖 `StorageEngine` canonical GIN/BRIN。后续仍需在该真实入口上补齐泛化 opclass、WAL-safe 增量维护和并发构建。
+
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、对齐、CRC、`xl_prev` 链和 segment 尾部严格校验；
@@ -113,7 +115,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | 2026-08-11 | 扫描失败契约继续向上收口：`filterRows`、查询/聚合/JOIN、FK/EXCLUDE/ON CONFLICT 检查、`ANALYZE`、ALTER/`VACUUM FULL` 表重写、TOAST/page 写入以及 Volcano 并行 page-range scan 均 fail-closed；统计文件改为原子替换，`ANALYZE` 失败不再报告成功。B-tree/Hash WAL-safe 构建、完整增量维护和剩余复杂 DML 原子 undo 仍待后续。 |
 | 2026-08-11 | StorageEngine 索引与执行器错误传播继续收口：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建和 `REINDEX` 检查 `forEachRow()` 失败；全文/GiST/SP-GiST/GIN/BRIN 在完整扫描后原子发布，Volcano 顺序/索引扫描 fail-closed。B-tree/Hash 的 WAL-safe 构建、统计/DML 辅助扫描、并行 page-range scan 的完整错误传播仍待后续。 |
 | 2026-08-11 | StorageEngine 索引调用链继续收口：`forEachRow()` 返回页面 I/O 失败，GIN/BRIN 构建完整扫描成功后才原子发布；BRIN 改为长度前缀二进制范围格式，读取损坏文件 fail-closed，并新增真实 DDL 索引查询回归。完整调用方错误传播、WAL-safe 增量维护和 PostgreSQL 泛化 opclass 仍待后续。 |
-| 2026-08-11 | 索引文件持久化继续收口：Hash/GIN/BRIN 独立索引改为严格格式校验，写入使用 fsync 后原子替换，截断/非法文件 fail-closed；BRIN 当前格式按不兼容旧数据策略重建。StorageEngine 访问方法的完整 WAL-safe 增量维护和 PostgreSQL 泛化 opclass 仍待后续。 |
+| 2026-08-11 | 索引文件持久化继续收口：StorageEngine 的 Hash/GIN/BRIN 索引改为严格格式校验，写入使用 fsync 后原子替换，截断/非法文件 fail-closed；BRIN 当前格式按不兼容旧数据策略重建。各访问方法的完整 WAL-safe 增量维护和 PostgreSQL 泛化 opclass 仍待后续。 |
 | 2026-08-11 | DDL 提交错误继续收口：`DdlTransaction` 检查引擎 commit 状态，延迟约束/SSI 失败会传播到 DDL executor，并恢复已启用的当前格式物理快照；新增提交失败与快照恢复回归。跨对象依赖 undo 和完整 PostgreSQL 隐式提交边界仍待后续。 |
 | 2026-08-11 | 事务快照并发与恢复继续收口：普通事务不再无条件复制整库；文件级 DDL 快照按 xid 命名并持有数据库级排他锁，启动时按 WAL 提交状态清理/恢复遗留快照，PREPARE TRANSACTION 快照延迟到最终提交或回滚；`beginTransaction()` 传播前一事务的隐式提交失败。 |
 | 2026-08-11 | WAL 提交安全继续收口：`XLogFlush()` 返回 segment 同步结果；事务先刷盘 COMMIT WAL，再发布 CLOG committed，WAL 不可用或刷盘失败时 fail-closed 回滚。 |
@@ -246,7 +248,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 > - 🔄 5.2-5.7, 5.9-5.18, 5.20-5.24, 5.26-5.43（CTE/MERGE/JOIN/子查询/并行/JIT/AIO/SSI 等）
 
 > **Phase 6（索引 AM/生态）**：核心完成，高级标注 🔄
-> - ✅ 6.1 IIndexAM 接口 + BPTreeIndexAM + HashIndexAM 适配器
+> - ✅ 6.1 索引访问路径审计：当前生产路径统一由 `StorageEngine` 管理 B+Tree/Hash/GiST/SP-GiST/GIN/BRIN；未接入的 `IIndexAM` 适配器已删除
 > - ✅ 6.4 GIN 倒排索引（term→RowId 倒排表，AND/OR/JSON 包含）+ BRIN 块范围索引（min/max 摘要）
 > - ✅ 6.6 expression/partial/include 索引
 > - 🔄 6.2 B-tree dedup, 6.3 Hash WAL-safe, 6.5 CONCURRENTLY, 6.7 index maintenance, 6.8 partitioned index, 6.9 opclass/collation
@@ -328,7 +330,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | 约束 | 6 类 | 5 类 | 1 类 ❌ | DEFAULT/GENERATED STORED/IDENTITY/CHECK 已接入 INSERT/UPDATE 执行路径（ExprHelper + ExprEvaluator）；DEFERRABLE 延迟队列+提交时检查已实现；EXCLUDE 执行检查已实现；constraint trigger 仍 ⚠️ |
 | DQL/查询 | 大量 | 中量 | 大量 | SELECT 已解析为 AST（CTE/JOIN/SET OPS）；执行仍走旧 switch/case |
 | 优化器/执行器 | 简化 | 中量 | 大量 ❌ | Volcano 算子已统一位于 `src/executor/`，但完整 Path/RelOptInfo/cost-based planner 框架仍未建 |
-| 索引 | 6 种 | 简化 | 大量 ❌ | IIndexAM 适配器已统一；AM API/opclass/concurrent/维护仍 ❌ |
+| 索引 | 6 种 | 简化 | 大量 ❌ | `StorageEngine` 已统一实际访问入口；AM API/opclass/concurrent/维护仍 ❌ |
 | 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI 已有行级/页级写偏差检测与空范围关系级 SIREAD，索引范围粒度及完整子事务仍 ❌ |
 | 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
 | 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；运行时 pg_hba、SCRAM 和基础 wire protocol 已接入，完整 ACL、channel binding 和协议语义仍待完善 |
@@ -550,7 +552,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 
 ## 8. 索引差距
 
-> **已完成进展（2026-06-21）**：Phase 0 已统一 `IIndexAM` 接口并提供 `BPTreeIndexAM`/`HashIndexAM` 适配器（`src/access/`）。8.1 由 ❌ 上调为 🔄（有接口层与适配器，但缺 `amhandler`/support functions/opclass/opfamily/amcostestimate/amvalidate 的 PG 完整 AM API）。其余索引能力仍在 Phase 6 待办。
+> **当前边界**：原计划中的 `IIndexAM`/`BPTreeIndexAM`/`HashIndexAM` 仅由自身和测试引用，未接入生产执行链，已在 2026-08-14 清理；当前 `StorageEngine` 是唯一实际索引入口。8.1 仍缺 `amhandler`/support functions/opclass/opfamily/amcostestimate/amvalidate 的 PG 完整 AM API，其余索引能力仍在 Phase 6 待办。
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|

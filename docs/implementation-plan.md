@@ -17,6 +17,8 @@
 
 2026-08-14 增量审计：索引 `.secidx`/`.idxnames` sidecar 改为 regular-file 预检和原子发布；CREATE INDEX 发布失败清理物理索引，DROP INDEX 传播 sidecar 失败，复合索引删除不再丢失 INCLUDE/WHERE 元数据，新增目录占用故障回归。
 
+2026-08-14 增量审计：删除未被生产执行链引用的 `IIndexAM`、BPTree/Hash 适配器和独立 GIN/BRIN 实现，生产 manifest 与测试改为只保留 `StorageEngine` canonical 索引路径；同步修正文档，避免把死接口描述为已统一架构。
+
 2026-08-12 增量审计：规范 DDL 执行器与 `main.cpp` legacy 兼容分发统一使用隐式提交失败守卫；提交失败会输出 SQLSTATE 并停止后续 DDL，避免不同入口产生不一致的成功结果。
 
 2026-08-11 增量审计：`LockManager` 修复 row/page 等待路径的资源生命周期、按线程锁 token 归属、表锁重入与共享锁升级，并在等待期间持续检测 wait-for graph；新增双线程死锁、重入/升级和 row token 竞争回归。完整 PostgreSQL 锁模式矩阵、页/索引 predicate lock 和 wait events 仍待后续。
@@ -149,7 +151,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
 |--------|-----------|------|
 | ✅ 0.1 删除未接入的 `IStorageEngine` 伪适配层 | — | `StorageEngine` 是唯一实际存储入口；删除返回空结果/0 的未接入接口和 `storage_engine.h` |
 | ✅ 0.2 让执行算子继承 `IOperator`，迁移到 `src/executor/` | 7.1 | 12 个 Operator (TableScan/IndexScan/Filter/Sort/Limit/Distinct/Join/Aggregate/...) |
-| ✅ 0.3 让索引实现继承 `IIndexAM` | 8.1 | BPTreeIndexAM + HashIndexAM 适配器 |
+| ✅ 0.3 统一实际索引入口 | 8.1 | `StorageEngine` 是生产索引访问唯一入口；未接入的 `IIndexAM` 适配器已清理 |
 | ✅ 0.4 统一 `DBStatus`、`TxnId`、`RowId` 等基础类型定义 | — | dbms_defs.h + DBStatus 枚举 |
 
 ### Phase 0 已完成内容
@@ -200,7 +202,7 @@ TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START T
   - ✅ 事务命令：`BEGIN`/`START TRANSACTION`、`COMMIT`/`END`、`COMMIT PREPARED`、`ROLLBACK`/`ABORT`、`ROLLBACK PREPARED`、`SAVEPOINT`、`RELEASE SAVEPOINT`、`ROLLBACK TO SAVEPOINT`
   - ✅ 配置命令：`SET`（ROLE / SESSION AUTHORIZATION / CONSTRAINTS / TRANSACTION ISOLATION / TIMEZONE / 会话 timeout / `SET GLOBAL` 进程参数）、`RESET`（ROLE / ALL / timeout 参数）、`ALTER SYSTEM SET`
   - ✅ Utility 命令：`ANALYZE`、`VACUUM`（含 FULL / CONCURRENTLY）、`CHECKPOINT`、`TRUNCATE`、`LOCK TABLE`、`COMMENT ON`（TABLE / COLUMN）、`SECURITY LABEL`、`REFRESH MATERIALIZED VIEW`、`REINDEX`
-- **接口收敛**：`IOperator`、`Operator`、`IIndexAM`、BPTreeIndexAM / HashIndexAM 适配器仍由真实执行路径使用；`IStorageEngine` 未接入执行器，已删除而不是继续保留伪实现（Phase 0）。
+- **接口收敛**：`IOperator` 由 Volcano 算子真实使用；`IStorageEngine` 和未接入执行器的 `IIndexAM` 适配器均已删除而不是继续保留伪实现。当前 `StorageEngine` 是生产索引访问唯一入口（Phase 0）。
 
   - ✅ 程序命令：`CALL`、Prepared Statements（`PREPARE`、`EXECUTE`、`DEALLOCATE`）、`COPY` FROM/TO
   - ✅ 查询计划：`EXPLAIN`（含 ANALYZE / BUFFERS / FORMAT JSON / 括号选项）
@@ -785,10 +787,10 @@ Phase 3 的 14 项基础子任务（3.1 ~ 3.14）均已有实现并通过冒烟�
 
 | 子任务 | 涉及的 gap | 备注 |
 |--------|-----------|------|
-| 🔄 6.1 实现 `amhandler`、support functions、opclass/opfamily、`amcostestimate`、`amvalidate` | 8.1, 16.7 | `IIndexAM` 接口 + `BPTreeIndexAM` + `HashIndexAM` 适配器已就绪；PG 完整 AM API 仍缺 |
+| 🔄 6.1 实现 `amhandler`、support functions、opclass/opfamily、`amcostestimate`、`amvalidate` | 8.1, 16.7 | 当前 `StorageEngine` 统一实际索引入口；PG 完整 AM API 仍缺，未接入的适配器不再保留 |
 | ⚠️ 6.2 补全 B-tree（dedup、suffix truncation、visibility map 驱动 index-only scan） | 8.2 | 基础 B+Tree 已覆盖跨叶/内部节点分裂、重复键、范围扫描和多值 `(key, RID)` 精确删除；PG 高级 B-tree 能力、page deletion/合并和 WAL-safe 增量维护仍缺 |
 | ⚠️ 6.3 补全 Hash（WAL-safe bucket split、metapage/overflow page） | 8.3 | 基础 Hash 索引已就绪，WAL-safe bucket split 等 PG 语义仍缺 |
-| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | 标准 `CREATE INDEX ... USING ...` 已由 typed DDL 路由到真实的简化实现；构建与扫描错误已 fail-closed，独立与 StorageEngine GIN/BRIN 文件已有严格校验和 fsync+原子替换，但泛化 opclass、WAL-safe 增量维护和 GiST 完整访问方法仍缺 |
+| ⚠️ 6.4 补全 GIN/GiST/BRIN/SP-GiST 的泛化 opclass | 8.4 | 标准 `CREATE INDEX ... USING ...` 已由 typed DDL 路由到 `StorageEngine` 的简化实现；构建与扫描错误已 fail-closed，GIN/BRIN 文件已有严格校验和 fsync+原子替换，但泛化 opclass、WAL-safe 增量维护和 GiST 完整访问方法仍缺 |
 | ⚠️ 6.5 实现 `CREATE INDEX CONCURRENTLY` | 8.5, 1.1.20 | 当前以共享锁/简化路径支持 concurrently；PG 两阶段/invalid catalog/旧快照等待语义仍缺 |
 | ⚠️ 6.6 实现 expression/partial/include 索引的完整支持（dependency、immutable 检查） | 8.6 | expression/partial/include 基础路径已就绪；dependency、immutable 检查和 predicate implication 仍缺 |
 | ⚠️ 6.7 实现 index maintenance（page deletion、vacuum cleanup、`amcheck`、`REINDEX CONCURRENTLY`） | 8.7, 1.1.47 | REINDEX 基础已就绪；page deletion、vacuum cleanup、amcheck 和并发重建仍缺 |

@@ -124,9 +124,11 @@ domain 创建使用原子发布。
 - SSI 回归：`phase5_remaining_test` 验证非空索引谓词按 heap page 登记 SIREAD，单列主键/二级 B+Tree 比较谓词登记逻辑索引范围并与写键进行重叠检测，非相交页事务可同时提交；跨页读写危险结构仍有一个事务返回 `SERIALIZATION_FAILURE`，空谓词关系级保护继续生效。复合/表达式/部分索引、其他访问方法的物理 predicate lock 和完整 SSI 规则仍未完成。
 - BufferPool 回归覆盖一帧缓存的脏页淘汰/重载与 pinned 页保护，确认缓存不足时返回失败而不是强制淘汰活动页。
 - GIN/BRIN/B+Tree 回归继续通过，并覆盖 root split/search/range、长键固定宽度规范化、重开索引后的查找和精确删除；B+Tree 的 header/node I/O 失败现在 fail-closed，避免底层页读取失败升级为空指针崩溃。
-- B+Tree 多值索引回归补充 `(key, RID)` 精确删除：删除 6000 条跨叶重复键中的单个 RID 后，其余相邻 RID 仍可检索，重复删除会正确失败；`BPTreeIndexAM` 与 DML/事务回滚路径统一使用精确删除。
+- B+Tree 多值索引回归补充 `(key, RID)` 精确删除：删除 6000 条跨叶重复键中的单个 RID 后，其余相邻 RID 仍可检索，重复删除会正确失败；生产 DML/事务回滚路径直接使用 `StorageEngine` 的 B+Tree 实现。
+
+- 索引架构清理回归：删除未接入生产执行链的 `IIndexAM`、B+Tree/Hash 适配器及独立 GIN/BRIN 类；保留并增强测试以验证 `StorageEngine` canonical GIN/BRIN 创建、查询和损坏 sidecar fail-closed。
 - 事务索引 WAL 回归通过：B+Tree/Hash `flush()` 和事务边界统一缓存刷盘路径已接入；脏索引刷盘会记录完整文件 before/after image，提交前 WAL 先刷盘；`wal_basic_test` 检查索引 WAL 记录，`redo_crash_recovery_test` 验证未提交插入回滚、已提交插入恢复和已提交删除恢复。
-- Hash/GIN/BRIN 持久化回归新增原子 durable 写入、Hash 二进制格式重载和损坏文件拒绝；三种独立索引的关闭失败不再清除 dirty 状态。
+- Hash/GIN/BRIN 持久化回归覆盖 `HashIndex` 二进制格式重载、StorageEngine GIN/BRIN sidecar 原子发布和损坏文件拒绝；Hash dirty 状态在关闭失败时保留。
 - StorageEngine GIN/BRIN 回归通过真实 DDL 构建后查询索引内容，验证 `forEachRow()` 页面失败契约、GIN 原子发布和 BRIN 二进制范围文件路径。
 - 索引/执行器错误传播回归通过：B-tree/复合/全文/GiST/SP-GiST/Hash/GIN/BRIN 构建与 `REINDEX` 不再吞掉 heap 扫描失败，Volcano 顺序扫描和索引扫描遇到页面读取失败时 fail-closed；`volcano_select_phase51_test` 通过。
 - 执行器架构清理回归：删除未使用的 `IExpr`/`PlanNode`/`IExecutionPlanner` 接口后，Volcano 算子仍统一实现 `IOperator`；`IndexScanOp` 改用带 page shared lock 和 MVCC 检查的直接 RID 回表，`volcano_select_phase51_test` 的索引、bitmap 和组合算子路径全部通过。

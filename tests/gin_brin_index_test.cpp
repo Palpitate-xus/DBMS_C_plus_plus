@@ -1,90 +1,22 @@
-#include "access/GinIndex.h"
-#include "access/BrinIndex.h"
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
+#include "commands/DdlExecutor.h"
+#include "commands/TableManage.h"
+#include "Session.h"
 #include <cassert>
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include "test_utils.h"
+
+extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
 
 static void cleanup(const std::string& p) {
     if (fs::exists(p)) fs::remove(p);
-}
-
-static void test_gin_basic() {
-    std::string idx = "/tmp/gin_test.idx";
-    cleanup(idx);
-    dbms::GinIndex gin(idx);
-    gin.open();
-    gin.insert("hello world", 1);
-    gin.insert("world peace", 2);
-    gin.insert("hello dbms", 3);
-
-    auto r1 = gin.searchContains("hello");
-    assert(r1.size() == 2);  // rows 1,3
-
-    auto r2 = gin.searchContains("world");
-    assert(r2.size() == 2);  // rows 1,2
-
-    auto r3 = gin.searchContains("hello world");
-    assert(r3.size() == 1);  // row 1 (AND semantics)
-
-    auto r4 = gin.searchContains("nonexistent");
-    assert(r4.empty());
-
-    gin.close();
-    cleanup(idx);
-    std::cout << "[GIN] basic OK" << std::endl;
-}
-
-static void test_gin_remove() {
-    std::string idx = "/tmp/gin_test2.idx";
-    cleanup(idx);
-    dbms::GinIndex gin(idx);
-    gin.open();
-    gin.insert("apple banana", 1);
-    gin.insert("apple cherry", 2);
-    gin.remove("apple banana", 1);
-
-    auto r = gin.searchContains("apple");
-    assert(r.size() == 1);  // only row 2
-
-    gin.close();
-    cleanup(idx);
-    std::cout << "[GIN] remove OK" << std::endl;
-}
-
-static void test_gin_persistence() {
-    std::string idx = "/tmp/gin_test3.idx";
-    cleanup(idx);
-    {
-        dbms::GinIndex gin(idx);
-        gin.open();
-        gin.insert("persist test", 10);
-        gin.insert("persist data", 20);
-        gin.close();
-    }
-    {
-        dbms::GinIndex gin(idx);
-        gin.open();
-        auto r = gin.searchContains("persist");
-        assert(r.size() == 2);
-        gin.close();
-    }
-    {
-        std::ofstream out(idx, std::ios::trunc);
-        out << "broken posting not-a-row-id\n";
-    }
-    {
-        dbms::GinIndex broken(idx);
-        assert(!broken.open());
-    }
-    cleanup(idx);
-    std::cout << "[GIN] persistence OK" << std::endl;
 }
 
 static void test_hash_persistence_and_corruption() {
@@ -114,56 +46,45 @@ static void test_hash_persistence_and_corruption() {
     std::cout << "[HASH] durable persistence/corruption rejection OK" << std::endl;
 }
 
-static void test_brin_basic() {
-    std::string idx = "/tmp/brin_test.idx";
-    cleanup(idx);
-    dbms::BrinIndex brin(idx);
-    brin.open();
+static void test_storage_engine_gin_brin() {
+    const std::string db = testDbPath("gin_brin_storage");
+    cleanupTestDb("gin_brin_storage");
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
 
-    for (int i = 0; i < 300; ++i) {
-        brin.addValue(std::to_string(1000 + i), i);
-    }
+    Session session;
+    session.currentDB = db;
+    session.username = "testuser";
+    session.permission = 1;
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE t (id INT, value TEXT)", session));
+    assert(g_engine.insert(db, "t", {{"id", "1"}, {"value", "hello world"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"value", "world peace"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "t", {{"id", "3"}, {"value", "hello dbms"}}) == dbms::DBStatus::OK);
 
-    auto r = brin.searchRange("1050", "1070");
-    // Should return rowIds in the overlapping blocks.
-    assert(!r.empty());
+    assert(!ddl.executeSql("CREATE INDEX t_value_gin ON t USING GIN (value)", session));
+    assert(g_engine.ginSearch(db, "t", "value", "hello").size() == 2);
+    assert(g_engine.ginSearch(db, "t", "value", "world").size() == 2);
+    assert(g_engine.ginSearch(db, "t", "value", "missing").empty());
 
-    auto r2 = brin.searchRange("2000", "3000");
-    assert(r2.empty());
+    assert(!ddl.executeSql("CREATE INDEX t_id_brin ON t USING BRIN (id)", session));
+    assert(!g_engine.brinSearchRange(db, "t", "id", "=", "1").empty());
+    assert(g_engine.brinSearchRange(db, "t", "id", "=", "99").empty());
 
-    assert(brin.close());
+    // The production search paths must reject a damaged sidecar rather than
+    // treating it as an empty, valid index.
     {
-        dbms::BrinIndex reopened(idx);
-        assert(reopened.open());
-        assert(!reopened.searchRange("1050", "1070").empty());
-        assert(reopened.close());
+        std::ofstream broken(db + "/t_value.gin", std::ios::trunc);
+        broken << "broken posting not-a-row-id\n";
     }
+    assert(g_engine.ginSearch(db, "t", "value", "hello").empty());
     {
-        std::ofstream out(idx, std::ios::binary | std::ios::trunc);
-        out << "truncated brin";
+        std::ofstream broken(db + "/t_id.brin", std::ios::binary | std::ios::trunc);
+        broken << "truncated brin";
     }
-    {
-        dbms::BrinIndex broken(idx);
-        assert(!broken.open());
-    }
-    cleanup(idx);
-    std::cout << "[BRIN] basic OK" << std::endl;
-}
+    assert(g_engine.brinSearchRange(db, "t", "id", "=", "1").empty());
 
-static void test_brin_json_contains() {
-    std::string idx = "/tmp/gin_json.idx";
-    cleanup(idx);
-    dbms::GinIndex gin(idx);
-    gin.open();
-    gin.insert("{\"name\":\"alice\",\"age\":30}", 1);
-    gin.insert("{\"name\":\"bob\",\"age\":40}", 2);
-
-    auto r = gin.searchJsonContains("alice");
-    assert(r.size() == 1);
-
-    gin.close();
-    cleanup(idx);
-    std::cout << "[GIN] JSON contains OK" << std::endl;
+    cleanupTestDb("gin_brin_storage");
+    std::cout << "[GIN/BRIN] StorageEngine canonical paths and corruption rejection OK" << std::endl;
 }
 
 static void test_btree_split_and_range() {
@@ -253,13 +174,9 @@ static void test_btree_split_and_range() {
 }
 
 int main() {
-    test_gin_basic();
-    test_gin_remove();
-    test_gin_persistence();
     test_hash_persistence_and_corruption();
-    test_brin_basic();
-    test_brin_json_contains();
+    test_storage_engine_gin_brin();
     test_btree_split_and_range();
-    std::cout << "[GIN_BRIN] all passed" << std::endl;
+    std::cout << "[ACCESS] all passed" << std::endl;
     return 0;
 }
