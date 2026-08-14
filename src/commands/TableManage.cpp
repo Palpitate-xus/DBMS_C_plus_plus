@@ -27,11 +27,14 @@ std::string dbms::sqlstateForDBStatus(DBStatus res) {
         case DBStatus::DATABASE_NOT_FOUND: return "3D000";
         case DBStatus::TABLE_ALREADY_EXISTS: return "42P07";
         case DBStatus::INVALID_VALUE: return "22023";
+        case DBStatus::INVALID_ARGUMENT: return "22023";
         case DBStatus::NULL_NOT_ALLOWED: return "23502";
         case DBStatus::SYNTAX_ERROR: return "42601";
         case DBStatus::DUPLICATE_KEY: return "23505";
         case DBStatus::LOCK_CONFLICT: return "55P03";
         case DBStatus::SERIALIZATION_FAILURE: return "40001";
+        case DBStatus::IO_ERROR: return "58030";
+        case DBStatus::CORRUPTED_DATA: return "XX001";
         default: return "XX000";
     }
 }
@@ -468,7 +471,10 @@ static std::string readFixedString(std::istream& in, size_t len) {
 }
 
 static bool validStoredIdentifier(const std::string& value, size_t fieldSize) {
-    return value.find('\0') == std::string::npos && value.size() < fieldSize;
+    return value.find('\0') == std::string::npos && value.size() < fieldSize &&
+           value.find('/') == std::string::npos &&
+           value.find('\\') == std::string::npos &&
+           value != "." && value != "..";
 }
 
 static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* error) {
@@ -1754,6 +1760,9 @@ DBStatus StorageEngine::createView(const std::string& dbname,
                                     const std::string& viewname,
                                     const std::string& sql) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (viewname.empty() || !validStoredIdentifier(viewname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto vdir = viewsDir(dbname);
     if (!std::filesystem::exists(vdir)) {
         std::filesystem::create_directories(vdir);
@@ -1767,6 +1776,9 @@ DBStatus StorageEngine::createView(const std::string& dbname,
 DBStatus StorageEngine::dropView(const std::string& dbname,
                                   const std::string& viewname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (viewname.empty() || !validStoredIdentifier(viewname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto path = viewPath(dbname, viewname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::filesystem::remove(path);
@@ -1821,7 +1833,8 @@ DBStatus StorageEngine::dropCollation(const std::string& dbname,
 }
 
 bool StorageEngine::viewExists(const std::string& dbname,
-                                const std::string& viewname) const {
+                               const std::string& viewname) const {
+    if (viewname.empty() || !validStoredIdentifier(viewname, MAX_TABLE_NAME_LEN)) return false;
     return std::filesystem::exists(viewPath(dbname, viewname));
 }
 
@@ -2465,17 +2478,21 @@ static std::filesystem::path schemaMarkerPath(const std::string& dbname,
 DBStatus StorageEngine::createSchema(const std::string& dbname,
                                      const std::string& schemaname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (schemaname.empty() || !validStoredIdentifier(schemaname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto path = schemaMarkerPath(dbname, schemaname);
-    if (std::filesystem::exists(path)) return DBStatus::OK; // already exists
-    std::ofstream ofs(path);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    return DBStatus::OK;
+    if (std::filesystem::exists(path)) return DBStatus::TABLE_ALREADY_EXISTS;
+    return index_file::writeAtomically(path, "") ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::dropSchema(const std::string& dbname,
                                    const std::string& schemaname,
                                    bool cascade) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (schemaname.empty() || !validStoredIdentifier(schemaname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto path = schemaMarkerPath(dbname, schemaname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     if (cascade) {
@@ -2507,6 +2524,11 @@ DBStatus StorageEngine::renameSchema(const std::string& dbname,
                                      const std::string& oldname,
                                      const std::string& newname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (oldname.empty() || newname.empty() ||
+        !validStoredIdentifier(oldname, MAX_TABLE_NAME_LEN) ||
+        !validStoredIdentifier(newname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto oldPath = schemaMarkerPath(dbname, oldname);
     auto newPath = schemaMarkerPath(dbname, newname);
     if (!std::filesystem::exists(oldPath)) return DBStatus::TABLE_NOT_FOUND;
@@ -2653,6 +2675,9 @@ bool StorageEngine::schemaExists(const std::string& dbname,
     // New databases persist the marker as well, but validation must preserve
     // the PostgreSQL invariant that public always exists.
     if (schemaname == "public" && databaseExists(dbname)) return true;
+    if (schemaname.empty() || !validStoredIdentifier(schemaname, MAX_TABLE_NAME_LEN)) {
+        return false;
+    }
     return std::filesystem::exists(schemaMarkerPath(dbname, schemaname));
 }
 
@@ -7695,6 +7720,7 @@ std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string&
 }
 
 bool StorageEngine::databaseExists(const std::string& dbname) const {
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN)) return false;
     return std::filesystem::exists(dbPath(dbname));
 }
 
@@ -7721,11 +7747,18 @@ std::vector<std::string> StorageEngine::getDatabaseNames() const {
 
 bool StorageEngine::tableExists(const std::string& dbname,
                                  const std::string& tablename) const {
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
+        tablename.empty() || !validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) {
+        return false;
+    }
     lockManager_.setResourceNamespace(dbname);
     return std::filesystem::exists(schemaPath(dbname, tablename));
 }
 
 DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::string& charset) {
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     if (databaseExists(dbname)) return DBStatus::TABLE_ALREADY_EXISTS;
     // Embedded callers and tests may remove a database directory directly.
     // Drop every file-backed cache before reusing the name; otherwise the
@@ -7768,6 +7801,9 @@ std::string StorageEngine::getDatabaseCharset(const std::string& dbname) const {
 
 DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
 
     // Release database-owned caches before removing the directory. This
@@ -11316,6 +11352,9 @@ DBStatus StorageEngine::createSequence(const std::string& dbname,
                                         const std::string& seqname,
                                         const dbms::SequenceInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     if (std::filesystem::exists(path)) return DBStatus::TABLE_ALREADY_EXISTS;
@@ -11347,6 +11386,9 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
                                        const std::string& seqname,
                                        const dbms::SequenceInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
@@ -11432,6 +11474,9 @@ DBStatus StorageEngine::renameSequence(const std::string& dbname,
 
 DBStatus StorageEngine::dropSequence(const std::string& dbname,
                                       const std::string& seqname) {
+    if (seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
@@ -11441,6 +11486,8 @@ DBStatus StorageEngine::dropSequence(const std::string& dbname,
 
 int64_t StorageEngine::nextval(const std::string& dbname,
                                 const std::string& seqname) {
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
+        seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) return 0;
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -11519,7 +11566,9 @@ int64_t StorageEngine::nextval(const std::string& dbname,
 }
 
 int64_t StorageEngine::currval(const std::string& dbname,
-                                const std::string& seqname) {
+                               const std::string& seqname) {
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
+        seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) return 0;
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -11537,6 +11586,8 @@ int64_t StorageEngine::lastval() const {
 int64_t StorageEngine::setval(const std::string& dbname,
                                const std::string& seqname,
                                int64_t value, bool isCalled) {
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
+        seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) return 0;
     auto path = sequencePath(dbname, seqname);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -11567,6 +11618,7 @@ int64_t StorageEngine::setval(const std::string& dbname,
 
 bool StorageEngine::sequenceExists(const std::string& dbname,
                                     const std::string& seqname) const {
+    if (seqname.empty() || !validStoredIdentifier(seqname, MAX_TABLE_NAME_LEN)) return false;
     return std::filesystem::exists(sequencePath(dbname, seqname));
 }
 
@@ -11592,6 +11644,10 @@ std::vector<std::string> StorageEngine::getSequenceNames(const std::string& dbna
 
 TableSchema StorageEngine::getTableSchema(const std::string& dbname,
                                             const std::string& tablename) const {
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
+        tablename.empty() || !validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) {
+        return {};
+    }
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
         if (transactionContext().catalogSnapshot) {
@@ -23039,14 +23095,28 @@ static std::filesystem::path domainPath(const std::string& dbname) {
 
 DBStatus StorageEngine::createDomain(const std::string& dbname, const DomainInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (info.name.empty() || !validStoredIdentifier(info.name, MAX_TABLE_NAME_LEN) ||
+        info.name.find('|') != std::string::npos) {
+        return DBStatus::INVALID_ARGUMENT;
+    }
     auto path = domainPath(dbname);
     auto existing = getDomain(dbname, info.name);
     if (!existing.name.empty()) return DBStatus::TABLE_ALREADY_EXISTS;
-    std::ofstream ofs(path, std::ios::app);
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << info.name << "|" << info.baseType << "|" << info.defaultValue << "|"
-        << info.checkExpr << "|" << info.constraintName << "\n";
-    return DBStatus::OK;
+
+    std::vector<std::string> lines;
+    if (std::filesystem::exists(path)) {
+        std::ifstream input(path);
+        if (!input) return DBStatus::IO_ERROR;
+        std::string line;
+        while (std::getline(input, line)) lines.push_back(std::move(line));
+        if (input.bad()) return DBStatus::IO_ERROR;
+    }
+    std::ostringstream serialized;
+    for (const auto& line : lines) serialized << line << '\n';
+    serialized << info.name << "|" << info.baseType << "|" << info.defaultValue << "|"
+               << info.checkExpr << "|" << info.constraintName << '\n';
+    return index_file::writeAtomically(path, serialized.str())
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::alterDomain(const std::string& dbname, const std::string& name,

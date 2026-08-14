@@ -11,6 +11,8 @@
 
 2026-08-14 数据库 DDL 错误传播收敛：`CREATE DATABASE`/`DROP DATABASE` 只有在存储层明确返回 `OK` 时才报告成功，目录创建、持久化和清理失败均 fail-closed 并映射 SQLSTATE；异常路径回归已纳入完整测试。
 
+2026-08-14 存储名称与 sidecar 边界收敛：数据库、schema、table、view、sequence、domain 的文件组件拒绝路径分隔符和特殊路径名；schema/domain 元数据创建采用原子发布，重复 schema 和 `IF NOT EXISTS` 行为已纳入 DDL 回归。
+
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、对齐、CRC、`xl_prev` 链和 segment 尾部严格校验；

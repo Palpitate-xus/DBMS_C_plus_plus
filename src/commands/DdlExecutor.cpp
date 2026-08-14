@@ -1563,6 +1563,7 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -1574,6 +1575,15 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
         return true;
     }
     DBStatus res = g_engine.createSchema(s.currentDB, name);
+    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
+        if (stmt->ifNotExists) {
+            std::cout << "NOTICE: schema \"" << name << "\" already exists, skipping"
+                      << std::endl;
+            return false;
+        }
+        std::cout << "ERROR: schema \"" << name << "\" already exists" << std::endl;
+        return true;
+    }
     if (res != DBStatus::OK) {
         std::cout << "CREATE SCHEMA failed" << std::endl;
         return true;
@@ -1582,8 +1592,13 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
     try {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
         cat.createNamespace(name, INVALID_OID);
+        if (!cat.persistAll()) {
+            std::cout << "CREATE SCHEMA catalog persistence failed" << std::endl;
+            return true;
+        }
     } catch (const std::exception& e) {
-        std::cerr << "WARNING: catalog schema registration failed: " << e.what() << std::endl;
+        std::cerr << "CREATE SCHEMA catalog registration failed: " << e.what() << std::endl;
+        return true;
     }
 
     txn.recordCreate(DdlObjectKind::Schema, name);
@@ -3330,6 +3345,11 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     DBStatus res = g_engine.createDomain(s.currentDB, info);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         std::cout << "Domain " << info.name << " already exists" << std::endl;
+        return true;
+    }
+    if (res != DBStatus::OK) {
+        std::cout << "CREATE DOMAIN failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
     txn.recordCreate(DdlObjectKind::Domain, info.name);

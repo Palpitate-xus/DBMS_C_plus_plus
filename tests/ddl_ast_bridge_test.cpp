@@ -134,6 +134,11 @@ static void test_create_database_schema() {
     assert(!err);
     assert(g_engine.schemaExists(db, "myschema"));
 
+    // CREATE SCHEMA is not silently idempotent; the explicit PostgreSQL
+    // spelling is required when an existing namespace should be accepted.
+    assert(ddl.executeSql("CREATE SCHEMA myschema", s));
+    assert(!ddl.executeSql("CREATE SCHEMA IF NOT EXISTS myschema", s));
+
     dbms::CatalogManager& cat = g_engine.catalogService().get(db);
     assert(cat.findNamespaceByName("myschema") != nullptr);
 
@@ -353,6 +358,21 @@ static void test_database_storage_errors_are_not_success() {
     std::cout << "[DDL] database storage errors propagate OK" << std::endl;
 }
 
+static void test_domain_storage_errors_are_not_success() {
+    const std::string db = testDbPath("domain_storage_error");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    std::filesystem::create_directory(std::filesystem::path(db) / ".domains");
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(ddl.executeSql("CREATE DOMAIN broken_domain AS INT", s));
+
+    cleanup(db);
+    std::cout << "[DDL] domain storage errors propagate OK" << std::endl;
+}
+
 int main() {
     cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
@@ -366,6 +386,7 @@ int main() {
     test_alter_table_metadata_actions();
     test_long_identifiers_round_trip();
     test_database_storage_errors_are_not_success();
+    test_domain_storage_errors_are_not_success();
     std::cout << "[DDL] all passed" << std::endl;
     return 0;
 }

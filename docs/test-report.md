@@ -41,6 +41,10 @@ checkpoint 文件必须是精确的当前三字段格式且拒绝尾随数据；
 本轮新增数据库 DDL 错误传播回归：构造数据库目录创建失败时，`CREATE DATABASE` 返回错误并输出
 SQLSTATE，不会伪报成功；`DROP DATABASE` 也只接受 `StorageEngine::OK` 为成功结果。
 
+本轮新增 DDL 路径与重复对象回归：重复 `CREATE SCHEMA` 必须失败，`IF NOT EXISTS` 才跳过；损坏
+domain sidecar、非法数据库路径、序列/视图/关系名称路径组件均 fail-closed，schema marker 和
+domain 创建使用原子发布。
+
 本轮修复 `planner_runtime_stats_test` 的后台 writer 清理竞态：测试 teardown 通过 `dropDatabase()` 释放
 数据库缓存与 WAL 所有权后再清理目录；专项测试和完整回归均通过，最终基线保持 `PASS=139 FAIL=0`。
 
