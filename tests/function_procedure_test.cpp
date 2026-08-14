@@ -5,6 +5,7 @@
 #include "expression/ExprEvaluator.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include "test_utils.h"
 
@@ -128,6 +129,71 @@ static void test_builtin_volatility() {
     std::cout << "[FUNCTION] builtin volatility OK" << std::endl;
 }
 
+static void test_metadata_sidecar_failures_and_duplicates() {
+    std::string db = testDbPath("func_metadata_failures");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    // A sidecar path occupied by a regular file must never be treated as a
+    // successful object definition.
+    {
+        std::ofstream blocker(std::filesystem::path(db) / ".views");
+        blocker << "not a directory";
+    }
+    assert(g_engine.createView(db, "blocked_view", "SELECT 1") ==
+           dbms::DBStatus::IO_ERROR);
+    std::filesystem::remove(std::filesystem::path(db) / ".views");
+
+    {
+        std::ofstream blocker(std::filesystem::path(db) / ".funcs");
+        blocker << "not a directory";
+    }
+    assert(g_engine.createUDF(db, "blocked_function", "x", "x + 1") ==
+           dbms::DBStatus::IO_ERROR);
+    std::filesystem::remove(std::filesystem::path(db) / ".funcs");
+
+    {
+        std::ofstream blocker(std::filesystem::path(db) / ".tvf");
+        blocker << "not a directory";
+    }
+    assert(g_engine.createTVF(db, "blocked_tvf", "x", "SELECT x") ==
+           dbms::DBStatus::IO_ERROR);
+    std::filesystem::remove(std::filesystem::path(db) / ".tvf");
+
+    {
+        std::ofstream blocker(std::filesystem::path(db) / ".procs");
+        blocker << "not a directory";
+    }
+    assert(g_engine.createProcedure(db, "blocked_procedure", {}, {"SELECT 1"}) ==
+           dbms::DBStatus::IO_ERROR);
+    std::filesystem::remove(std::filesystem::path(db) / ".procs");
+
+    assert(g_engine.createView(db, "duplicate_view", "SELECT 1") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createView(db, "duplicate_view", "SELECT 2") ==
+           dbms::DBStatus::TABLE_ALREADY_EXISTS);
+    assert(g_engine.getViewSQL(db, "duplicate_view") == "SELECT 1");
+    assert(g_engine.createUDF(db, "duplicate_function", "x", "x + 1") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createUDF(db, "duplicate_function", "x", "x + 2") ==
+           dbms::DBStatus::TABLE_ALREADY_EXISTS);
+    assert(g_engine.getUDF(db, "duplicate_function").expression == "x + 1");
+    assert(g_engine.createTVF(db, "duplicate_tvf", "x", "SELECT x") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createTVF(db, "duplicate_tvf", "x", "SELECT x + 1") ==
+           dbms::DBStatus::TABLE_ALREADY_EXISTS);
+    assert(g_engine.getTVFSQL(db, "duplicate_tvf") == "SELECT x");
+    assert(g_engine.createProcedure(db, "duplicate_procedure", {}, {"SELECT 1"}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createProcedure(db, "duplicate_procedure", {}, {"SELECT 2"}) ==
+           dbms::DBStatus::TABLE_ALREADY_EXISTS);
+    assert(g_engine.getProcedureStatements(db, "duplicate_procedure") ==
+           std::vector<std::string>{"SELECT 1"});
+
+    cleanup(db);
+    std::cout << "[FUNCTION/PROCEDURE] metadata failure and duplicate guards OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_create_function_single_param();
@@ -136,6 +202,7 @@ int main() {
     test_builtin_volatility();
     test_create_tvf();
     test_create_procedure();
+    test_metadata_sidecar_failures_and_duplicates();
     std::cout << "[FUNCTION/PROCEDURE] all passed" << std::endl;
     return 0;
 }

@@ -45,6 +45,9 @@ SQLSTATE，不会伪报成功；`DROP DATABASE` 也只接受 `StorageEngine::OK`
 domain sidecar、非法数据库路径、序列/视图/关系名称路径组件均 fail-closed，schema marker 和
 domain 创建使用原子发布。
 
+本轮新增辅助对象 sidecar 回归：view、function、TVF、procedure 的元数据父路径被普通文件占用时
+返回 `IO_ERROR`，正常定义使用原子发布，重复定义返回 already-exists 且不会覆盖旧内容。
+
 本轮修复 `planner_runtime_stats_test` 的后台 writer 清理竞态：测试 teardown 通过 `dropDatabase()` 释放
 数据库缓存与 WAL 所有权后再清理目录；专项测试和完整回归均通过，最终基线保持 `PASS=139 FAIL=0`。
 

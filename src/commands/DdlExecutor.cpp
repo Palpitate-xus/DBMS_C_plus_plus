@@ -3692,7 +3692,8 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
         return true;
     }
     if (res != DBStatus::OK) {
-        std::cout << "CREATE VIEW failed" << std::endl;
+        std::cout << "CREATE VIEW failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
 
@@ -3971,7 +3972,8 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     }
 
     if (res != DBStatus::OK) {
-        std::cout << "CREATE FUNCTION failed" << std::endl;
+        std::cout << "CREATE FUNCTION failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
 
@@ -4022,7 +4024,8 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
 
     DBStatus res = g_engine.createProcedure(s.currentDB, stmt->funcName, params, stmts);
     if (res != DBStatus::OK) {
-        std::cout << "CREATE PROCEDURE failed" << std::endl;
+        std::cout << "CREATE PROCEDURE failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
 

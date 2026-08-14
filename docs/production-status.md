@@ -14,6 +14,8 @@
 
 2026-08-14 DDL 路径边界收紧：数据库、schema、table、view、sequence 和 domain 的文件组件拒绝路径分隔符、`.`/`..` 及空名称；schema marker 和 domain sidecar 创建采用原子发布，重复 schema 只有 `IF NOT EXISTS` 才成功，非法路径不会被当作关系文件访问。
 
+2026-08-14 辅助对象 sidecar 收敛：view、function、table-valued function、procedure 的定义文件统一使用安全对象名、原子发布和明确的 `IO_ERROR`；父路径被普通文件占用时 DDL fail-closed，重复定义不再覆盖旧文件。完整函数/过程回归保持通过。
+
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、8 字节对齐、CRC、记录链和 segment 尾部在打开时严格验证；`xl_prev` 保留截断历史时允许指向已删除 segment，但禁止指向当前保留流的未来位置。恢复 heap page image 必须通过当前 8 KiB 页 checksum/layout 校验，page ID 只能连续扩展一页，非法 page image、越界 page ID 和损坏 WAL 均 fail-closed，避免无界分配或把损坏页写入关系。`XLogFlush` 只接受当前 WAL 流中的有效记录位置，并同步覆盖记录所在完整 segment。
 
 2026-08-13 DDL 路由收敛：删除 `src/main.cpp` 中已被 typed bridge 完整覆盖的旧字符串实现，

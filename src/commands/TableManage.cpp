@@ -477,6 +477,35 @@ static bool validStoredIdentifier(const std::string& value, size_t fieldSize) {
            value != "." && value != "..";
 }
 
+// Auxiliary object definitions are stored in line-oriented sidecars.  Keep
+// their object names safe both as path components and as metadata fields; a
+// delimiter or newline here would make the definition ambiguous on reload.
+static bool validMetadataObjectName(const std::string& value) {
+    if (value.empty() || !validStoredIdentifier(value, MAX_TABLE_NAME_LEN)) {
+        return false;
+    }
+    for (char c : value) {
+        if (c == '|' || c == ':' || c == ',' || c == '\n' || c == '\r') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ensureMetadataDirectory(const std::filesystem::path& path) {
+    std::error_code error;
+    if (std::filesystem::exists(path, error)) {
+        return !error && std::filesystem::is_directory(path, error) && !error;
+    }
+    if (!std::filesystem::create_directories(path, error) && error) return false;
+    return std::filesystem::is_directory(path, error) && !error;
+}
+
+static DBStatus persistMetadata(const std::filesystem::path& path,
+                                const std::string& contents) {
+    return index_file::writeAtomically(path, contents) ? DBStatus::OK : DBStatus::IO_ERROR;
+}
+
 static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* error) {
     auto reject = [&](const std::string& value, size_t fieldSize, const char* kind) {
         if (validStoredIdentifier(value, fieldSize)) return false;
@@ -1760,28 +1789,27 @@ DBStatus StorageEngine::createView(const std::string& dbname,
                                     const std::string& viewname,
                                     const std::string& sql) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (viewname.empty() || !validStoredIdentifier(viewname, MAX_TABLE_NAME_LEN)) {
+    if (!validMetadataObjectName(viewname)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto vdir = viewsDir(dbname);
-    if (!std::filesystem::exists(vdir)) {
-        std::filesystem::create_directories(vdir);
+    if (!ensureMetadataDirectory(vdir)) return DBStatus::IO_ERROR;
+    if (std::filesystem::exists(viewPath(dbname, viewname))) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
     }
-    std::ofstream ofs(viewPath(dbname, viewname));
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << sql;
-    return DBStatus::OK;
+    return persistMetadata(viewPath(dbname, viewname), sql);
 }
 
 DBStatus StorageEngine::dropView(const std::string& dbname,
                                   const std::string& viewname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (viewname.empty() || !validStoredIdentifier(viewname, MAX_TABLE_NAME_LEN)) {
+    if (!validMetadataObjectName(viewname)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = viewPath(dbname, viewname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::filesystem::remove(path);
+    std::error_code error;
+    if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -1834,12 +1862,13 @@ DBStatus StorageEngine::dropCollation(const std::string& dbname,
 
 bool StorageEngine::viewExists(const std::string& dbname,
                                const std::string& viewname) const {
-    if (viewname.empty() || !validStoredIdentifier(viewname, MAX_TABLE_NAME_LEN)) return false;
+    if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) return false;
     return std::filesystem::exists(viewPath(dbname, viewname));
 }
 
 std::string StorageEngine::getViewSQL(const std::string& dbname,
                                        const std::string& viewname) const {
+    if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) return "";
     auto path = viewPath(dbname, viewname);
     if (!std::filesystem::exists(path)) return "";
     std::ifstream ifs(path);
@@ -1851,6 +1880,7 @@ std::string StorageEngine::getViewSQL(const std::string& dbname,
 
 std::string StorageEngine::getViewBaseTable(const std::string& dbname,
                                              const std::string& viewname) const {
+    if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) return "";
     auto path = viewPath(dbname, viewname);
     if (!std::filesystem::exists(path)) return "";
     std::ifstream ifs(path);
@@ -1866,6 +1896,7 @@ std::string StorageEngine::getViewBaseTable(const std::string& dbname,
 
 std::string StorageEngine::getViewCheckOption(const std::string& dbname,
                                                const std::string& viewname) const {
+    if (!databaseExists(dbname) || !validMetadataObjectName(viewname)) return "";
     auto path = viewPath(dbname, viewname);
     if (!std::filesystem::exists(path)) return "";
     std::ifstream ifs(path);
@@ -2280,6 +2311,7 @@ bool StorageEngine::validateViewCheckOption(
 
 std::vector<std::string> StorageEngine::getViewNames(const std::string& dbname) const {
     std::vector<std::string> result;
+    if (!databaseExists(dbname)) return result;
     auto vdir = viewsDir(dbname);
     if (!std::filesystem::exists(vdir)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(vdir)) {
@@ -2368,44 +2400,49 @@ DBStatus StorageEngine::createProcedure(const std::string& dbname,
                                          const std::vector<ProcParam>& params,
                                          const std::vector<std::string>& statements) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validMetadataObjectName(procname)) return DBStatus::INVALID_ARGUMENT;
     auto pdir = proceduresDir(dbname);
-    if (!std::filesystem::exists(pdir)) {
-        std::filesystem::create_directories(pdir);
+    if (!ensureMetadataDirectory(pdir)) return DBStatus::IO_ERROR;
+    if (std::filesystem::exists(procedurePath(dbname, procname))) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
     }
-    std::ofstream ofs(procedurePath(dbname, procname));
-    if (!ofs) return DBStatus::INVALID_VALUE;
+    std::ostringstream serialized;
     // Write params metadata line first
     if (!params.empty()) {
-        ofs << "PARAMS:";
+        serialized << "PARAMS:";
         for (size_t i = 0; i < params.size(); ++i) {
-            if (i > 0) ofs << ',';
-            ofs << params[i].name << ':' << params[i].mode << ':' << params[i].type;
+            if (i > 0) serialized << ',';
+            serialized << params[i].name << ':' << params[i].mode << ':' << params[i].type;
         }
-        ofs << '\n';
+        serialized << '\n';
     }
     for (const auto& stmt : statements) {
-        ofs << stmt << '\n';
+        serialized << stmt << '\n';
     }
-    return DBStatus::OK;
+    return persistMetadata(procedurePath(dbname, procname), serialized.str());
 }
 
 DBStatus StorageEngine::dropProcedure(const std::string& dbname,
                                        const std::string& procname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validMetadataObjectName(procname)) return DBStatus::INVALID_ARGUMENT;
     auto path = procedurePath(dbname, procname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::filesystem::remove(path);
+    std::error_code error;
+    if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
 bool StorageEngine::procedureExists(const std::string& dbname,
                                     const std::string& procname) const {
-    return std::filesystem::exists(procedurePath(dbname, procname));
+    return databaseExists(dbname) && validMetadataObjectName(procname) &&
+           std::filesystem::exists(procedurePath(dbname, procname));
 }
 
 std::vector<std::string> StorageEngine::getProcedureStatements(
     const std::string& dbname, const std::string& procname) const {
     std::vector<std::string> result;
+    if (!databaseExists(dbname) || !validMetadataObjectName(procname)) return result;
     auto path = procedurePath(dbname, procname);
     std::ifstream ifs(path);
     if (!ifs) return result;
@@ -2421,6 +2458,7 @@ std::vector<std::string> StorageEngine::getProcedureStatements(
 std::vector<StorageEngine::ProcParam> StorageEngine::getProcedureParams(
     const std::string& dbname, const std::string& procname) const {
     std::vector<ProcParam> result;
+    if (!databaseExists(dbname) || !validMetadataObjectName(procname)) return result;
     auto path = procedurePath(dbname, procname);
     std::ifstream ifs(path);
     if (!ifs) return result;
@@ -2453,6 +2491,7 @@ std::vector<StorageEngine::ProcParam> StorageEngine::getProcedureParams(
 
 std::vector<std::string> StorageEngine::getProcedureNames(const std::string& dbname) const {
     std::vector<std::string> result;
+    if (!databaseExists(dbname)) return result;
     auto pdir = proceduresDir(dbname);
     if (!std::filesystem::exists(pdir)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(pdir)) {
@@ -2736,14 +2775,15 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& expression,
                                    char provolatile) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
-    if (!std::filesystem::exists(fdir)) {
-        std::filesystem::create_directories(fdir);
+    if (!ensureMetadataDirectory(fdir)) return DBStatus::IO_ERROR;
+    if (std::filesystem::exists(udfPath(dbname, funcname))) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
     }
-    std::ofstream ofs(udfPath(dbname, funcname));
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << param << "\n" << expression << "\n" << provolatile << "\n";
-    return DBStatus::OK;
+    std::ostringstream serialized;
+    serialized << param << "\n" << expression << "\n" << provolatile << "\n";
+    return persistMetadata(udfPath(dbname, funcname), serialized.str());
 }
 
 DBStatus StorageEngine::createUDF(const std::string& dbname,
@@ -2753,38 +2793,43 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& expression,
                                    char provolatile) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
-    if (!std::filesystem::exists(fdir)) {
-        std::filesystem::create_directories(fdir);
+    if (!ensureMetadataDirectory(fdir)) return DBStatus::IO_ERROR;
+    if (std::filesystem::exists(udfPath(dbname, funcname))) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
     }
-    std::ofstream ofs(udfPath(dbname, funcname));
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << "PARAMS:";
+    std::ostringstream serialized;
+    serialized << "PARAMS:";
     for (size_t i = 0; i < params.size(); ++i) {
-        if (i > 0) ofs << ',';
-        ofs << params[i] << ':' << (i < types.size() ? types[i] : "");
+        if (i > 0) serialized << ',';
+        serialized << params[i] << ':' << (i < types.size() ? types[i] : "");
     }
-    ofs << "\n" << expression << "\n" << provolatile << "\n";
-    return DBStatus::OK;
+    serialized << "\n" << expression << "\n" << provolatile << "\n";
+    return persistMetadata(udfPath(dbname, funcname), serialized.str());
 }
 
 DBStatus StorageEngine::dropUDF(const std::string& dbname,
                                  const std::string& funcname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto path = udfPath(dbname, funcname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::filesystem::remove(path);
+    std::error_code error;
+    if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
 bool StorageEngine::udfExists(const std::string& dbname,
                               const std::string& funcname) const {
-    return std::filesystem::exists(udfPath(dbname, funcname));
+    return databaseExists(dbname) && validMetadataObjectName(funcname) &&
+           std::filesystem::exists(udfPath(dbname, funcname));
 }
 
 StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
                                               const std::string& funcname) const {
     UDFInfo info;
+    if (!databaseExists(dbname) || !validMetadataObjectName(funcname)) return info;
     auto path = udfPath(dbname, funcname);
     std::ifstream ifs(path);
     if (!ifs) return info;
@@ -2827,6 +2872,7 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
 
 std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) const {
     std::vector<std::string> result;
+    if (!databaseExists(dbname)) return result;
     auto fdir = udfDir(dbname);
     if (!std::filesystem::exists(fdir)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(fdir)) {
@@ -2858,32 +2904,37 @@ DBStatus StorageEngine::createTVF(const std::string& dbname,
                                    const std::string& param,
                                    const std::string& sql) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto tdir = tvfDir(dbname);
-    if (!std::filesystem::exists(tdir)) {
-        std::filesystem::create_directories(tdir);
+    if (!ensureMetadataDirectory(tdir)) return DBStatus::IO_ERROR;
+    if (std::filesystem::exists(tvfPath(dbname, funcname))) {
+        return DBStatus::TABLE_ALREADY_EXISTS;
     }
-    std::ofstream ofs(tvfPath(dbname, funcname));
-    if (!ofs) return DBStatus::INVALID_VALUE;
-    ofs << param << "\n" << sql << "\n";
-    return DBStatus::OK;
+    std::ostringstream serialized;
+    serialized << param << "\n" << sql << "\n";
+    return persistMetadata(tvfPath(dbname, funcname), serialized.str());
 }
 
 DBStatus StorageEngine::dropTVF(const std::string& dbname,
                                  const std::string& funcname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto path = tvfPath(dbname, funcname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::filesystem::remove(path);
+    std::error_code error;
+    if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
 bool StorageEngine::tvfExists(const std::string& dbname,
                               const std::string& funcname) const {
-    return std::filesystem::exists(tvfPath(dbname, funcname));
+    return databaseExists(dbname) && validMetadataObjectName(funcname) &&
+           std::filesystem::exists(tvfPath(dbname, funcname));
 }
 
 std::string StorageEngine::getTVFSQL(const std::string& dbname,
                                       const std::string& funcname) const {
+    if (!databaseExists(dbname) || !validMetadataObjectName(funcname)) return "";
     auto path = tvfPath(dbname, funcname);
     if (!std::filesystem::exists(path)) return "";
     std::ifstream ifs(path);
@@ -2895,7 +2946,8 @@ std::string StorageEngine::getTVFSQL(const std::string& dbname,
 }
 
 std::string StorageEngine::getTVFParam(const std::string& dbname,
-                                        const std::string& funcname) const {
+                                      const std::string& funcname) const {
+    if (!databaseExists(dbname) || !validMetadataObjectName(funcname)) return "";
     auto path = tvfPath(dbname, funcname);
     if (!std::filesystem::exists(path)) return "";
     std::ifstream ifs(path);
@@ -2907,6 +2959,7 @@ std::string StorageEngine::getTVFParam(const std::string& dbname,
 
 std::vector<std::string> StorageEngine::getTVFNames(const std::string& dbname) const {
     std::vector<std::string> result;
+    if (!databaseExists(dbname)) return result;
     auto tdir = tvfDir(dbname);
     if (!std::filesystem::exists(tdir)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(tdir)) {

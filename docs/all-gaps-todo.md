@@ -13,6 +13,8 @@
 
 2026-08-14 存储名称与 sidecar 边界收敛：数据库、schema、table、view、sequence、domain 的文件组件拒绝路径分隔符和特殊路径名；schema/domain 元数据创建采用原子发布，重复 schema 和 `IF NOT EXISTS` 行为已纳入 DDL 回归。
 
+2026-08-14 辅助对象 sidecar 收敛：view、function、TVF、procedure 的定义文件使用安全对象名和原子发布；父目录损坏、发布失败和重复定义均不再伪报成功或覆盖已有定义，新增专项回归。
+
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、对齐、CRC、`xl_prev` 链和 segment 尾部严格校验；
