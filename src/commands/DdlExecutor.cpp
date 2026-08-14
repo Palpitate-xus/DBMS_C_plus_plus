@@ -2547,27 +2547,115 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     return false;
 }
 
-// Drop any sequence files owned by the named table.
-static void dropOwnedSequences(const std::string& dbname,
-                               const std::string& logicalTableName) {
-    auto dir = std::filesystem::path(dbname);
-    if (!std::filesystem::exists(dir)) return;
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string fname = entry.path().filename().string();
-        if (fname.size() <= 4 || fname.substr(fname.size() - 4) != ".seq") continue;
-        std::string seqname = fname.substr(0, fname.size() - 4);
-        std::ifstream ifs(entry.path());
-        if (!ifs) continue;
-        std::vector<std::string> tokens;
-        std::string tok;
-        while (ifs >> tok) tokens.push_back(tok);
-        if (tokens.size() >= 10) {
-            if (tokens[8] == logicalTableName) {
-                std::filesystem::remove(entry.path());
+struct PhysicalCascadeAction {
+    enum class Kind { Table, Index, Sequence };
+
+    Kind kind = Kind::Table;
+    std::string name;
+    std::string tableName;
+    std::string accessMethod;
+    std::string key;
+};
+
+// Catalog CASCADE plans are dependency-complete, but catalog deletion alone
+// is not enough: every file-backed dependent relation must be removed before
+// the catalog plan is published.  Build the physical worklist first so an
+// unresolvable index can fail closed without having changed storage.
+static bool buildPhysicalCascadeActions(
+    const CatalogManager& catalog,
+    StorageEngine& engine,
+    const std::string& dbname,
+    Oid rootOid,
+    const CatalogManager::DropPlan& plan,
+    std::vector<PhysicalCascadeAction>& actions,
+    std::string& error) {
+    for (const auto& object : plan.objectsToDrop) {
+        if (object.first != PgClassOid_Class || object.second == rootOid) continue;
+
+        const PgClassRow* relation = catalog.findClass(object.second);
+        if (!relation) {
+            error = "dependent catalog relation is missing";
+            return false;
+        }
+        const PgClassRow rel = *relation;
+
+        if (rel.relkind == 'r') {
+            actions.push_back({PhysicalCascadeAction::Kind::Table, rel.relname, "", "", ""});
+            continue;
+        }
+        if (rel.relkind == 'S') {
+            actions.push_back({PhysicalCascadeAction::Kind::Sequence, rel.relname, "", "", ""});
+            continue;
+        }
+        if (rel.relkind != 'i') continue;
+
+        std::string tableName;
+        for (const auto& dependency :
+             catalog.findDepends(PgClassOid_Class, rel.oid)) {
+            if (dependency.refclassid != PgClassOid_Class) continue;
+            const PgClassRow* referenced = catalog.findClass(dependency.refobjid);
+            if (referenced && referenced->relkind == 'r') {
+                tableName = referenced->relname;
+                break;
             }
         }
+        if (tableName.empty()) {
+            error = "dependent index has no owning table";
+            return false;
+        }
+
+        bool resolved = false;
+        auto named = engine.getNamedIndex(dbname, tableName, rel.relname);
+        if (named) {
+            actions.push_back({PhysicalCascadeAction::Kind::Index, rel.relname,
+                               tableName, named->accessMethod, named->key});
+            resolved = true;
+        }
+        if (!resolved) {
+            for (const auto& composite : engine.getCompositeIndexes(dbname, tableName)) {
+                if (composite.name == rel.relname) {
+                    actions.push_back({PhysicalCascadeAction::Kind::Index, rel.relname,
+                                       tableName, "composite", composite.name});
+                    resolved = true;
+                    break;
+                }
+            }
+        }
+        if (!resolved) {
+            error = "dependent index has no physical metadata";
+            return false;
+        }
     }
+    return true;
+}
+
+static bool dropPhysicalCascadeAction(StorageEngine& engine,
+                                      const std::string& dbname,
+                                      const PhysicalCascadeAction& action) {
+    DBStatus status = DBStatus::INVALID_VALUE;
+    if (action.kind == PhysicalCascadeAction::Kind::Table) {
+        status = engine.dropTable(dbname, action.name);
+    } else if (action.kind == PhysicalCascadeAction::Kind::Sequence) {
+        status = engine.dropSequence(dbname, action.name);
+    } else if (action.accessMethod == "composite") {
+        status = engine.dropCompositeIndex(dbname, action.tableName, action.key);
+    } else if (action.accessMethod == "hash") {
+        status = engine.dropHashIndex(dbname, action.tableName, action.key);
+    } else if (action.accessMethod == "gin") {
+        status = engine.dropGinIndex(dbname, action.tableName, action.key);
+    } else if (action.accessMethod == "gist") {
+        status = engine.dropGiSTIndex(dbname, action.tableName, action.key);
+    } else if (action.accessMethod == "brin") {
+        status = engine.dropBrinIndex(dbname, action.tableName, action.key);
+    } else if (action.accessMethod == "spgist") {
+        status = engine.dropSPGiSTIndex(dbname, action.tableName, action.key);
+    } else {
+        status = engine.dropIndex(dbname, action.tableName, action.key);
+    }
+    // A missing physical file is already in the desired post-drop state; the
+    // catalog plan still needs to remove its stale metadata.  Other failures
+    // must abort and let DdlTransaction restore the snapshot.
+    return status == DBStatus::OK || status == DBStatus::TABLE_NOT_FOUND;
 }
 
 bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
@@ -2603,6 +2691,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
     CatalogManager* catalogManager = nullptr;
     CatalogManager::DropPlan catalogDropPlan;
     bool hasCatalogDropPlan = false;
+    Oid catalogRootOid = INVALID_OID;
     const auto catalogQualifiedName = CatalogService::logicalName(tname);
     const std::string catalogLogicalName = catalogQualifiedName.schema.empty()
         ? catalogQualifiedName.name
@@ -2612,6 +2701,7 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         catalogManager = &cat;
         const PgClassRow* cls = cat.resolveRelation(catalogLogicalName, {"public"});
         if (cls) {
+            catalogRootOid = cls->oid;
             auto behavior = stmt->cascade
                                 ? CatalogManager::DropBehavior::Cascade
                                 : CatalogManager::DropBehavior::Restrict;
@@ -2629,7 +2719,25 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
         std::cerr << "WARNING: catalog drop check failed: " << e.what() << std::endl;
     }
 
+    std::vector<PhysicalCascadeAction> physicalCascadeActions;
+    if (stmt->cascade && hasCatalogDropPlan && catalogManager) {
+        std::string error;
+        if (!buildPhysicalCascadeActions(*catalogManager, g_engine, s.currentDB,
+                                          catalogRootOid,
+                                          catalogDropPlan, physicalCascadeActions, error)) {
+            std::cout << "DROP TABLE CASCADE planning failed: " << error << std::endl;
+            return true;
+        }
+    }
+
     txn.markSnapshotDirty();
+    for (const auto& action : physicalCascadeActions) {
+        if (!dropPhysicalCascadeAction(g_engine, s.currentDB, action)) {
+            std::cout << "DROP TABLE CASCADE physical cleanup failed for "
+                      << action.name << std::endl;
+            return true;
+        }
+    }
     DBStatus res = g_engine.dropTable(s.currentDB, tname);
     if (res != DBStatus::OK) {
         std::cout << "DROP TABLE failed" << std::endl;
@@ -2641,7 +2749,6 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
             std::cout << "DROP TABLE catalog cleanup failed: " << err << std::endl;
             return true;
         }
-        if (stmt->cascade) dropOwnedSequences(s.currentDB, catalogLogicalName);
     }
     txn.recordDrop(DdlObjectKind::Table, tname);
     if (!txn.commit()) return true;

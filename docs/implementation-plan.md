@@ -13,6 +13,8 @@
 
 2026-08-14 增量审计：view/function/TVF/procedure sidecar 统一通过原子发布写入，目录故障和发布失败返回 `IO_ERROR`，重复定义返回 already-exists，避免旧定义被静默覆盖；新增元数据故障与重复对象回归。
 
+2026-08-14 增量审计：`DROP TABLE CASCADE` 的 catalog 依赖计划现在同步生成并执行从属表、序列和索引的物理删除动作；物理清理完成前不应用 catalog 计划，新增依赖表+索引残留回归，完整依赖图与视图/函数等对象目录化仍待补齐。
+
 2026-08-12 增量审计：规范 DDL 执行器与 `main.cpp` legacy 兼容分发统一使用隐式提交失败守卫；提交失败会输出 SQLSTATE 并停止后续 DDL，避免不同入口产生不一致的成功结果。
 
 2026-08-11 增量审计：`LockManager` 修复 row/page 等待路径的资源生命周期、按线程锁 token 归属、表锁重入与共享锁升级，并在等待期间持续检测 wait-for graph；新增双线程死锁、重入/升级和 row token 竞争回归。完整 PostgreSQL 锁模式矩阵、页/索引 predicate lock 和 wait events 仍待后续。

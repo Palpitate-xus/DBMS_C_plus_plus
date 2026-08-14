@@ -33,6 +33,7 @@ static void test_drop_table_cascade_removes_dependents() {
 
     ddl.executeSql("CREATE TABLE parent (id INT PRIMARY KEY)", s);
     ddl.executeSql("CREATE TABLE child (id INT, pid INT)", s);
+    assert(!ddl.executeSql("CREATE INDEX child_id_idx ON child (id)", s));
 
     dbms::CatalogManager& cat = g_engine.catalogService().get(db);
     const auto* nsPublic = cat.findNamespaceByName("public");
@@ -60,12 +61,13 @@ static void test_drop_table_cascade_removes_dependents() {
     assert(g_engine.tableExists(db, "parent"));
     assert(cat.findClassByName("parent", nsPublic->oid) != nullptr);
 
-    // CASCADE should drop parent from both catalog and storage, and remove
-    // the dependent child row from the catalog. The child's storage file is
-    // not touched by this catalog-only dependency pass.
+    // CASCADE must remove dependent catalog rows and their physical relation
+    // and index files before publishing the catalog deletion plan.
     err = ddl.executeSql("DROP TABLE parent CASCADE", s);
     assert(!err);
     assert(!g_engine.tableExists(db, "parent"));
+    assert(!g_engine.tableExists(db, "child"));
+    assert(!g_engine.getNamedIndex(db, "child", "child_id_idx"));
     assert(cat.findClassByName("parent", nsPublic->oid) == nullptr);
     assert(cat.findClassByName("child", nsPublic->oid) == nullptr);
 
