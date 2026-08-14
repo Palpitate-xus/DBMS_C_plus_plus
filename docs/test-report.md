@@ -38,6 +38,9 @@
 本轮新增数据库生命周期持久化回归：新建数据库的 `tlist.lst`、字符集和 public schema 标记必须完整，
 checkpoint 文件必须是精确的当前三字段格式且拒绝尾随数据；完整回归继续验证物理备份标记和恢复路径。
 
+本轮新增数据库 DDL 错误传播回归：构造数据库目录创建失败时，`CREATE DATABASE` 返回错误并输出
+SQLSTATE，不会伪报成功；`DROP DATABASE` 也只接受 `StorageEngine::OK` 为成功结果。
+
 本轮修复 `planner_runtime_stats_test` 的后台 writer 清理竞态：测试 teardown 通过 `dropDatabase()` 释放
 数据库缓存与 WAL 所有权后再清理目录；专项测试和完整回归均通过，最终基线保持 `PASS=139 FAIL=0`。
 

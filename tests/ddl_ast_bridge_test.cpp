@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include "test_utils.h"
 
@@ -330,6 +331,28 @@ static void test_drop_database_evicts_catalog() {
     std::cout << "[DDL] DROP DATABASE evicts catalog OK" << std::endl;
 }
 
+static void test_database_storage_errors_are_not_success() {
+    const std::string parent = testDbPath("database_error_parent");
+    const std::string nested = parent + "/child";
+    cleanup(parent);
+
+    Session s;
+    setupSession(s, "");
+    dbms::DdlExecutor ddl;
+    auto createStmt = std::make_unique<dbms::CreateObjectStmt>(
+        dbms::SqlCommand::CreateDatabase);
+    createStmt->objectName = nested;
+    dbms::StmtPtr create = std::move(createStmt);
+
+    // The parent does not exist, so StorageEngine returns IO_ERROR.  The DDL
+    // layer must not report a false successful CREATE DATABASE.
+    assert(ddl.execute(create, s));
+    assert(!std::filesystem::exists(parent));
+
+    cleanup(parent);
+    std::cout << "[DDL] database storage errors propagate OK" << std::endl;
+}
+
 int main() {
     cleanupAllTestData();
     dbms::TypeRegistry::instance().bootstrap();
@@ -342,6 +365,7 @@ int main() {
     test_comment_on();
     test_alter_table_metadata_actions();
     test_long_identifiers_round_trip();
+    test_database_storage_errors_are_not_success();
     std::cout << "[DDL] all passed" << std::endl;
     return 0;
 }

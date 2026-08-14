@@ -9,6 +9,8 @@
 
 2026-08-14 数据库生命周期持久化收敛：新数据库的基础元数据、checkpoint 文件和物理备份标记统一通过原子临时文件发布；部分创建失败会清理目录，DROP 的统计文件清理失败会返回 I/O 错误。生命周期专项、checkpoint 精确格式和 planner 后台 writer teardown 回归均通过。
 
+2026-08-14 数据库 DDL 错误传播收敛：`CREATE DATABASE`/`DROP DATABASE` 只有在存储层明确返回 `OK` 时才报告成功，目录创建、持久化和清理失败均 fail-closed 并映射 SQLSTATE；异常路径回归已纳入完整测试。
+
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、对齐、CRC、`xl_prev` 链和 segment 尾部严格校验；

@@ -7,6 +7,8 @@
 
 本轮质量收敛已修复 planner 的 merge join cost 参数错误，并清理 parser 与测试中的未使用代码；主构建在 `-Wall -Wextra` 下无警告。2026-08-13 又将 Volcano 执行入口收敛为 checked result：EOF 与 open/next 失败分离，物化算子传播子算子错误，主 SELECT/集合/聚合/窗口入口不再把执行失败当成空结果，并删除旧的空结果兼容执行入口。2PC prepared 记录已具备原子 durable 发布、PREPARE WAL、准备前缓存刷盘、跨 backend 锁所有权转移、重启后表/row/page/gap 锁 ownership 重建、in-doubt xid 保留和索引回表可见性过滤；普通事务 CLOG 故障的 COMMIT→ABORT 序列也保持兼容。全局 prepared 目录和崩溃后 in-doubt 决策仍待实现。该改动不改变旧数据兼容边界，也不代表 PostgreSQL 生产级等价已经完成。
 
+2026-08-14 增量审计：数据库 DDL 只接受 `StorageEngine::OK` 为成功状态；`CREATE/DROP DATABASE` 的 I/O 和清理失败现在 fail-closed 并返回 SQLSTATE，新增异常数据库路径回归，完整套件保持 PASS=139 FAIL=0。
+
 2026-08-12 增量审计：规范 DDL 执行器与 `main.cpp` legacy 兼容分发统一使用隐式提交失败守卫；提交失败会输出 SQLSTATE 并停止后续 DDL，避免不同入口产生不一致的成功结果。
 
 2026-08-11 增量审计：`LockManager` 修复 row/page 等待路径的资源生命周期、按线程锁 token 归属、表锁重入与共享锁升级，并在等待期间持续检测 wait-for graph；新增双线程死锁、重入/升级和 row token 竞争回归。完整 PostgreSQL 锁模式矩阵、页/索引 predicate lock 和 wait events 仍待后续。

@@ -1131,8 +1131,13 @@ bool DdlExecutor::executeCreateDatabase(const CreateObjectStmt* stmt, Session& s
     auto it = stmt->options.find("encoding");
     if (it != stmt->options.end()) charset = it->second;
     DBStatus res = g_engine.createDatabase(dbname, charset);
-    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
+    if (res == DBStatus::TABLE_ALREADY_EXISTS || res == DBStatus::ALREADY_EXISTS) {
         std::cout << "Database already exists" << std::endl;
+        return true;
+    }
+    if (res != DBStatus::OK) {
+        std::cout << "ERROR: CREATE DATABASE failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
     std::cout << "CREATE DATABASE succeeded" << std::endl;
@@ -1154,8 +1159,13 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
     g_engine.catalogService().evict(dbname);
 
     DBStatus res = g_engine.dropDatabase(dbname);
-    if (res == DBStatus::NOT_FOUND) {
+    if (res == DBStatus::NOT_FOUND || res == DBStatus::DATABASE_NOT_FOUND) {
         std::cout << "Database not found" << std::endl;
+        return true;
+    }
+    if (res != DBStatus::OK) {
+        std::cout << "ERROR: DROP DATABASE failed (SQLSTATE "
+                  << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
     std::cout << "DROP DATABASE succeeded" << std::endl;

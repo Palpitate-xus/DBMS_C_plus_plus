@@ -10,6 +10,8 @@
 
 2026-08-14 数据库生命周期持久化收紧：数据库初始化文件、checkpoint 元数据和物理备份标记统一使用临时文件、文件/目录 `fsync` 与原子 rename；创建数据库的目录/文件失败会清理半成品并返回 `IO_ERROR`，checkpoint 和备份标记不会留下可被恢复流程误认的截断文件。生命周期回归增加了初始化文件完整性和 checkpoint 尾随数据校验；planner 统计回归的数据库 teardown 改用带缓存锁的 `dropDatabase()`，避免后台 writer 与裸目录删除竞争。
 
+2026-08-14 DDL 错误传播收紧：`CREATE DATABASE`/`DROP DATABASE` 现在只在 `StorageEngine` 返回 `OK` 时报告成功；`IO_ERROR`、未知状态和数据库清理失败均返回错误并映射 SQLSTATE，新增异常数据库路径回归，避免持久化失败被伪报为成功。
+
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、8 字节对齐、CRC、记录链和 segment 尾部在打开时严格验证；`xl_prev` 保留截断历史时允许指向已删除 segment，但禁止指向当前保留流的未来位置。恢复 heap page image 必须通过当前 8 KiB 页 checksum/layout 校验，page ID 只能连续扩展一页，非法 page image、越界 page ID 和损坏 WAL 均 fail-closed，避免无界分配或把损坏页写入关系。`XLogFlush` 只接受当前 WAL 流中的有效记录位置，并同步覆盖记录所在完整 segment。
 
 2026-08-13 DDL 路由收敛：删除 `src/main.cpp` 中已被 typed bridge 完整覆盖的旧字符串实现，
