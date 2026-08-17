@@ -19,6 +19,8 @@
 
 2026-08-14 增量审计：删除未被生产执行链引用的 `IIndexAM`、BPTree/Hash 适配器和独立 GIN/BRIN 实现，生产 manifest 与测试改为只保留 `StorageEngine` canonical 索引路径；同步修正文档，避免把死接口描述为已统一架构。
 
+2026-08-14 增量审计：`CREATE INDEX` 纳入当前格式 DDL 快照，按 access method 回滚物理 sidecar、名称映射和 catalog 依赖；catalog 注册失败 fail-closed，重复名称与 `IF NOT EXISTS` 行为补齐，并新增多访问方法外层事务回归。
+
 2026-08-12 增量审计：规范 DDL 执行器与 `main.cpp` legacy 兼容分发统一使用隐式提交失败守卫；提交失败会输出 SQLSTATE 并停止后续 DDL，避免不同入口产生不一致的成功结果。
 
 2026-08-11 增量审计：`LockManager` 修复 row/page 等待路径的资源生命周期、按线程锁 token 归属、表锁重入与共享锁升级，并在等待期间持续检测 wait-for graph；新增双线程死锁、重入/升级和 row token 竞争回归。完整 PostgreSQL 锁模式矩阵、页/索引 predicate lock 和 wait events 仍待后续。

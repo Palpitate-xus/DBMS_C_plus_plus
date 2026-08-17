@@ -2688,6 +2688,10 @@ bool DdlExecutor::executeDropTable(const DropStmt* stmt, Session& s) {
 
     // Build the catalog-side CASCADE/RESTRICT plan without mutating catalog
     // state. Physical storage must be removed before applying this plan.
+    // A rejected plan (e.g. RESTRICT with dependents) must not mark the
+    // DDL snapshot dirty: restoring the physical backup would evict the
+    // CatalogManager and invalidate every outstanding reference even though
+    // no storage mutation ever happened.
     CatalogManager* catalogManager = nullptr;
     CatalogManager::DropPlan catalogDropPlan;
     bool hasCatalogDropPlan = false;
@@ -2771,6 +2775,10 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
+    // Index creation publishes physical sidecars and catalog rows. Protect
+    // the whole operation with the current-format snapshot boundary so an
+    // outer ROLLBACK cannot leave one half of the index behind.
+    txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -2786,9 +2794,50 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
 
-    std::vector<std::string> colnames;
-    for (const auto& elem : stmt->columns) {
-        colnames.push_back(elem.column);
+    txn.markSnapshotDirty();
+
+    const std::vector<std::string> colnames = [&]() {
+        std::vector<std::string> names;
+        for (const auto& elem : stmt->columns) names.push_back(elem.column);
+        return names;
+    }();
+
+    // PostgreSQL's unnamed index syntax (CREATE INDEX ON tbl (col)) derives
+    // the index name from table and key columns. Generate the same shape and
+    // append a numeric suffix when the derived name is already taken.
+    auto namedIndexExists = [&](const std::string& candidate) {
+        if (g_engine.getNamedIndex(s.currentDB, tname, candidate).has_value()) return true;
+        try {
+            const auto tableName = CatalogService::logicalName(tname);
+            const std::string schema = tableName.schema.empty() ? "public" : tableName.schema;
+            auto& catalog = g_engine.catalogService().get(s.currentDB);
+            const auto* ns = catalog.findNamespaceByName(schema);
+            return ns != nullptr && catalog.findClassByName(candidate, ns->oid) != nullptr;
+        } catch (...) {
+            std::cout << "CREATE INDEX failed: cannot inspect catalog metadata" << std::endl;
+            std::string dummy;
+            return true; // fail-closed on catalog errors
+        }
+    };
+    std::string idxName = stmt->indexName;
+    if (idxName.empty()) {
+        std::string base = tname;
+        for (const auto& cname : colnames) {
+            if (!cname.empty()) base += "_" + cname;
+        }
+        base += "_idx";
+        idxName = base;
+        for (unsigned long suffix = 1; namedIndexExists(idxName); ++suffix) {
+            idxName = base + std::to_string(suffix);
+        }
+    }
+    if (namedIndexExists(idxName)) {
+        if (stmt->ifNotExists) {
+            std::cout << "NOTICE: index \"" << idxName << "\" already exists, skipping" << std::endl;
+            return false;
+        }
+        std::cout << "ERROR: index \"" << idxName << "\" already exists" << std::endl;
+        return true;
     }
 
     std::string whereCondition = stmt->whereClause ? stmt->whereClause->toString() : "";
@@ -2802,7 +2851,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
                                        includeCols, whereCondition, "", stmt->concurrently);
         } else {
             res = g_engine.createCompositeIndex(s.currentDB, tname, colnames,
-                                                stmt->indexName, includeCols,
+                                                idxName, includeCols,
                                                 whereCondition, stmt->concurrently);
         }
     } else if (am == "hash") {
@@ -2831,12 +2880,11 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         std::cout << "CREATE INDEX failed" << std::endl;
         return true;
     }
-    std::string idxName = stmt->indexName.empty() ? (tname + "_idx") : stmt->indexName;
     const std::string physicalMethod = (colnames.size() > 1)
         ? "composite" : (am.empty() ? "btree" : am);
     const std::string physicalKey = (colnames.size() > 1)
         ? idxName : (stmt->columns.front().expr ? stmt->columns.front().expr->toString() : colnames.front());
-    if (!g_engine.registerIndexName(s.currentDB, tname, idxName, physicalMethod, physicalKey)) {
+    auto discardCreatedIndex = [&]() {
         if (physicalMethod == "composite") g_engine.dropCompositeIndex(s.currentDB, tname, idxName);
         else if (physicalMethod == "hash") g_engine.dropHashIndex(s.currentDB, tname, physicalKey);
         else if (physicalMethod == "gin") g_engine.dropGinIndex(s.currentDB, tname, physicalKey);
@@ -2844,16 +2892,29 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         else if (physicalMethod == "brin") g_engine.dropBrinIndex(s.currentDB, tname, physicalKey);
         else if (physicalMethod == "spgist") g_engine.dropSPGiSTIndex(s.currentDB, tname, physicalKey);
         else g_engine.dropIndex(s.currentDB, tname, physicalKey);
+    };
+    if (!g_engine.registerIndexName(s.currentDB, tname, idxName, physicalMethod, physicalKey)) {
+        discardCreatedIndex();
         std::cout << "CREATE INDEX failed: cannot persist index metadata" << std::endl;
         return true;
     }
 
+    bool catalogRegistered = false;
+    Oid catalogIndexOid = INVALID_OID;
+    CatalogManager* catalogForCleanup = nullptr;
     try {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
+        catalogForCleanup = &cat;
         auto qn = CatalogService::logicalName(tname);
         const auto* ns = cat.findNamespaceByName(qn.schema.empty() ? "public" : qn.schema);
         const auto* tbl = (ns ? cat.resolveRelation(qn.name, {qn.schema.empty() ? "public" : qn.schema}) : nullptr);
-        if (ns && tbl) {
+        if (!ns || !tbl) {
+            throw std::runtime_error("table has no catalog entry");
+        }
+        if (cat.findClassByName(idxName, ns->oid) != nullptr) {
+            throw std::runtime_error("index name already exists");
+        }
+        {
             // createClass() may grow CatalogManager's backing vector and
             // invalidate pointers returned by resolveRelation(). Copy the
             // referenced OID before mutating the catalog.
@@ -2864,6 +2925,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             idx.relkind = 'i';
             idx.relnatts = static_cast<int16_t>(colnames.size());
             Oid idxOid = cat.createClass(idx);
+            catalogIndexOid = idxOid;
 
             PgDependRow dep;
             dep.classid = PgClassOid_Class;
@@ -2874,12 +2936,26 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             dep.refobjsubid = 0;
             dep.deptype = 'a';
             cat.addDepend(dep);
-        } else {
-            std::cerr << "WARNING: table " << tname
-                      << " has no catalog entry; index not registered" << std::endl;
+            catalogRegistered = true;
         }
     } catch (const std::exception& e) {
-        std::cerr << "WARNING: catalog index registration failed: " << e.what() << std::endl;
+        std::cerr << "ERROR: catalog index registration failed: " << e.what() << std::endl;
+    }
+    if (!catalogRegistered) {
+        if (catalogForCleanup && catalogIndexOid != INVALID_OID) {
+            std::string error;
+            if (!catalogForCleanup->dropObject(PgClassOid_Class, catalogIndexOid,
+                                               CatalogManager::DropBehavior::Cascade,
+                                               &error)) {
+                std::cerr << "ERROR: failed to roll back catalog index: " << error << std::endl;
+            }
+        }
+        discardCreatedIndex();
+        if (!g_engine.unregisterIndexName(s.currentDB, tname, idxName)) {
+            std::cerr << "ERROR: failed to remove index name mapping after catalog failure" << std::endl;
+        }
+        std::cout << "CREATE INDEX failed: cannot persist catalog metadata" << std::endl;
+        return true;
     }
 
     txn.recordCreate(DdlObjectKind::Index, idxName, tname);

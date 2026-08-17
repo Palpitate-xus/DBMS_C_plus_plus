@@ -63,7 +63,7 @@ for o in build/obj/*.o; do
         *) link+=("$o");;
     esac
 done
-if rg -q '(^|[[:space:]])(bool checkAdmin|bool checkDB|std::string resolveTableName|bool execute\(|void logSlowQuery|void recordSqlStat)' "tests/$test_name.cpp"; then
+if grep -Eq '(^|[[:space:]])(bool checkAdmin|bool checkDB|std::string resolveTableName|bool execute\(|void logSlowQuery|void recordSqlStat)' "tests/$test_name.cpp"; then
     filtered_link=()
     for o in "${link[@]}"; do
         [[ "$o" == */test_stubs.o ]] || filtered_link+=("$o")

@@ -558,6 +558,47 @@ static void test_auxiliary_object_rollback() {
     std::cout << "[DDL-TXN] auxiliary object rollback OK" << std::endl;
 }
 
+static void test_create_index_outer_rollback_restores_all_paths() {
+    const std::string db = testDbPath("ddl_txn_index_rollback");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE TABLE indexed (id INT, value TEXT)", s));
+    assert(g_engine.insert(db, "indexed", {{"id", "1"}, {"value", "hello world"}}) ==
+           dbms::DBStatus::OK);
+
+    const auto assertCatalogAbsent = [&](const std::string& indexName) {
+        auto& catalog = g_engine.catalogService().get(db);
+        const auto* ns = catalog.findNamespaceByName("public");
+        assert(ns != nullptr);
+        assert(catalog.findClassByName(indexName, ns->oid) == nullptr);
+    };
+    const auto rollbackCreate = [&](const std::string& sql,
+                                    const std::string& indexName) {
+        assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(!ddl.executeSql(sql, s));
+        assert(g_engine.getNamedIndex(db, "indexed", indexName).has_value());
+        assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+        assert(!g_engine.getNamedIndex(db, "indexed", indexName).has_value());
+        assertCatalogAbsent(indexName);
+    };
+
+    rollbackCreate("CREATE INDEX rollback_btree ON indexed (id)", "rollback_btree");
+    assert(g_engine.getIndexedColumns(db, "indexed").empty());
+    rollbackCreate("CREATE INDEX rollback_hash ON indexed USING HASH (id)", "rollback_hash");
+    assert(g_engine.getHashIndexedColumns(db, "indexed").empty());
+    rollbackCreate("CREATE INDEX rollback_gin ON indexed USING GIN (value)", "rollback_gin");
+    assert(g_engine.getGinIndexedColumns(db, "indexed").empty());
+    rollbackCreate("CREATE INDEX rollback_brin ON indexed USING BRIN (id)", "rollback_brin");
+    assert(g_engine.getBrinIndexedColumns(db, "indexed").empty());
+
+    cleanup(db);
+    std::cout << "[DDL-TXN] CREATE INDEX outer rollback restores physical/catalog paths OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_rollback_create();
@@ -576,6 +617,7 @@ int main() {
     test_catalog_drop_plan_is_deferred();
     test_schema_drop_plan_is_deferred();
     test_auxiliary_object_rollback();
+    test_create_index_outer_rollback_restores_all_paths();
     std::cout << "[DDL-TXN] all passed" << std::endl;
     return 0;
 }

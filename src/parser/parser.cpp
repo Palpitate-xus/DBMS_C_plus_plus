@@ -4508,7 +4508,7 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
     if (pos + 2 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "not") && match(tokens, pos + 2, "exists")) {
         stmt->ifNotExists = true; pos += 3;
     }
-    if (pos < tokens.size()) {
+    if (pos < tokens.size() && !match(tokens, pos, "on")) {
         stmt->indexName = tokens[pos++];
         if (pos < tokens.size() && tokens[pos] == ".") {
             ++pos;

@@ -22,6 +22,8 @@
 
 2026-08-14 索引架构清理：审计确认 `IIndexAM`、BPTree/Hash 适配器以及独立 GIN/BRIN 类没有生产调用方，均从 manifest 和源码删除；`StorageEngine` 作为唯一实际索引入口，索引回归改为覆盖 canonical GIN/BRIN 路径及损坏 sidecar fail-closed。未接入的伪适配层不再增加构建和维护负担。
 
+2026-08-14 CREATE INDEX 事务边界收紧：物理索引 sidecar、SQL 名称映射和 `pg_class/pg_depend` 注册现在由当前格式 DDL 快照共同保护；外层事务回滚会清理 B-tree、复合、Hash、GIN、BRIN 等真实访问路径，catalog 注册异常 fail-closed，不再只记录 warning 后伪报成功。重复名称支持 `IF NOT EXISTS` 跳过，普通重复创建拒绝。
+
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、8 字节对齐、CRC、记录链和 segment 尾部在打开时严格验证；`xl_prev` 保留截断历史时允许指向已删除 segment，但禁止指向当前保留流的未来位置。恢复 heap page image 必须通过当前 8 KiB 页 checksum/layout 校验，page ID 只能连续扩展一页，非法 page image、越界 page ID 和损坏 WAL 均 fail-closed，避免无界分配或把损坏页写入关系。`XLogFlush` 只接受当前 WAL 流中的有效记录位置，并同步覆盖记录所在完整 segment。
 
 2026-08-13 DDL 路由收敛：删除 `src/main.cpp` 中已被 typed bridge 完整覆盖的旧字符串实现，

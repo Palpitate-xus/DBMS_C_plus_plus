@@ -180,6 +180,11 @@ static void test_drop_index_uses_sql_name() {
     assert(!ddl.executeSql("DROP INDEX idx_drop_composite ON drop_idx_tbl", s));
     assert(!ddl.executeSql("DROP INDEX IF EXISTS idx_missing", s));
 
+    assert(!ddl.executeSql("CREATE INDEX idx_duplicate ON drop_idx_tbl (id)", s));
+    assert(!ddl.executeSql("CREATE INDEX IF NOT EXISTS idx_duplicate ON drop_idx_tbl (id)", s));
+    assert(ddl.executeSql("CREATE INDEX idx_duplicate ON drop_idx_tbl (id)", s));
+    assert(!ddl.executeSql("DROP INDEX idx_duplicate", s));
+
     // Standard PostgreSQL access-method syntax must use the real specialized
     // StorageEngine implementation, not the former B-tree compatibility path.
     assert(!ddl.executeSql("CREATE INDEX idx_gin ON drop_idx_tbl USING GIN (value)", s));

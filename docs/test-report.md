@@ -127,6 +127,7 @@ domain 创建使用原子发布。
 - B+Tree 多值索引回归补充 `(key, RID)` 精确删除：删除 6000 条跨叶重复键中的单个 RID 后，其余相邻 RID 仍可检索，重复删除会正确失败；生产 DML/事务回滚路径直接使用 `StorageEngine` 的 B+Tree 实现。
 
 - 索引架构清理回归：删除未接入生产执行链的 `IIndexAM`、B+Tree/Hash 适配器及独立 GIN/BRIN 类；保留并增强测试以验证 `StorageEngine` canonical GIN/BRIN 创建、查询和损坏 sidecar fail-closed。
+- CREATE INDEX 事务回归：B-tree、Hash、GIN、BRIN 在显式外层事务回滚后均清理物理文件、名称映射和 catalog；重复名称拒绝，`IF NOT EXISTS` 安全跳过。
 - 事务索引 WAL 回归通过：B+Tree/Hash `flush()` 和事务边界统一缓存刷盘路径已接入；脏索引刷盘会记录完整文件 before/after image，提交前 WAL 先刷盘；`wal_basic_test` 检查索引 WAL 记录，`redo_crash_recovery_test` 验证未提交插入回滚、已提交插入恢复和已提交删除恢复。
 - Hash/GIN/BRIN 持久化回归覆盖 `HashIndex` 二进制格式重载、StorageEngine GIN/BRIN sidecar 原子发布和损坏文件拒绝；Hash dirty 状态在关闭失败时保留。
 - StorageEngine GIN/BRIN 回归通过真实 DDL 构建后查询索引内容，验证 `forEachRow()` 页面失败契约、GIN 原子发布和 BRIN 二进制范围文件路径。

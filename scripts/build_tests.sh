@@ -77,7 +77,7 @@ for test_file in tests/*_test.cpp; do
     test_object="${BUILD_DIR}/${name}.o"
     binary="${SRC_DIR}/build/${name}"
     has_local_stubs=0
-    if rg -q '(^|[[:space:]])(bool checkAdmin|bool checkDB|std::string resolveTableName|bool execute\(|void logSlowQuery|void recordSqlStat)' "$test_file"; then
+    if grep -Eq '(^|[[:space:]])(bool checkAdmin|bool checkDB|std::string resolveTableName|bool execute\(|void logSlowQuery|void recordSqlStat)' "$test_file"; then
         has_local_stubs=1
     fi
 

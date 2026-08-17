@@ -3,6 +3,8 @@
 // ============================================================================
 
 #include "commands/DdlTransaction.h"
+#include "catalog/CatalogService.h"
+#include "catalog/systables.h"
 #include <algorithm>
 #include <iostream>
 
@@ -19,6 +21,53 @@ uint8_t walInfoForOp(DdlTransaction::RecordedOp::Op op) {
         case DdlTransaction::RecordedOp::Op::Update: return XLOG_CATALOG_UPDATE;
     }
     return XLOG_CATALOG_UPDATE;
+}
+
+bool undoIndexCreate(StorageEngine& engine, const std::string& db,
+                     const DdlTransaction::RecordedOp& op) {
+    if (db.empty() || op.extra.empty() || op.name.empty()) return false;
+
+    // Current-format index creation always publishes the durable SQL-name
+    // mapping before recording the DDL undo. Resolve the physical access
+    // method from that mapping instead of assuming every index is a B-tree
+    // keyed by its SQL name.
+    const auto named = engine.getNamedIndex(db, op.extra, op.name);
+    if (!named) return false;
+
+    DBStatus status = DBStatus::INVALID_VALUE;
+    if (named->accessMethod == "btree") {
+        status = engine.dropIndex(db, op.extra, named->key);
+    } else if (named->accessMethod == "composite") {
+        status = engine.dropCompositeIndex(db, op.extra, named->key);
+    } else if (named->accessMethod == "hash") {
+        status = engine.dropHashIndex(db, op.extra, named->key);
+    } else if (named->accessMethod == "gin") {
+        status = engine.dropGinIndex(db, op.extra, named->key);
+    } else if (named->accessMethod == "gist") {
+        status = engine.dropGiSTIndex(db, op.extra, named->key);
+    } else if (named->accessMethod == "brin") {
+        status = engine.dropBrinIndex(db, op.extra, named->key);
+    } else if (named->accessMethod == "spgist") {
+        status = engine.dropSPGiSTIndex(db, op.extra, named->key);
+    } else if (named->accessMethod == "fulltext") {
+        status = engine.dropFullTextIndex(db, op.extra, named->key);
+    }
+    if (status != DBStatus::OK ||
+        !engine.unregisterIndexName(db, op.extra, op.name)) {
+        return false;
+    }
+
+    // CREATE INDEX also publishes a pg_class/pg_depend entry. Remove it in
+    // the same undo action when a snapshot was not used by an older caller.
+    auto& catalog = engine.catalogService().get(db);
+    const auto tableName = CatalogService::logicalName(op.extra);
+    const std::string schema = tableName.schema.empty() ? "public" : tableName.schema;
+    const auto* relation = catalog.resolveRelation(op.name, {schema});
+    if (!relation || relation->relkind != 'i') return true;
+    const Oid indexOid = relation->oid;
+    std::string error;
+    return catalog.dropObject(PgClassOid_Class, indexOid,
+                              CatalogManager::DropBehavior::Cascade, &error);
 }
 
 } // anonymous namespace
@@ -235,8 +284,7 @@ bool DdlTransaction::undoCreate(StorageEngine& engine, const std::string& db,
             engine.dropTable(db, op.name);
             break;
         case DdlObjectKind::Index:
-            if (op.extra.empty()) return false;
-            return engine.dropIndex(db, op.extra, op.name) == DBStatus::OK;
+            return undoIndexCreate(engine, db, op);
         case DdlObjectKind::Sequence:
             engine.dropSequence(db, op.name);
             break;

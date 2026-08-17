@@ -21,6 +21,8 @@
 
 2026-08-14 索引冗余清理：删除未接入生产路径的 `IIndexAM`/BPTree/Hash 适配器和独立 GIN/BRIN 实现；测试改覆盖 `StorageEngine` canonical GIN/BRIN。后续仍需在该真实入口上补齐泛化 opclass、WAL-safe 增量维护和并发构建。
 
+2026-08-14 CREATE INDEX 原子性收紧：物理 sidecar、名称映射和 catalog 注册统一纳入当前格式 DDL 快照，外层回滚覆盖 B-tree/Hash/GIN/BRIN 等真实路径，catalog 失败不再伪报成功；完整对象级 undo、并发建索引和 WAL-safe 增量维护仍待后续。
+
 本轮重构已统一为 v2/8 KiB heap page 与当前 schema 格式，并移除旧数据迁移路径；旧数据目录需先导出后重建。
 
 2026-08-13 WAL/恢复输入边界收紧：WAL 记录长度、对齐、CRC、`xl_prev` 链和 segment 尾部严格校验；
