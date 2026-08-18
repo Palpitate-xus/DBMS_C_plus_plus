@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -23,6 +24,12 @@ namespace dbms {
 //      - pinCount   = "this frame is in use, do NOT evict"
 //      - usageCount = "recently accessed, give a second chance"
 //   4. Runtime page size (carried over from Step 1.4).
+//
+// An optional page validator runs once per page when it is loaded from disk.
+// Cache hits skip validation: a validated page cannot change while pinned in
+// the pool, so re-running a whole-page checksum on every fetch only burns
+// CPU. Callers that mutate pages directly through the frame pointer remain
+// responsible for the invariants they write.
 
 class BufferPool {
 public:
@@ -33,6 +40,13 @@ public:
     bool open();
     void close();
     bool isOpen() const { return fd_ >= 0; }
+
+    // Install (or clear) the on-load page validator. Must be called before
+    // open() or with no pages cached. Returning false rejects the page: the
+    // load fails and nothing is inserted into the cache.
+    void setPageValidator(std::function<bool(uint32_t, const char*)> validator) {
+        pageValidator_ = std::move(validator);
+    }
 
     // Invalidate cached page(s) so the next fetchPage reads from disk.
     void invalidatePage(uint32_t pageId);
@@ -90,12 +104,15 @@ private:
     size_t hits_ = 0;
     size_t misses_ = 0;
 
+    // Runs once per disk load; cache hits skip it.
+    std::function<bool(uint32_t, const char*)> pageValidator_;
+
     // Clock sweep hand
     size_t clockHand_ = 0;
 
     mutable std::mutex mutex_;
 
-    bool readFromDisk(uint32_t pageId, char* buf);
+    bool readFromDisk(uint32_t pageId, char* buf, bool* fullPageRead = nullptr);
     bool writeToDisk(uint32_t pageId, const char* buf);
     bool flushUnlocked();
     std::optional<size_t> evictFrame();

@@ -1,13 +1,44 @@
 #include "PageAllocator.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <limits>
 
 namespace dbms {
 
+size_t heapBufferFrameCount() {
+    static const size_t frames = [] {
+        const char* env = std::getenv("DBMS_BUFFER_FRAMES");
+        if (env && *env) {
+            char* end = nullptr;
+            const long value = std::strtol(env, &end, 10);
+            if (end && *end == '\0' && value >= 16 && value <= 4096) {
+                return static_cast<size_t>(value);
+            }
+        }
+        return static_cast<size_t>(256);
+    }();
+    return frames;
+}
+
 PageAllocator::PageAllocator(const std::string& filename, size_t rowSize, size_t pageSize, uint32_t formatVersion)
-    : filename_(filename), rowSize_(rowSize), pageSize_(pageSize), formatVersion_(formatVersion), bp_(std::make_unique<BufferPool>(filename, 16, pageSize)) {}
+    : filename_(filename), rowSize_(rowSize), pageSize_(pageSize), formatVersion_(formatVersion), bp_(std::make_unique<BufferPool>(filename, heapBufferFrameCount(), pageSize)) {
+    // Verify heap pages when they are first loaded from disk. Page 0 is the
+    // file header (own checksum, validated by validateFileHeader) and is
+    // explicitly excluded from the heap-page check.
+    const uint32_t fv = formatVersion_;
+    bp_->setPageValidator([fv](uint32_t pageId, const char* data) -> bool {
+        if (pageId == 0) return true;
+        const PageWrapper page(const_cast<char*>(data), PgPage::PAGE_SIZE, fv);
+        if (!page.isValid()) {
+            std::cerr << "[storage] invalid heap page " << pageId
+                      << "; refusing to load corrupted data" << std::endl;
+            return false;
+        }
+        return true;
+    });
+}
 
 PageAllocator::~PageAllocator() {
     close();
@@ -183,17 +214,11 @@ uint32_t PageAllocator::numPages() const {
 char* PageAllocator::fetchPage(uint32_t pageId) {
     if (!isOpen()) return nullptr;
     if (pageId >= numPages_) return nullptr;
-    char* buf = bp_->fetchPage(pageId);
-    if (buf && pageId >= 1) {
-        PageWrapper page(buf, pageSize_, formatVersion_);
-        if (!page.isValid()) {
-            std::cerr << "[storage] invalid heap page " << pageId
-                      << "; refusing to expose corrupted data" << std::endl;
-            bp_->invalidatePage(pageId);
-            return nullptr;
-        }
-    }
-    return buf;
+    // Page integrity (Fletcher-16 checksum + structural checks) is verified
+    // once by the buffer pool when a page is loaded from disk; a cached page
+    // cannot change underneath a pin, so re-validating on every access only
+    // repeated an 8KB checksum per row operation.
+    return bp_->fetchPage(pageId);
 }
 
 void PageAllocator::unpinPage(uint32_t pageId) {

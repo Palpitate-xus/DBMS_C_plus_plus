@@ -1,6 +1,7 @@
 #include "BPTree.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -10,6 +11,22 @@
 namespace dbms {
 
 static_assert(BP_KEY_LEN >= 4, "BP_KEY_LEN too small");
+
+// Index buffer-pool frame count. Overridable with DBMS_INDEX_BUFFER_FRAMES.
+static size_t indexBufferFrameCount() {
+    static const size_t frames = [] {
+        const char* env = std::getenv("DBMS_INDEX_BUFFER_FRAMES");
+        if (env && *env) {
+            char* end = nullptr;
+            const long value = std::strtol(env, &end, 10);
+            if (end && *end == '\0' && value >= 16 && value <= 4096) {
+                return static_cast<size_t>(value);
+            }
+        }
+        return static_cast<size_t>(128);
+    }();
+    return frames;
+}
 
 // ========================================================================
 // Key normalization: pad with '\0' to fixed length
@@ -90,7 +107,7 @@ void BPTree::deserializeNode(const char* buf, Node& node, uint16_t /*order*/) {
 // File I/O
 // ========================================================================
 BPTree::BPTree(const std::filesystem::path& indexFile)
-    : filePath_(indexFile), bp_(std::make_unique<BufferPool>(indexFile.string(), 16)) {}
+    : filePath_(indexFile), bp_(std::make_unique<BufferPool>(indexFile.string(), indexBufferFrameCount())) {}
 
 BPTree::~BPTree() {
     close();
@@ -98,7 +115,7 @@ BPTree::~BPTree() {
 
 bool BPTree::open() {
     if (bp_ && bp_->isOpen()) return true;
-    if (!bp_) bp_ = std::make_unique<BufferPool>(filePath_.string(), 16);
+    if (!bp_) bp_ = std::make_unique<BufferPool>(filePath_.string(), indexBufferFrameCount());
 
     // Check existence BEFORE opening (O_CREAT would create the file)
     bool exists = std::filesystem::exists(filePath_);

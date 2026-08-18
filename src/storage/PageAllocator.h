@@ -11,6 +11,10 @@
 
 namespace dbms {
 
+// Heap buffer-pool frame count. Overridable with DBMS_BUFFER_FRAMES so
+// larger working sets do not thrash a 16-frame (128KB) pool by default.
+size_t heapBufferFrameCount();
+
 // Manages page allocation for a heap data file (.dt).
 // Page 0 is reserved as the file header page.
 // Pages 1..N are data pages managed via a free list.

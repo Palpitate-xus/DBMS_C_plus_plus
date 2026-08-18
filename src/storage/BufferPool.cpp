@@ -65,7 +65,7 @@ void BufferPool::invalidateAll() {
     pageMap_.clear();
 }
 
-bool BufferPool::readFromDisk(uint32_t pageId, char* buf) {
+bool BufferPool::readFromDisk(uint32_t pageId, char* buf, bool* fullPageRead) {
     if (fd_ < 0) return false;
     off_t offset = static_cast<off_t>(pageId) * pageSize_;
     ssize_t n = ::pread(fd_, buf, pageSize_, offset);
@@ -73,6 +73,9 @@ bool BufferPool::readFromDisk(uint32_t pageId, char* buf) {
     if (n < static_cast<ssize_t>(pageSize_)) {
         // New page: zero-fill remainder
         std::memset(buf + n, 0, pageSize_ - n);
+        if (fullPageRead) *fullPageRead = false;
+    } else if (fullPageRead) {
+        *fullPageRead = true;
     }
     return true;
 }
@@ -168,7 +171,18 @@ char* BufferPool::fetchPage(uint32_t pageId) {
     f.dirty = false;
     f.pinCount = 1;
     f.usageCount = 3;
-    if (!readFromDisk(pageId, f.data.data())) {
+    bool fullPageRead = false;
+    if (!readFromDisk(pageId, f.data.data(), &fullPageRead)) {
+        f.pageId = static_cast<uint32_t>(-1);
+        f.pinCount = 0;
+        f.usageCount = 0;
+        return nullptr;
+    }
+    // A short read means the page was never written; the caller initializes
+    // it (e.g. allocPage's newPage.init). Only fully written pages carry a
+    // checksum worth verifying.
+    if (fullPageRead && pageValidator_ && !pageValidator_(pageId, f.data.data())) {
+        // Corrupt on disk: do not cache or expose it.
         f.pageId = static_cast<uint32_t>(-1);
         f.pinCount = 0;
         f.usageCount = 0;
