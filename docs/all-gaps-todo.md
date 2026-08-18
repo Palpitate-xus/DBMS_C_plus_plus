@@ -7,6 +7,8 @@
 
 > **当前真实状态（2026-08-14）**：统一回归基线 PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；数据库初始化、checkpoint 和物理备份标记已采用原子持久化，生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
 
+2026-08-14 性能与并发硬化轮次完成（13 个提交，详见 production-status.md）：WAL 增量追加状态与同事务 before-image 去重；`.secidx`/`.hashidx`/排除约束/schema/序列计数器内存缓存（DDL 全路径失效，序列保持非事务语义）；缓冲池 256/128 帧（`DBMS_BUFFER_FRAMES`/`DBMS_INDEX_BUFFER_FRAMES` 可覆盖）+ 页校验仅磁盘加载时执行；B+ 树二分查找 + 64 项节点缓存；BufferPool 磁盘 I/O 出锁（单加载者 + 孤儿帧失效，TSAN/ASAN 压测 0 竞态 0 损坏）；FSM/VM/PageAllocator/BPTree/HashIndex/CLOG 内部锁；INSERT 意图锁（IX）。实测：带 PK 事务插入 11.7 → ~2000+ 行/秒，500 行插入+聚合 ~106s → ~0.3s。性能类 gap（缓冲池、校验频率、线性查找、元数据重读）关闭；剩余差距见 feature-gaps.md。
+
 2026-08-14 数据库生命周期持久化收敛：新数据库的基础元数据、checkpoint 文件和物理备份标记统一通过原子临时文件发布；部分创建失败会清理目录，DROP 的统计文件清理失败会返回 I/O 错误。生命周期专项、checkpoint 精确格式和 planner 后台 writer teardown 回归均通过。
 
 2026-08-14 数据库 DDL 错误传播收敛：`CREATE DATABASE`/`DROP DATABASE` 只有在存储层明确返回 `OK` 时才报告成功，目录创建、持久化和清理失败均 fail-closed 并映射 SQLSTATE；异常路径回归已纳入完整测试。

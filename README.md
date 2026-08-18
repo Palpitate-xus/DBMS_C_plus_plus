@@ -6,6 +6,8 @@
 > **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
 > **PostgreSQL 18 差距分析**: [docs/postgresql-comparison.md](docs/postgresql-comparison.md)
 > **当前状态（2026-08-14）**: 生产化重构进行中；统一回归基线 PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E），主构建 `-Wall -Wextra` 无警告。当前发行格式为单一的 v2/8 KiB 存储格式，不提供旧数据迁移；数据库初始化、checkpoint 和物理备份标记采用原子持久化，生命周期清理失败会显式返回错误；PREPARE TRANSACTION 已在准备阶段刷出 heap/index 缓存、原子发布 prepared 元数据并记录 PREPARE WAL，跨 backend/进程完成时保留并恢复表/row/page/gap 锁；含内存 undo 的事务仍拒绝 PREPARE，完整 2PC 全局目录/in-doubt 决策语义仍未完成；这不代表已达到 PostgreSQL 生产级等价。
+>
+> **2026-08-14 性能与并发硬化轮次**（13 个提交，每步全量回归保持绿色）：WAL 追加改为增量状态 + 常开 segment fd + 按库互斥；同事务重复页 before-image 去重；`.secidx`/`.hashidx`/排除约束/表 schema/序列计数器内存缓存（DDL 全路径失效）；缓冲池默认 256/128 帧可环境变量覆盖，页校验只在磁盘加载时执行；B+ 树节点下降改二分查找并加 64 项节点缓存；BufferPool 磁盘 I/O 移出池锁（两阶段加载 + 单加载者规则 + 孤儿帧失效语义）；FSM/VM/PageAllocator/BPTree/HashIndex/CLOG 映射内部锁；`invalidatePage` 并发读者下的孤儿帧修复经 TSAN/ASAN 多线程压测验证 0 竞态 0 损坏。典型负载提升：事务内带 PK 插入 11.7 → ~2000+ 行/秒，commit 267ms → ~13ms，500 行插入+聚合 106s → ~0.3s。
 
 ## 功能特性
 
@@ -156,10 +158,11 @@
 | 测试项 | 结果 | 关键指标 |
 |--------|------|----------|
 | **事务原子性** | ✅ PASS | BEGIN/COMMIT/ROLLBACK 正确提交与回滚；SAVEPOINT 回滚恢复行/DDL undo，并释放保存点后的表、row/page/gap 锁 |
-| **WAL 顺序写入吞吐** | ✅ PASS | ~1767–1781 行/秒（200 行写入约 113ms） |
-| **B+ 树索引插入吞吐** | ✅ PASS | ~1729–1741 行/秒（100 行插入约 57ms） |
-| **索引等值查找** | ✅ PASS | 34 条匹配记录在 3–4ms 内返回 |
-| **聚合性能** | ✅ PASS | 500 行 COUNT/SUM/MAX/GROUP BY 约 78ms；批量插入 500 行约 254ms |
+| **WAL 顺序写入吞吐** | ✅ PASS | ~1700–1990 行/秒（200 行写入约 100–118ms；本轮性能优化前约 4.7 行/秒） |
+| **B+ 树索引插入吞吐** | ✅ PASS | ~1290–1800 行/秒（100 行插入约 55–77ms） |
+| **索引等值查找** | ✅ PASS | 34 条匹配记录在 1–2ms 内返回 |
+| **聚合性能** | ✅ PASS | 500 行 COUNT/SUM/MAX/GROUP BY 约 1.4ms；批量插入 500 行约 265–305ms（本轮优化前插入约 106s） |
+| **事务内主键插入微基准** | ✅ PASS | 200 行单事务带 PK 插入约 86–114ms（1760–2370 行/秒，commit 约 12–15ms；优化前 11.7 行/秒、commit 267ms） |
 | **MVCC 快照隔离** | ✅ PASS | 事务内 ReadView 可见性规则正确，未提交数据不可见 |
 | **HOT 堆内更新** | ✅ PASS | 更新不修改索引指针，减少 WAL 日志写入 |
 | **CLOG 提交日志** | ✅ PASS | 事务提交状态位图读写、提交顺序追踪、子事务可见性正确 |

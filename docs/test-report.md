@@ -4,6 +4,15 @@
 > 自动测试套件基线：PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
 > 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
 
+本轮完成性能与并发硬化轮次的全面复验（13 个提交后）：
+
+- **全量回归**：`./scripts/build_tests.sh` 完整重跑，137 个 C++ 测试 + 协议 E2E + 窗口函数 E2E（13/13）全部通过，0 失败。
+- **并发与事务专项独立复跑**：`concurrency_test`（含 INSERT/UPDATE/DELETE 回滚恢复二级/复合/Hash/TOAST、checkpoint 持久化、MVCC 快照隔离、性能子项）、`wal_truncate_test`、`redo_crash_recovery_test`、`prepared_transaction_test` 在独立临时目录中单独复跑，全部通过。
+- **线程安全压测（新增，本轮引入）**：针对 `BufferPool` 新的两阶段加载/孤儿帧失效语义，构造多线程压力（8 读者 + 改写者 + 失效器 + 4 帧小池强制驱逐/重载），分别在 TSAN 与 ASAN+UBSan 下运行：**0 数据竞争报告、0 内存错误、0 内容损坏**。修复前同一压测报告约 1 万次内容损坏（`invalidatePage` 在并发读者下重置被 pin 帧导致帧复用污染）。
+- **确定性失效语义回归（新增）**：pin → invalidate → unpin → 重取必须返回新鲜正确数据；invalidateAll 后重取同样正确；同线程持 pin 期间重取同页返回不可用而非死锁。
+- **性能基准复测**（与优化前同机对比）：事务内带 PK 插入 200 行 86–114ms（1760–2370 行/秒，优化前 11.7 行/秒），commit 12–15ms（优化前 267ms）；并发套件 500 行插入 + COUNT/SUM/MAX/GROUP BY 聚合 1.4ms、插入 265–305ms（优化前约 106s）；索引等值查找 14 次查找 1–2ms。
+- **回归发现的缺陷均在当步修复**：removeMulti 二分改造后等值键 RID 扫描、schema 缓存引入期捕获的 RLS/fillfactor/catalog 快照隔离、hashidx 失效误指 secidx 等，均由现有测试套件（gin_brin_index_test、policy_test、fillfactor_test、catalog_snapshot_test 等）拦截后修复，最终保持全绿。
+
 本轮新增 Volcano 执行失败契约回归：合成 `open()` 失败必须由
 `executePlanChecked()` 返回 `ok=false` 和错误信息，不能与合法空结果混淆；所有测试调用
 方均使用 checked contract，旧空结果兼容入口已删除。

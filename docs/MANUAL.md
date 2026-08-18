@@ -886,6 +886,22 @@ SELECT JSONB_CONTAINS(DATA, '{"admin"}') FROM configs;
 
 ---
 
+## 17b. 运行时性能参数（环境变量）
+
+```bash
+# 堆表缓冲池帧数（每帧 8 KiB，默认 256 = 2 MiB/关系）
+export DBMS_BUFFER_FRAMES=1024
+
+# 索引缓冲池帧数（默认 128）
+export DBMS_INDEX_BUFFER_FRAMES=256
+```
+
+两个变量均接受 16..4096 并夹取到该区间；未设置时使用默认值。缓冲池为每关系独立，
+总内存占用 ≈ 帧数 × 8 KiB × 打开的关系数，调大时请评估进程驻留内存。
+页完整性校验（Fletcher-16 + 结构校验）只在页面从磁盘加载时执行一次，缓冲命中不重复校验。
+
+---
+
 ## 18. 网络服务
 
 ```bash

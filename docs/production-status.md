@@ -4,6 +4,18 @@
 
 当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，137 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=139 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
 
+2026-08-14 性能与并发硬化轮次（13 个提交，每步全量回归保持绿色）：
+
+- **WAL 追加路径重构**：`WALManager` 维护增量尾部状态（上一记录 LSN/长度、已刷盘 LSN、最早可用 segment、常开追加 fd、可复用文件锁 fd），追加不再每条记录重扫 segment 目录；同目录多 WALManager 通过 leaked-singleton 注册表互斥，避免静态析构期锁销毁。修复了空 WAL 上第二个 manager 缓存 `currentLsn_=0` 覆盖首个 manager 数据的多实例缺陷（LSN 0 是合法记录位置，采用独立 `hasLastRecord_` 标志判空）。
+- **同事务重复页 before-image 去重**：恢复的 undo 遍历按最新到最早应用未提交 before-image，同事务重复记录同一页只膨胀 WAL；现在首个镜像后跳过（xid 0 的维护性成对记录仍保留精确配对）。
+- **元数据/序列/schema 内存缓存**：`.secidx`、`.hashidx`、排除约束、表 schema（mtime 新鲜度校验，支持同进程多实例）与自增序列计数器全部内存缓存；自增计数器每事务一次刷盘（序列保持非事务语义，与 PostgreSQL 一致）。全部 DDL 写路径经 `writeSchemaFile()`/显式失效收敛，修复了 RLS 开关、fillfactor、表空间迁移、分区挂载/卸载等处原有的缓存缺失隐患（由 policy/fillfactor/catalog_snapshot 测试捕获）。schema 缓存命中仍填充事务 catalog 快照，快照隔离跨引擎实例保持正确。
+- **缓冲池扩容与页校验降频**：堆池默认 256 帧、索引池 128 帧（`DBMS_BUFFER_FRAMES`/`DBMS_INDEX_BUFFER_FRAMES` 可覆盖，16..4096）；Fletcher-16 页校验从每次 fetch 降为仅磁盘加载时执行（经 BufferPool on-load validator，短读未写页跳过）。
+- **B+ 树查找与节点缓存**：全部节点下降路径由线性扫描（每层最多 order=100 次比较）改为 lower/upper-bound 二分查找（约 7 次），并修复 removeMulti 等值键内需继续扫描匹配 RID 的语义；64 项不可变节点 LRU 缓存使多数树层级跳过整页反序列化。
+- **BufferPool 并发加载与失效健全性**：磁盘 I/O 移出池锁——锁内预留并 pin 帧、放锁 pread 到私有 scratch、重新加锁校验发布；同页并发加载遵循单加载者规则；`invalidatePage`/`invalidateAll`/`close` 排干在途加载；发布时检测并淘汰重复加载。`invalidatePage` 在并发读者下改为孤儿帧语义（互斥不变量：任一页在 `pageMap_`/`orphanedPins_`/`loadingPages_` 中至多占一），修复持 pin 读者观察到帧被回收复用后读到他页数据的损坏缺陷。该缺陷由新增 TSAN/ASAN 多线程压测（读者+改写者+失效器+驱逐混合）发现：修复前约 1 万次内容损坏，修复后 0 竞态 0 损坏。注意 `invalidatePage`/`invalidateAll` 当前无生产调用方，属对潜在陷阱的加固。
+- **内部锁补全**：FSM、VisibilityMap、PageAllocator（头页读改写串行）、BPTree（递归写锁）、HashIndex、`getCommitLog` 的共享 map 全部加锁；INSERT 降级为表意图锁（IX），与 UPDATE 对齐。
+- **TableManage.h 瘦身与 AM 注册表收敛**：9 个存储/索引类改前置声明（仅作 unique_ptr 成员），去掉 `<iostream>`/`<fstream>`，103 个依赖 TU 不再重解析；索引物理删除的三处重复访问方法 if-else 链收敛为 `dropIndexByAccessMethod()` 单点分发（顺带修复 undo 路径 spgist 处理不一致）。
+- **实测性能变化**：事务内带 PK 插入 11.7 → ~2000+ 行/秒，commit 267ms → ~13ms；并发套件 500 行插入 + GROUP BY 从 ~106s → ~0.3s（约 350×）；WAL 每 200 插入字节数 3.4MB → 1.7MB。验证：全量回归（137 C++ + 2 E2E）全部通过、TSAN/ASAN 压测 0 报告、WAL 截断/崩溃恢复/预备事务专项独立复跑通过。
+
 2026-08-14 序列持久化与边界安全收紧：用户序列状态写入统一使用临时文件、文件/目录 `fsync` 和原子 rename；读取严格拒绝尾随字段、非法 cycle 标志、零增量、无效范围和非法 cache。`nextval` 的 cache 批量计算、`currval`、`setval`、创建/修改序列均使用 checked int64 算术，`INT64` 上下界和耗尽序列不会触发未定义行为；重启后状态保持，损坏元数据 fail-closed。旧序列文件不作为兼容格式接受。
 
 2026-08-14 DDL 生命周期安全修复：DDL 回滚现在会清理自身创建的物理快照，避免失败的 `ALTER SEQUENCE` 在下次启动被误恢复为旧数据库状态；typed `DdlExecutor` 以作用域守卫恢复线程局部 `Session*`，避免会话销毁后嵌入式 `nextval` 解引用悬空指针。重启、损坏序列文件、整数边界和失败 DDL 快照均有回归覆盖。
