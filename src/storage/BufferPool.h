@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <condition_variable>
 #include <fcntl.h>
 #include <functional>
 #include <mutex>
@@ -112,10 +113,23 @@ private:
 
     mutable std::mutex mutex_;
 
+    // Pages currently being loaded from disk. The loader released mutex_
+    // for the pread, so a concurrent fetch of the same page must not start
+    // a second read; it waits for the in-flight one instead.
+    std::unordered_map<uint32_t, size_t> loadingPages_;   // pageId -> frame idx
+    std::unordered_map<uint32_t, std::vector<std::condition_variable*>> loadWaiters_;
+
     bool readFromDisk(uint32_t pageId, char* buf, bool* fullPageRead = nullptr);
     bool writeToDisk(uint32_t pageId, const char* buf);
     bool flushUnlocked();
     std::optional<size_t> evictFrame();
+    // Fast path: pin a cached page; waits on an in-flight load of it.
+    // Returns nullptr on miss. mutex_ is NOT held on return.
+    char* tryPinCached(uint32_t pageId);
+    // Complete a load into frame idx (validator + publish). mutex_ held.
+    bool publishLoadedPage(uint32_t pageId, size_t idx, bool fullPageRead);
+    // Abort the in-flight load of pageId and wake all waiters. mutex_ held.
+    void failLoad(uint32_t pageId, size_t idx);
 };
 
 } // namespace dbms

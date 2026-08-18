@@ -116,6 +116,13 @@ BPTree::~BPTree() {
 bool BPTree::open() {
     if (bp_ && bp_->isOpen()) return true;
     if (!bp_) bp_ = std::make_unique<BufferPool>(filePath_.string(), indexBufferFrameCount());
+    // A (re)open may see a different on-disk tree (e.g. after clear or
+    // external rebuild); never serve nodes cached from the previous open.
+    {
+        std::unique_lock<std::shared_mutex> lock(nodeCacheMutex_);
+        nodeCache_.clear();
+        nodeCacheOrder_.clear();
+    }
 
     // Check existence BEFORE opening (O_CREAT would create the file)
     bool exists = std::filesystem::exists(filePath_);
@@ -142,6 +149,11 @@ bool BPTree::open() {
 }
 
 void BPTree::close() {
+    {
+        std::unique_lock<std::shared_mutex> lock(nodeCacheMutex_);
+        nodeCache_.clear();
+        nodeCacheOrder_.clear();
+    }
     if (bp_) {
         bp_->close();
     }
@@ -196,16 +208,79 @@ bool BPTree::writeNode(uint32_t pageNum, const Node& node) {
     serializeNode(buf, node, header_.order);
     bp_->markDirty(pageNum);
     bp_->unpinPage(pageNum);
+    cacheNode(pageNum, node);
     return true;
+}
+
+// ---- Node cache --------------------------------------------------------
+std::shared_ptr<const BPTree::Node> BPTree::cachedNode(uint32_t pageNum) const {
+    {
+        std::shared_lock<std::shared_mutex> lock(nodeCacheMutex_);
+        auto it = nodeCache_.find(pageNum);
+        if (it == nodeCache_.end()) return nullptr;
+        // Promote recency under the exclusive lock (small critical section;
+        // the find stays shared).
+        lock.unlock();
+        std::unique_lock<std::shared_mutex> ulock(nodeCacheMutex_);
+        auto it2 = nodeCache_.find(pageNum);
+        if (it2 == nodeCache_.end()) return nullptr;
+        for (auto q = nodeCacheOrder_.begin(); q != nodeCacheOrder_.end(); ++q) {
+            if (*q == pageNum) {
+                nodeCacheOrder_.erase(q);
+                break;
+            }
+        }
+        nodeCacheOrder_.push_front(pageNum);
+        return it2->second;
+    }
+}
+
+void BPTree::cacheNode(uint32_t pageNum, const Node& node) const {
+    std::unique_lock<std::shared_mutex> lock(nodeCacheMutex_);
+    auto it = nodeCache_.find(pageNum);
+    if (it != nodeCache_.end()) {
+        it->second = std::make_shared<const Node>(node);
+        for (auto q = nodeCacheOrder_.begin(); q != nodeCacheOrder_.end(); ++q) {
+            if (*q == pageNum) {
+                nodeCacheOrder_.erase(q);
+                break;
+            }
+        }
+        nodeCacheOrder_.push_front(pageNum);
+        return;
+    }
+    if (nodeCache_.size() >= kNodeCacheCapacity) {
+        const uint32_t victim = nodeCacheOrder_.back();
+        nodeCacheOrder_.pop_back();
+        nodeCache_.erase(victim);
+    }
+    nodeCache_.emplace(pageNum, std::make_shared<const Node>(node));
+    nodeCacheOrder_.push_front(pageNum);
+}
+
+void BPTree::dropNodeFromCache(uint32_t pageNum) {
+    std::unique_lock<std::shared_mutex> lock(nodeCacheMutex_);
+    nodeCache_.erase(pageNum);
+    for (auto q = nodeCacheOrder_.begin(); q != nodeCacheOrder_.end(); ++q) {
+        if (*q == pageNum) {
+            nodeCacheOrder_.erase(q);
+            break;
+        }
+    }
 }
 
 std::optional<BPTree::Node> BPTree::readNode(uint32_t pageNum) const {
     if (!bp_ || !bp_->isOpen()) return std::nullopt;
+    // Hot nodes (root, upper internal levels) are hit by nearly every
+    // descent; serving them from the node cache skips the whole-page
+    // deserialize (order-many heap allocations) per level.
+    if (auto cached = cachedNode(pageNum)) return *cached;
     Node node;
     char* buf = const_cast<BufferPool*>(bp_.get())->fetchPage(pageNum);
     if (!buf) return std::nullopt;
     deserializeNode(buf, node, header_.order);
     bp_->unpinPage(pageNum);
+    cacheNode(pageNum, node);
     return node;
 }
 
