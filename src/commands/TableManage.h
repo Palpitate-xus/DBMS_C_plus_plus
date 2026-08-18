@@ -1278,6 +1278,24 @@ private:
     mutable std::map<std::string, SeqFileState> seqFileCache_;
     void flushDeferredSequences();
 
+    // Parsed table schemas, cached per table. getTableSchema used to open
+    // and re-parse the .sch file on every call (several per DML row);
+    // callers still receive a copy, but the file I/O and parse disappear.
+    // The schema file's mtime+nsize are re-stat'ed on every read: another
+    // StorageEngine instance in this process (tests, replication) can
+    // rewrite the file without touching our invalidation paths.
+    mutable std::mutex schemaCacheMutex_;
+    struct CachedSchema {
+        std::shared_ptr<const TableSchema> schema;
+        int64_t mtimeSec = -1;
+        int64_t mtimeNsec = -1;
+        uintmax_t size = 0;
+    };
+    mutable std::map<std::string, CachedSchema> schemaCache_;
+    std::shared_ptr<const TableSchema> getCachedSchema(const std::string& dbname,
+                                                       const std::string& tablename) const;
+    void invalidateCachedSchema(const std::string& dbname, const std::string& tablename);
+
     // Hash index helpers
     std::filesystem::path hashIndexPath(const std::string& dbname,
                                          const std::string& tablename,
@@ -1373,6 +1391,9 @@ private:
     void captureCatalogSnapshot();
     void clearCatalogSnapshot();
     void invalidateCatalogSchema(const std::string& dbname, const std::string& tablename);
+    // Write a schema file and invalidate every cached copy of it.
+    void writeSchemaFile(const std::string& dbname, const std::string& tablename,
+                         const TableSchema& tbl);
     void invalidateCatalogTableList(const std::string& dbname);
 
     // SSI (Serializable Snapshot Isolation) read/write sets

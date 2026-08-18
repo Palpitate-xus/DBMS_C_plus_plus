@@ -1678,10 +1678,7 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
     }
 
     // Rewrite schema
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl); invalidateCatalogSchema(dbname, tablename);
 
     lockManager_.unlock(tablename);
     return DBStatus::OK;
@@ -1737,10 +1734,7 @@ DBStatus StorageEngine::detachPartition(const std::string& dbname,
     }
 
     // Rewrite schema
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl); invalidateCatalogSchema(dbname, tablename);
 
     // Close any cached page allocator for the detached partition
     pageAllocators_.erase(dbname + "/" + tablename + "#" + partitionName);
@@ -3792,6 +3786,16 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     eraseTableCaches(hashIndexCache_);
     eraseTableCaches(secidxLinesCache_);
     exclusionCache_.erase(dbname);
+    {
+        std::lock_guard<std::mutex> lock(schemaCacheMutex_);
+        for (auto it = schemaCache_.begin(); it != schemaCache_.end();) {
+            if (it->first.rfind(tablePrefix, 0) == 0) {
+                it = schemaCache_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     {
         // Drop deferred (possibly dirty) sequence state: the .seq files are
         // about to disappear with the database/table directory.
@@ -8523,6 +8527,8 @@ DBStatus StorageEngine::setStorageParams(
     for (const auto& kv : params) {
         ofs << kv.first << "=" << kv.second << "\n";
     }
+    // storageParams are folded into the cached table schema.
+    invalidateCatalogSchema(dbname, tablename);
     return DBStatus::OK;
 }
 
@@ -9089,6 +9095,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (!out) return failCreate("could not create table schema");
         writeSchema(out, tblWithVersion);
         if (!out) return failCreate("could not write table schema");
+        invalidateCatalogSchema(dbname, tblWithVersion.tablename);
     }
     {
         std::error_code ec;
@@ -9517,10 +9524,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     std::filesystem::remove(toastDataPath(dbname, tablename));
     std::filesystem::remove(toastIndexPath(dbname, tablename));
 
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
 
     // Re-create the current page-format heap(s) and TOAST relation.
@@ -9749,10 +9753,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     std::filesystem::remove(toastDataPath(dbname, tablename));
     std::filesystem::remove(toastIndexPath(dbname, tablename));
 
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
 
     const size_t pageSize = pageSizeForFormatVersion(tbl.formatVersion);
@@ -9969,10 +9970,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     }
 
     // 4. Persist the new schema.
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
 
     // 5. Re-create the empty data file with the NEW row size.
@@ -10023,10 +10021,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
 
     // Update schema
     tbl.cols[colIdx].dataName = newName;
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
 
     auto dbDir = dbPath(dbname);
@@ -10253,6 +10248,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
         writeSchema(out, renamedSchema);
+        invalidateCatalogSchema(dbname, newName);
         if (!out) {
             std::filesystem::remove(schemaPath(dbname, newName));
             lockManager_.unlock(oldName);
@@ -10568,10 +10564,7 @@ DBStatus StorageEngine::alterTableSetDefault(const std::string& dbname,
     }
 
     tbl.cols[colIdx].defaultValue = defaultValue;
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -10593,10 +10586,7 @@ DBStatus StorageEngine::alterTableDropDefault(const std::string& dbname,
     }
 
     tbl.cols[colIdx].defaultValue.clear();
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -10608,10 +10598,7 @@ DBStatus StorageEngine::alterTableSetLogged(const std::string& dbname,
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     TableSchema tbl = getTableSchema(dbname, tablename);
     tbl.isUnlogged = !logged;
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
@@ -10697,11 +10684,11 @@ DBStatus StorageEngine::alterTableSetConstraintDeferrability(
         return DBStatus::INVALID_VALUE;
     }
     writeSchema(out, tbl);
+    invalidateCatalogSchema(dbname, tablename);
     if (!out) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-    invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -10740,10 +10727,7 @@ DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
     }
 
     tbl.cols[colIdx].isNull = false;
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
@@ -10766,10 +10750,7 @@ DBStatus StorageEngine::alterTableDropNotNull(const std::string& dbname,
     }
 
     tbl.cols[colIdx].isNull = true;
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
@@ -10806,10 +10787,7 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
 
     tbl.cols[targetCol].checkExpr = expr;
     tbl.cols[targetCol].checkConstraintName = name;
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -10848,10 +10826,7 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
 
     tbl.uniqueConstraints.push_back(colIndices);
     tbl.uniqueConstraintNames.push_back(name);
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -10925,10 +10900,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
         tbl.cols[ci].isPrimaryKey = true;
         tbl.cols[ci].isNull = false;  // PK columns are implicitly NOT NULL
     }
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
 
     // Build the physical PK index and populate it from existing rows so that
     // insert-time uniqueness enforcement (which consults this index) works.
@@ -11009,10 +10981,7 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
     fk.onDelete = onDelete.empty() ? "restrict" : onDelete;
     fk.onUpdate = onUpdate.empty() ? "restrict" : onUpdate;
     tbl.appendFK(fk);
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -11083,10 +11052,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
@@ -11142,10 +11108,7 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    {
-        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
-        writeSchema(out, tbl);
-    }
+    writeSchemaFile(dbname, tablename, tbl);
     invalidateCatalogSchema(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
@@ -11250,6 +11213,7 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
             if (!out) throw std::runtime_error("could not write tablespace schema");
         }
         std::filesystem::rename(schemaTmp, schemaPath(dbname, tablename), ec);
+        invalidateCatalogSchema(dbname, tablename);
         if (ec) {
             std::filesystem::remove(schemaTmp, ec);
             throw std::runtime_error("could not publish tablespace schema");
@@ -11844,6 +11808,39 @@ std::vector<std::string> StorageEngine::getSequenceNames(const std::string& dbna
     return names;
 }
 
+std::shared_ptr<const TableSchema> StorageEngine::getCachedSchema(
+    const std::string& dbname, const std::string& tablename) const {
+    const std::string key = dbname + "/" + tablename;
+    // Cheap freshness check: another StorageEngine instance in this process
+    // may have rewritten the schema file without running our invalidation.
+    std::error_code ec;
+    const auto st = std::filesystem::last_write_time(schemaPath(dbname, tablename), ec);
+    const bool existsNow = !ec;
+    std::lock_guard<std::mutex> lock(schemaCacheMutex_);
+    auto it = schemaCache_.find(key);
+    if (it == schemaCache_.end()) return nullptr;
+    if (!existsNow) {
+        schemaCache_.erase(it);
+        return nullptr;
+    }
+    // Compare modification timestamps with nanosecond precision when the
+    // platform provides it; fall back to a whole-second comparison.
+    const auto dur = st.time_since_epoch();
+    const int64_t sec = std::chrono::duration_cast<std::chrono::seconds>(dur).count();
+    const int64_t nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count() % 1000000000LL;
+    if (it->second.mtimeSec != sec || it->second.mtimeNsec != nsec) {
+        schemaCache_.erase(it);
+        return nullptr;
+    }
+    return it->second.schema;
+}
+
+void StorageEngine::invalidateCachedSchema(const std::string& dbname,
+                                           const std::string& tablename) {
+    std::lock_guard<std::mutex> lock(schemaCacheMutex_);
+    schemaCache_.erase(dbname + "/" + tablename);
+}
+
 TableSchema StorageEngine::getTableSchema(const std::string& dbname,
                                             const std::string& tablename) const {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
@@ -11861,9 +11858,42 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
         }
     }
 
+    // Parsed-schema cache: DML reads the schema several times per row
+    // (row encode, index lookups, WAL page images). Only the first read
+    // pays the file open + parse. A cache hit must still populate the
+    // transaction's catalog snapshot: later DDL by another engine instance
+    // is masked by that snapshot for the rest of this transaction.
+    if (auto cached = getCachedSchema(dbname, tablename)) {
+        std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
+        if (transactionContext().catalogSnapshot) {
+            transactionContext().catalogSnapshot->schemas[std::make_pair(dbname, tablename)] = *cached;
+        }
+        return *cached;
+    }
+
     std::ifstream in(schemaPath(dbname, tablename), std::ios::binary);
     TableSchema tbl = readSchema(in, tablename);
     tbl.storageParams = getStorageParams(dbname, tablename);
+
+    // Do not cache a missing/unparsed schema (readSchema returns len == 0):
+    // a CREATE TABLE that follows would be masked by the cached empty entry.
+    if (tbl.len > 0) {
+        std::error_code mtEc;
+        const auto mtime = std::filesystem::last_write_time(
+            schemaPath(dbname, tablename), mtEc);
+        std::lock_guard<std::mutex> lock(schemaCacheMutex_);
+        CachedSchema entry;
+        entry.schema = std::make_shared<const TableSchema>(tbl);
+        if (!mtEc) {
+            const auto dur = mtime.time_since_epoch();
+            entry.mtimeSec = std::chrono::duration_cast<std::chrono::seconds>(dur).count();
+            entry.mtimeNsec = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count() % 1000000000LL;
+        } else {
+            entry.mtimeSec = -1;
+            entry.mtimeNsec = -1;
+        }
+        schemaCache_[dbname + "/" + tablename] = std::move(entry);
+    }
 
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
@@ -20487,10 +20517,24 @@ void StorageEngine::clearCatalogSnapshot() {
 
 void StorageEngine::invalidateCatalogSchema(const std::string& dbname,
                                             const std::string& tablename) {
+    invalidateCachedSchema(dbname, tablename);
     std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
     if (transactionContext().catalogSnapshot) {
         transactionContext().catalogSnapshot->schemas.erase(std::make_pair(dbname, tablename));
     }
+}
+
+// Write a table schema and drop every cached copy of it. All DDL schema
+// rewrites must go through here: a stale parsed-schema cache would serve
+// the pre-DDL shape to subsequent statements.
+void StorageEngine::writeSchemaFile(const std::string& dbname,
+                                    const std::string& tablename,
+                                    const TableSchema& tbl) {
+    {
+        std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
+        writeSchema(out, tbl);
+    }
+    invalidateCatalogSchema(dbname, tablename);
 }
 
 void StorageEngine::invalidateCatalogTableList(const std::string& dbname) {
@@ -23067,6 +23111,7 @@ DBStatus StorageEngine::enableRowLevelSecurity(const std::string& dbname, const 
     tbl.forceRowLevelSecurity = force;
     std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
     writeSchema(out, tbl);
+    invalidateCatalogSchema(dbname, tablename);
     return DBStatus::OK;
 }
 
@@ -23077,6 +23122,7 @@ DBStatus StorageEngine::disableRowLevelSecurity(const std::string& dbname, const
     tbl.forceRowLevelSecurity = false;
     std::ofstream out(schemaPath(dbname, tablename), std::ios::binary);
     writeSchema(out, tbl);
+    invalidateCatalogSchema(dbname, tablename);
     return DBStatus::OK;
 }
 
