@@ -212,6 +212,42 @@ std::optional<BPTree::Node> BPTree::readNode(uint32_t pageNum) const {
 // ========================================================================
 // Search
 // ========================================================================
+namespace {
+// Node key arrays are sorted; every descent previously walked them linearly
+// (up to `order` comparisons per level). Fixed-width normalized keys compare
+// directly as byte strings, so binary search applies.
+// lowerBound returns the first index whose key is >= `key`.
+size_t lowerBoundIdx(const std::vector<std::string>& keys, size_t count,
+                     const std::string& key) {
+    size_t lo = 0;
+    size_t hi = count;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (keys[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+// upperBound returns the first index whose key is > `key`.
+size_t upperBoundIdx(const std::vector<std::string>& keys, size_t count,
+                     const std::string& key) {
+    size_t lo = 0;
+    size_t hi = count;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (keys[mid] <= key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+} // namespace
+
 bool BPTree::search(const std::string& key, int64_t& value) const {
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
     return searchNode(header_.rootPage, normalizeKey(key), value);
@@ -222,17 +258,17 @@ bool BPTree::searchNode(uint32_t pageNum, const std::string& key, int64_t& value
     if (!nodeOpt) return false;
     Node node = std::move(*nodeOpt);
     if (node.isLeaf) {
-        for (size_t i = 0; i < node.numKeys; ++i) {
-            if (node.keys[i] == key) {
-                value = node.values[i];
-                return true;
-            }
+        const size_t i = lowerBoundIdx(node.keys, node.numKeys, key);
+        if (i < node.numKeys && node.keys[i] == key) {
+            value = node.values[i];
+            return true;
         }
         return false;
     }
-    // Internal node: find child to descend
-    size_t i = 0;
-    while (i < node.numKeys && key >= node.keys[i]) ++i;
+    // Internal node: separators are the smallest key of the right subtree,
+    // so an equal key lives to the right — descend past every separator
+    // that is <= key (upper bound).
+    const size_t i = upperBoundIdx(node.keys, node.numKeys, key);
     if (i < node.children.size()) {
         return searchNode(node.children[i], key, value);
     }
@@ -297,11 +333,10 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
     if (!nodeOpt) return results;
     Node node = std::move(*nodeOpt);
     while (!node.isLeaf) {
-        size_t i = 0;
         // Descend to the leftmost possible leaf for this key.  Equal keys
         // may span multiple leaves after a split; using >= here would start
         // at the rightmost equal separator and silently miss earlier rows.
-        while (i < node.numKeys && normalizedKey > node.keys[i]) ++i;
+        const size_t i = lowerBoundIdx(node.keys, node.numKeys, normalizedKey);
         if (i >= node.children.size()) return results;
         auto next = readNode(node.children[i]);
         if (!next) return {};
@@ -363,17 +398,15 @@ bool BPTree::insertNonFull(uint32_t pageNum, const std::string& key, int64_t val
     if (!nodeOpt) return false;
     Node node = std::move(*nodeOpt);
     if (node.isLeaf) {
-        // Insert into leaf in sorted order
-        size_t i = 0;
-        while (i < node.numKeys && key > node.keys[i]) ++i;
+        // Insert into leaf in sorted order: first key >= `key`.
+        const size_t i = lowerBoundIdx(node.keys, node.numKeys, key);
         node.keys.insert(node.keys.begin() + i, key);
         node.values.insert(node.values.begin() + i, value);
         node.numKeys++;
         return writeNode(pageNum, node);
     }
-    // Find child
-    size_t i = 0;
-    while (i < node.numKeys && key >= node.keys[i]) ++i;
+    // Find child: separators <= key point right (upper bound).
+    const size_t i = upperBoundIdx(node.keys, node.numKeys, key);
     if (i >= node.children.size()) return false;
     uint32_t childPage = node.children[i];
     auto childOpt = readNode(childPage);
@@ -384,10 +417,11 @@ bool BPTree::insertNonFull(uint32_t pageNum, const std::string& key, int64_t val
         auto parentOpt = readNode(pageNum);
         if (!parentOpt) return false;
         node = std::move(*parentOpt);
-        if (i >= node.children.size()) return false;
-        if (key >= node.keys[i]) ++i;
-        if (i >= node.children.size()) return false;
-        childPage = node.children[i];
+        size_t j = i;
+        if (j >= node.children.size()) return false;
+        if (key >= node.keys[j]) ++j;
+        if (j >= node.children.size()) return false;
+        childPage = node.children[j];
     }
     return insertNonFull(childPage, key, value);
 }
@@ -466,21 +500,24 @@ bool BPTree::removeFromNode(uint32_t pageNum, const std::string& key,
     if (!nodeOpt) return false;
     Node node = std::move(*nodeOpt);
     if (node.isLeaf) {
-        for (size_t i = 0; i < node.numKeys; ++i) {
-            if (node.keys[i] == key && (!value || node.values[i] == *value)) {
+        // Duplicate keys (multi-value indexes) can carry several RIDs; scan
+        // forward through every equal key until the requested value matches.
+        size_t i = lowerBoundIdx(node.keys, node.numKeys, key);
+        while (i < node.numKeys && node.keys[i] == key) {
+            if (!value || node.values[i] == *value) {
                 node.keys.erase(node.keys.begin() + i);
                 node.values.erase(node.values.begin() + i);
                 node.numKeys--;
                 return writeNode(pageNum, node);
             }
+            ++i;
         }
         return false;
     }
     // Equal separator keys can span multiple leaves after a split. Start at
     // the leftmost possible child and visit every child whose separator is
     // equal to the target, otherwise a duplicate RID could be missed.
-    size_t first = 0;
-    while (first < node.numKeys && key > node.keys[first]) ++first;
+    const size_t first = lowerBoundIdx(node.keys, node.numKeys, key);
     for (size_t i = first; i < node.children.size(); ++i) {
         if (i > first && node.keys[i - 1] != key) break;
         if (removeFromNode(node.children[i], key, value)) return true;
@@ -506,10 +543,11 @@ bool BPTree::collectRange(uint32_t pageNum, const std::string& startKey,
     if (!nodeOpt) return false;
     Node node = std::move(*nodeOpt);
     if (node.isLeaf) {
-        for (size_t i = 0; i < node.numKeys; ++i) {
-            if (node.keys[i] >= startKey && node.keys[i] <= endKey) {
-                out.push_back(node.values[i]);
-            }
+        // Keys are sorted: skip everything below startKey in one bound.
+        const size_t first = lowerBoundIdx(node.keys, node.numKeys, startKey);
+        for (size_t i = first; i < node.numKeys; ++i) {
+            if (node.keys[i] > endKey) break;
+            out.push_back(node.values[i]);
         }
         return true;
     }
