@@ -1,3 +1,4 @@
+#include "storage/CommitLog.h"
 #include "TableManage.h"
 #include "Config.h"
 #include <iostream>

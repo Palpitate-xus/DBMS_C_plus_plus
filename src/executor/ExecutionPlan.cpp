@@ -1,4 +1,6 @@
 #include "ExecutionPlan.h"
+#include "access/BPTree.h"
+#include "access/HashIndex.h"
 #include "Config.h"
 #include "process/RuntimeStats.h"
 #include "types/numeric.h"

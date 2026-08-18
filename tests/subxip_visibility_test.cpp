@@ -1,3 +1,4 @@
+#include "storage/CommitLog.h"
 #include "TableManage.h"
 #include "HeapTupleHeader.h"
 #include "Config.h"

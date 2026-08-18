@@ -1,5 +1,6 @@
 // Checkpoint test: verify checkpoint record and persistent checkpoint file.
 
+#include "storage/BufferPool.h"
 #include "TableManage.h"
 #include "Config.h"
 #include "WAL.h"

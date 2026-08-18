@@ -12,6 +12,16 @@
 #include "process/RuntimeStats.h"
 #include "process/SqlStats.h"
 #include "access/IndexFileUtil.h"
+// Full definitions for classes only forward-declared in TableManage.h.
+#include "BPTree.h"
+#include "BufferPool.h"
+#include "PageAllocator.h"
+#include "FreeSpaceMap.h"
+#include "VisibilityMap.h"
+#include "CommitLog.h"
+#include "WAL.h"
+#include "HashIndex.h"
+#include "SPGiSTIndex.h"
 #include <cmath>
 #include <cctype>
 #include <limits>

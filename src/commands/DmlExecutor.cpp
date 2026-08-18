@@ -4,6 +4,8 @@
 
 #include "commands/DmlExecutor.h"
 
+#include "access/BPTree.h"
+#include "access/HashIndex.h"
 #include "commands/TableManage.h"
 #include "expression/ExprEvaluator.h"
 #include "parser/parser.h"

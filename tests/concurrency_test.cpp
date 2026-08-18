@@ -11,6 +11,8 @@
 //   6. MVCC 快照隔离 (单线程验证)
 // ============================================================================
 
+#include "access/BPTree.h"
+#include "access/HashIndex.h"
 #include "test_utils.h"
 #include "catalog/type_registry.h"
 #include "commands/DdlExecutor.h"

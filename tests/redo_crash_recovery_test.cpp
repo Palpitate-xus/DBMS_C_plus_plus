@@ -1,5 +1,6 @@
 // Crash recovery test: verify redo/undo via WAL page images.
 
+#include "access/BPTree.h"
 #include "TableManage.h"
 #include "Config.h"
 #include <filesystem>

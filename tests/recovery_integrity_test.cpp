@@ -1,5 +1,6 @@
 // Recovery integrity test: valid WAL records with invalid images fail closed.
 
+#include <fstream>
 #include "TableManage.h"
 #include "Config.h"
 #include "WAL.h"

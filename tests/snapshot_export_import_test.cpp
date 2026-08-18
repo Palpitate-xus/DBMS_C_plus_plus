@@ -1,3 +1,4 @@
+#include "storage/PageAllocator.h"
 #include "TableManage.h"
 #include "Config.h"
 #include "dbms_defs.h"

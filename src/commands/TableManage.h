@@ -1,10 +1,8 @@
 #pragma once
 
 #include <cstdint>
-#include <fstream>
 #include <filesystem>
 #include <functional>
-#include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -22,17 +20,9 @@
 
 #include "DateType.h"
 #include "table_schema.h"
-#include "BPTree.h"
-#include "BufferPool.h"
-#include "PageAllocator.h"
-#include "FreeSpaceMap.h"
-#include "VisibilityMap.h"
+#include "dbms_defs.h"
 #include "PageWrapper.h"
-#include "CommitLog.h"
 #include "LockManager.h"
-#include "WAL.h"
-#include "HashIndex.h"
-#include "SPGiSTIndex.h"
 
 // Forward declaration for session-local sequence-state threading.
 struct Session;
@@ -40,6 +30,19 @@ struct Session;
 namespace dbms {
 
 class CatalogService;
+
+// Storage/index classes appear only as unique_ptr members in this header;
+// forward declarations keep ~100 dependent translation units from
+// re-parsing their headers (full definitions live in TableManage.cpp).
+class BPTree;
+class BufferPool;
+class PageAllocator;
+class FreeSpaceMap;
+class VisibilityMap;
+class CommitLog;
+class WALManager;
+class HashIndex;
+class SPGiSTIndex;
 
 // MVCC header size per row
 constexpr size_t MVCC_TXID_SIZE = 8;      // uint64_t creatorTxnId
