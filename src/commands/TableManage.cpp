@@ -19495,14 +19495,36 @@ Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& ta
     }
     WALManager* wal = getWAL(dbname);
     if (!wal) return INVALID_LSN;
+    const uint64_t xid =
+        transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
+    // Before-image dedup: recovery's undo pass applies uncommitted
+    // before-images newest-to-oldest, ending at the earliest image of each
+    // page, which already restores the pre-transaction state. Logging the
+    // same page again in one transaction only inflates the WAL. Records with
+    // xid 0 are non-transactional maintenance pairs replayed in WAL order,
+    // so they keep their exact before/after pairing and are not deduped.
+    char pageKey[32];
+    std::snprintf(pageKey, sizeof(pageKey), "%u", pageId);
+    const std::string key = tablename + "/" + pageKey;
+    if (beforeImage && xid != 0) {
+        auto& logged = transactionContext().txnLoggedBeforePages;
+        auto it = logged.find(key);
+        if (it != logged.end() && it->second == xid) {
+            return INVALID_LSN;  // already covered by the earliest image
+        }
+        if (it == logged.end()) {
+            logged.emplace(key, xid);
+        } else {
+            it->second = xid;
+        }
+    }
     std::vector<char> payload = encodeHeapPayload(tablename, pageId, 0);
     uint32_t pageLen = static_cast<uint32_t>(pageSize);
     payload.insert(payload.end(), reinterpret_cast<const char*>(&pageLen),
                    reinterpret_cast<const char*>(&pageLen) + sizeof(pageLen));
     payload.insert(payload.end(), pageBuf, pageBuf + pageSize);
     uint8_t info = beforeImage ? XLOG_HEAP_PAGE_BEFORE : XLOG_HEAP_PAGE_AFTER;
-    return wal->XLogInsert(RM_HEAP_ID, info,
-                           transactionContext().inTransaction ? transactionContext().currentTxnId : 0, payload);
+    return wal->XLogInsert(RM_HEAP_ID, info, xid, payload);
 }
 
 Lsn StorageEngine::walIndexFileImage(const std::string& dbname,

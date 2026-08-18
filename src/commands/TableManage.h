@@ -1457,6 +1457,13 @@ private:
         std::set<std::string> txnWrittenPages;
         std::set<SsiIndexPredicate> txnReadIndexPredicates;
         std::set<SsiIndexKey> txnWrittenIndexKeys;
+        // Pages whose pre-image has already been logged in this transaction.
+        // Recovery's undo pass replays before-images newest-to-oldest and
+        // terminates at the earliest image, so only the first one per page is
+        // required to restore the pre-transaction state; duplicates are pure
+        // WAL amplification for multi-write transactions. The owning xid is
+        // tracked so a new transaction automatically discards the stale set.
+        std::map<std::string, uint64_t> txnLoggedBeforePages;
         std::string lastvalDb;
         std::string lastvalSeq;
         int64_t lastvalValue = 0;
