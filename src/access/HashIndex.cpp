@@ -35,6 +35,7 @@ HashIndex::HashIndex(const std::filesystem::path& indexFile)
     : filePath_(indexFile) {}
 
 bool HashIndex::open() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (loaded_) return true;
     if (!loadFromFile()) return false;
     loaded_ = true;
@@ -42,6 +43,7 @@ bool HashIndex::open() {
 }
 
 bool HashIndex::close() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (loaded_ && dirty_) {
         if (!saveToFile()) return false;
     }
@@ -50,11 +52,13 @@ bool HashIndex::close() {
 }
 
 bool HashIndex::flush() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!loaded_) return false;
     return !dirty_ || saveToFile();
 }
 
 bool HashIndex::insert(const std::string& key, int64_t rid) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!loaded_) return false;
     map_[key].push_back(rid);
     dirty_ = true;
@@ -62,6 +66,7 @@ bool HashIndex::insert(const std::string& key, int64_t rid) {
 }
 
 bool HashIndex::remove(const std::string& key, int64_t rid) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!loaded_) return false;
     auto it = map_.find(key);
     if (it == map_.end()) return false;
@@ -75,18 +80,36 @@ bool HashIndex::remove(const std::string& key, int64_t rid) {
 }
 
 std::vector<int64_t> HashIndex::search(const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
     if (it != map_.end()) return it->second;
     return {};
 }
 
 bool HashIndex::contains(const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return map_.find(key) != map_.end();
 }
 
 void HashIndex::clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
     map_.clear();
     dirty_ = true;
+}
+
+bool HashIndex::isOpen() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return loaded_;
+}
+
+bool HashIndex::hasDirtyData() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dirty_;
+}
+
+size_t HashIndex::size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return map_.size();
 }
 
 bool HashIndex::loadFromFile() {

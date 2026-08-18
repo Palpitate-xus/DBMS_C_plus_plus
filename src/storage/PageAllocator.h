@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "BufferPool.h"
@@ -13,6 +14,10 @@ namespace dbms {
 // Manages page allocation for a heap data file (.dt).
 // Page 0 is reserved as the file header page.
 // Pages 1..N are data pages managed via a free list.
+//
+// allocPage/freePage serialize on an internal mutex: they read-modify-write
+// the header page (free list head, numPages) which concurrent writers
+// (intent-locked DML, background flush) may reach from different threads.
 class PageAllocator {
 public:
     PageAllocator(const std::string& filename, size_t rowSize,
@@ -58,6 +63,7 @@ private:
     uint32_t formatVersion_;
     uint32_t numPages_ = 0;
     std::unique_ptr<BufferPool> bp_;
+    mutable std::mutex allocMutex_;
     bool validateFileHeader(const DataFileHeader& fh) const;
 };
 

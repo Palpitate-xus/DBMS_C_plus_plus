@@ -12591,7 +12591,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     }
     if (transactionContext().readOnly) return DBStatus::INVALID_VALUE;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
+    // Intention lock instead of a full table X lock: concurrent inserts into
+    // different pages (and readers) proceed in parallel. Physical page state
+    // is guarded by the per-page exclusive locks below plus the allocator /
+    // FSM / VM internal mutexes, mirroring how UPDATE already sequences.
+    if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 

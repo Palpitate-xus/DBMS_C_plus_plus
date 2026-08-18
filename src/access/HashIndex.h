@@ -3,13 +3,17 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace dbms {
 
-// In-memory hash index with file persistence
+// In-memory hash index with file persistence.
+// All public methods are serialized by an internal mutex: concurrent DML
+// under table intent locks may reach the same index object from different
+// threads (foreground statements and background flush alike).
 class HashIndex {
 public:
     explicit HashIndex(const std::filesystem::path& indexFile);
@@ -34,17 +38,18 @@ public:
 
     void clear();
 
-    bool isOpen() const { return loaded_; }
+    bool isOpen() const;
     const std::filesystem::path& filePath() const { return filePath_; }
-    bool hasDirtyData() const { return dirty_; }
+    bool hasDirtyData() const;
 
-    size_t size() const { return map_.size(); }
+    size_t size() const;
 
 private:
     std::filesystem::path filePath_;
     std::unordered_map<std::string, std::vector<int64_t>> map_;
     bool loaded_ = false;
     bool dirty_ = false;
+    mutable std::mutex mutex_;
 
     bool loadFromFile();
     bool saveToFile();

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,9 @@ namespace dbms {
 //   255     = 未知 / 未初始化
 //
 // 用途：INSERT 时快速定位有足够空间的页面，避免逐页扫描。
+//
+// 线程安全：内部互斥锁保护内存缓存与磁盘文件。调用方不再需要为并发
+// 的 get/set/find/flush 串行化（bgwriter 与前台 DML 可同时访问）。
 
 class FreeSpaceMap {
 public:
@@ -23,7 +27,7 @@ public:
 
     bool open();
     void close();
-    bool isOpen() const { return f_.is_open(); }
+    bool isOpen() const;
 
     // 获取指定页的空闲空间百分比（0~100），未知返回 255
     uint8_t getFreePercent(uint32_t pageId) const;
@@ -36,7 +40,7 @@ public:
     uint32_t findPage(uint8_t minPercent, uint32_t startPage = 1) const;
 
     // 获取当前记录的总页数
-    uint32_t numPages() const { return numPages_; }
+    uint32_t numPages() const;
 
     // 将内存缓存刷盘
     void flush();
@@ -47,10 +51,11 @@ private:
     mutable std::vector<uint8_t> cache_;
     mutable bool dirty_ = false;
     mutable uint32_t numPages_ = 0;
+    mutable std::mutex mutex_;
 
-    void ensureSize(uint32_t pageId);
-    void loadFromDisk() const;
-    void writeToDisk() const;
+    void ensureSizeLocked(uint32_t pageId);
+    void loadFromDiskLocked() const;
+    void writeToDiskLocked() const;
 };
 
 } // namespace dbms

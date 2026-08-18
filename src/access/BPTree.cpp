@@ -227,6 +227,7 @@ bool BPTree::searchNode(uint32_t pageNum, const std::string& key, int64_t& value
 // ========================================================================
 bool BPTree::insert(const std::string& key, int64_t value) {
     if (!bp_ || !bp_->isOpen()) return false;
+    std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     const std::string normalizedKey = normalizeKey(key);
     if (header_.rootPage == 0) {
         // Create root leaf
@@ -306,6 +307,7 @@ std::vector<int64_t> BPTree::searchMulti(const std::string& key) const {
 
 bool BPTree::insertMulti(const std::string& key, int64_t value) {
     if (!bp_ || !bp_->isOpen()) return false;
+    std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     const std::string normalizedKey = normalizeKey(key);
     if (header_.rootPage == 0) {
         uint32_t root = allocPage();
@@ -431,11 +433,13 @@ bool BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
 // ========================================================================
 bool BPTree::remove(const std::string& key) {
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     return removeFromNode(header_.rootPage, normalizeKey(key), std::nullopt);
 }
 
 bool BPTree::removeMulti(const std::string& key, int64_t value) {
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(writeMutex_);
     return removeFromNode(header_.rootPage, normalizeKey(key), value);
 }
 

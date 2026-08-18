@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <vector>
 
 namespace dbms {
@@ -19,6 +20,9 @@ namespace dbms {
 //   2. 只读查询优化：Index-only scan 可跳过 heap 访问
 //
 // 每 8 个页面占 1 字节。pageId N 对应的字节索引 = N/8，位索引 = N%8。
+//
+// 线程安全：内部互斥锁保护内存缓存与磁盘文件（bgwriter/vacuum 与
+// 前台 DML 可并发访问）。
 
 class VisibilityMap {
 public:
@@ -27,7 +31,7 @@ public:
 
     bool open();
     void close();
-    bool isOpen() const { return f_.is_open(); }
+    bool isOpen() const;
 
     // 获取指定页的 AllVisible 状态
     bool isAllVisible(uint32_t pageId) const;
@@ -46,10 +50,11 @@ private:
     mutable std::fstream f_;
     mutable std::vector<uint8_t> cache_;
     mutable bool dirty_ = false;
+    mutable std::mutex mutex_;
 
-    void ensureSize(uint32_t pageId);
-    void loadFromDisk() const;
-    void writeToDisk() const;
+    void ensureSizeLocked(uint32_t pageId);
+    void loadFromDiskLocked() const;
+    void writeToDiskLocked() const;
 
     static size_t byteIndex(uint32_t pageId) { return pageId / 8; }
     static uint8_t bitMask(uint32_t pageId) { return static_cast<uint8_t>(1) << (pageId % 8); }

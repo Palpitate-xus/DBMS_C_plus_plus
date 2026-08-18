@@ -80,6 +80,10 @@ bool PageAllocator::isOpen() const {
 
 uint32_t PageAllocator::allocPage() {
     if (!isOpen()) return 0;
+    // The header page (free-list head, numPages) is read-modify-write state
+    // shared by every allocator user; concurrent inserts may run under mere
+    // intent locks, so serialize the whole allocation decision.
+    std::lock_guard<std::mutex> lock(allocMutex_);
 
     char* fhBuf = bp_->fetchPage(0);
     if (!fhBuf) return 0;
@@ -139,6 +143,7 @@ uint32_t PageAllocator::allocPage() {
 void PageAllocator::freePage(uint32_t pageId) {
     if (!isOpen() || pageId == 0) return;
 
+    std::lock_guard<std::mutex> lock(allocMutex_);
     // Read file header
     char* fhBuf = bp_->fetchPage(0);
     if (!fhBuf) return;
@@ -169,8 +174,11 @@ void PageAllocator::freePage(uint32_t pageId) {
 }
 
 uint32_t PageAllocator::numPages() const {
-    return isOpen() ? numPages_ : 0;
+    if (!isOpen()) return 0;
+    std::lock_guard<std::mutex> lock(allocMutex_);
+    return numPages_;
 }
+
 
 char* PageAllocator::fetchPage(uint32_t pageId) {
     if (!isOpen()) return nullptr;

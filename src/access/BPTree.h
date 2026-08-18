@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -79,6 +80,14 @@ public:
 private:
     std::filesystem::path filePath_;
     std::unique_ptr<BufferPool> bp_;
+
+    // Serializes node mutations. The tree deserializes whole nodes, mutates
+    // them locally and writes them back, so two writers could otherwise
+    // interleave their read-modify-write cycles and lose entries. Insert
+    // paths hold the table intent lock only, which does not exclude other
+    // writers inside this process. Recursive so public mutators may call the
+    // locked public search() internally.
+    mutable std::recursive_mutex writeMutex_;
 
     struct FileHeader {
         uint32_t rootPage = 0;      // page number of root node
