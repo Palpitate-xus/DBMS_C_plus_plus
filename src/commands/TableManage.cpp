@@ -3795,6 +3795,7 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     eraseTableCaches(secondaryIndexCache_);
     eraseTableCaches(hashIndexCache_);
     eraseTableCaches(secidxLinesCache_);
+    eraseTableCaches(hashidxLinesCache_);
     exclusionCache_.erase(dbname);
     {
         std::lock_guard<std::mutex> lock(schemaCacheMutex_);
@@ -3934,6 +3935,9 @@ void StorageEngine::closeAllVM() {
 }
 
 CommitLog* StorageEngine::getCommitLog(const std::string& dbname) const {
+    // commitLogs_ is a mutable shared map; lock it (cacheMutex_ is recursive,
+    // so callers that already hold it are fine).
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto it = commitLogs_.find(dbname);
     if (it != commitLogs_.end()) return it->second.get();
 
@@ -3944,6 +3948,7 @@ CommitLog* StorageEngine::getCommitLog(const std::string& dbname) const {
 }
 
 void StorageEngine::closeAllCommitLogs() {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     commitLogs_.clear();
 }
 
@@ -4533,15 +4538,34 @@ std::filesystem::path StorageEngine::hashIndexMetaPath(const std::string& dbname
 
 std::vector<std::string> StorageEngine::getHashIndexedColumns(const std::string& dbname,
                                                                const std::string& tablename) const {
-    std::vector<std::string> cols;
-    std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
-    std::ifstream in(meta);
-    if (!in) return cols;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty()) cols.push_back(line);
+    return readHashidxLines(dbname, tablename);
+}
+
+std::vector<std::string> StorageEngine::readHashidxLines(const std::string& dbname,
+                                                         const std::string& tablename) const {
+    const std::string key = dbname + "/" + tablename;
+    {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        auto it = hashidxLinesCache_.find(key);
+        if (it != hashidxLinesCache_.end()) return it->second;
     }
-    return cols;
+    std::vector<std::string> lines;
+    std::ifstream in(hashIndexMetaPath(dbname, tablename));
+    if (in) {
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty()) lines.push_back(line);
+        }
+    }
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    hashidxLinesCache_.emplace(key, std::move(lines));
+    return hashidxLinesCache_[key];
+}
+
+void StorageEngine::invalidateHashidxCache(const std::string& dbname,
+                                           const std::string& tablename) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    hashidxLinesCache_.erase(dbname + "/" + tablename);
 }
 
 HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
@@ -4620,6 +4644,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
         discardIndex();
         return DBStatus::IO_ERROR;
     }
+    invalidateHashidxCache(dbname, tablename);
     return DBStatus::OK;
 }
 
@@ -4639,6 +4664,7 @@ DBStatus StorageEngine::dropHashIndex(const std::string& dbname,
         std::ofstream out(meta, std::ios::trunc);
         for (const auto& c : existing) out << c << '\n';
     }
+    invalidateHashidxCache(dbname, tablename);
     std::string key = dbname + "." + tablename + "." + colname;
     hashIndexCache_.erase(key);
     std::filesystem::remove(hashIndexPath(dbname, tablename, colname));
@@ -9242,6 +9268,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(secondaryIndexMetaPath(dbname, tablename));
     invalidateSecidxCache(dbname, tablename);
     std::filesystem::remove(hashIndexMetaPath(dbname, tablename));
+    invalidateHashidxCache(dbname, tablename);
     std::filesystem::remove(namedIndexMetaPath(*this, dbname, tablename));
     std::filesystem::remove(fsmPath(dbname, tablename));
     std::filesystem::remove(vmPath(dbname, tablename));
@@ -10126,6 +10153,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
             std::ofstream out(meta, std::ios::trunc);
             for (const auto& l : lines) out << l << '\n';
         }
+        invalidateHashidxCache(dbname, tablename);
     }
 
     // Rename secondary index file if exists
@@ -10336,6 +10364,8 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
             if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
         }
         std::filesystem::rename(hashIndexMetaPath(dbname, oldName), hashIndexMetaPath(dbname, newName));
+        invalidateHashidxCache(dbname, oldName);
+        invalidateHashidxCache(dbname, newName);
     }
 
     // Rename composite indexes
@@ -15033,8 +15063,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
         }
     }
 
-    // Pre-fetch indexed column list
+    // Pre-fetch indexed column lists (hoisted out of the per-row loop)
     auto indexedCols = getIndexedColumns(dbname, tablename);
+    auto hashIndexedCols = getHashIndexedColumns(dbname, tablename);
 
     // For each matching row, read old data, update, write back, update indexes
     for (int64_t rid : matchIds) {
@@ -15059,8 +15090,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
             }
         }
         // Also save hash-indexed column values
-        auto hashCols = getHashIndexedColumns(dbname, tablename);
-        for (const auto& colname : hashCols) {
+        for (const auto& colname : hashIndexedCols) {
             size_t colIdx = tbl.len;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }

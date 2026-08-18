@@ -1273,6 +1273,14 @@ private:
                                const std::string& tablename);
     mutable std::map<std::string, std::vector<std::string>> secidxLinesCache_;
 
+    // Same treatment for .hashidx lines (per-row UPDATE used to re-open the
+    // file once per matching row).
+    std::vector<std::string> readHashidxLines(const std::string& dbname,
+                                              const std::string& tablename) const;
+    void invalidateHashidxCache(const std::string& dbname,
+                                const std::string& tablename);
+    mutable std::map<std::string, std::vector<std::string>> hashidxLinesCache_;
+
     // Exclusion constraints, cached per database (same invalidation rules).
     mutable std::map<std::string, std::vector<ExclusionConstraint>> exclusionCache_;
     void invalidateExclusionCache(const std::string& dbname);
