@@ -1,11 +1,13 @@
 #include "WAL.h"
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <system_error>
 
@@ -13,11 +15,33 @@ namespace dbms {
 
 namespace {
 
-// A StorageEngine can be embedded more than once in a process (for example,
-// one instance per backend session).  The file lock below protects separate
-// processes; this mutex also prevents two in-process WALManager instances from
-// observing the same end-of-WAL and appending at the same offset.
-std::mutex walProcessMutex;
+// Each WAL directory gets its own in-process mutex instead of one global for
+// the whole process: different databases no longer serialize their WAL
+// appends. The file lock below still protects separate processes; this map
+// also prevents two in-process WALManager instances observing the same
+// end-of-WAL and appending at the same offset.
+//
+// The registry is allocated on the heap and intentionally leaked: a
+// StorageEngine destructor may construct a WALManager (shutdown WAL flush)
+// during static destruction, long after function-local statics in other TUs
+// have been destroyed. A plain namespace-scope map would already be freed by
+// then; the leak keeps every mutex valid for the remainder of the process.
+std::map<std::string, std::shared_ptr<std::mutex>>& walDirMutexRegistry() {
+    static auto* registry = new std::map<std::string, std::shared_ptr<std::mutex>>();
+    return *registry;
+}
+
+std::mutex& walDirMutexRegistryGuard() {
+    static auto* guard = new std::mutex();
+    return *guard;
+}
+
+std::shared_ptr<std::mutex> walDirMutex(const std::filesystem::path& walDir) {
+    std::lock_guard<std::mutex> guard(walDirMutexRegistryGuard());
+    auto& entry = walDirMutexRegistry()[walDir.string()];
+    if (!entry) entry = std::make_shared<std::mutex>();
+    return entry;
+}
 
 // Simple CRC32C implementation (table-less, small)
 uint32_t crc32c(const char* data, size_t len) {
@@ -140,9 +164,17 @@ bool parseSegmentName(const std::string& name, uint32_t expectedTli,
 } // namespace
 
 WALManager::WALManager(const std::filesystem::path& walDir)
-    : walDir_(walDir), currentLsn_(0) {}
+    : walDir_(walDir), currentLsn_(0),
+      dirMutex_(walDirMutex(walDir)) {}
 
-WALManager::~WALManager() = default;
+WALManager::~WALManager() {
+    closeWriteFd();
+    if (lockFd_ >= 0) {
+        ::flock(lockFd_, LOCK_UN);
+        ::close(lockFd_);
+        lockFd_ = -1;
+    }
+}
 
 bool WALManager::ensureOpen() {
     if (open_) return true;
@@ -164,6 +196,14 @@ bool WALManager::ensureOpen() {
         open_ = false;
         return false;
     }
+    // Seed the incremental tail state (chain walk happens once here).
+    if (!scanWalTail()) {
+        open_ = false;
+        return false;
+    }
+    // Everything on disk is already durable by definition.
+    lastSyncedLsn_ = currentLsn_;
+    earliestSegValid_ = false;
     return true;
 }
 
@@ -191,6 +231,29 @@ bool WALManager::refreshCurrentLsnFromDisk() {
         currentLsn_ = static_cast<Lsn>(maxSeg) * kSegmentSize + size;
     }
     return true;
+}
+
+// Walk the retained record chain once to determine the last record's LSN and
+// length. This is the only place the chain is walked from the tail side; the
+// hot XLogInsert path keeps the result incrementally in lastRecordLsn_.
+bool WALManager::scanWalTail() {
+    lastRecordLsn_ = 0;
+    hasLastRecord_ = false;
+    lastRecordTotLen_ = 0;
+    Lsn lsn = earliestAvailableLsn();
+    std::optional<Lsn> previous;
+    while (lsn < currentLsn_) {
+        auto rec = ReadRecord(lsn);
+        if (!rec) return false;
+        previous = lsn;
+        lastRecordLsn_ = lsn;
+        hasLastRecord_ = true;
+        lastRecordTotLen_ = rec->header.xl_tot_len;
+        const Lsn next = lsn + rec->header.xl_tot_len;
+        if (next <= lsn || next > currentLsn_) return false;
+        lsn = next;
+    }
+    return lsn == currentLsn_;
 }
 
 bool WALManager::validateRecordsOnDisk() const {
@@ -236,19 +299,43 @@ int WALManager::acquireWalFileLock() const {
     std::error_code ec;
     std::filesystem::create_directories(walDir_, ec);
     if (ec) return -1;
-    int fd = ::open(lockPath().c_str(), O_RDWR | O_CREAT, 0644);
-    if (fd < 0) return -1;
-    if (::flock(fd, LOCK_EX) != 0) {
-        ::close(fd);
-        return -1;
+    // Reuse the long-lived lock descriptor across operations. Only the flock
+    // itself is taken/dropped per operation, preserving cross-process
+    // semantics while removing the per-record open/close syscalls.
+    if (lockFd_ < 0) {
+        int fd = ::open(lockPath().c_str(), O_RDWR | O_CREAT, 0644);
+        if (fd < 0) return -1;
+        lockFd_ = fd;
     }
-    return fd;
+    if (::flock(lockFd_, LOCK_EX) != 0) return -1;
+    return lockFd_;
 }
 
 void WALManager::releaseWalFileLock(int fd) {
     if (fd < 0) return;
     ::flock(fd, LOCK_UN);
-    ::close(fd);
+}
+
+// Single-stat check that the on-disk append offset still matches
+// currentLsn_. Must run under the WAL file lock. Returns false when another
+// process appended (or the stream is damaged) and the caller must rebuild
+// state from disk.
+bool WALManager::validateAppendOffset() {
+    // A manager that has never appended must also verify that the stream is
+    // still empty on disk: another in-process or external writer may have
+    // created records since this manager's ensureOpen() observed an empty
+    // directory. Appending at LSN 0 would then overwrite existing data.
+    const uint32_t seg = currentLsn_ == 0 ? 0u : segmentNumber(currentLsn_ - 1);
+    std::error_code ec;
+    const auto path = segmentPath(seg);
+    if (!std::filesystem::exists(path, ec) || ec) {
+        return currentLsn_ == 0;
+    }
+    auto size = std::filesystem::file_size(path, ec);
+    if (ec) return false;
+    if (size > kSegmentSize) return false;
+    const Lsn onDisk = static_cast<Lsn>(seg) * kSegmentSize + size;
+    return onDisk == currentLsn_;
 }
 
 std::filesystem::path WALManager::segmentPath(uint32_t segNo) const {
@@ -317,7 +404,24 @@ bool WALManager::setTimeline(uint32_t tli) {
     if (!ensureOpen()) return false;
     const uint32_t previousTli = timelineId_;
     timelineId_ = tli;
-    if (persistTimeline()) return true;
+    // Segment filenames embed the timeline; cached fd/path state must be
+    // rebuilt and the tail state re-derived after the switch.
+    closeWriteFd();
+    earliestSegValid_ = false;
+    if (persistTimeline()) {
+        std::lock_guard<std::mutex> processLock(*dirMutex_);
+        const int walLock = acquireWalFileLock();
+        if (walLock >= 0) {
+            if (!refreshCurrentLsnFromDisk() || !scanWalTail()) {
+                timelineId_ = previousTli;
+                releaseWalFileLock(walLock);
+                return false;
+            }
+            lastSyncedLsn_ = currentLsn_;
+            releaseWalFileLock(walLock);
+        }
+        return true;
+    }
     timelineId_ = previousTli;
     return false;
 }
@@ -336,7 +440,7 @@ std::filesystem::path WALManager::donePath(uint32_t segNo) const {
 
 bool WALManager::markSegmentReadyForArchive(uint32_t segNo) {
     if (!ensureOpen()) return false;
-    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
     const bool ok = markSegmentReadyForArchiveLocked(segNo);
@@ -353,7 +457,7 @@ bool WALManager::markSegmentReadyForArchiveLocked(uint32_t segNo) {
 
 bool WALManager::markSegmentArchived(uint32_t segNo) {
     if (!ensureOpen()) return false;
-    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
     const bool ok = markSegmentArchivedLocked(segNo);
@@ -399,7 +503,7 @@ std::vector<uint32_t> WALManager::pendingArchiveSegments() const {
 
 bool WALManager::archiveSegment(uint32_t segNo, const std::filesystem::path& archiveDir) {
     if (!ensureOpen()) return false;
-    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
     const bool ok = archiveSegmentLocked(segNo, archiveDir);
@@ -424,7 +528,7 @@ bool WALManager::archiveSegmentLocked(uint32_t segNo,
 
 bool WALManager::archivePendingSegments(const std::filesystem::path& archiveDir) {
     if (!ensureOpen()) return false;
-    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
     auto pending = pendingArchiveSegments();
@@ -438,7 +542,7 @@ bool WALManager::archivePendingSegments(const std::filesystem::path& archiveDir)
 
 bool WALManager::markSegmentsReadyBefore(Lsn lsn) {
     if (!ensureOpen() || lsn == INVALID_LSN) return false;
-    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
     uint32_t endSeg = segmentNumber(lsn);
@@ -456,6 +560,12 @@ bool WALManager::markSegmentsReadyBefore(Lsn lsn) {
 }
 
 Lsn WALManager::earliestAvailableLsn() const {
+    // Cached answer: the first retained segment only changes through
+    // truncateBefore()/reset(), both of which invalidate the cache. The
+    // directory walk used to run on every XLogFlush.
+    if (earliestSegValid_) {
+        return static_cast<Lsn>(earliestSeg_) * kSegmentSize;
+    }
     if (!std::filesystem::is_directory(walDir_)) return 0;
 
     std::error_code ec;
@@ -470,14 +580,20 @@ Lsn WALManager::earliestAvailableLsn() const {
         if (!parseSegmentName(name, timelineId_, seg)) continue;
         firstSeg = std::min(firstSeg, seg);
     }
-    if (firstSeg == std::numeric_limits<uint32_t>::max()) return 0;
+    if (firstSeg == std::numeric_limits<uint32_t>::max()) {
+        earliestSeg_ = 0;
+        earliestSegValid_ = true;
+        return 0;
+    }
+    earliestSeg_ = firstSeg;
+    earliestSegValid_ = true;
     return static_cast<Lsn>(firstSeg) * kSegmentSize;
 }
 
 bool WALManager::truncateBefore(Lsn lsn) {
     if (!ensureOpen() || lsn == INVALID_LSN || lsn > currentLsn_) return false;
 
-    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
 
@@ -534,6 +650,10 @@ bool WALManager::truncateBefore(Lsn lsn) {
         const int dirFd = ::open(walDir_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (dirFd < 0 || ::fsync(dirFd) != 0) ok = false;
         if (dirFd >= 0) ::close(dirFd);
+        // Removal changes the retained prefix and may have unlinked the
+        // segment the cached write fd points at.
+        earliestSegValid_ = false;
+        closeWriteFd();
     }
     releaseWalFileLock(walLock);
     return ok;
@@ -568,6 +688,31 @@ bool WALManager::ensureSegment(uint32_t segNo) {
     return ofs.good();
 }
 
+// Ensure writeFd_ targets the given segment, opening/switching as needed.
+// Returns the raw fd or -1. The fd stays open across appends; it is reopened
+// only when the stream rolls into a new segment (or after truncation).
+int WALManager::segmentWriteFd(uint32_t segNo) {
+    if (writeFdValid_ && writeFdSeg_ == segNo && writeFd_ >= 0) return writeFd_;
+    if (!closeWriteFd()) return -1;
+    if (!ensureSegment(segNo)) return -1;
+    auto path = segmentPath(segNo);
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) return -1;
+    writeFd_ = fd;
+    writeFdSeg_ = segNo;
+    writeFdValid_ = true;
+    return fd;
+}
+
+bool WALManager::closeWriteFd() {
+    if (writeFd_ >= 0) {
+        ::close(writeFd_);
+        writeFd_ = -1;
+    }
+    writeFdValid_ = false;
+    return true;
+}
+
 bool WALManager::appendBytes(const char* buf, size_t len) {
     if (!ensureOpen()) return false;
     uint64_t offset = currentLsn_;
@@ -576,17 +721,13 @@ bool WALManager::appendBytes(const char* buf, size_t len) {
     while (remaining > 0) {
         uint32_t segNo = segmentNumber(offset);
         uint32_t off = segmentOffset(offset);
-        if (!ensureSegment(segNo)) return false;
-        auto path = segmentPath(segNo);
-        int fd = ::open(path.c_str(), O_WRONLY | O_CREAT, 0644);
+        int fd = segmentWriteFd(segNo);
         if (fd < 0) return false;
         if (::lseek(fd, off, SEEK_SET) < 0) {
-            ::close(fd);
             return false;
         }
         uint64_t chunk = std::min(remaining, kSegmentSize - off);
         ssize_t wrote = ::write(fd, ptr, static_cast<size_t>(chunk));
-        ::close(fd);
         if (wrote < 0 || static_cast<uint64_t>(wrote) != chunk) return false;
         ptr += chunk;
         offset += chunk;
@@ -621,8 +762,13 @@ bool WALManager::readBytes(uint64_t offset, char* buf, size_t len) const {
 }
 
 bool WALManager::syncSegment(uint32_t segNo) {
+    // Reuse the long-lived append descriptor when it targets this segment;
+    // otherwise open briefly read-only (fsync does not require write access).
+    if (writeFdValid_ && writeFdSeg_ == segNo && writeFd_ >= 0) {
+        return ::fsync(writeFd_) == 0;
+    }
     auto path = segmentPath(segNo);
-    int fd = ::open(path.c_str(), O_RDWR);
+    int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return false;
     int r = ::fsync(fd);
     ::close(fd);
@@ -633,12 +779,19 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
                            const std::vector<char>& data) {
     if (!ensureOpen()) return INVALID_LSN;
 
-    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return INVALID_LSN;
-    if (!refreshCurrentLsnFromDisk()) {
-        releaseWalFileLock(walLock);
-        return INVALID_LSN;
+    // Cheap single-stat guard: if another process appended behind our back,
+    // rebuild the tail state from disk instead of silently overwriting.
+    if (!validateAppendOffset()) {
+        if (!refreshCurrentLsnFromDisk() || !scanWalTail()) {
+            releaseWalFileLock(walLock);
+            return INVALID_LSN;
+        }
+        // The stream moved; the cached write fd may point at a removed or
+        // rewritten segment. Force a reopen on next append.
+        closeWriteFd();
     }
 
     if (data.size() > kMaxRecordPayload ||
@@ -654,14 +807,16 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
     }
     uint32_t totalLen = static_cast<uint32_t>(alignedLen);
 
-    const auto previousLsn = lastRecordLsn();
-    if (currentLsn_ != 0 && !previousLsn) {
+    // The tail record is maintained incrementally; no chain re-walk here.
+    // LSN 0 is a valid record position, so presence is tracked separately.
+    const Lsn previousLsn = lastRecordLsn_;
+    if (currentLsn_ != 0 && !hasLastRecord_) {
         releaseWalFileLock(walLock);
         return INVALID_LSN;
     }
 
     XLogRecHeader header;
-    header.xl_prev = previousLsn.value_or(0);
+    header.xl_prev = previousLsn;
     header.xl_tot_len = totalLen;
     header.xl_info = (static_cast<uint32_t>(rmid) << 8) | info;
     header.xl_xid = xid;
@@ -682,6 +837,10 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
         releaseWalFileLock(walLock);
         return INVALID_LSN;
     }
+    // Advance the incremental tail state together with the LSN.
+    lastRecordLsn_ = recLsn;
+    hasLastRecord_ = true;
+    lastRecordTotLen_ = totalLen;
     advanceCurrentLsn(totalLen);
     uint32_t newSeg = segmentNumber(currentLsn_);
     if (newSeg != prevSeg) {
@@ -694,21 +853,31 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
 
 bool WALManager::XLogFlush(Lsn targetLsn) {
     if (!ensureOpen() || targetLsn == INVALID_LSN) return false;
-    std::lock_guard<std::mutex> processLock(walProcessMutex);
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;
     if (targetLsn > currentLsn_) {
         releaseWalFileLock(walLock);
         return false;
     }
+    // Already-durable prefix: nothing to do. This makes the common repeated
+    // flush of the same LSN a pure memory check.
+    if (targetLsn != 0 && targetLsn <= lastSyncedLsn_) {
+        releaseWalFileLock(walLock);
+        return true;
+    }
     Lsn endLsn = targetLsn;
     if (targetLsn < currentLsn_) {
-        const auto record = ReadRecord(targetLsn);
-        if (!record) {
-            releaseWalFileLock(walLock);
-            return false;
+        if (hasLastRecord_ && targetLsn == lastRecordLsn_) {
+            endLsn = targetLsn + lastRecordTotLen_;
+        } else {
+            const auto record = ReadRecord(targetLsn);
+            if (!record) {
+                releaseWalFileLock(walLock);
+                return false;
+            }
+            endLsn = targetLsn + record->header.xl_tot_len;
         }
-        endLsn = targetLsn + record->header.xl_tot_len;
         if (endLsn <= targetLsn || endLsn > currentLsn_) {
             releaseWalFileLock(walLock);
             return false;
@@ -718,7 +887,9 @@ bool WALManager::XLogFlush(Lsn targetLsn) {
         releaseWalFileLock(walLock);
         return true;
     }
-    uint32_t startSeg = segmentNumber(earliestAvailableLsn());
+    uint32_t startSeg = (lastSyncedLsn_ == 0)
+        ? segmentNumber(earliestAvailableLsn())
+        : segmentNumber(lastSyncedLsn_);
     uint32_t endSeg = segmentNumber(endLsn - 1);
     for (uint32_t seg = startSeg; seg <= endSeg; ++seg) {
         if (!syncSegment(seg)) {
@@ -726,6 +897,7 @@ bool WALManager::XLogFlush(Lsn targetLsn) {
             return false;
         }
     }
+    if (endLsn > lastSyncedLsn_) lastSyncedLsn_ = endLsn;
     releaseWalFileLock(walLock);
     return true;
 }
@@ -784,12 +956,24 @@ std::optional<XLogRecord> WALManager::readCheckpoint(Lsn lsn) const {
 
 void WALManager::reset() {
     if (!ensureOpen()) return;
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return;
     std::error_code ec;
+    // Close the append descriptor before unlinking the segments it targets.
+    closeWriteFd();
     for (const auto& entry : std::filesystem::directory_iterator(walDir_)) {
         std::filesystem::remove_all(entry.path(), ec);
     }
     currentLsn_ = 0;
     timelineId_ = 1;
+    lastRecordLsn_ = 0;
+    hasLastRecord_ = false;
+    lastRecordTotLen_ = 0;
+    lastSyncedLsn_ = 0;
+    earliestSeg_ = 0;
+    earliestSegValid_ = false;
+    releaseWalFileLock(walLock);
 }
 
 // ============================================================================

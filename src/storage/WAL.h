@@ -5,6 +5,8 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -193,6 +195,32 @@ private:
     Lsn currentLsn_ = 0;
     uint32_t timelineId_ = 1;
 
+    // ---- Incremental append state ---------------------------------------
+    // Maintained in memory under dirMutex_/the WAL file lock so a normal
+    // XLogInsert/XLogFlush does not rescan the segment directory or re-walk
+    // the record chain. refreshCurrentLsnFromDisk()/validateRecordsOnDisk()
+    // still rebuild this state at open and whenever another process is
+    // detected appending to the same directory (validateAppendOffset).
+    Lsn lastRecordLsn_ = 0;         // LSN of the last inserted record
+    bool hasLastRecord_ = false;    // false = no record yet (LSN 0 is valid)
+    uint32_t lastRecordTotLen_ = 0; // xl_tot_len of that record
+    Lsn lastSyncedLsn_ = 0;         // bytes [0, lastSyncedLsn_) are fsync'd
+    mutable uint32_t earliestSeg_ = 0; // first segment present on this timeline
+    mutable bool earliestSegValid_ = false;
+    // Long-lived descriptors: the cross-process wal.lock fd and the write fd
+    // of the segment currently being appended to. Reopened only on segment
+    // switch instead of per record.
+    mutable int lockFd_ = -1;
+    int writeFd_ = -1;
+    uint32_t writeFdSeg_ = 0;
+    bool writeFdValid_ = false;
+
+    // In-process mutex shared by every WALManager instance that targets the
+    // same WAL directory (several embedded StorageEngines may coexist). It
+    // replaces the former process-global mutex so different databases no
+    // longer serialize each other.
+    std::shared_ptr<std::mutex> dirMutex_;
+
     uint32_t segmentNumber(Lsn lsn) const {
         return static_cast<uint32_t>(lsn / kSegmentSize);
     }
@@ -208,6 +236,13 @@ private:
     bool validateRecordsOnDisk() const;
     std::optional<Lsn> lastRecordLsn() const;
 
+    // Verify the on-disk append offset still matches currentLsn_ with a
+    // single stat (called under the WAL file lock). When another process
+    // appended in between, the caller rebuilds state from disk.
+    bool validateAppendOffset();
+    // Walk the retained chain once, filling lastRecordLsn_/lastRecordTotLen_.
+    bool scanWalTail();
+
     int acquireWalFileLock() const;
     static void releaseWalFileLock(int fd);
 
@@ -221,6 +256,10 @@ private:
                               const std::filesystem::path& archiveDir);
 
     void advanceCurrentLsn(uint32_t len);
+
+    // Ensure writeFd_ targets the given segment, opening/switching as needed.
+    int segmentWriteFd(uint32_t segNo);
+    bool closeWriteFd();
 
     uint32_t computeCrc(const char* data, size_t len) const;
     bool verifyCrc(const XLogRecord& rec) const;
