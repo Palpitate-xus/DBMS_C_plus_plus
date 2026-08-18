@@ -1,5 +1,7 @@
 #include "BufferPool.h"
 
+#include <algorithm>
+#include <chrono>
 #include <unistd.h>
 
 namespace dbms {
@@ -60,20 +62,38 @@ void BufferPool::invalidatePage(uint32_t pageId) {
         cv.wait(lock);
     }
     auto it = pageMap_.find(pageId);
-    if (it != pageMap_.end()) {
-        size_t idx = it->second;
-        pageMap_.erase(it);
-        Frame& f = frames_[idx];
-        f.dirty = false;
-        f.usageCount = 0;
-        // Pre-existing note: engine-level locks serialize invalidate vs.
-        // fetch in all current callers; a reader that pinned this frame
-        // concurrently would observe the frame being recycled. The orphaned
-        // pin-count bookkeeping needed to close that window fully requires
-        // pin handles in the unpin API and is left as future work.
+    if (it == pageMap_.end()) return;
+    const size_t idx = it->second;
+    pageMap_.erase(it);
+    Frame& f = frames_[idx];
+    f.dirty = false;
+    f.usageCount = 0;
+    if (f.pinCount == 0) {
+        // No reader holds it: free the frame immediately.
         f.pageId = static_cast<uint32_t>(-1);
-        f.pinCount = 0;
+        return;
     }
+    // Readers still hold pointers into this frame's buffer. Orphan it: the
+    // buffer stays valid for them, but the frame is excluded from eviction
+    // and no new load of this page may start until they drain (the
+    // pageMap/orphanedPins mutual exclusion is what keeps unpin routing
+    // unambiguous).
+    orphanedPins_[pageId] = {f.pinCount, idx};
+    f.pageId = kOrphanedPage;
+    f.pinCount = 0;  // the orphan entry now owns the countdown
+}
+
+void BufferPool::reclaimOrphanedFrame(size_t idx) {
+    Frame& f = frames_[idx];
+    if (f.pageId == kOrphanedPage) {
+        f.pageId = static_cast<uint32_t>(-1);
+        f.usageCount = 0;
+    }
+}
+
+void BufferPool::notifyOrphanDrained(uint32_t pageId) {
+    for (auto* cv : orphanWaiters_) cv->notify_all();
+    orphanWaiters_.clear();
 }
 
 void BufferPool::invalidateAll() {
@@ -85,6 +105,13 @@ void BufferPool::invalidateAll() {
         // lists, so re-register until the map drains.
         const uint32_t pid = loadingPages_.begin()->first;
         loadWaiters_[pid].push_back(&cv);
+        cv.wait(lock);
+    }
+    // Orphaned frames are unwound by their readers' unpins; a fresh
+    // invalidateAll must not race them, so wait for those too.
+    while (!orphanedPins_.empty()) {
+        const uint32_t pid = orphanedPins_.begin()->first;
+        orphanWaiters_.push_back(&cv);
         cv.wait(lock);
     }
     for (auto& frame : frames_) {
@@ -133,7 +160,7 @@ std::optional<size_t> BufferPool::evictFrame() {
             clockHand_ = (clockHand_ + 1) % numFrames_;
 
             Frame& f = frames_[idx];
-            if (f.pinCount > 0) {
+            if (f.pinCount > 0 || f.pageId == kOrphanedPage) {
                 continue; // pinned pages and orphaned buffers are never evicted
             }
             if (f.usageCount > 0) {
@@ -250,6 +277,31 @@ char* BufferPool::fetchPage(uint32_t pageId) {
         // Peer failed: retry the load ourselves (loop re-checks loadingPages_).
     }
 
+    // An orphaned copy of this page still has readers. unpinPage routes by
+    // the pageMap/orphanedPins mutual exclusion, so a fresh load now would
+    // let a later unpin steal the new mapping's pin. Wait for the drain.
+    // BOUNDED retry: a caller that itself holds the orphan's pin (fetch ->
+    // invalidate -> fetch on one thread) cannot succeed until it unpins, so
+    // after a grace period we report the page unavailable rather than
+    // deadlocking forever.
+    if (orphanedPins_.count(pageId)) {
+        int attempts = 0;
+        while (orphanedPins_.count(pageId)) {
+            if (++attempts > 50) return nullptr;  // ~10s of bounded waiting
+            std::condition_variable cv;
+            orphanWaiters_.push_back(&cv);
+            cv.wait_for(lock, std::chrono::milliseconds(200));
+            // Remove ourselves before touching cv's scope again.
+            orphanWaiters_.erase(
+                std::remove(orphanWaiters_.begin(), orphanWaiters_.end(), &cv),
+                orphanWaiters_.end());
+        }
+        // Drained: re-run the whole fetch path so it sees current state.
+        lock.unlock();
+        if (char* cached = tryPinCached(pageId)) return cached;
+        lock.lock();
+    }
+
     // Select a victim frame. A frame mid-load is pinned by its loader, so
     // the sweep below (and evictFrame) already skip it.
     size_t idx = static_cast<size_t>(-1);
@@ -329,6 +381,19 @@ void BufferPool::unpinPage(uint32_t pageId) {
     if (it != pageMap_.end()) {
         Frame& f = frames_[it->second];
         if (f.pinCount > 0) f.pinCount--;
+        return;
+    }
+    // Not the cached copy: this unpin may belong to an orphaned buffer of
+    // the same page (pageMap/orphanedPins mutual exclusion guarantees we
+    // are not stealing a live mapping's pin).
+    auto oit = orphanedPins_.find(pageId);
+    if (oit != orphanedPins_.end()) {
+        if (oit->second.first > 0) oit->second.first--;
+        if (oit->second.first == 0) {
+            reclaimOrphanedFrame(oit->second.second);
+            orphanedPins_.erase(oit);
+            notifyOrphanDrained(pageId);
+        }
     }
 }
 
@@ -338,7 +403,8 @@ bool BufferPool::flushUnlocked() {
     std::vector<size_t> writtenFrames;
     for (size_t index = 0; index < frames_.size(); ++index) {
         auto& frame = frames_[index];
-        if (frame.dirty && frame.pageId != static_cast<uint32_t>(-1)) {
+        if (frame.dirty && frame.pageId != static_cast<uint32_t>(-1) &&
+            frame.pageId != kOrphanedPage) {
             if (writeToDisk(frame.pageId, frame.data.data())) {
                 writtenFrames.push_back(index);
             } else {
@@ -363,7 +429,8 @@ std::vector<BufferPool::FrameInfo> BufferPool::getFrameInfo() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<FrameInfo> result;
     for (const auto& frame : frames_) {
-        if (frame.pageId != static_cast<uint32_t>(-1)) {
+        if (frame.pageId != static_cast<uint32_t>(-1) &&
+            frame.pageId != kOrphanedPage) {
             result.push_back({frame.pageId, frame.dirty, frame.pinCount,
                               frame.usageCount, true});
         }

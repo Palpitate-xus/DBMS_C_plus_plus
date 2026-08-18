@@ -13,6 +13,12 @@
 
 namespace dbms {
 
+// Sentinel pageId for a frame whose page was invalidated while readers
+// still held it pinned: the buffer must stay valid until the last unpin,
+// but the frame is no longer any page's cached copy and cannot be evicted
+// or reloaded underneath those readers.
+constexpr uint32_t kOrphanedPage = 0xFFFFFFFE;
+
 // ========================================================================
 // BufferPool - Shared buffer cache with Clock Sweep eviction
 // ========================================================================
@@ -119,6 +125,15 @@ private:
     std::unordered_map<uint32_t, size_t> loadingPages_;   // pageId -> frame idx
     std::unordered_map<uint32_t, std::vector<std::condition_variable*>> loadWaiters_;
 
+    // Pages invalidated while readers were still pinned: pageId -> (remaining
+    // pins, frame idx). The frame carries kOrphanedPage until the last unpin.
+    // INVARIANT (mutual exclusion): for any pageId, at most one of
+    // pageMap_[pageId] / orphanedPins_[pageId] / loadingPages_[pageId] holds
+    // an entry at a time. unpinPage routes by that rule, so a pin is always
+    // released to the frame it was taken on.
+    std::unordered_map<uint32_t, std::pair<size_t, size_t>> orphanedPins_;
+    std::vector<std::condition_variable*> orphanWaiters_;  // fetches blocked on drain
+
     bool readFromDisk(uint32_t pageId, char* buf, bool* fullPageRead = nullptr);
     bool writeToDisk(uint32_t pageId, const char* buf);
     bool flushUnlocked();
@@ -130,6 +145,10 @@ private:
     bool publishLoadedPage(uint32_t pageId, size_t idx, bool fullPageRead);
     // Abort the in-flight load of pageId and wake all waiters. mutex_ held.
     void failLoad(uint32_t pageId, size_t idx);
+    // Retire an invalidated frame whose readers have all unpinned. mutex_ held.
+    void reclaimOrphanedFrame(size_t idx);
+    // Wake fetches waiting for an orphan of pageId to drain. mutex_ held.
+    void notifyOrphanDrained(uint32_t pageId);
 };
 
 } // namespace dbms
