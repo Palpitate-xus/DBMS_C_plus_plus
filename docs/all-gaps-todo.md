@@ -9,6 +9,8 @@
 
 2026-08-14 性能与并发硬化轮次完成（13 个提交，详见 production-status.md）：WAL 增量追加状态与同事务 before-image 去重；`.secidx`/`.hashidx`/排除约束/schema/序列计数器内存缓存（DDL 全路径失效，序列保持非事务语义）；缓冲池 256/128 帧（`DBMS_BUFFER_FRAMES`/`DBMS_INDEX_BUFFER_FRAMES` 可覆盖）+ 页校验仅磁盘加载时执行；B+ 树二分查找 + 64 项节点缓存；BufferPool 磁盘 I/O 出锁（单加载者 + 孤儿帧失效，TSAN/ASAN 压测 0 竞态 0 损坏）；FSM/VM/PageAllocator/BPTree/HashIndex/CLOG 内部锁；INSERT 意图锁（IX）。实测：带 PK 事务插入 11.7 → ~2000+ 行/秒，500 行插入+聚合 ~106s → ~0.3s。性能类 gap（缓冲池、校验频率、线性查找、元数据重读）关闭；剩余差距见 feature-gaps.md。
 
+2026-08-16 对标 PostgreSQL 差距复核（feature-gaps.md 新增 P1-10~P1-13、P2-9~P2-13、P3-7，详见该文件）：本轮逐项代码核实后确认的真实缺口——SQL 级 prepared statements 与 PG 语法不兼容（现有 `PREPARE name FROM 'sql'` + `?` 文本替换，非 `PREPARE name AS ... $1`，也无计划复用）；EXPLAIN ANALYZE 只输出整计划总耗时/行数，无每节点 `actual time/loops` 与按查询 buffer 统计；`.stats` 已采集 MCV/等深直方图/多列统计但 planner 仅用 cardinality 做 `=` 选择率（直方图与 MCV 无人消费，范围谓词一律 0.3），join 顺序仅 build/outer 交换无多表搜索；并行仅 TableScan 分片，JOIN/聚合无并行版本；deferrable 仅覆盖列级 CHECK，FK/UNIQUE/PK/EXCLUDE 不支持 `DEFERRABLE`；数组缺 `ARRAY[]` 构造/切片/`@>`/`unnest`（下标与 `=ANY` rewrite 已有）；表继承缺 `CREATE TABLE ... INHERITS` 与 SELECT/UPDATE/DELETE 的 `ONLY`（`ALTER TABLE INHERIT` 与查询含子表已有）；interval 缺算术与 `AT TIME ZONE`/`TimeZone`（字面量解析已有）；parser 无 dollar-quoting（函数体 dump 无法导入）；tsvector/tsquery 有类型与校验但无 `@@` 求值/`to_tsvector`/GIN 倒排。上述各项的「现状」均已核对到文件级。
+
 2026-08-14 数据库生命周期持久化收敛：新数据库的基础元数据、checkpoint 文件和物理备份标记统一通过原子临时文件发布；部分创建失败会清理目录，DROP 的统计文件清理失败会返回 I/O 错误。生命周期专项、checkpoint 精确格式和 planner 后台 writer teardown 回归均通过。
 
 2026-08-14 数据库 DDL 错误传播收敛：`CREATE DATABASE`/`DROP DATABASE` 只有在存储层明确返回 `OK` 时才报告成功，目录创建、持久化和清理失败均 fail-closed 并映射 SQLSTATE；异常路径回归已纳入完整测试。
@@ -385,12 +387,12 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | 1.1.31 | `CREATE TRIGGER` | 支持 before/after/instead of、row/statement、`WHEN`、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime | ⚠️ |
 | 1.1.32 | `CREATE TYPE` | 支持 composite type（`AS (field type, ...)`，经 DDL 桥正确解析含修饰符字段）与 enum（`AS ENUM`）；缺少 PG 的 range/base/shell 类型创建语义 | ⚠️ |
 | 1.1.33 | `CREATE VIEW` | 支持保存 SQL 和简单 updatable view；缺少 recursive view、security_barrier、security_invoker、check option 完整性 | ⚠️ |
-| 1.1.34 | `DEALLOCATE` / `PREPARE` / `EXECUTE` | 使用字符串 `?` 替换；缺少服务器端类型推断、binary params、plan invalidation、generic/custom plan、portal | ⚠️ |
+| 1.1.34 | `DEALLOCATE` / `PREPARE` / `EXECUTE` | 使用字符串 `?` 替换与自有 `PREPARE name FROM 'sql'`/`EXECUTE ... USING` 语法；与 PostgreSQL 的 `PREPARE name [(types)] AS ... $n` 不兼容，无类型推断、binary params、plan invalidation、generic/custom plan、portal（细化方案见 feature-gaps.md P1-10） | ⚠️ |
 | 1.1.35 | `DELETE` | 支持 WHERE/USING/RETURNING 部分；缺少 PG 全语义、CTE/`ONLY`/inheritance/RETURNING OLD/NEW 复杂表达式；MySQL-only LIMIT 已移除 | ⚠️ |
 | 1.1.36 | `DISCARD` | 主要 `DISCARD ALL` 清 session 局部状态；不完整 | ⚠️ |
 | 1.1.37 | `DROP ...` 常见对象 | table/database/view/mview/index/trigger/user/role/group/schema/domain/type/sequence/function/procedure 等部分；缺少依赖图、`CASCADE/RESTRICT` 精确行为、`IF EXISTS`/多对象列表完整支持 | ⚠️ |
 | 1.1.38 | `END` | 已作为 `COMMIT` 别名接入；缺少 `AND [NO] CHAIN` 等完整事务结束选项 | ⚠️ |
-| 1.1.39 | `EXPLAIN` | 只面向 SELECT 的简化计划；缺少真实 runtime instrumentation、JIT/WAL/BUFFERS/SETTINGS 完整输出和所有语句支持 | ⚠️ |
+| 1.1.39 | `EXPLAIN` | 只面向 SELECT 的简化计划；`ANALYZE` 仅输出整计划总耗时/行数（main.cpp handleExplain），无每节点 `actual time/loops`；`BUFFERS` 输出全池累计而非本查询增量；缺少 JIT/WAL/SETTINGS 完整输出和所有语句支持（细化方案见 feature-gaps.md P1-11） | ⚠️ |
 | 1.1.40 | `GRANT` / `REVOKE` | 支持有限 privilege 和列权限；表/列 ACL 已支持会话用户、PUBLIC、有效角色继承和表 owner 隐含权限，表 owner 可执行表级 REVOKE；表级 GRANT OPTION 支持独立撤销、RESTRICT/CASCADE 授权链；角色 ADMIN OPTION 支持授权、升级和撤销；缺少 PostgreSQL ACL item、set option、对象类型全集、默认权限联动 | ⚠️ |
 | 1.1.41 | `INSERT` | 支持 values、insert-select、无 target 或显式匹配主键/唯一约束 target 的 DO NOTHING、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 标量 DO UPDATE、目标行/`excluded` 受限 WHERE、returning 部分；缺少 `OVERRIDING`、部分/索引推断、引用子查询或其他关系的 DO UPDATE/WHERE、RETURNING OLD/NEW | ⚠️ |
 | 1.1.42 | `LISTEN` / `NOTIFY` / `UNLISTEN` | 进程内 map；缺少事务提交后发送、payload 长度/通道语义、跨进程持久服务语义 | ⚠️ |

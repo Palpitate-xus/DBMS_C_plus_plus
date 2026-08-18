@@ -52,9 +52,11 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 | 优先级 | 数量 | 说明 |
 |--------|------|------|
 | P0 严重缺失 | 7  | 生产级必需，无此功能不可上线 |
-| P1 重要缺失 | 9  | 影响实用性，大多数应用需要 |
-| P2 次要缺失 | 8  | 易用性/运维/性能优化 |
-| P3 锦上添花 | 6  | 企业级/兼容性/生态 |
+| P1 重要缺失 | 13 | 影响实用性，大多数应用需要 |
+| P2 次要缺失 | 13 | 易用性/运维/性能优化 |
+| P3 锦上添花 | 7  | 企业级/兼容性/生态 |
+
+> 2026-08-16 对照代码复核后新增 8 项（P1-10 SQL 级 prepared statements 对齐、P1-11 EXPLAIN ANALYZE 每节点统计、P1-12 统计驱动代价模型（消费侧）、P1-13 并行 JOIN/聚合、P2-9 deferrable 扩展、P2-10 数组表达式语义、P2-11 表继承 CREATE 侧、P2-12 interval 运算/时区、P2-13 dollar-quoting、P3-7 全文检索执行链路）。每项「现状」均先经代码检索核实已有部分（如 MCV/直方图已采集、`ALTER TABLE INHERIT` 已有、`= ANY()` 经 rewrite 支持、interval 字面量已解析），差距描述只列真正缺失的部分。
 
 ---
 
@@ -273,6 +275,59 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 - **预估工作量**: 2-3 天
 - **相关文件**: `src/executor/ExecutionPlan.cpp`
 
+### P1-10: SQL 级 prepared statements 对齐 PostgreSQL 语法
+- **类别**: 会话 / 协议兼容
+- **现状**: 已有：会话级命名 prepared statements（`main.cpp` handleExecutePrepared：`PREPARE name FROM 'sql'` 存模板、`EXECUTE name USING (vals)` 按 `?` 文本替换、`DEALLOCATE name`）与协议层 `Parse/Bind/Execute`（含参数类型与 binary 编解码）。但与 PostgreSQL 语法不兼容：PG 是 `PREPARE name [(types)] AS stmt` + `$1..$n` 占位符 + `EXECUTE name(args)`；当前是自有 `FROM 'sql'` + `?` + `USING`。且模板按文本展开，无类型推断、无计划复用（每次重新解析执行）、无 `pg_prepared_statements` 视图
+- **PG 参考**: `PREPARE name [(int,text)] AS SELECT ... WHERE id=$1`, `EXECUTE name(1,'a')`
+- **影响**: 使用标准 SQL PREPARE 语法的客户端/ORM/dump 无法工作；预编译得不到计划级加速
+- **实现路径**:
+  1. parser 接受 PG 语法的 `PREPARE ... AS` 与 `$n` 占位符（与扩展协议共享参数绑定机制）
+  2. EXECUTE 实参求值后走类型化绑定而非文本替换
+  3. 计划缓存按 (模板, 参数类型) 复用，DDL 失效
+  4. `pg_prepared_statements` 兼容视图
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/main.cpp`（handleExecutePrepared）, `src/network/NetworkServer.cpp`（协议层参数绑定）, `src/parser/parser.cpp`
+
+### P1-11: EXPLAIN ANALYZE 每-节点实际统计
+- **类别**: 可观测性 / 诊断
+- **现状**: `EXPLAIN (ANALYZE)` 解析选项并整体执行一次计划输出总行数/总耗时（`src/main.cpp` handleExplain），但无 PostgreSQL 的每-节点 `actual time=.. loops=.. rows`、共享 buffer 命中（`shared hit/read` 按节点）、worker 明细；`buffers` 选项输出的是全池累计统计而非本查询的
+- **PG 参考**: `ExplainPrintPlan` per-node `actual time`, `loops`, `Shared Hit Blocks`
+- **影响**: 无法定位计划中哪个算子是瓶颈；调优能力远弱于 PostgreSQL
+- **实现路径**:
+  1. 在 `Operator` 基类增加 `stats_`（rows produced、next() 累计时间、buffer 命中增量）
+  2. `executePlanChecked` 执行路径在 `next()` 前后计时并累计
+  3. explain 输出遍历时把每节点实际值与估算值并列输出
+  4. BufferPool 增加 per-query 计数作用域（fetch 前后差分）
+- **预估工作量**: 1 周
+- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/main.cpp`, `src/storage/BufferPool.h`
+
+### P1-12: 统计驱动的完整代价模型 (统计采集已备，消费不全)
+- **类别**: 优化器 / 统计
+- **现状**: `ANALYZE` 已采集并持久化到 `.stats`：每列 cardinality、min/max、等深直方图、MCV top-N（`TableManage.h` `ColumnStats`，`computeMCV`，含多列统计 `getMultiColumnStats`）；但 planner 消费极不完全——`estimateSelectivity` 仅 `=` 用 cardinality（回退 0.1），`!=/like` 硬编码 0.9/0.2，范围谓词一律 0.3（**直方图与 MCV 采了没人用**）；join 算法选择用行数+索引存在的固定公式（`estimateJoinCost`），无 `eqjoinsel` 风格的键重叠估计；join 顺序只有 build/outer 交换，无多表动态规划/贪心搜索；且这些选择率目前只影响 EXPLAIN 展示，是否影响实际计划生成需逐路径核对
+- **PG 参考**: `pg_stats` 直方图/MCV/correlation 驱动的 `eqsel/neqsel/scalarea_sel/eqjoinsel` + join 顺序动态规划
+- **影响**: 范围查询行数估计偏差 3×+，倾斜数据（MCV 本可纠正）下选错 join 算法/顺序，多表 join 顺序次优
+- **实现路径**:
+  1. `estimateSelectivity` 范围谓词走等深直方图插值；`=` 先查 MCV 再回退 `1/ndistinct`
+  2. join 键选择率用两侧列 cardinality 的 `min(nd1,nd2)/(nd1*nd2)` 估计并接入 `estimateJoinCost`
+  3. 三表以上 join 的顺序搜索（贪心或 DP，PG 为 GEQO 阈值内 DP）
+  4. `pg_stats` 兼容视图暴露已采集的统计
+- **预估工作量**: 1-2 周（采集侧已就绪，主要是消费侧接线）
+- **相关文件**: `src/executor/ExecutionPlan.cpp`（`estimateSelectivity`/`estimateJoinCost`/`buildJoinPlan`）, `src/commands/TableManage.cpp`（`.stats` 读写）
+
+### P1-13: 并行 JOIN/聚合与 GatherMerge
+- **类别**: 性能 / 执行器
+- **现状**: 仅 `ParallelTableScanOp` 按 page range 分片；`HashJoinOp`/`MergeJoinOp`/`GroupAggregateOp`（均已存在）无并行版本；Gather 输出按范围顺序拼接，无 `GatherMerge`；worker 每查询创建、无复用池
+- **PG 参考**: `Parallel Hash Join`, `Partial Aggregate` + `Finalize Aggregate`, `GatherMerge`
+- **影响**: 大表 join/聚合无法利用多核（这是分析查询的常见瓶颈）
+- **实现路径**:
+  1. 并行 HashJoin：build 侧每 worker 本地哈希（或共享哈希表 + 锁分区）
+  2. Partial + Finalize 两阶段聚合（worker 局部累计、leader 合并）
+  3. `GatherMergeOp`：按排序键 k 路归并 worker 输出
+  4. 独立 worker 池 + work-stealing
+- **预估工作量**: 2-3 周
+- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`
+- **备注**: 与 P0-1 高度重叠，可作为其第二阶段
+
 ---
 
 ## P2 — 次要缺失 (易用性/运维)
@@ -375,6 +430,67 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 - **预估工作量**: 1 周
 - **相关文件**: `src/storage/PageAllocator.cpp`
 
+### P2-9: Deferrable 约束扩展到 CHECK 之外
+- **类别**: 数据完整性
+- **现状**: 已有：列级 CHECK 约束的 `DEFERRABLE INITIALLY DEFERRED`（延迟队列 commit 时验证，`runDeferredCheck`），`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效（per-transaction，all-gaps-todo 1.1.53 已记）。仍缺：FK 的 deferrable（`ON DELETE CASCADE` 等动作与延迟检查的交互）、UNIQUE/PRIMARY KEY/EXCLUDE 的 deferrable（parser 无这些约束上的 `DEFERRABLE` 修饰）、constraint trigger 的 deferred 触发
+- **PG 参考**: 各类约束的 `DEFERRABLE INITIALLY {DEFERRED|IMMEDIATE}`
+- **影响**: 环状 FK、自引用行、批量重排唯一键等模式无法工作
+- **实现路径**:
+  1. parser 在 FK/UNIQUE/PK/EXCLUDE 约束子句接受 `DEFERRABLE [INITIALLY ...]`
+  2. 复用现有 deferred 队列：UNIQUE 延迟到 commit 时做存在性检查（需并发事务冲突处理）
+  3. FK 延迟检查与级联动作排序
+  4. constraint trigger（`CREATE CONSTRAINT TRIGGER`）挂入同一队列
+- **预估工作量**: 1 周
+- **相关文件**: `src/parser/parser.cpp`（约束子句）, `src/commands/TableManage.cpp`（deferred 队列）
+
+### P2-10: 数组类型的表达式/函数完整语义
+- **类别**: 类型系统
+- **现状**: 已有：数组列识别与字面量校验/规范化（`tests/array_test.cpp`）、数组下标 `a[i]`（parser postfix `[]` + `ExprEvaluator` 求值，含多维）、`= ANY(arr)`/`ALL` 经 text-rewrite 到 `array_contains`（`src/main.cpp` 预处理，Volcano 路径是否覆盖需核对）、`array_agg` 聚合（`TableManage.cpp`）。仍缺：`ARRAY[...]` 构造器表达式、切片 `a[1:3]`（parser 注释提及但求值未见）、`@>`/`<@` 包含操作符、`unnest()`、数组比较/哈希语义与协议 binary 数组 I/O（all-gaps-todo 2.15 已记）
+- **PG 参考**: array functions/operators, `unnest`, `@>`
+- **影响**: 常用数组运算（构造、切片、包含判断、展开为行）缺失
+- **实现路径**:
+  1. parser `ARRAY[...]` 构造与 `ExprEvaluator` 求值
+  2. 切片下标求值；`@>`/`<@` 操作符
+  3. `unnest()` 表函数（FROM 子句展开）
+  4. 协议 binary 数组编解码
+- **预估工作量**: 1 周
+- **相关文件**: `src/parser/parser.cpp`, `src/expression/ExprEvaluator.cpp`, `src/main.cpp`（ANY rewrite）
+
+### P2-11: 表继承的 CREATE 侧与 ONLY 语义
+- **类别**: 数据模型
+- **现状**: 已有：`ALTER TABLE ... INHERIT/NO INHERIT`（`DdlExecutor.cpp` 读写 `.<table>.inherits`）、`getInheritedChildren` 被 SELECT/DDL 消费（查询默认含子表行，main.cpp 多处）；`DROP TABLE` 级联清理继承关系。仍缺：`CREATE TABLE child (...) INHERITS (parent)` 产生式（列合并继承）、`ONLY (table)` 限定扫描（parser 无该修饰符；TRUNCATE 已支持 ONLY，SELECT/UPDATE/DELETE 未支持）
+- **PG 参考**: `CREATE TABLE ... INHERITS`, `SELECT * FROM ONLY (t)`
+- **影响**: 继承只能 ALTER 补建且子表不自动继承父表列；无法只操作父表行
+- **实现路径**:
+  1. parser `INHERITS (parent, ...)` 产生式 + 列合并（父列 + 子列，冲突检测）
+  2. SELECT/UPDATE/DELETE 的 `ONLY` 前缀修饰（查询改写处已有 children 展开点，加开关即可）
+  3. 约束/索引/默认值的继承传播语义
+- **预估工作量**: 3-5 天
+- **相关文件**: `src/parser/parser.cpp`, `src/commands/DdlExecutor.cpp`（Inherit action）, `src/main.cpp`（children 展开）
+
+### P2-12: Interval 运算与时区转换
+- **类别**: 类型系统 / 时区
+- **现状**: interval 已有列类型、字面量解析与 PostgreSQL 风格规范化（`tests/interval_test.cpp`：verbose 单位/`HH:MM:SS`/`Y-M`/裸秒/`ago`）。仍缺：`timestamp + interval` 等 interval 算术（`ExprEvaluator` 无 interval 运算分支）、`AT TIME ZONE` 双向转换（代码库无任何实现）、`TimeZone` GUC 与 timestamptz 按会话时区显示、interval 字段限定（`INTERVAL DAY TO SECOND`）
+- **PG 参考**: interval arithmetic, `AT TIME ZONE`, `TimeZone` GUC
+- **影响**: 时间偏移计算与跨时区应用无法正确表达
+- **实现路径**:
+  1. interval 微秒/月双基存储 + timestamp±interval/interval±interval/date_part
+  2. `AT TIME ZONE` 转换 + `TimeZone` GUC + 常用时区表（可先 POSIX TZ 串）
+  3. interval typmod 字段限定
+- **预估工作量**: 1 周
+- **相关文件**: `src/parser/parser.cpp`, `src/expression/ExprEvaluator.cpp`
+
+### P2-13: Dollar-quoting 与 SQL 函数体
+- **类别**: 解析器 / 兼容性
+- **现状**: parser 无 `$$body$$` dollar-quoted 字符串；CREATE FUNCTION 的函数体目前依赖普通字符串字面量承载；`\gset`/psql 元命令不属于本差距范围
+- **PG 参考**: `$$ ... $$`, `$tag$ ... $tag$`
+- **影响**: 任何使用 dollar-quoting 的 DDL dump（尤其函数/触发器定义）无法导入
+- **实现路径**:
+  1. tokenizer 识别 `$tag$ ... $tag$` 为单一字符串 token
+  2. CREATE FUNCTION/TRIGGER/PROCEDURE 体解析改为接受该 token
+- **预估工作量**: 1-2 天
+- **相关文件**: `src/parser/parser.cpp`（tokenizer）
+
 ---
 
 ## P3 — 锦上添花 (企业级/生态)
@@ -444,35 +560,56 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
   3. 实现 `CREATE POLICY ... USING (tenant_id = current_tenant())`
 - **预估工作量**: 3-5 天
 
+### P3-7: 全文检索执行链路 (tsvector/tsquery 已有类型，缺检索)
+- **类别**: 类型系统 / 检索
+- **现状**: tsvector/tsquery 已有字面量解析与 canonicalization/文法校验（`tests/tsearch_test.cpp`），列可存值；`@@` 已是 lexer 的双字符 token（`parser.cpp:265`），但无匹配求值；无 `to_tsvector`/`to_tsquery` 函数、无 GIN 倒排 opclass、无 `ts_rank`/`ts_headline`/文本搜索配置（all-gaps-todo 2.11 已记类型侧）
+- **PG 参考**: `@@`, GIN `gin_tsvector_ops`, `to_tsvector('english', ...)`
+- **影响**: 有类型无检索——无法在 SQL 内做全文查询
+- **实现路径**:
+  1. `ExprEvaluator` 实现 `@@`（tsquery 树与 tsvector 词位/位置匹配，含 `<->` 距离）
+  2. `to_tsvector`/`to_tsquery`（先 simple 配置 + 英文停用词）
+  3. GIN 倒排索引（词位 → RID）
+  4. `ts_rank`/`ts_headline` 排序与高亮
+- **预估工作量**: 2-3 周
+- **相关文件**: `src/expression/ExprEvaluator.cpp`, `src/parser/parser.cpp`, `src/commands/TableManage.cpp`（GIN）
+
 ---
 
 ## 实施路线图建议
 
-### 第一优先级 (并发正确性 + 查询完整性) — 约 4 周
+### 第一优先级 (并发正确性 + 查询完整性) — 约 5 周
 1. P0-7 视图触发器复杂视图/函数运行时语义 (后续)
 2. P0-6 Bitmap Scan (1w)
 3. P1-1 Window Function Executor (1-2w)
 4. P1-2 UNION/INTERSECT Executor (3-5d)
 5. P1-3 ROLLUP/CUBE Executor (3-5d)
 6. P0-4 Gap Locks (1-2w)
+7. P2-13 Dollar-quoting (1-2d，dump 导入前置)
 
-### 第二优先级 (性能) — 约 4 周
-1. P0-1 并行查询 (2-3w)
-2. P0-2 JIT 编译 (3-4w)
-3. P0-3 GiST 索引 (2-3w)
-4. P2-6 异步 I/O (1w)
+### 第二优先级 (优化器 + 性能) — 约 6 周
+1. P1-12 列级统计与直方图 (2w，一切代价模型的地基)
+2. P0-1/P1-13 并行查询二阶段：并行 JOIN/聚合 + GatherMerge (2-3w)
+3. P0-2 JIT 编译 (3-4w)
+4. P0-3 GiST 索引 (2-3w)
+5. P2-6 异步 I/O (1w)
 
-### 第三优先级 (可观测性 + 运维) — 约 3 周
-1. P1-6 后台统计收集器 (1w)
-2. P2-1 pg_stat_statements (2-3d)
+### 第三优先级 (兼容性 + 可观测性) — 约 5 周
+1. P1-10 SQL 级 prepared statements (3-5d)
+2. P1-11 EXPLAIN ANALYZE 每节点统计 (1w)
+3. P1-6 后台统计收集器 (1w)
+4. P2-1 pg_stat_statements (2-3d)
+5. P2-10 数组类型 (1-2w)
+6. P2-12 interval/AT TIME ZONE (1w)
+
+### 第四优先级 (运维 + 生态 + 安全) — 约 6 周
+1. P1-7 PL/pgSQL 运行时 (2-3w)
+2. P3-7 全文检索 (2-3w)
 3. P2-3 增量备份 (1-2w)
 4. P2-4 连接池 (1w)
-
-### 第四优先级 (生态 + 安全) — 约 4 周
-1. P1-7 PL/pgSQL 运行时 (2-3w)
-2. P3-1 C 扩展加载 (1-2w)
-3. P3-2 Hook 系统 (1w)
-4. P2-8 TDE 加密 (1w)
+5. P2-9 Deferrable 约束 (3-5d)
+6. P2-11 表继承 (1w)
+7. P3-1 C 扩展加载 (1-2w)
+8. P2-8 TDE 加密 (1w)
 
 ---
 
@@ -481,10 +618,10 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 | 维度 | 数量 | 预估总工作量 |
 |------|------|-------------|
 | P0 严重缺失 | 7 | ~11-15 周 |
-| P1 重要缺失 | 9 | ~10-14 周 |
-| P2 次要缺失 | 8 | ~7-10 周 |
-| P3 锦上添花 | 6 | ~6-9 周 |
-| **合计** | **30** | **~34-48 周** |
+| P1 重要缺失 | 13 | ~14-20 周 |
+| P2 次要缺失 | 13 | ~10-14 周 |
+| P3 锦上添花 | 7 | ~7-10 周 |
+| **合计** | **40** | **~42-59 周** |
 
 > 注: 工作量估算基于单人开发、熟悉 PostgreSQL 内部实现的前提。
-> 多人协作可并行推进多个 P0/P1 项，总时间可压缩至 20-25 周。
+> 多人协作可并行推进多个 P0/P1 项，总时间可压缩至 25-35 周。

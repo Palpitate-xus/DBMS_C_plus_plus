@@ -1,6 +1,6 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
-> 生成日期: 2026-08-14（更新反映数据库生命周期持久化与当前代码状态）
+> 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线（2026-08-14）: PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、跨 backend 2PC、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）
@@ -48,14 +48,14 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | BYTEA (hex/escape) | ✅ | ✅ | ✅ |
 | BOOLEAN | ✅ | ✅ | ✅ |
 | DATE/TIME/TIMESTAMP/TIMESTAMPTZ | ✅ | ✅ | ✅ (含 infinity) |
-| INTERVAL | ✅ | ✅ | ✅ |
+| INTERVAL | ✅ | ⚠️ | 字面量解析/规范化已有；`timestamp ± interval` 算术、`AT TIME ZONE`、`TimeZone` GUC 与字段限定仍缺（见 feature-gaps P2-12） |
 | UUID | ✅ | ✅ | ✅ |
 | INET/CIDR | ✅ | ✅ | ✅ |
 | MACADDR/MACADDR8 | ✅ | ✅ | ✅ |
-| JSON/JSONB | ✅ | ✅ | ✅ |
+| JSON/JSONB | ✅ | ⚠️ | 18 个 `json_/jsonb_` 函数（typeof/array_length/build_array/build_object/extract_path 等）；`->`/`->>`/`#>` 操作符、`@>` containment、jsonpath 求值、`JSON_TABLE` 与 GIN opclass 仍缺 |
 | XML | ✅ | ✅ (well-formedness) | ⚠️ 缺 XPath/XMLTABLE |
-| ARRAY (多维) | ✅ | ✅ (基础) | ⚠️ 缺 切片/unnest/ANY |
-| TSVECTOR/TSQUERY | ✅ | ✅ | ✅ |
+| ARRAY (多维) | ✅ | ✅ (基础) | ⚠️ 字面量/下标/`=ANY`(rewrite) 已有；缺 `ARRAY[]` 构造/切片/`@>`/`unnest` |
+| TSVECTOR/TSQUERY | ✅ | ⚠️ (类型) | 字面量解析/校验已有；缺 `@@` 求值、`to_tsvector`/`to_tsquery`、GIN 倒排与 ranking（见 feature-gaps P3-7） |
 | GEOMETRIC (line/lseg/box/path/polygon/circle) | ✅ | ✅ | ✅ |
 | POINT | ✅ | ✅ | ✅ |
 | ENUM | ✅ | ✅ | ✅ |
@@ -92,7 +92,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | CREATE/DROP/ALTER COLLATION | ✅ | ✅ (DDL) | ⚠️ ICU 缺 |
 | TABLESPACE | ✅ | ✅ | ⚠️ 关系文件已统一物理路由并支持跨文件系统 SET TABLESPACE/重启恢复；权限、owner、ALTER TABLESPACE 完整语义和 PostgreSQL OID/符号链接布局仍缺 |
 | PARTITION BY RANGE/LIST/HASH | ✅ | ✅ | ✅ |
-| INHERITS | ✅ | ✅ | ✅ |
+| INHERITS | ✅ | ⚠️ | `ALTER TABLE INHERIT/NO INHERIT` 与查询含子表行已有；`CREATE TABLE ... INHERITS` 列合并与 SELECT/UPDATE/DELETE 的 `ONLY` 修饰仍缺（见 feature-gaps P2-11） |
 | LIKE ( INCLUDING ALL/DEFAULTS/CONSTRAINTS/INDEXES/IDENTITY) | ✅ | ✅ | ✅ |
 | TRUNCATE (ONLY/RESTART IDENTITY/CASCADE) | ✅ | ✅ | ✅ |
 | **ALTER TABLE ... ADD COLUMN ... IF NOT EXISTS** | ✅ | ✅ | ✅ |
@@ -222,14 +222,14 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|-------|---------|------|
 | 火山模型执行器 | ✅ | ✅ (12 operators, Phase 5.1 已上线) | ✅ |
 | 基于成本的优化 (CBO) | ✅ | ⚠️ | 基础 |
-| 统计信息 (pg_statistic) | ✅ | ⚠️ | 基础 |
+| 统计信息 (pg_statistic) | ✅ | ⚠️ | 已采集 cardinality/MCV/等深直方图/多列统计；planner 仅消费 cardinality 做 `=` 选择率，直方图/MCV 未接入（见 feature-gaps P1-12） |
 | 索引选择 | ✅ | ✅ | ✅ |
 | **等价类 (Equivalence Classes)** | ✅ | ⚠️ | 基础 |
 | **PathKeys / 排序路径** | ✅ | ⚠️ | 基础 |
-| Join reorder (动态规划) | ✅ | ⚠️ | 启发式 |
+| Join reorder (动态规划) | ✅ | ⚠️ | 启发式：仅 build/outer 交换，无多表搜索 |
 | Bitmap scan | ✅ | ⚠️ | 等值 Bitmap AND/OR 已接入；范围/并行路径仍缺 |
 | **计划缓存** | ✅ | ✅ | ✅ |
-| EXPLAIN ANALYZE 真实统计 | ✅ | ✅ | ✅ |
+| EXPLAIN ANALYZE 真实统计 | ✅ | ⚠️ | `ANALYZE` 仅输出整计划总耗时/总行数；无每节点 `actual time/loops`、按查询 buffer 增量（BUFFERS 现为全池累计）与 trigger/JIT 明细（见 feature-gaps P1-11） |
 | 多索引组合 (Bitmap AND/OR) | ✅ | ⚠️ | 等值 Bitmap AND/OR 已接入，范围/并行组合仍缺 |
 | **参数化路径** | ✅ | ❌ | 缺 |
 | **自定义成本函数** | ✅ | ❌ | 缺 |
