@@ -34,24 +34,8 @@ bool undoIndexCreate(StorageEngine& engine, const std::string& db,
     const auto named = engine.getNamedIndex(db, op.extra, op.name);
     if (!named) return false;
 
-    DBStatus status = DBStatus::INVALID_VALUE;
-    if (named->accessMethod == "btree") {
-        status = engine.dropIndex(db, op.extra, named->key);
-    } else if (named->accessMethod == "composite") {
-        status = engine.dropCompositeIndex(db, op.extra, named->key);
-    } else if (named->accessMethod == "hash") {
-        status = engine.dropHashIndex(db, op.extra, named->key);
-    } else if (named->accessMethod == "gin") {
-        status = engine.dropGinIndex(db, op.extra, named->key);
-    } else if (named->accessMethod == "gist") {
-        status = engine.dropGiSTIndex(db, op.extra, named->key);
-    } else if (named->accessMethod == "brin") {
-        status = engine.dropBrinIndex(db, op.extra, named->key);
-    } else if (named->accessMethod == "spgist") {
-        status = engine.dropSPGiSTIndex(db, op.extra, named->key);
-    } else if (named->accessMethod == "fulltext") {
-        status = engine.dropFullTextIndex(db, op.extra, named->key);
-    }
+    DBStatus status = engine.dropIndexByAccessMethod(db, op.extra, named->key,
+                                                     named->accessMethod);
     if (status != DBStatus::OK ||
         !engine.unregisterIndexName(db, op.extra, op.name)) {
         return false;

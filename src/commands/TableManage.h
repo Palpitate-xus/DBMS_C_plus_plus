@@ -659,6 +659,15 @@ public:
                          bool concurrently = false);
     DBStatus dropIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname);
+    // Dispatch a physical index drop to the right access-method routine.
+    // The same method string ("", "btree", "composite", "hash", "gin",
+    // "gist", "brin", "spgist", "fulltext") is used by every DDL path
+    // (executor drop, cascade replay, transaction undo) so new methods are
+    // added in exactly one place.
+    DBStatus dropIndexByAccessMethod(const std::string& dbname,
+                                     const std::string& tablename,
+                                     const std::string& key,
+                                     const std::string& accessMethod);
     std::vector<std::string> getIndexedColumns(const std::string& dbname,
                                                 const std::string& tablename) const;
     bool isDescendingIndex(const std::string& dbname, const std::string& tablename,

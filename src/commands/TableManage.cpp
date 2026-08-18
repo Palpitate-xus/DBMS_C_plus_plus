@@ -6795,6 +6795,24 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     return DBStatus::OK;
 }
 
+DBStatus StorageEngine::dropIndexByAccessMethod(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& key, const std::string& accessMethod) {
+    std::string am;
+    for (char c : accessMethod) {
+        am += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (am == "composite") return dropCompositeIndex(dbname, tablename, key);
+    if (am == "hash") return dropHashIndex(dbname, tablename, key);
+    if (am == "gin") return dropGinIndex(dbname, tablename, key);
+    if (am == "gist") return dropGiSTIndex(dbname, tablename, key);
+    if (am == "brin") return dropBrinIndex(dbname, tablename, key);
+    if (am == "spgist") return dropSPGiSTIndex(dbname, tablename, key);
+    if (am == "fulltext") return dropFullTextIndex(dbname, tablename, key);
+    // "" and "btree" both mean the plain secondary B-tree.
+    return dropIndex(dbname, tablename, key);
+}
+
 DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& tablename,
                                    const std::string& colname) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);

@@ -2637,20 +2637,9 @@ static bool dropPhysicalCascadeAction(StorageEngine& engine,
         status = engine.dropTable(dbname, action.name);
     } else if (action.kind == PhysicalCascadeAction::Kind::Sequence) {
         status = engine.dropSequence(dbname, action.name);
-    } else if (action.accessMethod == "composite") {
-        status = engine.dropCompositeIndex(dbname, action.tableName, action.key);
-    } else if (action.accessMethod == "hash") {
-        status = engine.dropHashIndex(dbname, action.tableName, action.key);
-    } else if (action.accessMethod == "gin") {
-        status = engine.dropGinIndex(dbname, action.tableName, action.key);
-    } else if (action.accessMethod == "gist") {
-        status = engine.dropGiSTIndex(dbname, action.tableName, action.key);
-    } else if (action.accessMethod == "brin") {
-        status = engine.dropBrinIndex(dbname, action.tableName, action.key);
-    } else if (action.accessMethod == "spgist") {
-        status = engine.dropSPGiSTIndex(dbname, action.tableName, action.key);
     } else {
-        status = engine.dropIndex(dbname, action.tableName, action.key);
+        status = engine.dropIndexByAccessMethod(dbname, action.tableName,
+                                                action.key, action.accessMethod);
     }
     // A missing physical file is already in the desired post-drop state; the
     // catalog plan still needs to remove its stale metadata.  Other failures
@@ -3077,14 +3066,8 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         }
 
         txn.markSnapshotDirty();
-        DBStatus status = DBStatus::INVALID_VALUE;
-        if (method == "composite") status = g_engine.dropCompositeIndex(s.currentDB, tableName, key);
-        else if (method == "hash") status = g_engine.dropHashIndex(s.currentDB, tableName, key);
-        else if (method == "gin") status = g_engine.dropGinIndex(s.currentDB, tableName, key);
-        else if (method == "gist") status = g_engine.dropGiSTIndex(s.currentDB, tableName, key);
-        else if (method == "brin") status = g_engine.dropBrinIndex(s.currentDB, tableName, key);
-        else if (method == "spgist") status = g_engine.dropSPGiSTIndex(s.currentDB, tableName, key);
-        else status = g_engine.dropIndex(s.currentDB, tableName, key);
+        DBStatus status = g_engine.dropIndexByAccessMethod(s.currentDB, tableName,
+                                                           key, method);
         if (status != DBStatus::OK) {
             std::cout << "DROP INDEX failed" << std::endl;
             return true;
