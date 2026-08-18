@@ -1252,6 +1252,32 @@ private:
                                                   const std::string& tablename) const;
     mutable std::map<std::string, std::unique_ptr<BPTree>> secondaryIndexCache_;
 
+    // Parsed .secidx lines, cached per table so per-row DML does not re-read
+    // and re-parse the metadata file on every indexed-column lookup.
+    // Invalidated by every code path that rewrites the file.
+    std::vector<std::string> readSecidxLines(const std::string& dbname,
+                                             const std::string& tablename) const;
+    void invalidateSecidxCache(const std::string& dbname,
+                               const std::string& tablename);
+    mutable std::map<std::string, std::vector<std::string>> secidxLinesCache_;
+
+    // Exclusion constraints, cached per database (same invalidation rules).
+    mutable std::map<std::string, std::vector<ExclusionConstraint>> exclusionCache_;
+    void invalidateExclusionCache(const std::string& dbname);
+
+    // Auto-increment counters, cached per table. The per-row
+    // readNextSeq/writeNextSeq pair used to rewrite the whole <table>.seq
+    // file twice per inserted row; the file is now rewritten once per
+    // transaction (sequences are non-transactional, matching PostgreSQL).
+    mutable std::mutex seqCacheMutex_;
+    struct SeqFileState {
+        std::map<std::string, int64_t> values;  // colname -> next value
+        bool dirty = false;
+        bool loaded = false;
+    };
+    mutable std::map<std::string, SeqFileState> seqFileCache_;
+    void flushDeferredSequences();
+
     // Hash index helpers
     std::filesystem::path hashIndexPath(const std::string& dbname,
                                          const std::string& tablename,

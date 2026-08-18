@@ -1199,6 +1199,10 @@ void StorageEngine::endBackendSession() {
 StorageEngine::~StorageEngine() {
     stopBackgroundWorker();
 
+    // Persist deferred sequence counters before any teardown; rows inserted
+    // outside an explicit transaction never pass a commit boundary.
+    flushDeferredSequences();
+
     // Flush loaded heaps and indexes through the same WAL-aware path used by
     // transaction commit. This closes the crash window where an engine is
     // destroyed with an active transaction: recovery can apply the
@@ -3786,6 +3790,20 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     eraseTableCaches(pkIndexCache_);
     eraseTableCaches(secondaryIndexCache_);
     eraseTableCaches(hashIndexCache_);
+    eraseTableCaches(secidxLinesCache_);
+    exclusionCache_.erase(dbname);
+    {
+        // Drop deferred (possibly dirty) sequence state: the .seq files are
+        // about to disappear with the database/table directory.
+        std::lock_guard<std::mutex> lock(seqCacheMutex_);
+        for (auto it = seqFileCache_.begin(); it != seqFileCache_.end();) {
+            if (it->first.rfind(tablePrefix, 0) == 0) {
+                it = seqFileCache_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 
     for (auto it = toastPageAllocators_.begin(); it != toastPageAllocators_.end();) {
         if (it->first.rfind(toastPrefix, 0) == 0) {
@@ -4613,15 +4631,39 @@ DBStatus StorageEngine::dropHashIndex(const std::string& dbname,
     return DBStatus::OK;
 }
 
+std::vector<std::string> StorageEngine::readSecidxLines(const std::string& dbname,
+                                                        const std::string& tablename) const {
+    const std::string key = dbname + "/" + tablename;
+    {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        auto it = secidxLinesCache_.find(key);
+        if (it != secidxLinesCache_.end()) return it->second;
+    }
+    std::vector<std::string> lines;
+    std::ifstream in(secondaryIndexMetaPath(dbname, tablename));
+    if (in) {
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty()) lines.push_back(std::move(line));
+        }
+    }
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    // First writer wins; both see identical file content (writers hold the
+    // table metadata lock while rewriting).
+    secidxLinesCache_.emplace(key, lines);
+    return lines;
+}
+
+void StorageEngine::invalidateSecidxCache(const std::string& dbname,
+                                          const std::string& tablename) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    secidxLinesCache_.erase(dbname + "/" + tablename);
+}
+
 std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbname,
                                                            const std::string& tablename) const {
     std::vector<std::string> cols;
-    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    std::ifstream in(meta);
-    if (!in) return cols;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
+    for (const std::string& line : readSecidxLines(dbname, tablename)) {
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
             // Composite index: C:name:col1:col2:...[:INCLUDE:...]
             size_t pos = 2;
@@ -4664,12 +4706,7 @@ std::vector<std::string> StorageEngine::getIndexedColumns(const std::string& dbn
 
 bool StorageEngine::isDescendingIndex(const std::string& dbname, const std::string& tablename,
                                       const std::string& colname) const {
-    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    std::ifstream in(meta);
-    if (!in) return false;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
+    for (const std::string& line : readSecidxLines(dbname, tablename)) {
         if (line.substr(0, 5) == "EXPR:") continue;
         size_t wherePos = line.find(":WHERE:");
         std::string base = (wherePos != std::string::npos) ? line.substr(0, wherePos) : line;
@@ -4684,12 +4721,7 @@ std::vector<std::string> StorageEngine::getIndexIncludeColumns(const std::string
                                                                const std::string& tablename,
                                                                const std::string& colname) const {
     std::vector<std::string> result;
-    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    std::ifstream in(meta);
-    if (!in) return result;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
+    for (const std::string& line : readSecidxLines(dbname, tablename)) {
         size_t incPos = line.find(":INCLUDE:");
         if (incPos == std::string::npos) continue;
         // For single-column index: colname[:DESC][:WHERE:...]:INCLUDE:...
@@ -4723,12 +4755,7 @@ std::vector<std::string> StorageEngine::getIndexIncludeColumns(const std::string
 std::vector<StorageEngine::IndexMetadata> StorageEngine::getIndexMetadata(
     const std::string& dbname, const std::string& tablename) const {
     std::vector<IndexMetadata> result;
-    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    std::ifstream in(meta);
-    if (!in) return result;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) continue;
+    for (const std::string& line : readSecidxLines(dbname, tablename)) {
         IndexMetadata info;
         // Composite index lines start with "C:"
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') continue;
@@ -4809,11 +4836,7 @@ std::vector<StorageEngine::IndexMetadata> StorageEngine::getIndexMetadata(
 std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexes(
     const std::string& dbname, const std::string& tablename) const {
     std::vector<CompositeIndexInfo> result;
-    std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-    std::ifstream in(meta);
-    if (!in) return result;
-    std::string line;
-    while (std::getline(in, line)) {
+    for (const std::string& line : readSecidxLines(dbname, tablename)) {
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') {
             size_t pos = 2;
             size_t next = line.find(':', pos);
@@ -6328,6 +6351,7 @@ DBStatus StorageEngine::createExclusionConstraint(const std::string& dbname, con
     out.write(reinterpret_cast<const char*>(&count), sizeof(size_t));
     for (const auto& e : existing) writeExclusion(out, e);
     if (!out) return DBStatus::INVALID_VALUE;
+    invalidateExclusionCache(dbname);
     return DBStatus::OK;
 }
 
@@ -6346,24 +6370,54 @@ DBStatus StorageEngine::dropExclusionConstraint(const std::string& dbname, const
             else found = true;
         }
     }
+    invalidateExclusionCache(dbname);
     return found ? DBStatus::OK : DBStatus::TABLE_NOT_FOUND;
 }
 
 std::vector<StorageEngine::ExclusionConstraint> StorageEngine::getExclusionConstraints(
     const std::string& dbname, const std::string& tablename) const {
-    std::vector<ExclusionConstraint> result;
-    std::ifstream in(exclusionPath(dbname), std::ios::binary);
-    if (!in) return result;
-    size_t count = 0;
-    in.read(reinterpret_cast<char*>(&count), sizeof(size_t));
-    if (!in || count > 10000) return result;
-    for (size_t i = 0; i < count && in; ++i) {
-        ExclusionConstraint ec = readExclusion(in);
-        if (!ec.name.empty() && (tablename.empty() || ec.tableName == tablename)) {
-            result.push_back(std::move(ec));
+    bool haveCached = false;
+    {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        auto it = exclusionCache_.find(dbname);
+        if (it != exclusionCache_.end()) {
+            if (tablename.empty()) return it->second;
+            std::vector<ExclusionConstraint> result;
+            for (const auto& ec : it->second) {
+                if (ec.tableName == tablename) result.push_back(ec);
+            }
+            return result;
+        }
+        haveCached = true;
+    }
+    (void)haveCached;
+    std::vector<ExclusionConstraint> all;
+    {
+        std::ifstream in(exclusionPath(dbname), std::ios::binary);
+        if (in) {
+            size_t count = 0;
+            in.read(reinterpret_cast<char*>(&count), sizeof(size_t));
+            if (in && count <= 10000) {
+                for (size_t i = 0; i < count && in; ++i) {
+                    ExclusionConstraint ec = readExclusion(in);
+                    if (!ec.name.empty()) all.push_back(std::move(ec));
+                }
+            }
         }
     }
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    exclusionCache_.emplace(dbname, all);
+    if (tablename.empty()) return all;
+    std::vector<ExclusionConstraint> result;
+    for (const auto& ec : all) {
+        if (ec.tableName == tablename) result.push_back(ec);
+    }
     return result;
+}
+
+void StorageEngine::invalidateExclusionCache(const std::string& dbname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    exclusionCache_.erase(dbname);
 }
 
 // Parse canonicalized int4range bounds (e.g. [1,5) or empty).
@@ -6722,6 +6776,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
+    invalidateSecidxCache(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -6777,18 +6832,21 @@ DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& 
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
+    invalidateSecidxCache(dbname, tablename);
 
     const auto physicalPath = secondaryIndexPath(dbname, tablename, colname);
     std::error_code error;
     if (std::filesystem::exists(physicalPath, error) &&
         !std::filesystem::is_regular_file(physicalPath, error)) {
         writeIndexMetadata(meta, existingMetadata);
+        invalidateSecidxCache(dbname, tablename);
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
     std::filesystem::remove(physicalPath, error);
     if (error) {
         writeIndexMetadata(meta, existingMetadata);
+        invalidateSecidxCache(dbname, tablename);
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
@@ -6905,6 +6963,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
+    invalidateSecidxCache(dbname, tablename);
     lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
@@ -6944,6 +7003,7 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
     if (!removedMetadata || !writeIndexMetadata(meta, retained.str())) {
         return removedMetadata ? DBStatus::IO_ERROR : DBStatus::TABLE_NOT_FOUND;
     }
+    invalidateSecidxCache(dbname, tablename);
 
     const auto physicalPath = relationDir(dbname, tablename) /
                               (tablename + ".idx_" + indexName);
@@ -6951,11 +7011,13 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
     if (std::filesystem::exists(physicalPath, error) &&
         !std::filesystem::is_regular_file(physicalPath, error)) {
         writeIndexMetadata(meta, existingMetadata);
+        invalidateSecidxCache(dbname, tablename);
         return DBStatus::IO_ERROR;
     }
     std::filesystem::remove(physicalPath, error);
     if (error) {
         writeIndexMetadata(meta, existingMetadata);
+        invalidateSecidxCache(dbname, tablename);
         return DBStatus::IO_ERROR;
     }
     // Remove from cache
@@ -9143,6 +9205,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::filesystem::remove(dataPath(dbname, tablename));
     std::filesystem::remove(indexPath(dbname, tablename));
     std::filesystem::remove(secondaryIndexMetaPath(dbname, tablename));
+    invalidateSecidxCache(dbname, tablename);
     std::filesystem::remove(hashIndexMetaPath(dbname, tablename));
     std::filesystem::remove(namedIndexMetaPath(*this, dbname, tablename));
     std::filesystem::remove(fsmPath(dbname, tablename));
@@ -9996,6 +10059,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
             std::ofstream out(meta, std::ios::trunc);
             for (const auto& l : lines) out << l << '\n';
         }
+        invalidateSecidxCache(dbname, tablename);
     }
 
     // Keep the SQL-name to physical-key map aligned with a column rename.
@@ -10208,6 +10272,18 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     }
     if (std::filesystem::exists(seqPath(dbname, oldName))) {
         std::filesystem::rename(seqPath(dbname, oldName), seqPath(dbname, newName));
+        {
+            std::lock_guard<std::mutex> lock(seqCacheMutex_);
+            auto it = seqFileCache_.find(dbname + "/" + oldName);
+            if (it != seqFileCache_.end()) {
+                auto state = std::move(it->second);
+                seqFileCache_.erase(it);
+                if (state.dirty) {
+                    // Preserve pending updates across the rename.
+                    seqFileCache_[dbname + "/" + newName] = std::move(state);
+                }
+            }
+        }
     }
 
     // Rename secondary indexes and meta
@@ -10219,6 +10295,8 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
             if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
         }
         std::filesystem::rename(secondaryIndexMetaPath(dbname, oldName), secondaryIndexMetaPath(dbname, newName));
+        invalidateSecidxCache(dbname, oldName);
+        invalidateSecidxCache(dbname, newName);
     }
     if (std::filesystem::exists(namedIndexMetaPath(*this, dbname, oldName))) {
         std::filesystem::rename(namedIndexMetaPath(*this, dbname, oldName),
@@ -21574,6 +21652,7 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().databaseExclusiveLock.reset();
     transactionContext().databaseSharedLock.reset();
     transactionContext().databaseTxnMutex.reset();
+    flushDeferredSequences();
     return DBStatus::OK;
 }
 
@@ -22003,6 +22082,9 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().databaseExclusiveLock.reset();
     transactionContext().databaseSharedLock.reset();
     transactionContext().databaseTxnMutex.reset();
+    // Sequences are non-transactional: persist advanced counters even on
+    // rollback so concurrent transactions cannot observe reused values.
+    flushDeferredSequences();
     return snapshotRestoreOk && ddlUndoOk && clogOk && abortWalOk
         ? DBStatus::OK : DBStatus::IO_ERROR;
 }
@@ -23179,52 +23261,82 @@ StorageEngine::getDefaultPrivileges(const std::string& dbname) const {
 }
 
 int64_t StorageEngine::readNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname) {
-    auto path = seqPath(dbname, tablename);
-    int64_t val = 1;
-    if (std::filesystem::exists(path)) {
-        std::ifstream ifs(path);
-        if (ifs) {
-            std::string line;
-            while (std::getline(ifs, line)) {
-                size_t sp = line.find(' ');
-                if (sp == std::string::npos) continue;
-                if (line.substr(0, sp) == colname) {
+    const std::string key = dbname + "/" + tablename;
+    std::lock_guard<std::mutex> lock(seqCacheMutex_);
+    auto& state = seqFileCache_[key];
+    if (!state.loaded) {
+        auto path = seqPath(dbname, tablename);
+        if (std::filesystem::exists(path)) {
+            std::ifstream ifs(path);
+            if (ifs) {
+                std::string line;
+                while (std::getline(ifs, line)) {
+                    size_t sp = line.find(' ');
+                    if (sp == std::string::npos) continue;
                     try {
-                        val = std::stoll(line.substr(sp + 1));
-                    } catch (...) { val = 1; }
-                    break;
+                        state.values[line.substr(0, sp)] = std::stoll(line.substr(sp + 1));
+                    } catch (...) {}
                 }
             }
         }
+        state.loaded = true;
     }
-    return val;
+    auto it = state.values.find(colname);
+    return it == state.values.end() ? 1 : it->second;
 }
 
 void StorageEngine::writeNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname, int64_t val) {
-    auto path = seqPath(dbname, tablename);
-    // Read existing entries
-    std::map<std::string, int64_t> seqs;
-    if (std::filesystem::exists(path)) {
-        std::ifstream ifs(path);
-        if (ifs) {
-            std::string line;
-            while (std::getline(ifs, line)) {
-                size_t sp = line.find(' ');
-                if (sp == std::string::npos) continue;
-                try {
-                    seqs[line.substr(0, sp)] = std::stoll(line.substr(sp + 1));
-                } catch (...) {}
+    const std::string key = dbname + "/" + tablename;
+    std::lock_guard<std::mutex> lock(seqCacheMutex_);
+    auto& state = seqFileCache_[key];
+    if (!state.loaded) {
+        // Preserve other columns' counters on first touch of this table.
+        auto path = seqPath(dbname, tablename);
+        if (std::filesystem::exists(path)) {
+            std::ifstream ifs(path);
+            if (ifs) {
+                std::string line;
+                while (std::getline(ifs, line)) {
+                    size_t sp = line.find(' ');
+                    if (sp == std::string::npos) continue;
+                    try {
+                        state.values[line.substr(0, sp)] = std::stoll(line.substr(sp + 1));
+                    } catch (...) {}
+                }
             }
         }
+        state.loaded = true;
     }
-    seqs[colname] = val;
-    std::ofstream ofs(path);
-    for (const auto& p : seqs) {
-        ofs << p.first << ' ' << p.second << '\n';
+    state.values[colname] = val;
+    state.dirty = true;
+}
+
+// Persist every dirty sequence file. Called at transaction boundaries so a
+// multi-row INSERT rewrites <table>.seq once instead of twice per row.
+void StorageEngine::flushDeferredSequences() {
+    std::lock_guard<std::mutex> lock(seqCacheMutex_);
+    for (auto& [key, state] : seqFileCache_) {
+        if (!state.dirty) continue;
+        const size_t slash = key.find('/');
+        if (slash == std::string::npos) { state.dirty = false; continue; }
+        const std::string dbname = key.substr(0, slash);
+        const std::string tablename = key.substr(slash + 1);
+        auto path = seqPath(dbname, tablename);
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        std::ofstream ofs(path);
+        for (const auto& p : state.values) {
+            ofs << p.first << ' ' << p.second << '\n';
+        }
+        state.dirty = false;
     }
 }
 
 void StorageEngine::removeSeq(const std::string& dbname, const std::string& tablename) {
+    {
+        std::lock_guard<std::mutex> lock(seqCacheMutex_);
+        seqFileCache_.erase(dbname + "/" + tablename);
+    }
     auto path = seqPath(dbname, tablename);
     if (std::filesystem::exists(path)) {
         std::filesystem::remove(path);
