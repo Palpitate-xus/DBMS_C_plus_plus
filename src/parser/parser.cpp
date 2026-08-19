@@ -1331,9 +1331,51 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
 static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& pos) {
     auto left = parsePrimaryExpr(tokens, pos);
 
-    // Array subscript: expr[expr] or expr[lower:upper]
+    // Array subscript: expr[expr] (index) or expr[lower:upper] (slice).
+    // Index  -> BinaryOpExpr op "[]"  right = index expression
+    // Slice  -> BinaryOpExpr op "[:]" right = LiteralExpr "lower[:upper]"
+    //           (empty side = open bound, e.g. [2:], [:3])
     while (pos < tokens.size() && tokens[pos] == "[") {
         ++pos;
+        // Detect slice form: scan for a top-level ':' before ']'.
+        {
+            size_t scan = pos;
+            int depth = 0;
+            bool isSlice = false;
+            while (scan < tokens.size()) {
+                const std::string& tk = tokens[scan];
+                if (tk == "(") { ++depth; ++scan; continue; }
+                if (tk == ")") { if (depth > 0) --depth; ++scan; continue; }
+                if (depth == 0 && tk == "]") break;
+                if (depth == 0 && tk == ":") { isSlice = true; break; }
+                ++scan;
+            }
+            if (isSlice) {
+                // Parse lower (may be empty), expect ':', parse upper (may be
+                // empty), expect ']'.
+                std::string lower, upper;
+                if (pos < tokens.size() && tokens[pos] != ":" && tokens[pos] != "]") {
+                    auto lo = parseExpr(tokens, pos);
+                    if (lo) lower = lo->toString();
+                }
+                if (pos < tokens.size() && tokens[pos] == ":") {
+                    ++pos;
+                    if (pos < tokens.size() && tokens[pos] != "]") {
+                        auto hi = parseExpr(tokens, pos);
+                        if (hi) upper = hi->toString();
+                    }
+                }
+                if (pos < tokens.size() && tokens[pos] == "]") ++pos;
+                auto bin = std::make_unique<BinaryOpExpr>();
+                bin->op = "[:]";
+                bin->left = std::move(left);
+                auto bound = std::make_unique<LiteralExpr>();
+                bound->value = lower + ":" + upper; // "l:u", ":u", "l:", ":"
+                bin->right = std::move(bound);
+                left = std::move(bin);
+                continue;
+            }
+        }
         auto idx = parseExpr(tokens, pos);
         if (pos < tokens.size() && tokens[pos] == "]") ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
@@ -1367,6 +1409,24 @@ static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& 
 // Primary: literals, column refs, function calls, parenthesized exprs, subqueries, CASE
 static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
+
+    // ARRAY[...] constructor: one FunctionCallExpr "__array_construct" whose
+    // args are the element expressions. The evaluator renders it as the
+    // canonical {e1,e2,...} array literal text.
+    if (SQLParser::toLower(tokens[pos]) == "array" && pos + 1 < tokens.size()
+        && tokens[pos + 1] == "[") {
+        pos += 2;
+        auto call = std::make_unique<FunctionCallExpr>();
+        call->funcName = "__array_construct";
+        while (pos < tokens.size() && tokens[pos] != "]") {
+            auto elem = parseExpr(tokens, pos);
+            if (elem) call->args.push_back(std::move(elem));
+            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            else break;
+        }
+        if (pos < tokens.size() && tokens[pos] == "]") ++pos;
+        return call;
+    }
 
     // CASE expression
     if (SQLParser::toLower(tokens[pos]) == "case") {

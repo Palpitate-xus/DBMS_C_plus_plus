@@ -133,6 +133,42 @@ static bool jsonStep(const std::string& cur, const std::string& key, std::string
 static bool jsonTopLevelSplit(const std::string& s, char open, char close,
                               std::vector<std::string>& out);
 
+// Split a SQL array literal '{e1,e2,...}' (or a bare non-array scalar,
+// which yields one element) into its element texts. Handles nested arrays
+// and quoted elements with escaped quotes. Returns false on malformed input.
+static bool splitSqlArrayElems(const std::string& in, std::vector<std::string>& out) {
+    std::string s = trimStr(in);
+    if (s.empty()) return false;
+    if (s.front() != '{') {
+        // Not an array literal: treat as a single scalar element only when
+        // callers passed something scalar; array ops then fail cleanly.
+        out.push_back(s);
+        return true;
+    }
+    if (s.back() != '}') return false;
+    std::string body = s.substr(1, s.size() - 2);
+    std::string cur;
+    bool inQuote = false;
+    int depth = 0;
+    for (size_t i = 0; i < body.size(); ++i) {
+        char c = body[i];
+        if (inQuote) {
+            cur += c;
+            if (c == '\\' && i + 1 < body.size()) cur += body[++i];
+            else if (c == '"') inQuote = false;
+            continue;
+        }
+        if (c == '"') { inQuote = true; cur += c; continue; }
+        if (c == '{') { ++depth; cur += c; continue; }
+        if (c == '}') { --depth; cur += c; continue; }
+        if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); continue; }
+        cur += c;
+    }
+    if (inQuote || depth != 0) return false;
+    if (!cur.empty() || !out.empty()) out.push_back(cur);
+    return true;
+}
+
 static bool isNumericLiteral(const std::string& s) {
     if (s.empty()) return false;
     size_t i = 0;
@@ -486,16 +522,52 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         return ExprValue("text", t, false);
     }
     if (op == "@>" || op == "<@") {
-        // Containment is RECURSIVE (PostgreSQL semantics):
-        //   object @> object : every key of RHS exists in LHS with a
-        //                       recursively-contained value
-        //   array  @> array  : every element of RHS is recursively contained
-        //                       in some element of LHS
-        //   scalar == scalar : trimmed-text equality
-        // Defined via a self-recursive lambda.
+        // Two families share these operators:
+        //   SQL arrays '{e1,e2}'  — element containment, recursive
+        //   JSON '{"/["...'       — PostgreSQL JSON containment
+        // SQL arrays are recognized by the '{' opener with ',' or '}' next
+        // (a JSON object's first payload char is always '"'); JSON objects
+        // always have quoted keys.
         const ExprValue& cont = (op == "@>") ? l : r;   // container
         const ExprValue& item = (op == "@>") ? r : l;   // contained
         if (cont.isNull || item.isNull) return ExprValue("boolean", "", true);
+        auto looksSqlArray = [](const std::string& v) -> bool {
+            std::string t = trimStr(v);
+            if (t.size() < 2 || t.front() != '{' || t.back() == 0) return false;
+            if (t.back() != '}') return false;
+            // A JSON object always contains a top-level `":` (quoted key
+            // followed by a colon) before any other structural char; a SQL
+            // array's quoted elements are never followed by colons.
+            bool inQ = false;
+            for (size_t i = 1; i + 1 < t.size(); ++i) {
+                char c = t[i];
+                if (inQ) {
+                    if (c == '\\') ++i;
+                    else if (c == '"') inQ = false;
+                    continue;
+                }
+                if (c == '"') { inQ = true; continue; }
+                if (c == ':') return false; // JSON object
+            }
+            return true; // no key-colon shape: SQL array
+        };
+        if (looksSqlArray(cont.value) && looksSqlArray(item.value)) {
+            std::vector<std::string> ce, ie;
+            if (!splitSqlArrayElems(cont.value, ce) || !splitSqlArrayElems(item.value, ie))
+                return ExprValue("boolean", "", true);
+            // Every RHS element must appear in LHS (element-wise text match;
+            // nested arrays match recursively by canonical text).
+            bool res = true;
+            for (const auto& e : ie) {
+                bool found = false;
+                for (const auto& c2 : ce) {
+                    if (trimStr(c2) == trimStr(e)) { found = true; break; }
+                }
+                if (!found) { res = false; break; }
+            }
+            return ExprValue("boolean", res ? "t" : "f", false);
+        }
+        // JSON containment (recursive PostgreSQL semantics):
         std::function<bool(const std::string&, const std::string&)> contains =
             [&](const std::string& c, const std::string& i) -> bool {
             std::string ct = trimStr(c), it = trimStr(i);
@@ -580,10 +652,62 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         return evalCast(nullptr, ctx, l, r.value);
     }
 
-    // Array subscript (expr[idx])
+    // Array subscript (expr[idx]) — SQL array {e1,e2,...} text form.
     if (op == "[]") {
-        // Wave 0: not supported
-        return ExprValue("unknown", "", true);
+        if (l.isNull || r.isNull) return ExprValue("unknown", "", true);
+        std::vector<std::string> elems;
+        if (!splitSqlArrayElems(l.value, elems)) return ExprValue("unknown", "", true);
+        long idx = 0;
+        try {
+            size_t cpos = 0;
+            idx = std::stol(r.value, &cpos);
+            if (cpos != r.value.size()) return ExprValue("unknown", "", true);
+        } catch (...) {
+            return ExprValue("unknown", "", true);
+        }
+        // PostgreSQL arrays are 1-based; negative = from the end.
+        if (idx < 0) idx = static_cast<long>(elems.size()) + idx + 1;
+        if (idx < 1 || idx > static_cast<long>(elems.size()))
+            return ExprValue("unknown", "", true); // out of range -> NULL (PG)
+        return ExprValue("text", elems[static_cast<size_t>(idx - 1)], false);
+    }
+
+    // Array slice (expr[lower:upper]) — PostgreSQL inclusive bounds,
+    // 1-based; empty side = open bound; result is an array literal.
+    if (op == "[:]") {
+        if (l.isNull) return ExprValue("text", "", true);
+        std::vector<std::string> elems;
+        if (!splitSqlArrayElems(l.value, elems)) return ExprValue("unknown", "", true);
+        // Bounds literal "lower:upper" (either side may be empty).
+        const std::string& b = r.value;
+        size_t colon = b.find(':');
+        std::string loS = colon == std::string::npos ? b : b.substr(0, colon);
+        std::string hiS = colon == std::string::npos ? "" : b.substr(colon + 1);
+        long n = static_cast<long>(elems.size());
+        long lo = 1, hi = n;
+        auto parseBound = [](const std::string& s, long def, long nElem) -> long {
+            if (s.empty()) return def;
+            try {
+                size_t cp = 0;
+                long v = std::stol(s, &cp);
+                if (cp != s.size()) return def;
+                if (v < 0) v = nElem + v + 1; // negative = from the end
+                return v;
+            } catch (...) {
+                return def;
+            }
+        };
+        lo = parseBound(loS, 1, n);
+        hi = parseBound(hiS, n, n);
+        if (lo < 1) lo = 1;
+        if (hi > n) hi = n;
+        std::string out = "{";
+        for (long i = lo; i <= hi; ++i) {
+            if (i > lo) out += ",";
+            out += elems[static_cast<size_t>(i - 1)];
+        }
+        out += "}";
+        return ExprValue("text", out, false);
     }
 
     return ExprValue{};
@@ -1379,6 +1503,43 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
 }
 
 void ExprEvaluator::registerBuiltins() {
+    // ARRAY[...] constructor (emitted by the parser as a function call so it
+    // composes with the expression grammar). Renders the canonical
+    // {e1,e2,...} literal text; NULL elements render as NULL.
+    functions_["__array_construct"] = [](const std::vector<ExprValue>& a) {
+        std::string out = "{";
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (i > 0) out += ",";
+            std::string low;
+            for (char ch : a[i].value) low += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (a[i].isNull || low == "null") {
+                out += "NULL";
+            } else {
+                // Quote when the element contains whitespace, braces, commas
+                // or quotes (PostgreSQL array output rules).
+                const std::string& v = a[i].value;
+                // Nested array literals ({...}) stay bare so subscripting and
+                // containment compare canonical text; other elements quote on
+                // the PostgreSQL triggers (whitespace/braces/commas/quotes).
+                bool needQuote = v.empty() ||
+                    (v.front() != '{' &&
+                     v.find_first_of(" {},\"") != std::string::npos);
+                if (!needQuote) {
+                    out += v;
+                } else {
+                    out += '"';
+                    for (char c : v) {
+                        if (c == '"' || c == '\\') out += '\\';
+                        out += c;
+                    }
+                    out += '"';
+                }
+            }
+        }
+        out += "}";
+        return ExprValue("text", out, false);
+    };
+
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         if (isNumericTypeName(a[0].typeName)) {
