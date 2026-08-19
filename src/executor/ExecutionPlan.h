@@ -603,6 +603,8 @@ public:
     Operator* rightChild() const { return right_.get(); }
     const std::string& leftTable() const { return leftTable_; }
     const std::string& rightTable() const { return rightTable_; }
+    const std::string& leftColumn() const { return leftCol_; }
+    const std::string& rightColumn() const { return rightCol_; }
 
 private:
     StorageEngine* engine_;
@@ -636,6 +638,8 @@ public:
     Operator* rightChild() const { return right_.get(); }
     const std::string& leftTable() const { return leftTable_; }
     const std::string& rightTable() const { return rightTable_; }
+    const std::string& leftColumn() const { return leftCol_; }
+    const std::string& rightColumn() const { return rightCol_; }
 
 private:
     StorageEngine* engine_;
@@ -673,6 +677,8 @@ public:
     Operator* rightChild() const { return right_.get(); }
     const std::string& leftTable() const { return leftTable_; }
     const std::string& rightTable() const { return rightTable_; }
+    const std::string& leftColumn() const { return leftCol_; }
+    const std::string& rightColumn() const { return rightCol_; }
 
 private:
     StorageEngine* engine_;

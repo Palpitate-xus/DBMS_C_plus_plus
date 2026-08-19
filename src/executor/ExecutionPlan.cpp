@@ -2389,12 +2389,38 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
         }
     }
 
+    // Join selectivity from column statistics: an equality join emits about
+    // max(ndistinct(left), ndistinct(right)) groups over the cartesian
+    // product, so sel = 1 / max(nd_l, nd_r) (PostgreSQL's eqjoinsel for
+    // the uniform case). Without stats the old heuristic costs stand.
+    auto leftStats = engine->getColumnStats(dbname, leftTable, leftCol);
+    auto rightStats = engine->getColumnStats(dbname, rightTable, rightCol);
+    double ndL = static_cast<double>(leftStats.cardinality);
+    double ndR = static_cast<double>(rightStats.cardinality);
+    double joinSel = 0.0;
+    bool haveJoinStats = ndL > 0 && ndR > 0;
+    if (haveJoinStats) {
+        joinSel = 1.0 / std::max(ndL, ndR);
+        // Estimated output cardinality — recorded for cost comparison below.
+        // NLJ with an inner index benefits the most from selectivity: its
+        // per-outer cost is a lookup, and only matching rows carry forward.
+    }
+    double estJoinRows = haveJoinStats
+        ? static_cast<double>(leftRows) * static_cast<double>(rightRows) * joinSel
+        : 1e18;
+
     // Cost-based algorithm choice: try all three, pick the cheapest.
     double costNLJ = estimateJoinCost(leftRows, rightRows, rightColIndexed, "nlj");
     double costMerge = (leftColIndexed && rightColIndexed)
         ? estimateJoinCost(leftRows, rightRows, true, "merge")
         : 1e18;
     double costHash = estimateJoinCost(leftRows, rightRows, false, "hash");
+    // With join stats, NLJ only pays off when its output is small: charge
+    // NLJ with the materialization of its result when selectivity is known.
+    if (haveJoinStats && !rightColIndexed) {
+        costNLJ = static_cast<double>(leftRows) * static_cast<double>(rightRows)
+                  * 0.5 + estJoinRows;
+    }
 
     // Decide: if small tables, NLJ is fine; otherwise pick cheapest.
     std::string chosenAlgo;
@@ -2414,6 +2440,11 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
         shouldSwap = true;  // Outer loop should be smaller for NLJ
     } else if (chosenAlgo == "hash" && rightRows > leftRows) {
         shouldSwap = true;  // Build side (right) should be smaller for HashJoin
+    } else if (chosenAlgo == "hash" && rightRows == leftRows && haveJoinStats
+               && ndL > ndR) {
+        // Equal sizes: build on the denser-key side (fewer chain collisions
+        // when probing the sparser side).
+        shouldSwap = true;
     }
 
     std::string lTbl = shouldSwap ? rightTable : leftTable;
@@ -2448,21 +2479,104 @@ struct CostEstimate {
     double cost = 0;
 };
 
+// Numeric-aware comparison for histogram bucketing (text compare falls back
+// to lexicographic, which is correct for ISO dates and zero-padded numbers).
+static bool statLess(const std::string& a, const std::string& b) {
+    bool aNum = !a.empty() && a.find_first_not_of("0123456789.-") == std::string::npos;
+    bool bNum = !b.empty() && b.find_first_not_of("0123456789.-") == std::string::npos;
+    if (aNum && bNum) {
+        try { return std::stod(a) < std::stod(b); } catch (...) {}
+    }
+    return a < b;
+}
+
+// Selectivity estimation consuming ANALYZE statistics:
+//   '='  : MCV hit -> exact frequency; else 1/ndistinct (default 0.1)
+//   '!=' : 1 - '=' selectivity
+//   '<' '<=' '>' '>=' : equidepth histogram interpolation between bucket
+//                       boundaries, clamped by min/max (default 0.3)
 static double estimateSelectivity(const StorageEngine::Condition& cond,
                                   StorageEngine* engine,
                                   const std::string& dbname,
                                   const std::string& tablename) {
+    auto stats = engine->getColumnStats(dbname, tablename, cond.colName);
     if (cond.op == "=") {
-        auto stats = engine->getColumnStats(dbname, tablename, cond.colName);
+        // Most Common Values first: mcv entries are (value, row count), so
+        // the selectivity of a hot value is count / table rows — exact.
+        double rows = static_cast<double>(engine->getTableRowCount(dbname, tablename));
+        for (const auto& m : stats.mcv) {
+            if (m.first == cond.value) {
+                if (rows > 0) return static_cast<double>(m.second) / rows;
+                return 1.0 / static_cast<double>(stats.cardinality);
+            }
+        }
         if (stats.cardinality > 0) {
             return 1.0 / static_cast<double>(stats.cardinality);
         }
         return 0.1;
     }
-    if (cond.op == "!=") return 0.9;
+    if (cond.op == "!=") {
+        StorageEngine::Condition eqCond;
+        eqCond.op = "=";
+        eqCond.colName = cond.colName;
+        eqCond.value = cond.value;
+        return 1.0 - estimateSelectivity(eqCond, engine, dbname, tablename);
+    }
     if (cond.op == "like") return 0.2;
-    // Range operators: <, >, <=, >=
+    if (cond.op == "<" || cond.op == "<=" || cond.op == ">" || cond.op == ">=") {
+        // Histogram interpolation: fraction of buckets whose range lies
+        // below (or above) the probe value, with linear position inside the
+        // straddling bucket.
+        if (!stats.histogram.empty() && !cond.value.empty()) {
+            const std::string& v = cond.value;
+            bool below = (cond.op == "<" || cond.op == "<=");
+            double total = 0.0;
+            double n = static_cast<double>(stats.histogram.size());
+            for (size_t i = 0; i < stats.histogram.size(); ++i) {
+                const auto& b = stats.histogram[i];
+                bool bucketBelow = below ? statLess(b.second, v) : statLess(v, b.first);
+                bool straddle = !statLess(v, b.first) && !statLess(b.second, v);
+                if (bucketBelow) {
+                    total += 1.0;
+                } else if (straddle) {
+                    // linear position within the bucket
+                    double lo = 0.0, hi = 0.0, probe = 0.0;
+                    try {
+                        lo = std::stod(b.first); hi = std::stod(b.second); probe = std::stod(v);
+                    } catch (...) {
+                        // text: use relative length position as a rough proxy
+                        lo = 0.0;
+                        hi = static_cast<double>(std::max(b.first.size(), b.second.size()));
+                        probe = static_cast<double>(v.size());
+                    }
+                    double frac = (hi > lo) ? (probe - lo) / (hi - lo) : 0.5;
+                    if (frac < 0) frac = 0;
+                    if (frac > 1) frac = 1;
+                    total += below ? frac : (1.0 - frac);
+                }
+            }
+            double sel = total / n;
+            if (sel <= 0.0) sel = 0.001;   // keep a floor for empty sides
+            if (sel >= 1.0) sel = 0.999;
+            return sel;
+        }
+        return 0.3;
+    }
     return 0.3;
+}
+
+// Stats-driven equality-join selectivity: 1 / max(ndistinct_l, ndistinct_r),
+// defaulting to the historical 0.1 without ANALYZE stats.
+static double estimateJoinSel(StorageEngine* engine, const std::string& dbname,
+                              const std::string& leftTable, const std::string& leftCol,
+                              const std::string& rightTable, const std::string& rightCol) {
+    auto ls = engine->getColumnStats(dbname, leftTable, leftCol);
+    auto rs = engine->getColumnStats(dbname, rightTable, rightCol);
+    if (ls.cardinality > 0 && rs.cardinality > 0) {
+        return 1.0 / std::max(static_cast<double>(ls.cardinality),
+                              static_cast<double>(rs.cardinality));
+    }
+    return 0.1;
 }
 
 static std::string costRowsStr(const CostEstimate& est, const QueryPlanner::ExplainOptions& opts) {
@@ -2638,7 +2752,9 @@ static CostEstimate explainOp(Operator* op, int indent,
     } else if (auto* join = dynamic_cast<NestedLoopJoinOp*>(op)) {
         CostEstimate left = explainOp(join->leftChild(), indent + 1, engine, dbname, out, opts);
         CostEstimate right = explainOp(join->rightChild(), indent + 1, engine, dbname, out, opts);
-        est.rows = left.rows * right.rows * 0.1;
+        est.rows = left.rows * right.rows
+                   * estimateJoinSel(engine, dbname, join->leftTable(), join->leftColumn(),
+                                     join->rightTable(), join->rightColumn());
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + left.rows * right.cost;
         out += prefix + "NestedLoopJoin(" + join->leftTable() + ", " + join->rightTable() + ")" +
@@ -2647,7 +2763,9 @@ static CostEstimate explainOp(Operator* op, int indent,
     } else if (auto* hjoin = dynamic_cast<HashJoinOp*>(op)) {
         CostEstimate left = explainOp(hjoin->leftChild(), indent + 1, engine, dbname, out, opts);
         CostEstimate right = explainOp(hjoin->rightChild(), indent + 1, engine, dbname, out, opts);
-        est.rows = left.rows * right.rows * 0.1;
+        est.rows = left.rows * right.rows
+                   * estimateJoinSel(engine, dbname, hjoin->leftTable(), hjoin->leftColumn(),
+                                     hjoin->rightTable(), hjoin->rightColumn());
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + right.cost + right.rows * 2.0;
         out += prefix + "HashJoin(" + hjoin->leftTable() + ", " + hjoin->rightTable() + ")" +
@@ -2656,7 +2774,9 @@ static CostEstimate explainOp(Operator* op, int indent,
     } else if (auto* mjoin = dynamic_cast<MergeJoinOp*>(op)) {
         CostEstimate left = explainOp(mjoin->leftChild(), indent + 1, engine, dbname, out, opts);
         CostEstimate right = explainOp(mjoin->rightChild(), indent + 1, engine, dbname, out, opts);
-        est.rows = left.rows * right.rows * 0.1;
+        est.rows = left.rows * right.rows
+                   * estimateJoinSel(engine, dbname, mjoin->leftTable(), mjoin->leftColumn(),
+                                     mjoin->rightTable(), mjoin->rightColumn());
         if (est.rows < 1.0) est.rows = 1.0;
         est.cost = left.cost + right.cost + left.rows * std::log2(left.rows + 1) * 0.1
                    + right.rows * std::log2(right.rows + 1) * 0.1;
