@@ -338,7 +338,21 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
                 if (two == "<=" || two == ">=" || two == "<>" || two == "!=" ||
                     two == "::" || two == "||" || two == "->" || two == "~*" ||
                     two == "!~" || two == "@@" || two == "&&" || two == "<<" ||
-                    two == ">>" || two == "=>") {
+                    two == ">>" || two == "=>" || two == "#>" || two == "@>") {
+                    // Three-char JSON operators bind tighter than their
+                    // two-char prefixes: check ->> and #>> before emitting
+                    // -> / #>.
+                    if (i + 2 < sql.size() && ((two == "->" && sql[i + 2] == '>') ||
+                                               (two == "#>" && sql[i + 2] == '>'))) {
+                        tokens.push_back(two + ">");
+                        i += 2;
+                        continue;
+                    }
+                    tokens.push_back(two);
+                    ++i;
+                    continue;
+                }
+                if (two == "<@") {
                     tokens.push_back(two);
                     ++i;
                     continue;
@@ -936,6 +950,7 @@ static ExprPtr parseNotExpr(const std::vector<std::string>& tokens, size_t& pos)
 static ExprPtr parseIsExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseComparisonExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseJsonOpExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseConcatExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseAddSubExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseMulDivModExpr(const std::vector<std::string>& tokens, size_t& pos);
@@ -1152,13 +1167,42 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
     return left;
 }
 
-// || (concatenation, left-associative)
+// || (concatenation, left-associative). Operands parse at the JSON-operator
+// level so ->/->>/#>/#>>/@>/<@ bind tighter than || (PostgreSQL).
 static ExprPtr parseConcatExpr(const std::vector<std::string>& tokens, size_t& pos) {
-    auto left = parseAddSubExpr(tokens, pos);
+    auto left = parseJsonOpExpr(tokens, pos);
     while (pos < tokens.size() && tokens[pos] == "||") {
         ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
         bin->op = "||";
+        bin->left = std::move(left);
+        bin->right = parseJsonOpExpr(tokens, pos);
+        left = std::move(bin);
+    }
+    return left;
+}
+
+// JSON access operators (left-associative, bind tighter than || per PG):
+//   json  ->  int|text   -> json   (json_extract_path, keeps JSON form)
+//   json  ->> int|text   -> text   (json_extract_path_text, unquoted)
+//   json  #>  path       -> json   (path as text like 'a,b,0')
+//   json  #>> path       -> text
+//   json/jsonb @> json/jsonb -> boolean (contains)
+//   json/jsonb <@ json/jsonb -> boolean (contained, args swapped @>)
+//
+// Precedence: tighter than ||, looser than + (PostgreSQL's own ordering).
+// Operands parse at the additive level.
+static ExprPtr parseJsonOpExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseAddSubExpr(tokens, pos);
+    while (pos < tokens.size()) {
+        const std::string& op = tokens[pos];
+        if (op != "->" && op != "->>" && op != "#>" && op != "#>>" &&
+            op != "@>" && op != "<@") {
+            break;
+        }
+        ++pos;
+        auto bin = std::make_unique<BinaryOpExpr>();
+        bin->op = op;
         bin->left = std::move(left);
         bin->right = parseAddSubExpr(tokens, pos);
         left = std::move(bin);

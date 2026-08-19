@@ -126,6 +126,13 @@ static std::string unquote(const std::string& s) {
     return s;
 }
 
+// JSON helpers defined later in this file; forward-declared for the JSON
+// operator evaluation (-> / ->> / #> / #>> / @> / <@) higher up.
+static std::string trimStr(const std::string& s);
+static bool jsonStep(const std::string& cur, const std::string& key, std::string& out);
+static bool jsonTopLevelSplit(const std::string& s, char open, char close,
+                              std::vector<std::string>& out);
+
 static bool isNumericLiteral(const std::string& s) {
     if (s.empty()) return false;
     size_t i = 0;
@@ -432,6 +439,108 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     if (op == "||") {
         if (l.isNull || r.isNull) return ExprValue("text", "", true);
         return ExprValue("text", l.value + r.value, false);
+    }
+
+    // JSON access operators (PostgreSQL):
+    //   ->  field/array index as JSON    ->>  same but text (unquoted)
+    //   #>  path 'a,b,0' as JSON        #>>  same but text
+    //   @>  containment                  <@  contained-by (swapped @>)
+    if (op == "->" || op == "->>" || op == "#>" || op == "#>>") {
+        if (l.isNull || r.isNull) return ExprValue("text", "", true);
+        std::string cur = l.value;
+        if (op == "#>" || op == "#>>") {
+            // Path text 'k1,k2,0' — split on commas, step through each.
+            std::string path = r.value;
+            if (path.size() >= 2 && path.front() == '\'' && path.back() == '\'')
+                path = path.substr(1, path.size() - 2);
+            std::vector<std::string> steps;
+            std::string curStep;
+            for (char pc : path) {
+                if (pc == ',') { steps.push_back(curStep); curStep.clear(); }
+                else curStep += pc;
+            }
+            if (!curStep.empty() || !steps.empty()) steps.push_back(curStep);
+            for (const auto& st : steps) {
+                if (st.empty()) continue;
+                std::string next;
+                if (!jsonStep(cur, st, next)) return ExprValue("text", "", true);
+                cur = next;
+            }
+        } else {
+            std::string next;
+            if (!jsonStep(cur, r.value, next)) return ExprValue("text", "", true);
+            cur = next;
+        }
+        if (op == "->" || op == "#>") return ExprValue("json", cur, false);
+        // ->> / #>>: text form — unquote strings, JSON null -> SQL NULL.
+        std::string t = trimStr(cur);
+        if (t == "null" || t.empty()) return ExprValue("text", "", true);
+        if (t.size() >= 2 && t.front() == '"' && t.back() == '"') {
+            std::string o;
+            for (size_t i = 1; i + 1 < t.size(); ++i) {
+                if (t[i] == '\\' && i + 2 < t.size()) o.push_back(t[++i]);
+                else o.push_back(t[i]);
+            }
+            return ExprValue("text", o, false);
+        }
+        return ExprValue("text", t, false);
+    }
+    if (op == "@>" || op == "<@") {
+        // Containment is RECURSIVE (PostgreSQL semantics):
+        //   object @> object : every key of RHS exists in LHS with a
+        //                       recursively-contained value
+        //   array  @> array  : every element of RHS is recursively contained
+        //                       in some element of LHS
+        //   scalar == scalar : trimmed-text equality
+        // Defined via a self-recursive lambda.
+        const ExprValue& cont = (op == "@>") ? l : r;   // container
+        const ExprValue& item = (op == "@>") ? r : l;   // contained
+        if (cont.isNull || item.isNull) return ExprValue("boolean", "", true);
+        std::function<bool(const std::string&, const std::string&)> contains =
+            [&](const std::string& c, const std::string& i) -> bool {
+            std::string ct = trimStr(c), it = trimStr(i);
+            if (ct.empty() || it.empty()) return false;
+            if (ct.front() == '{' && it.front() == '{') {
+                std::vector<std::string> cm, im;
+                if (!jsonTopLevelSplit(ct, '{', '}', cm)) return false;
+                if (!jsonTopLevelSplit(it, '{', '}', im)) return false;
+                for (const auto& m : im) {
+                    size_t colon = std::string::npos; bool inQ = false;
+                    for (size_t k = 0; k < m.size(); ++k) {
+                        char c2 = m[k];
+                        if (inQ) { if (c2 == '\\' && k + 1 < m.size()) ++k; else if (c2 == '"') inQ = false; }
+                        else if (c2 == '"') inQ = true;
+                        else if (c2 == ':') { colon = k; break; }
+                    }
+                    if (colon == std::string::npos) return false;
+                    std::string k2 = trimStr(m.substr(0, colon));
+                    std::string ku = (k2.size() >= 2 && k2.front() == '"' && k2.back() == '"')
+                                         ? k2.substr(1, k2.size() - 2) : k2;
+                    std::string want = trimStr(m.substr(colon + 1));
+                    std::string got;
+                    if (!jsonStep(ct, ku, got)) return false;
+                    if (!contains(trimStr(got), want)) return false;
+                }
+                return true;
+            }
+            if (ct.front() == '[' && it.front() == '[') {
+                std::vector<std::string> ce, ie;
+                if (!jsonTopLevelSplit(ct, '[', ']', ce)) return false;
+                if (!jsonTopLevelSplit(it, '[', ']', ie)) return false;
+                for (const auto& e : ie) {
+                    bool found = false;
+                    for (const auto& c3 : ce) {
+                        if (contains(trimStr(c3), trimStr(e))) { found = true; break; }
+                    }
+                    if (!found) return false;
+                }
+                return true;
+            }
+            // Scalars (or mixed shapes) compare by trimmed text.
+            return ct == it;
+        };
+        const bool res = contains(cont.value, item.value);
+        return ExprValue("boolean", res ? "t" : "f", false);
     }
 
     // LIKE / ILIKE / SIMILAR TO
