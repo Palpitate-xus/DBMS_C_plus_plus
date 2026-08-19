@@ -13,7 +13,23 @@ namespace dbms {
 static std::string stripQuotes(const std::string& s) {
     if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') ||
                           (s.front() == '"' && s.back() == '"'))) {
-        return s.substr(1, s.size() - 2);
+        std::string inner = s.substr(1, s.size() - 2);
+        // PostgreSQL escaping: '' inside a single-quoted literal is one '.
+        // The tokenizer keeps both quotes in the token; collapse them here
+        // so consumers see the decoded value. String literals only — quoted
+        // identifiers "x" have no doubling escape.
+        if (s.front() == '\'') {
+            std::string out;
+            out.reserve(inner.size());
+            for (size_t i = 0; i < inner.size(); ++i) {
+                out += inner[i];
+                if (inner[i] == '\'' && i + 1 < inner.size() && inner[i + 1] == '\'') {
+                    ++i; // skip the doubled second quote
+                }
+            }
+            return out;
+        }
+        return inner;
     }
     return s;
 }
@@ -201,10 +217,69 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
 
     for (size_t i = 0; i < sql.size(); ++i) {
         char c = sql[i];
+        // Dollar-quoted string: $tag$ ... $tag$ (PostgreSQL). The whole
+        // construct becomes ONE token that carries the raw body including
+        // quotes/newlines/semicolons, so function bodies survive tokenization.
+        // Token shape: $tag$<body>$tag$; stripQuotes()/body extraction can
+        // split it because the delimiter is recorded verbatim at both ends.
+        if (!inString && !inIdentifier && c == '$') {
+            // Parse $tag$ opener: '$', {alpha|_|digit}*, '$' (tag must not
+            // start with a digit, matching PostgreSQL). Empty tag ($$) is the
+            // common anonymous form.
+            size_t j = i + 1;
+            while (j < sql.size()) {
+                const char tc = sql[j];
+                if (std::isalnum(static_cast<unsigned char>(tc)) || tc == '_') {
+                    // A leading digit after '$' is not a tag (positional
+                    // params etc.); only continue on non-first chars.
+                    if (j == i + 1 && std::isdigit(static_cast<unsigned char>(tc))) break;
+                    ++j;
+                } else {
+                    break;
+                }
+            }
+            if (j < sql.size() && sql[j] == '$') {
+                const std::string delim = sql.substr(i, j - i + 1); // "$tag$"
+                const size_t bodyStart = j + 1;
+                const size_t close = sql.find(delim, bodyStart);
+                if (close != std::string::npos) {
+                    if (!cur.empty()) {
+                        tokens.push_back(cur);
+                        cur.clear();
+                    }
+                    // Emit as a single-quoted string token so downstream
+                    // string handling (stripQuotes, literals) treats it as a
+                    // string value: '<body>' with embedded quotes escaped the
+                    // way the rest of the parser expects ('' per ').
+                    std::string body = sql.substr(bodyStart, close - bodyStart);
+                    std::string quoted = "'";
+                    for (char bc : body) {
+                        quoted += bc;
+                        if (bc == '\'') quoted += '\''; // double-up escapes
+                    }
+                    quoted += '\'';
+                    tokens.push_back(quoted);
+                    i = close + delim.size() - 1; // continue after closer
+                    continue;
+                }
+                // No closer: fall through, '$' is an ordinary character
+                // (e.g. operator or positional error), tokenized below.
+            }
+        }
         if (inString) {
             cur += c;
             if (c == stringChar) {
-                // check escape
+                // PostgreSQL escape: '' inside a string is a literal quote and
+                // the string continues. (Backslash is NOT special in standard
+                // SQL strings, but legacy input may carry \' — treat it as a
+                // closing quote only when not backslash-escaped, preserving
+                // the historical behavior below.)
+                if (i + 1 < sql.size() && sql[i + 1] == stringChar) {
+                    cur += sql[i + 1]; // keep both quotes in the token
+                    ++i;               // skip the second one
+                    continue;
+                }
+                // check backslash escape (legacy \' form)
                 size_t backslashCount = 0;
                 for (size_t j = cur.size() - 2; j + 1 > 0 && cur[j] == '\\'; --j) {
                     ++backslashCount;
