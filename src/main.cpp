@@ -8535,6 +8535,71 @@ static bool executeInternal(const string& rawSql, Session& s) {
     g_engine.setRLSUser(effectiveSessionRole(s));
     dbms::setCurrentSession(&s);
     string sql = sqlProcessor(rawSql);
+    // PostgreSQL ONLY: SELECT/UPDATE/DELETE ... [FROM] ONLY t restricts the
+    // statement to the named table, skipping inherited children. Strip the
+    // marker (bare or paren-wrapped) here; the DML handlers honor the flag.
+    {
+        string lsql2 = sql;
+        for (auto& c : lsql2) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        size_t onlyPos = string::npos;
+        // find " only" preceded by from/update/delete-context
+        size_t p = 0;
+        while ((p = lsql2.find("only", p)) != string::npos) {
+            bool wordBefore = p > 0 && (std::isalpha(static_cast<unsigned char>(lsql2[p-1])) || lsql2[p-1]=='(' || lsql2[p-1]==')');
+            bool wordAfter = p + 4 < lsql2.size() && (std::isalnum(static_cast<unsigned char>(lsql2[p+4])) || lsql2[p+4]=='_');
+            if (!wordBefore && !wordAfter) { onlyPos = p; break; }
+            ++p;
+        }
+        if (onlyPos != string::npos) {
+            // Only meaningful right after FROM/UPDATE/DELETE; check the
+            // preceding word to avoid touching identifiers containing 'only'.
+            string before = lsql2.substr(0, onlyPos);
+            bool ctx = false;
+            for (const char* kw : {"from ", "update ", "delete "}) {
+                if (before.size() >= strlen(kw) && before.compare(before.size() - strlen(kw), strlen(kw), kw) == 0) ctx = true;
+            }
+            if (ctx) {
+                s.onlyNext = true;
+                size_t afterOnly = onlyPos + 4;
+                // swallow optional '(' ... ')'
+                size_t q = afterOnly;
+                while (q < sql.size() && std::isspace(static_cast<unsigned char>(sql[q]))) ++q;
+                if (q < sql.size() && sql[q] == '(') {
+                    size_t rp = sql.find(')', q);
+                    if (rp != string::npos) {
+                        sql = sql.substr(0, onlyPos) + sql.substr(q + 1, rp - q - 1) + sql.substr(rp + 1);
+                    } else {
+                        sql = sql.substr(0, onlyPos) + sql.substr(afterOnly);
+                    }
+                } else {
+                    sql = sql.substr(0, onlyPos) + sql.substr(afterOnly);
+                }
+                // tidy double spaces left behind
+                {
+                    string out2;
+                    bool prevSpace = false;
+                    for (char c : sql) {
+                        if (std::isspace(static_cast<unsigned char>(c))) {
+                            if (!prevSpace) out2 += ' ';
+                            prevSpace = true;
+                        } else {
+                            out2 += c;
+                            prevSpace = false;
+                        }
+                    }
+                    sql = out2;
+                }
+            }
+        }
+    }
+    // Reset ONLY once the statement text has consumed it: handlers read
+    // Session::onlyNext directly during dispatch; clear it before any
+    // nested execute() so the flag never leaks past this statement.
+    struct OnlyReset {
+        Session& sess;
+        ~OnlyReset() { sess.onlyNext = false; }
+    } onlyReset_{s};
+
     // Handle pg_cancel_backend / pg_terminate_backend
     {
         string lsql = sql;
@@ -13385,8 +13450,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Fall back when the volcano path cannot yet handle the query.
             if (forUpdate || noWait || skipLocked) return false;
             if (!distinctOnCols.empty()) return false;
-            // Inheritance: volcano path only scans one table.
-            if (tblName != "information_schema" && tblName != "pg_catalog") {
+            // Inheritance: volcano path only scans one table; under
+            // ONLY that is exactly the requested semantics, so no fallback.
+            if (!s.onlyNext && tblName != "information_schema" && tblName != "pg_catalog") {
                 std::string db = queryDb;
                 if (!g_engine.tableExists(db, tblName)) db = s.currentDB;
                 if (g_engine.tableExists(db, tblName)) {
@@ -13619,7 +13685,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (!hasAggregateColumn(arg)) canUseVolcanoAggregate = false;
                 }
             }
-            if (queryDb != "information_schema" && queryDb != "pg_catalog") {
+            if (!s.onlyNext && queryDb != "information_schema" && queryDb != "pg_catalog") {
                 if (!g_engine.getInheritedChildren(queryDb, tname).empty()) {
                     canUseVolcanoAggregate = false;
                 }
@@ -14401,7 +14467,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                 }
                 // Inheritance: UNION rows from child tables
-                if (queryDb != "information_schema" && queryDb != "pg_catalog") {
+                // (SELECT ... FROM ONLY suppresses this — Session::onlyNext)
+                if (!s.onlyNext && queryDb != "information_schema" && queryDb != "pg_catalog") {
                     auto children = g_engine.getInheritedChildren(queryDb, tname);
                     if (!children.empty()) {
                         set<string> childSelectCols = selectCols;

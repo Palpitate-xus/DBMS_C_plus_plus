@@ -2355,6 +2355,51 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
     }
 
+    // CREATE TABLE ... INHERITS (parent, ...) — prepend inherited columns
+    // (parent columns first, in declaration order, then this table's own;
+    // same-named columns are not duplicated). The relationship is recorded
+    // in <db>/.inherits so SELECT/UPDATE/DELETE can expand children.
+    if (!stmt->inherits.empty()) {
+        std::set<std::string> ownCols;
+        for (size_t i = 0; i < tbl.len; ++i) ownCols.insert(tbl.cols[i].dataName);
+        TableSchema merged;
+        merged.tablename = tbl.tablename;
+        merged.owner = tbl.owner;
+        merged.isTemporary = tbl.isTemporary;
+        merged.isUnlogged = tbl.isUnlogged;
+        merged.tablespace = tbl.tablespace;
+        merged.storageParams = tbl.storageParams;
+        merged.partitionType = tbl.partitionType;
+        merged.partitionKey = tbl.partitionKey;
+        merged.rangePartitions = tbl.rangePartitions;
+        merged.listPartitions = tbl.listPartitions;
+        merged.hashPartitions = tbl.hashPartitions;
+        merged.defaultPartitionName = tbl.defaultPartitionName;
+        merged.pkColIndices = tbl.pkColIndices;
+        merged.uniqueConstraints = tbl.uniqueConstraints;
+        for (const auto& parentRaw : stmt->inherits) {
+            std::string parent = resolveTableName(s, parentRaw);
+            if (!g_engine.tableExists(s.currentDB, parent)) {
+                std::cout << "Parent table " << parentRaw << " not found" << std::endl;
+                return true;
+            }
+            TableSchema parentSchema = g_engine.getTableSchema(s.currentDB, parent);
+            for (size_t i = 0; i < parentSchema.len && merged.len < MAX_COLUMNS; ++i) {
+                const Column& pc = parentSchema.cols[i];
+                if (ownCols.count(pc.dataName)) continue; // child redefines it
+                // Inherited columns are nullable in the child (PG does not
+                // propagate NOT NULL through inheritance).
+                Column c = pc;
+                c.isNull = true;
+                c.isPrimaryKey = false;
+                merged.append(c);
+            }
+        }
+        for (size_t i = 0; i < tbl.len; ++i) merged.append(tbl.cols[i]);
+        for (size_t i = 0; i < tbl.fkLen; ++i) merged.appendFK(tbl.fks[i]);
+        tbl = merged;
+    }
+
     for (const auto& cd : stmt->columns) {
         Column column;
         std::string typeError;
@@ -2453,6 +2498,17 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
         } else if (t == "exclude") {
             // Defer creation until the table exists; collect for later.
+        }
+    }
+
+    // Record inheritance edges now that the child table exists.
+    if (!stmt->inherits.empty()) {
+        std::filesystem::path inhPath = std::filesystem::path(g_engine.dbPath(s.currentDB)) / ".inherits";
+        std::ofstream ofs(inhPath, std::ios::app);
+        if (ofs) {
+            for (const auto& parentRaw : stmt->inherits) {
+                ofs << resolveTableName(s, parentRaw) << "|" << tname << "\n";
+            }
         }
     }
 

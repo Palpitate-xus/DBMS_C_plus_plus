@@ -2459,6 +2459,12 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
     auto stmt = std::make_unique<UpdateStmt>();
     size_t pos = 1; // skip UPDATE
 
+    // UPDATE ONLY table — inheritance-restricted update
+    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
+        stmt->only = true;
+        ++pos;
+    }
+
     // Table name
     if (pos < tokens.size()) {
         stmt->tableName = tokens[pos++];

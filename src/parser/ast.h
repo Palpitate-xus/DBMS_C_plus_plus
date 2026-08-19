@@ -707,6 +707,7 @@ struct UpdateStmt : public Stmt {
     ExprPtr whereClause;
     std::unique_ptr<FromItem> fromClause;      // UPDATE ... FROM ...
     std::vector<SelectItem> returning;
+    bool only = false;                         // UPDATE ONLY table
 
     UpdateStmt() : Stmt(SqlCommand::Update) {}
     std::string toString() const override { return "UPDATE"; }

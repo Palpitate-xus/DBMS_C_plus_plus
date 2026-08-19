@@ -33,7 +33,7 @@ dbms_init_build_config() {
         -Isrc/process
     )
     DBMS_TEST_INCLUDES=("${DBMS_PRODUCTION_INCLUDES[@]}" -Itests)
-    DBMS_E2E_TESTS=(tests/postgres_protocol_test.py tests/window_e2e_test.py)
+    DBMS_E2E_TESTS=(tests/postgres_protocol_test.py tests/window_e2e_test.py tests/inherit_only_e2e_test.py)
     DBMS_CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
     DBMS_LDFLAGS=(-pthread)
 
