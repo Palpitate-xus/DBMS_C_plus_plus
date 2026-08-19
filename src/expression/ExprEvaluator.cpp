@@ -15,6 +15,7 @@
 #include <iterator>
 #include <regex>
 #include <sstream>
+#include <tuple>
 
 // Global engine reference used by sequence builtins.
 extern dbms::StorageEngine g_engine;
@@ -124,6 +125,275 @@ static bool isQuotedString(const std::string& s) {
 static std::string unquote(const std::string& s) {
     if (isQuotedString(s)) return s.substr(1, s.size() - 2);
     return s;
+}
+
+
+static std::string trimStr(const std::string& s);
+
+// ----------------------------------------------------------------------------
+// Interval support
+//
+// Canonical text form (PostgreSQL "postgres" style, produced by the
+// type layer):  [N years] [N mons] [N days] [HH:MM:SS[.ffffff]]
+// Internally an interval is (months, days, microseconds) — months and days
+// are applied calendar-wise, microseconds absolutely, exactly like PG.
+// ----------------------------------------------------------------------------
+
+struct IntervalParts {
+    long long months = 0;
+    long long days = 0;
+    long long micros = 0;
+    bool ok = false;
+};
+
+// Parse the canonical output form or the human input form ("2 years",
+// "14 months", "90 minutes", "1-2", "04:05:06", "1.5 days").
+static IntervalParts parseIntervalText(const std::string& in) {
+    IntervalParts r;
+    std::string s = trimStr(in);
+    if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') s = trimStr(s.substr(1, s.size() - 2));
+    if (s.empty()) return r;
+    bool negate = false;
+    std::string low;
+    for (char c : s) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (low.size() > 4 && low.substr(low.size() - 4) == " ago") {
+        negate = true;
+        s = trimStr(s.substr(0, s.size() - 4));
+    }
+    // SQL year-month shorthand "N-M"
+    {
+        bool shorthand = true;
+        size_t dash = std::string::npos;
+        for (size_t i = 0; i < s.size(); ++i) {
+            char c = s[i];
+            if (c == '-') { if (dash != std::string::npos) { shorthand = false; break; } dash = i; }
+            else if (!std::isdigit(static_cast<unsigned char>(c))) { shorthand = false; break; }
+        }
+        if (shorthand && dash != std::string::npos && dash > 0 && dash + 1 < s.size()) {
+            long long mm = std::stoll(s.substr(0, dash)) * 12 + std::stoll(s.substr(dash + 1));
+            r.months = negate ? -mm : mm;
+            r.ok = true;
+            return r;
+        }
+    }
+    r.ok = true;
+    auto applyUnit = [&](long long n, const std::string& unit) {
+        std::string u;
+        for (char c : unit) u += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        // strip a trailing 's' for singular forms
+        if (u == "year" || u == "years" || u == "y") r.months += n * 12;
+        else if (u == "mon" || u == "mons" || u == "month" || u == "months") r.months += n;
+        else if (u == "week" || u == "weeks" || u == "w") r.days += n * 7;
+        else if (u == "day" || u == "days" || u == "d") r.days += n;
+        else if (u == "hour" || u == "hours" || u == "h") r.micros += n * 3600000000LL;
+        else if (u == "min" || u == "mins" || u == "minute" || u == "minutes") r.micros += n * 60000000LL;
+        else if (u == "sec" || u == "secs" || u == "second" || u == "seconds" || u == "s") r.micros += n * 1000000LL;
+        else if (u == "millisec" || u == "millisecs" || u == "milliseconds") r.micros += n * 1000LL;
+        else if (u == "microsec" || u == "microsecs" || u == "microseconds") r.micros += n;
+        else r.ok = false;
+        (void)negate;
+    };
+    std::istringstream iss(s);
+    std::string tok;
+    while (iss >> tok) {
+        if (tok.find(':') != std::string::npos) {
+            // HH:MM:SS[.f] or HH:MM
+            long long hh = 0, mm = 0, ss = 0, fv = 0;
+            char c1 = 0, c2 = 0;
+            int got = std::sscanf(tok.c_str(), "%lld%c%lld%c%lld.%lld", &hh, &c1, &mm, &c2, &ss, &fv);
+            (void)got;
+            if (c1 == ':' && c2 == ':') {
+                size_t dot = tok.find('.');
+                size_t fracDigits = dot == std::string::npos ? 0 : tok.size() - dot - 1;
+                while (fracDigits > 6) { fv /= 10; --fracDigits; }
+                while (fracDigits < 6 && fracDigits > 0) { fv *= 10; ++fracDigits; }
+                if (fracDigits == 0) fv = 0;
+                r.micros += (hh * 3600 + mm * 60 + ss) * 1000000LL + fv;
+                continue;
+            }
+            if (std::sscanf(tok.c_str(), "%lld%c%lld", &hh, &c1, &mm) == 3 && c1 == ':') {
+                r.micros += (hh * 3600 + mm * 60) * 1000000LL;
+                continue;
+            }
+            r.ok = false;
+            break;
+        }
+        bool allDigit = !tok.empty() &&
+            tok.find_first_not_of("0123456789") == std::string::npos;
+        if (allDigit) {
+            // A bare number is seconds — unless the next token is a unit
+            // ("1 day"), in which case it applies to that unit.
+            std::string peek;
+            auto pos0 = iss.tellg();
+            if (pos0 != decltype(iss)::pos_type(-1) && (iss >> peek)) {
+                bool unitish = !peek.empty() &&
+                    std::isalpha(static_cast<unsigned char>(peek[0]));
+                if (unitish) {
+                    applyUnit(std::stoll(tok), peek);
+                    continue;
+                }
+                // put the token back
+                iss.clear();
+                iss.seekg(pos0);
+            }
+            r.micros += std::stoll(tok) * 1000000LL;
+            continue;
+        }
+        // number[.fraction][unit] with unit possibly in the next token
+        size_t endNum = 0;
+        while (endNum < tok.size() && (std::isdigit(static_cast<unsigned char>(tok[endNum])) || tok[endNum] == '.')) ++endNum;
+        if (endNum == 0) { r.ok = false; break; }
+        double n = std::stod(tok.substr(0, endNum));
+        std::string unit = tok.substr(endNum);
+        if (unit.empty()) {
+            if (!(iss >> unit)) { r.micros += static_cast<long long>(n * 1000000.0); continue; }
+        }
+        // lower-case the unit
+        for (char& c : unit) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (unit == "days" || unit == "day") {
+            long long whole = static_cast<long long>(n);
+            double frac = n - whole;
+            r.days += whole;
+            r.micros += static_cast<long long>(frac * 86400000000.0);
+        } else if (unit == "hours" || unit == "hour") {
+            r.micros += static_cast<long long>(n * 3600000000.0);
+        } else if (unit == "minutes" || unit == "minute") {
+            r.micros += static_cast<long long>(n * 60000000.0);
+        } else if (unit == "seconds" || unit == "second") {
+            r.micros += static_cast<long long>(n * 1000000.0);
+        } else {
+            applyUnit(static_cast<long long>(n), unit);
+        }
+    }
+    if (negate) { r.months = -r.months; r.days = -r.days; r.micros = -r.micros; }
+    return r;
+}
+
+// Render (months, days, micros) back to canonical PG text.
+static std::string intervalToText(long long months, long long days, long long micros) {
+    bool neg = months < 0 || days < 0 || micros < 0;
+    long long m = months < 0 ? -months : months;
+    long long d = days < 0 ? -days : days;
+    long long us = micros < 0 ? -micros : micros;
+    long long years = m / 12, mons = m % 12;
+    std::string out;
+    if (years) out += std::to_string(years) + (years == 1 ? " year" : " years");
+    if (mons) { if (!out.empty()) out += " "; out += std::to_string(mons) + (mons == 1 ? " mon" : " mons"); }
+    if (d) { if (!out.empty()) out += " "; out += std::to_string(d) + (d == 1 ? " day" : " days"); }
+    if (us || out.empty()) {
+        if (!out.empty()) out += " ";
+        long long hh = us / 3600000000LL; us %= 3600000000LL;
+        long long mm = us / 60000000LL; us %= 60000000LL;
+        long long ss = us / 1000000LL; long long frac = us % 1000000LL;
+        char buf[64];
+        if (frac) std::snprintf(buf, sizeof(buf), "%02lld:%02lld:%02lld.%06lld", hh, mm, ss, frac);
+        else std::snprintf(buf, sizeof(buf), "%02lld:%02lld:%02lld", hh, mm, ss);
+        out += buf;
+    }
+    if (neg && (months || days || micros)) out = "-" + out;
+    return out;
+}
+
+// Civil-date helpers (Howard Hinnant's algorithms, public domain).
+static long long civilToDays(long long y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const long long era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<long long>(doe) - 719468;
+}
+static std::tuple<long long, unsigned, unsigned> daysToCivil(long long z) {
+    z += 719468;
+    const long long era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const long long y = static_cast<long long>(yoe) + era * 400;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    const unsigned d = doy - (153 * mp + 2) / 5 + 1;
+    const unsigned m = mp + (mp < 10 ? 3 : -9);
+    return {y + (m <= 2), m, d};
+}
+
+// Apply an interval to 'YYYY-MM-DD[ HH:MM:SS]' (returns the same shape).
+// Months roll the calendar date (day clamped to month length); days and
+// microseconds shift absolutely with day carry — PostgreSQL semantics.
+static std::string timestampShift(const std::string& ts, const IntervalParts& iv, bool add) {
+    long long months = add ? iv.months : -iv.months;
+    long long days = add ? iv.days : -iv.days;
+    long long micros = add ? iv.micros : -iv.micros;
+    int Y = 1970, Mo = 1, D = 1, h = 0, mi = 0;
+    long long s = 0;
+    if (std::sscanf(ts.c_str(), "%d-%d-%d %d:%d:%lld", &Y, &Mo, &D, &h, &mi, &s) < 3) return "";
+    long long totalDays = civilToDays(Y, Mo, D) + days;
+    if (months != 0) {
+        auto [y2, m2, d2] = daysToCivil(totalDays);
+        long long cm = y2 * 12 + (m2 - 1) + months;
+        long long ny = cm / 12; long long nm = cm % 12;
+        if (nm < 0) { nm += 12; --ny; }
+        static const int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+        int ml = mdays[nm];
+        if (nm == 1 && ((ny % 4 == 0 && ny % 100 != 0) || ny % 400 == 0)) ml = 29;
+        if (d2 > static_cast<unsigned>(ml)) d2 = static_cast<unsigned>(ml);
+        totalDays = civilToDays(ny, static_cast<unsigned>(nm + 1), d2);
+    }
+    long long totalMicros = (static_cast<long long>(h) * 3600 + mi * 60 + s) * 1000000LL + micros;
+    long long carryDays = totalMicros / 86400000000LL;
+    totalMicros %= 86400000000LL;
+    if (totalMicros < 0) { totalMicros += 86400000000LL; --carryDays; }
+    totalDays += carryDays;
+    auto [Y2, M2, D2] = daysToCivil(totalDays);
+    long long hh = totalMicros / 3600000000LL;
+    long long mm = (totalMicros / 60000000LL) % 60;
+    long long ss = (totalMicros / 1000000LL) % 60;
+    long long fs = totalMicros % 1000000LL;
+    char buf[80];
+    if (ts.find(' ') != std::string::npos) {
+        if (fs) std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02lld:%02lld:%02lld.%06lld",
+                              Y2, M2, D2, hh, mm, ss, fs);
+        else std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u %02lld:%02lld:%02lld",
+                           Y2, M2, D2, hh, mm, ss);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02u", Y2, M2, D2);
+    }
+    return buf;
+}
+
+// Resolve a timezone name to a UTC offset in minutes. Supports UTC-style
+// fixed offsets ("UTC", "UTC+8", "UTC-05:30") and POSIX abbreviated forms
+// ("+08", "-0530"). Full IANA tzdata is out of scope for this layer.
+static bool parseTimeZoneOffset(const std::string& name, long long& offsetMinutes) {
+    std::string s = trimStr(name);
+    if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') s = trimStr(s.substr(1, s.size() - 2));
+    if (s.empty()) return false;
+    std::string low;
+    for (char c : s) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (low == "utc" || low == "gmt" || low == "z") { offsetMinutes = 0; return true; }
+    if (low.rfind("utc", 0) == 0 || low.rfind("gmt", 0) == 0) s = s.substr(3);
+    // [+-]HH[:MM] or [+-]HHMM
+    if (s.empty()) return false;
+    int sign = 1;
+    size_t i = 0;
+    if (s[0] == '+') { sign = 1; i = 1; }
+    else if (s[0] == '-') { sign = -1; i = 1; }
+    std::string rest = s.substr(i);
+    if (rest.empty() || rest.find_first_not_of("0123456789:") != std::string::npos) return false;
+    long long hh = 0, mm = 0;
+    if (rest.find(':') != std::string::npos) {
+        if (std::sscanf(rest.c_str(), "%lld:%lld", &hh, &mm) != 2) return false;
+    } else {
+        if (rest.size() == 4) {
+            hh = std::stoll(rest.substr(0, 2));
+            mm = std::stoll(rest.substr(2));
+        } else if (rest.size() <= 2) {
+            hh = std::stoll(rest); mm = 0;
+        } else {
+            return false;
+        }
+    }
+    offsetMinutes = sign * (hh * 60 + mm);
+    return true;
 }
 
 // JSON helpers defined later in this file; forward-declared for the JSON
@@ -252,6 +522,23 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     if (op == "not") {
         return ExprValue("boolean", v.asBool() ? "f" : "t", false);
     }
+    if (op.rfind("at time zone", 0) == 0) {
+        // AT TIME ZONE <zone>: with a timestamp input, re-interpret the
+        // wall clock in that zone (shift by the zone offset to UTC and keep
+        // the naive rendering); with a timestamptz input, render the UTC
+        // instant at the zone's local wall clock. Offset-only zone model.
+        std::string zone = trimStr(e->op.substr(std::string("at time zone").size()));
+        long long offMin = 0;
+        if (v.isNull || !parseTimeZoneOffset(zone, offMin))
+            return ExprValue("timestamp", "", true);
+        // Naive zone model: the input wall clock is read as UTC and
+        // rendered at the zone's local wall clock (local = utc + offset).
+        IntervalParts shift;
+        shift.micros = offMin * 60000000LL;
+        std::string out = timestampShift(v.value, shift, true);
+        if (out.empty()) return ExprValue("timestamp", "", true);
+        return ExprValue("timestamp", out, false);
+    }
     if (op == "is null") {
         return ExprValue("boolean", v.isNull ? "t" : "f", false);
     }
@@ -365,6 +652,74 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
     if (l.isNull || r.isNull) return ExprValue(l.typeName, "", true);
+
+    // Interval arithmetic (PostgreSQL semantics):
+    //   timestamp/date ± interval -> timestamp/date (months/days calendar-wise)
+    //   interval ± interval       -> interval
+    //   interval * n, n * interval, interval / n -> interval
+    auto isTsLike = [](const ExprValue& v) {
+        std::string t = toLower(v.typeName);
+        if (t == "timestamp" || t == "timestamptz" || t == "date" ||
+            t == "datetime")
+            return true;
+        if (!t.empty()) return false;
+        // Untyped: does it parse as 'YYYY-M-D[ H:M:S]'?
+        int Y = 0, Mo = 0, D = 0;
+        return std::sscanf(v.value.c_str(), "%d-%d-%d", &Y, &Mo, &D) == 3 &&
+               Y >= 1 && Mo >= 1 && Mo <= 12 && D >= 1 && D <= 31;
+    };
+    std::string lt = toLower(l.typeName), rt = toLower(r.typeName);
+    bool lIv = (lt == "interval"), rIv = (rt == "interval");    if (!lIv && !rIv && (op == "+" || op == "-") && isTsLike(l)) {
+        // 'timestamp' + '1 day' style: the untyped operand is an interval
+        // literal quoted as a string.
+        IntervalParts iv = parseIntervalText(r.value);
+        rIv = iv.ok;
+    } else if (!lIv && !rIv && op == "+" && isTsLike(r)) {
+        IntervalParts iv = parseIntervalText(l.value);
+        lIv = iv.ok;
+    }
+    if (lIv || rIv) {
+        if (op == "*" || op == "/") {
+            IntervalParts iv;
+            double k = 0;
+            if (lIv && !rIv) {
+                iv = parseIntervalText(l.value);
+                k = r.asDouble();
+            } else if (rIv && !lIv && op == "*") {
+                iv = parseIntervalText(r.value);
+                k = l.asDouble();
+            } else {
+                return ExprValue("interval", "", true);
+            }
+            if (!iv.ok) return ExprValue("interval", "", true);
+            double scale = (op == "*") ? k : (k == 0 ? 0 : 1.0 / k);
+            return ExprValue("interval",
+                             intervalToText(static_cast<long long>(iv.months * scale),
+                                            static_cast<long long>(iv.days * scale),
+                                            static_cast<long long>(iv.micros * scale)),
+                             false);
+        }
+        if (lIv && rIv) {
+            IntervalParts a = parseIntervalText(l.value);
+            IntervalParts b = parseIntervalText(r.value);
+            if (!a.ok || !b.ok) return ExprValue("interval", "", true);
+            long long mm = a.months + (op == "+" ? b.months : -b.months);
+            long long dd = a.days + (op == "+" ? b.days : -b.days);
+            long long us = a.micros + (op == "+" ? b.micros : -b.micros);
+            return ExprValue("interval", intervalToText(mm, dd, us), false);
+        }
+        if (lIv && op == "+") {
+            IntervalParts iv = parseIntervalText(l.value);
+            if (!iv.ok || !isTsLike(r)) return ExprValue("timestamp", "", true);
+            return ExprValue("timestamp", timestampShift(r.value, iv, true), false);
+        }
+        if (rIv) {
+            IntervalParts iv = parseIntervalText(r.value);
+            if (!iv.ok || !isTsLike(l)) return ExprValue("timestamp", "", true);
+            return ExprValue("timestamp", timestampShift(l.value, iv, op == "+"), false);
+        }
+        return ExprValue("timestamp", "", true);
+    }
 
     // Exact arithmetic for explicit numeric/decimal types.
     if (isNumericTypeName(l.typeName) || isNumericTypeName(r.typeName)) {
@@ -1538,6 +1893,18 @@ void ExprEvaluator::registerBuiltins() {
         }
         out += "}";
         return ExprValue("text", out, false);
+    };
+
+    // timezone(zone, timestamp) — AT TIME ZONE in function form
+    functions_["timezone"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() != 2 || a[0].isNull || a[1].isNull) return ExprValue("timestamp", "", true);
+        long long offMin = 0;
+        if (!parseTimeZoneOffset(a[0].value, offMin)) return ExprValue("timestamp", "", true);
+        IntervalParts shift;
+        shift.micros = offMin * 60000000LL;
+        std::string out = timestampShift(a[1].value, shift, true);
+        if (out.empty()) return ExprValue("timestamp", "", true);
+        return ExprValue("timestamp", out, false);
     };
 
     functions_["abs"] = [](const std::vector<ExprValue>& a) {

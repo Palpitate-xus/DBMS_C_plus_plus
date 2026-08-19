@@ -1270,8 +1270,29 @@ static ExprPtr parseUnaryExpr(const std::vector<std::string>& tokens, size_t& po
 }
 
 // :: (cast, left-associative)
+// True when tokens[pos..pos+2] are AT TIME ZONE (case-insensitive).
+static bool isAtTimeZone(const std::vector<std::string>& tokens, size_t pos) {
+    return pos + 2 < tokens.size()
+        && SQLParser::toLower(tokens[pos]) == "at"
+        && SQLParser::toLower(tokens[pos + 1]) == "time"
+        && SQLParser::toLower(tokens[pos + 2]) == "zone";
+}
+
 static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos) {
     auto left = parsePostfixExpr(tokens, pos);
+    // Postfix AT TIME ZONE 'zone' binds at the cast level so both
+    // `ts AT TIME ZONE 'z'` and `ts::timestamp AT TIME ZONE 'z'` work.
+    while (pos < tokens.size() && isAtTimeZone(tokens, pos)) {
+        pos += 3;
+        if (pos < tokens.size()) {
+            std::string z = tokens[pos++];
+            if (z.size() >= 2 && z.front() == '\'' && z.back() == '\'') z = z.substr(1, z.size() - 2);
+            auto unary = std::make_unique<UnaryOpExpr>();
+            unary->op = "AT TIME ZONE " + z;
+            unary->operand = std::move(left);
+            left = std::move(unary);
+        }
+    }
     while (pos < tokens.size() && tokens[pos] == "::") {
         ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
@@ -1280,6 +1301,7 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
         // Type name: read until next operator/terminator
         std::string typeName;
         while (pos < tokens.size()) {
+            if (isAtTimeZone(tokens, pos)) break; // postfix AT TIME ZONE
             std::string w = SQLParser::toLower(tokens[pos]);
             if (w == "and" || w == "or" || w == "then" || w == "else" || w == "end"
                 || w == "when" || w == "from" || w == "where" || w == "group"
@@ -1323,6 +1345,18 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
         right->value = typeName;
         bin->right = std::move(right);
         left = std::move(bin);
+        // Chained postfix AT TIME ZONE after a cast.
+        while (pos < tokens.size() && isAtTimeZone(tokens, pos)) {
+            pos += 3;
+            if (pos < tokens.size()) {
+                std::string z = tokens[pos++];
+                if (z.size() >= 2 && z.front() == '\'' && z.back() == '\'') z = z.substr(1, z.size() - 2);
+                auto unary = std::make_unique<UnaryOpExpr>();
+                unary->op = "AT TIME ZONE " + z;
+                unary->operand = std::move(left);
+                left = std::move(unary);
+            }
+        }
     }
     return left;
 }
@@ -1409,6 +1443,18 @@ static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& 
 // Primary: literals, column refs, function calls, parenthesized exprs, subqueries, CASE
 static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
+
+    // INTERVAL 'text' typed literal — a LiteralExpr with typeName interval
+    // (the body keeps its raw text; the interval parser canonicalizes).
+    if (SQLParser::toLower(tokens[pos]) == "interval" && pos + 1 < tokens.size()
+        && tokens[pos + 1].size() >= 2 && tokens[pos + 1].front() == '\''
+        && tokens[pos + 1].back() == '\'') {
+        auto lit = std::make_unique<LiteralExpr>();
+        lit->value = tokens[pos + 1].substr(1, tokens[pos + 1].size() - 2);
+        lit->typeName = "interval";
+        pos += 2;
+        return lit;
+    }
 
     // ARRAY[...] constructor: one FunctionCallExpr "__array_construct" whose
     // args are the element expressions. The evaluator renders it as the
