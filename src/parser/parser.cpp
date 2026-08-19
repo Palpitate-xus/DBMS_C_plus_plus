@@ -4305,6 +4305,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         for (const auto& c : cols) {
                             if (c != ",") tc.columns.push_back(c);
                         }
+                        parseConstraintDeferrability(tokens, pos, tc);
                         stmt->constraints.push_back(std::move(tc));
                     } else if (ctype == "unique") {
                         ++pos;
@@ -4315,6 +4316,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         for (const auto& c : cols) {
                             if (c != ",") tc.columns.push_back(c);
                         }
+                        parseConstraintDeferrability(tokens, pos, tc);
                         stmt->constraints.push_back(std::move(tc));
                     } else if (ctype == "foreign") {
                         ++pos; if (pos < tokens.size() && toLower(tokens[pos]) == "key") ++pos;
@@ -4350,6 +4352,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                                 } else break;
                             }
                         }
+                        parseConstraintDeferrability(tokens, pos, tc);
                         stmt->constraints.push_back(std::move(tc));
                     } else if (ctype == "check") {
                         ++pos;
@@ -4372,6 +4375,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         ++pos;
                         TableConstraint tc = parseExcludeConstraint(tokens, pos);
                         tc.name = cname;
+                        parseConstraintDeferrability(tokens, pos, tc);
                         stmt->constraints.push_back(std::move(tc));
                     } else {
                         // Unknown constraint, skip until comma or )
@@ -4386,6 +4390,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 for (const auto& c : cols) {
                     if (c != ",") tc.columns.push_back(c);
                 }
+                parseConstraintDeferrability(tokens, pos, tc);
                 stmt->constraints.push_back(std::move(tc));
             } else if (ltok == "unique") {
                 ++pos;
@@ -4395,6 +4400,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 for (const auto& c : cols) {
                     if (c != ",") tc.columns.push_back(c);
                 }
+                parseConstraintDeferrability(tokens, pos, tc);
                 stmt->constraints.push_back(std::move(tc));
             } else if (ltok == "foreign") {
                 ++pos; if (pos < tokens.size() && toLower(tokens[pos]) == "key") ++pos;
@@ -4426,6 +4432,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         } else break;
                     }
                 }
+                parseConstraintDeferrability(tokens, pos, tc);
                 stmt->constraints.push_back(std::move(tc));
             } else if (ltok == "check") {
                 ++pos;
@@ -4446,6 +4453,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
             } else if (ltok == "exclude") {
                 ++pos;
                 TableConstraint tc = parseExcludeConstraint(tokens, pos);
+                parseConstraintDeferrability(tokens, pos, tc);
                 stmt->constraints.push_back(std::move(tc));
             } else if (ltok == "like") {
                 // LIKE source_table [ { INCLUDING | EXCLUDING } option ] ...

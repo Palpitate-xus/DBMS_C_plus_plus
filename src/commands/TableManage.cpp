@@ -6601,7 +6601,68 @@ bool StorageEngine::isConstraintDeferred(const std::string& name, bool defaultDe
     return defaultDeferred;
 }
 
+bool StorageEngine::isConstraintCurrentlyDeferred(const std::string& dbname,
+                                                 const std::string& tablename,
+                                                 const std::string& constraintName) const {
+    if (constraintName.empty()) return false;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    std::string dkey = "constraint." + constraintName + ".deferrable";
+    std::string ikey = "constraint." + constraintName + ".initially_deferred";
+    auto it = tbl.storageParams.find(dkey);
+    bool deferrable = (it != tbl.storageParams.end() && it->second == "1");
+    if (!deferrable) return false;
+    auto it2 = tbl.storageParams.find(ikey);
+    bool initiallyDeferred = (it2 != tbl.storageParams.end() && it2->second == "1");
+    return isConstraintDeferred(constraintName, initiallyDeferred);
+}
+
 bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
+    if (dc.kind == DeferredCheck::Kind::Unique) {
+        // Count rows whose uniqueCol equals payloadValue; the queued row
+        // itself is excluded via exceptRid. More than one remaining row
+        // (the queued one plus a pre-existing other) means a violation.
+        TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
+        int colIdx = -1;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == dc.uniqueCol) { colIdx = static_cast<int>(i); break; }
+        }
+        if (colIdx < 0) return true;
+        int matches = 0;
+        forEachRow(dc.dbname, dc.tablename,
+                   [&](uint32_t pageId, uint16_t slot, const char* data, size_t len) {
+            int64_t rid = (static_cast<int64_t>(pageId) << 16) | slot;
+            if (dc.exceptRid >= 0 && rid == dc.exceptRid) return;
+            std::string row(data, len);
+            if (extractColumnValueStatic(row, tbl, static_cast<size_t>(colIdx))
+                    == dc.payloadValue) ++matches;
+        });
+        return matches <= 0;
+    }
+    if (dc.kind == DeferredCheck::Kind::ForeignKey) {
+        // The referenced key must exist by commit time.
+        if (!tableExists(dc.dbname, dc.refTable)) return false;
+        TableSchema refTbl = getTableSchema(dc.dbname, dc.refTable);
+        int refColIdx = -1;
+        for (size_t i = 0; i < refTbl.len; ++i) {
+            if (refTbl.cols[i].dataName == dc.refCol) { refColIdx = static_cast<int>(i); break; }
+        }
+        if (refColIdx < 0) return false;
+        BPTree* refIdx = getPKIndex(dc.dbname, dc.refTable);
+        if (refIdx) {
+            int64_t dummy;
+            return refIdx->search(dc.payloadValue, dummy);
+        }
+        bool found = false;
+        forEachRow(dc.dbname, dc.refTable,
+                   [&](uint32_t, uint16_t, const char* data, size_t len) {
+            if (found) return;
+            std::string row(data, len);
+            if (extractColumnValueStatic(row, refTbl, static_cast<size_t>(refColIdx))
+                    == dc.payloadValue) found = true;
+        });
+        return found;
+    }
+    // CHECK constraint evaluation
     TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
     if (dc.colIdx >= tbl.len) return true;
     const Column& col = tbl.cols[dc.colIdx];
@@ -12765,6 +12826,12 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
+    // Deferrable UNIQUE/FK constraints currently deferred: their checks are
+    // queued after the row lands (rid known).
+    struct DeferredFkEntry { size_t fkIndex; std::string value; };
+    std::vector<size_t> deferredUniqueCols;
+    std::vector<DeferredFkEntry> deferredFkEntries;
+
     // Apply DEFAULT values
     std::map<std::string, std::string> actualValues = values;
     auto typeHints = buildTypeHints(tbl);
@@ -12823,12 +12890,38 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
-    // Check single-column UNIQUE constraints (use B+ tree index if available)
+    // Check single-column UNIQUE constraints (use B+ tree index if available).
+    // DEFERRABLE constraints that are currently deferred skip the immediate
+    // check here; the violation (if any) is queued for commit time below.
     for (size_t i = 0; i < tbl.len; ++i) {
         const Column& col = tbl.cols[i];
         if (!col.isUnique) continue;
         auto it = actualValues.find(col.dataName);
         if (it == actualValues.end() || it->second.empty()) continue;
+        {
+            // Find this column's constraint name: named table-level UNIQUE
+            // via uniqueConstraintNames (single-col), else PG-derived name.
+            std::string cname = tablename + "_" + col.dataName + "_key";
+            if (i < tbl.uniqueConstraints.size()) {
+                // uniqueConstraints entries are column-index groups; find the
+                // group containing i and take the parallel name when present.
+                for (size_t ui = 0; ui < tbl.uniqueConstraints.size(); ++ui) {
+                    for (size_t uj = 0; uj < tbl.uniqueConstraints[ui].size(); ++uj) {
+                        if (tbl.uniqueConstraints[ui][uj] == i) {
+                            if (ui < tbl.uniqueConstraintNames.size()
+                                && !tbl.uniqueConstraintNames[ui].empty()) {
+                                cname = tbl.uniqueConstraintNames[ui];
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            if (isConstraintCurrentlyDeferred(dbname, tablename, cname)) {
+                deferredUniqueCols.push_back(i);
+                continue;
+            }
+        }
         bool duplicate = false;
         // Try B+ tree secondary index first
         BPTree* secIdx = getSecondaryIndex(dbname, tablename, col.dataName);
@@ -12855,8 +12948,22 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     }
 
     // Check composite UNIQUE constraints
-    for (const auto& uc : tbl.uniqueConstraints) {
+    for (size_t uci = 0; uci < tbl.uniqueConstraints.size(); ++uci) {
+        const auto& uc = tbl.uniqueConstraints[uci];
         if (uc.empty()) continue;
+        // Deferrable UNIQUE currently deferred: queue instead of failing.
+        // The commit-time check is value-equality on the first column (the
+        // common single-column constraint written table-level).
+        {
+            std::string cname;
+            if (uci < tbl.uniqueConstraintNames.size()) cname = tbl.uniqueConstraintNames[uci];
+            if (cname.empty()) cname = tablename + "_" + tbl.cols[uc[0]].dataName + "_key";
+            if (uc.size() == 1 &&
+                isConstraintCurrentlyDeferred(dbname, tablename, cname)) {
+                deferredUniqueCols.push_back(uc[0]);
+                continue;
+            }
+        }
         std::string compositeKey;
         bool containsNull = false;
         for (size_t idx : uc) {
@@ -13295,7 +13402,8 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
-    // Check foreign key references
+    // Check foreign key references. DEFERRABLE FKs currently deferred skip
+    // the immediate existence check and queue it for commit time.
     for (size_t fi = 0; fi < tbl.fkLen; ++fi) {
         const ForeignKey& fk = tbl.fks[fi];
         // Check if any FK column value is NULL (NULL is allowed in FKs)
@@ -13308,6 +13416,14 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
         }
         if (hasNull) continue;
+        if (!fk.name.empty() &&
+            isConstraintCurrentlyDeferred(dbname, tablename, fk.name)) {
+            DeferredFkEntry e;
+            e.fkIndex = fi;
+            if (fk.colNames.size() == 1) e.value = actualValues[fk.colNames[0]];
+            deferredFkEntries.push_back(std::move(e));
+            continue;
+        }
         if (!tableExists(dbname, fk.refTable)) {
             lockManager_.unlock(tablename);
             return DBStatus::TABLE_NOT_FOUND;
@@ -13525,7 +13641,45 @@ DBStatus StorageEngine::insert(const std::string& dbname,
     // Queue deferred CHECK constraints for commit-time validation.
     if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
         for (size_t ci : deferredCheckCols) {
-            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back({dbname, tablename, rid, tbl.cols[ci].checkConstraintName, ci});
+            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
+                    {DeferredCheck::Kind::Check, dbname, tablename, rid,
+                     tbl.cols[ci].checkConstraintName, ci, "", "", -1, "", ""});
+        }
+    }
+    // Queue deferred UNIQUE violations for commit-time validation. The queued
+    // row is excluded via exceptRid; any OTHER row still holding the same
+    // value at commit fails the transaction.
+    if (transactionContext().inTransaction && !deferredUniqueCols.empty()) {
+        for (size_t ci : deferredUniqueCols) {
+            auto vit = actualValues.find(tbl.cols[ci].dataName);
+            if (vit == actualValues.end() || vit->second.empty()) continue;
+            std::string cname = tablename + "_" + tbl.cols[ci].dataName + "_key";
+            for (size_t ui = 0; ui < tbl.uniqueConstraints.size(); ++ui) {
+                for (size_t uj = 0; uj < tbl.uniqueConstraints[ui].size(); ++uj) {
+                    if (tbl.uniqueConstraints[ui][uj] == ci) {
+                        if (ui < tbl.uniqueConstraintNames.size()
+                            && !tbl.uniqueConstraintNames[ui].empty()) {
+                            cname = tbl.uniqueConstraintNames[ui];
+                        }
+                        break;
+                    }
+                }
+            }
+            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
+                    {DeferredCheck::Kind::Unique, dbname, tablename, rid, cname, ci,
+                     tbl.cols[ci].dataName, vit->second, rid, "", ""});
+        }
+    }
+    // Queue deferred FK existence checks (single-column FKs).
+    if (transactionContext().inTransaction && !deferredFkEntries.empty()) {
+        for (const auto& e : deferredFkEntries) {
+            if (e.fkIndex >= tbl.fkLen) continue;
+            const ForeignKey& fk = tbl.fks[e.fkIndex];
+            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
+                    {DeferredCheck::Kind::ForeignKey, dbname, tablename, rid,
+                     fk.name, 0, fk.colNames.empty() ? "" : fk.colNames[0],
+                     e.value, -1, fk.refTable,
+                     fk.refCols.empty() ? "" : fk.refCols[0]});
         }
     }
 
@@ -15315,7 +15469,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
         }
         if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
             for (size_t ci : deferredCheckCols) {
-                transactionContext().deferredChecks[transactionContext().currentTxnId].push_back({dbname, tablename, rid, tbl.cols[ci].checkConstraintName, ci});
+                transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
+                    {DeferredCheck::Kind::Check, dbname, tablename, rid,
+                     tbl.cols[ci].checkConstraintName, ci, "", "", -1, "", ""});
             }
         }
 

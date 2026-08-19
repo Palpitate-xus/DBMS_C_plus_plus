@@ -1344,15 +1344,37 @@ private:
                                 int64_t excludeRid = -1,
                                 bool* scanFailed = nullptr) const;
 
-    // Deferred constraint helpers
+    // Deferred constraint helpers. kind "check" evaluates the column CHECK
+    // expression of colIdx; "unique" re-checks that payloadValue is unique
+    // across tablename's column uniqueCol (excluding row exceptRid);
+    // "fk" verifies the referenced key payloadValue exists in refTable's
+    // column refCol.
     struct DeferredCheck {
+        enum class Kind { Check, Unique, ForeignKey };
+        Kind kind = Kind::Check;
         std::string dbname;
         std::string tablename;
         int64_t rid;
         std::string constraintName;
         size_t colIdx;
+        // Unique payload
+        std::string uniqueCol;
+        std::string payloadValue;
+        int64_t exceptRid = -1;
+        // FK payload
+        std::string refTable;
+        std::string refCol;
     };
     bool runDeferredCheck(const DeferredCheck& dc) const;
+
+public:
+    // True when the named constraint on this table is currently deferred:
+    // metadata (deferrable + initially_deferred in storageParams) combined
+    // with SET CONSTRAINTS state for this transaction.
+    bool isConstraintCurrentlyDeferred(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& constraintName) const;
+private:
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,
