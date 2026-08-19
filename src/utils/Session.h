@@ -15,6 +15,8 @@ struct Session {
     int authenticatedPermission = 0;
     std::string currentDB = "info";
     std::map<std::string, std::string> preparedStmts;
+    // PostgreSQL PREPARE name(types) AS ...: declared parameter types
+    std::map<std::string, std::vector<std::string>> preparedStmtTypes;
     int isolationLevel = 2; // 0=READ UNCOMMITTED, 1=READ COMMITTED, 2=REPEATABLE READ, 3=SERIALIZABLE
     std::set<std::string> tempTables; // temporary table names in this session
     std::set<std::string> transientTempTables; // query-local CTE/derived table names

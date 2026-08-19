@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "TableManage.h"
+#include "utils/prepared_stmts.h"
 #include "ExecutionPlan.h"
 #include "NetworkServer.h"
 #include "logs.h"
@@ -2193,6 +2194,23 @@ static bool handlePrepare(const string& sql, Session& s) {
         }
         return res != DBStatus::OK;
     }
+    // PostgreSQL syntax: PREPARE name [(type, ...)] AS <statement with $n>
+    // Legacy syntax kept:    PREPARE name FROM '<statement with ?>'
+    size_t asPos = dbms::ps_findPrepareAs(rest);
+    if (asPos != string::npos) {
+        string head = trim(rest.substr(0, asPos));
+        string templateSql = trim(rest.substr(asPos + 4));
+        string stmtName;
+        vector<string> paramTypes;
+        if (!dbms::ps_parsePrepareHead(head, stmtName, paramTypes)) {
+            cout << "SQL syntax error: PREPARE requires a statement name" << endl;
+            return true;
+        }
+        s.preparedStmts[stmtName] = templateSql;
+        s.preparedStmtTypes[stmtName] = paramTypes;
+        cout << "Statement " << stmtName << " prepared" << endl;
+        return false;
+    }
     size_t fromPos = rest.find(" from ");
     if (fromPos == string::npos) {
         cout << "SQL syntax error: expected FROM" << endl;
@@ -2206,19 +2224,30 @@ static bool handlePrepare(const string& sql, Session& s) {
         return true;
     }
     s.preparedStmts[stmtName] = templateSql;
+    s.preparedStmtTypes[stmtName] = {};
     cout << "Statement " << stmtName << " prepared" << endl;
     return false;
 }
 
 static bool handleExecutePrepared(const string& sql, Session& s) {
     string rest = trim(sql.substr(8));
-    size_t usingPos = rest.find(" using ");
+    // PostgreSQL:  EXECUTE name [(expr, ...)]
+    // Legacy:       EXECUTE name USING val, val
     string stmtName, usingClause;
-    if (usingPos == string::npos) {
-        stmtName = rest;
+    bool pgForm = false;
+    size_t op = rest.find('(');
+    if (op != string::npos && rest.back() == ')') {
+        pgForm = true;
+        stmtName = trim(rest.substr(0, op));
+        usingClause = trim(rest.substr(op + 1, rest.size() - op - 2));
     } else {
-        stmtName = trim(rest.substr(0, usingPos));
-        usingClause = trim(rest.substr(usingPos + 7));
+        size_t usingPos = rest.find(" using ");
+        if (usingPos == string::npos) {
+            stmtName = rest;
+        } else {
+            stmtName = trim(rest.substr(0, usingPos));
+            usingClause = trim(rest.substr(usingPos + 7));
+        }
     }
     auto it = s.preparedStmts.find(stmtName);
     if (it == s.preparedStmts.end()) {
@@ -2226,14 +2255,21 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
         return true;
     }
     string expanded = it->second;
+    vector<string> values;
     if (!usingClause.empty()) {
-        if (usingClause.size() >= 2 && usingClause.front() == '(' && usingClause.back() == ')') {
-            usingClause = trim(usingClause.substr(1, usingClause.size() - 2));
+        values = dbms::ps_splitExecuteArgs(usingClause);
+    }
+    if (!values.empty()) {
+        // PostgreSQL $n substitution: values pass through verbatim.
+        if (pgForm || expanded.find('$') != string::npos) {
+            string sub, perr;
+            if (!dbms::ps_substituteDollarParams(expanded, values, sub, perr)) {
+                cout << "ERROR: " << perr << endl;
+                return true;
+            }
+            expanded = sub;
         }
-        stringstream vss(usingClause);
-        string val;
-        vector<string> values;
-        while (getline(vss, val, ',')) values.push_back(trim(val));
+        // Legacy '?' substitution for templates without $n.
         size_t vidx = 0;
         size_t pos = 0;
         while ((pos = expanded.find('?', pos)) != string::npos) {
@@ -2254,8 +2290,23 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
 }
 
 static bool handleDeallocate(const string& sql, Session& s) {
-    string stmtName = trim(sql.substr(19));
+    string rest = trim(sql.substr(11)); // after "deallocate"
+    // PG form: DEALLOCATE PREPARE name; plain form: DEALLOCATE name; ALL
+    string low;
+    for (char c : rest) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (low == "all") {
+        size_t n = s.preparedStmts.size();
+        s.preparedStmts.clear();
+        s.preparedStmtTypes.clear();
+        cout << "Deallocated " << n << " prepared statements" << endl;
+        return false;
+    }
+    if (low.rfind("prepare", 0) == 0) {
+        rest = trim(rest.substr(7));
+    }
+    string stmtName = trim(rest);
     if (s.preparedStmts.erase(stmtName)) {
+        s.preparedStmtTypes.erase(stmtName);
         cout << "Statement " << stmtName << " deallocated" << endl;
     } else {
         cout << "Prepared statement " << stmtName << " not found" << endl;

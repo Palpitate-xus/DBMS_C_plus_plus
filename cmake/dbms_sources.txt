@@ -31,6 +31,7 @@ src/commands/DdlExecutor.cpp
 src/commands/DdlTransaction.cpp
 src/commands/DmlExecutor.cpp
 src/utils/pg_hba.cpp
+src/utils/prepared_stmts.cpp
 src/utils/permissions.cpp
 src/replication/ReplicationManager.cpp
 src/process/ProcessManager.cpp
