@@ -1,6 +1,6 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
-> 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明；2026-08-17 批量补齐 P1-10~13 / P2-9~13 / P3-7 共 10 项差距（PG 语法 PREPARE/EXECUTE、EXPLAIN ANALYZE 每节点统计、统计驱动选择率与 join 成本、并行 HashJoin/聚合/GatherMerge、deferrable UNIQUE/FK、数组构造/切片/包含、CREATE INHERITS+ONLY、interval 算术+AT TIME ZONE、dollar-quoting、全文检索 @@/to_tsvector/to_tsquery/ts_rank）；2026-08-20 第二批 8 项（PL/pgSQL 最小解释器、VACUUM PARALLEL、pg_stats/pg_statistic 视图、unnest 表函数、TimeZone GUC 渲染、多表 join 贪心搜索、deferrable EXCLUDE、ts_rank weights+`<->` 短语）；2026-08-20 续：P1-9 自定义成本函数（CostModel+GUC+hook）
+> 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明；2026-08-17 批量补齐 P1-10~13 / P2-9~13 / P3-7 共 10 项差距（PG 语法 PREPARE/EXECUTE、EXPLAIN ANALYZE 每节点统计、统计驱动选择率与 join 成本、并行 HashJoin/聚合/GatherMerge、deferrable UNIQUE/FK、数组构造/切片/包含、CREATE INHERITS+ONLY、interval 算术+AT TIME ZONE、dollar-quoting、全文检索 @@/to_tsvector/to_tsquery/ts_rank）；2026-08-20 第二批 8 项（PL/pgSQL 最小解释器、VACUUM PARALLEL、pg_stats/pg_statistic 视图、unnest 表函数、TimeZone GUC 渲染、多表 join 贪心搜索、deferrable EXCLUDE、ts_rank weights+`<->` 短语）；2026-08-20 续：P1-9 自定义成本函数（CostModel+GUC+hook）；P2-2 Bloom 索引
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线（2026-08-14）: PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、跨 backend 2PC、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）；2026-08-17 批量补齐后 PASS=153
@@ -222,6 +222,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|-------|---------|------|
 | 火山模型执行器 | ✅ | ✅ (12 operators, Phase 5.1 已上线) | ✅ |
 | 基于成本的优化 (CBO) | ✅ | ⚠️ | 基础；成本参数可调 + 自定义 hook（2026-08-20） |
+| Bloom 索引 | ✅ | ✅ | `USING bloom` AM：bloom filter + 精确侧表，全 DML 维护与扫描探测（2026-08-20，多列签名仍缺） |
 | 统计信息 (pg_statistic) | ✅ | ✅ | 采集（cardinality/MCV/等深直方图/多列）+ planner 消费：MCV 精确等值选择率、直方图范围插值、eqjoinsel join 选择率与成本；`pg_stats`/`pg_statistic` 兼容视图已补（2026-08-20）；多表 join 顺序 DP 仍缺（已有贪心搜索） |
 | 索引选择 | ✅ | ✅ | ✅ |
 | **等价类 (Equivalence Classes)** | ✅ | ⚠️ | 基础 |

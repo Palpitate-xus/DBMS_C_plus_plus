@@ -270,6 +270,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 8. ✅ FTS `ts_rank` weights float4[] 与 `<->` 短语匹配（递归下降 `! > <-> > & > |`，`setweight()`）
 回归基线：PASS=160 FAIL=0 + E2E（multijoin/timestamptz/unnest 等 6 套 Python E2E 全绿）
 9. ✅ P1-9 自定义成本函数（`QueryPlanner::CostModel` + 8 个成本 GUC + 自定义成本 hook，PASS=161）
+10. ✅ P2-2 Bloom 索引（`BloomIndex` AM：bloom filter + 精确侧表、全写路径维护、扫描探测，PASS=162）
 
 ### P1-9: 自定义成本函数 (Custom Cost Functions) ✅（2026-08-20）
 - **类别**: 优化器 / 扩展性
@@ -358,17 +359,17 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 - **预估工作量**: 2-3 天
 - **相关文件**: `src/common/Config.cpp`, `src/main.cpp`
 
-### P2-2: Bloom 索引
-- **类别**: 索引 / 多列等值
-- **现状**: 无 Bloom filter 索引
+### P2-2: Bloom 索引 ✅（2026-08-20）
+- **类别**: 索引 / 等值探测
+- **现状**: ✅ `src/access/BloomIndex.{h,cpp}`：m 位/k 哈希 bloom filter（FNV-1a double hashing，PG 风格 128 bit/entry、k=7、~1% 假阳率）+ 精确 key→rid 侧表，O(k) 探测零假阴；删除保留位图（bloom 不可逆）而侧表精确。'BLM1' 磁盘格式 + 原子改名保存，坏文件拒绝加载。引擎侧 `createBloomIndex`（forEachRow 全量构建）/`dropBloomIndex`/`getBloomIndex`（缓存）/`.bloomidx` 元数据，接入 `dropIndexByAccessMethod`、建表/删表清理、ALTER TABLE 改名、reindex；INSERT/UPDATE（旧值入 `oldIdxVals` 后交换）/DELETE 三写路径同步维护；`collectEqualityIndexCandidates` 探测 bloom（IndexScan/BitmapScan/BitmapOr 共享），`hasEqualityIndex` 识别 bloom 列；`CREATE INDEX ... USING bloom` + DROP INDEX 名称注册表 + 回滚（`tests/bloom_index_test.cpp`，PASS=162）
 - **PG 参考**: `bloom` access method
-- **影响**: 多列等值查询无法使用单一索引
+- **残余缺口**: 多列 bloom 签名（PG bloom 支持多列组合签名）、per-index `length`/`col1..col2` 参数
 - **实现路径**:
-  1. 实现 `BloomIndex` 类：m 位数组 + k 个哈希函数
-  2. 接入 `IndexScanOp` 路径
-  3. 增加 `CREATE INDEX ... USING bloom` 语法
-- **预估工作量**: 3-5 天
-- **相关文件**: `src/access/BloomIndex.cpp` (新建)
+  1. ✅ `BloomIndex` 类：m 位数组 + k 个哈希函数 + 精确侧表
+  2. ✅ 接入扫描路径（collectEqualityIndexCandidates + hasEqualityIndex）
+  3. ✅ `CREATE INDEX ... USING bloom` 语法
+- **预估工作量**: ~~3-5 天~~ 已完成
+- **相关文件**: `src/access/BloomIndex.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `src/commands/DdlExecutor.cpp`, `src/executor/ExecutionPlan.cpp`, `tests/bloom_index_test.cpp`
 
 ### P2-3: 增量备份
 - **类别**: 运维 / 高可用
