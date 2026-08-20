@@ -110,10 +110,12 @@ bool TableScanOp::open() {
 }
 
 bool TableScanOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     lastRid_ = rows_[pos_].first;
     outRow = rows_[pos_].second;
     ++pos_;
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -229,9 +231,11 @@ bool ParallelTableScanOp::open() {
 }
 
 bool ParallelTableScanOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     lastRid_ = rows_[pos_].first;
     outRow = rows_[pos_++].second;
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -289,6 +293,7 @@ bool IndexScanOp::open() {
 }
 
 bool IndexScanOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     // Fetch indexed tuples directly. Scanning every heap tuple for each RID
     // turns an index lookup into O(index_matches * table_rows), which is
     // unacceptable for production workloads.
@@ -305,7 +310,8 @@ bool IndexScanOp::next(std::string& outRow) {
             continue;
         }
         outRow = engine_->resolveToastValues(dbname_, tablename_, row, tbl_);
-        return true;
+        rtInstr_.emitted = true;
+    return true;
     }
     return false;
 }
@@ -424,8 +430,10 @@ bool BitmapHeapScanOp::open() {
 }
 
 bool BitmapHeapScanOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -522,8 +530,10 @@ bool BitmapOrHeapScanOp::open() {
 }
 
 bool BitmapOrHeapScanOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -546,6 +556,7 @@ bool FilterOp::open() {
 }
 
 bool FilterOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     while (child_->next(outRow)) {
         bool match = true;
         for (const auto& c : conds_) {
@@ -566,7 +577,10 @@ bool FilterOp::next(std::string& outRow) {
                 break;
             }
         }
-        if (match) return true;
+        if (match) {
+            rtInstr_.emitted = true;
+            return true;
+        }
     }
     if (child_->hasError()) return propagateChildError(child_.get(), "filter child failed");
     return false;
@@ -643,8 +657,10 @@ bool SemiJoinOp::open() {
 }
 
 bool SemiJoinOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -689,6 +705,7 @@ bool QuantifiedSubqueryFilterOp::open() {
 }
 
 bool QuantifiedSubqueryFilterOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     size_t outerIdx = outerTbl_.len;
     for (size_t i = 0; i < outerTbl_.len; ++i) {
         if (outerTbl_.cols[i].dataName == outerColumn_) {
@@ -726,7 +743,7 @@ bool QuantifiedSubqueryFilterOp::next(std::string& outRow) {
             }
         }
         if (hasUnknown) result = false; // UNKNOWN is filtered from WHERE.
-        if (result) return true;
+        if (result) { rtInstr_.emitted = true; return true; }
     }
     if (outer_->hasError()) return propagateChildError(outer_.get(), "quantified outer scan failed");
     return false;
@@ -761,8 +778,10 @@ bool ExistenceFilterOp::open() {
 }
 
 bool ExistenceFilterOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -817,6 +836,7 @@ bool ScalarSubqueryProjectOp::open() {
 }
 
 bool ScalarSubqueryProjectOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     std::string row;
     if (!outer_->next(row)) {
         if (outer_->hasError()) return propagateChildError(outer_.get(), "scalar outer scan failed");
@@ -847,6 +867,7 @@ bool ScalarSubqueryProjectOp::next(std::string& outRow) {
         outRow += value;
         outRow += ' ';
     }
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -867,12 +888,14 @@ bool ProjectOp::open() {
 }
 
 bool ProjectOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     std::string raw;
     if (!child_->next(raw)) {
         if (child_->hasError()) return propagateChildError(child_.get(), "projection child failed");
         return false;
     }
     outRow = formatRow(raw, tbl_, selectCols_);
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -1328,8 +1351,10 @@ bool WindowOp::open() {
 }
 
 bool WindowOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -1391,9 +1416,11 @@ bool SortOp::open() {
 }
 
 bool SortOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= buffer_.size()) return false;
     outRow = buffer_[pos_];
     ++pos_;
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -1413,12 +1440,14 @@ bool LimitOp::open() {
 }
 
 bool LimitOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (count_ >= limit_) return false;
     if (!child_->next(outRow)) {
         if (child_->hasError()) return propagateChildError(child_.get(), "limit child failed");
         return false;
     }
     ++count_;
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -1440,7 +1469,8 @@ bool OffsetOp::open() {
 }
 
 bool OffsetOp::next(std::string& outRow) {
-    if (child_->next(outRow)) return true;
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
+    if (child_->next(outRow)) { rtInstr_.emitted = true; return true; }
     if (child_->hasError()) return propagateChildError(child_.get(), "offset child failed");
     return false;
 }
@@ -1462,8 +1492,9 @@ bool DistinctOp::open() {
 }
 
 bool DistinctOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     while (child_->next(outRow)) {
-        if (seen_.insert(outRow).second) return true;
+        if (seen_.insert(outRow).second) { rtInstr_.emitted = true; return true; }
     }
     if (child_->hasError()) return propagateChildError(child_.get(), "distinct child failed");
     return false;
@@ -1544,8 +1575,10 @@ bool SetOperationOp::open() {
 }
 
 bool SetOperationOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -1581,6 +1614,7 @@ bool NestedLoopJoinOp::open() {
 }
 
 bool NestedLoopJoinOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     std::string rightRow;
     while (hasLeft_) {
         while (right_->next(rightRow)) {
@@ -1632,7 +1666,8 @@ bool NestedLoopJoinOp::next(std::string& outRow) {
             }
             if (match) {
                 outRow = curLeftRow_ + rightRow;
-                return true;
+                rtInstr_.emitted = true;
+    return true;
             }
         }
         right_->close();
@@ -1697,12 +1732,14 @@ bool HashJoinOp::open() {
 }
 
 bool HashJoinOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     while (hasLeft_) {
         // If we have pending matches for current left row, output them
         while (matchPos_ < curRightMatches_.size()) {
             outRow = curLeftRow_ + curRightMatches_[matchPos_];
             ++matchPos_;
-            return true;
+            rtInstr_.emitted = true;
+    return true;
         }
 
         // Move to next left row
@@ -1775,13 +1812,15 @@ bool MergeJoinOp::open() {
 }
 
 bool MergeJoinOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     while (leftPos_ < leftRows_.size() && rightPos_ < rightRows_.size()) {
         std::string lk = extractJoinKey(leftRows_[leftPos_], leftTbl_, leftCol_);
         std::string rk = extractJoinKey(rightRows_[rightPos_], rightTbl_, rightCol_);
         if (lk == rk) {
             outRow = leftRows_[leftPos_] + rightRows_[rightPos_];
             ++rightPos_;
-            return true;
+            rtInstr_.emitted = true;
+    return true;
         } else if (lk < rk) {
             ++leftPos_;
         } else {
@@ -2028,8 +2067,10 @@ bool GroupAggregateOp::open() {
 }
 
 bool GroupAggregateOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
     outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
     return true;
 }
 
@@ -2585,6 +2626,23 @@ static std::string costRowsStr(const CostEstimate& est, const QueryPlanner::Expl
            "  rows=" + std::to_string(static_cast<int>(est.rows));
 }
 
+// Append EXPLAIN ANALYZE actuals to the last emitted plan line: PG-style
+// " (actual time=X rows=N loops=M)". Only instrumented operators report;
+// non-instrumented ones keep their estimate-only line.
+static void appendActuals(std::string& out, const IOperator* op,
+                          const QueryPlanner::ExplainOptions& opts) {
+    if (!opts.analyze || !op || op->runtimeLoops() == 0) return;
+    // strip the trailing newline of the last line, append, restore
+    if (out.empty() || out.back() != '\n') return;
+    out.pop_back();
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "  (actual time=%.3f rows=%llu loops=%llu)",
+                  op->runtimeMs(), (unsigned long long)op->runtimeRows(),
+                  (unsigned long long)op->runtimeLoops());
+    out += buf;
+    out += "\n";
+}
+
 static CostEstimate explainOp(Operator* op, int indent,
                               StorageEngine* engine,
                               const std::string& dbname,
@@ -2787,6 +2845,7 @@ static CostEstimate explainOp(Operator* op, int indent,
         out += prefix + "Unknown\n";
     }
 
+    appendActuals(out, op, opts);
     return est;
 }
 

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
+
 #include <string>
 #include <vector>
 
@@ -38,6 +41,49 @@ public:
 
     // 子算子
     virtual std::vector<IOperator*> children() { return {}; }
+
+    // ------------------------------------------------------------------
+    // Runtime instrumentation for EXPLAIN ANALYZE.
+    // Operators call instrumentNextStart() at the top of next() and
+    // instrumentNextEnd(true/false) before returning; the counters below
+    // accumulate actual time (ms), next() invocations (loops) and emitted
+    // rows. Reading them is always safe; non-instrumented operators stay
+    // zeroed and are simply reported without actuals.
+    // ------------------------------------------------------------------
+    double runtimeMs() const { return runtimeMs_; }
+    uint64_t runtimeLoops() const { return runtimeLoops_; }
+    uint64_t runtimeRows() const { return runtimeRows_; }
+    void resetRuntimeStats() {
+        runtimeMs_ = 0;
+        runtimeLoops_ = 0;
+        runtimeRows_ = 0;
+    }
+
+protected:
+    // RAII helper: construct at the top of next(); on ANY return it stops
+    // the clock, counts one loop and, when `emitted` was assigned true,
+    // one output row.
+    struct NextInstrument {
+        IOperator* self;
+        bool emitted = false;
+        std::chrono::steady_clock::time_point tick;
+        explicit NextInstrument(IOperator* s)
+            : self(s), tick(std::chrono::steady_clock::now()) {}
+        ~NextInstrument() {
+            self->runtimeMs_ += std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - tick)
+                                    .count();
+            ++self->runtimeLoops_;
+            if (emitted) ++self->runtimeRows_;
+        }
+    };
+
+private:
+    double runtimeMs_ = 0;
+    uint64_t runtimeLoops_ = 0;
+    uint64_t runtimeRows_ = 0;
+    bool rtClockActive_ = false;
+    std::chrono::steady_clock::time_point rtTick_{};
 };
 
 } // namespace dbms

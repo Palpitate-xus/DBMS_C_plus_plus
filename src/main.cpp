@@ -2558,8 +2558,11 @@ static bool handleExplain(const string& sql, Session& s) {
     if (cacheHit) cout << "\n[plan cache hit]";
 
     if (opts.analyze) {
-        // Rebuild plan for actual execution (the cached one was used for display).
+        // Rebuild plan for actual execution (the cached one was used for
+        // display) and run it with per-node instrumentation.
         auto execPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+        // Buffer deltas: compare shared-buffer counters across the query.
+        const auto bufBefore = g_engine.getBufferPoolStats();
         auto execStart = std::chrono::steady_clock::now();
         size_t actualRows = 0;
         std::string row;
@@ -2569,11 +2572,21 @@ static bool handleExplain(const string& sql, Session& s) {
         }
         auto execEnd = std::chrono::steady_clock::now();
         double execMs = std::chrono::duration<double, std::milli>(execEnd - execStart).count();
+        const auto bufAfter = g_engine.getBufferPoolStats();
+        // Re-explain the executed tree: instrumented nodes now carry their
+        // actual time/loops/rows and print PG-style per-node actuals.
         cout << "\n--- ANALYZE ---\n";
+        cout << dbms::QueryPlanner::explain(execPlan, &g_engine, s.currentDB, opts);
         if (opts.timing) {
-            cout << "Actual time: " << std::fixed << std::setprecision(3) << execMs << " ms\n";
+            cout << "Total runtime: " << std::fixed << std::setprecision(3) << execMs << " ms\n";
         }
         cout << "Actual rows: " << actualRows << "\n";
+        if (opts.buffers) {
+            cout << "Buffers: shared hit=" << (bufAfter.totalHits - bufBefore.totalHits)
+                 << " read=" << (bufAfter.totalMisses - bufBefore.totalMisses)
+                 << ", hit rate=" << std::fixed << std::setprecision(2)
+                 << bufAfter.hitRate << "\n";
+        }
     }
     return false;
 }
