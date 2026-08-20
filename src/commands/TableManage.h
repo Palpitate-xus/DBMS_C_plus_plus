@@ -645,7 +645,7 @@ public:
 
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename,
-                  bool concurrent = false);
+                  bool concurrent = false, int workers = 1);
     // VACUUM FULL: rewrite table entirely, reclaiming all dead space
     size_t vacuumFull(const std::string& dbname, const std::string& tablename);
 

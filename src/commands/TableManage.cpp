@@ -28,6 +28,9 @@
 #include <cctype>
 #include <limits>
 #include <mutex>
+#include <thread>
+#include <atomic>
+#include <vector>
 #include <unordered_map>
 
 extern dbms::Config g_config;
@@ -21061,7 +21064,8 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
 // ========================================================================
 size_t StorageEngine::vacuum(const std::string& dbname,
                              const std::string& tablename,
-                             bool concurrent) {
+                             bool concurrent,
+                             int workers) {
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
     if (concurrent) {
         if (!lockManager_.lockShared(tablename)) return 0;
@@ -21076,9 +21080,13 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     uint32_t np = pa->numPages();
     size_t freedPages = 0;
 
-    for (uint32_t pid = 1; pid < np; ++pid) {
+    // Compact one page: returns true when the page was returned to the
+    // allocator's free list.  Disjoint page ranges run concurrently; every
+    // storage primitive below (buffer pool pins, FSM/VM updates, page
+    // frees) is internally serialized.
+    auto vacuumPage = [&](uint32_t pid) -> bool {
         char* buf = pa->fetchPage(pid);
-        if (!buf) continue;
+        if (!buf) return false;
         PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
 
         // Skip pages that are already empty or fully live
@@ -21086,7 +21094,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         uint16_t beforeSlots = page.slotCount();
         if (beforeSlots == 0 || beforeLive == beforeSlots) {
             pa->unpinPage(pid);
-            continue;
+            return false;
         }
 
         // Compact: move live records together, keep slotIds stable
@@ -21109,9 +21117,36 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         if (page.liveCount() == 0) {
             pa->unpinPage(pid);
             pa->freePage(pid);
-            freedPages++;
-        } else {
-            pa->unpinPage(pid);
+            return true;
+        }
+        pa->unpinPage(pid);
+        return false;
+    };
+
+    const uint32_t heapPages = np > 1 ? np - 1 : 0;
+    int nWorkers = workers > 1 ? workers : 1;
+    if (nWorkers > static_cast<int>(heapPages)) nWorkers = static_cast<int>(heapPages);
+    if (nWorkers > 1) {
+        // Shard [1, np) into contiguous ranges; each worker vacuums its own
+        // slice so no two threads ever pin the same page.
+        std::vector<std::thread> pool;
+        std::atomic<size_t> freed{0};
+        uint32_t chunk = (heapPages + nWorkers - 1) / nWorkers;
+        for (int w = 0; w < nWorkers; ++w) {
+            uint32_t lo = 1 + static_cast<uint32_t>(w) * chunk;
+            uint32_t hi = std::min(lo + chunk, np);
+            if (lo >= hi) break;
+            pool.emplace_back([&](uint32_t a, uint32_t b) {
+                for (uint32_t pid = a; pid < b; ++pid) {
+                    if (vacuumPage(pid)) freed.fetch_add(1);
+                }
+            }, lo, hi);
+        }
+        for (auto& t : pool) t.join();
+        freedPages = freed.load();
+    } else {
+        for (uint32_t pid = 1; pid < np; ++pid) {
+            if (vacuumPage(pid)) freedPages++;
         }
     }
 

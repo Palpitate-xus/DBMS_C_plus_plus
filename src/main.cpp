@@ -1890,6 +1890,41 @@ static bool handleVacuum(const string& sql, Session& s) {
     }
     string rest = trim(sql.substr(6));
     bool concurrent = false;
+    int workers = 1;
+    // Option list: VACUUM (option[, ...]) [table] — options before or after
+    // CONCURRENTLY.  Recognized: PARALLEL n (n>=1), CONCURRENTLY (inline
+    // form for parity with the parenthesized syntax).
+    if (!rest.empty() && rest[0] == '(') {
+        size_t close = rest.find(')');
+        if (close == string::npos) {
+            cout << "VACUUM: unterminated option list" << endl;
+            return true;
+        }
+        string opts = toLower(rest.substr(1, close - 1));
+        rest = trim(rest.substr(close + 1));
+        size_t p = 0;
+        while (p < opts.size()) {
+            size_t comma = opts.find(',', p);
+            string tok = trim(opts.substr(p, comma == string::npos
+                                                ? string::npos : comma - p));
+            if (tok.substr(0, 8) == "parallel") {
+                string n = trim(tok.substr(8));
+                if (n.empty() || n.find_first_not_of("0123456789") != string::npos) {
+                    cout << "VACUUM: PARALLEL requires a positive integer" << endl;
+                    return true;
+                }
+                workers = std::max(1, atoi(n.c_str()));
+            } else if (tok == "concurrently") {
+                concurrent = true;
+            } else if (!tok.empty() && tok != "full" && tok != "analyze" &&
+                       tok != "freeze" && tok != "verbose") {
+                cout << "VACUUM: unsupported option '" << tok << "'" << endl;
+                return true;
+            }
+            if (comma == string::npos) break;
+            p = comma + 1;
+        }
+    }
     if (rest.substr(0, 12) == "concurrently") {
         concurrent = true;
         rest = trim(rest.substr(12));
@@ -1898,14 +1933,16 @@ static bool handleVacuum(const string& sql, Session& s) {
         auto tables = g_engine.getTableNames(s.currentDB);
         size_t totalFreed = 0;
         for (const auto& tbl : tables) {
-            totalFreed += g_engine.vacuum(s.currentDB, tbl, concurrent);
+            totalFreed += g_engine.vacuum(s.currentDB, tbl, concurrent, workers);
         }
         string mode = concurrent ? " CONCURRENTLY" : "";
+        if (workers > 1) mode += " (PARALLEL " + to_string(workers) + ")";
         cout << "VACUUM" << mode << " completed, " << totalFreed << " pages freed" << endl;
     } else {
         string resolvedName = resolveTableName(s, rest);
-        size_t freed = g_engine.vacuum(s.currentDB, resolvedName, concurrent);
+        size_t freed = g_engine.vacuum(s.currentDB, resolvedName, concurrent, workers);
         string mode = concurrent ? " CONCURRENTLY" : "";
+        if (workers > 1) mode += " (PARALLEL " + to_string(workers) + ")";
         cout << "VACUUM" << mode << " completed, " << freed << " pages freed" << endl;
     }
     return false;
