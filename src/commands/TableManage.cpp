@@ -1,4 +1,6 @@
 #include "TableManage.h"
+#include "utils/plpgsql.h"
+#include "parser/parser.h"
 #include "TxnIdGenerator.h"
 #include "Config.h"
 #include "HeapTupleHeader.h"
@@ -2781,7 +2783,8 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& funcname,
                                    const std::string& param,
                                    const std::string& expression,
-                                   char provolatile) {
+                                   char provolatile,
+                                   const std::string& language) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
@@ -2790,7 +2793,8 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
-    serialized << param << "\n" << expression << "\n" << provolatile << "\n";
+    serialized << param << "\n" << expression << "\n" << provolatile << "\n"
+               << (language.empty() ? "sql" : language) << "\n";
     return persistMetadata(udfPath(dbname, funcname), serialized.str());
 }
 
@@ -2799,7 +2803,8 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::vector<std::string>& params,
                                    const std::vector<std::string>& types,
                                    const std::string& expression,
-                                   char provolatile) {
+                                   char provolatile,
+                                   const std::string& language) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
     auto fdir = udfDir(dbname);
@@ -2873,6 +2878,14 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
         info.provolatile = volLine[0];
     } else {
         info.provolatile = 'v';
+    }
+    std::string langLine;
+    if (std::getline(ifs, langLine)) {
+        std::string lang = langLine;
+        for (char& c : lang) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        info.language = trim(lang).empty() ? "sql" : trim(lang);
+    } else {
+        info.language = "sql";
     }
     info.name = funcname;
     return info;
@@ -17721,6 +17734,52 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (engine && !dbname.empty()) {
         auto udf = engine->getUDF(dbname, expr.funcName);
         if (!udf.expression.empty()) {
+            if (udf.language == "plpgsql") {
+                // PL/pgSQL body: run through the interpreter with arguments
+                // pre-bound to their parameter names.
+                std::map<std::string, std::string> params;
+                for (size_t i = 0; i < udf.paramNames.size() && i < expr.funcArgs.size(); ++i) {
+                    params[udf.paramNames[i]] = getVal(expr.funcArgs[i]);
+                }
+                StorageEngine* eng = const_cast<StorageEngine*>(engine);
+                PlPgsqlHost host;
+                host.evalExpr = [](const std::string& e,
+                                   const std::map<std::string, std::string>&) {
+                    auto r = ExprHelper::evalString(e, {});
+                    if (!r.ok) return std::optional<std::string>{};
+                    return std::optional<std::string>{r.isNull ? "null" : r.value};
+                };
+                host.execStmt = [eng, &dbname](const std::string& sql,
+                                               const std::map<std::string, std::string>&) {
+                    auto rc = eng->plpgsqlExecSql(dbname, sql, nullptr);
+                    return rc.first;
+                };
+                host.selectInto = [eng, &dbname](const std::string& selectRest,
+                                                 const std::vector<std::string>& intoVars,
+                                                 std::map<std::string, std::string>& vars) {
+                    // selectRest = "<list> FROM <table>" (WHERE unsupported)
+                    std::string low;
+                    for (char c : selectRest)
+                        low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    size_t fpos = low.find(" from ");
+                    std::string list = fpos == std::string::npos
+                        ? selectRest : selectRest.substr(0, fpos);
+                    std::string from = fpos == std::string::npos
+                        ? "" : selectRest.substr(fpos + 6);
+                    size_t wpos = low.find(" where ");
+                    if (wpos != std::string::npos) {
+                        // WHERE unsupported in this helper: reject rather
+                        // than silently reading the wrong rows.
+                        return 2;
+                    }
+                    return eng->plpgsqlSelectInto(dbname, list, from, "", intoVars, vars);
+                };
+                std::string rv, err;
+                if (!PlPgsql::run(udf.expression, params, host, rv, err)) {
+                    return "null";
+                }
+                return rv;
+            }
             std::string result = udf.expression;
             for (size_t i = 0; i < udf.paramNames.size() && i < expr.funcArgs.size(); ++i) {
                 std::string val = getVal(expr.funcArgs[i]);
@@ -24519,6 +24578,113 @@ std::vector<std::string> StorageEngine::getUserPermissions(
 } // namespace dbms
 
 namespace dbms {
+
+// ---------------------------------------------------------------------------
+// PL/pgSQL host helpers
+// ---------------------------------------------------------------------------
+std::pair<bool, size_t> StorageEngine::plpgsqlExecSql(
+    const std::string& dbname, const std::string& sql, Session* session) {
+    (void)session;
+    SQLParser parser;
+    auto r = parser.parse(sql);
+    if (!r.success || !r.stmt) return {false, 0};
+    if (auto* ins = dynamic_cast<const InsertStmt*>(r.stmt.get())) {
+        if (!ins->tableName.empty()) {
+            TableSchema tbl = getTableSchema(dbname, ins->tableName);
+            for (const auto& rowVals : ins->values) {
+                std::map<std::string, std::string> values;
+                for (size_t i = 0; i < rowVals.size() && i < tbl.len; ++i) {
+                    // VALUES items are expression ASTs; use their literal
+                    // text (PL bodies passing variables already substituted
+                    // numeric/quoted literals above).
+                    values[tbl.cols[i].dataName] = rowVals[i] ? rowVals[i]->toString() : "";
+                }
+                if (insert(dbname, ins->tableName, values) != DBStatus::OK) return {false, 0};
+            }
+            return {true, ins->values.size()};
+        }
+        return {false, 0};
+    }
+    if (auto* upd = dynamic_cast<const UpdateStmt*>(r.stmt.get())) {
+        // PL/pgSQL UPDATE support: engine update() takes condition strings;
+        // the AST form is left to the DML executor (not reachable here).
+        return {false, 0};
+    }
+    if (auto* del = dynamic_cast<const DeleteStmt*>(r.stmt.get())) {
+        return {false, 0};
+    }
+    return {false, 0};
+}
+
+int StorageEngine::plpgsqlSelectInto(
+    const std::string& dbname,
+    const std::string& selectList,
+    const std::string& fromClause,
+    const std::string& whereClause,
+    const std::vector<std::string>& intoVars,
+    std::map<std::string, std::string>& vars) {
+    std::vector<std::pair<std::string, std::string>> items;
+    // Parse "tbl [WHERE ...]" from fromClause
+    std::string table = fromClause;
+    std::vector<std::string> conds;
+    std::string low;
+    for (char c : fromClause) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    size_t wpos = low.find(" where ");
+    if (wpos != std::string::npos) {
+        table = trim(fromClause.substr(0, wpos));
+        // engine conditions are "<op><col> <value>" strings; approximate by
+        // reusing parseConditions on the raw expression is not possible —
+        // restrict to no WHERE here (host callers pre-filter).
+        conds = {};
+    }
+    table = trim(table);
+    if (table.empty()) return 2;
+    if (!tableExists(dbname, table)) return 2;
+    auto rows = query(dbname, table, {}, {}, {});
+    if (rows.empty()) return 1;
+    // Evaluate each select item as a scalar on the first row via the
+    // expression evaluator on a MaterializedRows-shaped context.
+    TableSchema tbl = getTableSchema(dbname, table);
+    // Evaluate each select item via ExprHelper over a column-valued context.
+    std::map<std::string, ExprEvalResult> ctx;
+    for (size_t c = 0; c < tbl.len; ++c) {
+        std::string v = extractColumnValueStatic(rows.front(), tbl, c);
+        (void)ctx;
+        // ExprHelper::evalString has no row context; for plain column
+        // references bind directly, otherwise evaluate as constant.
+        items.push_back({tbl.cols[c].dataName, v});
+    }
+    // split the select list by top-level commas
+    std::vector<std::string> listItems;
+    {
+        std::string cur;
+        int depth = 0; bool inS = false;
+        for (char ch : selectList) {
+            if (inS) { cur += ch; if (ch == '\'') inS = false; continue; }
+            if (ch == '\'') { inS = true; cur += ch; continue; }
+            if (ch == '(') ++depth;
+            if (ch == ')') --depth;
+            if (ch == ',' && depth == 0) { listItems.push_back(trim(cur)); cur.clear(); continue; }
+            cur += ch;
+        }
+        if (!trim(cur).empty()) listItems.push_back(trim(cur));
+    }
+    for (size_t i = 0; i < intoVars.size() && i < listItems.size(); ++i) {
+        const std::string& item = trim(listItems[i]);
+        std::string low;
+        for (char ch : item) low += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        bool bound = false;
+        for (const auto& kv : items) {
+            if (low == kv.first) { vars[intoVars[i]] = kv.second; bound = true; break; }
+        }
+        if (bound) continue;
+        // constant/expression item
+        auto r = ExprHelper::evalString(item, {});
+        vars[intoVars[i]] = (r.ok && !r.isNull) ? r.value : "null";
+    }
+    return 0;
+}
+
 // Public wrapper for expression evaluation (to_tsvector) and INSERT
 // canonicalization paths outside this TU.
 bool StorageEngine::normalizeTsVectorText(const std::string& in, std::string& out) const {

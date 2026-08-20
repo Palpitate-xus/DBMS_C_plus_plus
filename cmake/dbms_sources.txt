@@ -41,3 +41,4 @@ src/process/StatsPersistence.cpp
 src/process/OutputCapture.cpp
 src/storage/LargeObject.cpp
 src/types/numeric.cpp
+src/utils/plpgsql.cpp

@@ -5331,19 +5331,23 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
         }
     }
 
-    // AS body
-    if (match(tokens, pos, "as")) {
-        ++pos;
-        if (pos < tokens.size()) {
-            stmt->body = stripQuotes(tokens[pos]);
-            ++pos;
+    // LANGUAGE lang and AS body in either order (PG commonly writes
+    // LANGUAGE plpgsql AS $$...$$; dumps sometimes reverse them).
+    for (int round = 0; round < 2 && pos < tokens.size(); ++round) {
+        if (match(tokens, pos, "language") && pos + 1 < tokens.size()) {
+            stmt->language = toLower(tokens[pos + 1]);
+            pos += 2;
+            continue;
         }
-    }
-
-    // LANGUAGE lang
-    if (match(tokens, pos, "language") && pos + 1 < tokens.size()) {
-        stmt->language = toLower(tokens[pos + 1]);
-        pos += 2;
+        if (match(tokens, pos, "as")) {
+            ++pos;
+            if (pos < tokens.size()) {
+                stmt->body = stripQuotes(tokens[pos]);
+                ++pos;
+            }
+            continue;
+        }
+        break;
     }
 
     return stmt;

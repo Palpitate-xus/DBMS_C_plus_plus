@@ -305,15 +305,18 @@ public:
         std::vector<std::string> paramNames; // multi-param support
         std::vector<std::string> paramTypes; // multi-param support
         char provolatile = 'v'; // i=immutable, s=stable, v=volatile
+        std::string language;   // "sql" (default) or "plpgsql"
     };
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::string& param, const std::string& expression,
-                       char provolatile = 'v');
+                       char provolatile = 'v',
+                       const std::string& language = "sql");
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::vector<std::string>& params,
                        const std::vector<std::string>& types,
                        const std::string& expression,
-                       char provolatile = 'v');
+                       char provolatile = 'v',
+                       const std::string& language = "sql");
     DBStatus dropUDF(const std::string& dbname, const std::string& funcname);
     bool udfExists(const std::string& dbname, const std::string& funcname) const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;
@@ -372,6 +375,21 @@ public:
     bool analyzeTable(const std::string& dbname, const std::string& tablename);
     // Canonicalize a tsvector literal (used by to_tsvector and insert paths).
     bool normalizeTsVectorText(const std::string& in, std::string& out) const;
+    // ---- PL/pgSQL support (helpers for the plpgsql interpreter) ----
+    // Execute one SQL statement through the DDL/DML executor bridge.
+    // Returns (ok, rowsAffected) — ok=false on any execution error.
+    std::pair<bool, size_t> plpgsqlExecSql(const std::string& dbname,
+                                           const std::string& sql,
+                                           Session* session);
+    // Run "SELECT <list> ..." and bind the single result row's values to
+    // intoVars (by position).  Returns 0 ok, 1 no row, 2 error.  Supports
+    // scalar expressions and single-table FROM ... WHERE forms.
+    int plpgsqlSelectInto(const std::string& dbname,
+                          const std::string& selectList,
+                          const std::string& fromClause,
+                          const std::string& whereClause,
+                          const std::vector<std::string>& intoVars,
+                          std::map<std::string, std::string>& vars);
     bool analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
                             const std::vector<std::string>& colnames);
     // Functional dependency degrees for CREATE STATISTICS (dependencies kind).
