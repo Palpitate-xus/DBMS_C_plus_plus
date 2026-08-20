@@ -21,6 +21,7 @@
 #include "common/scram_sha256.h"
 #include "Session.h"
 #include "expression/expr_helper.h"
+#include "common/DateType.h"
 #include "Config.h"
 #include "parser/parser.h"
 #include "commands/DdlExecutor.h"
@@ -8611,6 +8612,139 @@ static bool extractUnnestLiteral(const string& rawSql, string& outLiteral) {
     return !inner.empty();
 }
 
+
+// Re-render TIMESTAMPTZ answer values in the session's TimeZone.
+// `answers` rows are space-terminated formatted values ordered as
+// projCols (schema order when the projection is empty).  Values for
+// timestamptz columns were produced in UTC by the executor paths; this
+// converts "YYYY-MM-DD HH:MM:SS" back to epoch seconds and re-formats
+// with the session offset (+HH:MM suffix like PostgreSQL).
+static void applySessionTimezoneToAnswers(
+    std::vector<std::string>& answers,
+    const std::vector<std::pair<std::string, std::string>>& projCols,
+    int tzOffsetMinutes) {
+    if (tzOffsetMinutes == 0 || answers.empty() || projCols.empty()) return;
+    std::vector<size_t> tzPositions;
+    for (size_t i = 0; i < projCols.size(); ++i) {
+        std::string ty;
+        for (char c : projCols[i].second)
+            ty += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        if (ty == "timestamptz" || ty == "timestamp with time zone") {
+            tzPositions.push_back(i);
+        }
+    }
+    if (tzPositions.empty()) return;
+    for (auto& row : answers) {
+        // split on spaces (values themselves carry no inner spaces in this
+        // row format: timestamps render as one token only when the space
+        // between date and time is preserved — split carefully)
+        std::vector<std::string> vals;
+        {
+            std::string cur;
+            for (char c : row) {
+                if (c == ' ') {
+                    if (!cur.empty()) vals.push_back(cur);
+                    cur.clear();
+                } else {
+                    cur += c;
+                }
+            }
+            if (!cur.empty()) vals.push_back(cur);
+        }
+        bool changed = false;
+        for (size_t p : tzPositions) {
+            if (p >= vals.size()) continue;
+            const std::string& v = vals[p];
+            // Expect "YYYY-MM-DD HH:MM:SS" — but the split above broke it
+            // into two tokens; rejoin positionally instead: a timestamp
+            // occupies TWO tokens.  Recompute by scanning tokens with the
+            // knowledge that timestamptz consumes pairs.
+            (void)v;
+        }
+        // Positional pass: rebuild with pair-aware mapping.
+        std::vector<std::string> logical;
+        {
+            size_t t = 0;
+            for (size_t i = 0; i < projCols.size() && t < vals.size(); ++i) {
+                std::string ty;
+                for (char c : projCols[i].second)
+                    ty += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                bool isTs = ty == "timestamptz" || ty == "timestamp" ||
+                            ty == "timestamp with time zone" || ty == "datetime";
+                auto looksLikeDate = [](const std::string& x) {
+                    if (x.size() < 8 || x.size() > 10) return false;
+                    int dashes = 0;
+                    for (char c : x) {
+                        if (c == '-') ++dashes;
+                        else if (!isdigit(static_cast<unsigned char>(c))) return false;
+                    }
+                    return dashes == 2;
+                };
+                auto looksLikeTime = [](const std::string& x) {
+                    if (x.size() < 5) return false;
+                    int colons = 0;
+                    for (char c : x) {
+                        if (c == ':') ++colons;
+                        else if (!isdigit(static_cast<unsigned char>(c))) return false;
+                    }
+                    return colons >= 2;
+                };
+                if (isTs && t + 1 < vals.size() &&
+                    looksLikeDate(vals[t]) && looksLikeTime(vals[t + 1])) {
+                    logical.push_back(vals[t] + " " + vals[t + 1]);
+                    t += 2;
+                } else {
+                    logical.push_back(vals[t]);
+                    t += 1;
+                }
+            }
+        }
+        for (size_t p : tzPositions) {
+            if (p >= logical.size()) continue;
+            const std::string& v = logical[p];
+            // Already rendered with an offset suffix by the legacy path.
+            if (v.size() > 6 && (v[v.size() - 6] == '+' || v[v.size() - 6] == '-')
+                && v[v.size() - 3] == ':') continue;
+            // parse [Y]YYY-M-D H:M:S (components may be unpadded) -> epoch
+            size_t sp = v.find(' ');
+            if (sp == std::string::npos) continue;
+            std::string dpart = v.substr(0, sp);
+            std::string tpart = v.substr(sp + 1);
+            auto splitNum = [](const std::string& x, char sep,
+                               int out[3]) {
+                int n = 0;
+                size_t p = 0;
+                while (n < 3 && p <= x.size()) {
+                    size_t c = x.find(sep, p);
+                    std::string tok = x.substr(p, c == std::string::npos
+                                                        ? std::string::npos : c - p);
+                    out[n++] = tok.empty() ? 0 : atoi(tok.c_str());
+                    if (c == std::string::npos) break;
+                    p = c + 1;
+                }
+                while (n < 3) out[n++] = 0;
+            };
+            int dc[3], tc[3];
+            splitNum(dpart, '-', dc);
+            splitNum(tpart, ':', tc);
+            if (dc[0] <= 0 || dc[1] <= 0 || dc[2] <= 0) continue;
+            Date d;
+            d.year = dc[0];
+            d.month = dc[1];
+            d.day = dc[2];
+            int hh = tc[0], mm = tc[1], ss = tc[2];
+            int64_t epoch = CONVERT(d) * 86400LL + hh * 3600 + mm * 60 + ss;
+            logical[p] = formatTimestampWithTz(epoch, tzOffsetMinutes);
+            changed = true;
+        }
+        if (changed) {
+            std::string out;
+            for (const auto& lv : logical) out += lv + ' ';
+            row = out;
+        }
+    }
+}
+
 static bool executeInternal(const string& rawSql, Session& s) {
     // Check for pg_terminate_backend / pg_cancel_backend flags
     if (s.terminateRequested) {
@@ -14681,6 +14815,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 answers.erase(answers.begin() + noff + nlim, answers.end());
             if (noff > 0)
                 answers.erase(answers.begin(), answers.begin() + noff);
+        }
+        // Re-render TIMESTAMPTZ values in the session's TimeZone (SET TIME
+        // ZONE).  Executor paths emit UTC; the legacy engine query() already
+        // applied the offset and suffixed "+HH:MM", which the post-processor
+        // detects and leaves untouched (no double application).
+        {
+            std::vector<std::pair<std::string, std::string>> projCols;
+            if (g_engine.tableExists(queryDb, tname)) {
+                TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (selectCols.empty() || selectCols.count(tbl.cols[i].dataName)) {
+                        projCols.emplace_back(tbl.cols[i].dataName,
+                                              tbl.cols[i].dataType);
+                    }
+                }
+                applySessionTimezoneToAnswers(answers, projCols,
+                                              s.timezoneOffsetMinutes);
+            }
         }
         if (!outfile.empty()) {
             ofstream ofs(outfile);
