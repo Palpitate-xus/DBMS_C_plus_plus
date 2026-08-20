@@ -1,9 +1,9 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
-> 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明
+> 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明；2026-08-17 批量补齐 P1-10~13 / P2-9~13 / P3-7 共 10 项差距（PG 语法 PREPARE/EXECUTE、EXPLAIN ANALYZE 每节点统计、统计驱动选择率与 join 成本、并行 HashJoin/聚合/GatherMerge、deferrable UNIQUE/FK、数组构造/切片/包含、CREATE INHERITS+ONLY、interval 算术+AT TIME ZONE、dollar-quoting、全文检索 @@/to_tsvector/to_tsquery/ts_rank）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
-> 测试基线（2026-08-14）: PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、跨 backend 2PC、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）
+> 测试基线（2026-08-14）: PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、跨 backend 2PC、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）；2026-08-17 批量补齐后 PASS=153
 
 数据库生命周期边界现已进一步收紧：新数据库的 `tlist.lst`、字符集和 public schema 元数据通过原子发布创建，checkpoint 文件和物理备份标记也通过同一类原子写入；部分创建失败会回收目录，DROP 的统计文件清理失败会向调用方报告 I/O 错误。该改动改善崩溃一致性，但不改变本 DBMS 与 PostgreSQL 在完整 catalog、WAL/PITR、复制和协议语义上的差距。
 
@@ -48,14 +48,14 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | BYTEA (hex/escape) | ✅ | ✅ | ✅ |
 | BOOLEAN | ✅ | ✅ | ✅ |
 | DATE/TIME/TIMESTAMP/TIMESTAMPTZ | ✅ | ✅ | ✅ (含 infinity) |
-| INTERVAL | ✅ | ⚠️ | 字面量解析/规范化已有；`timestamp ± interval` 算术、`AT TIME ZONE`、`TimeZone` GUC 与字段限定仍缺（见 feature-gaps P2-12） |
+| INTERVAL | ✅ | ✅ | 字面量解析/规范化 + `timestamp ± interval`（日历月进位）/`interval ± interval`/`interval * / number` 算术 + `AT TIME ZONE` 双向（UTC/GMT/±HH[:MM]/±HHMM，`timezone()` 函数）；`TimeZone` GUC 会话显示与 interval typmod 字段限定仍缺 |
 | UUID | ✅ | ✅ | ✅ |
 | INET/CIDR | ✅ | ✅ | ✅ |
 | MACADDR/MACADDR8 | ✅ | ✅ | ✅ |
-| JSON/JSONB | ✅ | ⚠️ | 18 个 `json_/jsonb_` 函数（typeof/array_length/build_array/build_object/extract_path 等）；`->`/`->>`/`#>` 操作符、`@>` containment、jsonpath 求值、`JSON_TABLE` 与 GIN opclass 仍缺 |
+| JSON/JSONB | ✅ | ⚠️ | 18 个 `json_/jsonb_` 函数 + `->`/`->>`/`#>`/`#>>` 操作符与 `@>`/`<@` 递归 containment（本批补齐）；jsonpath 求值、`JSON_TABLE` 与 GIN opclass 仍缺 |
 | XML | ✅ | ✅ (well-formedness) | ⚠️ 缺 XPath/XMLTABLE |
-| ARRAY (多维) | ✅ | ✅ (基础) | ⚠️ 字面量/下标/`=ANY`(rewrite) 已有；缺 `ARRAY[]` 构造/切片/`@>`/`unnest` |
-| TSVECTOR/TSQUERY | ✅ | ⚠️ (类型) | 字面量解析/校验已有；缺 `@@` 求值、`to_tsvector`/`to_tsquery`、GIN 倒排与 ranking（见 feature-gaps P3-7） |
+| ARRAY (多维) | ✅ | ✅ | 字面量/下标（负数从尾部）/`=ANY`(rewrite) + 本批补齐 `ARRAY[]` 构造、`a[lo:hi]` 切片（钳制/开放边界）、`@>`/`<@`（SQL 数组与 JSON 自动判别）；`unnest` 表函数与协议 binary 数组 I/O 仍缺 |
+| TSVECTOR/TSQUERY | ✅ | ✅ (基础) | 类型 + `@@` 匹配（&/| 语义）、`to_tsvector`/`to_tsquery`/`plainto_tsquery`、`ts_rank`；GIN 倒排、`<->` 距离与 ts_headline 仍缺 |
 | GEOMETRIC (line/lseg/box/path/polygon/circle) | ✅ | ✅ | ✅ |
 | POINT | ✅ | ✅ | ✅ |
 | ENUM | ✅ | ✅ | ✅ |
@@ -92,7 +92,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | CREATE/DROP/ALTER COLLATION | ✅ | ✅ (DDL) | ⚠️ ICU 缺 |
 | TABLESPACE | ✅ | ✅ | ⚠️ 关系文件已统一物理路由并支持跨文件系统 SET TABLESPACE/重启恢复；权限、owner、ALTER TABLESPACE 完整语义和 PostgreSQL OID/符号链接布局仍缺 |
 | PARTITION BY RANGE/LIST/HASH | ✅ | ✅ | ✅ |
-| INHERITS | ✅ | ⚠️ | `ALTER TABLE INHERIT/NO INHERIT` 与查询含子表行已有；`CREATE TABLE ... INHERITS` 列合并与 SELECT/UPDATE/DELETE 的 `ONLY` 修饰仍缺（见 feature-gaps P2-11） |
+| INHERITS | ✅ | ✅ | `ALTER TABLE INHERIT/NO INHERIT`、`CREATE TABLE ... INHERITS` 列合并 + SELECT/UPDATE/DELETE 的 `ONLY [()]` 修饰；约束/索引/默认值的继承传播仍缺 |
 | LIKE ( INCLUDING ALL/DEFAULTS/CONSTRAINTS/INDEXES/IDENTITY) | ✅ | ✅ | ✅ |
 | TRUNCATE (ONLY/RESTART IDENTITY/CASCADE) | ✅ | ✅ | ✅ |
 | **ALTER TABLE ... ADD COLUMN ... IF NOT EXISTS** | ✅ | ✅ | ✅ |
@@ -173,7 +173,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | **Gap locks / predicate locks** | ✅ | ⚠️ | 有精确进程内 gap range、每表保守跨进程协调、heap page SIREAD、单列 B+Tree 逻辑谓词和空范围关系级兜底；缺真正物理索引范围 predicate lock |
 | **SSI (Serializable Snapshot Isolation)** | ✅ | ⚠️ | 行级/页级 rw-conflict + 单列 B+Tree 逻辑谓词 + 关系级空范围兜底；已验证非相交页并发和跨页危险结构，复合/其他访问方法 phantom 推理与完整 SSI 规则仍缺 |
 | **两阶段提交 (2PC)** | ✅ | ⚠️ | 基础 `prepareTransaction` + `COMMIT/ROLLBACK PREPARED` 已覆盖 durable prepared 记录、PREPARE WAL、跨 backend 锁所有权和提交/回滚回归；包含内存 DDL undo 的事务会拒绝 PREPARE，PG 全局目录与崩溃后 in-doubt 语义仍缺 |
-| **并行查询** | ✅ | ⚠️ | 非分区 heap 已支持按 page range 并行扫描和确定性 Gather，page I/O 失败会传播到算子；事务内回退，parallel join/aggregate/GatherMerge/worker pool 仍缺 |
+| **并行查询** | ✅ | ⚠️ | 非分区 heap 按 page range 并行扫描/确定性 Gather，本批补齐 ParallelHashJoin（分片 build）、ParallelGroupAggregate（局部桶+合并终态）与 GatherMerge（ORDER BY 分区排序+归并）；worker 线程池复用与并行索引扫描仍缺 |
 | **JIT compilation (LLVM)** | ✅ | ❌ | 缺 |
 | **Async I/O (io_uring)** | ✅ (PG18) | ❌ | 缺 |
 | HOT Update | ✅ | ✅ | ✅ |
@@ -222,20 +222,20 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|-------|---------|------|
 | 火山模型执行器 | ✅ | ✅ (12 operators, Phase 5.1 已上线) | ✅ |
 | 基于成本的优化 (CBO) | ✅ | ⚠️ | 基础 |
-| 统计信息 (pg_statistic) | ✅ | ⚠️ | 已采集 cardinality/MCV/等深直方图/多列统计；planner 仅消费 cardinality 做 `=` 选择率，直方图/MCV 未接入（见 feature-gaps P1-12） |
+| 统计信息 (pg_statistic) | ✅ | ✅ | 采集（cardinality/MCV/等深直方图/多列）+ planner 消费：MCV 精确等值选择率、直方图范围插值、eqjoinsel join 选择率与成本；`pg_stats` 兼容视图与多表 join 顺序 DP 仍缺 |
 | 索引选择 | ✅ | ✅ | ✅ |
 | **等价类 (Equivalence Classes)** | ✅ | ⚠️ | 基础 |
 | **PathKeys / 排序路径** | ✅ | ⚠️ | 基础 |
 | Join reorder (动态规划) | ✅ | ⚠️ | 启发式：仅 build/outer 交换，无多表搜索 |
 | Bitmap scan | ✅ | ⚠️ | 等值 Bitmap AND/OR 已接入；范围/并行路径仍缺 |
 | **计划缓存** | ✅ | ✅ | ✅ |
-| EXPLAIN ANALYZE 真实统计 | ✅ | ⚠️ | `ANALYZE` 仅输出整计划总耗时/总行数；无每节点 `actual time/loops`、按查询 buffer 增量（BUFFERS 现为全池累计）与 trigger/JIT 明细（见 feature-gaps P1-11） |
+| EXPLAIN ANALYZE 真实统计 | ✅ | ✅ | 每节点 `(actual time=… rows=… loops=…)`（21 个算子插桩）+ `BUFFERS` 按查询 shared hit/read 增量 + 总耗时/行数；trigger/JIT 明细仍缺 |
 | 多索引组合 (Bitmap AND/OR) | ✅ | ⚠️ | 等值 Bitmap AND/OR 已接入，范围/并行组合仍缺 |
 | **参数化路径** | ✅ | ❌ | 缺 |
 | **自定义成本函数** | ✅ | ❌ | 缺 |
 | **遗传算法 join reorder** | ✅ | ❌ | 缺 |
 | **分区裁剪** | ✅ | ✅ | ✅ |
-| **并行扫描/聚合/连接** | ✅ | ⚠️ | 非分区 heap page-range scan 已有真实 worker；并行聚合/连接与 GatherMerge 仍缺 |
+| **并行扫描/聚合/连接** | ✅ | ✅ | page-range scan 真实 worker + 并行 HashJoin/GroupAggregate/GatherMerge（本批补齐）；worker 池与并行索引路径仍缺 |
 
 ---
 

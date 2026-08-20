@@ -277,6 +277,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P1-10: SQL 级 prepared statements 对齐 PostgreSQL 语法
 - **类别**: 会话 / 协议兼容
+- **✅ 已完成（本批实现）**: parser 接受 `PREPARE name [(types)] AS stmt` 与 `$1..$n` 占位符（`ps_*` 辅助：类型感知的头部解析、顶层逗号切分、参数替换），`EXECUTE name(args)` 位置实参绑定，`DEALLOCATE` 兼容；旧 `FROM 'sql'`/`?`/`USING` 语法保留。类型标注存入会话 `preparedStmtTypes`（`tests/prepare_pg_test.cpp`）
 - **现状**: 已有：会话级命名 prepared statements（`main.cpp` handleExecutePrepared：`PREPARE name FROM 'sql'` 存模板、`EXECUTE name USING (vals)` 按 `?` 文本替换、`DEALLOCATE name`）与协议层 `Parse/Bind/Execute`（含参数类型与 binary 编解码）。但与 PostgreSQL 语法不兼容：PG 是 `PREPARE name [(types)] AS stmt` + `$1..$n` 占位符 + `EXECUTE name(args)`；当前是自有 `FROM 'sql'` + `?` + `USING`。且模板按文本展开，无类型推断、无计划复用（每次重新解析执行）、无 `pg_prepared_statements` 视图
 - **PG 参考**: `PREPARE name [(int,text)] AS SELECT ... WHERE id=$1`, `EXECUTE name(1,'a')`
 - **影响**: 使用标准 SQL PREPARE 语法的客户端/ORM/dump 无法工作；预编译得不到计划级加速
@@ -290,6 +291,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P1-11: EXPLAIN ANALYZE 每-节点实际统计
 - **类别**: 可观测性 / 诊断
+- **✅ 已完成（本批实现）**: `IOperator` 内建运行时插桩（`NextInstrument` RAII：每节点累计 actual time、loops、emitted rows，21 个算子全覆盖），`explain` 在 ANALYZE 选项下按节点追加 `(actual time=… rows=… loops=…)`；main.cpp 重执行计划后对同一棵已执行树 re-explain，`BUFFERS` 输出按查询的 shared hit/read 增量（BufferPool 计数器差分）（`tests/explain_analyze_test.cpp` + `explain_analyze_e2e_test.py`）
 - **现状**: `EXPLAIN (ANALYZE)` 解析选项并整体执行一次计划输出总行数/总耗时（`src/main.cpp` handleExplain），但无 PostgreSQL 的每-节点 `actual time=.. loops=.. rows`、共享 buffer 命中（`shared hit/read` 按节点）、worker 明细；`buffers` 选项输出的是全池累计统计而非本查询的
 - **PG 参考**: `ExplainPrintPlan` per-node `actual time`, `loops`, `Shared Hit Blocks`
 - **影响**: 无法定位计划中哪个算子是瓶颈；调优能力远弱于 PostgreSQL
@@ -303,6 +305,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P1-12: 统计驱动的完整代价模型 (统计采集已备，消费不全)
 - **类别**: 优化器 / 统计
+- **✅ 已完成（本批实现）**: `estimateSelectivity` 消费 MCV（热值精确频率 count/rows）与等深直方图（范围谓词桶内线性插值，数值/文本双路径，`!=` 取补）；新增 `estimateJoinSel`（eqjoinsel：1/max(nd_l,nd_r)）接入三种 join 的 EXPLAIN rows 与 `buildJoinPlan` 成本（无索引 NLJ 计入输出基数、hash build 侧按键密度选边）（`tests/stats_planner_test.cpp`）。多表 join 顺序 DP 搜索与 `pg_stats` 视图仍未做
 - **现状**: `ANALYZE` 已采集并持久化到 `.stats`：每列 cardinality、min/max、等深直方图、MCV top-N（`TableManage.h` `ColumnStats`，`computeMCV`，含多列统计 `getMultiColumnStats`）；但 planner 消费极不完全——`estimateSelectivity` 仅 `=` 用 cardinality（回退 0.1），`!=/like` 硬编码 0.9/0.2，范围谓词一律 0.3（**直方图与 MCV 采了没人用**）；join 算法选择用行数+索引存在的固定公式（`estimateJoinCost`），无 `eqjoinsel` 风格的键重叠估计；join 顺序只有 build/outer 交换，无多表动态规划/贪心搜索；且这些选择率目前只影响 EXPLAIN 展示，是否影响实际计划生成需逐路径核对
 - **PG 参考**: `pg_stats` 直方图/MCV/correlation 驱动的 `eqsel/neqsel/scalarea_sel/eqjoinsel` + join 顺序动态规划
 - **影响**: 范围查询行数估计偏差 3×+，倾斜数据（MCV 本可纠正）下选错 join 算法/顺序，多表 join 顺序次优
@@ -316,6 +319,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P1-13: 并行 JOIN/聚合与 GatherMerge
 - **类别**: 性能 / 执行器
+- **✅ 已完成（本批实现）**: 新增 `ParallelHashJoinOp`（build 侧按 page range 分片多线程建哈希、按 rid 排序合并保证确定性）、`ParallelGroupAggregateOp`（worker 局部分组桶 + 合并终态，count/sum/avg/min/max/bool_*、FILTER、HAVING）、`GatherMergeOp`（有序流 k 路归并；ORDER BY 并行路径=分区排序+归并）。planner 在非事务+并行开启时接入；EXPLAIN 显示 workers 与 used/fallback（`tests/parallel_exec_test.cpp`）。worker 池复用仍每次建线程
 - **现状**: 仅 `ParallelTableScanOp` 按 page range 分片；`HashJoinOp`/`MergeJoinOp`/`GroupAggregateOp`（均已存在）无并行版本；Gather 输出按范围顺序拼接，无 `GatherMerge`；worker 每查询创建、无复用池
 - **PG 参考**: `Parallel Hash Join`, `Partial Aggregate` + `Finalize Aggregate`, `GatherMerge`
 - **影响**: 大表 join/聚合无法利用多核（这是分析查询的常见瓶颈）
@@ -432,6 +436,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-9: Deferrable 约束扩展到 CHECK 之外
 - **类别**: 数据完整性
+- **✅ 已完成（本批实现）**: parser 在 named/unnamed 两种表约束形式的 PK/UNIQUE/FK/EXCLUDE 上解析 `DEFERRABLE [INITIALLY {DEFERRED|IMMEDIATE}]`；`DeferredCheck` 扩展 Kind{Unique,ForeignKey}+payload，单列 UNIQUE（列级+表级）与单列 FK 当前 deferred 时入队、COMMIT 时验证（UNIQUE 重扫排除自身 rid，FK 查父表），失败回滚；`SET CONSTRAINTS ALL IMMEDIATE` 恢复立即检查（`tests/deferrable_constraints_test.cpp`）。PK（严格 B+ 树插入）与 EXCLUDE 的延迟、级联交互未做
 - **现状**: 已有：列级 CHECK 约束的 `DEFERRABLE INITIALLY DEFERRED`（延迟队列 commit 时验证，`runDeferredCheck`），`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效（per-transaction，all-gaps-todo 1.1.53 已记）。仍缺：FK 的 deferrable（`ON DELETE CASCADE` 等动作与延迟检查的交互）、UNIQUE/PRIMARY KEY/EXCLUDE 的 deferrable（parser 无这些约束上的 `DEFERRABLE` 修饰）、constraint trigger 的 deferred 触发
 - **PG 参考**: 各类约束的 `DEFERRABLE INITIALLY {DEFERRED|IMMEDIATE}`
 - **影响**: 环状 FK、自引用行、批量重排唯一键等模式无法工作
@@ -445,6 +450,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-10: 数组类型的表达式/函数完整语义
 - **类别**: 类型系统
+- **✅ 已完成（本批实现）**: `ARRAY[...]` 构造器（parser 产生式→`__array_construct` 内置函数，NULL/引用规则同 PG 输出）、切片 `a[lo:hi]`（含负下标/开放边界/钳制）、下标 `a[i]` 负数从尾部、`@>`/`<@` 与 SQL 数组/JSON 自动判别的包含运算（`tests/array_expr_test.cpp`）。`unnest()` 表函数、协议 binary 数组 I/O 仍缺
 - **现状**: 已有：数组列识别与字面量校验/规范化（`tests/array_test.cpp`）、数组下标 `a[i]`（parser postfix `[]` + `ExprEvaluator` 求值，含多维）、`= ANY(arr)`/`ALL` 经 text-rewrite 到 `array_contains`（`src/main.cpp` 预处理，Volcano 路径是否覆盖需核对）、`array_agg` 聚合（`TableManage.cpp`）。仍缺：`ARRAY[...]` 构造器表达式、切片 `a[1:3]`（parser 注释提及但求值未见）、`@>`/`<@` 包含操作符、`unnest()`、数组比较/哈希语义与协议 binary 数组 I/O（all-gaps-todo 2.15 已记）
 - **PG 参考**: array functions/operators, `unnest`, `@>`
 - **影响**: 常用数组运算（构造、切片、包含判断、展开为行）缺失
@@ -458,6 +464,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-11: 表继承的 CREATE 侧与 ONLY 语义
 - **类别**: 数据模型
+- **✅ 已完成（本批实现）**: `CREATE TABLE child (...) INHERITS (parents)`（`executeCreateTable`：父列前插合并、继承列去 NOT NULL/PK、`.inherits` 登记子表）；`SELECT/UPDATE/DELETE` 的 `ONLY [()]` 修饰：主循环按词边界剥除并置 `onlyNext`，三处 children 展开点（volcano/聚合/SELECT 合并）受其抑制，RAII 语句级复位（`tests/inherit_only_e2e_test.py`）。约束/索引/默认值继承传播未做
 - **现状**: 已有：`ALTER TABLE ... INHERIT/NO INHERIT`（`DdlExecutor.cpp` 读写 `.<table>.inherits`）、`getInheritedChildren` 被 SELECT/DDL 消费（查询默认含子表行，main.cpp 多处）；`DROP TABLE` 级联清理继承关系。仍缺：`CREATE TABLE child (...) INHERITS (parent)` 产生式（列合并继承）、`ONLY (table)` 限定扫描（parser 无该修饰符；TRUNCATE 已支持 ONLY，SELECT/UPDATE/DELETE 未支持）
 - **PG 参考**: `CREATE TABLE ... INHERITS`, `SELECT * FROM ONLY (t)`
 - **影响**: 继承只能 ALTER 补建且子表不自动继承父表列；无法只操作父表行
@@ -470,6 +477,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-12: Interval 运算与时区转换
 - **类别**: 类型系统 / 时区
+- **✅ 已完成（本批实现）**: `ExprEvaluator` interval 双基（月+微秒）算术：`timestamp±interval`（日历月进位+日钳制+微秒进位）、`interval±interval`、`interval*/number`、无类型 interval 字面量邻接推断；`AT TIME ZONE`（`ts AT TIME ZONE 'zone'` 双向：UTC/GMT/±HH[:MM]/±HHMM 偏移，`timezone(zone,ts)` 函数）；`::type` 扫描不再吞掉 AT TIME ZONE（`tests/interval_arith_test.cpp`）。TimeZone GUC 会话显示与 interval typmod 限定仍缺
 - **现状**: interval 已有列类型、字面量解析与 PostgreSQL 风格规范化（`tests/interval_test.cpp`：verbose 单位/`HH:MM:SS`/`Y-M`/裸秒/`ago`）。仍缺：`timestamp + interval` 等 interval 算术（`ExprEvaluator` 无 interval 运算分支）、`AT TIME ZONE` 双向转换（代码库无任何实现）、`TimeZone` GUC 与 timestamptz 按会话时区显示、interval 字段限定（`INTERVAL DAY TO SECOND`）
 - **PG 参考**: interval arithmetic, `AT TIME ZONE`, `TimeZone` GUC
 - **影响**: 时间偏移计算与跨时区应用无法正确表达
@@ -482,6 +490,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-13: Dollar-quoting 与 SQL 函数体
 - **类别**: 解析器 / 兼容性
+- **✅ 已完成（本批实现）**: tokenizer 识别 `$tag$ ... $tag$` 为单一字符串 token（任意 tag、嵌套防护），CREATE FUNCTION/PROCEDURE/TRIGGER 函数体与普通字符串字面量处均可使用（`tests/prepare_pg_test.cpp` 内含 dollar-quote 用例）
 - **现状**: parser 无 `$$body$$` dollar-quoted 字符串；CREATE FUNCTION 的函数体目前依赖普通字符串字面量承载；`\gset`/psql 元命令不属于本差距范围
 - **PG 参考**: `$$ ... $$`, `$tag$ ... $tag$`
 - **影响**: 任何使用 dollar-quoting 的 DDL dump（尤其函数/触发器定义）无法导入
@@ -562,6 +571,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P3-7: 全文检索执行链路 (tsvector/tsquery 已有类型，缺检索)
 - **类别**: 类型系统 / 检索
+- **✅ 已完成（本批实现）**: `ExprEvaluator`：`to_tsvector`（分词+位置+经引擎 canonicalizer 规范化，`normalizeTsVectorText` 公开）、`to_tsquery`/`plainto_tsquery`（词表 & 连接，`&|!` 形态透传）、`@@`（词位集合匹配：& 全体命中、| 任一命中，容忍存储 tsvector 字面量或纯文本左值）、`ts_rank`（覆盖率+位置密度加权）（`tests/fulltext_search_test.cpp`）。GIN 倒排索引、`<->` 距离语义、`ts_headline`、文本搜索配置（停用词/词干）仍缺
 - **现状**: tsvector/tsquery 已有字面量解析与 canonicalization/文法校验（`tests/tsearch_test.cpp`），列可存值；`@@` 已是 lexer 的双字符 token（`parser.cpp:265`），但无匹配求值；无 `to_tsvector`/`to_tsquery` 函数、无 GIN 倒排 opclass、无 `ts_rank`/`ts_headline`/文本搜索配置（all-gaps-todo 2.11 已记类型侧）
 - **PG 参考**: `@@`, GIN `gin_tsvector_ops`, `to_tsvector('english', ...)`
 - **影响**: 有类型无检索——无法在 SQL 内做全文查询
