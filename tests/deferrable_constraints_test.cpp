@@ -1,5 +1,5 @@
 // ============================================================================
-// deferrable_constraints_test — DEFERRABLE on UNIQUE and FOREIGN KEY:
+// deferrable_constraints_test — DEFERRABLE on UNIQUE, FOREIGN KEY and EXCLUDE:
 //   UNIQUE ... DEFERRABLE INITIALLY DEFERRED: key swaps inside a transaction
 //   commit cleanly; unresolved duplicates abort the commit.
 //   FK ... DEFERRABLE INITIALLY DEFERRED: child-before-parent inserts commit
@@ -52,9 +52,44 @@ static void setup() {
         "  id INT PRIMARY KEY, "
         "  tag VARCHAR(20), "
         "  CONSTRAINT uniq_tag_key UNIQUE (tag) DEFERRABLE INITIALLY DEFERRED)", s));
+    assert(!ddl.executeSql(
+        "CREATE TABLE excl ("
+        "  id INT PRIMARY KEY, "
+        "  rng INT, "
+        "  CONSTRAINT excl_rng_key EXCLUDE (rng WITH =) "
+        "  DEFERRABLE INITIALLY DEFERRED)", s));
     // Constraint metadata must be recorded for the deferred paths.
     assert(g_engine.isConstraintCurrentlyDeferred(db, "child", "child_pid_fkey"));
     assert(g_engine.isConstraintCurrentlyDeferred(db, "uniq", "uniq_tag_key"));
+    assert(g_engine.isConstraintCurrentlyDeferred(db, "excl", "excl_rng_key"));
+}
+
+static void test_exclude_deferred_violation() {
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    // Both inserts queue deferred EXCLUDE re-checks; the values conflict.
+    assert(g_engine.insert(db, "excl", {{"id", "1"}, {"rng", "100"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "excl", {{"id", "2"}, {"rng", "100"}}) == DBStatus::OK);
+    // Conflict never resolved -> COMMIT must fail.
+    assert(g_engine.commitTransaction() == DBStatus::INVALID_VALUE);
+    std::cout << "[DEFER] EXCLUDE deferred conflicting commit rejected OK" << std::endl;
+}
+
+static void test_exclude_deferred_resolution() {
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(db, "excl", {{"id", "3"}, {"rng", "300"}}) == DBStatus::OK);
+    // Move out of the way before commit: row 3 no longer conflicts with 1.
+    assert(g_engine.update(db, "excl", {{"rng", "301"}}, {"=id 3"}) == DBStatus::OK);
+    assert(g_engine.insert(db, "excl", {{"id", "4"}, {"rng", "300"}}) == DBStatus::OK);
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+    std::cout << "[DEFER] EXCLUDE deferred resolved-in-txn commit OK" << std::endl;
+}
+
+static void test_exclude_immediate_rejects() {
+    // Without a transaction there is no commit point: deferrable EXCLUDE
+    // still checks immediately on autocommit inserts.
+    assert(g_engine.insert(db, "excl", {{"id", "5"}, {"rng", "300"}})
+               == DBStatus::INVALID_VALUE);
+    std::cout << "[DEFER] EXCLUDE autocommit conflict rejected OK" << std::endl;
 }
 
 static void test_fk_deferred_ok() {
@@ -108,6 +143,9 @@ static void test_set_constraints_immediate() {
 
 int main() {
     setup();
+    test_exclude_deferred_violation();
+    test_exclude_deferred_resolution();
+    test_exclude_immediate_rejects();
     test_fk_deferred_ok();
     test_fk_deferred_violation();
     test_unique_deferred_swap();

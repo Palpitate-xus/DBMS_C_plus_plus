@@ -6654,6 +6654,58 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         });
         return matches <= 0;
     }
+    if (dc.kind == DeferredCheck::Kind::Exclude) {
+        // Re-run the exclusion conflict scan at commit time against the
+        // row's CURRENT version.  The row may have been updated after the
+        // check was queued (possibly moved to a new slot by a HOT update,
+        // with the old line pointer redirected), so resolve the redirect
+        // chain and read the live row; its current slot is excluded from
+        // the scan.  This matches PostgreSQL: the constraint must hold for
+        // the final table state at commit.
+        TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
+        PageAllocator* pa = getPageAllocator(dc.dbname, dc.tablename);
+        if (!pa) return false;
+        int64_t curRid = dc.rid;
+        std::string row;
+        {
+            uint32_t rpage = 0; uint16_t rslot = 0;
+            decodeRid(dc.rid, rpage, rslot);
+            char* buf = pa->fetchPage(rpage);
+            if (!buf) return true;  // page gone: row vanished, check passes
+            {
+                PgPage page(buf);
+                // internal line pointers are 1-based
+                for (int hops = 0; hops < 64; ++hops) {
+                    const PgPage::ItemIdData* id = page.itemId(rslot + 1);
+                    if (!id) break;
+                    uint16_t flags = id->lp_len >> PgPage::LP_FLAG_SHIFT;
+                    if (flags != PgPage::LP_REDIRECT) break;
+                    uint16_t target = id->lp_off & PgPage::LP_OFF_MASK;
+                    if (target == 0 || target == rslot + 1) break;
+                    rslot = target - 1;
+                }
+            }
+            pa->unpinPage(rpage);
+            curRid = encodeRid(rpage, rslot);
+        }
+        bool readFailed = false;
+        if (!readVisibleRowByRid(dc.dbname, pa, curRid, row, tbl,
+                                 nullptr, &readFailed)) {
+            // Row deleted or no longer visible: nothing to check.
+            return !readFailed;
+        }
+        if (row.empty()) return true;
+        ExclusionConstraint ec;
+        ec.name = dc.constraintName;
+        ec.tableName = dc.tablename;
+        ec.elements = dc.excludeElements;
+        ec.wherePredicate = dc.excludeWhere;
+        bool scanFailed = false;
+        bool conflict = checkExclusionConflict(dc.dbname, dc.tablename, ec,
+                                               row, curRid, &scanFailed);
+        if (scanFailed) return false;
+        return !conflict;
+    }
     if (dc.kind == DeferredCheck::Kind::ForeignKey) {
         // The referenced key must exist by commit time.
         if (!tableExists(dc.dbname, dc.refTable)) return false;
@@ -13395,9 +13447,19 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
-    // Check EXCLUDE constraints before writing
+    // Check EXCLUDE constraints before writing.  DEFERRABLE EXCLUDE
+    // constraints currently deferred skip the immediate scan and queue a
+    // commit-time re-check instead.
     auto excludeConstraints = getExclusionConstraints(dbname, tablename);
+    std::vector<const ExclusionConstraint*> deferredExcludes;
     for (const auto& ec : excludeConstraints) {
+        // Deferring only matters inside a transaction; in autocommit there
+        // is no later commit point, so check immediately either way.
+        if (!ec.name.empty() && transactionContext().inTransaction &&
+            isConstraintCurrentlyDeferred(dbname, tablename, ec.name)) {
+            deferredExcludes.push_back(&ec);
+            continue;
+        }
         bool scanFailed = false;
         if (checkExclusionConflict(dbname, tablename, ec, strippedRow, -1, &scanFailed)) {
             lockManager_.unlock(tablename);
@@ -13654,6 +13716,22 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 
     int64_t rid = encodeRid(pageId, slotId);
 
+    // Queue deferred EXCLUDE constraints for commit-time re-validation.
+    if (transactionContext().inTransaction && !deferredExcludes.empty()) {
+        for (const ExclusionConstraint* ec : deferredExcludes) {
+            DeferredCheck dc;
+            dc.kind = DeferredCheck::Kind::Exclude;
+            dc.dbname = dbname;
+            dc.tablename = tablename;
+            dc.rid = rid;
+            dc.constraintName = ec->name;
+            dc.exceptRid = rid;
+            dc.excludeElements = ec->elements;
+            dc.excludeWhere = ec->wherePredicate;
+            transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
+                std::move(dc));
+        }
+    }
     // Queue deferred CHECK constraints for commit-time validation.
     if (transactionContext().inTransaction && !deferredCheckCols.empty()) {
         for (size_t ci : deferredCheckCols) {
@@ -15491,9 +15569,29 @@ DBStatus StorageEngine::update(const std::string& dbname,
             }
         }
 
-        // Check EXCLUDE constraints before writing (exclude the row being updated).
+        // Check EXCLUDE constraints before writing (exclude the row being
+        // updated).  DEFERRABLE EXCLUDE constraints currently deferred skip
+        // the immediate scan and queue a commit-time re-check.
         auto excludeConstraints = getExclusionConstraints(dbname, tablename);
         for (const auto& ec : excludeConstraints) {
+            // Deferring only matters inside a transaction (see insert path).
+            if (!ec.name.empty() && transactionContext().inTransaction &&
+                isConstraintCurrentlyDeferred(dbname, tablename, ec.name)) {
+                if (transactionContext().inTransaction) {
+                    DeferredCheck dc;
+                    dc.kind = DeferredCheck::Kind::Exclude;
+                    dc.dbname = dbname;
+                    dc.tablename = tablename;
+                    dc.rid = rid;
+                    dc.constraintName = ec.name;
+                    dc.exceptRid = rid;
+                    dc.excludeElements = ec.elements;
+                    dc.excludeWhere = ec.wherePredicate;
+                    transactionContext().deferredChecks[transactionContext().currentTxnId].push_back(
+                        std::move(dc));
+                }
+                continue;
+            }
             bool scanFailed = false;
             if (checkExclusionConflict(dbname, tablename, ec, strippedNewRow, rid, &scanFailed)) {
                 lockManager_.unlock(tablename);

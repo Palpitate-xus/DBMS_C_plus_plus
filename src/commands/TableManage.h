@@ -1376,7 +1376,7 @@ private:
     // "fk" verifies the referenced key payloadValue exists in refTable's
     // column refCol.
     struct DeferredCheck {
-        enum class Kind { Check, Unique, ForeignKey };
+        enum class Kind { Check, Unique, ForeignKey, Exclude };
         Kind kind = Kind::Check;
         std::string dbname;
         std::string tablename;
@@ -1390,6 +1390,11 @@ private:
         // FK payload
         std::string refTable;
         std::string refCol;
+        // Exclude payload: the constraint's element list re-checked at
+        // commit time against the row's current version (HOT redirects
+        // are followed), so no row image needs capturing here.
+        std::vector<std::pair<std::string, std::string>> excludeElements;
+        std::string excludeWhere;
     };
     bool runDeferredCheck(const DeferredCheck& dc) const;
 
