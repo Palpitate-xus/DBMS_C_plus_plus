@@ -1,6 +1,6 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
-> 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明；2026-08-17 批量补齐 P1-10~13 / P2-9~13 / P3-7 共 10 项差距（PG 语法 PREPARE/EXECUTE、EXPLAIN ANALYZE 每节点统计、统计驱动选择率与 join 成本、并行 HashJoin/聚合/GatherMerge、deferrable UNIQUE/FK、数组构造/切片/包含、CREATE INHERITS+ONLY、interval 算术+AT TIME ZONE、dollar-quoting、全文检索 @@/to_tsvector/to_tsquery/ts_rank）
+> 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明；2026-08-17 批量补齐 P1-10~13 / P2-9~13 / P3-7 共 10 项差距（PG 语法 PREPARE/EXECUTE、EXPLAIN ANALYZE 每节点统计、统计驱动选择率与 join 成本、并行 HashJoin/聚合/GatherMerge、deferrable UNIQUE/FK、数组构造/切片/包含、CREATE INHERITS+ONLY、interval 算术+AT TIME ZONE、dollar-quoting、全文检索 @@/to_tsvector/to_tsquery/ts_rank）；2026-08-20 第二批 8 项（PL/pgSQL 最小解释器、VACUUM PARALLEL、pg_stats/pg_statistic 视图、unnest 表函数、TimeZone GUC 渲染、多表 join 贪心搜索、deferrable EXCLUDE、ts_rank weights+`<->` 短语）
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)
 > 测试基线（2026-08-14）: PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E；含 Volcano 算子、并发测试、跨 backend/跨进程表锁协调、跨 backend 2PC、数据库生命周期、schema 格式完整性、WAL 损坏恢复、WAL 归档失败重试、复制管理器并发状态和网络启动安全）；2026-08-17 批量补齐后 PASS=153
@@ -54,8 +54,8 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | MACADDR/MACADDR8 | ✅ | ✅ | ✅ |
 | JSON/JSONB | ✅ | ⚠️ | 18 个 `json_/jsonb_` 函数 + `->`/`->>`/`#>`/`#>>` 操作符与 `@>`/`<@` 递归 containment（本批补齐）；jsonpath 求值、`JSON_TABLE` 与 GIN opclass 仍缺 |
 | XML | ✅ | ✅ (well-formedness) | ⚠️ 缺 XPath/XMLTABLE |
-| ARRAY (多维) | ✅ | ✅ | 字面量/下标（负数从尾部）/`=ANY`(rewrite) + 本批补齐 `ARRAY[]` 构造、`a[lo:hi]` 切片（钳制/开放边界）、`@>`/`<@`（SQL 数组与 JSON 自动判别）；`unnest` 表函数与协议 binary 数组 I/O 仍缺 |
-| TSVECTOR/TSQUERY | ✅ | ✅ (基础) | 类型 + `@@` 匹配（&/| 语义）、`to_tsvector`/`to_tsquery`/`plainto_tsquery`、`ts_rank`；GIN 倒排、`<->` 距离与 ts_headline 仍缺 |
+| ARRAY (多维) | ✅ | ✅ | 字面量/下标（负数从尾部）/`=ANY`(rewrite) + 本批补齐 `ARRAY[]` 构造、`a[lo:hi]` 切片（钳制/开放边界）、`@>`/`<@`（SQL 数组与 JSON 自动判别）；协议 binary 数组 I/O 仍缺；`unnest` 表函数已于 2026-08-20 补齐（`FROM unnest(...)` 与投影两路径） |
+| TSVECTOR/TSQUERY | ✅ | ✅ (基础) | 类型 + `@@` 匹配（&/| 语义）、`to_tsvector`/`to_tsquery`/`plainto_tsquery`、`ts_rank`（含 weights float4[] 与 `<->` 距离-1 短语匹配、`setweight()`，2026-08-20）；GIN 倒排与 ts_headline 仍缺 |
 | GEOMETRIC (line/lseg/box/path/polygon/circle) | ✅ | ✅ | ✅ |
 | POINT | ✅ | ✅ | ✅ |
 | ENUM | ✅ | ✅ | ✅ |
@@ -222,11 +222,11 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|-------|---------|------|
 | 火山模型执行器 | ✅ | ✅ (12 operators, Phase 5.1 已上线) | ✅ |
 | 基于成本的优化 (CBO) | ✅ | ⚠️ | 基础 |
-| 统计信息 (pg_statistic) | ✅ | ✅ | 采集（cardinality/MCV/等深直方图/多列）+ planner 消费：MCV 精确等值选择率、直方图范围插值、eqjoinsel join 选择率与成本；`pg_stats` 兼容视图与多表 join 顺序 DP 仍缺 |
+| 统计信息 (pg_statistic) | ✅ | ✅ | 采集（cardinality/MCV/等深直方图/多列）+ planner 消费：MCV 精确等值选择率、直方图范围插值、eqjoinsel join 选择率与成本；`pg_stats`/`pg_statistic` 兼容视图已补（2026-08-20）；多表 join 顺序 DP 仍缺（已有贪心搜索） |
 | 索引选择 | ✅ | ✅ | ✅ |
 | **等价类 (Equivalence Classes)** | ✅ | ⚠️ | 基础 |
 | **PathKeys / 排序路径** | ✅ | ⚠️ | 基础 |
-| Join reorder (动态规划) | ✅ | ⚠️ | 启发式：仅 build/outer 交换，无多表搜索 |
+| Join reorder (动态规划) | ✅ | ⚠️ | 贪心搜索（≥2 JOIN 的 FROM 链按 ndistinct 估计选最小对起步、逐步挂接、中间物化，2026-08-20）；DP 动态规划仍缺 |
 | Bitmap scan | ✅ | ⚠️ | 等值 Bitmap AND/OR 已接入；范围/并行路径仍缺 |
 | **计划缓存** | ✅ | ✅ | ✅ |
 | EXPLAIN ANALYZE 真实统计 | ✅ | ✅ | 每节点 `(actual time=… rows=… loops=…)`（21 个算子插桩）+ `BUFFERS` 按查询 shared hit/read 增量 + 总耗时/行数；trigger/JIT 明细仍缺 |
@@ -247,7 +247,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | **Shared memory** | ✅ | ❌ | 缺 |
 | Background workers | ✅ | ⚠️ 框架 | 11 种类型 |
 | WALWriter / BgWriter / Checkpointer | ✅ | ✅ | ✅ |
-| Autovacuum | ✅ | ⚠️ 框架 | |
+| Autovacuum | ✅ | ⚠️ 框架 | `VACUUM (PARALLEL n)` 页分片 worker 池已补（2026-08-20）；独立 worker 进程池与负载均衡仍缺 |
 | Stats collector | ✅ | ⚠️ | 有 RuntimeStats 事件计数子集（含顺序/索引扫描与索引取行）及当前格式持久化快照；后台采样和完整索引维度仍缺 |
 | **连接池** | ✅ (外部) | ✅ | ✅ |
 | **最大连接数** | ✅ | ✅ | ✅ |
@@ -297,7 +297,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 |------|-------|---------|------|
 | CREATE EXTENSION | ✅ | ⚠️ 框架 | |
 | FDW (外部数据包装器) | ✅ | ⚠️ 框架 | |
-| PL/pgSQL 运行时 | ✅ | ❌ | 缺 |
+| PL/pgSQL 运行时 | ✅ | ⚠️ | 最小解释器：DECLARE/IF/WHILE/FOR/RAISE/RETURN/SQL 执行/SELECT INTO（2026-08-20）；异常块、游标、触发器函数体仍缺 |
 | **C 扩展加载 (fmgr)** | ✅ | ❌ | 缺 |
 | **Hook 系统** | ✅ | ❌ | 缺 |
 | **Background worker API** | ✅ | ⚠️ 框架 | |
@@ -342,8 +342,8 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 5. **GiST 索引完整语义** — 基础文本/范围文件已存在，但全文搜索、几何最近邻、opclass 与并发维护仍缺
 6. **TOAST 完整语义** — 当前线外值使用 zlib 压缩；lz4/pglz、压缩策略、`toast_tuple_target` 和 PG pointer/catalog 仍待完成
 7. **后台 stats_collector** — 已有 `RuntimeStats` 在执行/存储边界收集数据库和表计数，并接入 `SHOW STATUS`/`pg_stat_database`/`pg_stat_tables`，Volcano 扫描算子也会记录顺序/索引扫描及索引取行；当前格式快照已持久化，后台采样线程和完整索引维度仍缺
-8. **PL/pgSQL 运行时** — 存储过程解释执行缺
-9. **并行 Vacuum** — Autovacuum 已工作但非并行
+8. **PL/pgSQL 运行时** — 最小集已落地（2026-08-20），异常块/游标/触发器函数仍缺
+9. **并行 Vacuum** — `VACUUM (PARALLEL n)` 已落地（2026-08-20），独立 worker 进程池仍缺
 
 ### 🟢 次要缺失 (易用性/运维)
 1. pg_stat_* views / pg_stat_statements

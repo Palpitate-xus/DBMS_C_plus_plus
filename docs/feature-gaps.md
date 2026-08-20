@@ -238,30 +238,37 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 - **预估工作量**: 1 周
 - **相关文件**: `src/process/RuntimeStats.{h,cpp}`, `src/main.cpp`, `src/network/NetworkServer.cpp`, `src/commands/TableManage.cpp`
 
-### P1-7: PL/pgSQL 运行时
+### P1-7: PL/pgSQL 运行时 ✅（最小实现，2026-08-20）
 - **类别**: 存储过程 / 扩展语言
-- **现状**: `CREATE PROCEDURE/FUNCTION` 仅 DDL 存储，无解释执行
+- **现状**: ✅ 最小 PL/pgSQL 解释器已落地：UDF 体按 `DECLARE/BEGIN/END` 解析为语句树（Compound/Assign/Sql/Return/Exit/Raise/If/While/For），两阶段 parse→interp 执行；表达式求值复用 SQL 表达式求值器（右结合扫描保证左结合、括号深度、一元负号、宿主变量回显）；`RETURNING ... INTO`/`SELECT ... INTO` 支持返回值装填。`tests/plpgsql_test.cpp` 覆盖赋值/IF/WHILE/FOR/RAISE/嵌套表达式
 - **PG 参考**: `plpgsql` 解释器, `CALL proc()`
-- **影响**: 存储过程无法执行，业务逻辑无法下沉到数据库
+- **残余缺口**: 异常块（`EXCEPTION`）、`EXIT WHEN` 之外的游标控制、`PERFORM`、触发器函数体、`plpgsql_check` 类静态校验
 - **实现路径**:
-  1. 实现 `PlPgSqlInterpreter`：解析 PL/pgSQL AST
-  2. 支持基本语法: `IF/ELSE`, `LOOP`, `FOR`, `WHILE`, `EXECUTE`, `RETURN`
-  3. 支持变量声明与类型系统
-  4. 在 `CALL` 命令中调用解释器
-- **预估工作量**: 2-3 周
-- **相关文件**: `src/pl/plpgsql.cpp` (新建), `src/pl/plpgsql.h` (新建)
+  1. ✅ 实现 `PlPgsql`：解析 PL/pgSQL 语句树（`src/utils/plpgsql.{h,cpp}`）
+  2. ✅ 支持基本语法: `IF/ELSE`, `LOOP`, `FOR`, `WHILE`, `EXECUTE`(SQL), `RETURN`, `RAISE`
+  3. ✅ DECLARE 变量声明与默认值求值
+  4. ✅ 在 UDF 调用路径接入解释器（language=plpgsql）
+- **预估工作量**: ~~2-3 周~~ 已完成最小集
+- **相关文件**: `src/utils/plpgsql.cpp` (新建), `src/utils/plpgsql.h` (新建), `src/commands/TableManage.cpp`
 
-### P1-8: 并行 Vacuum
+### P1-8: 并行 Vacuum ✅（2026-08-20）
 - **类别**: 存储 / 维护
-- **现状**: Autovacuum 已工作但单线程
+- **现状**: ✅ `VACUUM (PARALLEL n)` 已实现：heap 页按 `(pages + n - 1) / n` 分片，worker 线程池并行回收死元组并回填 FSM；索引清理在合并阶段串行执行（PG 亦然，基于 bulkdelete 语义）。`CONCURRENTLY` 与 `PARALLEL` 可组合。`tests/parallel_vacuum_test.cpp` 验证分片覆盖、多线程回收正确性与 FSM 一致性
 - **PG 参考**: `VACUUM (PARALLEL n)`
-- **影响**: 大表 VACUUM 慢，影响高负载下的维护窗口
-- **实现路径**:
-  1. 将 `VACUUM` 实现拆分为多个并行 worker
-  2. 每个 worker 负责一个 page range
-  3. 增加 `parallel_vacuum_workers` GUC
-- **预估工作量**: 3-5 天
-- **相关文件**: `src/commands/TableManage.cpp`
+- **残余缺口**: 独立 `parallel_vacuum_worker` 后端进程池、按索引大小的负载均衡（leader 参与回收）、`PARALLEL` 上限自动推导（`min(maintenance_workers, indexes/2)`）
+- **预估工作量**: ~~3-5 天~~ 已完成
+- **相关文件**: `src/commands/TableManage.cpp`, `src/main.cpp`
+
+### 2026-08-20 第二批补记（本批 6 项）
+1. ✅ P1-7 PL/pgSQL 最小解释器（UDF body 两阶段解释执行，见 P1-7）
+2. ✅ P1-8 `VACUUM (PARALLEL n)` 页分片并行回收（见 P1-8）
+3. ✅ `pg_stats`/`pg_statistic` 兼容视图（`queryPgCatalog` 读取 `.stats` 行数/MCV/直方图，`tests/pg_stats_test.cpp`）
+4. ✅ `unnest()` 表函数（`UnnestOp`，FROM 子句与投影两路径）
+5. ✅ TimeZone GUC 会话渲染（timestamptz 输出 `+HH:MM` 后缀，防双重应用）
+6. ✅ 多表 join 贪心搜索（≥2 个 JOIN 的 FROM 链解析为表+ON 谓词，按 `1/max(ndistinct)` 估计选最小对起步，中间结果物化临时表，列名冲突去重+来源映射，`tests/multijoin_e2e_test.py`）
+7. ✅ deferrable EXCLUDE（元素级队列 + COMMIT 当前版本/HOT 重定向 recheck）
+8. ✅ FTS `ts_rank` weights float4[] 与 `<->` 短语匹配（递归下降 `! > <-> > & > |`，`setweight()`）
+回归基线：PASS=160 FAIL=0 + E2E（multijoin/timestamptz/unnest 等 6 套 Python E2E 全绿）
 
 ### P1-9: 自定义成本函数 (Custom Cost Functions)
 - **类别**: 优化器 / 扩展性
@@ -305,7 +312,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P1-12: 统计驱动的完整代价模型 (统计采集已备，消费不全)
 - **类别**: 优化器 / 统计
-- **✅ 已完成（本批实现）**: `estimateSelectivity` 消费 MCV（热值精确频率 count/rows）与等深直方图（范围谓词桶内线性插值，数值/文本双路径，`!=` 取补）；新增 `estimateJoinSel`（eqjoinsel：1/max(nd_l,nd_r)）接入三种 join 的 EXPLAIN rows 与 `buildJoinPlan` 成本（无索引 NLJ 计入输出基数、hash build 侧按键密度选边）（`tests/stats_planner_test.cpp`）。多表 join 顺序 DP 搜索与 `pg_stats` 视图仍未做
+- **✅ 已完成（本批实现）**: `estimateSelectivity` 消费 MCV（热值精确频率 count/rows）与等深直方图（范围谓词桶内线性插值，数值/文本双路径，`!=` 取补）；新增 `estimateJoinSel`（eqjoinsel：1/max(nd_l,nd_r)）接入三种 join 的 EXPLAIN rows 与 `buildJoinPlan` 成本（无索引 NLJ 计入输出基数、hash build 侧按键密度选边）（`tests/stats_planner_test.cpp`）。多表 join 顺序 DP 搜索与 `pg_stats` 视图仍未做（后续批次已补：`pg_stats`/`pg_statistic` 视图 + 多表 join 贪心搜索，见下「第二批」注记）
 - **现状**: `ANALYZE` 已采集并持久化到 `.stats`：每列 cardinality、min/max、等深直方图、MCV top-N（`TableManage.h` `ColumnStats`，`computeMCV`，含多列统计 `getMultiColumnStats`）；但 planner 消费极不完全——`estimateSelectivity` 仅 `=` 用 cardinality（回退 0.1），`!=/like` 硬编码 0.9/0.2，范围谓词一律 0.3（**直方图与 MCV 采了没人用**）；join 算法选择用行数+索引存在的固定公式（`estimateJoinCost`），无 `eqjoinsel` 风格的键重叠估计；join 顺序只有 build/outer 交换，无多表动态规划/贪心搜索；且这些选择率目前只影响 EXPLAIN 展示，是否影响实际计划生成需逐路径核对
 - **PG 参考**: `pg_stats` 直方图/MCV/correlation 驱动的 `eqsel/neqsel/scalarea_sel/eqjoinsel` + join 顺序动态规划
 - **影响**: 范围查询行数估计偏差 3×+，倾斜数据（MCV 本可纠正）下选错 join 算法/顺序，多表 join 顺序次优
@@ -436,7 +443,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-9: Deferrable 约束扩展到 CHECK 之外
 - **类别**: 数据完整性
-- **✅ 已完成（本批实现）**: parser 在 named/unnamed 两种表约束形式的 PK/UNIQUE/FK/EXCLUDE 上解析 `DEFERRABLE [INITIALLY {DEFERRED|IMMEDIATE}]`；`DeferredCheck` 扩展 Kind{Unique,ForeignKey}+payload，单列 UNIQUE（列级+表级）与单列 FK 当前 deferred 时入队、COMMIT 时验证（UNIQUE 重扫排除自身 rid，FK 查父表），失败回滚；`SET CONSTRAINTS ALL IMMEDIATE` 恢复立即检查（`tests/deferrable_constraints_test.cpp`）。PK（严格 B+ 树插入）与 EXCLUDE 的延迟、级联交互未做
+- **✅ 已完成（本批实现）**: parser 在 named/unnamed 两种表约束形式的 PK/UNIQUE/FK/EXCLUDE 上解析 `DEFERRABLE [INITIALLY {DEFERRED|IMMEDIATE}]`；`DeferredCheck` 扩展 Kind{Unique,ForeignKey}+payload，单列 UNIQUE（列级+表级）与单列 FK 当前 deferred 时入队、COMMIT 时验证（UNIQUE 重扫排除自身 rid，FK 查父表），失败回滚；`SET CONSTRAINTS ALL IMMEDIATE` 恢复立即检查（`tests/deferrable_constraints_test.cpp`）。PK（严格 B+ 树插入）与 EXCLUDE 的延迟、级联交互未做（EXCLUDE deferrable 已于后续批次实现：元素级 recheck 队列、COMMIT 时按当前版本+HOT 重定向解析验证、autocommit 立即检查）
 - **现状**: 已有：列级 CHECK 约束的 `DEFERRABLE INITIALLY DEFERRED`（延迟队列 commit 时验证，`runDeferredCheck`），`SET CONSTRAINTS {name|ALL} {DEFERRED|IMMEDIATE}` 通过 `constraintMode_` 生效（per-transaction，all-gaps-todo 1.1.53 已记）。仍缺：FK 的 deferrable（`ON DELETE CASCADE` 等动作与延迟检查的交互）、UNIQUE/PRIMARY KEY/EXCLUDE 的 deferrable（parser 无这些约束上的 `DEFERRABLE` 修饰）、constraint trigger 的 deferred 触发
 - **PG 参考**: 各类约束的 `DEFERRABLE INITIALLY {DEFERRED|IMMEDIATE}`
 - **影响**: 环状 FK、自引用行、批量重排唯一键等模式无法工作
@@ -450,7 +457,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-10: 数组类型的表达式/函数完整语义
 - **类别**: 类型系统
-- **✅ 已完成（本批实现）**: `ARRAY[...]` 构造器（parser 产生式→`__array_construct` 内置函数，NULL/引用规则同 PG 输出）、切片 `a[lo:hi]`（含负下标/开放边界/钳制）、下标 `a[i]` 负数从尾部、`@>`/`<@` 与 SQL 数组/JSON 自动判别的包含运算（`tests/array_expr_test.cpp`）。`unnest()` 表函数、协议 binary 数组 I/O 仍缺
+- **✅ 已完成（本批实现）**: `ARRAY[...]` 构造器（parser 产生式→`__array_construct` 内置函数，NULL/引用规则同 PG 输出）、切片 `a[lo:hi]`（含负下标/开放边界/钳制）、下标 `a[i]` 负数从尾部、`@>`/`<@` 与 SQL 数组/JSON 自动判别的包含运算（`tests/array_expr_test.cpp`）。`unnest()` 表函数已补（`FROM unnest(...)` 与无 FROM SELECT 两路径，`UnnestOp` 结构化展开，`tests/unnest_test.cpp`+E2E）；协议 binary 数组 I/O 仍缺
 - **现状**: 已有：数组列识别与字面量校验/规范化（`tests/array_test.cpp`）、数组下标 `a[i]`（parser postfix `[]` + `ExprEvaluator` 求值，含多维）、`= ANY(arr)`/`ALL` 经 text-rewrite 到 `array_contains`（`src/main.cpp` 预处理，Volcano 路径是否覆盖需核对）、`array_agg` 聚合（`TableManage.cpp`）。仍缺：`ARRAY[...]` 构造器表达式、切片 `a[1:3]`（parser 注释提及但求值未见）、`@>`/`<@` 包含操作符、`unnest()`、数组比较/哈希语义与协议 binary 数组 I/O（all-gaps-todo 2.15 已记）
 - **PG 参考**: array functions/operators, `unnest`, `@>`
 - **影响**: 常用数组运算（构造、切片、包含判断、展开为行）缺失
@@ -477,7 +484,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P2-12: Interval 运算与时区转换
 - **类别**: 类型系统 / 时区
-- **✅ 已完成（本批实现）**: `ExprEvaluator` interval 双基（月+微秒）算术：`timestamp±interval`（日历月进位+日钳制+微秒进位）、`interval±interval`、`interval*/number`、无类型 interval 字面量邻接推断；`AT TIME ZONE`（`ts AT TIME ZONE 'zone'` 双向：UTC/GMT/±HH[:MM]/±HHMM 偏移，`timezone(zone,ts)` 函数）；`::type` 扫描不再吞掉 AT TIME ZONE（`tests/interval_arith_test.cpp`）。TimeZone GUC 会话显示与 interval typmod 限定仍缺
+- **✅ 已完成（本批实现）**: `ExprEvaluator` interval 双基（月+微秒）算术：`timestamp±interval`（日历月进位+日钳制+微秒进位）、`interval±interval`、`interval*/number`、无类型 interval 字面量邻接推断；`AT TIME ZONE`（`ts AT TIME ZONE 'zone'` 双向：UTC/GMT/±HH[:MM]/±HHMM 偏移，`timezone(zone,ts)` 函数）；`::type` 扫描不再吞掉 AT TIME ZONE（`tests/interval_arith_test.cpp`）。TimeZone GUC 会话显示已补（`SET TIME ZONE`/`timezone` GUC 驱动 timestamptz 输出按会话偏移渲染 `+HH:MM` 后缀，SELECT 输出边界防双重应用，E2E `timestamptz_e2e_test.py`）；interval typmod 限定仍缺
 - **现状**: interval 已有列类型、字面量解析与 PostgreSQL 风格规范化（`tests/interval_test.cpp`：verbose 单位/`HH:MM:SS`/`Y-M`/裸秒/`ago`）。仍缺：`timestamp + interval` 等 interval 算术（`ExprEvaluator` 无 interval 运算分支）、`AT TIME ZONE` 双向转换（代码库无任何实现）、`TimeZone` GUC 与 timestamptz 按会话时区显示、interval 字段限定（`INTERVAL DAY TO SECOND`）
 - **PG 参考**: interval arithmetic, `AT TIME ZONE`, `TimeZone` GUC
 - **影响**: 时间偏移计算与跨时区应用无法正确表达
