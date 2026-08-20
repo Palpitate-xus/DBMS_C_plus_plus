@@ -93,6 +93,39 @@ private:
 // ========================================================================
 // TableScan: full table scan using forEachRow
 // ========================================================================
+// UnnestOp: expand an array literal (or any expression producing an array
+// text value) into one row per element.  Output rows carry a single column
+// named "unnest"; the companion unnestTableSchema() exposes that shape to
+// projection/sort code that expects a real table.
+class UnnestOp : public Operator {
+public:
+    UnnestOp(const std::string& arrayLiteral, const std::string& outputColumn);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    double estimatedRows() const override { return static_cast<double>(elements_.size()); }
+    double estimatedCost() const override { return static_cast<double>(elements_.size()); }
+
+    const std::string& outputColumn() const { return column_; }
+    // Split a PG array literal {a,b,c} or [a,b,c] into trimmed elements,
+    // honoring single/double quotes.
+    static std::vector<std::string> splitArrayLiteral(const std::string& literal);
+    // Fixed-width column layout helper: rows emitted by this operator are
+    // the raw element text followed by a single space (single-column shape
+    // shared with the legacy engine row format).
+    static constexpr const char* kVirtualTableName = "unnest";
+
+private:
+    std::string literal_;
+    std::string column_;
+    std::vector<std::string> elements_;
+    size_t pos_ = 0;
+};
+
+// Synthesized schema for UnnestOp's virtual relation (one column "unnest").
+TableSchema unnestTableSchema();
+
 class TableScanOp : public Operator {
 public:
     TableScanOp(StorageEngine* engine, const std::string& dbname,

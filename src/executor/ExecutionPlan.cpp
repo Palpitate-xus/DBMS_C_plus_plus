@@ -109,6 +109,96 @@ bool TableScanOp::open() {
     return true;
 }
 
+// ========================================================================
+// UnnestOp: array literal -> one row per element
+// ========================================================================
+UnnestOp::UnnestOp(const std::string& arrayLiteral, const std::string& outputColumn)
+    : literal_(arrayLiteral), column_(outputColumn) {}
+
+std::vector<std::string> UnnestOp::splitArrayLiteral(const std::string& literal) {
+    std::string arr = literal;
+    // Case-insensitive helpers for prefix forms.
+    auto lowerPrefix = [](const std::string& s, const char* pre) {
+        size_t n = std::strlen(pre);
+        if (s.size() < n) return false;
+        for (size_t i = 0; i < n; ++i) {
+            if (std::tolower(static_cast<unsigned char>(s[i])) != pre[i]) return false;
+        }
+        return true;
+    };
+    // ARRAY[1,2,3] (any case) -> keep bracketed list only
+    size_t arrPrefixPos = std::string::npos;
+    for (size_t i = 0; i + 6 <= arr.size(); ++i) {
+        if (lowerPrefix(arr.substr(i, 6), "array[")) { arrPrefixPos = i; break; }
+    }
+    if (arrPrefixPos != std::string::npos) {
+        arr = arr.substr(arrPrefixPos + 5);
+    } else if (lowerPrefix(arr, "array_get(array,") ) {
+        // sqlProcessor-mangled form: array_get(array, 1,2,3) -> 1,2,3
+        size_t comma = arr.find(',');
+        size_t close = arr.rfind(')');
+        if (comma != std::string::npos && close != std::string::npos && close > comma) {
+            arr = arr.substr(comma + 1, close - comma - 1);
+        }
+    }
+    while (!arr.empty() && (arr.front() == ' ' || arr.front() == '\t')) arr.erase(arr.begin());
+    while (!arr.empty() && (arr.back() == ' ' || arr.back() == '\t')) arr.pop_back();
+    if (arr.size() >= 2 && (arr.front() == '{' || arr.front() == '[') &&
+        (arr.back() == '}' || arr.back() == ']')) {
+        arr = arr.substr(1, arr.size() - 2);
+    }
+    std::vector<std::string> elems;
+    size_t ai = 0;
+    while (ai < arr.size()) {
+        while (ai < arr.size() && std::isspace(static_cast<unsigned char>(arr[ai]))) ++ai;
+        if (ai >= arr.size()) break;
+        std::string elem;
+        if (arr[ai] == '\'' || arr[ai] == '"') {
+            char q = arr[ai++];
+            while (ai < arr.size() && arr[ai] != q) elem += arr[ai++];
+            if (ai < arr.size()) ++ai;
+        } else {
+            while (ai < arr.size() && arr[ai] != ',') elem += arr[ai++];
+        }
+        // trim
+        size_t b = 0, e = elem.size();
+        while (b < e && std::isspace(static_cast<unsigned char>(elem[b]))) ++b;
+        while (e > b && std::isspace(static_cast<unsigned char>(elem[e - 1]))) --e;
+        elems.push_back(elem.substr(b, e - b));
+        if (ai < arr.size() && arr[ai] == ',') ++ai;
+    }
+    return elems;
+}
+
+bool UnnestOp::open() {
+    elements_ = splitArrayLiteral(literal_);
+    pos_ = 0;
+    return true;
+}
+
+bool UnnestOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
+    if (pos_ >= elements_.size()) return false;
+    // Single-column row layout: "<value> " matching the engine's
+    // space-terminated column convention.
+    outRow = elements_[pos_] + " ";
+    ++pos_;
+    rtInstr_.emitted = true;
+    return true;
+}
+
+void UnnestOp::close() {
+    elements_.clear();
+    pos_ = 0;
+}
+
+TableSchema unnestTableSchema() {
+    TableSchema t;
+    t.tablename = UnnestOp::kVirtualTableName;
+    t.append(makeVarCharColumn("unnest", false, 256, false));
+    return t;
+}
+
 bool TableScanOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (pos_ >= rows_.size()) return false;
