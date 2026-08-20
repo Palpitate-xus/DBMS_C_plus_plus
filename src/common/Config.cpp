@@ -90,6 +90,11 @@ bool Config::validate() const {
            workMemKb > 0 && workMemKb <= 100000000 &&
            maxParallelWorkersPerGather >= 0 &&
            maxParallelWorkersPerGather <= 128 &&
+           std::isfinite(seqPageCost) && seqPageCost >= 0.0 &&
+           std::isfinite(randomPageCost) && randomPageCost >= 0.0 &&
+           std::isfinite(cpuTupleCost) && cpuTupleCost >= 0.0 &&
+           std::isfinite(cpuIndexTupleCost) && cpuIndexTupleCost >= 0.0 &&
+           std::isfinite(cpuOperatorCost) && cpuOperatorCost >= 0.0 &&
            std::isfinite(autoExplainThresholdMs) && autoExplainThresholdMs >= 0.0 &&
            sqlStatsMaxEntries > 0 && sqlStatsMaxEntries <= 1000000;
 }
@@ -118,7 +123,7 @@ bool assignParameter(Config& config, const std::string& key,
     else if (key == "deadlock_timeout_ms" || key == "deadlock_timeout") parsed = parseInt(value, config.deadlockTimeoutMs);
     else if (key == "work_mem_kb" || key == "work_mem") parsed = parseSize(value, config.workMemKb);
     else if (key == "enable_seq_scan") parsed = parseBool(value, config.enableSeqScan);
-    else if (key == "enable_hash_join") parsed = parseBool(value, config.enableHashJoin);
+    else if (key == "enable_hash_join" || key == "enable_hashjoin") parsed = parseBool(value, config.enableHashJoin);
     else if (key == "enable_merge_join") parsed = parseBool(value, config.enableMergeJoin);
     else if (key == "max_parallel_workers_per_gather") {
         parsed = parseInt(value, config.maxParallelWorkersPerGather);
@@ -127,6 +132,18 @@ bool assignParameter(Config& config, const std::string& key,
         parsed = parseDouble(value, config.autoExplainThresholdMs);
     } else if (key == "pg_stat_statements.max") {
         parsed = parseSize(value, config.sqlStatsMaxEntries);
+    } else if (key == "seq_page_cost") {
+        parsed = parseDouble(value, config.seqPageCost);
+    } else if (key == "random_page_cost") {
+        parsed = parseDouble(value, config.randomPageCost);
+    } else if (key == "cpu_tuple_cost") {
+        parsed = parseDouble(value, config.cpuTupleCost);
+    } else if (key == "cpu_index_tuple_cost") {
+        parsed = parseDouble(value, config.cpuIndexTupleCost);
+    } else if (key == "cpu_operator_cost") {
+        parsed = parseDouble(value, config.cpuOperatorCost);
+    } else if (key == "enable_nestloop") {
+        parsed = parseBool(value, config.enableNestloop);
     } else {
         return false;
     }
@@ -185,6 +202,12 @@ void Config::printAll() const {
               << "enable_hash_join " << (enableHashJoin ? "on" : "off") << "\n"
               << "enable_merge_join " << (enableMergeJoin ? "on" : "off") << "\n"
               << "max_parallel_workers_per_gather " << maxParallelWorkersPerGather << "\n"
+              << "seq_page_cost " << seqPageCost << "\n"
+              << "random_page_cost " << randomPageCost << "\n"
+              << "cpu_tuple_cost " << cpuTupleCost << "\n"
+              << "cpu_index_tuple_cost " << cpuIndexTupleCost << "\n"
+              << "cpu_operator_cost " << cpuOperatorCost << "\n"
+              << "enable_nestloop " << (enableNestloop ? "on" : "off") << "\n"
               << "auto_explain " << (autoExplainEnabled ? "on" : "off") << "\n"
               << "auto_explain_threshold_ms " << autoExplainThresholdMs << "\n"
               << "pg_stat_statements.max " << sqlStatsMaxEntries << "\n";
@@ -218,6 +241,12 @@ bool Config::save(const std::string& filename) const {
         << "enable_hash_join=" << (enableHashJoin ? "on" : "off") << "\n"
         << "enable_merge_join=" << (enableMergeJoin ? "on" : "off") << "\n"
         << "max_parallel_workers_per_gather=" << maxParallelWorkersPerGather << "\n"
+        << "seq_page_cost=" << seqPageCost << "\n"
+        << "random_page_cost=" << randomPageCost << "\n"
+        << "cpu_tuple_cost=" << cpuTupleCost << "\n"
+        << "cpu_index_tuple_cost=" << cpuIndexTupleCost << "\n"
+        << "cpu_operator_cost=" << cpuOperatorCost << "\n"
+        << "enable_nestloop=" << (enableNestloop ? "on" : "off") << "\n"
         << "auto_explain=" << (autoExplainEnabled ? "on" : "off") << "\n"
         << "auto_explain_threshold_ms=" << autoExplainThresholdMs << "\n"
         << "pg_stat_statements.max=" << sqlStatsMaxEntries << "\n";

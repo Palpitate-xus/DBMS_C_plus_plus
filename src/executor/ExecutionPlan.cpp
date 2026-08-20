@@ -26,6 +26,7 @@ namespace dbms {
 
 // Parallel query support
 int QueryPlanner::parallelWorkers_ = 0;
+QueryPlanner::CostModel QueryPlanner::costModel_{};
 
 static std::string trimExec(const std::string& value) {
     const size_t first = value.find_first_not_of(" \t\r\n");
@@ -2966,21 +2967,82 @@ OpPtr QueryPlanner::buildSetOperationPlan(OpPtr left, OpPtr right,
 static double estimateJoinCost(size_t leftRows, size_t rightRows,
                                 bool rightIndexed,
                                 const std::string& algo) {
+    return QueryPlanner::costJoinAlgorithm(
+        algo, static_cast<double>(leftRows), static_cast<double>(rightRows),
+        rightIndexed);
+}
+
+void QueryPlanner::setCostParameter(const std::string& name, double value) {
+    if (value < 0) return;
+    if (name == "seq_page_cost") costModel_.seqPageCost = value;
+    else if (name == "random_page_cost") costModel_.randomPageCost = value;
+    else if (name == "cpu_tuple_cost") costModel_.cpuTupleCost = value;
+    else if (name == "cpu_index_tuple_cost") costModel_.cpuIndexTupleCost = value;
+    else if (name == "cpu_operator_cost") costModel_.cpuOperatorCost = value;
+}
+
+void QueryPlanner::setCostEnable(const std::string& algo, bool on) {
+    if (algo == "nestloop" || algo == "nlj") costModel_.enableNestloop = on;
+    else if (algo == "hashjoin" || algo == "hash") costModel_.enableHashJoin = on;
+    else if (algo == "mergejoin" || algo == "merge") costModel_.enableMergeJoin = on;
+}
+
+double QueryPlanner::costJoinAlgorithm(const std::string& algo,
+                                       double leftRows, double rightRows,
+                                       bool rightIndexed) {
+    // Custom hook wins when installed and it accepts the algorithm.
+    if (costModel_.customCost) {
+        double custom = costModel_.customCost(algo, leftRows, rightRows,
+                                              rightIndexed);
+        if (custom >= 0) return custom;
+    }
+    // Disabled algorithms price themselves out of consideration.
+    if (algo == "nlj" && !costModel_.enableNestloop) return 1e18;
+    if (algo == "hash" && !costModel_.enableHashJoin) return 1e18;
+    if (algo == "merge" && !costModel_.enableMergeJoin) return 1e18;
+    const CostModel& cm = costModel_;
+    // Costs stay on the row-touch scale so the planner's absolute
+    // thresholds (small-table NLJ shortcut, selectivity override) keep
+    // their meaning; the GUC parameters modulate relative preferences.
+    const double pageRatio = cm.randomPageCost / std::max(1e-9, cm.seqPageCost);
     if (algo == "nlj") {
-        // NLJ: O(left * right) without index; O(left * log(right)) with index on right
+        // NLJ: O(left * right) without index; O(left * log(right)) with
+        // index on right.  Inner index probes scatter across the heap, so
+        // they pay the random/sequential page ratio.
         double perLeft = rightRows;
-        if (rightIndexed) perLeft = std::max(size_t(1), rightRows / 10);  // index lookup
-        return leftRows * perLeft;
+        if (rightIndexed) {
+            perLeft = std::max(1.0, rightRows / 10) * pageRatio;
+        }
+        return leftRows * perLeft * (1.0 + cm.cpuOperatorCost);
     }
     if (algo == "merge") {
-        // Merge: O(left + right) sorted merge
-        return leftRows + rightRows;
+        // Merge: O(left + right) sorted merge over sequential pages.
+        return (leftRows + rightRows) * (1.0 + cm.cpuTupleCost);
     }
     if (algo == "hash") {
-        // Hash: O(left + right) build + probe
-        return leftRows + rightRows * 1.2;
+        // Hash: one build pass plus a probe pass; the build side pays the
+        // CPU tuple cost twice (insert + probe hash).
+        return (leftRows + rightRows * 1.2) * (1.0 + cm.cpuTupleCost);
     }
     return leftRows * rightRows;  // fallback (worst case cartesian)
+}
+
+double QueryPlanner::costScan(const std::string& strategy,
+                              double tuples, double pages) {
+    if (costModel_.customCost) {
+        double custom = costModel_.customCost(strategy, tuples, 0.0, false);
+        if (custom >= 0) return custom;
+    }
+    const CostModel& cm = costModel_;
+    if (strategy == "seq_scan") {
+        return pages * cm.seqPageCost + tuples * cm.cpuTupleCost;
+    }
+    if (strategy == "index_scan") {
+        // Matching tuples cost an index-tuple CPU each; nonsequential heap
+        // fetches pay the random-page price.
+        return tuples * (cm.cpuIndexTupleCost + cm.randomPageCost);
+    }
+    return pages * cm.seqPageCost + tuples * cm.cpuTupleCost;
 }
 
 // Runtime statistics are useful only after an exact complete scan (and are

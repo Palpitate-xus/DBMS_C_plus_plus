@@ -997,8 +997,47 @@ public:
     static int parallelWorkers() { return parallelWorkers_; }
     static void setParallelWorkers(int n) { parallelWorkers_ = n < 0 ? 0 : n; }
 
+    // ------------------------------------------------------------------
+    // Cost model (P1-9 custom cost functions)
+    // PostgreSQL-style cost parameters plus per-algorithm override hooks.
+    // Hooks are plain function pointers so extensions (and tests) can
+    // install custom costing without linking against planner internals.
+    // ------------------------------------------------------------------
+    struct CostModel {
+        // GUC-backed parameters (SET seq_page_cost = ... etc.)
+        double seqPageCost = 1.0;
+        double randomPageCost = 4.0;
+        double cpuTupleCost = 0.01;
+        double cpuIndexTupleCost = 0.005;
+        double cpuOperatorCost = 0.0025;
+        bool enableNestloop = true;
+        bool enableHashJoin = true;
+        bool enableMergeJoin = true;
+
+        // Custom cost overrides: return < 0 to fall back to the built-in
+        // model.  algo is "seq_scan", "index_scan", "nlj", "merge", "hash".
+        using CostFn = double (*)(const std::string& algo,
+                                  double leftRows, double rightRows,
+                                  bool rightIndexed);
+        CostFn customCost = nullptr;
+        void* customCostArg = nullptr;
+    };
+    static const CostModel& costModel() { return costModel_; }
+    static void setCostModel(const CostModel& cm) { costModel_ = cm; }
+    // Convenience setters used by SET handlers.
+    static void setCostParameter(const std::string& name, double value);
+    static void setCostEnable(const std::string& algo, bool on);
+    // Cost a join algorithm under the current model (custom hook first).
+    static double costJoinAlgorithm(const std::string& algo,
+                                    double leftRows, double rightRows,
+                                    bool rightIndexed);
+    // Cost a scan strategy under the current model.
+    static double costScan(const std::string& strategy,
+                           double tuples, double pages);
+
 private:
     static int parallelWorkers_;
+    static CostModel costModel_;
 };
 
 } // namespace dbms

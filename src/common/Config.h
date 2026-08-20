@@ -31,6 +31,13 @@ struct Config {
     bool autoExplainEnabled = false; // auto_explain: log query plan for slow queries
     double autoExplainThresholdMs = 100.0; // threshold for auto_explain
     size_t sqlStatsMaxEntries = 5000; // bounded pg_stat_statements-style entries
+    // Planner cost parameters (PostgreSQL names).
+    double seqPageCost = 1.0;
+    double randomPageCost = 4.0;
+    double cpuTupleCost = 0.01;
+    double cpuIndexTupleCost = 0.005;
+    double cpuOperatorCost = 0.0025;
+    bool enableNestloop = true;
 
     // Load from file; returns true only when the file is absent or every
     // recognized setting is valid. A present but malformed file is rejected

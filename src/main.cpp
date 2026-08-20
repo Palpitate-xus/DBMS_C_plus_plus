@@ -103,6 +103,21 @@ int g_checkpointInterval = 30;  // auto checkpoint every N SQLs
 
 static void invalidatePlanCacheForConfigChange();
 
+// Push Config-backed planner cost parameters into the QueryPlanner cost
+// model (custom cost hooks installed by extensions are preserved).
+static void syncPlannerCostModel(const dbms::Config& cfg) {
+    dbms::QueryPlanner::CostModel cm = dbms::QueryPlanner::costModel();
+    cm.seqPageCost = cfg.seqPageCost;
+    cm.randomPageCost = cfg.randomPageCost;
+    cm.cpuTupleCost = cfg.cpuTupleCost;
+    cm.cpuIndexTupleCost = cfg.cpuIndexTupleCost;
+    cm.cpuOperatorCost = cfg.cpuOperatorCost;
+    cm.enableNestloop = cfg.enableNestloop;
+    cm.enableHashJoin = cfg.enableHashJoin;
+    cm.enableMergeJoin = cfg.enableMergeJoin;
+    dbms::QueryPlanner::setCostModel(cm);
+}
+
 static bool installReloadedConfig(const dbms::Config& next) {
     if (!next.validate() ||
         !dbms::setSqlStatsMaxEntries(next.sqlStatsMaxEntries)) {
@@ -112,6 +127,7 @@ static bool installReloadedConfig(const dbms::Config& next) {
     g_slowQueryThresholdMs = next.slowQueryThresholdMs;
     g_checkpointInterval = next.checkpointInterval;
     dbms::QueryPlanner::setParallelWorkers(next.maxParallelWorkersPerGather);
+    syncPlannerCostModel(next);
     invalidatePlanCacheForConfigChange();
     return true;
 }
@@ -1363,11 +1379,41 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     // Only settings represented in Session may be changed with ordinary SET.
     // Silently writing process-global state here would make one connection
     // change the behavior of every other connection.
+    // Planner cost GUCs are session-scoped like PostgreSQL's: they retune
+    // this session's cost model without touching the persisted config.
+    static const std::set<std::string> kCostParams = {
+        "seq_page_cost", "random_page_cost", "cpu_tuple_cost",
+        "cpu_index_tuple_cost", "cpu_operator_cost",
+        "enable_nestloop", "enable_hashjoin", "enable_merge_join",
+    };
     if (!isGlobal) {
         dbms::Config candidate = g_config;
         if (!candidate.setParameter(param, val)) {
             cout << "Invalid value for parameter " << param << endl;
             return true;
+        }
+        if (kCostParams.count(param)) {
+            // Session-scoped: patch the live cost model in place so
+            // earlier session overrides survive (they are not written
+            // back to g_config).
+            if (param == "seq_page_cost")
+                dbms::QueryPlanner::setCostParameter("seq_page_cost", candidate.seqPageCost);
+            else if (param == "random_page_cost")
+                dbms::QueryPlanner::setCostParameter("random_page_cost", candidate.randomPageCost);
+            else if (param == "cpu_tuple_cost")
+                dbms::QueryPlanner::setCostParameter("cpu_tuple_cost", candidate.cpuTupleCost);
+            else if (param == "cpu_index_tuple_cost")
+                dbms::QueryPlanner::setCostParameter("cpu_index_tuple_cost", candidate.cpuIndexTupleCost);
+            else if (param == "cpu_operator_cost")
+                dbms::QueryPlanner::setCostParameter("cpu_operator_cost", candidate.cpuOperatorCost);
+            else if (param == "enable_nestloop")
+                dbms::QueryPlanner::setCostEnable("nestloop", candidate.enableNestloop);
+            else if (param == "enable_hashjoin")
+                dbms::QueryPlanner::setCostEnable("hashjoin", candidate.enableHashJoin);
+            else if (param == "enable_merge_join")
+                dbms::QueryPlanner::setCostEnable("mergejoin", candidate.enableMergeJoin);
+            cout << "Set " << param << " = " << val << " (session)" << endl;
+            return false;
         }
         if (param == "statement_timeout_ms" || param == "statement_timeout") {
             s.statementTimeoutMs = candidate.statementTimeoutMs;
@@ -1416,6 +1462,7 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     g_slowQueryThresholdMs = g_config.slowQueryThresholdMs;
     g_checkpointInterval = g_config.checkpointInterval;
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
+    syncPlannerCostModel(g_config);
     invalidatePlanCacheForConfigChange();
     if (!g_config.save("dbms.conf")) {
         g_config = previous;
@@ -1423,6 +1470,7 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
         g_slowQueryThresholdMs = previous.slowQueryThresholdMs;
         g_checkpointInterval = previous.checkpointInterval;
         dbms::QueryPlanner::setParallelWorkers(previous.maxParallelWorkersPerGather);
+        syncPlannerCostModel(previous);
         s.statementTimeoutMs = previousSessionStatementTimeoutMs;
         s.defaultStatementTimeoutMs = previousSessionDefaultStatementTimeoutMs;
         s.lockTimeoutMs = previousSessionLockTimeoutMs;
@@ -11996,6 +12044,43 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             return false;
         }
+        // Planner cost GUCs: SHOW from the live cost model (session-scoped
+        // SET is reflected immediately).
+        {
+            const auto& cm = dbms::QueryPlanner::costModel();
+            if (rest == "seq_page_cost") {
+                cout << "seq_page_cost " << cm.seqPageCost << endl;
+                return false;
+            }
+            if (rest == "random_page_cost") {
+                cout << "random_page_cost " << cm.randomPageCost << endl;
+                return false;
+            }
+            if (rest == "cpu_tuple_cost") {
+                cout << "cpu_tuple_cost " << cm.cpuTupleCost << endl;
+                return false;
+            }
+            if (rest == "cpu_index_tuple_cost") {
+                cout << "cpu_index_tuple_cost " << cm.cpuIndexTupleCost << endl;
+                return false;
+            }
+            if (rest == "cpu_operator_cost") {
+                cout << "cpu_operator_cost " << cm.cpuOperatorCost << endl;
+                return false;
+            }
+            if (rest == "enable_nestloop") {
+                cout << "enable_nestloop " << (cm.enableNestloop ? "on" : "off") << endl;
+                return false;
+            }
+            if (rest == "enable_hashjoin") {
+                cout << "enable_hashjoin " << (cm.enableHashJoin ? "on" : "off") << endl;
+                return false;
+            }
+            if (rest == "enable_merge_join") {
+                cout << "enable_merge_join " << (cm.enableMergeJoin ? "on" : "off") << endl;
+                return false;
+            }
+        }
         cout << "Unknown SHOW command" << endl;
         return true;
     }
@@ -13533,6 +13618,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "enable_hash_join " << (g_config.enableHashJoin ? "on" : "off") << " " << endl;
                 cout << "enable_merge_join " << (g_config.enableMergeJoin ? "on" : "off") << " " << endl;
                 cout << "max_parallel_workers_per_gather " << g_config.maxParallelWorkersPerGather << " " << endl;
+                {
+                    const auto& cm = dbms::QueryPlanner::costModel();
+                    cout << "seq_page_cost " << cm.seqPageCost << " " << endl;
+                    cout << "random_page_cost " << cm.randomPageCost << " " << endl;
+                    cout << "cpu_tuple_cost " << cm.cpuTupleCost << " " << endl;
+                    cout << "cpu_index_tuple_cost " << cm.cpuIndexTupleCost << " " << endl;
+                    cout << "cpu_operator_cost " << cm.cpuOperatorCost << " " << endl;
+                    cout << "enable_nestloop " << (cm.enableNestloop ? "on" : "off") << " " << endl;
+                }
                 cout << "auto_explain " << (g_config.autoExplainEnabled ? "on" : "off") << " " << endl;
                 cout << "auto_explain.log_min_duration " << g_config.autoExplainThresholdMs << " ms" << endl;
                 cout << "auto_vacuum " << (g_config.autoVacuumEnabled ? "on" : "off") << " " << endl;
@@ -15543,6 +15637,7 @@ int main(int argc, char* argv[]) {
     g_engine.getLockManager().setLockTimeout(g_config.lockTimeoutMs);
     g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
+    syncPlannerCostModel(g_config);
 
     // Server mode: ./dbms_main --server PORT [--insecure]
     if (argc >= 3 && std::string(argv[1]) == "--server") {
