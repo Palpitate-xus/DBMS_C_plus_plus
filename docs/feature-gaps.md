@@ -269,18 +269,19 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 7. ✅ deferrable EXCLUDE（元素级队列 + COMMIT 当前版本/HOT 重定向 recheck）
 8. ✅ FTS `ts_rank` weights float4[] 与 `<->` 短语匹配（递归下降 `! > <-> > & > |`，`setweight()`）
 回归基线：PASS=160 FAIL=0 + E2E（multijoin/timestamptz/unnest 等 6 套 Python E2E 全绿）
+9. ✅ P1-9 自定义成本函数（`QueryPlanner::CostModel` + 8 个成本 GUC + 自定义成本 hook，PASS=161）
 
-### P1-9: 自定义成本函数 (Custom Cost Functions)
+### P1-9: 自定义成本函数 (Custom Cost Functions) ✅（2026-08-20）
 - **类别**: 优化器 / 扩展性
-- **现状**: 成本模型硬编码，无法扩展
+- **现状**: ✅ `QueryPlanner::CostModel` 落地：PG 风格成本参数（`seq_page_cost`/`random_page_cost`/`cpu_tuple_cost`/`cpu_index_tuple_cost`/`cpu_operator_cost`）+ 每算法 enable 开关（nestloop/hashjoin/mergejoin，禁用计价 1e18）+ 自定义成本 hook（函数指针，返回 <0 回退内置模型）。`costJoinAlgorithm`/`costScan` 按活跃模型求值，`estimateJoinCost` 委托之 → join 算法选择完全由成本参数驱动。GUC 会话级 `SET` 原地修补模型（保留先前会话覆盖），`SET GLOBAL`/`ALTER SYSTEM` 持久化并在启动/reload 同步；`SHOW`/`pg_settings` 暴露。成本保持 row-touch 量纲，planner 绝对阈值语义不变（`tests/cost_model_test.cpp`）
 - **PG 参考**: `cost_seqscan`, `cost_index`, `cost_hashjoin` 等 hook
-- **影响**: 无法为自定义索引/算子调整成本
+- **残余缺口**: per-opclass 索引成本、`custom_cost_hook` 的多注册与优先级、`geqo`/遗传算法路径
 - **实现路径**:
-  1. 定义 `CostFunction` 接口类
-  2. 在 `QueryPlanner` 中通过函数指针/hook 调用
-  3. 增加 `SET cost_seqscan = ...` GUC 参数
-- **预估工作量**: 2-3 天
-- **相关文件**: `src/executor/ExecutionPlan.cpp`
+  1. ✅ `CostModel` 结构（参数+开关+hook）
+  2. ✅ `QueryPlanner` 中函数指针 hook 调用（自定义优先，负值回退）
+  3. ✅ `SET seq_page_cost = ...` 等 8 个 GUC（会话级粘性 + 全局持久化）
+- **预估工作量**: ~~2-3 天~~ 已完成
+- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/common/Config.{h,cpp}`, `src/main.cpp`, `tests/cost_model_test.cpp`
 
 ### P1-10: SQL 级 prepared statements 对齐 PostgreSQL 语法
 - **类别**: 会话 / 协议兼容
