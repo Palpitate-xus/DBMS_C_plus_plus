@@ -1902,11 +1902,16 @@ static std::string tsBuildVector(const std::string& text) {
     return raw;
 }
 
-// Lexeme set of a stored tsvector literal ('l1':1,5 'l2':2 ...) — tolerant
-// of plain text input (treated as its token set) so @@ composes with any
-// text column.
-static std::map<std::string, std::vector<int>> tsLexemes(const std::string& v) {
-    std::map<std::string, std::vector<int>> out;
+// Lexeme positions of a stored tsvector literal ('l1':1,2A 'l2':3 ...) —
+// tolerant of plain text input (treated as its token set) so @@ composes
+// with any text column.  Each occurrence is (position, weight) with weight
+// one of 'A'..'D' ('D' when unlabeled, as PostgreSQL implies).
+struct TsVectorLex {
+    // lexeme -> (position, weight) occurrences
+    std::map<std::string, std::vector<std::pair<int, char>>> occ;
+};
+static TsVectorLex tsLexemesW(const std::string& v) {
+    TsVectorLex out;
     size_t i = 0, n = v.size();
     while (i < n) {
         // skip to next lexeme start: bare word or quoted
@@ -1924,7 +1929,7 @@ static std::map<std::string, std::vector<int>> tsLexemes(const std::string& v) {
             while (i < n && v[i] != ' ' && v[i] != ':') { lex += v[i]; ++i; }
         }
         if (lex.empty()) { if (i < n && v[i] == ':') ++i; continue; }
-        std::vector<int> positions;
+        std::vector<std::pair<int, char>> positions;
         if (i < n && v[i] == ':') {
             ++i;
             while (i < n && std::isdigit(static_cast<unsigned char>(v[i]))) {
@@ -1932,22 +1937,226 @@ static std::map<std::string, std::vector<int>> tsLexemes(const std::string& v) {
                 while (i < n && std::isdigit(static_cast<unsigned char>(v[i]))) {
                     p = p * 10 + (v[i] - '0'); ++i;
                 }
-                positions.push_back(p);
-                // skip weight letters and separators
-                while (i < n && (v[i] >= 'A' && v[i] <= 'D')) ++i;
+                char w = 'D';
+                if (i < n && v[i] >= 'A' && v[i] <= 'D') { w = v[i]; ++i; }
+                positions.push_back({p, w});
                 if (i < n && v[i] == ',') { ++i; continue; }
                 break;
             }
         }
-        if (positions.empty()) positions.push_back(0);
-        out[lex] = positions;
+        if (positions.empty()) positions.push_back({0, 'D'});
+        out.occ[lex] = positions;
+    }
+    return out;
+}
+// Position-only view (keeps older call sites simple).
+static std::map<std::string, std::vector<int>> tsLexemes(const std::string& v) {
+    std::map<std::string, std::vector<int>> out;
+    TsVectorLex w = tsLexemesW(v);
+    for (const auto& kv : w.occ) {
+        std::vector<int> ps;
+        for (const auto& pw : kv.second) ps.push_back(pw.first);
+        out[kv.first] = ps;
     }
     return out;
 }
 
-// Lexemes required by a tsquery: '&'-AND separated words ('|' OR and '!'
-// NOT contribute alternatives; matching is OR-of-all-terms then AND of
-// pure-& groups when no '|' appears).
+// tsquery parsing with PostgreSQL operator precedence
+//   !  (NOT, highest)
+//   <-> (phrase / adjacency)
+//   &  (AND)
+//   |  (OR, lowest)
+// Leaf: quoted or bare lexeme.  <-> matches when the two sides occur at
+// adjacent positions (left position + 1 == right position), which is the
+// default (distance-1) meaning of <-> in PostgreSQL.
+struct TsQueryNode {
+    enum Kind { Lexeme, Not, Phrase, And, Or } kind = Lexeme;
+    std::string lexeme;
+    std::unique_ptr<TsQueryNode> l, r;
+};
+struct TsQueryParser {
+    const std::string& q;
+    size_t i = 0;
+    explicit TsQueryParser(const std::string& s) : q(s) {}
+    void skipWs() { while (i < q.size() && std::isspace(static_cast<unsigned char>(q[i]))) ++i; }
+    bool eat(const char* tok) {
+        skipWs();
+        size_t j = i;
+        for (const char* p = tok; *p; ++p) {
+            if (j >= q.size() || q[j] != *p) return false;
+            ++j;
+        }
+        i = j;
+        return true;
+    }
+    std::unique_ptr<TsQueryNode> parseLeaf() {
+        skipWs();
+        if (i >= q.size()) return nullptr;
+        if (q[i] == '(') {
+            ++i;
+            auto node = parseOr();
+            skipWs();
+            if (i < q.size() && q[i] == ')') ++i;
+            return node;
+        }
+        std::string lex;
+        if (q[i] == '\'') {
+            ++i;
+            while (i < q.size()) {
+                if (q[i] == '\'' && i + 1 < q.size() && q[i + 1] == '\'') { lex += '\''; i += 2; }
+                else if (q[i] == '\'') { ++i; break; }
+                else { lex += q[i]; ++i; }
+            }
+        } else {
+            while (i < q.size() && std::isalnum(static_cast<unsigned char>(q[i]))) {
+                lex += static_cast<char>(std::tolower(static_cast<unsigned char>(q[i])));
+                ++i;
+            }
+        }
+        if (lex.empty()) return nullptr;
+        auto n = std::make_unique<TsQueryNode>();
+        n->kind = TsQueryNode::Lexeme;
+        n->lexeme = lex;
+        return n;
+    }
+    std::unique_ptr<TsQueryNode> parseNot() {
+        skipWs();
+        if (i < q.size() && q[i] == '!') {
+            ++i;
+            auto n = std::make_unique<TsQueryNode>();
+            n->kind = TsQueryNode::Not;
+            n->l = parseNot();
+            return n;
+        }
+        return parsePhraseOperand();
+    }
+    std::unique_ptr<TsQueryNode> parsePhraseOperand() {
+        auto left = parseLeaf();
+        if (!left) return nullptr;
+        while (eat("<->")) {
+            auto right = parseLeaf();
+            if (!right) break;
+            auto n = std::make_unique<TsQueryNode>();
+            n->kind = TsQueryNode::Phrase;
+            n->l = std::move(left);
+            n->r = std::move(right);
+            left = std::move(n);
+        }
+        return left;
+    }
+    std::unique_ptr<TsQueryNode> parseAnd() {
+        auto left = parseNot();
+        if (!left) return nullptr;
+        while (true) {
+            size_t save = i;
+            if (!eat("&")) { i = save; break; }
+            auto right = parseNot();
+            if (!right) { i = save; break; }
+            auto n = std::make_unique<TsQueryNode>();
+            n->kind = TsQueryNode::And;
+            n->l = std::move(left);
+            n->r = std::move(right);
+            left = std::move(n);
+        }
+        return left;
+    }
+    std::unique_ptr<TsQueryNode> parseOr() {
+        auto left = parseAnd();
+        if (!left) return nullptr;
+        while (true) {
+            size_t save = i;
+            if (!eat("|")) { i = save; break; }
+            auto right = parseAnd();
+            if (!right) { i = save; break; }
+            auto n = std::make_unique<TsQueryNode>();
+            n->kind = TsQueryNode::Or;
+            n->l = std::move(left);
+            n->r = std::move(right);
+            left = std::move(n);
+        }
+        return left;
+    }
+};
+
+// Evaluate a query node against the vector, producing the matching
+// occurrences; returns whether the node matches at all.
+static bool tsEvalNode(const TsQueryNode* n, const TsVectorLex& vec,
+                       std::vector<std::pair<int, char>>& out) {
+    out.clear();
+    if (!n) return false;
+    switch (n->kind) {
+    case TsQueryNode::Lexeme: {
+        auto it = vec.occ.find(n->lexeme);
+        if (it == vec.occ.end()) return false;
+        out = it->second;
+        return true;
+    }
+    case TsQueryNode::Not: {
+        std::vector<std::pair<int, char>> sub;
+        if (!tsEvalNode(n->l.get(), vec, sub)) {
+            // negation of a non-match: vacuously true at a sentinel position
+            out.push_back({0, 'D'});
+            return true;
+        }
+        return false;
+    }
+    case TsQueryNode::And: {
+        std::vector<std::pair<int, char>> a, b;
+        if (!tsEvalNode(n->l.get(), vec, a)) return false;
+        if (!tsEvalNode(n->r.get(), vec, b)) return false;
+        out = a;
+        out.insert(out.end(), b.begin(), b.end());
+        return true;
+    }
+    case TsQueryNode::Or: {
+        std::vector<std::pair<int, char>> a, b;
+        bool ma = tsEvalNode(n->l.get(), vec, a);
+        bool mb = tsEvalNode(n->r.get(), vec, b);
+        out = a;
+        out.insert(out.end(), b.begin(), b.end());
+        return ma || mb;
+    }
+    case TsQueryNode::Phrase: {
+        // left <-> right: some position of left is exactly one before a
+        // position of right (PostgreSQL distance-1 phrase semantics).
+        std::vector<std::pair<int, char>> a, b;
+        if (!tsEvalNode(n->l.get(), vec, a)) return false;
+        if (!tsEvalNode(n->r.get(), vec, b)) return false;
+        bool hasZero = false;
+        for (const auto& pw : a) if (pw.first == 0) hasZero = true;
+        for (const auto& pw : b) if (pw.first == 0) hasZero = true;
+        if (hasZero) {
+            // Position information unavailable on a side: degrade to plain
+            // co-occurrence (both sides present).
+            out = a;
+            out.insert(out.end(), b.begin(), b.end());
+            return true;
+        }
+        for (const auto& la : a) {
+            for (const auto& rb : b) {
+                if (rb.first == la.first + 1) {
+                    out.push_back(la);
+                    out.push_back(rb);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    }
+    return false;
+}
+
+static bool tsQueryMatch(const TsVectorLex& vec, const std::string& query) {
+    TsQueryParser p(query);
+    auto root = p.parseOr();
+    if (!root) return false;
+    std::vector<std::pair<int, char>> hits;
+    return tsEvalNode(root.get(), vec, hits);
+}
+
+// Every literal lexeme of a query (for ts_rank coverage accounting);
+// includes lexemes under <-> phrase nodes.
 struct TsQueryTerms {
     bool allAnd = true;               // no '|' encountered
     std::vector<std::string> terms;   // every literal lexeme
@@ -1972,18 +2181,9 @@ static TsQueryTerms tsQueryTerms(const std::string& q) {
 }
 
 static ExprValue tsMatch(const std::string& vecText, const std::string& query) {
-    auto lex = tsLexemes(vecText);
-    TsQueryTerms qt = tsQueryTerms(query);
-    if (qt.terms.empty()) return ExprValue("boolean", "f", false);
-    bool match;
-    if (qt.allAnd) {
-        match = true;
-        for (const auto& t : qt.terms) if (!lex.count(t)) { match = false; break; }
-    } else {
-        match = false;
-        for (const auto& t : qt.terms) if (lex.count(t)) { match = true; break; }
-    }
-    return ExprValue("boolean", match ? "t" : "f", false);
+    TsVectorLex lex = tsLexemesW(vecText);
+    if (!tsQueryMatch(lex, query)) return ExprValue("boolean", "f", false);
+    return ExprValue("boolean", "t", false);
 }
 
 void ExprEvaluator::registerBuiltins() {
@@ -2053,13 +2253,13 @@ void ExprEvaluator::registerBuiltins() {
         }
         return ExprValue("tsquery", q, false);
     };
-    // to_tsquery([config,] text): pass through (already &/|-shaped), or
-    // synthesize &'d terms for plain words.
+    // to_tsquery([config,] text): pass through (already &/|/!/<->-shaped),
+    // or synthesize &'d terms for plain words.
     functions_["to_tsquery"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a.back().isNull) return ExprValue("tsquery", "", true);
         const std::string& v = a.back().value;
         if (v.find('&') != std::string::npos || v.find('|') != std::string::npos ||
-            v.find('!') != std::string::npos) {
+            v.find('!') != std::string::npos || v.find("<->") != std::string::npos) {
             return ExprValue("tsquery", v, false);
         }
         auto toks = tsTokenize(v);
@@ -2070,32 +2270,110 @@ void ExprEvaluator::registerBuiltins() {
         }
         return ExprValue("tsquery", q, false);
     };
-    // ts_rank(tsvector, tsquery): matched-term coverage weighted by the
-    // query's term count and positional density of matches.
+    // setweight(tsvector, 'A'..'D'): tag every lexeme occurrence of the
+    // vector with the given weight letter (PostgreSQL semantics; the
+    // canonical output keeps only non-D labels).
+    functions_["setweight"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) {
+            return ExprValue("tsvector", "", true);
+        }
+        char w = static_cast<char>(std::toupper(static_cast<unsigned char>(
+            !a[1].value.empty() ? a[1].value[0] : 'D')));
+        if (w < 'A' || w > 'D') return ExprValue("tsvector", "", true);
+        TsVectorLex lex = tsLexemesW(a[0].value);
+        std::vector<std::pair<size_t, std::string>> items;  // (sortKey..., lexeme)
+        (void)items;
+        // Serialize canonically: lexemes sorted length-first then bytewise
+        // (the engine normalizer's order), positions merged and sorted.
+        std::vector<std::string> keys;
+        for (const auto& kv : lex.occ) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end(), [](const std::string& x, const std::string& y) {
+            if (x.size() != y.size()) return x.size() < y.size();
+            return x < y;
+        });
+        std::string out;
+        for (const auto& k : keys) {
+            auto it = lex.occ.find(k);
+            if (it == lex.occ.end()) continue;
+            std::map<int, char> pos;  // dedupe by position
+            for (const auto& pw : it->second) pos[pw.first] = w;
+            if (!out.empty()) out += ' ';
+            out += '\'' + k + '\'';
+            bool any = false;
+            for (const auto& pp : pos) {
+                if (pp.first <= 0) continue;  // positionless lexeme stays bare
+                out += (any ? "," : ":");
+                any = true;
+                out += std::to_string(pp.first);
+                if (w != 'D') out += w;
+            }
+        }
+        std::string canon;
+        if (!out.empty() && g_engine.normalizeTsVectorText(out, canon)) return ExprValue("tsvector", canon, false);
+        return ExprValue("tsvector", out, false);
+    };
+    // ts_rank(tsvector, tsquery [, weights float4[]]): matched-term
+    // coverage weighted by the query's term count and positional density
+    // of matches.  The optional weights array follows PostgreSQL's
+    // {D,C,B,A} ordering (default {0.1,0.2,0.4,1.0}): each occurrence
+    // contributes its weight letter's value.
     functions_["ts_rank"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) {
             return ExprValue("double precision", "", true);
         }
-        auto lex = tsLexemes(a[0].value);
+        // weights: array literal {d,c,b,a}
+        double w[4] = {0.1, 0.2, 0.4, 1.0};
+        if (a.size() >= 3 && !a[2].isNull) {
+            const std::string& wv = a[2].value;
+            std::vector<double> parsed;
+            std::string cur;
+            for (char ch : wv) {
+                if (ch == '{' || ch == ' ') continue;
+                if (ch == ',' || ch == '}') {
+                    if (!cur.empty()) {
+                        try { parsed.push_back(std::stod(cur)); }
+                        catch (...) { parsed.push_back(0.0); }
+                        cur.clear();
+                    }
+                    if (ch == '}') break;
+                } else {
+                    cur += ch;
+                }
+            }
+            if (parsed.size() >= 4) {
+                // PostgreSQL order: {D-weight, C, B, A}
+                w[0] = parsed[0]; w[1] = parsed[1]; w[2] = parsed[2]; w[3] = parsed[3];
+            }
+        }
+        TsVectorLex lex = tsLexemesW(a[0].value);
         TsQueryTerms qt = tsQueryTerms(a[1].value);
         if (qt.terms.empty()) {
             return ExprValue("double precision", "0", false);
         }
         size_t matchedTerms = 0;
-        double posSum = 0;
+        double weightedDensity = 0;
         for (const auto& t : qt.terms) {
-            auto it = lex.find(t);
-            if (it == lex.end()) continue;
+            auto it = lex.occ.find(t);
+            if (it == lex.occ.end()) continue;
             ++matchedTerms;
-            for (int p : it->second) {
-                posSum += (p > 0) ? (1.0 / static_cast<double>(p)) : 1.0;
+            for (const auto& pw : it->second) {
+                // weights[] is in PostgreSQL's {D,C,B,A} order, so letter A
+                // maps to slot 3 and letter D to slot 0.
+                int idx = (pw.second >= 'A' && pw.second <= 'D')
+                              ? ('D' - pw.second)
+                              : 0;
+                weightedDensity += w[idx] * (pw.first > 0 ? 1.0 / pw.first : 1.0);
             }
         }
+        // Term coverage stays monotone in matched terms; the weights array
+        // scales each occurrence's positional-density contribution by its
+        // weight letter (PostgreSQL {D,C,B,A} ordering).
         double coverage = static_cast<double>(matchedTerms) /
                           static_cast<double>(qt.terms.size());
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%.4f",
-                      0.05 + coverage * 0.4 + (coverage > 0 ? std::min(0.5, posSum * 0.05) : 0.0));
+                      0.05 + coverage * 0.4 +
+                          (coverage > 0 ? std::min(0.5, weightedDensity * 0.1) : 0.0));
         return ExprValue("double precision", buf, false);
     };
 
