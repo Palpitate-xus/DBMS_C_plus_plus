@@ -12745,7 +12745,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
 
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_stats" || tname == "pg_statistic") {
             auto bpStats = g_engine.getBufferPoolStats();
             if (tname == "pg_stat_database") {
                 cout << "datname numbackends blks_read blks_hit tup_returned xact_commit xact_rollback " << endl;
@@ -12935,6 +12935,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     } catch (const std::exception& e) {
                         std::cerr << "WARNING: pg_type lookup failed: " << e.what() << std::endl;
                     }
+                }
+            } else if (tname == "pg_stats" || tname == "pg_statistic") {
+                cout << "schemaname tablename attname null_frac n_distinct "
+                        "most_common_vals most_common_freqs histogram_bounds " << endl;
+                for (const auto& row : g_engine.getPgStatsRows()) {
+                    cout << row << endl;
                 }
             }
             return false;

@@ -16216,6 +16216,91 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
     return result;
 }
 
+
+// ---------------------------------------------------------------------------
+// pg_stats / pg_statistic rows: one per (database, table, column) with
+// schemaname tablename attname null_frac n_distinct most_common_vals
+// most_common_freqs histogram_bounds.  null_frac stays 0 until per-column
+// null counts are tracked; n_distinct follows PG conventions (negative =
+// fraction of rows, -1 = fully unique).
+// ---------------------------------------------------------------------------
+std::vector<std::string> StorageEngine::getPgStatsRows(
+    const std::string& onlyDb,
+    const std::string& onlyTable,
+    const std::string& onlyColumn) const {
+    std::vector<std::string> result;
+    for (const auto& dbname : getDatabaseNames()) {
+        if (!onlyDb.empty() && dbname != onlyDb) continue;
+        auto spath = statsPath(dbname);
+        if (!std::filesystem::exists(spath)) continue;
+        std::ifstream ifs(spath);
+        std::string line;
+        std::string currentTable;
+        size_t rowCount = 0;
+        std::map<std::string, StorageEngine::ColumnStats> cols;
+        auto emit = [&]() {
+            if (currentTable.empty()) return;
+            if (!onlyTable.empty() && currentTable != onlyTable) return;
+            for (const auto& cv : cols) {
+                if (!onlyColumn.empty() && cv.first != onlyColumn) continue;
+                double nDist = 0.0;
+                if (rowCount > 0) {
+                    if (cv.second.cardinality == rowCount) {
+                        nDist = -1.0;
+                    } else {
+                        nDist = -static_cast<double>(cv.second.cardinality) /
+                                static_cast<double>(rowCount);
+                    }
+                }
+                std::ostringstream mcv, freqs, hist;
+                for (size_t i = 0; i < cv.second.mcv.size(); ++i) {
+                    if (i > 0) { mcv << ","; freqs << ","; }
+                    mcv << "{" << cv.second.mcv[i].first << "}";
+                    freqs << "{"
+                          << (rowCount > 0
+                                  ? static_cast<double>(cv.second.mcv[i].second) /
+                                        static_cast<double>(rowCount)
+                                  : 0.0)
+                          << "}";
+                }
+                for (size_t i = 0; i < cv.second.histogram.size(); ++i) {
+                    if (i > 0) hist << ",";
+                    hist << "{" << cv.second.histogram[i].first << "}";
+                }
+                result.push_back(dbname + " " + currentTable + " " + cv.first +
+                                 " " + std::to_string(0.0) + " " +
+                                 std::to_string(nDist) + " " + mcv.str() + " " +
+                                 freqs.str() + " " + hist.str() + " ");
+            }
+        };
+        while (std::getline(ifs, line)) {
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string tname, cname;
+            ss >> tname >> cname;
+            if (cname == "__rows__") {
+                // A new table section starts: flush the previous one.
+                emit();
+                std::string rc;
+                std::getline(ss, rc);
+                try { rowCount = std::stoull(rc); } catch (...) { rowCount = 0; }
+                currentTable = tname;
+                cols.clear();
+                continue;
+            }
+            if (cname == "__multi__") continue;
+            if (tname != currentTable) {
+                emit();
+                currentTable = tname;
+                cols.clear();
+            }
+            cols[cname] = parseStatsLine(line);
+        }
+        emit();
+    }
+    return result;
+}
+
 std::vector<std::string> StorageEngine::queryPgCatalog(
     const std::string& tablename,
     const std::vector<std::string>& conditions,
@@ -16286,6 +16371,18 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
             }
             if (match) result.push_back(row);
         }
+    } else if (tablename == "pg_stats" || tablename == "PG_STATS" ||
+               tablename == "pg_statistic" || tablename == "PG_STATISTIC") {
+        // schemaname tablename attname null_frac n_distinct
+        // most_common_vals most_common_freqs histogram_bounds
+        std::string fDb, fTable, fCol;
+        for (const auto& c : conds) {
+            if (c.op != "=") continue;
+            if (c.colName == "schemaname") fDb = c.value;
+            if (c.colName == "tablename") fTable = c.value;
+            if (c.colName == "attname") fCol = c.value;
+        }
+        result = getPgStatsRows(fDb, fTable, fCol);
     } else if (tablename == "pg_index" || tablename == "PG_INDEX") {
         // PostgreSQL pg_index: indrelid indkey indisunique indisprimary
         for (const auto& dbname : getDatabaseNames()) {

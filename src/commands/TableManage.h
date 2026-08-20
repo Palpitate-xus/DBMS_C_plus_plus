@@ -373,6 +373,12 @@ public:
         std::map<std::string, ColumnStats> multiColStats;
     };
     bool analyzeTable(const std::string& dbname, const std::string& tablename);
+    // pg_stats/pg_statistic rows (schemaname tablename attname null_frac
+    // n_distinct most_common_vals most_common_freqs histogram_bounds) built
+    // from persisted ANALYZE statistics.  Empty filter = no restriction.
+    std::vector<std::string> getPgStatsRows(const std::string& onlyDb = "",
+                                            const std::string& onlyTable = "",
+                                            const std::string& onlyColumn = "") const;
     // Canonicalize a tsvector literal (used by to_tsvector and insert paths).
     bool normalizeTsVectorText(const std::string& in, std::string& out) const;
     // ---- PL/pgSQL support (helpers for the plpgsql interpreter) ----
