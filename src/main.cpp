@@ -22,6 +22,7 @@
 #include "Session.h"
 #include "expression/expr_helper.h"
 #include "common/DateType.h"
+#include <unistd.h>
 #include "Config.h"
 #include "parser/parser.h"
 #include "commands/DdlExecutor.h"
@@ -12698,6 +12699,422 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
 
         bool isJoin = (actualJoinPos != string::npos);
+
+        // ---- Greedy multi-table join ordering (>= 2 JOINs) -------------
+        // Parses the FROM chain, then repeatedly joins the pair with the
+        // smallest estimated intermediate result (ANALYZE statistics when
+        // available, plain cardinality otherwise), materializing each
+        // intermediate into a transient temp table.
+        if (isJoin) {
+            size_t joinCount = 0;
+            {
+                size_t p = fromPos;
+                while ((p = sql.find("join", p)) != string::npos) {
+                    // avoid matching "join" inside words (e.g., a column
+                    // named joined_id): require a word boundary before
+                    if (p == 0 || !isalnum((unsigned char)sql[p - 1])) ++joinCount;
+                    ++p;
+                }
+            }
+            if (joinCount >= 2) {
+                // ---- parse chain ----
+                struct JoinLink {
+                    string table;   // right-side table of this JOIN
+                    string alias;
+                    string type;    // inner/left/right/full/cross
+                    string onLeft;  // qualified
+                    string onRight;
+                    bool hasOn;
+                };
+                struct ParsedJoin {
+                    vector<pair<string, string>> tables;  // (name, alias) in FROM order
+                    vector<JoinLink> joins;               // joins[i] attaches tables[i+1]
+                } pj;
+                {
+                    // segment between FROM and WHERE/GROUP/ORDER/LIMIT/OFFSET
+                    size_t segEnd = wherePos != string::npos ? wherePos
+                                  : groupPos != string::npos ? groupPos
+                                  : havingPos != string::npos ? havingPos
+                                  : orderPos != string::npos ? orderPos
+                                  : limitPos != string::npos ? limitPos
+                                  : offsetPos != string::npos ? offsetPos
+                                  : windowPos != string::npos ? windowPos : sql.size();
+                    string seg = sql.substr(fromPos + 4, segEnd - fromPos - 4);
+                    // tokenize scan
+                    size_t i = 0;
+                    auto skipWs = [&](size_t& p) {
+                        while (p < seg.size() && isspace((unsigned char)seg[p])) ++p;
+                    };
+                    // first table
+                    auto readTableRef = [&](size_t& p, string& name, string& alias) {
+                        skipWs(p);
+                        size_t st = p;
+                        while (p < seg.size() && (isalnum((unsigned char)seg[p]) || seg[p] == '_')) ++p;
+                        name = seg.substr(st, p - st);
+                        skipWs(p);
+                        if (name.empty()) return false;
+                        // optional AS alias / bare alias (word not a keyword)
+                        static const char* kws[] = {"join", "inner", "left", "right",
+                                                    "full", "outer", "cross", "on",
+                                                    "natural"};
+                        size_t save = p;
+                        if (p + 3 <= seg.size() && seg.substr(p, 2) == "as") {
+                            p += 2; skipWs(p);
+                        }
+                        size_t a = p;
+                        while (p < seg.size() && (isalnum((unsigned char)seg[p]) || seg[p] == '_')) ++p;
+                        string cand = seg.substr(a, p - a);
+                        for (const char* k : kws) {
+                            if (cand == k) { cand.clear(); p = save; break; }
+                        }
+                        alias = cand;
+                        return true;
+                    };
+                    string fname, falias;
+                    if (!readTableRef(i, fname, falias)) {
+                        cout << "SQL syntax error in FROM clause" << endl;
+                        return true;
+                    }
+                    pj.tables.push_back({fname, falias});
+                    while (true) {
+                        skipWs(i);
+                        if (i >= seg.size()) break;
+                        // optional join type words
+                        string jt2 = "inner";
+                        auto matchWord = [&](const char* w) -> bool {
+                            size_t save = i;
+                            skipWs(save);
+                            size_t wl = strlen(w);
+                            if (save + wl <= seg.size() && seg.compare(save, wl, w) == 0) {
+                                // word boundary
+                                if (save + wl < seg.size() &&
+                                    (isalnum((unsigned char)seg[save + wl]) || seg[save + wl] == '_'))
+                                    return false;
+                                i = save + wl;
+                                return true;
+                            }
+                            return false;
+                        };
+                        if (matchWord("left")) jt2 = "left";
+                        else if (matchWord("right")) jt2 = "right";
+                        else if (matchWord("full")) jt2 = "full";
+                        else if (matchWord("cross")) jt2 = "cross";
+                        else if (matchWord("natural")) jt2 = "inner";
+                        (void)matchWord("outer");
+                        if (!matchWord("join")) {
+                            cout << "SQL syntax error in FROM clause near JOIN" << endl;
+                            return true;
+                        }
+                        string rname, ralias;
+                        if (!readTableRef(i, rname, ralias)) {
+                            cout << "SQL syntax error in FROM clause" << endl;
+                            return true;
+                        }
+                        JoinLink link;
+                        link.table = rname;
+                        link.alias = ralias;
+                        link.type = jt2;
+                        link.hasOn = false;
+                        if (jt2 != "cross" && matchWord("on")) {
+                            skipWs(i);
+                            size_t st = i;
+                            // read until whitespace + next join-type word or end
+                            // ON expr = simple a.x = b.y (single equality)
+                            string onText;
+                            {
+                                size_t e = i;
+                                // ON clause ends at next JOIN keyword at this level
+                                while (e < seg.size()) {
+                                    size_t save = e;
+                                    // check for a following JOIN marker
+                                    string low;
+                                    for (size_t k = e; k < seg.size() && low.size() < 5; ++k)
+                                        low += (char)tolower((unsigned char)seg[k]);
+                                    if (low == "left " || low == "right" || low == "inner" ||
+                                        low == "full " || low == "cross" || low == "join ") {
+                                        break;
+                                    }
+                                    ++e;
+                                    (void)save;
+                                }
+                                onText = trim(seg.substr(st, e - st));
+                                i = e;
+                            }
+                            size_t eq = onText.find('=');
+                            if (eq == string::npos) {
+                                cout << "SQL syntax error: invalid ON clause" << endl;
+                                return true;
+                            }
+                            link.onLeft = trim(onText.substr(0, eq));
+                            link.onRight = trim(onText.substr(eq + 1));
+                            link.hasOn = true;
+                        }
+                        pj.tables.push_back({rname, ralias});
+                        pj.joins.push_back(std::move(link));
+                        if (pj.joins.size() >= 12) break;  // safety cap
+                    }
+                }
+
+                // ---- validate + resolve ----
+                for (const auto& [tn, al] : pj.tables) {
+                    string resolved = resolveTableName(s, tn);
+                    if (!g_engine.tableExists(s.currentDB, resolved)) {
+                        cout << "Table " << tn << " not exist" << endl;
+                        return true;
+                    }
+                    if (!isTempTable(s, tn) &&
+                        !checkTablePermission(s, tn, dbms::StorageEngine::TablePrivilege::Select)) {
+                        return true;
+                    }
+                }
+
+                // ---- greedy ordering ----
+                // state: set of joined tables (by resolved name+index), the
+                // current intermediate is a materialized temp table
+                struct Rel {
+                    string name;       // resolved table name
+                    string alias;      // display alias
+                    TableSchema schema;
+                };
+                std::vector<Rel> pending;
+                for (size_t idx = 0; idx < pj.tables.size(); ++idx) {
+                    const auto& [tn, al] = pj.tables[idx];
+                    Rel r;
+                    r.name = resolveTableName(s, tn);
+                    r.alias = al.empty() ? tn : al;
+                    r.schema = g_engine.getTableSchema(s.currentDB, r.name);
+                    pending.push_back(std::move(r));
+                }
+                // join predicates that reference table indexes i<j with cols
+                struct Pred { size_t li, ri; string lcol, rcol; string type; };
+                std::vector<Pred> preds;
+                {
+                    // For each JoinLink, find which pending tables the ON
+                    // columns refer to by alias/table prefix.
+                    for (size_t ji = 0; ji < pj.joins.size(); ++ji) {
+                        const auto& link = pj.joins[ji];
+                        if (!link.hasOn) continue;
+                        auto resolveCol = [&](const string& qual, size_t& tIdx, string& col) -> bool {
+                            size_t dot = qual.find('.');
+                            if (dot == string::npos) return false;
+                            string pref = qual.substr(0, dot);
+                            col = qual.substr(dot + 1);
+                            for (size_t t = 0; t < pending.size(); ++t) {
+                                if (pref == pending[t].alias || pref == pj.tables[t].first) {
+                                    tIdx = t;
+                                    return true;
+                                }
+                            }
+                            return false;
+                        };
+                        size_t li = 0, ri = 0;
+                        string lc, rc;
+                        bool ok1 = resolveCol(link.onLeft, li, lc);
+                        bool ok2 = resolveCol(link.onRight, ri, rc);
+                        if (!ok1 || !ok2) {
+                            // try swapped
+                            ok1 = resolveCol(link.onRight, li, lc);
+                            ok2 = resolveCol(link.onLeft, ri, rc);
+                        }
+                        if (!ok1 || !ok2) continue;  // unresolvable: skip pred
+                        // orient: li must be the table being attached (later
+                        // index) if possible for chain semantics
+                        if (li > ri) { std::swap(li, ri); std::swap(lc, rc); }
+                        preds.push_back({li, ri, lc, rc, link.type});
+                    }
+                }
+
+                // greedy: start with the pair (i<j) minimizing est. join rows
+                auto rowCount = [&](const string& tn) -> size_t {
+                    return g_engine.getTableRowCount(s.currentDB, tn);
+                };
+                auto estPairRows = [&](size_t li, size_t ri, const string& lcol,
+                                       const string& rcol) -> double {
+                    size_t lr = rowCount(pending[li].name);
+                    size_t rr = rowCount(pending[ri].name);
+                    auto ls = g_engine.getColumnStats(s.currentDB, pending[li].name, lcol);
+                    auto rs = g_engine.getColumnStats(s.currentDB, pending[ri].name, rcol);
+                    double ndL = static_cast<double>(ls.cardinality);
+                    double ndR = static_cast<double>(rs.cardinality);
+                    double nd = std::max({ndL, ndR, 1.0});
+                    return static_cast<double>(lr) * static_cast<double>(rr) / nd;
+                };
+
+                if (pj.tables.size() < 2 || preds.empty()) {
+                    cout << "SQL syntax error: multi-table join requires ON clauses" << endl;
+                    return true;
+                }
+
+                // Pick starting pair greedily
+                std::vector<bool> done(pending.size(), false);
+                size_t bestI = 0, bestJ = 1;
+                double bestRows = -1;
+                string bestLCol, bestRCol;
+                for (const auto& pr : preds) {
+                    if (pr.li >= pending.size() || pr.ri >= pending.size()) continue;
+                    double est = estPairRows(pr.li, pr.ri, pr.lcol, pr.rcol);
+                    if (bestRows < 0 || est < bestRows) {
+                        bestRows = est;
+                        bestI = pr.li; bestJ = pr.ri;
+                        bestLCol = pr.lcol; bestRCol = pr.rcol;
+                    }
+                }
+
+                // Remember original ON column per pending index for naming.
+                // Intermediate table columns: concatenation of source columns.
+                // Build initial join result.
+                auto doJoin = [&](const string& lt, const string& rt,
+                                  const string& lc, const string& rc,
+                                  const string& type) -> vector<string> {
+                    if (type == "left")
+                        return g_engine.leftJoin(s.currentDB, lt, rt, lc, rc, {}, {});
+                    if (type == "right")
+                        return g_engine.rightJoin(s.currentDB, lt, rt, lc, rc, {}, {});
+                    if (type == "full")
+                        return g_engine.fullOuterJoin(s.currentDB, lt, rt, lc, rc, {}, {});
+                    if (type == "cross")
+                        return g_engine.crossJoin(s.currentDB, lt, rt, {}, {});
+                    return g_engine.join(s.currentDB, lt, rt, lc, rc, {}, {});
+                };
+                // column names of the first pair's result (left cols + right cols)
+                std::vector<string> interCols;
+                // original (tableIndex, colName) -> current intermediate
+                // column name (deduplicated on clash)
+                std::map<std::pair<size_t, string>, string> colMap;
+                auto addCols = [&](size_t tIdx, const TableSchema& ts2) {
+                    for (size_t c = 0; c < ts2.len; ++c) {
+                        string cn = ts2.cols[c].dataName;
+                        bool clash = false;
+                        for (const auto& existing : interCols) {
+                            if (existing == cn) { clash = true; break; }
+                        }
+                        string out = clash
+                            ? cn + "_" + std::to_string(interCols.size())
+                            : cn;
+                        interCols.push_back(out);
+                        colMap[{tIdx, cn}] = out;
+                    }
+                };
+                addCols(bestI, pending[bestI].schema);
+                addCols(bestJ, pending[bestJ].schema);
+                vector<string> interRows = doJoin(pending[bestI].name, pending[bestJ].name,
+                                                  bestLCol, bestRCol, "inner");
+
+                done[bestI] = done[bestJ] = true;
+                // Unique-ish base so a stale temp table from an earlier
+                // statement/process can never collide with this chain's
+                // intermediates (createTempTableFromRows fails silently on
+                // an existing name and the join would read a stale schema).
+                int tmpCounter = (getpid() % 100000) * 1000
+                    + static_cast<int>(
+                          std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count() % 1000)
+                          * 10
+                    + 9000;
+                // attach remaining tables greedily
+                size_t remaining = pending.size() - 2;
+                while (remaining > 0) {
+                    // materialize current intermediate
+                    string interName = createTempTableFromRows(s, interRows, interCols, tmpCounter);
+                    if (interName.empty()) {
+                        cout << "ERROR: multi-join intermediate materialization failed" << endl;
+                        return true;
+                    }
+                    string interActual = tempTablePrefix(s, interName);
+                    // choose the pending table with an ON link to any joined
+                    // column name; greedy by row count (smallest first)
+                    ssize_t pickIdx = -1;
+                    string pickLCol, pickRCol;
+                    size_t pickRows = 0;
+                    for (size_t t = 0; t < pending.size(); ++t) {
+                        if (done[t]) continue;
+                        // find a pred connecting t to any done table by
+                        // matching column names in interCols
+                        for (const auto& pr : preds) {
+                            if (pr.li >= pending.size() || pr.ri >= pending.size()) continue;
+                            // pending indexes in preds refer to ORIGINAL
+                            // table indexes; after materialization the
+                            // intermediate holds their columns by name.
+                            bool tIsLeft = (pr.li == t);
+                            bool tIsRight = (pr.ri == t);
+                            if (!tIsLeft && !tIsRight) continue;
+                            size_t other = tIsLeft ? pr.ri : pr.li;
+                            if (!done[other]) continue;
+                            // connect via column names
+                            string myCol = tIsLeft ? pr.lcol : pr.rcol;
+                            string otherCol = tIsLeft ? pr.rcol : pr.lcol;
+                            // map the other side's column through colMap
+                            // (handles deduplicated names)
+                            auto mit = colMap.find({other, otherCol});
+                            if (mit == colMap.end()) continue;
+                            otherCol = mit->second;
+                            size_t rc2 = rowCount(pending[t].name);
+                            if (pickIdx < 0 || rc2 < pickRows) {
+                                pickIdx = (ssize_t)t;
+                                // join key on the intermediate side
+                                pickLCol = otherCol;
+                                pickRCol = myCol;
+                                pickRows = rc2;
+                            }
+                        }
+                    }
+                    if (pickIdx < 0) {
+                        // No connecting predicate: cross join the smallest
+                        // remaining table.
+                        for (size_t t = 0; t < pending.size(); ++t) {
+                            if (done[t]) continue;
+                            size_t rc2 = rowCount(pending[t].name);
+                            if (pickIdx < 0 || rc2 < pickRows) {
+                                pickIdx = (ssize_t)t;
+                                pickRows = rc2;
+                            }
+                        }
+                        if (pickIdx < 0) break;
+                        pickLCol.clear();
+                        pickRCol.clear();
+                    }
+                    vector<string> newRows = pickLCol.empty()
+                        ? g_engine.crossJoin(s.currentDB, interActual,
+                                             pending[pickIdx].name, {}, {})
+                        : doJoin(interActual, pending[pickIdx].name,
+                                 pickLCol, pickRCol, "inner");
+                    // extend columns (de-duplicated the same way)
+                    addCols(pickIdx, pending[pickIdx].schema);
+                    interRows = std::move(newRows);
+                    done[pickIdx] = true;
+                    --remaining;
+                }
+
+                // ---- output ----
+                // The intermediate columns follow greedy join order; report
+                // them with their original (un-suffixed) names.  colMap
+                // preserves provenance when names clashed.
+                {
+                    // invert colMap: current name -> (tableIdx, orig name)
+                    std::map<string, std::pair<size_t, string>> inv;
+                    for (const auto& kv : colMap) inv[kv.second] = kv.first;
+                    for (const auto& ic : interCols) {
+                        auto it = inv.find(ic);
+                        if (it != inv.end()) {
+                            size_t tIdx = it->second.first;
+                            string prefix = pj.tables[tIdx].second.empty()
+                                ? pj.tables[tIdx].first
+                                : pj.tables[tIdx].second;
+                            cout << prefix << "." << it->second.second << ' ';
+                        } else {
+                            cout << ic << ' ';
+                        }
+                    }
+                }
+                cout << '\n';
+                for (const auto& row : interRows) {
+                    cout << row << endl;
+                    log(s.username, row, getTime());
+                }
+                return false;
+            }
+        }
 
         if (isJoin) {
             string leftTableOrig = trim(sql.substr(fromPos + 4, actualJoinPos - fromPos - 4));
