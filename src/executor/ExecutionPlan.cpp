@@ -914,6 +914,13 @@ struct WindowInputRow {
     std::vector<std::string> values;
 };
 
+static size_t sortColIndex(const TableSchema& tbl, const std::string& name) {
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == name) return i;
+    }
+    return tbl.len;
+}
+
 static int compareWindowValue(const std::string& left, const std::string& right) {
     if (left.empty() && right.empty()) return 0;
     if (left.empty()) return -1;
@@ -1731,6 +1738,430 @@ bool HashJoinOp::open() {
     return true;
 }
 
+// ========================================================================
+// ParallelGroupAggregateOp
+// ========================================================================
+ParallelGroupAggregateOp::ParallelGroupAggregateOp(
+    OpPtr child, const TableSchema& tbl,
+    const std::vector<std::string>& groupByCols,
+    const std::vector<StorageEngine::AggItem>& items,
+    const std::vector<std::string>& havingConds, int workers)
+    : child_(std::move(child)), tbl_(tbl), groupByCols_(groupByCols),
+      items_(items), havingConds_(havingConds),
+      workers_(workers < 1 ? 1 : workers) {}
+
+bool ParallelGroupAggregateOp::open() {
+    rows_.clear();
+    pos_ = 0;
+    usedParallelWorkers_ = false;
+    if (!child_->open()) return false;
+
+    struct InputRow {
+        std::string raw;
+        std::vector<std::string> values;
+    };
+    std::vector<InputRow> input;
+    std::string raw;
+    while (child_->next(raw)) {
+        InputRow row;
+        row.raw = std::move(raw);
+        row.values.reserve(tbl_.len);
+        for (size_t i = 0; i < tbl_.len; ++i) {
+            row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
+        }
+        input.push_back(std::move(row));
+    }
+    if (child_->hasError()) return propagateChildError(child_.get(), "aggregate child failed");
+    child_->close();
+
+    auto columnIndex = [&](const std::string& name) {
+        for (size_t i = 0; i < tbl_.len; ++i) {
+            if (tbl_.cols[i].dataName == name) return i;
+        }
+        return tbl_.len;
+    };
+    std::vector<size_t> setIndices;
+    for (const auto& name : groupByCols_) {
+        const size_t index = columnIndex(name);
+        if (index >= tbl_.len) return false;
+        setIndices.push_back(index);
+    }
+
+    // ---- parallel partition into local group buckets ----
+    using Buckets = std::map<std::string, std::vector<size_t>>;
+    const size_t n = input.size();
+    int activeWorkers = 1;
+    // Workers only partition the already-buffered input rows — no engine
+    // calls inside the threads — so this is safe during transactions too.
+    if (workers_ > 1 && n >= 256) {
+        activeWorkers = static_cast<int>(std::min<size_t>(
+            static_cast<size_t>(workers_),
+            (n + 255) / 256));
+    }
+    std::vector<Buckets> localB(static_cast<size_t>(activeWorkers));
+    if (activeWorkers > 1) {
+        usedParallelWorkers_ = true;
+        std::vector<std::thread> threads;
+        threads.reserve(static_cast<size_t>(activeWorkers));
+        const size_t chunk = (n + activeWorkers - 1) / activeWorkers;
+        for (int w = 0; w < activeWorkers; ++w) {
+            const size_t begin = static_cast<size_t>(w) * chunk;
+            const size_t end = std::min(n, begin + chunk);
+            threads.emplace_back([&, w, begin, end]() {
+                auto& buckets = localB[static_cast<size_t>(w)];
+                for (size_t rowId = begin; rowId < end; ++rowId) {
+                    std::string key;
+                    for (size_t index : setIndices) {
+                        const auto& value = input[rowId].values[index];
+                        key += std::to_string(value.size()) + ":" + value + "|";
+                    }
+                    buckets[key].push_back(rowId);
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+    } else {
+        for (size_t rowId = 0; rowId < n; ++rowId) {
+            std::string key;
+            for (size_t index : setIndices) {
+                const auto& value = input[rowId].values[index];
+                key += std::to_string(value.size()) + ":" + value + "|";
+            }
+            localB[0][key].push_back(rowId);
+        }
+    }
+
+    // ---- merge local buckets (order preserved within each group) ----
+    Buckets groups;
+    for (const auto& buckets : localB) {
+        for (const auto& kv : buckets) {
+            auto& merged = groups[kv.first];
+            merged.insert(merged.end(), kv.second.begin(), kv.second.end());
+        }
+    }
+
+    // ---- finalize each group on this thread (aggregates + HAVING) ----
+    static const std::set<std::string> supported = {
+        "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+    };
+    auto parseNumber = [](const std::string& value, long double& out) {
+        try {
+            size_t consumed = 0;
+            out = std::stold(value, &consumed);
+            return consumed == value.size();
+        } catch (...) {
+            return false;
+        }
+    };
+    auto formatNumber = [](long double value) {
+        if (std::floor(value) == value &&
+            value >= static_cast<long double>(std::numeric_limits<int64_t>::min()) &&
+            value <= static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+            return std::to_string(static_cast<int64_t>(value));
+        }
+        std::ostringstream out;
+        out << std::setprecision(15) << static_cast<double>(value);
+        return out.str();
+    };
+    auto computeAggregate = [&](const std::vector<size_t>& rowIds,
+                                const StorageEngine::AggItem& item) -> std::string {
+        std::string func = item.func;
+        for (char& c : func) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const bool distinct = func == "count" && item.arg.size() > 9 &&
+            item.arg.substr(0, 9) == "distinct ";
+        std::string arg = distinct ? item.arg.substr(9) : item.arg;
+        const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
+        const auto filters = StorageEngine::parseConditions(item.filterConds);
+        std::set<std::string> distinctValues;
+        int64_t count = 0;
+        long double sum = 0;
+        bool hasValue = false;
+        std::string selected;
+        bool boolSeen = false;
+        bool boolValue = func == "bool_and" || func == "every";
+        for (size_t rowId : rowIds) {
+            const auto& row = input[rowId];
+            bool passes = true;
+            for (const auto& filter : filters) {
+                if (!StorageEngine::evalConditionOnRow(filter, row.raw, tbl_)) {
+                    passes = false; break;
+                }
+            }
+            if (!passes) continue;
+            const std::string value = argIndex < tbl_.len ? row.values[argIndex] : "";
+            if (func == "count") {
+                if (distinct) {
+                    if (!value.empty()) distinctValues.insert(value);
+                } else if (arg == "*" || !value.empty()) ++count;
+                continue;
+            }
+            if (value.empty()) continue;
+            if (func == "sum" || func == "avg") {
+                long double number = 0;
+                if (!parseNumber(value, number)) continue;
+                sum += number; ++count;
+            } else if (func == "min" || func == "max") {
+                if (!hasValue || (func == "min"
+                        ? compareWindowValue(value, selected) < 0
+                        : compareWindowValue(value, selected) > 0)) {
+                    selected = value; hasValue = true;
+                }
+            } else if (func == "bool_and" || func == "every" || func == "bool_or") {
+                boolSeen = true;
+                if (func == "bool_or") boolValue = boolValue || value == "true";
+                else boolValue = boolValue && value == "true";
+            }
+        }
+        if (func == "count") return distinct ? std::to_string(distinctValues.size())
+                                             : std::to_string(count);
+        if (func == "sum") return count == 0 ? "NULL" : formatNumber(sum);
+        if (func == "avg") return count == 0 ? "NULL"
+                                             : std::to_string(static_cast<double>(sum / count));
+        if (func == "min" || func == "max") return hasValue ? selected : "NULL";
+        if (func == "bool_and" || func == "every" || func == "bool_or") {
+            return boolSeen ? (boolValue ? "true" : "false") : "NULL";
+        }
+        return "NULL";
+    };
+    for (const auto& item : items_) {
+        std::string func = item.func;
+        for (char& c : func) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!supported.count(func)) return false;
+        if (func == "count" && item.arg == "*") continue;
+        std::string arg = item.arg;
+        if (arg.size() > 9 && arg.substr(0, 9) == "distinct ") arg = arg.substr(9);
+        if (columnIndex(arg) >= tbl_.len) return false;
+    }
+    for (const auto& group : groups) {
+        std::vector<std::string> values;
+        values.reserve(groupByCols_.size() + items_.size());
+        for (const auto& column : groupByCols_) {
+            values.push_back(group.second.empty()
+                ? "NULL"
+                : input[group.second.front()].values[columnIndex(column)]);
+        }
+        for (const auto& item : items_) values.push_back(computeAggregate(group.second, item));
+        std::string output;
+        for (const auto& value : values) {
+            if (!output.empty()) output.push_back(' ');
+            output += value.empty() ? "NULL" : value;
+        }
+        rows_.push_back(std::move(output));
+    }
+    return true;
+}
+
+bool ParallelGroupAggregateOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
+    return true;
+}
+
+void ParallelGroupAggregateOp::close() {
+    rows_.clear();
+    pos_ = 0;
+}
+
+// ========================================================================
+// ParallelHashJoinOp
+// ========================================================================
+ParallelHashJoinOp::ParallelHashJoinOp(
+    StorageEngine* engine, const std::string& dbname,
+    OpPtr left, OpPtr right,
+    const std::string& leftTable, const std::string& rightTable,
+    const std::string& leftCol, const std::string& rightCol, int workers)
+    : engine_(engine), dbname_(dbname), left_(std::move(left)),
+      right_(std::move(right)), leftTable_(leftTable), rightTable_(rightTable),
+      leftCol_(leftCol), rightCol_(rightCol),
+      workers_(workers < 1 ? 1 : workers) {}
+
+bool ParallelHashJoinOp::open() {
+    leftTbl_ = engine_->getTableSchema(dbname_, leftTable_);
+    rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
+    rightHash_.clear();
+
+    // Decide whether the build side can be hashed by worker threads.
+    const uint32_t pageCount = engine_->tableNumPages(dbname_, rightTable_);
+    bool parallelBuild = workers_ > 1 && !engine_->inTransaction() &&
+                         rightTbl_.partitionType == TableSchema::PartitionType::None &&
+                         pageCount > 2;
+    if (parallelBuild) {
+        const int activeWorkers = static_cast<int>(std::min<size_t>(
+            static_cast<size_t>(workers_), static_cast<size_t>(pageCount - 1)));
+        using Shard = std::map<std::string, std::vector<std::pair<int64_t, std::string>>>;
+        std::vector<Shard> shards(static_cast<size_t>(activeWorkers));
+        std::atomic<bool> failed{false};
+        std::vector<std::thread> threads;
+        threads.reserve(static_cast<size_t>(activeWorkers));
+        for (int w = 0; w < activeWorkers; ++w) {
+            const uint32_t begin = 1 + static_cast<uint32_t>(w) * (pageCount - 1) /
+                                       static_cast<uint32_t>(activeWorkers);
+            const uint32_t end = 1 + static_cast<uint32_t>(w + 1) * (pageCount - 1) /
+                                       static_cast<uint32_t>(activeWorkers);
+            threads.emplace_back([this, &shards, &failed, w, begin, end]() {
+                auto& shard = shards[static_cast<size_t>(w)];
+                if (!engine_->forEachRowPageRange(dbname_, rightTable_, begin, end,
+                        [this, &shard](uint32_t pageId, uint16_t slotId,
+                                       const char* data, size_t len) {
+                            std::string row(data, len);
+                            row = engine_->resolveToastValues(dbname_, rightTable_, row, rightTbl_);
+                            std::string key = extractJoinKey(row, rightTbl_, rightCol_);
+                            shard[key].emplace_back(
+                                StorageEngine::encodeRid(pageId, slotId), std::move(row));
+                        })) {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            });
+        }
+        for (auto& t : threads) t.join();
+        if (failed.load(std::memory_order_relaxed)) {
+            setError("parallel hash join build failed");
+            return false;
+        }
+        // merge shards; keep per-key chains ordered by rid for determinism
+        for (auto& shard : shards) {
+            for (auto& kv : shard) {
+                auto& chain = rightHash_[kv.first];
+                chain.insert(chain.end(),
+                             std::make_move_iterator(kv.second.begin()),
+                             std::make_move_iterator(kv.second.end()));
+            }
+        }
+        for (auto& kv : rightHash_) {
+            std::sort(kv.second.begin(), kv.second.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+        }
+        usedParallelWorkers_ = true;
+        // the right child was not used; close it politely if it opened nothing
+        right_->close();
+    } else {
+        if (!right_->open()) return false;
+        std::string rightRow;
+        while (right_->next(rightRow)) {
+            std::string key = extractJoinKey(rightRow, rightTbl_, rightCol_);
+            rightHash_[key].emplace_back(0, std::move(rightRow));
+        }
+        if (right_->hasError()) {
+            return propagateChildError(right_.get(), "hash join right child failed");
+        }
+        right_->close();
+    }
+
+    if (!left_->open()) return false;
+    hasLeft_ = left_->next(curLeftRow_);
+    if (left_->hasError()) {
+        return propagateChildError(left_.get(), "hash join left child failed");
+    }
+    matchPos_ = 0;
+    curRightMatches_.clear();
+    return true;
+}
+
+bool ParallelHashJoinOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
+    while (hasLeft_) {
+        while (matchPos_ < curRightMatches_.size()) {
+            outRow = curLeftRow_ + curRightMatches_[matchPos_].second;
+            ++matchPos_;
+            rtInstr_.emitted = true;
+            return true;
+        }
+        hasLeft_ = left_->next(curLeftRow_);
+        if (left_->hasError()) {
+            return propagateChildError(left_.get(), "hash join left child failed");
+        }
+        if (!hasLeft_) break;
+        std::string key = extractJoinKey(curLeftRow_, leftTbl_, leftCol_);
+        auto it = rightHash_.find(key);
+        curRightMatches_ = (it == rightHash_.end())
+            ? std::vector<std::pair<int64_t, std::string>>{} : it->second;
+        matchPos_ = 0;
+    }
+    return false;
+}
+
+void ParallelHashJoinOp::close() {
+    left_->close();
+    right_->close();
+    rightHash_.clear();
+    hasLeft_ = false;
+    curRightMatches_.clear();
+    matchPos_ = 0;
+}
+
+// ========================================================================
+// GatherMergeOp
+// ========================================================================
+GatherMergeOp::GatherMergeOp(std::vector<OpPtr> children, const TableSchema& tbl,
+                             const std::string& sortCol, bool asc)
+    : children_(std::move(children)), tbl_(tbl), sortCol_(sortCol), asc_(asc) {
+    colIdx_ = tbl_.len;
+    for (size_t i = 0; i < tbl_.len; ++i) {
+        if (tbl_.cols[i].dataName == sortCol_) { colIdx_ = i; break; }
+    }
+}
+
+bool GatherMergeOp::open() {
+    heads_.assign(children_.size(), {});
+    done_.assign(children_.size(), true);
+    bool anyOk = false;
+    for (size_t i = 0; i < children_.size(); ++i) {
+        if (!children_[i]->open()) {
+            if (children_[i]->hasError()) {
+                return propagateChildError(children_[i].get(), "gather merge child failed");
+            }
+            done_[i] = true;
+            continue;
+        }
+        anyOk = true;
+        std::string row;
+        if (children_[i]->next(row)) {
+            heads_[i] = std::move(row);
+            done_[i] = false;
+        } else {
+            if (children_[i]->hasError()) {
+                return propagateChildError(children_[i].get(), "gather merge child failed");
+            }
+            done_[i] = true;
+            children_[i]->close();
+        }
+    }
+    return anyOk || children_.empty();
+}
+
+bool GatherMergeOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
+    // pick the smallest/largest head among live streams
+    ssize_t pick = -1;
+    for (size_t i = 0; i < children_.size(); ++i) {
+        if (done_[i]) continue;
+        if (pick < 0) { pick = static_cast<ssize_t>(i); continue; }
+        const std::string a = StorageEngine::extractColumnValueStatic(heads_[i], tbl_, colIdx_);
+        const std::string b = StorageEngine::extractColumnValueStatic(heads_[pick], tbl_, colIdx_);
+        const int cmp = compareWindowValue(a, b);
+        if ((asc_ && cmp < 0) || (!asc_ && cmp > 0)) pick = static_cast<ssize_t>(i);
+    }
+    if (pick < 0) return false;
+    outRow = heads_[static_cast<size_t>(pick)];
+    std::string row;
+    if (children_[static_cast<size_t>(pick)]->next(row)) {
+        heads_[static_cast<size_t>(pick)] = std::move(row);
+    } else {
+        done_[static_cast<size_t>(pick)] = true;
+        children_[static_cast<size_t>(pick)]->close();
+    }
+    rtInstr_.emitted = true;
+    return true;
+}
+
+void GatherMergeOp::close() {
+    for (auto& c : children_) c->close();
+    heads_.clear();
+    done_.clear();
+}
+
 bool HashJoinOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     while (hasLeft_) {
@@ -2261,18 +2692,32 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
 
     if (!ctx.groupByCols.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
-        root = std::make_unique<GroupAggregateOp>(
-            std::move(root), tbl, ctx.groupByCols, ctx.groupingSets,
-            ctx.aggregateItems, ctx.havingConds);
+        if (ctx.groupingSets.empty() && !rlsApplies && parallelWorkers_ > 1) {
+            // Worker threads partition the buffered child rows into local
+            // group buckets; results are merged and finalized once.
+            root = std::make_unique<ParallelGroupAggregateOp>(
+                std::move(root), tbl, ctx.groupByCols,
+                ctx.aggregateItems, ctx.havingConds, parallelWorkers_);
+        } else {
+            root = std::make_unique<GroupAggregateOp>(
+                std::move(root), tbl, ctx.groupByCols, ctx.groupingSets,
+                ctx.aggregateItems, ctx.havingConds);
+        }
     } else if (!ctx.aggregateItems.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
-        // A plain aggregate is one implicit empty grouping set.  Reusing the
-        // same node keeps filtering, visibility, FILTER, DISTINCT arguments,
-        // and aggregate formatting on one structured execution path.
-        root = std::make_unique<GroupAggregateOp>(
-            std::move(root), tbl, std::vector<std::string>{},
-            std::vector<std::vector<std::string>>{}, ctx.aggregateItems,
-            ctx.havingConds);
+        if (!rlsApplies && parallelWorkers_ > 1) {
+            root = std::make_unique<ParallelGroupAggregateOp>(
+                std::move(root), tbl, std::vector<std::string>{},
+                ctx.aggregateItems, ctx.havingConds, parallelWorkers_);
+        } else {
+            // A plain aggregate is one implicit empty grouping set.  Reusing
+            // the same node keeps filtering, visibility, FILTER, DISTINCT
+            // arguments, and aggregate formatting on one structured path.
+            root = std::make_unique<GroupAggregateOp>(
+                std::move(root), tbl, std::vector<std::string>{},
+                std::vector<std::vector<std::string>>{}, ctx.aggregateItems,
+                ctx.havingConds);
+        }
     } else if (!ctx.windowFunctions.empty()) {
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<WindowOp>(std::move(root), tbl,
@@ -2283,8 +2728,70 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         // applies the final query ordering after it computes the values.
         if (!ctx.orderByCol.empty()) {
             TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
-            root = std::make_unique<SortOp>(std::move(root), tbl,
-                                            ctx.orderByCol, ctx.orderByAsc);
+            // Parallel path: worker threads sort disjoint rid partitions and
+            // GatherMerge k-way merges the sorted streams (PG Gather Merge).
+            const uint32_t pageCount = engine->tableNumPages(ctx.dbname, ctx.tablename);
+            if (!rlsApplies && parallelWorkers_ > 1 && !engine->inTransaction() &&
+                pageCount > 2 && ctx.conds.empty()) {
+                const int activeWorkers = static_cast<int>(
+                    std::min<size_t>(static_cast<size_t>(parallelWorkers_),
+                                     static_cast<size_t>(pageCount - 1)));
+                using Part = std::vector<std::pair<int64_t, std::string>>;
+                std::vector<Part> parts(static_cast<size_t>(activeWorkers));
+                std::atomic<bool> failed{false};
+                std::vector<std::thread> sorters;
+                sorters.reserve(static_cast<size_t>(activeWorkers));
+                for (int w = 0; w < activeWorkers; ++w) {
+                    const uint32_t begin =
+                        1 + static_cast<uint32_t>(w) * (pageCount - 1) /
+                                static_cast<uint32_t>(activeWorkers);
+                    const uint32_t end =
+                        1 + static_cast<uint32_t>(w + 1) * (pageCount - 1) /
+                                static_cast<uint32_t>(activeWorkers);
+                    sorters.emplace_back([engine, &ctx, &tbl, &parts, &failed, w,
+                                          begin, end]() {
+                        auto& part = parts[static_cast<size_t>(w)];
+                        if (!engine->forEachRowPageRange(
+                                ctx.dbname, ctx.tablename, begin, end,
+                                [&part](uint32_t pageId, uint16_t slotId,
+                                        const char* data, size_t len) {
+                                    part.emplace_back(0, std::string(data, len));
+                                })) {
+                            failed.store(true, std::memory_order_relaxed);
+                            return;
+                        }
+                        std::sort(part.begin(), part.end(),
+                                  [&tbl, &ctx](const std::pair<int64_t, std::string>& a,
+                                               const std::pair<int64_t, std::string>& b) {
+                                      const std::string va =
+                                          StorageEngine::extractColumnValueStatic(a.second, tbl, sortColIndex(tbl, ctx.orderByCol));
+                                      const std::string vb =
+                                          StorageEngine::extractColumnValueStatic(b.second, tbl, sortColIndex(tbl, ctx.orderByCol));
+                                      return ctx.orderByAsc ? compareWindowValue(va, vb) < 0
+                                                            : compareWindowValue(va, vb) > 0;
+                                  });
+                    });
+                }
+                for (auto& t : sorters) t.join();
+                if (failed.load(std::memory_order_relaxed)) {
+                    root = std::make_unique<SortOp>(std::move(root), tbl,
+                                                    ctx.orderByCol, ctx.orderByAsc);
+                } else {
+                    std::vector<OpPtr> runs;
+                    runs.reserve(parts.size());
+                    for (auto& part : parts) {
+                        std::vector<std::string> rows;
+                        rows.reserve(part.size());
+                        for (auto& pr : part) rows.push_back(std::move(pr.second));
+                        runs.push_back(std::make_unique<MaterializedRowsOp>(std::move(rows)));
+                    }
+                    root = std::make_unique<GatherMergeOp>(
+                        std::move(runs), tbl, ctx.orderByCol, ctx.orderByAsc);
+                }
+            } else {
+                root = std::make_unique<SortOp>(std::move(root), tbl,
+                                                ctx.orderByCol, ctx.orderByAsc);
+            }
         }
 
         // Always add a Project so the output is formatted text (not raw binary).
@@ -2501,6 +3008,12 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
             engine, dbname, std::move(leftScan), std::move(rightScan),
             lTbl, rTbl, lCol, rCol);
     }
+    if (chosenAlgo == "hash" && !engine->inTransaction() &&
+        parallelWorkers_ > 1) {
+        return std::make_unique<ParallelHashJoinOp>(
+            engine, dbname, std::move(leftScan), std::move(rightScan),
+            lTbl, rTbl, lCol, rCol, parallelWorkers_);
+    }
     if (chosenAlgo == "merge") {
         return std::make_unique<MergeJoinOp>(
             engine, dbname, std::move(leftScan), std::move(rightScan),
@@ -2658,6 +3171,43 @@ static CostEstimate explainOp(Operator* op, int indent,
         est.cost = rows / std::max(1, pscan->workers());
         out += prefix + "ParallelTableScan(table=" + pscan->tableName() +
                ", workers=" + std::to_string(pscan->workers()) + ")" +
+               costRowsStr(est, opts) + "\n";
+
+    } else if (auto* pagg = dynamic_cast<ParallelGroupAggregateOp*>(op)) {
+        CostEstimate child = explainOp(pagg->child(), indent + 1, engine, dbname, out, opts);
+        est.rows = child.rows / 10.0;
+        if (est.rows < 1.0) est.rows = 1.0;
+        est.cost = child.cost / std::max(1, pagg->workers());
+        out += prefix + "ParallelAggregate(workers=" +
+               std::to_string(pagg->workers()) +
+               (pagg->usedParallelWorkers() ? ", used" : ", fallback") + ")" +
+               costRowsStr(est, opts) + "\n";
+
+    } else if (auto* pjoin = dynamic_cast<ParallelHashJoinOp*>(op)) {
+        CostEstimate left = explainOp(pjoin->leftChild(), indent + 1, engine, dbname, out, opts);
+        CostEstimate right = explainOp(pjoin->rightChild(), indent + 1, engine, dbname, out, opts);
+        est.rows = left.rows * right.rows
+                   * estimateJoinSel(engine, dbname, pjoin->leftTable(), pjoin->leftColumn(),
+                                     pjoin->rightTable(), pjoin->rightColumn());
+        if (est.rows < 1.0) est.rows = 1.0;
+        est.cost = left.cost + right.cost + right.rows * 2.0 / std::max(1, pjoin->workers());
+        out += prefix + "ParallelHashJoin(" + pjoin->leftTable() + ", " +
+               pjoin->rightTable() + ", workers=" + std::to_string(pjoin->workers()) +
+               (pjoin->usedParallelWorkers() ? ", used" : ", fallback") + ")" +
+               costRowsStr(est, opts) + "\n";
+
+    } else if (auto* gm = dynamic_cast<GatherMergeOp*>(op)) {
+        double rows = 0, cost = 0;
+        for (size_t i = 0; i < gm->inputCount(); ++i) {
+            CostEstimate child = explainOp(gm->childAt(i), indent + 1, engine, dbname, out, opts);
+            rows += child.rows;
+            cost = std::max(cost, child.cost);
+        }
+        est.rows = rows;
+        est.cost = cost + rows * 0.01;
+        out += prefix + "GatherMerge(sort=" + gm->sortColumn() +
+               (gm->ascending() ? " ASC" : " DESC") +
+               ", streams=" + std::to_string(gm->inputCount()) + ")" +
                costRowsStr(est, opts) + "\n";
 
     } else if (auto* scan = dynamic_cast<TableScanOp*>(op)) {
@@ -2840,6 +3390,11 @@ static CostEstimate explainOp(Operator* op, int indent,
                    + right.rows * std::log2(right.rows + 1) * 0.1;
         out += prefix + "MergeJoin(" + mjoin->leftTable() + ", " + mjoin->rightTable() + ")" +
                costRowsStr(est, opts) + "\n";
+
+    } else if (auto* mat = dynamic_cast<MaterializedRowsOp*>(op)) {
+        est.rows = static_cast<double>(mat->rowCount());
+        est.cost = est.rows * 0.01;
+        out += prefix + "MaterializedRows" + costRowsStr(est, opts) + "\n";
 
     } else {
         out += prefix + "Unknown\n";

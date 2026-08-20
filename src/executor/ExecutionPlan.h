@@ -83,6 +83,7 @@ public:
     bool open() override;
     bool next(std::string& outRow) override;
     void close() override;
+    size_t rowCount() const { return rows_.size(); }
 
 private:
     std::vector<std::string> rows_;
@@ -725,6 +726,117 @@ private:
     std::vector<std::string> havingConds_;
     std::vector<std::string> rows_;
     size_t pos_ = 0;
+};
+
+// ========================================================================
+// ParallelGroupAggregateOp: worker-thread aggregation.
+// The child rows are buffered as in GroupAggregateOp, then partitioned
+// into per-worker chunks.  Each worker hashes its chunk into local
+// group buckets (group key -> row indexes); the buckets are merged and
+// each merged group is finalized (aggregates, HAVING, render) once on
+// the calling thread.  Falls back to a single worker inside a
+// transaction, mirroring ParallelTableScanOp's safety rules.
+// ========================================================================
+class ParallelGroupAggregateOp : public Operator {
+public:
+    ParallelGroupAggregateOp(OpPtr child, const TableSchema& tbl,
+                             const std::vector<std::string>& groupByCols,
+                             const std::vector<StorageEngine::AggItem>& items,
+                             const std::vector<std::string>& havingConds,
+                             int workers);
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* child() const { return child_.get(); }
+    int workers() const { return workers_; }
+    bool usedParallelWorkers() const { return usedParallelWorkers_; }
+
+private:
+    OpPtr child_;
+    TableSchema tbl_;
+    std::vector<std::string> groupByCols_;
+    std::vector<StorageEngine::AggItem> items_;
+    std::vector<std::string> havingConds_;
+    int workers_;
+    bool usedParallelWorkers_ = false;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+};
+
+// ========================================================================
+// ParallelHashJoinOp: INNER hash join with a worker-thread build side.
+// The build (right) table is partitioned by page range; workers hash
+// their range into local maps that are merged on the calling thread
+// (per-key chains ordered by rid for deterministic output).  The probe
+// side is the regular Volcano pull.  Falls back to the serial build
+// inside a transaction or on partitioned build tables.
+// ========================================================================
+class ParallelHashJoinOp : public Operator {
+public:
+    ParallelHashJoinOp(StorageEngine* engine, const std::string& dbname,
+                       OpPtr left, OpPtr right,
+                       const std::string& leftTable, const std::string& rightTable,
+                       const std::string& leftCol, const std::string& rightCol,
+                       int workers);
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    Operator* leftChild() const { return left_.get(); }
+    Operator* rightChild() const { return right_.get(); }
+    const std::string& leftTable() const { return leftTable_; }
+    const std::string& rightTable() const { return rightTable_; }
+    const std::string& leftColumn() const { return leftCol_; }
+    const std::string& rightColumn() const { return rightCol_; }
+    int workers() const { return workers_; }
+    bool usedParallelWorkers() const { return usedParallelWorkers_; }
+
+private:
+    StorageEngine* engine_;
+    std::string dbname_;
+    OpPtr left_;
+    OpPtr right_;
+    std::string leftTable_;
+    std::string rightTable_;
+    std::string leftCol_;
+    std::string rightCol_;
+    int workers_;
+    bool usedParallelWorkers_ = false;
+    TableSchema leftTbl_;
+    TableSchema rightTbl_;
+    std::map<std::string, std::vector<std::pair<int64_t, std::string>>> rightHash_;
+    std::string curLeftRow_;
+    bool hasLeft_ = false;
+    std::vector<std::pair<int64_t, std::string>> curRightMatches_;
+    size_t matchPos_ = 0;
+};
+
+// ========================================================================
+// GatherMergeOp: k-way merge of pre-sorted worker streams.
+// Children are per-worker sorted runs (partitioned scans with an
+// order-preserving sort applied per partition); this node merges them
+// into one globally ordered output, like PostgreSQL's Gather Merge.
+// ========================================================================
+class GatherMergeOp : public Operator {
+public:
+    GatherMergeOp(std::vector<OpPtr> children, const TableSchema& tbl,
+                  const std::string& sortCol, bool asc);
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+    const std::string& sortColumn() const { return sortCol_; }
+    bool ascending() const { return asc_; }
+    size_t inputCount() const { return children_.size(); }
+    Operator* childAt(size_t i) const { return i < children_.size() ? children_[i].get() : nullptr; }
+
+private:
+    std::vector<OpPtr> children_;
+    TableSchema tbl_;
+    std::string sortCol_;
+    bool asc_;
+    // head row + done flag per stream
+    std::vector<std::string> heads_;
+    std::vector<bool> done_;
+    size_t colIdx_ = 0;
 };
 
 struct SemiJoinSpec {
