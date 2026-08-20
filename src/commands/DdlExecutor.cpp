@@ -2906,6 +2906,13 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             std::cout << "HASH index only supports single column" << std::endl;
             return true;
         }
+    } else if (am == "bloom") {
+        if (colnames.size() == 1) {
+            res = g_engine.createBloomIndex(s.currentDB, tname, colnames.front());
+        } else {
+            std::cout << "BLOOM index only supports single column" << std::endl;
+            return true;
+        }
     } else if (am == "gin" || am == "gist" || am == "brin" || am == "spgist") {
         if (stmt->unique || colnames.size() != 1 || colnames.front().empty()) {
             std::cout << "CREATE INDEX access method requires one non-unique column" << std::endl;
@@ -2932,6 +2939,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     auto discardCreatedIndex = [&]() {
         if (physicalMethod == "composite") g_engine.dropCompositeIndex(s.currentDB, tname, idxName);
         else if (physicalMethod == "hash") g_engine.dropHashIndex(s.currentDB, tname, physicalKey);
+        else if (physicalMethod == "bloom") g_engine.dropBloomIndex(s.currentDB, tname, physicalKey);
         else if (physicalMethod == "gin") g_engine.dropGinIndex(s.currentDB, tname, physicalKey);
         else if (physicalMethod == "gist") g_engine.dropGiSTIndex(s.currentDB, tname, physicalKey);
         else if (physicalMethod == "brin") g_engine.dropBrinIndex(s.currentDB, tname, physicalKey);

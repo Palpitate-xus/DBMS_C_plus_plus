@@ -1,6 +1,7 @@
 #include "ExecutionPlan.h"
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
+#include "access/BloomIndex.h"
 #include "Config.h"
 #include "process/RuntimeStats.h"
 #include "types/numeric.h"
@@ -440,6 +441,15 @@ static bool collectEqualityIndexCandidates(
         auto* hash = engine->getHashIndex(dbname, tablename, condition.colName);
         if (!hash) return false;
         for (int64_t rid : hash->search(condition.value)) candidates.insert(rid);
+        return true;
+    }
+
+    const auto bloomIndexedColumns = engine->getBloomIndexedColumns(dbname, tablename);
+    if (std::find(bloomIndexedColumns.begin(), bloomIndexedColumns.end(),
+                  condition.colName) != bloomIndexedColumns.end()) {
+        auto* bloom = engine->getBloomIndex(dbname, tablename, condition.colName);
+        if (!bloom) return false;
+        for (int64_t rid : bloom->search(condition.value)) candidates.insert(rid);
         return true;
     }
 
@@ -2618,7 +2628,10 @@ static bool hasEqualityIndex(StorageEngine* engine, const PlanContext& ctx,
     if (std::find(btreeColumns.begin(), btreeColumns.end(), condition.colName) != btreeColumns.end())
         return true;
     const auto hashColumns = engine->getHashIndexedColumns(ctx.dbname, ctx.tablename);
-    return std::find(hashColumns.begin(), hashColumns.end(), condition.colName) != hashColumns.end();
+    if (std::find(hashColumns.begin(), hashColumns.end(), condition.colName) != hashColumns.end())
+        return true;
+    const auto bloomColumns = engine->getBloomIndexedColumns(ctx.dbname, ctx.tablename);
+    return std::find(bloomColumns.begin(), bloomColumns.end(), condition.colName) != bloomColumns.end();
 }
 
 static bool canUseBitmapHeapScan(StorageEngine* engine, const PlanContext& ctx) {

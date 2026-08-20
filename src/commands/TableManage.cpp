@@ -23,6 +23,7 @@
 #include "CommitLog.h"
 #include "WAL.h"
 #include "HashIndex.h"
+#include "BloomIndex.h"
 #include "SPGiSTIndex.h"
 #include <cmath>
 #include <cctype>
@@ -4687,6 +4688,132 @@ DBStatus StorageEngine::dropHashIndex(const std::string& dbname,
     return DBStatus::OK;
 }
 
+// ========================================================================
+// Bloom Index
+// ========================================================================
+std::filesystem::path StorageEngine::bloomIndexPath(const std::string& dbname,
+                                                    const std::string& tablename,
+                                                    const std::string& colname) const {
+    return relationDir(dbname, tablename) / (tablename + "_" + colname + ".bidx");
+}
+
+std::filesystem::path StorageEngine::bloomIndexMetaPath(const std::string& dbname,
+                                                        const std::string& tablename) const {
+    return dbPath(dbname) / (tablename + ".bloomidx");
+}
+
+std::vector<std::string> StorageEngine::getBloomIndexedColumns(const std::string& dbname,
+                                                               const std::string& tablename) const {
+    std::vector<std::string> lines;
+    std::ifstream in(bloomIndexMetaPath(dbname, tablename));
+    if (in) {
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty()) lines.push_back(line);
+        }
+    }
+    return lines;
+}
+
+BloomIndex* StorageEngine::getBloomIndex(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    std::string key = dbname + "." + tablename + "." + colname;
+    auto it = bloomIndexCache_.find(key);
+    if (it != bloomIndexCache_.end()) return it->second.get();
+    auto idx = std::make_unique<BloomIndex>(bloomIndexPath(dbname, tablename, colname));
+    if (idx->open()) {
+        BloomIndex* ptr = idx.get();
+        bloomIndexCache_[key] = std::move(idx);
+        return ptr;
+    }
+    return nullptr;
+}
+
+DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname) {
+    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    bool found = false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].dataName == colname) { found = true; break; }
+    }
+    if (!found) return DBStatus::INVALID_VALUE;
+
+    std::filesystem::path meta = bloomIndexMetaPath(dbname, tablename);
+    std::set<std::string> existing;
+    {
+        std::ifstream in(meta);
+        std::string line;
+        while (std::getline(in, line)) if (!line.empty()) existing.insert(line);
+    }
+    if (existing.count(colname)) return DBStatus::OK;  // already exists
+    existing.insert(colname);
+
+    BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
+    if (!bidx) return DBStatus::IO_ERROR;
+    const std::string cacheKey = dbname + "." + tablename + "." + colname;
+    auto discardIndex = [&]() {
+        bidx->close();
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        bloomIndexCache_.erase(cacheKey);
+        std::filesystem::remove(bloomIndexPath(dbname, tablename, colname));
+    };
+    bidx->clear();
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                           const char* data, size_t len) {
+        std::string row(data, len);
+        for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].dataName == colname) {
+                std::string val = extractColumnValue(row, tbl, i);
+                if (!val.empty()) {
+                    bidx->insert(val, encodeRid(pageId, slotId));
+                }
+                break;
+            }
+        }
+    })) {
+        discardIndex();
+        return DBStatus::IO_ERROR;
+    }
+    if (!bidx->close() || !bidx->open()) {
+        discardIndex();
+        return DBStatus::IO_ERROR;
+    }
+    std::ostringstream serializedMeta;
+    for (const auto& c : existing) serializedMeta << c << '\n';
+    if (!index_file::writeAtomically(meta, serializedMeta.str())) {
+        discardIndex();
+        return DBStatus::IO_ERROR;
+    }
+    return DBStatus::OK;
+}
+
+DBStatus StorageEngine::dropBloomIndex(const std::string& dbname,
+                                       const std::string& tablename,
+                                       const std::string& colname) {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    std::filesystem::path meta = bloomIndexMetaPath(dbname, tablename);
+    std::set<std::string> existing;
+    {
+        std::ifstream in(meta);
+        std::string line;
+        while (std::getline(in, line)) if (!line.empty()) existing.insert(line);
+    }
+    existing.erase(colname);
+    {
+        std::ofstream out(meta, std::ios::trunc);
+        for (const auto& c : existing) out << c << '\n';
+    }
+    std::string key = dbname + "." + tablename + "." + colname;
+    bloomIndexCache_.erase(key);
+    std::filesystem::remove(bloomIndexPath(dbname, tablename, colname));
+    return DBStatus::OK;
+}
+
 std::vector<std::string> StorageEngine::readSecidxLines(const std::string& dbname,
                                                         const std::string& tablename) const {
     const std::string key = dbname + "/" + tablename;
@@ -6959,6 +7086,7 @@ DBStatus StorageEngine::dropIndexByAccessMethod(
     }
     if (am == "composite") return dropCompositeIndex(dbname, tablename, key);
     if (am == "hash") return dropHashIndex(dbname, tablename, key);
+    if (am == "bloom") return dropBloomIndex(dbname, tablename, key);
     if (am == "gin") return dropGinIndex(dbname, tablename, key);
     if (am == "gist") return dropGiSTIndex(dbname, tablename, key);
     if (am == "brin") return dropBrinIndex(dbname, tablename, key);
@@ -9206,6 +9334,10 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             if (it->first.rfind(hashPrefix, 0) == 0) it = hashIndexCache_.erase(it);
             else ++it;
         }
+        for (auto it = bloomIndexCache_.begin(); it != bloomIndexCache_.end();) {
+            if (it->first.rfind(hashPrefix, 0) == 0) it = bloomIndexCache_.erase(it);
+            else ++it;
+        }
         toastPageAllocators_.erase(dbname + ":" + tbl.tablename);
         toastIndexes_.erase(dbname + ":" + tbl.tablename);
 
@@ -9436,6 +9568,10 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         if (it->first.rfind(hashPrefix, 0) == 0) it = hashIndexCache_.erase(it);
         else ++it;
     }
+    for (auto it = bloomIndexCache_.begin(); it != bloomIndexCache_.end();) {
+        if (it->first.rfind(hashPrefix, 0) == 0) it = bloomIndexCache_.erase(it);
+        else ++it;
+    }
     if (std::filesystem::exists(relationRoot)) {
         for (const auto& entry : std::filesystem::directory_iterator(relationRoot)) {
             const std::string filename = entry.path().filename().string();
@@ -9503,6 +9639,10 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     auto hashIdx = getHashIndexedColumns(dbname, tablename);
     for (const auto& col : hashIdx) {
         std::filesystem::remove(hashIndexPath(dbname, tablename, col));
+    }
+    auto bloomIdxCols = getBloomIndexedColumns(dbname, tablename);
+    for (const auto& col : bloomIdxCols) {
+        std::filesystem::remove(bloomIndexPath(dbname, tablename, col));
     }
     auto compIdx = getCompositeIndexes(dbname, tablename);
     for (const auto& ci : compIdx) {
@@ -9784,6 +9924,25 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
             if (!value.empty()) hidx->insert(value, encodeRid(pageId, slotId));
         })) return DBStatus::IO_ERROR;
         if (!hidx->close() || !hidx->open()) return DBStatus::IO_ERROR;
+    }
+    const auto bloomCols = getBloomIndexedColumns(dbname, tablename);
+    for (const auto& cn : bloomCols) {
+        BloomIndex* bidx = getBloomIndex(dbname, tablename, cn);
+        if (!bidx) return DBStatus::IO_ERROR;
+        bidx->clear();
+        TableSchema rebuilt = getTableSchema(dbname, tablename);
+        size_t colIdx = rebuilt.len;
+        for (size_t i = 0; i < rebuilt.len; ++i) {
+            if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
+        }
+        if (colIdx >= rebuilt.len) return DBStatus::INVALID_VALUE;
+        if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
+                                               const char* data, size_t len) {
+            std::string row(data, len);
+            std::string value = extractColumnValue(row, rebuilt, colIdx, dbname);
+            if (!value.empty()) bidx->insert(value, encodeRid(pageId, slotId));
+        })) return DBStatus::IO_ERROR;
+        if (!bidx->close() || !bidx->open()) return DBStatus::IO_ERROR;
     }
     for (const auto& cn : fullTextCols)
         if (createFullTextIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
@@ -10495,6 +10654,17 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         std::filesystem::rename(hashIndexMetaPath(dbname, oldName), hashIndexMetaPath(dbname, newName));
         invalidateHashidxCache(dbname, oldName);
         invalidateHashidxCache(dbname, newName);
+    }
+
+    // Rename bloom indexes and meta
+    if (std::filesystem::exists(bloomIndexMetaPath(dbname, oldName))) {
+        auto cols = getBloomIndexedColumns(dbname, oldName);
+        for (const auto& c : cols) {
+            std::filesystem::path oldIdx = bloomIndexPath(dbname, oldName, c);
+            std::filesystem::path newIdx = bloomIndexPath(dbname, newName, c);
+            if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
+        }
+        std::filesystem::rename(bloomIndexMetaPath(dbname, oldName), bloomIndexMetaPath(dbname, newName));
     }
 
     // Rename composite indexes
@@ -13937,6 +14107,22 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
         }
     }
+    // Update bloom indexes.
+    {
+        auto bloomCols = getBloomIndexedColumns(dbname, tablename);
+        for (const auto& colname : bloomCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) return abortIndexUpdate();
+            BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
+            std::string val = extractColumnValue(strippedRow, tbl, colIdx);
+            if (!bidx || (!val.empty() && !bidx->insert(val, rid))) {
+                return abortIndexUpdate();
+            }
+        }
+    }
     lockManager_.unlock(tablename);
 
     // INSERT RETURNING observes the tuple after BEFORE INSERT triggers and
@@ -14998,6 +15184,27 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             }
         }
     }
+    // Remove from bloom indexes
+    {
+        auto bloomCols = getBloomIndexedColumns(dbname, tablename);
+        for (const auto& colname : bloomCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
+            if (!bidx) continue;
+            size_t bidx_i = 0;
+            for (int64_t rid : toDelete) {
+                if (bidx_i < rowsToDelete.size() && !rowsToDelete[bidx_i].empty()) {
+                    std::string val = extractColumnValue(rowsToDelete[bidx_i], tbl, colIdx);
+                    if (!val.empty()) bidx->remove(val, rid);
+                }
+                ++bidx_i;
+            }
+        }
+    }
     lockManager_.unlock(tablename);
 
     // Fire AFTER DELETE triggers
@@ -15339,6 +15546,16 @@ DBStatus StorageEngine::update(const std::string& dbname,
         }
         // Also save hash-indexed column values
         for (const auto& colname : hashIndexedCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx < tbl.len) {
+                oldIdxVals[colname] = extractColumnValue(row, tbl, colIdx);
+            }
+        }
+        // Also save bloom-indexed column values
+        for (const auto& colname : getBloomIndexedColumns(dbname, tablename)) {
             size_t colIdx = tbl.len;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
@@ -16020,6 +16237,29 @@ DBStatus StorageEngine::update(const std::string& dbname,
             } else if (actualRid != rid && !newVal.empty()) {
                 hidx->remove(newVal, rid);
                 hidx->insert(newVal, actualRid);
+            }
+        }
+
+        // Update bloom indexes (same old/new swap semantics).
+        auto bloomIdxCols = getBloomIndexedColumns(dbname, tablename);
+        for (const auto& colname : bloomIdxCols) {
+            size_t colIdx = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
+            }
+            if (colIdx >= tbl.len) continue;
+            BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
+            if (!bidx) continue;
+            auto itOld = oldIdxVals.find(colname);
+            std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
+            std::string newVal = extractColumnValue(strippedNewRow, tbl, colIdx);
+            bool colChanged = (colUpdates.find(colIdx) != colUpdates.end());
+            if (colChanged && oldVal != newVal) {
+                if (!oldVal.empty()) bidx->remove(oldVal, rid);
+                if (!newVal.empty()) bidx->insert(newVal, actualRid);
+            } else if (actualRid != rid && !newVal.empty()) {
+                bidx->remove(newVal, rid);
+                bidx->insert(newVal, actualRid);
             }
         }
 

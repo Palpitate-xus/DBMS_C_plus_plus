@@ -727,6 +727,16 @@ public:
                             const std::string& colname);
     std::vector<std::string> getHashIndexedColumns(const std::string& dbname,
                                                     const std::string& tablename) const;
+    // Bloom index (single-column equality probe; bloom filter + exact side
+    // map so probes never return false negatives)
+    DBStatus createBloomIndex(const std::string& dbname, const std::string& tablename,
+                               const std::string& colname);
+    DBStatus dropBloomIndex(const std::string& dbname, const std::string& tablename,
+                             const std::string& colname);
+    std::vector<std::string> getBloomIndexedColumns(const std::string& dbname,
+                                                     const std::string& tablename) const;
+    class BloomIndex* getBloomIndex(const std::string& dbname, const std::string& tablename,
+                                    const std::string& colname) const;
     class HashIndex* getHashIndex(const std::string& dbname, const std::string& tablename,
                                    const std::string& colname) const;
 
@@ -1305,6 +1315,11 @@ private:
                                               const std::string& tablename) const;
     void invalidateHashidxCache(const std::string& dbname,
                                 const std::string& tablename);
+    std::filesystem::path bloomIndexPath(const std::string& dbname,
+                                         const std::string& tablename,
+                                         const std::string& colname) const;
+    std::filesystem::path bloomIndexMetaPath(const std::string& dbname,
+                                             const std::string& tablename) const;
     mutable std::map<std::string, std::vector<std::string>> hashidxLinesCache_;
 
     // Exclusion constraints, cached per database (same invalidation rules).
@@ -1349,6 +1364,7 @@ private:
     std::filesystem::path hashIndexMetaPath(const std::string& dbname,
                                              const std::string& tablename) const;
     mutable std::map<std::string, std::unique_ptr<HashIndex>> hashIndexCache_;
+    mutable std::map<std::string, std::unique_ptr<class BloomIndex>> bloomIndexCache_;
 
     // SP-GiST index cache
     mutable std::mutex spGiSTMutex_;
