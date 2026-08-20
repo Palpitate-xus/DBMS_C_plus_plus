@@ -370,6 +370,8 @@ public:
         std::map<std::string, ColumnStats> multiColStats;
     };
     bool analyzeTable(const std::string& dbname, const std::string& tablename);
+    // Canonicalize a tsvector literal (used by to_tsvector and insert paths).
+    bool normalizeTsVectorText(const std::string& in, std::string& out) const;
     bool analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
                             const std::vector<std::string>& colnames);
     // Functional dependency degrees for CREATE STATISTICS (dependencies kind).

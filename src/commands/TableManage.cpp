@@ -5597,7 +5597,7 @@ static bool isWellFormedXml(const std::string& s) {
 // tsquery: validate the boolean grammar (! > <-> > & > |, parentheses, quoted
 //   or bare lexemes with optional :weight/* flags); stored verbatim.
 // ========================================================================
-static bool normalizeTsVector(const std::string& in, std::string& out) {
+static bool normalizeTsVectorImpl(const std::string& in, std::string& out) {
     std::map<std::string, std::set<std::pair<int, char>>> positions;
     std::map<std::string, bool> present;  // lexeme seen (even without positions)
     size_t i = 0, n = in.size();
@@ -13147,7 +13147,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         // Validate / canonicalize tsvector; validate tsquery (verbatim).
         if (col.dataType == "tsvector" && !col.isArray && !val.empty()) {
             std::string canon;
-            if (!normalizeTsVector(val, canon)) {
+            if (!normalizeTsVectorImpl(val, canon)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -15097,7 +15097,7 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     } else if (col.dataType == "tsvector") {
                         if (!kv.second.empty()) {
                             std::string canon;
-                            if (!normalizeTsVector(kv.second, canon))
+                            if (!normalizeTsVectorImpl(kv.second, canon))
                                 return DBStatus::INVALID_VALUE;
                             storeVal = canon;
                         }
@@ -24517,3 +24517,11 @@ std::vector<std::string> StorageEngine::getUserPermissions(
 }
 
 } // namespace dbms
+
+namespace dbms {
+// Public wrapper for expression evaluation (to_tsvector) and INSERT
+// canonicalization paths outside this TU.
+bool StorageEngine::normalizeTsVectorText(const std::string& in, std::string& out) const {
+    return ::dbms::normalizeTsVectorImpl(in, out);
+}
+}  // namespace dbms

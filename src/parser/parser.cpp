@@ -1197,7 +1197,7 @@ static ExprPtr parseJsonOpExpr(const std::vector<std::string>& tokens, size_t& p
     while (pos < tokens.size()) {
         const std::string& op = tokens[pos];
         if (op != "->" && op != "->>" && op != "#>" && op != "#>>" &&
-            op != "@>" && op != "<@") {
+            op != "@>" && op != "<@" && op != "@@") {
             break;
         }
         ++pos;

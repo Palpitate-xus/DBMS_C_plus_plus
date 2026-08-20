@@ -797,6 +797,8 @@ bool ExprEvaluator::similarToMatch(const std::string& text, const std::string& p
 // Binary operators
 // ----------------------------------------------------------------------------
 
+static ExprValue tsMatch(const std::string& vecText, const std::string& query);
+
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
     if (!e || !e->left || !e->right) return ExprValue{};
     std::string op = toLower(e->op);
@@ -875,6 +877,13 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             return ExprValue("text", o, false);
         }
         return ExprValue("text", t, false);
+    }
+    if (op == "@@") {
+        // Full-text match: tsvector @@ tsquery. The left side may be a
+        // stored tsvector literal ('l':1,3 ...) or plain text; the right
+        // side is a tsquery string.
+        if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
+        return tsMatch(l.value, r.value);
     }
     if (op == "@>" || op == "<@") {
         // Two families share these operators:
@@ -1857,6 +1866,126 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     return out;
 }
 
+// ============================================================================
+// Full-text search evaluation
+//   to_tsvector(text): tokenize (alnum runs, lowercased, trailing
+//     punctuation stripped), assign 1-based positions, canonicalize via
+//     the engine's tsvector normalizer.
+//   to_tsquery(text) / plainto_tsquery(text): AND (&) the query words.
+//   @@: does the tsvector (left) satisfy the tsquery (right)?
+//   ts_rank(tsvector, tsquery): frequency-weighted match score in [0,1].
+// ============================================================================
+static std::vector<std::string> tsTokenize(const std::string& text) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char ch : text) {
+        if (std::isalnum(static_cast<unsigned char>(ch))) {
+            cur += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        } else if (!cur.empty()) {
+            out.push_back(cur);
+            cur.clear();
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+static std::string tsBuildVector(const std::string& text) {
+    std::vector<std::string> toks = tsTokenize(text);
+    std::string raw;
+    for (size_t i = 0; i < toks.size(); ++i) {
+        if (!raw.empty()) raw += ' ';
+        raw += "'" + toks[i] + "':" + std::to_string(i + 1);
+    }
+    std::string canon;
+    if (!raw.empty() && g_engine.normalizeTsVectorText(raw, canon)) return canon;
+    return raw;
+}
+
+// Lexeme set of a stored tsvector literal ('l1':1,5 'l2':2 ...) — tolerant
+// of plain text input (treated as its token set) so @@ composes with any
+// text column.
+static std::map<std::string, std::vector<int>> tsLexemes(const std::string& v) {
+    std::map<std::string, std::vector<int>> out;
+    size_t i = 0, n = v.size();
+    while (i < n) {
+        // skip to next lexeme start: bare word or quoted
+        while (i < n && (v[i] == ' ' || v[i] == ',')) ++i;
+        if (i >= n) break;
+        std::string lex;
+        if (v[i] == '\'') {
+            ++i;
+            while (i < n) {
+                if (v[i] == '\'' && i + 1 < n && v[i + 1] == '\'') { lex += '\''; i += 2; }
+                else if (v[i] == '\'') { ++i; break; }
+                else { lex += v[i]; ++i; }
+            }
+        } else {
+            while (i < n && v[i] != ' ' && v[i] != ':') { lex += v[i]; ++i; }
+        }
+        if (lex.empty()) { if (i < n && v[i] == ':') ++i; continue; }
+        std::vector<int> positions;
+        if (i < n && v[i] == ':') {
+            ++i;
+            while (i < n && std::isdigit(static_cast<unsigned char>(v[i]))) {
+                int p = 0;
+                while (i < n && std::isdigit(static_cast<unsigned char>(v[i]))) {
+                    p = p * 10 + (v[i] - '0'); ++i;
+                }
+                positions.push_back(p);
+                // skip weight letters and separators
+                while (i < n && (v[i] >= 'A' && v[i] <= 'D')) ++i;
+                if (i < n && v[i] == ',') { ++i; continue; }
+                break;
+            }
+        }
+        if (positions.empty()) positions.push_back(0);
+        out[lex] = positions;
+    }
+    return out;
+}
+
+// Lexemes required by a tsquery: '&'-AND separated words ('|' OR and '!'
+// NOT contribute alternatives; matching is OR-of-all-terms then AND of
+// pure-& groups when no '|' appears).
+struct TsQueryTerms {
+    bool allAnd = true;               // no '|' encountered
+    std::vector<std::string> terms;   // every literal lexeme
+};
+static TsQueryTerms tsQueryTerms(const std::string& q) {
+    TsQueryTerms out;
+    std::string cur;
+    for (size_t i = 0; i < q.size(); ++i) {
+        char ch = q[i];
+        if (std::isalnum(static_cast<unsigned char>(ch))) {
+            cur += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        } else if (!cur.empty()) {
+            out.terms.push_back(cur);
+            cur.clear();
+            if (ch == '|') out.allAnd = false;
+        } else if (ch == '|') {
+            out.allAnd = false;
+        }
+    }
+    if (!cur.empty()) out.terms.push_back(cur);
+    return out;
+}
+
+static ExprValue tsMatch(const std::string& vecText, const std::string& query) {
+    auto lex = tsLexemes(vecText);
+    TsQueryTerms qt = tsQueryTerms(query);
+    if (qt.terms.empty()) return ExprValue("boolean", "f", false);
+    bool match;
+    if (qt.allAnd) {
+        match = true;
+        for (const auto& t : qt.terms) if (!lex.count(t)) { match = false; break; }
+    } else {
+        match = false;
+        for (const auto& t : qt.terms) if (lex.count(t)) { match = true; break; }
+    }
+    return ExprValue("boolean", match ? "t" : "f", false);
+}
+
 void ExprEvaluator::registerBuiltins() {
     // ARRAY[...] constructor (emitted by the parser as a function call so it
     // composes with the expression grammar). Renders the canonical
@@ -1905,6 +2034,69 @@ void ExprEvaluator::registerBuiltins() {
         std::string out = timestampShift(a[1].value, shift, true);
         if (out.empty()) return ExprValue("timestamp", "", true);
         return ExprValue("timestamp", out, false);
+    };
+
+    // ------------------ full-text search ------------------
+    // to_tsvector([config,] text): tokens -> 'lex':pos entries, canonical.
+    functions_["to_tsvector"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a.back().isNull) return ExprValue("tsvector", "", true);
+        return ExprValue("tsvector", tsBuildVector(a.back().value), false);
+    };
+    // plainto_tsquery([config,] text): plain words ANDed together.
+    functions_["plainto_tsquery"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a.back().isNull) return ExprValue("tsquery", "", true);
+        auto toks = tsTokenize(a.back().value);
+        std::string q;
+        for (const auto& t : toks) {
+            if (!q.empty()) q += " & ";
+            q += "'" + t + "'";
+        }
+        return ExprValue("tsquery", q, false);
+    };
+    // to_tsquery([config,] text): pass through (already &/|-shaped), or
+    // synthesize &'d terms for plain words.
+    functions_["to_tsquery"] = [](const std::vector<ExprValue>& a) {
+        if (a.empty() || a.back().isNull) return ExprValue("tsquery", "", true);
+        const std::string& v = a.back().value;
+        if (v.find('&') != std::string::npos || v.find('|') != std::string::npos ||
+            v.find('!') != std::string::npos) {
+            return ExprValue("tsquery", v, false);
+        }
+        auto toks = tsTokenize(v);
+        std::string q;
+        for (const auto& t : toks) {
+            if (!q.empty()) q += " & ";
+            q += "'" + t + "'";
+        }
+        return ExprValue("tsquery", q, false);
+    };
+    // ts_rank(tsvector, tsquery): matched-term coverage weighted by the
+    // query's term count and positional density of matches.
+    functions_["ts_rank"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) {
+            return ExprValue("double precision", "", true);
+        }
+        auto lex = tsLexemes(a[0].value);
+        TsQueryTerms qt = tsQueryTerms(a[1].value);
+        if (qt.terms.empty()) {
+            return ExprValue("double precision", "0", false);
+        }
+        size_t matchedTerms = 0;
+        double posSum = 0;
+        for (const auto& t : qt.terms) {
+            auto it = lex.find(t);
+            if (it == lex.end()) continue;
+            ++matchedTerms;
+            for (int p : it->second) {
+                posSum += (p > 0) ? (1.0 / static_cast<double>(p)) : 1.0;
+            }
+        }
+        double coverage = static_cast<double>(matchedTerms) /
+                          static_cast<double>(qt.terms.size());
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.4f",
+                      0.05 + coverage * 0.4 + (coverage > 0 ? std::min(0.5, posSum * 0.05) : 0.0));
+        return ExprValue("double precision", buf, false);
     };
 
     functions_["abs"] = [](const std::vector<ExprValue>& a) {
