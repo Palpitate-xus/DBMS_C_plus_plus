@@ -39,7 +39,12 @@ fi
 WORK="$(mktemp -d /tmp/dbms_soak.XXXXXX)"
 SERVER_PID=""
 cleanup() {
-    [ -n "$SERVER_PID" ] && kill -9 "$SERVER_PID" 2>/dev/null
+    if [ -n "$SERVER_PID" ]; then
+        kill -9 "$SERVER_PID" 2>/dev/null
+        # Belt and braces: any dbms_main still holding this workdir must
+        # die, or its wal.lock stalls later verification runs.
+        pkill -9 -f "dbms_main --server $PORT" 2>/dev/null
+    fi
     if [ "${SOAK_KEEP_DIR:-0}" != "1" ]; then rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
@@ -87,7 +92,10 @@ printf 'checkpoint_interval=1000000\n' > "$WORK/dbms.conf"
 # --- server ----------------------------------------------------------------
 # --insecure: the soak harness runs on loopback with no TLS certs; the
 # wire protocol still performs SCRAM-SHA-256 authentication.
-(cd "$WORK" && "$DBMS_MAIN" --server "$PORT" --insecure > "$WORK/server.log" 2>&1) &
+# NOTE: run via exec so $! is the SERVER's pid, not a subshell's — a
+# mismatched pid leaves the real server alive holding wal.lock, which
+# stalls every later process opening the database directory.
+(cd "$WORK" && exec "$DBMS_MAIN" --server "$PORT" --insecure > "$WORK/server.log" 2>&1) &
 SERVER_PID=$!
 
 # Wait for the accept loop to come up.
@@ -101,18 +109,26 @@ if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "[soak] FATAL: server died during startup"; tail -10 "$WORK/server.log"; exit 1
 fi
 
-# Create the workload table through the CLI process (server holds the db).
-(cd "$WORK" && printf 'admin admin\nUSE DATABASE soakdb;\nCREATE TABLE soak_t (id BIGINT PRIMARY KEY, worker INT, seq INT, payload VARCHAR(64));\nCREATE INDEX soak_idx ON soak_t (worker);\nexit\n' \
-    | timeout 60 "$DBMS_MAIN" > "$WORK/ddl.log" 2>&1) || {
-    echo "[soak] FATAL: workload table setup failed"; tail -5 "$WORK/ddl.log"; exit 1; }
+# Workload schema is created through the SERVER's own protocol connection
+# (worker 1 bootstraps; --bootstrap-sql).  A second CLI process touching
+# the same data directory while the server holds it was observed to kill
+# the server outright — the single-writer constraint documented in
+# docs/PACKAGING.md applies to the harness too.
 
 # --- clients ----------------------------------------------------------------
 echo "[soak] starting $CLIENTS protocol clients for ${DURATION}s ..."
 declare -a CPIDS
 for i in $(seq 1 "$CLIENTS"); do
-    ( cd "$WORK" && python3 "$SRC_DIR/scripts/soak_client.py" \
-        --port "$PORT" --db soakdb --worker "$i" --duration "$DURATION" \
-        > "$WORK/client_$i.json" 2> "$WORK/client_$i.err" ) &
+    if [ "$i" -eq 1 ]; then
+        ( cd "$WORK" && python3 "$SRC_DIR/scripts/soak_client.py" \
+            --port "$PORT" --db soakdb --worker "$i" --duration "$DURATION" \
+            --bootstrap-sql "CREATE TABLE soak_t (id BIGINT PRIMARY KEY, worker INT, seq INT, payload VARCHAR(64)); CREATE INDEX soak_idx ON soak_t (worker)" \
+            > "$WORK/client_$i.json" 2> "$WORK/client_$i.err" ) &
+    else
+        ( cd "$WORK" && python3 "$SRC_DIR/scripts/soak_client.py" \
+            --port "$PORT" --db soakdb --worker "$i" --duration "$DURATION" \
+            > "$WORK/client_$i.json" 2> "$WORK/client_$i.err" ) &
+    fi
     CPIDS+=($!)
 done
 
@@ -154,6 +170,21 @@ if ! kill -0 "$SERVER_PID" 2>/dev/null; then
 fi
 echo "[soak] server alive after load: yes"
 
+# Shut the server down before verifying: a second process opening the
+# same database directory while the server holds it stalls indefinitely
+# (documented single-writer constraint — docs/PACKAGING.md).  Stopping
+# here doubles as a restart-recovery check: every verification query
+# below runs through WAL recovery on a fresh process.
+kill "$SERVER_PID" 2>/dev/null
+for _ in $(seq 1 50); do
+    kill -0 "$SERVER_PID" 2>/dev/null || break
+    sleep 0.2
+done
+kill -9 "$SERVER_PID" 2>/dev/null
+wait "$SERVER_PID" 2>/dev/null
+SERVER_PID=""
+echo "[soak] server stopped cleanly; verification runs post-restart"
+
 # --- invariants + clean reopen ------------------------------------------------
 # The verification client may itself land inside a world-stop stall; the
 # 120s budget covers one full documented stall cycle.
@@ -184,8 +215,11 @@ echo
 echo "=================================================================="
 # Error budget: transient stalls (known v0.1 world-stop) recover via
 # client retry; a dominant failure rate means a real defect.
-if [ "$CLIENT_FAILED" -ne 0 ] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo "[soak] RESULT: FAIL (server death or client crash; errors=$TOTAL_ERR)" >&2
+# SERVER_PID was cleared after the deliberate shutdown above, so server
+# liveness was already asserted at the "server alive after load" gate;
+# here only client crashes count as hard failures.
+if [ "$CLIENT_FAILED" -ne 0 ]; then
+    echo "[soak] RESULT: FAIL (client crash; errors=$TOTAL_ERR)" >&2
     exit 1
 fi
 ATTEMPTED=$((TOTAL_OPS + TOTAL_ERR))

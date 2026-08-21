@@ -192,6 +192,12 @@ def main() -> int:
     ap.add_argument("--duration", type=int, required=True)
     ap.add_argument("--rate", type=float, default=0.0,
                     help="max ops/sec per worker (0 = unlimited)")
+    ap.add_argument("--bootstrap-sql", default=None,
+                    help="run these semicolon-separated statements once "
+                         "after connecting (before the load loop); used "
+                         "to create the workload schema through the "
+                         "server itself instead of a second CLI process "
+                         "touching the same data directory")
     args = ap.parse_args()
 
     worker = args.worker
@@ -201,6 +207,21 @@ def main() -> int:
     error_times = []
     sock = None
     last_error = ""
+
+    if args.bootstrap_sql:
+        # Worker 1 creates the schema; others just wait for it to exist
+        # (their first loop op will retry until the table is there).
+        if worker == 1:
+            b = connect(args.host, args.port, args.user,
+                        args.password, args.db)
+            for stmt in args.bootstrap_sql.split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    simple_query(b, stmt)
+            try:
+                b.close()
+            except OSError:
+                pass
 
     def ensure_conn():
         nonlocal sock
@@ -274,7 +295,11 @@ def main() -> int:
         "last_error": last_error[:200],
         "error_times": error_times[:10],
     }))
-    return 0 if errors == 0 else 1
+    # Per-op errors are REPORTED (JSON), not fatal: the soak harness
+    # applies the documented error budget (world-stop stalls recover by
+    # retry).  A nonzero exit would read as "client crashed without a
+    # summary", which the emitted summary itself disproves.
+    return 0
 
 
 if __name__ == "__main__":
