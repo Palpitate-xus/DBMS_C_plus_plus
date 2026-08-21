@@ -16,6 +16,7 @@
 #include "utils/prepared_stmts.h"
 #include "ExecutionPlan.h"
 #include "NetworkServer.h"
+#include "network/ConnectionPool.h"
 #include "logs.h"
 #include "permissions.h"
 #include "common/scram_sha256.h"
@@ -1463,6 +1464,8 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     g_checkpointInterval = g_config.checkpointInterval;
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
     syncPlannerCostModel(g_config);
+    dbms::ConnectionPool::instance().configure(g_config.poolMode, g_config.poolSize,
+                                               g_config.maxClientConnections);
     invalidatePlanCacheForConfigChange();
     if (!g_config.save("dbms.conf")) {
         g_config = previous;
@@ -1471,6 +1474,8 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
         g_checkpointInterval = previous.checkpointInterval;
         dbms::QueryPlanner::setParallelWorkers(previous.maxParallelWorkersPerGather);
         syncPlannerCostModel(previous);
+        dbms::ConnectionPool::instance().configure(previous.poolMode, previous.poolSize,
+                                                   previous.maxClientConnections);
         s.statementTimeoutMs = previousSessionStatementTimeoutMs;
         s.defaultStatementTimeoutMs = previousSessionDefaultStatementTimeoutMs;
         s.lockTimeoutMs = previousSessionLockTimeoutMs;
@@ -11606,6 +11611,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             return false;
         }
+        if (rest == "pools") {
+            const auto st = dbms::ConnectionPool::instance().stats();
+            cout << "mode pool_size backends idle rented waiting clients total_rents total_waits" << endl;
+            cout << st.mode << " " << st.poolSize << " " << st.totalContexts << " "
+                 << st.idleContexts << " " << st.rentedContexts << " " << st.waitingRenters
+                 << " " << st.clientConnections << " " << st.totalRents << " "
+                 << st.totalWaits << endl;
+            return false;
+        }
         if (rest == "variables") {
             g_config.printAll();
             return false;
@@ -12080,6 +12094,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "enable_merge_join " << (cm.enableMergeJoin ? "on" : "off") << endl;
                 return false;
             }
+        }
+        if (rest == "pool_mode") {
+            cout << "pool_mode " << dbms::ConnectionPool::instance().modeName() << endl;
+            return false;
+        }
+        if (rest == "pool_size") {
+            cout << "pool_size " << dbms::ConnectionPool::instance().poolSize() << endl;
+            return false;
+        }
+        if (rest == "max_client_conn") {
+            cout << "max_client_conn " << dbms::ConnectionPool::instance().maxClientConnections() << endl;
+            return false;
         }
         cout << "Unknown SHOW command" << endl;
         return true;
@@ -13626,6 +13652,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cout << "cpu_index_tuple_cost " << cm.cpuIndexTupleCost << " " << endl;
                     cout << "cpu_operator_cost " << cm.cpuOperatorCost << " " << endl;
                     cout << "enable_nestloop " << (cm.enableNestloop ? "on" : "off") << " " << endl;
+                    const auto poolStats = dbms::ConnectionPool::instance().stats();
+                    cout << "pool_mode " << poolStats.mode << " " << endl;
+                    cout << "pool_size " << poolStats.poolSize << " " << endl;
+                    cout << "max_client_conn " << poolStats.maxClientConnections << " " << endl;
                 }
                 cout << "auto_explain " << (g_config.autoExplainEnabled ? "on" : "off") << " " << endl;
                 cout << "auto_explain.log_min_duration " << g_config.autoExplainThresholdMs << " ms" << endl;
@@ -15638,6 +15668,8 @@ int main(int argc, char* argv[]) {
     g_engine.getLockManager().setDeadlockTimeout(g_config.deadlockTimeoutMs);
     dbms::QueryPlanner::setParallelWorkers(g_config.maxParallelWorkersPerGather);
     syncPlannerCostModel(g_config);
+    dbms::ConnectionPool::instance().configure(g_config.poolMode, g_config.poolSize,
+                                               g_config.maxClientConnections);
 
     // Server mode: ./dbms_main --server PORT [--insecure]
     if (argc >= 3 && std::string(argv[1]) == "--server") {

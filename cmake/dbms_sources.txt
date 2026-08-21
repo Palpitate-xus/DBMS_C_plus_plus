@@ -16,6 +16,7 @@ src/access/SPGiSTIndex.cpp
 src/transaction/LockManager.cpp
 src/transaction/TxnIdGenerator.cpp
 src/network/NetworkServer.cpp
+src/network/ConnectionPool.cpp
 src/network/PostgresProtocol.cpp
 src/network/PostgresNumeric.cpp
 src/common/Config.cpp

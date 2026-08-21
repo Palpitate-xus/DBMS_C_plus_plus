@@ -90,6 +90,8 @@ bool Config::validate() const {
            workMemKb > 0 && workMemKb <= 100000000 &&
            maxParallelWorkersPerGather >= 0 &&
            maxParallelWorkersPerGather <= 128 &&
+           poolSize >= 1 && poolSize <= 4096 &&
+           maxClientConnections >= 0 &&
            std::isfinite(seqPageCost) && seqPageCost >= 0.0 &&
            std::isfinite(randomPageCost) && randomPageCost >= 0.0 &&
            std::isfinite(cpuTupleCost) && cpuTupleCost >= 0.0 &&
@@ -144,6 +146,15 @@ bool assignParameter(Config& config, const std::string& key,
         parsed = parseDouble(value, config.cpuOperatorCost);
     } else if (key == "enable_nestloop") {
         parsed = parseBool(value, config.enableNestloop);
+    } else if (key == "pool_mode") {
+        if (value == "session" || value == "transaction" || value == "statement") {
+            config.poolMode = value;
+            parsed = true;
+        }
+    } else if (key == "pool_size") {
+        parsed = parseInt(value, config.poolSize);
+    } else if (key == "max_client_conn") {
+        parsed = parseInt(value, config.maxClientConnections);
     } else {
         return false;
     }
@@ -203,6 +214,9 @@ void Config::printAll() const {
               << "enable_merge_join " << (enableMergeJoin ? "on" : "off") << "\n"
               << "max_parallel_workers_per_gather " << maxParallelWorkersPerGather << "\n"
               << "seq_page_cost " << seqPageCost << "\n"
+              << "pool_mode " << poolMode << "\n"
+              << "pool_size " << poolSize << "\n"
+              << "max_client_conn " << maxClientConnections << "\n"
               << "random_page_cost " << randomPageCost << "\n"
               << "cpu_tuple_cost " << cpuTupleCost << "\n"
               << "cpu_index_tuple_cost " << cpuIndexTupleCost << "\n"
@@ -242,6 +256,9 @@ bool Config::save(const std::string& filename) const {
         << "enable_merge_join=" << (enableMergeJoin ? "on" : "off") << "\n"
         << "max_parallel_workers_per_gather=" << maxParallelWorkersPerGather << "\n"
         << "seq_page_cost=" << seqPageCost << "\n"
+        << "pool_mode=" << poolMode << "\n"
+        << "pool_size=" << poolSize << "\n"
+        << "max_client_conn=" << maxClientConnections << "\n"
         << "random_page_cost=" << randomPageCost << "\n"
         << "cpu_tuple_cost=" << cpuTupleCost << "\n"
         << "cpu_index_tuple_cost=" << cpuIndexTupleCost << "\n"

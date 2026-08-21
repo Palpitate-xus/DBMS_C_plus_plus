@@ -38,6 +38,10 @@ struct Config {
     double cpuIndexTupleCost = 0.005;
     double cpuOperatorCost = 0.0025;
     bool enableNestloop = true;
+    // Connection pooling (PgBouncer-style backend context pool).
+    std::string poolMode = "session";  // session | transaction | statement
+    int poolSize = 16;                 // pooled backend contexts per user
+    int maxClientConnections = 0;      // 0 = unlimited (engine maxConnections still applies)
 
     // Load from file; returns true only when the file is absent or every
     // recognized setting is valid. A present but malformed file is rejected

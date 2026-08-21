@@ -4,6 +4,7 @@
 #include "permissions.h"
 #include "PostgresProtocol.h"
 #include "Session.h"
+#include "network/ConnectionPool.h"
 #include "TLSWrapper.h"
 #include "utils/pg_hba.h"
 #include "common/scram_sha256.h"
@@ -1267,10 +1268,47 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         return;
     }
 
-    std::map<std::string, ProtocolPreparedStatement> preparedStatements;
-    std::map<std::string, ProtocolPortal> portals;
+    // ---- Pooled backend contexts (PgBouncer-style) ------------------
+    // Session mode: one backend rented for the client's whole lifetime,
+    // discarded on disconnect (temp tables die with it — same as an
+    // unpooled backend). Transaction/statement mode: a backend is rented
+    // while a transaction/statement runs and returned between statements,
+    // so idle clients do not hold backend resources. Known limitation
+    // (shared with PgBouncer's transaction mode): session-level state
+    // such as PREPARE ... names does not travel across rentals.
+    auto& pool = ConnectionPool::instance();
+    const bool sessionMode = pool.mode() == ConnectionPool::Mode::Session;
+    std::shared_ptr<BackendContext> backend;
+    if (sessionMode) {
+        backend = pool.acquire(username, session.currentDB);
+        if (backend) {
+            // The client's freshly authenticated session is authoritative;
+            // the backend slot only tracks the rental for accounting.
+            backend->session = session;
+        }
+    }
+    struct BackendRelease {
+        ConnectionPool& pool;
+        std::shared_ptr<BackendContext>& backend;
+        bool sessionMode;
+        std::shared_ptr<BackendContext>& held;
+        ~BackendRelease() {
+            if (held) {
+                if (sessionMode) pool.discard(held);
+                else {
+                    ConnectionPool::resetForReuse(*held);
+                    pool.release(held);
+                }
+            }
+        }
+    } backendRelease{pool, backend, sessionMode, backend};
     bool transactionFailed = false;
     bool extendedQueryError = false;
+    // Connection-local extended-query state. In transaction/statement pool
+    // modes these do not travel across backend rentals (PgBouncer has the
+    // same restriction for session-level features).
+    std::map<std::string, ProtocolPreparedStatement> preparedStatements;
+    std::map<std::string, ProtocolPortal> portals;
     const auto readyStatus = [&]() -> char {
         if (transactionFailed) return 'E';
         return g_engine.inTransaction() ? 'T' : 'I';
@@ -1283,7 +1321,28 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         const std::string effectiveSql = transactionFailed
                                              ? rollbackCommandForAbortedTransaction(sql)
                                              : sql;
-        QueryResult result = executeProtocolQuery(effectiveSql, session);
+        // Short-rent pooling: borrow a backend for the statement, run on
+        // its session state, then hand it back. Between statements this
+        // client holds no backend at all.
+        std::shared_ptr<BackendContext> rented;
+        Session* execSession = &session;
+        if (!sessionMode) {
+            rented = pool.acquire(username, session.currentDB);
+            if (rented) {
+                rented->session = session;  // project client state onto backend
+                execSession = &rented->session;
+            }
+        }
+        QueryResult result = executeProtocolQuery(effectiveSql, *execSession);
+        if (!sessionMode && rented) {
+            session = rented->session;      // carry back GUC/DB changes
+            const bool statementEndsTran =
+                !g_engine.inTransaction() && !wasInTransaction;
+            (void)statementEndsTran;
+            ConnectionPool::resetForReuse(*rented);
+            pool.release(rented);
+            rented.reset();
+        }
         if (result.error && wasInTransaction) {
             transactionFailed = true;
         } else if (!result.error && isTransactionRecoveryCommand(sql)) {
@@ -1814,6 +1873,18 @@ bool startServer(int port, bool allowPlaintext) {
             g_stats.rejectedConnections++;
             continue;
         }
+        auto& pool = ConnectionPool::instance();
+        if (!pool.tryReserveClientSlot()) {
+            // Pool-level client limit (max_client_conn) reached.
+            ::shutdown(clientFd, SHUT_RDWR);
+            ::close(clientFd);
+            releaseConnectionSlot();
+            g_stats.rejectedConnections++;
+            continue;
+        }
+        struct ClientSlotGuard {
+            ~ClientSlotGuard() { ConnectionPool::instance().releaseClientSlot(); }
+        } clientSlotGuard;
 
         std::string clientHost = inet_ntoa(clientAddr.sin_addr);
         clientHost += ":" + std::to_string(ntohs(clientAddr.sin_port));
@@ -1858,6 +1929,7 @@ bool startServer(int port, bool allowPlaintext) {
     ::close(serverFd);
     shutdownActiveClients();
     for (auto& worker : workers) worker->thread.join();
+    ConnectionPool::instance().shutdown();
     return acceptLoopHealthy;
 }
 
