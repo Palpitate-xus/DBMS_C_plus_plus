@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dbms_defs.h"
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -144,7 +145,10 @@ public:
     std::optional<XLogRecord> ReadNextRecord(Lsn lsn) const;
 
     // Get the LSN where the next record will be written.
-    Lsn currentWriteLsn() const { return currentLsn_; }
+    // Relaxed atomic read: callers use this both inside and outside the
+    // WAL process mutex, so taking the mutex here would self-deadlock; the
+    // value is only a progress hint for flush/recovery decisions.
+    Lsn currentWriteLsn() const { return currentLsn_.load(std::memory_order_relaxed); }
 
     // Timeline ID (TLI). Default is 1. Used in segment file names.
     uint32_t timelineId() const { return timelineId_; }
@@ -192,7 +196,9 @@ public:
 private:
     std::filesystem::path walDir_;
     bool open_ = false;
-    Lsn currentLsn_ = 0;
+    // Written under dirMutex_ (XLogInsert/XLogFlush/recovery init); read
+    // lock-free by currentWriteLsn() from arbitrary threads.
+    std::atomic<Lsn> currentLsn_{0};
     uint32_t timelineId_ = 1;
 
     // ---- Incremental append state ---------------------------------------

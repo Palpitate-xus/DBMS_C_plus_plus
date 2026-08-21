@@ -1,0 +1,7 @@
+# Intentional process-lifetime singletons (never destroyed by design).
+leak:WALManager
+leak:g_engine
+leak:PageCrypto
+leak:ConnectionPool
+leak:PublicationCatalog
+leak:LogicalChangeStore

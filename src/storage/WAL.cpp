@@ -202,14 +202,14 @@ bool WALManager::ensureOpen() {
         return false;
     }
     // Everything on disk is already durable by definition.
-    lastSyncedLsn_ = currentLsn_;
+    lastSyncedLsn_ = currentLsn_.load(std::memory_order_relaxed);
     earliestSegValid_ = false;
     return true;
 }
 
 bool WALManager::refreshCurrentLsnFromDisk() {
     // Scan existing segments to find current LSN (end of last segment).
-    currentLsn_ = 0;
+    currentLsn_.store(0, std::memory_order_relaxed);
     uint32_t maxSeg = 0;
     bool found = false;
     std::error_code ec;
@@ -228,7 +228,7 @@ bool WALManager::refreshCurrentLsnFromDisk() {
         auto size = std::filesystem::file_size(path, ec);
         if (ec) return false;
         if (size > kSegmentSize) return false;
-        currentLsn_ = static_cast<Lsn>(maxSeg) * kSegmentSize + size;
+        currentLsn_.store(static_cast<Lsn>(maxSeg) * kSegmentSize + size, std::memory_order_relaxed);
     }
     return true;
 }
@@ -660,7 +660,8 @@ bool WALManager::truncateBefore(Lsn lsn) {
 }
 
 void WALManager::advanceCurrentLsn(uint32_t len) {
-    currentLsn_ += len;
+    currentLsn_.store(currentLsn_.load(std::memory_order_relaxed) + len,
+                      std::memory_order_relaxed);
 }
 
 uint32_t WALManager::computeCrc(const char* data, size_t len) const {
