@@ -50,7 +50,7 @@ def verifier(password, salt=b"0123456789abcdef", iterations=4096):
     salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
     ck = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
     sk = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
-    return "SCRAM-SHA-256$%d:%s$%s$%s" % (iterations, base64.b64encode(salt).decode(), base64.b64encode(hashlib.sha256(ck).digest()).decode(), base64.b64encode(sk).decode())
+    return "SCRAM-SHA-256$%d:%s$%s:%s" % (iterations, base64.b64encode(salt).decode(), base64.b64encode(hashlib.sha256(ck).digest()).decode(), base64.b64encode(sk).decode())
 import os
 os.makedirs(os.path.join(root, "info/pg_catalog"), exist_ok=True)
 open(os.path.join(root, "info/pg_catalog/pg_authid.cat"), "w").write(
