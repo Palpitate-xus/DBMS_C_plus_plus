@@ -273,6 +273,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 10. ✅ P2-2 Bloom 索引（`BloomIndex` AM：bloom filter + 精确侧表、全写路径维护、扫描探测，PASS=162）
 11. ✅ P2-4 连接池（`ConnectionPool`：三模式 BackendContext 池化 + 3 个 GUC + `SHOW POOLS`，PASS=163）
 12. ✅ P2-5 逻辑解码（双输出插件 + PublicationCatalog + 按槽变更流 + 全 SQL 面，PASS=164）
+13. ✅ P2-8 TDE（SHA-256-CTR+EtM 页级加密、边车信封、keyring 0600、崩溃恢复兼容，PASS=165）
 
 ### P1-9: 自定义成本函数 (Custom Cost Functions) ✅（2026-08-20）
 - **类别**: 优化器 / 扩展性
@@ -433,17 +434,17 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 - **预估工作量**: 3-5 天
 - **相关文件**: `src/utils/permissions.h`
 
-### P2-8: TDE (透明数据加密)
+### P2-8: TDE (透明数据加密) ✅（2026-08-21）
 - **类别**: 安全 / 加密
-- **现状**: 数据文件明文存储
+- **现状**: ✅ `src/storage/PageCrypto.{h,cpp}`：页级 TDE，SHA-256-CTR 密流 + SHA-256 EtM 认证（等价 AES-GCM 组合语义，零外部依赖）。存储模型：**整页密文**，每页信封（nonce+MAC，48B）住边车文件 `<datafile>.tde`（页号索引）；堆页头部 line-pointer 向下生长/tuple 向上生长，页内无处安放信封——边车保持物理布局不变。全零信封 = 明文页（未加密库可就地加密）。页 0（文件头）永不加密。`BufferPool` 读写钩子：读验证+解密（MAC 失败 fail-closed）、写封缄+落信封。密钥环 0600 首建/重载/坏格式拒绝；GUC `tde_keyring` 在引擎前静态初始化装载（崩溃恢复可解密）；`SHOW TDE STATUS`。WAL 崩溃恢复验证通过（before-image 明文、redo 经 buffer pool 再封缄）
 - **PG 参考**: `pg_tde` extension
-- **影响**: 无法满足合规要求
+- **残余缺口**: 索引文件（.idx/.gin/.brin 等）未经 BufferPool 页路径的部分未覆盖；无密钥轮换（re-encrypt）、无 per-database 密钥隔离
 - **实现路径**:
-  1. 实现 `PageCrypto`：AES-256-GCM 页级加密
-  2. 在 `PageAllocator` 读写路径中加解密
-  3. 实现密钥管理：`pg_tde_keyring`
-- **预估工作量**: 1 周
-- **相关文件**: `src/storage/PageAllocator.cpp`
+  1. ✅ `PageCrypto`：SHA-256-CTR + EtM 页级加密
+  2. ✅ `BufferPool` 读写路径加解密（页 0 豁免）
+  3. ✅ 密钥管理：keyring 文件（0600、首建随机、坏格式拒绝）
+- **预估工作量**: ~~1 周~~ 已完成（本批范围）
+- **相关文件**: `src/storage/PageCrypto.{h,cpp}`, `src/storage/BufferPool.{h,cpp}`, `src/common/Config.{h,cpp}`, `src/main.cpp`, `tests/tde_test.cpp`
 
 ### P2-9: Deferrable 约束扩展到 CHECK 之外
 - **类别**: 数据完整性
