@@ -19,6 +19,7 @@
 #include "network/ConnectionPool.h"
 #include "replication/LogicalDecoder.h"
 #include "storage/PageCrypto.h"
+#include "common/version.h"
 #include "replication/ReplicationManager.h"
 #include "logs.h"
 #include "permissions.h"
@@ -15904,6 +15905,16 @@ bool execute(const std::string& rawSql, Session& s) {
 int main(int argc, char* argv[]) {
     // Set locale for Unicode support
     std::setlocale(LC_CTYPE, "");
+
+    // --version / -V: print the release identity and exit before any
+    // engine/config side effects.
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--version" || arg == "-V") {
+            std::cout << "dbms " << DBMS_VERSION_STRING << std::endl;
+            return 0;
+        }
+    }
 
     if (!g_initialConfigLoadOk) return 1;
 
