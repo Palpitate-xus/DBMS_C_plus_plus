@@ -17,7 +17,10 @@
 质量与并发（sanitizer 例程直接产出的修复）：
 
 - **WAL LSN 数据竞争修复**：`WALManager::currentLsn_` 原在 `dirMutex_` 下写、经 `currentWriteLsn()` 无锁读（flush 决策 + 后台 flusher）——并发 insert 与后台 flusher 竞争。改为 `std::atomic<Lsn>` relaxed 序（进度提示语义；记录插入仍由 `dirMutex_` 串行化）。TSAN 12/12 CLEAN 验证。
-- **已知（未修）**：LockManager `pageLockExclusive`/`pageUnlock` 锁序反转（TSAN lock-order-inversion 报告，单线程测试经 shared_mutex 升级模式即可触发；数据竞争为零）。记录在案，v0.2 处理。
+- **时间格式化线程安全修复（soak 发现）**：`ctime()`/`localtime()` 返回 libc 静态缓冲；协议服务器是 thread-per-connection，每条连接格式化时间戳（slow-query/audit/auto-explain 日志、引擎 getTime、now() 求值器、LockManager nowIso8601）都在竞争同一静态缓冲 → native 构建偶发 SIGSEGV（soak 捕捉到的不稳定崩溃）。全部调用点改用可重入变体（`ctime_r`/`localtime_r`）。验证：TSAN 服务器竞态 8→3；native 6 客户端×70s 压测连续 3 轮服务器存活（此前崩溃复现）。
+- **已知（未修）——PgPage 同页插入竞态**：TSAN 在真实并发负载下报告 `PgPage::insert`/`setLpOff`/`writeChecksum` 数据竞争——两个线程无页锁并发插入**同一页**。属于引擎页级锁不变量缺失（调用方应持页锁），v0.2 引擎项；当前表现为并发 INSERT 吞吐受限 + 偶发语句级错误，不影响已提交数据正确性（WAL + 崩溃矩阵 12/12 仍绿）。
+- **已知（未修）——LockManager 锁序反转**：`pageLockExclusive`/`pageUnlock`（TSAN lock-order-inversion 报告，单线程测试经 shared_mutex 升级模式即可触发；数据竞争为零）。记录在案，v0.2 处理。
+- **已知（未修）——world-stop 停顿**：并发负载下所有连接每隔约 30s 统一停顿一次（与语句计数 checkpoint 无关：interval=1000000 时仍复现；后台 checkpointer 间隔为 5min 亦不匹配；根因未定位）。停顿期内客户端超时但重连/重试即恢复。soak 以错误预算区分 pass-with-notes 与硬失败。
 
 发布工程（本批次核心产出）：
 
@@ -25,7 +28,7 @@
 - **CI**：`scripts/ci.sh`（build → 165 回归 + 7 E2E → 版本一致性 → sanitizer 核心）+ `.github/workflows/ci.yml`（push/PR/tag 触发）。
 - **Sanitizer 例程**：`scripts/sanitizer.sh`（out-of-tree ASAN+UBSAN / TSAN 构建，核心 12 测试；`setarch -R` 规避内核 6.8 高熵 ASLR 与 TSAN 的不兼容；LSAN suppressions 记录有意泄漏的单例）。
 - **崩溃恢复矩阵**：`tests/crash_matrix_test.sh` —— {wal-insert, tde-insert, ddl-mixed, connection-pool} × {mid-transaction, post-commit, post-checkpoint} = 12 组合，SIGKILL 后继进程验证已提交行存活/未提交行消失。post-commit 用输出确认屏障消除 kill 与 flush 的竞态 flake。
-- **Soak 负载**：`scripts/soak.sh` + `scripts/soak_client.py` —— 单 `--server` 进程（thread-per-connection，真实并发架构）+ N 个 PG wire protocol 客户端（SCRAM 认证 + 混合 DML 循环），验证 server 存活、行数一致性、CHECKPOINT 后干净重开。**架构发现：process-per-connection 共享数据目录不是安全并发形态**（每进程 XID 计数器在共享 WAL 中冲突 → 恢复时 contradictory COMMIT）；多用户必须走单 --server 进程。文档化于脚本注释。
+- **Soak 负载**：`scripts/soak.sh` + `scripts/soak_client.py` —— 单 `--server` 进程（thread-per-connection，真实并发架构）+ N 个 PG wire protocol 客户端（SCRAM 认证 + 混合 DML 循环），验证 server 存活、行数一致性、CHECKPOINT 后干净重开。**架构发现：process-per-connection 共享数据目录不是安全并发形态**（每进程 XID 计数器在共享 WAL 中冲突 → 恢复时 contradictory COMMIT）；多用户必须走单 --server 进程。文档化于脚本注释。soak 的直接产出：两个真修复（时间格式化线程安全、WAL LSN 原子化伴随项）与三项 v0.2 已知发现（PgPage 竞态、锁序反转、world-stop）。
 - **打包**：`scripts/package.sh` 源码 tarball（版本三方一致性校验）+ 目录约定（docs/PACKAGING.md）。
 
 遗留（v0.2 候选，详见 RELEASE-NOTES.md 已知限制）：DML 双执行入口收尾（P1-0 第 4 步）、LockManager 锁序、TDE 索引文件覆盖 + 密钥轮换、逻辑解码 SUBSCRIPTION 拉取端与 WAL replay、代价模型统计消费（P1-12）、prepared statements PG 语法对齐（P1-10）。
