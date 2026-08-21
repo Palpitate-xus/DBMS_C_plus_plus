@@ -1,4 +1,5 @@
 #include "BufferPool.h"
+#include "storage/PageCrypto.h"
 
 #include <algorithm>
 #include <chrono>
@@ -26,7 +27,30 @@ BufferPool::~BufferPool() {
 bool BufferPool::open() {
     if (fd_ >= 0) return true;
     fd_ = ::open(filename_.c_str(), O_RDWR | O_CREAT, 0644);
-    return fd_ >= 0;
+    if (fd_ < 0) return false;
+    // TDE sidecar for the page envelopes.  Absent sidecar = database not
+    // (yet) encrypted; it is created lazily on the first sealed write.
+    tdeFd_ = ::open((filename_ + ".tde").c_str(), O_RDWR | O_CREAT, 0600);
+    return true;
+}
+
+// Read one sidecar record.  Returns an all-zero record for pageIds beyond
+// the sidecar EOF (plaintext pages of a database not yet encrypted).
+void BufferPool::readTdeRecord(uint32_t pageId, uint8_t record[PageCrypto::kRecordSize]) {
+    PageCrypto::clearRecord(record);
+    if (tdeFd_ < 0) return;
+    const off_t off = static_cast<off_t>(pageId) * PageCrypto::kRecordSize;
+    uint8_t buf[PageCrypto::kRecordSize];
+    const ssize_t n = ::pread(tdeFd_, buf, sizeof(buf), off);
+    if (n == static_cast<ssize_t>(sizeof(buf)))
+        std::memcpy(record, buf, sizeof(buf));
+}
+
+void BufferPool::writeTdeRecord(uint32_t pageId,
+                                const uint8_t record[PageCrypto::kRecordSize]) {
+    if (tdeFd_ < 0) return;
+    const off_t off = static_cast<off_t>(pageId) * PageCrypto::kRecordSize;
+    (void)::pwrite(tdeFd_, record, PageCrypto::kRecordSize, off);
 }
 
 void BufferPool::close() {
@@ -46,6 +70,10 @@ void BufferPool::close() {
         flushUnlocked();
         ::close(fd_);
         fd_ = -1;
+    }
+    if (tdeFd_ >= 0) {
+        ::close(tdeFd_);
+        tdeFd_ = -1;
     }
     frames_.clear();
     pageMap_.clear();
@@ -135,6 +163,19 @@ bool BufferPool::readFromDisk(uint32_t pageId, char* buf, bool* fullPageRead) {
     } else if (fullPageRead) {
         *fullPageRead = true;
     }
+    // TDE: transparently decrypt sealed pages on load.  Page 0 (the
+    // structural file header) and pages whose sidecar record is the
+    // all-zero plaintext marker pass through untouched, so an unencrypted
+    // database keeps working and can be encrypted in place as it is
+    // rewritten.
+    if (pageId != 0 && PageCrypto::enabled()) {
+        uint8_t record[PageCrypto::kRecordSize];
+        readTdeRecord(pageId, record);
+        if (!PageCrypto::isPlaintextRecord(record) &&
+            !PageCrypto::openPage(pageId, buf, pageSize_, record)) {
+            return false;  // MAC mismatch: tampering or wrong key
+        }
+    }
     return true;
 }
 
@@ -142,8 +183,26 @@ bool BufferPool::writeToDisk(uint32_t pageId, const char* buf) {
     if (fd_ < 0) {
         return false;
     }
+    // TDE: seal the page into a scratch copy (the caller's plaintext frame
+    // stays untouched) and persist the envelope in the sidecar.  Page 0
+    // stays plaintext so the file can always be opened and header-verified.
+    const char* toWrite = buf;
+    std::vector<char> sealed;
+    uint8_t record[PageCrypto::kRecordSize];
+    if (pageId != 0 && PageCrypto::enabled()) {
+        sealed.assign(buf, buf + pageSize_);
+        if (PageCrypto::sealPage(pageId, sealed.data(), pageSize_, record)) {
+            toWrite = sealed.data();
+            writeTdeRecord(pageId, record);
+        } else {
+            // Could not seal (e.g. empty page): mark the sidecar record as
+            // plaintext so loads skip decryption.
+            PageCrypto::clearRecord(record);
+            writeTdeRecord(pageId, record);
+        }
+    }
     off_t offset = static_cast<off_t>(pageId) * pageSize_;
-    ssize_t n = ::pwrite(fd_, buf, pageSize_, offset);
+    ssize_t n = ::pwrite(fd_, toWrite, pageSize_, offset);
     return n == static_cast<ssize_t>(pageSize_);
 }
 

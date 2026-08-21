@@ -2,6 +2,7 @@ src/main.cpp
 src/commands/TableManage.cpp
 src/executor/ExecutionPlan.cpp
 src/storage/BufferPool.cpp
+src/storage/PageCrypto.cpp
 src/storage/PageAllocator.cpp
 src/storage/PgPage.cpp
 src/storage/PageWrapper.cpp

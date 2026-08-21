@@ -155,6 +155,9 @@ bool assignParameter(Config& config, const std::string& key,
         parsed = parseInt(value, config.poolSize);
     } else if (key == "max_client_conn") {
         parsed = parseInt(value, config.maxClientConnections);
+    } else if (key == "tde_keyring") {
+        config.tdeKeyring = value;
+        parsed = true;
     } else {
         return false;
     }
@@ -217,6 +220,7 @@ void Config::printAll() const {
               << "pool_mode " << poolMode << "\n"
               << "pool_size " << poolSize << "\n"
               << "max_client_conn " << maxClientConnections << "\n"
+              << "tde_keyring " << (tdeKeyring.empty() ? std::string("(disabled)") : tdeKeyring) << "\n"
               << "random_page_cost " << randomPageCost << "\n"
               << "cpu_tuple_cost " << cpuTupleCost << "\n"
               << "cpu_index_tuple_cost " << cpuIndexTupleCost << "\n"
@@ -267,6 +271,8 @@ bool Config::save(const std::string& filename) const {
         << "auto_explain=" << (autoExplainEnabled ? "on" : "off") << "\n"
         << "auto_explain_threshold_ms=" << autoExplainThresholdMs << "\n"
         << "pg_stat_statements.max=" << sqlStatsMaxEntries << "\n";
+    if (!tdeKeyring.empty())
+        ofs << "tde_keyring=" << tdeKeyring << "\n";
     ofs.flush();
     if (!ofs) {
         ofs.close();

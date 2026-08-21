@@ -18,6 +18,7 @@
 #include "NetworkServer.h"
 #include "network/ConnectionPool.h"
 #include "replication/LogicalDecoder.h"
+#include "storage/PageCrypto.h"
 #include "replication/ReplicationManager.h"
 #include "logs.h"
 #include "permissions.h"
@@ -91,6 +92,16 @@ const bool g_initialConfigLoadOk = [] {
         return false;
     }
     dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries);
+    // TDE must be armed before the StorageEngine (declared right below)
+    // opens any data file: recovery reads pages through the buffer pool,
+    // and a sealed page without the key loaded fails closed.
+    if (!g_config.tdeKeyring.empty()) {
+        std::string tdeError;
+        if (!dbms::PageCrypto::loadKeyFromFile(g_config.tdeKeyring, tdeError)) {
+            std::cerr << "FATAL: TDE keyring error: " << tdeError << std::endl;
+            return false;
+        }
+    }
     return true;
 }();
 }
@@ -11858,6 +11869,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             cout << "confirmed up to lsn " << confirmed << endl;
             return false;
         }
+        if (rest == "tde status") {
+            cout << "enabled keyring" << endl;
+            if (dbms::PageCrypto::enabled()) {
+                cout << "on " << g_config.tdeKeyring << endl;
+            } else {
+                cout << "off (none)" << endl;
+            }
+            return false;
+        }
         if (rest == "pools") {
             const auto st = dbms::ConnectionPool::instance().stats();
             cout << "mode pool_size backends idle rented waiting clients total_rents total_waits" << endl;
@@ -15917,6 +15937,15 @@ int main(int argc, char* argv[]) {
     syncPlannerCostModel(g_config);
     dbms::ConnectionPool::instance().configure(g_config.poolMode, g_config.poolSize,
                                                g_config.maxClientConnections);
+    // TDE: load the keyring before any data file opens.
+    if (!g_config.tdeKeyring.empty()) {
+        std::string tdeError;
+        if (!dbms::PageCrypto::loadKeyFromFile(g_config.tdeKeyring, tdeError)) {
+            std::cerr << "FATAL: TDE keyring error: " << tdeError << std::endl;
+            return 1;
+        }
+        std::cout << "TDE enabled (keyring " << g_config.tdeKeyring << ")" << std::endl;
+    }
 
     // Server mode: ./dbms_main --server PORT [--insecure]
     if (argc >= 3 && std::string(argv[1]) == "--server") {

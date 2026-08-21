@@ -42,6 +42,9 @@ struct Config {
     std::string poolMode = "session";  // session | transaction | statement
     int poolSize = 16;                 // pooled backend contexts per user
     int maxClientConnections = 0;      // 0 = unlimited (engine maxConnections still applies)
+    // Transparent data encryption: empty = disabled; otherwise a keyring
+    // file path whose 64-hex-char key encrypts heap pages at rest.
+    std::string tdeKeyring;
 
     // Load from file; returns true only when the file is absent or every
     // recognized setting is valid. A present but malformed file is rejected
