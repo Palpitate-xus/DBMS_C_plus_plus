@@ -271,6 +271,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 回归基线：PASS=160 FAIL=0 + E2E（multijoin/timestamptz/unnest 等 6 套 Python E2E 全绿）
 9. ✅ P1-9 自定义成本函数（`QueryPlanner::CostModel` + 8 个成本 GUC + 自定义成本 hook，PASS=161）
 10. ✅ P2-2 Bloom 索引（`BloomIndex` AM：bloom filter + 精确侧表、全写路径维护、扫描探测，PASS=162）
+11. ✅ P2-4 连接池（`ConnectionPool`：三模式 BackendContext 池化 + 3 个 GUC + `SHOW POOLS`，PASS=163）
 
 ### P1-9: 自定义成本函数 (Custom Cost Functions) ✅（2026-08-20）
 - **类别**: 优化器 / 扩展性
@@ -383,17 +384,17 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 - **预估工作量**: 1-2 周
 - **相关文件**: `src/replication/ReplicationManager.cpp`
 
-### P2-4: 连接池 (PgBouncer 式)
+### P2-4: 连接池 (PgBouncer 式) ✅（2026-08-20）
 - **类别**: 网络 / 连接管理
-- **现状**: 每连接一个线程，无池化
+- **现状**: ✅ `src/network/ConnectionPool.{h,cpp}`：BackendContext 按 (user, database) 池化，session/transaction/statement 三模式 —— session 模式客户端独占至断开（断开 discard），transaction/statement 模式按语句租借（客户端状态投影到后端、执行后回写 GUC/DB 变更并归还，空闲客户端零后端占用）；容量满时条件变量阻塞、release 唤醒；命名 prepared statement 随后端存续（PgBouncer transaction 模式语义）。接入 `handleClient`/`executeForProtocol` 与 accept 循环（`max_client_conn` 客户端上限，0=无限），客户端已认证会话始终权威（后端槽不泄漏权限态）；服务器停止时 shutdown 唤醒全部等待者。GUC `pool_mode`/`pool_size`/`max_client_conn` 全链路（解析/校验/持久化/启动/reload/SET GLOBAL 回滚），`SHOW POOLS` + 单参数 SHOW + pg_settings 行（`tests/connection_pool_test.cpp`，PASS=163）
 - **PG 参考**: `pgbouncer`, `pgpool-II`
-- **影响**: 高并发下线程数爆炸
+- **残余缺口**: 事务中途归还的后端状态回滚依赖协议层先行 rollback；LISTEN/NOTIFY、游标等会话级特性在短租模式下不跨租借（与 PgBouncer 相同限制）
 - **实现路径**:
-  1. 实现 `ConnectionPool`：session/transaction/statement 三级池化
-  2. 在 `NetworkServer` 中增加池化层
-  3. 增加 `pool_size`, `max_client_conn` GUC
-- **预估工作量**: 1 周
-- **相关文件**: `src/network/NetworkServer.cpp`
+  1. ✅ 实现 `ConnectionPool`：session/transaction/statement 三级池化
+  2. ✅ 在 `NetworkServer` 中增加池化层
+  3. ✅ 增加 `pool_size`, `max_client_conn` GUC（+ `pool_mode`、`SHOW POOLS`）
+- **预估工作量**: ~~1 周~~ 已完成
+- **相关文件**: `src/network/ConnectionPool.{h,cpp}`, `src/network/NetworkServer.cpp`, `src/common/Config.{h,cpp}`, `src/main.cpp`, `tests/connection_pool_test.cpp`
 
 ### P2-5: Logical Decoding / 逻辑复制 Plugin
 - **类别**: 复制 / 生态
