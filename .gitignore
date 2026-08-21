@@ -35,3 +35,4 @@ tmpidx/
 .txnid
 user.dat
 .vscode
+dist/
