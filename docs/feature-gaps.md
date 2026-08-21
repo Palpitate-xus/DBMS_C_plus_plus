@@ -272,6 +272,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 9. ✅ P1-9 自定义成本函数（`QueryPlanner::CostModel` + 8 个成本 GUC + 自定义成本 hook，PASS=161）
 10. ✅ P2-2 Bloom 索引（`BloomIndex` AM：bloom filter + 精确侧表、全写路径维护、扫描探测，PASS=162）
 11. ✅ P2-4 连接池（`ConnectionPool`：三模式 BackendContext 池化 + 3 个 GUC + `SHOW POOLS`，PASS=163）
+12. ✅ P2-5 逻辑解码（双输出插件 + PublicationCatalog + 按槽变更流 + 全 SQL 面，PASS=164）
 
 ### P1-9: 自定义成本函数 (Custom Cost Functions) ✅（2026-08-20）
 - **类别**: 优化器 / 扩展性
@@ -396,17 +397,17 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 - **预估工作量**: ~~1 周~~ 已完成
 - **相关文件**: `src/network/ConnectionPool.{h,cpp}`, `src/network/NetworkServer.cpp`, `src/common/Config.{h,cpp}`, `src/main.cpp`, `tests/connection_pool_test.cpp`
 
-### P2-5: Logical Decoding / 逻辑复制 Plugin
+### P2-5: Logical Decoding / 逻辑复制 Plugin ✅（2026-08-20）
 - **类别**: 复制 / 生态
-- **现状**: 逻辑复制框架有，无 plugin 实现
+- **现状**: ✅ `src/replication/LogicalDecoder.{h,cpp}`：双输出插件 —— `pgoutput`（帧式二进制：B/R/I/U/D/C 消息、长度前缀行像）与 `test_decoding`（可读文本）。`PublicationCatalog` 持久化发布（FOR TABLE / FOR ALL TABLES、insert/update/delete 发布过滤）；`LogicalChangeStore` 按槽流式存储（peek 恢复 LSN、acknowledge 推进、kMaxRetained 限界）。引擎侧 `TransactionContext` 增逻辑变更缓冲，三写路径（INSERT/UPDATE/DELETE）对已发布表渲染全列文本行像入队，COMMIT 按提交 LSN/xid 批量流向全部逻辑槽，ROLLBACK 丢弃（订阅者只见已提交变更）；`advanceSlotLsn` 单调推进确认 LSN。SQL 面（解析器前置拦截）：CREATE/DROP PUBLICATION、CREATE/DROP REPLICATION SLOT（LOGICAL 插件 | PHYSICAL）、`SHOW PUBLICATIONS` / `SHOW REPLICATION SLOTS`（含 pending 深度）/ `SHOW LOGICAL CHANGES FOR SLOT` / `SHOW LOGICAL CONFIRM FOR SLOT`（`tests/logical_decoding_test.cpp`，PASS=164）
 - **PG 参考**: `pgoutput`, `test_decoding`, `wal2json`
-- **影响**: 无法做 CDC、数据同步到外部系统
+- **残余缺口**: pgoutput 未做二进制 wire 级兼容（自描述帧式）、无 CREATE SUBSCRIPTION 拉取端、变更不经 WAL 重放而是写路径直采（崩溃恢复后无 replay）
 - **实现路径**:
-  1. 实现 `LogicalDecoder` 接口：将 WAL 记录转为逻辑变更
-  2. 实现 `pgoutput` 协议
-  3. 实现 `CREATE PUBLICATION` / `CREATE SUBSCRIPTION`
-- **预估工作量**: 2-3 周
-- **相关文件**: `src/replication/ReplicationManager.cpp`
+  1. ✅ `LogicalDecoder`：提交级变更批（表/op/新旧行像）
+  2. ✅ `pgoutput` 协议（+ `test_decoding` 文本）
+  3. ✅ `CREATE PUBLICATION`（CREATE SUBSCRIPTION 需要真实网络复制端，残余）
+- **预估工作量**: ~~2-3 周~~ 已完成（本批范围）
+- **相关文件**: `src/replication/LogicalDecoder.{h,cpp}`, `src/replication/ReplicationManager.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `src/main.cpp`, `tests/logical_decoding_test.cpp`
 
 ### P2-6: 异步 I/O (io_uring)
 - **类别**: 性能 / I/O

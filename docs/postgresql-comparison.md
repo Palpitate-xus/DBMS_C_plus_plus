@@ -224,6 +224,7 @@ SQL 可观测性已补强：交互式和协议入口共用线程安全的 `SqlSt
 | 基于成本的优化 (CBO) | ✅ | ⚠️ | 基础；成本参数可调 + 自定义 hook（2026-08-20） |
 | Bloom 索引 | ✅ | ✅ | `USING bloom` AM：bloom filter + 精确侧表，全 DML 维护与扫描探测（2026-08-20，多列签名仍缺） |
 | 连接池 (PgBouncer 式) | ✅ | ✅ | `ConnectionPool` 三模式后端池 + `max_client_conn`/`SHOW POOLS`（2026-08-20；短租模式下 LISTEN/游标不跨租借，同 PgBouncer） |
+| 逻辑解码 (Logical Decoding) | ✅ | ✅ | 双输出插件 + 发布目录 + 槽级变更流 + SQL 面（2026-08-20；无 SUBSCRIPTION 拉取端、非 WAL 重放） |
 | 统计信息 (pg_statistic) | ✅ | ✅ | 采集（cardinality/MCV/等深直方图/多列）+ planner 消费：MCV 精确等值选择率、直方图范围插值、eqjoinsel join 选择率与成本；`pg_stats`/`pg_statistic` 兼容视图已补（2026-08-20）；多表 join 顺序 DP 仍缺（已有贪心搜索） |
 | 索引选择 | ✅ | ✅ | ✅ |
 | **等价类 (Equivalence Classes)** | ✅ | ⚠️ | 基础 |
