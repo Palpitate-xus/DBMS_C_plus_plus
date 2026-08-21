@@ -163,7 +163,15 @@ CREATE TABLE crash_t (id INT PRIMARY KEY, payload VARCHAR(64));'
             printf 'BEGIN\n' >&9; sleep 0.2
             printf 'INSERT INTO crash_t VALUES (2, %s)\n' "'committed-late'" >&9; sleep 0.2
             printf 'COMMIT\n' >&9
-            sleep 1.0   # let the commit land + flush
+            # Wait until the COMMIT is observable in the session output
+            # before killing: a kill racing the commit flush turns this
+            # into the mid-transaction case and the verify step would
+            # legitimately miss the row.
+            for _ in $(seq 1 40); do
+                sleep 0.1
+                grep -qE "committed|1 row" "$dir/out.log" 2>/dev/null && break
+            done
+            sleep 0.5   # flush margin
             ;;
         post-checkpoint)
             printf 'BEGIN\n' >&9; sleep 0.2
