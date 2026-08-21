@@ -1,5 +1,6 @@
 #include "TableManage.h"
 #include "utils/plpgsql.h"
+#include "replication/ReplicationManager.h"
 #include "parser/parser.h"
 #include "TxnIdGenerator.h"
 #include "Config.h"
@@ -14123,6 +14124,20 @@ DBStatus StorageEngine::insert(const std::string& dbname,
             }
         }
     }
+    // Logical decoding: buffer the change for streaming at commit.
+    if (PublicationCatalog::instance().publishes(dbname, tablename)) {
+        auto& txn = transactionContext();
+        if (txn.inTransaction) {
+            // Render every column in text form so subscribers see the same
+            // row image regardless of physical storage format.
+            std::string rendered;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (i) rendered += '|';
+                rendered += extractColumnValue(strippedRow, tbl, i, dbname, true);
+            }
+            txn.txnLogicalChanges.push_back({tablename, 0, "", rendered});
+        }
+    }
     lockManager_.unlock(tablename);
 
     // INSERT RETURNING observes the tuple after BEFORE INSERT triggers and
@@ -15205,6 +15220,26 @@ DBStatus StorageEngine::remove(const std::string& dbname,
             }
         }
     }
+    // Logical decoding: buffer the deletes (old images) for streaming at
+    // commit.
+    if (PublicationCatalog::instance().publishes(dbname, tablename)) {
+        auto& txn = transactionContext();
+        if (txn.inTransaction) {
+            size_t di = 0;
+            for (int64_t rid : toDelete) {
+                if (di < rowsToDelete.size() && !rowsToDelete[di].empty()) {
+                    std::string rendered;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (i) rendered += '|';
+                        rendered += extractColumnValue(rowsToDelete[di], tbl, i,
+                                                       dbname, true);
+                    }
+                    txn.txnLogicalChanges.push_back({tablename, 2, rendered, ""});
+                }
+                ++di;
+            }
+        }
+    }
     lockManager_.unlock(tablename);
 
     // Fire AFTER DELETE triggers
@@ -16260,6 +16295,22 @@ DBStatus StorageEngine::update(const std::string& dbname,
             } else if (actualRid != rid && !newVal.empty()) {
                 bidx->remove(newVal, rid);
                 bidx->insert(newVal, actualRid);
+            }
+        }
+
+        // Logical decoding: buffer the update (old/new images) for
+        // streaming at commit.
+        if (PublicationCatalog::instance().publishes(dbname, tablename)) {
+            auto& txn = transactionContext();
+            if (txn.inTransaction) {
+                std::string oldRendered, newRendered;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (i) { oldRendered += '|'; newRendered += '|'; }
+                    oldRendered += extractColumnValue(row, tbl, i, dbname, true);
+                    newRendered += extractColumnValue(strippedNewRow, tbl, i, dbname, true);
+                }
+                txn.txnLogicalChanges.push_back(
+                    {tablename, 1, oldRendered, newRendered});
             }
         }
 
@@ -22368,6 +22419,37 @@ DBStatus StorageEngine::commitTransaction() {
         return DBStatus::IO_ERROR;
     }
 
+    // Logical decoding (P2-5): stream buffered row changes into every
+    // logical replication slot.  Only committed changes cross this line —
+    // rollback drains the buffer instead.
+    {
+        auto& txn = transactionContext();
+        if (!txn.txnLogicalChanges.empty()) {
+            LogicalChangeBatch batch;
+            batch.xid = committingTxnId;
+            batch.commitLsn = static_cast<uint64_t>(commitLsn);
+            for (const auto& c : txn.txnLogicalChanges) {
+                LogicalChange lc;
+                lc.table = c.table;
+                lc.op = static_cast<LogicalChange::Op>(c.op);
+                lc.oldRow = c.oldRow;
+                lc.newRow = c.newRow;
+                lc.xid = committingTxnId;
+                lc.commitLsn = static_cast<uint64_t>(commitLsn);
+                batch.changes.push_back(std::move(lc));
+            }
+            // Publication membership was already checked when the change
+            // was buffered; every logical slot receives the batch and its
+            // consumer side filters (a slot's plugin controls only the
+            // output format).
+            for (const auto& slot : ReplicationManager::instance().listSlots()) {
+                if (slot.slotType != "logical") continue;
+                LogicalChangeStore::instance().append(slot.name, batch);
+            }
+            txn.txnLogicalChanges.clear();
+        }
+    }
+
     // Update and durably publish CLOG before clearing transaction state. WAL
     // alone is sufficient to reconstruct status after a crash, but the live
     // backend must never report a successful commit after CLOG persistence
@@ -22415,6 +22497,9 @@ DBStatus StorageEngine::commitTransaction() {
         ssiInEdges_.clear();
     }
     transactionContext().txnLog.clear();
+    // Logical decoding: rollback discards buffered changes — subscribers
+    // never see uncommitted work.
+    transactionContext().txnLogicalChanges.clear();
     transactionContext().ddlUndoActions.clear();
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
@@ -22802,6 +22887,9 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().txnLog.clear();
+    // Logical decoding: rollback discards buffered changes — subscribers
+    // never see uncommitted work.
+    transactionContext().txnLogicalChanges.clear();
     transactionContext().snapshotImported = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;

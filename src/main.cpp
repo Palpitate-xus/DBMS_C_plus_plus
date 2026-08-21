@@ -17,6 +17,8 @@
 #include "ExecutionPlan.h"
 #include "NetworkServer.h"
 #include "network/ConnectionPool.h"
+#include "replication/LogicalDecoder.h"
+#include "replication/ReplicationManager.h"
 #include "logs.h"
 #include "permissions.h"
 #include "common/scram_sha256.h"
@@ -7964,6 +7966,149 @@ static bool handleDropTablespace(const string& sql, Session& s) {
     return false;
 }
 
+// ----------------------------------------------------------------------------
+// Logical decoding SQL surface (P2-5)
+// ----------------------------------------------------------------------------
+
+static bool handleCreatePublication(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    // CREATE PUBLICATION name [FOR TABLE t1, t2 | FOR ALL TABLES]
+    //   [WITH (publish = 'insert,update,delete')]
+    string rest = trim(sql.substr(18));
+    size_t sp = rest.find(' ');
+    string name = (sp == string::npos) ? rest : rest.substr(0, sp);
+    if (name.empty()) {
+        cout << "SQL syntax error: CREATE PUBLICATION requires a name" << endl;
+        return true;
+    }
+    dbms::Publication pub;
+    pub.name = name;
+    pub.owner = s.username;
+    string opts = (sp == string::npos) ? "" : trim(rest.substr(sp + 1));
+    if (startsWithKeyword(opts, "for all tables")) {
+        pub.publishAllTables = true;
+    } else if (startsWithKeyword(opts, "for table")) {
+        string list = trim(opts.substr(9));
+        size_t withPos = findTopLevelKeyword(list, "with");
+        if (withPos != string::npos) {
+            list = trim(list.substr(0, withPos));
+        }
+        size_t start = 0;
+        while (start <= list.size()) {
+            size_t comma = list.find(',', start);
+            string t = trim(list.substr(start, comma == string::npos ? string::npos : comma - start));
+            if (!t.empty()) pub.tables.push_back(t);
+            if (comma == string::npos) break;
+            start = comma + 1;
+        }
+        if (pub.tables.empty()) {
+            cout << "SQL syntax error: FOR TABLE requires at least one table" << endl;
+            return true;
+        }
+    }
+    // WITH (publish = 'insert,update,delete')
+    size_t withPos = findTopLevelKeyword(opts, "with");
+    if (withPos != string::npos) {
+        string w = toLower(trim(opts.substr(withPos + 4)));
+        if (w.find("insert") == string::npos) pub.publishInsert = false;
+        if (w.find("update") == string::npos) pub.publishUpdate = false;
+        if (w.find("delete") == string::npos) pub.publishDelete = false;
+    }
+    for (const auto& t : pub.tables) {
+        if (!g_engine.tableExists(s.currentDB, t)) {
+            cout << "ERROR: table " << t << " does not exist" << endl;
+            return true;
+        }
+    }
+    string error;
+    if (!dbms::PublicationCatalog::instance().create(s.currentDB, pub, error)) {
+        cout << "ERROR: " << error << endl;
+        return true;
+    }
+    cout << "CREATE PUBLICATION succeeded" << endl;
+    return false;
+}
+
+static bool handleDropPublicationSql(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string name = trim(sql.substr(16));
+    if (name.empty()) {
+        cout << "SQL syntax error: DROP PUBLICATION requires a name" << endl;
+        return true;
+    }
+    string error;
+    if (!dbms::PublicationCatalog::instance().drop(s.currentDB, name, error)) {
+        cout << "ERROR: " << error << endl;
+        return true;
+    }
+    cout << "DROP PUBLICATION succeeded" << endl;
+    return false;
+}
+
+// CREATE REPLICATION SLOT name LOGICAL plugin  (physical slots use the
+// engine API; the SQL surface only needs the logical ones for decoding).
+static bool handleCreateReplicationSlotSql(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string rest = trim(sql.substr(23));
+    size_t sp = rest.find(' ');
+    string name = (sp == string::npos) ? rest : rest.substr(0, sp);
+    string kind = toLower((sp == string::npos) ? "" : trim(rest.substr(sp + 1)));
+    if (name.empty()) {
+        cout << "SQL syntax error: CREATE REPLICATION SLOT requires a name" << endl;
+        return true;
+    }
+    if (kind == "logical" || startsWithKeyword(kind, "logical")) {
+        string plugin = trim(kind.substr(7));
+        if (plugin.empty()) {
+            cout << "SQL syntax error: LOGICAL slot requires an output plugin" << endl;
+            return true;
+        }
+        bool known = false;
+        for (const auto& p : dbms::LogicalDecoder::availablePlugins()) {
+            if (p == plugin) known = true;
+        }
+        if (!known) {
+            cout << "ERROR: output plugin " << plugin << " is not available" << endl;
+            return true;
+        }
+        if (!dbms::ReplicationManager::instance().createReplicationSlot(name, "logical", plugin)) {
+            cout << "ERROR: cannot create replication slot " << name << endl;
+            return true;
+        }
+        cout << "CREATE REPLICATION SLOT succeeded" << endl;
+        return false;
+    }
+    if (kind == "physical" || kind.empty()) {
+        if (!dbms::ReplicationManager::instance().createReplicationSlot(name, "physical")) {
+            cout << "ERROR: cannot create replication slot " << name << endl;
+            return true;
+        }
+        cout << "CREATE REPLICATION SLOT succeeded" << endl;
+        return false;
+    }
+    cout << "SQL syntax error: slot type must be LOGICAL or PHYSICAL" << endl;
+    return true;
+}
+
+static bool handleDropReplicationSlotSql(const string& sql, Session& s) {
+    if (!checkAdmin(s)) return true;
+    if (!checkDB(s)) return true;
+    string name = trim(sql.substr(22));
+    if (name.empty()) {
+        cout << "SQL syntax error: DROP REPLICATION SLOT requires a name" << endl;
+        return true;
+    }
+    if (!dbms::ReplicationManager::instance().dropReplicationSlot(name)) {
+        cout << "ERROR: replication slot " << name << " does not exist" << endl;
+        return true;
+    }
+    cout << "DROP REPLICATION SLOT succeeded" << endl;
+    return false;
+}
+
 static bool handleCreateStatistics(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -8813,6 +8958,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
     g_engine.setRLSUser(effectiveSessionRole(s));
     dbms::setCurrentSession(&s);
     string sql = sqlProcessor(rawSql);
+    // Logical replication DDL must be intercepted before the generic parser
+    // maps "CREATE PUBLICATION/REPLICATION SLOT" onto unrelated commands.
+    {
+        string pre = sql;
+        for (auto& c : pre) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (pre.rfind("create publication ", 0) == 0 ||
+            pre.rfind("create replication slot ", 0) == 0 ||
+            pre.rfind("drop publication ", 0) == 0 ||
+            pre.rfind("drop replication slot ", 0) == 0) {
+            if (pre.rfind("create publication ", 0) == 0)
+                return handleCreatePublication(sql, s);
+            if (pre.rfind("create replication slot ", 0) == 0)
+                return handleCreateReplicationSlotSql(sql, s);
+            if (pre.rfind("drop publication ", 0) == 0)
+                return handleDropPublicationSql(sql, s);
+            return handleDropReplicationSlotSql(sql, s);
+        }
+    }
     // PostgreSQL ONLY: SELECT/UPDATE/DELETE ... [FROM] ONLY t restricts the
     // statement to the named table, skipping inherited children. Strip the
     // marker (bare or paren-wrapped) here; the DML handlers honor the flag.
@@ -9222,6 +9385,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         if (sql.substr(7, 10) == "statistics") {
             return handleCreateStatistics(sql, s);
+        }
+        if (sql.substr(7, 11) == "publication") {
+            return handleCreatePublication(sql, s);
+        }
+        if (sql.substr(7, 16) == "replication slot") {
+            return handleCreateReplicationSlotSql(sql, s);
         }
         if (isCompatObjectCreate(sql)) {
             return handleCreateCompatObject(sql, s);
@@ -11258,6 +11427,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return handleDropPolicy(sql, s);
     }
 
+    if (sql.substr(0, 16) == "drop publication ") {
+        return handleDropPublicationSql(sql, s);
+    }
+    if (sql.substr(0, 22) == "drop replication slot ") {
+        return handleDropReplicationSlotSql(sql, s);
+    }
+
     {
         string rest = trim(sql.substr(4));
         string compatKind, compatPhrase;
@@ -11609,6 +11785,77 @@ static bool executeInternal(const string& rawSql, Session& s) {
             for (const auto& kv : g_queryPlanCache) {
                 cout << kv.first << endl;
             }
+            return false;
+        }
+        if (rest == "publications") {
+            if (!checkDB(s)) return true;
+            const auto pubs = dbms::PublicationCatalog::instance().list(s.currentDB);
+            cout << "name owner insert update delete all_tables tables" << endl;
+            for (const auto& p : pubs) {
+                string tables;
+                for (size_t i = 0; i < p.tables.size(); ++i) {
+                    if (i) tables += ",";
+                    tables += p.tables[i];
+                }
+                cout << p.name << " " << p.owner << " "
+                     << (p.publishInsert ? "t" : "f") << " "
+                     << (p.publishUpdate ? "t" : "f") << " "
+                     << (p.publishDelete ? "t" : "f") << " "
+                     << (p.publishAllTables ? "t" : "f") << " "
+                     << (p.publishAllTables ? "{all}" : tables) << endl;
+            }
+            return false;
+        }
+        if (rest == "replication slots") {
+            const auto slots = dbms::ReplicationManager::instance().listSlots();
+            cout << "name type plugin active changes" << endl;
+            for (const auto& slot : slots) {
+                cout << slot.name << " " << slot.slotType << " " << slot.plugin << " "
+                     << (slot.active ? "t" : "f") << " "
+                     << dbms::LogicalChangeStore::instance().depth(slot.name) << endl;
+            }
+            return false;
+        }
+        if (rest.rfind("logical changes for slot ", 0) == 0) {
+            string slotName = trim(rest.substr(25));
+            auto slot = dbms::ReplicationManager::instance().findSlot(slotName);
+            if (!slot || slot->slotType != "logical") {
+                cout << "ERROR: logical replication slot " << slotName
+                     << " does not exist" << endl;
+                return true;
+            }
+            const auto peek = dbms::LogicalChangeStore::instance().peek(
+                slotName, slot->restartLsn, 100);
+            for (const auto& batch : peek.batches) {
+                string out;
+                if (!dbms::LogicalDecoder::format(slot->plugin, batch, out)) {
+                    cout << "ERROR: output plugin failed" << endl;
+                    return true;
+                }
+                cout << out;
+            }
+            if (peek.batches.empty()) cout << "(no pending changes)" << endl;
+            return false;
+        }
+        if (rest.rfind("logical confirm for slot ", 0) == 0) {
+            string slotName = trim(rest.substr(24));
+            auto slot = dbms::ReplicationManager::instance().findSlot(slotName);
+            if (!slot || slot->slotType != "logical") {
+                cout << "ERROR: logical replication slot " << slotName
+                     << " does not exist" << endl;
+                return true;
+            }
+            const auto peek = dbms::LogicalChangeStore::instance().peek(
+                slotName, slot->restartLsn, 4096);
+            if (peek.batches.empty()) {
+                cout << "(nothing to confirm)" << endl;
+                return false;
+            }
+            const uint64_t confirmed = peek.nextLsn;
+            dbms::LogicalChangeStore::instance().acknowledge(slotName, confirmed);
+            dbms::ReplicationManager::instance().advanceSlotLsn(
+                slotName, static_cast<int64_t>(confirmed));
+            cout << "confirmed up to lsn " << confirmed << endl;
             return false;
         }
         if (rest == "pools") {

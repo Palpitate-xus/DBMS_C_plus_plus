@@ -36,6 +36,7 @@ src/utils/pg_hba.cpp
 src/utils/prepared_stmts.cpp
 src/utils/permissions.cpp
 src/replication/ReplicationManager.cpp
+src/replication/LogicalDecoder.cpp
 src/process/ProcessManager.cpp
 src/process/RuntimeStats.cpp
 src/process/SqlStats.cpp

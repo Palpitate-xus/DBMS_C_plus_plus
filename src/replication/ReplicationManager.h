@@ -31,6 +31,8 @@ public:
     std::optional<ReplicationSlot> findSlot(const std::string& name) const;
     bool activateReplicationSlot(const std::string& name);
     bool deactivateReplicationSlot(const std::string& name);
+    // Advance a slot's confirmed restart LSN (logical decoding flow).
+    bool advanceSlotLsn(const std::string& name, int64_t newRestartLsn);
     std::vector<ReplicationSlot> listSlots() const;
 
     // Streaming replication state (8.1, 8.2)

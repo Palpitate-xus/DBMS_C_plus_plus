@@ -69,6 +69,15 @@ bool ReplicationManager::deactivateReplicationSlot(const std::string& name) {
     return true;
 }
 
+bool ReplicationManager::advanceSlotLsn(const std::string& name, int64_t newRestartLsn) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = slots_.find(name);
+    if (it == slots_.end()) return false;
+    if (newRestartLsn < it->second.restartLsn) return false;  // never rewind
+    it->second.restartLsn = newRestartLsn;
+    return true;
+}
+
 std::vector<ReplicationManager::ReplicationSlot> ReplicationManager::listSlots() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ReplicationSlot> result;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "replication/LogicalDecoder.h"
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -1600,6 +1601,16 @@ private:
         // WAL amplification for multi-write transactions. The owning xid is
         // tracked so a new transaction automatically discards the stale set.
         std::map<std::string, uint64_t> txnLoggedBeforePages;
+        // Logical decoding buffer (P2-5): row changes captured by the DML
+        // write paths, streamed into logical replication slots at commit
+        // and discarded on rollback.
+        struct LogicalChangeBuf {
+            std::string table;
+            int op = 0;  // 0=insert 1=update 2=delete
+            std::string oldRow;
+            std::string newRow;
+        };
+        std::vector<LogicalChangeBuf> txnLogicalChanges;
         std::string lastvalDb;
         std::string lastvalSeq;
         int64_t lastvalValue = 0;
