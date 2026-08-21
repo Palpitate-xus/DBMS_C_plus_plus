@@ -17326,9 +17326,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "now" || expr.funcName == "current_timestamp") {
         std::time_t t = std::time(nullptr);
-        std::tm* tm = std::localtime(&t);
+        std::tm tmBuf;
+        ::localtime_r(&t, &tmBuf);
         char buf[32];
-        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tmBuf.tm_year + 1900, tmBuf.tm_mon + 1, tmBuf.tm_mday);
         return std::string(buf);
     }
     if (expr.funcName == "extract" && expr.funcArgs.size() >= 2) {

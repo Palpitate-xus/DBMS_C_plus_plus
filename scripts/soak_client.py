@@ -123,7 +123,20 @@ def run_scram(sock, user: str, password: str, cnonce: str) -> None:
 
 
 def connect(host: str, port: int, user: str, password: str, database: str):
-    sock = socket.create_connection((host, port), timeout=30)
+    # Connect with retry: under a connection storm (all workers starting
+    # at once) the accept queue + per-connection SCRAM PBKDF2 work can
+    # exceed a single connect() timeout; backing off is correct client
+    # behaviour, not a server fault.
+    last_exc = None
+    for attempt in range(3):
+        try:
+            sock = socket.create_connection((host, port), timeout=30)
+            break
+        except (socket.timeout, OSError) as exc:
+            last_exc = exc
+            time.sleep(0.5 * (attempt + 1))
+    else:
+        raise last_exc
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     send_packet(sock, build_startup(user, database))
     kind, body = recv_message(sock)
@@ -185,6 +198,7 @@ def main() -> int:
     deadline = time.time() + args.duration
     ops = errors = seq = 0
     rows_committed = 0
+    error_times = []
     sock = None
     last_error = ""
 
@@ -222,6 +236,7 @@ def main() -> int:
             result = simple_query(sock, sql)
             if "ERROR" in result:
                 errors += 1
+                error_times.append(round(time.time() - (deadline - args.duration), 1))
                 last_error = result
                 if "does not exist" in result and "soak_t" in result:
                     break
@@ -237,6 +252,7 @@ def main() -> int:
                     rows_committed += 1
         except (ConnectionError, OSError, RuntimeError, AssertionError) as exc:
             errors += 1
+            error_times.append(round(time.time() - (deadline - args.duration), 1))
             last_error = str(exc)
             try:
                 if sock is not None:
@@ -256,6 +272,7 @@ def main() -> int:
         "worker": worker, "ops": ops, "errors": errors,
         "rows": rows_committed, "seq": seq,
         "last_error": last_error[:200],
+        "error_times": error_times[:10],
     }))
     return 0 if errors == 0 else 1
 

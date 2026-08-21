@@ -1,8 +1,36 @@
 # 生产化状态
 
-最后更新：2026-08-14
+最后更新：2026-08-21（v0.1.0 发布批次）
 
-当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，137 个 C++ 回归测试和 2 个 E2E（协议、窗口函数）共 `PASS=139 FAIL=0`，其中窗口函数 E2E 为 `13/13`。
+当前版本处于生产化重构阶段，不能宣称已经达到 PostgreSQL 的生产级完整度。当前可验证基线为：主程序构建成功，**165 个 C++ 回归测试 + 7 个 E2E**（协议、窗口函数、EXPLAIN ANALYZE、多表 JOIN、timestamptz、inherit-only、unnest）共 `PASS=165 FAIL=0`；ASAN/TSAN sanitizer 核心集 12/12 CLEAN；崩溃恢复矩阵 12/12（见下）；发布工程管线（CI、sanitizer、soak、打包）就绪。
+
+## v0.1.0 发布批次（2026-08-20 ~ 08-21）
+
+功能补全（每项独立提交，全量回归逐步 163 → 165 保持绿色）：
+
+- **P1-9 自定义代价函数**：`QueryPlanner::CostModel` 可注入钩子 + GUC 同步（`seq_page_cost`/`random_page_cost`/`cpu_*_cost`），`custom_cost_hook` 式注册路径。
+- **P2-2 Bloom 索引访问方法**：签名位图索引、CREATE INDEX ... USING bloom、等值查询走 bloom 预过滤。
+- **P2-4 PgBouncer 式连接池**：session/transaction/statement 三模式 BackendContext 池化、3 个 GUC（`pool_mode`/`pool_size`/`max_client_conn`）、`SHOW POOLS`。修复权限泄漏：客户端会话认证状态权威，后端槽位只跟踪租借。
+- **P2-5 逻辑解码**：`pgoutput`（帧式二进制）+ `test_decoding`（文本）双输出插件、`PublicationCatalog`（FOR TABLE/ALL TABLES + 按操作发布过滤）、按槽变更流（peek/acknowledge/kMaxRetained 限界）、COMMIT 流向逻辑槽/ROLLBACK 丢弃、`CREATE/DROP PUBLICATION|REPLICATION SLOT` + 4 个 SHOW 面（解析器前置拦截——否则 CREATE PUBLICATION 被通用 parser 误映射为 CREATE TABLE）。
+- **P2-8 TDE 透明数据加密**：SHA-256-CTR 密流 + SHA-256 EtM 认证（组合语义等价 AES-GCM，零外部依赖）。**边车信封**模型：整页密文 + `<file>.tde` 每页 48B nonce+MAC（堆页 line-pointer 向下生长/tuple 向上生长，页内无处安放信封）；全零信封 = 明文页（就地渐进加密）；页 0 永不加密。keyring 0600 首建/坏格式拒绝。**关键修复：TDE 装载从 main 深处提前到 pre-engine 静态初始化**——否则崩溃恢复读到裸密文中止。E2E：秘密数据 at-rest 全文件 grep 不到、重启后 WAL 恢复 + 解密读回全部行。
+
+质量与并发（sanitizer 例程直接产出的修复）：
+
+- **WAL LSN 数据竞争修复**：`WALManager::currentLsn_` 原在 `dirMutex_` 下写、经 `currentWriteLsn()` 无锁读（flush 决策 + 后台 flusher）——并发 insert 与后台 flusher 竞争。改为 `std::atomic<Lsn>` relaxed 序（进度提示语义；记录插入仍由 `dirMutex_` 串行化）。TSAN 12/12 CLEAN 验证。
+- **已知（未修）**：LockManager `pageLockExclusive`/`pageUnlock` 锁序反转（TSAN lock-order-inversion 报告，单线程测试经 shared_mutex 升级模式即可触发；数据竞争为零）。记录在案，v0.2 处理。
+
+发布工程（本批次核心产出）：
+
+- **版本单一事实源**：CMake project version ↔ `src/common/version.h` ↔ CHANGELOG.md；`dbms_main --version/-V`；git tag v0.1.0。
+- **CI**：`scripts/ci.sh`（build → 165 回归 + 7 E2E → 版本一致性 → sanitizer 核心）+ `.github/workflows/ci.yml`（push/PR/tag 触发）。
+- **Sanitizer 例程**：`scripts/sanitizer.sh`（out-of-tree ASAN+UBSAN / TSAN 构建，核心 12 测试；`setarch -R` 规避内核 6.8 高熵 ASLR 与 TSAN 的不兼容；LSAN suppressions 记录有意泄漏的单例）。
+- **崩溃恢复矩阵**：`tests/crash_matrix_test.sh` —— {wal-insert, tde-insert, ddl-mixed, connection-pool} × {mid-transaction, post-commit, post-checkpoint} = 12 组合，SIGKILL 后继进程验证已提交行存活/未提交行消失。post-commit 用输出确认屏障消除 kill 与 flush 的竞态 flake。
+- **Soak 负载**：`scripts/soak.sh` + `scripts/soak_client.py` —— 单 `--server` 进程（thread-per-connection，真实并发架构）+ N 个 PG wire protocol 客户端（SCRAM 认证 + 混合 DML 循环），验证 server 存活、行数一致性、CHECKPOINT 后干净重开。**架构发现：process-per-connection 共享数据目录不是安全并发形态**（每进程 XID 计数器在共享 WAL 中冲突 → 恢复时 contradictory COMMIT）；多用户必须走单 --server 进程。文档化于脚本注释。
+- **打包**：`scripts/package.sh` 源码 tarball（版本三方一致性校验）+ 目录约定（docs/PACKAGING.md）。
+
+遗留（v0.2 候选，详见 RELEASE-NOTES.md 已知限制）：DML 双执行入口收尾（P1-0 第 4 步）、LockManager 锁序、TDE 索引文件覆盖 + 密钥轮换、逻辑解码 SUBSCRIPTION 拉取端与 WAL replay、代价模型统计消费（P1-12）、prepared statements PG 语法对齐（P1-10）。
+
+---
 
 2026-08-14 性能与并发硬化轮次（13 个提交，每步全量回归保持绿色）：
 

@@ -462,7 +462,8 @@ static std::string tidToString(std::thread::id tid) {
 static std::string nowIso8601() {
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
-    std::tm tm = *std::localtime(&time_t_now);
+    std::tm tm;
+    ::localtime_r(&time_t_now, &tm);
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
     return std::string(buf);

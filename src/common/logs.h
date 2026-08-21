@@ -6,10 +6,15 @@
 #include <string>
 
 // 获取当前时间
+// ctime()/localtime() return libc static buffers and are data races when
+// two connection threads format timestamps concurrently; use the
+// reentrant variants everywhere (observed live under TSAN on the
+// protocol server).
 inline std::string getTime() {
     time_t now = time(0);
-    std::string now_dt = ctime(&now);
-    return now_dt;
+    char buf[64];
+    if (!ctime_r(&now, buf)) return std::string();
+    return std::string(buf);
 }
 
 // 写入日志文件
@@ -49,7 +54,9 @@ inline void auditLog(int auditLevel, const std::string& user, const std::string&
     std::ofstream ofs("audit.log", std::ios::app);
     if (!ofs) return;
     time_t now = time(0);
-    std::string ts = ctime(&now);
+    char tsBuf[64];
+    if (!ctime_r(&now, tsBuf)) tsBuf[0] = '\0';
+    std::string ts = tsBuf;
     if (!ts.empty() && ts.back() == '\n') ts.pop_back();
     // Truncate long SQL for readability
     std::string sqlTrunc = sql;

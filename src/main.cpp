@@ -8702,7 +8702,8 @@ void autoExplainLog(const std::string& sql, double ms,
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     char buf[64];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+    struct tm tmBuf;
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", ::localtime_r(&t, &tmBuf));
 
     // Build a simple plan description based on SQL text
     std::string plan;
@@ -8749,7 +8750,8 @@ void logSlowQuery(const std::string& sql, double ms,
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     char buf[64];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+    struct tm tmBuf;
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", ::localtime_r(&t, &tmBuf));
 
     // Write to file with enhanced format
     std::ofstream ofs("slow_query.log", std::ios::app);
