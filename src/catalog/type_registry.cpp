@@ -1,4 +1,5 @@
 #include "type_registry.h"
+#include <mutex>
 #include "types/numeric.h"
 
 #include <cctype>
@@ -25,12 +26,14 @@ bool parseInt(const std::string& s, int64_t& out) {
 } // anonymous namespace
 
 TypeRegistry& TypeRegistry::instance() {
+    // C++11 guards the static object's construction, but a separate
+    // `static bool bootstrapped` does NOT get that guarantee: two
+    // connection threads hitting a type lookup for the first time ran
+    // bootstrap() concurrently (TSAN: data race on the flag and on the
+    // registry maps).  call_once closes the window.
     static TypeRegistry reg;
-    static bool bootstrapped = false;
-    if (!bootstrapped) {
-        reg.bootstrap();
-        bootstrapped = true;
-    }
+    static std::once_flag bootstrapOnce;
+    std::call_once(bootstrapOnce, [] { reg.bootstrap(); });
     return reg;
 }
 
