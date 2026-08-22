@@ -3872,18 +3872,29 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     walManagers_.erase(dbname);
     lastCheckpointLsns_.erase(dbname);
 
-    for (auto it = deadTupleCounts_.begin(); it != deadTupleCounts_.end();) {
-        if (it->first.first == dbname) {
-            it = deadTupleCounts_.erase(it);
-        } else {
-            ++it;
+    // These maps are also read/written by connection threads under their
+    // own mutexes (recordModification / resetDeadTupleCount / stats
+    // readers); erasing here without those mutexes raced the background
+    // pruner against a concurrent insert (TSAN: data race on the map's
+    // string keys).
+    {
+        std::lock_guard<std::mutex> lock(deadTupleMutex_);
+        for (auto it = deadTupleCounts_.begin(); it != deadTupleCounts_.end();) {
+            if (it->first.first == dbname) {
+                it = deadTupleCounts_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
-    for (auto it = modifyCounts_.begin(); it != modifyCounts_.end();) {
-        if (it->first.first == dbname) {
-            it = modifyCounts_.erase(it);
-        } else {
-            ++it;
+    {
+        std::lock_guard<std::mutex> lock(modifyMutex_);
+        for (auto it = modifyCounts_.begin(); it != modifyCounts_.end();) {
+            if (it->first.first == dbname) {
+                it = modifyCounts_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 }
