@@ -1335,6 +1335,33 @@ void StorageEngine::backgroundWorkerLoop() {
         backgroundWalFlush();
         backgroundBufferFlush();
         backgroundCheckpoint();
+        backgroundAutoVacuum();
+    }
+}
+
+void StorageEngine::backgroundAutoVacuum() {
+    // Drain auto-vacuum requests off the query path (see
+    // maybeAutoVacuum).  Each vacuum still takes the table locks it
+    // needs, but no user statement is blocked for the vacuum's full
+    // duration — only behind their own lock acquisitions.
+    std::vector<std::pair<std::string, std::string>> todo;
+    {
+        std::lock_guard<std::mutex> lock(autoVacuumMutex_);
+        for (const auto& [key, flag] : autoVacuumPending_) {
+            if (flag) todo.push_back(key);
+        }
+        autoVacuumPending_.clear();
+    }
+    for (const auto& [dbname, tablename] : todo) {
+        if (!databaseExists(dbname)) continue;
+        const auto t0 = std::chrono::steady_clock::now();
+        vacuum(dbname, tablename);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (ms > 500) {
+            std::cerr << "[background] auto-vacuum " << dbname << "/"
+                      << tablename << " took " << ms << "ms" << std::endl;
+        }
     }
 }
 
@@ -1382,7 +1409,14 @@ void StorageEngine::backgroundCheckpoint() {
     // checkpointer: run checkpoint for every known database.
     auto dbs = getDatabaseNames();
     for (const auto& dbname : dbs) {
+        const auto t0 = std::chrono::steady_clock::now();
         checkpoint(dbname);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (ms > 500) {
+            std::cerr << "[background] checkpoint " << dbname
+                      << " took " << ms << "ms" << std::endl;
+        }
     }
 }
 
@@ -24757,7 +24791,15 @@ void StorageEngine::maybeAutoVacuum(const std::string& dbname,
         count = it->second;
     }
     if (count >= static_cast<size_t>(g_config.autoVacuumThreshold)) {
-        vacuum(dbname, tablename);
+        // Defer to the background loop: a synchronous vacuum here ran a
+        // full-table compaction on the query path while holding the
+        // table's locks, serializing all concurrent statements behind it
+        // (measured: multi-second global stalls when 4 workers crossed
+        // the 50-dead-tuple threshold together).
+        {
+            std::lock_guard<std::mutex> lock(autoVacuumMutex_);
+            autoVacuumPending_[key] = true;
+        }
         std::lock_guard<std::mutex> lock(deadTupleMutex_);
         deadTupleCounts_[key] = 0;
     }

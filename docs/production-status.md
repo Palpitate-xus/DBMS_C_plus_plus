@@ -26,6 +26,16 @@ soak/TSAN 实测驱动的四个提交，每步全量回归绿色：
 
 **批次验证**：回归 163/0、崩溃矩阵 12/12、kill-storm 双项 10/10、ASAN/TSAN 核心集 CLEAN、soak PASS-WITH-NOTES（120KB WAL/60s，批前 ~70MB/30s）。
 
+## v0.2 收尾批次（2026-08-22 第三轮）
+
+world-stop 残余核查与根因终局，三项提交：
+
+- **TCP_NODELAY**（2ca3faf）：服务器 accept 的 socket 从未关 Nagle——协议响应分多个小 send（行数据、命令状态、ReadyForQuery），第二个段被 Nagle 扣住等客户端 delayed-ACK（~40ms），形成**每条语句 41ms 的固定地板**（空查询也是 41ms 实锤）。修复后单客户端 SELECT 1 41→0ms、INSERT 58→19ms、UPDATE 75→39ms。并发下这个地板×队列深度就是此前"多秒级停顿"的主要构成。
+- **auto-vacuum 移出语句路径**：DELETE/UPDATE 路径在 dead-tuple 计数过阈值（50）时**同步跑全表 vacuum 并持表锁**——4 个 soak worker 在 t≈8s 同时过阈值，全部语句被一次 vacuum 串到后面（连续 30s+ 饿死、client 30s 读超时雪崩重连）。现改为语句路径只登记 (db,table)，200ms 后台循环执行 vacuum。soak 从 crash FAIL 变 PASS。
+- **残余 30s 周期停顿定性为宿主环境（结案）**：修正探针 pid 错误（setsid fork 导致 $! 失效,此前 wchan 追踪一直看着错误进程）后取到真栈：停顿窗口内 worker 线程**一次 fsync 在 ext4 jbd2_log_wait_commit 上等待 25 秒**。裸 fsync canary（覆写旧块）仅 6ms——WAL 追加新块必须等 jbd2 元数据事务提交,而宿主机上 3 个 100% CPU 的 RL 训练进程每 ~30s 周期性写大 checkpoint（iostat: sde burst 225 w/s、w_await 312ms、%util 63%）,jbd2 提交被拖到 25s。**触发条件**：共享存储宿主机上邻居进程的周期性大写入 + ext4 data=ordered 的 fsync 语义。引擎侧缓解已尽（group commit、纪元化索引图像、事务级堆页 flush、异步 auto-vacuum、TCP_NODELAY）；根治需独占存储或 XFS/ext4 nojournal WAL 卷——已记录为部署要求而非代码缺陷。
+
+**批次验证**：soak 150s×4 PASS-WITH-NOTES（errors 从连续饿死降为宿主噪声级 3-4 次/worker,ops 恢复预算上限）。
+
 ## v0.1.0 发布批次（2026-08-20 ~ 08-21）
 
 功能补全（每项独立提交，全量回归逐步 163 → 165 保持绿色）：

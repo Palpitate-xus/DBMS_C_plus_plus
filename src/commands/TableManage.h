@@ -1455,6 +1455,15 @@ private:
     // Auto-VACUUM: per-table dead tuple tracking
     mutable std::mutex deadTupleMutex_;
     mutable std::map<std::pair<std::string, std::string>, size_t> deadTupleCounts_;
+    // Auto-vacuum requests surfaced by statement threads.  The DML paths
+    // used to run vacuum() synchronously when the dead-tuple threshold
+    // was crossed, which stalled every concurrent statement on the same
+    // table behind a full-table vacuum (the ~30s periodic world-stop:
+    // four soak workers crossed the threshold together ~8s into the run).
+    // Now the statement path only enqueues the (db, table) pair here and
+    // the 200ms background loop performs the vacuum off the query path.
+    std::mutex autoVacuumMutex_;
+    std::map<std::pair<std::string, std::string>, bool> autoVacuumPending_;
 
     // Auto-ANALYZE: per-table modification tracking
     mutable std::mutex modifyMutex_;
@@ -1561,6 +1570,7 @@ private:
     void backgroundWalFlush();
     void backgroundBufferFlush();
     void backgroundCheckpoint();
+    void backgroundAutoVacuum();
 
     std::thread backgroundThread_;
     std::atomic<bool> backgroundStop_{false};
