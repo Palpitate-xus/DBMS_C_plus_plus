@@ -13,7 +13,8 @@ soak/TSAN 实测驱动的四个提交，每步全量回归绿色：
 - **commit 去掉堆页同步刷**（f4e8728）：world-stop 根因链取证完成——停顿窗口内冻结线程 `state=D wchan=jbd2_log_wait_commit`，放大器是 commitTransaction 每事务刷全部脏堆页（90s 压测 207MB 写入把 ext4 日志打满，fsync 排队 30s+ 且持插入锁）。堆页持久性本就由 WAL before/after 图像对 + 200ms bgwriter 承担。**验证方法论修正**：kill-storm 必须带 commit 确认屏障（无屏障版会把"kill 在 commit 前"误判为丢行——12/15 假阳性来源）。修复后带屏障 kill-storm 10/10、矩阵 12/12、soak 吞吐 43→613 ops/60s。
 - **stats-map 擦除竞态修复**（d2a9e46）：closeDatabaseCaches 无锁擦 deadTupleCounts_/modifyCounts_，与连接线程在各自 mutex 下的读写竞争（TypeRegistry 修复后的时序变化暴露了它）。擦除循环补上对应 mutex。
 - **LockManager 锁序报告定性为设计权衡**（dd5e347）：M1(物理令牌)跨调用持有→M0(注册表) 与 acquireLock 内 M0→M1 构成 TSAN 环；真实 AB-BA 死锁由 wait-graph 环检测 + 1s 超时兜底。修复需重写锁表协议，记录调用协议约定。
-- **残留（v0.2-next）**：索引文件 WAL 图像是"每次 flush 整文件写 WAL ×2"——剩余写放大源与偶发停顿来源；需重构为索引逻辑 WAL + 恢复期重建。PgPage 同页插入竞态仍开放（表现限于吞吐与偶发语句错误，持久性不受影响）。
+- **残留（v0.2-next）**：索引文件 WAL 图像是"每次 flush 整文件写 WAL ×2"——剩余写放大源与偶发停顿来源；需重构为索引逻辑 WAL + 恢复期重建。
+- **已关闭——PgPage 同页插入竞态**：TypeRegistry 修复后的 live TSAN server 压力复测（4 协议客户端 × 50s）**0 数据竞争、0 PgPage 报告**——此前的 PgPage::insert/setLpOff 报告确认为坏 map 时代的连锁症状，不是独立的页锁缺失。该项关闭。
 
 ## v0.1.0 发布批次（2026-08-20 ~ 08-21）
 
