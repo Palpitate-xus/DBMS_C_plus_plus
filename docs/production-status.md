@@ -19,7 +19,7 @@
 - **WAL LSN 数据竞争修复**：`WALManager::currentLsn_` 原在 `dirMutex_` 下写、经 `currentWriteLsn()` 无锁读（flush 决策 + 后台 flusher）——并发 insert 与后台 flusher 竞争。改为 `std::atomic<Lsn>` relaxed 序（进度提示语义；记录插入仍由 `dirMutex_` 串行化）。TSAN 12/12 CLEAN 验证。
 - **时间格式化线程安全修复（soak 发现）**：`ctime()`/`localtime()` 返回 libc 静态缓冲；协议服务器是 thread-per-connection，每条连接格式化时间戳（slow-query/audit/auto-explain 日志、引擎 getTime、now() 求值器、LockManager nowIso8601）都在竞争同一静态缓冲 → native 构建偶发 SIGSEGV（soak 捕捉到的不稳定崩溃）。全部调用点改用可重入变体（`ctime_r`/`localtime_r`）。验证：TSAN 服务器竞态 8→3；native 6 客户端×70s 压测连续 3 轮服务器存活（此前崩溃复现）。
 - **已知（未修）——PgPage 同页插入竞态**：TSAN 在真实并发负载下报告 `PgPage::insert`/`setLpOff`/`writeChecksum` 数据竞争——两个线程无页锁并发插入**同一页**。属于引擎页级锁不变量缺失（调用方应持页锁），v0.2 引擎项；当前表现为并发 INSERT 吞吐受限 + 偶发语句级错误，不影响已提交数据正确性（WAL + 崩溃矩阵 12/12 仍绿）。
-- **已知（未修）——LockManager 锁序反转**：`pageLockExclusive`/`pageUnlock`（TSAN lock-order-inversion 报告，单线程测试经 shared_mutex 升级模式即可触发；数据竞争为零）。记录在案，v0.2 处理。
+- **已知（设计权衡，非缺陷）——LockManager 锁序报告**：TSAN lock-order-inversion（复现于 lock_manager_concurrency_test 的双表死锁场景）：物理锁令牌 `LockState::mtx`（M1）跨 API 调用持有期间再次进入 acquireLock 会先取注册表锁 `globalMutex_`（M0），而 acquireLock 内部正常序为 M0→M1。真实死锁需两线程以相反序交叉持有——该场景正是测试复现的双表 AB-BA，**由 wait-graph 环检测 + deadlockTimeoutMs=1000 兜底解除**（测试断言二者至少一个失败返回）。修复需要把锁表重构为"注册表短锁 + 等待队列条件变量"协议（PostgreSQL LOCKMODE 结构），影响全部 lock/pageLock/rowLock 路径——收益是消除 TSAN 报告，代价是重写核心并发原语。定性为有意权衡：sanitizer 例程对该类报告保持 detect_deadlocks=0（数据竞争仍致命），文档记录锁序协议如下——任何持有 state->mtx 的路径不得再调用锁管理器公开 API。
 - **world-stop 停顿——根因链已完整定位（v0.2 修复进行中）**：并发负载下所有连接统一冻结。取证（停顿窗口内 /proc 线程态采样 + 每秒语句吞吐直方图）：
   1. 卡死线程 `state=D wchan=jbd2_log_wait_commit`——ext4 日志提交队列堵塞；
   2. 放大器 = commitTransaction 每次事务执行 `flushDatabaseCaches`（全部堆页 pwrite + 每文件 fsync）+ WAL XLogFlush fsync——90s 压测写 207MB，jbd2 过载后每个 fsync 排队 30s+，持有 dirMutex_ 期间全部插入停摆；
