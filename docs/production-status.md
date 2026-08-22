@@ -20,7 +20,11 @@
 - **时间格式化线程安全修复（soak 发现）**：`ctime()`/`localtime()` 返回 libc 静态缓冲；协议服务器是 thread-per-connection，每条连接格式化时间戳（slow-query/audit/auto-explain 日志、引擎 getTime、now() 求值器、LockManager nowIso8601）都在竞争同一静态缓冲 → native 构建偶发 SIGSEGV（soak 捕捉到的不稳定崩溃）。全部调用点改用可重入变体（`ctime_r`/`localtime_r`）。验证：TSAN 服务器竞态 8→3；native 6 客户端×70s 压测连续 3 轮服务器存活（此前崩溃复现）。
 - **已知（未修）——PgPage 同页插入竞态**：TSAN 在真实并发负载下报告 `PgPage::insert`/`setLpOff`/`writeChecksum` 数据竞争——两个线程无页锁并发插入**同一页**。属于引擎页级锁不变量缺失（调用方应持页锁），v0.2 引擎项；当前表现为并发 INSERT 吞吐受限 + 偶发语句级错误，不影响已提交数据正确性（WAL + 崩溃矩阵 12/12 仍绿）。
 - **已知（未修）——LockManager 锁序反转**：`pageLockExclusive`/`pageUnlock`（TSAN lock-order-inversion 报告，单线程测试经 shared_mutex 升级模式即可触发；数据竞争为零）。记录在案，v0.2 处理。
-- **已知（未修）——world-stop 停顿**：并发负载下所有连接每隔约 30s 统一停顿一次（与语句计数 checkpoint 无关：interval=1000000 时仍复现；后台 checkpointer 间隔为 5min 亦不匹配；根因未定位）。停顿期内客户端超时但重连/重试即恢复。soak 以错误预算区分 pass-with-notes 与硬失败。
+- **world-stop 停顿——根因链已完整定位（v0.2 修复进行中）**：并发负载下所有连接统一冻结。取证（停顿窗口内 /proc 线程态采样 + 每秒语句吞吐直方图）：
+  1. 卡死线程 `state=D wchan=jbd2_log_wait_commit`——ext4 日志提交队列堵塞；
+  2. 放大器 = commitTransaction 每次事务执行 `flushDatabaseCaches`（全部堆页 pwrite + 每文件 fsync）+ WAL XLogFlush fsync——90s 压测写 207MB，jbd2 过载后每个 fsync 排队 30s+，持有 dirMutex_ 期间全部插入停摆；
+  3. 客户端 30s 超时是表象周期，不是引擎周期。
+  已落地缓解：WAL group commit（flushMutex_ 排队合并，等待者搭已落盘前缀的便车，消除 N 个 fsync 串行）。待做（设计级）：commit 路径去掉堆页全量 flush（堆页有 WAL 全页镜像 redo，崩溃安全不依赖 commit 时刷盘；交给 bgwriter 200ms 循环 + checkpoint，即 PostgreSQL 模型）；索引文件的 WAL 图像机制需要同步重新设计。soak 以错误预算区分 pass-with-notes 与硬失败。
 
 发布工程（本批次核心产出）：
 

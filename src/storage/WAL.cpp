@@ -854,6 +854,17 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
 
 bool WALManager::XLogFlush(Lsn targetLsn) {
     if (!ensureOpen() || targetLsn == INVALID_LSN) return false;
+    // ---- Group commit gate ----------------------------------------------
+    // Serialize flushes on a dedicated mutex BEFORE dirMutex_.  While one
+    // thread fsyncs inside dirMutex_, queued committers block here rather
+    // than on dirMutex_, so concurrent XLogInserts keep appending; when
+    // the in-flight fsync lands, its synced prefix almost always already
+    // covers the waiters' targets and they return from the durable-prefix
+    // check without any fsync of their own.  A slow jbd2 commit costs a
+    // waiter one queue delay instead of serializing N full fsyncs under
+    // the insert lock (the observed world-stop pattern: every connection
+    // stalls ~30s while commits queue behind each other's fsync).
+    std::lock_guard<std::mutex> flushQueue(flushMutex_);
     std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return false;

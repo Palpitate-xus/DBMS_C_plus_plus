@@ -227,6 +227,17 @@ private:
     // longer serialize each other.
     std::shared_ptr<std::mutex> dirMutex_;
 
+    // ---- Group commit -----------------------------------------------------
+    // fsync dominates commit latency and the kernel journal (jbd2)
+    // serializes it: one slow fsync performed while dirMutex_ is held
+    // stalls every concurrent XLogInsert — observed as a full world-stop
+    // under concurrent load.  Flushes therefore serialize on this
+    // dedicated mutex FIRST, outside dirMutex_: waiters queued behind an
+    // in-flight fsync piggy-back on its result (their target is covered
+    // by the synced prefix once it lands) instead of each paying their
+    // own fsync while still holding the insert lock.
+    std::mutex flushMutex_;
+
     uint32_t segmentNumber(Lsn lsn) const {
         return static_cast<uint32_t>(lsn / kSegmentSize);
     }
