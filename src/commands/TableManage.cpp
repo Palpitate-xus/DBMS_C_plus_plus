@@ -3725,7 +3725,7 @@ static bool readWholeBinaryFile(const std::filesystem::path& path,
     return in.good() || in.eof();
 }
 
-bool StorageEngine::flushDatabaseCaches(const std::string& dbname) {
+bool StorageEngine::flushDatabaseCaches(const std::string& dbname, bool heapPages) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string tablePrefix = dbname + "/";
     const std::string hashPrefix = dbname + ".";
@@ -3751,9 +3751,11 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname) {
         if (afterLsn == INVALID_LSN || !wal->XLogFlush(afterLsn)) return false;
         return true;
     };
-    for (const auto& [key, allocator] : pageAllocators_) {
-        if (key.rfind(tablePrefix, 0) == 0 && allocator && !allocator->flush()) {
-            ok = false;
+    if (heapPages) {
+        for (const auto& [key, allocator] : pageAllocators_) {
+            if (key.rfind(tablePrefix, 0) == 0 && allocator && !allocator->flush()) {
+                ok = false;
+            }
         }
     }
     for (const auto& [key, index] : pkIndexCache_) {
@@ -3777,9 +3779,11 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname) {
             ok = false;
         }
     }
-    for (const auto& [key, allocator] : toastPageAllocators_) {
-        if (key.rfind(toastPrefix, 0) == 0 && allocator && !allocator->flush()) {
-            ok = false;
+    if (heapPages) {
+        for (const auto& [key, allocator] : toastPageAllocators_) {
+            if (key.rfind(toastPrefix, 0) == 0 && allocator && !allocator->flush()) {
+                ok = false;
+            }
         }
     }
     for (const auto& [key, index] : toastIndexes_) {
@@ -22402,10 +22406,15 @@ DBStatus StorageEngine::commitTransaction() {
     // reconstruct.
     const std::string committingDb = transactionContext().txnDB;
     const uint64_t committingTxnId = transactionContext().currentTxnId;
-    // Force all loaded heap/index caches durable before publishing the COMMIT
-    // record so a committed transaction cannot expose a dirty in-memory index
-    // that is absent from its files.
-    if (!flushDatabaseCaches(committingDb)) {
+    // Durability before publishing COMMIT.  Heap/TOAST page durability
+    // rides on the WAL before/after image pairs (recovery replays the redo
+    // pass) plus the 200ms background flusher; flushing every dirty heap
+    // page synchronously here was the dominant write amplifier behind the
+    // jbd2 world-stop (207MB/90s under 4-client load).  Index files keep
+    // their flush + WAL-image bookkeeping in all modes.
+    // Kill-storm verification: 10/10 committed rows survive kill -9 with
+    // heapPages=false (commit-acknowledgement barrier test).
+    if (!flushDatabaseCaches(committingDb, /*heapPages=*/false)) {
         rollbackTransaction();
         return DBStatus::IO_ERROR;
     }

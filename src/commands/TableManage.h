@@ -1216,7 +1216,11 @@ private:
     mutable std::recursive_mutex cacheMutex_;
     mutable std::map<std::string, std::unique_ptr<PageAllocator>> pageAllocators_;
     void closeAllPageAllocators();
-    bool flushDatabaseCaches(const std::string& dbname);
+    // Flush every loaded cache for the database.  heapPages=false skips the
+    // heap/TOAST page flushes (callers whose durability already rides on WAL
+    // full-page images + the background flusher, e.g. the commit path);
+    // index files keep their flush + WAL-image bookkeeping in all modes.
+    bool flushDatabaseCaches(const std::string& dbname, bool heapPages = true);
     void closeDatabaseCaches(const std::string& dbname);
     void pruneMissingDatabaseCaches();
 

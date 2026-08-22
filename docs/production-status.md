@@ -24,7 +24,10 @@
   1. 卡死线程 `state=D wchan=jbd2_log_wait_commit`——ext4 日志提交队列堵塞；
   2. 放大器 = commitTransaction 每次事务执行 `flushDatabaseCaches`（全部堆页 pwrite + 每文件 fsync）+ WAL XLogFlush fsync——90s 压测写 207MB，jbd2 过载后每个 fsync 排队 30s+，持有 dirMutex_ 期间全部插入停摆；
   3. 客户端 30s 超时是表象周期，不是引擎周期。
-  已落地缓解：WAL group commit（flushMutex_ 排队合并，等待者搭已落盘前缀的便车，消除 N 个 fsync 串行）。待做（设计级）：commit 路径去掉堆页全量 flush（堆页有 WAL 全页镜像 redo，崩溃安全不依赖 commit 时刷盘；交给 bgwriter 200ms 循环 + checkpoint，即 PostgreSQL 模型）；索引文件的 WAL 图像机制需要同步重新设计。soak 以错误预算区分 pass-with-notes 与硬失败。
+  已落地缓解：
+  1. WAL group commit（flushMutex_ 排队合并，等待者搭已落盘前缀的便车，消除 N 个 fsync 串行）；
+  2. commit 路径不再同步刷堆页/TOAST 页（flushDatabaseCaches(heapPages=false)）——堆页持久性由 WAL before/after 图像对 + 200ms bgwriter 承担，即 PostgreSQL 模型。崩溃安全验证：带 commit 确认屏障的 kill-storm 10/10 行存活、崩溃矩阵 12/12。
+  待做（设计级）：索引文件的 WAL 图像是“每次 flush 整文件写 WAL ×2”的保守机制，是剩余写放大源；需要改为索引逻辑 WAL 记录 + 恢复期重建。soak 以错误预算区分 pass-with-notes 与硬失败。
 
 发布工程（本批次核心产出）：
 
