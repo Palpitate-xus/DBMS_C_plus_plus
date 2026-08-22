@@ -16,6 +16,16 @@ soak/TSAN 实测驱动的四个提交，每步全量回归绿色：
 - **残留（v0.2-next）**：索引文件 WAL 图像是"每次 flush 整文件写 WAL ×2"——剩余写放大源与偶发停顿来源；需重构为索引逻辑 WAL + 恢复期重建。
 - **已关闭——PgPage 同页插入竞态**：TypeRegistry 修复后的 live TSAN server 压力复测（4 协议客户端 × 50s）**0 数据竞争、0 PgPage 报告**——此前的 PgPage::insert/setLpOff 报告确认为坏 map 时代的连锁症状，不是独立的页锁缺失。该项关闭。
 
+## v0.2-next 批次（2026-08-22 第二轮）
+
+写放大根除批次——三项提交，每步全量回归绿色：
+
+- **PgPage 同页竞态关闭**（89ef2ef）：live TSAN server 压力复测 0 报告，确认为坏 map 时代连锁症状。
+- **索引 WAL 图像按 checkpoint 纪元去重**（7e59b1e）：实测每条 40 字节 INSERT 写 ~120KB WAL（70MB/574 次插入）——每次 commit 把**整个索引文件**写进 WAL 两次 × 每个脏索引。纪元化后同量负载 WAL 降两个数量级（60s soak 492KB→120KB）。索引 kill -9 一致性经屏障 kill-storm 验证依赖物理 flush 而非图像（10/10）。
+- **事务级堆页 flush**（92167cd）：堆页全池 flush 移除后的并发正确性闭环。bgwriter 撕页竞态（TSAN 捕获 insert vs pwrite）与 bgwriter 页锁死锁（array_test 复现锁序反转）两条歧路都被否决；正解是 commit 只 flush 本事务写的页（txnWrittenPages，SSI 已有记录）——这些页仍在事务页锁下,写入无竞态。新增 BufferPool::flushPage。
+
+**批次验证**：回归 163/0、崩溃矩阵 12/12、kill-storm 双项 10/10、ASAN/TSAN 核心集 CLEAN、soak PASS-WITH-NOTES（120KB WAL/60s，批前 ~70MB/30s）。
+
 ## v0.1.0 发布批次（2026-08-20 ~ 08-21）
 
 功能补全（每项独立提交，全量回归逐步 163 → 165 保持绿色）：
