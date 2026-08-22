@@ -1244,6 +1244,14 @@ private:
     // Per-database checkpoint LSN. Pages with pd_lsn <= this value trigger
     // a full-page write on their next modification.
     mutable std::map<std::string, Lsn> lastCheckpointLsns_;
+    // Index WAL-image epoch: bumped on every checkpoint.  An index file's
+    // whole-file WAL image pair (before/after) is written at most once per
+    // epoch per file — the physical flush at commit already puts the entries
+    // on disk, so repeating the image every commit only duplicated megabytes
+    // into the WAL (measured: ~120KB WAL per 40-byte INSERT).  The image
+    // remains the crash-corruption baseline for the epoch.
+    mutable uint64_t indexImageEpoch_ = 1;
+    mutable std::map<std::string, uint64_t> indexImageWrittenEpoch_;
 
     // Helpers to emit WAL records for heap operations.
     Lsn walPageImage(const std::string& dbname, const std::string& tablename,

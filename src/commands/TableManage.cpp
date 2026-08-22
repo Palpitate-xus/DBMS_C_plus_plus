@@ -3736,6 +3736,20 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname, bool heapPage
                                    bool dirty,
                                    const std::function<bool()>& flush) {
         if (!dirty) return true;
+        // Write the whole-file WAL image pair at most once per checkpoint
+        // epoch per file.  The physical flush below already puts committed
+        // entries on disk at commit time (index consistency after kill -9
+        // rides on that flush — verified by the barrier kill-storm), so the
+        // image is a corruption-recovery baseline, not the primary
+        // durability mechanism.  Repeating it every commit made WAL volume
+        // grow with index size per transaction (~120KB per INSERT).
+        const std::string pathKey = path.string();
+        const bool needImage =
+            indexImageWrittenEpoch_.find(pathKey) == indexImageWrittenEpoch_.end() ||
+            indexImageWrittenEpoch_[pathKey] != indexImageEpoch_;
+        if (!needImage) {
+            return flush();
+        }
         std::vector<char> before;
         if (!readWholeBinaryFile(path, before)) return false;
 
@@ -3749,6 +3763,7 @@ bool StorageEngine::flushDatabaseCaches(const std::string& dbname, bool heapPage
         if (!readWholeBinaryFile(path, after)) return false;
         const Lsn afterLsn = walIndexFileImage(dbname, path, after, false);
         if (afterLsn == INVALID_LSN || !wal->XLogFlush(afterLsn)) return false;
+        indexImageWrittenEpoch_[pathKey] = indexImageEpoch_;
         return true;
     };
     if (heapPages) {
@@ -21339,6 +21354,12 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
             if (activeDb == dbname) return false;
         }
     }
+
+    // A checkpoint starts a new index-image epoch: the next dirty-index
+    // flush re-baselines its whole-file WAL image pair (see
+    // flushWalLoggedIndex).  Entries committed since the last epoch ride on
+    // the physical flush that already happened at their commit.
+    ++indexImageEpoch_;
 
     // Flush all loaded heap and index caches through the WAL-aware path.
     if (!flushDatabaseCaches(dbname)) {
