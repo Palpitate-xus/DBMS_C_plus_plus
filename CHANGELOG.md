@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-22
+
+并发硬化与写放大根除（"concurrency hardening"）。
+基线：163 个 C++ 回归 + 7 个 E2E 全绿；崩溃恢复矩阵 12/12；ASAN/TSAN 核心集 CLEAN。
+
+### 并发正确性
+- TypeRegistry 单例 bootstrap 竞态：`static bool` 旗标不受 Meyers 单例保护，两线程并发 bootstrap 重写注册表——TSAN 1288 条报告的单一根因，`call_once` 修复后 0 报告
+- stats-map 擦除竞态：closeDatabaseCaches 无锁擦 deadTupleCounts_/modifyCounts_ 与连接线程读写竞争，补对应 mutex
+- 事务级堆页 flush：commit 只刷本事务写过的页（仍在事务页锁下，无竞态无死锁）；曾试 bgwriter 逐页加锁（锁序死锁,array_test 复现）已否决
+- LockManager 锁序反转定性为设计权衡（调用协议文档化）
+
+### 性能
+- TCP_NODELAY：服务器 socket Nagle+delayed-ACK 造成每语句 41ms 固定地板（含空查询），修复后 SELECT 1 0ms / INSERT 19ms
+- WAL group commit：fsync 队列与插入锁解耦，N 个串行 fsync 合一
+- 索引 WAL 图像按 checkpoint 纪元去重：每 commit 整索引文件×2 写 WAL（实测 40 字节 INSERT 写 120KB WAL）→ 同纪元只写一次；WAL 量降两个数量级（70MB/30s → 120KB/60s）
+- auto-vacuum 移出语句路径：阈值(50 dead tuples)触发的同步全表 vacuum 曾把全部并发语句串到 30s+ 饿死；改为后台循环执行
+- commit 去掉全池堆页 flush（jbd2 world-stop 主放大器，207MB/90s）
+
+### 运维定性
+- 残余 ~30s 周期停顿取证结案：worker 单次 fsync 在 ext4 jbd2 等待 25s,由宿主机邻居进程周期性大写入（iostat 225 w/s burst）拖慢 jbd2 提交所致——部署要求独占 WAL 卷,非引擎缺陷
+- kill-storm 验证方法论：必须带 commit 确认屏障（无屏障会把 kill-before-commit 误判为丢行）
+
 ## [0.1.0] - 2026-08-21
 
 首个公开发布版本（v0.1.0 "first public cut"）。

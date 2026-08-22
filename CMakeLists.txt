@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(DBMS_C_plus_plus VERSION 0.1.0 LANGUAGES CXX)
+project(DBMS_C_plus_plus VERSION 0.2.0 LANGUAGES CXX)
 # Keep CMake, src/common/version.h and CHANGELOG.md in sync when cutting a
 # release; scripts/package.sh re-checks the three agree before packaging.
 
