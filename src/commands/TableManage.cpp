@@ -1354,7 +1354,13 @@ void StorageEngine::backgroundWalFlush() {
 
 void StorageEngine::backgroundBufferFlush() {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    // bgwriter: write out dirty pages from each buffer pool.
+    // bgwriter: write out dirty pages from each buffer pool.  NOTE: this
+    // whole-pool flush runs without engine page locks — it can race a
+    // concurrent statement mutating a cached page, which is acceptable
+    // here because the committing statement's own pages are flushed
+    // synchronously at commit (see commitTransaction) under the page
+    // locks it already holds; the bgwriter's possibly-torn copy is
+    // overwritten by the next commit's flush of that page.
     for (auto& kv : pageAllocators_) {
         PageAllocator* pa = kv.second.get();
         if (pa && pa->bufferPool()) {
@@ -22438,14 +22444,38 @@ DBStatus StorageEngine::commitTransaction() {
     // reconstruct.
     const std::string committingDb = transactionContext().txnDB;
     const uint64_t committingTxnId = transactionContext().currentTxnId;
-    // Durability before publishing COMMIT.  Heap/TOAST page durability
-    // rides on the WAL before/after image pairs (recovery replays the redo
-    // pass) plus the 200ms background flusher; flushing every dirty heap
-    // page synchronously here was the dominant write amplifier behind the
-    // jbd2 world-stop (207MB/90s under 4-client load).  Index files keep
-    // their flush + WAL-image bookkeeping in all modes.
-    // Kill-storm verification: 10/10 committed rows survive kill -9 with
-    // heapPages=false (commit-acknowledgement barrier test).
+    // Durability before publishing COMMIT.  Heap durability: flush ONLY
+    // the pages this transaction itself wrote (txnWrittenPages, recorded
+    // by logTxnInsert/Update/Delete).  Those pages are still protected by
+    // this transaction's page locks, so the flush cannot race a concurrent
+    // writer — unlike the previous whole-pool flush (the jbd2 world-stop
+    // amplifier: 207MB/90s under 4-client load) and unlike deferring to
+    // the bgwriter (which takes no page locks and would tear pages).
+    // Pages dirtied by earlier transactions are the bgwriter's job.
+    {
+        const auto& ctx = transactionContext();
+        for (const auto& page : ctx.txnWrittenPages) {
+            // key format: dbname  table  "page"  pageId
+            const size_t p1 = page.find('\x1f');
+            const size_t p2 = page.find('\x1f', p1 + 1);
+            const size_t p3 = page.find('\x1f', p2 + 1);
+            if (p1 == std::string::npos || p2 == std::string::npos ||
+                p3 == std::string::npos) {
+                continue;
+            }
+            const std::string pageDb = page.substr(0, p1);
+            const std::string pageTable = page.substr(p1 + 1, p2 - p1 - 1);
+            const uint32_t pageId = static_cast<uint32_t>(
+                std::strtoul(page.c_str() + p3 + 1, nullptr, 10));
+            if (pageDb != committingDb) continue;
+            PageAllocator* pa = getPageAllocator(pageDb, pageTable);
+            if (pa && pa->bufferPool() &&
+                !pa->bufferPool()->flushPage(pageId)) {
+                rollbackTransaction();
+                return DBStatus::IO_ERROR;
+            }
+        }
+    }
     if (!flushDatabaseCaches(committingDb, /*heapPages=*/false)) {
         rollbackTransaction();
         return DBStatus::IO_ERROR;

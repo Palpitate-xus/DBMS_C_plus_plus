@@ -68,6 +68,11 @@ public:
     // Mark a page as dirty (will be written back on eviction/flush).
     void markDirty(uint32_t pageId);
 
+    // Per-page flush: write one dirty page out (used by the commit path,
+    // which already holds that page's engine lock so no concurrent writer
+    // exists; the whole-pool flush() is reserved for checkpoints).
+    bool flushPage(uint32_t pageId);
+
     // Unpin a page (allow eviction when pinCount reaches 0).
     void unpinPage(uint32_t pageId);
 

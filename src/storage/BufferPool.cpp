@@ -484,6 +484,17 @@ bool BufferPool::flush() {
     return flushUnlocked();
 }
 
+bool BufferPool::flushPage(uint32_t pageId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = pageMap_.find(pageId);
+    if (it == pageMap_.end()) return true;  // not cached: nothing to write
+    Frame& frame = frames_[it->second];
+    if (!frame.dirty) return true;
+    if (!writeToDisk(pageId, frame.data.data())) return false;
+    frame.dirty = false;
+    return true;
+}
+
 std::vector<BufferPool::FrameInfo> BufferPool::getFrameInfo() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<FrameInfo> result;
