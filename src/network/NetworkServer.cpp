@@ -16,6 +16,7 @@
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
 #include "Config.h"
+#include <netinet/tcp.h>
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -1888,6 +1889,16 @@ bool startServer(int port, bool allowPlaintext) {
 
         std::string clientHost = inet_ntoa(clientAddr.sin_addr);
         clientHost += ":" + std::to_string(ntohs(clientAddr.sin_port));
+
+        // Disable Nagle on the accepted socket: protocol responses are
+        // written as several small sends (row data, then command status,
+        // then ReadyForQuery).  With Nagle + the client's delayed ACK the
+        // second segment waits out the ~40ms delayed-ACK timer, which
+        // showed up as a flat 41ms floor on EVERY statement — including
+        // an empty query — and compounded into multi-second stalls under
+        // concurrent load.
+        int nodelay = 1;
+        ::setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         registerClientFd(clientFd);
         auto done = std::make_shared<std::atomic<bool>>(false);
