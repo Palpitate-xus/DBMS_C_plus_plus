@@ -21041,7 +21041,10 @@ bool StorageEngine::recoverAllDatabases() {
                         if (clog) clog->setStatus(xid, CommitLog::Status::Aborted);
                     }
                 } else if (rmid == RM_CHECKPOINT_ID) {
-                    lastCheckpointLsns_[dbname] = lsn;
+                    {
+                        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+                        lastCheckpointLsns_[dbname] = lsn;
+                    }
                 }
                 lsn += rec.header.xl_tot_len;
             }
@@ -21416,7 +21419,13 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     // archiving. The current segment still contains the checkpoint record
     // and is kept for recovery.
     if (!wal->markSegmentsReadyBefore(checkpointLsn)) return false;
-    lastCheckpointLsns_[dbname] = checkpointLsn;
+    {
+        // Guard against the background pruner reading this map under
+        // cacheMutex_ (TSAN: data race, pruneMissingDatabaseCaches vs
+        // checkpoint's unsynchronized store).
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        lastCheckpointLsns_[dbname] = checkpointLsn;
+    }
 
     // Persist checkpoint LSN for fast recovery startup.
     auto cpPath = checkpointPath(dbname);
