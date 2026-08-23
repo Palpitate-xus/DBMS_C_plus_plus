@@ -129,6 +129,9 @@ bool assignParameter(Config& config, const std::string& key,
     else if (key == "enable_merge_join") parsed = parseBool(value, config.enableMergeJoin);
     else if (key == "max_parallel_workers_per_gather") {
         parsed = parseInt(value, config.maxParallelWorkersPerGather);
+    } else if (key == "archive_command") {
+        config.archiveCommand = value;
+        parsed = true;
     } else if (key == "auto_explain") parsed = parseBool(value, config.autoExplainEnabled);
     else if (key == "auto_explain_threshold_ms" || key == "auto_explain_threshold") {
         parsed = parseDouble(value, config.autoExplainThresholdMs);
@@ -183,10 +186,25 @@ bool Config::load(const std::string& filename) {
         line = trim(line);
         if (line.empty() || line[0] == '#') continue;
         size_t eq = line.find('=');
-        if (eq == std::string::npos || line.find('=', eq + 1) != std::string::npos) return false;
+        if (eq == std::string::npos) return false;
         std::string key = trim(line.substr(0, eq));
         std::string val = trim(line.substr(eq + 1));
-        if (key.empty() || val.empty()) return false;
+        // Values that are fully wrapped in single quotes keep embedded '='
+        // and spaces verbatim (needed for archive_command, which may carry
+        // a full shell command line); the quotes are stripped here.
+        bool quoted = false;
+        if (val.size() >= 2 && val.front() == '\'' && val.back() == '\'') {
+            val = val.substr(1, val.size() - 2);
+            quoted = true;
+            if (val.find('=') != std::string::npos && key != "archive_command") {
+                return false;
+            }
+        } else if (line.find('=', eq + 1) != std::string::npos) {
+            return false;
+        }
+        // A quoted value may legitimately be empty (e.g. archive_command=''
+        // for "unset"); only bare-empty values are malformed lines.
+        if (key.empty() || (val.empty() && !quoted)) return false;
         if (!seenKeys.insert(key).second) return false;
         if (!assignParameter(candidate, key, val)) return false;
     }
@@ -227,6 +245,7 @@ void Config::printAll() const {
               << "cpu_operator_cost " << cpuOperatorCost << "\n"
               << "enable_nestloop " << (enableNestloop ? "on" : "off") << "\n"
               << "auto_explain " << (autoExplainEnabled ? "on" : "off") << "\n"
+              << "archive_command '" << archiveCommand << "'\n"
               << "auto_explain_threshold_ms " << autoExplainThresholdMs << "\n"
               << "pg_stat_statements.max " << sqlStatsMaxEntries << "\n";
 }
@@ -241,6 +260,7 @@ bool Config::save(const std::string& filename) const {
     ofs << "# DBMS runtime configuration\n"
         << "max_connections=" << maxConnections << "\n"
         << "slow_query_threshold_ms=" << slowQueryThresholdMs << "\n"
+        << "archive_command='" << archiveCommand << "'\n"
         << "checkpoint_interval=" << checkpointInterval << "\n"
         << "statement_timeout_ms=" << statementTimeoutMs << "\n"
         << "buffer_pool_frames=" << bufferPoolFrames << "\n"

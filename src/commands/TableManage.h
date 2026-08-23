@@ -1571,6 +1571,7 @@ private:
     void backgroundBufferFlush();
     void backgroundCheckpoint();
     void backgroundAutoVacuum();
+    void backgroundArchiveWAL();
 
     std::thread backgroundThread_;
     std::atomic<bool> backgroundStop_{false};

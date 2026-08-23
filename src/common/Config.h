@@ -28,6 +28,15 @@ struct Config {
     bool enableHashJoin = true;    // enable hash join
     bool enableMergeJoin = true;   // enable merge join
     int maxParallelWorkersPerGather = 0; // 0 disables parallel heap scans
+    // WAL archiving (PITR): when set, fully-written WAL segments marked
+    // .ready at checkpoint boundaries are copied/executed per this command.
+    // Two forms are accepted:
+    //   dir:<absolute path>   built-in copy into that directory (safe, no
+    //                         shell), %p/%f not needed
+    //   <anything else>       external command; %p expands to the segment's
+    //                         absolute source path, %f to its file name;
+    //                         exit code 0 = archived
+    std::string archiveCommand;
     bool autoExplainEnabled = false; // auto_explain: log query plan for slow queries
     double autoExplainThresholdMs = 100.0; // threshold for auto_explain
     size_t sqlStatsMaxEntries = 5000; // bounded pg_stat_statements-style entries

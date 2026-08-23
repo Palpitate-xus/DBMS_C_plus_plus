@@ -1336,7 +1336,44 @@ void StorageEngine::backgroundWorkerLoop() {
         backgroundBufferFlush();
         backgroundCheckpoint();
         backgroundAutoVacuum();
+        backgroundArchiveWAL();
     }
+}
+
+static std::filesystem::path archiveDestinationFromConfig();
+
+void StorageEngine::backgroundArchiveWAL() {
+    // Archiver: drain .ready segments into the configured destination.
+    // Failures keep the .ready marker, so the next loop retries (matching
+    // PostgreSQL's archiver retry semantics).
+    const auto archiveDir = archiveDestinationFromConfig();
+    if (archiveDir.empty()) return;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    for (auto& kv : walManagers_) {
+        WALManager* wal = kv.second.get();
+        if (!wal) continue;
+        const auto pending = wal->pendingArchiveSegments();
+        if (pending.empty()) continue;
+        if (!wal->archivePendingSegments(archiveDir)) {
+            std::cerr << "[archiver] incomplete archive pass for " << kv.first
+                      << " (" << pending.size() << " segment(s) pending, will retry)"
+                      << std::endl;
+        }
+    }
+}
+
+// Resolve the archive destination from g_config.archiveCommand.
+//   "dir:<path>"       -> built-in copy mode, returns <path>
+//   external command   -> not supported for built-in copying; returns empty
+//   empty / unset      -> archiving disabled
+static std::filesystem::path archiveDestinationFromConfig() {
+    const std::string& cmd = g_config.archiveCommand;
+    if (cmd.rfind("dir:", 0) == 0) {
+        std::string dir = cmd.substr(4);
+        while (!dir.empty() && dir.back() == ' ') dir.pop_back();
+        if (!dir.empty()) return std::filesystem::path(dir);
+    }
+    return {};
 }
 
 void StorageEngine::backgroundAutoVacuum() {
@@ -21419,6 +21456,12 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     // archiving. The current segment still contains the checkpoint record
     // and is kept for recovery.
     if (!wal->markSegmentsReadyBefore(checkpointLsn)) return false;
+    {
+        // Archive freshly-eligible segments immediately at the checkpoint
+        // boundary (the background loop retries anything this pass misses).
+        const auto archiveDir = archiveDestinationFromConfig();
+        if (!archiveDir.empty()) (void)wal->archivePendingSegments(archiveDir);
+    }
     {
         // Guard against the background pruner reading this map under
         // cacheMutex_ (TSAN: data race, pruneMissingDatabaseCaches vs
