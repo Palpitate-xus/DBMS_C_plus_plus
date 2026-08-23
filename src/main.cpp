@@ -16409,7 +16409,10 @@ int main(int argc, char* argv[]) {
                             a = a.substr(1, a.size() - 2);
                     }
                     std::string rv;
-                    bool ok = g_engine.callUDF(triggerSession.currentDB, fname, args, rv);
+                    bool ok = g_engine.callUDFWithCtx(
+                        triggerSession.currentDB, fname, args,
+                        g_engine.getExecFunctionCtx(), rv);
+                    g_engine.clearExecFunctionCtx();
                     dbms::setCurrentSession(activeSession);
                     return !ok;
                 }

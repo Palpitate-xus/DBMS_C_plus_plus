@@ -931,6 +931,43 @@ def main():
             sock, "SELECT msg, n FROM pl_trig_log WHERE msg = 'tagged'"))
         assert tag_rows == [[b"tagged", b"7"]], tag_rows
 
+        # EXECUTE FUNCTION trigger bodies see NEW/OLD/TG_* variables:
+        # INSERT exposes NEW (OLD null), UPDATE both images, DELETE OLD.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE tg_var_ev (op TEXT, tid INT, old_v TEXT, "
+            "new_v TEXT, tname TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE FUNCTION tg_var_audit() RETURNS INT LANGUAGE plpgsql AS "
+            "$$ BEGIN INSERT INTO tg_var_ev VALUES "
+            "(tg_op, new.id, old.name, new.name, tg_relname); RETURN 0; END $$"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE FUNCTION tg_var_audit_del() RETURNS INT LANGUAGE plpgsql AS "
+            "$$ BEGIN INSERT INTO tg_var_ev VALUES "
+            "(tg_op, old.id, old.name, new.name, tg_relname); RETURN 0; END $$"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER tg_var_ins AFTER INSERT ON view_trigger_base "
+            "FOR EACH ROW EXECUTE FUNCTION tg_var_audit()"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER tg_var_upd AFTER UPDATE ON view_trigger_base "
+            "FOR EACH ROW EXECUTE FUNCTION tg_var_audit()"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER tg_var_del AFTER DELETE ON view_trigger_base "
+            "FOR EACH ROW EXECUTE FUNCTION tg_var_audit_del()"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO view_trigger_base VALUES (70, 'i1')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "UPDATE view_trigger_base SET name = 'i2' WHERE id = 70"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "DELETE FROM view_trigger_base WHERE id = 70"))
+        tg_rows = data_row_values(simple_query(
+            sock, "SELECT op, tid, old_v, new_v FROM tg_var_ev"))
+        # The engine's tabular path renders NULL as the text "null" here.
+        assert tg_rows == [
+            [b"INSERT", b"70", b"null", b"i1"],
+            [b"UPDATE", b"70", b"i1", b"i2"],
+            [b"DELETE", b"70", b"i2", b"null"],
+        ], tg_rows
+
         # Legacy SQL-action triggers keep routing through the SQL executor.
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE pl_sql_log (n INT)"))

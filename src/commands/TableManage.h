@@ -328,6 +328,17 @@ public:
     bool callUDF(const std::string& dbname, const std::string& funcname,
                  const std::vector<std::string>& argValues,
                  std::string& returnValue) const;
+    // Trigger context for EXECUTE FUNCTION actions: pre-bound interpreter
+    // variables (NEW.col / OLD.col flattened to "new.col" style keys, plus
+    // tg_name / tg_op / ... diagnostics).
+    struct TriggerCtx {
+        std::map<std::string, std::string> vars;
+        bool empty() const { return vars.empty(); }
+    };
+    bool callUDFWithCtx(const std::string& dbname, const std::string& funcname,
+                        const std::vector<std::string>& argValues,
+                        const TriggerCtx& ctx,
+                        std::string& returnValue) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)
@@ -1048,6 +1059,12 @@ public:
     DBStatus disableTrigger(const std::string& dbname, const std::string& trgName);
     std::vector<Trigger> getTriggers(const std::string& dbname, const std::string& tablename,
                                       const std::string& timing, const std::string& event) const;
+    // Per-firing EXECUTE FUNCTION context (NEW/OLD/TG_* values) that fire
+    // sites stage before invoking triggerExecutor_; consumed and cleared by
+    // the executor for UDF-dispatched actions.
+    void setExecFunctionCtx(TriggerCtx ctx) const { execFunctionCtx_ = std::move(ctx); }
+    const TriggerCtx& getExecFunctionCtx() const { return execFunctionCtx_; }
+    void clearExecFunctionCtx() const { execFunctionCtx_ = TriggerCtx{}; }
     std::vector<Trigger> getAllTriggers(const std::string& dbname) const;
 
     // Trigger executor callback: action SQL -> success/failure
@@ -1411,6 +1428,7 @@ private:
     void writeTrigger(std::ostream& out, const Trigger& trg) const;
     Trigger readTrigger(std::istream& in) const;
     TriggerExecutor triggerExecutor_;
+    mutable TriggerCtx execFunctionCtx_;
     WhenConditionEvaluator whenEvaluator_;
 
     // Exclusion constraint helpers

@@ -2927,7 +2927,51 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         const std::vector<std::string>& argValues,
                         StorageEngine* engine,
                         const std::string& dbname,
-                        std::string& returnValue);
+                        std::string& returnValue,
+                        const std::map<std::string, std::string>* extraVars = nullptr);
+
+// Stage EXECUTE FUNCTION context for the imminent trigger firing: NEW/OLD
+// row values (dotted lowercase keys) plus TG_* diagnostics.  Consumed by
+// the trigger executor's UDF dispatch.
+static void stageExecFunctionCtx(const StorageEngine& eng,
+                                 const std::string& tgName,
+                                 const std::string& tgWhen,
+                                 const std::string& tgOp,
+                                 const std::string& tgTable,
+                                 bool rowLevel,
+                                 const std::map<std::string, std::string>* newVals,
+                                 const std::map<std::string, std::string>* oldVals,
+                                 const TableSchema* ctxCols = nullptr) {
+StorageEngine::TriggerCtx ctx;
+auto add = [&](const char* prefix, const std::map<std::string, std::string>* m) {
+        if (!m) return;
+        for (const auto& kv : *m) {
+            std::string key = prefix + kv.first;
+            for (auto& ch : key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            ctx.vars[key] = kv.second;
+        }
+};
+add("new.", newVals);
+add("old.", oldVals);
+// The absent side of the NEW/OLD pair is a NULL record in PostgreSQL: bind
+// every column to null so old.col in an INSERT trigger reads as NULL rather
+// than surviving as literal text.
+if (ctxCols) {
+    for (size_t i = 0; i < ctxCols->len; ++i) {
+        std::string col = ctxCols->cols[i].dataName;
+        for (auto& ch : col) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (!newVals) ctx.vars["new." + col] = "null";
+        if (!oldVals) ctx.vars["old." + col] = "null";
+    }
+}
+ctx.vars["tg_name"] = tgName;
+ctx.vars["tg_when"] = tgWhen;
+ctx.vars["tg_level"] = rowLevel ? "ROW" : "STATEMENT";
+ctx.vars["tg_op"] = tgOp;
+ctx.vars["tg_relname"] = tgTable;
+eng.setExecFunctionCtx(std::move(ctx));
+}
+
 
 StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
                                               const std::string& funcname) const {
@@ -2989,6 +3033,18 @@ bool StorageEngine::callUDF(const std::string& dbname, const std::string& funcna
     if (udf.expression.empty()) return false;
     return evalUDFBody(udf, funcname, argValues,
                        const_cast<StorageEngine*>(this), dbname, returnValue);
+}
+
+bool StorageEngine::callUDFWithCtx(const std::string& dbname,
+                                   const std::string& funcname,
+                                   const std::vector<std::string>& argValues,
+                                   const TriggerCtx& ctx,
+                                   std::string& returnValue) const {
+    auto udf = getUDF(dbname, funcname);
+    if (udf.expression.empty()) return false;
+    return evalUDFBody(udf, funcname, argValues,
+                       const_cast<StorageEngine*>(this), dbname, returnValue,
+                       &ctx.vars);
 }
 
 std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) const {
@@ -13636,6 +13692,7 @@ DBStatus StorageEngine::insert(const std::string& dbname,
         }
     }
 
+
     // Fire BEFORE INSERT triggers (row-level)
     // BEFORE triggers execute before the actual write and can modify NEW column values
     // via "SET col = val" or "NEW.col = val" assignments in the trigger action.
@@ -13683,6 +13740,9 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 replaceVar("tg_relname", trg.tableName);
             }
             // Execute the trigger action
+            stageExecFunctionCtx(*this, trg.name, trg.timing,
+                              "INSERT", trg.tableName,
+                              trg.forEachRow, &actualValues, nullptr, &tbl);
             triggerExecutor_(action);
             // Parse "SET col = val" assignments from action and apply to actualValues
             {
@@ -14356,6 +14416,9 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                 replaceVar("tg_op", "INSERT");
                 replaceVar("tg_relname", trg.tableName);
             }
+            stageExecFunctionCtx(*this, trg.name, trg.timing,
+                              "INSERT", trg.tableName,
+                              trg.forEachRow, &actualValues, nullptr, &tbl);
             triggerExecutor_(action);
         }
     }
@@ -15201,6 +15264,9 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                         replaceVar("tg_op", "DELETE");
                         replaceVar("tg_relname", trg.tableName);
                     }
+                    stageExecFunctionCtx(*this, trg.name, trg.timing,
+                                      "DELETE", trg.tableName,
+                                      trg.forEachRow, nullptr, &oldValues, &tbl);
                     triggerExecutor_(action);
                 }
             } else {
@@ -15223,6 +15289,9 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                     replaceVar("tg_op", "DELETE");
                     replaceVar("tg_relname", trg.tableName);
                 }
+                stageExecFunctionCtx(*this, trg.name, trg.timing,
+                                  "DELETE", trg.tableName,
+                                  trg.forEachRow, nullptr, nullptr);
                 triggerExecutor_(action);
             }
         }
@@ -15449,6 +15518,9 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                         replaceVar("tg_op", "DELETE");
                         replaceVar("tg_relname", trg.tableName);
                     }
+                    stageExecFunctionCtx(*this, trg.name, trg.timing,
+                                      "DELETE", trg.tableName,
+                                      trg.forEachRow, nullptr, &oldValues, &tbl);
                     triggerExecutor_(action);
                 }
             } else {
@@ -15471,6 +15543,9 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                     replaceVar("tg_op", "DELETE");
                     replaceVar("tg_relname", trg.tableName);
                 }
+                stageExecFunctionCtx(*this, trg.name, trg.timing,
+                                  "DELETE", trg.tableName,
+                                  trg.forEachRow, nullptr, nullptr);
                 triggerExecutor_(action);
             }
         }
@@ -15717,6 +15792,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
     auto hashIndexedCols = getHashIndexedColumns(dbname, tablename);
 
     // For each matching row, read old data, update, write back, update indexes
+    // Pre-update row images keyed by rid: AFTER UPDATE triggers expose OLD
+    // from these (the on-disk row already holds NEW by then).
+    std::map<int64_t, std::map<std::string, std::string>> oldImages;
     for (int64_t rid : matchIds) {
         std::string row;
         if (!readRowByRid(pa, rid, row, tbl)) continue;
@@ -15726,6 +15804,13 @@ DBStatus StorageEngine::update(const std::string& dbname,
             logTxnUpdate(tablename, rid, row);
         }
 
+        {
+            std::map<std::string, std::string> img;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                img[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+            }
+            oldImages.emplace(rid, std::move(img));
+        }
         // Save old PK and indexed column values before modification
         std::string oldPK = extractPKValue(row, tbl);
         std::map<std::string, std::string> oldIdxVals;
@@ -15875,6 +15960,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     replaceVar("tg_op", "UPDATE");
                     replaceVar("tg_relname", trg.tableName);
                 }
+                stageExecFunctionCtx(*this, trg.name, trg.timing,
+                                  "UPDATE", trg.tableName,
+                                  trg.forEachRow, &rowValues, &oldRowValues, &tbl);
                 triggerExecutor_(action);
                 // Parse "SET col = val" assignments and apply to rowValues
                 {
@@ -16501,6 +16589,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     for (size_t i = 0; i < tbl.len; ++i) {
                         newValues[tbl.cols[i].dataName] = extractColumnValue(newRow, tbl, i);
                     }
+                    const std::map<std::string, std::string>* oldImage = nullptr;
+                    auto oit = oldImages.find(rid);
+                    if (oit != oldImages.end()) oldImage = &oit->second;
                     // Evaluate WHEN condition if present
                     if (!trg.whenCondition.empty() && whenEvaluator_) {
                         std::string cond = trg.whenCondition;
@@ -16538,6 +16629,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                         replaceVar("tg_op", "UPDATE");
                         replaceVar("tg_relname", trg.tableName);
                     }
+                    stageExecFunctionCtx(*this, trg.name, trg.timing,
+                                      "UPDATE", trg.tableName,
+                                      trg.forEachRow, &newValues, oldImage, &tbl);
                     triggerExecutor_(action);
                 }
             } else {
@@ -16560,6 +16654,9 @@ DBStatus StorageEngine::update(const std::string& dbname,
                     replaceVar("tg_op", "UPDATE");
                     replaceVar("tg_relname", trg.tableName);
                 }
+                stageExecFunctionCtx(*this, trg.name, trg.timing,
+                                  "UPDATE", trg.tableName,
+                                  trg.forEachRow, nullptr, nullptr);
                 triggerExecutor_(action);
             }
         }
@@ -17382,7 +17479,8 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         const std::vector<std::string>& argValues,
                         StorageEngine* engine,
                         const std::string& dbname,
-                        std::string& returnValue) {
+                        std::string& returnValue,
+                        const std::map<std::string, std::string>* extraVars) {
     auto udf_ = udf;
     (void)udf_;
     std::vector<std::string> funcArgs = argValues;
@@ -17390,6 +17488,13 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         std::map<std::string, std::string> params;
         for (size_t i = 0; i < udf.paramNames.size() && i < funcArgs.size(); ++i) {
             params[udf.paramNames[i]] = funcArgs[i];
+        }
+        // Trigger context (NEW.col / OLD.col / TG_*): pre-bound like
+        // parameters; explicit parameters take precedence.
+        if (extraVars) {
+            for (const auto& kv : *extraVars) {
+                params.emplace(kv.first, kv.second);
+            }
         }
         PlPgsqlHost host;
         host.evalExpr = [](const std::string& e,

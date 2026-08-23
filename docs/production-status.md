@@ -345,3 +345,16 @@ P0-7 记录"INSTEAD OF 触发器已支持"但协议级审计发现 **join 视图
 新增回归：`tests/postgres_protocol_test.py` 追加 `SELECT 1+1`/`SELECT -5`/`SELECT 1+2*3, 'a'||'b' AS cat`/`SELECT current_user`/`SELECT dbl21(21)`（无别名与有别名）断言。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）；ASAN CLEAN。已知边界：FROM-less 下标量子查询、`SELECT ... WHERE`（PG 也不支持无 FROM WHERE）、多行 set-returning 函数（除 unnest）未覆盖。
+
+
+## 2026-08-23 v0.8 批次：触发器函数 NEW/OLD/TG_* 变量注入
+
+v0.6 让 `EXECUTE FUNCTION` 触发器真正执行函数体，但函数体内 `new.col`/`old.col`/`tg_op` 等触发器变量不可见（未绑定，dotted 引用原样落库为文本）。
+
+1. **PL 解释器 dotted 变量替换**（`plpgsql.cpp substitute()`）：词法扫描在标识符后尝试逐段扩展 `.` 追加段，整段匹配小写 dotted 键（`new.id`、`tg_relname`）一次替换；找不到则回退单词路径（既有变量语义不变）。
+2. **触发上下文管线**：`StorageEngine::TriggerCtx` + `setExecFunctionCtx` 暂存（NEW/OLD 值映射 + `tg_name/tg_when/tg_level/tg_op/tg_relname`）；9 个触发点火点（B/A × INS/UPD/DEL，行级/语句级）在调用执行器前暂存；main.cpp 触发器执行器的 UDF 分派改走 `callUDFWithCtx` 预绑定解释器参数（显式参数优先）。
+3. **PG 语义对齐**：缺失侧是 NULL 记录——INSERT 触发器里 `old.col` 读 NULL（按表列全量绑 null）而非字面文本；AFTER UPDATE 的 OLD 从更新前捕获的行预映像（rid→列值 map，更新循环内记录）取值，而非重读已写入 NEW 的磁盘行。
+
+新增回归：`tests/postgres_protocol_test.py` 追加同一审计函数在 INSERT（NEW 可见/OLD null）、UPDATE（OLD=旧值/NEW=新值）、DELETE（OLD 可见/NEW null）三事件的完整断言。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。已知边界：函数体引用不存在的字段仍静默保留文本（PG 报 "record ... has no field"）；`tg_argv`/`tg_tag`/`tg_table_name` 等扩展变量未提供。

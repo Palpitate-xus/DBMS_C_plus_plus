@@ -518,6 +518,39 @@ struct Interp {
                 while (j < expr.size() &&
                        (std::isalnum(static_cast<unsigned char>(expr[j])) || expr[j] == '_')) ++j;
                 std::string word = expr.substr(i, j - i);
+                // Dotted references (NEW.col / OLD.col / TG_OP style trigger
+                // variables): try progressively longer dotted keys so the
+                // whole reference resolves to one substitution.
+                size_t ext = j;
+                auto tryDotted = [&](size_t endPos) -> bool {
+                    std::string dotted = lowerCopy(expr.substr(i, endPos - i));
+                    auto dit = vars.find(dotted);
+                    if (dit == vars.end()) return false;
+                    const std::string& v = dit->second;
+                    bool numeric = !v.empty() &&
+                        v.find_first_not_of("0123456789.-") == std::string::npos;
+                    bool nullv = lowerCopy(v) == "null" || v.empty();
+                    if (nullv) out += "NULL";
+                    else if (numeric) out += v;
+                    else out += "'" + v + "'";
+                    return true;
+                };
+                bool matchedDotted = false;
+                while (ext + 1 < expr.size() && expr[ext] == '.' &&
+                       (std::isalpha(static_cast<unsigned char>(expr[ext + 1])) ||
+                        expr[ext + 1] == '_')) {
+                    size_t k = ext + 1;
+                    while (k < expr.size() &&
+                           (std::isalnum(static_cast<unsigned char>(expr[k])) ||
+                            expr[k] == '_')) ++k;
+                    if (tryDotted(k)) {
+                        matchedDotted = true;
+                        i = k;
+                        break;
+                    }
+                    ext = k;
+                }
+                if (matchedDotted) continue;
                 auto it = vars.find(lowerCopy(word));
                 if (it != vars.end()) {
                     const std::string& v = it->second;
