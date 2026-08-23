@@ -873,6 +873,28 @@ def main():
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
 
+        # FROM-less SELECT evaluates a single-row constant projection
+        # (regression: any non-unnest projection raised "SQL syntax error").
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE FUNCTION dbl21(x INT) RETURNS INT LANGUAGE plpgsql AS "
+            "$$ BEGIN RETURN x * 2; END $$"))
+        udf_nop_rows = data_row_values(simple_query(sock, "SELECT dbl21(4)"))
+        assert udf_nop_rows == [[b"8"]], udf_nop_rows
+        const_rows = data_row_values(simple_query(sock, "SELECT 1 + 1"))
+        assert const_rows == [[b"2"]], const_rows
+        neg_rows = data_row_values(simple_query(sock, "SELECT -5"))
+        assert neg_rows == [[b"-5"]], neg_rows
+        mixed_rows = data_row_values(simple_query(
+            sock, "SELECT 1 + 2 * 3, 'a' || 'b' AS cat"))
+        assert mixed_rows == [[b"7", b"ab"]], mixed_rows
+        cu_rows = data_row_values(simple_query(sock, "SELECT current_user"))
+        assert cu_rows and cu_rows[0] and cu_rows[0][0], cu_rows
+        # FROM-less UDF call with and without an alias.
+        udf_rows = data_row_values(simple_query(sock, "SELECT dbl21(21)"))
+        assert udf_rows == [[b"42"]], udf_rows
+        udf_alias_rows = data_row_values(simple_query(sock, "SELECT dbl21(21) AS t"))
+        assert udf_alias_rows == [[b"42"]], udf_alias_rows
+
         # EXECUTE FUNCTION triggers dispatch to the UDF runtime: a PL/pgSQL
         # trigger function must actually run (regression: the stored action
         # "name()" was executed as SQL and silently failed), string literals

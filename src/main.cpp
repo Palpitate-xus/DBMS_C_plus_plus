@@ -4630,6 +4630,170 @@ static bool handleDoBlock(const string& sql, Session& s) {
     return false;
 }
 
+// FROM-less SELECT: evaluate a single-row projection of constant
+// expressions (literals, arithmetic, unary minus, parentheses, pseudo
+// functions current_user/session_user/version, and UDF calls with literal
+// arguments).  Output shape matches the tabular path: header line then one
+// value line, both via cout so protocol/CLI see the same result.
+static bool handleFromlessSelect(const string& sql, Session& s) {
+    string cols = trim(string(sql.substr(6)));
+    bool isDistinct = false;
+    if (cols.size() >= 9 && cols.substr(0, 9) == "distinct ") {
+        isDistinct = true;
+        cols = trim(cols.substr(9));
+    }
+    if (cols.empty()) {
+        cout << "SQL syntax error: empty projection" << endl;
+        return true;
+    }
+    // Split projection on top-level commas.
+    vector<string> items;
+    {
+        string cur;
+        int depth = 0;
+        bool inStr = false;
+        for (size_t i = 0; i < cols.size(); ++i) {
+            char c = cols[i];
+            if (c == '\'' ) inStr = !inStr;
+            if (!inStr) {
+                if (c == '(') ++depth;
+                else if (c == ')') --depth;
+                else if (c == ',' && depth == 0) {
+                    items.push_back(trim(cur));
+                    cur.clear();
+                    continue;
+                }
+            }
+            cur += c;
+        }
+        items.push_back(trim(cur));
+    }
+
+    // Evaluate each item; remember display names for the header.
+    vector<string> headers;
+    vector<string> values;
+    for (const string& item : items) {
+        if (item.empty()) {
+            cout << "SQL syntax error: empty projection item" << endl;
+            return true;
+        }
+        // Display name: explicit AS alias, else the item text.  The
+        // expression itself is evaluated without the alias.
+        string expr = item;
+        string disp;
+        {
+            string low;
+            for (char c : item) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            size_t as = low.rfind(" as ");
+            if (as != string::npos) {
+                disp = trim(item.substr(as + 4));
+                expr = trim(item.substr(0, as));
+            }
+        }
+        if (disp.empty()) disp = item;
+        string lowItem;
+        for (char c : expr) lowItem += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+        // Pseudo functions
+        if (lowItem == "current_user") {
+            headers.push_back("current_user");
+            values.push_back(s.currentRole.empty() ? s.username : s.currentRole);
+            continue;
+        }
+        if (lowItem == "session_user") {
+            headers.push_back("session_user");
+            values.push_back(s.username);
+            continue;
+        }
+        if (lowItem == "version()" || lowItem == "version ( )") {
+            headers.push_back("version");
+            values.push_back("DBMS-C++ protocol/3.0");
+            continue;
+        }
+
+        // UDF call with literal arguments: name(...) where name is a stored
+        // UDF.  Arguments are split on top-level commas, quotes stripped.
+        size_t lp = lowItem.find('(');
+        if (lp != string::npos && expr.back() == ')' && lp > 0) {
+            bool nameOk = true;
+            for (size_t i = 0; i < lp; ++i) {
+                if (!isalnum(static_cast<unsigned char>(lowItem[i])) && lowItem[i] != '_') {
+                    nameOk = false;
+                    break;
+                }
+            }
+            string fname = expr.substr(0, lp);
+            if (nameOk && !s.currentDB.empty()) {
+                auto udf = g_engine.getUDF(s.currentDB, fname);
+                if (!udf.expression.empty()) {
+                    string inner = expr.substr(lp + 1, expr.size() - lp - 2);
+                    vector<string> args;
+                    {
+                        string cur;
+                        int depth = 0;
+                        bool inStr = false;
+                        for (size_t i = 0; i < inner.size(); ++i) {
+                            char c = inner[i];
+                            if (c == '\'') inStr = !inStr;
+                            if (!inStr) {
+                                if (c == '(') ++depth;
+                                else if (c == ')') --depth;
+                                else if (c == ',' && depth == 0) {
+                                    args.push_back(trim(cur));
+                                    cur.clear();
+                                    continue;
+                                }
+                            }
+                            cur += c;
+                        }
+                        if (!trim(cur).empty() || !args.empty()) args.push_back(trim(cur));
+                    }
+                    for (auto& a : args) {
+                        if (a.size() >= 2 && a.front() == '\'' && a.back() == '\'')
+                            a = a.substr(1, a.size() - 2);
+                    }
+                    string rv;
+                    if (!g_engine.callUDF(s.currentDB, fname, args, rv)) {
+                        cout << "Function " << fname << " failed" << endl;
+                        return true;
+                    }
+                    headers.push_back(disp == item ? fname : disp);
+                    values.push_back(rv);
+                    continue;
+                }
+            }
+        }
+
+        // Constant expression: literal, arithmetic, parens, unary minus.
+        auto r = dbms::ExprHelper::evalString(
+            expr, {}, {}, s.currentDB, s.username);
+        if (!r.ok) {
+            cout << "SQL syntax error: cannot evaluate projection item" << endl;
+            return true;
+        }
+        // PG names unaliased computed columns "?column?" (literals keep a
+        // single-token name like "1").  Header cells must stay single
+        // tokens: the tabular cout format is space-separated.
+        if (disp == item) {
+            bool simple = expr.find(' ') == string::npos;
+            headers.push_back(simple ? expr : "?column?");
+        } else {
+            headers.push_back(disp);
+        }
+        values.push_back(r.isNull ? "NULL" : r.value);
+    }
+
+    if (isDistinct) {
+        // Single row: distinct is a no-op unless the row duplicates itself.
+    }
+
+    for (const auto& h : headers) cout << h << ' ';
+    cout << '\n';
+    for (const auto& v : values) cout << v << ' ';
+    cout << '\n';
+    return false;
+}
+
 static bool handleSelectIntoTable(const string& sql, Session& s, bool& handled) {
     handled = false;
     if (!startsWithKeyword(sql, "select")) return false;
@@ -13130,36 +13294,38 @@ if (sql.rfind("backup database", 0) == 0) {
 
         size_t fromPos = findTopLevelKeyword(sql, "from");
         if (fromPos == string::npos) {
-            // FROM-less SELECT unnest(<array>): expand directly
+            // FROM-less SELECT: PostgreSQL computes a single-row projection
+            // of constant expressions (literals, arithmetic, pseudo
+            // functions, UDF calls).  unnest(<array>) keeps its dedicated
+            // expansion path.
             string cols = trim(sql.substr(6));
             string colslow;
             for (auto& c : cols) colslow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
             size_t up = colslow.find("unnest(");
-            if (up == string::npos) {
-                cout << "SQL syntax error" << endl;
-                return true;
+            if (up != string::npos) {
+                size_t lp = cols.find('(', up);
+                size_t rp = cols.rfind(')');
+                if (lp == string::npos || rp == string::npos || rp <= lp) {
+                    cout << "SQL syntax error" << endl;
+                    return true;
+                }
+                string arrVal;
+                if (!extractUnnestLiteral(rawSql, arrVal)) {
+                    cout << "SQL syntax error" << endl;
+                    return true;
+                }
+                dbms::UnnestOp op(arrVal, "unnest");
+                op.open();
+                string row;
+                cout << "unnest " << endl;
+                while (op.next(row)) {
+                    cout << trim(row) << endl;
+                    log(s.username, trim(row), getTime());
+                }
+                op.close();
+                return false;
             }
-            size_t lp = cols.find('(', up);
-            size_t rp = cols.rfind(')');
-            if (lp == string::npos || rp == string::npos || rp <= lp) {
-                cout << "SQL syntax error" << endl;
-                return true;
-            }
-            string arrVal;
-            if (!extractUnnestLiteral(rawSql, arrVal)) {
-                cout << "SQL syntax error" << endl;
-                return true;
-            }
-            dbms::UnnestOp op(arrVal, "unnest");
-            op.open();
-            string row;
-            cout << "unnest " << endl;
-            while (op.next(row)) {
-                cout << trim(row) << endl;
-                log(s.username, trim(row), getTime());
-            }
-            op.close();
-            return false;
+            return handleFromlessSelect(rawSql, s);
         }
         string columns = trim(sql.substr(6, fromPos - 6));
         bool isDistinct = false;

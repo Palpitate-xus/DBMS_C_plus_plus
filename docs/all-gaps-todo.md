@@ -532,7 +532,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
-| 6.1 | `SELECT` grammar | 缺少完整 SELECT 语法树；join、where、group、window、cte 多靠字符串定位，嵌套复杂查询容易偏离 PG | ⚠️ |
+| 6.1 | `SELECT` grammar | 缺少完整 SELECT 语法树；join、where、group、window、cte 多靠字符串定位，嵌套复杂查询容易偏离 PG；无 FROM 常量投影 `SELECT 1+1` 已支持（算术/一元负号/`current_user`/`version()`/无别与有别 UDF 调用，2026-08-23 v0.7） | ⚠️ |
 | 6.2 | Join | 支持 inner/left/right/full/cross 部分；两表 join 投影现按请求列序输出（header 与 data 一致，2026-08-23）；未关联 IN/NOT IN 已有 Volcano semi/anti 节点，但显式 SEMI/ANTI、lateral 完整相关性、join reordering/search space、outer join predicate 推理仍缺 | ⚠️ |
 | 6.3 | Set operations | UNION/INTERSECT/EXCEPT 已按优先级/左结合解析，组合统一走 Volcano `SetOperationOp` 并支持 ALL；复杂 producer、AST 到计划全量下推、类型合并、排序/limit 作用域和 collation 仍缺 | ⚠️ |
 | 6.4 | CTE | 有 WITH/RECURSIVE/DML CTE 痕迹；缺少 MATERIALIZED/NOT MATERIALIZED、可写 CTE 快照语义、递归检测、cycle/search 子句 | ⚠️ |

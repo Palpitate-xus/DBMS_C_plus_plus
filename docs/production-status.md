@@ -330,3 +330,18 @@ P0-7 记录"INSTEAD OF 触发器已支持"但协议级审计发现 **join 视图
 新增回归：`tests/postgres_protocol_test.py` 追加 PL 触发函数逐行触发（2 次 INSERT → 2 行日志）、字面量参数 `pl_tagv(7)` 传递、字符串落库无引号、legacy SQL action 触发器不回归。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）；ASAN CLEAN。已知边界：触发器函数内 `NEW`/`OLD`/`TG_*` 变量注入、`RETURNING` 语义（返回 NULL/触发器返回值丢弃为 PG 简化）、PL 体 UPDATE/DELETE 语句（`plpgsqlExecSql` 显式不支持并如实报错）。
+
+
+## 2026-08-23 v0.7 批次：无 FROM 常量投影 SELECT
+
+`SELECT 1+1`、`SELECT current_user`、`SELECT myfunc(21)` 这类无 FROM 的常量投影一直直接报 `SQL syntax error`——legacy SELECT 分派只特判了 `unnest(<array>)` 与序列函数，其余全部拒收。这是基础 PG 兼容面：任何常量表达式、伪函数、无 FROM 的 UDF 调用都不可用（也挡住了触发器函数的手动验证路径）。
+
+实现 `handleFromlessSelect`（`main.cpp`）：
+1. 顶层逗号拆分投影项（括号/字符串感知）；
+2. 每项求值：`AS` 别名剥离后依次尝试伪函数（`current_user`/`session_user`/`version()`）、UDF 调用（`name(literal,...)` 经 `callUDF` 走 PL/pgSQL/SQL 运行时，字面量参数剥引号）、常量表达式（`ExprHelper`：算术优先级/一元负号/括号/`||`/NULL）；
+3. 列名遵循 PG：显式别名 > 单 token 字面量原样 > `?column?`（多 token 表达式）；表头单元格保持单 token（cout 表格式以空格分列）；
+4. 输出单行（`DISTINCT` 单行语义为无操作）；`unnest` 保持既有展开路径。
+
+新增回归：`tests/postgres_protocol_test.py` 追加 `SELECT 1+1`/`SELECT -5`/`SELECT 1+2*3, 'a'||'b' AS cat`/`SELECT current_user`/`SELECT dbl21(21)`（无别名与有别名）断言。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）；ASAN CLEAN。已知边界：FROM-less 下标量子查询、`SELECT ... WHERE`（PG 也不支持无 FROM WHERE）、多行 set-returning 函数（除 unnest）未覆盖。
