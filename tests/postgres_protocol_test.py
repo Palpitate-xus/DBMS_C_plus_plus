@@ -872,6 +872,54 @@ def main():
             sock, "INSERT INTO writable_view (id, name) VALUES (50, 'ret') "
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
+
+        # EXECUTE FUNCTION triggers dispatch to the UDF runtime: a PL/pgSQL
+        # trigger function must actually run (regression: the stored action
+        # "name()" was executed as SQL and silently failed), string literals
+        # in its INSERT body must land unquoted, and literal arguments must
+        # reach the function.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE pl_trig_log (msg TEXT, n INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE FUNCTION pl_logit() RETURNS INT LANGUAGE plpgsql AS "
+            "$$ BEGIN INSERT INTO pl_trig_log VALUES ('fired', 1); "
+            "RETURN 1; END $$"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER view_trigger_base_pl INSTEAD OF INSERT ON "
+            "writable_view FOR EACH ROW EXECUTE FUNCTION pl_logit()"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO writable_view (id, name) VALUES (60, 'p1')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO writable_view (id, name) VALUES (61, 'p2')"))
+        pl_rows = data_row_values(simple_query(
+            sock, "SELECT msg, n FROM pl_trig_log"))
+        assert pl_rows == [[b"fired", b"1"], [b"fired", b"1"]], pl_rows
+
+        # Literal arguments flow through EXECUTE FUNCTION call syntax.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE FUNCTION pl_tagv(x INT) RETURNS INT LANGUAGE plpgsql AS "
+            "$$ BEGIN INSERT INTO pl_trig_log VALUES ('tagged', x); "
+            "RETURN x; END $$"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER view_trigger_base_tag INSTEAD OF INSERT ON "
+            "writable_view FOR EACH ROW EXECUTE FUNCTION pl_tagv(7)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO writable_view (id, name) VALUES (62, 'p3')"))
+        tag_rows = data_row_values(simple_query(
+            sock, "SELECT msg, n FROM pl_trig_log WHERE msg = 'tagged'"))
+        assert tag_rows == [[b"tagged", b"7"]], tag_rows
+
+        # Legacy SQL-action triggers keep routing through the SQL executor.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE pl_sql_log (n INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER view_trigger_base_sql INSTEAD OF INSERT ON "
+            "writable_view FOR EACH ROW INSERT INTO pl_sql_log VALUES (42)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO writable_view (id, name) VALUES (63, 'p4')"))
+        sql_rows = data_row_values(simple_query(
+            sock, "SELECT n FROM pl_sql_log"))
+        assert sql_rows == [[b"42"]], sql_rows
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "UPDATE writable_view SET name = 'bob' WHERE id > 0"))
         assert data_row_values(simple_query(

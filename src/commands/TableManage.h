@@ -321,6 +321,13 @@ public:
     DBStatus dropUDF(const std::string& dbname, const std::string& funcname);
     bool udfExists(const std::string& dbname, const std::string& funcname) const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;
+    // Invoke a stored UDF with literal argument values.  Dispatches to the
+    // PL/pgSQL interpreter or the SQL-expression evaluator; used by trigger
+    // EXECUTE FUNCTION actions and any other host-side call sites.
+    // Returns true on success and sets returnValue.
+    bool callUDF(const std::string& dbname, const std::string& funcname,
+                 const std::vector<std::string>& argValues,
+                 std::string& returnValue) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)

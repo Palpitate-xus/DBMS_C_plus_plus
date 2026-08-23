@@ -396,7 +396,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | 1.1.30 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 关系文件已统一路由到 `<location>/<database>/`，CREATE/ALTER SET TABLESPACE 支持跨文件系统迁移并在缺失表空间时 fail-closed；仍缺权限、owner、ALTER TABLESPACE 完整语义和 PostgreSQL OID/符号链接布局 | ⚠️ |
 | 1.1.31 | `CREATE TRIGGER` | 支持 before/after/instead of、row/statement、`WHEN`、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime | ⚠️ |
 | 1.1.32 | `CREATE TYPE` | 支持 composite type（`AS (field type, ...)`，经 DDL 桥正确解析含修饰符字段）与 enum（`AS ENUM`）；缺少 PG 的 range/base/shell 类型创建语义 | ⚠️ |
-| 1.1.33 | `CREATE VIEW` | 支持保存 SQL（量化引用 `a.b` 折叠存储，join 视图可执行）和简单 updatable view；INSTEAD OF 触发器对 join 视图的 UPDATE/DELETE/INSERT 精确路由（2026-08-23，含 RETURNING RowData）；缺少 recursive view、security_barrier、security_invoker、check option 完整性 | ⚠️ |
+| 1.1.33 | `CREATE VIEW` | 支持保存 SQL（量化引用 `a.b` 折叠存储，join 视图可执行）和简单 updatable view；INSTEAD OF 触发器对 join 视图的 UPDATE/DELETE/INSERT 精确路由（2026-08-23，含 RETURNING RowData）；`EXECUTE FUNCTION` 触发器接入 UDF 运行时（PL/pgSQL 与 SQL 体，2026-08-23 v0.6）；缺少 recursive view、security_barrier、security_invoker、check option 完整性 | ⚠️ |
 | 1.1.34 | `DEALLOCATE` / `PREPARE` / `EXECUTE` | 使用字符串 `?` 替换与自有 `PREPARE name FROM 'sql'`/`EXECUTE ... USING` 语法；与 PostgreSQL 的 `PREPARE name [(types)] AS ... $n` 不兼容，无类型推断、binary params、plan invalidation、generic/custom plan、portal（细化方案见 feature-gaps.md P1-10） | ⚠️ |
 | 1.1.35 | `DELETE` | 支持 WHERE/USING/RETURNING 部分；缺少 PG 全语义、CTE/`ONLY`/inheritance/RETURNING OLD/NEW 复杂表达式；MySQL-only LIMIT 已移除 | ⚠️ |
 | 1.1.36 | `DISCARD` | 主要 `DISCARD ALL` 清 session 局部状态；不完整 | ⚠️ |

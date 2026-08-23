@@ -16204,6 +16204,51 @@ int main(int argc, char* argv[]) {
         if (!activeSession) return true;
         Session triggerSession = *activeSession;
         triggerSession.preparedStmts.clear();
+        // EXECUTE FUNCTION actions are stored as "name(args)".  Those are
+        // not executable SQL: dispatch them through the UDF runtime (SQL
+        // expression or PL/pgSQL interpreter) instead of the SQL pipeline.
+        std::string action = actionSql;
+        for (char& ch : action)
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        size_t lp = action.find('(');
+        if (lp != std::string::npos && action.back() == ')' && lp > 0 &&
+            action.find(' ', lp) == std::string::npos) {
+            bool nameOk = true;
+            for (size_t i = 0; i < lp; ++i) {
+                if (!std::isalnum(static_cast<unsigned char>(action[i])) &&
+                    action[i] != '_') { nameOk = false; break; }
+            }
+            std::string fname = actionSql.substr(0, lp);
+            if (nameOk && triggerSession.currentDB.empty() == false) {
+                auto udf = g_engine.getUDF(triggerSession.currentDB, fname);
+                if (!udf.expression.empty()) {
+                    // Literal arguments only: split on top-level commas and
+                    // strip surrounding quotes.
+                    std::string inner = actionSql.substr(lp + 1, actionSql.size() - lp - 2);
+                    std::vector<std::string> args;
+                    std::string cur;
+                    int depth = 0;
+                    for (size_t i = 0; i < inner.size(); ++i) {
+                        char ch = inner[i];
+                        if (ch == '(') ++depth;
+                        else if (ch == ')') --depth;
+                        if (ch == ',' && depth == 0) {
+                            args.push_back(trim(cur));
+                            cur.clear();
+                        } else cur += ch;
+                    }
+                    if (!trim(cur).empty() || !args.empty()) args.push_back(trim(cur));
+                    for (auto& a : args) {
+                        if (a.size() >= 2 && a.front() == '\'' && a.back() == '\'')
+                            a = a.substr(1, a.size() - 2);
+                    }
+                    std::string rv;
+                    bool ok = g_engine.callUDF(triggerSession.currentDB, fname, args, rv);
+                    dbms::setCurrentSession(activeSession);
+                    return !ok;
+                }
+            }
+        }
         bool failed = execute(actionSql, triggerSession);
         dbms::setCurrentSession(activeSession);
         return failed;

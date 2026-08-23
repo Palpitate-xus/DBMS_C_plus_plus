@@ -317,3 +317,16 @@ P0-7 记录"INSTEAD OF 触发器已支持"但协议级审计发现 **join 视图
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E，新断言在 postgres_protocol_test 内）。协议级手工矩阵：join 视图 SELECT / UPDATE（单行命中）/ DELETE（单行命中）/ RETURNING（单列与 `*`）全部符合预期。已知边界：复杂 `INSERT ... SELECT` 经视图触发器、transition tables、`EXECUTE FUNCTION` 运行时仍未做（feature-gaps P0-7 残余）。
 
 已知边界（记录于 feature-gaps P2-3 残余）：外部命令形式 `archive_command` 仅解析不执行（安全考虑本批只做内建 `dir:` 复制）；单时间线（timeline 1）；`pg_basebackup` 协议未实现。恢复目标为进程重启时消费,不支持在线滚动恢复。
+
+
+## 2026-08-23 v0.6 批次：触发器 EXECUTE FUNCTION 接入 UDF 运行时（P0-7 残余项）
+
+协议级审计发现 `CREATE TRIGGER ... EXECUTE FUNCTION fn()` 的函数体**从未执行**：action 以 `fn()` 文本存储后仍走 SQL 执行器，`fn()` 不是合法 SQL → 静默失败，INSERT 照常成功、函数副作用丢失。
+
+1. **EXECUTE FUNCTION 分发**（`main.cpp` 触发器执行器）：action 匹配 `name(args)` 且 name 是已存储 UDF 时改走 UDF 运行时；顶层逗号拆分字面量参数（剥引号），`StorageEngine::callUDF`（新 API）按语言分发——PL/pgSQL 体进解释器（参数按名预绑定），SQL 体做参数替换求值。非 UDF 形态的 legacy SQL action 原样走 SQL 执行器（回归验证不回归）。
+2. **PL 体提取公共化**：`applyScalarFunc` 内联的 UDF 求值块提取为 `evalUDFBody` 共享（标量投影与 `callUDF` 同一路径，避免双实现漂移）。
+3. **PL/pgSQL INSERT 字面量带引号落库**（存量缺陷，直接调用与触发器路径同病）：`plpgsqlExecSql` 用 `LiteralExpr::toString()` 取值导致 `'fired'` 连引号入库；现剥一层引号。
+
+新增回归：`tests/postgres_protocol_test.py` 追加 PL 触发函数逐行触发（2 次 INSERT → 2 行日志）、字面量参数 `pl_tagv(7)` 传递、字符串落库无引号、legacy SQL action 触发器不回归。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）；ASAN CLEAN。已知边界：触发器函数内 `NEW`/`OLD`/`TG_*` 变量注入、`RETURNING` 语义（返回 NULL/触发器返回值丢弃为 PG 简化）、PL 体 UPDATE/DELETE 语句（`plpgsqlExecSql` 显式不支持并如实报错）。

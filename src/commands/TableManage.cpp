@@ -2921,6 +2921,14 @@ bool StorageEngine::udfExists(const std::string& dbname,
            std::filesystem::exists(udfPath(dbname, funcname));
 }
 
+// Defined near applyScalarFunc; shared by scalar dispatch and callUDF.
+static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
+                        const std::string& funcName,
+                        const std::vector<std::string>& argValues,
+                        StorageEngine* engine,
+                        const std::string& dbname,
+                        std::string& returnValue);
+
 StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
                                               const std::string& funcname) const {
     UDFInfo info;
@@ -2971,6 +2979,16 @@ StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
     }
     info.name = funcname;
     return info;
+}
+
+
+bool StorageEngine::callUDF(const std::string& dbname, const std::string& funcname,
+                            const std::vector<std::string>& argValues,
+                            std::string& returnValue) const {
+    auto udf = getUDF(dbname, funcname);
+    if (udf.expression.empty()) return false;
+    return evalUDFBody(udf, funcname, argValues,
+                       const_cast<StorageEngine*>(this), dbname, returnValue);
 }
 
 std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) const {
@@ -17356,6 +17374,70 @@ std::vector<std::string> StorageEngine::query(const std::string& dbname,
 // ========================================================================
 // Scalar function helper
 // ========================================================================
+// Shared UDF-body executor: evaluates a stored UDF (SQL or PL/pgSQL) with
+// literal argument values.  Used by scalar-function dispatch and by
+// StorageEngine::callUDF (trigger EXECUTE FUNCTION actions).
+static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
+                        const std::string& funcName,
+                        const std::vector<std::string>& argValues,
+                        StorageEngine* engine,
+                        const std::string& dbname,
+                        std::string& returnValue) {
+    auto udf_ = udf;
+    (void)udf_;
+    std::vector<std::string> funcArgs = argValues;
+    if (udf.language == "plpgsql") {
+        std::map<std::string, std::string> params;
+        for (size_t i = 0; i < udf.paramNames.size() && i < funcArgs.size(); ++i) {
+            params[udf.paramNames[i]] = funcArgs[i];
+        }
+        PlPgsqlHost host;
+        host.evalExpr = [](const std::string& e,
+                           const std::map<std::string, std::string>&) {
+            auto r = ExprHelper::evalString(e, {});
+            if (!r.ok) return std::optional<std::string>{};
+            return std::optional<std::string>{r.isNull ? "null" : r.value};
+        };
+        host.execStmt = [engine, &dbname](const std::string& sql,
+                                          const std::map<std::string, std::string>&) {
+            auto rc = engine->plpgsqlExecSql(dbname, sql, nullptr);
+            return rc.first;
+        };
+        host.selectInto = [engine, &dbname](const std::string& selectRest,
+                                            const std::vector<std::string>& intoVars,
+                                            std::map<std::string, std::string>& vars) {
+            std::string low;
+            for (char ch : selectRest)
+                low += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            size_t fpos = low.find(" from ");
+            std::string list = fpos == std::string::npos ? selectRest : selectRest.substr(0, fpos);
+            std::string from = fpos == std::string::npos ? "" : selectRest.substr(fpos + 6);
+            size_t wpos = low.find(" where ");
+            if (wpos != std::string::npos) {
+                return 2;
+            }
+            return engine->plpgsqlSelectInto(dbname, list, from, "", intoVars, vars);
+        };
+        std::string rv, err;
+        if (!PlPgsql::run(udf.expression, params, host, rv, err)) {
+            return false;
+        }
+        returnValue = rv;
+        return true;
+    }
+    std::string result = udf.expression;
+    for (size_t i = 0; i < udf.paramNames.size() && i < funcArgs.size(); ++i) {
+        std::string val = funcArgs[i];
+        size_t pos = 0;
+        while ((pos = result.find(udf.paramNames[i], pos)) != std::string::npos) {
+            result.replace(pos, udf.paramNames[i].size(), val);
+            pos += val.size();
+        }
+    }
+    returnValue = result;
+    return true;
+}
+
 static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const std::string& rowBuffer,
                                     const TableSchema& tbl,
@@ -18365,62 +18447,14 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (engine && !dbname.empty()) {
         auto udf = engine->getUDF(dbname, expr.funcName);
         if (!udf.expression.empty()) {
-            if (udf.language == "plpgsql") {
-                // PL/pgSQL body: run through the interpreter with arguments
-                // pre-bound to their parameter names.
-                std::map<std::string, std::string> params;
-                for (size_t i = 0; i < udf.paramNames.size() && i < expr.funcArgs.size(); ++i) {
-                    params[udf.paramNames[i]] = getVal(expr.funcArgs[i]);
-                }
-                StorageEngine* eng = const_cast<StorageEngine*>(engine);
-                PlPgsqlHost host;
-                host.evalExpr = [](const std::string& e,
-                                   const std::map<std::string, std::string>&) {
-                    auto r = ExprHelper::evalString(e, {});
-                    if (!r.ok) return std::optional<std::string>{};
-                    return std::optional<std::string>{r.isNull ? "null" : r.value};
-                };
-                host.execStmt = [eng, &dbname](const std::string& sql,
-                                               const std::map<std::string, std::string>&) {
-                    auto rc = eng->plpgsqlExecSql(dbname, sql, nullptr);
-                    return rc.first;
-                };
-                host.selectInto = [eng, &dbname](const std::string& selectRest,
-                                                 const std::vector<std::string>& intoVars,
-                                                 std::map<std::string, std::string>& vars) {
-                    // selectRest = "<list> FROM <table>" (WHERE unsupported)
-                    std::string low;
-                    for (char c : selectRest)
-                        low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                    size_t fpos = low.find(" from ");
-                    std::string list = fpos == std::string::npos
-                        ? selectRest : selectRest.substr(0, fpos);
-                    std::string from = fpos == std::string::npos
-                        ? "" : selectRest.substr(fpos + 6);
-                    size_t wpos = low.find(" where ");
-                    if (wpos != std::string::npos) {
-                        // WHERE unsupported in this helper: reject rather
-                        // than silently reading the wrong rows.
-                        return 2;
-                    }
-                    return eng->plpgsqlSelectInto(dbname, list, from, "", intoVars, vars);
-                };
-                std::string rv, err;
-                if (!PlPgsql::run(udf.expression, params, host, rv, err)) {
-                    return "null";
-                }
+            std::vector<std::string> argVals;
+            argVals.reserve(expr.funcArgs.size());
+            for (const auto& a : expr.funcArgs) argVals.push_back(getVal(a));
+            std::string rv;
+            if (evalUDFBody(udf, expr.funcName, argVals, engine, dbname, rv)) {
                 return rv;
             }
-            std::string result = udf.expression;
-            for (size_t i = 0; i < udf.paramNames.size() && i < expr.funcArgs.size(); ++i) {
-                std::string val = getVal(expr.funcArgs[i]);
-                size_t pos = 0;
-                while ((pos = result.find(udf.paramNames[i], pos)) != std::string::npos) {
-                    result.replace(pos, udf.paramNames[i].size(), val);
-                    pos += val.size();
-                }
-            }
-            return result;
+            return "null";
         }
     }
     return "";
@@ -25503,8 +25537,14 @@ std::pair<bool, size_t> StorageEngine::plpgsqlExecSql(
                 for (size_t i = 0; i < rowVals.size() && i < tbl.len; ++i) {
                     // VALUES items are expression ASTs; use their literal
                     // text (PL bodies passing variables already substituted
-                    // numeric/quoted literals above).
-                    values[tbl.cols[i].dataName] = rowVals[i] ? rowVals[i]->toString() : "";
+                    // numeric/quoted literals above).  String literals'
+                    // toString() keeps the surrounding quotes; the engine's
+                    // value layer is unquoted, so strip one pair.
+                    std::string v = rowVals[i] ? rowVals[i]->toString() : "";
+                    if (v.size() >= 2 && v.front() == '\'' && v.back() == '\'') {
+                        v = v.substr(1, v.size() - 2);
+                    }
+                    values[tbl.cols[i].dataName] = v;
                 }
                 if (insert(dbname, ins->tableName, values) != DBStatus::OK) return {false, 0};
             }
