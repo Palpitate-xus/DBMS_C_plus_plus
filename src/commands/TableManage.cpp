@@ -20553,7 +20553,25 @@ Lsn StorageEngine::walXactCommit(const std::string& dbname, uint64_t xid) {
     std::vector<char> payload;
     payload.insert(payload.end(), reinterpret_cast<const char*>(&xid),
                    reinterpret_cast<const char*>(&xid) + sizeof(xid));
+    // Commit timestamp (seconds since epoch) for PITR: recovery stops
+    // treating commits newer than the recovery target as committed.
+    // v1 records carry only the xid; readers treat missing timestamp as 0
+    // (= always allowed), so old WAL segments replay unchanged.
+    const uint64_t commitEpoch = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    payload.insert(payload.end(), reinterpret_cast<const char*>(&commitEpoch),
+                   reinterpret_cast<const char*>(&commitEpoch) + sizeof(commitEpoch));
     return wal->XLogInsert(RM_XACT_ID, XLOG_XACT_COMMIT, xid, payload);
+}
+
+static uint64_t commitEpochOf(const XLogRecord& rec) {
+    // v2 commit records: [xid (8)][epoch (8)]. v1: xid only -> 0.
+    if (rec.rmid() != RM_XACT_ID || rec.info() != XLOG_XACT_COMMIT) return 0;
+    if (rec.data.size() < sizeof(uint64_t) * 2) return 0;
+    uint64_t epoch = 0;
+    std::memcpy(&epoch, rec.data.data() + sizeof(uint64_t), sizeof(epoch));
+    return epoch;
 }
 
 Lsn StorageEngine::walXactAbort(const std::string& dbname, uint64_t xid) {
@@ -21046,6 +21064,24 @@ bool StorageEngine::recoverAllDatabases() {
         if (!wal) continue;
         if (wal->currentWriteLsn() == 0) continue; // no WAL
 
+        // A persisted PITR target (written by pitrRestore in the previous
+        // process) gates this database's commit replay. It is consumed and
+        // removed after a successful recovery so subsequent restarts are
+        // normal crash recoveries.
+        {
+            const auto targetPath = dbPath(dbname) / "pg_wal" / "recovery_target";
+            std::error_code tec;
+            if (std::filesystem::exists(targetPath, tec) && !tec) {
+                std::ifstream ifs(targetPath);
+                uint64_t target = 0;
+                if (ifs >> target && target != 0) {
+                    recoveryTargetEpoch_.store(target);
+                    std::cerr << "[recovery] " << dbname
+                              << ": PITR target epoch " << target << std::endl;
+                }
+            }
+        }
+
         auto checkpointLsnOpt = wal->findLastCheckpointLsn();
         Lsn redoLsn = checkpointLsnOpt.value_or(wal->earliestAvailableLsn());
 
@@ -21093,6 +21129,13 @@ bool StorageEngine::recoverAllDatabases() {
             std::cerr << "[recovery] failed to persist CLOG for database "
                       << dbname << std::endl;
             return false;
+        }
+        // PITR target is single-use: a successful visibility decision
+        // consumes it so later restarts replay normally.
+        recoveryTargetEpoch_.store(0);
+        {
+            std::error_code rmEc;
+            std::filesystem::remove(dbPath(dbname) / "pg_wal" / "recovery_target", rmEc);
         }
 
         // Pass 2: replay committed/non-transactional images in WAL order.
@@ -21672,6 +21715,112 @@ bool StorageEngine::physicalRestore(const std::string& dbname, const std::string
     } catch (...) {
         return false;
     }
+}
+
+Lsn StorageEngine::switchWal(const std::string& dbname) {
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return INVALID_LSN;
+    return wal->switchWal();
+}
+
+// ========================================================================
+// PITR: point-in-time recovery
+// ========================================================================
+
+bool StorageEngine::pitrRestore(const std::string& dbname,
+                                const std::string& backupPath,
+                                const std::string& archiveDir,
+                                uint64_t targetEpoch) {
+    if (targetEpoch == 0) {
+        std::cerr << "[pitr] recovery target epoch is required" << std::endl;
+        return false;
+    }
+    if (!physicalRestore(dbname, backupPath)) return false;
+
+    // Roll-forward material: archived segments of this database's timeline
+    // that are newer than the backup. The backup carries its own pg_wal up
+    // to the backup checkpoint; the archive holds everything after that.
+    const auto srcArchive = std::filesystem::path(archiveDir);
+    std::error_code ec;
+    if (!std::filesystem::is_directory(srcArchive, ec) || ec) {
+        std::cerr << "[pitr] archive directory not found: " << archiveDir
+                  << std::endl;
+        return false;
+    }
+    auto walDir = dbPath(dbname) / "pg_wal";
+    std::filesystem::create_directories(walDir, ec);
+    if (ec) return false;
+
+    // Backup's highest retained segment decides where archived history
+    // starts overlapping; copy every archived segment with a number >= the
+    // backup's newest, letting the copy overwrite the (older) backup copy.
+    uint32_t backupMaxSeg = 0;
+    {
+        std::error_code iterEc;
+        for (const auto& entry : std::filesystem::directory_iterator(walDir, iterEc)) {
+            const std::string name = entry.path().filename().string();
+            if (name.size() != 24) continue;
+            unsigned long long parts[3] = {0, 0, 0};
+            bool ok = true;
+            for (int i = 0; i < 3; ++i) {
+                std::string hex = name.substr(i * 8, 8);
+                try { parts[i] = std::stoul(hex, nullptr, 16); }
+                catch (...) { ok = false; break; }
+            }
+            if (!ok) continue;
+            backupMaxSeg = std::max(backupMaxSeg, static_cast<uint32_t>(parts[2]));
+        }
+    }
+
+    size_t copied = 0;
+    {
+        std::error_code iterEc;
+        for (const auto& entry : std::filesystem::directory_iterator(srcArchive, iterEc)) {
+            const std::string name = entry.path().filename().string();
+            if (name.size() != 24) continue;
+            unsigned long long parts[3] = {0, 0, 0};
+            bool ok = true;
+            for (int i = 0; i < 3; ++i) {
+                std::string hex = name.substr(i * 8, 8);
+                try { parts[i] = std::stoul(hex, nullptr, 16); }
+                catch (...) { ok = false; break; }
+            }
+            if (!ok || parts[0] != 1) continue;  // timeline 1 only for now
+            const auto segNo = static_cast<uint32_t>(parts[2]);
+            if (segNo < backupMaxSeg) continue;
+            std::error_code copyEc;
+            std::filesystem::copy_file(
+                entry.path(), walDir / name,
+                std::filesystem::copy_options::overwrite_existing, copyEc);
+            if (copyEc) {
+                std::cerr << "[pitr] failed to restore archived segment " << name
+                          << ": " << copyEc.message() << std::endl;
+                return false;
+            }
+            ++copied;
+        }
+    }
+    // Archived history replaces the ready/done bookkeeping of the backup;
+    // recovery decides from content, not markers.
+    std::filesystem::remove_all(walDir / "archive_status", ec);
+
+    // Persist the target so the NEXT process startup (where recovery
+    // actually replays) sees it — the restore command runs in a different
+    // process than the roll-forward.
+    const auto targetPath = walDir / "recovery_target";
+    {
+        std::ofstream ofs(targetPath, std::ios::trunc);
+        ofs << targetEpoch << "\n";
+        if (!ofs) {
+            std::cerr << "[pitr] cannot persist recovery target" << std::endl;
+            return false;
+        }
+    }
+    std::cerr << "[pitr] restored " << copied
+              << " archived segment(s) for " << dbname
+              << "; recovery target epoch " << targetEpoch << std::endl;
+    setRecoveryTargetEpoch(targetEpoch);
+    return true;
 }
 
 // ========================================================================

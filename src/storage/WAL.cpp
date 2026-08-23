@@ -244,7 +244,19 @@ bool WALManager::scanWalTail() {
     std::optional<Lsn> previous;
     while (lsn < currentLsn_) {
         auto rec = ReadRecord(lsn);
-        if (!rec) return false;
+        if (!rec) {
+            // Zero padding from switchWal() legitimately terminates the
+            // record chain before the end of a padded segment: the tail
+            // state is the last real record, and currentLsn_ (the append
+            // position) stands.
+            XLogRecHeader header;
+            if (readBytes(lsn, reinterpret_cast<char*>(&header), sizeof(header)) &&
+                header.xl_prev == 0 && header.xl_tot_len == 0 &&
+                header.xl_info == 0 && header.xl_xid == 0) {
+                break;
+            }
+            return false;
+        }
         previous = lsn;
         lastRecordLsn_ = lsn;
         hasLastRecord_ = true;
@@ -253,7 +265,8 @@ bool WALManager::scanWalTail() {
         if (next <= lsn || next > currentLsn_) return false;
         lsn = next;
     }
-    return lsn == currentLsn_;
+    // A padding break means the walk stopped before currentLsn_ by design.
+    return true;
 }
 
 bool WALManager::validateRecordsOnDisk() const {
@@ -261,7 +274,17 @@ bool WALManager::validateRecordsOnDisk() const {
     std::optional<Lsn> previous;
     while (lsn < currentLsn_) {
         auto rec = ReadRecord(lsn);
-        if (!rec) return false;
+        if (!rec) {
+            // Zero padding from switchWal() ends the record chain before
+            // the end of a padded segment.
+            XLogRecHeader header;
+            if (readBytes(lsn, reinterpret_cast<char*>(&header), sizeof(header)) &&
+                header.xl_prev == 0 && header.xl_tot_len == 0 &&
+                header.xl_info == 0 && header.xl_xid == 0) {
+                break;
+            }
+            return false;
+        }
         if (previous) {
             if (rec->header.xl_prev != *previous) return false;
         } else if ((lsn == 0 && rec->header.xl_prev != 0) ||
@@ -276,7 +299,8 @@ bool WALManager::validateRecordsOnDisk() const {
         if (next <= lsn || next > currentLsn_) return false;
         lsn = next;
     }
-    return lsn == currentLsn_;
+    // Padding break: the walk may stop before currentLsn_ by design.
+    return true;
 }
 
 std::optional<Lsn> WALManager::lastRecordLsn() const {
@@ -538,6 +562,52 @@ bool WALManager::archivePendingSegments(const std::filesystem::path& archiveDir)
     }
     releaseWalFileLock(walLock);
     return ok;
+}
+
+Lsn WALManager::switchWal() {
+    if (!ensureOpen()) return INVALID_LSN;
+    std::lock_guard<std::mutex> processLock(*dirMutex_);
+    const int walLock = acquireWalFileLock();
+    if (walLock < 0) return INVALID_LSN;
+
+    const uint64_t cur = currentLsn_.load(std::memory_order_relaxed);
+    const uint32_t curSeg = segmentNumber(cur);
+    const uint64_t off = segmentOffset(cur);
+    if (off > 0) {
+        // Zero-fill the rest of the current segment so its file exists in
+        // full and a later reader sees end-of-records at the padding.
+        int fd = segmentWriteFd(curSeg);
+        if (fd < 0) {
+            releaseWalFileLock(walLock);
+            return INVALID_LSN;
+        }
+        const uint64_t padLen = kSegmentSize - off;
+        std::vector<char> zeros(4096, 0);
+        uint64_t remaining = padLen;
+        if (::lseek(fd, static_cast<off_t>(off), SEEK_SET) < 0) {
+            releaseWalFileLock(walLock);
+            return INVALID_LSN;
+        }
+        while (remaining > 0) {
+            const uint64_t chunk = std::min<uint64_t>(remaining, zeros.size());
+            const ssize_t wrote = ::write(fd, zeros.data(), static_cast<size_t>(chunk));
+            if (wrote < 0 || static_cast<uint64_t>(wrote) != chunk) {
+                releaseWalFileLock(walLock);
+                return INVALID_LSN;
+            }
+            remaining -= chunk;
+        }
+        if (::fsync(fd) < 0) {
+            releaseWalFileLock(walLock);
+            return INVALID_LSN;
+        }
+    }
+
+    const Lsn next = static_cast<Lsn>(curSeg + 1) * kSegmentSize;
+    currentLsn_.store(next, std::memory_order_relaxed);
+    closeWriteFd();
+    releaseWalFileLock(walLock);
+    return next;
 }
 
 bool WALManager::markSegmentsReadyBefore(Lsn lsn) {
@@ -810,11 +880,15 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
 
     // The tail record is maintained incrementally; no chain re-walk here.
     // LSN 0 is a valid record position, so presence is tracked separately.
-    const Lsn previousLsn = lastRecordLsn_;
     if (currentLsn_ != 0 && !hasLastRecord_) {
-        releaseWalFileLock(walLock);
-        return INVALID_LSN;
+        // e.g. after switchWal() in another process left the tail cache
+        // empty; rebuild it from the record chain instead of failing.
+        if (!scanWalTail()) {
+            releaseWalFileLock(walLock);
+            return INVALID_LSN;
+        }
     }
+    const Lsn previousLsn = lastRecordLsn_;
 
     XLogRecHeader header;
     header.xl_prev = previousLsn;

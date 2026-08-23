@@ -649,6 +649,21 @@ public:
     // Physical backup / restore
     bool physicalBackup(const std::string& dbname, const std::string& backupPath);
     bool physicalRestore(const std::string& dbname, const std::string& backupPath);
+    // pg_switch_wal: close the current WAL segment of the database so the
+    // archiver can ship it. Returns the next insertion LSN (0 on error).
+    Lsn switchWal(const std::string& dbname);
+    // PITR: physical restore + WAL roll-forward from the archive directory
+    // up to (and including) commits at/before targetEpoch. Segments of the
+    // database's timeline newer than the backup are copied back into pg_wal
+    // first; recovery then replays with commits after the target treated as
+    // uncommitted (their before-images undo them).
+    bool pitrRestore(const std::string& dbname, const std::string& backupPath,
+                     const std::string& archiveDir, uint64_t targetEpoch);
+    // Recovery target used by recoverAllDatabases: commits whose WAL
+    // timestamp is newer than this are rolled back (0 = no limit).
+    void setRecoveryTargetEpoch(uint64_t epoch) { recoveryTargetEpoch_ = epoch; }
+    uint64_t recoveryTargetEpoch() const { return recoveryTargetEpoch_; }
+
 
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename,
@@ -1243,6 +1258,7 @@ private:
 
     // Per-database checkpoint LSN. Pages with pd_lsn <= this value trigger
     // a full-page write on their next modification.
+    std::atomic<uint64_t> recoveryTargetEpoch_{0};
     mutable std::map<std::string, Lsn> lastCheckpointLsns_;
     // Index WAL-image epoch: bumped on every checkpoint.  An index file's
     // whole-file WAL image pair (before/after) is written at most once per

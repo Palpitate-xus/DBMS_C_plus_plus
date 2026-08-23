@@ -391,6 +391,12 @@ bool persistSqlStats(const std::string& dbname, const std::filesystem::path& pat
         if (const auto it = onDisk.find(key); it != onDisk.end()) disk = it->second;
         merged[key] = mergeEntry(disk, current, baseline);
     }
+    // validEntry() rejects zero-call rows on load; never persist them or a
+    // restart would abort with "SQL statistics are corrupt".
+    for (auto it = merged.begin(); it != merged.end();) {
+        if (it->second.calls == 0) it = merged.erase(it);
+        else ++it;
+    }
     trimSqlStatsLocked(merged);
     if (!publishStatsSnapshot(path, [&](const std::filesystem::path& temporary) {
             return writeSnapshot(temporary, dbname, merged);

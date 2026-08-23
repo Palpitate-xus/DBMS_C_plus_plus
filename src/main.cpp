@@ -1534,7 +1534,7 @@ static bool handleSetCommand(const string& sql, Session& s) {
 
     // SET CONSTRAINTS { ALL | constraint_name [, ...] } { DEFERRED | IMMEDIATE }
     if (sql.substr(0, 15) == "set constraints") {
-        string rest = trim(sql.substr(15));
+        string rest = trim(sql.substr(17));  // skip "restore database"
         if (rest.empty()) {
             cout << "SQL syntax error: SET CONSTRAINTS name [, ...] IMMEDIATE|DEFERRED" << endl;
             return true;
@@ -11281,6 +11281,113 @@ static bool executeInternal(const string& rawSql, Session& s) {
     }
 
     // RESTORE DATABASE dbname FROM 'file.sql'
+        if (sql.rfind("pg_switch_wal", 0) == 0 || sql.rfind("switch wal", 0) == 0) {
+        if (!checkAdmin(s)) return true;
+        if (!checkDB(s)) return true;
+        const dbms::Lsn next = g_engine.switchWal(s.currentDB);
+        if (next == dbms::INVALID_LSN) {
+            cout << "pg_switch_wal failed" << endl;
+            return true;
+        }
+        cout << "WAL segment switched; next record LSN " << next << endl;
+        log(s.username, "pg_switch_wal " + s.currentDB, getTime());
+        return false;
+    }
+
+if (sql.rfind("backup database", 0) == 0) {
+        if (!checkAdmin(s)) return true;
+        string rest = trim(sql.substr(16));  // skip "backup database"
+        size_t toPos = rest.find("to ");
+        if (toPos == string::npos) {
+            cout << "SQL syntax error: BACKUP DATABASE dbname TO 'path'" << endl;
+            return true;
+        }
+        string dbname = trim(rest.substr(0, toPos));
+        string backupPath = stripQuotes(trim(rest.substr(toPos + 3)));
+        if (backupPath.empty()) {
+            cout << "SQL syntax error: missing backup path" << endl;
+            return true;
+        }
+        if (g_engine.physicalBackup(dbname, backupPath)) {
+            cout << "Backup completed: " << dbname << " -> " << backupPath << endl;
+            log(s.username, "backup " + dbname + " to " + backupPath, getTime());
+        } else {
+            cout << "Backup failed" << endl;
+            return true;
+        }
+        return false;
+    }
+
+    if (sql.rfind("restore database", 0) == 0) {
+        if (!checkAdmin(s)) return true;
+        string rest = trim(sql.substr(17));  // skip "restore database"
+        size_t fromPos = rest.find("from ");
+        if (fromPos == string::npos) {
+            cout << "SQL syntax error: RESTORE DATABASE dbname FROM 'path' "
+                 << "[PITR 'YYYY-MM-DD HH:MM:SS' ARCHIVE 'dir']" << endl;
+            return true;
+        }
+        string dbname = trim(rest.substr(0, fromPos));
+        string tail = rest.substr(fromPos + 5);
+        // Optional: PITR 'timestamp' ARCHIVE 'dir' (both required together).
+        string backupAndOpts = tail;
+        string pitrTs, archiveDir;
+        size_t pitrPos = tail.find(" pitr ");
+        if (pitrPos != string::npos) {
+            backupAndOpts = tail.substr(0, pitrPos);
+            string opts = trim(tail.substr(pitrPos + 6));
+            size_t archPos = opts.find(" archive ");
+            if (archPos == string::npos) {
+                cout << "SQL syntax error: PITR requires ARCHIVE 'dir'" << endl;
+                return true;
+            }
+            pitrTs = stripQuotes(trim(opts.substr(0, archPos)));
+            archiveDir = stripQuotes(trim(opts.substr(archPos + 9)));
+            if (pitrTs.empty() || archiveDir.empty()) {
+                cout << "SQL syntax error: PITR requires a timestamp and archive dir" << endl;
+                return true;
+            }
+        }
+        string backupPath = stripQuotes(trim(backupAndOpts));
+        if (backupPath.empty()) {
+            cout << "SQL syntax error: missing backup path" << endl;
+            return true;
+        }
+        if (!pitrTs.empty()) {
+            // Parse 'YYYY-MM-DD HH:MM:SS' in local time to an epoch.
+            std::tm tmBuf{};
+            const char* parsed = ::strptime(pitrTs.c_str(), "%Y-%m-%d %H:%M:%S", &tmBuf);
+            if (parsed == nullptr || *parsed != '\0') {
+                cout << "SQL syntax error: bad PITR timestamp (want 'YYYY-MM-DD HH:MM:SS')" << endl;
+                return true;
+            }
+            const time_t epoch = ::mktime(&tmBuf);
+            if (epoch == static_cast<time_t>(-1)) {
+                cout << "SQL syntax error: unrepresentable PITR timestamp" << endl;
+                return true;
+            }
+            if (g_engine.pitrRestore(dbname, backupPath, archiveDir,
+                                     static_cast<uint64_t>(epoch))) {
+                cout << "PITR restore staged: " << backupPath << " -> " << dbname
+                     << " at " << pitrTs << "; restart to roll forward" << endl;
+                log(s.username, "pitr restore " + dbname + " from " + backupPath +
+                    " to " + pitrTs, getTime());
+            } else {
+                cout << "Restore failed" << endl;
+                return true;
+            }
+            return false;
+        }
+        if (g_engine.physicalRestore(dbname, backupPath)) {
+            cout << "Restore completed: " << backupPath << " -> " << dbname << endl;
+            log(s.username, "restore " + dbname + " from " + backupPath, getTime());
+        } else {
+            cout << "Restore failed" << endl;
+            return true;
+        }
+        return false;
+    }
+
     if (sql.substr(0, 7) == "restore") {
         if (!checkAdmin(s)) return true;
         string rest = trim(sql.substr(7));
@@ -11321,54 +11428,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             stmt += " ";
         }
         cout << "Restored " << count << " statements to " << dbname << endl;
-        return false;
-    }
-
-    if (sql.substr(0, 14) == "backup database") {
-        if (!checkAdmin(s)) return true;
-        string rest = trim(sql.substr(14));
-        size_t toPos = rest.find("to ");
-        if (toPos == string::npos) {
-            cout << "SQL syntax error: BACKUP DATABASE dbname TO 'path'" << endl;
-            return true;
-        }
-        string dbname = trim(rest.substr(0, toPos));
-        string backupPath = stripQuotes(trim(rest.substr(toPos + 3)));
-        if (backupPath.empty()) {
-            cout << "SQL syntax error: missing backup path" << endl;
-            return true;
-        }
-        if (g_engine.physicalBackup(dbname, backupPath)) {
-            cout << "Backup completed: " << dbname << " -> " << backupPath << endl;
-            log(s.username, "backup " + dbname + " to " + backupPath, getTime());
-        } else {
-            cout << "Backup failed" << endl;
-            return true;
-        }
-        return false;
-    }
-
-    if (sql.substr(0, 15) == "restore database") {
-        if (!checkAdmin(s)) return true;
-        string rest = trim(sql.substr(15));
-        size_t fromPos = rest.find("from ");
-        if (fromPos == string::npos) {
-            cout << "SQL syntax error: RESTORE DATABASE dbname FROM 'path'" << endl;
-            return true;
-        }
-        string dbname = trim(rest.substr(0, fromPos));
-        string backupPath = stripQuotes(trim(rest.substr(fromPos + 5)));
-        if (backupPath.empty()) {
-            cout << "SQL syntax error: missing backup path" << endl;
-            return true;
-        }
-        if (g_engine.physicalRestore(dbname, backupPath)) {
-            cout << "Restore completed: " << backupPath << " -> " << dbname << endl;
-            log(s.username, "restore " + dbname + " from " + backupPath, getTime());
-        } else {
-            cout << "Restore failed" << endl;
-            return true;
-        }
         return false;
     }
 

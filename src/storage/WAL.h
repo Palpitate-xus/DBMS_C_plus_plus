@@ -166,6 +166,11 @@ public:
 
     // Mark all complete segments strictly before lsn as ready for archiving.
     bool markSegmentsReadyBefore(Lsn lsn);
+    // pg_switch_wal: zero-pad the current segment to its end and move the
+    // append position to the next segment, closing the old one for
+    // archiving. Returns the LSN where subsequent records will be written.
+    // (Zero padding is inert: a zero header length terminates record scans.)
+    Lsn switchWal();
 
     // Remove complete segments strictly before lsn after they have been
     // archived. The segment containing lsn is always retained.
