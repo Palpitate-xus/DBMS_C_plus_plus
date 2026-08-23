@@ -64,15 +64,15 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P0-1: 并行查询执行
 - **类别**: 性能 / 执行器
-- **现状**: 已实现 `ParallelTableScanOp`：非分区 heap 按 page range 分片，由多个 worker 读取并按范围顺序 Gather；事务内和分区表安全回退到普通扫描。尚无并行 join/aggregate、GatherMerge、work-stealing worker pool 或完整 parallel-aware planner。
+- **现状**: ✅（核心路径 2026-08-20 落地）`ParallelTableScanOp`（非分区 heap 按 page range 分片 + Gather）、`ParallelHashJoinOp`（worker 线程 build 侧）、`ParallelGroupAggregateOp`（分区聚合）、`GatherMergeOp`（k 路归并已排序 worker 流）均已接入计划器；事务内和分区表安全回退到串行路径；`max_parallel_workers_per_gather` 配置入口可用。残余（residual）: 每次查询创建固定 worker（无独立 ThreadPool/work-stealing 生命周期）、无 parallel-aware hash split 的两阶段聚合、无 `parallel_leader_participation` 语义
 - **PG 参考**: `parallel_workers`, `parallel_leader_participation`, `Gather`/`GatherMerge` 节点
-- **影响**: 大表全表扫描、聚合、JOIN 无法利用多核，性能差距 10x+
+- **影响**: （已缓解）大表扫描/聚合/JOIN 可用多核；剩余差距是 worker 生命周期开销而非语义
 - **实现路径**:
   1. ✅ 在 `QueryPlanner` 中接入 `ParallelTableScanOp`，按 heap page range 分片
   2. ⚠️ 当前使用每次查询创建的固定 worker，仍需独立 ThreadPool/work-stealing 生命周期
-  3. ⚠️ 已有确定性 Gather，仍需 GatherMerge、并行 HashJoin/Aggregate
+  3. ✅ GatherMerge、并行 HashJoin/Aggregate（`cc40031`）
   4. ✅ 增加 `max_parallel_workers_per_gather` 配置入口
-- **预估工作量**: 2-3 周
+- **预估工作量**: 残余 1 周
 - **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `src/common/Config.{h,cpp}`
 
 ### P0-2: JIT 编译 (LLVM)
@@ -90,16 +90,16 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P0-3: GiST 索引
 - **类别**: 索引 / 全文搜索 / 几何
-- **现状**: 仅有 SP-GiST (Point quadtree)，无通用 GiST
+- **现状**: ✅（查询路径接入 2026-08-23）`CREATE INDEX ... USING GIST` 的 `.gist` sidecar（每行 `rid low high` 条目）现已进入计划器：范围谓词（`< <= > >=`，单边或双边同列）和锚定前缀 `LIKE 'prefix%'` 触发 `GiSTScanOp`（候选 RID 收窄 + FilterOp 重检 correctness 边界，RLS/分区安全回退）；重叠判定对数值列按数值比较（修复 `"51" > "100"` 的文本序错排）；EXPLAIN 显示 `GiSTScan(table=..., colOPval ...)` 节点。同时修复 `.gist`/`.brin` 后缀长度 off-by-one（列发现从未生效）。残余（residual）: 无键聚合树结构（union/penalty/picksplit）、无 `tsvector` opclass（FTS 走 GIN）、几何/最近邻 opclass、`<->` KNN 排序仍未做
 - **PG 参考**: `gist`, `tsvector` 全文搜索, `geometry` 最近邻
-- **影响**: 全文检索、地理空间查询、范围类型索引缺失
+- **影响**: （已缓解）范围/前缀查询现有候选收窄路径；全文检索继续走 GIN；地理空间最近邻仍缺
 - **实现路径**:
-  1. 实现 `GistIndex` 基类：统一接口 `consistent()`, `union()`, `compress()`, `decompress()`, `penalty()`, `picksplit()`
-  2. 实现内置 operator class: `gist_tr_ops` (tsvector), `gist_int4_ops` (int4 range)
-  3. 接入 `IndexScanOp` 路径
-  4. 实现 `@@` 全文搜索操作符 + `to_tsvector()` / `to_tsquery()` 函数
-- **预估工作量**: 2-3 周
-- **相关文件**: `src/access/GistIndex.cpp` (新建), `src/access/GistIndex.h` (新建)
+  1. ✅ `CREATE INDEX ... USING GIST` sidecar 构建（`StorageEngine::createGiSTIndex`，既有）
+  2. ✅ 数值感知的重叠/包含判定（`giSTSearchOverlap`/`giSTSearchContainedBy`）
+  3. ✅ 计划器接入：`GiSTScanOp` + `canUseGiSTScan` 门控 + EXPLAIN 节点（2026-08-23）
+  4. ✅ `@@` 全文搜索操作符 + `to_tsvector()`/`to_tsquery()`（既有，FTS 走 GIN 路径）
+  5. ⚠️ 键聚合树（union/penalty/picksplit）、KNN、几何 opclass 仍待后续
+- **相关文件**: `src/executor/ExecutionPlan.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `tests/gist_scan_test.cpp`
 
 ### P0-4: Gap Locks / Predicate Locks
 - **类别**: 并发控制 / 隔离性

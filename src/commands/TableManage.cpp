@@ -7895,6 +7895,40 @@ bool StorageEngine::hasGiSTIndex(const std::string& dbname,
     return std::filesystem::exists(giSTIndexPath(dbname, tablename, colname));
 }
 
+// The GiST sidecar stores textual low/high bounds, but numeric columns
+// must compare numerically: "51" must not sort after "100".  When both
+// sides parse fully as doubles the numeric order wins; otherwise the
+// textual (lexicographic) order used for text keys applies.
+static bool gistEntryOverlaps(const std::string& lo, const std::string& hi,
+                              const std::string& entryLo, const std::string& entryHi) {
+    char *pl = nullptr, *ph = nullptr, *pel = nullptr, *peh = nullptr;
+    double dl = std::strtod(lo.c_str(), &pl);
+    double dh = std::strtod(hi.c_str(), &ph);
+    double del = std::strtod(entryLo.c_str(), &pel);
+    double deh = std::strtod(entryHi.c_str(), &peh);
+    const bool numeric = pl == lo.c_str() + lo.size() && !lo.empty() &&
+                         ph == hi.c_str() + hi.size() && !hi.empty() &&
+                         pel == entryLo.c_str() + entryLo.size() && !entryLo.empty() &&
+                         peh == entryHi.c_str() + entryHi.size() && !entryHi.empty();
+    if (numeric) return !(dh < dl || deh < del);   // range intersect
+    return !(entryHi < lo || entryLo > hi);        // textual overlap
+}
+
+static bool gistEntryContained(const std::string& lo, const std::string& hi,
+                               const std::string& entryLo, const std::string& entryHi) {
+    char *pl = nullptr, *ph = nullptr, *pel = nullptr, *peh = nullptr;
+    double dl = std::strtod(lo.c_str(), &pl);
+    double dh = std::strtod(hi.c_str(), &ph);
+    double del = std::strtod(entryLo.c_str(), &pel);
+    double deh = std::strtod(entryHi.c_str(), &peh);
+    const bool numeric = pl == lo.c_str() + lo.size() && !lo.empty() &&
+                         ph == hi.c_str() + hi.size() && !hi.empty() &&
+                         pel == entryLo.c_str() + entryLo.size() && !entryLo.empty() &&
+                         peh == entryHi.c_str() + entryHi.size() && !entryHi.empty();
+    if (numeric) return dl <= del && deh <= dh;
+    return lo <= entryLo && entryHi <= hi;
+}
+
 std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
                                                        const std::string& tablename,
                                                        const std::string& colname,
@@ -7911,8 +7945,8 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
         std::string entryLow, entryHigh;
         if (!(ss >> rid >> entryLow >> entryHigh)) continue;
         // Overlap: entry range [entryLow, entryHigh] intersects [low, high]
-        // i.e., NOT (entryHigh < low OR entryLow > high)
-        if (!(entryHigh < low || entryLow > high)) result.push_back(rid);
+        // (numeric when both sides are numeric literals, textual otherwise)
+        if (gistEntryOverlaps(low, high, entryLow, entryHigh)) result.push_back(rid);
     }
     return result;
 }
@@ -7933,8 +7967,8 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
         std::string entryLow, entryHigh;
         if (!(ss >> rid >> entryLow >> entryHigh)) continue;
         // Contained by: entry range is fully within [low, high]
-        // i.e., low <= entryLow AND entryHigh <= high
-        if (low <= entryLow && entryHigh <= high) result.push_back(rid);
+        // (numeric when both sides are numeric literals, textual otherwise)
+        if (gistEntryContained(low, high, entryLow, entryHigh)) result.push_back(rid);
     }
     return result;
 }
@@ -7948,9 +7982,9 @@ std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string&
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (!entry.is_regular_file()) continue;
         std::string name = entry.path().filename().string();
-        if (name.size() > 6 && name.substr(name.size() - 6) == ".gist" &&
+        if (name.size() > 5 && name.substr(name.size() - 5) == ".gist" &&
             name.substr(0, prefix.size()) == prefix) {
-            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 6);
+            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 5);
             result.push_back(colname);
         }
     }
@@ -8319,9 +8353,9 @@ std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string&
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (!entry.is_regular_file()) continue;
         std::string name = entry.path().filename().string();
-        if (name.size() > 6 && name.substr(name.size() - 6) == ".brin" &&
+        if (name.size() > 5 && name.substr(name.size() - 5) == ".brin" &&
             name.substr(0, prefix.size()) == prefix) {
-            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 6);
+            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 5);
             result.push_back(colname);
         }
     }

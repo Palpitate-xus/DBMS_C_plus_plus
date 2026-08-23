@@ -288,4 +288,18 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 
 验证状态：完整回归 `PASS=164 FAIL=0`（含新增归档测试与 7 个 Python E2E）；ASAN 与 TSAN 全 CLEAN（归档测试已加入 sanitizer 核心集）；崩溃矩阵 12/12（首跑 11/1、基线对照 10/2 均为宿主机 RL 训练进程 ~30s IO 突发导致的 kill 时序偏移，复跑全绿）。sanitizer.sh 修复存量缺陷：对象重建只比较 .cpp mtime 不查头文件，布局变更头文件（如 Config 新字段）会与新测试代码错位（UBSAN 报非法 bool 读）——现已按任意项目头文件新于对象即重建。
 
+## 2026-08-23 v0.4 批次：GiST 查询路径接入（P0-3 部分翻转）
+
+P0-3 长期停留在"仅有 SP-GiST、无通用 GiST"的记录上，但审计发现 `CREATE INDEX ... USING GIST` 的存储层 sidecar（每行 `rid low high`）早已存在——缺的是**查询路径**：没有任何谓词会使用它，没有 EXPLAIN 节点，没有回归。本批把它接入计划器：
+
+1. **`GiSTScanOp` 执行算子**（`src/executor/ExecutionPlan.{h,cpp}`）：把 WHERE 中同列的范围谓词对（`>= n AND <= m`、单边 `> n`/`< m`）折叠成 `[lo, hi]`，或把锚定前缀 `LIKE 'prefix%'` 折叠成 `[prefix, prefix+\x7f]`，对 `.gist` sidecar 做 overlap 候选 RID 收窄，再逐 RID 走与 IndexScan/Bitmap 相同的 page-lock/MVCC 边界回表。所有原谓词保留在上方 FilterOp 重检——本节点只收窄候选，不是正确性过滤器（与 BitmapHeapScan 同一契约）。RLS 表和分区表安全回退串行扫描。
+2. **数值感知重叠判定**（`src/commands/TableManage.cpp`）：`giSTSearchOverlap`/`giSTSearchContainedBy` 原先纯文本比较，`"51" > "100"` 的字典序使数值列范围查询返回空。现在双侧全为数字字面量时按 double 比较，否则保持文本序（文本列前缀语义不变）。
+3. **两个存量 off-by-one**：`.gist`/`.brin` 是 5 字符后缀但列发现代码用 `substr(size-6)` 比较 6 字符——`getGiSTIndexedColumns`/`getBrinIndexedColumns` 从未返回过任何列（意味着 BRIN 的查询侧消费也从未可能生效），已修正。
+4. **EXPLAIN**：新增 `GiSTScan(table=..., col>=v AND col<=v)` 节点（行数上界 = 表行数，代价按随机回表近似）。
+5. **文档矫正（顺带）**：P0-1 的现状描述同样过时——GatherMerge/并行 HashJoin/并行聚合已于 2026-08-20（`cc40031`）落地，feature-gaps 与 all-gaps-todo 已同步；两处残余（worker 生命周期、两阶段聚合）如实保留。
+
+新增 `tests/gist_scan_test.cpp`：范围双边/单边、前缀 LIKE（含奇偶 parity 正确性探针——`even7%` 必须为 0 行）、非 GiST 列保持串行、EXPLAIN 节点存在、sidecar 列发现（依赖 off-by-one 修复）。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（164 既有 + 新增 gist_scan_test，含 7 个 Python E2E）；ASAN CLEAN。已知边界（记录于 feature-gaps P0-3 残余）：sidecar 是线性扫描而非键聚合树（union/penalty/picksplit）；无 tsvector/几何 opclass；无 `<->` KNN；DML 后需 REINDEX 刷新 sidecar（既有行为，本批未改）。
+
 已知边界（记录于 feature-gaps P2-3 残余）：外部命令形式 `archive_command` 仅解析不执行（安全考虑本批只做内建 `dir:` 复制）；单时间线（timeline 1）；`pg_basebackup` 协议未实现。恢复目标为进程重启时消费,不支持在线滚动恢复。

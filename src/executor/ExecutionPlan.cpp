@@ -546,6 +546,126 @@ void BitmapHeapScanOp::close() {
 }
 
 // ========================================================================
+// GiSTScanOp
+// ========================================================================
+
+GiSTScanOp::GiSTScanOp(StorageEngine* engine, const std::string& dbname,
+                       const std::string& tablename,
+                       const std::vector<StorageEngine::Condition>& conds)
+    : engine_(engine), dbname_(dbname), tablename_(tablename), conds_(conds) {}
+
+std::string GiSTScanOp::describeConds() const {
+    std::string out;
+    for (const auto& c : conds_) {
+        if (!out.empty()) out += " AND ";
+        out += c.colName + c.op + c.value;
+    }
+    return out;
+}
+
+bool GiSTScanOp::open() {
+    tbl_ = engine_->getTableSchema(dbname_, tablename_);
+    rids_.clear();
+    rows_.clear();
+    pos_ = 0;
+
+    // Fold the GiST-servable predicates into [lo, hi] bounds on the
+    // indexed column.  Mixed-column predicates stay in FilterOp; this node
+    // only takes over when at least one bound is known.
+    std::string lo, hi;
+    bool haveLo = false, haveHi = false;
+    std::string loCol, hiCol;
+    for (const auto& c : conds_) {
+        const bool isRange = c.op == "<" || c.op == "<=" || c.op == ">" || c.op == ">=";
+        if (!isRange) continue;
+        if (c.op == ">" || c.op == ">=") {
+            if (haveLo) continue;  // narrowest wins is FilterOp's job
+            lo = c.value;
+            if (c.op == ">") {
+                // exclusive: keep the boundary but note the recheck above
+                // still enforces strictness; overlap widening is safe.
+            }
+            haveLo = true;
+            loCol = c.colName;
+        } else {
+            if (haveHi) continue;
+            hi = c.value;
+            haveHi = true;
+            hiCol = c.colName;
+        }
+    }
+    // Both bounds must target the same GiST-indexed column.
+    std::string gistCol;
+    const auto gistColumns = engine_->getGiSTIndexedColumns(dbname_, tablename_);
+    auto isGist = [&](const std::string& col) {
+        return std::find(gistColumns.begin(), gistColumns.end(), col) != gistColumns.end();
+    };
+    if (haveLo && haveHi && loCol == hiCol && isGist(loCol)) gistCol = loCol;
+    else if (haveLo && isGist(loCol)) gistCol = loCol;
+    else if (haveHi && isGist(hiCol)) gistCol = hiCol;
+
+    if (!gistCol.empty()) {
+        // Missing side: use the widest possible bound.  The sidecar compares
+        // textually, so an empty lo is below every key and a high sentinel
+        // is above every ASCII key.
+        const std::string overlapLo = haveLo ? lo : "";
+        const std::string overlapHi = haveHi ? hi : "\x7f";
+        rids_ = engine_->giSTSearchOverlap(dbname_, tablename_, gistCol,
+                                           overlapLo, overlapHi);
+    } else {
+        // Text-prefix predicate: LIKE 'prefix%' via the GiST containment
+        // style (entry low <= prefix <= entry high is replaced by the
+        // overlap with [prefix, prefix + sentinel]).
+        for (const auto& c : conds_) {
+            if (c.op != "like" || c.value.empty()) continue;
+            if (c.value.back() != '%' || c.value.find('%') != c.value.size() - 1)
+                continue;  // only anchored prefixes
+            if (!isGist(c.colName)) continue;
+            std::string prefix = c.value.substr(0, c.value.size() - 1);
+            rids_ = engine_->giSTSearchOverlap(dbname_, tablename_, c.colName,
+                                               prefix, prefix + "\x7f");
+            break;
+        }
+    }
+
+    bool readFailed = false;
+    for (int64_t rid : rids_) {
+        std::string row;
+        if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr,
+                                          &readFailed)) {
+            if (readFailed) {
+                rows_.clear();
+                setError("gist heap fetch failed");
+                return false;
+            }
+            continue;  // concurrently removed row: not visible, skip
+        }
+        rows_.push_back(std::move(row));
+    }
+    pos_ = 0;
+    if (!statsRecorded_) {
+        recordTableScan(dbname_, tablename_, rows_.size(), true, false);
+        statsRecorded_ = true;
+    }
+    return true;
+}
+
+bool GiSTScanOp::next(std::string& outRow) {
+    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
+    if (pos_ >= rows_.size()) return false;
+    outRow = rows_[pos_++];
+    rtInstr_.emitted = true;
+    return true;
+}
+
+void GiSTScanOp::close() {
+    rids_.clear();
+    rows_.clear();
+    pos_ = 0;
+    statsRecorded_ = false;
+}
+
+// ========================================================================
 // BitmapOrHeapScanOp
 // ========================================================================
 
@@ -2634,6 +2754,31 @@ static bool hasEqualityIndex(StorageEngine* engine, const PlanContext& ctx,
     return std::find(bloomColumns.begin(), bloomColumns.end(), condition.colName) != bloomColumns.end();
 }
 
+// A GiST-servable predicate exists: a range (>, >=, <, <=) pair or single
+// bound, or an anchored prefix LIKE 'abc%', whose column carries a .gist
+// sidecar index.
+static bool canUseGiSTScan(StorageEngine* engine, const PlanContext& ctx) {
+    const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    if (table.partitionType != TableSchema::PartitionType::None) return false;
+    const auto gistColumns = engine->getGiSTIndexedColumns(ctx.dbname, ctx.tablename);
+    if (gistColumns.empty()) return false;
+    auto isGist = [&](const std::string& col) {
+        return std::find(gistColumns.begin(), gistColumns.end(), col) != gistColumns.end();
+    };
+    for (const auto& condition : ctx.conds) {
+        const bool isRange = condition.op == "<" || condition.op == "<=" ||
+                             condition.op == ">" || condition.op == ">=";
+        if (isRange && isGist(condition.colName)) return true;
+        if (condition.op == "like" && !condition.value.empty() &&
+            condition.value.back() == '%' &&
+            condition.value.find('%') == condition.value.size() - 1 &&
+            isGist(condition.colName)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool canUseBitmapHeapScan(StorageEngine* engine, const PlanContext& ctx) {
     const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
     if (table.partitionType != TableSchema::PartitionType::None) return false;
@@ -2677,10 +2822,18 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
     // policy-aware TableScanOp and keep user predicates above it.
     const bool rlsApplies = engine->rlsAppliesTo(ctx.dbname, ctx.tablename);
     const bool useBitmap = !rlsApplies && canUseBitmapHeapScan(engine, ctx);
+    // GiST acceleration: a range or anchored-prefix predicate on a
+    // .gist-indexed column narrows candidates via the sidecar overlap
+    // scan.  All predicates stay in FilterOp above as the recheck
+    // boundary, identical to the bitmap path.
+    const bool useGiST = !rlsApplies && canUseGiSTScan(engine, ctx);
     if (useBitmap) {
         // Keep all predicates for FilterOp's heap recheck.  The bitmap node
         // only narrows the candidate RID set; it is not a correctness filter.
         root = std::make_unique<BitmapHeapScanOp>(
+            engine, ctx.dbname, ctx.tablename, ctx.conds);
+    } else if (useGiST) {
+        root = std::make_unique<GiSTScanOp>(
             engine, ctx.dbname, ctx.tablename, ctx.conds);
     } else if (!rlsApplies && !remainingConds.empty()) {
         for (const auto& c : remainingConds) {
@@ -3404,6 +3557,17 @@ static CostEstimate explainOp(Operator* op, int indent,
         out += prefix + "IndexScan(table=" + idx->tableName() +
                ", col=" + idx->colName() + ", val=" + idx->value() + ")" +
                costRowsStr(est, opts) + "\n";
+
+    } else if (auto* gist = dynamic_cast<GiSTScanOp*>(op)) {
+        // The sidecar overlap returns candidates, not final rows; the
+        // table row count is the safest upper bound without bucket stats.
+        double rows = static_cast<double>(
+            engine->getTableRowCount(dbname, gist->tableName()));
+        if (rows < 1.0) rows = 1.0;
+        est.rows = rows;
+        est.cost = rows * 3.0;   // random-ish heap fetches, heavier than seq
+        out += prefix + "GiSTScan(table=" + gist->tableName() +
+               ", " + gist->describeConds() + ")" + costRowsStr(est, opts) + "\n";
 
     } else if (auto* filt = dynamic_cast<FilterOp*>(op)) {
         CostEstimate child = explainOp(filt->child(), indent + 1, engine, dbname, out, opts);

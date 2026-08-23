@@ -548,14 +548,15 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 ## 7. 查询优化器和执行器差距
 
 > **已完成进展（2026-08-13）**：解析/分析层已分层（Parser → AST，`src/parser/`），Volcano 算子统一位于 `src/executor/` 并通过 `IOperator` 接口执行；`execute()` 不再是纯字符串分发器，DDL 经 `DdlExecutor` 驱动，复杂路径仍有明确 legacy/materialized-row 边界。完整 Path/RelOptInfo/PlannerInfo cost-based planner 框架仍未建立，故 7.2~7.4 仍为 ⚠️/❌，7.5/7.6/7.7（并行/JIT/AIO）仍 ❌。
+> **补充（2026-08-23）**：7.4 增加 GiST 查询路径——`GiSTScanOp` 对 `.gist` sidecar 的范围谓词/锚定前缀 LIKE 做候选 RID 收窄（FilterOp 重检，RLS/分区回退），重叠判定数值感知；同时修复 `.gist`/`.brin` 后缀 off-by-one（列发现从未生效）。7.5 的 GatherMerge/并行 HashJoin/并行聚合已在 2026-08-20 接入计划器（历史文档未同步），残余为 worker 生命周期与两阶段聚合。
 
 | # | PostgreSQL 能力 | 差距描述 | 状态 |
 |---|----------------|---------|------|
 | 7.1 | Parser/analyzer/rewrite/planner/executor 分层 | 主要在 `execute()` 中字符串解析并直接调用 engine | 🔄 |
 | 7.2 | Cost-based planner | 有简化成本、统计和 plan cache；缺少 path 枚举、参数化路径、join search、equivalence classes、pathkeys、parallel aware path | ⚠️ |
 | 7.3 | 统计信息 | 有行数、cardinality、min/max、histogram/MCV、多列简化、扩展统计对象元数据与函数依赖（dependencies）强度计算；缺少 PostgreSQL 级 ndistinct、correlation、表达式统计、catalog 和 planner 深度使用 | ⚠️ |
-| 7.4 | Index selection | 已支持等值多索引 Bitmap AND/OR、候选 RID 组合、heap fetch 和原谓词 recheck；缺少范围/并行 bitmap、skip scan、lossy pages | ⚠️ |
-| 7.5 | Parallel query | 已有非分区 heap page-range parallel scan 和确定性 Gather；缺 GatherMerge、parallel join/aggregate、worker lifecycle 与 parallel-aware path | ⚠️ |
+| 7.4 | Index selection | 已支持等值多索引 Bitmap AND/OR、候选 RID 组合、heap fetch 和原谓词 recheck；GiST sidecar 进入计划器（`GiSTScanOp`：范围谓词与锚定前缀 LIKE 的候选收窄 + FilterOp 重检，数值感知重叠判定）；缺少范围/并行 bitmap、skip scan、lossy pages | ⚠️ |
+| 7.5 | Parallel query | 已有非分区 heap page-range parallel scan、确定性 Gather、GatherMerge k 路归并、并行 HashJoin build 侧与并行分区聚合（均接入计划器）；缺独立 worker pool/work-stealing 生命周期、两阶段 parallel-aware 聚合 | ⚠️ |
 | 7.6 | JIT | 缺失 LLVM JIT | ❌ |
 | 7.7 | Async I/O | 缺失 PostgreSQL 18 AIO 子系统 | ❌ |
 | 7.8 | Plan invalidation | 缺少基于 catalog/dependency 的 plan invalidation | ❌ |

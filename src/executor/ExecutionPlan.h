@@ -207,6 +207,38 @@ private:
     bool statsRecorded_ = false;
 };
 
+// GiSTScan: range/prefix predicate acceleration over the .gist sidecar.
+// The sidecar stores one (rid, low, high) entry per row, so a range query
+// [lo, hi] becomes an overlap scan and a text-prefix query becomes a
+// "high >= prefix, low <= prefix..." containment-style scan.  The original
+// FilterOp conditions stay above this node as the correctness boundary:
+// this node only narrows candidates.
+class GiSTScanOp : public Operator {
+public:
+    GiSTScanOp(StorageEngine* engine, const std::string& dbname,
+               const std::string& tablename,
+               const std::vector<StorageEngine::Condition>& conds);
+
+    bool open() override;
+    bool next(std::string& outRow) override;
+    void close() override;
+
+    const std::string& tableName() const { return tablename_; }
+    // Human-readable predicate summary for EXPLAIN.
+    std::string describeConds() const;
+
+private:
+    StorageEngine* engine_;
+    std::string dbname_;
+    std::string tablename_;
+    std::vector<StorageEngine::Condition> conds_;
+    TableSchema tbl_;
+    std::vector<int64_t> rids_;
+    std::vector<std::string> rows_;
+    size_t pos_ = 0;
+    bool statsRecorded_ = false;
+};
+
 // BitmapHeapScan: intersect candidate RIDs from multiple equality indexes,
 // then fetch the heap rows once.  FilterOp remains above this node as the
 // visibility/condition recheck boundary.
