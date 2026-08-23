@@ -302,4 +302,18 @@ P0-3 长期停留在"仅有 SP-GiST、无通用 GiST"的记录上，但审计发
 
 验证状态：完整回归 `PASS=165 FAIL=0`（164 既有 + 新增 gist_scan_test，含 7 个 Python E2E）；ASAN CLEAN。已知边界（记录于 feature-gaps P0-3 残余）：sidecar 是线性扫描而非键聚合树（union/penalty/picksplit）；无 tsvector/几何 opclass；无 `<->` KNN；DML 后需 REINDEX 刷新 sidecar（既有行为，本批未改）。
 
+## 2026-08-23 v0.5 批次：join 视图 INSTEAD OF 触发器修复（P0-7 部分翻转）
+
+P0-7 记录"INSTEAD OF 触发器已支持"但协议级审计发现 **join 视图上的整套路径从未工作过**，且一个回归让 UPDATE/DELETE 静默影响全表。四个连环存量缺陷：
+
+1. **存储 SQL 的 token 空格拼接产生 `old . bid`**（`parser.cpp` 的 `CREATE VIEW` selectSql 与 `CREATE TRIGGER` legacy action 都用 `tokens[i] + " "` 拼接，而 lexer 把 `.` 单独切词）：join 执行器把 `jb . bid` 当未知列 → **join 视图 SELECT 恒返回空**；触发器 action 里 `old . bid` 与 `replaceTriggerReference` 的 `OLD.col` 匹配失配 → **UPDATE/DELETE 的 WHERE 失效、静默影响全表**（对生产是数据损坏级）。修复：`joinSqlTokens` 折叠 `ident . ident` → `ident.ident`（多段 `a.b.c` 连续折叠），两处存储路径统一使用。
+2. **join 视图触发器行收集走 `getViewBaseTable`**（join 视图无 BASE_TABLE 行 → `collectViewRows` 返回空 → 触发器零次触发但外层仍报成功）。修复：无 BASE_TABLE 时执行视图自身 SELECT（把 DML 的 WHERE 折叠进去）解析输出行。
+3. **join 投影 header/data 列序错位**（header 用 `set<string>` 字母序、data 用 FROM 序）——`SELECT ja.tag, jb.bid, jb.val` 的值会配错列。修复：按请求顺序输出 header，并把每行单元格重排到请求序（从引擎的 left-then-right 布局映射）。
+4. **视图行 map 只有量化键**（`jb9.bid`）而触发器替换裸引用（`NEW.bid`）→ 替换失配。修复：收集时同时提供 bare 列名键。
+5. **`INSERT ... RETURNING` 经视图触发器只有命令标签**（无 RowData）。修复：通过 `publishLastDmlResult`（新增 API）把 NEW 值投影发布为结构化结果，协议层发出真实行。
+
+新增回归：`tests/postgres_protocol_test.py` 追加 join 视图 SELECT 两列序断言、经触发器的 UPDATE/DELETE 精确行路由、单表视图触发器 `RETURNING` 行返回。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E，新断言在 postgres_protocol_test 内）。协议级手工矩阵：join 视图 SELECT / UPDATE（单行命中）/ DELETE（单行命中）/ RETURNING（单列与 `*`）全部符合预期。已知边界：复杂 `INSERT ... SELECT` 经视图触发器、transition tables、`EXECUTE FUNCTION` 运行时仍未做（feature-gaps P0-7 残余）。
+
 已知边界（记录于 feature-gaps P2-3 残余）：外部命令形式 `archive_command` 仅解析不执行（安全考虑本批只做内建 `dir:` 复制）；单时间线（timeline 1）；`pg_basebackup` 协议未实现。恢复目标为进程重启时消费,不支持在线滚动恢复。

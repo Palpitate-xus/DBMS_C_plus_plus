@@ -3068,6 +3068,9 @@ static void replaceTriggerReference(string& sql, const string& prefix,
             ++pos;
             continue;
         }
+        // Tolerate historic sidecars that stored "OLD . col" with spaces
+        // around the dot: the column match above already skipped them, but
+        // the replaced span must cover the whole spaced reference.
         sql.replace(pos, end + column.size() - pos, value);
         pos += value.size();
     }
@@ -3078,7 +3081,93 @@ static vector<map<string, string>> collectViewRows(Session& s,
                                                     const string& whereClause) {
     vector<map<string, string>> rows;
     const string baseTable = g_engine.getViewBaseTable(s.currentDB, viewname);
-    if (baseTable.empty() || !g_engine.tableExists(s.currentDB, baseTable)) return rows;
+
+    // Join/aggregate views have no single BASE_TABLE: evaluate the stored
+    // view SELECT (rewritten with the DML's WHERE) through the normal
+    // executor and parse the emitted rows.  Single-table views keep the
+    // direct scan path below — it also carries the WHERE evaluation.
+    if (baseTable.empty()) {
+        string viewSql = g_engine.getViewSQL(s.currentDB, viewname);
+        size_t btPos = viewSql.find("\nBASE_TABLE:");
+        if (btPos != string::npos) viewSql = viewSql.substr(0, btPos);
+        viewSql = trim(viewSql);
+        if (viewSql.empty()) return rows;
+        // Fold the DML predicate into the view query.  A WHERE already in
+        // the view is combined with AND; otherwise one is appended.
+        string filtered = viewSql;
+        const string normWhere = trim(whereClause);
+        if (!normWhere.empty()) {
+            string lower = toLower(filtered);
+            size_t wPos = lower.find(" where ");
+            size_t gPos = lower.find(" group by ");
+            size_t oPos = lower.find(" order by ");
+            size_t lPos = lower.find(" limit ");
+            size_t insertAt = std::min({wPos == string::npos ? filtered.size() : wPos,
+                                        gPos == string::npos ? filtered.size() : gPos,
+                                        oPos == string::npos ? filtered.size() : oPos,
+                                        lPos == string::npos ? filtered.size() : lPos});
+            if (wPos == string::npos) {
+                filtered = filtered.substr(0, insertAt) + " where " + normWhere +
+                           filtered.substr(insertAt);
+            } else {
+                // view has its own WHERE: AND it (parens around the DML one)
+                filtered = filtered.substr(0, insertAt) + " and (" + normWhere + ")" +
+                           filtered.substr(insertAt);
+            }
+        }
+        stringstream captured;
+        bool failed = false;
+        {
+            dbms::ScopedOutputCapture capture(captured);
+            try {
+                failed = execute(filtered, s);
+            } catch (...) {
+                failed = true;
+            }
+        }
+        if (failed) return rows;
+        vector<string> lines;
+        {
+            string line;
+            while (getline(captured, line)) lines.push_back(line);
+        }
+        if (lines.empty()) return rows;
+        // First line is the column header; each following line is a row of
+        // space-separated display values in header order.
+        vector<string> cols;
+        {
+            stringstream hs(lines[0]);
+            string c;
+            while (hs >> c) cols.push_back(c);
+        }
+        for (size_t i = 1; i < lines.size(); ++i) {
+            if (lines[i].rfind("ERROR", 0) == 0) return vector<map<string, string>>{};
+            vector<string> vals;
+            {
+                stringstream vs(lines[i]);
+                string v;
+                while (vs >> v) vals.push_back(v);
+            }
+            if (vals.size() != cols.size()) continue;
+            map<string, string> values;
+            for (size_t c = 0; c < cols.size(); ++c) {
+                // Headers may be qualified (jb8.bid): trigger actions
+                // reference bare NEW.bid / OLD.bid, so store the bare name
+                // (keeping the qualified form as a secondary key when the
+                // bare name would collide).
+                string name = cols[c];
+                size_t dot = name.rfind('.');
+                if (dot != string::npos && dot + 1 < name.size()) {
+                    string bare = name.substr(dot + 1);
+                    if (values.find(bare) == values.end()) values[bare] = vals[c];
+                }
+                values[name] = vals[c];
+            }
+            rows.push_back(std::move(values));
+        }
+        return rows;
+    }
+    if (!g_engine.tableExists(s.currentDB, baseTable)) return rows;
 
     const TableSchema table = g_engine.getTableSchema(s.currentDB, baseTable);
     vector<vector<dbms::StorageEngine::Condition>> groups;
@@ -10264,6 +10353,46 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     cout << "INSTEAD OF INSERT trigger executed on view " << tname
                          << " (" << valueRows.size() << " row(s))" << endl;
+                    // RETURNING through a view trigger: the inserted rows are
+                    // the NEW values each trigger invocation carried (the
+                    // action SQL's own row shape is opaque here).  Publish a
+                    // structured DmlResult so the protocol layer emits real
+                    // RowData messages, matching the plain-table path.
+                    {
+                        auto [retCols, retAll] = parseReturningClause(
+                            sql, firstValEnd != string::npos ? firstValEnd + 1 : 0);
+                        if (!retCols.empty() || retAll) {
+                            // Column order for retAll: the INSERT's explicit
+                            // column list, or the view's own column order.
+                            vector<string> retOrder;
+                            if (retAll) {
+                                retOrder = columns;
+                            } else {
+                                retOrder.assign(retCols.begin(), retCols.end());
+                            }
+                            dbms::DmlResult dml;
+                            dml.available = true;
+                            dml.columns = retOrder;
+                            dml.commandTag =
+                                "INSERT 0 " + std::to_string(valueRows.size());
+                            for (const auto& valueRow : valueRows) {
+                                vector<string> vals = splitValues(valueRow);
+                                map<string, string> newValues;
+                                for (size_t i = 0; i < columns.size() && i < vals.size(); ++i) {
+                                    newValues[columns[i]] = trim(vals[i]);
+                                }
+                                vector<string> row;
+                                for (const auto& c : retOrder) {
+                                    auto it = newValues.find(c);
+                                    row.push_back(it != newValues.end()
+                                                      ? stripQuotes(it->second)
+                                                      : "NULL");
+                                }
+                                dml.rows.push_back(std::move(row));
+                            }
+                            dbms::publishLastDmlResult(std::move(dml));
+                        }
+                    }
                     return false;
                 }
             }
@@ -13660,13 +13789,52 @@ if (sql.rfind("backup database", 0) == 0) {
             TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
             string leftPrefix = leftAlias.empty() ? leftTableName : leftAlias;
             string rightPrefix = rightAlias.empty() ? rightTableName : rightAlias;
+            // The engine emits join rows as left-table columns followed by
+            // right-table columns.  The projected header must list columns
+            // in the *requested* order and every data row must be permuted
+            // to match, otherwise values pair with the wrong headers when
+            // the requested order differs from the FROM order.
+            vector<string> requestedCols;
+            if (!selectAll) {
+                for (const auto& item : splitSelectColumns(columns)) {
+                    string col = trim(item);
+                    for (const auto& alias : {leftAlias, rightAlias}) {
+                        if (alias.empty()) continue;
+                        string prefix = alias + ".";
+                        if (col.size() > prefix.size() && col.substr(0, prefix.size()) == prefix) {
+                            col = col.substr(prefix.size());
+                        }
+                    }
+                    if (!col.empty()) requestedCols.push_back(col);
+                }
+            }
+            // Requested column -> position in the engine's row layout.
+            // Qualified names resolve to their table; bare names prefer
+            // the left table (the engine's colMap does the same).
+            auto enginePos = [&](const string& col) -> pair<int,int> {
+                // returns {which: 0 left/1 right, idx}; {-1,-1} unknown
+                if (col.find('.') != string::npos) {
+                    string tbl = col.substr(0, col.find('.'));
+                    string name = col.substr(col.find('.') + 1);
+                    const TableSchema& ts = (tbl == leftTable || tbl == leftPrefix) ? leftTbl : rightTbl;
+                    bool isLeft = (tbl == leftTable || tbl == leftPrefix);
+                    for (size_t i = 0; i < ts.len; ++i)
+                        if (ts.cols[i].dataName == name) return {isLeft ? 0 : 1, (int)i};
+                    return {-1, -1};
+                }
+                for (size_t i = 0; i < leftTbl.len; ++i)
+                    if (leftTbl.cols[i].dataName == col) return {0, (int)i};
+                for (size_t i = 0; i < rightTbl.len; ++i)
+                    if (rightTbl.cols[i].dataName == col) return {1, (int)i};
+                return {-1, -1};
+            };
             if (selectAll) {
                 for (size_t i = 0; i < leftTbl.len; ++i)
                     cout << leftPrefix << "." << leftTbl.cols[i].dataName << ' ';
                 for (size_t i = 0; i < rightTbl.len; ++i)
                     cout << rightPrefix << "." << rightTbl.cols[i].dataName << ' ';
             } else {
-                for (const auto& c : selectCols) cout << c << ' ';
+                for (const auto& c : requestedCols) cout << c << ' ';
             }
             cout << '\n';
 
@@ -13732,6 +13900,54 @@ if (sql.rfind("backup database", 0) == 0) {
                     answers.erase(answers.begin() + joff + jlim, answers.end());
                 if (joff > 0)
                     answers.erase(answers.begin(), answers.begin() + joff);
+            }
+            // Permute each row's cells into the requested projection order
+            // (engine layout is left columns then right columns).
+            if (!selectAll && !requestedCols.empty()) {
+                vector<string> permuted;
+                permuted.reserve(answers.size());
+                for (const auto& row : answers) {
+                    // Engine row cells: left columns then right columns, in
+                    // table order (the engine's filter also drops unselected
+                    // columns, so rebuild the mapping from what it kept).
+                    // Cells are space-separated display values.
+                    vector<string> cells;
+                    {
+                        stringstream rs(row);
+                        string cell;
+                        while (rs >> cell) cells.push_back(cell);
+                    }
+                    // Reconstruct which engine positions survived: the
+                    // engine keeps left cols in order, then right cols.
+                    vector<pair<int,int>> kept;   // {which, colIdx}
+                    for (size_t i = 0; i < leftTbl.len; ++i) {
+                        string n = leftTbl.cols[i].dataName;
+                        if (selectCols.count(n) || selectCols.count(leftTable + "." + n))
+                            kept.push_back({0, (int)i});
+                    }
+                    for (size_t i = 0; i < rightTbl.len; ++i) {
+                        string n = rightTbl.cols[i].dataName;
+                        if (selectCols.count(n) || selectCols.count(rightTable + "." + n))
+                            kept.push_back({1, (int)i});
+                    }
+                    string out;
+                    if (cells.size() == kept.size()) {
+                        for (const auto& c : requestedCols) {
+                            auto want = enginePos(c);
+                            int at = -1;
+                            for (size_t k = 0; k < kept.size(); ++k) {
+                                if (kept[k] == want) { at = (int)k; break; }
+                            }
+                            if (at >= 0) out += cells[at] + ' ';
+                            else out += "NULL ";
+                        }
+                        while (!out.empty() && out.back() == ' ') out.pop_back();
+                        permuted.push_back(std::move(out));
+                    } else {
+                        permuted.push_back(row);   // layout mismatch: keep as-is
+                    }
+                }
+                answers = std::move(permuted);
             }
             for (const auto& row : answers) {
                 cout << row << endl;

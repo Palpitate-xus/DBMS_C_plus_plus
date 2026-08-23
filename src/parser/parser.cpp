@@ -10,6 +10,41 @@
 
 namespace dbms {
 
+// Reassemble a lexer token stream back into SQL text.  Qualified references
+// arrive as three tokens ("jb", ".", "bid") because '.' is its own token
+// class; the naive space join produces "jb . bid", which downstream
+// executors treat as an unknown column.  Collapse identifier-dot-identifier
+// triples into "jb.bid" so views/CTEs stored from parsed statements stay
+// executable.
+static std::string joinSqlTokens(const std::vector<std::string>& tokens) {
+    std::string out;
+    auto isIdent = [](const std::string& s) {
+        if (s.empty()) return false;
+        for (char c : s) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
+        }
+        return true;
+    };
+    for (size_t i = 0; i < tokens.size();) {
+        if (i + 2 < tokens.size() && tokens[i + 1] == "." &&
+            isIdent(tokens[i]) && isIdent(tokens[i + 2])) {
+            if (!out.empty()) out += ' ';
+            out += tokens[i] + "." + tokens[i + 2];
+            i += 3;
+            // further .x segments (a.b.c)
+            while (i + 1 < tokens.size() && tokens[i] == "." && isIdent(tokens[i + 1])) {
+                out += "." + tokens[i + 1];
+                i += 2;
+            }
+            continue;
+        }
+        if (!out.empty()) out += ' ';
+        out += tokens[i];
+        ++i;
+    }
+    return out;
+}
+
 static std::string stripQuotes(const std::string& s) {
     if (s.size() >= 2 && ((s.front() == '\'' && s.back() == '\'') ||
                           (s.front() == '"' && s.back() == '"'))) {
@@ -4874,11 +4909,7 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
                 sel.resize(sel.size() - 2);
             }
         }
-        std::string selectSql;
-        for (const auto& t : sel) {
-            if (!selectSql.empty()) selectSql += " ";
-            selectSql += t;
-        }
+        std::string selectSql = joinSqlTokens(sel);
         stmt->selectSql = selectSql;
         stmt->query = parseSelect(selectSql).stmt;
         pos = tokens.size();
@@ -5504,13 +5535,11 @@ StmtPtr SQLParser::parseCreateTrigger(const std::vector<std::string>& tokens, si
             }
         }
     } else {
-        // Remaining tokens form the action SQL (legacy style).
-        std::string action;
-        while (pos < tokens.size()) {
-            if (!action.empty()) action += " ";
-            action += tokens[pos++];
-        }
-        stmt->action = action;
+        // Remaining tokens form the action SQL (legacy style).  Qualified
+        // references (NEW.col / OLD.col) must survive storage with their
+        // dots intact, so reuse the collapsing join.
+        std::vector<std::string> rest(tokens.begin() + pos, tokens.end());
+        stmt->action = joinSqlTokens(rest);
     }
 
     return stmt;

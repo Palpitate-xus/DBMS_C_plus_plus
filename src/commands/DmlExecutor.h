@@ -30,6 +30,9 @@ struct DmlResult {
 
 DmlResult takeLastDmlResult();
 void clearLastDmlResult();
+// Publish a structured DML result (used by paths outside this executor,
+// e.g. INSTEAD OF view triggers emitting RETURNING rows).
+void publishLastDmlResult(DmlResult result);
 
 // DML AST bridge entry point.  The return value follows main.cpp::execute():
 // false means success, true means an error.  `handled` is true when this

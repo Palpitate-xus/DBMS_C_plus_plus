@@ -798,6 +798,45 @@ def main():
             sock, "SELECT id FROM bitmap_t WHERE tenant = 7 OR state = 1"))
         assert bitmap_or_rows == [[b"1"], [b"2"], [b"3"]], bitmap_or_rows
 
+        # Join-view INSTEAD OF triggers: the view has no single BASE_TABLE,
+        # so row collection must go through the view's own SELECT.  A join
+        # view must be selectable, and UPDATE/DELETE through it must fire
+        # the trigger per visible row (regression: both silently affected
+        # zero rows when only BASE_TABLE views were collected).
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE jt_a (aid INT PRIMARY KEY, tag TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE jt_b (bid INT PRIMARY KEY, aid INT, val TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO jt_a VALUES (1, 'x')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO jt_b VALUES (10, 1, 'v1')"))
+        # Stored view SQL keeps qualified refs executable (jb.bid, not
+        # "jb . bid" which the join executor cannot resolve).
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE VIEW jt_view AS "
+            "SELECT jt_b.bid, jt_a.tag, jt_b.val FROM jt_b "
+            "JOIN jt_a ON jt_b.aid = jt_a.aid"))
+        join_rows = data_row_values(simple_query(
+            sock, "SELECT bid, tag, val FROM jt_view"))
+        assert join_rows == [[b"10", b"x", b"v1"]], join_rows
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER jt_view_update INSTEAD OF UPDATE ON jt_view "
+            "FOR EACH ROW UPDATE jt_b SET val = NEW.val WHERE bid = OLD.bid"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "UPDATE jt_view SET val = 'v2' WHERE bid = 10"))
+        updated = data_row_values(simple_query(
+            sock, "SELECT val FROM jt_b WHERE bid = 10"))
+        assert updated == [[b"v2"]], updated
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER jt_view_delete INSTEAD OF DELETE ON jt_view "
+            "FOR EACH ROW DELETE FROM jt_b WHERE bid = OLD.bid"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "DELETE FROM jt_view WHERE bid = 10"))
+        remaining = data_row_values(simple_query(
+            sock, "SELECT bid FROM jt_b WHERE bid = 10"))
+        assert remaining == [], remaining
+
         # INSTEAD OF view triggers must be creatable on views and must route
         # each DML operation to the trigger action instead of the base-view
         # rewrite path.
@@ -826,6 +865,13 @@ def main():
         assert data_row_values(view_rows) == [[b"alice"]], view_rows
         assert data_row_values(simple_query(
             sock, "SELECT name FROM view_trigger_base WHERE id = 11")) == [[b"carol"]]
+        # RETURNING through an INSTEAD OF insert trigger emits the projected
+        # NEW values as real RowData messages (regression: command tag only,
+        # zero rows).
+        returning_rows = data_row_values(simple_query(
+            sock, "INSERT INTO writable_view (id, name) VALUES (50, 'ret') "
+            "RETURNING id, name"))
+        assert returning_rows == [[b"50", b"ret"]], returning_rows
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "UPDATE writable_view SET name = 'bob' WHERE id > 0"))
         assert data_row_values(simple_query(

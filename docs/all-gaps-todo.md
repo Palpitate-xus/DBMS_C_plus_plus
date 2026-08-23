@@ -1,8 +1,11 @@
-# DBMS 全部 Gap TODO（唯一来源）
+# DBMS 全部 Gap TODO（历史记录）
+
+> **已于 2026-08-23 被 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 取代；逐项落地方法见 [`postgresql-18-implementation-blueprint.md`](postgresql-18-implementation-blueprint.md)。**
+> 本文件保留早期 Wave、提交和状态变化记录，不再是当前差距的权威来源；其中的日期、PASS 数和“已完成”状态可能已过时。
 
 > 生成日期：2026-06-10 | 当前审计：2026-08-14
 > 来源：基于 `postgresql-complete-gap-analysis.md` 逐条提取，**无一遗漏**
-> 原则：本文件为唯一 TODO 来源，所有 gap 状态以此为准
+> 历史原则：本文件曾作为唯一 TODO 来源；当前状态请以新审计为准
 > 状态符号：❌ 缺失 | ⚠️ 部分实现 | ✅ 已完成 | 🔄 有骨架/在途
 
 > **当前真实状态（2026-08-14）**：统一回归基线 PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；数据库初始化、checkpoint 和物理备份标记已采用原子持久化，生产化重构尚未完成。历史 Wave 记录保留为变更日志，不代表当前生产就绪。
@@ -393,7 +396,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | 1.1.30 | `CREATE TABLESPACE` / `ALTER TABLESPACE` / `DROP TABLESPACE` | 关系文件已统一路由到 `<location>/<database>/`，CREATE/ALTER SET TABLESPACE 支持跨文件系统迁移并在缺失表空间时 fail-closed；仍缺权限、owner、ALTER TABLESPACE 完整语义和 PostgreSQL OID/符号链接布局 | ⚠️ |
 | 1.1.31 | `CREATE TRIGGER` | 支持 before/after/instead of、row/statement、`WHEN`、action SQL；缺少 transition tables、constraint triggers、deferred triggers、tg_* 全量、trigger function runtime | ⚠️ |
 | 1.1.32 | `CREATE TYPE` | 支持 composite type（`AS (field type, ...)`，经 DDL 桥正确解析含修饰符字段）与 enum（`AS ENUM`）；缺少 PG 的 range/base/shell 类型创建语义 | ⚠️ |
-| 1.1.33 | `CREATE VIEW` | 支持保存 SQL 和简单 updatable view；缺少 recursive view、security_barrier、security_invoker、check option 完整性 | ⚠️ |
+| 1.1.33 | `CREATE VIEW` | 支持保存 SQL（量化引用 `a.b` 折叠存储，join 视图可执行）和简单 updatable view；INSTEAD OF 触发器对 join 视图的 UPDATE/DELETE/INSERT 精确路由（2026-08-23，含 RETURNING RowData）；缺少 recursive view、security_barrier、security_invoker、check option 完整性 | ⚠️ |
 | 1.1.34 | `DEALLOCATE` / `PREPARE` / `EXECUTE` | 使用字符串 `?` 替换与自有 `PREPARE name FROM 'sql'`/`EXECUTE ... USING` 语法；与 PostgreSQL 的 `PREPARE name [(types)] AS ... $n` 不兼容，无类型推断、binary params、plan invalidation、generic/custom plan、portal（细化方案见 feature-gaps.md P1-10） | ⚠️ |
 | 1.1.35 | `DELETE` | 支持 WHERE/USING/RETURNING 部分；缺少 PG 全语义、CTE/`ONLY`/inheritance/RETURNING OLD/NEW 复杂表达式；MySQL-only LIMIT 已移除 | ⚠️ |
 | 1.1.36 | `DISCARD` | 主要 `DISCARD ALL` 清 session 局部状态；不完整 | ⚠️ |
@@ -530,7 +533,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | # | 领域 | 差距描述 | 状态 |
 |---|------|---------|------|
 | 6.1 | `SELECT` grammar | 缺少完整 SELECT 语法树；join、where、group、window、cte 多靠字符串定位，嵌套复杂查询容易偏离 PG | ⚠️ |
-| 6.2 | Join | 支持 inner/left/right/full/cross 部分；未关联 IN/NOT IN 已有 Volcano semi/anti 节点，但显式 SEMI/ANTI、lateral 完整相关性、join reordering/search space、outer join predicate 推理仍缺 | ⚠️ |
+| 6.2 | Join | 支持 inner/left/right/full/cross 部分；两表 join 投影现按请求列序输出（header 与 data 一致，2026-08-23）；未关联 IN/NOT IN 已有 Volcano semi/anti 节点，但显式 SEMI/ANTI、lateral 完整相关性、join reordering/search space、outer join predicate 推理仍缺 | ⚠️ |
 | 6.3 | Set operations | UNION/INTERSECT/EXCEPT 已按优先级/左结合解析，组合统一走 Volcano `SetOperationOp` 并支持 ALL；复杂 producer、AST 到计划全量下推、类型合并、排序/limit 作用域和 collation 仍缺 | ⚠️ |
 | 6.4 | CTE | 有 WITH/RECURSIVE/DML CTE 痕迹；缺少 MATERIALIZED/NOT MATERIALIZED、可写 CTE 快照语义、递归检测、cycle/search 子句 | ⚠️ |
 | 6.5 | Subquery | 未关联单列 IN/NOT IN 已下推 Volcano semi/anti plan 并覆盖 NULL 语义；未关联单表 EXISTS/NOT EXISTS 已进入 ExistenceFilterOp；单个未关联标量目标已进入 init-plan 并覆盖 NULL/cardinality error；单列未关联 ANY/ALL 已进入 QuantifiedSubqueryFilterOp 并覆盖 NULL/空集三值逻辑；复杂标量、复杂关联子查询、row comparison、array ANY/ALL 和复杂组合仍不完整 | ⚠️ |

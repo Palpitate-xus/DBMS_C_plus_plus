@@ -29,6 +29,10 @@ namespace {
 thread_local DmlResult g_lastDmlResult;
 }
 
+void publishLastDmlResult(DmlResult result) {
+    g_lastDmlResult = std::move(result);
+}
+
 DmlResult takeLastDmlResult() {
     DmlResult result = std::move(g_lastDmlResult);
     g_lastDmlResult = {};

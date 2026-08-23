@@ -147,11 +147,11 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 
 ### P0-7: INSTEAD OF 视图触发器
 - **类别**: 触发器 / 数据完整性
-- **现状**: 已支持在视图上创建行级 `INSTEAD OF INSERT/UPDATE/DELETE`，并通过协议连接执行 action SQL；`NEW`/`OLD` 变量、`WHEN`、动作失败传播、server/CLI 会话执行和简单单表视图的逐行派发已接入
-- **剩余差距**: 尚未完整支持复杂 `INSERT ... SELECT`（JOIN/聚合/排序/CTE 等）、复杂视图行映射、完整 `RETURNING`、transition tables，以及真正的 `EXECUTE FUNCTION`/PL 触发器运行时
+- **现状**: ✅（复杂视图修复 2026-08-23）行级 `INSTEAD OF INSERT/UPDATE/DELETE` 支持单表与 **join 视图**：`collectViewRows` 对无 `BASE_TABLE` 的复杂视图回退为执行视图自身 SELECT（折叠 DML 的 WHERE）解析行；修复三个连环存量缺陷——(a) 视图/触发器 action 存储的 SQL 由 token 空格拼接产生 `old . bid` 量化引用（join 执行器无法解析 → join 视图 SELECT 恒空、触发器 `OLD.col` 替换失配 → UPDATE/DELETE 静默影响全表），`joinSqlTokens` 现折叠 `ident . ident` 为 `ident.ident`；(b) join 投影按请求顺序输出（此前 header 用 set 字母序、data 用 FROM 序 → 列值错位）；(c) 视图行 map 提供 bare 列名键（此前只有量化键，触发器替换 `NEW.bid` 不匹配）；`INSERT ... RETURNING` 经视图触发器通过 `DmlResult` 发布真实 RowData（此前只有命令标签零行）
+- **剩余差距**: 复杂 `INSERT ... SELECT` 经视图触发器、transition tables、真正的 `EXECUTE FUNCTION`/PL 触发器运行时
 - **PG 参考**: `CREATE TRIGGER ... INSTEAD OF INSERT OR UPDATE OR DELETE ON view FOR EACH ROW`
-- **验证**: `tests/postgres_protocol_test.py` 覆盖通过视图触发器插入、更新、删除底表行
-- **相关文件**: `src/commands/DdlExecutor.cpp`, `src/main.cpp`, `tests/postgres_protocol_test.py`
+- **验证**: `tests/postgres_protocol_test.py` 覆盖 join 视图 SELECT/UPDATE/DELETE 经触发器精确路由 + RETURNING 行返回 + 单表视图全套
+- **相关文件**: `src/commands/DdlExecutor.cpp`, `src/main.cpp`, `src/parser/parser.cpp`, `tests/postgres_protocol_test.py`
 
 ---
 
