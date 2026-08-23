@@ -873,6 +873,26 @@ def main():
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
 
+        # JOIN with a right table whose name contains "on" (e.g.
+        # "location"): the ON-clause scan must match the keyword with word
+        # boundaries, not inside the table name.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE jo_loc (x INT, y INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO jo_loc VALUES (1, 2)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE jo_plain (x INT, z INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO jo_plain VALUES (1, 5)"))
+        jo_rows = data_row_values(simple_query(
+            sock, "SELECT x, y FROM jo_plain JOIN jo_loc ON jo_plain.x = jo_loc.x"))
+        assert jo_rows == [[b"1", b"2"]], jo_rows
+        # Same for a left join with an aliased "on"-bearing right table.
+        jo_left = data_row_values(simple_query(
+            sock, "SELECT x, y FROM jo_plain LEFT JOIN jo_loc AS l "
+            "ON jo_plain.x = l.x"))
+        assert jo_left == [[b"1", b"2"]], jo_left
+
         # Transition tables: REFERENCING OLD TABLE AS <alias> on a
         # statement-level trigger exposes the pre-statement row set to the
         # action SQL as a queryable table.

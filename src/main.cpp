@@ -13749,6 +13749,11 @@ if (sql.rfind("backup database", 0) == 0) {
                                                   bestLCol, bestRCol, "inner");
 
                 done[bestI] = done[bestJ] = true;
+                // Estimated cardinality of the current intermediate result:
+                // kept as a double so successive eqjoinsel-style updates do
+                // not accumulate integer truncation.
+                double interEstRows = bestRows > 0 ? bestRows
+                    : static_cast<double>(interRows.size());
                 // Unique-ish base so a stale temp table from an earlier
                 // statement/process can never collide with this chain's
                 // intermediates (createTempTableFromRows fails silently on
@@ -13774,7 +13779,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     // column name; greedy by row count (smallest first)
                     ssize_t pickIdx = -1;
                     string pickLCol, pickRCol;
-                    size_t pickRows = 0;
+                    double pickEst = 0.0;
                     for (size_t t = 0; t < pending.size(); ++t) {
                         if (done[t]) continue;
                         // find a pred connecting t to any done table by
@@ -13797,13 +13802,28 @@ if (sql.rfind("backup database", 0) == 0) {
                             auto mit = colMap.find({other, otherCol});
                             if (mit == colMap.end()) continue;
                             otherCol = mit->second;
-                            size_t rc2 = rowCount(pending[t].name);
-                            if (pickIdx < 0 || rc2 < pickRows) {
+                            // Estimated output cardinality of joining this
+                            // table now: eqjoinsel 1/max(nd_l, nd_r) applied
+                            // to the current intermediate estimate.  Prefers
+                            // attachments whose join keys are most selective,
+                            // not merely the smallest table.
+                            double tRows = static_cast<double>(rowCount(pending[t].name));
+                            double ndL = static_cast<double>(
+                                g_engine.getColumnStats(s.currentDB, pending[t].name,
+                                                        myCol).cardinality);
+                            double ndR = static_cast<double>(
+                                g_engine.getColumnStats(s.currentDB,
+                                                        pending[other].name,
+                                                        tIsLeft ? pr.rcol : pr.lcol)
+                                    .cardinality);
+                            double nd = std::max({ndL, ndR, 1.0});
+                            double est = interEstRows * tRows / nd;
+                            if (pickIdx < 0 || est < pickEst) {
                                 pickIdx = (ssize_t)t;
                                 // join key on the intermediate side
                                 pickLCol = otherCol;
                                 pickRCol = myCol;
-                                pickRows = rc2;
+                                pickEst = est;
                             }
                         }
                     }
@@ -13812,10 +13832,11 @@ if (sql.rfind("backup database", 0) == 0) {
                         // remaining table.
                         for (size_t t = 0; t < pending.size(); ++t) {
                             if (done[t]) continue;
-                            size_t rc2 = rowCount(pending[t].name);
-                            if (pickIdx < 0 || rc2 < pickRows) {
+                            double rc2 = static_cast<double>(rowCount(pending[t].name));
+                            double est = interEstRows * rc2;   // cartesian blow-up
+                            if (pickIdx < 0 || est < pickEst) {
                                 pickIdx = (ssize_t)t;
-                                pickRows = rc2;
+                                pickEst = est;
                             }
                         }
                         if (pickIdx < 0) break;
@@ -13830,6 +13851,8 @@ if (sql.rfind("backup database", 0) == 0) {
                     // extend columns (de-duplicated the same way)
                     addCols(pickIdx, pending[pickIdx].schema);
                     interRows = std::move(newRows);
+                    interEstRows = pickEst > 0 ? pickEst
+                        : static_cast<double>(interRows.size());
                     done[pickIdx] = true;
                     --remaining;
                 }
@@ -13867,7 +13890,24 @@ if (sql.rfind("backup database", 0) == 0) {
         if (isJoin) {
             string leftTableOrig = trim(sql.substr(fromPos + 4, actualJoinPos - fromPos - 4));
             bool isCrossJoin = (jt == JoinType::Cross);
-            size_t onPos = sql.find("on", actualJoinPos);
+            // Word-boundary "on": a naive find() matches the "on" inside
+            // table names like "location"/"person", silently slicing the
+            // right table down to a prefix and failing with a bogus
+            // "not exist" (or worse, joining the wrong fragment).
+            size_t onPos = string::npos;
+            {
+                size_t p = actualJoinPos;
+                while ((p = sql.find("on", p)) != string::npos) {
+                    bool leftOk = (p == 0) ||
+                        !isalnum((unsigned char)sql[p - 1]) ||
+                        sql[p - 1] == '_';
+                    bool rightOk = (p + 2 >= sql.size()) ||
+                        !isalnum((unsigned char)sql[p + 2]) ||
+                        sql[p + 2] == '_';
+                    if (leftOk && rightOk) { onPos = p; break; }
+                    ++p;
+                }
+            }
             size_t tableNameStart = actualJoinPos;
             if (jt == JoinType::Left) tableNameStart += 9;
             else if (jt == JoinType::Right) tableNameStart += 10;

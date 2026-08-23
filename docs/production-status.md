@@ -402,3 +402,16 @@ v0.6 让 `EXECUTE FUNCTION` 触发器真正执行函数体，但函数体内 `ne
 验证：`tests/stats_planner_test.cpp` 追加两个断言——`LIKE 'hot%'` 估计 ∈ [45,95]（真实 90，平坦值只给 20）、`LIKE 'c95%'` ∈ [0,10]；既有 MCV/直方图/join 场景不回归。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。P1-12 剩余：多表 join 顺序从贪心升级为 DP 搜索、`is null`/`in` 等边缘选择率。
+
+
+## 2026-08-23 v0.12 批次：JOIN 两项修复（ON 词边界 + eqjoinsel 附表选择）
+
+多表 join 审计中发现两个缺陷，其一为静默数据路径错误：
+
+1. **`JOIN` 右表名含 "on" 即失败**（`main.cpp` 2 表 join 路径）：ON 子句定位用朴素 `sql.find("on", joinPos)`，`join location on ...` 中的 "location" 内嵌 "on" 被误认为关键字 → 右表被切至 `l` 前缀 → 报错误的 "not exist"（或更糟，join 错误片段）。实测 `select x,y from plain join location on plain.x = location.x` 稳定失败，而表名不含 "on" 的同构查询正常——纯表名运气。修复为词边界匹配（前后须为非字母数字/下划线）。别名形式（`join location as l`）同样受累并一并修复。
+
+2. **多表贪心附表选择用裸表行数**（≥3 表路径）：原逻辑每次附加"行数最小的待连接表"，完全无视连接键选择性——事实表先连 region(nd=10) 还是 cust(nd=300) 产出中间结果差 30×，原逻辑只看表大小。升级为 eqjoinsel 估计：`est = interEstRows × tableRows / max(nd_l, nd_r)`（nd 取 ANALYZE 统计 cardinality，增量维护中间估计行数），cross-join 回退同样按笛卡尔积估计选择。外连接/初始对选择逻辑不变。
+
+验证：`facts(5000)×cust(300)×prod(80)×region(10)` 星型 2/3/4 表 join + LEFT JOIN 全部行数正确；`location` 表名用例修复。新增协议回归：含 "on" 表名的 INNER/LEFT(别名) join 断言。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。P1-12 剩余：穷举 DP join 顺序（当前贪心+统计估计）、`is null`/`in` 选择率。
