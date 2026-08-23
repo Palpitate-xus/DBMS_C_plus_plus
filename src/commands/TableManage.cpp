@@ -6536,6 +6536,14 @@ void StorageEngine::writeTrigger(std::ostream& out, const Trigger& trg) const {
     out.write(&forEachRow, sizeof(char));
     char enabled = trg.enabled ? 1 : 0;
     out.write(&enabled, sizeof(char));
+    // Transition table specs ("new <name>" / "old <name>"): count-prefixed.
+    size_t tn = trg.transitions.size();
+    out.write(reinterpret_cast<const char*>(&tn), sizeof(size_t));
+    for (const auto& t : trg.transitions) {
+        size_t m = t.size();
+        out.write(reinterpret_cast<const char*>(&m), sizeof(size_t));
+        out.write(t.data(), static_cast<std::streamsize>(m));
+    }
 }
 
 StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
@@ -6561,6 +6569,20 @@ StorageEngine::Trigger StorageEngine::readTrigger(std::istream& in) const {
     in.read(&enabled, sizeof(char));
     if (!in) return {};
     trg.enabled = (enabled != 0);
+    // Transition table specs; older sidecars without this block simply
+    // leave the vector empty (read fails at EOF, tolerated).
+    size_t tn = 0;
+    in.read(reinterpret_cast<char*>(&tn), sizeof(size_t));
+    if (in && tn <= 64) {
+        for (size_t i = 0; i < tn && in; ++i) {
+            size_t m = 0;
+            in.read(reinterpret_cast<char*>(&m), sizeof(size_t));
+            if (!in || m > 256) break;
+            std::string spec(m, '\0');
+            in.read(spec.data(), static_cast<std::streamsize>(m));
+            if (in) trg.transitions.push_back(spec);
+        }
+    }
     return trg;
 }
 
@@ -15546,6 +15568,26 @@ DBStatus StorageEngine::remove(const std::string& dbname,
                 stageExecFunctionCtx(*this, trg.name, trg.timing,
                                   "DELETE", trg.tableName,
                                   trg.forEachRow, nullptr, nullptr);
+                // Transition tables (REFERENCING OLD TABLE ...): stage the
+                // full pre-statement row set for the executor to
+                // materialize as a session temp table.
+                if (!trg.transitions.empty()) {
+                    auto& ctx = const_cast<StorageEngine*>(this)->getExecFunctionCtxMut();
+                    for (const auto& spec : trg.transitions) {
+                        if (spec.rfind("old ", 0) != 0) continue;
+                        std::string name = trim(spec.substr(4));
+                        std::vector<std::map<std::string, std::string>> rows;
+                        for (const auto& row : rowsToDelete) {
+                            if (row.empty()) continue;
+                            std::map<std::string, std::string> m;
+                            for (size_t i = 0; i < tbl.len; ++i) {
+                                m[tbl.cols[i].dataName] = extractColumnValue(row, tbl, i);
+                            }
+                            rows.push_back(std::move(m));
+                        }
+                        ctx.transitionRows[name] = std::move(rows);
+                    }
+                }
                 triggerExecutor_(action);
             }
         }

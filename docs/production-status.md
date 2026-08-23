@@ -371,3 +371,19 @@ v0.6 让 `EXECUTE FUNCTION` 触发器真正执行函数体，但函数体内 `ne
 新增回归：`tests/postgres_protocol_test.py` 在协议连接上依次执行 `use info`、`use database info`、随后 `SELECT 1+1` 仍可用（连接存活断言；旧行为是第一条就杀死服务器）。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）；协议级实测短式/长式/误拼标识符三路径（服务器全程存活）。
+
+
+## 2026-08-23 v0.10 批次：transition tables 首个子集（REFERENCING OLD TABLE）
+
+`CREATE TRIGGER ... REFERENCING OLD TABLE AS x FOR EACH STATEMENT` 此前直接被 parser 丢弃（FOR EACH 子句前不认识 REFERENCING，导致其泄漏进 action 文本）。本批落地经典审计场景所需的完整链路：
+
+1. **Parser**：REFERENCING 子句按 PG 顺序在 FOR EACH 之前解析（`NEW TABLE [AS] n` / `OLD TABLE [AS] n`，可多个），存入 `CreateTriggerStmt::transitionTableNames`（`"old <name>"` 条目）；FOR EACH 恢复正确消费。
+2. **存储**：`Trigger::transitions` 字段按 count-prefix 序列化进 `.triggers` sidecar；旧 sidecar 无此块读空向量（向后兼容）。
+3. **引擎暂存**：AFTER DELETE 语句级点火点把 `rowsToDelete` 的完整预语句行集（列名→值 map）填进 `TriggerCtx::transitionRows[别名]`。
+4. **执行器物化**：触发器执行器把暂存行集建成会话临时表（REFERENCING 别名注册进 `session.tempTables`，`resolveTableName` 自动解析），action SQL 里 `FROM deleted_rows` 直接可查；action 完成后 drop 并反注册，别名不留残迹。
+
+验证：`delete ... where id <= 2` → 审计表收到被删两行、目标表剩一行；二次触发正常；语句后别名确实消失（查询报 not exist）；legacy 行级触发器不受影响。
+
+新增回归：`tests/postgres_protocol_test.py` 追加完整场景断言（建触发器、删 2 行、审计表内容、目标表剩余、别名清理）。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。已知边界：`NEW TABLE`（INSERT/UPDATE 的转换表）需语句级批处理捕获（INSERT 引擎路径逐行调用）；`OLD TABLE` 仅 AFTER DELETE。

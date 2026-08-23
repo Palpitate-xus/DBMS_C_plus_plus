@@ -148,7 +148,7 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 ### P0-7: INSTEAD OF 视图触发器
 - **类别**: 触发器 / 数据完整性
 - **现状**: ✅（复杂视图修复 2026-08-23）行级 `INSTEAD OF INSERT/UPDATE/DELETE` 支持单表与 **join 视图**：`collectViewRows` 对无 `BASE_TABLE` 的复杂视图回退为执行视图自身 SELECT（折叠 DML 的 WHERE）解析行；修复三个连环存量缺陷——(a) 视图/触发器 action 存储的 SQL 由 token 空格拼接产生 `old . bid` 量化引用（join 执行器无法解析 → join 视图 SELECT 恒空、触发器 `OLD.col` 替换失配 → UPDATE/DELETE 静默影响全表），`joinSqlTokens` 现折叠 `ident . ident` 为 `ident.ident`；(b) join 投影按请求顺序输出（此前 header 用 set 字母序、data 用 FROM 序 → 列值错位）；(c) 视图行 map 提供 bare 列名键（此前只有量化键，触发器替换 `NEW.bid` 不匹配）；`INSERT ... RETURNING` 经视图触发器通过 `DmlResult` 发布真实 RowData（此前只有命令标签零行）
-- **剩余差距**: 复杂 `INSERT ... SELECT` 经视图触发器、transition tables（触发器函数的 `NEW`/`OLD`/`TG_*` 变量注入已于 2026-08-23 v0.8 落地：PL 解释器支持 dotted 变量替换，缺失侧按 PG 语义绑定为 NULL 记录，AFTER UPDATE 从预映像取 OLD；`EXECUTE FUNCTION` 于 v0.6 接入 UDF 运行时）
+- **剩余差距**: 复杂 `INSERT ... SELECT` 经视图触发器；transition tables 已落地首个子集（2026-08-23 v0.10：`REFERENCING OLD TABLE AS x` 于 AFTER DELETE 语句级触发器——引擎暂存预语句行集、执行器物化为会话临时表供 action SQL 查询、事后清理；parser 按正确 PG 顺序在 FOR EACH 前解析 REFERENCING；`NEW TABLE`（INSERT/UPDATE）待语句级批处理捕获）；触发器函数的 `NEW`/`OLD`/`TG_*` 变量注入已于 v0.8 落地；`EXECUTE FUNCTION` 于 v0.6 接入 UDF 运行时
 - **PG 参考**: `CREATE TRIGGER ... INSTEAD OF INSERT OR UPDATE OR DELETE ON view FOR EACH ROW`
 - **验证**: `tests/postgres_protocol_test.py` 覆盖 join 视图 SELECT/UPDATE/DELETE 经触发器精确路由 + RETURNING 行返回 + 单表视图全套
 - **相关文件**: `src/commands/DdlExecutor.cpp`, `src/main.cpp`, `src/parser/parser.cpp`, `tests/postgres_protocol_test.py`

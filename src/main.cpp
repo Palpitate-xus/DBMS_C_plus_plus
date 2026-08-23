@@ -16431,7 +16431,45 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        // Transition tables (REFERENCING ...): materialize the staged row
+        // sets as session temp tables named after the REFERENCING alias so
+        // the action SQL can query them; drop them after the action runs.
+        auto& ctx = g_engine.getExecFunctionCtxMut();
+        std::vector<std::string> createdAliases;
+        for (const auto& kv : ctx.transitionRows) {
+            const std::string& alias = kv.first;
+            const auto& rows = kv.second;
+            if (rows.empty()) continue;   // no rows: leave uncreated
+            std::vector<std::string> cols;
+            for (const auto& c : rows.front()) cols.push_back(c.first);
+            std::string actual = tempTablePrefix(triggerSession, alias);
+            TableSchema tmpTbl;
+            tmpTbl.tablename = actual;
+            tmpTbl.isTemporary = true;
+            for (const auto& cname : cols) {
+                Column col;
+                col.dataName = cname;
+                col.dataType = "varchar";
+                col.isVariableLength = true;
+                col.dsize = 255;
+                col.isNull = true;
+                tmpTbl.append(col);
+            }
+            if (g_engine.createTable(triggerSession.currentDB, tmpTbl) != dbms::DBStatus::OK)
+                continue;
+            triggerSession.tempTables.insert(alias);
+            createdAliases.push_back(alias);
+            for (const auto& r : rows) {
+                g_engine.insert(triggerSession.currentDB, actual, r);
+            }
+        }
         bool failed = execute(actionSql, triggerSession);
+        for (const auto& alias : createdAliases) {
+            g_engine.dropTable(triggerSession.currentDB,
+                               tempTablePrefix(triggerSession, alias));
+            triggerSession.tempTables.erase(alias);
+        }
+        g_engine.clearExecFunctionCtx();
         dbms::setCurrentSession(activeSession);
         return failed;
     });

@@ -5479,6 +5479,33 @@ StmtPtr SQLParser::parseCreateTrigger(const std::vector<std::string>& tokens, si
         }
     }
 
+    // REFERENCING {NEW TABLE [AS] name | OLD TABLE [AS] name} [...]
+    // Transition tables: statement-level row sets exposed to the trigger
+    // action.  Stored as "new <name>" / "old <name>" entries.
+    while (match(tokens, pos, "referencing")) {
+        ++pos;
+        bool parsedAny = false;
+        while (pos + 1 < tokens.size() && match(tokens, pos, "new") &&
+               match(tokens, pos + 1, "table")) {
+            pos += 2;
+            if (match(tokens, pos, "as")) ++pos;
+            if (pos < tokens.size()) {
+                stmt->transitionTableNames.push_back("new " + tokens[pos++]);
+                parsedAny = true;
+            }
+        }
+        while (pos + 1 < tokens.size() && match(tokens, pos, "old") &&
+               match(tokens, pos + 1, "table")) {
+            pos += 2;
+            if (match(tokens, pos, "as")) ++pos;
+            if (pos < tokens.size()) {
+                stmt->transitionTableNames.push_back("old " + tokens[pos++]);
+                parsedAny = true;
+            }
+        }
+        if (!parsedAny) break;  // malformed; leave for later error handling
+    }
+
     // FOR EACH ROW / STATEMENT
     if (match(tokens, pos, "for") && match(tokens, pos + 1, "each")) {
         pos += 2;

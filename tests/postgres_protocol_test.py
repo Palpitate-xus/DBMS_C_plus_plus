@@ -873,6 +873,31 @@ def main():
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
 
+        # Transition tables: REFERENCING OLD TABLE AS <alias> on a
+        # statement-level trigger exposes the pre-statement row set to the
+        # action SQL as a queryable table.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE tt_src (id INT PRIMARY KEY, v TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO tt_src VALUES (1, 'a'), (2, 'b'), (3, 'c')"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE tt_archive (id INT, v TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TRIGGER tt_del_arch AFTER DELETE ON tt_src "
+            "REFERENCING OLD TABLE AS deleted_rows FOR EACH STATEMENT "
+            "INSERT INTO tt_archive SELECT id, v FROM deleted_rows"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "DELETE FROM tt_src WHERE id <= 2"))
+        tt_arch = data_row_values(simple_query(
+            sock, "SELECT id, v FROM tt_archive"))
+        assert tt_arch == [[b"1", b"a"], [b"2", b"b"]], tt_arch
+        tt_left = data_row_values(simple_query(
+            sock, "SELECT id FROM tt_src"))
+        assert tt_left == [[b"3"]], tt_left
+        # The transition alias is dropped after the statement.
+        tt_gone = simple_query(sock, "SELECT * FROM deleted_rows")
+        assert any(kind == b"E" for kind, _ in tt_gone), tt_gone
+
         # "use <db>" must not kill the backend: the parser classifies any
         # leading "use" as UseDatabase and the handler used to slice a
         # 13-char prefix unconditionally (out_of_range abort on the short

@@ -333,7 +333,11 @@ public:
     // tg_name / tg_op / ... diagnostics).
     struct TriggerCtx {
         std::map<std::string, std::string> vars;
-        bool empty() const { return vars.empty(); }
+        // Transition tables: logical name -> column/value row maps, staged by
+        // the engine for statement-level triggers and materialized as session
+        // temp tables by the executor before the action runs.
+        std::map<std::string, std::vector<std::map<std::string, std::string>>> transitionRows;
+        bool empty() const { return vars.empty() && transitionRows.empty(); }
     };
     bool callUDFWithCtx(const std::string& dbname, const std::string& funcname,
                         const std::vector<std::string>& argValues,
@@ -1052,6 +1056,8 @@ public:
         std::string whenCondition; // WHEN (condition) — empty = no condition
         bool forEachRow = true;  // true = FOR EACH ROW, false = FOR EACH STATEMENT
         bool enabled = true;     // true = ENABLED, false = DISABLED
+        // Transition tables (REFERENCING clause): "new <name>" / "old <name>".
+        std::vector<std::string> transitions;
     };
     DBStatus createTrigger(const std::string& dbname, const Trigger& trg);
     DBStatus dropTrigger(const std::string& dbname, const std::string& trgName);
@@ -1064,6 +1070,7 @@ public:
     // the executor for UDF-dispatched actions.
     void setExecFunctionCtx(TriggerCtx ctx) const { execFunctionCtx_ = std::move(ctx); }
     const TriggerCtx& getExecFunctionCtx() const { return execFunctionCtx_; }
+    TriggerCtx& getExecFunctionCtxMut() const { return execFunctionCtx_; }
     void clearExecFunctionCtx() const { execFunctionCtx_ = TriggerCtx{}; }
     std::vector<Trigger> getAllTriggers(const std::string& dbname) const;
 

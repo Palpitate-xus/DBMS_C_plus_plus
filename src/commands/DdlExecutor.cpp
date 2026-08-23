@@ -4122,6 +4122,7 @@ bool DdlExecutor::executeCreateTrigger(const CreateTriggerStmt* stmt, Session& s
     trg.action = stmt->action;
     if (stmt->whenCondition) trg.whenCondition = stmt->whenCondition->toString();
     trg.forEachRow = stmt->forEachRow;
+    trg.transitions = stmt->transitionTableNames;
 
     // PostgreSQL only permits INSTEAD OF triggers on views, and they are
     // row-level triggers.  Enforce this at DDL time so the DML executor never
