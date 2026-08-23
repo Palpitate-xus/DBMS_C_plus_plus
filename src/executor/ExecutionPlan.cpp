@@ -3394,7 +3394,68 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
         eqCond.value = cond.value;
         return 1.0 - estimateSelectivity(eqCond, engine, dbname, tablename);
     }
-    if (cond.op == "like") return 0.2;
+    if (cond.op == "like") {
+        // PG-style likesel: a literal prefix (LIKE 'abc%') bounds the
+        // estimate by the fraction of values ordering below the prefix's
+        // upper edge (prefix++ via last-char increment, histogram-driven).
+        // Without a literal prefix keep the historical flat guess.
+        std::string pat = cond.value;
+        // Callers hand either the bare pattern or a quoted literal; accept
+        // both (parseConditions strips, raw PlanContext conds may not).
+        if (pat.size() >= 2 && pat.front() == '\'' && pat.back() == '\'') {
+            pat = pat.substr(1, pat.size() - 2);
+        }
+        std::string prefix;
+        for (size_t i = 0; i < pat.size(); ++i) {
+            char ch = pat[i];
+            if (ch == '%' || ch == '_') break;
+            if (ch == '\\' && i + 1 < pat.size()) {   // escaped wildcard
+                prefix += pat[++i];
+                continue;
+            }
+            prefix += ch;
+        }
+        if (prefix.empty()) return 0.2;
+        // prefix++ : increment the last character; carries saturate by
+        // appending (max char -> grow the string), like PG's
+        // make_greater_string in spirit.
+        std::string upper = prefix;
+        bool carry = true;
+        for (int i = static_cast<int>(upper.size()) - 1; i >= 0 && carry; --i) {
+            if (static_cast<unsigned char>(upper[i]) < 255) {
+                ++upper[i];
+                carry = false;
+            } else {
+                upper[i] = '\x01';
+            }
+        }
+        if (carry) upper += '\x01';
+        // sel(LIKE 'p%') ~ sel(prefix <= v < prefix++) via the histogram.
+        StorageEngine::Condition lo;
+        lo.op = ">=";
+        lo.colName = cond.colName;
+        lo.value = prefix;
+        StorageEngine::Condition hi;
+        hi.op = "<";
+        hi.colName = cond.colName;
+        hi.value = upper;
+        double s = estimateSelectivity(lo, engine, dbname, tablename) *
+                   estimateSelectivity(hi, engine, dbname, tablename);
+        // MCV correction: hot values inside the prefix range give exact
+        // frequencies that the uniform histogram misses.
+        double rows = static_cast<double>(engine->getTableRowCount(dbname, tablename));
+        double mcvInside = 0.0;
+        for (const auto& m : stats.mcv) {
+            const std::string& v = m.first;
+            bool ge = !statLess(v, prefix);
+            bool lt = statLess(v, upper);
+            if (ge && lt && rows > 0) mcvInside += static_cast<double>(m.second) / rows;
+        }
+        if (mcvInside > s) s = mcvInside;
+        if (s <= 0.0) s = 0.001;
+        if (s >= 1.0) s = 0.999;
+        return s;
+    }
     if (cond.op == "<" || cond.op == "<=" || cond.op == ">" || cond.op == ">=") {
         // Histogram interpolation: fraction of buckets whose range lies
         // below (or above) the probe value, with linear position inside the

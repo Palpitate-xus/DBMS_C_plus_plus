@@ -126,6 +126,27 @@ int main() {
               << " <1=" << lt1Rows << ")" << std::endl;
 
     // ------------------------------------------------------------------
+    // 2b. LIKE prefix selectivity: 90 rows 'hot...' vs 10 'cN'.
+    //     LIKE 'hot%' must estimate far above the flat 0.2 guess.
+    // ------------------------------------------------------------------
+    ctx.tablename = "m";
+    ctx.conds = {{"like", "tag", "'hot%'"}};
+    plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    explain = dbms::QueryPlanner::explain(plan, &g_engine, db);
+    int likeHotRows = parseRows(explain, "Filter");
+    // True count is 90; flat 0.2 would say 20.  MCV/histogram-driven must
+    // land well above the flat guess and inside a sane band.
+    assert(likeHotRows >= 45 && likeHotRows <= 95);
+    // A rare prefix matches ~1 row (c95).
+    ctx.conds = {{"like", "tag", "'c95%'"}};
+    plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    explain = dbms::QueryPlanner::explain(plan, &g_engine, db);
+    int likeColdRows = parseRows(explain, "Filter");
+    assert(likeColdRows >= 0 && likeColdRows <= 10);
+    std::cout << "[STATS-PLAN] like prefix selectivity OK (hot=" << likeHotRows
+              << " cold=" << likeColdRows << ")" << std::endl;
+
+    // ------------------------------------------------------------------
     // 3. Join selectivity: orders(1000 rows) x customers(100 rows) on
     //    customer_id with ndistinct 100 -> est rows ~= 1000*100/100 = 1000.
     // ------------------------------------------------------------------

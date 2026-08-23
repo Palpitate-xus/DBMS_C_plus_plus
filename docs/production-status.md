@@ -387,3 +387,18 @@ v0.6 让 `EXECUTE FUNCTION` 触发器真正执行函数体，但函数体内 `ne
 新增回归：`tests/postgres_protocol_test.py` 追加完整场景断言（建触发器、删 2 行、审计表内容、目标表剩余、别名清理）。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。已知边界：`NEW TABLE`（INSERT/UPDATE 的转换表）需语句级批处理捕获（INSERT 引擎路径逐行调用）；`OLD TABLE` 仅 AFTER DELETE。
+
+
+## 2026-08-23 v0.11 批次：likesel 接入统计（P1-12 残余项）
+
+`LIKE` 选择率是 `estimateSelectivity` 中最后一个硬编码（恒 0.2）：90 行 'hot' + 10 行 'cN' 的列上 `LIKE 'hot%'` 估计 20 行（真实 90）——倾斜数据下 LIKE 谓词的行数估计完全失真。
+
+实现 PG 风格 likesel（`ExecutionPlan.cpp`）：
+1. 提取模式字面前缀（`%`/`_` 截断，`\\` 转义通配符计入前缀）；无字面前缀（如 `'%x'`）保持平坦 0.2。
+2. 前缀上界 prefix++：末字符递增、255 进位回退为 \x01、全进位则追加字节——取直方图上 `>= prefix AND < prefix++` 的区间估计作为前缀匹配选择率。
+3. MCV 修正：热值落在区间内时用精确频率（count/rows）对直方图的均匀假设做上修（取较大者）。
+4. 模式值既接受 parseConditions 已剥引号的裸文本，也接受 PlanContext 直接传入的 `'hot%'` 字面量。
+
+验证：`tests/stats_planner_test.cpp` 追加两个断言——`LIKE 'hot%'` 估计 ∈ [45,95]（真实 90，平坦值只给 20）、`LIKE 'c95%'` ∈ [0,10]；既有 MCV/直方图/join 场景不回归。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。P1-12 剩余：多表 join 顺序从贪心升级为 DP 搜索、`is null`/`in` 等边缘选择率。
