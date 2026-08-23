@@ -718,7 +718,12 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     }
     if (lsql.substr(0, 4) == "show") return SqlCommand::Show;
     if (lsql.substr(0, 5) == "reset") return SqlCommand::Reset;
-    if (lsql.substr(0, 3) == "use") return SqlCommand::UseDatabase;
+    // "use" must be followed by a word boundary: "user_xyz" or "utils"
+    // are identifiers, not this command.
+    if (lsql.substr(0, 3) == "use" &&
+        (lsql.size() == 3 || isspace(static_cast<unsigned char>(lsql[3])))) {
+        return SqlCommand::UseDatabase;
+    }
     if (lsql.substr(0, 7) == "discard") return SqlCommand::Discard;
 
     // Utility

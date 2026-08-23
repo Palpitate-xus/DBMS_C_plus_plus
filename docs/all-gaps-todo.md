@@ -698,7 +698,7 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 
 | # | 项目特性 | PostgreSQL 情况 |
 |---|---------|----------------|
-| 15.1 | `USE DATABASE db` | PG 连接后不能用 SQL 切换数据库 |
+| 15.1 | `USE DATABASE db` | 会话内 `use <db>`/`use database <db>` 均可切换（2026-08-23 v0.9 修复短式 substr(13) 越界崩溃 + parser 词边界）；仍与 PG 语义不同（PG 需重连接切换数据库） |
 | 15.2 | `REPLACE INTO` | MySQL 语法，PG 不支持 |
 | 15.3 | `LOAD DATA INFILE` | MySQL 风格，PG 使用 `COPY`/\`copy` |
 | 15.4 | `SELECT ... INTO OUTFILE` | MySQL 风格；PG `SELECT INTO` 是建表，导出用 `COPY TO` |

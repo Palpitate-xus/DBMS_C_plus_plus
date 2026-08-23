@@ -9433,7 +9433,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return executeValuesStatement(sql);
 
         case dbms::SqlCommand::UseDatabase: {
-            string dbname = trim(sql.substr(13)); // skip "use database"
+            // Accept both "use database <name>" (13-char prefix) and the
+            // short "use <name>" form.  The parser classifies any leading
+            // "use" here, so the short form used to hit substr(13) on a
+            // shorter string and abort the backend with out_of_range.
+            string dbname;
+            if (sql.size() >= 13 && sql.substr(0, 13) == "use database ") {
+                dbname = trim(sql.substr(13));
+            } else {
+                dbname = trim(sql.substr(3));
+            }
+            if (dbname.empty()) {
+                cout << "SQL syntax error: use [database] name" << endl;
+                return true;
+            }
             if (dbname != "information_schema" && !g_engine.databaseExists(dbname)) {
                 cout << "Database not found" << endl;
                 s.currentDB = "";

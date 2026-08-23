@@ -873,6 +873,18 @@ def main():
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
 
+        # "use <db>" must not kill the backend: the parser classifies any
+        # leading "use" as UseDatabase and the handler used to slice a
+        # 13-char prefix unconditionally (out_of_range abort on the short
+        # form).  Both forms now succeed/fail cleanly and the connection
+        # stays alive afterwards.
+        use_short = simple_query(sock, "use info")
+        assert any(kind == b"Z" for kind, _ in use_short), use_short
+        use_long = simple_query(sock, "use database info")
+        assert any(kind == b"Z" for kind, _ in use_long), use_long
+        alive = data_row_values(simple_query(sock, "SELECT 1 + 1"))
+        assert alive == [[b"2"]], alive
+
         # FROM-less SELECT evaluates a single-row constant projection
         # (regression: any non-unnest projection raised "SQL syntax error").
         assert any(kind == b"C" for kind, _ in simple_query(

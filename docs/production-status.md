@@ -358,3 +358,16 @@ v0.6 让 `EXECUTE FUNCTION` 触发器真正执行函数体，但函数体内 `ne
 新增回归：`tests/postgres_protocol_test.py` 追加同一审计函数在 INSERT（NEW 可见/OLD null）、UPDATE（OLD=旧值/NEW=新值）、DELETE（OLD 可见/NEW null）三事件的完整断言。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。已知边界：函数体引用不存在的字段仍静默保留文本（PG 报 "record ... has no field"）；`tg_argv`/`tg_tag`/`tg_table_name` 等扩展变量未提供。
+
+
+## 2026-08-23 v0.9 批次：`use <db>` 后端崩溃修复
+
+`use testdb;`（PG 生态客户端常见的手工切换写法）直接令后端 abort：parser 把所有以 "use" 开头的语句归类 `UseDatabase`，而处理器无条件 `sql.substr(13)`（跳过 "use database" 前缀）——短式 9 字符越界抛 `std::out_of_range`，未捕获 → 进程崩溃（协议连接即 DoS）。
+
+修复两处：
+1. `main.cpp` UseDatabase 分支：先识别 13 字符 "use database " 前缀，否则按短式 `use <name>`（`substr(3)`）解析；空名报语法错误而非崩溃。
+2. `parser.cpp` 归类加词边界：`use` 后必须紧跟空白或行尾——`username_check` 这类标识符不再被误分类为 UseDatabase（此前会误吞进数据库切换逻辑）。
+
+新增回归：`tests/postgres_protocol_test.py` 在协议连接上依次执行 `use info`、`use database info`、随后 `SELECT 1+1` 仍可用（连接存活断言；旧行为是第一条就杀死服务器）。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）；协议级实测短式/长式/误拼标识符三路径（服务器全程存活）。
