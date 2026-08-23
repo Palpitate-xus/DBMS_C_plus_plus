@@ -32,6 +32,7 @@
 18. [网络服务](#18-网络服务)
 19. [预编译语句](#19-预编译语句)
 20. [导入导出](#20-导入导出)
+    - [WAL 归档与时间点恢复 (PITR)](#201-wal-归档与时间点恢复-pitr)
 21. [pg_hba 访问控制](#21-pg_hba-访问控制)
 22. [复制与高可用](#22-复制与高可用)
 23. [大对象](#23-大对象)
@@ -957,9 +958,59 @@ COPY users TO 'output.csv';
 DUMP DATABASE mydb TO 'mydb.sql';
 RESTORE DATABASE mydb FROM 'mydb.sql';
 
--- BACKUP
+-- BACKUP (物理备份: 整库目录快照)
 BACKUP DATABASE mydb TO 'mydb.bak';
 ```
+
+---
+
+## 20.1 WAL 归档与时间点恢复 (PITR)
+
+### 配置归档
+
+`dbms.conf` 中设置 `archive_command`（单引号值,可含空格和 `=`）:
+
+```
+# 内建安全模式: 段被原子复制到目录 (无 shell)
+archive_command='dir:/var/dbms/archive'
+
+# 外部命令形式已保留 (dir: 前缀以外的值暂不执行)
+```
+
+归档触发在 checkpoint 边界: 完整写满的段先标记 `archive_status/<seg>.ready`,
+复制成功后翻转为 `.done`; 失败保留 `.ready`,后台归档线程每轮重试。
+
+### 强制切换段 (pg_switch_wal)
+
+小负载不会自然填满 16 MiB 段。要在关键时刻确保 WAL 已归档:
+
+```sql
+PG_SWITCH_WAL;   -- 当前段零填充关闭, 后续记录写入新段
+CHECKPOINT;      -- 关闭的段此刻被归档
+```
+
+### 时间点恢复
+
+```sql
+-- 1. 基础备份
+BACKUP DATABASE mydb TO '/backup/mydb_base';
+
+-- 2. (持续运行中) 事务不断写入并被归档
+
+-- 3. 灾难发生: 恢复到过去某一时刻
+RESTORE DATABASE mydb FROM '/backup/mydb_base'
+    PITR '2026-08-23 12:34:56' ARCHIVE '/var/dbms/archive';
+
+-- 4. 重启进程: 恢复重放归档 WAL, 目标时刻之后的事务被回滚
+```
+
+语义:
+
+- 恢复目标时刻**含**该时刻: 恰在目标时刻提交的事务保留。
+- 目标之后提交的事务按未提交处理,其 before-image 被恢复(等于这些写入从未发生)。
+- 恢复目标是单次的: 重放成功后 `recovery_target` 标记被消费,后续重启是普通崩溃恢复。
+- 提交时间戳以 v2 格式写在 WAL 提交记录里; 旧格式记录按"无限制"重放。
+- 时间线固定为 1 (多时间线 `PITR` 分支仍为差距, 见 feature-gaps.md)。
 
 ---
 

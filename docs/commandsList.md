@@ -1497,11 +1497,47 @@ RESTORE DATABASE shopdb FROM '/tmp/shopdb_backup.sql';
 BACKUP DATABASE database_name TO 'file_path'
 ```
 
-**说明** 将数据库文件直接复制到指定路径。
+**说明** 将数据库目录做物理快照复制到指定路径（配合 PITR 使用的基础备份）。
 
 **示例**
 ```sql
 BACKUP DATABASE shopdb TO '/backup/shopdb.bak';
+```
+
+---
+
+### RESTORE DATABASE (物理恢复 / PITR)
+
+**语法**
+```sql
+RESTORE DATABASE database_name FROM 'backup_path'
+    [PITR 'YYYY-MM-DD HH:MM:SS' ARCHIVE 'archive_dir']
+```
+
+**说明** 不带 PITR 子句时直接用备份覆盖恢复数据库；带 PITR 时把归档目录中该库时间线的段回填 pg_wal,并持久化恢复目标,下一次进程启动时恢复重放 WAL,目标时刻之后提交的事务被回滚（before-image 恢复）。目标含该时刻;恢复目标单次消费。
+
+**示例**
+```sql
+RESTORE DATABASE shopdb FROM '/backup/shopdb.bak';
+RESTORE DATABASE shopdb FROM '/backup/shopdb.bak'
+    PITR '2026-08-23 12:34:56' ARCHIVE '/var/dbms/archive';
+```
+
+---
+
+### PG_SWITCH_WAL
+
+**语法**
+```sql
+PG_SWITCH_WAL;
+```
+
+**说明** 将当前 WAL 段零填充关闭,后续记录写入新段;配合 CHECKPOINT 让关闭的段立即可归档。小负载填不满 16 MiB 段时用它确保关键 WAL 已进入归档。
+
+**示例**
+```sql
+PG_SWITCH_WAL;
+CHECKPOINT;
 ```
 
 ---

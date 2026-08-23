@@ -4,9 +4,9 @@
 > 基于 `docs/postgresql-comparison.md` 代码验证结果整理
 > 本 DBMS 当前状态（2026-08-14）: 生产化重构进行中，统一回归基线 PASS=139 FAIL=0（137 个 C++ 测试 + 协议 E2E + 窗口函数 E2E）；v2/8 KiB 存储格式已统一，heap 文件头和页面完整性校验 fail-closed，旧数据不迁移；数据库初始化、checkpoint 和物理备份标记采用原子持久化，部分创建失败会清理目录；事务提交现在先保证 COMMIT WAL 刷盘再发布 CLOG 可见性，PREPARE 前刷 heap/index 缓存并原子 durable 发布 prepared 元数据，跨进程可恢复表/row/page/gap 锁；snapshot export/import 已升级为数据库绑定的 v2 格式并限制在首次读写前导入，但完整 DDL 依赖事务和全局 2PC 语义仍在建设。
 
-WAL 当前明确区分合法 LSN 0 与无效哨兵；恢复会忽略未初始化页的无效页 LSN，多个 WAL writer 通过进程/文件锁和磁盘尾部刷新串行化追加。heap 使用 page before/after image，B+Tree/Hash 使用完整索引文件 before/after image；同事务重复页 before-image 已去重，WAL 追加维护增量尾部状态（常开 fd + 按库互斥）。归档复制采用临时文件、文件/目录 `fsync` 和原子状态发布，失败保留 `.ready` 供重试；GIN/GiST/SP-GiST/BRIN、原生 page-level 索引 WAL、PITR 和完整 PostgreSQL 恢复语义仍属于差距。
+WAL 当前明确区分合法 LSN 0 与无效哨兵；恢复会忽略未初始化页的无效页 LSN，多个 WAL writer 通过进程/文件锁和磁盘尾部刷新串行化追加。heap 使用 page before/after image，B+Tree/Hash 使用完整索引文件 before/after image；同事务重复页 before-image 已去重，WAL 追加维护增量尾部状态（常开 fd + 按库互斥）。归档复制采用临时文件、文件/目录 `fsync` 和原子状态发布，失败保留 `.ready` 供重试；GIN/GiST/SP-GiST/BRIN、原生 page-level 索引 WAL 和完整 PostgreSQL 恢复语义仍属于差距（基础 PITR 已于 2026-08-23 落地,见 P2-3）。
 
-2026-08-14 性能与并发硬化轮次已完成（详见 production-status.md）：元数据/schema/序列内存缓存、缓冲池扩容（256/128 帧，环境变量可覆盖）与页校验降频（仅磁盘加载时）、B+ 树二分查找 + 节点缓存、BufferPool 磁盘 I/O 移出池锁（单加载者规则 + 孤儿帧失效语义，TSAN/ASAN 压测 0 竞态 0 损坏）、FSM/VM/PageAllocator/索引内部锁补全、INSERT 意图锁降级。性能差距项（缓冲池大小、逐条校验、线性查找、每行元数据重读）不再是缺口；仍未覆盖的差距：查询优化器代价模型、并行查询、page-level 索引 WAL、PITR、多进程 postmaster 架构。
+2026-08-14 性能与并发硬化轮次已完成（详见 production-status.md）：元数据/schema/序列内存缓存、缓冲池扩容（256/128 帧，环境变量可覆盖）与页校验降频（仅磁盘加载时）、B+ 树二分查找 + 节点缓存、BufferPool 磁盘 I/O 移出池锁（单加载者规则 + 孤儿帧失效语义，TSAN/ASAN 压测 0 竞态 0 损坏）、FSM/VM/PageAllocator/索引内部锁补全、INSERT 意图锁降级。性能差距项（缓冲池大小、逐条校验、线性查找、每行元数据重读）不再是缺口；仍未覆盖的差距：查询优化器代价模型、并行查询、page-level 索引 WAL、多时间线 PITR、多进程 postmaster 架构（基础 PITR 已落地,见 P2-3）。
 
 本文件列出与 PostgreSQL 18 生产级完整度的所有差距，按优先级分级，
 每项标注类别、影响范围、预估工作量，供下一阶段实施参考。
@@ -374,17 +374,17 @@ RLS 当前执行路径已补齐 PostgreSQL 基础策略组合：策略默认为 
 - **预估工作量**: ~~3-5 天~~ 已完成
 - **相关文件**: `src/access/BloomIndex.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `src/commands/DdlExecutor.cpp`, `src/executor/ExecutionPlan.cpp`, `tests/bloom_index_test.cpp`
 
-### P2-3: 增量备份
+### P2-3: 增量备份 ✅（部分: WAL 归档 + PITR, 2026-08-23）
 - **类别**: 运维 / 高可用
-- **现状**: 仅有全量 DUMP/BACKUP
+- **现状**: ✅ WAL 归档与 PITR 已实现: `archive_command='dir:<path>'`（`Config` 单引号值解析,checkpoint 边界标记 `.ready`→原子复制→`.done`,失败保留 `.ready` 由 bgwriter 每 200ms 重试）; `PG_SWITCH_WAL` 强制关闭当前段（零填充,记录链遍历器在填充处停止）; `RESTORE DATABASE db FROM 'bk' PITR 'YYYY-MM-DD HH:MM:SS' ARCHIVE 'dir'`（归档段回填 pg_wal + 持久化 `recovery_target`,下次启动恢复时目标之后的提交按未提交回滚,单次消费）。提交记录 v2 格式携带时间戳,v1 记录兼容。E2E: 备份→分段写入→PITR 到中间时刻→目标后写入消失。残余: 外部命令形式 `archive_command` 解析但不执行; 多时间线; `pg_basebackup` 协议
 - **PG 参考**: `pg_basebackup` + WAL archiving
-- **影响**: 大库备份慢、无法做 PITR
+- **影响**: 已可做时间点恢复; 大库快速增量基础备份仍缺
 - **实现路径**:
-  1. 实现 WAL archiving：`archive_command` 配置
+  1. ✅ 实现 WAL archiving：`archive_command` 配置
   2. 实现 `pg_basebackup` 协议
-  3. 实现 PITR 恢复：`recovery_target_time`
+  3. ✅ 实现 PITR 恢复：`recovery_target_time`
 - **预估工作量**: 1-2 周
-- **相关文件**: `src/replication/ReplicationManager.cpp`
+- **相关文件**: `src/storage/WAL.{h,cpp}`, `src/commands/TableManage.{h,cpp}`, `src/common/Config.{h,cpp}`, `src/main.cpp`, `tests/wal_archive_conf_test.cpp`
 
 ### P2-4: 连接池 (PgBouncer 式) ✅（2026-08-20）
 - **类别**: 网络 / 连接管理

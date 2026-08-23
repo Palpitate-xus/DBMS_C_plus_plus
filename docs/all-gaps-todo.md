@@ -345,9 +345,9 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 | 优化器/执行器 | 简化 | 中量 | 大量 ❌ | Volcano 算子已统一位于 `src/executor/`，但完整 Path/RelOptInfo/cost-based planner 框架仍未建 |
 | 索引 | 6 种 | 简化 | 大量 ❌ | `StorageEngine` 已统一实际访问入口；AM API/opclass/concurrent/维护仍 ❌ |
 | 事务/MVCC | 基础→中量 | 中量 | 部分 ❌ | xmin/xmax/ctid/HOT、CLOG(pg_xact)、snapshot export/import+subxip 已实现；SSI 已有行级/页级写偏差检测与空范围关系级 SIREAD，索引范围粒度及完整子事务仍 ❌ |
-| 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；PITR/真实 freeze 仍 ❌ |
+| 存储/WAL | 基础 ✅ | 中量 | 部分 ❌ | redo WAL(LSN/segment/full-page/redo/timeline/archive)、forks(main/fsm/vm/init)、数据库路径管理、BufferPool(clock sweep/pin)、TOAST、checksum 已实现；旧 ClusterLayout 已删除；基础 PITR ✅(2026-08-23: archive_command dir: 归档 + pg_switch_wal + RESTORE ... PITR 'ts' ARCHIVE 'dir',单时间线)；真实 freeze 仍 ❌ |
 | 安全/权限 | 基础 | 简化 | 大量 ❌ | pg_authid/auth_members 已建；运行时 pg_hba、SCRAM 和基础 wire protocol 已接入，完整 ACL、channel binding 和协议语义仍待完善 |
-| 复制/HA | 复制槽/standby/promote 管理层 | WAL archive、slot 状态与配置框架 | 真实流复制/逻辑解码/PITR ❌ | `ReplicationManager` 已具备线程安全值快照、slot 定义校验和生命周期 API；尚未接入 WAL sender/receiver |
+| 复制/HA | 复制槽/standby/promote 管理层 | WAL archive、slot 状态与配置框架 | 真实流复制/逻辑解码 ❌（基础 PITR ✅ 2026-08-23,归档重放路径,非流复制） | `ReplicationManager` 已具备线程安全值快照、slot 定义校验和生命周期 API；尚未接入 WAL sender/receiver |
 | 监控/诊断 | 子集 | 子集 | 大量 ❌ | RuntimeStats 已接入 pg_stat_database/pg_stat_tables/pg_stat_activity/locks/statements 风格子集；pg_stat_io/wait events 缺 |
 | 扩展/生态 | 0 | 0 | 全部 ❌ | EXTENSION/FDW/PL 全缺；event trigger/rule 仅 parser classify stub |
 
