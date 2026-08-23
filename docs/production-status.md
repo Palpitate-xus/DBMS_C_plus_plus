@@ -277,3 +277,15 @@ DDL 回滚边界继续收敛：`DdlTransaction` 现在可以撤销 view、materi
 
 验证入口：`./scripts/build.sh`、`./scripts/run_all_tests_fast.sh`、`./scripts/build_tests.sh`；两个 E2E 已由统一测试入口自动执行。DML AST 路径另由 parser 单测和协议 E2E 覆盖。Docker 镜像构建使用 `docker build`。CMake 验证需要环境提供 `cmake` 可执行文件。
 - SQL 解析边界继续收敛：`LIMIT/OFFSET/FETCH` 的无符号计数现在要求完整十进制整数，非法值、缺失值和不完整 FETCH 子句均返回解析错误，不再被异常吞掉后静默变成默认的“无限制”。`FETCH FIRST/NEXT` 省略 count 时按 PostgreSQL 语法默认 1 行处理。
+
+## 2026-08-23 v0.3 批次：PITR（时间点恢复）落地
+
+本批次关闭 P0 级差距"时间点恢复"，分三个提交完成并各自全量验证：
+
+1. **WAL 归档执行**（`3976309`）：`archive_command='dir:<path>'` 配置（单引号值可含空格与 `=`，空引号=未设置）；checkpoint 边界标记 `.ready` → 原子复制 → `.done`，失败保留 `.ready` 由 bgwriter 归档线程每 200ms 重试（PostgreSQL 语义）。`tests/wal_archive_conf_test` 覆盖解析与端到端标记翻转。修复测试基建陷阱：测试内强定义 `g_config` 与 test_stubs 弱符号在增量构建下布局错位导致静态析构 double-free——改为 `extern` 声明使用桩定义。
+2. **PITR 恢复**（`ab33d50`）：提交记录 v2 格式 `[xid][epoch]` 携带时间戳（v1 记录兼容，读作无限制）；`RESTORE DATABASE db FROM 'bk' PITR 'YYYY-MM-DD HH:MM:SS' ARCHIVE 'dir'` 归档段回填 pg_wal + 持久化单次消费的 `recovery_target`，下次启动恢复把目标后提交按未提交回滚（before-image 恢复）。新增 `PG_SWITCH_WAL`（零填充关闭当前段；`scanWalTail`/`validateRecordsOnDisk` 在填充处停止，`XLogInsert` 自愈空尾缓存）。顺带修复两个存量 CLI bug：物理 `BACKUP/RESTORE DATABASE` 前缀长度错误（`substr(0,14)` vs 15 字符关键字）从未匹配过、且 SQL-dump `RESTORE` 分支遮蔽物理恢复；`.sql_stats` 持久化零调用行导致重启 abort。Shell E2E：备份→分段写入→PITR 到中间时刻→目标后写入消失，PASS。
+3. **文档**（`7857db2`）：`MANUAL.md` §20.1 归档配置/`PG_SWITCH_WAL`/四步 PITR 操作手册；`commandsList.md` 新增 `RESTORE DATABASE (PITR)` 与 `PG_SWITCH_WAL` 条目；`feature-gaps.md` P2-3 翻转为部分完成；`all-gaps-todo.md` 存储/WAL、复制/HA 矩阵行更新。
+
+验证状态：完整回归 `PASS=164 FAIL=0`（含新增归档测试与 7 个 Python E2E）；ASAN 与 TSAN 全 CLEAN（归档测试已加入 sanitizer 核心集）；崩溃矩阵 12/12（首跑 11/1、基线对照 10/2 均为宿主机 RL 训练进程 ~30s IO 突发导致的 kill 时序偏移，复跑全绿）。sanitizer.sh 修复存量缺陷：对象重建只比较 .cpp mtime 不查头文件，布局变更头文件（如 Config 新字段）会与新测试代码错位（UBSAN 报非法 bool 读）——现已按任意项目头文件新于对象即重建。
+
+已知边界（记录于 feature-gaps P2-3 残余）：外部命令形式 `archive_command` 仅解析不执行（安全考虑本批只做内建 `dir:` 复制）；单时间线（timeline 1）；`pg_basebackup` 协议未实现。恢复目标为进程重启时消费,不支持在线滚动恢复。

@@ -46,6 +46,8 @@ CORE_TESTS=(
     wal_basic_test
     wal_full_page_write_test
     wal_truncate_test
+    wal_timeline_archive_test
+    wal_archive_conf_test
     checkpoint_test
     catalog_snapshot_test
     connection_pool_test
@@ -86,7 +88,13 @@ run_sanitized() {
         if [ "$(basename "$src")" == "main.cpp" ]; then
             continue
         fi
-        if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ]; then
+        # Rebuild when the source OR ANY project header is newer than the
+        # cached object: the production build tracks the newest header,
+        # and a layout-changing header edit (e.g. a new Config field)
+        # silently mismatches stale sanitizer objects otherwise.
+        local newest_header
+        newest_header="$(find "$SRC_DIR/src" -type f \( -name '*.h' -o -name '*.hpp' \) -newer "$obj" -print -quit 2>/dev/null)"
+        if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ -n "$newest_header" ]; then
             echo "[sanitizer] compiling $src"
             if ! g++ -std=c++17 $san_flags -g -O1 -fno-omit-frame-pointer \
                      -I"$SRC_DIR/src" \
