@@ -19003,6 +19003,88 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
     return result;
 }
 
+// Aggregate-argument expression support ----------------------------------
+// An aggregate argument like "amt * 2" or "price - cost" is not a bare
+// column.  Detect it: an operator character (+ - * / %) at depth 0 outside
+// quotes, after the first character (so "-5" style leading signs in
+// literals do not count).
+static bool aggArgIsExpression(const std::string& arg) {
+    if (arg.empty()) return false;
+    int depth = 0;
+    bool inQuote = false;
+    char prevCh = 0;
+    for (char ch : arg) {
+        if (inQuote) {
+            if (ch == '\'') inQuote = false;
+            prevCh = ch;
+            continue;
+        }
+        if (ch == '\'') { inQuote = true; prevCh = ch; continue; }
+        if (ch == '(') { ++depth; prevCh = ch; continue; }
+        if (ch == ')') { --depth; prevCh = ch; continue; }
+        if (depth == 0 && ch != prevCh &&
+            std::string("+-*/%").find(ch) != std::string::npos) {
+            // A leading sign of a literal ("col * -2") is still part of an
+            // expression; a bare leading sign ("-5" as the whole arg) is not.
+            return true;
+        }
+        prevCh = ch;
+    }
+    return false;
+}
+
+// Evaluate a simple left-to-right (no precedence) arithmetic expression
+// over a row.  getVal resolves a bare column name (or literal) to its
+// string value for the current row.  Returns "" when not evaluable.
+template <typename GetVal>
+static std::string evalAggArgExpr(const std::string& expr, GetVal getVal) {
+    double acc = 0.0;
+    bool accSet = false;
+    char pendingOp = 0;
+    std::string token;
+    auto flushToken = [&]() {
+        if (token.empty()) return;
+        std::string v = getVal(token);
+        if (!accSet) {
+            try { acc = std::stod(v); } catch (...) { token.clear(); return; }
+            accSet = true;
+        } else {
+            double rhs = 0.0;
+            try { rhs = std::stod(v); } catch (...) { token.clear(); return; }
+            switch (pendingOp) {
+                case '+': acc += rhs; break;
+                case '-': acc -= rhs; break;
+                case '*': acc *= rhs; break;
+                case '/': if (rhs == 0) { token.clear(); return; } acc /= rhs; break;
+                case '%': { auto l = static_cast<int64_t>(acc), r = static_cast<int64_t>(rhs);
+                           if (r == 0) { token.clear(); return; }
+                           acc = static_cast<double>(l % r); break; }
+                default: token.clear(); return;
+            }
+        }
+        token.clear();
+    };
+    for (char ch : expr) {
+        if (ch == ' ') { flushToken(); continue; }
+        // Operator: the left operand was flushed by the preceding space (or
+        // is the accumulated first token).  Record it as pending.
+        if (accSet && pendingOp == 0 &&
+            std::string("+-*/%").find(ch) != std::string::npos && token.empty()) {
+            pendingOp = ch;
+            continue;
+        }
+        token += ch;
+    }
+    flushToken();
+    if (!accSet) return "";
+    if (acc == static_cast<double>(static_cast<int64_t>(acc)))
+        return std::to_string(static_cast<int64_t>(acc));
+    std::string s = std::to_string(acc);
+    s.erase(s.find_last_not_of('0') + 1, std::string::npos);
+    if (!s.empty() && s.back() == '.') s.pop_back();
+    return s;
+}
+
 std::vector<std::string> StorageEngine::aggregate(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,
@@ -19079,6 +19161,15 @@ std::vector<std::string> StorageEngine::aggregate(
                 }
             }
         }
+        // Aggregate over an arithmetic expression ("sum(amt * 2)"):
+        // resolve operands per row; numeric aggregation semantics.
+        const bool aggArgExpr = (colIdx >= tbl.len) && !isPercentile &&
+            (func == "sum" || func == "avg" || func == "min" || func == "max" ||
+             func == "count") &&
+            aggArgIsExpression(isPercentile ? pctColName : actualColName);
+        std::string aggExprText = aggArgExpr ? (isPercentile ? pctColName : actualColName) : "";
+        double exprSumDouble = 0.0;
+        bool sumFromDouble = false;
 
         // Parse FILTER (WHERE ...) conditions if present
         auto filterConds = parseConditions(item.filterConds);
@@ -19115,8 +19206,21 @@ std::vector<std::string> StorageEngine::aggregate(
                 }
                 if (func == "count") {
                     if (colName == "*") { count++; continue; }
-                    if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val;
+                    if (aggArgExpr) {
+                        auto getValC = [&](const std::string& tok) -> std::string {
+                            for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                                if (tbl.cols[ci2].dataName == tok)
+                                    return extractColumnValue(row, tbl, ci2);
+                            if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
+                                return tok.substr(1, tok.size() - 2);
+                            return tok;
+                        };
+                        val = evalAggArgExpr(aggExprText, getValC);
+                    } else {
+                        if (colIdx >= tbl.len) continue;
+                        val = extractColumnValue(row, tbl, colIdx);
+                    }
                     if (!val.empty()) count++;
                 } else if (func == "group_concat" || func == "string_agg") {
                     if (colIdx >= tbl.len) continue;
@@ -19134,8 +19238,21 @@ std::vector<std::string> StorageEngine::aggregate(
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     arrayAggVals.push_back(val);
                 } else {
-                if (colIdx >= tbl.len) continue;
-                std::string val = extractColumnValue(row, tbl, colIdx);
+                std::string val;
+                if (aggArgExpr) {
+                    auto getVal = [&](const std::string& tok) -> std::string {
+                        for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                            if (tbl.cols[ci2].dataName == tok)
+                                return extractColumnValue(row, tbl, ci2);
+                        if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
+                            return tok.substr(1, tok.size() - 2);
+                        return tok;
+                    };
+                    val = evalAggArgExpr(aggExprText, getVal);
+                } else {
+                    if (colIdx >= tbl.len) continue;
+                    val = extractColumnValue(row, tbl, colIdx);
+                }
                 if (isModeMedian) {
                     if (!val.empty()) {
                         orderedVals.push_back(val);
@@ -19154,22 +19271,39 @@ std::vector<std::string> StorageEngine::aggregate(
                     if (isBoolOr && val == "true") boolResult = true;
                     continue;
                 }
-                if (isInt) {
+                if (isInt || aggArgExpr) {
                     int64_t num = val.empty() ? INF : parseInt(val);
-                    if (num == INF) continue;
-                    if (func == "sum") sum += num;
-                    if (func == "avg") { sum += num; count++; }
-                    if (func == "max") {
-                        if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; }
-                    }
-                    if (func == "min") {
-                        if (!hasMin || num < minInt) { minInt = num; hasMin = true; }
-                    }
-                    if (isStat) {
-                        wCount++;
-                        double delta = static_cast<double>(num) - wMean;
-                        wMean += delta / wCount;
-                        wM2 += delta * (static_cast<double>(num) - wMean);
+                    if (num == INF) {
+                        // Fractional expression value: double fallback for
+                        // sum/avg; min/max compare numerically as doubles.
+                        double d = 0.0;
+                        try { d = val.empty() ? 0.0 : std::stod(val); }
+                        catch (...) { continue; }
+                        if (func == "sum" || func == "avg") {
+                            exprSumDouble += d;
+                            ++count;
+                            if (func == "sum") sum += static_cast<int64_t>(0); // keep int path inert
+                            sumFromDouble = true;
+                        } else if (func == "max") {
+                            if (!hasMax || d > static_cast<double>(maxInt)) { maxInt = static_cast<int64_t>(d); hasMax = true; }
+                        } else if (func == "min") {
+                            if (!hasMin || d < static_cast<double>(minInt)) { minInt = static_cast<int64_t>(d); hasMin = true; }
+                        } else { continue; }
+                    } else {
+                        if (func == "sum") { sum += num; sumFromDouble = false; }
+                        if (func == "avg") { sum += num; count++; }
+                        if (func == "max") {
+                            if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; }
+                        }
+                        if (func == "min") {
+                            if (!hasMin || num < minInt) { minInt = num; hasMin = true; }
+                        }
+                        if (isStat) {
+                            wCount++;
+                            double delta = static_cast<double>(num) - wMean;
+                            wMean += delta / wCount;
+                            wM2 += delta * (static_cast<double>(num) - wMean);
+                        }
                     }
                 } else if (isDate) {
                     Date d = val.empty() ? Date{} : Date(val.c_str());
@@ -19194,7 +19328,16 @@ std::vector<std::string> StorageEngine::aggregate(
         }
 
         if (func == "count") rowResult += transstr(count) + ' ';
-        else if (func == "sum") rowResult += transstr(sum) + ' ';
+        else if (func == "sum") {
+            if (aggArgExpr && sumFromDouble) {
+                std::string s = std::to_string(exprSumDouble);
+                s.erase(s.find_last_not_of('0') + 1, std::string::npos);
+                if (!s.empty() && s.back() == '.') s.pop_back();
+                rowResult += s + ' ';
+            } else {
+                rowResult += transstr(sum) + ' ';
+            }
+        }
         else if (func == "avg") rowResult += (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count)) + ' ';
         else if (func == "group_concat" || func == "string_agg") {
             rowResult += (groupConcat.empty() ? "NULL" : groupConcat) + ' ';
@@ -19235,13 +19378,13 @@ std::vector<std::string> StorageEngine::aggregate(
         }
         else if (func == "max") {
             if (!hasMax) rowResult += "NULL ";
-            else if (isInt) rowResult += transstr(maxInt) + ' ';
+            else if (isInt || aggArgExpr) rowResult += transstr(maxInt) + ' ';
             else if (isDate) rowResult += str(maxDate) + ' ';
             else rowResult += maxStr + ' ';
         }
         else if (func == "min") {
             if (!hasMin) rowResult += "NULL ";
-            else if (isInt) rowResult += transstr(minInt) + ' ';
+            else if (isInt || aggArgExpr) rowResult += transstr(minInt) + ' ';
             else if (isDate) rowResult += str(minDate) + ' ';
             else rowResult += minStr + ' ';
         }
@@ -19452,6 +19595,12 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 }
             }
         }
+        // Aggregate over an arithmetic expression (see aggregate()).
+        const bool aggArgExpr = (colIdx >= tbl.len) && !isPercentile &&
+            (func == "sum" || func == "avg" || func == "min" || func == "max" ||
+             func == "count") &&
+            aggArgIsExpression(isPercentile ? pctColName : actualColName);
+        std::string aggExprText = aggArgExpr ? (isPercentile ? pctColName : actualColName) : "";
         int64_t count = 0, sum = 0;
         bool hasMax = false, hasMin = false;
         std::string maxStr, minStr;
@@ -19490,8 +19639,21 @@ std::vector<std::string> StorageEngine::groupAggregate(
 
                 if (func == "count") {
                     if (colName == "*") { count++; continue; }
-                    if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
+                    std::string val;
+                    if (aggArgExpr) {
+                        auto getValC = [&](const std::string& tok) -> std::string {
+                            for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                                if (tbl.cols[ci2].dataName == tok)
+                                    return extractColumnValue(row, tbl, ci2);
+                            if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
+                                return tok.substr(1, tok.size() - 2);
+                            return tok;
+                        };
+                        val = evalAggArgExpr(aggExprText, getValC);
+                    } else {
+                        if (colIdx >= tbl.len) continue;
+                        val = extractColumnValue(row, tbl, colIdx);
+                    }
                     if (!val.empty()) count++;
                 } else if (func == "group_concat" || func == "string_agg") {
                     if (colIdx >= tbl.len) continue;
@@ -19509,8 +19671,21 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     arrayAggVals.push_back(val);
                 } else {
-                if (colIdx >= tbl.len) continue;
-                std::string val = extractColumnValue(row, tbl, colIdx);
+                std::string val;
+                if (aggArgExpr) {
+                    auto getVal = [&](const std::string& tok) -> std::string {
+                        for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                            if (tbl.cols[ci2].dataName == tok)
+                                return extractColumnValue(row, tbl, ci2);
+                        if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
+                            return tok.substr(1, tok.size() - 2);
+                        return tok;
+                    };
+                    val = evalAggArgExpr(aggExprText, getVal);
+                } else {
+                    if (colIdx >= tbl.len) continue;
+                    val = extractColumnValue(row, tbl, colIdx);
+                }
                 if (isModeMedian) {
                     if (!val.empty()) {
                         orderedVals.push_back(val);
@@ -19529,7 +19704,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     if (isBoolOr && val == "true") boolResult = true;
                     continue;
                 }
-                if (isInt) {
+                if (isInt || aggArgExpr) {
                     int64_t num = val.empty() ? INF : parseInt(val);
                     if (num == INF) continue;
                     if (func == "sum") sum += num;
@@ -19588,13 +19763,13 @@ std::vector<std::string> StorageEngine::groupAggregate(
         }
         if (func == "max") {
             if (!hasMax) return "NULL";
-            if (isInt) return transstr(maxInt);
+            if (isInt || aggArgExpr) return transstr(maxInt);
             if (isDate) return str(maxDate);
             return maxStr;
         }
         if (func == "min") {
             if (!hasMin) return "NULL";
-            if (isInt) return transstr(minInt);
+            if (isInt || aggArgExpr) return transstr(minInt);
             if (isDate) return str(minDate);
             return minStr;
         }
@@ -19795,6 +19970,12 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                 }
             }
         }
+        // Aggregate over an arithmetic expression (see aggregate()).
+        const bool aggArgExpr = (colIdx >= tbl.len) && !isPercentile &&
+            (func == "sum" || func == "avg" || func == "min" || func == "max" ||
+             func == "count") &&
+            aggArgIsExpression(isPercentile ? pctColName : actualColName);
+        std::string aggExprText = aggArgExpr ? (isPercentile ? pctColName : actualColName) : "";
         int64_t count = 0, sum = 0;
         bool hasMax = false, hasMin = false;
         std::string maxStr, minStr;
@@ -19848,9 +20029,22 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                     std::string val = extractColumnValue(row, tbl, colIdx);
                     arrayAggVals.push_back(val);
                 } else {
-                    if (colIdx >= tbl.len) continue;
-                    std::string val = extractColumnValue(row, tbl, colIdx);
-                    if (isInt) {
+                    std::string val;
+                    if (aggArgExpr) {
+                        auto getVal = [&](const std::string& tok) -> std::string {
+                            for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                                if (tbl.cols[ci2].dataName == tok)
+                                    return extractColumnValue(row, tbl, ci2);
+                            if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
+                                return tok.substr(1, tok.size() - 2);
+                            return tok;
+                        };
+                        val = evalAggArgExpr(aggExprText, getVal);
+                    } else {
+                        if (colIdx >= tbl.len) continue;
+                        val = extractColumnValue(row, tbl, colIdx);
+                    }
+                    if (isInt || aggArgExpr) {
                         int64_t num = val.empty() ? INF : parseInt(val);
                         if (num == INF) continue;
                         if (func == "sum") sum += num;
@@ -19902,13 +20096,13 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         }
         if (func == "max") {
             if (!hasMax) return "NULL";
-            if (isInt) return transstr(maxInt);
+            if (isInt || aggArgExpr) return transstr(maxInt);
             if (isDate) return str(maxDate);
             return maxStr;
         }
         if (func == "min") {
             if (!hasMin) return "NULL";
-            if (isInt) return transstr(minInt);
+            if (isInt || aggArgExpr) return transstr(minInt);
             if (isDate) return str(minDate);
             return minStr;
         }

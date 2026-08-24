@@ -2092,6 +2092,67 @@ bool ParallelGroupAggregateOp::open() {
             item.arg.substr(0, 9) == "distinct ";
         std::string arg = distinct ? item.arg.substr(9) : item.arg;
         const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
+        // Aggregate over an arithmetic expression ("sum(amt * 2)"): resolve
+        // operands per row when the arg is not a bare column.
+        const bool argIsExpr = argIndex >= tbl_.len && arg != "*" &&
+            (func == "sum" || func == "avg" || func == "min" ||
+             func == "max" || func == "count") && !arg.empty();
+        auto exprVal = [&](const std::string& raw,
+                           const std::vector<std::string>& rowVals) -> std::string {
+            double acc = 0.0;
+            bool accSet = false;
+            char pendingOp = 0;
+            std::string token;
+            auto resolve = [&](const std::string& tok) -> std::string {
+                for (size_t ci = 0; ci < tbl_.len; ++ci)
+                    if (tbl_.cols[ci].dataName == tok) return rowVals[ci];
+                if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
+                    return tok.substr(1, tok.size() - 2);
+                return tok;
+            };
+            auto flush = [&]() {
+                if (token.empty()) return;
+                std::string v = resolve(token);
+                if (!accSet) {
+                    try { acc = std::stod(v); accSet = true; }
+                    catch (...) { token = "\x01"; return; }
+                } else {
+                    double rhs = 0.0;
+                    try { rhs = std::stod(v); }
+                    catch (...) { token = "\x01"; return; }
+                    switch (pendingOp) {
+                        case '+': acc += rhs; break;
+                        case '-': acc -= rhs; break;
+                        case '*': acc *= rhs; break;
+                        case '/': if (rhs == 0) { token = "\x01"; return; } acc /= rhs; break;
+                        case '%': { auto l = static_cast<int64_t>(acc), r = static_cast<int64_t>(rhs);
+                                   if (r == 0) { token = "\x01"; return; }
+                                   acc = static_cast<double>(l % r); break; }
+                        default: token = "\x01"; return;
+                    }
+                }
+                token.clear();
+            };
+            for (char ch : raw) {
+                if (ch == ' ') { flush(); if (token == "\x01") return ""; continue; }
+                if (accSet && pendingOp == 0 &&
+                    std::string("+-*/%").find(ch) != std::string::npos && !token.empty()) {
+                    flush();
+                    if (token == "\x01") return "";
+                    pendingOp = ch;
+                    continue;
+                }
+                token += ch;
+            }
+            flush();
+            if (token == "\x01" || !accSet) return "";
+            if (acc == static_cast<double>(static_cast<int64_t>(acc)))
+                return std::to_string(static_cast<int64_t>(acc));
+            std::string s = std::to_string(acc);
+            s.erase(s.find_last_not_of('0') + 1, std::string::npos);
+            if (!s.empty() && s.back() == '.') s.pop_back();
+            return s;
+        };
         const auto filters = StorageEngine::parseConditions(item.filterConds);
         std::set<std::string> distinctValues;
         int64_t count = 0;
@@ -2109,7 +2170,12 @@ bool ParallelGroupAggregateOp::open() {
                 }
             }
             if (!passes) continue;
-            const std::string value = argIndex < tbl_.len ? row.values[argIndex] : "";
+            std::string value;
+            if (argIsExpr) {
+                value = exprVal(arg, row.values);
+            } else {
+                value = argIndex < tbl_.len ? row.values[argIndex] : "";
+            }
             if (func == "count") {
                 if (distinct) {
                     if (!value.empty()) distinctValues.insert(value);

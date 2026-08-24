@@ -15709,9 +15709,24 @@ if (sql.rfind("backup database", 0) == 0) {
             for (const auto& gc : groupByCols) cout << gc << ' ';
             vector<dbms::StorageEngine::AggItem> pureAgg;
             for (const auto& it : aggItems) {
-                if (!it.func.empty()) {
-                    cout << it.func << '(' << it.arg << ") ";
-                    pureAgg.push_back(it);
+                if (!it.func.empty()) pureAgg.push_back(it);
+            }
+            // Header: use the SELECT-list display names (aliases honored, no
+            // space-splitting of expression text by the protocol layer).
+            // Skip empty-func items: bare group columns are already printed
+            // above from groupByCols.
+            {
+                size_t ai2 = 0;
+                for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
+                    if (exprTypes[ei] == 0 || exprTypes[ei] == 1) {
+                        if (ai2 < aggItems.size() && !aggItems[ai2].func.empty())
+                            cout << selectExprs[ei].displayName << ' ';
+                        ++ai2;
+                    } else if (exprTypes[ei] == 2) {
+                        if (ai2 < aggItems.size() && !aggItems[ai2].func.empty())
+                            cout << selectExprs[ei].displayName << ' ';
+                        ++ai2;
+                    }
                 }
             }
             cout << '\n';
@@ -15830,9 +15845,11 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
         } else if (hasAgg) {
-            for (const auto& it : aggItems) {
-                if (it.func.empty()) cout << it.arg << ' ';
-                else cout << it.func << '(' << it.arg << ") ";
+            // Header: SELECT-list display names (aliases honored; avoids
+            // space-splitting "sum(amt * 2)" into phantom protocol columns).
+            for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
+                if (exprTypes[ei] == 0 || exprTypes[ei] == 1)
+                    cout << selectExprs[ei].displayName << ' ';
             }
             cout << '\n';
             vector<dbms::StorageEngine::AggItem> pureAgg;

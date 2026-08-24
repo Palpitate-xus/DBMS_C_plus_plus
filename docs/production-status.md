@@ -535,3 +535,22 @@ v0.17 记录的残留缺口（单谓词 `WHERE c NOT LIKE 'x'` / `c BETWEEN a AN
 验证：G1 `group by d`（按 dept 分组正确行）✓、G2 别名单列分组 ✓、H1 `having cnt > 1`（仅返回 eng 组，PG 语义）✓；回归：普通列 GROUP BY、非别名 HAVING（`count(*) > 1`、`sum(salary) > 300`）、ORDER BY 聚合别名（`order by cnt desc`）、ROLLUP、`order by d` 全部不变；协议回归 +6 断言（grp_t 表）。探测方法论记录：RowDescription 列名解析曾因误带消息类型字节偏移 +5 而误报 "y*2"——修正偏移后确认服务器列名本来就正确（`salary*2`/`count(*)`），非缺陷。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E，v0.19）。
+
+## 2026-08-24 v0.20 批次：聚合参数算术表达式（sum/min/max/count/avg over "col * 2"）
+
+聚合域审计发现表达式参数聚合静默错误：
+
+- **`select sum(amt * 2) from o` 返回 0**（PG: 500）——聚合参数被当作裸列名查 schema，"amt * 2" 匹配不到 → 每行 `continue` → 求和恒 0；
+- **`select min(amt * 2)`/`max(amt + 1)` 返回空**、**`count(amt * 2)` 返回 0**——同一根因；
+- **`group by` + 表达式聚合同样全坏**（分组路径 `groupAggregate`/`groupAggregateSets` 与标量路径 `aggregate` 各有一份相同的裸列假设）。
+
+修复（TableManage.cpp）：
+
+- 新增 `aggArgIsExpression`（参数含深度 0 引号外运算符即视为表达式）与模板 `evalAggArgExpr`（左结合无优先级算术：操作数逐行解析——裸列→行值、带引号→剥引号、其余→字面量；除零/解析失败返回空）；实现中修正了一处解析缺陷（运算符 token 在左操作数已被空格 flush 后到达，必须接受空 token 记录 pendingOp，否则 `amt * 2` 退化为 `amt`）。
+- 三个聚合函数（`aggregate`/`groupAggregate`/`groupAggregateSets`）统一接入：参数非裸列且为 sum/avg/min/max/count 时逐行求值表达式；min/max 用数值比较并在返回处输出（此前表达式值落入字符串分支导致空结果）；sum 的非整数值走 double 累计路径。
+- Volcano 路径（`ExecutionPlan.cpp computeAggregate`）同样接入参数表达式求值。
+- 聚合输出表头改用 SELECT 列表 displayName（别名生效；带别名的表达式聚合不再被协议层按空格切出幻影列）。
+
+验证：标量矩阵 sum 500 / min 50 / max 101 / count 4 / avg 125 / 两列相加 310 全对；分组矩阵 sum 300/200、min 100/50、max 200/150、count 2/2、avg 150/100 全对；回归：裸列聚合（sum 250、avg 62.5、min/max/count、group by 多聚合、rollup、having、where+agg、distinct count）全部不变；协议回归 +15 断言（expr_t 表，带别名形式）。已知残留（预先存在，基线复现）：无别名表达式聚合的显示名（如 `sum(amt * 2)`）仍被协议层按空格切分产生幻影空列（带别名则正确单列）——协议列名构造与文本表头解耦是后续工作；`order by sum(amt)`（非别名列形式）分组排序同为基线既有行为。
+
+验证状态：完整回归 `PASS=167 FAIL=0`（含 7 个 Python E2E，v0.20）。

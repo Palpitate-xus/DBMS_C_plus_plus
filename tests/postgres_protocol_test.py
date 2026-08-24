@@ -965,6 +965,53 @@ def main():
             "GROUP BY dept ORDER BY cnt DESC, dept"))
         assert h3 == [[b"eng", b"2"], [b"ops", b"1"]], h3
 
+        # Aggregates over arithmetic expressions (sum/min/max/count/avg of
+        # "col * 2" style args): previously returned 0 / empty because the
+        # argument was not a bare column and every row was skipped.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE expr_t (id INT PRIMARY KEY, cust INT, amt INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO expr_t VALUES (1,10,100),(2,10,50),(3,20,75),(4,20,25)"))
+        ag1 = data_row_values(simple_query(
+            sock, "SELECT SUM(amt * 2) AS s FROM expr_t"))
+        assert ag1 == [[b"500"]], ag1
+        ag2 = data_row_values(simple_query(
+            sock, "SELECT MIN(amt * 2) AS s FROM expr_t"))
+        assert ag2 == [[b"50"]], ag2
+        ag3 = data_row_values(simple_query(
+            sock, "SELECT MAX(amt + 1) AS s FROM expr_t"))
+        assert ag3 == [[b"101"]], ag3
+        ag4 = data_row_values(simple_query(
+            sock, "SELECT COUNT(amt * 2) AS s FROM expr_t"))
+        assert ag4 == [[b"4"]], ag4
+        ag5 = data_row_values(simple_query(
+            sock, "SELECT AVG(amt * 2) AS s FROM expr_t"))
+        assert ag5 == [[b"125.000000"]], ag5
+        ag6 = data_row_values(simple_query(
+            sock, "SELECT SUM(cust + amt) AS s FROM expr_t"))
+        assert ag6 == [[b"310"]], ag6
+        ag7 = data_row_values(simple_query(
+            sock, "SELECT cust, SUM(amt * 2) AS s FROM expr_t "
+            "GROUP BY cust ORDER BY cust"))
+        assert ag7 == [[b"10", b"300"], [b"20", b"200"]], ag7
+        ag8 = data_row_values(simple_query(
+            sock, "SELECT cust, MIN(amt * 2) AS lo, MAX(amt * 2) AS hi FROM expr_t "
+            "GROUP BY cust ORDER BY cust"))
+        assert ag8 == [[b"10", b"100", b"200"], [b"20", b"50", b"150"]], ag8
+        ag9 = data_row_values(simple_query(
+            sock, "SELECT cust, COUNT(amt * 2) AS c FROM expr_t "
+            "GROUP BY cust ORDER BY cust"))
+        assert ag9 == [[b"10", b"2"], [b"20", b"2"]], ag9
+        # Regressions: bare-column aggregates unchanged.
+        agr1 = data_row_values(simple_query(sock, "SELECT SUM(amt) FROM expr_t"))
+        assert agr1 == [[b"250"]], agr1
+        agr2 = data_row_values(simple_query(
+            sock, "SELECT cust, SUM(amt) FROM expr_t GROUP BY cust ORDER BY cust"))
+        assert agr2 == [[b"10", b"150"], [b"20", b"100"]], agr2
+        agr3 = data_row_values(simple_query(
+            sock, "SELECT SUM(amt), MIN(amt), MAX(amt), COUNT(*) FROM expr_t"))
+        assert agr3 == [[b"250", b"25", b"100", b"4"]], agr3
+
         # SELECT-list aliases (AS) and arithmetic projections: previously
         # "select id as no" failed with "Invalid column name id as no".
         assert any(kind == b"C" for kind, _ in simple_query(
