@@ -12674,6 +12674,21 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     const Column& col = tbl.cols[ci];
     if (cond.op == "isnull") return val.empty();
     if (cond.op == "isnotnull") return !val.empty();
+    if (cond.op == "in" || cond.op == "notin") {
+        // cond.value = space-joined literals (built by modifyLogic)
+        if (val.empty()) return false;   // NULL IN (...) -> UNKNOWN (false)
+        bool hit = false;
+        std::istringstream iss(cond.value);
+        std::string tok;
+        while (iss >> tok) {
+            StorageEngine::Condition eq;
+            eq.op = "=";
+            eq.colName = cond.colName;
+            eq.value = tok;
+            if (evalConditionOnRow(eq, rowBuffer, tbl)) { hit = true; break; }
+        }
+        return (cond.op == "in") ? hit : !hit;
+    }
 
     // Three-valued logic: any comparison with NULL yields UNKNOWN (FALSE in WHERE)
     bool valIsNull = val.empty();
@@ -14530,6 +14545,29 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
                 c.value = c.value.substr(1, c.value.size() - 2);
             conds.push_back(c);
             continue;
+        }
+        // Handle IN / NOT IN lists ("in<col> v1 v2 ..." from modifyLogic:
+        // op prefix directly concatenated with the column name, then the
+        // space-joined literal values).
+        if (s.size() > 5 && s.substr(0, 5) == "notin") {
+            size_t sp = s.find(' ');
+            if (sp != std::string::npos && sp > 5) {
+                c.op = "notin";
+                c.colName = s.substr(5, sp - 5);
+                c.value = s.substr(sp + 1);
+                conds.push_back(c);
+                continue;
+            }
+        }
+        if (s.size() > 2 && s.substr(0, 2) == "in") {
+            size_t sp = s.find(' ');
+            if (sp != std::string::npos && sp > 2) {
+                c.op = "in";
+                c.colName = s.substr(2, sp - 2);
+                c.value = s.substr(sp + 1);
+                conds.push_back(c);
+                continue;
+            }
         }
         // Handle IS NOT NULL operator
         if (s.size() >= 9 && s.substr(0, 9) == "isnotnull") {

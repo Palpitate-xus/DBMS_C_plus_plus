@@ -852,6 +852,7 @@ static bool checkSelectColumnPermission(Session& s, const string& tname,
 static vector<string> splitConds(const string& s);
 static string normalizeConditionStr(string s);
 static string modifyLogic(const string& logic);
+static string compactInLists(const string& s);
 static vector<vector<string>> breakDownConditions(const vector<string>& tokens);
 static bool setSessionAuthorization(Session& s, const string& targetRaw);
 static vector<string> splitValues(const string& s);
@@ -5077,6 +5078,62 @@ static string foldConstants(const string& s) {
 // ========================================================================
 // Condition conversion: "col=value" → "=col value"
 // ========================================================================
+// Rewrite "col [not] in (v1, v2, ...)" into the whitespace-free token
+// "in<col>(v1,v2,...)" / "notin<col>(v1,v2,...)" so tokenize() keeps the
+// predicate as one token and the per-token modifyLogic can decode it.
+static string compactInLists(const string& s) {
+    string out;
+    size_t i = 0;
+    while (i < s.size()) {
+        // find " in (" or " not in (" at a token boundary
+        size_t rest = s.find(" in (", i);
+        size_t nrest = s.find(" not in (", i);
+        bool neg = false;
+        size_t at = rest;
+        if (nrest != string::npos && (rest == string::npos || nrest < rest)) {
+            neg = true;
+            at = nrest;
+        }
+        if (at == string::npos) { out += s.substr(i); break; }
+        // The keyword begins at `at` (both " in (" and " not in ("): the
+        // column is the identifier immediately before `at`.
+        size_t kwStart = at;
+        size_t colStart = at;
+        while (colStart > i && !isspace((unsigned char)s[colStart - 1])) --colStart;
+        if (colStart == kwStart) { out += s.substr(i, at + 5 - i); i = at + 5; continue; }
+        string col = s.substr(colStart, kwStart - colStart);
+        if (col.empty() || col.find_first_of("(),+-*/%") != string::npos) {
+            // not a simple column; leave as-is (skip past this " in (")
+            out += s.substr(i, at + 5 - i);
+            i = at + 5;
+            continue;
+        }
+        // find matching close paren
+        size_t open = s.find('(', at);
+        size_t depth = 0, close = string::npos;
+        for (size_t p = open; p < s.size(); ++p) {
+            if (s[p] == '(') ++depth;
+            else if (s[p] == ')') { --depth; if (depth == 0) { close = p; break; } }
+        }
+        if (close == string::npos) {
+            out += s.substr(i, at + 5 - i);
+            i = at + 5;
+            continue;
+        }
+        // literals, commas only (strip spaces inside)
+        string lits;
+        for (size_t p = open + 1; p < close; ++p) {
+            char ch = s[p];
+            if (isspace((unsigned char)ch)) continue;
+            lits += ch;
+        }
+        out += s.substr(i, colStart - i);
+        out += (neg ? "notin" : "in") + col + "(" + lits + ")";
+        i = close + 1;
+    }
+    return out;
+}
+
 static string modifyLogic(const string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
     // Handle LIKE
@@ -5106,6 +5163,76 @@ static string modifyLogic(const string& logic) {
         string before = logic.substr(0, overlapsPos);
         string after = logic.substr(overlapsPos + 8);
         return "overlaps" + before + " " + after;
+    }
+    // Handle compact IN form produced by compactInLists:
+    // "in<col>(v1,v2,...)" / "notin<col>(v1,v2,...)".
+    if (logic.size() > 3 &&
+        (logic.substr(0, 2) == "in" || logic.substr(0, 5) == "notin")) {
+        bool negC = (logic.substr(0, 5) == "notin");
+        size_t open = logic.find('(');
+        if (open != string::npos && logic.back() == ')') {
+            string col = logic.substr(negC ? 5 : 2, open - (negC ? 5 : 2));
+            string lits = logic.substr(open + 1, logic.size() - open - 2);
+            if (!col.empty() && col.find(' ') == string::npos && !lits.empty()) {
+                // comma-joined -> space-joined
+                string joined;
+                for (char ch : lits) joined += (ch == ',') ? ' ' : ch;
+                return string(negC ? "notin" : "in") + col + " " + joined;
+            }
+        }
+    }
+    // Handle IN lists: "col in (l1,l2,...)" / "col not in (...)".
+    // The op carries the space-joined literals as its value so the
+    // estimator and row evaluator can consume them uniformly.
+    {
+        // " not in " must be tested first: it contains " in " as a
+        // substring, and matching that would slice the column to a
+        // space-bearing fragment ("id not") which is then rejected.
+        size_t notInAt = logic.find(" not in ");
+        size_t inAt = string::npos;
+        bool notIn = false;
+        if (notInAt != string::npos) {
+            notIn = true;
+            inAt = notInAt + 4;   // position of " in " inside " not in "
+        } else {
+            inAt = logic.find(" in ");
+        }
+        if (inAt != string::npos) {
+            size_t open = logic.find('(', inAt);
+            size_t close = logic.rfind(')');
+            if (open != string::npos && close != string::npos && close > open) {
+                string col = trim(logic.substr(0, notIn ? inAt - 4 : inAt));
+                string listRaw = logic.substr(open + 1, close - open - 1);
+                // split on commas, strip quotes/spacing
+                string joined;
+                {
+                    string cur;
+                    for (char ch : listRaw) {
+                        if (ch == ',') {
+                            string t = trim(cur);
+                            if (!t.empty()) {
+                                if (t.size() >= 2 &&
+                                    ((t.front() == '\'' && t.back() == '\'') ||
+                                     (t.front() == '"' && t.back() == '"')))
+                                    t = t.substr(1, t.size() - 2);
+                                joined += (joined.empty() ? "" : " ") + t;
+                            }
+                            cur.clear();
+                        } else cur += ch;
+                    }
+                    string t = trim(cur);
+                    if (!t.empty()) {
+                        if (t.size() >= 2 &&
+                            ((t.front() == '\'' && t.back() == '\'') ||
+                             (t.front() == '"' && t.back() == '"')))
+                            t = t.substr(1, t.size() - 2);
+                        joined += (joined.empty() ? "" : " ") + t;
+                    }
+                }
+                if (!col.empty() && !joined.empty() && col.find(' ') == string::npos)
+                    return string(notIn ? "notin" : "in") + col + " " + joined;
+            }
+        }
     }
     // Handle IS NOT NULL
     size_t isnotPos = logic.find("isnotnull");
@@ -7324,17 +7451,38 @@ static std::string expandSubqueries(std::string sql, Session& s) {
         sql = sql.substr(0, colNameStart) + replacement + sql.substr(parenEnd + 1);
     }
 
-    // ---------- IN ----------
+    // ---------- IN / NOT IN ----------
     while (true) {
+        // " not in " must be found first: " in " matches inside it, and
+        // the old code then read the column name as the word "not",
+        // rewriting "id not in (1,3)" into "not=1 or not=3" — matching
+        // nothing (NOT IN silently returned zero rows).
+        // " not in " already carries surrounding spaces, so it is
+        // inherently word-bounded before; only the right side must allow
+        // the list paren to follow directly ("not in (1,2)").
+        size_t notPos = string::npos;
+        for (size_t p = sql.find(" not in "); p != string::npos; p = sql.find(" not in ", p + 8)) {
+            bool wordAfter = p + 8 >= sql.size() ||
+                             isspace(static_cast<unsigned char>(sql[p + 8])) ||
+                             sql[p + 8] == '(';
+            if (wordAfter) { notPos = p; break; }
+        }
         size_t pos = sql.find(" in ");
-        if (pos == std::string::npos) break;
+        bool anti = false;
+        if (notPos != string::npos &&
+            (pos == string::npos || notPos + 1 < pos)) {
+            // treat the " in " inside " not in " as the match
+            pos = notPos + 4;
+            anti = true;
+        }
+        if (pos == string::npos) break;
 
         size_t parenStart = sql.find('(', pos);
-        if (parenStart == std::string::npos) break;
+        if (parenStart == string::npos) break;
 
         bool onlySpace = true;
         for (size_t i = pos + 4; i < parenStart; ++i) {
-            if (!std::isspace(static_cast<unsigned char>(sql[i]))) { onlySpace = false; break; }
+            if (!isspace(static_cast<unsigned char>(sql[i]))) { onlySpace = false; break; }
         }
         if (!onlySpace) {
             sql.erase(pos, 4);
@@ -7344,13 +7492,22 @@ static std::string expandSubqueries(std::string sql, Session& s) {
         }
 
         size_t parenEnd = findMatchingParen(sql, parenStart);
-        if (parenEnd == std::string::npos) break;
+        if (parenEnd == string::npos) break;
 
-        size_t colStart = pos;
-        while (colStart > 0 && std::isspace(static_cast<unsigned char>(sql[colStart - 1]))) --colStart;
+        size_t colStart = anti ? notPos : pos;
+        while (colStart > 0 && isspace(static_cast<unsigned char>(sql[colStart - 1]))) --colStart;
         size_t colNameStart = colStart;
-        while (colNameStart > 0 && !std::isspace(static_cast<unsigned char>(sql[colNameStart - 1]))) --colNameStart;
+        while (colNameStart > 0 && !isspace(static_cast<unsigned char>(sql[colNameStart - 1]))) --colNameStart;
         std::string colName = trim(sql.substr(colNameStart, colStart - colNameStart));
+        if (anti && colName == "not") {
+            // column named "not" is not a thing; recover the real column
+            colNameStart = colStart;
+            while (colNameStart > 0 && isspace(static_cast<unsigned char>(sql[colNameStart - 1]))) --colNameStart;
+            size_t c2 = colNameStart;
+            while (c2 > 0 && !isspace(static_cast<unsigned char>(sql[c2 - 1]))) --c2;
+            colName = trim(sql.substr(c2, colNameStart - c2));
+            colNameStart = c2;
+        }
 
         std::string inner = trim(sql.substr(parenStart + 1, parenEnd - parenStart - 1));
         std::vector<std::string> values;
@@ -7360,20 +7517,22 @@ static std::string expandSubqueries(std::string sql, Session& s) {
             size_t vpos = 0;
             while (vpos < inner.size()) {
                 size_t comma = inner.find(',', vpos);
-                std::string val = trim((comma == std::string::npos) ? inner.substr(vpos) : inner.substr(vpos, comma - vpos));
+                std::string val = trim((comma == string::npos) ? inner.substr(vpos) : inner.substr(vpos, comma - vpos));
                 values.push_back(val);
-                if (comma == std::string::npos) break;
+                if (comma == string::npos) break;
                 vpos = comma + 1;
             }
         }
 
         std::string replacement;
         if (values.empty()) {
-            replacement = colName + "=__empty__ __empty__";
+            // IN () matches nothing; NOT IN () matches everything.
+            replacement = anti ? colName + "=" + colName
+                               : colName + "=__empty__ __empty__";
         } else {
             for (size_t i = 0; i < values.size(); ++i) {
-                if (i > 0) replacement += " or ";
-                replacement += colName + "=" + values[i];
+                if (i > 0) replacement += anti ? " and " : " or ";
+                replacement += colName + (anti ? "!=" : "=") + values[i];
             }
         }
         sql = sql.substr(0, colNameStart) + replacement + sql.substr(parenEnd + 1);
@@ -13999,6 +14158,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     }
                 }
                 string condStr = normalizeConditionStr(whereClause);
+                condStr = compactInLists(condStr);
                 condTokens = tokenize(condStr);
             }
 
@@ -15020,6 +15180,9 @@ if (sql.rfind("backup database", 0) == 0) {
             } else {
                 whereClause = expandSubqueries(whereClause, s);
                 string condStr = normalizeConditionStr(whereClause);
+                // Collapse IN lists into single tokens so the per-token
+                // modifyLogic below sees the whole predicate.
+                condStr = compactInLists(condStr);
                 condTokens = tokenize(condStr);
             }
         }

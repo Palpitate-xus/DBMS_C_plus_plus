@@ -428,3 +428,20 @@ P1-12 收尾项：NULL 选择率此前完全缺失（`isnull`/`isnotnull` 落入
 验证：`stats_planner_test` 新增场景（100 行中 30 NULL：nullCount 断言、isnull 估 30 精确、isnotnull 估 70），既有 MCV/直方图/likesel/join 场景不回归。注意：固定宽度数值列的零值与 NULL 同编码（引擎既有约定），NULL 精确计数对 varchar/文本类列完全成立。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。P1-12 剩余：穷举 DP join 顺序、`IN` 列表选择率。
+
+
+## 2026-08-24 v0.14 批次：IN/NOT IN 字面量列表——规划器可见化 + NOT IN 静默空结果修复
+
+探测发现两个耦合缺陷：
+
+1. **IN 谓词对规划器不可见**：`id in (1,3,5)` 执行正确（legacy 路径改写为 OR-of-=），但 EXPLAIN 完全无 Filter 节点、rows 不衰减——估算器与计划器都看不到该谓词。
+2. **NOT IN 静默返回空**（长期潜伏）：legacy 改写器用朴素 `find(" in ")` 定位，"not in" 内嵌的 " in " 被误中 → 列名回扫成 "not" → `id not in (1,3)` 被改写为 `not=1 or not=3`（应为 `id!=1 and id!=3`）→ 恒无匹配 → 所有 NOT IN 查询静默返回零行。
+
+修复链路：
+- **modifyLogic/parseConditions/evalConditionOnRow/estimateSelectivity** 四点新增 `in`/`notin` 条件算子（值为空格连接的字面量）；IN 选择率按 PG eqsel 求和语义（MCV 精确值求和，clamp）。
+- **compactInLists**：主执行流在 tokenize 前把 `col [not] in (…)` 折叠为无空白单 token（`in<col>(v1,v2)`），避免逐 token modifyLogic 把谓词拆碎。
+- **legacy 改写器修复**：` not in ` 优先探测（词边界含列表括号 `(`），列名正确回扫；NOT IN 改写为 AND-of-`!=`（PG 语义），空列表 `not in ()` 恒真。
+
+验证（协议级实测）：IN/NOT IN 数值与文本列表、AND/OR 组合、`not in ()` 全部正确；EXPLAIN 出现 Filter 节点且 rows=3（5 行 × 3 值 × 1/5 精确）；`tests/postgres_protocol_test.py` 新增 6 项断言（含 EXPLAIN Filter 存在性）。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。

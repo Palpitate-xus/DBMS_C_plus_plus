@@ -873,6 +873,32 @@ def main():
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
 
+        # IN / NOT IN literal lists: planner-visible conditions with
+        # statistics-driven row estimates, NOT IN rewriting to AND-of-!=
+        # (previously matched nothing), and correct execution.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE in_t (id INT PRIMARY KEY, v TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO in_t VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e')"))
+        simple_query(sock, "ANALYZE in_t")
+        in_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM in_t WHERE id IN (1,3,5)"))
+        assert in_rows == [[b"1"], [b"3"], [b"5"]], in_rows
+        notin_rows = data_row_values(simple_query(
+            sock, "SELECT id FROM in_t WHERE id NOT IN (1,2,3,4)"))
+        assert notin_rows == [[b"5"]], notin_rows
+        text_notin = data_row_values(simple_query(
+            sock, "SELECT id FROM in_t WHERE v NOT IN ('a','b','c')"))
+        assert text_notin == [[b"4"], [b"5"]], text_notin
+        combo = data_row_values(simple_query(
+            sock, "SELECT id FROM in_t WHERE id IN (2,4) AND v LIKE 'b'"))
+        assert combo == [[b"2"]], combo
+        # EXPLAIN now shows a Filter node with a reduced row estimate.
+        in_exp = simple_query(
+            sock, "EXPLAIN SELECT * FROM in_t WHERE id IN (1,3,5)")
+        exp_text = b"".join(b for _, b in [m for m in in_exp if m[0] == b"D"])
+        assert b"Filter" in exp_text, in_exp
+
         # JOIN with a right table whose name contains "on" (e.g.
         # "location"): the ON-clause scan must match the keyword with word
         # boundaries, not inside the table name.

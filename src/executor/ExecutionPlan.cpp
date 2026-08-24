@@ -3386,6 +3386,29 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
         if (totalRows > 0 && stats.nullCount > 0) return 1.0 - nullFrac;
         return 0.9;
     }
+    if (cond.op == "in" || cond.op == "notin") {
+        // PG scalargtsub/eqsel-sum semantics: sum the per-value equality
+        // selectivities (MCV-exact where available), clamp IN to at most
+        // 0.5..1 like PG's HALF/ONE defaults; NOT IN takes the complement.
+        std::istringstream iss(cond.value);
+        std::string tok;
+        double sum = 0.0;
+        size_t k = 0;
+        while (iss >> tok) {
+            StorageEngine::Condition eq;
+            eq.op = "=";
+            eq.colName = cond.colName;
+            eq.value = tok;
+            sum += estimateSelectivity(eq, engine, dbname, tablename);
+            ++k;
+        }
+        if (k == 0) return cond.op == "in" ? 0.0 : 1.0;
+        if (sum > 1.0) sum = 1.0;
+        double sel = (cond.op == "in") ? sum : (1.0 - sum);
+        if (sel <= 0.0) sel = 0.001;
+        if (sel >= 1.0) sel = 0.999;
+        return sel;
+    }
     if (cond.op == "=") {
         // Most Common Values first: mcv entries are (value, row count), so
         // the selectivity of a hot value is count / table rows — exact.
