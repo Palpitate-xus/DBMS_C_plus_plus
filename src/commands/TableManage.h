@@ -382,6 +382,9 @@ public:
     // Statistics
     struct ColumnStats {
         size_t cardinality = 0;
+        // Number of NULL (empty-coded) values seen by ANALYZE; feeds
+        // IS NULL / IS NOT NULL selectivity (pg null_frac * rows).
+        size_t nullCount = 0;
         std::string minVal;
         std::string maxVal;
         // Equi-depth histogram: each bucket is (low, high) boundary

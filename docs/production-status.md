@@ -415,3 +415,16 @@ v0.6 让 `EXECUTE FUNCTION` 触发器真正执行函数体，但函数体内 `ne
 验证：`facts(5000)×cust(300)×prod(80)×region(10)` 星型 2/3/4 表 join + LEFT JOIN 全部行数正确；`location` 表名用例修复。新增协议回归：含 "on" 表名的 INNER/LEFT(别名) join 断言。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。P1-12 剩余：穷举 DP join 顺序（当前贪心+统计估计）、`is null`/`in` 选择率。
+
+
+## 2026-08-23 v0.13 批次：null_frac 统计 + IS NULL/IS NOT NULL 选择率 + stats 解析对齐修复
+
+P1-12 收尾项：NULL 选择率此前完全缺失（`isnull`/`isnotnull` 落入兜底 0.3，等值估计也不感知 NULL），且统计解析存在潜在字段错位。
+
+1. **采集**（`TableManage.cpp` analyzeTable）：每列计数空值（引擎以零长度编码 NULL 的约定），`ColumnStats::nullCount` 新字段持久化为 `.stats` 第 5 个 `|` 字段；旧文件无此字段读 0（向后兼容）。
+2. **解析对齐修复**：`parseStatsLine` 原用「跳过前导空字段」对齐 min/max/hist/mcv，但 min/max 可合法为空（全 NULL 列/varchar 列最小值为空串），两个空字段时 MCV/nullCount 全体左移错位（本次实测复现：nullCount 被吞、MCV 混入纯数字项）。改为位置对齐（parts[0] 为 cardinality 后定界符空段，min/max/hist/mcv/nulls 依次取 1..5），保留旧退化行回退路径。
+3. **选择率**（`ExecutionPlan.cpp` estimateSelectivity）：`isnull` → nullCount/rows 精确值（无统计回退 0.1）；`isnotnull` → 1−null_frac（回退 0.9）；冷值等值按 PG 语义 `(1−null_frac)/ndistinct`（NULL 不参与等值匹配）。
+
+验证：`stats_planner_test` 新增场景（100 行中 30 NULL：nullCount 断言、isnull 估 30 精确、isnotnull 估 70），既有 MCV/直方图/likesel/join 场景不回归。注意：固定宽度数值列的零值与 NULL 同编码（引擎既有约定），NULL 精确计数对 varchar/文本类列完全成立。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。P1-12 剩余：穷举 DP join 顺序、`IN` 列表选择率。

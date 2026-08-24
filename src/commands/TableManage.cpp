@@ -3225,11 +3225,20 @@ static StorageEngine::ColumnStats parseStatsLine(const std::string& line) {
         if (pipe == std::string::npos) break;
         p = pipe + 1;
     }
-    // Skip leading empty parts (from the | immediately after cardinality)
-    size_t startIdx = 0;
-    while (startIdx < parts.size() && parts[startIdx].empty()) ++startIdx;
+    // Positional layout after cardinality: |min|max|hist|mcv|nulls.
+    // parts[0] is the empty split before min (the | right after the
+    // cardinality); min/max may themselves be legitimately empty (an
+    // all-NULL column), so leading-empty skipping would misalign fields.
+    // Old files may omit mcv/nulls; guard by size.
     std::vector<std::string> realParts;
-    for (size_t i = startIdx; i < parts.size(); ++i) realParts.push_back(parts[i]);
+    for (size_t i = 1; i < parts.size(); ++i) realParts.push_back(parts[i]);
+    if (realParts.size() < 4 && parts.size() >= 1) {
+        // zero-delimiter degenerate line; fall back to old alignment
+        size_t startIdx = 0;
+        while (startIdx < parts.size() && parts[startIdx].empty()) ++startIdx;
+        realParts.clear();
+        for (size_t i = startIdx; i < parts.size(); ++i) realParts.push_back(parts[i]);
+    }
 
     StorageEngine::ColumnStats cs;
     cs.cardinality = card;
@@ -3254,6 +3263,10 @@ static StorageEngine::ColumnStats parseStatsLine(const std::string& line) {
     if (realParts.size() > 3 && !realParts[3].empty()) {
         cs.mcv = mcvFromString(realParts[3]);
     }
+    // NULL count (optional 5th field; absent in pre-nullCount stats files)
+    if (realParts.size() > 4 && !realParts[4].empty()) {
+        try { cs.nullCount = std::stoull(realParts[4]); } catch (...) {}
+    }
     return cs;
 }
 
@@ -3266,7 +3279,7 @@ static void writeStatsEntry(std::ostream& ofs, const std::string& tname,
         if (i > 0) ofs << ";";
         ofs << cs.histogram[i].first << "," << cs.histogram[i].second;
     }
-    ofs << "|" << mcvToString(cs.mcv) << "\n";
+    ofs << "|" << mcvToString(cs.mcv) << "|" << cs.nullCount << "\n";
 }
 
 bool StorageEngine::analyzeTable(const std::string& dbname,
@@ -3279,12 +3292,14 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     std::map<std::string, std::set<std::string>> distinctVals;
     std::map<std::string, std::vector<std::string>> allVals;
     std::map<std::string, std::string> minVals, maxVals;
+    std::map<std::string, size_t> nullCounts;
 
     if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
         stats.rowCount++;
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             std::string val = extractColumnValue(row, tbl, i);
+            if (val.empty()) ++nullCounts[tbl.cols[i].dataName];
             distinctVals[tbl.cols[i].dataName].insert(val);
             allVals[tbl.cols[i].dataName].push_back(val);
             if (minVals.find(tbl.cols[i].dataName) == minVals.end() || val < minVals[tbl.cols[i].dataName]) {
@@ -3302,6 +3317,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         const std::string& cname = tbl.cols[i].dataName;
         StorageEngine::ColumnStats cs;
         cs.cardinality = distinctVals[cname].size();
+        cs.nullCount = nullCounts[cname];
         cs.minVal = minVals[cname];
         cs.maxVal = maxVals[cname];
         auto& vals = allVals[cname];

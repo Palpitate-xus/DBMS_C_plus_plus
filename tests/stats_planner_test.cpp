@@ -147,6 +147,37 @@ int main() {
               << " cold=" << likeColdRows << ")" << std::endl;
 
     // ------------------------------------------------------------------
+    // 2c. NULL statistics: 30 of 100 rows NULL, 70 with values.
+    //     IS NULL estimates 0.3 exactly; IS NOT NULL ~0.7; the cold-value
+    //     equality scales by the non-null fraction.
+    // ------------------------------------------------------------------
+    // VARCHAR column: zero-length is the engine's NULL encoding, so
+    // "" inserts real NULLs the isnull evaluator agrees with.
+    assert(!ddl.executeSql("CREATE TABLE nz (id INT, v VARCHAR(16))", s));
+    for (int i = 0; i < 100; ++i) {
+        std::string v = (i < 30) ? "" : ("v" + std::to_string(i));
+        assert(g_engine.insert(db, "nz",
+                               {{"id", std::to_string(i)}, {"v", v}})
+                   == dbms::DBStatus::OK);
+    }
+    assert(g_engine.analyzeTable(db, "nz"));
+    auto nzStats = g_engine.getColumnStats(db, "nz", "v");
+    assert(nzStats.nullCount == 30);
+    ctx.tablename = "nz";
+    ctx.conds = {{"isnull", "v", ""}};
+    plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    explain = dbms::QueryPlanner::explain(plan, &g_engine, db);
+    int nullRows = parseRows(explain, "Filter");
+    assert(nullRows >= 25 && nullRows <= 35);   // exact 30, not the flat 10
+    ctx.conds = {{"isnotnull", "v", ""}};
+    plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    explain = dbms::QueryPlanner::explain(plan, &g_engine, db);
+    int notNullRows = parseRows(explain, "Filter");
+    assert(notNullRows >= 60 && notNullRows <= 80);   // ~70
+    std::cout << "[STATS-PLAN] null fraction selectivity OK (isnull="
+              << nullRows << " isnotnull=" << notNullRows << ")" << std::endl;
+
+    // ------------------------------------------------------------------
     // 3. Join selectivity: orders(1000 rows) x customers(100 rows) on
     //    customer_id with ndistinct 100 -> est rows ~= 1000*100/100 = 1000.
     // ------------------------------------------------------------------

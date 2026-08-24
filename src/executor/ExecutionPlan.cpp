@@ -3372,10 +3372,25 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
                                   const std::string& dbname,
                                   const std::string& tablename) {
     auto stats = engine->getColumnStats(dbname, tablename, cond.colName);
+    double totalRows = static_cast<double>(engine->getTableRowCount(dbname, tablename));
+    // NULL fraction (pg null_frac): 0 when stats predate nullCount.
+    double nullFrac = (totalRows > 0 && stats.nullCount > 0)
+        ? std::min(1.0, static_cast<double>(stats.nullCount) / totalRows)
+        : 0.0;
+    if (cond.op == "isnull") {
+        // Exact when ANALYZE ran: nullCount / rows.
+        if (totalRows > 0 && stats.nullCount > 0) return nullFrac;
+        return 0.1;   // historical default-null guess
+    }
+    if (cond.op == "isnotnull") {
+        if (totalRows > 0 && stats.nullCount > 0) return 1.0 - nullFrac;
+        return 0.9;
+    }
     if (cond.op == "=") {
         // Most Common Values first: mcv entries are (value, row count), so
         // the selectivity of a hot value is count / table rows — exact.
-        double rows = static_cast<double>(engine->getTableRowCount(dbname, tablename));
+        // NULLs never satisfy equality; the count already excludes them.
+        double rows = totalRows;
         for (const auto& m : stats.mcv) {
             if (m.first == cond.value) {
                 if (rows > 0) return static_cast<double>(m.second) / rows;
@@ -3383,7 +3398,10 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
             }
         }
         if (stats.cardinality > 0) {
-            return 1.0 / static_cast<double>(stats.cardinality);
+            // Non-null fraction times uniform 1/ndistinct (PG semantics).
+            double s = (1.0 - nullFrac) / static_cast<double>(stats.cardinality);
+            if (s <= 0.0) s = 0.001;
+            return s;
         }
         return 0.1;
     }
