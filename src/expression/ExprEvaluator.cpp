@@ -997,8 +997,8 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         return ExprValue("boolean", m ? "t" : "f", false);
     }
 
-    // IN list
-    if (op == "in") {
+    // IN / NOT IN list
+    if (op == "in" || op == "not in") {
         if (l.isNull) return ExprValue("boolean", "", true);
         // Parser currently stores IN list as raw literal text; split on space
         std::string listText = r.value;
@@ -1006,9 +1006,9 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         std::string tok;
         while (iss >> tok) {
             if (compareValues(l, ExprValue("character varying", unquote(tok), false)) == 0)
-                return ExprValue("boolean", "t", false);
+                return ExprValue("boolean", op == "in" ? "t" : "f", false);
         }
-        return ExprValue("boolean", "f", false);
+        return ExprValue("boolean", op == "in" ? "f" : "t", false);
     }
 
     // Cast (::)
@@ -1223,11 +1223,12 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         }
         return best;
     }
-    if (name == "between") {
+    if (name == "between" || name == "not between") {
         if (args.size() != 3) return ExprValue("boolean", "f", false);
         ExprValue v = args[0], lo = args[1], hi = args[2];
         bool r = !v.isNull && !lo.isNull && !hi.isNull &&
                  compareValues(v, lo) >= 0 && compareValues(v, hi) <= 0;
+        if (name == "not between") r = !r;
         return ExprValue("boolean", r ? "t" : "f", false);
     }
 

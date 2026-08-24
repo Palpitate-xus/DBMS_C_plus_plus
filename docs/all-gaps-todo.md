@@ -13,6 +13,8 @@
 2026-08-14 性能与并发硬化轮次完成（13 个提交，详见 production-status.md）：WAL 增量追加状态与同事务 before-image 去重；`.secidx`/`.hashidx`/排除约束/schema/序列计数器内存缓存（DDL 全路径失效，序列保持非事务语义）；缓冲池 256/128 帧（`DBMS_BUFFER_FRAMES`/`DBMS_INDEX_BUFFER_FRAMES` 可覆盖）+ 页校验仅磁盘加载时执行；B+ 树二分查找 + 64 项节点缓存；BufferPool 磁盘 I/O 出锁（单加载者 + 孤儿帧失效，TSAN/ASAN 压测 0 竞态 0 损坏）；FSM/VM/PageAllocator/BPTree/HashIndex/CLOG 内部锁；INSERT 意图锁（IX）。实测：带 PK 事务插入 11.7 → ~2000+ 行/秒，500 行插入+聚合 ~106s → ~0.3s。性能类 gap（缓冲池、校验频率、线性查找、元数据重读）关闭；剩余差距见 feature-gaps.md。
 
 2026-08-20 第二批（8 项）：① PL/pgSQL 最小解释器（DECLARE/IF/WHILE/FOR/RAISE/RETURN/RETURNING INTO，`utils/plpgsql`，UDF language=plpgsql）；② `VACUUM (PARALLEL n)` 页分片 worker 池；③ `pg_stats`/`pg_statistic` 视图（读 `.stats`，含 MCV/直方图）；④ `unnest()` 表函数（UnnestOp，FROM+投影）；⑤ TimeZone GUC 会话 timestamptz 渲染；⑥ 多表 join 贪心搜索（ON 链解析+最小对起步+中间物化+列名映射，修复 3 表以上 JOIN 静默丢表）；⑦ deferrable EXCLUDE（COMMIT 当前版本 recheck，HOT 重定向解析，autocommit 立即检查）；⑧ FTS ts_rank weights float4[] + `<->` 短语（递归下降优先级 `! > <-> > & > |`）+ `setweight()`。回归 PASS=160 FAIL=0（新增 plpgsql/parallel_vacuum/pg_stats/unnest C++ 测试 + multijoin/unnest/timestamptz E2E）。
+2026-08-24 v0.17：UPDATE/DELETE 域——中缀 NOT 谓词（`x NOT IN/NOT LIKE/NOT BETWEEN` 此前解析残留 "not" token 报语法错误）与 UPDATE 表别名（`update t [as] x set`，此前 "UPDATE requires SET"/"t x not exist"）双修；表达式求值器补 not in/not between。残留：主 SELECT 单谓词 not like/between 仍错误（基线既有）。回归 PASS=165 FAIL=0。
+
 2026-08-24 v0.16：SELECT 列表别名（`select id as no` 此前整串当列名校验失败）+ 算术投影（`salary * 2` 新增 arith 求值器：+ - * / % 左结合、除零 NULL、字符串拼接）+ ORDER BY 输出别名解析（此前静默按物理序返回）。回归 PASS=165 FAIL=0。
 
 2026-08-24 v0.15：单表别名（`from t [as] a` 此前整体被当表名 → not exist）与表名限定符（`where emp.id=2` 谓词被静默丢弃返回空）双修——FROM 区早期拆分别名，投影/WHERE 剥离 `<alias>.`/`<table>.` 限定。回归 PASS=165 FAIL=0。

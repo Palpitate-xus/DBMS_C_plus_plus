@@ -480,3 +480,21 @@ P1-12 收尾项：NULL 选择率此前完全缺失（`isnull`/`isnotnull` 落入
 验证：`salary*2`→200、`salary+id`→202、`salary/4`→100、`salary-100`→400、链式 `salary+id-1`→302、AS 别名（普通/order/group 投影）、ORDER BY 别名 desc/asc 全部实测正确；普通投影/ORDER BY 无回归。协议回归 +5 断言。已知残留：GROUP BY 引用输出别名（`group by d`）暂不支持（PG 允许，低频形状）。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。
+
+
+## 2026-08-24 v0.17 批次：UPDATE/DELETE 谓词与别名（NOT IN 语法拒绝 + UPDATE 别名拒绝修复）
+
+UPDATE/DELETE 域审计发现两个语法级缺陷：
+
+1. **`UPDATE/DELETE ... WHERE c NOT IN (...)` 语法报错**：表达式解析链（parseNotExpr→parseIsExpr→parseComparisonExpr→parseRangeExpr）仅支持前缀 NOT；中缀 `x NOT IN / NOT LIKE / NOT BETWEEN` 在 parseRangeExpr 处残留 "not" token → "unexpected token in UPDATE statement: not"。
+2. **`UPDATE t [AS] x SET ...` 被拒绝**（PG 标准形状）：UPDATE 解析器不支持表别名（"UPDATE requires SET"）；legacy 执行路径同样把 "t x" 当表名（"u3 x not exist"）。
+
+修复：
+- **parseRangeExpr**：谓词前置 `not`（词法边界安全，仅当后随 in/between/like/ilike/similar 时消费），生成 `NOT IN`/`NOT BETWEEN`/`NOT LIKE`/`NOT ILIKE` 运算符；前缀 NOT 语义不变（非谓词组合回退返回）。
+- **ExprEvaluator**：`not in`（补集语义，NULL 传播）与 `not between`（区间否定）求值。
+- **UPDATE 解析器**：表名后可选 `[AS] alias`（ast.h UpdateStmt 增 alias 字段）；**legacy UPDATE 执行路径**：表名/别名拆分 + `<alias>.` 限定符剥离。
+- parseConditions/evalConditionOnRow 增 notlike/between/notbetween 解码与求值（引擎层；主 SELECT 流的单谓词路径尚有残留缺口，见下）。
+
+验证：UPDATE NOT IN（正确更新目标行）、UPDATE 别名（裸/AS + 别名限定 WHERE）、DELETE NOT IN、SELECT in/notin/like 无回归；协议回归 +6 断言。已知残留（预先存在，基线复现）：单谓词 `where c not like / between`（不带 AND）在主 SELECT 流仍返回错误结果（0 行/全行）——AND 组合、UPDATE/DELETE、表达式求值器层均已正确；该单谓词流水线路径待后续批次修复（多轮 trace 未定位到条件丢失点，疑在 Volcano 构建前的某快速路径）。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。

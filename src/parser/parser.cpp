@@ -1131,12 +1131,25 @@ static ExprPtr parseComparisonExpr(const std::vector<std::string>& tokens, size_
     return left;
 }
 
-// BETWEEN, IN, LIKE, ILIKE, SIMILAR TO
+// BETWEEN, IN, LIKE, ILIKE, SIMILAR TO  (each optionally NOT-prefixed:
+// "x NOT IN (...)", "x NOT LIKE ...", "x NOT BETWEEN ...")
 static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& pos) {
     auto left = parseConcatExpr(tokens, pos);
     if (pos >= tokens.size()) return left;
 
     std::string w = SQLParser::toLower(tokens[pos]);
+    bool negated = false;
+    if (w == "not" && pos + 1 < tokens.size()) {
+        std::string next = SQLParser::toLower(tokens[pos + 1]);
+        if (next == "in" || next == "between" || next == "like" ||
+            next == "ilike" || next == "similar") {
+            negated = true;
+            ++pos;
+            w = next;
+        } else {
+            return left;   // prefix-NOT belongs to the caller's grammar
+        }
+    }
 
     if (w == "between") {
         ++pos;
@@ -1144,7 +1157,7 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "and") ++pos;
         auto upper = parseConcatExpr(tokens, pos);
         auto betweenExpr = std::make_unique<FunctionCallExpr>();
-        betweenExpr->funcName = "BETWEEN";
+        betweenExpr->funcName = negated ? "NOT BETWEEN" : "BETWEEN";
         betweenExpr->args.push_back(std::move(left));
         betweenExpr->args.push_back(std::move(lower));
         betweenExpr->args.push_back(std::move(upper));
@@ -1154,7 +1167,7 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
     if (w == "in") {
         ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
-        bin->op = "IN";
+        bin->op = negated ? "NOT IN" : "IN";
         bin->left = std::move(left);
         if (pos < tokens.size() && tokens[pos] == "(") {
             ++pos;
@@ -1176,7 +1189,8 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
     if (w == "like" || w == "ilike") {
         ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
-        bin->op = (w == "like") ? "LIKE" : "ILIKE";
+        if (negated) bin->op = (w == "like") ? "NOT LIKE" : "NOT ILIKE";
+        else bin->op = (w == "like") ? "LIKE" : "ILIKE";
         bin->left = std::move(left);
         bin->right = parseConcatExpr(tokens, pos);
         // ESCAPE
@@ -2505,10 +2519,20 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
         ++pos;
     }
 
-    // Table name
+    // Table name, optional [AS] alias (PG: UPDATE t [AS] x SET ...)
     if (pos < tokens.size()) {
         stmt->tableName = tokens[pos++];
     }
+    std::string updateAlias;
+    if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as") {
+        updateAlias = tokens[pos + 1];
+        pos += 2;
+    } else if (pos < tokens.size() && !isKeyword(tokens[pos]) &&
+               toLower(tokens[pos]) != "set" && tokens[pos] != ";" &&
+               toLower(tokens[pos]) != "where" && toLower(tokens[pos]) != "returning") {
+        updateAlias = tokens[pos++];
+    }
+    if (!updateAlias.empty()) stmt->alias = updateAlias;
 
     // SET clause
     if (pos >= tokens.size() || toLower(tokens[pos]) != "set") {

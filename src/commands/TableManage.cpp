@@ -2150,6 +2150,7 @@ static std::string normalizeViewCondStr(std::string s) {
     }
     struct KW { const char* w; size_t l; const char* r; };
     static const KW kws[] = {
+        {"not like", 9, "notlike"}, {"not between", 12, "notbetween"},
         {"like", 4, "like"}, {"regexp", 6, "regexp"}, {"contains", 8, "contains"},
         {"overlaps", 8, "overlaps"}, {"is not null", 11, "isnotnull"}, {"is null", 7, "isnull"}
     };
@@ -2193,7 +2194,10 @@ static std::string normalizeViewCondStr(std::string s) {
 
 static std::string modifyViewLogic(const std::string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
-    size_t p = logic.find("like");
+    size_t p = logic.find("not like");
+    if (p != std::string::npos)
+        return "notlike" + logic.substr(0, p) + " " + logic.substr(p + 9);
+    p = logic.find("like");
     if (p != std::string::npos)
         return "like" + logic.substr(0, p) + " " + logic.substr(p + 4);
     p = logic.find("regexp");
@@ -12709,6 +12713,18 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == ">=" && (scmp(val, cond.value) < 0))      return false;
         if (cond.op == "!=" && scmp(val, cond.value) == 0)        return false;
         if (cond.op == "like" && !likeMatch(val, cond.value)) return false;
+        if (cond.op == "notlike" && likeMatch(val, cond.value)) return false;
+        if (cond.op == "between" || cond.op == "notbetween") {
+            // cond.value = "lo hi" (space-joined by modifyLogic)
+            size_t sp = cond.value.find(' ');
+            if (sp != std::string::npos) {
+                const std::string& lo = cond.value.substr(0, sp);
+                const std::string& hi = cond.value.substr(sp + 1);
+                bool inRange = scmp(val, lo) >= 0 && scmp(val, hi) <= 0;
+                if (cond.op == "between" && !inRange) return false;
+                if (cond.op == "notbetween" && inRange) return false;
+            }
+        }
         if (cond.op == "regexp" && !regexMatch(val, cond.value)) return false;
         if (cond.op == "contains") {
             auto tokens = tokenizeText(val);
@@ -14489,6 +14505,45 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         if (s.empty()) continue;
         Condition c;
         // Handle LIKE operator
+        // Accept both "notlike<col> <val>" (glued, from modifyLogic's
+        // compact path) and "notlike <col> <val>" (spaced, from splitConds
+        // substrings).
+        if (s.size() >= 8 && s.substr(0, 8) == "notlike") {
+            c.op = "notlike";
+            size_t off = 8;
+            if (off < s.size() && s[off] == ' ') ++off;
+            size_t sp = s.find(' ', off);
+            if (sp != std::string::npos) {
+                c.colName = s.substr(off, sp - off);
+                c.value = s.substr(sp + 1);
+            }
+            conds.push_back(c);
+            continue;
+        }
+        if (s.size() >= 7 && s.substr(0, 7) == "between") {
+            c.op = "between";
+            size_t off = 7;
+            if (off < s.size() && s[off] == ' ') ++off;
+            size_t sp = s.find(' ', off);
+            if (sp != std::string::npos) {
+                c.colName = s.substr(off, sp - off);
+                c.value = s.substr(sp + 1);
+            }
+            conds.push_back(c);
+            continue;
+        }
+        if (s.size() >= 11 && s.substr(0, 11) == "notbetween") {
+            c.op = "notbetween";
+            size_t off = 11;
+            if (off < s.size() && s[off] == ' ') ++off;
+            size_t sp = s.find(' ', off);
+            if (sp != std::string::npos) {
+                c.colName = s.substr(off, sp - off);
+                c.value = s.substr(sp + 1);
+            }
+            conds.push_back(c);
+            continue;
+        }
         if (s.size() >= 4 && s.substr(0, 4) == "like") {
             c.op = "like";
             size_t sp = s.find(' ', 4);

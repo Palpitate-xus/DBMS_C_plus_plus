@@ -561,11 +561,42 @@ static string normalizeCaseCondition(string s) {
     if (isPos != string::npos) {
         return "isnull " + trim(s.substr(0, isPos));
     }
+    // "col not like pat" must be detected before "like" (which would
+    // otherwise read the column as "col not")
+    size_t notLikePos = s.find("not like ");
+    if (notLikePos != string::npos) {
+        string before = trim(s.substr(0, notLikePos));
+        string after = trim(s.substr(notLikePos + 9));
+        return "notlike" + before + " " + after;
+    }
     size_t likePos = s.find("like");
     if (likePos != string::npos) {
         string before = trim(s.substr(0, likePos));
         string after = trim(s.substr(likePos + 4));
         return "like" + before + " " + after;
+    }
+    // "col not between lo and hi" -> negated range pair
+    size_t notBtwPos = s.find("not between ");
+    if (notBtwPos != string::npos) {
+        string before = trim(s.substr(0, notBtwPos));
+        string rest = trim(s.substr(notBtwPos + 12));
+        size_t andPos = rest.find(" and ");
+        if (andPos != string::npos) {
+            string lo = trim(rest.substr(0, andPos));
+            string hi = trim(rest.substr(andPos + 5));
+            return "notbetween" + before + " " + lo + " " + hi;
+        }
+    }
+    size_t btwPos = s.find("between ");
+    if (btwPos != string::npos) {
+        string before = trim(s.substr(0, btwPos));
+        string rest = trim(s.substr(btwPos + 8));
+        size_t andPos = rest.find(" and ");
+        if (andPos != string::npos) {
+            string lo = trim(rest.substr(0, andPos));
+            string hi = trim(rest.substr(andPos + 5));
+            return "between" + before + " " + lo + " " + hi;
+        }
     }
     return s;
 }
@@ -5081,6 +5112,7 @@ static string foldConstants(const string& s) {
 // Rewrite "col [not] in (v1, v2, ...)" into the whitespace-free token
 // "in<col>(v1,v2,...)" / "notin<col>(v1,v2,...)" so tokenize() keeps the
 // predicate as one token and the per-token modifyLogic can decode it.
+
 static string compactInLists(const string& s) {
     string out;
     size_t i = 0;
@@ -5134,8 +5166,29 @@ static string compactInLists(const string& s) {
     return out;
 }
 
+
 static string modifyLogic(const string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
+    // Glued compact forms from compactInLists' second pass:
+    //   "notlike<col>(pat)" / "between<col>(lo,hi)" / "notbetween<col>(lo,hi)"
+    // -- decode to the engine's "<op> <col> <value>" form.
+    {
+        static const struct { const char* pfx; size_t len; } glued[] = {
+            {"notbetween", 11}, {"notlike", 8}, {"between", 7}, {"like", 4}
+        };
+        for (const auto& g : glued) {
+            if (logic.size() > g.len + 2 && logic.substr(0, g.len) == g.pfx) {
+                size_t lp = logic.find('(', g.len);
+                if (lp != string::npos && logic.back() == ')') {
+                    string col = logic.substr(g.len, lp - g.len);
+                    string args = logic.substr(lp + 1, logic.size() - lp - 2);
+                    // commas -> spaces (between lo,hi); pattern keeps commas? none expected
+                    for (auto& ch : args) if (ch == ',') ch = ' ';
+                    return string(g.pfx) + " " + col + " " + args;
+                }
+            }
+        }
+    }
     // Handle LIKE
     size_t likePos = logic.find("like");
     if (likePos != string::npos) {
@@ -11416,6 +11469,31 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return true;
         }
         string tname = trim(sql.substr(6, setPos - 6));
+        // UPDATE t [AS] x SET ... -- split the alias off the table name and
+        // strip "x." qualifiers from the rest of the statement so the
+        // engine's bare-column condition matching works.
+        string updAlias;
+        {
+            size_t sp = tname.find(' ');
+            if (sp != string::npos) {
+                string second = trim(tname.substr(sp + 1));
+                if (second.size() > 3 && second.substr(0, 3) == "as ")
+                    second = trim(second.substr(3));
+                if (!second.empty() &&
+                    second.find_first_of(" ,()[;.") == string::npos) {
+                    updAlias = second;
+                    tname = trim(tname.substr(0, sp));
+                }
+            }
+        }
+        if (!updAlias.empty()) {
+            string prefix = updAlias + ".";
+            size_t ap = sql.find(prefix, setPos);
+            while (ap != string::npos) {
+                sql = sql.substr(0, ap) + sql.substr(ap + prefix.size());
+                ap = sql.find(prefix, ap);
+            }
+        }
         // Check for INSTEAD OF UPDATE triggers on view
         {
             string ioResolved = resolveTableName(s, tname);

@@ -873,6 +873,27 @@ def main():
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
 
+        # UPDATE with NOT IN predicates and table aliases (PG shapes):
+        # "UPDATE t SET ... WHERE c NOT IN (...)" previously failed with a
+        # syntax error ("unexpected token: not"); "UPDATE t x SET ..." was
+        # rejected ("UPDATE requires SET").
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE upd_t (id INT PRIMARY KEY, v TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO upd_t VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d')"))
+        simple_query(sock, "UPDATE upd_t SET v = 'q' WHERE id NOT IN (1,2,3)")
+        uq1 = data_row_values(simple_query(sock, "SELECT v FROM upd_t WHERE id = 4"))
+        assert uq1 == [[b"q"]], uq1
+        simple_query(sock, "UPDATE upd_t x SET v = 'r' WHERE x.id = 1")
+        uq2 = data_row_values(simple_query(sock, "SELECT v FROM upd_t WHERE id = 1"))
+        assert uq2 == [[b"r"]], uq2
+        simple_query(sock, "UPDATE upd_t AS u SET v = 's' WHERE u.id = 2")
+        uq3 = data_row_values(simple_query(sock, "SELECT v FROM upd_t WHERE id = 2"))
+        assert uq3 == [[b"s"]], uq3
+        simple_query(sock, "DELETE FROM upd_t WHERE id NOT IN (1,2,3)")
+        uq4 = data_row_values(simple_query(sock, "SELECT COUNT(*) FROM upd_t"))
+        assert uq4 == [[b"3"]], uq4
+
         # SELECT-list aliases (AS) and arithmetic projections: previously
         # "select id as no" failed with "Invalid column name id as no".
         assert any(kind == b"C" for kind, _ in simple_query(

@@ -703,6 +703,7 @@ struct InsertStmt : public Stmt {
 
 struct UpdateStmt : public Stmt {
     std::string tableName;
+    std::string alias;                         // UPDATE t [AS] x
     std::map<std::string, ExprPtr> setClauses;
     ExprPtr whereClause;
     std::unique_ptr<FromItem> fromClause;      // UPDATE ... FROM ...
