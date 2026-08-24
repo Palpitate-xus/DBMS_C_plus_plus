@@ -873,6 +873,33 @@ def main():
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
 
+        # Single-table aliases and table-name qualifiers: "FROM t [as] a"
+        # must resolve the table (not "t a"), and "<alias>."/"<table>."
+        # qualifiers in projection/WHERE must strip to bare columns
+        # (previously "emp.id = 2" silently returned zero rows).
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE al_emp (id INT PRIMARY KEY, dept TEXT, salary INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO al_emp VALUES (1,'eng',100),(2,'eng',200),(3,'ops',300)"))
+        al1 = data_row_values(simple_query(
+            sock, "SELECT id FROM al_emp e WHERE e.salary > 150 ORDER BY e.id"))
+        assert al1 == [[b"2"], [b"3"]], al1
+        al2 = data_row_values(simple_query(
+            sock, "SELECT id FROM al_emp AS e WHERE e.id = 2"))
+        assert al2 == [[b"2"]], al2
+        al3 = data_row_values(simple_query(
+            sock, "SELECT e.id FROM al_emp e WHERE e.dept = 'eng' ORDER BY e.id"))
+        assert al3 == [[b"1"], [b"2"]], al3
+        al4 = data_row_values(simple_query(
+            sock, "SELECT al_emp.id FROM al_emp WHERE al_emp.id = 3"))
+        assert al4 == [[b"3"]], al4
+        al5 = data_row_values(simple_query(
+            sock, "SELECT al_emp.id, al_emp.salary FROM al_emp WHERE al_emp.id = 1"))
+        assert al5 == [[b"1", b"100"]], al5
+        al6 = data_row_values(simple_query(
+            sock, "SELECT id FROM al_emp e WHERE e.id IN (1,3)"))
+        assert al6 == [[b"1"], [b"3"]], al6
+
         # IN / NOT IN literal lists: planner-visible conditions with
         # statistics-driven row estimates, NOT IN rewriting to AND-of-!=
         # (previously matched nothing), and correct execution.

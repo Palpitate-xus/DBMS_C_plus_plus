@@ -13500,6 +13500,50 @@ if (sql.rfind("backup database", 0) == 0) {
             return handleFromlessSelect(rawSql, s);
         }
         string columns = trim(sql.substr(6, fromPos - 6));
+        // Single-table alias detection (early): "from t [as] a ..." -- strip
+        // "a." qualifiers from the projection list.  The FROM region ends
+        // at the first clause keyword; only a bare identifier (or "as X")
+        // may follow the table name.
+        string fromTableAlias;
+        {
+            static const char* clauseKws[] = {"where", "group", "having", "window",
+                                              "order", "limit", "offset", "fetch"};
+            size_t fEnd = sql.size();
+            for (const char* kw : clauseKws) {
+                size_t p = sql.find(string(" ") + kw, fromPos + 4);
+                if (p != string::npos && p < fEnd) fEnd = p;
+            }
+            string fromText = trim(sql.substr(fromPos + 4, fEnd - fromPos - 4));
+            size_t sp = fromText.find(' ');
+            if (sp != string::npos) {
+                string second = trim(fromText.substr(sp + 1));
+                if (second.size() > 3 && second.substr(0, 3) == "as ")
+                    second = trim(second.substr(3));
+                if (!second.empty() &&
+                    second.find_first_of(" ,()[;.") == string::npos)
+                    fromTableAlias = second;
+            }
+        }
+        {
+            // Projection: strip both "<alias>." and "<table>." qualifiers.
+            // The table name is the first whitespace-delimited token in
+            // the FROM region (before any alias).
+            size_t fromTokStart = fromPos + 4;
+            while (fromTokStart < sql.size() &&
+                   isspace(static_cast<unsigned char>(sql[fromTokStart]))) ++fromTokStart;
+            size_t fromTokEnd = fromTokStart;
+            while (fromTokEnd < sql.size() &&
+                   !isspace(static_cast<unsigned char>(sql[fromTokEnd]))) ++fromTokEnd;
+            string tableName = trim(sql.substr(fromTokStart, fromTokEnd - fromTokStart));
+            for (const auto& qual : {fromTableAlias, tableName}) {
+                if (qual.empty() || qual == ".") continue;
+                string prefix = qual + ".";
+                size_t cpos = 0;
+                while ((cpos = columns.find(prefix, cpos)) != string::npos)
+                    columns = columns.substr(0, cpos) +
+                              columns.substr(cpos + prefix.size());
+            }
+        }
         bool isDistinct = false;
         vector<string> distinctOnCols;
         if (columns.size() >= 12 && columns.substr(0, 12) == "distinct on(") {
@@ -14344,6 +14388,34 @@ if (sql.rfind("backup database", 0) == 0) {
                          : (limitPos != string::npos) ? limitPos
                          : (offsetPos != string::npos) ? offsetPos : sql.size();
         string tnameOrig = trim(sql.substr(fromPos + 4, tnameEnd - fromPos - 4));
+        // Single-table alias: "table [as] alias".  Split it off here and
+        // strip "<alias>." qualifiers from the WHERE clause below; without
+        // this the raw "emp e" reached resolveTableName and the engine
+        // looked for a table literally named "emp e".
+        string tableAlias;
+        {
+            string rest = tnameOrig;
+            size_t sp = rest.find(' ');
+            if (sp != string::npos) {
+                string second = trim(rest.substr(sp + 1));
+                rest = trim(rest.substr(0, sp));
+                bool secondIsAlias = false;
+                if (second.size() > 3 && second.substr(0, 3) == "as ") {
+                    tableAlias = trim(second.substr(3));
+                    secondIsAlias = true;
+                } else if (!second.empty() &&
+                           second.find_first_of(" ,()[;") == string::npos) {
+                    tableAlias = second;
+                    secondIsAlias = true;
+                }
+                if (secondIsAlias && !tableAlias.empty() &&
+                    tableAlias.find_first_of(" ,()[;") == string::npos) {
+                    tnameOrig = rest;
+                } else {
+                    tableAlias.clear();
+                }
+            }
+        }
         string tname = resolveTableName(s, tnameOrig);
 
         // Support dbname.tablename syntax for special catalogs
@@ -15155,6 +15227,19 @@ if (sql.rfind("backup database", 0) == 0) {
                            : (limitPos != string::npos) ? limitPos
                            : (offsetPos != string::npos) ? offsetPos : sql.size();
             string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
+            // Strip "<alias>." and "<tablename>." qualifiers: the single-
+            // table engine matches bare column names, and a table-name-
+            // qualified predicate ("emp.id = 2") used to be silently
+            // dropped, returning an empty (wrong) result.
+            for (const auto& qual : {tableAlias, tnameOrig}) {
+                if (qual.empty()) continue;
+                string prefix = qual + ".";
+                size_t apos = 0;
+                while ((apos = whereClause.find(prefix, apos)) != string::npos) {
+                    whereClause = whereClause.substr(0, apos) +
+                                  whereClause.substr(apos + prefix.size());
+                }
+            }
             rawWhereClause = whereClause;
             dbms::SemiJoinSpec semiJoin;
             dbms::ExistenceSpec existence;

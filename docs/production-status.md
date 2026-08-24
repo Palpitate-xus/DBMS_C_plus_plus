@@ -445,3 +445,20 @@ P1-12 收尾项：NULL 选择率此前完全缺失（`isnull`/`isnotnull` 落入
 验证（协议级实测）：IN/NOT IN 数值与文本列表、AND/OR 组合、`not in ()` 全部正确；EXPLAIN 出现 Filter 节点且 rows=3（5 行 × 3 值 × 1/5 精确）；`tests/postgres_protocol_test.py` 新增 6 项断言（含 EXPLAIN Filter 存在性）。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。
+
+
+## 2026-08-24 v0.15 批次：单表别名与表名限定符（两个静默错误结果缺陷）
+
+协议级审计发现两个基础语法缺陷（均以错误结果而非报错呈现）：
+
+1. **`FROM t [as] a` 完全不可用**：单表路径的 FROM 文本 `emp e` 未拆分别名，整个串被当作表名 → "Table emp e not exist"。任何带别名的单表查询（含聚合/星号/IN/ORDER/LIMIT 全部形状）一律失败。JOIN 路径别名正常，独单表路径缺失。
+2. **表名限定谓词静默返回空**（长期潜伏）：`where emp.id = 2` 中 `emp.` 限定符未被剥离，条件列名解析为不存在的 "emp.id" → 谓词被丢弃 → 返回空集（应为 id=2 一行）。HEAD 基线复现确认非本会话引入。
+
+修复（`main.cpp` 单表 SELECT 路径）：
+- FROM 区早期解析出 `表名 + [as] 别名`，别名用于剥离投影与 WHERE 中的 `<alias>.` 前缀；
+- `<table>.` 限定符同样从投影与 WHERE 剥离（WHERE 剥离同时覆盖别名与表名两种限定）；
+- 投影剥离处理前导空白（FROM 后首个 token 提取修正）。
+
+验证：别名（裸/as/限定列/聚合/IN/ORDER/LIMIT）、表名限定（投影+WHERE+聚合）、混合限定（表名限定投影+别名限定 WHERE）、JOIN 路径无回归、普通无限定查询无回归，全形状实测通过；`tests/postgres_protocol_test.py` 新增 6 项断言。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。已知相邻残留：投影列别名（`select id as no`）与 ORDER BY 组合的解析问题（独立缺陷，本批未触碰）。
