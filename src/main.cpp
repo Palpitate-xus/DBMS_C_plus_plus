@@ -744,7 +744,15 @@ static vector<string> splitFuncArgs(const string& s) {
             while (i < s.size() && s[i] != '\'') arg += s[i++];
             if (i < s.size()) arg += s[i++];
         } else {
-            while (i < s.size() && s[i] != ',') arg += s[i++];
+            int depth = 0;
+            while (i < s.size()) {
+                char ch = s[i];
+                if (ch == '(') ++depth;
+                else if (ch == ')') { if (depth > 0) --depth; }
+                else if (ch == ',' && depth == 0) break;
+                arg += ch;
+                ++i;
+            }
         }
         args.push_back(trim(arg));
         if (i < s.size() && s[i] == ',') ++i;
@@ -15372,7 +15380,24 @@ if (sql.rfind("backup database", 0) == 0) {
                         itemBase = trim(item.substr(0, filterPos));
                     }
                     size_t lp = itemBase.find('(');
-                    size_t rp = itemBase.find(')');
+                    // Balance parentheses so a nested call like
+                    // "upper(substring(name, 1, 1))" keeps its full argument
+                    // (find(')') would cut at the inner close).
+                    size_t rp = string::npos;
+                    if (lp != string::npos) {
+                        int depth = 0;
+                        bool inQ = false;
+                        for (size_t k = lp; k < itemBase.size(); ++k) {
+                            char ch = itemBase[k];
+                            if (inQ) { if (ch == '\'') inQ = false; continue; }
+                            if (ch == '\'') { inQ = true; continue; }
+                            if (ch == '(') ++depth;
+                            else if (ch == ')') {
+                                --depth;
+                                if (depth == 0) { rp = k; break; }
+                            }
+                        }
+                    }
                     if (lp != string::npos && rp != string::npos && rp > lp) {
                         string func = itemBase.substr(0, lp);
                         string arg = itemBase.substr(lp + 1, rp - lp - 1);
@@ -15392,6 +15417,9 @@ if (sql.rfind("backup database", 0) == 0) {
                                 arg = "distinct " + trim(arg.substr(9));
                             }
                         }
+                        // PostgreSQL function names are case-insensitive.
+                        for (char& fc : func)
+                            fc = static_cast<char>(tolower(static_cast<unsigned char>(fc)));
                         bool isUDF = (!s.currentDB.empty() && g_engine.udfExists(s.currentDB, func));
                         if (isScalarFunc(func) || isUDF) {
                             dbms::StorageEngine::SelectExpr expr;

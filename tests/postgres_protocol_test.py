@@ -1012,6 +1012,53 @@ def main():
             sock, "SELECT SUM(amt), MIN(amt), MAX(amt), COUNT(*) FROM expr_t"))
         assert agr3 == [[b"250", b"25", b"100", b"4"]], agr3
 
+        # Decimal literals, round(x, n), nested scalar calls, POSITION(.. IN ..)
+        # and decimal BETWEEN: the tokenizer used to split "3.567" into
+        # "3 . 567", round ignored its precision argument, nested calls fell
+        # back to literal text, position(IN) returned NULL, and decimal
+        # BETWEEN bounds parsed as INF (matching no rows).
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE dec_t (id INT PRIMARY KEY, v NUMERIC, name TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO dec_t VALUES (1, 1.5, 'ann'), (2, 2.25, 'bob')"))
+        d1 = data_row_values(simple_query(sock, "SELECT ROUND(3.567, 1) AS r"))
+        assert d1 == [[b"3.6"]], d1
+        d2 = data_row_values(simple_query(sock, "SELECT ABS(-5) AS a"))
+        assert d2 == [[b"5"]], d2
+        d3 = data_row_values(simple_query(sock, "SELECT 1.5 + 2.25 AS s"))
+        assert d3 == [[b"3.75"]], d3
+        d4 = data_row_values(simple_query(
+            sock, "SELECT ROUND(v, 1) AS r FROM dec_t WHERE id = 2"))
+        assert d4 == [[b"2.3"]], d4
+        d5 = data_row_values(simple_query(
+            sock, "SELECT POSITION('b' IN 'abc') AS p"))
+        assert d5 == [[b"2"]], d5
+        d6 = data_row_values(simple_query(
+            sock, "SELECT POSITION('z' IN 'abc') AS p"))
+        assert d6 == [[b"0"]], d6
+        d7 = data_row_values(simple_query(
+            sock, "SELECT UPPER(SUBSTRING(name, 1, 1)) AS u FROM dec_t WHERE id = 1"))
+        assert d7 == [[b"A"]], d7
+        d8 = data_row_values(simple_query(
+            sock, "SELECT id FROM dec_t WHERE v BETWEEN 1.25 AND 2.0"))
+        assert d8 == [[b"1"]], d8
+        d9 = data_row_values(simple_query(
+            sock, "SELECT id FROM dec_t WHERE v BETWEEN 1.6 AND 2.1"))
+        assert d9 == [], d9
+        d10 = data_row_values(simple_query(
+            sock, "SELECT id FROM dec_t WHERE id BETWEEN 0.5 AND 1.5"))
+        assert d10 == [[b"1"]], d10
+        d11 = data_row_values(simple_query(
+            sock, "SELECT id FROM dec_t WHERE id NOT BETWEEN 1 AND 1"))
+        assert d11 == [[b"2"]], d11
+        # Regression: plain IN predicate and integer-bound BETWEEN unchanged.
+        d12 = data_row_values(simple_query(
+            sock, "SELECT id FROM dec_t WHERE id IN (1, 2)"))
+        assert d12 == [[b"1"], [b"2"]], d12
+        d13 = data_row_values(simple_query(
+            sock, "SELECT id FROM dec_t WHERE v BETWEEN 1 AND 2"))
+        assert d13 == [[b"1"]], d13
+
         # SELECT-list aliases (AS) and arithmetic projections: previously
         # "select id as no" failed with "Invalid column name id as no".
         assert any(kind == b"C" for kind, _ in simple_query(

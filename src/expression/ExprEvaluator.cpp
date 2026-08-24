@@ -33,7 +33,10 @@ static std::string toLower(std::string s) {
 
 static bool isNumericTypeName(const std::string& s) {
     std::string t = toLower(s);
-    return t == "numeric" || t == "decimal";
+    return t == "numeric" || t == "decimal" || t == "integer" ||
+           t == "int" || t == "bigint" || t == "smallint" ||
+           t == "double precision" || t == "float" || t == "float8" ||
+           t == "real" || t == "float4";
 }
 
 static std::optional<Numeric> tryParseNumeric(const std::string& s) {
@@ -721,8 +724,16 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         return ExprValue("timestamp", "", true);
     }
 
-    // Exact arithmetic for explicit numeric/decimal types.
-    if (isNumericTypeName(l.typeName) || isNumericTypeName(r.typeName)) {
+    // Exact arithmetic when either side carries a decimal-capable type
+    // (numeric/decimal/float).  Integer op integer stays integer-typed, as
+    // in PostgreSQL ("id + 10" on int4 returns int4, not numeric).
+    auto isDecimalTyped = [](const std::string& t) {
+        std::string tl = toLower(t);
+        return tl == "numeric" || tl == "decimal" ||
+               tl == "double precision" || tl == "float" || tl == "float8" ||
+               tl == "real" || tl == "float4";
+    };
+    if (isDecimalTyped(l.typeName) || isDecimalTyped(r.typeName)) {
         auto nl = tryParseNumeric(l.value);
         auto nr = tryParseNumeric(r.value);
         if (nl && nr) {

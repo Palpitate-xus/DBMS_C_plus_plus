@@ -362,6 +362,16 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
             c == '/' || c == '%' || c == '^' || c == '~' || c == '!' ||
             c == '|' || c == '&' || c == '#' || c == '@' || c == '?' ||
             c == ':' || c == '[' || c == ']' || c == '.') {
+            // Decimal literal: keep "3.567" as ONE token. A '.' between two
+            // digit runs only folds when the left run is a bare number (so
+            // qualified identifiers like t.col and numeric-list syntax like
+            // "1." stay symbol-split).
+            if (c == '.' && isNumericToken(cur) &&
+                i + 1 < sql.size() &&
+                std::isdigit(static_cast<unsigned char>(sql[i + 1]))) {
+                cur += c;
+                continue;
+            }
             if (!cur.empty()) {
                 tokens.push_back(cur);
                 cur.clear();
@@ -412,6 +422,33 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
     }
     if (!cur.empty()) {
         tokens.push_back(cur);
+    }
+    // PostgreSQL POSITION(needle IN haystack): rewrite the IN token to a
+    // comma when it appears inside a position()/strpos() argument list, so
+    // the generic expression parser sees two arguments instead of an IN
+    // comparison.
+    {
+        int depth = 0;
+        int posFuncDepth = -1;  // paren depth of an open position( call
+        std::string prev;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            const std::string& t = tokens[i];
+            std::string tl = toLower(t);
+            if (t == "(") {
+                ++depth;
+                if (tl == "(" && (prev == "position" || prev == "strpos") &&
+                    posFuncDepth < 0) {
+                    posFuncDepth = depth;
+                }
+            } else if (t == ")") {
+                if (posFuncDepth > 0 && depth == posFuncDepth) posFuncDepth = -1;
+                --depth;
+            } else if (posFuncDepth > 0 && depth == posFuncDepth && tl == "in") {
+                const_cast<std::string&>(tokens[i]) = ",";
+            }
+            if (t != "(") prev = tl;
+            else prev.clear();
+        }
     }
     return tokens;
 }
@@ -1705,9 +1742,18 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
             }
             auto arg = parseExpr(tokens, pos);
             parseArg(std::move(arg));
-            if (pos < tokens.size() && tokens[pos] == ",") {
+            // PostgreSQL POSITION(needle IN haystack): the IN keyword acts
+            // as the argument separator inside position()/strpos().
+            if (pos + 1 < tokens.size() && tokens[pos] == "," ) {
                 ++pos;
                 continue;
+            }
+            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "in" &&
+                (SQLParser::toLower(func->funcName) == "position" ||
+                 SQLParser::toLower(func->funcName) == "strpos")) {
+                ++pos;
+                auto arg2 = parseExpr(tokens, pos);
+                parseArg(std::move(arg2));
             }
         }
         if (pos < tokens.size() && tokens[pos] == ")") ++pos;

@@ -554,3 +554,26 @@ v0.17 记录的残留缺口（单谓词 `WHERE c NOT LIKE 'x'` / `c BETWEEN a AN
 验证：标量矩阵 sum 500 / min 50 / max 101 / count 4 / avg 125 / 两列相加 310 全对；分组矩阵 sum 300/200、min 100/50、max 200/150、count 2/2、avg 150/100 全对；回归：裸列聚合（sum 250、avg 62.5、min/max/count、group by 多聚合、rollup、having、where+agg、distinct count）全部不变；协议回归 +15 断言（expr_t 表，带别名形式）。已知残留（预先存在，基线复现）：无别名表达式聚合的显示名（如 `sum(amt * 2)`）仍被协议层按空格切分产生幻影空列（带别名则正确单列）——协议列名构造与文本表头解耦是后续工作；`order by sum(amt)`（非别名列形式）分组排序同为基线既有行为。
 
 验证状态：完整回归 `PASS=167 FAIL=0`（含 7 个 Python E2E，v0.20）。
+
+## 2026-08-24 v0.21 批次：标量函数六联缺陷（小数字面量 / round 精度 / 嵌套调用 / POSITION-IN / 函数名大小写 / 小数 BETWEEN）
+
+标量函数域逐项审计发现六个真实缺陷，全部表现为静默错误结果或空结果：
+
+- **小数字面量在 tokenizer 被拆散**：`3.567` 被切成 `3`、`.`、`567` 三个 token（`.` 是符号字符直接断词）→ 解析层 `round(3.567, 1)` 收到 argc=4 的垃圾参数返回 `3.000000`（PG: 3.6）；任何经解析器的表达式里的小数字面量都损坏。
+- **`round(x, n)` 丢弃精度参数**：FROM 路径的 round 只做 `std::round(d)` 整数舍入。
+- **嵌套标量调用回退原文**：`upper(substring(name, 1, 1))` 返回字面文本 `SUBSTRING(NAME`——投影层 `find(')')` 在内层括号处截断 + `splitFuncArgs` 不感知括号深度。
+- **`position('b' in 'abc')` 返回 NULL**：IN 关键字被当比较运算符吃掉，双参形式从未形成。
+- **函数名大小写敏感**：`SUBSTRING(...)` 无法匹配小写比较链，走到错误回退返回错位字符。
+- **小数 BETWEEN 全部空结果**：numeric 列 `v between 1.25 and 2.0` 中 `Numeric("1.25 2.0")` 抛异常→false；整数列小数边界 parseInt→INF→false；double/decimal 分支根本没有 BETWEEN 处理。
+
+修复：
+
+1. `src/parser/parser.cpp`：tokenizer 对 `数字.数字` 形态折叠为单 token（限定左侧必须是纯数字 token，`t.col` 限定名不受影响）；tokenize 后处理把 position()/strpos() 参数列表内的 IN token 重写为逗号（PG `POSITION(needle IN haystack)` 语法）。
+2. `src/commands/TableManage.cpp`：round 支持 `round(x, n)` 保留 n 位小数（fixed+setprecision）；applyScalarFunc 的 getVal 递归求值嵌套标量调用（括号平衡解析内层 name(args)，深度感知逗号拆分后递归 applyScalarFunc）。
+3. `src/main.cpp`：投影层函数名解析用括号平衡匹配 `)`（不再 find(')') 截断）；splitFuncArgs 深度感知；标量函数名统一小写化。
+4. `src/expression/ExprEvaluator.cpp`：isNumericTypeName 扩展到 integer/float 族（round/abs 等走 Numeric 路径输出 `3.6`/`5` 而非 `3.600000`）；算术结果类型保持——int op int 仍是 int（`id + 10` 的 RETURNING OID 从 1700 回到 23=INT4，与 PG 一致），仅 decimal 族类型进 Numeric 精确路径。
+5. BETWEEN 三分支（numeric/double/整数列）全部支持小数边界：numeric 列拆分 "lo hi" 后逐段 Numeric 比较；double 同理 stod；整数列 stod 十进制比较失败时回退整数解析。
+
+验证：探针矩阵 12 项全对（length/upper/lower/substr/concat/coalesce/abs/round/nested/replace/trim/position）；回归矩阵 13 项（限定列名 `t1.v`、`::` 转换、小数 WHERE/聚合/JOIN/ORDER BY、IN 列表、LIKE 含点、JSON 操作符、小数算术、round 列）除基线已知的 `id::text` 投影转换外全部通过；BETWEEN 子矩阵（numeric 列小数边界命中/不命中/not between、整数列小数边界、整数边界回归、gt/lt 回归）全部与手算 PG 语义一致；协议回归 +13 断言（ROUND/ABS/POSITION/嵌套 UPPER(SUBSTRING)/BETWEEN 命中与不命中/NOT BETWEEN/IN 回归/整数边界回归）。注意 PG 语义核对修正了一处测试预期：`id BETWEEN 1.1 AND 2.9` 中 id=1 不满足（1 < 1.1），只有 id=2 命中。
+
+验证状态：完整回归 PASS=167 FAIL=0（geometric_test 首轮出现临时目录清理竞态 flake，隔离重跑通过；复跑全量绿色，含 7 个 Python E2E）；ASAN CLEAN（14 组）。

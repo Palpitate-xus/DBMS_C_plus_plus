@@ -12787,6 +12787,24 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == ">=" && (num < cmp))  return false;
         if (cond.op == "!=" && num == cmp)   return false;
     } else if (col.dataType == "numeric") {
+        if (cond.op == "between" || cond.op == "notbetween") {
+            // cond.value = "lo hi" (space-joined upstream).  Numeric bounds
+            // previously failed here: Numeric("1.25 2.0") throws and the
+            // whole comparison returned false.
+            size_t sp = cond.value.find(' ');
+            if (sp == std::string::npos) return false;
+            try {
+                Numeric lo(cond.value.substr(0, sp));
+                Numeric hi(cond.value.substr(sp + 1));
+                Numeric num = val.empty() ? Numeric(0) : Numeric(val);
+                bool inRange = !(num < lo) && !(num > hi);
+                if (cond.op == "between" && !inRange) return false;
+                if (cond.op == "notbetween" && inRange) return false;
+            } catch (...) {
+                return false;
+            }
+            return true;
+        }
         try {
             Numeric num = val.empty() ? Numeric(0) : Numeric(val);
             Numeric cmp(cond.value);
@@ -12803,6 +12821,21 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         }
     } else if (col.dataType == "double" || col.dataType == "decimal") {
         double num = 0.0, cmp = 0.0;
+        if (cond.op == "between" || cond.op == "notbetween") {
+            size_t sp = cond.value.find(' ');
+            if (sp == std::string::npos) return false;
+            try {
+                double lo = std::stod(cond.value.substr(0, sp));
+                double hi = std::stod(cond.value.substr(sp + 1));
+                num = val.empty() ? 0.0 : std::stod(val);
+                bool inRange = num >= lo && num <= hi;
+                if (cond.op == "between" && !inRange) return false;
+                if (cond.op == "notbetween" && inRange) return false;
+            } catch (...) {
+                return false;
+            }
+            return true;
+        }
         try {
             num = val.empty() ? 0.0 : std::stod(val);
             cmp = std::stod(cond.value);
@@ -12937,13 +12970,26 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "between" || cond.op == "notbetween") {
             size_t sp = cond.value.find(' ');
             if (sp == std::string::npos) return false;
-            int64_t lo = StorageEngine::parseInt(cond.value.substr(0, sp));
-            int64_t hi = StorageEngine::parseInt(cond.value.substr(sp + 1));
-            if (num == INF || lo == INF || hi == INF) return false;
-            bool inRange = num >= lo && num <= hi;
-            if (cond.op == "between" && !inRange) return false;
-            if (cond.op == "notbetween" && inRange) return false;
-            return true;
+            // Decimal bounds compare numerically against the integer
+            // column value ("id between 1.1 and 2.9" in PostgreSQL matches
+            // ids 1 and 2); fall back to integer parsing when not decimal.
+            try {
+                double loD = std::stod(cond.value.substr(0, sp));
+                double hiD = std::stod(cond.value.substr(sp + 1));
+                if (num == INF) return false;
+                bool inRange = static_cast<double>(num) >= loD && static_cast<double>(num) <= hiD;
+                if (cond.op == "between" && !inRange) return false;
+                if (cond.op == "notbetween" && inRange) return false;
+                return true;
+            } catch (...) {
+                int64_t lo = StorageEngine::parseInt(cond.value.substr(0, sp));
+                int64_t hi = StorageEngine::parseInt(cond.value.substr(sp + 1));
+                if (num == INF || lo == INF || hi == INF) return false;
+                bool inRange = num >= lo && num <= hi;
+                if (cond.op == "between" && !inRange) return false;
+                if (cond.op == "notbetween" && inRange) return false;
+                return true;
+            }
         }
         if (cond.op == "notlike") {
             // NOT LIKE on a non-text column: match textually, then negate.
@@ -17754,12 +17800,53 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 return StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
             }
         }
+        // Nested scalar call in an argument (upper(substring(name,1,2))):
+        // parse "name(arg,...)" and recurse through applyScalarFunc.
+        {
+            size_t nlp = arg.find('(');
+            if (nlp != std::string::npos && nlp > 0 && arg.back() == ')') {
+                std::string nfunc = arg.substr(0, nlp);
+                bool nameOk = !nfunc.empty();
+                for (char ch : nfunc)
+                    if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
+                        { nameOk = false; break; }
+                if (nameOk) {
+                    std::string inner = arg.substr(nlp + 1, arg.size() - nlp - 2);
+                    // Depth-aware comma split (shared shape with the
+                    // projection layer's splitFuncArgs).
+                    std::vector<std::string> nArgs;
+                    std::string cur;
+                    int depth = 0;
+                    bool inQ = false;
+                    for (size_t k = 0; k < inner.size(); ++k) {
+                        char ch = inner[k];
+                        if (ch == '\'') { inQ = !inQ; cur += ch; continue; }
+                        if (!inQ) {
+                            if (ch == '(') ++depth;
+                            else if (ch == ')') --depth;
+                            else if (ch == ',' && depth == 0) {
+                                nArgs.push_back(trim(cur)); cur.clear(); continue;
+                            }
+                        }
+                        cur += ch;
+                    }
+                    if (!trim(cur).empty() || !nArgs.empty()) nArgs.push_back(trim(cur));
+                    StorageEngine::SelectExpr sub;
+                    sub.isScalar = true;
+                    sub.funcName = nfunc;
+                    sub.funcArgs = nArgs;
+                    sub.sessionUser = expr.sessionUser;
+                    return applyScalarFunc(sub, rowBuffer, tbl, engine, dbname);
+                }
+            }
+        }
         return arg;
     };
 
     if ((expr.funcName == "current_user" || expr.funcName == "session_user") && !expr.sessionUser.empty()) {
         return expr.sessionUser;
     }
+
     // Arithmetic projection: col op val op val ... evaluated left-to-right
     // (no precedence), for + - * / % on numeric operands.  Operands may be
     // bare columns (row-resolved via getVal), integer/float literals, or
@@ -17878,6 +17965,24 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::string val = getVal(expr.funcArgs[0]);
         try {
             double d = std::stod(val);
+            // PG: round(x) -> nearest integer; round(x, n) keeps n decimals.
+            if (expr.funcArgs.size() >= 2) {
+                int digits = 0;
+                try { digits = std::stoi(getVal(expr.funcArgs[1])); }
+                catch (...) { digits = 0; }
+                if (digits > 0) {
+                    double scale = 1.0;
+                    for (int i = 0; i < digits; ++i) scale *= 10.0;
+                    d = std::round(d * scale) / scale;
+                    std::ostringstream out;
+                    out << std::fixed << std::setprecision(digits) << d;
+                    // trim trailing zeros beyond requested precision is not
+                    // needed: setprecision(digits) already limits them.
+                    return out.str();
+                }
+                d = std::round(d);
+                return std::to_string(static_cast<int64_t>(d));
+            }
             d = std::round(d);
             return std::to_string(static_cast<int64_t>(d));
         } catch (...) { return val; }
