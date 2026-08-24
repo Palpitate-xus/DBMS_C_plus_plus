@@ -894,6 +894,47 @@ def main():
         uq4 = data_row_values(simple_query(sock, "SELECT COUNT(*) FROM upd_t"))
         assert uq4 == [[b"3"]], uq4
 
+        # Single-predicate NOT LIKE / BETWEEN / NOT BETWEEN (no AND): the
+        # condition previously never reached the engine (0 rows / all rows).
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE pred_t (id INT PRIMARY KEY, name TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO pred_t VALUES (1,'ann'),(2,'bob'),(3,'cat')"))
+        nl1 = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE name NOT LIKE 'a%' ORDER BY id"))
+        assert nl1 == [[b"2"], [b"3"]], nl1
+        bt1 = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE id BETWEEN 1 AND 2 ORDER BY id"))
+        assert bt1 == [[b"1"], [b"2"]], bt1
+        nb1 = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE id NOT BETWEEN 1 AND 2"))
+        assert nb1 == [[b"3"]], nb1
+        tb1 = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE name BETWEEN 'b' AND 'c'"))
+        assert tb1 == [[b"2"]], tb1
+        tnb1 = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE name NOT BETWEEN 'b' AND 'c' ORDER BY id"))
+        assert tnb1 == [[b"1"], [b"3"]], tnb1
+        # AND combinations must stay correct (regression).
+        anl = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE name NOT LIKE 'a%' AND id > 2"))
+        assert anl == [[b"3"]], anl
+        abt = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE id BETWEEN 1 AND 2 AND name LIKE 'b%'"))
+        assert abt == [[b"2"]], abt
+        # UPDATE / DELETE with the same predicates.
+        simple_query(sock, "UPDATE pred_t SET name = 'x' WHERE name NOT LIKE 'a%'")
+        upn = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE name = 'x' ORDER BY id"))
+        assert upn == [[b"2"], [b"3"]], upn
+        simple_query(sock, "UPDATE pred_t SET name = 'y' WHERE id BETWEEN 2 AND 3")
+        upb = data_row_values(simple_query(
+            sock, "SELECT id FROM pred_t WHERE name = 'y' ORDER BY id"))
+        assert upb == [[b"2"], [b"3"]], upb
+        simple_query(sock, "DELETE FROM pred_t WHERE id NOT BETWEEN 2 AND 3")
+        dnb = data_row_values(simple_query(sock, "SELECT id FROM pred_t"))
+        assert dnb == [[b"2"], [b"3"]], dnb
+
         # SELECT-list aliases (AS) and arithmetic projections: previously
         # "select id as no" failed with "Invalid column name id as no".
         assert any(kind == b"C" for kind, _ in simple_query(

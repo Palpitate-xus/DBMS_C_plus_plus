@@ -498,3 +498,24 @@ UPDATE/DELETE 域审计发现两个语法级缺陷：
 验证：UPDATE NOT IN（正确更新目标行）、UPDATE 别名（裸/AS + 别名限定 WHERE）、DELETE NOT IN、SELECT in/notin/like 无回归；协议回归 +6 断言。已知残留（预先存在，基线复现）：单谓词 `where c not like / between`（不带 AND）在主 SELECT 流仍返回错误结果（0 行/全行）——AND 组合、UPDATE/DELETE、表达式求值器层均已正确；该单谓词流水线路径待后续批次修复（多轮 trace 未定位到条件丢失点，疑在 Volcano 构建前的某快速路径）。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。
+
+## 2026-08-24 v0.18 批次：单谓词 NOT LIKE / BETWEEN 流水线修复（v0.17 遗留缺口闭合）
+
+v0.17 记录的残留缺口（单谓词 `WHERE c NOT LIKE 'x'` / `c BETWEEN a AND b` 不带 AND 时主 SELECT 流返回错误结果）本轮定位并修复。根因是一条五层叠加的丢失链：
+
+1. **normalizeConditionStr 预粘合**：`not like` 在 tokenize 之前就被粘合成 `notlike'x%'`，tokenize 切出 `[col, notlike'x%']` 两 token——而 `between` 不会被粘合（保持 5 token 空格形式），两条形状不同；
+2. **per-token modifyLogic 粉碎**：`notlikeX` 内部包含 "like" 子串，modifyLogic 的 like 关键字扫描把它重组成错误形式；
+3. **breakDownConditions 分组丢失**：未合并的多 token 谓词在 AND/OR 分组算法中被拆散丢弃；
+4. **parseConditions 前缀长度错误**：`notlike`（7 字符）被按 8 字符比较、`notbetween`（10 字符）被按 11 字符比较——永远不匹配，条件被静默丢弃（branches 为空 → 不过滤或全过滤）；
+5. **evalConditionOnRow 整型分支缺 between**：int 列走最终 else 分支，`parseInt("1 2")` 失败 → 全部行被过滤；且文本比较未剥引号（`'b'` 带引号参与比较）。
+
+修复：
+
+- **mergeNegPredTokens（新，main.cpp）**：tokenize 后合并谓词 token 运为引擎粘合形式——预粘合双 token 形 `[col, notlike'x%']` 与空格形式 `[col, not, like, pat]` / `[col, between, lo, and, hi]`（正负两种）均归一为 `notlike<col> <val>` / `between<col> <lo> <hi>` / `notbetween<col> <lo> <hi>`；接入全部四个 condTokens 构建点（主 SELECT 单表流、结构化子查询回退、UPDATE、DELETE）；
+- **modifyLogic**：合并单 token 形式直通（不被 like 关键字扫描粉碎）；
+- **parseConditions**：前缀长度修正（notlike=7、notbetween=10）；between/notlike/notbetween 值域逐 token 剥单引号（`betweenid 'b' 'c'` → `b c`）；
+- **evalConditionOnRow**：最终 else（整型）分支补 between/notbetween（`lo hi` 拆分数值比较）与 notlike（文本匹配取反）。
+
+验证：12 项手工矩阵全绿——单谓词 not like（2,3）/ between（1,2）/ not between（3）、文本 between（2）/ not between（1,3）、AND/OR 组合、in/notin/like/等值/小于回归；UPDATE not like（精确 3 行）、UPDATE between（精确 2 行）、DELETE not between（精确删 2 行）；协议回归 +13 断言（pred_t 表）。定位过程记录：DBG 分支追踪证明条件在 breakDownConditions→parseConditions 之间丢失，branches=1 但 conds=0 是第 4 层前缀长度错误的直接证据。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E，v0.18）。

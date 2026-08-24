@@ -884,6 +884,12 @@ static vector<string> splitConds(const string& s);
 static string normalizeConditionStr(string s);
 static string modifyLogic(const string& logic);
 static string compactInLists(const string& s);
+// After tokenize(): merge negated predicate token runs into the engine's
+// glued form so per-token modifyLogic cannot shred them:
+//   [col, "not", "like", pat]     -> ["notlike<col> <pat>"]
+//   [col, "not", "between", lo, "and", hi] -> ["notbetween<col> <lo> <hi>"]
+//   [col, "between", lo, "and", hi]        -> ["between<col> <lo> <hi>"]
+static vector<string> mergeNegPredTokens(const vector<string>& toks);
 static vector<vector<string>> breakDownConditions(const vector<string>& tokens);
 static bool setSessionAuthorization(Session& s, const string& targetRaw);
 static vector<string> splitValues(const string& s);
@@ -5167,8 +5173,87 @@ static string compactInLists(const string& s) {
 }
 
 
+static bool isBareIdentToken(const string& t) {
+    if (t.empty()) return false;
+    if (t == "(" || t == ")" || t == "and" || t == "or") return false;
+    for (char ch : t) {
+        if (!(isalnum(static_cast<unsigned char>(ch)) || ch == '_')) return false;
+    }
+    return true;
+}
+
+static vector<string> mergeNegPredTokens(const vector<string>& toks) {
+    vector<string> out;
+    size_t i = 0;
+    while (i < toks.size()) {
+        // Pre-glued two-token form from normalizeConditionStr:
+        //   [col, "notlike'pat'"] / [col, "notbetween..."] etc.
+        // (the keyword was glued to the value, so tokenize split col off)
+        if (i + 1 < toks.size() && isBareIdentToken(toks[i])) {
+            const string& nxt = toks[i + 1];
+            static const struct { const char* pfx; size_t len; } glue[] = {
+                {"notbetween", 10}, {"notlike", 7}, {"between", 7}, {"like", 4}
+            };
+            bool glued = false;
+            for (const auto& g : glue) {
+                if (nxt.size() > g.len && nxt.compare(0, g.len, g.pfx) == 0) {
+                    out.push_back(string(g.pfx) + toks[i] + " " + nxt.substr(g.len));
+                    i += 2;
+                    glued = true;
+                    break;
+                }
+            }
+            if (glued) continue;
+        }
+        // Pattern A: col "not" ("like"|"between") ...
+        // Pattern B: col ("between") lo "and" hi
+        bool handled = false;
+        if (i + 2 < toks.size() && toks[i + 1] == "not" &&
+            (toks[i + 2] == "like" || toks[i + 2] == "between") &&
+            isBareIdentToken(toks[i])) {
+            if (toks[i + 2] == "like" && i + 3 < toks.size()) {
+                // [col, not, like, pat]
+                out.push_back("notlike" + toks[i] + " " + toks[i + 3]);
+                i += 4;
+                handled = true;
+            } else if (toks[i + 2] == "between" && i + 5 < toks.size() &&
+                       toks[i + 4] == "and") {
+                // [col, not, between, lo, and, hi]
+                out.push_back("notbetween" + toks[i] + " " + toks[i + 3] + " " + toks[i + 5]);
+                i += 6;
+                handled = true;
+            }
+        }
+        if (!handled) {
+            // col between lo and hi: [col, between, lo, and, hi]
+            if (i + 4 < toks.size() && toks[i + 1] == "between" &&
+                toks[i + 3] == "and" && isBareIdentToken(toks[i])) {
+                out.push_back("between" + toks[i] + " " + toks[i + 2] + " " + toks[i + 4]);
+                i += 5;
+                handled = true;
+            }
+        }
+        if (!handled) { out.push_back(toks[i]); ++i; }
+    }
+    return out;
+}
+
 static string modifyLogic(const string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
+    // Merged single-token predicate forms produced by mergeNegPredTokens:
+    //   "notlike<col> <pat>" / "between<col> <lo> <hi>" / "notbetween<col> ..."
+    // -- already in the engine's decode form; pass through so the "like"
+    // keyword scan below cannot shred them ("notlikeX" contains "like").
+    {
+        static const char* mergedPfx[] = {"notbetween", "notlike", "between"};
+        for (const char* p : mergedPfx) {
+            size_t pl = strlen(p);
+            if (logic.size() > pl + 1 && logic.compare(0, pl, p) == 0 &&
+                logic[pl] != ' ' && isalnum(static_cast<unsigned char>(logic[pl]))) {
+                return logic;
+            }
+        }
+    }
     // Glued compact forms from compactInLists' second pass:
     //   "notlike<col>(pat)" / "between<col>(lo,hi)" / "notbetween<col>(lo,hi)"
     // -- decode to the engine's "<op> <col> <value>" form.
@@ -11375,7 +11460,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             cout << "Delete done (" << deletedCount << " row(s))" << endl;
             return false;
         }
-        vector<string> tokens = tokenize(normalizeConditionStr(delRest));
+        vector<string> tokens = mergeNegPredTokens(tokenize(normalizeConditionStr(delRest)));
         if (tokens.empty()) {
             cout << "SQL syntax error" << endl;
             return true;
@@ -11713,7 +11798,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             string whereClause = trim(sql.substr(wherePos + 5));
             whereClause = expandSubqueries(whereClause, s);
             whereClause = normalizeConditionStr(whereClause);
-            vector<string> tokens = tokenize(whereClause);
+            vector<string> tokens = mergeNegPredTokens(tokenize(whereClause));
             tokens.insert(tokens.begin(), "(");
             tokens.push_back(")");
             for (auto& t : tokens) t = modifyLogic(t);
@@ -14295,7 +14380,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
                 string condStr = normalizeConditionStr(whereClause);
                 condStr = compactInLists(condStr);
-                condTokens = tokenize(condStr);
+                condTokens = mergeNegPredTokens(tokenize(condStr));
             }
 
             if (forUpdate) { cout << "FOR UPDATE not supported with JOIN" << endl; return true; }
@@ -15448,7 +15533,7 @@ if (sql.rfind("backup database", 0) == 0) {
                 // Collapse IN lists into single tokens so the per-token
                 // modifyLogic below sees the whole predicate.
                 condStr = compactInLists(condStr);
-                condTokens = tokenize(condStr);
+                condTokens = mergeNegPredTokens(tokenize(condStr));
             }
         }
 
@@ -16461,8 +16546,8 @@ if (sql.rfind("backup database", 0) == 0) {
             // legacy fallback so unsupported features cannot silently drop it.
             if (!volcanoUsed && (!semiJoins.empty() || !existenceFilters.empty() ||
                                  !quantifiedSubqueries.empty())) {
-                condTokens = tokenize(normalizeConditionStr(
-                    expandSubqueries(rawWhereClause, s)));
+                condTokens = mergeNegPredTokens(tokenize(normalizeConditionStr(
+                    expandSubqueries(rawWhereClause, s))));
                 semiJoins.clear();
                 existenceFilters.clear();
                 quantifiedSubqueries.clear();

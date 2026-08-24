@@ -12933,6 +12933,23 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         }
     } else {
         int64_t num = val.empty() ? INF : parseInt(val);
+        // BETWEEN family: cond.value = "lo hi" (space-joined upstream).
+        if (cond.op == "between" || cond.op == "notbetween") {
+            size_t sp = cond.value.find(' ');
+            if (sp == std::string::npos) return false;
+            int64_t lo = StorageEngine::parseInt(cond.value.substr(0, sp));
+            int64_t hi = StorageEngine::parseInt(cond.value.substr(sp + 1));
+            if (num == INF || lo == INF || hi == INF) return false;
+            bool inRange = num >= lo && num <= hi;
+            if (cond.op == "between" && !inRange) return false;
+            if (cond.op == "notbetween" && inRange) return false;
+            return true;
+        }
+        if (cond.op == "notlike") {
+            // NOT LIKE on a non-text column: match textually, then negate.
+            if (likeMatch(val, cond.value)) return false;
+            return true;
+        }
         int64_t cmp = StorageEngine::parseInt(cond.value);
         if (cmp == INF) return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
         if (cond.op == "<"  && !(num < cmp)) return false;
@@ -14501,6 +14518,22 @@ DBStatus StorageEngine::insert(const std::string& dbname,
 std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     const std::vector<std::string>& cstr) {
     std::vector<Condition> conds;
+    // Strip one level of single quotes from every space-separated token:
+    // "betweenid 'b' 'c'" -> value "b c" (comparisons must not see quotes).
+    auto unquoteTokens = [](const std::string& v) {
+        std::string out;
+        std::istringstream iss(v);
+        std::string tok;
+        bool first = true;
+        while (iss >> tok) {
+            if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
+                tok = tok.substr(1, tok.size() - 2);
+            if (!first) out += ' ';
+            out += tok;
+            first = false;
+        }
+        return out;
+    };
     for (const auto& s : cstr) {
         if (s.empty()) continue;
         Condition c;
@@ -14508,14 +14541,14 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         // Accept both "notlike<col> <val>" (glued, from modifyLogic's
         // compact path) and "notlike <col> <val>" (spaced, from splitConds
         // substrings).
-        if (s.size() >= 8 && s.substr(0, 8) == "notlike") {
+        if (s.size() >= 7 && s.substr(0, 7) == "notlike") {
             c.op = "notlike";
-            size_t off = 8;
+            size_t off = 7;
             if (off < s.size() && s[off] == ' ') ++off;
             size_t sp = s.find(' ', off);
             if (sp != std::string::npos) {
                 c.colName = s.substr(off, sp - off);
-                c.value = s.substr(sp + 1);
+                c.value = unquoteTokens(s.substr(sp + 1));
             }
             conds.push_back(c);
             continue;
@@ -14527,19 +14560,19 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', off);
             if (sp != std::string::npos) {
                 c.colName = s.substr(off, sp - off);
-                c.value = s.substr(sp + 1);
+                c.value = unquoteTokens(s.substr(sp + 1));
             }
             conds.push_back(c);
             continue;
         }
-        if (s.size() >= 11 && s.substr(0, 11) == "notbetween") {
+        if (s.size() >= 10 && s.substr(0, 10) == "notbetween") {
             c.op = "notbetween";
-            size_t off = 11;
+            size_t off = 10;
             if (off < s.size() && s[off] == ' ') ++off;
             size_t sp = s.find(' ', off);
             if (sp != std::string::npos) {
                 c.colName = s.substr(off, sp - off);
-                c.value = s.substr(sp + 1);
+                c.value = unquoteTokens(s.substr(sp + 1));
             }
             conds.push_back(c);
             continue;
