@@ -873,6 +873,28 @@ def main():
             "RETURNING id, name"))
         assert returning_rows == [[b"50", b"ret"]], returning_rows
 
+        # SELECT-list aliases (AS) and arithmetic projections: previously
+        # "select id as no" failed with "Invalid column name id as no".
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE pa_emp (id INT PRIMARY KEY, dept TEXT, salary INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO pa_emp VALUES (1,'eng',100),(2,'eng',200),(3,'ops',300)"))
+        pa1 = data_row_values(simple_query(
+            sock, "SELECT id AS no FROM pa_emp ORDER BY no DESC LIMIT 2"))
+        assert pa1 == [[b"3"], [b"2"]], pa1
+        pa2 = data_row_values(simple_query(
+            sock, "SELECT dept AS d, COUNT(*) AS c FROM pa_emp GROUP BY dept ORDER BY d"))
+        assert pa2 == [[b"eng", b"2"], [b"ops", b"1"]], pa2
+        pa3 = data_row_values(simple_query(
+            sock, "SELECT salary * 2 AS ds FROM pa_emp WHERE id = 1"))
+        assert pa3 == [[b"200"]], pa3
+        pa4 = data_row_values(simple_query(
+            sock, "SELECT salary + id AS s FROM pa_emp WHERE id = 2"))
+        assert pa4 == [[b"202"]], pa4
+        pa5 = data_row_values(simple_query(
+            sock, "SELECT salary - 100 AS s FROM pa_emp WHERE id = 3"))
+        assert pa5 == [[b"200"]], pa5
+
         # Single-table aliases and table-name qualifiers: "FROM t [as] a"
         # must resolve the table (not "t a"), and "<alias>."/"<table>."
         # qualifiers in projection/WHERE must strip to bare columns

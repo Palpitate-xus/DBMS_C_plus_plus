@@ -17644,6 +17644,18 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const TableSchema& tbl,
                                     StorageEngine* engine = nullptr,
                                     const std::string& dbname = "") {
+    auto isNumberLike = [](const std::string& v) -> bool {
+        if (v.empty()) return false;
+        size_t i = (v[0] == '-' || v[0] == '+') ? 1 : 0;
+        if (i >= v.size()) return false;
+        bool digit = false, dot = false;
+        for (; i < v.size(); ++i) {
+            if (v[i] >= '0' && v[i] <= '9') { digit = true; }
+            else if (v[i] == '.' && !dot) { dot = true; }
+            else return false;
+        }
+        return digit;
+    };
     auto getVal = [&](const std::string& arg) -> std::string {
         if (arg.size() >= 2 && ((arg.front() == '\'' && arg.back() == '\'') || (arg.front() == '"' && arg.back() == '"')))
             return arg.substr(1, arg.size() - 2);
@@ -17659,6 +17671,56 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
 
     if ((expr.funcName == "current_user" || expr.funcName == "session_user") && !expr.sessionUser.empty()) {
         return expr.sessionUser;
+    }
+    // Arithmetic projection: col op val op val ... evaluated left-to-right
+    // (no precedence), for + - * / % on numeric operands.  Operands may be
+    // bare columns (row-resolved via getVal), integer/float literals, or
+    // quoted strings (string concat for '+').
+    if (expr.funcName == "arith") {
+        double acc = 0.0;
+        bool accSet = false;
+        char pendingOp = 0;
+        std::string strAcc;
+        bool isString = false;
+        for (const auto& rawArg : expr.funcArgs) {
+            std::string a = rawArg;
+            // Operators ride along as standalone args ("*", "+", ...).
+            if (a.size() == 1 && std::string("+-*/%").find(a[0]) != std::string::npos) {
+                pendingOp = a[0];
+                continue;
+            }
+            std::string v = getVal(a);
+            if (!accSet) {
+                strAcc = v;
+                try { acc = std::stod(v); } catch (...) { isString = true; }
+                accSet = true;
+                continue;
+            }
+            if (pendingOp == '+' && (isString || !isNumberLike(v))) {
+                strAcc += v;   // string concatenation
+                continue;
+            }
+            double rhs = 0.0;
+            try { rhs = std::stod(v); } catch (...) { return ""; }
+            switch (pendingOp) {
+                case '+': acc += rhs; break;
+                case '-': acc -= rhs; break;
+                case '*': acc *= rhs; break;
+                case '/': if (rhs == 0) return ""; acc /= rhs; break;
+                case '%': { int64_t l = static_cast<int64_t>(acc), r = static_cast<int64_t>(rhs);
+                           if (r == 0) return ""; acc = static_cast<double>(l % r); break; }
+                default: return "";
+            }
+            isString = false;
+        }
+        if (isString) return strAcc;
+        if (acc == static_cast<double>(static_cast<int64_t>(acc)))
+            return std::to_string(static_cast<int64_t>(acc));
+        // trim trailing zeros of the double formatting
+        std::string s = std::to_string(acc);
+        s.erase(s.find_last_not_of('0') + 1, std::string::npos);
+        if (!s.empty() && s.back() == '.') s.pop_back();
+        return s;
     }
     if (expr.funcName == "length" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);

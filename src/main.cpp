@@ -13544,6 +13544,20 @@ if (sql.rfind("backup database", 0) == 0) {
                               columns.substr(cpos + prefix.size());
             }
         }
+        // SELECT-list alias map ("expr as name" -> expr) for ORDER BY
+        // resolution; computed on the raw projection text.
+        map<string, string> selectAliasMap;
+        for (const auto& itemRaw : splitSelectColumns(columns)) {
+            string it = trim(itemRaw);
+            size_t ap = it.find(" as ");
+            if (ap == string::npos) continue;
+            string expr = trim(it.substr(0, ap));
+            string alias = trim(it.substr(ap + 4));
+            if (!expr.empty() && !alias.empty() &&
+                alias.find_first_of(" ,()+-*/%") == string::npos) {
+                selectAliasMap[alias] = expr;
+            }
+        }
         bool isDistinct = false;
         vector<string> distinctOnCols;
         if (columns.size() >= 12 && columns.substr(0, 12) == "distinct on(") {
@@ -14840,7 +14854,12 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                     }
                 }
-                // Simple column
+                // Simple column (resolve SELECT-list aliases first: PG
+                // allows ORDER BY to reference output aliases)
+                if (sortItem.find_first_of("()+-*/%") == string::npos) {
+                    auto amIt = selectAliasMap.find(sortItem);
+                    if (amIt != selectAliasMap.end()) sortItem = amIt->second;
+                }
                 dbms::StorageEngine::OrderBySpec spec;
                 spec.colName = sortItem;
                 spec.ascending = asc;
@@ -15015,9 +15034,36 @@ if (sql.rfind("backup database", 0) == 0) {
         {
             for (const auto& itemRaw : splitSelectColumns(columns)) {
                 string item = trim(itemRaw);
+                // SELECT-list alias: "expr AS name" -- evaluate expr, but
+                // display and order by the alias (PG semantics).  The bare
+                // column check below must see the expression, not the whole
+                // "expr as name" text.
+                string itemAlias;
+                {
+                    size_t asPos = string::npos;
+                    for (size_t ap = item.find(" as "); ap != string::npos;
+                         ap = item.find(" as ", ap + 4)) {
+                        // The pattern's own leading space is the separator;
+                        // no extra boundary check needed before it.
+                        size_t after = ap + 4;
+                        bool la = true;
+                        while (after < item.size() &&
+                               isspace(static_cast<unsigned char>(item[after]))) ++after;
+                        string tail = item.substr(after);
+                        if (!tail.empty() &&
+                            tail.find_first_of(" ,()+-*/%") == string::npos) {
+                            asPos = ap;
+                            itemAlias = tail;
+                            break;
+                        }
+                    }
+                    if (asPos != string::npos) {
+                        item = trim(item.substr(0, asPos));
+                    }
+                }
                 if (item == "current_user" || item == "session_user") {
                     dbms::StorageEngine::SelectExpr expr;
-                    expr.displayName = item;
+                    expr.displayName = itemAlias.empty() ? item : itemAlias;
                     expr.isScalar = true;
                     expr.funcName = item;
                     expr.sessionUser = (item == "current_user")
@@ -15038,7 +15084,7 @@ if (sql.rfind("backup database", 0) == 0) {
                     ai.arg = wf.arg;
                     aggItems.push_back(ai);
                     dbms::StorageEngine::SelectExpr expr;
-                    expr.displayName = item;
+                    expr.displayName = itemAlias.empty() ? item : itemAlias;
                     expr.isScalar = false;
                     expr.colName = item;
                     selectExprs.push_back(expr);
@@ -15046,7 +15092,7 @@ if (sql.rfind("backup database", 0) == 0) {
                            item.substr(1, 7) == "select ") {
                     // Scalar subquery in SELECT: (SELECT col FROM t [WHERE ...])
                     dbms::StorageEngine::SelectExpr expr;
-                    expr.displayName = item;
+                    expr.displayName = itemAlias.empty() ? item : itemAlias;
                     expr.isScalar = true;
                     expr.funcName = "subquery";
                     expr.funcArgs.push_back(item.substr(1, item.size() - 2));
@@ -15109,7 +15155,7 @@ if (sql.rfind("backup database", 0) == 0) {
                         bool isUDF = (!s.currentDB.empty() && g_engine.udfExists(s.currentDB, func));
                         if (isScalarFunc(func) || isUDF) {
                             dbms::StorageEngine::SelectExpr expr;
-                            expr.displayName = item;
+                            expr.displayName = itemAlias.empty() ? item : itemAlias;
                             expr.isScalar = true;
                             expr.funcName = func;
                             expr.funcArgs = splitFuncArgs(arg);
@@ -15136,19 +15182,74 @@ if (sql.rfind("backup database", 0) == 0) {
                             hasAgg = true;
                             exprTypes.push_back(1);
                             dbms::StorageEngine::SelectExpr expr;
-                            expr.displayName = item;
+                            expr.displayName = itemAlias.empty() ? item : itemAlias;
                             expr.isScalar = false;
                             expr.colName = item;
                             selectExprs.push_back(expr);
                         }
                     } else {
+                        // Arithmetic projection item ("salary * 2", "a + b"):
+                        // tokenize on spaces; operands resolved per-row.
+                        bool isArithItem = false;
+                        {
+                            static const string ops = "+-*/%";
+                            size_t opCount = 0;
+                            for (size_t k = 1; k < item.size(); ++k) {
+                                char ch = item[k];
+                                if (ops.find(ch) == string::npos) continue;
+                                // operator must sit between non-space operands
+                                size_t prevNonSpace = item.find_last_not_of(' ', k - 1);
+                                size_t nextNonSpace = item.find_first_not_of(' ', k + 1);
+                                if (prevNonSpace == string::npos || nextNonSpace == string::npos)
+                                    continue;
+                                ++opCount;
+                            }
+                            isArithItem = opCount >= 1;
+                        }
+                        if (isArithItem) {
+                            dbms::StorageEngine::SelectExpr expr;
+                            expr.displayName = itemAlias.empty() ? item : itemAlias;
+                            expr.isScalar = true;
+                            expr.funcName = "arith";
+                            // operands and operators as separate args
+                            string operand;
+                            for (size_t k = 0; k < item.size(); ++k) {
+                                char ch = item[k];
+                                if (isspace(static_cast<unsigned char>(ch))) {
+                                    if (!operand.empty()) { expr.funcArgs.push_back(operand); operand.clear(); }
+                                } else if (string("+-*/%").find(ch) != string::npos &&
+                                           !operand.empty() &&
+                                           operand.find_first_not_of("+-.0123456789") == string::npos &&
+                                           operand.find_first_of(".eE") != string::npos) {
+                                    // sign of a numeric literal (rare); treat as part
+                                    expr.funcArgs.push_back(operand);
+                                    operand.clear();
+                                    operand += ch;
+                                } else if (string("+-*/%").find(ch) != string::npos) {
+                                    if (!operand.empty()) { expr.funcArgs.push_back(operand); operand.clear(); }
+                                    expr.funcArgs.push_back(string(1, ch));
+                                } else {
+                                    operand += ch;
+                                }
+                            }
+                            if (!operand.empty()) expr.funcArgs.push_back(operand);
+                            selectExprs.push_back(expr);
+                            hasScalar = true;
+                            exprTypes.push_back(3);
+                            // fetch operand columns
+                            for (const auto& a : expr.funcArgs) {
+                                for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                    if (tbl.cols[ci].dataName == a) { selectCols.insert(a); break; }
+                                }
+                            }
+                        } else {
                         dbms::StorageEngine::AggItem ai;
                         ai.func = "";
                         ai.arg = item;
                         aggItems.push_back(ai);
                         exprTypes.push_back(0);
                         dbms::StorageEngine::SelectExpr expr;
-                        expr.displayName = item;
+                        expr.displayName = itemAlias.empty() ? item : itemAlias;
                         expr.isScalar = false;
                         expr.colName = item;
                         selectExprs.push_back(expr);
@@ -15162,6 +15263,7 @@ if (sql.rfind("backup database", 0) == 0) {
                                 return true;
                             }
                             selectCols.insert(item);
+                        }
                         }
                     }
                 }

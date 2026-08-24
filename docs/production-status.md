@@ -462,3 +462,21 @@ P1-12 收尾项：NULL 选择率此前完全缺失（`isnull`/`isnotnull` 落入
 验证：别名（裸/as/限定列/聚合/IN/ORDER/LIMIT）、表名限定（投影+WHERE+聚合）、混合限定（表名限定投影+别名限定 WHERE）、JOIN 路径无回归、普通无限定查询无回归，全形状实测通过；`tests/postgres_protocol_test.py` 新增 6 项断言。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。已知相邻残留：投影列别名（`select id as no`）与 ORDER BY 组合的解析问题（独立缺陷，本批未触碰）。
+
+
+## 2026-08-24 v0.16 批次：SELECT 列表别名（AS）+ 算术投影 + ORDER BY 别名
+
+协议级审计发现三联缺陷（同一条语法链）：
+
+1. **投影别名完全不可用**：`select id as no from t` 报 "Invalid column name id as no"——单表路径把整个 `expr as name` 文本当作列名校验。全部形状失败（普通列/表达式/GROUP BY 投影），仅聚合路径（`count(*) as c`）例外。
+2. **算术投影不存在**：`select salary * 2 from t`（无论有无 AS）报同样错误——引擎无表达式投影能力。
+3. **ORDER BY 别名被忽略**：`order by no`（no 为输出别名）不报错但静默按物理顺序返回（错误顺序结果）。
+
+修复：
+- 投影循环早期拆分 `expr AS alias`：表达式参与列校验与求值，displayName 用别名（PG 语义）；AS 尾部合法性校验（不含运算符/逗号）。
+- 新增 `arith` 标量表达式（applyScalarFunc 内）：操作数（列/整型/浮点/字符串字面量经 getVal 行内解析）与运算符（+ - * / %）分离编码，左结合求值；除零/取模零返回 NULL；字符串 '+' 拼接；整数结果无小数点输出。主路径按"运算符位于非空操作数之间"检测算术项并路由。
+- ORDER BY 简单列项先查 SELECT 别名映射（早期构建的 alias→expr map），别名解析为底层表达式/列。
+
+验证：`salary*2`→200、`salary+id`→202、`salary/4`→100、`salary-100`→400、链式 `salary+id-1`→302、AS 别名（普通/order/group 投影）、ORDER BY 别名 desc/asc 全部实测正确；普通投影/ORDER BY 无回归。协议回归 +5 断言。已知残留：GROUP BY 引用输出别名（`group by d`）暂不支持（PG 允许，低频形状）。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E）。
