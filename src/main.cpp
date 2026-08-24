@@ -15119,6 +15119,37 @@ if (sql.rfind("backup database", 0) == 0) {
                 stringstream gss(groupRest);
                 string part;
                 while (getline(gss, part, ',')) groupByCols.push_back(trim(part));
+                // PG semantics: GROUP BY may reference a SELECT-list alias
+                // ("SELECT dept AS d ... GROUP BY d").  Resolve each group
+                // column through the SELECT list's aliases before use.
+                if (!groupByCols.empty()) {
+                    // "columns" holds the SELECT list (distinct already
+                    // stripped).  Build alias -> expression map from it.
+                    const string& selList = columns;
+                    std::map<string, string> aliasToExpr;
+                    for (const auto& itemRaw : splitSelectColumns(selList)) {
+                        string it = trim(itemRaw);
+                        // find " as <alias>" (case-insensitive keyword)
+                        string lower;
+                        lower.reserve(it.size());
+                        for (char ch : it)
+                            lower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                        size_t ap = lower.find(" as ");
+                        while (ap != string::npos) {
+                            string tail = trim(it.substr(ap + 4));
+                            if (!tail.empty() &&
+                                tail.find_first_of(" ,()+-*/%") == string::npos) {
+                                aliasToExpr[tail] = trim(it.substr(0, ap));
+                                break;
+                            }
+                            ap = lower.find(" as ", ap + 4);
+                        }
+                    }
+                    for (auto& gc : groupByCols) {
+                        auto it = aliasToExpr.find(gc);
+                        if (it != aliasToExpr.end()) gc = it->second;
+                    }
+                }
             }
         }
 
@@ -15142,6 +15173,52 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
                 havingConds.push_back(trim(havingClause.substr(pos, andPos - pos)));
                 pos = andPos + 3;
+            }
+            // PG semantics: HAVING may reference a SELECT-list alias
+            // ("SELECT count(*) AS cnt ... HAVING cnt > 1").  Resolve each
+            // whole-word alias token through the SELECT list.
+            {
+                std::map<string, string> aliasToExpr;
+                for (const auto& itemRaw : splitSelectColumns(columns)) {
+                    string it = trim(itemRaw);
+                    string lower;
+                    lower.reserve(it.size());
+                    for (char ch : it)
+                        lower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                    size_t ap = lower.find(" as ");
+                    while (ap != string::npos) {
+                        string tail = trim(it.substr(ap + 4));
+                        if (!tail.empty() &&
+                            tail.find_first_of(" ,()+-*/%") == string::npos) {
+                            aliasToExpr[tail] = trim(it.substr(0, ap));
+                            break;
+                        }
+                        ap = lower.find(" as ", ap + 4);
+                    }
+                }
+                if (!aliasToExpr.empty()) {
+                    for (auto& hc : havingConds) {
+                        for (const auto& kv : aliasToExpr) {
+                            const string& al = kv.first;
+                            size_t hp = 0;
+                            while ((hp = hc.find(al, hp)) != string::npos) {
+                                bool leftOk = (hp == 0) ||
+                                    !(isalnum(static_cast<unsigned char>(hc[hp - 1])) ||
+                                      hc[hp - 1] == '_' || hc[hp - 1] == '.');
+                                size_t ae = hp + al.size();
+                                bool rightOk = (ae >= hc.size()) ||
+                                    !(isalnum(static_cast<unsigned char>(hc[ae])) ||
+                                      hc[ae] == '_' || hc[ae] == '(');
+                                if (leftOk && rightOk) {
+                                    hc = hc.substr(0, hp) + kv.second + hc.substr(ae);
+                                    hp = hp + kv.second.size();
+                                } else {
+                                    hp = ae;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

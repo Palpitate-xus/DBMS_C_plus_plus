@@ -935,6 +935,36 @@ def main():
         dnb = data_row_values(simple_query(sock, "SELECT id FROM pred_t"))
         assert dnb == [[b"2"], [b"3"]], dnb
 
+        # GROUP BY / HAVING referencing SELECT-list aliases (PG semantics):
+        # "GROUP BY d" / "HAVING cnt > 1" previously returned wrong results
+        # (alias unresolved: group produced all rows / having was dropped).
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE grp_t (id INT PRIMARY KEY, dept TEXT, salary INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO grp_t VALUES (1,'eng',100),(2,'eng',200),(3,'ops',300)"))
+        g1 = data_row_values(simple_query(
+            sock, "SELECT dept AS d, COUNT(*) FROM grp_t GROUP BY d ORDER BY d"))
+        assert g1 == [[b"eng", b"2"], [b"ops", b"1"]], g1
+        g2 = data_row_values(simple_query(
+            sock, "SELECT dept AS d FROM grp_t GROUP BY d ORDER BY d"))
+        assert g2 == [[b"eng"], [b"ops"]], g2
+        h1 = data_row_values(simple_query(
+            sock, "SELECT dept, COUNT(*) AS cnt FROM grp_t "
+            "GROUP BY dept HAVING cnt > 1"))
+        assert h1 == [[b"eng", b"2"]], h1
+        # Regressions: plain column GROUP BY, non-alias HAVING, ORDER BY agg.
+        g3 = data_row_values(simple_query(
+            sock, "SELECT dept, COUNT(*) FROM grp_t GROUP BY dept ORDER BY dept"))
+        assert g3 == [[b"eng", b"2"], [b"ops", b"1"]], g3
+        h2 = data_row_values(simple_query(
+            sock, "SELECT dept, COUNT(*) FROM grp_t GROUP BY dept "
+            "HAVING COUNT(*) > 1"))
+        assert h2 == [[b"eng", b"2"]], h2
+        h3 = data_row_values(simple_query(
+            sock, "SELECT dept, COUNT(*) AS cnt FROM grp_t "
+            "GROUP BY dept ORDER BY cnt DESC, dept"))
+        assert h3 == [[b"eng", b"2"], [b"ops", b"1"]], h3
+
         # SELECT-list aliases (AS) and arithmetic projections: previously
         # "select id as no" failed with "Invalid column name id as no".
         assert any(kind == b"C" for kind, _ in simple_query(

@@ -519,3 +519,19 @@ v0.17 记录的残留缺口（单谓词 `WHERE c NOT LIKE 'x'` / `c BETWEEN a AN
 验证：12 项手工矩阵全绿——单谓词 not like（2,3）/ between（1,2）/ not between（3）、文本 between（2）/ not between（1,3）、AND/OR 组合、in/notin/like/等值/小于回归；UPDATE not like（精确 3 行）、UPDATE between（精确 2 行）、DELETE not between（精确删 2 行）；协议回归 +13 断言（pred_t 表）。定位过程记录：DBG 分支追踪证明条件在 breakDownConditions→parseConditions 之间丢失，branches=1 但 conds=0 是第 4 层前缀长度错误的直接证据。
 
 验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E，v0.18）。
+
+## 2026-08-24 v0.19 批次：GROUP BY / HAVING 引用 SELECT 列表别名（两个静默错误结果缺陷）
+
+聚合域审计发现两个别名可见性缺陷（PG 中 GROUP BY/HAVING 均可引用 SELECT 列表别名）：
+
+1. **`GROUP BY <别名>` 返回错误结果**：`select dept as d, count(*) from t group by d` 静默返回空结果——分组列 "d" 不是物理列，分组逻辑无法解析，输出为空（PG 返回按 dept 分组的正确聚合行）。
+2. **`HAVING <别名>` 谓词被静默丢弃**：`select dept, count(*) as cnt from t group by dept having cnt > 1` 返回全部组（谓词无效）——having 条件文本中的 "cnt" 无法求值，条件被跳过（PG 只返回 cnt>1 的组）。
+
+修复（main.cpp，两处均在 clause 解析处做别名归一）：
+
+- **GROUP BY**：普通（非 ROLLUP/CUBE/GROUPING SETS）分组列提取后，从 SELECT 列表（`columns` 变量，DISTINCT 已剥离）构建 `alias → 表达式` 映射（识别 `expr as <裸标识符>`，与 SELECT 别名解析同一规则），把每个分组列中的别名替换为其表达式；
+- **HAVING**：having 条件拆分后，用同一映射做**词边界安全**的整词替换（左侧非 `[A-Za-z0-9_.]`、右侧非 `[A-Za-z0-9_(]`），`cnt > 1` → `count(*) > 1`；替换后继续走既有聚合求值路径。
+
+验证：G1 `group by d`（按 dept 分组正确行）✓、G2 别名单列分组 ✓、H1 `having cnt > 1`（仅返回 eng 组，PG 语义）✓；回归：普通列 GROUP BY、非别名 HAVING（`count(*) > 1`、`sum(salary) > 300`）、ORDER BY 聚合别名（`order by cnt desc`）、ROLLUP、`order by d` 全部不变；协议回归 +6 断言（grp_t 表）。探测方法论记录：RowDescription 列名解析曾因误带消息类型字节偏移 +5 而误报 "y*2"——修正偏移后确认服务器列名本来就正确（`salary*2`/`count(*)`），非缺陷。
+
+验证状态：完整回归 `PASS=165 FAIL=0`（含 7 个 Python E2E，v0.19）。
