@@ -15942,7 +15942,11 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                         if (isArithItem) {
                             dbms::StorageEngine::SelectExpr expr;
-                            expr.displayName = itemAlias.empty() ? item : itemAlias;
+                            // PG header naming: an unaliased arithmetic
+                            // expression is "?column?" — a raw "a + a"
+                            // header breaks space-splitting protocol
+                            // column counts (P0-02 differential finding).
+                            expr.displayName = itemAlias.empty() ? "?column?" : itemAlias;
                             expr.isScalar = true;
                             expr.funcName = "arith";
                             // operands and operators as separate args

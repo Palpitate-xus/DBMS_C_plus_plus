@@ -58,8 +58,17 @@ def reference_query(sql):
     segs = out.split("\n")
     if segs and segs[-1] == "":
         segs = segs[:-1]
+    # psql -A -t prints command tags (CREATE TABLE, INSERT 0 2, ...) on
+    # stdout too; they never contain the field separator and match the
+    # known tag grammar, so filter them out of the row stream.
+    tag_re = re.compile(
+        r"^(CREATE|INSERT|UPDATE|DELETE|SELECT|DROP|ALTER|TRUNCATE|BEGIN|"
+        r"COMMIT|ROLLBACK|SET|RESET|GRANT|REVOKE|COPY|ANALYZE|VACUUM|"
+        r"REINDEX|COMMENT|DO|CALL|LOCK|SHOW)\b.*$")
     rows = []
     for line in segs:
+        if tag_re.match(line) and "\x1f" not in line:
+            continue
         vals = line.split("\x1f")
         rows.append([None if v == "NULLMARK" else v for v in vals])
     state = None
