@@ -69,7 +69,7 @@
 
 - id: SQL-01
   title: 用正式 grammar/lexer 覆盖 PostgreSQL 词法规则，去掉基于 `substr/find/tokenize` 的二次解析
-  status: open
+  status: in_progress
 
 - id: SQL-02
   title: 支持完整 quoted identifier、Unicode escape identifier/string、escape string、bit/hex literal、标准 conforming strings 和嵌套注释
@@ -209,7 +209,7 @@
 
 - id: CAT-22
   title: 删除 `.pg_compat_objects` 的“成功但无运行时效果”语义；未实现命令应返回 `0A000 feature_not_supported`
-  status: open
+  status: in_progress
 
 - id: TYPE-01
   title: numeric 补 PostgreSQL 精度/scale、NaN/±Infinity、舍入、溢出、比较、hash、sort support 和 binary protocol
@@ -1093,5 +1093,5 @@
 
 - id: DIV-14
   title: 对仅保存兼容记录的命令返回“created/loaded/altered”会误导用户；应改为 feature-not-supported，直到运行时真正存在
-  status: open
+  status: in_progress
 

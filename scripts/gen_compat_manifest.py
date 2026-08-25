@@ -30,6 +30,22 @@ PAT_CAP = re.compile(
 )
 
 
+def load_overrides():
+    """Read hand-maintained status overrides (gap id -> status)."""
+    path = os.path.join(os.path.dirname(DST), "status_overrides.yaml")
+    overrides = {}
+    if not os.path.exists(path):
+        return overrides
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        gid, status = (part.strip() for part in line.split(":", 1))
+        if status in ("open", "in_progress", "complete"):
+            overrides[gid] = status
+    return overrides
+
+
 def main() -> int:
     text = open(SRC, encoding="utf-8").read()
     seen = {}
@@ -46,6 +62,12 @@ def main() -> int:
         fam, num = g.split("-")
         return (FAMILIES.index(fam), int(num))
 
+    overrides = load_overrides()
+    unknown = sorted(set(overrides) - set(seen))
+    if unknown:
+        raise SystemExit(
+            "status_overrides.yaml references unknown gap ids: %s" % ", ".join(unknown)
+        )
     lines = [
         "# DBMS_C_plus_plus PostgreSQL 18.6 compatibility manifest",
         "# Auto-generated from docs/postgresql-18-gap-audit.md; regenerate with",
@@ -57,7 +79,7 @@ def main() -> int:
         title = seen[gid].rstrip(IDEOGRAPHIC_DOT).rstrip(".")
         lines.append("- id: %s" % gid)
         lines.append("  title: %s" % title)
-        lines.append("  status: open")
+        lines.append("  status: %s" % overrides.get(gid, "open"))
         lines.append("")
     os.makedirs(os.path.dirname(DST), exist_ok=True)
     with open(DST, "w", encoding="utf-8") as fh:

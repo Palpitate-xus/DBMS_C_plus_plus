@@ -1,0 +1,9 @@
+# Status overrides for tests/compat/manifest.yaml.
+# Keyed by gap id. Values: open | in_progress | complete.
+# This file is hand-maintained; gen_compat_manifest.py merges it into the
+# generated manifest, so regeneration never loses progress.
+# Mark "complete" ONLY with full blueprint acceptance evidence
+# (differential + isolation + wire + fault tests).
+DIV-14: in_progress
+CAT-22: in_progress
+SQL-01: in_progress
