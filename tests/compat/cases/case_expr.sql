@@ -1,0 +1,4 @@
+-- CASE expression evaluation
+SELECT CASE WHEN 1 > 2 THEN 'a' ELSE 'b' END
+SELECT CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END
+SELECT CASE WHEN NULL THEN 'x' ELSE 'y' END

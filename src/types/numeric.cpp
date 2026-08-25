@@ -364,9 +364,35 @@ Numeric Numeric::operator/(const Numeric& rhs) const {
         return infinity(sign_ * rhs.sign_);
     }
     if (sign() == 0) return Numeric(0);
-    int extraScale = std::max(scale_, rhs.scale_) + 4;
-    Numeric r = divideMagnitudes(*this, rhs, extraScale);
+    // PostgreSQL select_div_scale(): the quotient keeps at least
+    // NUMERIC_MIN_SIG_DIGITS (16) significant digits; small or sub-unit
+    // quotients carry 20.  Reproduce PG output by computing at 20
+    // fractional digits, then narrowing to 16 when the quotient is >= 1
+    // and either inexact or its dividend has more than two significant
+    // digits.  divideMagnitudes rounds half-up and keeps trailing zeros,
+    // so exact quotients stay zero-padded exactly like PG.
+    int nd = static_cast<int>(digits_.size());
+    int minFrac = std::max(scale_, rhs.scale_);
+    int wide = std::max(20, minFrac);
+    int extraWide = wide - scale_ + rhs.scale_;
+    if (extraWide < 0) extraWide = 0;
+    Numeric r = divideMagnitudes(*this, rhs, extraWide);
     r.sign_ = sign_ * rhs.sign_;
+    int intDigits = static_cast<int>(r.digits_.size()) - r.scale_;
+    bool belowOne = intDigits < 1;
+    bool exact = true;
+    {
+        // exact when every fractional digit beyond position 16 is zero
+        int fracCount = r.scale_;
+        for (int pos = 17; pos <= fracCount; ++pos) {
+            int idx = static_cast<int>(r.digits_.size()) - pos;
+            if (idx < 0) break;
+            if (r.digits_[idx] != 0) { exact = false; break; }
+        }
+    }
+    if (!belowOne && (!exact || nd > 2) && r.scale_ > 16) {
+        r = r.withScale(16);
+    }
     return r;
 }
 

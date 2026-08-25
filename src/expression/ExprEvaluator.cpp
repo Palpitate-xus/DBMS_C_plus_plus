@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <regex>
@@ -761,8 +762,28 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         else if (op == "/") res = (b == 0) ? 0 : a / b;
         else if (op == "%") res = (b == 0) ? 0 : std::fmod(a, b);
         else if (op == "^") res = std::pow(a, b);
+        // PostgreSQL float8 output: shortest decimal string that round-trips
+        // to the same double (extra_float_digits >= 1 semantics).  A plain
+        // ostringstream insert would truncate to 6 significant digits.
+        if (std::floor(res) == res && std::isfinite(res) &&
+            res >= -9.007199254740992e15 && res <= 9.007199254740992e15) {
+            // Integral values print without a fractional part, like PG.
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.0f", res);
+            return ExprValue("double precision", buf, false);
+        }
+        for (int prec = 15; prec <= 17; ++prec) {
+            std::ostringstream oss;
+            oss << std::setprecision(prec) << res;
+            double back = 0;
+            std::istringstream iss(oss.str());
+            iss >> back;
+            if (back == res) {
+                return ExprValue("double precision", oss.str(), false);
+            }
+        }
         std::ostringstream oss;
-        oss << res;
+        oss << std::setprecision(17) << res;
         return ExprValue("double precision", oss.str(), false);
     }
 

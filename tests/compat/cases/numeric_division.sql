@@ -1,0 +1,16 @@
+-- numeric division result scale must match PG exactly
+SELECT 10.0 / 3
+SELECT 1.0 / 7
+SELECT 9.9 / 7
+SELECT 7.0 / 7
+SELECT 14.0 / 7
+SELECT 100.0 / 7
+SELECT 1.0 / 70
+SELECT 2.0 / 2
+SELECT 123.456 / 7.8
+SELECT 10000.0 / 7
+SELECT 0.5 / 3
+SELECT 6.9 / 7
+SELECT 99.0 / 100
+SELECT 100.0 / 99
+SELECT 2.5 * 2
