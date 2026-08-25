@@ -71,6 +71,7 @@ enum class SqlCommand {
     CreateOperatorClass,
     CreateOperatorFamily,
     CreateAggregate,
+    CreateAssertion,
     CreateTransform,
     CreateLanguage,
     CreateAccessMethod,
@@ -114,6 +115,7 @@ enum class SqlCommand {
     DropOperatorClass,
     DropOperatorFamily,
     DropAggregate,
+    DropAssertion,
     DropTransform,
     DropLanguage,
     DropAccessMethod,
@@ -489,6 +491,7 @@ public:
             case SqlCommand::CreateOperatorClass: return "CREATE OPERATOR CLASS";
             case SqlCommand::CreateOperatorFamily: return "CREATE OPERATOR FAMILY";
             case SqlCommand::CreateAggregate: return "CREATE AGGREGATE";
+            case SqlCommand::CreateAssertion: return "CREATE ASSERTION";
             case SqlCommand::CreateTransform: return "CREATE TRANSFORM";
             case SqlCommand::CreateLanguage: return "CREATE LANGUAGE";
             case SqlCommand::CreateTextSearchConfiguration: return "CREATE TEXT SEARCH CONFIGURATION";
@@ -530,6 +533,7 @@ public:
             case SqlCommand::DropOperatorClass: return "DROP OPERATOR CLASS";
             case SqlCommand::DropOperatorFamily: return "DROP OPERATOR FAMILY";
             case SqlCommand::DropAggregate: return "DROP AGGREGATE";
+            case SqlCommand::DropAssertion: return "DROP ASSERTION";
             case SqlCommand::DropTransform: return "DROP TRANSFORM";
             case SqlCommand::DropLanguage: return "DROP LANGUAGE";
             case SqlCommand::DropTextSearchConfiguration: return "DROP TEXT SEARCH CONFIGURATION";

@@ -550,7 +550,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         std::string rest = lsql.substr(pos);
         if (rest.substr(0, 9) == "database ") return SqlCommand::CreateDatabase;
         if (rest.substr(0, 7) == "schema ") return SqlCommand::CreateSchema;
-        if (rest.substr(0, 12) == "tablespace ") return SqlCommand::CreateTablespace;
+        if (rest.compare(0, 11, "tablespace ") == 0) return SqlCommand::CreateTablespace;
         if (rest.substr(0, 9) == "sequence ") return SqlCommand::CreateSequence;
         if (rest.substr(0, 7) == "domain ") return SqlCommand::CreateDomain;
         if (rest.substr(0, 5) == "type ") return SqlCommand::CreateType;
@@ -562,12 +562,13 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 5) == "rule ") return SqlCommand::CreateRule;
         if (rest.substr(0, 6) == "event ") return SqlCommand::CreateEventTrigger;
         if (rest.substr(0, 5) == "role ") return SqlCommand::CreateRole;
+        if (rest.compare(0, 13, "user mapping ") == 0) return SqlCommand::CreateUserMapping;
         if (rest.substr(0, 5) == "user ") return SqlCommand::CreateUser;
         if (rest.substr(0, 6) == "group ") return SqlCommand::CreateRole; // legacy
         if (rest.substr(0, 11) == "statistics ") return SqlCommand::CreateStatistics;
         if (rest.substr(0, 7) == "policy ") return SqlCommand::CreatePolicy;
         if (rest.substr(0, 10) == "extension ") return SqlCommand::CreateExtension;
-        if (rest.substr(0, 13) == "publication ") return SqlCommand::CreatePublication;
+        if (rest.compare(0, 12, "publication ") == 0) return SqlCommand::CreatePublication;
         if (rest.substr(0, 13) == "subscription ") return SqlCommand::CreateSubscription;
         if (rest.substr(0, 7) == "access ") return SqlCommand::CreateAccessMethod;
         if (rest.substr(0, 7) == "foreign") {
@@ -575,14 +576,15 @@ SqlCommand SQLParser::classify(const std::string& sql) {
             if (rest.substr(8, 6) == "table ") return SqlCommand::CreateForeignTable;
             if (rest.substr(8, 6) == "server") return SqlCommand::CreateServer; // 'foreign server'
         }
-        if (rest.substr(0, 14) == "user mapping ") return SqlCommand::CreateUserMapping;
         if (rest.substr(0, 5) == "cast ") return SqlCommand::CreateCast;
         if (rest.substr(0, 10) == "collation ") return SqlCommand::CreateCollation;
         if (rest.substr(0, 11) == "conversion ") return SqlCommand::CreateConversion;
         if (rest.substr(0, 9) == "operator ") return SqlCommand::CreateOperator;
         if (rest.substr(0, 14) == "operator class") return SqlCommand::CreateOperatorClass;
         if (rest.substr(0, 15) == "operator family") return SqlCommand::CreateOperatorFamily;
-        if (rest.substr(0, 11) == "aggregate ") return SqlCommand::CreateAggregate;
+        if (rest.compare(0, 10, "aggregate ") == 0) return SqlCommand::CreateAggregate;
+        if (rest.compare(0, 10, "assertion ") == 0) return SqlCommand::CreateAssertion;
+        if (rest.compare(0, 7, "server ") == 0) return SqlCommand::CreateServer;
         if (rest.substr(0, 10) == "transform ") return SqlCommand::CreateTransform;
         if (rest.substr(0, 9) == "language ") return SqlCommand::CreateLanguage;
         if (rest.substr(0, 5) == "text ") {
@@ -607,7 +609,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         std::string rest = lsql.substr(pos);
         if (rest.substr(0, 9) == "database ") return SqlCommand::DropDatabase;
         if (rest.substr(0, 7) == "schema ") return SqlCommand::DropSchema;
-        if (rest.substr(0, 12) == "tablespace ") return SqlCommand::DropTablespace;
+        if (rest.compare(0, 11, "tablespace ") == 0) return SqlCommand::DropTablespace;
         if (rest.substr(0, 9) == "sequence ") return SqlCommand::DropSequence;
         if (rest.substr(0, 7) == "domain ") return SqlCommand::DropDomain;
         if (rest.substr(0, 5) == "type ") return SqlCommand::DropType;
@@ -620,12 +622,13 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 5) == "rule ") return SqlCommand::DropRule;
         if (rest.substr(0, 6) == "event ") return SqlCommand::DropEventTrigger;
         if (rest.substr(0, 5) == "role ") return SqlCommand::DropRole;
+        if (rest.compare(0, 13, "user mapping ") == 0) return SqlCommand::DropUserMapping;
         if (rest.substr(0, 5) == "user ") return SqlCommand::DropUser;
         if (rest.substr(0, 6) == "group ") return SqlCommand::DropRole; // legacy
         if (rest.substr(0, 11) == "statistics ") return SqlCommand::DropStatistics;
         if (rest.substr(0, 7) == "policy ") return SqlCommand::DropPolicy;
         if (rest.substr(0, 10) == "extension ") return SqlCommand::DropExtension;
-        if (rest.substr(0, 13) == "publication ") return SqlCommand::DropPublication;
+        if (rest.compare(0, 12, "publication ") == 0) return SqlCommand::DropPublication;
         if (rest.substr(0, 13) == "subscription ") return SqlCommand::DropSubscription;
         if (rest.substr(0, 7) == "access ") return SqlCommand::DropAccessMethod;
         if (rest.substr(0, 7) == "foreign") {
@@ -633,14 +636,15 @@ SqlCommand SQLParser::classify(const std::string& sql) {
             if (rest.substr(8, 6) == "table ") return SqlCommand::DropForeignTable;
             if (rest.substr(8, 6) == "server") return SqlCommand::DropServer;
         }
-        if (rest.substr(0, 14) == "user mapping ") return SqlCommand::DropUserMapping;
         if (rest.substr(0, 5) == "cast ") return SqlCommand::DropCast;
         if (rest.substr(0, 10) == "collation ") return SqlCommand::DropCollation;
         if (rest.substr(0, 11) == "conversion ") return SqlCommand::DropConversion;
         if (rest.substr(0, 9) == "operator ") return SqlCommand::DropOperator;
         if (rest.substr(0, 14) == "operator class") return SqlCommand::DropOperatorClass;
         if (rest.substr(0, 15) == "operator family") return SqlCommand::DropOperatorFamily;
-        if (rest.substr(0, 11) == "aggregate ") return SqlCommand::DropAggregate;
+        if (rest.compare(0, 10, "aggregate ") == 0) return SqlCommand::DropAggregate;
+        if (rest.compare(0, 10, "assertion ") == 0) return SqlCommand::DropAssertion;
+        if (rest.compare(0, 7, "server ") == 0) return SqlCommand::DropServer;
         if (rest.substr(0, 10) == "transform ") return SqlCommand::DropTransform;
         if (rest.substr(0, 9) == "language ") return SqlCommand::DropLanguage;
         if (rest.substr(0, 5) == "text ") {
@@ -666,7 +670,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         std::string rest = lsql.substr(pos);
         if (rest.substr(0, 9) == "database ") return SqlCommand::AlterDatabase;
         if (rest.substr(0, 7) == "schema ") return SqlCommand::AlterSchema;
-        if (rest.substr(0, 12) == "tablespace ") return SqlCommand::AlterTablespace;
+        if (rest.compare(0, 11, "tablespace ") == 0) return SqlCommand::AlterTablespace;
         if (rest.substr(0, 9) == "sequence ") return SqlCommand::AlterSequence;
         if (rest.substr(0, 7) == "domain ") return SqlCommand::AlterDomain;
         if (rest.substr(0, 5) == "type ") return SqlCommand::AlterType;
@@ -679,11 +683,12 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 5) == "rule ") return SqlCommand::AlterRule;
         if (rest.substr(0, 6) == "event ") return SqlCommand::AlterEventTrigger;
         if (rest.substr(0, 5) == "role ") return SqlCommand::AlterRole;
+        if (rest.compare(0, 13, "user mapping ") == 0) return SqlCommand::AlterUserMapping;
         if (rest.substr(0, 5) == "user ") return SqlCommand::AlterUser;
         if (rest.substr(0, 11) == "statistics ") return SqlCommand::AlterStatistics;
         if (rest.substr(0, 7) == "policy ") return SqlCommand::AlterPolicy;
         if (rest.substr(0, 10) == "extension ") return SqlCommand::AlterExtension;
-        if (rest.substr(0, 13) == "publication ") return SqlCommand::AlterPublication;
+        if (rest.compare(0, 12, "publication ") == 0) return SqlCommand::AlterPublication;
         if (rest.substr(0, 13) == "subscription ") return SqlCommand::AlterSubscription;
         if (rest.substr(0, 8) == "default ") return SqlCommand::AlterDefaultPrivileges;
         if (rest.substr(0, 7) == "system ") return SqlCommand::AlterSystem;
@@ -692,7 +697,6 @@ SqlCommand SQLParser::classify(const std::string& sql) {
             if (rest.substr(8, 6) == "table ") return SqlCommand::AlterForeignTable;
             if (rest.substr(8, 6) == "server") return SqlCommand::AlterServer;
         }
-        if (rest.substr(0, 14) == "user mapping ") return SqlCommand::AlterUserMapping;
         if (rest.substr(0, 5) == "text ") {
             if (rest.substr(5, 7) == "search ") {
                 std::string ts = rest.substr(12);
@@ -707,7 +711,8 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 9) == "operator ") return SqlCommand::AlterOperator;
         if (rest.substr(0, 14) == "operator class") return SqlCommand::AlterOperatorClass;
         if (rest.substr(0, 15) == "operator family") return SqlCommand::AlterOperatorFamily;
-        if (rest.substr(0, 11) == "aggregate ") return SqlCommand::AlterAggregate;
+        if (rest.compare(0, 10, "aggregate ") == 0) return SqlCommand::AlterAggregate;
+        if (rest.compare(0, 7, "server ") == 0) return SqlCommand::AlterServer;
         if (rest.substr(0, 9) == "language ") return SqlCommand::AlterLanguage;
         if (rest.substr(0, 6) == "large ") return SqlCommand::AlterLargeObject;
         if (rest.substr(0, 6) == "table ") return SqlCommand::AlterTable;
@@ -734,7 +739,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     if (lsql.substr(0, 3) == "end") return SqlCommand::End;
     if (lsql.substr(0, 9) == "savepoint") return SqlCommand::Savepoint;
     if (lsql.substr(0, 7) == "release") return SqlCommand::ReleaseSavepoint;
-    if (lsql.substr(0, 17) == "prepare transaction") return SqlCommand::PrepareTransaction;
+    if (lsql.compare(0, 19, "prepare transaction") == 0) return SqlCommand::PrepareTransaction;
 
     // DCL
     if (lsql.substr(0, 5) == "grant") return SqlCommand::Grant;
@@ -746,7 +751,7 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         while (pos < lsql.size() && std::isspace(static_cast<unsigned char>(lsql[pos]))) ++pos;
         std::string rest = lsql.substr(pos);
         if (rest.substr(0, 5) == "role ") return SqlCommand::SetRole;
-        if (rest.substr(0, 25) == "session authorization") return SqlCommand::SetSessionAuthorization;
+        if (rest.compare(0, 21, "session authorization") == 0) return SqlCommand::SetSessionAuthorization;
         if (rest.substr(0, 12) == "constraints ") return SqlCommand::SetConstraints;
         if (rest.substr(0, 11) == "transaction") return SqlCommand::SetTransaction;
         if (rest.substr(0, 5) == "time ") return SqlCommand::Set; // set time zone
@@ -789,17 +794,19 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     // Prepared statement
     if (lsql.substr(0, 7) == "prepare") return SqlCommand::Prepare;
     if (lsql.substr(0, 7) == "execute") return SqlCommand::Execute;
-    if (lsql.substr(0, 11) == "deallocate") return SqlCommand::Deallocate;
+    if (lsql.compare(0, 10, "deallocate") == 0 &&
+        (lsql.size() == 10 || std::isspace(static_cast<unsigned char>(lsql[10]))))
+        return SqlCommand::Deallocate;
 
     // Import
     if (lsql.substr(0, 21) == "import foreign schema") return SqlCommand::ImportForeignSchema;
 
     // Non-PG syntax (Phase 11 清理)
     if (lsql.substr(0, 7) == "replace") return SqlCommand::ReplaceInto;
-    if (lsql.substr(0, 8) == "load data") return SqlCommand::LoadDataInfile;
+    if (lsql.compare(0, 9, "load data") == 0) return SqlCommand::LoadDataInfile;
     if (lsql.substr(0, 4) == "desc") return SqlCommand::Desc;
-    if (lsql.substr(0, 9) == "view table") return SqlCommand::ViewTable;
-    if (lsql.substr(0, 12) == "view database") return SqlCommand::ViewDatabase;
+    if (lsql.compare(0, 10, "view table") == 0) return SqlCommand::ViewTable;
+    if (lsql.compare(0, 13, "view database") == 0) return SqlCommand::ViewDatabase;
 
     return SqlCommand::Unknown;
 }
@@ -2996,6 +3003,8 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
                 ++pos;
                 r.stmt = parseCreateServer(tokens, pos);
             }
+        } else if (kw == "server") {
+            r.stmt = parseCreateServer(tokens, pos);
         } else if (kw == "cast") {
             r.stmt = parseCreateCast(tokens, pos);
         } else if (kw == "collation") {
