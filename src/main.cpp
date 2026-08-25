@@ -12934,6 +12934,13 @@ if (sql.rfind("backup database", 0) == 0) {
             return false;
         }
         if (rest == "tde status") {
+            // DIV-12: TDE is a project extension, not a PostgreSQL core
+            // capability; do not advertise it in postgresql18 mode.
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::featureNotSupportedError(
+                    "SHOW TDE STATUS (project extension)") << endl;
+                return true;
+            }
             cout << "enabled keyring" << endl;
             if (dbms::PageCrypto::enabled()) {
                 cout << "on " << g_config.tdeKeyring << endl;
@@ -13442,6 +13449,15 @@ if (sql.rfind("backup database", 0) == 0) {
             if (rest == "enable_merge_join") {
                 cout << "enable_merge_join " << (cm.enableMergeJoin ? "on" : "off") << endl;
                 return false;
+            }
+        }
+        // DIV-12: PgBouncer-style pool GUC names are project extensions;
+        // PostgreSQL has no such server parameters.
+        if (rest == "pool_mode" || rest == "pool_size" || rest == "max_client_conn") {
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << "ERROR: unrecognized configuration parameter \"" << rest
+                     << "\" (SQLSTATE 42704)" << endl;
+                return true;
             }
         }
         if (rest == "pool_mode") {
@@ -15278,10 +15294,15 @@ if (sql.rfind("backup database", 0) == 0) {
                     cout << "cpu_index_tuple_cost " << cm.cpuIndexTupleCost << " " << endl;
                     cout << "cpu_operator_cost " << cm.cpuOperatorCost << " " << endl;
                     cout << "enable_nestloop " << (cm.enableNestloop ? "on" : "off") << " " << endl;
-                    const auto poolStats = dbms::ConnectionPool::instance().stats();
-                    cout << "pool_mode " << poolStats.mode << " " << endl;
-                    cout << "pool_size " << poolStats.poolSize << " " << endl;
-                    cout << "max_client_conn " << poolStats.maxClientConnections << " " << endl;
+                    // DIV-12: PgBouncer-style pool parameters are project
+                    // extensions; hide them from SHOW ALL in postgresql18
+                    // mode so clients do not mistake them for GUCs.
+                    if (dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                        const auto poolStats = dbms::ConnectionPool::instance().stats();
+                        cout << "pool_mode " << poolStats.mode << " " << endl;
+                        cout << "pool_size " << poolStats.poolSize << " " << endl;
+                        cout << "max_client_conn " << poolStats.maxClientConnections << " " << endl;
+                    }
                 }
                 cout << "auto_explain " << (g_config.autoExplainEnabled ? "on" : "off") << " " << endl;
                 cout << "auto_explain.log_min_duration " << g_config.autoExplainThresholdMs << " ms" << endl;

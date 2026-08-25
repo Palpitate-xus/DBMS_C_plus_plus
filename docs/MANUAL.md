@@ -1158,6 +1158,10 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
   `0A000`，提示 `pg_basebackup`；`RESTORE DATABASE` → `0A000`，提示
   `pg_restore` 或 recovery.signal + restore_command；
   `CLEAR PLAN CACHE` → `0A000`（项目扩展）
+- PgBouncer 风格连接池与 TDE（DIV-12）：`SHOW POOLS`、`SHOW TDE STATUS`
+  → `0A000`；`pool_mode`/`pool_size`/`max_client_conn` 不再出现在
+  `SHOW ALL`，单独 `SHOW` 返回 `42704` 未识别参数；扩展能力只能通过
+  服务器配置文件启用，不在 SQL 层暴露
 
 会话默认模式可由环境变量 `DBMS_COMPATIBILITY_MODE=extended|postgresql18`
 设定（默认 `postgresql18`），CLI 与网络会话一致生效。

@@ -1085,7 +1085,7 @@
 
 - id: DIV-12
   title: 内置 PgBouncer 风格连接池、TDE、`BACKUP/RESTORE DATABASE` 是项目扩展，不等于 PostgreSQL 核心同名能力
-  status: open
+  status: in_progress
 
 - id: DIV-13
   title: 默认端口、数据目录和启动 CWD 状态布局与 PostgreSQL 不同，应避免给工具造成“这是 PostgreSQL cluster”的假象

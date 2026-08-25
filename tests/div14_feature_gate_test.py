@@ -220,6 +220,17 @@ def main():
             assert err is not None and err[0] == "0A000" and tool in err[1], \
                 "%s must fail with 0A000 mentioning %s: %r" % (sql, tool, err)
 
+        # DIV-12: project pool/TDE surface is hidden in postgresql18 mode.
+        messages = simple_query(sock, "SHOW TDE STATUS")
+        err = error_of(messages)
+        assert err is not None and err[0] == "0A000" and "TDE" in err[1], \
+            "SHOW TDE STATUS must be 0A000: %r" % (err,)
+        for guc in ("pool_mode", "pool_size", "max_client_conn"):
+            messages = simple_query(sock, "SHOW %s" % guc)
+            err = error_of(messages)
+            assert err is not None and err[0] == "42704" and guc in err[1], \
+                "SHOW %s must be unrecognized parameter 42704: %r" % (guc, err)
+
         # DIV-09: plain-SQL slot management and SHOW LOGICAL are project
         # interfaces; PostgreSQL uses the replication protocol.
         for sql in ["CREATE REPLICATION SLOT s1",

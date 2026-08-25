@@ -1748,7 +1748,8 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
             else if (baseType == "nchar") canonical = "char";
             else if (baseType == "double") canonical = "double precision";
             else canonical = "bytea";
-            error = "type " + baseType + " does not exist; use " + canonical;
+            error = "type " + baseType + " does not exist; use " + canonical +
+                    " (SQLSTATE 42704)";
             return false;
         }
         if (alias) {

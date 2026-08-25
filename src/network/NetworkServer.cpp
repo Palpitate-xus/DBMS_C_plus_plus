@@ -796,6 +796,13 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                        std::string::npos) {
             // DIV-14: capability gate refusals carry their own SQLSTATE.
             result.sqlState = "0A000";
+        } else if (result.errorMessage.find(
+                       "unrecognized configuration parameter") !=
+                       std::string::npos ||
+                   result.errorMessage.find("(SQLSTATE 42704)") !=
+                       std::string::npos) {
+            // DIV-06/DIV-12: unknown type or parameter errors.
+            result.sqlState = "42704";
         } else {
             result.sqlState = "XX000";
         }
