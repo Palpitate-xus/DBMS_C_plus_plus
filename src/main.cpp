@@ -2895,6 +2895,10 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
             const string frameStr = frameTextOver;
             const string frameKeyword = frameKeywordOver;
             string lfs = toLower(frameStr);
+            // Bound parsing must not see the EXCLUDE clause: its
+            // "current row"/"group"/"ties" words corrupt the bounds.
+            const size_t exclBoundPos = lfs.find("exclude");
+            if (exclBoundPos != string::npos) lfs = lfs.substr(0, exclBoundPos);
             if (lfs.find("between") != string::npos) {
                 wf.hasFrame = true;
                 if (frameKeyword == "range") wf.frameType = WindowFunc::FrameType::RANGE;
@@ -2934,10 +2938,13 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
                         if (!numStr.empty()) wf.frameEndOffset = std::stoi(numStr);
                     }
                 }
-                // Parse EXCLUDE clause: EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
-                size_t exclPos = lfs.find("exclude");
+                // Parse EXCLUDE clause from the UNTRIMMED frame text (the
+                // bounds copy above has the EXCLUDE words removed):
+                // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
+                const string lfsFull = toLower(frameStr);
+                size_t exclPos = lfsFull.find("exclude");
                 if (exclPos != string::npos) {
-                    string exclRest = lfs.substr(exclPos + 7);
+                    string exclRest = lfsFull.substr(exclPos + 7);
                     exclRest = trim(exclRest);
                     if (exclRest.find("current row") == 0) wf.frameExclusion = "current row";
                     else if (exclRest.find("group") == 0) wf.frameExclusion = "group";
@@ -2958,6 +2965,8 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
         // UNBOUNDED FOLLOWING).
         if (!frameTextOver.empty()) {
             string lfs = toLower(frameTextOver);
+            const size_t exclBoundPos2 = lfs.find("exclude");
+            if (exclBoundPos2 != string::npos) lfs = lfs.substr(0, exclBoundPos2);
             if (lfs.find("between") != string::npos) {
                 wf.hasFrame = true;
                 if (frameKeywordOver == "range") wf.frameType = WindowFunc::FrameType::RANGE;
@@ -2992,6 +3001,16 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
                         if (!numStr.empty()) wf.frameEndOffset = std::stoi(numStr);
                     }
                 }
+            }
+            // EXCLUDE clause (from the untrimmed frame text)
+            const string lfsFull2 = toLower(frameTextOver);
+            size_t exclPos2 = lfsFull2.find("exclude");
+            if (exclPos2 != string::npos) {
+                string exclRest2 = trim(lfsFull2.substr(exclPos2 + 7));
+                if (exclRest2.find("current row") == 0) wf.frameExclusion = "current row";
+                else if (exclRest2.find("group") == 0) wf.frameExclusion = "group";
+                else if (exclRest2.find("ties") == 0) wf.frameExclusion = "ties";
+                else if (exclRest2.find("no others") == 0) wf.frameExclusion = "no others";
             }
         }
         if (wf.partitionByCols.empty() && !wf.isAggregate) {
