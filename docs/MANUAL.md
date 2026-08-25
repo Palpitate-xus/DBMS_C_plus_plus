@@ -1111,7 +1111,30 @@ ALTER SYSTEM SET work_mem = '64MB';
 -- AUTO_VACUUM
 SET GLOBAL AUTO_VACUUM = ON;
 SET GLOBAL AUTO_VACUUM_THRESHOLD = 1000;
+
+-- 兼容模式（DIV 框架；会话开始处受限，事务中不可更改）
+SHOW compatibility_mode;                     -- 默认 postgresql18
+SET compatibility_mode = 'extended';         -- 显式启用项目扩展层
+SET compatibility_mode = 'postgresql18';     -- 回到 PostgreSQL 18 语义
+SHOW dbms.extensions;                        -- 审计当前会话启用的偏移
 ```
+
+### 25.1 兼容模式与能力门控（0A000）
+
+默认 `postgresql18` 模式下，以下命令**没有真实运行时**，一律返回
+`feature_not_supported`（SQLSTATE `0A000`），不再写入兼容对象记录后假报成功：
+
+- `CREATE/ALTER/DROP EXTENSION、OPERATOR [CLASS/FAMILY]、RULE、LANGUAGE、
+  AGGREGATE、TRANSFORM、ASSERTION、ACCESS METHOD、EVENT TRIGGER、
+  SERVER、FOREIGN DATA WRAPPER、FOREIGN TABLE、USER MAPPING、
+  SUBSCRIPTION、TEXT SEARCH CONFIGURATION/DICTIONARY/PARSER/TEMPLATE`
+- `IMPORT FOREIGN SCHEMA`（无 FDW 运行时）
+- `LOAD 'library'`（无动态加载运行时）
+
+其中 `ASSERTION` 在两种模式下都返回 `0A000`（PostgreSQL 18 本身也未实现
+SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门控命令
+恢复旧的兼容对象记录行为，便于项目工具链过渡；该模式是会话级设置，
+进入事务后不可切换。
 
 ---
 

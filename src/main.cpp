@@ -20,6 +20,7 @@
 #include "replication/LogicalDecoder.h"
 #include "storage/PageCrypto.h"
 #include "common/version.h"
+#include "common/FeatureGate.h"
 #include "replication/ReplicationManager.h"
 #include "logs.h"
 #include "permissions.h"
@@ -1669,6 +1670,35 @@ static bool handleSetCommand(const string& sql, Session& s) {
         char buf[32];
         snprintf(buf, sizeof(buf), "%s%02d:%02d", sign.c_str(), tzh, tzm);
         cout << "Timezone set to UTC" << buf << " (" << tzVal << ")" << endl;
+        return false;
+    }
+
+    // SET compatibility_mode = postgresql18 | extended  (DIV framework)
+    // Session-start restricted: refuse to change semantics mid-transaction.
+    if (sql.substr(0, 3) == "set" &&
+        sql.find("compatibility_mode") != string::npos) {
+        size_t eqPos = sql.find('=');
+        if (eqPos == string::npos) {
+            cout << "SQL syntax error: SET compatibility_mode = postgresql18|extended"
+                 << endl;
+            return true;
+        }
+        string val = trim(sql.substr(eqPos + 1));
+        if (!val.empty() && val.back() == ';') val.pop_back();
+        val = trim(val);
+        if (val != dbms::kCompatModePostgresql18 &&
+            val != dbms::kCompatModeExtended) {
+            cout << "Invalid value for compatibility_mode: " << val
+                 << " (expected postgresql18 or extended)" << endl;
+            return true;
+        }
+        if (g_engine.inTransaction()) {
+            cout << "ERROR: compatibility_mode cannot change inside a transaction"
+                 << endl;
+            return true;
+        }
+        s.compatibilityMode = val;
+        cout << "SET" << endl;
         return false;
     }
 
@@ -4391,6 +4421,17 @@ static bool handleCreateCompatObject(const string& sql, Session& s) {
     }
     string kind, phrase;
     if (!consumeCompatPrefix(rest, compatCreatePrefixes(), kind, phrase)) return false;
+    // DIV-14/CAT-22: refuse to fake-succeed.  Without a runtime behind the
+    // kind, the command must fail with feature_not_supported instead of
+    // storing a compatibility record and reporting success.
+    if ((!dbms::compatKindHasRuntime(kind) ||
+         dbms::compatKindAlwaysUnsupported(kind)) &&
+        (dbms::compatKindAlwaysUnsupported(kind) ||
+         !dbms::isExtendedCompatMode(s.compatibilityMode))) {
+        cout << dbms::featureNotSupportedError(
+            string("CREATE ") + phrase) << endl;
+        return true;
+    }
     bool ifNotExists = false;
     if (startsWithKeyword(rest, "if not exists")) {
         ifNotExists = true;
@@ -4427,6 +4468,16 @@ static bool handleAlterCompatObject(const string& sql, Session& s) {
     string rest = trim(sql.substr(5));
     string kind, phrase;
     if (!consumeCompatPrefix(rest, compatAlterDropPrefixes(), kind, phrase)) return false;
+    // DIV-14/CAT-22: no runtime behind the kind means ALTER must not report
+    // success against a compatibility record.
+    if ((!dbms::compatKindHasRuntime(kind) ||
+         dbms::compatKindAlwaysUnsupported(kind)) &&
+        (dbms::compatKindAlwaysUnsupported(kind) ||
+         !dbms::isExtendedCompatMode(s.compatibilityMode))) {
+        cout << dbms::featureNotSupportedError(
+            string("ALTER ") + phrase) << endl;
+        return true;
+    }
     string name = parseCompatObjectName(kind, rest);
     if (name.empty()) {
         cout << "SQL syntax error: ALTER " << phrase << " requires an object name" << endl;
@@ -4477,6 +4528,16 @@ static bool handleDropCompatObject(const string& sql, Session& s) {
     string rest = trim(sql.substr(4));
     string kind, phrase;
     if (!consumeCompatPrefix(rest, compatDropPrefixes(), kind, phrase)) return false;
+    // DIV-14/CAT-22: dropping a compatibility record is not dropping a real
+    // object; report feature_not_supported unless a runtime exists.
+    if ((!dbms::compatKindHasRuntime(kind) ||
+         dbms::compatKindAlwaysUnsupported(kind)) &&
+        (dbms::compatKindAlwaysUnsupported(kind) ||
+         !dbms::isExtendedCompatMode(s.compatibilityMode))) {
+        cout << dbms::featureNotSupportedError(
+            string("DROP ") + phrase) << endl;
+        return true;
+    }
     bool ifExists = false;
     if (startsWithKeyword(rest, "if exists")) {
         ifExists = true;
@@ -4518,6 +4579,13 @@ static bool handleDropCompatObject(const string& sql, Session& s) {
 static bool handleImportForeignSchema(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
+    // DIV-14/FDW: no FDW runtime exists; the previous behavior stored a
+    // record and claimed the schema was imported.
+    if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+        cout << dbms::featureNotSupportedError(
+            "IMPORT FOREIGN SCHEMA") << endl;
+        return true;
+    }
     string rest = trim(sql.substr(21)); // after "import foreign schema"
     string remoteSchema = firstCompatNameToken(rest);
     size_t serverPos = findTopLevelKeyword(rest, "server");
@@ -4599,6 +4667,12 @@ static bool handleLoadSharedLibrary(const string& sql, Session& s) {
     string lib = stripQuotes(trim(sql.substr(4)));
     if (lib.empty()) {
         cout << "SQL syntax error: LOAD 'library'" << endl;
+        return true;
+    }
+    // DIV-14/EXT-02: no dynamic library loading runtime exists; storing a
+    // "loaded_library" record is not loading anything.
+    if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+        cout << dbms::featureNotSupportedError("LOAD") << endl;
         return true;
     }
     auto objects = loadCompatObjects(s.currentDB);
@@ -12536,6 +12610,24 @@ if (sql.rfind("backup database", 0) == 0) {
     // SHOW CONNECTIONS / SHOW STATUS
     if (sql.substr(0, 5) == "show ") {
         string rest = trim(sql.substr(5));
+        if (!rest.empty() && rest.back() == ';') rest.pop_back();
+        rest = trim(rest);
+        if (rest == "compatibility_mode") {
+            cout << "compatibility_mode" << endl;
+            cout << s.compatibilityMode << endl;
+            return false;
+        }
+        if (rest == "dbms.extensions") {
+            // DIV framework audit surface: which project extensions are
+            // active in this session's compatibility mode.
+            cout << "extension mode" << endl;
+            if (dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << "compat_object_record_layer enabled" << endl;
+            } else {
+                cout << "none (postgresql18 mode)" << endl;
+            }
+            return false;
+        }
         if (rest == "connections") {
             auto& s = dbms::getServerStats();
             cout << "active_connections: " << s.activeConnections.load() << endl;

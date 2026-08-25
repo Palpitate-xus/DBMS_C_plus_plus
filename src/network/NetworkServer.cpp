@@ -789,6 +789,12 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                        "more than one row returned by a subquery used as an expression")
                    != std::string::npos) {
             result.sqlState = "21000";
+        } else if (result.errorMessage.find("feature not supported") !=
+                       std::string::npos ||
+                   result.errorMessage.find("(SQLSTATE 0A000)") !=
+                       std::string::npos) {
+            // DIV-14: capability gate refusals carry their own SQLSTATE.
+            result.sqlState = "0A000";
         } else {
             result.sqlState = "XX000";
         }

@@ -49,6 +49,12 @@ struct Session {
     // Cancellation flags for pg_cancel_backend / pg_terminate_backend
     bool cancelRequested = false;   // set true to cancel current query
     bool terminateRequested = false; // set true to terminate session
+
+    // Compatibility mode (gap DIV-01..DIV-14 framework): "postgresql18" is
+    // the default and rejects project-only syntax with SQLSTATE 0A000;
+    // "extended" enables project extensions such as the compatibility-object
+    // record layer.
+    std::string compatibilityMode = "postgresql18";
 };
 
 inline std::string tempTablePrefix(const Session& session, const std::string& name) {

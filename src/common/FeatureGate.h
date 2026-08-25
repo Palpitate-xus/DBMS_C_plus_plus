@@ -1,0 +1,39 @@
+// Feature gate for PostgreSQL 18 compatibility (gap DIV-14 / CAT-22).
+//
+// Commands that previously only stored a record in .pg_compat_objects (or
+// another sidecar) while reporting success must instead fail with
+// SQLSTATE 0A000 (feature_not_supported) until a real runtime exists.
+// This module is the single place that decides, per object kind, whether a
+// runtime implementation exists.  The default compatibility mode is
+// "postgresql18"; the explicit "extended" mode keeps the legacy
+// record-keeping behavior for project extensions (DIV-01..DIV-14 framework).
+#pragma once
+
+#include <string>
+
+namespace dbms {
+
+// Canonical compatibility modes.
+inline constexpr const char* kCompatModePostgresql18 = "postgresql18";
+inline constexpr const char* kCompatModeExtended = "extended";
+
+// Returns true when mode names the extended compatibility mode.
+bool isExtendedCompatMode(const std::string& mode);
+
+// Object kinds understood by the compatibility-object layer in main.cpp.
+// Keep in sync with compatCreatePrefixes()/compatAlterDropPrefixes().
+// Returns true when the kind has a real runtime implementation behind it
+// (executor/planner/catalog effect), not just a stored definition record.
+bool compatKindHasRuntime(const std::string& kind);
+
+// Kinds that must stay feature_not_supported in every compatibility mode
+// because PostgreSQL 18 itself does not implement them (DIV-08: SQL
+// assertions) or because no honest runtime can exist yet.
+bool compatKindAlwaysUnsupported(const std::string& kind);
+
+// Builds the standard feature-not-supported error line for a command.
+// Example: featureNotSupportedError("CREATE EXTENSION") produces
+//   "ERROR: feature not supported: CREATE EXTENSION is not implemented (SQLSTATE 0A000)"
+std::string featureNotSupportedError(const std::string& command);
+
+} // namespace dbms
