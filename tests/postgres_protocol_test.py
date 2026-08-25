@@ -1059,6 +1059,72 @@ def main():
             sock, "SELECT id FROM dec_t WHERE v BETWEEN 1 AND 2"))
         assert d13 == [[b"1"]], d13
 
+        # Derived tables (FROM (SELECT ...)), single CTEs, and comma cross
+        # joins.  Previously: the no-AS alias form "(select ...) t" crashed
+        # with a substring exception; alias-qualified columns (t.id) mis-
+        # replaced positions after alias stripping; aggregate/group-by/nested
+        # subqueries inside FROM (...) returned empty or failed; CTE name
+        # replacement rewrote letters inside keywords (a CTE named "c"
+        # corrupted "select"); "from a, b" (comma cross join) was rejected.
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE dt_t (id INT PRIMARY KEY, k INT, txt TEXT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO dt_t VALUES (1,1,'aa'),(2,2,'bb'),"
+                  "(3,2,'cc'),(4,3,'dd')"))
+        e1 = data_row_values(simple_query(
+            sock, "SELECT t.id FROM (SELECT id FROM dt_t WHERE k = 2) t"))
+        assert e1 == [[b"2"], [b"3"]], e1
+        e2 = data_row_values(simple_query(
+            sock, "SELECT t.id FROM (SELECT id FROM dt_t WHERE k = 2) AS t"))
+        assert e2 == [[b"2"], [b"3"]], e2
+        e3 = data_row_values(simple_query(
+            sock, "SELECT t.mx FROM (SELECT MAX(k) AS mx FROM dt_t) t"))
+        assert e3 == [[b"3"]], e3
+        e4 = data_row_values(simple_query(
+            sock, "SELECT t.k, t.c FROM (SELECT k, COUNT(*) AS c FROM dt_t "
+                  "GROUP BY k) t ORDER BY t.k LIMIT 2"))
+        assert e4 == [[b"1", b"1"], [b"2", b"2"]], e4
+        e5 = data_row_values(simple_query(
+            sock, "SELECT u.id FROM (SELECT id FROM (SELECT id FROM dt_t "
+                  "WHERE k = 2) it) u ORDER BY u.id"))
+        assert e5 == [[b"2"], [b"3"]], e5
+        e6 = data_row_values(simple_query(
+            sock, "SELECT t.id FROM (SELECT id, k FROM dt_t) t WHERE t.k = 3"))
+        assert e6 == [[b"4"]], e6
+        e7 = data_row_values(simple_query(
+            sock, "WITH c AS (SELECT id FROM dt_t WHERE k = 2) "
+                  "SELECT id FROM c ORDER BY id"))
+        assert e7 == [[b"2"], [b"3"]], e7
+        e8 = data_row_values(simple_query(
+            sock, "WITH c AS (SELECT MAX(k) AS mx FROM dt_t) SELECT mx FROM c"))
+        assert e8 == [[b"3"]], e8
+        e9 = data_row_values(simple_query(
+            sock, "WITH c AS (SELECT id, k FROM dt_t) "
+                  "SELECT c.id FROM c WHERE c.k = 3"))
+        assert e9 == [[b"4"]], e9
+        e10 = data_row_values(simple_query(
+            sock, "SELECT a.id FROM dt_t a JOIN (SELECT id FROM dt_t "
+                  "WHERE k = 3) b ON a.id = b.id"))
+        assert e10 == [[b"4"]], e10
+        # Comma cross join (PG: "from a, b" == "from a cross join b").
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE cj1 (a INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "CREATE TABLE cj2 (b INT)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO cj1 VALUES (1)"))
+        assert any(kind == b"C" for kind, _ in simple_query(
+            sock, "INSERT INTO cj2 VALUES (5)"))
+        e11 = data_row_values(simple_query(sock, "SELECT a, b FROM cj1, cj2"))
+        assert e11 == [[b"1", b"5"]], e11
+        e12 = data_row_values(simple_query(
+            sock, "SELECT p.a, q.b FROM cj1 p, cj2 q"))
+        assert e12 == [[b"1", b"5"]], e12
+        # IN-list commas must NOT be rewritten by the comma-join pass.
+        e13 = data_row_values(simple_query(
+            sock, "SELECT id FROM dt_t WHERE id IN (1, 2) ORDER BY id"))
+        assert e13 == [[b"1"], [b"2"]], e13
+
         # SELECT-list aliases (AS) and arithmetic projections: previously
         # "select id as no" failed with "Invalid column name id as no".
         assert any(kind == b"C" for kind, _ in simple_query(

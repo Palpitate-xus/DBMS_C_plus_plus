@@ -6942,6 +6942,40 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
     return answers;
 }
 
+// Run a derived-table / CTE inner SELECT through the full SQL dispatcher
+// with captured output, so arbitrary SELECT shapes (aggregates, GROUP BY,
+// joins, nested derived tables, scalar functions) work inside FROM (...)
+// and WITH clauses.  Falls back to the minimal legacy parser on failure.
+static std::vector<std::string> runDerivedSubQueryFull(const std::string& rawSql, Session& s,
+                                                       std::vector<std::string>& outColNames) {
+    std::stringstream captured;
+    {
+        dbms::ScopedOutputCapture cap(captured);
+        bool failed = execute(rawSql, s);
+        if (failed) return {};
+    }
+    std::vector<std::string> lines;
+    {
+        std::string ln;
+        std::istringstream iss(captured.str());
+        while (std::getline(iss, ln)) {
+            std::string t = trim(ln);
+            if (!t.empty()) lines.push_back(t);
+        }
+    }
+    if (lines.empty()) return {};
+    // First non-empty line is the header (column names, space separated).
+    outColNames.clear();
+    {
+        std::stringstream hss(lines[0]);
+        std::string col;
+        while (hss >> col) outColNames.push_back(col);
+    }
+    if (outColNames.empty()) return {};
+    std::vector<std::string> rows(lines.begin() + 1, lines.end());
+    return rows;
+}
+
 // Helper: create a temp table from query rows and column names.
 // Returns the user-visible temp name (without __tmp_ prefix).
 static std::string createTempTableFromRows(Session& s,
@@ -7274,22 +7308,42 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
             }
         } else {
             // Non-recursive CTE: execute and store
-            auto rows = runDerivedSubQuery(innerSelect, s, colNames);
+            auto rows = runDerivedSubQueryFull(innerSelect, s, colNames);
+            if (colNames.empty()) {
+                colNames.clear();
+                rows = runDerivedSubQuery(innerSelect, s, colNames);
+            }
             if (colNames.empty()) break;
             tmpName = createTempTableFromRows(s, rows, colNames, cteCount);
             if (tmpName.empty()) break;
         }
         } // end if (!isDmlCte)
 
-        // Replace CTE name references in the rest of the SQL
+        // Replace CTE name references in the rest of the SQL.  Both loops
+        // need word-boundary checks: a CTE named "c" must not rewrite the
+        // 'c' inside "select".
         size_t replacePos = parenEnd + 1;
         while ((replacePos = result.find(cteName + ".", replacePos)) != std::string::npos) {
-            result = result.substr(0, replacePos) + result.substr(replacePos + cteName.size() + 1);
+            bool leftOk = (replacePos == 0) || !isalnum(static_cast<unsigned char>(result[replacePos - 1]));
+            bool rightOk = (replacePos + cteName.size() < result.size()) &&
+                           !isalnum(static_cast<unsigned char>(result[replacePos + cteName.size() + 1]));
+            if (leftOk && rightOk) {
+                result = result.substr(0, replacePos) + result.substr(replacePos + cteName.size() + 1);
+            } else {
+                replacePos += cteName.size() + 1;
+            }
         }
         replacePos = parenEnd + 1;
         while ((replacePos = result.find(cteName, replacePos)) != std::string::npos) {
-            result = result.substr(0, replacePos) + tmpName + result.substr(replacePos + cteName.size());
-            replacePos += tmpName.size();
+            bool leftOk = (replacePos == 0) || !isalnum(static_cast<unsigned char>(result[replacePos - 1]));
+            bool rightOk = (replacePos + cteName.size() == result.size()) ||
+                           !isalnum(static_cast<unsigned char>(result[replacePos + cteName.size()]));
+            if (leftOk && rightOk) {
+                result = result.substr(0, replacePos) + tmpName + result.substr(replacePos + cteName.size());
+                replacePos += tmpName.size();
+            } else {
+                replacePos += cteName.size();
+            }
         }
 
         // Move past this CTE definition
@@ -7321,6 +7375,47 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
     while (true) {
         size_t parenStart = result.find("(select");
         if (parenStart == std::string::npos) break;
+        // A derived table must be preceded by FROM / JOIN / comma / lateral,
+        // otherwise the "(select" belongs to a scalar or predicate subquery
+        // elsewhere in the statement (e.g. a SELECT-list item).
+        {
+            std::string before = trim(result.substr(0, parenStart));
+            std::string beforeLower;
+            for (char ch : before) beforeLower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+            bool fromCtx = false;
+            for (const char* kw : {" from", " join", " cross", " inner",
+                                   " left", " right", " full", " lateral", ","}) {
+                size_t klen = strlen(kw);
+                if (beforeLower.size() >= klen &&
+                    beforeLower.compare(beforeLower.size() - klen, klen, kw) == 0) {
+                    fromCtx = true;
+                    break;
+                }
+            }
+            if (!fromCtx) {
+                // Not a FROM item: skip this occurrence to avoid an
+                // infinite loop.
+                parenStart = result.find("(select", parenStart + 1);
+                if (parenStart == std::string::npos) break;
+                // Re-check the new occurrence's context once; if still not
+                // FROM, give up this pass (the outer SELECT machinery will
+                // handle the subquery).
+                std::string before2 = trim(result.substr(0, parenStart));
+                std::string before2Lower;
+                for (char ch : before2) before2Lower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                bool fromCtx2 = false;
+                for (const char* kw : {" from", " join", " cross", " inner",
+                                       " left", " right", " full", " lateral", ","}) {
+                    size_t klen = strlen(kw);
+                    if (before2Lower.size() >= klen &&
+                        before2Lower.compare(before2Lower.size() - klen, klen, kw) == 0) {
+                        fromCtx2 = true;
+                        break;
+                    }
+                }
+                if (!fromCtx2) break;
+            }
+        }
         // Skip LATERAL subqueries — they are handled dynamically per left-row
         std::string beforeParen = trim(result.substr(0, parenStart));
         if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
@@ -7335,16 +7430,47 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         size_t parenEnd = findMatchingParen(result, parenStart);
         if (parenEnd == std::string::npos) break;
 
-        std::string afterParen = trim(result.substr(parenEnd + 1));
-        if (afterParen.size() < 3 || afterParen.substr(0, 3) != "as ") break;
-        std::string alias = trim(afterParen.substr(3));
-        size_t sp = alias.find(' ');
-        if (sp != std::string::npos) alias = alias.substr(0, sp);
+        // PostgreSQL allows both "(select ...) as alias" and the short
+        // "(select ...) alias" form.  Scan the raw string so the alias
+        // expression extent is measured on real positions.
+        size_t p = parenEnd + 1;
+        while (p < result.size() && isspace((unsigned char)result[p])) ++p;
+        bool hasAs = false;
+        if (p + 2 < result.size() &&
+            tolower((unsigned char)result[p]) == 'a' &&
+            tolower((unsigned char)result[p + 1]) == 's' &&
+            isspace((unsigned char)result[p + 2])) {
+            hasAs = true;
+            p += 3;
+            while (p < result.size() && isspace((unsigned char)result[p])) ++p;
+        }
+        size_t aliasStart = p;
+        while (p < result.size() && (isalnum((unsigned char)result[p]) || result[p] == '_')) ++p;
+        std::string alias = result.substr(aliasStart, p - aliasStart);
+        // The next character must terminate the alias (space, comma, EOS...).
         if (alias.empty()) break;
+        if (!hasAs) {
+            // Without AS, make sure this bare word is not a SQL keyword that
+            // introduces the next clause (i.e. there is no alias at all).
+            std::string aliasLower;
+            for (char ch : alias) aliasLower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+            if (aliasLower == "where" || aliasLower == "group" || aliasLower == "order" ||
+                aliasLower == "limit" || aliasLower == "offset" || aliasLower == "having" ||
+                aliasLower == "join" || aliasLower == "inner" || aliasLower == "cross" ||
+                aliasLower == "left" || aliasLower == "right" || aliasLower == "on" ||
+                aliasLower == "union" || aliasLower == "lateral" || aliasLower == "from")
+                break;
+        }
+        size_t aliasExprStart = p;
 
+        std::string afterParen = trim(result.substr(parenEnd + 1));
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
         std::vector<std::string> colNames;
-        auto rows = runDerivedSubQuery(innerSelect, s, colNames);
+        auto rows = runDerivedSubQueryFull(innerSelect, s, colNames);
+        if (colNames.empty()) {
+            colNames.clear();
+            rows = runDerivedSubQuery(innerSelect, s, colNames);
+        }
         if (colNames.empty()) break;
 
         int counter = derivedCount;
@@ -7352,23 +7478,22 @@ static std::string processDerivedTables(const std::string& sql, Session& s) {
         if (tmpName.empty()) break;
         derivedCount = counter;
 
-        // Replace alias references with bare column names
+        // Replace alias references with bare column names.  Occurrences
+        // before the subquery shift the recorded positions, so adjust
+        // parenStart / aliasExprStart for each removal.
         std::string aliasDot = alias + ".";
         size_t pos = 0;
         while ((pos = result.find(aliasDot, pos)) != std::string::npos) {
             result = result.substr(0, pos) + result.substr(pos + aliasDot.size());
-            // pos stays same since we removed characters
+            if (pos < parenStart) {
+                parenStart -= aliasDot.size();
+                parenEnd -= aliasDot.size();
+                aliasExprStart -= aliasDot.size();
+            }
         }
 
         // Replace the derived table definition with temp table name
-        size_t aliasEnd = parenEnd + 1;
-        while (aliasEnd < result.size() && isspace((unsigned char)result[aliasEnd])) ++aliasEnd;
-        if (aliasEnd + 2 < result.size() && result.substr(aliasEnd, 3) == "as ") {
-            aliasEnd += 3;
-            while (aliasEnd < result.size() && isspace((unsigned char)result[aliasEnd])) ++aliasEnd;
-            aliasEnd += alias.size();
-        }
-        result = result.substr(0, parenStart) + tmpName + result.substr(aliasEnd);
+        result = result.substr(0, parenStart) + tmpName + result.substr(aliasExprStart);
     }
 
     return result;
@@ -13631,6 +13756,52 @@ if (sql.rfind("backup database", 0) == 0) {
                 if (q2 != string::npos) {
                     outfile = sql.substr(q1 + 1, q2 - q1 - 1);
                     sql = trim(sql.substr(0, intoPos));
+                }
+            }
+        }
+
+        // PostgreSQL comma cross join: "from a, b" == "from a cross join b".
+        // Rewrite top-level (paren/quote-free) commas inside the FROM region
+        // before any join detection, so the existing CROSS JOIN pipeline
+        // handles them.  Commas inside parentheses (IN lists, subqueries) are
+        // untouched.
+        {
+            size_t fp = findTopLevelKeyword(sql, "from");
+            if (fp != string::npos) {
+                // Determine the end of the FROM region: the next top-level
+                // clause keyword.
+                const char* clauses[] = {"where", "group by", "having",
+                                         "order by", "limit", "offset",
+                                         "window", "union", "except", "intersect"};
+                size_t fEnd = sql.size();
+                for (const char* kw : clauses) {
+                    size_t p = findTopLevelKeyword(sql, kw, fp + 4);
+                    if (p != string::npos && p < fEnd) fEnd = p;
+                }
+                std::string region = sql.substr(fp + 4, fEnd - fp - 4);
+                bool hasTopComma = false;
+                {
+                    int depth = 0; bool inQ = false;
+                    for (char ch : region) {
+                        if (inQ) { if (ch == '\'') inQ = false; continue; }
+                        if (ch == '\'') { inQ = true; continue; }
+                        if (ch == '(') ++depth;
+                        else if (ch == ')') --depth;
+                        else if (ch == ',' && depth == 0) { hasTopComma = true; break; }
+                    }
+                }
+                if (hasTopComma) {
+                    std::string out;
+                    int depth = 0; bool inQ = false;
+                    for (char ch : region) {
+                        if (inQ) { out += ch; if (ch == '\'') inQ = false; continue; }
+                        if (ch == '\'') { inQ = true; out += ch; continue; }
+                        if (ch == '(') ++depth;
+                        else if (ch == ')') --depth;
+                        else if (ch == ',' && depth == 0) { out += " cross join "; continue; }
+                        out += ch;
+                    }
+                    sql = sql.substr(0, fp + 4) + out + sql.substr(fEnd);
                 }
             }
         }

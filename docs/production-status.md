@@ -577,3 +577,23 @@ v0.17 记录的残留缺口（单谓词 `WHERE c NOT LIKE 'x'` / `c BETWEEN a AN
 验证：探针矩阵 12 项全对（length/upper/lower/substr/concat/coalesce/abs/round/nested/replace/trim/position）；回归矩阵 13 项（限定列名 `t1.v`、`::` 转换、小数 WHERE/聚合/JOIN/ORDER BY、IN 列表、LIKE 含点、JSON 操作符、小数算术、round 列）除基线已知的 `id::text` 投影转换外全部通过；BETWEEN 子矩阵（numeric 列小数边界命中/不命中/not between、整数列小数边界、整数边界回归、gt/lt 回归）全部与手算 PG 语义一致；协议回归 +13 断言（ROUND/ABS/POSITION/嵌套 UPPER(SUBSTRING)/BETWEEN 命中与不命中/NOT BETWEEN/IN 回归/整数边界回归）。注意 PG 语义核对修正了一处测试预期：`id BETWEEN 1.1 AND 2.9` 中 id=1 不满足（1 < 1.1），只有 id=2 命中。
 
 验证状态：完整回归 PASS=167 FAIL=0（geometric_test 首轮出现临时目录清理竞态 flake，隔离重跑通过；复跑全量绿色，含 7 个 Python E2E）；ASAN CLEAN（14 组）。
+
+## 2026-08-24 v0.22 批次：派生表 / CTE / 逗号 cross join
+
+FROM 子查询域逐项审计发现四个真实缺陷：
+
+- **`(select ...) t` 无 AS 别名形式崩溃**：`basic_string::substr: __pos > size`——别名剥离（`t.` 移除）缩短字符串后，记录的括号位置没有同步偏移；
+- **FROM 内聚合/分组/嵌套子查询全部空结果或失败**：`runDerivedSubQuery` 是极简单表解析器，不支持聚合、GROUP BY、嵌套派生表——`(select max(k) as mx from s) t` 空、`(select ... from (select ...) it) u` 报表不存在；
+- **CTE 名替换无词边界检查**：名为 `c` 的 CTE 把 `select` 里的 `c` 也替换掉（"sele__cte_0t"）——`with c as (...) select id from c` 报 Invalid column name；
+- **`from a, b` 逗号 cross join 被拒绝**（PG 语义等同 `cross join`）。
+
+修复：
+
+1. `processDerivedTables`（main.cpp）：别名扫描改为在原始字符串上按位置测量（支持 `(select ...) alias` 短形式，排除 where/group/order/limit/offset/having/join/union/lateral/from 等关键字误判）；别名引用剥离时同步修正 parenStart/parenEnd/aliasExprStart 位置；新增 FROM 上下文守卫——`(select` 前必须是 from/join/cross/inner/left/right/full/lateral/逗号，投影中的标量子查询与 IN/EXISTS 谓词子查询不再被误物化。
+2. 新增 `runDerivedSubQueryFull`：经 `ScopedOutputCapture` 把内层 SELECT 送完整 SQL 分发器执行并捕获表头/行，失败时回退旧极简解析器——派生表/CTE 内层支持任意 SELECT 形态（聚合、GROUP BY、JOIN、嵌套派生表、标量函数）。
+3. `processCTEs`：两处名字替换循环（`c.` 剥离与 `c`→临时表名）补词边界检查（左右邻字符非字母数字）。
+4. 主 SELECT 分发早期：FROM 区域顶层逗号（括号/引号外）重写为 `cross join`——`from a, b`、`from a p, b q`、`from a, b where ...` 全部走既有 CROSS JOIN 管线；IN 列表等括号内逗号不受影响。
+
+验证：派生表矩阵 10 项（无 AS/有 AS/别名限定列/聚合/分组/嵌套/派生表上 WHERE/与基表 JOIN）全对；CTE 矩阵 4 项（基础/聚合/限定列引用）通过；逗号 join 矩阵 5 项（基础/cross 关键字对照/带 WHERE/别名形式/IN 列表安全性）通过；回归：标量子查询（既有能力）、IN 子查询、窗口函数三件套、LIMIT/OFFSET 族、UNION/EXCEPT/INTERSECT、UPSERT/RETURNING 全部不变；协议回归 +13 断言（dt_t/cj1/cj2 表）。已知残留（基线既有，本轮如实记录）：多 CTE（`with a as (...), b as (...)`）第二定义仍失败；投影位置含聚合的标量子查询（`(select max(k) from s)`）基线即报错；LATERAL、`= ANY(子查询)`、`LIMIT 1+1` 表达式形式未覆盖。
+
+验证状态：完整回归 PASS=167 FAIL=0（含 7 个 Python E2E，v0.22）；ASAN CLEAN（14 组）。
