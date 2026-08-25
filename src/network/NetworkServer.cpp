@@ -1,4 +1,5 @@
 #include "NetworkServer.h"
+#include "common/version.h"
 #include "commands/DmlExecutor.h"
 #include "TableManage.h"
 #include "permissions.h"
@@ -1832,13 +1833,19 @@ bool startServer(int port, bool allowPlaintext) {
     }
     g_listenFd.store(serverFd, std::memory_order_relaxed);
 
-    std::cout << "DBMS server listening on port " << port;
+    std::cout << "DBMS server (version " << DBMS_VERSION_STRING
+              << ", compatibility mode "
+              << dbms::defaultCompatibilityMode()
+              << ") listening on port " << port;
     if (tlsCtx.enabled()) {
         std::cout << " (TLS enabled)";
     } else {
         std::cout << " (INSECURE plaintext; explicitly enabled)";
     }
     std::cout << std::endl;
+    std::cout << "note: this is not a PostgreSQL server cluster; the data "
+                 "directory layout, wire defaults and tooling differ"
+              << std::endl;
 
     struct Worker {
         std::thread thread;

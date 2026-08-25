@@ -220,6 +220,10 @@ def main():
             assert err is not None and err[0] == "0A000" and tool in err[1], \
                 "%s must fail with 0A000 mentioning %s: %r" % (sql, tool, err)
 
+        # DIV-08: CREATE ASSERTION is unsupported in BOTH modes, exactly
+        # like PostgreSQL 18 (which never implemented SQL assertions).
+        expect_0a000(sock, "CREATE ASSERTION a CHECK (1 = 1)", "DIV-08 assertion")
+
         # DIV-12: project pool/TDE surface is hidden in postgresql18 mode.
         messages = simple_query(sock, "SHOW TDE STATUS")
         err = error_of(messages)

@@ -1069,7 +1069,7 @@
 
 - id: DIV-08
   title: `CREATE ASSERTION` 被当作 compatibility object 接受，但 PostgreSQL 18 自身也没有实现 SQL assertion；项目当前更没有约束运行时
-  status: open
+  status: in_progress
 
 - id: DIV-09
   title: 普通 SQL 形式的 `CREATE/DROP REPLICATION SLOT` 和 `SHOW LOGICAL ...` 是项目接口；PostgreSQL 通过 replication protocol 或系统函数管理/消费槽
@@ -1089,7 +1089,7 @@
 
 - id: DIV-13
   title: 默认端口、数据目录和启动 CWD 状态布局与 PostgreSQL 不同，应避免给工具造成“这是 PostgreSQL cluster”的假象
-  status: open
+  status: in_progress
 
 - id: DIV-14
   title: 对仅保存兼容记录的命令返回“created/loaded/altered”会误导用户；应改为 feature-not-supported，直到运行时真正存在

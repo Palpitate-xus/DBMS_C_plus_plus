@@ -1162,6 +1162,12 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
   → `0A000`；`pool_mode`/`pool_size`/`max_client_conn` 不再出现在
   `SHOW ALL`，单独 `SHOW` 返回 `42704` 未识别参数；扩展能力只能通过
   服务器配置文件启用，不在 SQL 层暴露
+- `CREATE ASSERTION`（DIV-08）→ 两种模式都返回 `0A000`（PostgreSQL 18
+  同样未实现 SQL assertion）
+- 启动标识（DIV-13）：服务端 banner 标明自身版本与兼容模式，并明确
+  提示“这不是 PostgreSQL server cluster”；`server_version` 参数上报
+  `DBMS-C++ protocol/3.0`，不冒充 PostgreSQL 版本号；无默认端口，
+  必须显式 `--server PORT`
 
 会话默认模式可由环境变量 `DBMS_COMPATIBILITY_MODE=extended|postgresql18`
 设定（默认 `postgresql18`），CLI 与网络会话一致生效。
