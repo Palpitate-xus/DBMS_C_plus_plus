@@ -1,0 +1,1097 @@
+# DBMS_C_plus_plus PostgreSQL 18.6 compatibility manifest
+# Auto-generated from docs/postgresql-18-gap-audit.md; regenerate with
+#   python3 scripts/gen_compat_manifest.py
+# status: open | complete  (complete requires full blueprint acceptance evidence)
+
+- id: P0-01
+  title: 统一 SQL 执行管线
+  status: open
+
+- id: P0-02
+  title: 结构化结果与错误
+  status: open
+
+- id: P0-03
+  title: catalog 成为唯一事实源
+  status: open
+
+- id: P0-04
+  title: 完整事务化 DDL
+  status: open
+
+- id: P0-05
+  title: 完整持久性证明
+  status: open
+
+- id: P0-06
+  title: 索引 WAL 重构
+  status: open
+
+- id: P0-07
+  title: 完整 MVCC/SSI
+  status: open
+
+- id: P0-08
+  title: XID 生命周期
+  status: open
+
+- id: P0-09
+  title: 单实例并发与故障隔离
+  status: open
+
+- id: P0-10
+  title: 真实备份和恢复链
+  status: open
+
+- id: P0-11
+  title: 物理复制和 hot standby
+  status: open
+
+- id: P0-12
+  title: wire protocol 合规
+  status: open
+
+- id: P0-13
+  title: 权限边界统一
+  status: open
+
+- id: P0-14
+  title: 资源治理
+  status: open
+
+- id: P0-15
+  title: 可升级性
+  status: open
+
+- id: P0-16
+  title: 差分兼容测试
+  status: open
+
+- id: SQL-01
+  title: 用正式 grammar/lexer 覆盖 PostgreSQL 词法规则，去掉基于 `substr/find/tokenize` 的二次解析
+  status: open
+
+- id: SQL-02
+  title: 支持完整 quoted identifier、Unicode escape identifier/string、escape string、bit/hex literal、标准 conforming strings 和嵌套注释
+  status: open
+
+- id: SQL-03
+  title: 将当前 SQL 预处理中的 boolean、array、CASE、ANY/ALL 等文本 rewrite 移到 AST/analyze 阶段
+  status: open
+
+- id: SQL-04
+  title: 实现 binder：relation/column/function/operator/type 的 namespace lookup、歧义检测和逐层 scope
+  status: open
+
+- id: SQL-05
+  title: 完整实现 schema-qualified 名称、`search_path`、临时 schema、`pg_catalog` 隐式搜索和跨 schema 同名对象
+  status: open
+
+- id: SQL-06
+  title: 实现 PostgreSQL identifier folding 和最大长度规则，所有 catalog/物理文件名使用同一规范
+  status: open
+
+- id: SQL-07
+  title: 实现 unknown literal、参数类型推断、preferred type、category 和 common supertype 选择
+  status: open
+
+- id: SQL-08
+  title: 实现 assignment/implicit/explicit cast graph；当前 `CREATE CAST` 记录不能驱动 analyzer/executor
+  status: open
+
+- id: SQL-09
+  title: 实现函数/过程/聚合/operator 重载解析、默认参数、variadic、多态伪类型和 schema 可见性
+  status: open
+
+- id: SQL-10
+  title: 实现 collatable expression 推导、collation conflict 和 provider/version 处理
+  status: open
+
+- id: SQL-11
+  title: 对所有语句做尾随 token 检查、准确 error position、hint/detail/context 和 PostgreSQL SQLSTATE 映射
+  status: open
+
+- id: SQL-12
+  title: 移除以空格分割行/列的内部结果格式；它不能正确承载含空格、NULL、转义和复合值的数据
+  status: open
+
+- id: SQL-13
+  title: 统一 SQL 级 `PREPARE ... AS ... $n` 与协议 prepared statement 的类型、计划、失效和 portal 生命周期
+  status: open
+
+- id: SQL-14
+  title: 实现 rewrite system 所需的 query tree 复制、权限标记和依赖失效
+  status: open
+
+- id: CAT-01
+  title: 将 catalog 从 CSV/sidecar 缓存提升为 WAL/MVCC 管理的普通系统关系
+  status: open
+
+- id: CAT-02
+  title: `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等必须是内部执行的真实来源，而不是另一套虚拟输出
+  status: open
+
+- id: CAT-03
+  title: 补齐 `pg_constraint`、`pg_index`、`pg_am`、`pg_opclass`、`pg_operator`、`pg_cast`、`pg_collation`、`pg_rewrite`、`pg_trigger`、`pg_policy`、`pg_auth*`、`pg_default_acl`、`pg_database`、`pg_tablespace`、`pg_statistic*`、复制 catalog 等
+  status: open
+
+- id: CAT-04
+  title: 实现所有对象的稳定 OID、reg* 查找、OID 引用和 dump/restore 保真
+  status: open
+
+- id: CAT-05
+  title: 统一 owner、ACL、comment、security label、extension membership 和 dependency graph
+  status: open
+
+- id: CAT-06
+  title: 完整 `CASCADE/RESTRICT`、internal/auto/normal/pin/extension dependency 行为
+  status: open
+
+- id: CAT-07
+  title: DDL 对 catalog 和物理文件的修改必须同一事务提交/回滚/恢复
+  status: open
+
+- id: CAT-08
+  title: `CREATE DATABASE` 补 template、owner、encoding、locale/ICU provider、collation version、tablespace、strategy 和 connection limit
+  status: open
+
+- id: CAT-09
+  title: schema 不应通过 `schema__table` 或 marker 模拟；补真正 namespace、rename/owner、权限和 search_path
+  status: open
+
+- id: CAT-10
+  title: 表/列 DDL 补完整 rewrite、`USING`、dependency invalidation、锁等级、递归/ONLY 和多 action 原子性
+  status: open
+
+- id: CAT-11
+  title: 分区表补默认分区、约束证明、attach validation、detach concurrently/finalize、分区索引和跨分区唯一性
+  status: open
+
+- id: CAT-12
+  title: 继承补约束/default/generated/identity/统计/权限传播和多父表冲突规则
+  status: open
+
+- id: CAT-13
+  title: 临时对象补 `pg_temp_N` catalog、search_path、ON COMMIT、两阶段事务限制和 session/backend 清理语义
+  status: open
+
+- id: CAT-14
+  title: unlogged relation 补 init fork、crash truncate、复制和备份行为
+  status: open
+
+- id: CAT-15
+  title: sequence 补 relation/catalog 语义、cache、cycle、min/max、owned-by、并发、WAL、session currval/lastval 和非事务行为
+  status: open
+
+- id: CAT-16
+  title: view 补完整 rewrite rule、自动可更新判断、CHECK OPTION、security barrier/invoker、recursive view 和依赖
+  status: open
+
+- id: CAT-17
+  title: materialized view 补列类型推断、依赖、populate state、真实 concurrent refresh 和唯一索引要求
+  status: open
+
+- id: CAT-18
+  title: trigger 补 trigger function、transition table、constraint/deferred trigger、列列表、`WHEN` scope、触发顺序和递归规则
+  status: open
+
+- id: CAT-19
+  title: event trigger 和 rule 当前只是骨架，需要真实 DDL/rewrite 事件执行
+  status: open
+
+- id: CAT-20
+  title: tablespace 补 cluster 级 catalog、OID/symlink 布局、owner/ACL、并发、跨设备持久化和备份恢复
+  status: open
+
+- id: CAT-21
+  title: `COMMENT`/`SECURITY LABEL` 覆盖 PostgreSQL 对象全集，并使用 catalog dependency
+  status: open
+
+- id: CAT-22
+  title: 删除 `.pg_compat_objects` 的“成功但无运行时效果”语义；未实现命令应返回 `0A000 feature_not_supported`
+  status: open
+
+- id: TYPE-01
+  title: numeric 补 PostgreSQL 精度/scale、NaN/±Infinity、舍入、溢出、比较、hash、sort support 和 binary protocol
+  status: open
+
+- id: TYPE-02
+  title: integer/float 补完整溢出、NaN ordering、implicit cast、平台无关 binary storage 和错误语义
+  status: open
+
+- id: TYPE-03
+  title: `money` 补 locale-aware I/O 和精确内部表示；不能走 double/字符串近似
+  status: open
+
+- id: TYPE-04
+  title: character/text 补无限 text/bytea 语义、typmod、blank padding、encoding、collation 和 Unicode 行为；当前 65535 等项目限制不是 PG 限制
+  status: open
+
+- id: TYPE-05
+  title: bytea 补全部 operators/functions、binary I/O 和大值 TOAST 行为
+  status: open
+
+- id: TYPE-06
+  title: date/time/timestamp/timestamptz/interval 补微秒精度、BC/infinity、完整 timezone database、DST、timezone abbreviation、typmod 和所有边界值
+  status: open
+
+- id: TYPE-07
+  title: boolean 保持真正三值类型，避免预处理阶段把 `TRUE/FALSE` 文本改成 `1/0` 引起类型偏移
+  status: open
+
+- id: TYPE-08
+  title: enum 补 catalog ordering、rename/add value 的并发可见性、比较/hash 和 dump/restore
+  status: open
+
+- id: TYPE-09
+  title: geometric types 补 PostgreSQL binary representation、全部 operator/function、NaN/边界和 GiST/SP-GiST opclass
+  status: open
+
+- id: TYPE-10
+  title: inet/cidr/macaddr 补完整网络运算、排序、包含、hash 和 binary protocol
+  status: open
+
+- id: TYPE-11
+  title: bit/varbit 补完整位运算、移位、比较、substring 和 binary I/O
+  status: open
+
+- id: TYPE-12
+  title: tsvector/tsquery 补配置/字典/parser、词干/停用词、完整 query tree、headline/rank 和 GIN/GiST opclass
+  status: open
+
+- id: TYPE-13
+  title: UUID 补 16-byte 内部/binary 语义和 PostgreSQL 18 `uuidv7()` 等函数
+  status: open
+
+- id: TYPE-14
+  title: XML 补 libxml 语义、well-formed document/content、XMLTABLE/XMLNAMESPACES 和相关函数
+  status: open
+
+- id: TYPE-15
+  title: JSON/JSONB 补真正 binary JSONB、完整 operators/functions、SQL/JSON、jsonpath evaluator、GIN opclass、duplicate key/numeric/collation 细节
+  status: open
+
+- id: TYPE-16
+  title: array 补任意元素类型、多维 lower bounds、rectangularity、comparison/hash、array assignment、record/array binary I/O 和完整函数集
+  status: open
+
+- id: TYPE-17
+  title: composite/record 补 row descriptor、anonymous record、field selection/update、comparison、I/O 和函数返回 record 推导
+  status: open
+
+- id: TYPE-18
+  title: range 补 canonical/subtype diff、empty/infinite bounds、operators、aggregate 和 GiST/SP-GiST；multirange 当前只是 string-backed 名称，需要真实实现
+  status: open
+
+- id: TYPE-19
+  title: domain 补任意层嵌套、multiple CHECK、NOT NULL/default、cast、全表 revalidation 和 domain-over-composite/array
+  status: open
+
+- id: TYPE-20
+  title: OID 家族补 `oid`, `regclass`, `regtype`, `regproc`, `regprocedure`, `regoperator`, `regnamespace`, `regrole` 等真实 catalog resolution
+  status: open
+
+- id: TYPE-21
+  title: 内部类型补 `xid/xid8/cid/tid`, `pg_lsn`, `pg_snapshot`, `aclitem`, `name`, `char`, `cstring` 等 PostgreSQL I/O/比较语义
+  status: open
+
+- id: TYPE-22
+  title: pseudo/polymorphic 类型补 `anycompatible*`, `anymultirange`, `internal`, `trigger`, `event_trigger`, `table_am_handler`, `index_am_handler` 等调用约束
+  status: open
+
+- id: FUNC-01
+  title: 补 PostgreSQL 数学、字符串、binary、格式化、日期时间、枚举、几何、网络、全文、XML、JSON、array/range、系统信息、管理、统计和 replication 函数族
+  status: open
+
+- id: FUNC-02
+  title: 实现 aggregate catalog/executor：ordered-set、hypothetical-set、partial/combine/serialize、moving aggregate、FILTER/ORDER BY/DISTINCT 完整组合
+  status: open
+
+- id: FUNC-03
+  title: 实现 user-defined operator、commutator/negator、selectivity function、hash/merge 标记和 dependency
+  status: open
+
+- id: FUNC-04
+  title: volatility/strict/leakproof/parallel safety/security definer/cost/rows/SET 属性必须真正影响 planner 和 executor
+  status: open
+
+- id: FUNC-05
+  title: 实现 SQL function inlining、support functions、polymorphism、variadic/default/named arguments 和重载
+  status: open
+
+- id: FUNC-06
+  title: PL/pgSQL 补 records/rowtype、exceptions、diagnostics、dynamic SQL、cursors、trigger variables、subtransactions、packages of statements、plan cache 和 dependency invalidation
+  status: open
+
+- id: CONS-01
+  title: primary key/unique 支持完整多列、NULLS NOT DISTINCT、deferrable、partitioned table 和 concurrent conflict 语义
+  status: open
+
+- id: CONS-02
+  title: foreign key 支持多列、MATCH FULL/PARTIAL、deferrable、循环 FK、partitioned table、各种 action 与并发 snapshot/locking 规则
+  status: open
+
+- id: CONS-03
+  title: CHECK 支持 immutable dependency、NOT VALID/VALIDATE、domain/table 语义和 partition constraint 证明
+  status: open
+
+- id: CONS-04
+  title: exclusion constraint 使用真实 GiST/opclass、任意表达式/操作符、多列、deferrable 和并发冲突检查
+  status: open
+
+- id: CONS-05
+  title: generated column 补 PostgreSQL 18 virtual/stored 默认与限制、依赖和复制行为
+  status: open
+
+- id: CONS-06
+  title: identity 补 ALWAYS/BY DEFAULT、OVERRIDING、sequence options、ALTER 和 partition/inheritance 行为
+  status: open
+
+- id: CONS-07
+  title: constraint trigger 接入统一 deferred event queue，并保证 savepoint/rollback/crash 语义
+  status: open
+
+- id: CONS-08
+  title: DML 的所有入口，包括 legacy、view、trigger、COPY、partition route、MERGE、ON CONFLICT，都必须经过同一约束路径
+  status: open
+
+- id: DML-01
+  title: 删除 DML 双入口；复杂 `INSERT ... SELECT`、view/CTE/partition target 全部使用结构化 ModifyTable
+  status: open
+
+- id: DML-02
+  title: `ON CONFLICT` 补 index inference、partial/expression index、constraint target、复杂 expression/subquery、并发 speculative insertion
+  status: open
+
+- id: DML-03
+  title: `UPDATE ... FROM`/`DELETE ... USING` 补任意 join tree、outer/lateral/subquery、重复 source row 和 `WHERE CURRENT OF`
+  status: open
+
+- id: DML-04
+  title: `MERGE` 补多个 WHEN、MATCHED DELETE、NOT MATCHED BY SOURCE/TARGET、DO NOTHING、复杂 source、RETURNING 和并发规则
+  status: open
+
+- id: DML-05
+  title: PostgreSQL 18 `RETURNING WITH (OLD/NEW AS ...)`、任意表达式、subquery/window、trigger 后值和协议 metadata
+  status: open
+
+- id: DML-06
+  title: `COPY` 补 protocol STDIN/STDOUT、binary、PROGRAM、FREEZE、ON_ERROR、REJECT_LIMIT、HEADER MATCH、encoding 和权限
+  status: open
+
+- id: QRY-01
+  title: SELECT target list 补完整 expression、SRF、row expansion、star qualification、alias visibility 和 resjunk column
+  status: open
+
+- id: QRY-02
+  title: FROM 补完整 LATERAL、table function、ROWS FROM、WITH ORDINALITY、TABLESAMPLE、XMLTABLE/JSON_TABLE
+  status: open
+
+- id: QRY-03
+  title: join 补 USING/NATURAL 的输出列合并、FULL/outer null extension、lateral/parameterized join 和任意嵌套语义
+  status: open
+
+- id: QRY-04
+  title: subquery 补 correlated scalar/EXISTS/IN/ANY/ALL、row comparison、decorrelation、parameter passing 和 NULL 三值逻辑
+  status: open
+
+- id: QRY-05
+  title: CTE 补 recursive evaluation、SEARCH/CYCLE、materialized/not materialized、data-modifying CTE snapshot 和 visibility
+  status: open
+
+- id: QRY-06
+  title: set operations 补任意 query expression、对应列类型/collation、嵌套 precedence、ALL duplicate count 和 ORDER/LIMIT scope
+  status: open
+
+- id: QRY-07
+  title: aggregate/grouping 补 grouping sets 的任意组合、GROUPING/GROUPING_ID、ordered/distinct aggregate 和 functional dependency
+  status: open
+
+- id: QRY-08
+  title: window 补多个 window specs、named/inherited window、所有 frame/exclusion/peer 边界、ordered-set interaction 和 spill
+  status: open
+
+- id: QRY-09
+  title: DISTINCT/DISTINCT ON 补 PostgreSQL ordering 约束、NULL/collation 和可 spill 实现
+  status: open
+
+- id: QRY-10
+  title: ORDER BY 补任意 expression、operator USING、NULLS、collation、stable tie handling 和 top-N/external sort
+  status: open
+
+- id: QRY-11
+  title: row locking 补 `FOR UPDATE/NO KEY UPDATE/SHARE/KEY SHARE OF ... NOWAIT/SKIP LOCKED` 的完整冲突和 EPQ recheck
+  status: open
+
+- id: QRY-12
+  title: inheritance/partition scan、ONLY、view rewrite 和 RLS 必须在 planner 中统一展开，不能靠文本标志或旁路扫描
+  status: open
+
+- id: QRY-13
+  title: snapshot、trigger、rule、RLS、generated column 和 RETURNING 的执行顺序需与 PostgreSQL 一致
+  status: open
+
+- id: OPT-01
+  title: 建立 PostgreSQL 式 relation/path/parameterization/equivalence class/pathkey 框架，而不是直接拼单棵计划树
+  status: open
+
+- id: OPT-02
+  title: 实现 exhaustive/DP join search、GEQO 阈值、outer/semi/anti join constraints 和 bushy plan
+  status: open
+
+- id: OPT-03
+  title: 完整 predicate implication、constant propagation、equivalence class、join removal、outer join reduction 和 partition pruning
+  status: open
+
+- id: OPT-04
+  title: 完整统计：采样、null fraction、ndistinct、MCV、histogram、correlation、extended ndistinct/dependencies/MCV、表达式统计
+  status: open
+
+- id: OPT-05
+  title: 实现 selectivity/cost support function、数据类型/operator/collation-aware 估算和统计失效
+  status: open
+
+- id: OPT-06
+  title: parameterized path、nested-loop inner index scan、subplan/initplan、memoize 和 correlated execution
+  status: open
+
+- id: OPT-07
+  title: 补 Seq/TID/TID Range/Sample/Function/Values/CTE/WorkTable/Foreign/Custom/Append/MergeAppend 扫描节点
+  status: open
+
+- id: OPT-08
+  title: 补真正 index-only scan、visibility map 条件、heap fetch fallback 和 INCLUDE column
+  status: open
+
+- id: OPT-09
+  title: bitmap 补 block/lossy bitmap、range predicate、parallel bitmap、recheck 和 work_mem spill
+  status: open
+
+- id: OPT-10
+  title: sort/hash/aggregate/window/join 必须使用 work_mem 并支持临时文件 spill、批处理和 skew handling
+  status: open
+
+- id: OPT-11
+  title: 补 Incremental Sort、Memoize、Materialize、Unique、LockRows、ModifyTable、ProjectSet、RecursiveUnion 等节点完整语义
+  status: open
+
+- id: OPT-12
+  title: parallel query 补 worker pool/lifecycle、parallel-aware append/bitmap/hash、partial/final aggregate、leader participation、parallel safety
+  status: open
+
+- id: OPT-13
+  title: PostgreSQL 18 AIO：异步 read queue、prefetch、io_method/io_combine_limit、统计和取消；不只等于“使用 io_uring”
+  status: open
+
+- id: OPT-14
+  title: LLVM JIT：expression、tuple deform、cost threshold、EXPLAIN JIT 信息和平台构建
+  status: open
+
+- id: OPT-15
+  title: generic/custom prepared plans、catalog/GUC/statistics invalidation、search_path/role/RLS 安全的 plan cache
+  status: open
+
+- id: OPT-16
+  title: EXPLAIN 覆盖所有 statement/node，补 VERBOSE、COSTS、SETTINGS、WAL、MEMORY、SERIALIZE、SUMMARY、FORMAT JSON/XML/YAML 完整结构
+  status: open
+
+- id: OPT-17
+  title: executor cancellation、interrupt、statement timeout、error cleanup 和 resource owner 必须贯穿全部算子/worker/I/O
+  status: open
+
+- id: IDX-01
+  title: 实现 catalog-driven Table AM/Index AM API、handler、support routine、validator、cost estimate、build/insert/scan/vacuum callbacks
+  status: open
+
+- id: IDX-02
+  title: operator class/family、strategy/support number、cross-type operator、collation 和 sort support
+  status: open
+
+- id: IDX-03
+  title: B-tree 补 PostgreSQL key ordering、NULL、dedup、suffix truncation、page split/delete/recycle、fast root、high key、concurrent scan 和 corruption checks
+  status: open
+
+- id: IDX-04
+  title: PostgreSQL 18 B-tree skip scan 和多列统计驱动 path 选择
+  status: open
+
+- id: IDX-05
+  title: Hash 补 metapage/bucket/overflow/split、并发锁、WAL、vacuum 和 hash support function
+  status: open
+
+- id: IDX-06
+  title: GIN 补 entry/posting tree、pending list/fastupdate、extract/consistent/triConsistent、vacuum、WAL 和 jsonb/array/tsvector opclass
+  status: open
+
+- id: IDX-07
+  title: GiST 当前只是 flat interval sidecar；需真实 tree、union/penalty/picksplit/same/consistent/distance、KNN、WAL 和 opclass
+  status: open
+
+- id: IDX-08
+  title: SP-GiST 补 radix/quad/k-d 等节点模型、choose/picksplit/inner-consistent/leaf-consistent、WAL/vacuum/opclass
+  status: open
+
+- id: IDX-09
+  title: BRIN 补 page range summary tuple、revmap、autosummarize、desummarize、minmax/minmax-multi/bloom/inclusion opclass
+  status: open
+
+- id: IDX-10
+  title: expression/partial index 补 immutable 检查、dependency、predicate implication、planner matching 和 HOT safety
+  status: open
+
+- id: IDX-11
+  title: covering/index-only scan 补 VM、included payload、non-key attribute 和 heap visibility fallback
+  status: open
+
+- id: IDX-12
+  title: partitioned index、attach/detach、parent validity 和唯一约束跨分区规则
+  status: open
+
+- id: IDX-13
+  title: 真正 `CREATE INDEX CONCURRENTLY`/`REINDEX CONCURRENTLY`：invalid state、多事务阶段、等待旧 snapshot、失败恢复
+  status: open
+
+- id: IDX-14
+  title: vacuum cleanup、page deletion、bulk delete、amcheck、pg_stat index/progress 和 corruption recovery
+  status: open
+
+- id: IDX-15
+  title: 所有索引 DML、DDL、reindex、crash recovery、TDE、backup/restore 路径使用统一且可证明的持久化协议
+  status: open
+
+- id: TXN-01
+  title: 明确实现 PG 的 Read Uncommitted=Read Committed；逐语句 snapshot 和 command counter 行为一致
+  status: open
+
+- id: TXN-02
+  title: Repeatable Read、Serializable、read-only/deferrable 的 snapshot 时机和错误条件一致
+  status: open
+
+- id: TXN-03
+  title: tuple xmin/xmax/cmin/cmax/ctid/infomask、combo CID、HOT chain、redirect/dead line pointer 的全部可见性规则
+  status: open
+
+- id: TXN-04
+  title: subtransaction 使用真实 SubXID/parent、overflow、CLOG/pg_subtrans、resource owner 和错误状态
+  status: open
+
+- id: TXN-05
+  title: savepoint 回滚 catalog、locks、files、deferred events、portals、LISTEN/NOTIFY 和 sequence 相关状态
+  status: open
+
+- id: TXN-06
+  title: 2PC 使用全局 durable prepared transaction state，恢复 locks/subxacts/invalidation/notify，并支持跨 backend 管理和清理
+  status: open
+
+- id: TXN-07
+  title: 完整 heavyweight lock modes/conflict matrix、fast-path locks、lock queue fairness、deadlock soft edge/reorder 和 wait events
+  status: open
+
+- id: TXN-08
+  title: tuple locks、MultiXact、key-share/no-key-update、EPQ 和 FK/unique 冲突的锁规则
+  status: open
+
+- id: TXN-09
+  title: predicate lock 在 relation/page/tuple/index range 间升级，覆盖所有访问方法和空范围
+  status: open
+
+- id: TXN-10
+  title: advisory lock 的 session/transaction 两类、two-int key、shared/exclusive、try-lock 和 cleanup
+  status: open
+
+- id: TXN-11
+  title: commit/abort/group commit 顺序、synchronous_commit 级别、commit timestamp 和 WAL flush wait
+  status: open
+
+- id: TXN-12
+  title: LISTEN/NOTIFY 在事务提交后投递、rollback 丢弃、payload/channel 规则、跨 session/backend 队列和协议异步通知
+  status: open
+
+- id: VAC-01
+  title: VACUUM 的 prune/freeze/index cleanup/truncate、visibility/freeze map、failsafe 和 wraparound 防护
+  status: open
+
+- id: VAC-02
+  title: autovacuum launcher/worker、per-table thresholds/cost delay、worker slots、anti-wraparound 优先级和冲突取消
+  status: open
+
+- id: VAC-03
+  title: VACUUM FULL 使用 transactional table rewrite/swap；ANALYZE/VACUUM option 与 progress view 对齐
+  status: open
+
+- id: VAC-04
+  title: HOT eligibility 必须考虑所有索引（含 expression/partial）和 page space；chain pruning 与 concurrent snapshot 安全
+  status: open
+
+- id: STO-01
+  title: 定义稳定 on-disk format、control file、system identifier、catalog version、block size、endianness 和 feature flags
+  status: open
+
+- id: STO-02
+  title: relation locator/fork/segment 布局、database/tablespace OID 和临时 relation 命名对齐内部模型
+  status: open
+
+- id: STO-03
+  title: page header、item identifier、tuple/varlena/toast pointer、special space、LSN/checksum 的兼容且自描述格式
+  status: open
+
+- id: STO-04
+  title: Buffer Manager 补 shared hash/partition locks、buffer content locks、I/O-in-progress、prefetch、bulk strategy、ring buffer 和 resource owner pin cleanup
+  status: open
+
+- id: STO-05
+  title: FSM/VM 持久化、crash rebuild、all-visible/all-frozen 和 index-only/VACUUM 交互
+  status: open
+
+- id: STO-06
+  title: TOAST 补 varlena short/compressed/external datum、storage strategy、toast_tuple_target、pglz/lz4、dedup/delete/vacuum 和索引一致性
+  status: open
+
+- id: STO-07
+  title: 大对象补 catalog、ACL、事务、64-bit offset、lo_* API、protocol/libpq 和 vacuum
+  status: open
+
+- id: STO-08
+  title: TDE 使用成熟密码库和审计过的 AEAD/KMS 方案；补索引/WAL/temp/backup 全覆盖、密钥轮换、per-database key 和灾难恢复
+  status: open
+
+- id: WAL-01
+  title: WAL resource manager 记录 heap/index/catalog/fsm/vm/toast/multixact/sequence/standby 等所有资源变化
+  status: open
+
+- id: WAL-02
+  title: WAL insertion、page LSN、full-page image、compression、continuation、segment switch、recycling 和 concurrent writer 规则
+  status: open
+
+- id: WAL-03
+  title: checkpoint 补 redo horizon、dirty buffer scheduling、checkpoint completion、control file、WAL retention 和节流
+  status: open
+
+- id: WAL-04
+  title: restartpoint、recovery consistency、recovery conflict、hot standby snapshot、timeline history 和 promotion
+  status: open
+
+- id: WAL-05
+  title: recovery 必须是 redo-based 状态机；当前额外 before-image undo 模型需证明与 steal/no-force、并发 checkpoint 的所有 crash window 一致
+  status: open
+
+- id: WAL-06
+  title: 数据页、所有索引和元数据 checksum；补离线/在线启停与 `pg_checksums`/verify 工具等价物
+  status: open
+
+- id: WAL-07
+  title: 目录/fsync/rename/link/unlink 顺序覆盖 ext4/XFS、跨设备表空间、磁盘满、partial write、torn write 和 power-loss
+  status: open
+
+- id: WAL-08
+  title: unlogged/temp relation、2PC、sequence、DDL、logical slot 在 crash 后的专门恢复规则
+  status: open
+
+- id: REPL-01
+  title: physical replication connection、`IDENTIFY_SYSTEM`、`START_REPLICATION`、CopyBoth、keepalive/feedback 和 WAL sender/receiver
+  status: open
+
+- id: REPL-02
+  title: standby startup/replay、read-only query、recovery snapshot、冲突处理、`hot_standby_feedback`
+  status: open
+
+- id: REPL-03
+  title: physical/logical replication slot 持久化、restart/confirmed LSN、WAL retention、xmin/catalog_xmin、drop/advance/copy/sync/failover
+  status: open
+
+- id: REPL-04
+  title: synchronous replication、remote_write/flush/apply、priority/quorum、sync standby reconfiguration 和 commit wait
+  status: open
+
+- id: REPL-05
+  title: cascading replication、timeline follow、promotion、rewind 和 split-brain 运维边界
+  status: open
+
+- id: REPL-06
+  title: logical decoding 必须从 WAL 解码 committed transaction，而不是 DML 写路径旁路采集
+  status: open
+
+- id: REPL-07
+  title: 实现 wire-compatible `pgoutput`、protocol v1-v4、large transaction streaming、2PC、origin、binary、schema/type messages
+  status: open
+
+- id: REPL-08
+  title: publication 补 column list、row filter、partition root、publish_via_partition_root 和 ALTER 行为
+  status: open
+
+- id: REPL-09
+  title: subscription/apply worker、initial table sync、replication origin、conflict、disabled slot、two-phase、failover slot
+  status: open
+
+- id: REPL-10
+  title: logical decoding plugin API、snapshot export、reorder buffer、spill 和 output plugin lifecycle
+  status: open
+
+- id: BACKUP-01
+  title: online base backup protocol/API、start/stop backup、backup_label、tablespace map、WAL inclusion 和 throttling
+  status: open
+
+- id: BACKUP-02
+  title: backup manifest、checksums、验证工具和损坏/缺文件诊断
+  status: open
+
+- id: BACKUP-03
+  title: PostgreSQL incremental backup/backup summary 和 `pg_combinebackup` 等价链路
+  status: open
+
+- id: BACKUP-04
+  title: PITR 补 `restore_command`、recovery.signal/standby.signal、name/time/xid/LSN/immediate target、inclusive/action/pause
+  status: open
+
+- id: BACKUP-05
+  title: 多 timeline archive、history file、archive cleanup、archive module/command retry 和安全 shell substitution
+  status: open
+
+- id: BACKUP-06
+  title: `pg_dump`/`pg_restore` 兼容的 schema/data/archive 格式、依赖排序、parallel dump/restore、large object、ACL/owner
+  status: open
+
+- id: BACKUP-07
+  title: `pg_rewind`、promote 后重新加入、备份恢复演练和 RPO/RTO 证据
+  status: open
+
+- id: PROTO-01
+  title: 协议 3.0/3.2 negotiation、startup parameters、ParameterStatus、BackendKeyData、ReadyForQuery 状态完整性
+  status: open
+
+- id: PROTO-02
+  title: Simple Query 多 statement、implicit transaction、empty query、command tag 和错误后跳过规则
+  status: open
+
+- id: PROTO-03
+  title: Extended Query Parse/Bind/Describe/Execute/Close/Flush/Sync、unnamed replacement、portal suspension、error recovery 和 pipelining
+  status: open
+
+- id: PROTO-04
+  title: RowDescription/DataRow 使用准确 type OID/typmod/table OID/attnum/format；不能由文本输出猜列
+  status: open
+
+- id: PROTO-05
+  title: 所有内置/用户类型的 text/binary input/output，尤其 numeric、array、range/composite、jsonb、inet、interval、bytea
+  status: open
+
+- id: PROTO-06
+  title: COPY IN/OUT/BOTH、CopyData/Done/Fail 和流式 backpressure
+  status: open
+
+- id: PROTO-07
+  title: CancelRequest 使用 backend PID/secret key，在阻塞锁、I/O、并行 worker 和长算子中及时生效
+  status: open
+
+- id: PROTO-08
+  title: ErrorResponse/NoticeResponse/NotificationResponse 全字段和 SQLSTATE；异步消息可以在查询之间/期间发送
+  status: open
+
+- id: PROTO-09
+  title: SSLRequest/GSSENCRequest、TLS negotiation、证书、SNI、channel binding 和 secure renegotiation policy
+  status: open
+
+- id: PROTO-10
+  title: replication mode 与 physical/logical streaming protocol
+  status: open
+
+- id: PROTO-11
+  title: Unix-domain socket、IPv4/IPv6、keepalive、TCP user timeout、client_encoding 和 locale
+  status: open
+
+- id: PROTO-12
+  title: 建立并持续运行 libpq、psql、JDBC、Npgsql、psycopg、pgx、SQLAlchemy、Django、Hibernate 兼容套件
+  status: open
+
+- id: CLIENT-01
+  title: 提供或兼容 `psql` 元命令、COPY、describe、变量、脚本错误控制和密码处理
+  status: open
+
+- id: CLIENT-02
+  title: 工具链：initdb、pg_ctl、createdb/dropdb、createuser/dropuser、vacuumdb、reindexdb、clusterdb、pg_isready、pgbench
+  status: open
+
+- id: SEC-01
+  title: `pg_hba.conf` 完整 record type、samehost/samenet、replication、database/role list、include、map、reload 和错误诊断
+  status: open
+
+- id: SEC-02
+  title: 认证方法：peer/ident、cert、LDAP、PAM、RADIUS、GSSAPI/Kerberos、SSPI、BSD、OAuth；不支持时明确拒绝而非近似
+  status: open
+
+- id: SEC-03
+  title: SCRAM-SHA-256-PLUS/channel binding、iteration policy、verifier lifecycle、password encryption GUC 和 credential rotation
+  status: open
+
+- id: SEC-04
+  title: TLS 使用真实 OpenSSL 构建作为发布门槛，补协议 negotiation、client cert、CRL/OCSP、cipher/min protocol、reload 和统计
+  status: open
+
+- id: SEC-05
+  title: role membership 补 INHERIT/SET/ADMIN option 的 PostgreSQL 18 语义、grantor/dependency、循环和 DROP/REASSIGN OWNED
+  status: open
+
+- id: SEC-06
+  title: ACL item 和所有对象类型：database/schema/table/column/sequence/function/procedure/language/type/domain/FDW/server/tablespace/large object/parameter
+  status: open
+
+- id: SEC-07
+  title: default privileges 使用 catalog，并正确作用于 owner/schema/object type/large object
+  status: open
+
+- id: SEC-08
+  title: RLS 补 planner/rewrite integration、policy dependency、partition/inheritance、prepared plan、leakproof ordering 和完整 owner/bypass/force 规则
+  status: open
+
+- id: SEC-09
+  title: SECURITY DEFINER/INVOKER 的 user identity、search_path、防对象劫持、SET 配置和异常恢复
+  status: open
+
+- id: SEC-10
+  title: view security_barrier/security_invoker、function leakproof、row security 与 optimizer pushdown 的安全证明
+  status: open
+
+- id: SEC-11
+  title: `SECURITY LABEL` provider、sepgsql/MAC hook；当前 label 文件不是强制访问控制
+  status: open
+
+- id: SEC-12
+  title: COPY/PROGRAM、file read/write、large object、extension/library load 的超级用户/预定义角色权限和路径防护
+  status: open
+
+- id: SEC-13
+  title: 审计日志需防篡改、结构化、敏感参数脱敏、rotation/retention；同时明确它不是 PostgreSQL 核心兼容能力
+  status: open
+
+- id: MON-01
+  title: `pg_catalog` 补 PostgreSQL 18 system catalogs/views/functions 的结构、OID、类型和权限过滤
+  status: open
+
+- id: MON-02
+  title: 当前 `information_schema` 只有 tables/columns/statistics/routines/views/triggers/key_column_usage 等少量虚拟表；补标准全集和角色可见性
+  status: open
+
+- id: MON-03
+  title: 统计子系统补 shared/persistent counters、snapshot semantics、reset、track_* GUC、function/SLRU/WAL/checkpointer/bgwriter/I/O 统计
+  status: open
+
+- id: MON-04
+  title: `pg_stat_activity` 补 state、query_id、xact/query start、wait_event_type/event、backend type、client、leader pid 和权限脱敏
+  status: open
+
+- id: MON-05
+  title: `pg_locks` 补全部 locktag/mode/granted/fastpath/waitstart 和 predicate locks
+  status: open
+
+- id: MON-06
+  title: 复制/归档/SSL/GSS/subscription/slot/recovery 统计视图
+  status: open
+
+- id: MON-07
+  title: PostgreSQL 18 `pg_stat_io`、`pg_aios`、WAL/checkpointer/slru 和 backend memory context 视图
+  status: open
+
+- id: MON-08
+  title: ANALYZE/VACUUM/CREATE INDEX/CLUSTER/COPY/base backup progress views
+  status: open
+
+- id: MON-09
+  title: `pg_stat_statements` 补 queryid/jumble、plans、rows、block/WAL/JIT/parallel、reset/minmax、容量淘汰和权限
+  status: open
+
+- id: MON-10
+  title: logging collector、stderr/csvlog/jsonlog/syslog、rotation、log_line_prefix、statement/duration/error verbosity 和采样
+  status: open
+
+- id: MON-11
+  title: auto_explain、pg_buffercache 等应通过真实 extension 或清楚标注为内置兼容视图，字段必须对齐
+  status: open
+
+- id: OPS-01
+  title: 配置采用 data directory/control file/GUC context/source/reload/restart 语义；当前大量状态依赖启动 CWD
+  status: open
+
+- id: OPS-02
+  title: `SHOW ALL`/`pg_settings` 补完整 name/setting/unit/category/context/source/min/max/enum/pending_restart
+  status: open
+
+- id: OPS-03
+  title: SIGHUP/reload、smart/fast/immediate shutdown、startup lock/PID file、crash restart 和 child supervision
+  status: open
+
+- id: OPS-04
+  title: 日志、WAL、数据、temp、archive 的目录/权限/umask/ownership 和服务管理约定
+  status: open
+
+- id: OPS-05
+  title: 磁盘空间、inode、FD、内存、CPU、I/O、连接风暴和慢客户端的监控及保护
+  status: open
+
+- id: EXT-01
+  title: `CREATE EXTENSION` 控制文件、SQL install/update、version graph、relocatable/schema、membership、dependency、dump/restore
+  status: open
+
+- id: EXT-02
+  title: 动态库加载、fmgr ABI、Datum/NullableDatum、memory context、PG_FUNCTION_INFO、error/interrupt 安全
+  status: open
+
+- id: EXT-03
+  title: 自定义 base/composite/range/multirange type I/O、typmod、analyze、subscript handler
+  status: open
+
+- id: EXT-04
+  title: 自定义 function/procedure/aggregate/operator/cast/collation/conversion 的真实 catalog 驱动执行
+  status: open
+
+- id: EXT-05
+  title: index/table access method API、operator class/family 和 WAL for extensions
+  status: open
+
+- id: EXT-06
+  title: planner/executor/utility/object access/emit log 等 hooks 和 CustomScan API
+  status: open
+
+- id: EXT-07
+  title: shared memory/LWLock tranche/dynamic shared memory、shared preload/session preload
+  status: open
+
+- id: EXT-08
+  title: background worker 注册、启动时机、restart、signal、DB connection 和 shared memory
+  status: open
+
+- id: EXT-09
+  title: procedural language handler/validator/inline handler；PL/Python、PL/Perl、PL/Tcl 等生态接口
+  status: open
+
+- id: EXT-10
+  title: logical decoding output plugin、archive module、OAuth validator module 和 injection point 等 PG18 扩展点
+  status: open
+
+- id: EXT-11
+  title: 兼容常用扩展的现实前提：pg_stat_statements、auto_explain、pg_trgm、btree_gin/gist、hstore、citext、uuid-ossp、postgres_fdw 等
+  status: open
+
+- id: FDW-01
+  title: FDW handler/validator、foreign server/user mapping、GetForeignRelSize/Paths/Plan、scan/modify/direct modify、transaction callbacks
+  status: open
+
+- id: FDW-02
+  title: IMPORT FOREIGN SCHEMA、parameterized pushdown、join/aggregate pushdown、async foreign scan 和 EXPLAIN
+  status: open
+
+- id: ENG-01
+  title: 修正文档事实漂移：README、RELEASE-NOTES、CHANGELOG、feature-gaps 和 production-status 中存在互相冲突的 PASS 数、版本和“已完成”描述
+  status: open
+
+- id: ENG-02
+  title: 修正版本单一事实源：`version.h` 的 `MAJOR/MINOR/PATCH` 当前仍是 0/1/0，而字符串与 CMake 是 0.2.0
+  status: open
+
+- id: ENG-03
+  title: 每个 release 必须在 clean worktree、固定 compiler/dependency、真实 TLS 构建上完成全量测试并保存机器可读报告
+  status: open
+
+- id: ENG-04
+  title: 单元测试之外增加 SQLLogicTest、PostgreSQL regression/isolation test 移植、ORM suites 和随机 differential SQL
+  status: open
+
+- id: ENG-05
+  title: parser/expression/protocol/WAL/page/catalog/backup 输入 fuzzing，以及 corpus/minimization
+  status: open
+
+- id: ENG-06
+  title: fault injection 覆盖每个 write/fsync/rename/unlink/alloc/thread/lock/WAL point，配合 power-cut 模拟和恢复不变量检查
+  status: open
+
+- id: ENG-07
+  title: TSAN/ASAN/UBSAN/LSAN、debug assertions、不同优化级、GCC/Clang 和 32/64-bit/endianness 策略持续运行
+  status: open
+
+- id: ENG-08
+  title: 并发 history checking：事务隔离用 Elle/Jepsen 风格验证，而不是只看测试返回 PASS
+  status: open
+
+- id: ENG-09
+  title: 长时间 soak、连接风暴、锁风暴、checkpoint/vacuum/backup/DDL/DML 混合、磁盘慢/满/错误测试
+  status: open
+
+- id: ENG-10
+  title: pgbench/TPC-C/TPC-H/TPC-DS 与 PostgreSQL 同硬件基准，记录吞吐、p50/p95/p99、WAL 放大、CPU、内存、I/O
+  status: open
+
+- id: ENG-11
+  title: crash-compatible upgrade/downgrade、catalog migration、rollback plan 和长期 on-disk compatibility 测试
+  status: open
+
+- id: ENG-12
+  title: 发布二进制、包管理、容器、SBOM、依赖/CVE、签名、reproducible build 和支持平台矩阵
+  status: open
+
+- id: ENG-13
+  title: 安全评审：密码学、协议、SQL 权限、文件路径、extension/load、backup/restore、DoS 和敏感日志
+  status: open
+
+- id: ENG-14
+  title: 明确 SLA、支持范围、已知限制、数据恢复手册、备份恢复演练和 incident response
+  status: open
+
+- id: ENG-15
+  title: 建立兼容版本策略：是“接受 psql 的自有 DBMS”，还是“PostgreSQL 18 行为兼容”；两种目标的验收标准完全不同
+  status: open
+
+- id: DIV-01
+  title: `USE DATABASE`：PostgreSQL 连接建立后不能用 SQL 切换 database
+  status: open
+
+- id: DIV-02
+  title: `REPLACE INTO`：MySQL 语法；PostgreSQL 使用 `INSERT ... ON CONFLICT`
+  status: open
+
+- id: DIV-03
+  title: `LOAD DATA INFILE`：MySQL 风格；PostgreSQL 使用 `COPY`/psql `\copy`
+  status: open
+
+- id: DIV-04
+  title: `SELECT ... INTO OUTFILE`：MySQL 风格；PostgreSQL `SELECT INTO` 是建表
+  status: open
+
+- id: DIV-05
+  title: `DESC`/`DESCRIBE`、`VIEW TABLE`、`VIEW DATABASE`、`SHOW USERS/ROLES/POOLS` 等是项目命令或客户端元命令风格
+  status: open
+
+- id: DIV-06
+  title: `AUTO_INCREMENT`、unsigned integers、`TINYINT`、`DATETIME`、`BLOB`、`NCHAR/NVARCHAR`、`BINARY/VARBINARY` 是兼容别名或非 PG 类型
+  status: open
+
+- id: DIV-07
+  title: `CREATE FULLTEXT INDEX`、`CREATE HASH INDEX` 等快捷语法不是 PostgreSQL 的标准写法；PG 使用 `CREATE INDEX ... USING ...` 和 operator class
+  status: open
+
+- id: DIV-08
+  title: `CREATE ASSERTION` 被当作 compatibility object 接受，但 PostgreSQL 18 自身也没有实现 SQL assertion；项目当前更没有约束运行时
+  status: open
+
+- id: DIV-09
+  title: 普通 SQL 形式的 `CREATE/DROP REPLICATION SLOT` 和 `SHOW LOGICAL ...` 是项目接口；PostgreSQL 通过 replication protocol 或系统函数管理/消费槽
+  status: open
+
+- id: DIV-10
+  title: `DUMP`、`BACKUP DATABASE`、`RESTORE DATABASE`、`RESTORE ... PITR`、`CLEAR PLAN CACHE` 是项目命令，不是 PostgreSQL SQL reference 命令
+  status: open
+
+- id: DIV-11
+  title: `SET GLOBAL` 和部分 `SHOW` 命令是 MySQL 风格，不是 PostgreSQL GUC 语法
+  status: open
+
+- id: DIV-12
+  title: 内置 PgBouncer 风格连接池、TDE、`BACKUP/RESTORE DATABASE` 是项目扩展，不等于 PostgreSQL 核心同名能力
+  status: open
+
+- id: DIV-13
+  title: 默认端口、数据目录和启动 CWD 状态布局与 PostgreSQL 不同，应避免给工具造成“这是 PostgreSQL cluster”的假象
+  status: open
+
+- id: DIV-14
+  title: 对仅保存兼容记录的命令返回“created/loaded/altered”会误导用户；应改为 feature-not-supported，直到运行时真正存在
+  status: open
+
