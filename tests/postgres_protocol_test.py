@@ -448,6 +448,9 @@ def main():
         process = subprocess.Popen(
             [DBMS_MAIN, "--server", str(port), "--insecure"],
             cwd=work_dir,
+            # Parts of this regression exercise extended-mode project
+            # commands (SET GLOBAL plan invalidation, DIV-11).
+            env=dict(os.environ, DBMS_COMPATIBILITY_MODE="extended"),
             # The protocol test deliberately drives many commands.  Do not
             # leave a child stdout/stderr PIPE unread: once its buffer fills,
             # the server blocks while the client waits for ReadyForQuery.

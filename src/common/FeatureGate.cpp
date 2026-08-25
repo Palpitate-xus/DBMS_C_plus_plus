@@ -2,6 +2,7 @@
 // See src/common/FeatureGate.h for the contract.
 #include "common/FeatureGate.h"
 
+#include <cstdlib>
 #include <string>
 #include <unordered_set>
 
@@ -9,6 +10,17 @@ namespace dbms {
 
 bool isExtendedCompatMode(const std::string& mode) {
     return mode == kCompatModeExtended;
+}
+
+std::string defaultCompatibilityMode() {
+    static const std::string cached = [] {
+        const char* env = std::getenv("DBMS_COMPATIBILITY_MODE");
+        if (env && std::string(env) == kCompatModeExtended) {
+            return std::string(kCompatModeExtended);
+        }
+        return std::string(kCompatModePostgresql18);
+    }();
+    return cached;
 }
 
 bool compatKindHasRuntime(const std::string& kind) {

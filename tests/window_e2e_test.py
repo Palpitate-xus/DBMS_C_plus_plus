@@ -32,12 +32,17 @@ def run_sql(sql):
     """Send SQL commands (semicolon-separated) to dbms_main and return stdout lines."""
     statements = [s.strip() for s in sql.split(";") if s.strip()]
     script = "admin admin\n" + "\n".join(statements) + "\nexit\n"
+    env = dict(os.environ)
+    # This E2E suite drives the project-specific USE DATABASE command, an
+    # extended-mode extension (DIV-01); run the session in extended mode.
+    env["DBMS_COMPATIBILITY_MODE"] = "extended"
     proc = subprocess.run(
         [DBMS_MAIN],
         input=script,
         capture_output=True,
         text=True,
         timeout=COMMAND_TIMEOUT,
+        env=env,
     )
     return proc.stdout.splitlines(), proc.stderr.splitlines(), proc.returncode
 

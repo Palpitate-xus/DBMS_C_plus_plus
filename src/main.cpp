@@ -1711,6 +1711,20 @@ static bool handleSetCommand(const string& sql, Session& s) {
             isGlobal = true;
             rest = trim(rest.substr(7));
         }
+        // DIV-11: PostgreSQL grammar has no SET GLOBAL.  In postgresql18
+        // mode it is a syntax error; the extended mode maps it onto the
+        // ALTER SYSTEM path (persistent dbms.conf write) with an admin
+        // check and a NOTICE, never a silent in-memory global change.
+        if (isGlobal) {
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << "SQL syntax error: SET GLOBAL is not PostgreSQL syntax; "
+                        "use ALTER SYSTEM (SQLSTATE 42601)" << endl;
+                return true;
+            }
+            if (!checkAdmin(s)) return true;
+            cout << "NOTICE: SET GLOBAL is mapped to ALTER SYSTEM semantics in "
+                    "extended compatibility mode" << endl;
+        }
         size_t eqPos = rest.find('=');
         if (eqPos == string::npos) {
             cout << "SQL syntax error: SET [GLOBAL] parameter = value" << endl;
@@ -9937,6 +9951,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return executeValuesStatement(sql);
 
         case dbms::SqlCommand::UseDatabase: {
+            // DIV-01: PostgreSQL cannot switch databases via SQL after
+            // connecting.  Only the explicit extended compatibility mode
+            // keeps this project command; postgresql18 mode refuses it
+            // before touching any session state.
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::featureNotSupportedError(
+                    "USE DATABASE (reconnect to switch databases)") << endl;
+                return true;
+            }
             // Accept both "use database <name>" (13-char prefix) and the
             // short "use <name>" form.  The parser classifies any leading
             // "use" here, so the short form used to hit substr(13) on a
@@ -17455,6 +17478,7 @@ int main(int argc, char* argv[]) {
     }
 
     Session s;
+    s.compatibilityMode = dbms::defaultCompatibilityMode();
     s.statementTimeoutMs = g_config.statementTimeoutMs;
     s.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
     s.lockTimeoutMs = g_config.lockTimeoutMs;

@@ -186,6 +186,25 @@ def main():
                      "IMPORT FOREIGN SCHEMA")
         expect_0a000(sock, "LOAD 'auto_explain'", "LOAD")
 
+        # DIV-01: USE DATABASE is not PostgreSQL SQL; the connection must
+        # stay alive and the session state must be untouched.
+        err = error_of(simple_query(sock, "USE DATABASE info"))
+        assert err is not None and err[0] == "0A000", \
+            "USE DATABASE must fail with 0A000 in postgresql18 mode: %r" % (err,)
+        err = error_of(simple_query(sock, "use info"))
+        assert err is not None and err[0] == "0A000", \
+            "short 'use' form must fail with 0A000 too: %r" % (err,)
+        alive = [m for m in simple_query(sock, "SELECT 1 + 1") if m[0] == b"D"]
+        assert alive, "connection must stay usable after gated USE DATABASE"
+
+        # DIV-11: SET GLOBAL is MySQL-style syntax, not a PostgreSQL GUC
+        # statement.  postgresql18 mode rejects it with 42601.
+        err = error_of(simple_query(sock, "SET GLOBAL auto_vacuum = on"))
+        assert err is not None and err[0] == "42601", \
+            "SET GLOBAL must fail with 42601 in postgresql18 mode: %r" % (err,)
+        # Plain SET on the same parameter remains valid PostgreSQL syntax.
+        expect_command_tag(sock, "SET statement_timeout = 1234", "plain SET")
+
         # The transaction stays usable after a gated failure (error aborts
         # only the statement, matching PostgreSQL statement semantics).
         expect_command_tag(sock, "BEGIN", "BEGIN")
@@ -208,6 +227,11 @@ def main():
         compat_store = os.path.join(work_dir, "info", ".pg_compat_objects")
         assert os.path.exists(compat_store), \
             "extended mode must keep writing the legacy compat store"
+
+        # DIV-01 / DIV-11 in extended mode: project commands work again.
+        expect_command_tag(sock, "USE DATABASE info", "extended USE DATABASE")
+        expect_command_tag(sock, "SET GLOBAL auto_vacuum = on",
+                           "extended SET GLOBAL")
 
         # Mode cannot flip inside a transaction (DIV framework: session-start
         # restricted).

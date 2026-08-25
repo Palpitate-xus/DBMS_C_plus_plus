@@ -20,6 +20,13 @@ inline constexpr const char* kCompatModeExtended = "extended";
 // Returns true when mode names the extended compatibility mode.
 bool isExtendedCompatMode(const std::string& mode);
 
+// Session-start default compatibility mode.  Reads the
+// DBMS_COMPATIBILITY_MODE environment variable once (values:
+// postgresql18 | extended); invalid or unset falls back to postgresql18.
+// This is the documented opt-in for project tooling and E2E tests that
+// rely on extended-mode commands.
+std::string defaultCompatibilityMode();
+
 // Object kinds understood by the compatibility-object layer in main.cpp.
 // Keep in sync with compatCreatePrefixes()/compatAlterDropPrefixes().
 // Returns true when the kind has a real runtime implementation behind it

@@ -38,12 +38,16 @@ def scram_verifier(password, salt=b"0123456789abcdef", iterations=4096):
 def run_sql(sql):
     statements = [s.strip() for s in sql.split(";") if s.strip()]
     script = "admin admin\n" + "\n".join(statements) + "\nexit\n"
+    env = dict(os.environ)
+    # USE DATABASE is an extended-mode project command (DIV-01).
+    env["DBMS_COMPATIBILITY_MODE"] = "extended"
     proc = subprocess.run(
         [DBMS_MAIN],
         input=script,
         capture_output=True,
         text=True,
         timeout=COMMAND_TIMEOUT,
+        env=env,
     )
     return proc.stdout.splitlines(), proc.stderr.splitlines(), proc.returncode
 

@@ -8,6 +8,7 @@
 #include "TLSWrapper.h"
 #include "utils/pg_hba.h"
 #include "common/scram_sha256.h"
+#include "common/FeatureGate.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "common/DateType.h"
@@ -1212,6 +1213,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     if (!authenticationCompleted) return;
 
     Session session;
+    session.compatibilityMode = dbms::defaultCompatibilityMode();
     struct BackendSessionGuard {
         Session* session;
         ~BackendSessionGuard() {
