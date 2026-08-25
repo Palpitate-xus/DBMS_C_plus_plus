@@ -11,3 +11,7 @@ SELECT g, v, min(v) over (partition by g) AS mn FROM diff_w ORDER BY g, v
 SELECT g, v, max(v) over (partition by g) AS mx FROM diff_w ORDER BY g, v
 SELECT g, v, count(*) over (partition by g) AS cn FROM diff_w ORDER BY g, v
 SELECT g, row_number() over (order by v) AS rn FROM diff_w ORDER BY g
+SELECT g, v, lag(v) over (order by v) AS lg FROM diff_w ORDER BY v
+SELECT g, v, lead(v) over (order by v) AS ld FROM diff_w ORDER BY v
+SELECT g, v, first_value(v) over (partition by g order by v) AS fv FROM diff_w ORDER BY v
+SELECT g, v, last_value(v) over (partition by g order by v) AS lv FROM diff_w ORDER BY v
