@@ -1045,19 +1045,19 @@
 
 - id: DIV-02
   title: `REPLACE INTO`：MySQL 语法；PostgreSQL 使用 `INSERT ... ON CONFLICT`
-  status: open
+  status: in_progress
 
 - id: DIV-03
   title: `LOAD DATA INFILE`：MySQL 风格；PostgreSQL 使用 `COPY`/psql `\copy`
-  status: open
+  status: in_progress
 
 - id: DIV-04
   title: `SELECT ... INTO OUTFILE`：MySQL 风格；PostgreSQL `SELECT INTO` 是建表
-  status: open
+  status: in_progress
 
 - id: DIV-05
   title: `DESC`/`DESCRIBE`、`VIEW TABLE`、`VIEW DATABASE`、`SHOW USERS/ROLES/POOLS` 等是项目命令或客户端元命令风格
-  status: open
+  status: in_progress
 
 - id: DIV-06
   title: `AUTO_INCREMENT`、unsigned integers、`TINYINT`、`DATETIME`、`BLOB`、`NCHAR/NVARCHAR`、`BINARY/VARBINARY` 是兼容别名或非 PG 类型
@@ -1073,7 +1073,7 @@
 
 - id: DIV-09
   title: 普通 SQL 形式的 `CREATE/DROP REPLICATION SLOT` 和 `SHOW LOGICAL ...` 是项目接口；PostgreSQL 通过 replication protocol 或系统函数管理/消费槽
-  status: open
+  status: in_progress
 
 - id: DIV-10
   title: `DUMP`、`BACKUP DATABASE`、`RESTORE DATABASE`、`RESTORE ... PITR`、`CLEAR PLAN CACHE` 是项目命令，不是 PostgreSQL SQL reference 命令

@@ -186,6 +186,30 @@ def main():
                      "IMPORT FOREIGN SCHEMA")
         expect_0a000(sock, "LOAD 'auto_explain'", "LOAD")
 
+        # DIV-09: plain-SQL slot management and SHOW LOGICAL are project
+        # interfaces; PostgreSQL uses the replication protocol.
+        for sql in ["CREATE REPLICATION SLOT s1",
+                    "DROP REPLICATION SLOT s1",
+                    "SHOW REPLICATION SLOTS",
+                    "SHOW LOGICAL CHANGES FOR SLOT s1"]:
+            expect_0a000(sock, sql, sql)
+
+        # DIV-02/03/04: MySQL-style syntax is rejected with 42601 in
+        # postgresql18 mode.
+        for sql in ["REPLACE INTO t VALUES (1)",
+                    "LOAD DATA INFILE '/tmp/x.csv' INTO TABLE t",
+                    "SELECT * FROM t INTO OUTFILE '/tmp/x.csv'"]:
+            messages = simple_query(sock, sql)
+            err = error_of(messages)
+            assert err is not None and err[0] == "42601", \
+                "%s must fail with 42601: %r" % (sql, err)
+
+        # DIV-05: project meta-commands are gated; PostgreSQL
+        # introspection goes through catalog queries.
+        for sql in ["DESC t", "DESCRIBE t", "VIEW TABLE t", "VIEW DATABASE",
+                    "SHOW USERS", "SHOW ROLES", "SHOW POOLS"]:
+            expect_0a000(sock, sql, sql)
+
         # DIV-01: USE DATABASE is not PostgreSQL SQL; the connection must
         # stay alive and the session state must be untouched.
         err = error_of(simple_query(sock, "USE DATABASE info"))

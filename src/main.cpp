@@ -9752,6 +9752,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
             pre.rfind("create replication slot ", 0) == 0 ||
             pre.rfind("drop publication ", 0) == 0 ||
             pre.rfind("drop replication slot ", 0) == 0) {
+            if ((pre.rfind("create replication slot ", 0) == 0 ||
+                 pre.rfind("drop replication slot ", 0) == 0) &&
+                !dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                // DIV-09: plain-SQL slot management is a project
+                // interface; PostgreSQL uses the replication protocol or
+                // pg_create/drop_*_replication_slot() functions.
+                cout << dbms::featureNotSupportedError(
+                    string(pre.rfind("create", 0) == 0
+                               ? "CREATE REPLICATION SLOT as SQL"
+                               : "DROP REPLICATION SLOT as SQL") +
+                    " (use the replication protocol or "
+                    "pg_*_replication_slot() functions)") << endl;
+                return true;
+            }
             if (pre.rfind("create publication ", 0) == 0)
                 return handleCreatePublication(sql, s);
             if (pre.rfind("create replication slot ", 0) == 0)
@@ -10978,6 +10992,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     bool isReplace = false;
     if (sql.substr(0, 13) == "replace into ") {
+        // DIV-02: MySQL REPLACE INTO.  postgresql18 mode rejects it;
+        // PostgreSQL uses INSERT ... ON CONFLICT.
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << "SQL syntax error: REPLACE INTO is not PostgreSQL syntax; "
+                    "use INSERT ... ON CONFLICT (SQLSTATE 42601)" << endl;
+            return true;
+        }
         isReplace = true;
         sql = "insert into " + sql.substr(13);
     }
@@ -12755,6 +12776,19 @@ if (sql.rfind("backup database", 0) == 0) {
             }
             return false;
         }
+        if (rest == "replication slots" ||
+            rest.rfind("logical changes for slot ", 0) == 0 ||
+            rest.rfind("logical confirm for slot ", 0) == 0) {
+            // DIV-09: SHOW LOGICAL / SHOW REPLICATION SLOTS are project
+            // interfaces; PostgreSQL consumes slots through the
+            // replication protocol.
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::featureNotSupportedError(
+                    "SHOW LOGICAL (use the replication protocol or "
+                    "pg_replication_slots)") << endl;
+                return true;
+            }
+        }
         if (rest == "replication slots") {
             const auto slots = dbms::ReplicationManager::instance().listSlots();
             cout << "name type plugin active changes" << endl;
@@ -12817,6 +12851,12 @@ if (sql.rfind("backup database", 0) == 0) {
             return false;
         }
         if (rest == "pools") {
+            // DIV-05: connection pool introspection is a project extension.
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::featureNotSupportedError(
+                    "SHOW POOLS (project extension)") << endl;
+                return true;
+            }
             const auto st = dbms::ConnectionPool::instance().stats();
             cout << "mode pool_size backends idle rented waiting clients total_rents total_waits" << endl;
             cout << st.mode << " " << st.poolSize << " " << st.totalContexts << " "
@@ -13237,6 +13277,13 @@ if (sql.rfind("backup database", 0) == 0) {
             return false;
         }
         if (rest == "users") {
+            // DIV-05: SHOW USERS is a project meta-command; PostgreSQL
+            // introspects roles via pg_roles / pg_user.
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::featureNotSupportedError(
+                    "SHOW USERS (query pg_roles instead)") << endl;
+                return true;
+            }
             if (!checkAdmin(s)) return true;
             const auto accounts = authCatalog().listAuthIds();
             if (accounts.empty()) {
@@ -13251,6 +13298,11 @@ if (sql.rfind("backup database", 0) == 0) {
             return false;
         }
         if (rest == "roles") {
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << dbms::featureNotSupportedError(
+                    "SHOW ROLES (query pg_roles instead)") << endl;
+                return true;
+            }
             if (!checkAdmin(s)) return true;
             const auto accounts = authCatalog().listAuthIds();
             if (accounts.empty()) {
@@ -13665,6 +13717,13 @@ if (sql.rfind("backup database", 0) == 0) {
 
     // LOAD DATA INFILE: import CSV
     if (sql.substr(0, 17) == "load data infile ") {
+        // DIV-03: MySQL-style LOAD DATA INFILE.  postgresql18 mode
+        // rejects it; imports go through COPY FROM / psql \copy.
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << "SQL syntax error: LOAD DATA INFILE is not PostgreSQL syntax; "
+                    "use COPY ... FROM (SQLSTATE 42601)" << endl;
+            return true;
+        }
         if (!checkAdmin(s)) return true;
         if (!checkDB(s)) return true;
         string rest = trim(sql.substr(17));
@@ -13865,6 +13924,14 @@ if (sql.rfind("backup database", 0) == 0) {
         string outfile;
         size_t intoPos = sql.find("into outfile");
         if (intoPos != string::npos) {
+            // DIV-04: MySQL-style SELECT ... INTO OUTFILE.  In postgresql18
+            // mode SELECT INTO is table creation and OUTFILE is a syntax
+            // error; exports go through COPY TO / client \copy.
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << "SQL syntax error: INTO OUTFILE is not PostgreSQL syntax; "
+                        "use COPY ... TO (SQLSTATE 42601)" << endl;
+                return true;
+            }
             size_t q1 = sql.find('\'', intoPos);
             if (q1 != string::npos) {
                 size_t q2 = sql.find('\'', q1 + 1);
@@ -17131,6 +17198,14 @@ if (sql.rfind("backup database", 0) == 0) {
     }
 
     if (sql.substr(0, 5) == "desc " || sql.substr(0, 9) == "describe ") {
+        // DIV-05: client meta-commands are project extensions.  In
+        // postgresql18 mode introspection goes through catalog queries
+        // (psql \d), not server-side DESC.
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << dbms::featureNotSupportedError(
+                "DESC (query information_schema or pg_catalog instead)") << endl;
+            return true;
+        }
         if (!checkDB(s)) return true;
         string tname = (sql.substr(0, 5) == "desc ") ? trim(sql.substr(5)) : trim(sql.substr(9));
         tname = resolveTableName(s, tname);
@@ -17154,6 +17229,13 @@ if (sql.rfind("backup database", 0) == 0) {
     }
 
     if (sql.substr(0, 4) == "view") {
+        // DIV-05: VIEW TABLE / VIEW DATABASE are project meta-commands.
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << dbms::featureNotSupportedError(
+                "VIEW TABLE/VIEW DATABASE "
+                "(query information_schema or pg_catalog instead)") << endl;
+            return true;
+        }
         string rest = trim(sql.substr(4));
         vector<string> tokens = tokenize(rest);
         if (tokens.empty()) {

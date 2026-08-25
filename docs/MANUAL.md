@@ -1136,6 +1136,22 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
 恢复旧的兼容对象记录行为，便于项目工具链过渡；该模式是会话级设置，
 进入事务后不可切换。
 
+同一批门控的项目语法（`postgresql18` 模式下的行为）：
+
+- `USE [DATABASE]`（DIV-01）→ `0A000`，提示重连切换数据库
+- `REPLACE INTO`（DIV-02）→ `42601`，提示 `INSERT ... ON CONFLICT`
+- `LOAD DATA INFILE`（DIV-03）→ `42601`，提示 `COPY ... FROM`
+- `SELECT ... INTO OUTFILE`（DIV-04）→ `42601`，提示 `COPY ... TO`
+- `DESC/DESCRIBE`、`VIEW TABLE/DATABASE`、`SHOW USERS/ROLES/POOLS`（DIV-05）→
+  `0A000`，提示查询 `information_schema`/`pg_catalog`/`pg_roles`
+- `CREATE/DROP REPLICATION SLOT` SQL 形式与 `SHOW LOGICAL/REPLICATION SLOTS`
+  （DIV-09）→ `0A000`，提示使用 replication protocol 或
+  `pg_*_replication_slot()` 函数
+- `SET GLOBAL`（DIV-11）→ `42601`，提示 `ALTER SYSTEM`
+
+会话默认模式可由环境变量 `DBMS_COMPATIBILITY_MODE=extended|postgresql18`
+设定（默认 `postgresql18`），CLI 与网络会话一致生效。
+
 ---
 
 ## 测试验证
