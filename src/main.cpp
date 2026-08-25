@@ -2845,6 +2845,27 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
     }
 
     string lowContent = toLower(overContent);
+    // Extract the frame clause (ROWS/RANGE/GROUPS ...) at the OVER level:
+    // a frame may follow PARTITION BY directly when ORDER BY is absent,
+    // e.g. OVER (PARTITION BY g ROWS BETWEEN UNBOUNDED PRECEDING AND
+    // UNBOUNDED FOLLOWING).  The keywords are space-bounded so columns
+    // named rows/range/groups do not match.
+    size_t frameInOver = string::npos;
+    string frameKeywordOver;
+    for (const char* kw : {" rows ", " range ", " groups "}) {
+        const size_t fp = lowContent.find(kw);
+        if (fp != string::npos &&
+            (frameInOver == string::npos || fp + 1 < frameInOver)) {
+            frameInOver = fp + 1;
+            frameKeywordOver = string(kw).substr(1, strlen(kw) - 2);
+        }
+    }
+    string frameTextOver;
+    if (frameInOver != string::npos) {
+        frameTextOver = trim(overContent.substr(frameInOver));
+        lowContent = lowContent.substr(0, frameInOver);
+        overContent = overContent.substr(0, frameInOver);
+    }
     size_t partPos = lowContent.find("partition by");
     size_t orderPos = lowContent.find("order by");
 
@@ -2868,21 +2889,11 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
     // ORDER BY is optional for window functions like row_number with partition only
     if (orderPos != string::npos) {
         string orderRest = trim(overContent.substr(orderPos + 8));
-        // Detect frame clause: ROWS / RANGE / GROUPS BETWEEN
-        string lowOrderRest = toLower(orderRest);
-        size_t framePos = string::npos;
-        string frameKeyword;
-        for (const char* kw : {"rows", "range", "groups"}) {
-            size_t fp = lowOrderRest.find(kw);
-            if (fp != string::npos) {
-                framePos = fp;
-                frameKeyword = kw;
-                break;
-            }
-        }
-        if (framePos != string::npos) {
-            string frameStr = trim(orderRest.substr(framePos));
-            orderRest = trim(orderRest.substr(0, framePos));
+        // Frame already hoisted out of the OVER content; any leftover
+        // keyword inside orderRest would be part of the sort expression.
+        if (!frameTextOver.empty()) {
+            const string frameStr = frameTextOver;
+            const string frameKeyword = frameKeywordOver;
             string lfs = toLower(frameStr);
             if (lfs.find("between") != string::npos) {
                 wf.hasFrame = true;
@@ -2905,10 +2916,13 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
                         if (!numStr.empty()) wf.frameStartOffset = std::stoi(numStr);
                     }
                 }
-                // end bound
+                // end bound: everything here is relative to the " and "
+                // separator; "current row" as the START bound must not match.
+                const size_t andPos = lfs.find(" and ");
                 if (lfs.find("unbounded following") != string::npos) {
                     wf.frameEndOffset = -1;
-                } else if (lfs.find("current row") != string::npos) {
+                } else if (andPos != string::npos &&
+                           lfs.find("current row", andPos) != string::npos) {
                     wf.frameEndOffset = 0;
                 } else {
                     size_t follPos = lfs.find("following");
@@ -2938,9 +2952,52 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
             wf.orderByAsc = true;
             if (ot.size() > 1 && toLower(ot[1]) == "desc") wf.orderByAsc = false;
         }
-    } else if (wf.partitionByCols.empty() && !wf.isAggregate) {
-        // Neither PARTITION BY nor ORDER BY - invalid for non-aggregate window functions
-        return false;
+    } else {
+        // ORDER BY absent: the hoisted frame (if any) still applies, e.g.
+        // OVER (PARTITION BY g ROWS BETWEEN UNBOUNDED PRECEDING AND
+        // UNBOUNDED FOLLOWING).
+        if (!frameTextOver.empty()) {
+            string lfs = toLower(frameTextOver);
+            if (lfs.find("between") != string::npos) {
+                wf.hasFrame = true;
+                if (frameKeywordOver == "range") wf.frameType = WindowFunc::FrameType::RANGE;
+                else if (frameKeywordOver == "groups") wf.frameType = WindowFunc::FrameType::GROUPS;
+                else wf.frameType = WindowFunc::FrameType::ROWS;
+                const size_t andPos2 = lfs.find(" and ");
+                if (lfs.find("unbounded preceding") != string::npos) {
+                    wf.frameStartOffset = -1;
+                } else if (lfs.find("current row") != string::npos &&
+                           lfs.find("current row") < andPos2) {
+                    wf.frameStartOffset = 0;
+                } else {
+                    size_t precPos = lfs.find("preceding");
+                    if (precPos != string::npos) {
+                        string numStr;
+                        for (size_t i = lfs.find("between") + 7; i < precPos; ++i)
+                            if (isdigit(static_cast<unsigned char>(lfs[i]))) numStr += lfs[i];
+                        if (!numStr.empty()) wf.frameStartOffset = std::stoi(numStr);
+                    }
+                }
+                if (lfs.find("unbounded following") != string::npos) {
+                    wf.frameEndOffset = -1;
+                } else if (andPos2 != string::npos &&
+                           lfs.find("current row", andPos2) != string::npos) {
+                    wf.frameEndOffset = 0;
+                } else {
+                    size_t follPos = lfs.find("following");
+                    if (follPos != string::npos) {
+                        string numStr;
+                        for (size_t i = lfs.rfind(" and ", follPos) + 5; i < follPos; ++i)
+                            if (isdigit(static_cast<unsigned char>(lfs[i]))) numStr += lfs[i];
+                        if (!numStr.empty()) wf.frameEndOffset = std::stoi(numStr);
+                    }
+                }
+            }
+        }
+        if (wf.partitionByCols.empty() && !wf.isAggregate) {
+            // Neither PARTITION BY nor ORDER BY - invalid for non-aggregate window functions
+            return false;
+        }
     }
 
     return true;

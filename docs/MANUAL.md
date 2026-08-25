@@ -1189,9 +1189,11 @@ join 上的纯聚合）、子查询（WHERE 标量子查询、IN/NOT IN、HAVING
 相关条件经半连接（SemiJoinOp）下推执行、相关标量聚合
 子查询 v > (SELECT min(v) ... WHERE g = s.g) —— 按相关值分组
 一次性物化内表聚合，再逐行比较）、错误面（除零 22012、非法整型输入
-22P02、缺失表/函数）、窗口函数（row_number/rank/dense_rank/sum/
-avg/min/max/count 的 PARTITION BY 与 ORDER BY 组合、表头别名
-或裸函数名、avg 的 PG select_div_scale 精确数值语义）。运行：`python3 tests/compat/pg_diff_runner.py
+22P02、缺失表/函数）、窗口函数（row_number/rank/dense_rank/lag/lead/first_value/
+last_value/sum/avg/min/max/count、PARTITION BY 与 ORDER BY 组合、
+命名窗口 WINDOW 子句、ROWS BETWEEN 帧含无 ORDER BY 的
+PARTITION 帧、表头别名或裸函数名、avg 的 PG select_div_scale
+精确数值语义）。运行：`python3 tests/compat/pg_diff_runner.py
 [--only NAME]`（需要 docker 参考库）。
 
 差分驱动已修复的语义：`CASE` 生成真正的 `CaseExpr`；`NULL AND/OR x`

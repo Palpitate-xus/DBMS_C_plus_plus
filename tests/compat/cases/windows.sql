@@ -15,3 +15,8 @@ SELECT g, v, lag(v) over (order by v) AS lg FROM diff_w ORDER BY v
 SELECT g, v, lead(v) over (order by v) AS ld FROM diff_w ORDER BY v
 SELECT g, v, first_value(v) over (partition by g order by v) AS fv FROM diff_w ORDER BY v
 SELECT g, v, last_value(v) over (partition by g order by v) AS lv FROM diff_w ORDER BY v
+SELECT g, v, row_number() over w AS rn FROM diff_w WINDOW w AS (partition by g order by v) ORDER BY g, v
+SELECT g, v, sum(v) over (order by v rows between 1 preceding and current row) AS rp FROM diff_w ORDER BY v
+SELECT g, v, sum(v) over (order by v rows between current row and 1 following) AS rf FROM diff_w ORDER BY v
+SELECT g, v, sum(v) over (order by v rows between unbounded preceding and unbounded following) AS ru FROM diff_w ORDER BY v
+SELECT g, sum(v) over (partition by g rows between unbounded preceding and unbounded following) AS pu FROM diff_w ORDER BY g
