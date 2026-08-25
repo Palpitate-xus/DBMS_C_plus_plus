@@ -16037,8 +16037,19 @@ if (sql.rfind("backup database", 0) == 0) {
                             : (offsetPos != string::npos) ? offsetPos : sql.size();
             string groupRest = trim(sql.substr(groupPos + 8, groupEnd - groupPos - 8));
             // Detect ROLLUP / CUBE / GROUPING SETS
-            if (groupRest.size() > 7 && groupRest.substr(0, 7) == "rollup(") {
-                string inner = groupRest.substr(7);
+            // PG accepts an optional space after the keyword: ROLLUP (g).
+            auto kwForm = [](const string& text, const string& kw) -> string {
+                if (text.substr(0, kw.size()) != kw) return "";
+                size_t after = kw.size();
+                while (after < text.size() && isspace(static_cast<unsigned char>(text[after]))) ++after;
+                if (after >= text.size() || text[after] != '(') return "";
+                return text.substr(0, after);
+            };
+            const string rollupKw = kwForm(groupRest, "rollup");
+            const string cubeKw = kwForm(groupRest, "cube");
+            const string gsKw = kwForm(groupRest, "grouping sets");
+            if (!rollupKw.empty()) {
+                string inner = groupRest.substr(rollupKw.size() + 1);
                 if (!inner.empty() && inner.back() == ')') inner.pop_back();
                 stringstream gss(inner);
                 string part;
@@ -16051,8 +16062,8 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
                 groupingSets.push_back({});
                 isGroupingSets = true;
-            } else if (groupRest.size() > 5 && groupRest.substr(0, 5) == "cube(") {
-                string inner = groupRest.substr(5);
+            } else if (!cubeKw.empty()) {
+                string inner = groupRest.substr(cubeKw.size() + 1);
                 if (!inner.empty() && inner.back() == ')') inner.pop_back();
                 stringstream gss(inner);
                 string part;
@@ -16066,8 +16077,8 @@ if (sql.rfind("backup database", 0) == 0) {
                     groupingSets.push_back(set);
                 }
                 isGroupingSets = true;
-            } else if (groupRest.size() > 14 && groupRest.substr(0, 14) == "grouping sets(") {
-                string inner = groupRest.substr(14);
+            } else if (!gsKw.empty()) {
+                string inner = groupRest.substr(gsKw.size() + 1);
                 if (!inner.empty() && inner.back() == ')') inner.pop_back();
                 size_t pos = 0;
                 set<string> seenCols;

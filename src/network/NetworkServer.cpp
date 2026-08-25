@@ -539,7 +539,11 @@ std::vector<std::string> outputLines(const std::string& output) {
     std::istringstream input(output);
     std::string line;
     while (std::getline(input, line)) {
-        line = trimText(line);
+        // Trim only the RIGHT side: a leading space is data (first cell
+        // NULL renders as " val ..."), while trailing spaces are the
+        // cell-separator artifact.
+        while (!line.empty() &&
+               isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
         if (!line.empty()) lines.push_back(std::move(line));
     }
     return lines;
@@ -847,7 +851,32 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                 // Splitting it on whitespace corrupts timestamp/time-like
                 // values that legitimately contain spaces.
                 if (result.columns.size() == 1) result.rows.push_back({lines[i]});
-                else result.rows.push_back(splitProtocolFields(lines[i]));
+                else {
+                    // The CLI renders cells as "v1 v2 ... " with single
+                    // spaces; an empty cell yields a doubled space (or a
+                    // leading space when the first cell is NULL).  Split on
+                    // single spaces and drop only the trailing artifact so
+                    // empty cells survive as empty fields.
+                    std::vector<std::string> fields;
+                    {
+                        const std::string& raw = lines[i];
+                        size_t start = 0;
+                        while (true) {
+                            const size_t sp = raw.find(' ', start);
+                            if (sp == std::string::npos) {
+                                fields.push_back(raw.substr(start));
+                                break;
+                            }
+                            fields.push_back(raw.substr(start, sp - start));
+                            start = sp + 1;
+                        }
+                    }
+                    if (!fields.empty() && fields.back().empty() &&
+                        fields.size() > result.columns.size())
+                        fields.pop_back();
+                    fields.resize(result.columns.size());
+                    result.rows.push_back(std::move(fields));
+                }
             }
         }
         result.columnDescriptions = describeProtocolColumns(result, sql, session);

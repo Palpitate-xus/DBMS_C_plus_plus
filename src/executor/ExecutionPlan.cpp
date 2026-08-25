@@ -1645,12 +1645,14 @@ bool SortOp::open() {
         if (tbl_.cols[i].dataName == orderByCol_) { sortIdx = i; break; }
     }
     if (sortIdx < tbl_.len) {
-        struct Item { std::string s; int64_t n; Date d; double f; };
+        struct Item { std::string s; int64_t n; Date d; double f; bool isNull; };
         std::vector<std::pair<std::string, Item>> items;
         const Column& scol = tbl_.cols[sortIdx];
         for (auto& r : buffer_) {
             std::string val = StorageEngine::extractColumnValueStatic(r, tbl_, sortIdx);
-            Item it{"", 0, {}, 0.0};
+            // PG default: NULLS LAST for ASC, NULLS FIRST for DESC.
+            const bool valNull = val.empty() || val == "NULL" || val == "null";
+            Item it{"", 0, {}, 0.0, valNull};
             if (scol.dataType == "char" || scol.isVariableLength) {
                 it.s = val;
             } else if (scol.dataType == "date") {
@@ -1665,6 +1667,8 @@ bool SortOp::open() {
             items.emplace_back(std::move(r), it);
         }
         std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
+            if (a.second.isNull != b.second.isNull)
+                return a.second.isNull ? !asc_ : asc_;
             if (scol.dataType == "char" || scol.isVariableLength) return asc_ ? (a.second.s < b.second.s) : (b.second.s < a.second.s);
             if (scol.dataType == "date") return asc_ ? (a.second.d < b.second.d) : (b.second.d < a.second.d);
             if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") return asc_ ? (a.second.f < b.second.f) : (b.second.f < a.second.f);

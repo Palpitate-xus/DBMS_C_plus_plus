@@ -142,6 +142,11 @@ def normalize_rows(rows):
     for row in rows:
         nrow = []
         for v in row:
+            # psql -A prints both NULL and '' as empty; our wire protocol
+            # also renders NULL as an empty cell.  Normalize empty -> None
+            # on both sides so NULL placement is compared, not spelling.
+            if v == "":
+                v = None
             if isinstance(v, str):
                 for pat, rep in UNSTABLE:
                     v = pat.sub(rep, v)
