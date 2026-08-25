@@ -16265,6 +16265,9 @@ if (sql.rfind("backup database", 0) == 0) {
         TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
         set<string> selectCols;
         bool selectAll = (columns == "*");
+        // Plain-column projection in SELECT-list order (PG projects columns
+        // in the written order, not table order).
+        vector<string> projectionOrder;
 
         // Detect aggregate functions, window functions, and scalar functions in columns
         vector<dbms::StorageEngine::AggItem> aggItems;
@@ -16524,6 +16527,8 @@ if (sql.rfind("backup database", 0) == 0) {
                         ai.arg = item;
                         aggItems.push_back(ai);
                         exprTypes.push_back(0);
+                        // remember SELECT-list order for plain columns
+                        if (!selectAll) projectionOrder.push_back(itemAlias.empty() ? item : itemAlias + "\x01" + item);
                         dbms::StorageEngine::SelectExpr expr;
                         expr.displayName = itemAlias.empty() ? item : itemAlias;
                         expr.isScalar = false;
@@ -17645,7 +17650,52 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
             if (scalarVolcanoUsed) {
-                if (volcanoExecutionError) return true;
+                // PG projection order for plain columns (see the final
+                // print path): permute cells out of table order.
+                if (!projectionOrder.empty() && projectionOrder.size() == selectCols.size()) {
+                    vector<string> want;
+                    for (const auto& po : projectionOrder) {
+                        string wantName = po;
+                        size_t sep = po.find("\x01");
+                        if (sep != string::npos) wantName = po.substr(sep + 1);
+                        want.push_back(wantName);
+                    }
+                    vector<string> have;
+                    for (size_t i = 0; i < tbl.len; ++i)
+                        if (selectCols.count(tbl.cols[i].dataName)) have.push_back(tbl.cols[i].dataName);
+                    vector<size_t> srcIdx;
+                    bool needsPermute = false;
+                    for (const auto& w : want) {
+                        bool found = false;
+                        for (size_t h = 0; h < have.size(); ++h) {
+                            if (have[h] == w) {
+                                srcIdx.push_back(h);
+                                found = true;
+                                if (h != srcIdx.size() - 1) needsPermute = true;
+                                break;
+                            }
+                        }
+                        if (!found) { srcIdx.clear(); break; }
+                    }
+                    if (needsPermute && srcIdx.size() == want.size()) {
+                        for (auto& row : answers) {
+                            vector<string> cells;
+                            size_t start = 0;
+                            while (start <= row.size()) {
+                                size_t sp = row.find(' ', start);
+                                if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
+                                cells.push_back(row.substr(start, sp - start));
+                                start = sp + 1;
+                            }
+                            if (cells.size() < srcIdx.size()) continue;
+                            string out;
+                            for (size_t oi = 0; oi < srcIdx.size(); ++oi)
+                                out += cells[srcIdx[oi]] + " ";
+                            while (!out.empty() && out.back() == ' ') out.pop_back();
+                            row = out;
+                        }
+                    }
+                }
                 for (const auto& target : projectionTargets) {
                     cout << (target.isScalar ? "?column?" : target.column) << ' ';
                 }
@@ -17677,9 +17727,17 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
             }
         } else {
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
-                cout << tbl.cols[i].dataName << ' ';
+            // PG header order follows the SELECT list for plain columns.
+            if (!projectionOrder.empty() && projectionOrder.size() == selectCols.size()) {
+                for (const auto& po : projectionOrder) {
+                    size_t sep = po.find("\x01");
+                    cout << (sep == string::npos ? po : po.substr(0, sep)) << ' ';
+                }
+            } else {
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
+                    cout << tbl.cols[i].dataName << ' ';
+                }
             }
             cout << '\n';
 
@@ -17839,6 +17897,54 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
                 applySessionTimezoneToAnswers(answers, projCols,
                                               s.timezoneOffsetMinutes);
+            }
+        }
+        // PG projects plain columns in SELECT-list order; the engine emits
+        // them in table order.  Permute cells when the orders differ.
+        if (!projectionOrder.empty() && projectionOrder.size() == selectCols.size()) {
+            vector<string> want;
+            for (const auto& po : projectionOrder) {
+                string wantName = po;
+                size_t sep = po.find("\x01");
+                if (sep != string::npos) wantName = po.substr(sep + 1);
+                want.push_back(wantName);
+            }
+            vector<string> have;
+            for (size_t i = 0; i < tbl.len; ++i)
+                if (selectCols.count(tbl.cols[i].dataName)) have.push_back(tbl.cols[i].dataName);
+            vector<size_t> srcIdx;
+            bool needsPermute = false;
+            for (const auto& w : want) {
+                bool found = false;
+                for (size_t h = 0; h < have.size(); ++h) {
+                    if (have[h] == w) {
+                        srcIdx.push_back(h);
+                        found = true;
+                        if (h != srcIdx.size() - 1) needsPermute = true;
+                        break;
+                    }
+                }
+                if (!found) { srcIdx.clear(); break; }
+            }
+            if (needsPermute && srcIdx.size() == want.size()) {
+                for (auto& row : answers) {
+                    vector<string> cells;
+                    {
+                        size_t start = 0;
+                        while (start <= row.size()) {
+                            size_t sp = row.find(' ', start);
+                            if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
+                            cells.push_back(row.substr(start, sp - start));
+                            start = sp + 1;
+                        }
+                    }
+                    if (cells.size() < srcIdx.size()) continue;
+                    string out;
+                    for (size_t oi = 0; oi < srcIdx.size(); ++oi)
+                        out += cells[srcIdx[oi]] + " ";
+                    while (!out.empty() && out.back() == ' ') out.pop_back();
+                    row = out;
+                }
             }
         }
         if (!outfile.empty()) {
