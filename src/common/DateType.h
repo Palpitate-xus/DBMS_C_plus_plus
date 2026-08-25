@@ -130,7 +130,10 @@ inline std::string transstr(int64_t t) {
 }
 
 inline std::string str(Date t) {
-    return transstr(t.year) + '-' + transstr(t.month) + '-' + transstr(t.day);
+    // ISO 8601 date text like PostgreSQL: zero-padded month and day.
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", t.year, t.month, t.day);
+    return buf;
 }
 
 inline std::ostream& operator<<(std::ostream& ost, Date a) {

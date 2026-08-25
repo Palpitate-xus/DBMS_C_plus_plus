@@ -1178,7 +1178,14 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return ExprValue("boolean", v.asBool() ? "t" : "f", false);
     }
     if (target == "integer" || target == "int" || target == "int4") {
-        return ExprValue("integer", std::to_string(v.asInt()), false);
+        // Boolean text converts first: PG cast(true as int) = 1.
+        if (v.value == "t" || v.value == "true")
+            return ExprValue("integer", "1", false);
+        if (v.value == "f" || v.value == "false")
+            return ExprValue("integer", "0", false);
+        // PG cast rounds to nearest (half away from zero): 3.7 -> 4, -3.7 -> -4
+        const bool integral = v.value.find('.') == std::string::npos;
+        return ExprValue("integer", std::to_string(integral ? v.asInt() : static_cast<int64_t>(std::llround(v.asDouble()))), false);
     }
     if (target == "bigint" || target == "int8") {
         return ExprValue("bigint", std::to_string(v.asInt()), false);

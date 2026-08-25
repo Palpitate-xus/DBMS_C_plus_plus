@@ -576,8 +576,10 @@ static void test_group_aggregate() {
     auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
     assert(dynamic_cast<dbms::GroupAggregateOp*>(plan.get()));
     auto rows = executePlanRows(std::move(plan));
+    // avg uses exact numeric division (PG-verified):
+    // 35/3 = 11.6666666666666667, 7/1 = 7.0000000000000000
     assert((rows == std::vector<std::string>{
-        "A 3 35 11.666667 5 20", "B 1 7 7.000000 7 7"
+        "A 3 35 11.6666666666666667 5 20", "B 1 7 7.0000000000000000 7 7"
     }));
 
     dbms::PlanContext plainCtx;

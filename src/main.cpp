@@ -4812,16 +4812,31 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             return true;
         }
         // Display name: explicit AS alias, else the item text.  The
-        // expression itself is evaluated without the alias.
+        // expression itself is evaluated without the alias.  Only a
+        // top-level " as " (outside parentheses and quotes) separates an
+        // alias: cast(1 as text) keeps its inner type-name AS intact.
         string expr = item;
         string disp;
         {
             string low;
             for (char c : item) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            size_t as = low.rfind(" as ");
-            if (as != string::npos) {
-                disp = trim(item.substr(as + 4));
-                expr = trim(item.substr(0, as));
+            int depth = 0;
+            bool inQuote = false;
+            for (size_t ai = 0; ai + 4 <= low.size(); ++ai) {
+                const char ch = item[ai];
+                if (inQuote) { if (ch == 39) inQuote = false; continue; }
+                if (ch == 39) { inQuote = true; continue; }
+                if (ch == '(') { ++depth; continue; }
+                if (ch == ')') { if (depth > 0) --depth; continue; }
+                if (depth == 0 && low.compare(ai, 4, " as ") == 0) {
+                    string tail = trim(item.substr(ai + 4));
+                    if (!tail.empty() &&
+                        tail.find_first_of(" ,()+-*/%") == string::npos) {
+                        disp = tail;
+                        expr = trim(item.substr(0, ai));
+                    }
+                    break;
+                }
             }
         }
         if (disp.empty()) disp = item;
@@ -4909,11 +4924,25 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // single-token name like "1").  Header cells must stay single
         // tokens: the tabular cout format is space-separated.
         if (disp == item) {
+            // CAST target type names the column (PG: cast(1 as text) ->
+            // "text"); multi-word type names fall back to "?column?"
+            // until structured results carry exact headers (P0-02).
+            string low2;
+            for (char c : expr) low2 += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            if (low2.compare(0, 5, "cast(") == 0) {
+                size_t asPos = low2.rfind(" as ");
+                if (asPos != string::npos) {
+                    string tname = trim(expr.substr(asPos + 4));
+                    if (!tname.empty() && tname.back() == ')') tname.pop_back();
+                    if (tname.find(' ') == string::npos) { headers.push_back(tname); goto headerDone; }
+                }
+            }
             bool simple = expr.find(' ') == string::npos;
             headers.push_back(simple ? expr : "?column?");
         } else {
             headers.push_back(disp);
         }
+        headerDone:;
         values.push_back(r.isNull ? "NULL" : r.value);
     }
 
@@ -15889,7 +15918,9 @@ if (sql.rfind("backup database", 0) == 0) {
                         bool isUDF = (!s.currentDB.empty() && g_engine.udfExists(s.currentDB, func));
                         if (isScalarFunc(func) || isUDF) {
                             dbms::StorageEngine::SelectExpr expr;
-                            expr.displayName = itemAlias.empty() ? item : itemAlias;
+                            // PG header naming: a function call projects as
+                            // its lowercased function name ("upper").
+                            expr.displayName = itemAlias.empty() ? func : itemAlias;
                             expr.isScalar = true;
                             expr.funcName = func;
                             expr.funcArgs = splitFuncArgs(arg);
@@ -15916,7 +15947,11 @@ if (sql.rfind("backup database", 0) == 0) {
                             hasAgg = true;
                             exprTypes.push_back(1);
                             dbms::StorageEngine::SelectExpr expr;
-                            expr.displayName = itemAlias.empty() ? item : itemAlias;
+                            // PG header naming: aggregate output is named by
+                            // the function ("sum"), never the raw item text
+                            // ("sum(v) filter (where v > 5)" would split the
+                            // protocol header into phantom columns).
+                            expr.displayName = itemAlias.empty() ? func : itemAlias;
                             expr.isScalar = false;
                             expr.colName = item;
                             selectExprs.push_back(expr);

@@ -1474,6 +1474,8 @@ bool WindowOp::open() {
                 const auto [frameBegin, frameEnd] = frameBounds(position);
                 int64_t count = 0;
                 int64_t sum = 0;
+                dbms::Numeric exactSum(0);
+                bool exactSumOk = true;
                 bool hasValue = false;
                 bool boolValue = function.name == "bool_and" || function.name == "every";
                 bool boolSeen = false;
@@ -1507,9 +1509,22 @@ bool WindowOp::open() {
                     if (value.empty()) continue;
                     int64_t number = 0;
                     if (function.name == "sum" || function.name == "avg") {
-                        if (!parseInteger(value, number)) continue;
-                        sum += number;
-                        ++count;
+                        if (!parseInteger(value, number)) {
+                            // numeric/decimal storage keeps fraction digits;
+                            // accumulate exactly instead of skipping
+                            if (!exactSumOk) continue;
+                            try {
+                                exactSum = exactSum + dbms::Numeric(value);
+                                ++count;
+                            } catch (...) { exactSumOk = false; continue; }
+                        } else {
+                            sum += number;
+                            ++count;
+                            if (exactSumOk) {
+                                try { exactSum = exactSum + dbms::Numeric(value); }
+                                catch (...) { exactSumOk = false; }
+                            }
+                        }
                     } else if (function.name == "min" || function.name == "max") {
                         if (!hasValue || (function.name == "min"
                                 ? compareWindowValue(value, selected) < 0
@@ -1522,10 +1537,29 @@ bool WindowOp::open() {
                 if (function.name == "count") {
                     computed[rowIndex][functionIndex] = std::to_string(count);
                 } else if (function.name == "sum") {
-                    computed[rowIndex][functionIndex] = count == 0 ? "NULL" : std::to_string(sum);
+                    if (count == 0) { computed[rowIndex][functionIndex] = "NULL"; }
+                    else if (exactSumOk) {
+                        try { computed[rowIndex][functionIndex] = exactSum.toString(); }
+                        catch (...) { computed[rowIndex][functionIndex] = std::to_string(sum); }
+                    } else {
+                        computed[rowIndex][functionIndex] = std::to_string(sum);
+                    }
                 } else if (function.name == "avg") {
-                    computed[rowIndex][functionIndex] = count == 0
-                        ? "NULL" : std::to_string(static_cast<double>(sum) / count);
+                    if (count == 0) {
+                        computed[rowIndex][functionIndex] = "NULL";
+                    } else if (exactSumOk) {
+                        // PG avg(numeric): exact division with select_div_scale
+                        try {
+                            computed[rowIndex][functionIndex] =
+                                (exactSum / dbms::Numeric(count)).toString();
+                        } catch (...) {
+                            computed[rowIndex][functionIndex] =
+                                std::to_string(static_cast<double>(sum) / count);
+                        }
+                    } else {
+                        computed[rowIndex][functionIndex] =
+                            std::to_string(static_cast<double>(sum) / count);
+                    }
                 } else if (function.name == "bool_and" || function.name == "every" ||
                            function.name == "bool_or") {
                     computed[rowIndex][functionIndex] = boolSeen ? (boolValue ? "true" : "false") : "NULL";
@@ -2157,6 +2191,8 @@ bool ParallelGroupAggregateOp::open() {
         std::set<std::string> distinctValues;
         int64_t count = 0;
         long double sum = 0;
+        dbms::Numeric exactSum(0);
+        bool exactSumOk = true;
         bool hasValue = false;
         std::string selected;
         bool boolSeen = false;
@@ -2187,6 +2223,13 @@ bool ParallelGroupAggregateOp::open() {
                 long double number = 0;
                 if (!parseNumber(value, number)) continue;
                 sum += number; ++count;
+                if (exactSumOk) {
+                    try {
+                        exactSum = exactSum + dbms::Numeric(value);
+                    } catch (...) {
+                        exactSumOk = false;
+                    }
+                }
             } else if (func == "min" || func == "max") {
                 if (!hasValue || (func == "min"
                         ? compareWindowValue(value, selected) < 0
@@ -2202,8 +2245,18 @@ bool ParallelGroupAggregateOp::open() {
         if (func == "count") return distinct ? std::to_string(distinctValues.size())
                                              : std::to_string(count);
         if (func == "sum") return count == 0 ? "NULL" : formatNumber(sum);
-        if (func == "avg") return count == 0 ? "NULL"
-                                             : std::to_string(static_cast<double>(sum / count));
+        if (func == "avg") {
+            if (count == 0) return "NULL";
+            // PG avg(numeric) = numeric division of the exact sum by the
+            // row count, carrying the select_div_scale digit rules.
+            if (exactSumOk) {
+                try {
+                    return (exactSum / dbms::Numeric(static_cast<int64_t>(count))).toString();
+                } catch (...) {
+                }
+            }
+            return std::to_string(static_cast<double>(sum / count));
+        }
         if (func == "min" || func == "max") return hasValue ? selected : "NULL";
         if (func == "bool_and" || func == "every" || func == "bool_or") {
             return boolSeen ? (boolValue ? "true" : "false") : "NULL";
@@ -2648,6 +2701,8 @@ bool GroupAggregateOp::open() {
         std::set<std::string> distinctValues;
         int64_t count = 0;
         long double sum = 0;
+        dbms::Numeric exactSum(0);
+        bool exactSumOk = true;
         bool hasValue = false;
         std::string selected;
         bool boolSeen = false;
@@ -2679,6 +2734,10 @@ bool GroupAggregateOp::open() {
                 if (!parseNumber(value, number)) continue;
                 sum += number;
                 ++count;
+                if (exactSumOk) {
+                    try { exactSum = exactSum + dbms::Numeric(value); }
+                    catch (...) { exactSumOk = false; }
+                }
             } else if (func == "min" || func == "max") {
                 if (!hasValue || (func == "min"
                         ? compareWindowValue(value, selected) < 0
@@ -2698,7 +2757,16 @@ bool GroupAggregateOp::open() {
         }
         if (func == "sum") return count == 0 ? "NULL" : formatNumber(sum);
         if (func == "avg") {
-            return count == 0 ? "NULL" : std::to_string(static_cast<double>(sum / count));
+            if (count == 0) return "NULL";
+            // PG avg(numeric) = numeric division of the exact sum by the
+            // row count, carrying the select_div_scale digit rules.
+            if (exactSumOk) {
+                try {
+                    return (exactSum / dbms::Numeric(static_cast<int64_t>(count))).toString();
+                } catch (...) {
+                }
+            }
+            return std::to_string(static_cast<double>(sum / count));
         }
         if (func == "min" || func == "max") return hasValue ? selected : "NULL";
         if (func == "bool_and" || func == "every" || func == "bool_or") {

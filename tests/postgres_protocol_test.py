@@ -989,7 +989,7 @@ def main():
         assert ag4 == [[b"4"]], ag4
         ag5 = data_row_values(simple_query(
             sock, "SELECT AVG(amt * 2) AS s FROM expr_t"))
-        assert ag5 == [[b"125.000000"]], ag5
+        assert ag5 == [[b"125.0000000000000000"]], ag5
         ag6 = data_row_values(simple_query(
             sock, "SELECT SUM(cust + amt) AS s FROM expr_t"))
         assert ag6 == [[b"310"]], ag6

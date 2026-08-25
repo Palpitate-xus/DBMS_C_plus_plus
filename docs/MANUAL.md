@@ -1180,13 +1180,22 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
 SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版本。
 
 当前覆盖：算术、字符串函数、布尔/NULL 三值逻辑、整数/numeric 除法
-（含 PG `select_div_scale` 的 16/20 位小数规则）、CASE 表达式。运行：
-`python3 tests/compat/pg_diff_runner.py [--only NAME]`（需要 docker 参考库）。
+（含 PG `select_div_scale` 的 16/20 位小数规则）、CASE 表达式、聚合
+（sum/count/avg/min/max、GROUP BY、FILTER 子句）、显式/隐式类型转换
+（CAST(x AS t) 前缀语法、`::` 后缀语法、舍入与布尔规则）、有状态
+DDL/DML 往返。运行：`python3 tests/compat/pg_diff_runner.py [--only NAME]`
+（需要 docker 参考库）。
 
 差分驱动已修复的语义：`CASE` 生成真正的 `CaseExpr`；`NULL AND/OR x`
 三值逻辑；`IS [NOT] DISTINCT FROM`；一元负号保留整数类型（`-7/2 = -3`）；
 `SUBSTRING(s FROM n FOR m)`/`TRIM(... FROM s)` 关键字调用语法；float8
-字面量算术输出最短可回环十进制表示。
+字面量算术输出最短可回环十进制表示；`avg()` 用 numeric 精确除法（不再
+丢失小数位，`avg(10.5)` 常量参数可求值）；numeric/decimal 列在聚合器中
+按数值而非词法聚合；`CAST(expr AS type)` 前缀表达式解析（此前仅支持
+`::`）；无 FROM 投影的 `AS` 别名只在顶层括号深度切分（`cast(1 as text)`
+不再被截断）；int 转换按 PG 舍入（`3.7→4`，`-3.7→-4`，`true→1`）；
+date 输出 ISO 零填充格式（`2020-01-02`）；聚合/函数投影列头按 PG 规则
+命名（函数名或 `?column?`，防止多词表头撑爆协议列数）。
 
 ---
 

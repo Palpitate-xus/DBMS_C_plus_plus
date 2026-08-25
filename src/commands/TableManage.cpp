@@ -19115,6 +19115,19 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
 // literals do not count).
 static bool aggArgIsExpression(const std::string& arg) {
     if (arg.empty()) return false;
+    // A bare numeric literal ("10.5", "-3") is a valid constant
+    // aggregate argument: treat it as an expression so it resolves via
+    // getVal instead of being skipped as an unknown column.
+    {
+        const std::string a = [&arg] { std::string s = arg; size_t b = s.find_first_not_of(" \t"); size_t e = s.find_last_not_of(" \t"); return (b == std::string::npos) ? std::string() : s.substr(b, e - b + 1); }();
+        if (!a.empty()) {
+            try {
+                size_t pos = 0;
+                std::stod(a, &pos);
+                if (pos == a.size()) return true;
+            } catch (...) {}
+        }
+    }
     int depth = 0;
     bool inQuote = false;
     char prevCh = 0;
@@ -19220,6 +19233,11 @@ std::vector<std::string> StorageEngine::aggregate(
         int64_t maxInt = 0, minInt = 0;
         Date maxDate, minDate;
         bool isInt = false, isDate = false;
+        // Exact-decimal accumulation for numeric columns (PG avg/sum of
+        // numeric must not lose fraction digits).
+        dbms::Numeric exactSum(0);
+        bool exactSumOk = true;
+        int64_t exactCount = 0;
         size_t colIdx = tbl.len;
         std::string groupConcat;
         bool groupConcatFirst = true;
@@ -19259,8 +19277,18 @@ std::vector<std::string> StorageEngine::aggregate(
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
-                    isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
-                    isDate = (tbl.cols[i].dataType == "date");
+                    // Fixed-width numeric storage is obvious, but numeric/
+                    // decimal/float columns are string-backed (variable
+                    // length) and must still aggregate numerically
+                    // (sum/avg), not lexically (min/max only).
+                    const std::string& dt = tbl.cols[i].dataType;
+                    const std::string dtl = [&dt] { std::string s = dt; for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); return s; }();
+                    const bool numericType = dtl != "char" && dtl != "varchar" &&
+                                             dtl != "text" && dtl != "date" && dtl != "time" &&
+                                             dtl != "timestamp" && dtl != "timestamptz" &&
+                                             dtl.rfind("char(", 0) != 0;
+                    isInt = numericType || (!tbl.cols[i].isVariableLength && dtl != "char" && dtl != "date");
+                    isDate = (dtl == "date");
                     // isChar removed (unused)
                     break;
                 }
@@ -19355,8 +19383,20 @@ std::vector<std::string> StorageEngine::aggregate(
                     };
                     val = evalAggArgExpr(aggExprText, getVal);
                 } else {
-                    if (colIdx >= tbl.len) continue;
-                    val = extractColumnValue(row, tbl, colIdx);
+                    if (colIdx >= tbl.len) {
+                        // Bare numeric literal aggregate argument (avg(10.5)):
+                        // the constant is the value for every row.
+                        if (actualColName.empty()) continue;
+                        try {
+                            size_t pos = 0;
+                            std::stod(actualColName, &pos);
+                            while (pos < actualColName.size() && isspace(static_cast<unsigned char>(actualColName[pos]))) ++pos;
+                            if (pos != actualColName.size()) continue;
+                            val = actualColName;
+                        } catch (...) { continue; }
+                    } else {
+                        val = extractColumnValue(row, tbl, colIdx);
+                    }
                 }
                 if (isModeMedian) {
                     if (!val.empty()) {
@@ -19389,6 +19429,10 @@ std::vector<std::string> StorageEngine::aggregate(
                             ++count;
                             if (func == "sum") sum += static_cast<int64_t>(0); // keep int path inert
                             sumFromDouble = true;
+                            if (exactSumOk) {
+                                try { exactSum = exactSum + dbms::Numeric(val); ++exactCount; }
+                                catch (...) { exactSumOk = false; }
+                            }
                         } else if (func == "max") {
                             if (!hasMax || d > static_cast<double>(maxInt)) { maxInt = static_cast<int64_t>(d); hasMax = true; }
                         } else if (func == "min") {
@@ -19397,6 +19441,10 @@ std::vector<std::string> StorageEngine::aggregate(
                     } else {
                         if (func == "sum") { sum += num; sumFromDouble = false; }
                         if (func == "avg") { sum += num; count++; }
+                        if ((func == "sum" || func == "avg") && exactSumOk) {
+                            try { exactSum = exactSum + dbms::Numeric(val); ++exactCount; }
+                            catch (...) { exactSumOk = false; }
+                        }
                         if (func == "max") {
                             if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; }
                         }
@@ -19439,11 +19487,27 @@ std::vector<std::string> StorageEngine::aggregate(
                 s.erase(s.find_last_not_of('0') + 1, std::string::npos);
                 if (!s.empty() && s.back() == '.') s.pop_back();
                 rowResult += s + ' ';
+            } else if (exactSumOk && exactCount == count && count > 0) {
+                // exact-decimal sum for numeric columns
+                try { rowResult += exactSum.toString() + ' '; }
+                catch (...) { rowResult += transstr(sum) + ' '; }
             } else {
                 rowResult += transstr(sum) + ' ';
             }
         }
-        else if (func == "avg") rowResult += (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count)) + ' ';
+        else if (func == "avg") {
+            std::string avgOut = "0";
+            if (count > 0) {
+                // PG avg(numeric): exact numeric division (select_div_scale).
+                if (exactSumOk && exactCount == count) {
+                    try { avgOut = (exactSum / dbms::Numeric(count)).toString(); }
+                    catch (...) { avgOut = std::to_string(static_cast<double>(sum) / count); }
+                } else {
+                    avgOut = std::to_string(static_cast<double>(sum) / count);
+                }
+            }
+            rowResult += avgOut + ' ';
+        }
         else if (func == "group_concat" || func == "string_agg") {
             rowResult += (groupConcat.empty() ? "NULL" : groupConcat) + ' ';
         }
@@ -19688,13 +19752,28 @@ std::vector<std::string> StorageEngine::groupAggregate(
         std::unordered_map<std::string, int64_t> freqMap;
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false;
+        // Exact-decimal accumulation for numeric columns (PG avg/sum of
+        // numeric must not lose fraction digits).
+        dbms::Numeric exactSum(0);
+        bool exactSumOk = true;
+        int64_t exactCount = 0;
         if (func != "count" || actualColName != "*") {
             std::string lookupCol = isPercentile ? pctColName : actualColName;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
-                    isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
-                    isDate = (tbl.cols[i].dataType == "date");
+                    // Fixed-width numeric storage is obvious, but numeric/
+                    // decimal/float columns are string-backed (variable
+                    // length) and must still aggregate numerically
+                    // (sum/avg), not lexically (min/max only).
+                    const std::string& dt = tbl.cols[i].dataType;
+                    const std::string dtl = [&dt] { std::string s = dt; for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); return s; }();
+                    const bool numericType = dtl != "char" && dtl != "varchar" &&
+                                             dtl != "text" && dtl != "date" && dtl != "time" &&
+                                             dtl != "timestamp" && dtl != "timestamptz" &&
+                                             dtl.rfind("char(", 0) != 0;
+                    isInt = numericType || (!tbl.cols[i].isVariableLength && dtl != "char" && dtl != "date");
+                    isDate = (dtl == "date");
                     // isChar removed (unused)
                     break;
                 }
@@ -19788,8 +19867,20 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     };
                     val = evalAggArgExpr(aggExprText, getVal);
                 } else {
-                    if (colIdx >= tbl.len) continue;
-                    val = extractColumnValue(row, tbl, colIdx);
+                    if (colIdx >= tbl.len) {
+                        // Bare numeric literal aggregate argument (avg(10.5)):
+                        // the constant is the value for every row.
+                        if (actualColName.empty()) continue;
+                        try {
+                            size_t pos = 0;
+                            std::stod(actualColName, &pos);
+                            while (pos < actualColName.size() && isspace(static_cast<unsigned char>(actualColName[pos]))) ++pos;
+                            if (pos != actualColName.size()) continue;
+                            val = actualColName;
+                        } catch (...) { continue; }
+                    } else {
+                        val = extractColumnValue(row, tbl, colIdx);
+                    }
                 }
                 if (isModeMedian) {
                     if (!val.empty()) {
@@ -19814,6 +19905,10 @@ std::vector<std::string> StorageEngine::groupAggregate(
                     if (num == INF) continue;
                     if (func == "sum") sum += num;
                     if (func == "avg") { sum += num; count++; }
+                    if ((func == "sum" || func == "avg") && exactSumOk) {
+                        try { exactSum = exactSum + dbms::Numeric(val); ++exactCount; }
+                        catch (...) { exactSumOk = false; }
+                    }
                     if (func == "max") { if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; } }
                     if (func == "min") { if (!hasMin || num < minInt) { minInt = num; hasMin = true; } }
                 } else if (isDate) {
@@ -19830,8 +19925,21 @@ std::vector<std::string> StorageEngine::groupAggregate(
         }
         }
         if (func == "count") return transstr(count);
-        if (func == "sum") return transstr(sum);
-        if (func == "avg") return (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count));
+        if (func == "sum") {
+            if (exactSumOk && exactCount == count && count > 0) {
+                try { return exactSum.toString(); } catch (...) {}
+            }
+            return transstr(sum);
+        }
+        if (func == "avg") {
+            if (count == 0) return "0";
+            // PG avg(numeric): exact numeric division (select_div_scale).
+            if (exactSumOk && exactCount == count) {
+                try { return (exactSum / dbms::Numeric(count)).toString(); }
+                catch (...) {}
+            }
+            return std::to_string(static_cast<double>(sum) / count);
+        }
         if (func == "group_concat" || func == "string_agg") return groupConcat.empty() ? "NULL" : groupConcat;
         if (isJsonAgg) {
             std::string json = "[";
@@ -20063,13 +20171,28 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         std::unordered_map<std::string, int64_t> freqMap;
         size_t colIdx = tbl.len;
         bool isInt = false, isDate = false;
+        // Exact-decimal accumulation for numeric columns (PG avg/sum of
+        // numeric must not lose fraction digits).
+        dbms::Numeric exactSum(0);
+        bool exactSumOk = true;
+        int64_t exactCount = 0;
         if (func != "count" || actualColName != "*") {
             std::string lookupCol = isPercentile ? pctColName : actualColName;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
-                    isInt = (!tbl.cols[i].isVariableLength && tbl.cols[i].dataType != "char" && tbl.cols[i].dataType != "date");
-                    isDate = (tbl.cols[i].dataType == "date");
+                    // Fixed-width numeric storage is obvious, but numeric/
+                    // decimal/float columns are string-backed (variable
+                    // length) and must still aggregate numerically
+                    // (sum/avg), not lexically (min/max only).
+                    const std::string& dt = tbl.cols[i].dataType;
+                    const std::string dtl = [&dt] { std::string s = dt; for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); return s; }();
+                    const bool numericType = dtl != "char" && dtl != "varchar" &&
+                                             dtl != "text" && dtl != "date" && dtl != "time" &&
+                                             dtl != "timestamp" && dtl != "timestamptz" &&
+                                             dtl.rfind("char(", 0) != 0;
+                    isInt = numericType || (!tbl.cols[i].isVariableLength && dtl != "char" && dtl != "date");
+                    isDate = (dtl == "date");
                     // isChar removed (unused)
                     break;
                 }
@@ -20154,6 +20277,10 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                         if (num == INF) continue;
                         if (func == "sum") sum += num;
                         if (func == "avg") { sum += num; count++; }
+                        if ((func == "sum" || func == "avg") && exactSumOk) {
+                            try { exactSum = exactSum + dbms::Numeric(val); ++exactCount; }
+                            catch (...) { exactSumOk = false; }
+                        }
                         if (func == "max") { if (!hasMax || num > maxInt) { maxInt = num; hasMax = true; } }
                         if (func == "min") { if (!hasMin || num < minInt) { minInt = num; hasMin = true; } }
                     } else if (isDate) {
@@ -20170,8 +20297,21 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
             }
         }
         if (func == "count") return transstr(count);
-        if (func == "sum") return transstr(sum);
-        if (func == "avg") return (count == 0 ? "0" : std::to_string(static_cast<double>(sum) / count));
+        if (func == "sum") {
+            if (exactSumOk && exactCount == count && count > 0) {
+                try { return exactSum.toString(); } catch (...) {}
+            }
+            return transstr(sum);
+        }
+        if (func == "avg") {
+            if (count == 0) return "0";
+            // PG avg(numeric): exact numeric division (select_div_scale).
+            if (exactSumOk && exactCount == count) {
+                try { return (exactSum / dbms::Numeric(count)).toString(); }
+                catch (...) {}
+            }
+            return std::to_string(static_cast<double>(sum) / count);
+        }
         if (func == "group_concat" || func == "string_agg") return groupConcat.empty() ? "NULL" : groupConcat;
         if (isJsonAgg) {
             std::string json = "[";

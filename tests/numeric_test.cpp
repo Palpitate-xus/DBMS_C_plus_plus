@@ -47,13 +47,17 @@ static void test_multiplication() {
 
 static void test_division() {
     // Expectations verified byte-identical against PostgreSQL 17
-    // select_div_scale behavior (tests/compat/cases/numeric_division.sql):
-    // quotients >= 1 carry 16 fractional digits; sub-unit quotients and
-    // exact quotients of <= 2-digit dividends carry 20.
+    // select_div_scale behavior (tests/compat/cases/numeric_division.sql
+    // plus systematic docker probes): quotients >= 1 carry 16 fractional
+    // digits unless the wide result is exact AND the leading-digit
+    // quotient estimate is 1 (7.0/7 -> 20 digits); sub-unit quotients
+    // carry 20.
     assert((Numeric("10") / Numeric("4")).toString() == "2.5000000000000000");
     assert((Numeric("1") / Numeric("3")).toString() == "0.33333333333333333333");
     assert((Numeric("22") / Numeric("7")).toString() == "3.1428571428571429");
-    assert((Numeric("-15") / Numeric("3")).toString() == "-5.00000000000000000000");
+    assert((Numeric("-15") / Numeric("3")).toString() == "-5.0000000000000000");
+    assert((Numeric("7.0") / Numeric("7")).toString() == "1.00000000000000000000");
+    assert((Numeric("7") / Numeric("1")).toString() == "7.0000000000000000");
     std::cout << "[NUMERIC] division OK" << std::endl;
 }
 

@@ -72,10 +72,14 @@ def reference_query(sql):
         vals = line.split("\x1f")
         rows.append([None if v == "NULLMARK" else v for v in vals])
     state = None
+    # NOTICE/WARNING/HINT lines are diagnostics, not errors; only real
+    # ERROR lines (with or without a SQLSTATE marker) count.
+    errLines = [ln for ln in err.splitlines()
+                if ln.strip() and not ln.startswith(("NOTICE", "WARNING", "HINT"))]
     m = re.search(r"\[(SQLSTATE ([0-9A-Z]{5}))\]", err)
     if m:
         state = m.group(2)
-    elif err.strip():
+    elif any(ln.startswith("ERROR") for ln in errLines):
         state = "ERROR"
     tag = None
     m2 = re.search(r"^([A-Z_]+ [A-Z_ ]+)$", err.strip(), re.M)

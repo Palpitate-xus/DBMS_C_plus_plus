@@ -390,7 +390,28 @@ Numeric Numeric::operator/(const Numeric& rhs) const {
             if (r.digits_[idx] != 0) { exact = false; break; }
         }
     }
-    if (!belowOne && (!exact || nd > 2) && r.scale_ > 16) {
+    // PG select_div_scale keeps the wide (20-digit) result when the
+    // quotient is sub-unit, or when it is exact and the leading-digit
+    // estimate of the quotient is 1 (e.g. 7.0/7 -> 1.00000000000000000000,
+    // 13.0/13 -> 1.000..., but 15.0/3 -> 5.0000000000000000 and
+    // 7::numeric/1 -> 7.0000000000000000 narrow to 16).  Weight (integer
+    // digit count) decides how many leading dividend digits enter the
+    // estimate: equal weights compare first digits; a heavier dividend
+    // compares its first two digits against the divisor's first.
+    bool keepWide = belowOne;
+    if (!keepWide && exact) {
+        const int w1 = static_cast<int>(digits_.size()) - scale_;
+        const int w2 = static_cast<int>(rhs.digits_.size()) - rhs.scale_;
+        const int d1 = digits_.empty() ? 0 : digits_[0];
+        const int d2 = rhs.digits_.empty() ? 0 : rhs.digits_[0];
+        if (w1 < w2) keepWide = true;             // sub-unit quotient
+        else if (w1 == w2) keepWide = (d1 / std::max(1, d2)) == 1;
+        else {
+            const int d1b = digits_.size() > 1 ? digits_[0] * 10 + digits_[1] : d1 * 10;
+            keepWide = (d1b / std::max(1, d2)) == 1;
+        }
+    }
+    if (!keepWide && r.scale_ > 16) {
         r = r.withScale(16);
     }
     return r;

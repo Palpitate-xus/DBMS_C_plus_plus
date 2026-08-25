@@ -1544,6 +1544,45 @@ static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& 
 static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
 
+    // CAST(expr AS type [mods]): prefix form of the :: cast operator.
+    if (SQLParser::toLower(tokens[pos]) == "cast" && pos + 1 < tokens.size()
+        && tokens[pos + 1] == "(") {
+        size_t save = pos;
+        pos += 2;
+        auto operand = parseExpr(tokens, pos);
+        if (operand && pos < tokens.size()
+            && SQLParser::toLower(tokens[pos]) == "as") {
+            ++pos;
+            std::string typeName;
+            while (pos < tokens.size()
+                   && tokens[pos] != ")"
+                   && tokens[pos] != ","
+                   && SQLParser::toLower(tokens[pos]) != "as") {
+                if (!typeName.empty()) typeName += ' ';
+                typeName += tokens[pos];
+                ++pos;
+            }
+            // Optional modifier list: varchar(10), numeric(10,2)
+            std::vector<std::string> mods;
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                ++pos;
+                while (pos < tokens.size() && tokens[pos] != ")") {
+                    if (tokens[pos] != ",") mods.push_back(tokens[pos]);
+                    ++pos;
+                }
+                if (pos < tokens.size()) ++pos; // consume ')'
+            }
+            if (pos < tokens.size() && tokens[pos] == ")") {
+                ++pos;
+                auto cast = std::make_unique<CastExpr>();
+                cast->operand = std::move(operand);
+                cast->typeName = typeName;
+                cast->typeMods = std::move(mods);
+                return cast;
+            }
+        }
+        pos = save; // fall through to generic handling on malformed input
+    }
     // INTERVAL 'text' typed literal — a LiteralExpr with typeName interval
     // (the body keeps its raw text; the interval parser canonicalizes).
     if (SQLParser::toLower(tokens[pos]) == "interval" && pos + 1 < tokens.size()

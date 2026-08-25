@@ -117,7 +117,7 @@ def main():
     # Default session (UTC): no offset suffix
     out, _, _ = run_sql(use + ["SELECT * FROM tt"])
     rows = data_rows(out)
-    check("default UTC render", rows == ["1 2026-8-17 10:00:00"], str(rows))
+    check("default UTC render", rows == ["1 2026-08-17 10:00:00"], str(rows))
 
     # Asia/Shanghai: +8h
     out, _, _ = run_sql(use + [
@@ -125,7 +125,7 @@ def main():
         "SELECT * FROM tt",
     ])
     rows = data_rows(out)
-    check("Asia/Shanghai +08:00", rows == ["1 2026-8-17 18:00:00 +08:00"], str(rows))
+    check("Asia/Shanghai +08:00", rows == ["1 2026-08-17 18:00:00 +08:00"], str(rows))
 
     # America/New_York: -5h
     out, _, _ = run_sql(use + [
@@ -133,7 +133,7 @@ def main():
         "SELECT * FROM tt",
     ])
     rows = data_rows(out)
-    check("America/New_York -05:00", rows == ["1 2026-8-17 05:00:00 -05:00"], str(rows))
+    check("America/New_York -05:00", rows == ["1 2026-08-17 05:00:00 -05:00"], str(rows))
 
     # Offset GUC syntax + idempotence (same query twice)
     out, _, _ = run_sql(use + [
@@ -142,7 +142,7 @@ def main():
         "SELECT * FROM tt",
     ])
     rows = data_rows(out)
-    check("offset syntax + repeat", rows == ["1 2026-8-17 18:00:00 +08:00"], str(rows))
+    check("offset syntax + repeat", rows == ["1 2026-08-17 18:00:00 +08:00"], str(rows))
 
     print(f"[TZ-E2E] {passed} passed, {failed} failed")
     return 1 if failed else 0
