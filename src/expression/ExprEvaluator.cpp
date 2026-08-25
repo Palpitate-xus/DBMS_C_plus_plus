@@ -518,7 +518,15 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
         if (v.value.empty()) return ExprValue(v.typeName, "0", false);
         if (isNumericTypeName(v.typeName)) {
             auto n = tryParseNumeric(v.value);
-            if (n) return ExprValue("numeric", (-(*n)).toString(), false);
+            // Keep the operand's type: like PG, -int4 stays int4 and only
+            // numeric/decimal inputs stay exact-decimal (a numeric result
+            // here would flip integer division into decimal division).
+            if (n) {
+                std::string outType = v.typeName;
+                std::string tl = toLower(outType);
+                if (tl == "numeric" || tl == "decimal") outType = "numeric";
+                return ExprValue(outType, (-(*n)).toString(), false);
+            }
         }
         if (v.value[0] == '-') return ExprValue(v.typeName, v.value.substr(1), false);
         return ExprValue(v.typeName, "-" + v.value, false);
@@ -835,17 +843,23 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     if (!e || !e->left || !e->right) return ExprValue{};
     std::string op = toLower(e->op);
 
-    // Logical short-circuit
+    // Logical short-circuit with SQL three-valued logic:
+    //   NULL AND false = false,  NULL AND true  = NULL
+    //   NULL OR true   = true,   NULL OR false  = NULL
     if (op == "and") {
         ExprValue l = eval(e->left.get(), ctx);
-        if (!l.asBool()) return ExprValue("boolean", "f", false);
+        if (!l.isNull && !l.asBool()) return ExprValue("boolean", "f", false);
         ExprValue r = eval(e->right.get(), ctx);
+        if (!r.isNull && !r.asBool()) return ExprValue("boolean", "f", false);
+        if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
         return ExprValue("boolean", r.asBool() ? "t" : "f", false);
     }
     if (op == "or") {
         ExprValue l = eval(e->left.get(), ctx);
-        if (l.asBool()) return ExprValue("boolean", "t", false);
+        if (!l.isNull && l.asBool()) return ExprValue("boolean", "t", false);
         ExprValue r = eval(e->right.get(), ctx);
+        if (!r.isNull && r.asBool()) return ExprValue("boolean", "t", false);
+        if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
         return ExprValue("boolean", r.asBool() ? "t" : "f", false);
     }
 
@@ -853,6 +867,18 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     ExprValue r = eval(e->right.get(), ctx);
 
     // Comparison
+    // IS [NOT] DISTINCT FROM: equality that treats NULLs as comparable
+    // (never returns NULL).
+    if (op == "is distinct from" || op == "is not distinct from") {
+        bool distinct;
+        if (l.isNull || r.isNull) {
+            distinct = (l.isNull != r.isNull);
+        } else {
+            distinct = applyComparison("<>", l, r).asBool();
+        }
+        if (op == "is not distinct from") distinct = !distinct;
+        return ExprValue("boolean", distinct ? "t" : "f", false);
+    }
     static const std::set<std::string> cmpOps = {"=", "<>", "!=", "<", ">", "<=", ">="};
     if (cmpOps.count(op)) return applyComparison(op, l, r);
 

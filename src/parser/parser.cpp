@@ -1577,29 +1577,26 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
     // CASE expression
     if (SQLParser::toLower(tokens[pos]) == "case") {
         ++pos;
-        auto caseExpr = std::make_unique<FunctionCallExpr>();
-        caseExpr->funcName = "CASE";
-        // Simple CASE: CASE expr WHEN ... END
-        // Searched CASE: CASE WHEN ... END
-        ExprPtr caseOperand;
+        auto caseExpr = std::make_unique<CaseExpr>();
+        // Simple CASE: CASE expr WHEN v1 THEN r1 ... END
+        // Searched CASE: CASE WHEN c1 THEN r1 ... END
         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) != "when"
             && SQLParser::toLower(tokens[pos]) != "end") {
-            caseOperand = parseExpr(tokens, pos);
+            caseExpr->switchExpr = parseExpr(tokens, pos);
         }
-        if (caseOperand) caseExpr->args.push_back(std::move(caseOperand));
 
         while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "when") {
             ++pos;
             auto whenExpr = parseExpr(tokens, pos);
             if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "then") ++pos;
             auto thenExpr = parseExpr(tokens, pos);
-            if (whenExpr) caseExpr->args.push_back(std::move(whenExpr));
-            if (thenExpr) caseExpr->args.push_back(std::move(thenExpr));
+            if (whenExpr && thenExpr) {
+                caseExpr->whenClauses.emplace_back(std::move(whenExpr), std::move(thenExpr));
+            }
         }
         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "else") {
             ++pos;
-            auto elseExpr = parseExpr(tokens, pos);
-            if (elseExpr) caseExpr->args.push_back(std::move(elseExpr));
+            caseExpr->elseExpr = parseExpr(tokens, pos);
         }
         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "end") ++pos;
         return caseExpr;
@@ -1763,6 +1760,31 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
                 ++pos;
                 auto arg2 = parseExpr(tokens, pos);
                 parseArg(std::move(arg2));
+            }
+            // SUBSTRING(string FROM start [FOR len]) and TRIM(... FROM s):
+            // the FROM keyword separates the start argument and FOR
+            // introduces the length, PostgreSQL special call syntaxes.
+            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "from" &&
+                (SQLParser::toLower(func->funcName) == "substring" ||
+                 SQLParser::toLower(func->funcName) == "substr" ||
+                 SQLParser::toLower(func->funcName) == "trim" ||
+                 SQLParser::toLower(func->funcName) == "ltrim" ||
+                 SQLParser::toLower(func->funcName) == "rtrim" ||
+                 SQLParser::toLower(func->funcName) == "btrim" ||
+                 SQLParser::toLower(func->funcName) == "overlay" ||
+                 SQLParser::toLower(func->funcName) == "position" ||
+                 SQLParser::toLower(func->funcName) == "strpos")) {
+                ++pos;
+                auto arg2 = parseExpr(tokens, pos);
+                parseArg(std::move(arg2));
+                if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "for" &&
+                    (SQLParser::toLower(func->funcName) == "substring" ||
+                     SQLParser::toLower(func->funcName) == "substr" ||
+                     SQLParser::toLower(func->funcName) == "overlay")) {
+                    ++pos;
+                    auto arg3 = parseExpr(tokens, pos);
+                    parseArg(std::move(arg3));
+                }
             }
         }
         if (pos < tokens.size() && tokens[pos] == ")") ++pos;

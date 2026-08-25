@@ -65,7 +65,7 @@
 
 - id: P0-16
   title: 差分兼容测试
-  status: open
+  status: in_progress
 
 - id: SQL-01
   title: 用正式 grammar/lexer 覆盖 PostgreSQL 词法规则，去掉基于 `substr/find/tokenize` 的二次解析

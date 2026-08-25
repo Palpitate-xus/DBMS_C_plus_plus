@@ -1172,6 +1172,22 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
 会话默认模式可由环境变量 `DBMS_COMPATIBILITY_MODE=extended|postgresql18`
 设定（默认 `postgresql18`），CLI 与网络会话一致生效。
 
+### 25.2 差分兼容测试（P0-16）
+
+`tests/compat/pg_diff_runner.py` 将 `tests/compat/cases/*.sql` 中的同一组
+语句分别发往参考 PostgreSQL（docker 容器 `pgref`，psql `-A -t` + NULL
+标记）和本 DBMS（wire protocol），规范化不稳定字段后逐条比对行数据与
+SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版本。
+
+当前覆盖：算术、字符串函数、布尔/NULL 三值逻辑、整数/numeric 除法
+（含 PG `select_div_scale` 的 16/20 位小数规则）、CASE 表达式。运行：
+`python3 tests/compat/pg_diff_runner.py [--only NAME]`（需要 docker 参考库）。
+
+差分驱动已修复的语义：`CASE` 生成真正的 `CaseExpr`；`NULL AND/OR x`
+三值逻辑；`IS [NOT] DISTINCT FROM`；一元负号保留整数类型（`-7/2 = -3`）；
+`SUBSTRING(s FROM n FOR m)`/`TRIM(... FROM s)` 关键字调用语法；float8
+字面量算术输出最短可回环十进制表示。
+
 ---
 
 ## 测试验证
