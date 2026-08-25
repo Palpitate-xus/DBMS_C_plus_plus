@@ -917,6 +917,11 @@ struct ExistenceSpec {
     std::string dbname;
     std::string tablename;
     std::vector<StorageEngine::Condition> innerConds;
+    // Correlated EXISTS: inner predicates reference the outer table via
+    // "<outerAlias>.<col>".  A single equality correlation lowers to a
+    // semi-join key; empty means fully uncorrelated.
+    std::string outerColumn;
+    std::string innerColumn;
     bool anti = false;
 };
 

@@ -6836,7 +6836,7 @@ static bool parseSimpleQuantifiedSubquery(
 // observes whether the inner relation has at least one qualifying row.
 static bool parseSimpleExistenceSubquery(
     const std::string& rawClause, Session& s, const std::string& dbname,
-    dbms::ExistenceSpec& outSpec) {
+    const std::string& outerTable, dbms::ExistenceSpec& outSpec) {
     std::string clause = trim(rawClause);
     bool anti = false;
     if (clause.size() >= 10 && clause.substr(0, 10) == "not exists") {
@@ -6892,23 +6892,53 @@ static bool parseSimpleExistenceSubquery(
         if (groups.size() != 1) return false;
         innerConds = dbms::StorageEngine::parseConditions(groups.front());
         if (innerConds.empty() || innerConds.size() != groups.front().size()) return false;
-        for (const auto& condition : innerConds) {
-            bool found = false;
-            for (size_t i = 0; i < innerSchema.len; ++i) {
-                if (innerSchema.cols[i].dataName == condition.colName) {
-                    found = true;
-                    break;
-                }
-            }
-            // Reject outer references here; correlated predicates remain on
-            // the legacy path until parameterized plans exist.
-            if (!found) return false;
-        }
     }
 
+    const TableSchema outerSchema = outerTable.empty()
+        ? TableSchema{} : g_engine.getTableSchema(dbname, outerTable);
+    auto outerHasColumn = [&outerSchema](const std::string& name) {
+        for (size_t i = 0; i < outerSchema.len; ++i)
+            if (outerSchema.cols[i].dataName == name) return true;
+        return false;
+    };
+    auto innerHasColumn = [&innerSchema](const std::string& name) {
+        for (size_t i = 0; i < innerSchema.len; ++i)
+            if (innerSchema.cols[i].dataName == name) return true;
+        return false;
+    };
+
+    // Correlation: equality with inner column on the left and a bare OUTER
+    // column reference on the right (optionally alias-qualified).  One
+    // correlation key lowers to a semi-join; richer shapes stay legacy.
+    std::string correlOuter, correlInner;
+    std::vector<dbms::StorageEngine::Condition> plainConds;
+    for (const auto& condition : innerConds) {
+        bool handled = false;
+        if (condition.op == "=" && innerHasColumn(condition.colName)) {
+            std::string val = condition.value;
+            if (!val.empty() && val.find("'") == std::string::npos) {
+                std::string bare = val;
+                const size_t dot = bare.rfind('.');
+                if (dot != std::string::npos) bare = trim(bare.substr(dot + 1));
+                const bool valIsInner = dot == std::string::npos && innerHasColumn(bare);
+                if (!valIsInner && outerHasColumn(bare)) {
+                    if (!correlOuter.empty()) return false;
+                    correlOuter = bare;
+                    correlInner = condition.colName;
+                    handled = true;
+                }
+            }
+        }
+        if (!handled) {
+            if (!innerHasColumn(condition.colName)) return false;
+            plainConds.push_back(condition);
+        }
+    }
     outSpec.dbname = dbname;
     outSpec.tablename = table;
-    outSpec.innerConds = std::move(innerConds);
+    outSpec.innerConds = std::move(plainConds);
+    outSpec.outerColumn = correlOuter;
+    outSpec.innerColumn = correlInner;
     outSpec.anti = anti;
     return true;
 }
@@ -16314,13 +16344,29 @@ if (sql.rfind("backup database", 0) == 0) {
             // table engine matches bare column names, and a table-name-
             // qualified predicate ("emp.id = 2") used to be silently
             // dropped, returning an empty (wrong) result.
-            for (const auto& qual : {tableAlias, tnameOrig}) {
-                if (qual.empty()) continue;
-                string prefix = qual + ".";
-                size_t apos = 0;
-                while ((apos = whereClause.find(prefix, apos)) != string::npos) {
-                    whereClause = whereClause.substr(0, apos) +
-                                  whereClause.substr(apos + prefix.size());
+            // Strip "<alias>." qualifiers ONLY outside subquery parentheses:
+            // inside a subquery the alias qualifies an OUTER reference
+            // (correlation), which must survive for the structured
+            // existence/semi-join parsers to see.
+            {
+                auto stripOutsideParens = [](const string& text, const string& pre) {
+                    string out;
+                    int depth = 0;
+                    for (size_t i = 0; i < text.size();) {
+                        if (text[i] == '(') { ++depth; out += text[i++]; continue; }
+                        if (text[i] == ')') { if (depth > 0) --depth; out += text[i++]; continue; }
+                        if (depth == 0 && text.compare(i, pre.size(), pre) == 0) {
+                            i += pre.size();
+                            continue;
+                        }
+                        out += text[i++];
+                    }
+                    return out;
+                };
+                for (const auto& qual : {tableAlias, tnameOrig}) {
+                    if (qual.empty()) continue;
+                    string prefix = qual + ".";
+                    whereClause = stripOutsideParens(whereClause, prefix);
                 }
             }
             rawWhereClause = whereClause;
@@ -16335,7 +16381,8 @@ if (sql.rfind("backup database", 0) == 0) {
                                             whereClause, s, queryDb, tname, semiJoin);
             const bool structuredExistence = canUseStructuredSubquery &&
                                              parseSimpleExistenceSubquery(
-                                                 whereClause, s, queryDb, existence);
+                                                 whereClause, s, queryDb, tname,
+                                                 existence);
             const bool structuredQuantified = canUseStructuredSubquery &&
                                               parseSimpleQuantifiedSubquery(
                                                   whereClause, s, queryDb, tname, quantified);

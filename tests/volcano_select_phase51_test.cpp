@@ -718,8 +718,12 @@ static void test_semi_and_anti_join() {
     existsCtx.dbname = db;
     existsCtx.tablename = "outer_t";
     existsCtx.selectCols = {"id"};
-    existsCtx.existenceFilters.push_back({
-        db, "inner_t", dbms::StorageEngine::parseConditions({"=enabled 1"}), false});
+    dbms::ExistenceSpec existsSpec;
+    existsSpec.dbname = db;
+    existsSpec.tablename = "inner_t";
+    existsSpec.innerConds = dbms::StorageEngine::parseConditions({"=enabled 1"});
+    existsSpec.anti = false;
+    existsCtx.existenceFilters.push_back(existsSpec);
     auto existsPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, existsCtx);
     auto* existsProject = dynamic_cast<dbms::ProjectOp*>(existsPlan.get());
     assert(existsProject);
@@ -729,8 +733,12 @@ static void test_semi_and_anti_join() {
     assert((existsRows == std::vector<std::string>{"1 ", "2 ", "3 ", "4 "}));
 
     dbms::PlanContext notExistsCtx = existsCtx;
-    notExistsCtx.existenceFilters = {{
-        db, "inner_t", dbms::StorageEngine::parseConditions({"=enabled 9"}), true}};
+    dbms::ExistenceSpec notExistsSpec;
+    notExistsSpec.dbname = db;
+    notExistsSpec.tablename = "inner_t";
+    notExistsSpec.innerConds = dbms::StorageEngine::parseConditions({"=enabled 9"});
+    notExistsSpec.anti = true;
+    notExistsCtx.existenceFilters = {notExistsSpec};
     auto notExistsPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, notExistsCtx);
     auto* notExistsProject = dynamic_cast<dbms::ProjectOp*>(notExistsPlan.get());
     assert(notExistsProject);

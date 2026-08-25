@@ -3047,6 +3047,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
     // existence predicate is independent of each outer row, so the inner
     // plan can be opened once and the outer row shape remains unchanged.
     if (!ctx.existenceFilters.empty()) {
+        const TableSchema outerTbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         for (const auto& spec : ctx.existenceFilters) {
             const std::string innerDb = spec.dbname.empty() ? ctx.dbname : spec.dbname;
             const TableSchema innerTbl = engine->getTableSchema(innerDb, spec.tablename);
@@ -3056,8 +3057,16 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                 inner = std::make_unique<FilterOp>(
                     std::move(inner), innerTbl, spec.innerConds);
             }
-            root = std::make_unique<ExistenceFilterOp>(
-                std::move(root), std::move(inner), spec.anti);
+            if (!spec.outerColumn.empty() && !spec.innerColumn.empty()) {
+                // Correlated EXISTS: the equality to the outer row lowers
+                // to a semi-join key (anti for NOT EXISTS).
+                root = std::make_unique<SemiJoinOp>(
+                    std::move(root), std::move(inner), outerTbl, innerTbl,
+                    spec.outerColumn, spec.innerColumn, spec.anti);
+            } else {
+                root = std::make_unique<ExistenceFilterOp>(
+                    std::move(root), std::move(inner), spec.anti);
+            }
         }
     }
 
