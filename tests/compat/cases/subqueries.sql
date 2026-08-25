@@ -9,3 +9,5 @@ SELECT v FROM diff_sq WHERE v NOT IN (1) ORDER BY v
 SELECT (SELECT count(*) FROM diff_sq) AS c
 SELECT * FROM diff_sq s WHERE EXISTS (SELECT 1 FROM diff_sq WHERE g = s.g AND v > 2) ORDER BY v
 SELECT * FROM diff_sq s WHERE NOT EXISTS (SELECT 1 FROM diff_sq WHERE g = s.g AND v > 2) ORDER BY v
+SELECT * FROM diff_sq s WHERE v > (SELECT min(v) FROM diff_sq WHERE g = s.g) ORDER BY v
+SELECT * FROM diff_sq s WHERE v = (SELECT max(v) FROM diff_sq WHERE g = s.g) ORDER BY v

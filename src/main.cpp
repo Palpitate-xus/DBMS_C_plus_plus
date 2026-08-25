@@ -6597,6 +6597,184 @@ static size_t findMatchingParen(const std::string& s, size_t start) {
 // Recognize the deliberately narrow structured subquery boundary used by the
 // single-table Volcano path.  Complex, correlated, and multi-branch
 // predicates deliberately return false and continue through expandSubqueries.
+
+// ========================================================================
+// Correlated scalar aggregate subquery filter (legacy string path).
+// Matches WHERE of the exact shape:
+//   <outerCol> <op> (SELECT <agg>(<innerCol>) FROM <tbl> WHERE
+//                    <corrInnerCol> = <outerAlias>.<outerCorrCol>)
+// PG evaluates the aggregate once per outer row; we emulate that by
+// grouping the inner aggregate per correlated value.
+// ========================================================================
+static bool tryCorrelatedScalarAggFilter(
+    const std::string& rawClause, Session& s, const std::string& dbname,
+    const std::string& outerTable, const TableSchema& outerTbl,
+    const std::set<std::string>& selectCols, bool selectAll,
+    std::vector<std::string>& answers) {
+    std::string clause = trim(rawClause);
+    if (clause.empty()) return false;
+    size_t p = 0;
+    while (p < clause.size() && (isalnum((unsigned char)clause[p]) || clause[p]=='_')) ++p;
+    std::string outerCol = trim(clause.substr(0, p));
+    size_t opPos = p;
+    while (opPos < clause.size() && isspace((unsigned char)clause[opPos])) ++opPos;
+    size_t opEnd = opPos;
+    while (opEnd < clause.size() && (clause[opEnd]=='>' || clause[opEnd]=='<' || clause[opEnd]=='=' || clause[opEnd]=='!')) ++opEnd;
+    std::string op = clause.substr(opPos, opEnd - opPos);
+    if (op.empty()) return false;
+    size_t subStart = opEnd;
+    while (subStart < clause.size() && isspace((unsigned char)clause[subStart])) ++subStart;
+    if (subStart >= clause.size() || clause[subStart] != '(') return false;
+    size_t subEnd = findMatchingParen(clause, subStart);
+    if (subEnd == std::string::npos || !trim(clause.substr(subEnd + 1)).empty()) return false;
+    std::string inner = trim(clause.substr(subStart + 1, subEnd - subStart - 1));
+    std::string innerLow;
+    for (char c : inner) innerLow += (char)tolower((unsigned char)c);
+    if (innerLow.compare(0, 7, "select ") != 0) return false;
+    size_t fromPos = innerLow.find(" from ");
+    if (fromPos == std::string::npos) return false;
+    std::string aggText = trim(inner.substr(6, fromPos - 6));
+    static const char* aggFns[] = {"count", "sum", "avg", "min", "max"};
+    std::string aggFn, aggArg;
+    for (const char* fn : aggFns) {
+        size_t fl = strlen(fn);
+        if (aggText.size() > fl + 1 && strncasecmp(aggText.c_str(), fn, fl) == 0 && aggText[fl] == '(' && aggText.back() == ')') {
+            aggFn = fn;
+            aggArg = trim(aggText.substr(fl + 1, aggText.size() - fl - 2));
+            break;
+        }
+    }
+    if (aggFn.empty()) return false;
+    size_t wherePos = innerLow.find(" where ", fromPos);
+    if (wherePos == std::string::npos) return false;
+    std::string innerTableText = trim(inner.substr(fromPos + 6, wherePos - fromPos - 6));
+    std::string corrClause = trim(inner.substr(wherePos + 7));
+    size_t eqPos = corrClause.find('=');
+    if (eqPos == std::string::npos) return false;
+    std::string lhs = trim(corrClause.substr(0, eqPos));
+    std::string rhs = trim(corrClause.substr(eqPos + 1));
+    if (lhs.empty() || rhs.empty() || rhs.find('.') == std::string::npos) return false;
+    size_t dot = rhs.rfind('.');
+    std::string corrOuter = trim(rhs.substr(dot + 1));
+    std::string corrInner = lhs;
+    auto hasCol = [](const TableSchema& t, const std::string& n) {
+        for (size_t i = 0; i < t.len; ++i) if (t.cols[i].dataName == n) return true;
+        return false;
+    };
+    if (!hasCol(outerTbl, corrOuter) || !hasCol(outerTbl, outerCol)) return false;
+    if (innerTableText.find_first_of(" \t.") != std::string::npos) return false;
+    std::string innerTable = resolveTableName(s, innerTableText);
+    if (!g_engine.tableExists(dbname, innerTable)) return false;
+    const TableSchema innerTbl = g_engine.getTableSchema(dbname, innerTable);
+    if (!hasCol(innerTbl, corrInner)) return false;
+    if (aggArg != "*" && !hasCol(innerTbl, aggArg)) return false;
+    // Read the whole inner table ONCE as full rows; group by correlated value.
+    std::vector<std::string> innerRows = g_engine.query(dbname, innerTable, {}, {}, {});
+    std::vector<std::string> outerRows = g_engine.query(dbname, outerTable, {}, {}, {});
+    auto colIndex = [](const TableSchema& t, const std::string& n) -> int {
+        for (size_t i = 0; i < t.len; ++i) if (t.cols[i].dataName == n) return (int)i;
+        return -1;
+    };
+    auto splitCells = [](const std::string& row) {
+        std::vector<std::string> cells; std::stringstream ss(row); std::string c;
+        while (ss >> c) cells.push_back(c);
+        return cells;
+    };
+    const int corrOuterIdx = colIndex(outerTbl, corrOuter);
+    const int outerColIdx = colIndex(outerTbl, outerCol);
+    const int corrInnerIdx = colIndex(innerTbl, corrInner);
+    const int aggIdx = aggArg == "*" ? -1 : colIndex(innerTbl, aggArg);
+    if (corrOuterIdx < 0 || outerColIdx < 0 || corrInnerIdx < 0) return false;
+    if (aggArg != "*" && aggIdx < 0) return false;
+    // Build per-group aggregates over the inner rows.
+    std::map<std::string, std::string> groupResult;   // corr value -> agg result
+    {
+        std::map<std::string, std::vector<std::string>> groups;
+        for (const auto& r : innerRows) {
+            auto cells = splitCells(r);
+            if ((int)cells.size() < innerTbl.len) continue;
+            groups[cells[corrInnerIdx]].push_back(r);
+        }
+        auto isNullV = [](const std::string& v) {
+            return v.empty() || v == "NULL" || v == "null";
+        };
+        for (auto& [key, rows] : groups) {
+            int64_t cnt = 0;
+            dbms::Numeric exactSum(0);
+            bool exactOk = true;
+            std::string mn, mx; bool hasV = false;
+            for (const auto& r : rows) {
+                auto cells = splitCells(r);
+                if (aggArg == "*") { ++cnt; continue; }
+                const std::string& v = cells[aggIdx];
+                if (isNullV(v)) continue;
+                ++cnt;
+                if (aggFn == "count") continue;
+                if (aggFn == "min" || aggFn == "max") {
+                    if (!hasV || (aggFn == "min" ? v < mn : v > mx)) { mn = mx = v; hasV = true; }
+                    continue;
+                }
+                if (exactOk) {
+                    try { exactSum = exactSum + dbms::Numeric(v); }
+                    catch (...) { exactOk = false; }
+                }
+            }
+            std::string res;
+            if (aggFn == "count") res = std::to_string(cnt);
+            else if (cnt == 0) res = "NULL";
+            else if (aggFn == "sum") res = exactOk ? exactSum.toString() : "0";
+            else if (aggFn == "avg") {
+                res = exactOk ? (exactSum / dbms::Numeric(cnt)).toString() : "0";
+            }
+            else res = hasV ? (aggFn == "min" ? mn : mx) : "NULL";
+            groupResult[key] = res;
+        }
+    }
+    // Compare each outer row against its group aggregate.
+    auto compareVals = [](const std::string& a, const std::string& b) -> int {
+        bool aNum = !a.empty(), bNum = !b.empty();
+        for (char ch : a) if (!isdigit((unsigned char)ch) && ch != '.' && ch != '-') aNum = false;
+        for (char ch : b) if (!isdigit((unsigned char)ch) && ch != '.' && ch != '-') bNum = false;
+        if (aNum && bNum) {
+            long double x = strtold(a.c_str(), nullptr), y = strtold(b.c_str(), nullptr);
+            return x < y ? -1 : (x > y ? 1 : 0);
+        }
+        return a < b ? -1 : (a > b ? 1 : 0);
+    };
+    answers.clear();
+    for (const auto& r : outerRows) {
+        auto cells = splitCells(r);
+        if ((int)cells.size() < outerTbl.len) continue;
+        const std::string& corrVal = cells[corrOuterIdx];
+        const std::string& colVal = cells[outerColIdx];
+        auto it = groupResult.find(corrVal);
+        std::string aggVal = (it != groupResult.end()) ? it->second : std::string("NULL");
+        bool keep;
+        if (aggVal == "NULL" || colVal == "NULL" || colVal.empty()) keep = false;
+        else {
+            int c = compareVals(colVal, aggVal);
+            if (op == "=") keep = c == 0;
+            else if (op == "!=" || op == "<>") keep = c != 0;
+            else if (op == "<") keep = c < 0;
+            else if (op == ">") keep = c > 0;
+            else if (op == "<=") keep = c <= 0;
+            else keep = c >= 0;   // >= 
+        }
+        if (keep) {
+            // Project to the requested columns (engine row layout).
+            std::string out;
+            auto rcells = splitCells(r);
+            for (size_t i = 0; i < outerTbl.len; ++i) {
+                if (!selectAll && selectCols.find(outerTbl.cols[i].dataName) == selectCols.end())
+                    continue;
+                if (i < rcells.size()) out += rcells[i] + " ";
+            }
+            while (!out.empty() && out.back() == ' ') out.pop_back();
+            answers.push_back(out);
+        }
+    }
+    return !outerRows.empty() || true;   // handled: caller must project
+}
 static bool parseSimpleSemiJoinSubquery(
     const std::string& rawClause, Session& s, const std::string& outerDb,
     const std::string& outerTable, dbms::SemiJoinSpec& outSpec) {
@@ -17402,10 +17580,27 @@ if (sql.rfind("backup database", 0) == 0) {
             }
             bool useDistinct = isDistinct && distinctOnCols.empty();
 
+            // Correlated scalar aggregate subqueries must bypass both the
+            // volcano and plain paths: neither can evaluate a per-row
+            // aggregate.  tryCorrelatedScalarAggFilter fills `answers`
+            // with projected rows directly.
+            std::vector<std::string> corrAggRows;
+            bool corrAggHandled = false;
+            if (wherePos != string::npos) {
+                corrAggHandled = tryCorrelatedScalarAggFilter(
+                    rawWhereClause, s, queryDb, tname, tbl, selectCols,
+                    selectAll, corrAggRows);
+            }
+            if (corrAggHandled) {
+                for (const auto& row : corrAggRows) answers.push_back(row);
+            }
+
             // Try volcano operator-tree execution for the base table.
             // Falls back to g_engine.query() when unsupported features are present.
-            bool volcanoUsed = false;
-            if (condTokens.empty()) {
+            bool volcanoUsed = corrAggHandled;
+            if (corrAggHandled) {
+                // answers already filled by the correlated scalar filter.
+            } else if (condTokens.empty()) {
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, {},
                                                     firstOrderBy, useDistinct,
                                                     semiJoins, existenceFilters,
@@ -17455,7 +17650,8 @@ if (sql.rfind("backup database", 0) == 0) {
                 }
                 // Inheritance: UNION rows from child tables
                 // (SELECT ... FROM ONLY suppresses this — Session::onlyNext)
-                if (!s.onlyNext && queryDb != "information_schema" && queryDb != "pg_catalog") {
+                if (!corrAggHandled &&
+                    !s.onlyNext && queryDb != "information_schema" && queryDb != "pg_catalog") {
                     auto children = g_engine.getInheritedChildren(queryDb, tname);
                     if (!children.empty()) {
                         set<string> childSelectCols = selectCols;

@@ -1186,7 +1186,9 @@ CASE 表达式、聚合（sum/count/avg/min/max、GROUP BY、FILTER 子句）、
 布尔规则）、有状态 DDL/DML 往返、JOIN（inner/left/right/cross 及
 join 上的纯聚合）、子查询（WHERE 标量子查询、IN/NOT IN、HAVING、
 无 FROM 投影中的标量子查询、相关 EXISTS/NOT EXISTS —— 单等值
-相关条件经半连接（SemiJoinOp）下推执行）、错误面（除零 22012、非法整型输入
+相关条件经半连接（SemiJoinOp）下推执行、相关标量聚合
+子查询 v > (SELECT min(v) ... WHERE g = s.g) —— 按相关值分组
+一次性物化内表聚合，再逐行比较）、错误面（除零 22012、非法整型输入
 22P02、缺失表/函数）。运行：`python3 tests/compat/pg_diff_runner.py
 [--only NAME]`（需要 docker 参考库）。
 
