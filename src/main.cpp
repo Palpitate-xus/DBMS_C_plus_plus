@@ -16902,6 +16902,66 @@ if (sql.rfind("backup database", 0) == 0) {
                     }
                 }
             }
+                // ORDER BY over aggregate output: map each spec to an output
+                // cell (group column, select alias, or aggregate expression)
+                // and sort the result rows.  PG compares NULLS LAST (ASC) /
+                // NULLS FIRST (DESC) by default.
+                if (!orderBySpecs.empty()) {
+                    vector<pair<size_t, const dbms::StorageEngine::OrderBySpec*>> keys;
+                    bool allMapped = true;
+                    for (const auto& spec : orderBySpecs) {
+                        long idx = -1;
+                        for (size_t ei = 0; ei < selectExprs.size(); ++ei) {
+                            const string& dn = selectExprs[ei].displayName;
+                            if (!dn.empty() && dn == spec.colName) { idx = (long)ei; break; }
+                        }
+                        if (idx < 0) {
+                            for (size_t ei = 0; ei < selectExprs.size(); ++ei) {
+                                if (selectExprs[ei].colName == spec.colName) { idx = (long)ei; break; }
+                            }
+                        }
+                        if (idx < 0) { allMapped = false; break; }
+                        keys.push_back({(size_t)idx, &spec});
+                    }
+                    if (allMapped && !keys.empty()) {
+                        auto cellOf = [](const string& row, size_t want) -> string {
+                            vector<string> cells;
+                            size_t start = 0;
+                            while (start <= row.size()) {
+                                size_t sp = row.find(' ', start);
+                                if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
+                                cells.push_back(row.substr(start, sp - start));
+                                start = sp + 1;
+                            }
+                            return want < cells.size() ? cells[want] : string();
+                        };
+                        auto nullish = [](const string& v) {
+                            return v.empty() || v == "NULL" || v == "null";
+                        };
+                        std::stable_sort(answers.begin(), answers.end(),
+                            [&](const string& a, const string& b) {
+                                for (const auto& k : keys) {
+                                    const string va = cellOf(a, k.first);
+                                    const string vb = cellOf(b, k.first);
+                                    const bool na = nullish(va), nb = nullish(vb);
+                                    if (na != nb) {
+                                        const bool aNull = na;
+                                        return k.second->ascending ? !aNull : aNull;
+                                    }
+                                    if (na) continue;
+                                    int cmp = 0;
+                                    dbms::Numeric na_(0), nb_(0);
+                                    bool numA = true, numB = true;
+                                    try { na_ = dbms::Numeric(va); } catch (...) { numA = false; }
+                                    try { nb_ = dbms::Numeric(vb); } catch (...) { numB = false; }
+                                    if (numA && numB) cmp = na_ < nb_ ? -1 : (nb_ < na_ ? 1 : 0);
+                                    else cmp = va < vb ? -1 : (vb < va ? 1 : 0);
+                                    if (cmp != 0) return k.second->ascending ? cmp < 0 : cmp > 0;
+                                }
+                                return false;
+                            });
+                    }
+                }
         } else if (hasAgg) {
             // Header: SELECT-list display names (aliases honored; avoids
             // space-splitting "sum(amt * 2)" into phantom protocol columns).
@@ -16985,6 +17045,66 @@ if (sql.rfind("backup database", 0) == 0) {
                     for (const auto& row : part) {
                         if (seen.insert(row).second) answers.push_back(row);
                     }
+                }
+            }
+            // ORDER BY over aggregate output: map each spec to an output
+            // cell (group column, select alias, or aggregate expression)
+            // and sort the result rows.  PG compares NULLS LAST (ASC) /
+            // NULLS FIRST (DESC) by default.
+            if (!orderBySpecs.empty()) {
+                vector<pair<size_t, const dbms::StorageEngine::OrderBySpec*>> keys;
+                bool allMapped = true;
+                for (const auto& spec : orderBySpecs) {
+                    long idx = -1;
+                    for (size_t ei = 0; ei < selectExprs.size(); ++ei) {
+                        const string& dn = selectExprs[ei].displayName;
+                        if (!dn.empty() && dn == spec.colName) { idx = (long)ei; break; }
+                    }
+                    if (idx < 0) {
+                        for (size_t ei = 0; ei < selectExprs.size(); ++ei) {
+                            if (selectExprs[ei].colName == spec.colName) { idx = (long)ei; break; }
+                        }
+                    }
+                    if (idx < 0) { allMapped = false; break; }
+                    keys.push_back({(size_t)idx, &spec});
+                }
+                if (allMapped && !keys.empty()) {
+                    auto cellOf = [](const string& row, size_t want) -> string {
+                        vector<string> cells;
+                        size_t start = 0;
+                        while (start <= row.size()) {
+                            size_t sp = row.find(' ', start);
+                            if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
+                            cells.push_back(row.substr(start, sp - start));
+                            start = sp + 1;
+                        }
+                        return want < cells.size() ? cells[want] : string();
+                    };
+                    auto nullish = [](const string& v) {
+                        return v.empty() || v == "NULL" || v == "null";
+                    };
+                    std::stable_sort(answers.begin(), answers.end(),
+                        [&](const string& a, const string& b) {
+                            for (const auto& k : keys) {
+                                const string va = cellOf(a, k.first);
+                                const string vb = cellOf(b, k.first);
+                                const bool na = nullish(va), nb = nullish(vb);
+                                if (na != nb) {
+                                    const bool aNull = na;
+                                    return k.second->ascending ? !aNull : aNull;
+                                }
+                                if (na) continue;
+                                int cmp = 0;
+                                dbms::Numeric na_(0), nb_(0);
+                                bool numA = true, numB = true;
+                                try { na_ = dbms::Numeric(va); } catch (...) { numA = false; }
+                                try { nb_ = dbms::Numeric(vb); } catch (...) { numB = false; }
+                                if (numA && numB) cmp = na_ < nb_ ? -1 : (nb_ < na_ ? 1 : 0);
+                                else cmp = va < vb ? -1 : (vb < va ? 1 : 0);
+                                if (cmp != 0) return k.second->ascending ? cmp < 0 : cmp > 0;
+                            }
+                            return false;
+                        });
                 }
             }
         } else if (hasWindow) {
