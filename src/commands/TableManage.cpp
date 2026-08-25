@@ -20473,10 +20473,15 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
             }
 
             std::string row;
+            size_t colPos = 0;
             for (const auto& col : allGroupByCols) {
-                if (!row.empty()) row += ' ';
+                // Separator BETWEEN cells (by position, not by accumulated
+                // text): an empty first cell keeps its leading slot as a
+                // leading space.
+                if (colPos > 0) row += ' ';
                 auto it = colValues.find(col);
                 if (it != colValues.end()) row += it->second;
+                ++colPos;
             }
             row += ' ';
             for (const auto& item : items) {

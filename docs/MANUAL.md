@@ -1195,7 +1195,8 @@ last_value/sum/avg/min/max/count、PARTITION BY 与 ORDER BY 组合、
 GROUPS 帧含无 ORDER BY 的 PARTITION 帧、EXCLUDE CURRENT ROW/
 GROUP/TIES 排除子句、表头别名或裸函数名、avg 的 PG
 select_div_scale 精确数值语义）、ROLLUP 分组集（含关键字后带
-空格的 ROLLUP (g) 写法与总计行的 NULL 键）、NULL 排序（ASC 时
+空格的 ROLLUP (g) 写法与总计行的 NULL 键）、CUBE 多列与 GROUPING SETS
+（空键单元格在结果行中保持其位置，排序时空键居末）、NULL 排序（ASC 时
 NULLS LAST、DESC 时 NULLS FIRST，PG 默认语义）与 NULL 单元格
 的协议空值显示、投影列序（SELECT 列表顺序而非表定义顺序，
 含别名投影）、聚合输出上的 ORDER BY（按别名、聚合表达式或
