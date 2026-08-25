@@ -5626,7 +5626,26 @@ static vector<vector<string>> breakDownConditions(const vector<string>& tokens) 
 // ========================================================================
 // Parse CREATE TABLE columns
 // ========================================================================
-static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const string& dbname = "") {
+// DIV-06: MySQL/SQL Server type aliases accepted by the extended mode.
+// Returns the canonical PostgreSQL type name, or empty when ctype is
+// native PostgreSQL syntax.
+static string mysqlTypeAliasToPostgres(const string& ctype, bool isUnsigned) {
+    if (isUnsigned) return "integer";  // any unsigned int is non-PG syntax
+    if (ctype == "tiny" || ctype == "tinyint") return "smallint";
+    if (ctype == "long" || ctype == "long int") return "bigint";
+    if (ctype == "datetime") return "timestamp";
+    if (ctype == "blob") return "bytea";
+    if (ctype == "tinyblob" || ctype == "mediumblob" || ctype == "longblob") return "bytea";
+    if (ctype == "tinytext" || ctype == "mediumtext" || ctype == "longtext") return "text";
+    if (ctype == "binary" || ctype == "varbinary") return "bytea";
+    if (ctype.substr(0, 7) == "nvarchar") return "varchar" + ctype.substr(7);
+    if (ctype.substr(0, 5) == "nchar") return "char" + ctype.substr(5);
+    if (ctype == "int" || ctype == "integer") return "integer";  // native
+    return "";
+}
+
+static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const string& dbname = "",
+                                    const Session* session = nullptr) {
     TableSchema tbl;
     std::vector<std::string> pkColNames;  // raw names from PRIMARY KEY (a,b)
     std::vector<std::vector<std::string>> uniqueColNames; // raw names from UNIQUE (a,b)
@@ -6067,6 +6086,36 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
             if (ctype.size() >= 2 && ctype.substr(ctype.size() - 2) == "[]") {
                 isArray = true;
                 ctype = ctype.substr(0, ctype.size() - 2);
+            }
+
+            // DIV-06: MySQL/SQL Server type aliases.  postgresql18 mode
+            // rejects them with the canonical PostgreSQL type in the hint;
+            // extended mode maps them silently (legacy behavior).
+            if (session != nullptr) {
+                string canonical = mysqlTypeAliasToPostgres(ctype, isUnsigned);
+                if (!canonical.empty() && canonical != "integer") {
+                    if (!dbms::isExtendedCompatMode(session->compatibilityMode)) {
+                        cout << "ERROR: type " << ctype
+                             << (isUnsigned ? " unsigned" : "")
+                             << " does not exist; use " << canonical
+                             << " (SQLSTATE 42704)" << endl;
+                        tbl.len = 0;
+                        return tbl;
+                    }
+                    cout << "NOTICE: type " << ctype
+                         << (isUnsigned ? " unsigned" : "")
+                         << " mapped to " << canonical << endl;
+                } else if (canonical == "integer" && isUnsigned) {
+                    if (!dbms::isExtendedCompatMode(session->compatibilityMode)) {
+                        cout << "ERROR: type " << ctype
+                             << " unsigned does not exist; UNSIGNED is not "
+                                "PostgreSQL syntax (SQLSTATE 42601)" << endl;
+                        tbl.len = 0;
+                        return tbl;
+                    }
+                    cout << "NOTICE: " << ctype << " unsigned mapped to "
+                         << ctype << endl;
+                }
             }
 
             Column col;
@@ -10429,7 +10478,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (inheritsPos != string::npos && (partPos == string::npos || inheritsPos < partPos)) {
                 colsSql = sql.substr(0, inheritsPos);
             }
-            TableSchema tbl = parseTableColumns(colsSql, restOff + tnameEnd, s.currentDB);
+            TableSchema tbl = parseTableColumns(colsSql, restOff + tnameEnd, s.currentDB, &s);
 
             // Merge inherited columns from parent
             if (!parentName.empty()) {

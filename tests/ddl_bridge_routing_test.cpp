@@ -158,6 +158,8 @@ static void test_supported_serial_type_mapping() {
 
     Session s;
     setupSession(s, db);
+    // NCHAR/BINARY are extended-mode aliases (DIV-06).
+    s.compatibilityMode = "extended";
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql(
         "CREATE TABLE serial_t (id SERIAL PRIMARY KEY, label NCHAR(4), raw BINARY(4))", s));

@@ -46,6 +46,9 @@ static void test_ddl_alias_columns() {
 
     Session s;
     setupSession(s, db);
+    // This test exercises the extended-mode alias mapping (DIV-06): in
+    // the default postgresql18 mode the alias DDL is rejected.
+    s.compatibilityMode = "extended";
     dbms::DdlExecutor ddl;
 
     bool err = ddl.executeSql(
@@ -65,10 +68,31 @@ static void test_ddl_alias_columns() {
     std::cout << "[TYPE-ALIAS] DDL alias columns OK" << std::endl;
 }
 
+static void test_postgresql18_mode_rejects_aliases() {
+    std::string db = testDbPath("type_alias_t2");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    Session s;
+    setupSession(s, db);
+    // Default mode: aliases must be rejected (DIV-06).
+    assert(s.compatibilityMode == "postgresql18");
+    dbms::DdlExecutor ddl;
+    bool err = ddl.executeSql("CREATE TABLE t (a TINYINT)", s);
+    assert(err);
+    assert(!g_engine.tableExists(db, "t"));
+    // Canonical types still work.
+    assert(!ddl.executeSql("CREATE TABLE t2 (a SMALLINT)", s));
+
+    cleanup(db);
+    std::cout << "[TYPE-ALIAS] postgresql18 mode rejects aliases OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_registry_aliases();
     test_ddl_alias_columns();
+    test_postgresql18_mode_rejects_aliases();
     std::cout << "[TYPE-ALIAS] all passed" << std::endl;
     return 0;
 }

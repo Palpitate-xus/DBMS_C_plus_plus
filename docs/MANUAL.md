@@ -1148,6 +1148,10 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
   （DIV-09）→ `0A000`，提示使用 replication protocol 或
   `pg_*_replication_slot()` 函数
 - `SET GLOBAL`（DIV-11）→ `42601`，提示 `ALTER SYSTEM`
+- MySQL/SQL Server 类型别名 `TINYINT`、`LONG`、`DATETIME`、`BLOB`、
+  `BINARY/VARBINARY`、`NCHAR/NVARCHAR`（DIV-06）→ `42704`/`42601` 类型错误，
+  错误信息给出等价的 PostgreSQL 类型（`smallint`/`bigint`/`timestamp`/
+  `bytea`/`char`/`varchar`）
 
 会话默认模式可由环境变量 `DBMS_COMPATIBILITY_MODE=extended|postgresql18`
 设定（默认 `postgresql18`），CLI 与网络会话一致生效。

@@ -186,6 +186,18 @@ def main():
                      "IMPORT FOREIGN SCHEMA")
         expect_0a000(sock, "LOAD 'auto_explain'", "LOAD")
 
+        # DIV-06: MySQL/SQL Server type aliases are rejected with the
+        # canonical type in the message (SQLSTATE 42704).
+        for sql, canon in [("CREATE TABLE t6a (a TINYINT)", "smallint"),
+                           ("CREATE TABLE t6b (a DATETIME)", "timestamp"),
+                           ("CREATE TABLE t6c (a NVARCHAR(10))", "varchar")]:
+            messages = simple_query(sock, sql)
+            err = error_of(messages)
+            assert err is not None and "does not exist" in err[1] and canon in err[1], \
+                "%s must fail with type error mentioning %s: %r" % (sql, canon, err)
+        # A canonical type still works in postgresql18 mode.
+        expect_command_tag(sock, "CREATE TABLE t6d (a SMALLINT)", "pg type create")
+
         # DIV-09: plain-SQL slot management and SHOW LOGICAL are project
         # interfaces; PostgreSQL uses the replication protocol.
         for sql in ["CREATE REPLICATION SLOT s1",
@@ -256,6 +268,9 @@ def main():
         expect_command_tag(sock, "USE DATABASE info", "extended USE DATABASE")
         expect_command_tag(sock, "SET GLOBAL auto_vacuum = on",
                            "extended SET GLOBAL")
+        # DIV-06 in extended mode: alias mapping keeps working.
+        expect_command_tag(sock, "CREATE TABLE t6e (a TINYINT)",
+                           "extended TINYINT")
 
         # Mode cannot flip inside a transaction (DIV framework: session-start
         # restricted).

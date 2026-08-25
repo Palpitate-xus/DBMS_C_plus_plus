@@ -695,7 +695,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 Column column;
                 std::string typeError;
-                if (!columnDefToColumn(sub.colDef, s.currentDB, column, typeError)) {
+                if (!columnDefToColumn(sub.colDef, s.currentDB, column, typeError,
+                                        s.compatibilityMode)) {
                     std::cout << "Invalid column type: " << typeError << std::endl;
                     return true;
                 }
@@ -771,7 +772,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     ColumnDef cd = columnDefFromAlterType(sub.name, sub.dataType);
                     Column column;
                     std::string error;
-                    if (!columnDefToColumn(cd, s.currentDB, column, error)) {
+                    if (!columnDefToColumn(cd, s.currentDB, column, error,
+                                            s.compatibilityMode)) {
                         std::cout << "Invalid column type: " << error << std::endl;
                         return true;
                     }
@@ -1682,7 +1684,8 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
 // ----------------------------------------------------------------------------
 
 bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbname,
-                                    Column& col, std::string& error) {
+                                    Column& col, std::string& error,
+                                    const std::string& compatibilityMode) {
     error.clear();
     if (cd.name.empty() || cd.typeName.empty()) {
         error = "column name and type are required";
@@ -1728,6 +1731,37 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         }
     }
     // Normalize common aliases
+    // DIV-06: MySQL/SQL Server aliases.  postgresql18 mode rejects them
+    // with the canonical type in the error; extended mode keeps the legacy
+    // silent mapping.
+    {
+        const bool alias = baseType == "tinyint" || baseType == "datetime" ||
+                           baseType == "nvarchar" || baseType == "nchar" ||
+                           baseType == "blob" || baseType == "binary" ||
+                           baseType == "varbinary" || baseType == "double" ||
+                           baseType == "long";
+        if (alias && compatibilityMode != "extended") {
+            std::string canonical;
+            if (baseType == "tinyint" || baseType == "long") canonical = (baseType == "long") ? "bigint" : "smallint";
+            else if (baseType == "datetime") canonical = "timestamp";
+            else if (baseType == "nvarchar") canonical = "varchar";
+            else if (baseType == "nchar") canonical = "char";
+            else if (baseType == "double") canonical = "double precision";
+            else canonical = "bytea";
+            error = "type " + baseType + " does not exist; use " + canonical;
+            return false;
+        }
+        if (alias) {
+            std::cout << "NOTICE: type " << baseType << " mapped to "
+                      << (baseType == "tinyint" ? "smallint"
+                          : baseType == "datetime" ? "timestamp"
+                          : baseType == "nvarchar" ? "varchar"
+                          : baseType == "nchar" ? "char"
+                          : baseType == "double" ? "double precision"
+                          : baseType == "long" ? "bigint" : "bytea")
+                      << std::endl;
+        }
+    }
     if (baseType == "int" || baseType == "integer") baseType = "int4";
     else if (baseType == "bigint") baseType = "int8";
     else if (baseType == "smallint") baseType = "int2";
@@ -2403,7 +2437,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     for (const auto& cd : stmt->columns) {
         Column column;
         std::string typeError;
-        if (!columnDefToColumn(cd, s.currentDB, column, typeError)) {
+        if (!columnDefToColumn(cd, s.currentDB, column, typeError,
+                            s.compatibilityMode)) {
             std::cout << "Invalid column type: " << typeError << std::endl;
             return true;
         }
@@ -2444,7 +2479,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
             Column column;
             std::string typeError;
-            if (!columnDefToColumn(cd, s.currentDB, column, typeError)) {
+            if (!columnDefToColumn(cd, s.currentDB, column, typeError,
+                            s.compatibilityMode)) {
                 std::cout << "Invalid column type: " << typeError << std::endl;
                 return true;
             }
