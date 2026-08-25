@@ -16998,7 +16998,21 @@ if (sql.rfind("backup database", 0) == 0) {
                     return true;
                 }
                 vector<string> windowAnswers = std::move(execution.rows);
-                for (const auto& itemRaw : splitSelectColumns(columns)) cout << trim(itemRaw) << ' ';
+                // PG headers: alias if given, else bare function name / column.
+                for (const auto& itemRaw : splitSelectColumns(columns)) {
+                    string item = trim(itemRaw);
+                    string alias;
+                    size_t asPos = item.rfind(" as ");
+                    if (asPos != string::npos) {
+                        alias = trim(item.substr(asPos + 4));
+                        item = trim(item.substr(0, asPos));
+                    }
+                    WindowFunc hwf;
+                    if (parseWindowFunc(item, hwf, namedWindows))
+                        cout << (alias.empty() ? hwf.name : alias) << ' ';
+                    else
+                        cout << item << ' ';
+                }
                 cout << '\n';
                 for (const auto& row : windowAnswers) {
                     cout << row << endl;
@@ -17010,20 +17024,14 @@ if (sql.rfind("backup database", 0) == 0) {
             // Output header
             for (size_t i = 0; i < aggItems.size(); ++i) {
                 if (exprTypes[i] == 2) {
-                    cout << aggItems[i].func << "(" << aggItems[i].arg << ") over (";
-                    bool hasPart = !windowFuncs[0].partitionByCols.empty();
-                    if (hasPart) {
-                        cout << "partition by ";
-                        for (size_t pi = 0; pi < windowFuncs[0].partitionByCols.size(); ++pi) {
-                            if (pi > 0) cout << ",";
-                            cout << windowFuncs[0].partitionByCols[pi];
-                        }
-                    }
-                    if (!windowFuncs[0].orderByCol.empty()) {
-                        if (hasPart) cout << " ";
-                        cout << "order by " << windowFuncs[0].orderByCol;
-                    }
-                    cout << ") ";
+                    // PG header: the alias when one is given, otherwise the
+                    // bare window function name ("row_number", "sum", ...).
+                    string aliasName = (i < selectExprs.size())
+                        ? selectExprs[i].displayName : string();
+                    if (i < selectExprs.size() &&
+                        selectExprs[i].displayName == selectExprs[i].colName)
+                        aliasName.clear();
+                    cout << (aliasName.empty() ? aggItems[i].func : aliasName) << ' ';
                 } else if (exprTypes[i] == 1) {
                     cout << aggItems[i].func << "(" << aggItems[i].arg << ") ";
                 } else {
@@ -17246,6 +17254,9 @@ if (sql.rfind("backup database", 0) == 0) {
                         int64_t sum = 0, count = 0;
                         bool hasMax = false, hasMin = false;
                         int64_t maxVal = 0, minVal = 0;
+                        dbms::Numeric exactSum(0);
+                        int64_t exactCnt = 0;
+                        bool exactOk = true;
                         // Determine peer group boundaries for GROUP/TIES exclusion
                         size_t peerStart = fStart, peerEnd = fStart;
                         if (!wf.frameExclusion.empty() && wf.frameExclusion != "current row" && wf.frameExclusion != "no others") {
@@ -17301,11 +17312,24 @@ if (sql.rfind("backup database", 0) == 0) {
                                 if (wf.name == "max") { if (!hasMax || v > maxVal) { maxVal = v; hasMax = true; } }
                                 if (wf.name == "min") { if (!hasMin || v < minVal) { minVal = v; hasMin = true; } }
                             } catch (...) {}
+                            if (wf.name == "sum" || wf.name == "avg") {
+                                // numeric/decimal storage: exact accumulation
+                                if (exactOk) {
+                                    try { exactSum = exactSum + dbms::Numeric(it->second); ++exactCnt; }
+                                    catch (...) { exactOk = false; }
+                                }
+                            }
                         }
                         string aggVal;
-                        if (wf.name == "sum") aggVal = to_string(sum);
+                        if (wf.name == "sum") aggVal = exactOk ? exactSum.toString() : to_string(sum);
                         else if (wf.name == "count") aggVal = to_string(count);
-                        else if (wf.name == "avg") aggVal = (count == 0 ? "0" : to_string(static_cast<double>(sum) / count));
+                        else if (wf.name == "avg") {
+                            if (count == 0) aggVal = "NULL";
+                            else if (exactOk) {
+                                try { aggVal = (exactSum / dbms::Numeric(exactCnt)).toString(); }
+                                catch (...) { aggVal = to_string(static_cast<double>(sum) / count); }
+                            } else aggVal = to_string(static_cast<double>(sum) / count);
+                        }
                         else if (wf.name == "max") aggVal = hasMax ? to_string(maxVal) : "NULL";
                         else if (wf.name == "min") aggVal = hasMin ? to_string(minVal) : "NULL";
                         aggCache[wi][ri] = aggVal;
