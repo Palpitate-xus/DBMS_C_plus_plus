@@ -579,11 +579,12 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 5) == "cast ") return SqlCommand::CreateCast;
         if (rest.substr(0, 10) == "collation ") return SqlCommand::CreateCollation;
         if (rest.substr(0, 11) == "conversion ") return SqlCommand::CreateConversion;
-        if (rest.substr(0, 9) == "operator ") return SqlCommand::CreateOperator;
         if (rest.substr(0, 14) == "operator class") return SqlCommand::CreateOperatorClass;
         if (rest.substr(0, 15) == "operator family") return SqlCommand::CreateOperatorFamily;
+        if (rest.substr(0, 9) == "operator ") return SqlCommand::CreateOperator;
         if (rest.compare(0, 10, "aggregate ") == 0) return SqlCommand::CreateAggregate;
         if (rest.compare(0, 10, "assertion ") == 0) return SqlCommand::CreateAssertion;
+        if (rest.compare(0, 15, "fulltext index ") == 0) return SqlCommand::CreateFullTextIndex;
         if (rest.compare(0, 7, "server ") == 0) return SqlCommand::CreateServer;
         if (rest.substr(0, 10) == "transform ") return SqlCommand::CreateTransform;
         if (rest.substr(0, 9) == "language ") return SqlCommand::CreateLanguage;
@@ -639,11 +640,12 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         if (rest.substr(0, 5) == "cast ") return SqlCommand::DropCast;
         if (rest.substr(0, 10) == "collation ") return SqlCommand::DropCollation;
         if (rest.substr(0, 11) == "conversion ") return SqlCommand::DropConversion;
-        if (rest.substr(0, 9) == "operator ") return SqlCommand::DropOperator;
         if (rest.substr(0, 14) == "operator class") return SqlCommand::DropOperatorClass;
         if (rest.substr(0, 15) == "operator family") return SqlCommand::DropOperatorFamily;
+        if (rest.substr(0, 9) == "operator ") return SqlCommand::DropOperator;
         if (rest.compare(0, 10, "aggregate ") == 0) return SqlCommand::DropAggregate;
         if (rest.compare(0, 10, "assertion ") == 0) return SqlCommand::DropAssertion;
+        if (rest.compare(0, 15, "fulltext index ") == 0) return SqlCommand::DropFullTextIndex;
         if (rest.compare(0, 7, "server ") == 0) return SqlCommand::DropServer;
         if (rest.substr(0, 10) == "transform ") return SqlCommand::DropTransform;
         if (rest.substr(0, 9) == "language ") return SqlCommand::DropLanguage;
@@ -708,9 +710,9 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         }
         if (rest.substr(0, 10) == "collation ") return SqlCommand::AlterCollation;
         if (rest.substr(0, 11) == "conversion ") return SqlCommand::AlterConversion;
-        if (rest.substr(0, 9) == "operator ") return SqlCommand::AlterOperator;
         if (rest.substr(0, 14) == "operator class") return SqlCommand::AlterOperatorClass;
         if (rest.substr(0, 15) == "operator family") return SqlCommand::AlterOperatorFamily;
+        if (rest.substr(0, 9) == "operator ") return SqlCommand::AlterOperator;
         if (rest.compare(0, 10, "aggregate ") == 0) return SqlCommand::AlterAggregate;
         if (rest.compare(0, 7, "server ") == 0) return SqlCommand::AlterServer;
         if (rest.substr(0, 9) == "language ") return SqlCommand::AlterLanguage;

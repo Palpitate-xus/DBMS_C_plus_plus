@@ -1152,6 +1152,12 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
   `BINARY/VARBINARY`、`NCHAR/NVARCHAR`（DIV-06）→ `42704`/`42601` 类型错误，
   错误信息给出等价的 PostgreSQL 类型（`smallint`/`bigint`/`timestamp`/
   `bytea`/`char`/`varchar`）
+- `CREATE/DROP FULLTEXT INDEX`（DIV-07）→ `42601`，提示
+  `CREATE INDEX ... USING gin (to_tsvector(col))` 与 `DROP INDEX`
+- `DUMP`（DIV-10）→ `0A000`，提示 `pg_dump`；`BACKUP DATABASE` →
+  `0A000`，提示 `pg_basebackup`；`RESTORE DATABASE` → `0A000`，提示
+  `pg_restore` 或 recovery.signal + restore_command；
+  `CLEAR PLAN CACHE` → `0A000`（项目扩展）
 
 会话默认模式可由环境变量 `DBMS_COMPATIBILITY_MODE=extended|postgresql18`
 设定（默认 `postgresql18`），CLI 与网络会话一致生效。

@@ -10687,6 +10687,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
 
         if (sql.substr(7, 9) == "fulltext ") {
+            // DIV-07: MySQL-style shortcut syntax.  PostgreSQL creates such
+            // an index with CREATE INDEX ... USING gin (to_tsvector(col)).
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << "SQL syntax error: CREATE FULLTEXT INDEX is not "
+                        "PostgreSQL syntax; use CREATE INDEX ... USING gin "
+                        "(to_tsvector(col)) (SQLSTATE 42601)" << endl;
+                return true;
+            }
             if (!checkAdmin(s)) return true;
             if (!checkDB(s)) return true;
             // create fulltext index idxname on tablename(column)
@@ -12141,6 +12149,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     // DUMP DATABASE dbname TO 'file.sql'
     if (sql.substr(0, 4) == "dump") {
+        // DIV-10: project dump command; PostgreSQL uses pg_dump/pg_dumpall.
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << dbms::featureNotSupportedError(
+                "DUMP (use pg_dump)") << endl;
+            return true;
+        }
         if (!checkAdmin(s)) return true;
         string rest = trim(sql.substr(4));
         size_t toPos = rest.find("to ");
@@ -12223,6 +12237,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
     }
 
 if (sql.rfind("backup database", 0) == 0) {
+        // DIV-10: project physical backup command; PostgreSQL uses
+        // pg_basebackup / the backup API.
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << dbms::featureNotSupportedError(
+                "BACKUP DATABASE (use pg_basebackup)") << endl;
+            return true;
+        }
         if (!checkAdmin(s)) return true;
         string rest = trim(sql.substr(16));  // skip "backup database"
         size_t toPos = rest.find("to ");
@@ -12247,6 +12268,14 @@ if (sql.rfind("backup database", 0) == 0) {
     }
 
     if (sql.rfind("restore database", 0) == 0) {
+        // DIV-10: project restore command; PostgreSQL restores via
+        // pg_restore / recovery.signal with restore_command.
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << dbms::featureNotSupportedError(
+                "RESTORE DATABASE (use pg_restore or recovery with "
+                "restore_command)") << endl;
+            return true;
+        }
         if (!checkAdmin(s)) return true;
         string rest = trim(sql.substr(17));  // skip "restore database"
         size_t fromPos = rest.find("from ");
@@ -12360,6 +12389,13 @@ if (sql.rfind("backup database", 0) == 0) {
     }
 
     if (sql.substr(0, 16) == "clear plan cache") {
+        // DIV-10: project maintenance command; PostgreSQL does not expose
+        // plan cache clearing as SQL.
+        if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+            cout << dbms::featureNotSupportedError(
+                "CLEAR PLAN CACHE (project extension)") << endl;
+            return true;
+        }
         size_t cleared = 0;
         {
             std::lock_guard<std::mutex> lock(g_planCacheMutex);
@@ -12516,6 +12552,13 @@ if (sql.rfind("backup database", 0) == 0) {
             return false;
         }
         if (op == "fulltext") {
+            // DIV-07: DROP FULLTEXT INDEX shortcut syntax gate.
+            if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
+                cout << "SQL syntax error: DROP FULLTEXT INDEX is not "
+                        "PostgreSQL syntax; use DROP INDEX "
+                        "(SQLSTATE 42601)" << endl;
+                return true;
+            }
             if (tokens.size() < 3 || tokens[1] != "index" || tokens.size() < 5 || tokens[3] != "on") {
                 cout << "SQL syntax error: DROP FULLTEXT INDEX idx ON t" << endl;
                 return true;

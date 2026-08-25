@@ -198,6 +198,28 @@ def main():
         # A canonical type still works in postgresql18 mode.
         expect_command_tag(sock, "CREATE TABLE t6d (a SMALLINT)", "pg type create")
 
+        # DIV-07: MySQL-style fulltext shortcut syntax -> 42601.
+        for sql, hint in [
+            ("CREATE FULLTEXT INDEX fi ON t6d (a)", "USING gin"),
+            ("DROP FULLTEXT INDEX fi ON t6d", "DROP INDEX"),
+        ]:
+            messages = simple_query(sock, sql)
+            err = error_of(messages)
+            assert err is not None and err[0] == "42601" and hint in err[1], \
+                "%s must fail with 42601 syntax error mentioning %s: %r" % (sql, hint, err)
+
+        # DIV-10: project admin commands -> 0A000 with tool hints.
+        for sql, tool in [
+            ("DUMP DATABASE info TO '/tmp/x.sql'", "pg_dump"),
+            ("BACKUP DATABASE info TO '/tmp/x.bak'", "pg_basebackup"),
+            ("RESTORE DATABASE info FROM '/tmp/x.bak'", "pg_restore"),
+            ("CLEAR PLAN CACHE", "project extension"),
+        ]:
+            messages = simple_query(sock, sql)
+            err = error_of(messages)
+            assert err is not None and err[0] == "0A000" and tool in err[1], \
+                "%s must fail with 0A000 mentioning %s: %r" % (sql, tool, err)
+
         # DIV-09: plain-SQL slot management and SHOW LOGICAL are project
         # interfaces; PostgreSQL uses the replication protocol.
         for sql in ["CREATE REPLICATION SLOT s1",

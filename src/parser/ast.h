@@ -36,6 +36,7 @@ enum class SqlCommand {
     CreateTable,
     CreateTableAs,
     CreateIndex,
+    CreateFullTextIndex,
     CreateView,
     CreateMaterializedView,
     CreateDatabase,
@@ -79,6 +80,7 @@ enum class SqlCommand {
     // DDL — DROP
     DropTable,
     DropIndex,
+    DropFullTextIndex,
     DropView,
     DropMaterializedView,
     DropDatabase,
@@ -459,6 +461,7 @@ public:
             case SqlCommand::Truncate: return "TRUNCATE";
             case SqlCommand::CreateTable: return "CREATE TABLE";
             case SqlCommand::CreateIndex: return "CREATE INDEX";
+            case SqlCommand::CreateFullTextIndex: return "CREATE FULLTEXT INDEX";
             case SqlCommand::CreateView: return "CREATE VIEW";
             case SqlCommand::CreateMaterializedView: return "CREATE MATERIALIZED VIEW";
             case SqlCommand::CreateDatabase: return "CREATE DATABASE";
@@ -500,6 +503,7 @@ public:
             case SqlCommand::CreateTextSearchTemplate: return "CREATE TEXT SEARCH TEMPLATE";
             case SqlCommand::DropTable: return "DROP TABLE";
             case SqlCommand::DropIndex: return "DROP INDEX";
+            case SqlCommand::DropFullTextIndex: return "DROP FULLTEXT INDEX";
             case SqlCommand::DropView: return "DROP VIEW";
             case SqlCommand::DropMaterializedView: return "DROP MATERIALIZED VIEW";
             case SqlCommand::DropDatabase: return "DROP DATABASE";
