@@ -119,7 +119,15 @@ ExprEvalResult ExprHelper::evalString(
     evaluator.registerFunction("session_user", [currentUser](const std::vector<ExprValue>&) {
         return ExprValue("name", currentUser, currentUser.empty());
     }, 's');
-    ExprValue v = evaluator.eval(select->selectList[0].expr.get(), ctx);
+    ExprValue v;
+    try {
+        v = evaluator.eval(select->selectList[0].expr.get(), ctx);
+    } catch (const std::exception& e) {
+        // Runtime expression errors (division by zero, invalid cast input)
+        // surface as evaluation failures carrying the engine message.
+        res.error = e.what();
+        return res;
+    }
 
     if (v.isUnknown()) {
         res.error = "expression evaluated to an unsupported value";

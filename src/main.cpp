@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "types/numeric.h"
 #include <chrono>
 #include <cctype>
 #include <filesystem>
@@ -4769,6 +4770,8 @@ static bool handleDoBlock(const string& sql, Session& s) {
 // functions current_user/session_user/version, and UDF calls with literal
 // arguments).  Output shape matches the tabular path: header line then one
 // value line, both via cout so protocol/CLI see the same result.
+static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& s);
+
 static bool handleFromlessSelect(const string& sql, Session& s) {
     string cols = trim(string(sql.substr(6)));
     bool isDistinct = false;
@@ -4913,11 +4916,35 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             }
         }
 
+        // Scalar subquery item: (SELECT ...) — evaluate the inner query
+        // once and project its first row's first cell (PG semantics: a
+        // scalar subquery in the projection list yields one value).
+        if (expr.size() >= 8 && expr.front() == '(' && expr.back() == ')') {
+            string inner = trim(expr.substr(1, expr.size() - 2));
+            string innerLow;
+            for (char c : inner) innerLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            if (innerLow.compare(0, 7, "select ") == 0) {
+                auto rows = runSubQuery(inner, s);
+                string cell = "NULL";
+                if (!rows.empty()) {
+                    stringstream rs(rows.front());
+                    string first;
+                    rs >> first;
+                    if (!first.empty()) cell = first;
+                }
+                headers.push_back(disp == item ? "?column?" : disp);
+                values.push_back(cell);
+                continue;
+            }
+        }
+
         // Constant expression: literal, arithmetic, parens, unary minus.
         auto r = dbms::ExprHelper::evalString(
             expr, {}, {}, s.currentDB, s.username);
         if (!r.ok) {
-            cout << "SQL syntax error: cannot evaluate projection item" << endl;
+            // Surface the evaluator's own message (carries SQLSTATE markers
+            // like division by zero 22012 and invalid cast input 22P02).
+            cout << "ERROR: " << (r.error.empty() ? "cannot evaluate projection item" : r.error) << endl;
             return true;
         }
         // PG names unaliased computed columns "?column?" (literals keep a
@@ -6492,6 +6519,37 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
     }
 
     std::vector<std::string> answers;
+
+    // Aggregate subquery ("select min(v) from t"): the engine's plain
+    // projector cannot evaluate aggregate names as columns; route the
+    // supported pure aggregates through g_engine.aggregate instead.
+    {
+        std::string colsLow;
+        for (char c : columns) colsLow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        colsLow = trim(colsLow);
+        static const char* aggFns[] = {"count", "sum", "avg", "min", "max"};
+        dbms::StorageEngine::AggItem aggItem;
+        bool isAgg = false;
+        for (const char* fn : aggFns) {
+            size_t fl = strlen(fn);
+            if (colsLow.compare(0, fl, fn) == 0 && colsLow.size() > fl + 1
+                && colsLow[fl] == '(' && colsLow.back() == ')') {
+                aggItem.func = fn;
+                aggItem.arg = trim(columns.substr(fl + 1, columns.size() - fl - 2));
+                isAgg = true;
+                break;
+            }
+        }
+        if (isAgg && wherePos == std::string::npos) {
+            auto res = g_engine.aggregate(s.currentDB, tname, {}, {aggItem});
+            for (auto& r : res) {
+                r = trim(r);
+                if (!r.empty()) answers.push_back(r);
+            }
+            return answers;
+        }
+    }
+
     if (wherePos != std::string::npos) {
         std::string condStr = normalizeConditionStr(trim(sql.substr(wherePos + 5)));
         std::vector<std::string> tokens = tokenize(condStr);
@@ -7806,6 +7864,51 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
 
 // Expand IN (...) / EXISTS (...) / ANY / ALL subqueries into plain conditions
 static std::string expandSubqueries(std::string sql, Session& s) {
+    // ---------- SCALAR (single-value) ----------
+    // "v > (SELECT min(v) FROM t)": execute the inner query once and
+    // substitute its first row's first cell as a literal.  Numeric output
+    // substitutes bare; anything else substitutes as a quoted string.
+    while (true) {
+        size_t parenStart = string::npos;
+        for (size_t p = 0; p + 7 < sql.size(); ++p) {
+            if (sql.compare(p, 7, "(select") == 0 ||
+                sql.compare(p, 7, "(SELECT") == 0) {
+                int depth = 0; bool ok = true;
+                for (size_t q = 0; q < p; ++q) {
+                    if (sql[q] == '(') ++depth;
+                    else if (sql[q] == ')') --depth;
+                    if (depth < 0) { ok = false; break; }
+                }
+                if (ok && depth == 0) { parenStart = p; break; }
+            }
+        }
+        if (parenStart == string::npos) break;
+        size_t parenEnd = findMatchingParen(sql, parenStart);
+        if (parenEnd == string::npos) break;
+        std::string inner = trim(sql.substr(parenStart + 1, parenEnd - parenStart - 1));
+        std::string replacement = "null";
+        bool done = false;
+        if (inner.size() >= 6 && (inner.substr(0, 6) == "select" || inner.substr(0, 6) == "SELECT")) {
+            auto rows = runSubQuery(inner, s);
+            if (!rows.empty()) {
+                std::string cell;
+                {
+                    stringstream rs(rows.front());
+                    rs >> cell;
+                }
+                if (!cell.empty() && cell != "NULL" && cell != "null") {
+                    bool numeric = !cell.empty();
+                    for (char ch : cell)
+                        if (!(isdigit(static_cast<unsigned char>(ch)) || ch == '.' || ch == '-')) { numeric = false; break; }
+                    replacement = numeric ? cell : "'" + cell + "'";
+                }
+            }
+            done = true;
+        }
+        if (!done) break;
+        sql = sql.substr(0, parenStart) + replacement + sql.substr(parenEnd + 1);
+    }
+
     // ---------- EXISTS ----------
     while (true) {
         size_t pos = sql.find("exists");
@@ -14859,8 +14962,46 @@ if (sql.rfind("backup database", 0) == 0) {
                     selectCols.insert(col);
                 }
             }
+            // Pure aggregate over a join (count(*)/count(col)/sum/avg/
+            // min/max): the join pipeline below projects raw rows, so
+            // intercept here, run the join with ALL columns, and aggregate
+            // the joined rows locally (PG semantics: count(*) counts joined
+            // rows; count/sum/avg/min/max skip NULL cells).
+            struct JoinAggItem { string func; string arg; };
+            vector<JoinAggItem> joinAggs;
+            bool pureJoinAgg = !selectAll;
+            if (pureJoinAgg) {
+                for (const auto& item : splitSelectColumns(columns)) {
+                    string it = trim(item);
+                    string low;
+                    for (char c : it) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                    static const char* fns[] = {"count", "sum", "avg", "min", "max"};
+                    bool matched = false;
+                    for (const char* fn : fns) {
+                        size_t fl = strlen(fn);
+                        if (low.compare(0, fl, fn) == 0 && low.size() > fl + 1
+                            && low[fl] == '(' && low.back() == ')') {
+                            string a = trim(it.substr(fl + 1, it.size() - fl - 2));
+                            for (const auto& alias : {leftAlias, rightAlias}) {
+                                if (alias.empty()) continue;
+                                string prefix = alias + ".";
+                                if (a.size() > prefix.size() && a.substr(0, prefix.size()) == prefix)
+                                    a = a.substr(prefix.size());
+                            }
+                            joinAggs.push_back({fn, a});
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched) { pureJoinAgg = false; joinAggs.clear(); break; }
+                }
+            }
+            if (pureJoinAgg && joinAggs.empty()) pureJoinAgg = false;
+
 
             vector<string> condTokens;
+            // Aggregate interception needs every joined column available.
+            if (pureJoinAgg) selectCols.clear();
             if (wherePos != string::npos) {
                 size_t condEnd = (orderPos != string::npos) ? orderPos : sql.size();
                 string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
@@ -14926,7 +15067,10 @@ if (sql.rfind("backup database", 0) == 0) {
                     if (rightTbl.cols[i].dataName == col) return {1, (int)i};
                 return {-1, -1};
             };
-            if (selectAll) {
+            if (pureJoinAgg) {
+                for (const auto& ja : joinAggs) cout << ja.func << ' ';
+                cout << '\n';
+            } else if (selectAll) {
                 for (size_t i = 0; i < leftTbl.len; ++i)
                     cout << leftPrefix << "." << leftTbl.cols[i].dataName << ' ';
                 for (size_t i = 0; i < rightTbl.len; ++i)
@@ -14998,6 +15142,70 @@ if (sql.rfind("backup database", 0) == 0) {
                     answers.erase(answers.begin() + joff + jlim, answers.end());
                 if (joff > 0)
                     answers.erase(answers.begin(), answers.begin() + joff);
+            }
+            if (pureJoinAgg) {
+                // Aggregate the joined rows.  Cell layout: left columns
+                // then right columns, space-separated display values.
+                string outRow;
+                for (const auto& ja : joinAggs) {
+                    // resolve argument column -> cell index
+                    int cellIdx = -1;
+                    if (ja.arg != "*") {
+                        int base = 0;
+                        bool found = false;
+                        for (size_t i = 0; i < leftTbl.len && !found; ++i)
+                            if (leftTbl.cols[i].dataName == ja.arg) { cellIdx = base + (int)i; found = true; }
+                        base = (int)leftTbl.len;
+                        for (size_t i = 0; i < rightTbl.len && !found; ++i)
+                            if (rightTbl.cols[i].dataName == ja.arg) { cellIdx = base + (int)i; found = true; }
+                        if (!found) cellIdx = -1;
+                    }
+                    int64_t cnt = 0;
+                    long double dsum = 0;
+                    dbms::Numeric exactSum(0);
+                    bool exactOk = true;
+                    string mn, mx; bool hasV = false;
+                    for (const auto& row : answers) {
+                        vector<string> cells;
+                        {
+                            stringstream rs(row);
+                            string cell;
+                            while (rs >> cell) cells.push_back(cell);
+                        }
+                        if (ja.arg == "*") { ++cnt; continue; }
+                        if (cellIdx < 0 || (size_t)cellIdx >= cells.size()) continue;
+                        const string& v = cells[cellIdx];
+                        if (v.empty() || v == "NULL" || v == "null") continue;
+                        ++cnt;
+                        if (ja.func == "count") continue;
+                        if (ja.func == "min" || ja.func == "max") {
+                            bool better = !hasV || (ja.func == "min" ? v < mn : v > mx);
+                            if (better) { mn = mx = v; hasV = true; }
+                            continue;
+                        }
+                        try { dsum += std::stold(v); } catch (...) {}
+                        if (exactOk) {
+                            try { exactSum = exactSum + dbms::Numeric(v); }
+                            catch (...) { exactOk = false; }
+                        }
+                    }
+                    string val;
+                    if (ja.func == "count") val = to_string(cnt);
+                    else if (cnt == 0) val = "NULL";
+                    else if (ja.func == "sum") val = exactOk ? exactSum.toString() : to_string((double)dsum);
+                    else if (ja.func == "avg") {
+                        if (exactOk) {
+                            try { val = (exactSum / dbms::Numeric(cnt)).toString(); }
+                            catch (...) { val = to_string((double)(dsum / cnt)); }
+                        } else val = to_string((double)(dsum / cnt));
+                    }
+                    else val = hasV ? (ja.func == "min" ? mn : mx) : "NULL";
+                    outRow += val + ' ';
+                }
+                while (!outRow.empty() && outRow.back() == ' ') outRow.pop_back();
+                cout << outRow << endl;
+                log(s.username, outRow, getTime());
+                return false;
             }
             // Permute each row's cells into the requested projection order
             // (engine layout is left columns then right columns).

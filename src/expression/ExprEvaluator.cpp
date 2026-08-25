@@ -750,7 +750,11 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             if (op == "+") res = *nl + *nr;
             else if (op == "-") res = *nl - *nr;
             else if (op == "*") res = *nl * *nr;
-            else if (op == "/") res = *nl / *nr;
+            else if (op == "/") {
+                if (nr->sign() == 0)
+                    throw std::runtime_error("division by zero (SQLSTATE 22012)");
+                res = *nl / *nr;
+            }
             else return ExprValue("numeric", "", true);
             return ExprValue("numeric", res.toString(), false);
         }
@@ -767,7 +771,10 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         if (op == "+") res = a + b;
         else if (op == "-") res = a - b;
         else if (op == "*") res = a * b;
-        else if (op == "/") res = (b == 0) ? 0 : a / b;
+        else if (op == "/") {
+            if (b == 0) throw std::runtime_error("division by zero (SQLSTATE 22012)");
+            res = a / b;
+        }
         else if (op == "%") res = (b == 0) ? 0 : std::fmod(a, b);
         else if (op == "^") res = std::pow(a, b);
         // PostgreSQL float8 output: shortest decimal string that round-trips
@@ -799,7 +806,10 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     if (op == "+") res = a + b;
     else if (op == "-") res = a - b;
     else if (op == "*") res = a * b;
-    else if (op == "/") res = (b == 0) ? 0 : a / b;
+    else if (op == "/") {
+        if (b == 0) throw std::runtime_error("division by zero (SQLSTATE 22012)");
+        res = a / b;
+    }
     else if (op == "%") res = (b == 0) ? 0 : a % b;
     else if (op == "^") res = static_cast<int64_t>(std::pow(static_cast<double>(a), static_cast<double>(b)));
     return ExprValue("integer", std::to_string(res), false);
@@ -1183,6 +1193,23 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
             return ExprValue("integer", "1", false);
         if (v.value == "f" || v.value == "false")
             return ExprValue("integer", "0", false);
+        // Unparseable text is a hard error in PG: invalid input syntax
+        // for type integer (SQLSTATE 22P02).  Leading/trailing spaces are
+        // tolerated, as in PG.
+        {
+            const std::string t = trimStr(v.value);
+            bool ok = !t.empty();
+            size_t i = (t.size() > 0 && (t[0] == '+' || t[0] == '-')) ? 1 : 0;
+            bool digits = false;
+            for (; i < t.size(); ++i) {
+                if (std::isdigit(static_cast<unsigned char>(t[i]))) digits = true;
+                else if (t[i] == '.') { if (i == t.size() - 1 || t.find('.', i + 1) != std::string::npos) { ok = false; break; } }
+                else { ok = false; break; }
+            }
+            if (!ok || !digits)
+                throw std::runtime_error("invalid input syntax for type integer: " +
+                                         std::string("'") + t + "' (SQLSTATE 22P02)");
+        }
         // PG cast rounds to nearest (half away from zero): 3.7 -> 4, -3.7 -> -4
         const bool integral = v.value.find('.') == std::string::npos;
         return ExprValue("integer", std::to_string(integral ? v.asInt() : static_cast<int64_t>(std::llround(v.asDouble()))), false);

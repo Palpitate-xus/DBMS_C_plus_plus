@@ -804,6 +804,16 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                        std::string::npos) {
             // DIV-06/DIV-12: unknown type or parameter errors.
             result.sqlState = "42704";
+        } else if (result.errorMessage.find("division by zero") !=
+                       std::string::npos ||
+                   result.errorMessage.find("(SQLSTATE 22012)") !=
+                       std::string::npos) {
+            result.sqlState = "22012";
+        } else if (result.errorMessage.find("invalid input syntax") !=
+                       std::string::npos ||
+                   result.errorMessage.find("(SQLSTATE 22P02)") !=
+                       std::string::npos) {
+            result.sqlState = "22P02";
         } else {
             result.sqlState = "XX000";
         }
