@@ -1041,7 +1041,7 @@
 
 - id: DIV-01
   title: `USE DATABASE`：PostgreSQL 连接建立后不能用 SQL 切换 database
-  status: open
+  status: in_progress
 
 - id: DIV-02
   title: `REPLACE INTO`：MySQL 语法；PostgreSQL 使用 `INSERT ... ON CONFLICT`
@@ -1081,7 +1081,7 @@
 
 - id: DIV-11
   title: `SET GLOBAL` 和部分 `SHOW` 命令是 MySQL 风格，不是 PostgreSQL GUC 语法
-  status: open
+  status: in_progress
 
 - id: DIV-12
   title: 内置 PgBouncer 风格连接池、TDE、`BACKUP/RESTORE DATABASE` 是项目扩展，不等于 PostgreSQL 核心同名能力
