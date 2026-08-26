@@ -18325,6 +18325,36 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return std::to_string(static_cast<int64_t>(d));
         } catch (...) { return val; }
     }
+    if ((expr.funcName == "gcd" || expr.funcName == "lcm") && expr.funcArgs.size() >= 2) {
+        std::string a = getVal(expr.funcArgs[0]);
+        std::string b = getVal(expr.funcArgs[1]);
+        // PG: gcd/lcm operate on abs values; lcm = |a*b| / gcd.
+        try {
+            int64_t x = std::llabs(std::stoll(a)), y = std::llabs(std::stoll(b));
+            int64_t g = x, yy = y;
+            while (yy != 0) { int64_t tmp = g % yy; g = yy; yy = tmp; }
+            if (expr.funcName == "gcd") return std::to_string(g);
+            if (g == 0) return "0";
+            return std::to_string((x / g) * y);
+        } catch (...) { return ""; }
+    }
+    if (expr.funcName == "width_bucket" && expr.funcArgs.size() >= 4) {
+        std::string os = getVal(expr.funcArgs[0]);
+        std::string ls = getVal(expr.funcArgs[1]);
+        std::string us = getVal(expr.funcArgs[2]);
+        std::string cs = getVal(expr.funcArgs[3]);
+        // PG: bucket = trunc((op - lb) * count / (ub - lb)) + 1; op < lb -> 0,
+        // op >= ub -> count + 1.
+        try {
+            double op = std::stod(os), lb = std::stod(ls), ub = std::stod(us);
+            int count = std::stoi(cs);
+            if (ub == lb || count <= 0) return "";
+            if (op < lb) return "0";
+            if (op >= ub) return std::to_string(count + 1);
+            double bb = std::trunc((op - lb) * count / (ub - lb)) + 1;
+            return std::to_string(static_cast<int64_t>(bb));
+        } catch (...) { return ""; }
+    }
     if (expr.funcName == "div" && expr.funcArgs.size() >= 2) {
         std::string a = getVal(expr.funcArgs[0]);
         std::string b = getVal(expr.funcArgs[1]);
