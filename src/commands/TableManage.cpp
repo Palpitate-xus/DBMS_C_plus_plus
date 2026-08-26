@@ -18325,6 +18325,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return std::to_string(static_cast<int64_t>(d));
         } catch (...) { return val; }
     }
+    if (expr.funcName == "translate" && expr.funcArgs.size() >= 3) {
+        // PG: map each char of from -> to; extra from chars delete.
+        std::string s = getVal(expr.funcArgs[0]);
+        std::string from = getVal(expr.funcArgs[1]);
+        std::string to = getVal(expr.funcArgs[2]);
+        std::string out;
+        for (char c : s) {
+            size_t idx = from.find(c);
+            if (idx == std::string::npos) out.push_back(c);
+            else if (idx < to.size()) out.push_back(to[idx]);
+        }
+        return out;
+    }
     if (expr.funcName == "strpos" && expr.funcArgs.size() >= 2) {
         // PG: strpos(s, sub) = 1-based position or 0.
         std::string a = getVal(expr.funcArgs[0]);
