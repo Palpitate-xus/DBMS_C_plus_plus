@@ -6481,8 +6481,13 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         return val ? "true" : "false";
     } else {
         int64_t val = 0;
-        std::memcpy(&val, rowBuffer.data() + offset,
-                    std::min(col.dsize, sizeof(val)));
+        size_t n = std::min(col.dsize, sizeof(val));
+        std::memcpy(&val, rowBuffer.data() + offset, n);
+        // Sign-extend sub-8-byte integers: -7 stored in 4 bytes must
+        // decode as -7, not 4294967289.
+        if (n == 4 && (val & 0x80000000LL)) val |= 0xFFFFFFFF00000000LL;
+        else if (n == 2 && (val & 0x8000LL)) val |= 0xFFFFFFFFFFFF0000LL;
+        else if (n == 1 && (val & 0x80LL)) val |= 0xFFFFFFFFFFFFFF00LL;
         return (val == INF) ? "" : transstr(val);
     }
 }
@@ -12534,13 +12539,21 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
 }
 
 int64_t StorageEngine::parseInt(const std::string& s) {
-    if (s.empty() || s.length() > 19) return INF;
+    if (s.empty() || s.length() > 20) return INF;
+    bool neg = false;
+    size_t i = 0;
+    if (s[0] == '+' || s[0] == '-') {
+        neg = (s[0] == '-');
+        i = 1;
+        if (s.size() == 1) return INF;
+    }
     int64_t val = 0;
-    for (char c : s) {
+    for (; i < s.size(); ++i) {
+        char c = s[i];
         if (c < '0' || c > '9') return INF;
         val = val * 10 + (c - '0');
     }
-    return val;
+    return neg ? -val : val;
 }
 
 bool StorageEngine::stringToBuffer(const std::string& src, char* dst, size_t len) {
@@ -17891,6 +17904,39 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // bare columns (row-resolved via getVal), integer/float literals, or
     // quoted strings (string concat for '+').
     if (expr.funcName == "arith" && expr.funcArgs.size() == 3) {
+        // INTEGER division: int / int truncates toward zero (PG).
+        auto isIntType = [](const std::string& dt) {
+            return dt == "int" || dt == "integer" || dt == "int2" || dt == "int4" ||
+                   dt == "int8" || dt == "bigint" || dt == "smallint" || dt == "tinyint";
+        };
+        auto colTypeOf = [&](const std::string& a) -> std::string {
+            for (size_t i = 0; i < tbl.len; ++i)
+                if (tbl.cols[i].dataName == a) {
+                    std::string dt = tbl.cols[i].dataType;
+                    for (auto& c : dt) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                    return dt;
+                }
+            return "";
+        };
+        if (expr.funcArgs[1] == "/") {
+            std::string lv = getVal(expr.funcArgs[0]);
+            std::string rv = getVal(expr.funcArgs[2]);
+            auto intLiteral = [](const std::string& v) {
+                return !v.empty() && v.find_first_not_of("+-0123456789") == std::string::npos;
+            };
+            bool lint = isIntType(colTypeOf(expr.funcArgs[0])) ||
+                        (colTypeOf(expr.funcArgs[0]).empty() && intLiteral(lv));
+            bool rint = isIntType(colTypeOf(expr.funcArgs[2])) ||
+                        (colTypeOf(expr.funcArgs[2]).empty() && intLiteral(rv));
+            if (lint && rint && !lv.empty() && !rv.empty()) {
+                try {
+                    int64_t l = std::stoll(lv);
+                    int64_t r = std::stoll(rv);
+                    if (r != 0) return std::to_string(l / r);
+                    return "";
+                } catch (...) { }
+            }
+        }
         // DATE arithmetic: date +/- integer days yields a date; date -
         // date yields the day count (PG semantics).
         auto looksDate = [](const std::string& v) {
@@ -17980,6 +18026,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         char pendingOp = 0;
         std::string strAcc;
         bool isString = false;
+        // Integer-division semantics: stays true while every operand so
+        // far is integer-typed; PG truncates int / int toward zero.
+        bool allInt = true;
         for (const auto& rawArg : expr.funcArgs) {
             std::string a = rawArg;
             if (a == "||") {
@@ -17996,6 +18045,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 a.find_first_of("0123456789") != std::string::npos) {
                 // Numeric literal operand.
                 v = a;
+                if (a.find_first_of(".eE") != std::string::npos) allInt = false;
             } else if (a.size() >= 2 && a.front() == 39 && a.back() == 39) {
                 // Quoted literal operand: strip the quotes.
                 v = a.substr(1, a.size() - 2);
@@ -18055,6 +18105,20 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 strAcc = v;
                 try { acc = std::stod(v); } catch (...) { isString = true; }
                 accSet = true;
+                {
+                    bool isIntCol = false;
+                    for (size_t ci = 0; ci < tbl.len; ++ci)
+                        if (tbl.cols[ci].dataName == a) {
+                            std::string dt = tbl.cols[ci].dataType;
+                            for (auto& ch : dt) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                            isIntCol = (dt == "int" || dt == "integer" || dt == "int2" ||
+                                        dt == "int4" || dt == "int8" || dt == "bigint" ||
+                                        dt == "smallint" || dt == "tinyint");
+                            break;
+                        }
+                    if (!isIntCol && (v.find_first_of(".eE") != std::string::npos || !isNumberLike(v)))
+                        allInt = false;
+                }
                 continue;
             }
             if (pendingOp == '+' && (isString || !isNumberLike(v))) {
@@ -18063,11 +18127,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             double rhs = 0.0;
             try { rhs = std::stod(v); } catch (...) { return ""; }
+            if (v.find_first_of(".eE") != std::string::npos) allInt = false;
             switch (pendingOp) {
                 case '+': acc += rhs; break;
                 case '-': acc -= rhs; break;
                 case '*': acc *= rhs; break;
-                case '/': if (rhs == 0) return ""; acc /= rhs; break;
+                case '/': if (rhs == 0) return "";
+                           if (allInt && rhs == static_cast<double>(static_cast<int64_t>(rhs)))
+                               acc = static_cast<double>(static_cast<int64_t>(acc) / static_cast<int64_t>(rhs));
+                           else acc /= rhs;
+                           break;
                 case '%': { int64_t l = static_cast<int64_t>(acc), r = static_cast<int64_t>(rhs);
                            if (r == 0) return ""; acc = static_cast<double>(l % r); break; }
                 default: return "";
