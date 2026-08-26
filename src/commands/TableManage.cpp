@@ -18080,6 +18080,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         if (targetType == "int" || targetType == "integer" || targetType == "tinyint" || targetType == "long") {
             try {
+                // PG rounds to nearest, half away from zero (3.7 -> 4, -3.7 -> -4).
+                if (val.find('.') != std::string::npos)
+                    return std::to_string(static_cast<int64_t>(std::llround(std::stold(val))));
                 int64_t num = std::stoll(val);
                 return std::to_string(num);
             } catch (...) { return "0"; }

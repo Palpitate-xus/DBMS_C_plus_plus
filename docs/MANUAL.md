@@ -1201,7 +1201,9 @@ NULLS LAST、DESC 时 NULLS FIRST，PG 默认语义）与 NULL 单元格
 的协议空值显示、投影列序（SELECT 列表顺序而非表定义顺序，
 含别名投影，重复列（SELECT a, b, a）按列表重复输出）、聚合输出上的 ORDER BY（按别名、聚合表达式或
 分组列排序，含 DESC 与 NULL 语义）、INTERSECT/EXCEPT/UNION 集合运算
-（尾部 ORDER BY/LIMIT 作用于整个集合结果，含 UNION ALL）。运行：`python3 tests/compat/pg_diff_runner.py
+（尾部 ORDER BY/LIMIT 作用于整个集合结果，含 UNION ALL）、CAST 列头
+按目标类型命名（float8/text/bpchar 等）与一元正负号投影
+（SELECT -v，头为 ?column?），数值转整数按 PG 四舍五入。运行：`python3 tests/compat/pg_diff_runner.py
 [--only NAME]`（需要 docker 参考库）。
 
 差分驱动已修复的语义：`CASE` 生成真正的 `CaseExpr`；`NULL AND/OR x`

@@ -16502,8 +16502,36 @@ if (sql.rfind("backup database", 0) == 0) {
                         if (isScalarFunc(func) || isUDF) {
                             dbms::StorageEngine::SelectExpr expr;
                             // PG header naming: a function call projects as
-                            // its lowercased function name ("upper").
-                            expr.displayName = itemAlias.empty() ? func : itemAlias;
+                            // its lowercased function name ("upper"); a CAST
+                            // projects as the target type's name ("text",
+                            // "float8", ...).
+                            string headerName = func;
+                            if (func == "cast") {
+                                auto castArgs = splitFuncArgs(arg);
+                                if (castArgs.size() >= 2) {
+                                    string targetType;
+                                    for (char tc : castArgs[1])
+                                        targetType += static_cast<char>(tolower(static_cast<unsigned char>(tc)));
+                                    static const map<string, string> pgTypeNames = {
+                                        {"double precision", "float8"}, {"float", "float4"},
+                                        {"real", "float4"}, {"int", "int4"}, {"integer", "int4"},
+                                        {"bigint", "int8"}, {"smallint", "int2"},
+                                        {"int2", "int2"}, {"int4", "int4"}, {"int8", "int8"},
+                                        {"text", "text"}, {"numeric", "numeric"},
+                                        {"decimal", "numeric"}, {"varchar", "varchar"},
+                                        {"character varying", "varchar"}, {"char", "bpchar"},
+                                        {"character", "bpchar"}, {"boolean", "bool"},
+                                        {"bool", "bool"}, {"date", "date"},
+                                        {"timestamp", "timestamp"},
+                                        {"timestamptz", "timestamptz"},
+                                        {"time", "time"}, {"interval", "interval"},
+                                        {"json", "json"}, {"jsonb", "jsonb"},
+                                    };
+                                    auto tn = pgTypeNames.find(trim(targetType));
+                                    if (tn != pgTypeNames.end()) headerName = tn->second;
+                                }
+                            }
+                            expr.displayName = itemAlias.empty() ? headerName : itemAlias;
                             expr.isScalar = true;
                             expr.funcName = func;
                             expr.funcArgs = splitFuncArgs(arg);
@@ -16542,16 +16570,23 @@ if (sql.rfind("backup database", 0) == 0) {
                     } else {
                         // Arithmetic projection item ("salary * 2", "a + b"):
                         // tokenize on spaces; operands resolved per-row.
+                        // A leading unary sign ("-v", "+v") becomes
+                        // "0 - v" / "0 + v" so the binary path evaluates it.
+                        string arithItem = item;
+                        if (!item.empty() && (item[0] == '-' || item[0] == '+') &&
+                            item.find_first_not_of(" 	", 1) != string::npos) {
+                            arithItem = string("0 ") + item[0] + " " + item.substr(1);
+                        }
                         bool isArithItem = false;
                         {
                             static const string ops = "+-*/%";
                             size_t opCount = 0;
-                            for (size_t k = 1; k < item.size(); ++k) {
-                                char ch = item[k];
+                            for (size_t k = 1; k < arithItem.size(); ++k) {
+                                char ch = arithItem[k];
                                 if (ops.find(ch) == string::npos) continue;
                                 // operator must sit between non-space operands
-                                size_t prevNonSpace = item.find_last_not_of(' ', k - 1);
-                                size_t nextNonSpace = item.find_first_not_of(' ', k + 1);
+                                size_t prevNonSpace = arithItem.find_last_not_of(' ', k - 1);
+                                size_t nextNonSpace = arithItem.find_first_not_of(' ', k + 1);
                                 if (prevNonSpace == string::npos || nextNonSpace == string::npos)
                                     continue;
                                 ++opCount;
@@ -16569,8 +16604,8 @@ if (sql.rfind("backup database", 0) == 0) {
                             expr.funcName = "arith";
                             // operands and operators as separate args
                             string operand;
-                            for (size_t k = 0; k < item.size(); ++k) {
-                                char ch = item[k];
+                            for (size_t k = 0; k < arithItem.size(); ++k) {
+                                char ch = arithItem[k];
                                 if (isspace(static_cast<unsigned char>(ch))) {
                                     if (!operand.empty()) { expr.funcArgs.push_back(operand); operand.clear(); }
                                 } else if (string("+-*/%").find(ch) != string::npos &&
