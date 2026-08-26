@@ -18705,8 +18705,12 @@ if (sql.rfind("backup database", 0) == 0) {
             }
         }
         // PG projects plain columns in SELECT-list order; the engine emits
-        // them in table order.  Permute cells when the orders differ.
-        if (!projectionOrder.empty() && !projectionOrder.empty()) {
+        // them in table order.  Permute cells when the orders differ.  The
+        // permutation assumes rows contain ONLY plain-column cells, so it
+        // must not run when expression items (scalar/aggregate/window)
+        // contributed extra cells to each row.
+        if (!projectionOrder.empty() && !projectionOrder.empty() &&
+            !hasScalar && !hasAgg && !hasWindow) {
             vector<string> want;
             for (const auto& po : projectionOrder) {
                 string wantName = po;
