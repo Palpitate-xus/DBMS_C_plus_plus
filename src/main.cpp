@@ -6928,6 +6928,177 @@ static bool tryCorrelatedScalarAggFilter(
     }
     return !outerRows.empty() || true;   // handled: caller must project
 }
+// Correlated (NOT) EXISTS whose inner WHERE mixes equality and range
+// correlations: evaluated per outer row by substituting the outer row's
+// values into the inner SQL (same substitution shape as the GROUP BY
+// scalar subquery path).  Returns false when the clause is not a simple
+// correlated EXISTS so the caller falls back.
+static bool tryCorrelatedExistsFilter(
+    const std::string& rawClause, Session& s, const std::string& dbname,
+    const std::string& outerTable, const TableSchema& outerTbl,
+    const std::set<std::string>& selectCols, bool selectAll,
+    std::vector<std::string>& answers) {
+    std::string clause = trim(rawClause);
+    if (clause.empty()) return false;
+    bool anti = false;
+    if (clause.size() >= 10 && strncasecmp(clause.c_str(), "not exists", 10) == 0) {
+        anti = true;
+        clause = trim(clause.substr(10));
+    } else if (clause.size() >= 6 && strncasecmp(clause.c_str(), "exists", 6) == 0) {
+        clause = trim(clause.substr(6));
+    } else {
+        return false;
+    }
+    if (clause.empty() || clause.front() != '(') return false;
+    const size_t subEnd = findMatchingParen(clause, 0);
+    if (subEnd == std::string::npos || !trim(clause.substr(subEnd + 1)).empty())
+        return false;
+    std::string inner = trim(clause.substr(1, subEnd - 1));
+    std::string innerLow;
+    for (char c : inner) innerLow += (char)tolower((unsigned char)c);
+    if (innerLow.compare(0, 7, "select ") != 0) return false;
+    size_t fromPos = innerLow.find(" from ");
+    if (fromPos == std::string::npos) return false;
+    size_t wherePos = innerLow.find(" where ", fromPos);
+    if (wherePos == std::string::npos) return false;
+    std::string innerTableText = trim(inner.substr(fromPos + 6, wherePos - fromPos - 6));
+    if (innerTableText.empty() || innerTableText.find_first_of(" \t.") != std::string::npos)
+        return false;
+    std::string innerTable = resolveTableName(s, innerTableText);
+    if (!g_engine.tableExists(dbname, innerTable)) return false;
+    const TableSchema innerTbl = g_engine.getTableSchema(dbname, innerTable);
+    std::string corrClause = inner.substr(wherePos + 7);
+    if (corrClause.find('(') != std::string::npos ||
+        corrClause.find(')') != std::string::npos) return false;
+    {
+        std::string low;
+        for (char c : corrClause) low += (char)tolower((unsigned char)c);
+        for (const char* bad : {"select ", " union ", " intersect ", " except ",
+                                "count(", "sum(", "min(", "max(", "avg("}) {
+            if (low.find(bad) != std::string::npos) return false;
+        }
+    }
+    auto outerHas = [&](const std::string& n) {
+        for (size_t i = 0; i < outerTbl.len; ++i)
+            if (outerTbl.cols[i].dataName == n) return true;
+        return false;
+    };
+    auto innerHas = [&](const std::string& n) {
+        for (size_t i = 0; i < innerTbl.len; ++i)
+            if (innerTbl.cols[i].dataName == n) return true;
+        return false;
+    };
+    auto isNumericCol = [](const TableSchema& t, const std::string& n) {
+        for (size_t i = 0; i < t.len; ++i) {
+            if (t.cols[i].dataName == n) {
+                std::string dt = t.cols[i].dataType;
+                for (auto& c : dt) c = (char)tolower((unsigned char)c);
+                return dt.find("int") != std::string::npos ||
+                       dt.find("numeric") != std::string::npos ||
+                       dt.find("decimal") != std::string::npos ||
+                       dt.find("float") != std::string::npos ||
+                       dt.find("double") != std::string::npos;
+            }
+        }
+        return false;
+    };
+    struct Ref { std::string col; bool qualified; };
+    std::vector<Ref> refs;
+    {
+        std::string cur;
+        std::vector<std::string> toks;
+        for (size_t i = 0; i <= corrClause.size(); ++i) {
+            char c = (i < corrClause.size()) ? corrClause[i] : ' ';
+            if (isalnum((unsigned char)c) || c == '_') cur += c;
+            else {
+                if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
+                if (c == '.') { toks.push_back("."); }
+            }
+        }
+        for (size_t i = 0; i < toks.size(); ++i) {
+            if (i + 2 < toks.size() && toks[i+1] == "." &&
+                toks[i] == outerTable) {
+                // A qualified "<outerTable>.<col>" names the OUTER row
+                // even when the inner table has a column of the same name.
+                const std::string& col = toks[i+2];
+                if (outerHas(col))
+                    refs.push_back({col, true});
+            }
+        }
+    }
+    if (refs.empty()) return false;
+    std::vector<std::string> outerRows = g_engine.query(dbname, outerTable, {}, {}, {});
+    auto colIndex = [](const TableSchema& t, const std::string& n) -> int {
+        for (size_t i = 0; i < t.len; ++i) if (t.cols[i].dataName == n) return (int)i;
+        return -1;
+    };
+    auto splitCells = [](const std::string& row) {
+        std::vector<std::string> cells; std::stringstream ss(row); std::string c;
+        while (ss >> c) cells.push_back(c);
+        return cells;
+    };
+    answers.clear();
+    for (const auto& r : outerRows) {
+        auto cells = splitCells(r);
+        if ((int)cells.size() < (int)outerTbl.len) continue;
+        std::string sql = inner;
+        for (const auto& ref : refs) {
+            int idx = colIndex(outerTbl, ref.col);
+            if (idx < 0 || idx >= (int)cells.size()) { sql.clear(); break; }
+            const std::string& val = cells[idx];
+            const bool nullish = val.empty() || val == "NULL" || val == "null";
+            const std::string lit = nullish ? "NULL"
+                : (isNumericCol(outerTbl, ref.col) ? val : "'" + val + "'");
+            const std::string qual = outerTable + "." + ref.col;
+            size_t pp = 0;
+            while ((pp = sql.find(qual, pp)) != std::string::npos) {
+                sql = sql.substr(0, pp) + " " + lit + sql.substr(pp + qual.size());
+                pp += lit.size() + 1;
+            }
+            std::string out;
+            size_t i = 0;
+            while (i < sql.size()) {
+                if (sql.compare(i, ref.col.size(), ref.col) == 0 &&
+                    (i == 0 || !(isalnum((unsigned char)sql[i-1]) || sql[i-1]=='_' || sql[i-1]=='.')) &&
+                    (i + ref.col.size() >= sql.size() || !(isalnum((unsigned char)sql[i+ref.col.size()]) || sql[i+ref.col.size()]=='_'))) {
+                    out += lit;
+                    i += ref.col.size();
+                } else out += sql[i++];
+            }
+            sql = out;
+        }
+        bool exists = false;
+        if (!sql.empty()) {
+            std::string bare;
+            for (size_t i = 0; i < sql.size();) {
+                if (sql[i] == '.' && i > 0 &&
+                    (isalnum((unsigned char)sql[i-1]) || sql[i-1]=='_')) {
+                    size_t ws = bare.size();
+                    while (ws > 0 && (isalnum((unsigned char)bare[ws-1]) || bare[ws-1]=='_')) --ws;
+                    bare.erase(ws);
+                    ++i;
+                    continue;
+                }
+                bare += sql[i++];
+            }
+            exists = !runSubQuery(bare, s).empty();
+        }
+        const bool keep = anti ? !exists : exists;
+        if (keep) {
+            std::string out;
+            auto rcells = splitCells(r);
+            for (size_t i = 0; i < outerTbl.len; ++i) {
+                if (!selectAll && selectCols.find(outerTbl.cols[i].dataName) == selectCols.end())
+                    continue;
+                if (i < rcells.size()) out += rcells[i] + " ";
+            }
+            while (!out.empty() && out.back() == ' ') out.pop_back();
+            answers.push_back(out);
+        }
+    }
+    return true;
+}
+
 static bool parseSimpleSemiJoinSubquery(
     const std::string& rawClause, Session& s, const std::string& outerDb,
     const std::string& outerTable, dbms::SemiJoinSpec& outSpec) {
@@ -18152,6 +18323,20 @@ if (sql.rfind("backup database", 0) == 0) {
             }
             if (corrAggHandled) {
                 for (const auto& row : corrAggRows) answers.push_back(row);
+            }
+            // Correlated (NOT) EXISTS with mixed equality/range predicates:
+            // the structured semi-join path rejected it, so evaluate per
+            // outer row here (the legacy fallback evaluates once globally).
+            if (!corrAggHandled && wherePos != string::npos &&
+                semiJoins.empty() && existenceFilters.empty() &&
+                quantifiedSubqueries.empty()) {
+                std::vector<std::string> corrExRows;
+                if (tryCorrelatedExistsFilter(
+                        rawWhereClause, s, queryDb, tname, tbl, selectCols,
+                        selectAll, corrExRows)) {
+                    for (const auto& row : corrExRows) answers.push_back(row);
+                    corrAggHandled = true;
+                }
             }
 
             // Try volcano operator-tree execution for the base table.

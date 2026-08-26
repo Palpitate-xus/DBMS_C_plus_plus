@@ -1208,7 +1208,8 @@ NULLS LAST、DESC 时 NULLS FIRST，PG 默认语义）与 NULL 单元格
 20 位宽结果规则（1.5/1、2.2/2 与 PG 逐位一致）、GROUP BY 选择
 列表中的相关标量子查询（按分组值相关求值，列头取子查询自身的
 输出列名）、EXISTS/NOT EXISTS 的多列相关（复合键半连接/反连
-接，含相关列与内表同名的歧义消解）。运行：`python3 tests/compat/pg_diff_runner.py
+接，含相关列与内表同名的歧义消解）、混合等值/范围相关谓词的
+EXISTS/NOT EXISTS 逐行求值。运行：`python3 tests/compat/pg_diff_runner.py
 [--only NAME]`（需要 docker 参考库）。
 
 差分驱动已修复的语义：`CASE` 生成真正的 `CaseExpr`；`NULL AND/OR x`
