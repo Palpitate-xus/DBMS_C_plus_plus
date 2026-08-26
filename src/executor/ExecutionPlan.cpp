@@ -823,9 +823,76 @@ SemiJoinOp::SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
       innerTbl_(innerTbl), outerColumn_(outerColumn), innerColumn_(innerColumn),
       anti_(anti) {}
 
+SemiJoinOp::SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
+                       const TableSchema& innerTbl,
+                       std::vector<std::pair<std::string, std::string>> keys,
+                       bool anti)
+    : outer_(std::move(outer)), inner_(std::move(inner)), outerTbl_(outerTbl),
+      innerTbl_(innerTbl),
+      outerColumn_(keys.empty() ? std::string() : keys.front().first),
+      innerColumn_(keys.empty() ? std::string() : keys.front().second),
+      keys_(std::move(keys)), anti_(anti) {}
+
 bool SemiJoinOp::open() {
     rows_.clear();
     pos_ = 0;
+
+    if (!keys_.empty()) {
+        // Multi-key correlated semi/anti join: composite keys joined
+        // with a NUL-free separator; NULL in any key column never
+        // matches (three-valued NOT semantics for anti).
+        std::vector<size_t> outerIdxs, innerIdxs;
+        for (const auto& k : keys_) {
+            size_t oi = outerTbl_.len, ii = innerTbl_.len;
+            for (size_t i = 0; i < outerTbl_.len; ++i)
+                if (outerTbl_.cols[i].dataName == k.first) { oi = i; break; }
+            for (size_t i = 0; i < innerTbl_.len; ++i)
+                if (innerTbl_.cols[i].dataName == k.second) { ii = i; break; }
+            if (oi >= outerTbl_.len || ii >= innerTbl_.len) return false;
+            outerIdxs.push_back(oi);
+            innerIdxs.push_back(ii);
+        }
+        if (!inner_->open()) return false;
+        auto innerKey = [&](const std::string& r, bool& isNull) {
+            std::string key;
+            for (size_t ki = 0; ki < innerIdxs.size(); ++ki) {
+                if (ki) key += "\x01";
+                const std::string v = StorageEngine::extractColumnValueStatic(
+                    r, innerTbl_, innerIdxs[ki]);
+                if (rawColumnIsNull(r, innerTbl_, innerIdxs[ki])) isNull = true;
+                key += v;
+            }
+            return key;
+        };
+        std::unordered_set<std::string> innerKeys;
+        bool innerHasNull = false;
+        std::string row;
+        while (inner_->next(row)) {
+            bool isNull = false;
+            const std::string key = innerKey(row, isNull);
+            if (isNull) innerHasNull = true;
+            else innerKeys.insert(key);
+        }
+        inner_->close();
+        if (!outer_->open()) return false;
+        while (outer_->next(row)) {
+            bool isNull2 = false;
+            std::string okey;
+
+            for (size_t ki = 0; ki < outerIdxs.size(); ++ki) {
+                if (ki) okey += "\x01";
+                const std::string v = StorageEngine::extractColumnValueStatic(
+                    row, outerTbl_, outerIdxs[ki]);
+                if (rawColumnIsNull(row, outerTbl_, outerIdxs[ki])) isNull2 = true;
+                okey += v;
+            }
+            const bool found = !isNull2 && innerKeys.count(okey) > 0;
+            const bool keep = anti_ ? (!isNull2 && !found && !innerHasNull) : found;
+            if (keep) rows_.push_back(row);
+        }
+        outer_->close();
+        return true;
+    }
 
     size_t outerIdx = outerTbl_.len;
     size_t innerIdx = innerTbl_.len;
@@ -3041,9 +3108,15 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                 inner = std::make_unique<FilterOp>(
                     std::move(inner), innerTbl, spec.innerConds);
             }
-            root = std::make_unique<SemiJoinOp>(
-                std::move(root), std::move(inner), outerTbl, innerTbl,
-                spec.outerColumn, spec.innerColumn, spec.anti);
+            if (!spec.correlations.empty()) {
+                root = std::make_unique<SemiJoinOp>(
+                    std::move(root), std::move(inner), outerTbl, innerTbl,
+                    spec.correlations, spec.anti);
+            } else {
+                root = std::make_unique<SemiJoinOp>(
+                    std::move(root), std::move(inner), outerTbl, innerTbl,
+                    spec.outerColumn, spec.innerColumn, spec.anti);
+            }
         }
     }
 
@@ -3061,7 +3134,14 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                 inner = std::make_unique<FilterOp>(
                     std::move(inner), innerTbl, spec.innerConds);
             }
-            if (!spec.outerColumn.empty() && !spec.innerColumn.empty()) {
+            if (!spec.correlations.empty()) {
+                // Correlated EXISTS: equality keys to the outer row lower
+                // to semi-join keys (anti for NOT EXISTS); multiple
+                // correlations join on a composite key.
+                root = std::make_unique<SemiJoinOp>(
+                    std::move(root), std::move(inner), outerTbl, innerTbl,
+                    spec.correlations, spec.anti);
+            } else if (!spec.outerColumn.empty() && !spec.innerColumn.empty()) {
                 // Correlated EXISTS: the equality to the outer row lowers
                 // to a semi-join key (anti for NOT EXISTS).
                 root = std::make_unique<SemiJoinOp>(

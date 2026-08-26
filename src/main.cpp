@@ -7237,13 +7237,35 @@ static bool parseSimpleExistenceSubquery(
             if (innerSchema.cols[i].dataName == name) return true;
         return false;
     };
+    // Does a predicate VALUE reference the OUTER row?  Qualified values
+    // ("<outerTable>.<col>") name the outer row even when the bare
+    // column also exists in the inner table; unqualified values are outer
+    // references only when the inner table lacks that column.
+    auto valueReferencesOuter = [&](const std::string& v) {
+        if (v.empty() || v.find("'") != std::string::npos) return false;
+        const size_t dot = v.rfind('.');
+        if (dot != std::string::npos) {
+            const std::string prefix = toLower(trim(v.substr(0, dot)));
+            return prefix == toLower(outerTable) || outerHasColumn(trim(v.substr(dot + 1)));
+        }
+        return !innerHasColumn(v) && outerHasColumn(v);
+    };
 
     // Correlation: equality with inner column on the left and a bare OUTER
     // column reference on the right (optionally alias-qualified).  One
     // correlation key lowers to a semi-join; richer shapes stay legacy.
     std::string correlOuter, correlInner;
+    std::vector<std::pair<std::string, std::string>> correlations;
     std::vector<dbms::StorageEngine::Condition> plainConds;
-    for (const auto& condition : innerConds) {
+    for (auto condition : innerConds) {
+        // Inner columns may arrive table-qualified ("mc2.a"); the
+        // condition engine matches bare names.
+        {
+            const size_t cd = condition.colName.rfind('.');
+            if (cd != std::string::npos) {
+                condition.colName = trim(condition.colName.substr(cd + 1));
+            }
+        }
         bool handled = false;
         if (condition.op == "=" && innerHasColumn(condition.colName)) {
             std::string val = condition.value;
@@ -7252,16 +7274,25 @@ static bool parseSimpleExistenceSubquery(
                 const size_t dot = bare.rfind('.');
                 if (dot != std::string::npos) bare = trim(bare.substr(dot + 1));
                 const bool valIsInner = dot == std::string::npos && innerHasColumn(bare);
-                if (!valIsInner && outerHasColumn(bare)) {
-                    if (!correlOuter.empty()) return false;
-                    correlOuter = bare;
-                    correlInner = condition.colName;
+                if (valIsInner ? false : valueReferencesOuter(val)) {
+                    if (correlOuter.empty()) {
+                        correlOuter = bare;
+                        correlInner = condition.colName;
+                    }
+                    correlations.push_back({bare, condition.colName});
                     handled = true;
                 }
             }
         }
         if (!handled) {
             if (!innerHasColumn(condition.colName)) return false;
+            // A non-equality predicate whose VALUE references an OUTER
+            // column is a range correlation; the semi-join lowering cannot
+            // express it, so keep the legacy fallback (which substitutes
+            // outer values per row).
+            {
+                if (valueReferencesOuter(condition.value)) return false;
+            }
             plainConds.push_back(condition);
         }
     }
@@ -7270,6 +7301,7 @@ static bool parseSimpleExistenceSubquery(
     outSpec.innerConds = std::move(plainConds);
     outSpec.outerColumn = correlOuter;
     outSpec.innerColumn = correlInner;
+    outSpec.correlations = std::move(correlations);
     outSpec.anti = anti;
     return true;
 }

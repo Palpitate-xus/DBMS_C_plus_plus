@@ -1179,7 +1179,7 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
 标记）和本 DBMS（wire protocol），规范化不稳定字段后逐条比对行数据与
 SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版本。
 
-当前覆盖（21 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑、
+当前覆盖（22 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑、
 整数/numeric 除法（含 PG `select_div_scale` 的 16/20 位小数规则）、
 CASE 表达式、聚合（sum/count/avg/min/max、GROUP BY、FILTER 子句）、
 显式/隐式类型转换（CAST(x AS t) 前缀语法、`::` 后缀语法、舍入与
@@ -1207,7 +1207,8 @@ NULLS LAST、DESC 时 NULLS FIRST，PG 默认语义）与 NULL 单元格
 字面量按 NUMERIC 精确运算、除法精确性判定与 select_div_scale 的
 20 位宽结果规则（1.5/1、2.2/2 与 PG 逐位一致）、GROUP BY 选择
 列表中的相关标量子查询（按分组值相关求值，列头取子查询自身的
-输出列名）。运行：`python3 tests/compat/pg_diff_runner.py
+输出列名）、EXISTS/NOT EXISTS 的多列相关（复合键半连接/反连
+接，含相关列与内表同名的歧义消解）。运行：`python3 tests/compat/pg_diff_runner.py
 [--only NAME]`（需要 docker 参考库）。
 
 差分驱动已修复的语义：`CASE` 生成真正的 `CaseExpr`；`NULL AND/OR x`

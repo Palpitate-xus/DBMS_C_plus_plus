@@ -327,6 +327,12 @@ public:
     SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
                const TableSchema& innerTbl, const std::string& outerColumn,
                const std::string& innerColumn, bool anti);
+    // Multi-key correlated semi/anti join: each pair is (outer col,
+    // inner col); rows match when ALL pairs match.
+    SemiJoinOp(OpPtr outer, OpPtr inner, const TableSchema& outerTbl,
+               const TableSchema& innerTbl,
+               std::vector<std::pair<std::string, std::string>> keys,
+               bool anti);
 
     bool open() override;
     bool next(std::string& outRow) override;
@@ -344,6 +350,7 @@ private:
     TableSchema innerTbl_;
     std::string outerColumn_;
     std::string innerColumn_;
+    std::vector<std::pair<std::string, std::string>> keys_;
     bool anti_;
     std::vector<std::string> rows_;
     size_t pos_ = 0;
@@ -911,6 +918,9 @@ struct SemiJoinSpec {
     std::string innerColumn;
     std::vector<StorageEngine::Condition> innerConds;
     bool anti = false;
+    // All equality correlations (outer col, inner col); appended after
+    // the legacy members so aggregate initializers keep compiling.
+    std::vector<std::pair<std::string, std::string>> correlations;
 };
 
 struct ExistenceSpec {
@@ -922,6 +932,9 @@ struct ExistenceSpec {
     // semi-join key; empty means fully uncorrelated.
     std::string outerColumn;
     std::string innerColumn;
+    // All equality correlations (outer col, inner col); the pair above
+    // keeps the first for compatibility.
+    std::vector<std::pair<std::string, std::string>> correlations;
     bool anti = false;
 };
 
