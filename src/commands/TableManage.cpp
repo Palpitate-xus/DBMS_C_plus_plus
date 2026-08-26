@@ -18325,6 +18325,30 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return std::to_string(static_cast<int64_t>(d));
         } catch (...) { return val; }
     }
+    if (expr.funcName == "strpos" && expr.funcArgs.size() >= 2) {
+        // PG: strpos(s, sub) = 1-based position or 0.
+        std::string a = getVal(expr.funcArgs[0]);
+        std::string b2 = getVal(expr.funcArgs[1]);
+        if (b2.empty()) return "1";
+        size_t p = a.find(b2);
+        return (p == std::string::npos) ? "0" : std::to_string(p + 1);
+    }
+    if (expr.funcName == "overlay" && expr.funcArgs.size() >= 3) {
+        // PG: overlay(s placing r from start [for n]) replaces n
+        // chars (default: length of r) starting at start.
+        std::string s = getVal(expr.funcArgs[0]);
+        std::string r = getVal(expr.funcArgs[1]);
+        int start = 1, n = (int)r.size();
+        try { start = std::stoi(getVal(expr.funcArgs[2])); } catch (...) { return s; }
+        if (expr.funcArgs.size() >= 4) {
+            try { n = std::stoi(getVal(expr.funcArgs[3])); } catch (...) {}
+        }
+        if (start < 1) return s;
+        size_t st = (size_t)(start - 1);
+        if (st > s.size()) return s + r;
+        if (st + n > s.size()) n = (int)(s.size() - st);
+        return s.substr(0, st) + r + s.substr(st + n);
+    }
     if (expr.funcName == "btrim" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
         // PG: btrim(s, chars) strips any of chars from both ends;

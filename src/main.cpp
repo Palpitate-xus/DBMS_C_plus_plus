@@ -668,7 +668,7 @@ static bool isScalarFunc(const string& name) {
                                          "case_when", "cast", "convert",
                                          "to_number", "to_char", "to_date",
                                          "coalesce", "nullif",
-                                         "replace", "position", "instr",
+                                         "replace", "position", "instr", "strpos", "overlay",
                                          "power", "sqrt", "mod", "div", "gcd", "lcm", "width_bucket",
                                          "ln", "log", "exp", "random", "rand",
                                          "lpad", "rpad", "reverse", "left", "right", "repeat", "btrim", "ltrim", "rtrim",
@@ -16961,6 +16961,32 @@ if (sql.rfind("backup database", 0) == 0) {
                                     expr.funcArgs = {fld, col};
                                 }
                             }
+                            if (func == "overlay" && expr.funcArgs.size() == 1) {
+                                // OVERLAY(s PLACING r FROM start [FOR n]) ->
+                                // positional args [s, r, start, n].
+                                const string& one = expr.funcArgs[0];
+                                string lower1 = one;
+                                for (auto& lc : lower1) lc = static_cast<char>(tolower(static_cast<unsigned char>(lc)));
+                                auto wordPos = [](const string& hay, const string& w) -> size_t {
+                                    size_t p = hay.find(w);
+                                    return p;
+                                };
+                                size_t pPl = wordPos(lower1, " placing ");
+                                size_t pFr = lower1.rfind(" from ");
+                                size_t pFo = lower1.rfind(" for ");
+                                if (pPl != string::npos && pFr != string::npos && pFr > pPl) {
+                                    string base = trim(one.substr(0, pPl));
+                                    string rep = trim(one.substr(pPl + 9, pFr - (pPl + 9)));
+                                    string tail = (pFo != string::npos && pFo > pFr) ? trim(one.substr(pFr + 6, pFo - (pFr + 6))) : trim(one.substr(pFr + 6));
+                                    string cnt = (pFo != string::npos && pFo > pFr) ? trim(one.substr(pFo + 5)) : "";
+                                    expr.funcArgs.clear();
+                                    expr.funcArgs.push_back(base);
+                                    expr.funcArgs.push_back(rep);
+                                    expr.funcArgs.push_back(tail);
+                                    if (!cnt.empty()) expr.funcArgs.push_back(cnt);
+                                }
+                            }
+
                             selectExprs.push_back(expr);
                             hasScalar = true;
                             exprTypes.push_back(3);
