@@ -18325,6 +18325,39 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return std::to_string(static_cast<int64_t>(d));
         } catch (...) { return val; }
     }
+    if (expr.funcName == "left" && expr.funcArgs.size() >= 2) {
+        std::string val = getVal(expr.funcArgs[0]);
+        // PG: left(s, n) n>=0 first n chars; n<0 drops the last |n| chars.
+        try {
+            int n = std::stoi(getVal(expr.funcArgs[1]));
+            if (n >= 0) return val.substr(0, (size_t)n);
+            if ((size_t)(-n) >= val.size()) return "";
+            return val.substr(0, val.size() + n);
+        } catch (...) { return val; }
+    }
+    if (expr.funcName == "right" && expr.funcArgs.size() >= 2) {
+        std::string val = getVal(expr.funcArgs[0]);
+        // PG: right(s, n) n>=0 last n chars; n<0 drops the first |n| chars.
+        try {
+            int n = std::stoi(getVal(expr.funcArgs[1]));
+            if (n >= 0) {
+                if ((size_t)n >= val.size()) return val;
+                return val.substr(val.size() - n);
+            }
+            if ((size_t)(-n) >= val.size()) return "";
+            return val.substr(-n);
+        } catch (...) { return val; }
+    }
+    if (expr.funcName == "repeat" && expr.funcArgs.size() >= 2) {
+        std::string val = getVal(expr.funcArgs[0]);
+        // PG: repeat(s, n) concatenates s n times; n<=0 gives empty.
+        try {
+            int n = std::stoi(getVal(expr.funcArgs[1]));
+            std::string out;
+            for (int i = 0; i < n; ++i) out += val;
+            return out;
+        } catch (...) { return val; }
+    }
     if ((expr.funcName == "gcd" || expr.funcName == "lcm") && expr.funcArgs.size() >= 2) {
         std::string a = getVal(expr.funcArgs[0]);
         std::string b = getVal(expr.funcArgs[1]);

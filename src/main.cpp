@@ -671,7 +671,7 @@ static bool isScalarFunc(const string& name) {
                                          "replace", "position", "instr",
                                          "power", "sqrt", "mod", "div", "gcd", "lcm", "width_bucket",
                                          "ln", "log", "exp", "random", "rand",
-                                         "lpad", "rpad", "reverse",
+                                         "lpad", "rpad", "reverse", "left", "right", "repeat",
                                          "greatest", "least", "if", "iif",
                                          "date_add", "date_sub",
                                          "datediff", "date_trunc", "date_format",
