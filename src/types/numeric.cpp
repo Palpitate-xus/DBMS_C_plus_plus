@@ -382,11 +382,12 @@ Numeric Numeric::operator/(const Numeric& rhs) const {
     bool belowOne = intDigits < 1;
     bool exact = true;
     {
-        // exact when every fractional digit beyond position 16 is zero
-        int fracCount = r.scale_;
-        for (int pos = 17; pos <= fracCount; ++pos) {
-            int idx = static_cast<int>(r.digits_.size()) - pos;
-            if (idx < 0) break;
+        // exact when every fractional digit beyond the 16th (counted from
+        // the decimal point, left to right) is zero.  Fractional digit p
+        // (1-based) is digits[intDigits + p - 1].
+        int intDig = static_cast<int>(r.digits_.size()) - r.scale_;
+        if (intDig < 0) intDig = 0;
+        for (size_t idx = intDig + 16; idx < r.digits_.size(); ++idx) {
             if (r.digits_[idx] != 0) { exact = false; break; }
         }
     }

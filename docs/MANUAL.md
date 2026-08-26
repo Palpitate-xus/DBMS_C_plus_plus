@@ -1203,7 +1203,9 @@ NULLS LAST、DESC 时 NULLS FIRST，PG 默认语义）与 NULL 单元格
 分组列排序，含 DESC 与 NULL 语义）、INTERSECT/EXCEPT/UNION 集合运算
 （尾部 ORDER BY/LIMIT 作用于整个集合结果，含 UNION ALL）、CAST 列头
 按目标类型命名（float8/text/bpchar 等）与一元正负号投影
-（SELECT -v，头为 ?column?），数值转整数按 PG 四舍五入。运行：`python3 tests/compat/pg_diff_runner.py
+（SELECT -v，头为 ?column?），数值转整数按 PG 四舍五入，裸小数
+字面量按 NUMERIC 精确运算、除法精确性判定与 select_div_scale 的
+20 位宽结果规则（1.5/1、2.2/2 与 PG 逐位一致）。运行：`python3 tests/compat/pg_diff_runner.py
 [--only NAME]`（需要 docker 参考库）。
 
 差分驱动已修复的语义：`CASE` 生成真正的 `CaseExpr`；`NULL AND/OR x`

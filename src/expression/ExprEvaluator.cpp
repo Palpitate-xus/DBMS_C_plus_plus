@@ -766,6 +766,26 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                        toLower(l.typeName) == "real" ||
                        toLower(l.typeName) == "numeric";
 
+    // A bare decimal literal ("1.5") is NUMERIC in PG even when untyped
+    // here: route decimal-point values through exact Numeric arithmetic
+    // (select 1.5/1 -> 1.50000000000000000000 via select_div_scale).
+    if (floatResult && !isDecimalTyped(l.typeName) && !isDecimalTyped(r.typeName)) {
+        auto nl2 = tryParseNumeric(l.value);
+        auto nr2 = tryParseNumeric(r.value);
+        if (nl2 && nr2) {
+            Numeric res;
+            if (op == "+") res = *nl2 + *nr2;
+            else if (op == "-") res = *nl2 - *nr2;
+            else if (op == "*") res = *nl2 * *nr2;
+            else if (op == "/") {
+                if (nr2->sign() == 0)
+                    throw std::runtime_error("division by zero (SQLSTATE 22012)");
+                res = *nl2 / *nr2;
+            } else return ExprValue("numeric", "", true);
+            return ExprValue("numeric", res.toString(), false);
+        }
+    }
+
     if (floatResult) {
         double a = l.asDouble(), b = r.asDouble(), res = 0;
         if (op == "+") res = a + b;
