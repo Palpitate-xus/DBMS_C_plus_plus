@@ -16896,6 +16896,22 @@ if (sql.rfind("backup database", 0) == 0) {
                         if (ai2 < aggItems.size() && !aggItems[ai2].func.empty())
                             cout << selectExprs[ei].displayName << ' ';
                         ++ai2;
+                    } else if (exprTypes[ei] == 3 &&
+                               selectExprs[ei].funcName == "subquery") {
+                        // Scalar subquery in a GROUP BY select list:
+                        // evaluated per output group below.  PG names the
+                        // column after the subquery's own select column.
+                        string subCol = selectExprs[ei].displayName;
+                        {
+                            const string& sq = selectExprs[ei].funcArgs[0];
+                            size_t sp = sq.find("select ");
+                            if (sp == 0) {
+                                size_t fp = sq.find(" from ");
+                                if (fp != string::npos)
+                                    subCol = trim(sq.substr(7, fp - 7));
+                            }
+                        }
+                        cout << subCol << ' ';
                     }
                 }
             }
@@ -17011,6 +17027,116 @@ if (sql.rfind("backup database", 0) == 0) {
                         for (const auto& row : part) {
                             if (seen.insert(row).second) answers.push_back(row);
                         }
+                    }
+                }
+            }
+            // Scalar subqueries in a GROUP BY select list: evaluate per
+            // output group.  Correlation on group columns is substituted
+            // with the group's value (any "alias.col" / bare "col"
+            // reference where col is a GROUP BY column).
+            {
+                vector<pair<size_t, string>> subqItems;  // (select index, sql)
+                for (size_t ei = 0; ei < exprTypes.size(); ++ei) {
+                    if (exprTypes[ei] == 3 &&
+                        selectExprs[ei].funcName == "subquery" &&
+                        !selectExprs[ei].funcArgs.empty()) {
+                        subqItems.push_back({ei, selectExprs[ei].funcArgs[0]});
+                    }
+                }
+                if (!subqItems.empty() && !answers.empty()) {
+                    size_t groupCellCount = min(groupByCols.size(), answers.front().find(' ') == string::npos ? 1 : groupByCols.size());
+                    auto splitCells = [](const string& row) {
+                        vector<string> cells;
+                        size_t start = 0;
+                        while (start <= row.size()) {
+                            size_t sp = row.find(' ', start);
+                            if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
+                            cells.push_back(row.substr(start, sp - start));
+                            start = sp + 1;
+                        }
+                        return cells;
+                    };
+                    for (auto& row : answers) {
+                        vector<string> cells = splitCells(row);
+                        string extra;
+                        for (const auto& sq : subqItems) {
+                            string sql = sq.second;
+                            for (size_t gi = 0; gi < groupByCols.size() && gi < cells.size(); ++gi) {
+                                const string& col = groupByCols[gi];
+                                const string& val = cells[gi];
+                                // Substitute only OUTER references:
+                                // "<outertable>.<col>".  Bare "col" is
+                                // substituted only when not preceded by a
+                                // dot ("c2.g" must survive).
+                                {
+                                    // Numeric group columns substitute
+                                    // unquoted (text needs quotes).
+                                    bool colIsNumeric = false;
+                                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                        if (tbl.cols[ci].dataName == col) {
+                                            string dt = tbl.cols[ci].dataType;
+                                            for (auto& dc : dt) dc = static_cast<char>(tolower(static_cast<unsigned char>(dc)));
+                                            colIsNumeric = dt.find("int") != string::npos ||
+                                                           dt.find("numeric") != string::npos ||
+                                                           dt.find("decimal") != string::npos ||
+                                                           dt.find("float") != string::npos ||
+                                                           dt.find("double") != string::npos;
+                                            break;
+                                        }
+                                    }
+                                    string lit = colIsNumeric ? val : "'" + val + "'";
+                                    string qual = tname + "." + col;
+                                    size_t pp = 0;
+                                    while ((pp = sql.find(qual, pp)) != string::npos) {
+                                        sql = sql.substr(0, pp) + " " + lit + sql.substr(pp + qual.size());
+                                        pp += lit.size() + 1;
+                                    }
+                                    string out;
+                                    size_t i = 0;
+                                    while (i < sql.size()) {
+                                        if (sql.compare(i, col.size(), col) == 0 &&
+                                            (i == 0 || !(isalnum((unsigned char)sql[i-1]) || sql[i-1]=='_' || sql[i-1]=='.')) &&
+                                            (i + col.size() >= sql.size() || !(isalnum((unsigned char)sql[i+col.size()]) || sql[i+col.size()]=='_'))) {
+                                            out += lit;
+                                            i += col.size();
+                                        } else out += sql[i++];
+                                    }
+                                    sql = out;
+                                }
+                            }
+                            string cell = "NULL";
+                            {
+                                // runSubQuery conditions expect BARE column
+                                // names: strip "<table>." qualifiers.
+                                string bare;
+                                size_t i = 0;
+                                while (i < sql.size()) {
+                                    if (sql[i] == '.' && i > 0 &&
+                                        (isalnum((unsigned char)sql[i-1]) || sql[i-1]=='_')) {
+                                        size_t ws = bare.size();
+                                        while (ws > 0 && (isalnum((unsigned char)bare[ws-1]) || bare[ws-1]=='_')) --ws;
+                                        bare.erase(ws);
+                                        ++i;
+                                        continue;
+                                    }
+                                    bare += sql[i++];
+                                }
+                                sql = bare;
+                            }
+                            {
+                                auto rows = runSubQuery(sql, s);
+                                if (!rows.empty() && !rows.front().empty()) {
+                                    stringstream rs(rows.front());
+                                    string first;
+                                    rs >> first;
+                                    if (!first.empty()) cell = first;
+                                }
+                            }
+                            extra += cell + ' ';
+                        }
+                        while (!extra.empty() && extra.back() == ' ') extra.pop_back();
+                        while (!row.empty() && row.back() == ' ') row.pop_back();
+                        row = row.empty() ? extra : row + ' ' + extra;
                     }
                 }
             }
