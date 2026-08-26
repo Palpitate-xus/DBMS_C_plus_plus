@@ -16648,6 +16648,65 @@ if (sql.rfind("backup database", 0) == 0) {
                     selectExprs.push_back(expr);
                     hasScalar = true;
                     exprTypes.push_back(3);
+                } else if (item.find("||") != string::npos &&
+                           [&item]{
+                               bool inQ = false; int depth = 0;
+                               for (size_t i = 0; i + 1 < item.size(); ++i) {
+                                   if (item[i] == 39) { inQ = !inQ; continue; }
+                                   if (inQ) continue;
+                                   if (item[i] == '(') ++depth;
+                                   else if (item[i] == ')') --depth;
+                                   if (depth == 0 && item[i] == '|' && item[i+1] == '|') return true;
+                               }
+                               return false;
+                           }()) {
+                    // Concatenation chain: tokenize on top-level ||
+                    dbms::StorageEngine::SelectExpr expr;
+                    expr.displayName = itemAlias.empty() ? "?column?" : itemAlias;
+                    expr.isScalar = true;
+                    expr.funcName = "arith";
+                    {
+                        std::vector<std::string> parts;
+                        std::string cur;
+                        bool inQ = false; int depth = 0;
+                        for (size_t i = 0; i < item.size(); ++i) {
+                            char c = item[i];
+                            if (c == 39) { inQ = !inQ; cur += c; continue; }
+                            if (inQ) { cur += c; continue; }
+                            if (c == '(') ++depth;
+                            else if (c == ')') --depth;
+                            if (depth == 0 && c == '|' && i + 1 < item.size() && item[i+1] == '|') {
+                                parts.push_back(trim(cur)); cur.clear(); ++i;
+                                parts.push_back("||");
+                                continue;
+                            }
+                            cur += c;
+                        }
+                        if (!trim(cur).empty()) parts.push_back(trim(cur));
+                        for (const auto& p2 : parts) {
+                            if (!p2.empty()) expr.funcArgs.push_back(p2);
+                        }
+                    }
+                    selectExprs.push_back(expr);
+                    hasScalar = true;
+                    exprTypes.push_back(3);
+                    for (const auto& a : expr.funcArgs) {
+                        if (a == "||") continue;
+                        string bare = a;
+                        size_t cc = bare.find("::");
+                        if (cc != string::npos) bare = bare.substr(0, cc);
+                        if (bare.find('(') != string::npos) {
+                            string inner = bare.substr(bare.find('(') + 1);
+                            inner = inner.substr(0, inner.rfind(')'));
+                            for (size_t ci = 0; ci < tbl.len; ++ci)
+                                if (inner == tbl.cols[ci].dataName) { selectCols.insert(inner); break; }
+                            continue;
+                        }
+                        if (bare.size() >= 2 && bare.front() == 39) continue;
+                        for (size_t ci = 0; ci < tbl.len; ++ci) {
+                            if (tbl.cols[ci].dataName == bare) { selectCols.insert(bare); break; }
+                        }
+                    }
                 } else {
                     // Detect FILTER (WHERE condition) after aggregate function
                     vector<string> filterConds;
@@ -16816,11 +16875,14 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                         bool isArithItem = false;
                         {
-                            static const string ops = "+-*/%";
+                            static const string ops = "+-*/%|";
                             size_t opCount = 0;
                             for (size_t k = 1; k < arithItem.size(); ++k) {
                                 char ch = arithItem[k];
                                 if (ops.find(ch) == string::npos) continue;
+                                if (ch == '|' &&
+                                    (k + 1 >= arithItem.size() || arithItem[k+1] != '|'))
+                                    continue;   // single | is not concat
                                 // operator must sit between non-space operands
                                 size_t prevNonSpace = arithItem.find_last_not_of(' ', k - 1);
                                 size_t nextNonSpace = arithItem.find_first_not_of(' ', k + 1);
@@ -16843,6 +16905,15 @@ if (sql.rfind("backup database", 0) == 0) {
                             string operand;
                             for (size_t k = 0; k < arithItem.size(); ++k) {
                                 char ch = arithItem[k];
+                                if (ch == '|' && k + 1 < arithItem.size() &&
+                                    arithItem[k+1] == '|') {
+                                    // concat operator: one token, operands
+                                    // flushed around it.
+                                    if (!operand.empty()) { expr.funcArgs.push_back(operand); operand.clear(); }
+                                    expr.funcArgs.push_back("||");
+                                    ++k;
+                                    continue;
+                                }
                                 if (isspace(static_cast<unsigned char>(ch))) {
                                     if (!operand.empty()) { expr.funcArgs.push_back(operand); operand.clear(); }
                                 } else if (string("+-*/%").find(ch) != string::npos &&

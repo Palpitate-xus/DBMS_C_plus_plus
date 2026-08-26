@@ -17859,12 +17859,67 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         bool isString = false;
         for (const auto& rawArg : expr.funcArgs) {
             std::string a = rawArg;
+            if (a == "||") {
+                pendingOp = 'C';   // concatenation marker
+                continue;
+            }
             // Operators ride along as standalone args ("*", "+", ...).
             if (a.size() == 1 && std::string("+-*/%").find(a[0]) != std::string::npos) {
                 pendingOp = a[0];
                 continue;
             }
-            std::string v = getVal(a);
+            std::string v;
+            if (a.size() >= 2 && a.front() == 39 && a.back() == 39) {
+                // Quoted literal operand: strip the quotes.
+                v = a.substr(1, a.size() - 2);
+            } else {
+            {
+                // Operand may carry an inline cast ("id::text"):
+                // resolve the column, then render per the target type.
+                size_t cc = a.find("::");
+                if (cc != std::string::npos) {
+                    std::string col = a.substr(0, cc);
+                    std::string typ = a.substr(cc + 2);
+                    for (auto& c : typ) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                    std::string raw = getVal(col);
+                    if (typ == "text" || typ == "varchar" || typ == "char" ||
+                        typ == "character varying" || typ == "character") {
+                        v = raw;   // already text
+                    } else {
+                        v = getVal(a);   // other casts: fall through
+                    }
+                } else if (a.find('(') != std::string::npos && a.back() == ')') {
+                    // Function-call operand: evaluate recursively.
+                    size_t lp = a.find('(');
+                    std::string fn = a.substr(0, lp);
+                    for (auto& c : fn) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                    std::string inner = a.substr(lp + 1, a.size() - lp - 2);
+                    StorageEngine::SelectExpr sub;
+                    sub.funcName = fn;
+                    {
+                        std::string cur;
+                        int depth = 0;
+                        for (char c : inner) {
+                            if (c == '(') ++depth;
+                            if (c == ')') --depth;
+                            if (c == ',' && depth == 0) { sub.funcArgs.push_back(cur); cur.clear(); continue; }
+                            cur += c;
+                        }
+                        if (!cur.empty()) sub.funcArgs.push_back(cur);
+                    }
+                    v = applyScalarFunc(sub, rowBuffer, tbl, engine, dbname);
+                } else {
+                    v = getVal(a);
+                }
+            }
+            }
+            if (pendingOp == 'C' && accSet) {
+                // SQL concatenation: both sides rendered as text.
+                strAcc += v;
+                isString = true;
+                pendingOp = 0;
+                continue;
+            }
             if (!accSet) {
                 strAcc = v;
                 try { acc = std::stod(v); } catch (...) { isString = true; }
