@@ -661,7 +661,7 @@ static string preprocessCaseWhen(string s) {
 // ========================================================================
 static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "char_length", "character_length", "upper", "lower", "trim", "substring", "concat",
-                                         "abs", "round", "ceil", "floor",
+                                         "abs", "round", "trunc", "ceil", "floor",
                                          "now", "current_timestamp", "extract",
                                          "year", "month", "day",
                                          "hour", "minute", "second",

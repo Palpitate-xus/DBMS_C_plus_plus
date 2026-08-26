@@ -18312,10 +18312,45 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     // needed: setprecision(digits) already limits them.
                     return out.str();
                 }
+                if (digits < 0) {
+                    double scale = 1.0;
+                    for (int i = 0; i > digits; --i) scale *= 10.0;
+                    d = std::round(d / scale) * scale;
+                    return std::to_string(static_cast<int64_t>(d));
+                }
                 d = std::round(d);
                 return std::to_string(static_cast<int64_t>(d));
             }
             d = std::round(d);
+            return std::to_string(static_cast<int64_t>(d));
+        } catch (...) { return val; }
+    }
+    if (expr.funcName == "trunc" && !expr.funcArgs.empty()) {
+        std::string val = getVal(expr.funcArgs[0]);
+        try {
+            double d = std::stod(val);
+            // PG: trunc(x) truncates toward zero; trunc(x, n) keeps n
+            // decimals (n may be negative).
+            if (expr.funcArgs.size() >= 2) {
+                int digits = 0;
+                try { digits = std::stoi(getVal(expr.funcArgs[1])); }
+                catch (...) { digits = 0; }
+                if (digits > 0) {
+                    double scale = 1.0;
+                    for (int i = 0; i < digits; ++i) scale *= 10.0;
+                    d = std::trunc(d * scale) / scale;
+                    std::ostringstream out;
+                    out << std::fixed << std::setprecision(digits) << d;
+                    return out.str();
+                }
+                if (digits < 0) {
+                    double scale = 1.0;
+                    for (int i = 0; i > digits; --i) scale *= 10.0;
+                    d = std::trunc(d / scale) * scale;
+                    return std::to_string(static_cast<int64_t>(d));
+                }
+            }
+            d = std::trunc(d);
             return std::to_string(static_cast<int64_t>(d));
         } catch (...) { return val; }
     }
