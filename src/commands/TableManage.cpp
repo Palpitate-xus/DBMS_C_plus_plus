@@ -18325,6 +18325,18 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return std::to_string(static_cast<int64_t>(d));
         } catch (...) { return val; }
     }
+    if (expr.funcName == "div" && expr.funcArgs.size() >= 2) {
+        std::string a = getVal(expr.funcArgs[0]);
+        std::string b = getVal(expr.funcArgs[1]);
+        // PG: div(x, y) is the integer quotient truncating toward zero;
+        // div by zero raises 22012.
+        try {
+            double x = std::stod(a), y = std::stod(b);
+            if (y == 0) return "";
+            double q = std::trunc(x / y);
+            return std::to_string(static_cast<int64_t>(q));
+        } catch (...) { return ""; }
+    }
     if (expr.funcName == "trunc" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
         try {

@@ -669,7 +669,7 @@ static bool isScalarFunc(const string& name) {
                                          "to_number", "to_char", "to_date",
                                          "coalesce", "nullif",
                                          "replace", "position", "instr",
-                                         "power", "sqrt", "mod",
+                                         "power", "sqrt", "mod", "div",
                                          "ln", "log", "exp", "random", "rand",
                                          "lpad", "rpad", "reverse",
                                          "greatest", "least", "if", "iif",
