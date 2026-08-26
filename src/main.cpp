@@ -891,6 +891,20 @@ static bool checkTablePermission(Session& s, const string& tname,
 static bool checkSelectColumnPermission(Session& s, const string& tname,
                                          const string& columns);
 static vector<string> splitConds(const string& s);
+static size_t findWordCI(const string& s, const string& w, size_t from) {
+    for (size_t i = from; i + w.size() <= s.size(); ++i) {
+        bool m = true;
+        for (size_t k = 0; k < w.size(); ++k) {
+            if (tolower(static_cast<unsigned char>(s[i + k])) != w[k]) { m = false; break; }
+        }
+        if (!m) continue;
+        bool lb = (i == 0) || !isalnum(static_cast<unsigned char>(s[i - 1]));
+        bool la = (i + w.size() == s.size()) || !isalnum(static_cast<unsigned char>(s[i + w.size()]));
+        if (lb && la) return i;
+    }
+    return string::npos;
+}
+
 static string normalizeConditionStr(string s);
 static string modifyLogic(const string& logic);
 static string compactInLists(const string& s);
@@ -5200,6 +5214,29 @@ static string normalizeConditionStr(string s) {
                 pos += len;
             }
         }
+    }
+    // LIKE ... ESCAPE clause: rewrite into an encoded pattern.
+    for (size_t ep = 0; (ep = findWordCI(s, "escape", ep)) != string::npos; ) {
+        size_t vs = ep;
+        while (vs > 0 && isspace(static_cast<unsigned char>(s[vs - 1]))) vs--;
+        if (vs == 0 || s[vs - 1] != (char)39) { ep += 6; continue; }
+        size_t q1 = s.find_first_not_of(" ", ep + 6);
+        if (q1 == string::npos || s[q1] != (char)39 || q1 + 2 >= s.size() || s[q1 + 2] != (char)39) { ep += 6; continue; }
+        char esc = s[q1 + 1];
+        size_t pe = vs - 1;
+        size_t ps = pe;
+        while (ps > 0 && s[ps - 1] != (char)39) ps--;
+        if (ps == 0) { ep += 6; continue; }
+        string pat = s.substr(ps, pe - ps);
+        string enc;
+        for (size_t k = 0; k < pat.size(); ++k) {
+            if (pat[k] == esc && k + 1 < pat.size()) { enc += char(1); enc += pat[k + 1]; ++k; }
+            else enc += pat[k];
+        }
+        size_t clauseEnd = q1 + 3;
+        string tail = (clauseEnd + 1 < s.size()) ? s.substr(clauseEnd + 1) : string();
+        s = s.substr(0, ps) + enc + (char)39 + tail;
+        ep = ps + enc.size() + 1;
     }
     size_t ipos = 0;
     while ((ipos = s.find("ilike", ipos)) != string::npos) {

@@ -446,7 +446,12 @@ static bool likeMatch(const std::string& text, const std::string& pattern, bool 
     size_t i = 0, j = 0;
     size_t starIdx = std::string::npos, matchIdx = 0;
     while (i < t.size()) {
-        if (j < p.size() && (p[j] == t[i] || p[j] == '_')) {
+        if (j + 1 < p.size() && p[j] == 0x01) {
+            // escaped literal (from LIKE ... ESCAPE): next pattern char
+            // matches itself exactly.
+            if (p[j + 1] != t[i]) return false;
+            ++i; j += 2;
+        } else if (j < p.size() && (p[j] == t[i] || p[j] == '_')) {
             ++i; ++j;
         } else if (j < p.size() && p[j] == '%') {
             starIdx = j++;
