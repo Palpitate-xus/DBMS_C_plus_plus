@@ -17881,6 +17881,26 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             };
             stripDateKw(lv);
             stripDateKw(rv);
+            auto parseInterval = [](const std::string& v, long long& days, long long& months) -> bool {
+                std::string low;
+                for (char c : v) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                if (low.compare(0, 9, "interval ") != 0) return false;
+                std::string body = v.substr(9);
+                if (body.size() >= 2 && body.front() == (char)39 && body.back() == (char)39)
+                    body = body.substr(1, body.size() - 2);
+                days = 0; months = 0;
+                std::stringstream ss(body);
+                long long n;
+                std::string unit;
+                while (ss >> n >> unit) {
+                    if (unit == "day" || unit == "days") days += n;
+                    else if (unit == "week" || unit == "weeks") days += n * 7;
+                    else if (unit == "month" || unit == "months" || unit == "mon" || unit == "mons") months += n;
+                    else if (unit == "year" || unit == "years") months += n * 12;
+                    else return false;
+                }
+                return true;
+            };
             bool lDate = lt == "date" || (lt.empty() && looksDate(lv));
             bool rDate = rt == "date" || (rt.empty() && looksDate(rv));
             bool rNum = !rv.empty() && rv.find_first_not_of("+-.0123456789eE") == std::string::npos &&
@@ -17889,6 +17909,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 Date a(lv.c_str()), b(rv.c_str());
                 if (a.year == 0 || b.year == 0) return "";
                 return std::to_string(a.convert() - b.convert());
+            }
+            long long ivDays = 0, ivMonths = 0;
+            if (lDate && parseInterval(expr.funcArgs[2], ivDays, ivMonths)) {
+                Date a(lv.c_str());
+                if (a.year == 0) return "";
+                long long sign = (op == "-") ? -1 : 1;
+                Date r = dateAddMonths(a, static_cast<int>(sign * ivMonths));
+                if (ivDays != 0)
+                    r = (sign > 0) ? (r + ivDays) : (r - ivDays);
+                if (r.year == 0) return "";
+                char buf[40];
+                std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d 00:00:00", r.year, r.month, r.day);
+                return std::string(buf);
             }
             if (lDate && rNum) {
                 Date a(lv.c_str());
@@ -18560,15 +18593,41 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return std::to_string(d1 - d2);
     }
     if (expr.funcName == "age" && expr.funcArgs.size() >= 2) {
-        std::string a = getVal(expr.funcArgs[0]);
-        std::string b = getVal(expr.funcArgs[1]);
-        Date d1(a.c_str()), d2(b.c_str());
-        if (d1.year == 0 || d2.year == 0) return "";
-        int years = d1.year - d2.year;
-        if (d1.month < d2.month || (d1.month == d2.month && d1.day < d2.day)) {
-            years--;
+        std::string tv = getVal(expr.funcArgs[0]);
+        std::string sv = getVal(expr.funcArgs[1]);
+        auto stripKw = [](std::string& v) {
+            if (v.size() > 5 && (v.compare(0, 5, "DATE ") == 0 || v.compare(0, 5, "date ") == 0)) {
+                v = v.substr(5);
+                if (v.size() >= 2 && v.front() == (char)39 && v.back() == (char)39)
+                    v = v.substr(1, v.size() - 2);
+            }
+            if (v.size() > 11) v = v.substr(0, 10);
+        };
+        stripKw(tv); stripKw(sv);
+        if (tv.empty() || sv.empty() || tv == "NULL" || sv == "NULL") return "";
+        Date t(tv.c_str()), s(sv.c_str());
+        if (t.year == 0 || s.year == 0) return "";
+        bool neg = false;
+        if (s > t) { std::swap(t, s); neg = true; }
+        int y = t.year - s.year;
+        int m = t.month - s.month;
+        int d = t.day - s.day;
+        if (d < 0) {
+            m -= 1;
+            int pm = (t.month == 1) ? 12 : t.month - 1;
+            int py = (t.month == 1) ? t.year - 1 : t.year;
+            static const int md[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+            int dim = md[pm - 1];
+            if (pm == 2 && ((py % 4 == 0 && py % 100 != 0) || py % 400 == 0)) dim = 29;
+            d += dim;
         }
-        return std::to_string(years);
+        if (m < 0) { m += 12; y -= 1; }
+        std::string out = neg ? "-" : "";
+        bool has = neg;
+        if (y > 0) { out += std::to_string(y) + (y == 1 ? " year" : " years"); has = true; }
+        if (m > 0) { if (has) out += " "; out += std::to_string(m) + (m == 1 ? " mon" : " mons"); has = true; }
+        if (d > 0 || !has) { if (has) out += " "; out += std::to_string(d) + (d == 1 ? " day" : " days"); }
+        return out;
     }
     if (expr.funcName == "date_trunc" && expr.funcArgs.size() >= 2) {
         std::string unit = getVal(expr.funcArgs[0]);
