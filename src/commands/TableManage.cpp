@@ -17851,6 +17851,57 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // (no precedence), for + - * / % on numeric operands.  Operands may be
     // bare columns (row-resolved via getVal), integer/float literals, or
     // quoted strings (string concat for '+').
+    if (expr.funcName == "arith" && expr.funcArgs.size() == 3) {
+        // DATE arithmetic: date +/- integer days yields a date; date -
+        // date yields the day count (PG semantics).
+        auto looksDate = [](const std::string& v) {
+            return v.size() >= 10 && v[4] == '-' && v[7] == '-';
+        };
+        auto colType = [&](const std::string& a) -> std::string {
+            for (size_t i = 0; i < tbl.len; ++i)
+                if (tbl.cols[i].dataName == a) {
+                    std::string dt = tbl.cols[i].dataType;
+                    for (auto& c : dt) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+                    return dt;
+                }
+            return "";
+        };
+        const std::string& op = expr.funcArgs[1];
+        if (op == "+" || op == "-") {
+            std::string lt = colType(expr.funcArgs[0]);
+            std::string rt = colType(expr.funcArgs[2]);
+            std::string lv = getVal(expr.funcArgs[0]);
+            std::string rv = getVal(expr.funcArgs[2]);
+            auto stripDateKw = [](std::string& v) {
+                if (v.size() > 5 && (v.compare(0, 5, "DATE ") == 0 || v.compare(0, 5, "date ") == 0)) {
+                    v = v.substr(5);
+                    if (v.size() >= 2 && v.front() == 39 && v.back() == 39)
+                        v = v.substr(1, v.size() - 2);
+                }
+            };
+            stripDateKw(lv);
+            stripDateKw(rv);
+            bool lDate = lt == "date" || (lt.empty() && looksDate(lv));
+            bool rDate = rt == "date" || (rt.empty() && looksDate(rv));
+            bool rNum = !rv.empty() && rv.find_first_not_of("+-.0123456789eE") == std::string::npos &&
+                        rv.find_first_of("0123456789") != std::string::npos;
+            if (lDate && rDate && op == "-") {
+                Date a(lv.c_str()), b(rv.c_str());
+                if (a.year == 0 || b.year == 0) return "";
+                return std::to_string(a.convert() - b.convert());
+            }
+            if (lDate && rNum) {
+                Date a(lv.c_str());
+                if (a.year == 0) return "";
+                long long n = std::strtoll(rv.c_str(), nullptr, 10);
+                Date r = (op == "+") ? (a + n) : (a - n);
+                if (r.year == 0) return "";
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", r.year, r.month, r.day);
+                return std::string(buf);
+            }
+        }
+    }
     if (expr.funcName == "arith") {
         double acc = 0.0;
         bool accSet = false;
@@ -18076,11 +18127,23 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "extract" && expr.funcArgs.size() >= 2) {
         std::string val = getVal(expr.funcArgs[1]);
+        if (val.empty() || val == "NULL" || val == "null") return "";
         Date d(val.c_str());
         std::string field = expr.funcArgs[0];
         if (field == "year") return std::to_string(d.year);
         if (field == "month") return std::to_string(d.month);
         if (field == "day") return std::to_string(d.day);
+        if (field == "dow") {
+            static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+            int yy = d.year - (d.month < 3 ? 1 : 0);
+            int w = (yy + yy/4 - yy/100 + yy/400 + t[(d.month > 0 ? d.month : 1) - 1] + d.day) % 7;
+            return std::to_string(w);
+        }
+        if (field == "doy") {
+            Date jan1(d.year, 1, 1);
+            if (d.year == 0 || jan1.year == 0) return "";
+            return std::to_string(d.convert() - jan1.convert() + 1);
+        }
         return "";
     }
     // YEAR / MONTH / DAY - date extraction functions

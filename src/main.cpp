@@ -16858,6 +16858,21 @@ if (sql.rfind("backup database", 0) == 0) {
                             expr.isScalar = true;
                             expr.funcName = func;
                             expr.funcArgs = splitFuncArgs(arg);
+                            // EXTRACT(field FROM col): splitFuncArgs only
+                            // splits commas, so rewrite the field FROM col
+                            // form into two positional arguments.
+                            if (func == "extract" && expr.funcArgs.size() == 1) {
+                                const string& one = expr.funcArgs[0];
+                                size_t sp2 = one.find(" from ");
+                                if (sp2 == string::npos)
+                                    sp2 = one.find(" FROM ");
+                                if (sp2 != string::npos) {
+                                    string fld = trim(one.substr(0, sp2));
+                                    string col = trim(one.substr(sp2 + 6));
+                                    for (auto& fc : fld) fc = static_cast<char>(tolower(static_cast<unsigned char>(fc)));
+                                    expr.funcArgs = {fld, col};
+                                }
+                            }
                             selectExprs.push_back(expr);
                             hasScalar = true;
                             exprTypes.push_back(3);
