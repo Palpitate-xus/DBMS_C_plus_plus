@@ -17772,7 +17772,7 @@ if (sql.rfind("backup database", 0) == 0) {
             if (scalarVolcanoUsed) {
                 // PG projection order for plain columns (see the final
                 // print path): permute cells out of table order.
-                if (!projectionOrder.empty() && projectionOrder.size() == selectCols.size()) {
+                if (!projectionOrder.empty() && !projectionOrder.empty()) {
                     vector<string> want;
                     for (const auto& po : projectionOrder) {
                         string wantName = po;
@@ -17848,7 +17848,7 @@ if (sql.rfind("backup database", 0) == 0) {
             }
         } else {
             // PG header order follows the SELECT list for plain columns.
-            if (!projectionOrder.empty() && projectionOrder.size() == selectCols.size()) {
+            if (!projectionOrder.empty() && !projectionOrder.empty()) {
                 for (const auto& po : projectionOrder) {
                     size_t sep = po.find("\x01");
                     cout << (sep == string::npos ? po : po.substr(0, sep)) << ' ';
@@ -18021,7 +18021,7 @@ if (sql.rfind("backup database", 0) == 0) {
         }
         // PG projects plain columns in SELECT-list order; the engine emits
         // them in table order.  Permute cells when the orders differ.
-        if (!projectionOrder.empty() && projectionOrder.size() == selectCols.size()) {
+        if (!projectionOrder.empty() && !projectionOrder.empty()) {
             vector<string> want;
             for (const auto& po : projectionOrder) {
                 string wantName = po;

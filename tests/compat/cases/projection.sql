@@ -6,3 +6,6 @@ SELECT b, a FROM diff_pr ORDER BY a
 SELECT c, b, a FROM diff_pr ORDER BY a
 SELECT a AS aa, c AS cc FROM diff_pr ORDER BY aa
 SELECT b AS first, a AS second FROM diff_pr ORDER BY second
+SELECT a, b, a FROM diff_pr ORDER BY a
+SELECT b, b FROM diff_pr ORDER BY a
+SELECT a AS x, b, a AS y FROM diff_pr ORDER BY a

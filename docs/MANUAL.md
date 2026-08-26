@@ -1199,7 +1199,7 @@ select_div_scale 精确数值语义）、ROLLUP 分组集（含关键字后带
 （空键单元格在结果行中保持其位置，排序时空键居末）、NULL 排序（ASC 时
 NULLS LAST、DESC 时 NULLS FIRST，PG 默认语义）与 NULL 单元格
 的协议空值显示、投影列序（SELECT 列表顺序而非表定义顺序，
-含别名投影）、聚合输出上的 ORDER BY（按别名、聚合表达式或
+含别名投影，重复列（SELECT a, b, a）按列表重复输出）、聚合输出上的 ORDER BY（按别名、聚合表达式或
 分组列排序，含 DESC 与 NULL 语义）。运行：`python3 tests/compat/pg_diff_runner.py
 [--only NAME]`（需要 docker 参考库）。
 
