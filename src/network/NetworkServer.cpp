@@ -542,9 +542,16 @@ std::vector<std::string> outputLines(const std::string& output) {
         // Trim only the RIGHT side: a leading space is data (first cell
         // NULL renders as " val ..."), while trailing spaces are the
         // cell-separator artifact.
+        const bool originallyEmpty = line.empty();
         while (!line.empty() &&
                isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
-        if (!line.empty()) lines.push_back(std::move(line));
+        if (originallyEmpty) continue;
+        // A line that was non-empty before trimming is real data: an
+        // all-NULL row renders as a single space.  Keep it so the row
+        // survives; only originally-empty lines (statement separators)
+        // are dropped.
+        if (line.empty()) line = " ";
+        lines.push_back(std::move(line));
     }
     return lines;
 }
@@ -850,7 +857,13 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                 // The legacy executor prints one column as the complete line.
                 // Splitting it on whitespace corrupts timestamp/time-like
                 // values that legitimately contain spaces.
-                if (result.columns.size() == 1) result.rows.push_back({lines[i]});
+                if (result.columns.size() == 1) {
+                    // An all-NULL single-cell row survives as a single
+                    // space; the empty string is the NULL representation.
+                    std::string cell = lines[i];
+                    if (cell == " ") cell.clear();
+                    result.rows.push_back({cell});
+                }
                 else {
                     // The CLI renders cells as "v1 v2 ... " with single
                     // spaces; an empty cell yields a doubled space (or a

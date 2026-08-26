@@ -17869,7 +17869,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 continue;
             }
             std::string v;
-            if (a.size() >= 2 && a.front() == 39 && a.back() == 39) {
+            if (!a.empty() && a.find_first_not_of("+-.0123456789eE") == std::string::npos &&
+                a.find_first_of("0123456789") != std::string::npos) {
+                // Numeric literal operand.
+                v = a;
+            } else if (a.size() >= 2 && a.front() == 39 && a.back() == 39) {
                 // Quoted literal operand: strip the quotes.
                 v = a.substr(1, a.size() - 2);
             } else {
@@ -17902,16 +17906,20 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         for (char c : inner) {
                             if (c == '(') ++depth;
                             if (c == ')') --depth;
-                            if (c == ',' && depth == 0) { sub.funcArgs.push_back(cur); cur.clear(); continue; }
+                            if (c == ',' && depth == 0) { sub.funcArgs.push_back(trim(cur)); cur.clear(); continue; }
                             cur += c;
                         }
-                        if (!cur.empty()) sub.funcArgs.push_back(cur);
+                        if (!cur.empty()) sub.funcArgs.push_back(trim(cur));
                     }
                     v = applyScalarFunc(sub, rowBuffer, tbl, engine, dbname);
                 } else {
                     v = getVal(a);
                 }
             }
+            }
+            if (v.empty() || v == "NULL" || v == "null") {
+                // SQL NULL propagates through arithmetic and concat.
+                return "";
             }
             if (pendingOp == 'C' && accSet) {
                 // SQL concatenation: both sides rendered as text.

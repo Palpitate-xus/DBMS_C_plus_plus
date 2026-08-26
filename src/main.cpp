@@ -16648,15 +16648,28 @@ if (sql.rfind("backup database", 0) == 0) {
                     selectExprs.push_back(expr);
                     hasScalar = true;
                     exprTypes.push_back(3);
-                } else if (item.find("||") != string::npos &&
+                } else if (item.find("(select") == string::npos &&
+                           item.find("(SELECT") == string::npos &&
                            [&item]{
+                               // top-level operator (concat or arithmetic)
+                               // outside quotes and parentheses; a leading
+                               // sign is unary, not an operator.
                                bool inQ = false; int depth = 0;
-                               for (size_t i = 0; i + 1 < item.size(); ++i) {
+                               for (size_t i = 0; i < item.size(); ++i) {
                                    if (item[i] == 39) { inQ = !inQ; continue; }
                                    if (inQ) continue;
                                    if (item[i] == '(') ++depth;
                                    else if (item[i] == ')') --depth;
-                                   if (depth == 0 && item[i] == '|' && item[i+1] == '|') return true;
+                                   if (depth != 0) continue;
+                                   if (item[i] == '|' && i + 1 < item.size() && item[i+1] == '|') return true;
+                                   if (i == 0) continue;
+                                   if (string("+-*/%").find(item[i]) == string::npos) continue;
+                                   size_t prev = item.find_last_not_of(' ', i - 1);
+                                   size_t next = item.find_first_not_of(' ', i + 1);
+                                   if (prev == string::npos || next == string::npos) continue;
+                                   if (string("+-*/%").find(item[prev]) != string::npos) continue;
+                                   if (item[prev] == 'e' || item[prev] == 'E') continue;
+                                   return true;
                                }
                                return false;
                            }()) {
@@ -16666,19 +16679,47 @@ if (sql.rfind("backup database", 0) == 0) {
                     expr.isScalar = true;
                     expr.funcName = "arith";
                     {
+                        // Leading unary sign: rewrite as "0 - v" so the
+                        // binary path evaluates it (same as the plain
+                        // arithmetic branch).
+                        std::string exprText = item;
+                        if (!exprText.empty() && (exprText[0] == '-' || exprText[0] == '+') &&
+                            exprText.find_first_not_of(" 	", 1) != string::npos) {
+                            exprText = string("0 ") + exprText[0] + " " + exprText.substr(1);
+                        }
                         std::vector<std::string> parts;
                         std::string cur;
                         bool inQ = false; int depth = 0;
-                        for (size_t i = 0; i < item.size(); ++i) {
-                            char c = item[i];
+                        for (size_t i = 0; i < exprText.size(); ++i) {
+                            char c = exprText[i];
                             if (c == 39) { inQ = !inQ; cur += c; continue; }
                             if (inQ) { cur += c; continue; }
                             if (c == '(') ++depth;
                             else if (c == ')') --depth;
-                            if (depth == 0 && c == '|' && i + 1 < item.size() && item[i+1] == '|') {
+                            if (depth == 0 && c == '|' && i + 1 < exprText.size() && exprText[i+1] == '|') {
                                 parts.push_back(trim(cur)); cur.clear(); ++i;
                                 parts.push_back("||");
                                 continue;
+                            }
+                            if (depth == 0 && i > 0 && string("+-*/%").find(c) != string::npos &&
+                                !cur.empty() && cur.find_first_not_of(" 	") != string::npos) {
+                                // binary arithmetic at top level; the
+                                // operand accumulated so far is complete
+                                {
+                                    string trimmedCur = trim(cur);
+                                    if (!trimmedCur.empty() &&
+                                        trimmedCur.find_first_not_of("+-0123456789.eE") == string::npos &&
+                                        string("+-").find(trimmedCur.back()) != string::npos) {
+                                        // operand ended with a sign of the NEXT numeric literal
+                                        cur = trimmedCur.substr(0, trimmedCur.size() - 1);
+                                        parts.push_back(trim(cur)); cur.clear();
+                                        parts.push_back(string(1, trimmedCur.back()));
+                                        continue;
+                                    }
+                                    parts.push_back(trimmedCur); cur.clear();
+                                    parts.push_back(string(1, c));
+                                    continue;
+                                }
                             }
                             cur += c;
                         }
