@@ -436,11 +436,13 @@ static std::string evalExpressionSql(
     return res.isNull ? "" : res.value;
 }
 
-static bool likeMatch(const std::string& text, const std::string& pattern) {
+static bool likeMatch(const std::string& text, const std::string& pattern, bool foldCase = false) {
     std::string t = text;
     std::string p = pattern;
-    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    for (char& c : p) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (foldCase) {
+        for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : p) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
     size_t i = 0, j = 0;
     size_t starIdx = std::string::npos, matchIdx = 0;
     while (i < t.size()) {
@@ -2151,6 +2153,7 @@ static std::string normalizeViewCondStr(std::string s) {
     struct KW { const char* w; size_t l; const char* r; };
     static const KW kws[] = {
         {"not like", 9, "notlike"}, {"not between", 12, "notbetween"},
+        {"not ilike", 9, "notilike"}, {"ilike", 5, "ilike"},
         {"like", 4, "like"}, {"regexp", 6, "regexp"}, {"contains", 8, "contains"},
         {"overlaps", 8, "overlaps"}, {"is not null", 11, "isnotnull"}, {"is null", 7, "isnull"}
     };
@@ -2197,6 +2200,12 @@ static std::string modifyViewLogic(const std::string& logic) {
     size_t p = logic.find("not like");
     if (p != std::string::npos)
         return "notlike" + logic.substr(0, p) + " " + logic.substr(p + 9);
+    p = logic.find("ilike");
+    if (p != std::string::npos) {
+        std::string before = logic.substr(0, p);
+        std::string after = logic.substr(p + 5);
+        return "ilike" + before + " " + after;
+    }
     p = logic.find("like");
     if (p != std::string::npos)
         return "like" + logic.substr(0, p) + " " + logic.substr(p + 4);
@@ -12712,8 +12721,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && (scmp(val, cond.value) > 0))      return false;
         if (cond.op == ">=" && (scmp(val, cond.value) < 0))      return false;
         if (cond.op == "!=" && scmp(val, cond.value) == 0)        return false;
-        if (cond.op == "like" && !likeMatch(val, cond.value)) return false;
-        if (cond.op == "notlike" && likeMatch(val, cond.value)) return false;
+        if (cond.op == "like" && !likeMatch(val, cond.value, false)) return false;
+        if (cond.op == "notlike" && likeMatch(val, cond.value, false)) return false;
+        if (cond.op == "ilike" && !likeMatch(val, cond.value, true)) return false;
+        if (cond.op == "notilike" && likeMatch(val, cond.value, true)) return false;
         if (cond.op == "between" || cond.op == "notbetween") {
             // cond.value = "lo hi" (space-joined by modifyLogic)
             size_t sp = cond.value.find(' ');
@@ -12991,9 +13002,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 return true;
             }
         }
-        if (cond.op == "notlike") {
-            // NOT LIKE on a non-text column: match textually, then negate.
-            if (likeMatch(val, cond.value)) return false;
+        if (cond.op == "notlike" || cond.op == "notilike") {
+            // NOT LIKE / NOT ILIKE on a non-text column: match textually,
+            // then negate.
+            if (likeMatch(val, cond.value, cond.op == "notilike")) return false;
             return true;
         }
         int64_t cmp = StorageEngine::parseInt(cond.value);
@@ -14620,6 +14632,28 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
                 c.colName = s.substr(off, sp - off);
                 c.value = unquoteTokens(s.substr(sp + 1));
             }
+            conds.push_back(c);
+            continue;
+        }
+        if (s.size() >= 8 && s.substr(0, 8) == "notilike") {
+            c.op = "notilike";
+            size_t sp = s.find(' ', 8);
+            if (sp == std::string::npos) continue;
+            c.colName = s.substr(8, sp - 8);
+            c.value = s.substr(sp + 1);
+            if (c.value.size() >= 2 && c.value.front() == 39 && c.value.back() == 39)
+            c.value = c.value.substr(1, c.value.size() - 2);
+            conds.push_back(c);
+            continue;
+        }
+        if (s.size() >= 5 && s.substr(0, 5) == "ilike") {
+            c.op = "ilike";
+            size_t sp = s.find(' ', 5);
+            if (sp == std::string::npos) continue;
+            c.colName = s.substr(5, sp - 5);
+            c.value = s.substr(sp + 1);
+            if (c.value.size() >= 2 && c.value.front() == 39 && c.value.back() == 39)
+                c.value = c.value.substr(1, c.value.size() - 2);
             conds.push_back(c);
             continue;
         }

@@ -5201,6 +5201,19 @@ static string normalizeConditionStr(string s) {
             }
         }
     }
+    size_t ipos = 0;
+    while ((ipos = s.find("ilike", ipos)) != string::npos) {
+        size_t before = ipos;
+        while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
+        size_t after = ipos + 5;
+        while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
+        if (before != ipos || after != ipos + 5) {
+            s = s.substr(0, before) + "ilike" + s.substr(after);
+            ipos = before + 5;
+        } else {
+            ipos += 5;
+        }
+    }
     // Normalize LIKE keyword: "name like 'a%'" → "namelike'a%'"
     size_t pos = 0;
     while ((pos = s.find("like", pos)) != string::npos) {
@@ -5497,7 +5510,8 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
         if (i + 1 < toks.size() && isBareIdentToken(toks[i])) {
             const string& nxt = toks[i + 1];
             static const struct { const char* pfx; size_t len; } glue[] = {
-                {"notbetween", 10}, {"notlike", 7}, {"between", 7}, {"like", 4}
+                {"notbetween", 10}, {"notlike", 7}, {"notilike", 8},
+                {"between", 7}, {"like", 4}, {"ilike", 5}
             };
             bool glued = false;
             for (const auto& g : glue) {
@@ -5514,11 +5528,16 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
         // Pattern B: col ("between") lo "and" hi
         bool handled = false;
         if (i + 2 < toks.size() && toks[i + 1] == "not" &&
-            (toks[i + 2] == "like" || toks[i + 2] == "between") &&
+            (toks[i + 2] == "like" || toks[i + 2] == "between" ||
+             toks[i + 2] == "ilike") &&
             isBareIdentToken(toks[i])) {
             if (toks[i + 2] == "like" && i + 3 < toks.size()) {
                 // [col, not, like, pat]
                 out.push_back("notlike" + toks[i] + " " + toks[i + 3]);
+                i += 4;
+                handled = true;
+            } else if (toks[i + 2] == "ilike" && i + 3 < toks.size()) {
+                out.push_back("notilike" + toks[i] + " " + toks[i + 3]);
                 i += 4;
                 handled = true;
             } else if (toks[i + 2] == "between" && i + 5 < toks.size() &&
@@ -5550,7 +5569,7 @@ static string modifyLogic(const string& logic) {
     // -- already in the engine's decode form; pass through so the "like"
     // keyword scan below cannot shred them ("notlikeX" contains "like").
     {
-        static const char* mergedPfx[] = {"notbetween", "notlike", "between"};
+        static const char* mergedPfx[] = {"notbetween", "notlike", "notilike", "ilike", "between"};
         for (const char* p : mergedPfx) {
             size_t pl = strlen(p);
             if (logic.size() > pl + 1 && logic.compare(0, pl, p) == 0 &&
@@ -5580,6 +5599,12 @@ static string modifyLogic(const string& logic) {
         }
     }
     // Handle LIKE
+    size_t ilikePos = logic.find("ilike");
+    if (ilikePos != string::npos) {
+        string before = logic.substr(0, ilikePos);
+        string after = logic.substr(ilikePos + 5);
+        return "ilike" + before + " " + after;
+    }
     size_t likePos = logic.find("like");
     if (likePos != string::npos) {
         string before = logic.substr(0, likePos);
