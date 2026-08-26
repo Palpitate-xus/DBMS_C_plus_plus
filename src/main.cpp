@@ -16842,6 +16842,29 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                         itemBase = trim(item.substr(0, filterPos));
                     }
+                    // Typed cast rewrite: v::numeric(4,2) -> cast(v as numeric(4,2)).
+                    {
+                        size_t cc2 = string::npos;
+                        {
+                            bool inQ = false;
+                            for (size_t k2 = 0; k2 + 1 < itemBase.size(); ++k2) {
+                                char ch2 = itemBase[k2];
+                                if (ch2 == 39) inQ = !inQ;
+                                if (!inQ && ch2 == ':' && itemBase[k2 + 1] == ':') { cc2 = k2; break; }
+                            }
+                        }
+                        if (cc2 != string::npos) {
+                            string lhsC = trim(itemBase.substr(0, cc2));
+                            string rhsC = trim(itemBase.substr(cc2 + 2));
+                            bool okT = !rhsC.empty() && isalpha(static_cast<unsigned char>(rhsC[0]));
+                            size_t pp = rhsC.find('(');
+                            string tname = (pp == string::npos) ? rhsC : rhsC.substr(0, pp);
+                            for (auto& tc2 : tname) tc2 = static_cast<char>(tolower(static_cast<unsigned char>(tc2)));
+                            static const set<string> castTypes = {"int","integer","bigint","smallint","text","varchar","char","numeric","decimal","float","double","real","boolean","bool","date","timestamp","timestamptz","time","interval","json","jsonb"};
+                            if (okT && castTypes.count(tname) && !lhsC.empty() && lhsC.find(' ') == string::npos)
+                                itemBase = "cast(" + lhsC + " as " + rhsC + ")";
+                        }
+                    }
                     size_t lp = itemBase.find('(');
                     // Balance parentheses so a nested call like
                     // "upper(substring(name, 1, 1))" keeps its full argument
@@ -16912,7 +16935,10 @@ if (sql.rfind("backup database", 0) == 0) {
                                         {"time", "time"}, {"interval", "interval"},
                                         {"json", "json"}, {"jsonb", "jsonb"},
                                     };
-                                    auto tn = pgTypeNames.find(trim(targetType));
+                                    string tnBase = trim(targetType);
+                                    size_t tnParen = tnBase.find('(');
+                                    if (tnParen != string::npos) tnBase = tnBase.substr(0, tnParen);
+                                    auto tn = pgTypeNames.find(trim(tnBase));
                                     if (tn != pgTypeNames.end()) headerName = tn->second;
                                 }
                             }

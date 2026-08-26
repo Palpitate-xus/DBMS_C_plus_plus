@@ -18516,6 +18516,51 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             int64_t ts = parseTimestampToSeconds(val);
             return (ts == 0) ? "" : formatTimestampSeconds(ts);
         }
+        if (targetType.size() > 7 && targetType.substr(0, 8) == "numeric(") {
+            // numeric(p) -> scale 0; numeric(p,s) -> scale s; round
+            // half-up on the DECIMAL digits (22.345 -> 22.35).
+            int scale = 0;
+            {
+                size_t o = targetType.find(',');
+                size_t c2 = targetType.find(')');
+                if (o != std::string::npos && c2 != std::string::npos && c2 > o)
+                    scale = std::stoi(targetType.substr(o + 1, c2 - o - 1));
+                if (scale < 0) scale = 0;
+            }
+            try {
+                std::string s2 = val;
+                bool neg = (!s2.empty() && s2[0] == '-');
+                if (neg) s2 = s2.substr(1);
+                size_t dot = s2.find('.');
+                std::string ip = (dot == std::string::npos) ? s2 : s2.substr(0, dot);
+                std::string fp = (dot == std::string::npos) ? "" : s2.substr(dot + 1);
+                while ((int)fp.size() < scale + 1) fp += '0';
+                std::string keep = fp.substr(0, scale);
+                char next = fp[scale];
+                if (next >= '5') {
+                    std::string all = ip + keep;
+                    int carry = 1;
+                    for (int k = (int)all.size() - 1; k >= 0 && carry; --k) {
+                        int d2 = all[k] - '0' + carry;
+                        carry = d2 / 10;
+                        all[k] = static_cast<char>('0' + d2 % 10);
+                    }
+                    if (carry) all.insert(all.begin(), '1');
+                    if (scale > 0) {
+                        ip = all.substr(0, all.size() - scale);
+                        keep = all.substr(all.size() - scale);
+                    } else ip = all;
+                }
+                if (ip.empty()) ip = "0";
+                std::string out2 = (neg ? "-" : "") + ip;
+                if (scale > 0) out2 += "." + keep;
+                return out2;
+            } catch (...) { return val; }
+        }
+        if (targetType == "numeric" || targetType == "decimal" || targetType == "number") {
+            // plain numeric: value unchanged (1.1 -> 1.1)
+            return val;
+        }
         if (targetType == "float") {
             try { return std::to_string(std::stof(val)); } catch (...) { return "0"; }
         }
