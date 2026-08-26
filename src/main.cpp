@@ -3681,6 +3681,40 @@ static bool captureSetOperand(const string& sql, Session& s, vector<string>& lin
     return true;
 }
 
+static void applySetOperationTail(vector<string>& rows, bool hasOrder,
+                                 bool asc, size_t limitN, bool hasLimit) {
+    if (hasOrder) {
+        auto cellOf = [](const string& row) -> string {
+            vector<string> cells;
+            size_t start = 0;
+            while (start <= row.size()) {
+                size_t sp = row.find(' ', start);
+                if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
+                cells.push_back(row.substr(start, sp - start));
+                start = sp + 1;
+            }
+            return cells.empty() ? string() : cells.front();
+        };
+        auto nullish = [](const string& v) {
+            return v.empty() || v == "NULL" || v == "null";
+        };
+        std::stable_sort(rows.begin(), rows.end(),
+            [&](const string& a, const string& b) {
+                const string va = cellOf(a), vb = cellOf(b);
+                const bool na = nullish(va), nb = nullish(vb);
+                if (na != nb) return asc ? !na : na;
+                if (na) return false;
+                dbms::Numeric xa(0), xb(0);
+                bool okA = true, okB = true;
+                try { xa = dbms::Numeric(va); } catch (...) { okA = false; }
+                try { xb = dbms::Numeric(vb); } catch (...) { okB = false; }
+                if (okA && okB) return asc ? xa < xb : xb < xa;
+                return asc ? va < vb : vb < va;
+            });
+    }
+    if (hasLimit && rows.size() > limitN) rows.resize(limitN);
+}
+
 static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     handled = false;
     const SetOperationSplit split = findTopLevelSetOperation(sql);
@@ -3688,10 +3722,49 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     handled = true;
 
     const string leftSql = trim(sql.substr(0, split.position));
-    const string rightSql = trim(sql.substr(split.position + split.length));
+    string rightSql = trim(sql.substr(split.position + split.length));
     if (leftSql.empty() || rightSql.empty()) {
         cout << "SQL syntax error: invalid set operation" << endl;
         return true;
+    }
+
+    // A trailing ORDER BY / LIMIT belongs to the WHOLE set operation (PG
+    // applies it to the final result), not to the right operand.  Strip
+    // it and apply after combining.
+    string tailOrderCol;
+    bool tailOrderAsc = true;
+    bool tailHasOrder = false;
+    size_t tailLimit = 0;
+    bool tailHasLimit = false;
+    {
+        auto stripLimit = [&](string& text) {
+            size_t lp = findTopLevelKeyword(text, "limit");
+            if (lp == string::npos) return;
+            string num = trim(text.substr(lp + 5));
+            try {
+                size_t parsed = 0;
+                size_t v = static_cast<size_t>(stoull(num, &parsed));
+                if (parsed == num.size()) {
+                    tailLimit = v;
+                    tailHasLimit = true;
+                    text = trim(text.substr(0, lp));
+                }
+            } catch (...) {}
+        };
+        stripLimit(rightSql);
+        size_t op = findTopLevelKeyword(rightSql, "order by");
+        if (op != string::npos) {
+            string spec = trim(rightSql.substr(op + 8));
+            rightSql = trim(rightSql.substr(0, op));
+            vector<string> toks = tokenize(spec);
+            if (!toks.empty()) {
+                tailOrderCol = toks[0];
+                tailHasOrder = true;
+                if (toks.size() >= 2) {
+                    if (toks[1] == "desc") tailOrderAsc = false;
+                }
+            }
+        }
     }
 
     StructuredSetOperand leftPlan;
@@ -3717,6 +3790,8 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
             return true;
         }
         auto rows = std::move(execution.rows);
+        applySetOperationTail(rows, tailHasOrder, tailOrderAsc,
+                              tailLimit, tailHasLimit);
         cout << leftPlan.header << endl;
         for (const auto& row : rows) cout << row << endl;
         return false;
@@ -3759,6 +3834,8 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
         return true;
     }
     auto rows = std::move(execution.rows);
+    applySetOperationTail(rows, tailHasOrder, tailOrderAsc,
+                          tailLimit, tailHasLimit);
     cout << header << endl;
     for (const auto& row : rows) cout << row << endl;
     return false;
