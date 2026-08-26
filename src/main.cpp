@@ -6693,8 +6693,26 @@ static std::vector<std::string> runSubQuery(const std::string& rawSql, Session& 
                 break;
             }
         }
-        if (isAgg && wherePos == std::string::npos) {
-            auto res = g_engine.aggregate(s.currentDB, tname, {}, {aggItem});
+        if (isAgg) {
+            // Aggregate subquery, optionally with a WHERE clause: route
+            // through g_engine.aggregate with parsed conditions so
+            // "select sum(id) from t where g = 'a'" evaluates per group.
+            std::vector<std::string> aggConds;
+            if (wherePos != std::string::npos) {
+                std::string condStr = normalizeConditionStr(
+                    trim(sql.substr(wherePos + 5)));
+                std::vector<std::string> tokens = tokenize(condStr);
+                tokens.insert(tokens.begin(), "(");
+                tokens.push_back(")");
+                for (auto& tk : tokens) tk = modifyLogic(tk);
+                auto groups = breakDownConditions(tokens);
+                if (groups.size() == 1) aggConds = groups.front();
+                else {
+                    for (const auto& g : groups)
+                        aggConds.insert(aggConds.end(), g.begin(), g.end());
+                }
+            }
+            auto res = g_engine.aggregate(s.currentDB, tname, aggConds, {aggItem});
             for (auto& r : res) {
                 r = trim(r);
                 if (!r.empty()) answers.push_back(r);
@@ -16554,6 +16572,8 @@ if (sql.rfind("backup database", 0) == 0) {
         vector<WindowFunc> windowFuncs;
         vector<dbms::StorageEngine::SelectExpr> selectExprs;
         vector<int> exprTypes; // 0=normal, 1=agg, 2=window, 3=scalar
+        // selectExprs index -> raw item text (arith items for GROUP BY)
+        std::map<size_t, std::string> arithRawText;
         bool hasAgg = false;
         bool hasWindow = false;
         bool hasScalar = false;
@@ -16752,6 +16772,20 @@ if (sql.rfind("backup database", 0) == 0) {
                                     }
                                 }
                             }
+                        } else if (item.find("(select") != string::npos ||
+                                   item.find("(SELECT") != string::npos) {
+                            // Aggregate combined with a scalar subquery
+                            // ("sum(id) + (select ...)"): keep the RAW item
+                            // for per-group evaluation; the plain aggregate
+                            // path cannot express the arithmetic tail.
+                            dbms::StorageEngine::SelectExpr expr;
+                            expr.displayName = itemAlias.empty() ? "?column?" : itemAlias;
+                            expr.isScalar = true;
+                            expr.funcName = "arith";
+                            selectExprs.push_back(expr);
+                            hasScalar = true;
+                            exprTypes.push_back(3);
+                            arithRawText[(size_t)(selectExprs.size() - 1)] = item;
                         } else {
                             dbms::StorageEngine::AggItem ai;
                             ai.func = func;
@@ -16830,6 +16864,9 @@ if (sql.rfind("backup database", 0) == 0) {
                             selectExprs.push_back(expr);
                             hasScalar = true;
                             exprTypes.push_back(3);
+                            // Raw text for GROUP BY evaluation of
+                            // aggregate-plus-subquery arithmetic items.
+                            arithRawText[(size_t)(selectExprs.size() - 1)] = item;
                             // fetch operand columns
                             for (const auto& a : expr.funcArgs) {
                                 for (size_t ci = 0; ci < tbl.len; ++ci) {
@@ -17115,6 +17152,14 @@ if (sql.rfind("backup database", 0) == 0) {
                             }
                         }
                         cout << subCol << ' ';
+                    } else if (exprTypes[ei] == 3 &&
+                               selectExprs[ei].funcName == "arith" &&
+                               arithRawText.count(ei) &&
+                               arithRawText[ei].find("(select") != string::npos) {
+                        // agg + (SELECT ...) in a GROUP BY select list:
+                        // evaluated per output group below; PG names an
+                        // unaliased arithmetic column ?column?.
+                                        cout << selectExprs[ei].displayName << ' ';
                     }
                 }
             }
@@ -17341,8 +17386,193 @@ if (sql.rfind("backup database", 0) == 0) {
                         while (!row.empty() && row.back() == ' ') row.pop_back();
                         row = row.empty() ? extra : row + ' ' + extra;
                     }
-                }
-            }
+                 }
+                 // Arithmetic items combining an aggregate and a scalar
+                 // subquery ("sum(id) + (SELECT ...)"), evaluated per output
+                 // group: aggregates re-run per group, subqueries substitute
+                 // the group's values, then the remaining arithmetic is
+                 // evaluated exactly with Numeric.
+                 if (!arithRawText.empty() && !answers.empty()) {
+                     struct ArithSub { size_t ei; string raw; };
+                     std::vector<ArithSub> items;
+                     for (const auto& kv : arithRawText) {
+                         if (exprTypes[kv.first] == 3 &&
+                             kv.second.find("(select") != string::npos)
+                             items.push_back({kv.first, kv.second});
+                     }
+                     if (!items.empty()) {
+                         auto splitCells2 = [](const string& row) {
+                             vector<string> cells;
+                             size_t start = 0;
+                             while (start <= row.size()) {
+                                 size_t sp = row.find(' ', start);
+                                 if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
+                                 cells.push_back(row.substr(start, sp - start));
+                                 start = sp + 1;
+                             }
+                             return cells;
+                         };
+                         for (auto& row : answers) {
+                             vector<string> cells = splitCells2(row);
+                             string extra2;
+                             for (const auto& it : items) {
+                                 string expr = it.raw;
+                                 // per-group WHERE snippet for aggregates
+                                 string whereSnip;
+                                 for (size_t gi = 0; gi < groupByCols.size() && gi < cells.size(); ++gi) {
+                                     const string& col = groupByCols[gi];
+                                     const string& val = cells[gi];
+                                     bool colIsNumeric = false;
+                                     for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                         if (tbl.cols[ci].dataName == col) {
+                                             string dt = tbl.cols[ci].dataType;
+                                             for (auto& dc : dt) dc = static_cast<char>(tolower(static_cast<unsigned char>(dc)));
+                                             colIsNumeric = dt.find("int") != string::npos ||
+                                                            dt.find("numeric") != string::npos ||
+                                                            dt.find("decimal") != string::npos ||
+                                                            dt.find("float") != string::npos ||
+                                                            dt.find("double") != string::npos;
+                                             break;
+                                         }
+                                     }
+                                     string lit = colIsNumeric ? val : "'" + val + "'";
+                                     if (!whereSnip.empty()) whereSnip += " and ";
+                                     whereSnip += col + " = " + lit;
+                                 }
+                                 // replace each "(select ...)" span
+                                 while (true) {
+                                     size_t sp2 = expr.find("(select");
+                                     if (sp2 == string::npos) break;
+                                     size_t open = expr.find('(', sp2);
+                                     size_t close = findMatchingParen(expr, open);
+                                     if (close == string::npos) break;
+                                     string sub = trim(expr.substr(open + 1, close - open - 1));
+                                     // substitute group correlation
+                                     for (size_t gi = 0; gi < groupByCols.size() && gi < cells.size(); ++gi) {
+                                         const string& col = groupByCols[gi];
+                                         const string& val = cells[gi];
+                                         bool colIsNumeric = false;
+                                         for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                             if (tbl.cols[ci].dataName == col) {
+                                                 string dt = tbl.cols[ci].dataType;
+                                                 for (auto& dc : dt) dc = static_cast<char>(tolower(static_cast<unsigned char>(dc)));
+                                                 colIsNumeric = dt.find("int") != string::npos ||
+                                                                dt.find("numeric") != string::npos ||
+                                                                dt.find("decimal") != string::npos ||
+                                                                dt.find("float") != string::npos ||
+                                                                dt.find("double") != string::npos;
+                                                 break;
+                                             }
+                                         }
+                                         string lit = colIsNumeric ? val : "'" + val + "'";
+                                         string qual = tname + "." + col;
+                                         size_t pp = 0;
+                                         while ((pp = sub.find(qual, pp)) != string::npos) {
+                                             sub = sub.substr(0, pp) + " " + lit + sub.substr(pp + qual.size());
+                                             pp += lit.size() + 1;
+                                         }
+                                         string out2;
+                                         size_t i = 0;
+                                         while (i < sub.size()) {
+                                             if (sub.compare(i, col.size(), col) == 0 &&
+                                                 (i == 0 || !(isalnum((unsigned char)sub[i-1]) || sub[i-1]=='_' || sub[i-1]=='.')) &&
+                                                 (i + col.size() >= sub.size() || !(isalnum((unsigned char)sub[i+col.size()]) || sub[i+col.size()]=='_'))) {
+                                                 out2 += lit;
+                                                 i += col.size();
+                                             } else out2 += sub[i++];
+                                         }
+                                         sub = out2;
+                                     }
+                                     {
+                                         string bare;
+                                         size_t i = 0;
+                                         while (i < sub.size()) {
+                                             if (sub[i] == '.' && i > 0 &&
+                                                 (isalnum((unsigned char)sub[i-1]) || sub[i-1]=='_')) {
+                                                 size_t ws = bare.size();
+                                                 while (ws > 0 && (isalnum((unsigned char)bare[ws-1]) || bare[ws-1]=='_')) --ws;
+                                                 bare.erase(ws);
+                                                 ++i;
+                                                 continue;
+                                             }
+                                             bare += sub[i++];
+                                         }
+                                         sub = bare;
+                                     }
+                                     string val2 = "NULL";
+                                     {
+                                         auto rows = runSubQuery(sub, s);
+                                         if (!rows.empty() && !rows.front().empty()) {
+                                             stringstream rs(rows.front());
+                                             string first;
+                                             rs >> first;
+                                             if (!first.empty()) val2 = first;
+                                         }
+                                     }
+                                     expr = expr.substr(0, sp2) + " " + val2 + " " + expr.substr(close + 1);
+                                 }
+                                 // replace each aggregate "fn(arg)"
+                                 while (true) {
+                                     static const char* aggFns[] = {"count", "sum", "avg", "min", "max"};
+                                     size_t fp = string::npos; string fn;
+                                     for (const char* f : aggFns) {
+                                         size_t p3 = expr.find(string(f) + "(");
+                                         if (p3 != string::npos && (fp == string::npos || p3 < fp)) { fp = p3; fn = f; }
+                                     }
+                                     if (fp == string::npos) break;
+                                     size_t open = expr.find('(', fp);
+                                     size_t close = expr.find(')', open);
+                                     if (close == string::npos) break;
+                                     string arg = trim(expr.substr(open + 1, close - open - 1));
+                                     string aggSql = "select " + fn + "(" + arg + ") from " + tname;
+                                     if (!whereSnip.empty()) aggSql += " where " + whereSnip;
+                                     string val3 = "NULL";
+                                     {
+                                         auto rows = runSubQuery(aggSql, s);
+                                         if (!rows.empty() && !rows.front().empty()) {
+                                             stringstream rs(rows.front());
+                                             string first;
+                                             rs >> first;
+                                             if (!first.empty()) val3 = first;
+                                         }
+                                     }
+                                     expr = expr.substr(0, fp) + " " + val3 + " " + expr.substr(close + 1);
+                                 }
+                                 // evaluate remaining arithmetic left-to-right
+                                 string val4 = "NULL";
+                                 {
+                                     stringstream es(expr);
+                                     string tok;
+                                     vector<string> toks;
+                                     while (es >> tok) toks.push_back(tok);
+                                     bool ok = !toks.empty();
+                                     dbms::Numeric acc(0);
+                                     bool haveAcc = false;
+                                     string op;
+                                     for (const auto& tk : toks) {
+                                         if (tk == "+" || tk == "-" || tk == "*" || tk == "/" || tk == "%") { op = tk; continue; }
+                                         if (tk == "NULL" || tk == "null") { ok = false; break; }
+                                         dbms::Numeric v(0);
+                                         try { v = dbms::Numeric(tk); }
+                                         catch (...) { ok = false; break; }
+                                         if (!haveAcc) { acc = v; haveAcc = true; }
+                                         else if (op == "+") acc = acc + v;
+                                         else if (op == "-") acc = acc - v;
+                                         else if (op == "*") acc = acc * v;
+                                         else if (op == "/") { if (v == dbms::Numeric(0)) { ok = false; break; } acc = acc / v; }
+                                         else { ok = false; break; }
+                                     }
+                                     if (ok && haveAcc) val4 = acc.toString();
+                                 }
+                                 extra2 += val4 + ' ';
+                             }
+                             while (!extra2.empty() && extra2.back() == ' ') extra2.pop_back();
+                             while (!row.empty() && row.back() == ' ') row.pop_back();
+                             row = row.empty() ? extra2 : row + ' ' + extra2;
+                         }
+                     }
+                 }
+             }
                 // ORDER BY over aggregate output: map each spec to an output
                 // cell (group column, select alias, or aggregate expression)
                 // and sort the result rows.  PG compares NULLS LAST (ASC) /
