@@ -17830,6 +17830,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const TableSchema& tbl,
                                     StorageEngine* engine = nullptr,
                                     const std::string& dbname = "") {
+    auto scaleOf = [](const std::string& v) -> int {
+        size_t dot = v.find('.');
+        if (dot == std::string::npos) return -1;
+        return static_cast<int>(v.size() - dot - 1);
+    };
     auto isNumberLike = [](const std::string& v) -> bool {
         if (v.empty()) return false;
         size_t i = (v[0] == '-' || v[0] == '+') ? 1 : 0;
@@ -18029,6 +18034,9 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         // Integer-division semantics: stays true while every operand so
         // far is integer-typed; PG truncates int / int toward zero.
         bool allInt = true;
+        int accScale = -1;
+        std::string prevVal;
+        std::string divResult;
         for (const auto& rawArg : expr.funcArgs) {
             std::string a = rawArg;
             if (a == "||") {
@@ -18045,7 +18053,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 a.find_first_of("0123456789") != std::string::npos) {
                 // Numeric literal operand.
                 v = a;
-                if (a.find_first_of(".eE") != std::string::npos) allInt = false;
+                if (a.find_first_of(".eE") != std::string::npos) {
+                    allInt = false;
+                    size_t dot = a.find('.');
+                    accScale = (dot == std::string::npos) ? 16 : std::max(accScale, static_cast<int>(a.size() - dot - 1));
+                }
             } else if (a.size() >= 2 && a.front() == 39 && a.back() == 39) {
                 // Quoted literal operand: strip the quotes.
                 v = a.substr(1, a.size() - 2);
@@ -18105,6 +18117,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 strAcc = v;
                 try { acc = std::stod(v); } catch (...) { isString = true; }
                 accSet = true;
+                prevVal = v;
                 {
                     bool isIntCol = false;
                     for (size_t ci = 0; ci < tbl.len; ++ci)
@@ -18118,6 +18131,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         }
                     if (!isIntCol && (v.find_first_of(".eE") != std::string::npos || !isNumberLike(v)))
                         allInt = false;
+                    if (!isIntCol && scaleOf(v) > accScale) accScale = scaleOf(v);
                 }
                 continue;
             }
@@ -18128,14 +18142,70 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             double rhs = 0.0;
             try { rhs = std::stod(v); } catch (...) { return ""; }
             if (v.find_first_of(".eE") != std::string::npos) allInt = false;
+            int rhsScale = scaleOf(v);
+            if (v.find_first_of("eE") != std::string::npos) rhsScale = 16;
+            std::string curVal = v;
             switch (pendingOp) {
-                case '+': acc += rhs; break;
-                case '-': acc -= rhs; break;
-                case '*': acc *= rhs; break;
+                case '+': acc += rhs; accScale = std::max(accScale, rhsScale); break;
+                case '-': acc -= rhs; accScale = std::max(accScale, rhsScale); break;
+                case '*': acc *= rhs; accScale = std::max(0, accScale) + std::max(0, rhsScale); if (accScale == 0) accScale = -1; break;
                 case '/': if (rhs == 0) return "";
                            if (allInt && rhs == static_cast<double>(static_cast<int64_t>(rhs)))
                                acc = static_cast<double>(static_cast<int64_t>(acc) / static_cast<int64_t>(rhs));
-                           else acc /= rhs;
+                           else {
+                               acc /= rhs; accScale = 16;
+                               // Exact decimal long division to 16 places.
+                               try {
+                                   // value = a / 10^ka over b / 10^kb
+                                   long long a2 = 0, b2 = 0; int ka = 0, kb = 0;
+                                   {
+                                       std::string c;
+                                       size_t dotp = prevVal.rfind('.');
+                                       ka = (dotp == std::string::npos) ? 0 : (int)(prevVal.size() - dotp - 1);
+                                       for (char ch : prevVal) { if (ch >= '0' && ch <= '9') c += ch; }
+                                       bool neg2 = (!prevVal.empty() && prevVal.find('-') != std::string::npos);
+                                       for (char ch : c) a2 = a2 * 10 + (ch - '0');
+                                       if (neg2) a2 = -a2;
+                                   }
+                                   {
+                                       std::string c;
+                                       size_t dotp = curVal.rfind('.');
+                                       kb = (dotp == std::string::npos) ? 0 : (int)(curVal.size() - dotp - 1);
+                                       for (char ch : curVal) { if (ch >= '0' && ch <= '9') c += ch; }
+                                       bool neg2 = (!curVal.empty() && curVal.find('-') != std::string::npos);
+                                       for (char ch : c) b2 = b2 * 10 + (ch - '0');
+                                       if (neg2) b2 = -b2;
+                                   }
+                                   if (b2 != 0) {
+                                       bool negr = ((a2 < 0) != (b2 < 0));
+                                       unsigned long long un = a2 < 0 ? (unsigned long long)(-(a2 + 1)) + 1 : (unsigned long long)a2;
+                                       unsigned long long ud = b2 < 0 ? (unsigned long long)(-(b2 + 1)) + 1 : (unsigned long long)b2;
+                                       unsigned long long ip = un / ud;
+                                       unsigned long long rem = un % ud;
+                                       std::string frac;
+                                       for (int k = 0; k < 32; ++k) {
+                                           rem *= 10;
+                                           frac += static_cast<char>('0' + (rem / ud));
+                                           rem %= ud;
+                                       }
+                                       int shift = kb - ka;
+                                       std::string all = std::to_string(ip) + frac;
+                                       if (shift > 0) {
+                                           for (int k = 0; k < shift && all.size() < 40; ++k) all += '0';
+                                           shift = 0;
+                                       } else if (shift < 0) {
+                                           int L = -shift;
+                                           if ((int)all.size() <= L) {
+                                               std::string z(L - all.size() + 1, '0');
+                                               all = z + all;
+                                           }
+                                       }
+                                       std::string ipart = all.substr(0, all.size() - 32 + shift);
+                                       std::string fp = all.substr(all.size() - 32 + shift, 16);
+                                       divResult = (negr ? "-" : "") + ipart + "." + fp;
+                                   }
+                               } catch (...) { divResult.clear(); }
+                           }
                            break;
                 case '%': { int64_t l = static_cast<int64_t>(acc), r = static_cast<int64_t>(rhs);
                            if (r == 0) return ""; acc = static_cast<double>(l % r); break; }
@@ -18143,9 +18213,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             isString = false;
         }
+        if (!divResult.empty() && accScale == 16)
+            return divResult;
         if (isString) return strAcc;
-        if (acc == static_cast<double>(static_cast<int64_t>(acc)))
+        if (allInt && acc == static_cast<double>(static_cast<int64_t>(acc)))
             return std::to_string(static_cast<int64_t>(acc));
+        if (accScale > 0) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.*Lf", accScale, static_cast<long double>(acc));
+            return std::string(buf);
+        }
         // trim trailing zeros of the double formatting
         std::string s = std::to_string(acc);
         s.erase(s.find_last_not_of('0') + 1, std::string::npos);
