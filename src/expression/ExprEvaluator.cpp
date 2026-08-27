@@ -2055,11 +2055,43 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     bool hasPL = fmt.find("PL") != std::string::npos;
     bool hasPR = fmt.find("PR") != std::string::npos;
     bool hasMI = fmt.find("MI") != std::string::npos;
+    bool hasTH = fmt.find("TH") != std::string::npos || fmt.find("th") != std::string::npos;
+    bool hasV = fmt.find('V') != std::string::npos;
+    bool hasRN = fmt.find("RN") != std::string::npos || fmt.find("rn") != std::string::npos;
     bool hasS = false;    {
         size_t sp2 = fmt.find('S');        while (sp2 != std::string::npos) {            if (sp2 + 1 >= fmt.size() || fmt[sp2 + 1] != 'G') { hasS = true; break; }            sp2 = fmt.find('S', sp2 + 2);        }    }
     bool hasL = fmt.find('L') != std::string::npos;
     bool hasG = fmt.find('G') != std::string::npos;
+    if (hasRN) {
+        // Roman numerals, right-aligned to width 15 (FMRN unpads).
+        long n2 = (long)((val < 0) ? -val : val);
+        if (n2 < 1 || n2 > 3999) return "";
+        static const char* h2[] = {"","I","II","III","IV","V","VI","VII","VIII","IX"};
+        static const char* t2[] = {"","X","XX","XXX","XL","L","LX","LXX","LXXX","XC"};
+        static const char* h3[] = {"","C","CC","CCC","CD","D","DC","DCC","DCCC","CM"};
+        static const char* h4[] = {"","M","MM","MMM"};
+        std::string r2 = std::string(h4[n2 / 1000]) + h3[(n2 / 100) % 10] + t2[(n2 / 10) % 10] + h2[n2 % 10];
+        std::string rnOut = ((int)r2.size() < 15 && !fm) ? std::string(15 - r2.size(), ' ') + r2 : r2;
+        if (fmtIn.find("rn") != std::string::npos) for (auto& rc : rnOut) rc = static_cast<char>(std::tolower((unsigned char)rc));
+        return rnOut;
+    }
+    const double valTH = (val < 0) ? -val : val;
     bool neg = val < 0;
+    if (hasV) {
+        // V shifts the decimal point: digits after V are scale shifts.
+        size_t vPos = fmt.find('V');
+        int shift = 0;
+        for (size_t i = vPos + 1; i < fmt.size(); ++i)
+            if (fmt[i] == '9' || fmt[i] == '0') ++shift;
+        double av2 = neg ? -val : val;
+        for (int k2 = 0; k2 < shift; ++k2) av2 *= 10.0;
+        val = av2; neg = false; fracDigits = 0; dot = std::string::npos;
+        // intPlaces spans digits on both sides of V.
+        intPlaces = 0; zeroPad = false;
+        for (size_t i = 0; i < fmt.size(); ++i)
+            if (fmt[i] == '9') ++intPlaces;
+            else if (fmt[i] == '0') { ++intPlaces; zeroPad = true; }
+    }
     char numbuf[64];
     std::snprintf(numbuf, sizeof numbuf, "%.*f", fracDigits, neg ? -val : val);
     std::string s = numbuf, ip = s, fp;
@@ -2073,6 +2105,11 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         if (ip == "0") ip = std::string(intPlaces, ' ');
         else if (static_cast<int>(ip.size()) < intPlaces)
             ip = std::string(intPlaces - ip.size(), ' ') + ip;
+    }
+    // PG overflow: more integer digits than 9/0 positions render #.
+    if (!ip.empty() && ip.find_first_not_of(" 0123456789") == std::string::npos &&
+        static_cast<int>(ip.size()) > intPlaces) {
+        ip = std::string(intPlaces, '#');
     }
     if (hasG) {
         // Insert commas every three digits, leaving leading blanks in place.
@@ -2147,6 +2184,18 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         out += ip;
     }
     if (fracDigits > 0) out += "." + fp;
+    if (hasTH) {
+        long iv = (long)std::llround(valTH);
+        long a11 = iv % 100; long d1 = iv % 10;
+        std::string sfxS = "th";
+        if (a11 == 11 || a11 == 12 || a11 == 13) sfxS = "th";
+        else if (d1 == 1) sfxS = "st";
+        else if (d1 == 2) sfxS = "nd";
+        else if (d1 == 3) sfxS = "rd";
+        if (fmtIn.find("th") != std::string::npos) for (auto& sc : sfxS) sc = static_cast<char>(std::tolower((unsigned char)sc));
+        else for (auto& sc : sfxS) sc = static_cast<char>(std::toupper((unsigned char)sc));
+        out += sfxS;
+    }
     return out;
 }
 

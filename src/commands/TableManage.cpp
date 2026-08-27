@@ -18737,7 +18737,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             bool numericVal = !val.empty() &&
                 val.find_first_not_of("+-0123456789.") == std::string::npos &&
                 val.find_first_of("0123456789") != std::string::npos;
-            bool numericFmt = fmt.find_first_of("90") != std::string::npos;
+            bool numericFmt = fmt.find_first_of("90") != std::string::npos || fmt.find("RN") != std::string::npos || fmt.find("rn") != std::string::npos;
             if (numericVal && numericFmt) {
                 bool fm = fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
                             (fmt[1] == 'M' || fmt[1] == 'm');
@@ -18745,6 +18745,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 bool neg = !val.empty() && val[0] == '-';
                 double dv = std::strtod(val.c_str(), nullptr);
                 if (neg) dv = -dv;
+                if (f2.find("RN") != std::string::npos || f2.find("rn") != std::string::npos) {
+                    long n2 = (long)dv;
+                    if (n2 >= 1 && n2 <= 3999) {
+                        static const char* e2[] = {"","I","II","III","IV","V","VI","VII","VIII","IX"};
+                        static const char* f2t[] = {"","X","XX","XXX","XL","L","LX","LXX","LXXX","XC"};
+                        static const char* g2[] = {"","C","CC","CCC","CD","D","DC","DCC","DCCC","CM"};
+                        static const char* k2[] = {"","M","MM","MMM"};
+                        std::string r2 = std::string(k2[n2/1000]) + g2[(n2/100)%10] + f2t[(n2/10)%10] + e2[n2%10];
+                        std::string ro2 = ((int)r2.size() < 15 && !fm) ? std::string(15 - r2.size(), ' ') + r2 : r2;
+                        if (fmt.find("rn") != std::string::npos) for (auto& rc : ro2) rc = (char)tolower((unsigned char)rc);
+                        return ro2;
+                    }
+                }
                 size_t dot = f2.find('.');
                 if (dot == std::string::npos) dot = f2.find('D');
                 int fracDigits = 0;
@@ -18760,6 +18773,18 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 bool hasMI = f2.find("MI") != std::string::npos;
                 bool hasS = false;                {
                     size_t sp2 = f2.find('S');                    while (sp2 != std::string::npos) {                        if (sp2 + 1 >= f2.size() || f2[sp2 + 1] != 'G') { hasS = true; break; }                        sp2 = f2.find('S', sp2 + 2);                    }                }
+                if (f2.find('V') != std::string::npos) {
+                    size_t vPos = f2.find('V');
+                    int shift = 0;
+                    for (size_t i = vPos + 1; i < f2.size(); ++i)
+                        if (f2[i] == '9' || f2[i] == '0') ++shift;
+                    for (int k2 = 0; k2 < shift; ++k2) dv *= 10.0;
+                    neg = false; fracDigits = 0; dot = std::string::npos;
+                    intPlaces = 0; zeroPad = false;
+                    for (size_t i = 0; i < f2.size(); ++i)
+                        if (f2[i] == '9') ++intPlaces;
+                        else if (f2[i] == '0') { ++intPlaces; zeroPad = true; }
+                }
                 char nb[64];
                 std::snprintf(nb, sizeof nb, "%.*f", fracDigits, dv);
                 std::string s = nb, ip = s, fp;
@@ -18771,6 +18796,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     if (ip == "0") ip = std::string(intPlaces, ' ');
                     else if ((int)ip.size() < intPlaces)
                         ip = std::string(intPlaces - ip.size(), ' ') + ip;
+                }
+                if (!ip.empty() && ip.find_first_not_of(" 0123456789") == std::string::npos &&
+                    (int)ip.size() > intPlaces) {
+                    ip = std::string(intPlaces, '#');
                 }
                 std::string out;
                 if (hasMI) {
@@ -18801,6 +18830,18 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     out = (neg ? "-" : (fm ? "" : " ")) + ip;
                 }
                 if (fracDigits > 0) out += "." + fp;
+                if (f2.find("TH") != std::string::npos || f2.find("th") != std::string::npos) {
+                    long iv = (long)dv;
+                    long a11 = iv % 100; long d1 = iv % 10;
+                    std::string sfxS = "th";
+                    if (a11 == 11 || a11 == 12 || a11 == 13) sfxS = "th";
+                    else if (d1 == 1) sfxS = "st";
+                    else if (d1 == 2) sfxS = "nd";
+                    else if (d1 == 3) sfxS = "rd";
+                    if (fmt.find("th") != std::string::npos) for (auto& sc : sfxS) sc = (char)tolower((unsigned char)sc);
+                    else for (auto& sc : sfxS) sc = (char)toupper((unsigned char)sc);
+                    out += sfxS;
+                }
                 return out;
             }
             // TO_CHAR(date, fmt) - reuse date_format logic
