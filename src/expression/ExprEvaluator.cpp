@@ -1392,6 +1392,23 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     std::vector<ExprValue> args;
     for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
 
+    if (name == "make_interval") {
+        long long mi_months = 0, mi_days = 0, mi_micros = 0;
+        for (const auto& na : e->namedArgs) {
+            ExprValue nv = eval(na.value.get(), ctx);
+            if (nv.isNull) continue;
+            long long n = nv.asInt();
+            std::string k = toLower(na.name);
+            if (k == "years") mi_months += n * 12;
+            else if (k == "months") mi_months += n;
+            else if (k == "weeks") mi_days += n * 7;
+            else if (k == "days") mi_days += n;
+            else if (k == "hours") mi_micros += n * 3600000000LL;
+            else if (k == "mins") mi_micros += n * 60000000LL;
+            else if (k == "secs") mi_micros += n * 1000000LL;
+        }
+        return ExprValue("interval", intervalToText(mi_months, mi_days, mi_micros), false);
+    }
     auto it = functions_.find(name);
     if (it != functions_.end()) return it->second(args);
 
@@ -2845,9 +2862,14 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() >= 2 && !a[1].isNull) {
             int n = static_cast<int>(a[1].asInt());
             double mult = std::pow(10.0, n);
-            return ExprValue("numeric", std::to_string(std::trunc(v * mult) / mult), false);
+            std::string ts2 = std::to_string(std::trunc(v * mult) / mult);
+            while (!ts2.empty() && ts2.back() == '0') ts2.pop_back();
+            if (!ts2.empty() && ts2.back() == '.') ts2.pop_back();
+            return ExprValue("numeric", ts2, false);
         }
-        return ExprValue("double precision", std::to_string(std::trunc(v)), false);
+        double tv = std::trunc(v);
+        if (tv == (long long)tv) return ExprValue("numeric", std::to_string((long long)tv), false);
+        return ExprValue("double precision", std::to_string(tv), false);
     };
 
     functions_["atan2"] = [](const std::vector<ExprValue>& a) {
