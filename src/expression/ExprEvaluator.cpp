@@ -1967,6 +1967,9 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         if (fmt[i] == '9') ++intPlaces;
         else if (fmt[i] == '0') { ++intPlaces; zeroPad = true; }
     }
+    bool hasPL = fmt.find("PL") != std::string::npos;
+    bool hasPR = fmt.find("PR") != std::string::npos;
+    bool hasL = fmt.find('L') != std::string::npos;
     bool hasG = fmt.find('G') != std::string::npos;
     bool neg = val < 0;
     char numbuf[64];
@@ -1996,8 +1999,39 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         }
         ip = lead + grouped;
     }
-    std::string out = neg ? "-" : (fm ? "" : " ");
-    out += ip;
+    std::string out;
+    if (hasPR && neg) {
+        // PR: negatives in angle brackets occupying the sign + digit region.
+        std::string trimIp = ip;
+    size_t nz = trimIp.find_first_not_of(' ');
+    if (nz != std::string::npos) trimIp = trimIp.substr(nz);
+    std::string body = "<" + trimIp + ">";
+        int width = intPlaces + 2;
+        if (static_cast<int>(body.size()) < width)
+            body = std::string(width - body.size(), ' ') + body;
+        out = body;
+    } else if (hasPR) {
+        out = fm ? "" : " ";
+        out += ip;
+        out += " ";
+    } else if (hasPL && !neg) {
+        out = std::string("+") + (fm ? "" : " ") + ip;
+    } else if (hasPL && neg) {
+        // PL on negative: blank sign slot, minus adjacent to the digits.
+        std::string trimIp2 = ip;
+        size_t nz2 = trimIp2.find_first_not_of(' ');
+        if (nz2 != std::string::npos) trimIp2 = trimIp2.substr(nz2);
+        std::string body = "-" + trimIp2;
+        int width = intPlaces + 2;
+        if (static_cast<int>(body.size()) < width)
+            body = std::string(width - body.size(), ' ') + body;
+        out = body;
+    } else if (hasL) {
+        out = std::string("$") + (fm ? "" : " ") + ip;
+    } else {
+        out = neg ? "-" : (fm ? "" : " ");
+        out += ip;
+    }
     if (fracDigits > 0) out += "." + fp;
     return out;
 }
