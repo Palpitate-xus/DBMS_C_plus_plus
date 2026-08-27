@@ -18694,7 +18694,15 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "to_number" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
-        try { return std::to_string(std::stod(val)); } catch (...) { return "0"; }
+        // Strip template/grouping characters; keep sign, digits and one dot.
+        std::string digits; bool seenDot = false;
+        for (char c : val) {
+            if (c >= '0' && c <= '9') digits += c;
+            else if (c == '.' && !seenDot) { digits += c; seenDot = true; }
+            else if (c == '-' && digits.empty()) digits += c;
+        }
+        if (digits.empty() || digits == "-") return "0";
+        return digits;
     }
     if (expr.funcName == "to_char" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);

@@ -3042,6 +3042,26 @@ void ExprEvaluator::registerBuiltins() {
         }
         return ExprValue("text", out, false);
     };
+    // to_number(text, fmt): extract the numeric literal; pattern characters
+    // (9/0 digits, D decimal point, G grouping, S sign, blanks) guide parsing.
+    functions_["to_number"] = [](const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        const std::string& s = a[0].value;
+        std::string digits;
+        bool seenDot = false, seenSign = false;
+        for (char c : s) {
+            if ((c >= '0' && c <= '9')) digits += c;
+            else if (c == '.' && !seenDot) { digits += c; seenDot = true; }
+            else if ((c == '-' || c == '+') && !seenSign && digits.empty()) {
+                if (c == '-') digits += c;
+                seenSign = true;
+            }
+            // grouping separators / blanks / template letters are skipped
+        }
+        if (digits.empty() || digits == "-") return ExprValue("numeric", "0", false);
+        return ExprValue("numeric", digits, false);
+    };
+
     // overlay(string, newsub, start[, count]) — replace count chars at 1-based start
     functions_["overlay"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
