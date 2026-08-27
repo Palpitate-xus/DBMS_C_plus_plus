@@ -2021,6 +2021,11 @@ static std::string formatDateTime(const std::string& src, const std::string& fmt
         if (matches(i, "AM") || matches(i, "PM")) { out += recase(h >= 12 ? "PM" : "AM", styleOf(i, 2)); i += 2; continue; }
         if (matches(i, "WW")) { std::snprintf(buf, sizeof buf, "%02d", (doy() - 1) / 7 + 1); out += buf; i += 2; continue; }
         if (c == 'Q' || c == 'q') { std::snprintf(buf, sizeof buf, "%d", mo > 0 ? (mo - 1) / 3 + 1 : 0); out += buf; ++i; continue; }
+        if (c == 'J') { // Julian day number
+            long mp = mo - 3; if (mp < 0) mp += 12; long yp = y - (mo < 3 ? 1 : 0);
+            long jd = d + (153 * mp + 2) / 5 + 365 * yp + yp / 4 - yp / 100 + yp / 400 + 1721119;
+            std::snprintf(buf, sizeof buf, "%ld", jd); out += buf; ++i; continue;
+        }
         if (c == 'D' || c == 'd') { std::snprintf(buf, sizeof buf, "%d", dow() + 1); out += buf; ++i; continue; }
         if (c == 'Y' || c == 'y') { std::snprintf(buf, sizeof buf, "%d", y % 10); out += buf; ++i; continue; }
         out.push_back(c);
