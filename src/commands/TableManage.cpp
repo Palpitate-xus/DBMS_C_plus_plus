@@ -18737,7 +18737,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             bool numericVal = !val.empty() &&
                 val.find_first_not_of("+-0123456789.") == std::string::npos &&
                 val.find_first_of("0123456789") != std::string::npos;
-            bool numericFmt = fmt.find_first_of("90") != std::string::npos || fmt.find("RN") != std::string::npos || fmt.find("rn") != std::string::npos;
+            bool numericFmt = fmt.find_first_of("90") != std::string::npos || fmt.find("RN") != std::string::npos || fmt.find("rn") != std::string::npos || fmt.find("EEEE") != std::string::npos;
             if (numericVal && numericFmt) {
                 bool fm = fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
                             (fmt[1] == 'M' || fmt[1] == 'm');
@@ -18769,6 +18769,24 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 for (size_t i = 0; i < intEnd; ++i) {
                     if (f2[i] == '9') ++intPlaces;
                     else if (f2[i] == '0') { ++intPlaces; zeroPad = true; }
+                }
+                if (f2.find("EEEE") != std::string::npos) {
+                    int sig = intPlaces + fracDigits;
+                    if (sig < 1) sig = 1;
+                    char eb[64];
+                    std::snprintf(eb, sizeof eb, "%.*e", sig - 1, neg ? -dv : dv);
+                    std::string es(eb);
+                    size_t ep2 = es.find('e');
+                    if (ep2 == std::string::npos) return es;
+                    std::string mant = es.substr(0, ep2);
+                    std::string expt = es.substr(ep2 + 1);
+                    char xs = '+';
+                    if (!expt.empty() && (expt[0] == '+' || expt[0] == '-')) { xs = expt[0]; expt = expt.substr(1); }
+                    while (expt.size() > 2 && expt[0] == '0') expt = expt.substr(1);
+                    std::string mout;
+                    if (!mant.empty() && mant[0] == '-') mout = mant;
+                    else mout = (fm ? "" : " ") + mant;
+                    return mout + "e" + xs + expt;
                 }
                 bool hasMI = f2.find("MI") != std::string::npos;
                 bool hasS = false;                {

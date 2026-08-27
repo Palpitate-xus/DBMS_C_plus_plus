@@ -2057,6 +2057,7 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     bool hasMI = fmt.find("MI") != std::string::npos;
     bool hasTH = fmt.find("TH") != std::string::npos || fmt.find("th") != std::string::npos;
     bool hasV = fmt.find('V') != std::string::npos;
+    bool hasEEEE = fmt.find("EEEE") != std::string::npos;
     bool hasRN = fmt.find("RN") != std::string::npos || fmt.find("rn") != std::string::npos;
     bool hasS = false;    {
         size_t sp2 = fmt.find('S');        while (sp2 != std::string::npos) {            if (sp2 + 1 >= fmt.size() || fmt[sp2 + 1] != 'G') { hasS = true; break; }            sp2 = fmt.find('S', sp2 + 2);        }    }
@@ -2077,6 +2078,24 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     }
     const double valTH = (val < 0) ? -val : val;
     bool neg = val < 0;
+    if (hasEEEE) {
+        int sig = intPlaces + fracDigits;
+        if (sig < 1) sig = 1;
+        char eb[64];
+        std::snprintf(eb, sizeof eb, "%.*e", sig - 1, val);
+        std::string es(eb);
+        size_t ep2 = es.find('e');
+        if (ep2 == std::string::npos) return es;
+        std::string mant = es.substr(0, ep2);
+        std::string expt = es.substr(ep2 + 1);
+        char xs = '+';
+        if (!expt.empty() && (expt[0] == '+' || expt[0] == '-')) { xs = expt[0]; expt = expt.substr(1); }
+        while (expt.size() > 2 && expt[0] == '0') expt = expt.substr(1);
+        std::string mout;
+        if (!mant.empty() && mant[0] == '-') mout = mant;
+        else mout = (fm ? "" : " ") + mant;
+        return mout + "e" + xs + expt;
+    }
     if (hasV) {
         // V shifts the decimal point: digits after V are scale shifts.
         size_t vPos = fmt.find('V');
