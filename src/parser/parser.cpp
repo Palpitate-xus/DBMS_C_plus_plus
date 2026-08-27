@@ -1556,6 +1556,7 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
             std::string typeName;
             while (pos < tokens.size()
                    && tokens[pos] != ")"
+                   && tokens[pos] != "("
                    && tokens[pos] != ","
                    && SQLParser::toLower(tokens[pos]) != "as") {
                 if (!typeName.empty()) typeName += ' ';
