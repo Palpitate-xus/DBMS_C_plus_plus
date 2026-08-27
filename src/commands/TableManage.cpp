@@ -18758,6 +18758,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     else if (f2[i] == '0') { ++intPlaces; zeroPad = true; }
                 }
                 bool hasMI = f2.find("MI") != std::string::npos;
+                bool hasS = false;                {
+                    size_t sp2 = f2.find('S');                    while (sp2 != std::string::npos) {                        if (sp2 + 1 >= f2.size() || f2[sp2 + 1] != 'G') { hasS = true; break; }                        sp2 = f2.find('S', sp2 + 2);                    }                }
                 char nb[64];
                 std::snprintf(nb, sizeof nb, "%.*f", fracDigits, dv);
                 std::string s = nb, ip = s, fp;
@@ -18781,6 +18783,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         out = sgn + ip;
                     } else {
                         out = ip + sgn;
+                    }
+                } else if (hasS) {
+                    // S: explicit sign (+/-) at its position.
+                    size_t sPos = f2.find('S');
+                    std::string sg2 = neg ? "-" : "+";
+                    size_t fd2 = f2.find_first_of("90");
+                    if (sPos != std::string::npos && fd2 != std::string::npos && sPos < fd2) {
+                        // Sign adjacent to the digits, inside the pad region.
+                        size_t fz = ip.find_first_not_of(' ');
+                        if (fz == std::string::npos) fz = 0;
+                        out = ip.substr(0, fz) + sg2 + ip.substr(fz);
+                    } else {
+                        out = ip + sg2;
                     }
                 } else {
                     out = (neg ? "-" : (fm ? "" : " ")) + ip;

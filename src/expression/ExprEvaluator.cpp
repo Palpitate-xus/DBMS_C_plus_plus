@@ -2055,6 +2055,8 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     bool hasPL = fmt.find("PL") != std::string::npos;
     bool hasPR = fmt.find("PR") != std::string::npos;
     bool hasMI = fmt.find("MI") != std::string::npos;
+    bool hasS = false;    {
+        size_t sp2 = fmt.find('S');        while (sp2 != std::string::npos) {            if (sp2 + 1 >= fmt.size() || fmt[sp2 + 1] != 'G') { hasS = true; break; }            sp2 = fmt.find('S', sp2 + 2);        }    }
     bool hasL = fmt.find('L') != std::string::npos;
     bool hasG = fmt.find('G') != std::string::npos;
     bool neg = val < 0;
@@ -2122,6 +2124,21 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
             out = sgn + ip;
         } else {
             out = ip + sgn;
+        }
+    } else if (hasS) {
+        // S: explicit sign (+/-) anchored at its position;
+        // FM keeps the sign, only blanks are suppressed.
+        size_t sPos = fmt.find('S');
+        std::string sg2 = neg ? "-" : "+";
+        size_t fd2 = fmt.find_first_of("90");
+        if (sPos != std::string::npos && fd2 != std::string::npos && sPos < fd2) {
+            // Sign sits ADJACENT to the digits, inside the pad region
+            // (PG: S9999 -42 -> "  -42", width intPlaces+1).
+            size_t fz = ip.find_first_not_of(' ');
+            if (fz == std::string::npos) fz = 0;
+            out = ip.substr(0, fz) + sg2 + ip.substr(fz);
+        } else {
+            out = ip + sg2;
         }
     } else if (hasL) {
         out = std::string("$") + (fm ? "" : " ") + ip;
