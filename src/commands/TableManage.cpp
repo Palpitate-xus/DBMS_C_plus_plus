@@ -18732,9 +18732,65 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "to_char" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
         if (expr.funcArgs.size() >= 2) {
-            // TO_CHAR(date, fmt) - reuse date_format logic
             std::string fmt = getVal(expr.funcArgs[1]);
+            // Numeric template (9/0 patterns): render like PG.
+            bool numericVal = !val.empty() &&
+                val.find_first_not_of("+-0123456789.") == std::string::npos &&
+                val.find_first_of("0123456789") != std::string::npos;
+            bool numericFmt = fmt.find_first_of("90") != std::string::npos;
+            if (numericVal && numericFmt) {
+                bool fm = fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
+                            (fmt[1] == 'M' || fmt[1] == 'm');
+                std::string f2 = fm ? fmt.substr(2) : fmt;
+                bool neg = !val.empty() && val[0] == '-';
+                double dv = std::strtod(val.c_str(), nullptr);
+                if (neg) dv = -dv;
+                size_t dot = f2.find('.');
+                if (dot == std::string::npos) dot = f2.find('D');
+                int fracDigits = 0;
+                if (dot != std::string::npos)
+                    for (size_t i = dot + 1; i < f2.size(); ++i)
+                        if (f2[i] == '9' || f2[i] == '0') ++fracDigits;
+                int intPlaces = 0; bool zeroPad = false;
+                size_t intEnd = (dot == std::string::npos) ? f2.size() : dot;
+                for (size_t i = 0; i < intEnd; ++i) {
+                    if (f2[i] == '9') ++intPlaces;
+                    else if (f2[i] == '0') { ++intPlaces; zeroPad = true; }
+                }
+                bool hasMI = f2.find("MI") != std::string::npos;
+                char nb[64];
+                std::snprintf(nb, sizeof nb, "%.*f", fracDigits, dv);
+                std::string s = nb, ip = s, fp;
+                size_t sp = s.find('.');
+                if (sp != std::string::npos) { ip = s.substr(0, sp); fp = s.substr(sp + 1); }
+                if (zeroPad && (int)ip.size() < intPlaces)
+                    ip = std::string(intPlaces - ip.size(), '0') + ip;
+                else if (!zeroPad && !fm) {
+                    if (ip == "0") ip = std::string(intPlaces, ' ');
+                    else if ((int)ip.size() < intPlaces)
+                        ip = std::string(intPlaces - ip.size(), ' ') + ip;
+                }
+                std::string out;
+                if (hasMI) {
+                    // MI marks the sign position (prefix or suffix).
+                    size_t miPos = f2.find("MI");
+                    std::string sgn = neg ? "-" : (fm ? "" : " ");
+                    size_t dot0 = (dot == std::string::npos) ? f2.size() : dot;
+                    size_t firstDig = f2.find_first_of("90");
+                    if (miPos != std::string::npos && firstDig != std::string::npos && miPos < firstDig) {
+                        out = sgn + ip;
+                    } else {
+                        out = ip + sgn;
+                    }
+                } else {
+                    out = (neg ? "-" : (fm ? "" : " ")) + ip;
+                }
+                if (fracDigits > 0) out += "." + fp;
+                return out;
+            }
+            // TO_CHAR(date, fmt) - reuse date_format logic
             Date d(val.c_str());
+            if (d.year == 0) return val;
             if (d.year == 0) return val;
             std::string out;
             for (size_t i = 0; i < fmt.size(); ++i) {

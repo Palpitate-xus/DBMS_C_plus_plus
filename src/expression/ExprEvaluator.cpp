@@ -2040,6 +2040,7 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         (fmt[1] == 'M' || fmt[1] == 'm')) { fm = true; fmt = fmt.substr(2); }
     // Treat D as the decimal point (PG locale-independent form).
     size_t dot = fmt.find('.');
+    size_t dot0pos = dot;
     if (dot == std::string::npos) dot = fmt.find('D');
     int fracDigits = 0;
     if (dot != std::string::npos)
@@ -2053,6 +2054,7 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     }
     bool hasPL = fmt.find("PL") != std::string::npos;
     bool hasPR = fmt.find("PR") != std::string::npos;
+    bool hasMI = fmt.find("MI") != std::string::npos;
     bool hasL = fmt.find('L') != std::string::npos;
     bool hasG = fmt.find('G') != std::string::npos;
     bool neg = val < 0;
@@ -2110,6 +2112,17 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         if (static_cast<int>(body.size()) < width)
             body = std::string(width - body.size(), ' ') + body;
         out = body;
+    } else if (hasMI) {
+        // MI marks the sign POSITION: minus for negatives,
+        // blank otherwise (FM suppresses the blank).
+        size_t miPos = fmt.find("MI");
+        std::string sgn = neg ? "-" : (fm ? "" : " ");
+        size_t firstDig = fmt.find_first_of("90");        
+        if (miPos != std::string::npos && firstDig != std::string::npos && miPos < firstDig) {
+            out = sgn + ip;
+        } else {
+            out = ip + sgn;
+        }
     } else if (hasL) {
         out = std::string("$") + (fm ? "" : " ") + ip;
     } else {
