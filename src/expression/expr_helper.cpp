@@ -72,6 +72,36 @@ ExprEvalResult ExprHelper::evalString(
     const std::string& currentDB,
     const std::string& currentUser) {
 
+    // Unwrap typed literals before parsing: date '2026-08-15' -> '2026-08-15'.
+    std::string sql = exprSql;
+    {
+        static const std::string kws[] = {"date ", "timestamp ", "time ", "numeric ", "int ", "text "};
+        std::string out;
+        out.reserve(sql.size());
+        for (size_t i = 0; i < sql.size();) {
+            bool matched = false;
+            for (const auto& kw : kws) {
+                if (sql.size() >= i + kw.size() + 2 &&
+                    sql.compare(i, kw.size(), kw) == 0 &&
+                    sql[i + kw.size()] == 39) {
+                    if (i == 0 || !isalnum((unsigned char)sql[i - 1])) {
+                        size_t close = sql.find(39, i + kw.size() + 1);
+                        if (close != std::string::npos) {
+                            out += 39;
+                            out += sql.substr(i + kw.size() + 1, close - i - kw.size() - 1);
+                            out += 39;
+                            i = close + 1;
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!matched) out += sql[i++];
+        }
+        sql = out;
+    }
+
     ExprEvalResult res;
     if (exprSql.empty()) {
         res.error = "empty expression";
@@ -80,7 +110,7 @@ ExprEvalResult ExprHelper::evalString(
 
     // Parse the expression by wrapping it in a SELECT.
     SQLParser parser;
-    ParseResult pr = parser.parse("SELECT " + exprSql);
+    ParseResult pr = parser.parse("SELECT " + sql);
     if (!pr.success || !pr.stmt) {
         res.error = pr.error.empty() ? "failed to parse expression" : pr.error;
         return res;

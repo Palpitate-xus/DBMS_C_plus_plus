@@ -16946,6 +16946,18 @@ if (sql.rfind("backup database", 0) == 0) {
                             expr.isScalar = true;
                             expr.funcName = func;
                             expr.funcArgs = splitFuncArgs(arg);
+                            // Unwrap typed literals in scalar args:
+                            // date '2026-08-15' -> '2026-08-15'.
+                            for (auto& fa : expr.funcArgs) {
+                                static const vector<string> tlKws = {"date ", "timestamp ", "time ", "numeric ", "int ", "text "};
+                                for (const auto& kw : tlKws) {
+                                    if (fa.size() > kw.size()) {
+                                        string low = fa.substr(0, kw.size());
+                                        for (auto& lc : low) lc = static_cast<char>(tolower(static_cast<unsigned char>(lc)));
+                                        if (low == kw) { fa = fa.substr(kw.size()); break; }
+                                    }
+                                }
+                            }
                             // EXTRACT(field FROM col): splitFuncArgs only
                             // splits commas, so rewrite the field FROM col
                             // form into two positional arguments.

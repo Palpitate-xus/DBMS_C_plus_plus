@@ -3812,7 +3812,25 @@ void ExprEvaluator::registerBuiltins() {
     // or its value looks like 'YYYY-MM-DD...' / 'HH:MM:SS'; otherwise numeric.
     functions_["to_char"] = [](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
-        const std::string& v = a[0].value;
+        // Unwrap typed literals: date '...' / timestamp '...' / numeric '...'
+        std::string vval = a[0].value;
+        {
+            static const char* kws[] = {"date ", "timestamp ", "time ", "numeric ", "int ", "text "};
+            for (const char* kw : kws) {
+                std::string kwd(kw);
+                if (vval.size() > kwd.size()) {
+                    std::string low = vval.substr(0, kwd.size());
+                    for (auto& lc : low) lc = static_cast<char>(std::tolower((unsigned char)lc));
+                    if (low == kwd) {
+                        vval = vval.substr(kwd.size());
+                        if (vval.size() >= 2 && vval.front() == (char)39 && vval.back() == (char)39)
+                            vval = vval.substr(1, vval.size() - 2);
+                        break;
+                    }
+                }
+            }
+        }
+        const std::string& v = vval;
         const std::string& fmt = a[1].value;
         std::string tn = toLower(a[0].typeName);
         bool temporal = tn.find("date") != std::string::npos ||
