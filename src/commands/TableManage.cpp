@@ -18729,6 +18729,27 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return val;
     }
+    if (expr.funcName == "to_timestamp" && expr.funcArgs.size() >= 1) {
+        std::string val = getVal(expr.funcArgs[0]);
+        if (expr.funcArgs.size() >= 2) {
+            std::string fmt = getVal(expr.funcArgs[1]);
+            int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0; size_t ip = 0;
+            for (size_t fp = 0; fp < fmt.size() && ip < val.size();) {
+                if (fmt.compare(fp, 4, "YYYY") == 0) { y = std::stoi(val.substr(ip, 4)); fp += 4; ip += 4; }
+                else if (fmt.compare(fp, 4, "HH24") == 0) { h = std::stoi(val.substr(ip, 2)); fp += 4; ip += 2; }
+                else if (fmt.compare(fp, 2, "MM") == 0) { mo = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
+                else if (fmt.compare(fp, 2, "DD") == 0) { d = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
+                else if (fmt.compare(fp, 2, "MI") == 0) { mi = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
+                else if (fmt.compare(fp, 2, "SS") == 0) { se = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
+                else { ++fp; ++ip; }
+            }
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d:%02d+00", y, mo, d, h, mi, se);
+            return buf;
+        }
+        int64_t ts = parseTimestampToSeconds(val);
+        return (ts == 0) ? "" : formatTimestampSeconds(ts);
+    }
     if (expr.funcName == "to_date" && expr.funcArgs.size() >= 1) {
         std::string val = getVal(expr.funcArgs[0]);
         // Pattern parse when a format is supplied (YYYY/MM/DD widths).

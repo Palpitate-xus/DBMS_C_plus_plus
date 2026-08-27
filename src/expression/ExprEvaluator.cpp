@@ -3066,6 +3066,28 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("date", buf, false);
     };
 
+    // to_timestamp(text, fmt): pattern parse like to_date plus HH24/MI/SS;
+    // renders "YYYY-MM-DD HH:MM:SS+00" (UTC offset like PG).
+    functions_["to_timestamp"] = [](const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.empty() || a[0].isNull) return ExprValue("timestamp", "", true);
+        const std::string& s = a[0].value;
+        std::string fmt = (a.size() >= 2 && !a[1].isNull) ? a[1].value : "YYYY-MM-DD HH24:MI:SS";
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0;
+        size_t ip = 0;
+        for (size_t fp = 0; fp < fmt.size() && ip < s.size();) {
+            if (fmt.compare(fp, 4, "YYYY") == 0) { y = std::stoi(s.substr(ip, 4)); fp += 4; ip += 4; }
+            else if (fmt.compare(fp, 4, "HH24") == 0) { h = std::stoi(s.substr(ip, 2)); fp += 4; ip += 2; }
+            else if (fmt.compare(fp, 2, "MM") == 0) { mo = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2; }
+            else if (fmt.compare(fp, 2, "DD") == 0) { d = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2; }
+            else if (fmt.compare(fp, 2, "MI") == 0) { mi = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2; }
+            else if (fmt.compare(fp, 2, "SS") == 0) { se = std::stoi(s.substr(ip, 2)); fp += 2; ip += 2; }
+            else { ++fp; ++ip; }
+        }
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d:%02d+00", y, mo, d, h, mi, se);
+        return ExprValue("timestamp", buf, false);
+    };
+
     // to_number(text, fmt): extract the numeric literal; pattern characters
     // (9/0 digits, D decimal point, G grouping, S sign, blanks) guide parsing.
     functions_["to_number"] = [](const std::vector<ExprValue>& a) -> ExprValue {
