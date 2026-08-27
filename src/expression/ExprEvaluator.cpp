@@ -1973,6 +1973,13 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     if (sp != std::string::npos) { ip = s.substr(0, sp); fp = s.substr(sp + 1); }
     if (zeroPad && static_cast<int>(ip.size()) < intPlaces)
         ip = std::string(intPlaces - ip.size(), '0') + ip;
+    else if (!zeroPad && !fm) {
+        // PG: unused leading 9-positions render as blanks; an
+        // all-zero integer part with no 0-pattern renders blank.
+        if (ip == "0") ip = std::string(intPlaces, ' ');
+        else if (static_cast<int>(ip.size()) < intPlaces)
+            ip = std::string(intPlaces - ip.size(), ' ') + ip;
+    }
     std::string out = neg ? "-" : (fm ? "" : " ");
     out += ip;
     if (fracDigits > 0) out += "." + fp;

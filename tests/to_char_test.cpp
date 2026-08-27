@@ -79,8 +79,9 @@ static void test_numeric() {
     assert(callFn(eval, "to_char", {N("1234.5"), F("FM9999.99")}).value == "1234.50");
     // '0' zero-pads the integer part; non-FM keeps the leading sign blank.
     assert(callFn(eval, "to_char", {N("7"), F("000")}).value == " 007");
-    // Non-FM keeps a leading blank in the sign position.
-    assert(callFn(eval, "to_char", {N("42"), F("9999")}).value == " 42");
+    // Non-FM keeps a leading blank in the sign position; unused leading
+    // 9-positions render as blanks (PG: to_char(42,'9999') = "   42").
+    assert(callFn(eval, "to_char", {N("42"), F("9999")}).value == "   42");
     // Negative.
     assert(callFn(eval, "to_char", {N("-3.14"), F("FM99.99")}).value == "-3.14");
     std::cout << "[TOCHAR] numeric OK" << std::endl;

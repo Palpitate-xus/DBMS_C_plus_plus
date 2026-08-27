@@ -1179,7 +1179,7 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
 标记）和本 DBMS（wire protocol），规范化不稳定字段后逐条比对行数据与
 SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版本。
 
-当前覆盖（40 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑、
+当前覆盖（41 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑、
 整数/numeric 除法（含 PG `select_div_scale` 的 16/20 位小数规则）、
 CASE 表达式、聚合（sum/count/avg/min/max、GROUP BY、FILTER 子句）、
 显式/隐式类型转换（CAST(x AS t) 前缀语法、`::` 后缀语法、舍入与
@@ -1212,7 +1212,7 @@ NULLS LAST、DESC 时 NULLS FIRST，PG 默认语义）与 NULL 单元格
 EXISTS/NOT EXISTS 逐行求值、GROUP BY 选择列表中
 "sum(id) + (select ...)" 聚合与相关标量子查询的算术组合
 （逐组求值聚合与子查询后按 Numeric 精确运算，列头 ?column?）、SELECT 列表中普通列与算术表达式混合
-（修复公共列序重排误删表达式列：重排仅在纯普通列查询执行）、字符串连接 ||（列/字面量/内联 ::text 转换/函数调用操作数，顶层切分保留嵌套括号）、函数调用与算术组合（coalesce(a,b)+1 等，顶层运算符切分、NULL 传播、数值字面量与一元符号处理、全 NULL 行经协议保留）、日期函数（EXTRACT year/month/day/dow/doy 的 FROM 参数形式与 NULL、日期 ± 整数天返回日期、日期 − 日期返回天数、DATE '...' 类型字面量）、区间运算与 age（date ± interval 'N day/week/month/year' 返回时间戳、age(t, s) 按 PG 格式 "N years M mons K days" 借位渲染、类型字面量参数）、LIKE/ILIKE 谓词（LIKE 区分大小写、ILIKE 折叠大小写、NOT 变体、下划线通配符）、LIKE ESCAPE 子句（normalize 阶段将 esc+X 编码为 0x01+字面量，匹配器解编码）、负整数（parseInt 支持符号、定长整数解码符号扩展、% 与 int/int 截断除法向零取整）、numeric 标度渲染（+− 取最大标度、* 标度相加、/ 精确十进制长除法 16 位小数、整数无小数点）、round/trunc（round 负数位、trunc(x)/trunc(x,n) 向零截断含负 n 位）、div(x,y) 整数商向零截断（mod 已对齐）、gcd/lcm（绝对值运算、lcm=|ab|/gcd）、width_bucket（trunc((op-lb)*cnt/(ub-lb))+1，越界 0/cnt+1）、类型化 numeric 转换（v::numeric(4,2) 重写为 cast、十进制半进位、按标度渲染）、left/right/repeat（负 n 分别去尾/去头、n=0 空串）、btrim/ltrim/rtrim（trim 字符集合、单参 btrim 去空白；lpad/rpad 已对齐）、strpos（1 基找不到 0）与 overlay（placing/from/for 语法重写为位置参数）、translate（from→to 逐字符映射，to 较短删除、to 较长忽略多余；字面量路径原本已通，列路径补路由+处理器）。运行：`python3 tests/compat/pg_diff_runner.py
+（修复公共列序重排误删表达式列：重排仅在纯普通列查询执行）、字符串连接 ||（列/字面量/内联 ::text 转换/函数调用操作数，顶层切分保留嵌套括号）、函数调用与算术组合（coalesce(a,b)+1 等，顶层运算符切分、NULL 传播、数值字面量与一元符号处理、全 NULL 行经协议保留）、日期函数（EXTRACT year/month/day/dow/doy 的 FROM 参数形式与 NULL、日期 ± 整数天返回日期、日期 − 日期返回天数、DATE '...' 类型字面量）、区间运算与 age（date ± interval 'N day/week/month/year' 返回时间戳、age(t, s) 按 PG 格式 "N years M mons K days" 借位渲染、类型字面量参数）、LIKE/ILIKE 谓词（LIKE 区分大小写、ILIKE 折叠大小写、NOT 变体、下划线通配符）、LIKE ESCAPE 子句（normalize 阶段将 esc+X 编码为 0x01+字面量，匹配器解编码）、负整数（parseInt 支持符号、定长整数解码符号扩展、% 与 int/int 截断除法向零取整）、numeric 标度渲染（+− 取最大标度、* 标度相加、/ 精确十进制长除法 16 位小数、整数无小数点）、round/trunc（round 负数位、trunc(x)/trunc(x,n) 向零截断含负 n 位）、div(x,y) 整数商向零截断（mod 已对齐）、gcd/lcm（绝对值运算、lcm=|ab|/gcd）、width_bucket（trunc((op-lb)*cnt/(ub-lb))+1，越界 0/cnt+1）、类型化 numeric 转换（v::numeric(4,2) 重写为 cast、十进制半进位、按标度渲染）、left/right/repeat（负 n 分别去尾/去头、n=0 空串）、btrim/ltrim/rtrim（trim 字符集合、单参 btrim 去空白；lpad/rpad 已对齐）、strpos（1 基找不到 0）与 overlay（placing/from/for 语法重写为位置参数）、translate（from→to 逐字符映射，to 较短删除、to 较长忽略多余；字面量路径原本已通，列路径补路由+处理器）、to_char 数值模式（未用 9 位渲染空格、全零整数无 0 模式渲染空、0 位补零）。运行：`python3 tests/compat/pg_diff_runner.py
 [--only NAME]`（需要 docker 参考库）。
 
 差分驱动已修复的语义：`CASE` 生成真正的 `CaseExpr`；`NULL AND/OR x`
