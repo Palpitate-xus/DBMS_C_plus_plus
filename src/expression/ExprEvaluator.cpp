@@ -756,7 +756,24 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 res = *nl / *nr;
             }
             else return ExprValue("numeric", "", true);
-            return ExprValue("numeric", res.toString(), false);
+            // PG display scale from the operand TEXTS: +/- max,
+            // * sum, / division scale.
+            auto textScale = [](const std::string& s) {
+                size_t d = s.find('.');
+                return (d == std::string::npos) ? 0 : (int)(s.size() - d - 1);
+            };
+            int tsL = textScale(l.value), tsR = textScale(r.value);
+            if (op == "/") return ExprValue("numeric", res.toString(), false);            int target = std::max(tsL, tsR);            if (op == "*") target = tsL + tsR;
+            Numeric rs2 = res.withScale(target);
+            std::string s = rs2.toString();
+            int cur = 0;
+            size_t dot = s.find('.');
+            if (dot != std::string::npos) cur = (int)(s.size() - dot - 1);
+            if (cur < target) {
+                if (dot == std::string::npos) { s += '.'; }
+                s += std::string(target - cur, '0');
+            }
+            return ExprValue("numeric", s, false);
         }
     }
 
@@ -1192,8 +1209,7 @@ ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) cons
 
 ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) const {
     if (e) {
-        ExprValue v = eval(e->operand.get(), ctx);
-        return evalCast(nullptr, ctx, v, e->typeName);
+        ExprValue v = eval(e->operand.get(), ctx);        std::string fullT = e->typeName;        if (!e->typeMods.empty()) {            fullT += "(";            for (size_t mi = 0; mi < e->typeMods.size(); ++mi) {                if (mi) fullT += ",";                fullT += e->typeMods[mi];            }            fullT += ")";        }        return evalCast(nullptr, ctx, v, fullT);
     }
     return ExprValue{};
 }
@@ -1203,6 +1219,30 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                                   const ExprValue& v, const std::string& targetTypeName) const {
     if (v.isNull) return ExprValue(targetTypeName, "", true);
     std::string target = toLower(targetTypeName);
+    {
+        // ::type mod lists arrive space-joined WITHOUT the open paren
+        // ("numeric 4 , 2)"): rebuild canonical "numeric(4,2)".
+        size_t dpos = target.find_first_of("0123456789");
+        size_t rpos = target.find(')');
+        if (dpos != std::string::npos && rpos != std::string::npos && rpos > dpos) {
+            std::string base = target.substr(0, dpos);
+            while (!base.empty() && (base.back() == ' ' || base.back() == 9)) base.pop_back();
+            std::vector<int> nums;
+            for (size_t i = dpos; i < rpos; ++i)
+                if (std::isdigit((unsigned char)target[i])) {
+                    int v2 = 0;
+                    while (i < rpos && std::isdigit((unsigned char)target[i])) { v2 = v2 * 10 + (target[i] - '0'); ++i; }
+                    nums.push_back(v2);
+                }
+            std::string rebuilt = base + "(";
+            for (size_t k2 = 0; k2 < nums.size(); ++k2) {
+                if (k2) rebuilt += ",";
+                rebuilt += std::to_string(nums[k2]);
+            }
+            rebuilt += ")";
+            target = rebuilt;
+        }
+    }
 
     if (target == "boolean" || target == "bool") {
         return ExprValue("boolean", v.asBool() ? "t" : "f", false);
@@ -1247,6 +1287,50 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target == "double precision" || target == "float8") {
         std::ostringstream oss; oss << v.asDouble();
         return ExprValue("double precision", oss.str(), false);
+    }
+    if (target.size() > 7 && target.compare(0, 8, "numeric(") == 0) {
+        // Typed numeric cast: round half-up to the declared scale
+        // (numeric(p,s) or numeric(p) -> scale 0).
+        int scale = 0;
+        {
+            // Mods may arrive comma- or space-joined:
+            // numeric(4,2) / numeric(4 2). Last number is the
+            // scale; a single number means scale 0.
+            std::vector<int> nums;
+            size_t p2 = target.find('(');
+            size_t e2 = target.find(')');
+            if (p2 != std::string::npos && e2 != std::string::npos && e2 > p2) {
+                std::string seg = target.substr(p2 + 1, e2 - p2 - 1);
+                size_t i2 = 0;
+                while (i2 < seg.size()) {
+                    if (std::isdigit((unsigned char)seg[i2])) {
+                        int v2 = 0;
+                        while (i2 < seg.size() && std::isdigit((unsigned char)seg[i2])) {
+                            v2 = v2 * 10 + (seg[i2] - '0'); ++i2;
+                        }
+                        nums.push_back(v2);
+                    } else ++i2;
+                }
+                if (nums.size() >= 2) scale = nums.back();
+            }
+            if (scale < 0) scale = 0;
+        }
+        auto n = tryParseNumeric(v.value);
+        if (n) {
+            Numeric rs = n->withScale(scale);
+            // Render with the declared scale: pad trailing zeros
+            // (withScale normalizes them away).
+            std::string s = rs.toString();
+            int cur = 0;
+            size_t dot = s.find('.');
+            if (dot != std::string::npos) cur = (int)(s.size() - dot - 1);
+            if (cur < scale) {
+                if (dot == std::string::npos) { s += '.'; }
+                s += std::string(scale - cur, '0');
+            }
+            return ExprValue("numeric", s, false);
+        }
+        return ExprValue("numeric", "", true);
     }
     if (target == "numeric" || target == "decimal") {
         auto n = tryParseNumeric(v.value);

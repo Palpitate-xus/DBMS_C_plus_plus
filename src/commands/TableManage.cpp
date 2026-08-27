@@ -17888,6 +17888,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         cur += ch;
                     }
                     if (!trim(cur).empty() || !nArgs.empty()) nArgs.push_back(trim(cur));
+                    // cast(v as numeric(4,2)): the nested-call split
+                    // yields one arg; split the AS form into [val, type].
+                    if (nfunc == "cast" && nArgs.size() == 1) {
+                        std::string one = nArgs[0];
+                        std::string oneLow;
+                        for (char oc : one) oneLow += static_cast<char>(tolower(static_cast<unsigned char>(oc)));
+                        size_t asP = oneLow.find(" as ");
+                        if (asP != std::string::npos) {
+                            std::string cv = trim(one.substr(0, asP));
+                            std::string ct = trim(one.substr(asP + 4));
+                            nArgs = {cv, ct};
+                        }
+                    }
                     StorageEngine::SelectExpr sub;
                     sub.isScalar = true;
                     sub.funcName = nfunc;
@@ -18095,6 +18108,18 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                             cur += c;
                         }
                         if (!cur.empty()) sub.funcArgs.push_back(trim(cur));
+                        // cast(v as numeric(4,2)): split the AS form.
+                        if (fn == "cast" && sub.funcArgs.size() == 1) {
+                            std::string one = sub.funcArgs[0];
+                            std::string oneLow;
+                            for (char oc : one) oneLow += static_cast<char>(tolower(static_cast<unsigned char>(oc)));
+                            size_t asP = oneLow.find(" as ");
+                            if (asP != std::string::npos) {
+                                std::string cv = trim(one.substr(0, asP));
+                                std::string ct = trim(one.substr(asP + 4));
+                                sub.funcArgs = {cv, ct};
+                            }
+                        }
                     }
                     v = applyScalarFunc(sub, rowBuffer, tbl, engine, dbname);
                 } else {

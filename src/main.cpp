@@ -16786,7 +16786,20 @@ if (sql.rfind("backup database", 0) == 0) {
                             cur += c;
                         }
                         if (!trim(cur).empty()) parts.push_back(trim(cur));
-                        for (const auto& p2 : parts) {
+                        for (auto& p2 : parts) {
+                            // Typed cast inside an arithmetic operand:
+                            // v::numeric(4,2) -> cast(v as numeric(4,2))
+                            // so the evaluator resolves it as a function call.
+                            if (p2 != "||" && p2.find("::") != string::npos) {
+                                size_t cc2 = p2.find("::");
+                                string lhsC = trim(p2.substr(0, cc2));
+                                string rhsC = trim(p2.substr(cc2 + 2));
+                                if (!lhsC.empty() && isalpha((unsigned char)lhsC[0]) &&
+                                    lhsC.find(' ') == string::npos &&
+                                    !rhsC.empty() && isalpha((unsigned char)rhsC[0])) {
+                                    p2 = "cast(" + lhsC + " as " + rhsC + ")";
+                                }
+                            }
                             if (!p2.empty()) expr.funcArgs.push_back(p2);
                         }
                     }
