@@ -1,0 +1,11 @@
+-- string function coverage
+SELECT overlay('Txxxxas' placing 'hom' from 2 for 4)
+SELECT repeat('ab', 3)
+SELECT reverse('abc')
+SELECT substr('alphabet', 2, 3)
+SELECT substring('alphabet' from 2 for 3)
+SELECT btrim('xxhelloxx', 'x'), ltrim('  hi'), rtrim('hi  ')
+SELECT concat_ws('-', 'a', 'b', NULL, 'c')
+SELECT left('hello', 2), right('hello', 2)
+SELECT lpad('hi', 5, '*')
+SELECT strpos('hello', 'll'), position('ll' in 'hello')
