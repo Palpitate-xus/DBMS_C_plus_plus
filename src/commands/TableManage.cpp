@@ -18731,6 +18731,20 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "to_date" && expr.funcArgs.size() >= 1) {
         std::string val = getVal(expr.funcArgs[0]);
+        // Pattern parse when a format is supplied (YYYY/MM/DD widths).
+        if (expr.funcArgs.size() >= 2) {
+            std::string fmt = getVal(expr.funcArgs[1]);
+            int y = 0, m = 0, d = 0; size_t ip = 0;
+            for (size_t fp = 0; fp < fmt.size() && ip < val.size();) {
+                if (fmt.compare(fp, 4, "YYYY") == 0) { y = std::stoi(val.substr(ip, 4)); fp += 4; ip += 4; }
+                else if (fmt.compare(fp, 2, "MM") == 0) { m = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
+                else if (fmt.compare(fp, 2, "DD") == 0) { d = std::stoi(val.substr(ip, 2)); fp += 2; ip += 2; }
+                else { ++fp; ++ip; }
+            }
+            char buf[16];
+            std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", y, m, d);
+            return buf;
+        }
         Date d(val.c_str());
         return (d.year == 0) ? "" : str(d);
     }
