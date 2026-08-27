@@ -1746,6 +1746,30 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
             func->funcName = first;
         }
 
+        // PG keyword-arg syntax: normalize inside overlay/trim/extract calls.
+        std::string fnLow = SQLParser::toLower(func->funcName);
+        if (fnLow == "overlay" || fnLow == "trim" || fnLow == "extract") {
+            std::vector<std::string>& tok2 = const_cast<std::vector<std::string>&>(tokens);
+            // tok2 aliases the caller-owned token buffer; keyword rewrite below.
+            int depth = 1; size_t e2 = pos;
+            while (e2 < tokens.size() && depth > 0) {
+                if (tok2[e2] == "(") ++depth;
+                else if (tok2[e2] == ")") --depth;
+                ++e2;
+            }
+            for (size_t k2 = pos; k2 < e2; ) {
+                std::string lk2 = SQLParser::toLower(tok2[k2]);
+                if (fnLow == "overlay") {
+                    if (lk2 == "placing" || lk2 == "from" || lk2 == "for") tok2[k2] = ",";
+                } else if (fnLow == "trim") {
+                    if (lk2 == "both" || lk2 == "leading" || lk2 == "trailing") tok2[k2] = "'" + lk2 + "'";
+                    else if (lk2 == "from") tok2[k2] = ",";
+                } else if (fnLow == "extract") {
+                    if (lk2 == "from") tok2[k2] = ",";
+                }
+                ++k2;
+            }
+        }
         auto parseArg = [&](ExprPtr arg) {
             // Detect named argument: name => value
             if (arg && arg->type == ExprType::ColumnRef && pos + 1 < tokens.size() &&

@@ -2995,9 +2995,25 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", s, false);
     };
     functions_["trim"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        const std::string& s = a[0].value;
-        std::string chars = (a.size() >= 2 && !a[1].isNull) ? a[1].value : " \t\n\r\f\v";
+        // Keyword form: trim([both|leading|trailing] [chars] from s).
+        std::string dir = "both";
+        size_t idx = 0;
+        if (!a.empty() && (a[0].value == "both" || a[0].value == "leading" || a[0].value == "trailing")) { dir = a[0].value; idx = 1; }
+        if (a.size() <= idx || a[idx].isNull) return ExprValue("text", "", true);
+        std::string s, chars = " \t\n\r\f\v";
+        if (idx == 1 && a.size() > 2) { chars = a[1].value; s = a[2].value; }
+        else if (idx == 0 && a.size() > 1) { s = a[0].value; chars = a[1].value; }
+        else s = a[idx].value;
+        if (dir == "leading") {
+            size_t b = 0;
+            while (b < s.size() && chars.find(s[b]) != std::string::npos) ++b;
+            return ExprValue("text", s.substr(b), false);
+        }
+        if (dir == "trailing") {
+            size_t e = s.size();
+            while (e > 0 && chars.find(s[e - 1]) != std::string::npos) --e;
+            return ExprValue("text", s.substr(0, e), false);
+        }
         size_t b = 0, e = s.size();
         while (b < e && chars.find(s[b]) != std::string::npos) ++b;
         while (e > b && chars.find(s[e - 1]) != std::string::npos) --e;
