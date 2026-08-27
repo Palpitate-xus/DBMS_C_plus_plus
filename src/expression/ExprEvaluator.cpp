@@ -1954,7 +1954,9 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
     bool fm = false;
     if (fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
         (fmt[1] == 'M' || fmt[1] == 'm')) { fm = true; fmt = fmt.substr(2); }
+    // Treat D as the decimal point (PG locale-independent form).
     size_t dot = fmt.find('.');
+    if (dot == std::string::npos) dot = fmt.find('D');
     int fracDigits = 0;
     if (dot != std::string::npos)
         for (size_t i = dot + 1; i < fmt.size(); ++i)
@@ -1965,6 +1967,7 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         if (fmt[i] == '9') ++intPlaces;
         else if (fmt[i] == '0') { ++intPlaces; zeroPad = true; }
     }
+    bool hasG = fmt.find('G') != std::string::npos;
     bool neg = val < 0;
     char numbuf[64];
     std::snprintf(numbuf, sizeof numbuf, "%.*f", fracDigits, neg ? -val : val);
@@ -1979,6 +1982,19 @@ static std::string formatNumeric(double val, const std::string& fmtIn) {
         if (ip == "0") ip = std::string(intPlaces, ' ');
         else if (static_cast<int>(ip.size()) < intPlaces)
             ip = std::string(intPlaces - ip.size(), ' ') + ip;
+    }
+    if (hasG) {
+        // Insert commas every three digits, leaving leading blanks in place.
+        size_t firstDig = ip.find_first_not_of(' ');
+        if (firstDig == std::string::npos) firstDig = 0;
+        std::string digits = ip.substr(firstDig);
+        std::string lead = ip.substr(0, firstDig);
+        std::string grouped;
+        for (size_t k = 0; k < digits.size(); ++k) {
+            if (k > 0 && (digits.size() - k) % 3 == 0) grouped += ",";
+            grouped += digits[k];
+        }
+        ip = lead + grouped;
     }
     std::string out = neg ? "-" : (fm ? "" : " ");
     out += ip;
