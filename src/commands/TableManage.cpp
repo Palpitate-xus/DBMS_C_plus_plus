@@ -19197,6 +19197,102 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         if (d1.year == 0 || d2.year == 0) return "";
         return std::to_string(d1 - d2);
     }
+    if (expr.funcName == "justify_hours" || expr.funcName == "justify_days" || expr.funcName == "justify_interval") {
+        std::string src = getVal(expr.funcArgs[0]);
+        long long months = 0, days = 0, micros = 0;
+        size_t tp = src.find(':');
+        std::string noTime = src;
+        if (tp != std::string::npos) {
+            size_t ts2 = tp; while (ts2 > 0 && isdigit((unsigned char)src[ts2-1])) --ts2;
+            bool tneg = false; if (ts2 > 0 && src[ts2-1] == '-') { tneg = true; --ts2; }
+            long long hh = 0, mm2 = 0, ss2 = 0;
+            int consumed = sscanf(src.c_str() + ts2, "%lld:%lld:%lld", &hh, &mm2, &ss2);
+            if (consumed >= 2) {
+                long long us2 = hh * 3600000000LL + mm2 * 60000000LL + ((consumed >= 3) ? ss2 * 1000000LL : 0);
+                micros += tneg ? -us2 : us2;
+                size_t tend = ts2; while (tend < src.size() && (isdigit((unsigned char)src[tend]) || src[tend] == ':' || src[tend] == '.')) ++tend;
+                noTime = src.substr(0, ts2) + ' ' + src.substr(tend);
+            }
+        }
+        long long sign = 1, cur = 0; bool have = false;
+        for (size_t i = 0; i <= noTime.size(); ++i) {
+            if (i < noTime.size() && noTime[i] == '-') { sign = -1; continue; }
+            if (i < noTime.size() && isdigit((unsigned char)noTime[i])) { cur = cur * 10 + (noTime[i] - '0'); have = true; continue; }
+            if (i == noTime.size() || noTime[i] == ' ') {
+                if (have) {
+                    size_t u = (i < noTime.size()) ? i + 1 : i;
+                    while (u < noTime.size() && noTime[u] == ' ') ++u;
+                    std::string unit;
+                    while (u < noTime.size() && isalpha((unsigned char)noTime[u])) unit += noTime[u++];
+                    std::string lu; for (char c : unit) lu += (char)tolower((unsigned char)c);
+                    if (lu == "year" || lu == "years") months += sign * cur * 12;
+                    else if (lu == "mon" || lu == "mons" || lu == "month" || lu == "months") months += sign * cur;
+                    else if (lu == "day" || lu == "days") days += sign * cur;
+                    else if (lu == "hour" || lu == "hours") micros += sign * cur * 3600000000LL;
+                    else if (lu == "min" || lu == "mins" || lu == "minute" || lu == "minutes") micros += sign * cur * 60000000LL;
+                    else if (lu == "sec" || lu == "secs" || lu == "second" || lu == "seconds") micros += sign * cur * 1000000LL;
+                    else days += sign * cur;
+                    i = u; have = false; cur = 0; sign = 1; continue;
+                }
+                sign = 1; cur = 0; continue;
+            }
+        }
+        bool jh = expr.funcName == "justify_hours";
+        bool jd = expr.funcName == "justify_days";
+        bool ji = expr.funcName == "justify_interval";
+        if (ji) { // single dominant sign: decompose |days+time|, sign, fold 30s
+            long long totUs = days * 86400000000LL + micros;
+            long long sgn = (months != 0) ? (months < 0 ? -1 : 1) : (totUs < 0 ? -1 : 1);
+            long long au = totUs < 0 ? -totUs : totUs;
+            long long nd = au / 86400000000LL; long long rem = au % 86400000000LL;
+            months += sgn * (nd / 30);
+            days = sgn * (nd % 30);
+            micros = sgn * rem;
+        } else if (jd) { months += days / 30; days %= 30; }
+        else { // justify_hours: fold whole 24h groups into days
+            long long nd = micros / 86400000000LL; long long rem = micros % 86400000000LL;
+            days += nd; micros = rem;
+        }
+        // PG-style render: negative intervals carry per-part minus signs.
+        bool anyNeg = months < 0 || days < 0 || micros < 0;
+        bool anyPos = months > 0 || days > 0 || micros > 0;
+        bool mixed = anyNeg && anyPos;
+        if (mixed) { // canonicalize: absorb time into days so one sign dominates
+            long long totUs = days * 86400000000LL + micros;
+            long long nd = totUs / 86400000000LL; long long rem = totUs % 86400000000LL;
+            if (nd != 0 && ((nd < 0) != (months < 0))) { // flip day into months direction
+                months += nd / 30; long long rest = nd % 30;
+                days = rest; micros = rem;
+                if (days * 86400000000LL + micros != 0 && ((days < 0 || micros < 0) != (months < 0))) {
+                    // borrow one month
+                    months -= (months < 0 ? -1 : 1);
+                    long long borrow = 30;
+                    long long t2 = days * 86400000000LL + micros + ((months < 0 ? -1 : 1) * borrow * 86400000000LL);
+                    days = t2 / 86400000000LL; micros = t2 % 86400000000LL;
+                }
+            } else { days = nd; micros = rem; }
+        }
+        std::string out;
+        auto part = [&](long long v, const char* one, const char* many) {
+            if (!v) return;
+            if (!out.empty()) out += ' ';
+            out += std::to_string(v) + ' ' + (v == 1 ? one : many);
+        };
+        long long yy = months / 12, mm3 = months % 12;
+        part(yy, "year", "years"); part(mm3, "mon", "mons"); part(days, "day", "days");
+        if (micros || out.empty()) {
+            bool tn = micros < 0; long long au = tn ? -micros : micros;
+            long long hh = au / 3600000000LL; au %= 3600000000LL;
+            long long mi = au / 60000000LL; au %= 60000000LL;
+            long long se = au / 1000000LL;
+            char tb[64];
+            if (tn) std::snprintf(tb, sizeof tb, "-%02lld:%02lld:%02lld", hh, mi, se);
+            else std::snprintf(tb, sizeof tb, "%02lld:%02lld:%02lld", hh, mi, se);
+            if (!out.empty()) out += ' ';
+            out += tb;
+        }
+        return out;
+    }
     if (expr.funcName == "age" && expr.funcArgs.size() >= 2) {
         std::string tv = getVal(expr.funcArgs[0]);
         std::string sv = getVal(expr.funcArgs[1]);

@@ -245,10 +245,14 @@ static IntervalParts parseIntervalText(const std::string& in) {
         }
         // number[.fraction][unit] with unit possibly in the next token
         size_t endNum = 0;
+        bool tokNeg = !tok.empty() && tok[0] == '-';
+        size_t scan0 = tokNeg ? 1 : 0;
+        while (scan0 + endNum < tok.size() && (std::isdigit(static_cast<unsigned char>(tok[scan0 + endNum])) || tok[scan0 + endNum] == '.')) ++endNum;
         while (endNum < tok.size() && (std::isdigit(static_cast<unsigned char>(tok[endNum])) || tok[endNum] == '.')) ++endNum;
         if (endNum == 0) { r.ok = false; break; }
+        if (tokNeg) endNum += 1; // include the sign in the numeric prefix
         double n = std::stod(tok.substr(0, endNum));
-        std::string unit = tok.substr(endNum);
+        std::string unit = (endNum <= tok.size()) ? tok.substr(endNum) : std::string();
         if (unit.empty()) {
             if (!(iss >> unit)) { r.micros += static_cast<long long>(n * 1000000.0); continue; }
         }
@@ -3997,6 +4001,57 @@ void ExprEvaluator::registerBuiltins() {
     // to_char(value, fmt): format a date/timestamp/time or number as text. The
     // input is treated as temporal when its declared type is date/time/timestamp
     // or its value looks like 'YYYY-MM-DD...' / 'HH:MM:SS'; otherwise numeric.
+    // justify_hours/days/interval: PG interval normalization.
+    auto intervalToTextPg = [](long long months, long long days, long long micros) -> std::string {
+        std::string o;
+        auto part = [&](long long v, const char* one, const char* many) {
+            if (!v) return;
+            if (!o.empty()) o += " ";
+            o += std::to_string(v) + " " + ((v == 1) ? one : many);
+        };
+        long long yy = months / 12, mm = months % 12;
+        part(yy, "year", "years"); part(mm, "mon", "mons"); part(days, "day", "days");
+        if (micros || o.empty()) {
+            bool tn = micros < 0; long long au = tn ? -micros : micros;
+            long long hh = au / 3600000000LL; au %= 3600000000LL;
+            long long mi = au / 60000000LL; au %= 60000000LL;
+            long long se = au / 1000000LL;
+            char tb[64];
+            if (tn) std::snprintf(tb, sizeof tb, "-%02lld:%02lld:%02lld", hh, mi, se);
+            else std::snprintf(tb, sizeof tb, "%02lld:%02lld:%02lld", hh, mi, se);
+            if (!o.empty()) o += " ";
+            o += tb;
+        }
+        return o;
+    };
+    auto justifyCommon = [&](const std::string& in, int mode) -> std::string {
+        IntervalParts p = parseIntervalText(in);
+        if (!p.ok) return in;
+        long long months = p.months, days = p.days, micros = p.micros;
+        if (mode == 2) {
+            // Normalize so a single sign dominates: decompose |days+time|,
+            // attach the overall sign, fold whole 30-day groups into months.
+            long long totUs = days * 86400000000LL + micros;
+            long long sgn = (months != 0) ? (months < 0 ? -1 : 1) : (totUs < 0 ? -1 : 1);
+            long long au = totUs < 0 ? -totUs : totUs;
+            long long nd = au / 86400000000LL;
+            long long rem = au % 86400000000LL;
+            months += sgn * (nd / 30);
+            days = sgn * (nd % 30);
+            micros = sgn * rem;
+        } else if (mode == 1) { months += days / 30; days %= 30; }
+        else { long long nd = micros / 86400000000LL; long long rem = micros % 86400000000LL; days += nd; micros = rem; }
+        return intervalToTextPg(months, days, micros);
+    };
+    functions_["justify_hours"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+        return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 0), a.empty() || a[0].isNull);
+    };
+    functions_["justify_days"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+        return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 1), a.empty() || a[0].isNull);
+    };
+    functions_["justify_interval"] = [&](const std::vector<ExprValue>& a) -> ExprValue {
+        return ExprValue("interval", justifyCommon(a.empty() ? "" : a[0].value, 2), a.empty() || a[0].isNull);
+    };
     functions_["to_char"] = [](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
         // Unwrap typed literals: date '...' / timestamp '...' / numeric '...'

@@ -667,6 +667,7 @@ static bool isScalarFunc(const string& name) {
                                          "hour", "minute", "second",
                                          "case_when", "cast", "convert",
                                          "to_number", "to_char", "to_date", "to_timestamp",
+        "justify_hours", "justify_days", "justify_interval",
                                          "coalesce", "nullif",
                                          "replace", "position", "instr", "strpos", "overlay", "translate",
                                          "power", "sqrt", "mod", "div", "gcd", "lcm", "width_bucket",
