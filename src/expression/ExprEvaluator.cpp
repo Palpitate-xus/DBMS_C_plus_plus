@@ -127,7 +127,16 @@ static bool isQuotedString(const std::string& s) {
 }
 
 static std::string unquote(const std::string& s) {
-    if (isQuotedString(s)) return s.substr(1, s.size() - 2);
+    // SQL string literal: strip the outer quotes and collapse doubled quotes.
+    if (isQuotedString(s)) {
+        std::string inner = s.substr(1, s.size() - 2);
+        std::string out;
+        for (size_t i = 0; i < inner.size(); ++i) {
+            out += inner[i];
+            if (inner[i] == '\'' && i + 1 < inner.size() && inner[i + 1] == '\'') ++i;
+        }
+        return out;
+    }
     return s;
 }
 
