@@ -19,3 +19,14 @@ SELECT bool_or(v > 25) FROM nt2
 SELECT every(v > 1) FROM nt2
 SELECT bool_and(v > 9) FROM nt2
 DROP TABLE nt2
+
+-- WHERE-path IS [NOT] NULL on parenthesized expressions
+DROP TABLE IF EXISTS nt3
+CREATE TABLE nt3 (id INT, v INT)
+INSERT INTO nt3 VALUES (1, 5), (2, 9)
+SELECT id FROM nt3 WHERE (v > 5) IS NULL
+SELECT id FROM nt3 WHERE (v > 5) IS NOT NULL
+SELECT id FROM nt3 WHERE v > 5 IS NULL
+SELECT id FROM nt3 WHERE v IS NOT NULL
+SELECT id FROM nt3 WHERE (v > 5) AND id IS NOT NULL
+DROP TABLE nt3

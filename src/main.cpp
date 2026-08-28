@@ -5345,6 +5345,30 @@ static string normalizeConditionStr(string s) {
             pos += 8;
         }
     }
+    // Parenthesized-expression IS [NOT] NULL: with no physical NULL
+    // storage, a comparison expression never evaluates to NULL, so
+    // "(expr) is null" is constant-false and "(expr) is not null" is
+    // constant-true (matches PostgreSQL's result for non-NULL operands).
+    {
+        const char* pats[2] = {" is not null", " is null"};
+        for (int pi = 0; pi < 2; ++pi) {
+            size_t plen = strlen(pats[pi]);
+            size_t p2 = 0;
+            while ((p2 = s.find(pats[pi], p2)) != string::npos) {
+                size_t opEnd = p2;
+                if (opEnd == 0 || s[opEnd - 1] != ')') { p2 += plen; continue; }
+                int depth3 = 0; size_t open = string::npos;
+                for (size_t k = opEnd; k > 0; --k) {
+                    if (s[k - 1] == ')') ++depth3;
+                    else if (s[k - 1] == '(') { --depth3; if (depth3 == 0) { open = k - 1; break; } }
+                }
+                if (open == string::npos) { p2 += plen; continue; }
+                const char* repl = (pi == 0) ? "1 = 1" : "1 = 2";
+                s = s.substr(0, open) + repl + s.substr(opEnd);
+                p2 = open + strlen(repl);
+            }
+        }
+    }
     // Normalize IS NOT NULL (before IS NULL to avoid partial match)
     pos = 0;
     while ((pos = s.find("is not null", pos)) != string::npos) {
