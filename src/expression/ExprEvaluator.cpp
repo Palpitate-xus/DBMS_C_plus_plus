@@ -3470,6 +3470,36 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", sqlQuoteIdent(a[0].value), false);
     };
     // format(fmtstr, args...) — %s (string), %I (identifier), %L (literal), %% (percent)
+    // regexp_matches(text, pattern[, flags]) — PG set-returning form used
+    // as a scalar: first match as a text array; capture groups when present.
+    functions_["regexp_matches"] = [](const std::vector<ExprValue>& a) {
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        auto fl = std::regex::ECMAScript;
+        if (a.size() >= 3 && !a[2].isNull) {
+            for (char c : a[2].value) {
+                if (c == 0x69) fl |= std::regex::icase;  // i
+            }
+        }
+        try {
+            std::regex re(a[1].value, fl);
+            std::smatch m;
+            if (!std::regex_search(a[0].value, m, re)) return ExprValue("text", "", true);
+            std::string out = "{";
+            if (m.size() > 1) {
+                for (size_t k = 1; k < m.size(); ++k) {
+                    if (k > 1) out += ",";
+                    out += m[k].str();
+                }
+            } else {
+                out += m[0].str();
+            }
+            out += "}";
+            return ExprValue("text", out, false);
+        } catch (const std::regex_error&) {
+            return ExprValue("text", "", true);
+        }
+    };
+
     functions_["format"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
         const std::string& fmt = a[0].value;
