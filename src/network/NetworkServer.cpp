@@ -794,7 +794,26 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     if (executionError || (!lines.empty() && lines.front().rfind("ERROR:", 0) == 0)) {
         result.error = true;
         if (result.errorMessage.empty()) {
-            result.errorMessage = lines.empty() ? "query failed" : lines.front().substr(6);
+            if (lines.empty()) {
+                result.errorMessage = "query failed";
+            } else {
+                std::string msg = lines.front();
+                // Strip the CLI's severity prefix so the wire carries the bare
+                // message like PG: "ERROR: x" -> "x", "SQL syntax error: y"
+                // -> "y".  substr(6) used to mangle the latter to "ntax error".
+                static const char* prefixes[] = { "ERROR:", "SQL syntax error:", "SQL error:" };
+                bool stripped = false;
+                for (const char* pre : prefixes) {
+                    size_t n = std::strlen(pre);
+                    if (msg.compare(0, n, pre) == 0) {
+                        msg = trimText(msg.substr(n));
+                        stripped = true;
+                        break;
+                    }
+                }
+                if (!stripped) msg = trimText(msg);
+                result.errorMessage = msg;
+            }
         }
         if (result.errorMessage.find("syntax") != std::string::npos) {
             result.sqlState = "42601";
