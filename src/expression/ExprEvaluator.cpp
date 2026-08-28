@@ -1698,6 +1698,22 @@ static bool hexDecode(const std::string& in, std::string& out) {
     return true;
 }
 
+// UTF-8 aware helpers: total characters and char-index -> byte offset.
+static size_t utf8CharCount(const std::string& s) {
+    size_t n = 0;
+    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+static size_t utf8ByteAt(const std::string& s, size_t charIdx) {
+    size_t n = 0, b = 0;
+    while (b < s.size()) {
+        if (n == charIdx) return b;
+        unsigned char c = static_cast<unsigned char>(s[b]);
+        b += (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0) ? 2 : ((c & 0xF0) == 0xE0) ? 3 : 4;
+        ++n;
+    }
+    return s.size();
+}
 static std::string trimStr(const std::string& s) {
     size_t b = 0, e = s.size();
     while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
@@ -3157,21 +3173,26 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("integer", "", true);
         size_t pos = a[1].value.find(a[0].value);
-        return ExprValue("integer", std::to_string(pos == std::string::npos ? 0 : static_cast<int64_t>(pos + 1)), false);
+        if (pos == std::string::npos) return ExprValue("integer", "0", false);
+        return ExprValue("integer", std::to_string(utf8CharCount(a[1].value.substr(0, pos)) + 1), false);
     };
     functions_["left"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
         int64_t n = a[1].asInt();
-        if (n <= 0) return ExprValue("text", "", false);
-        return ExprValue("text", a[0].value.substr(0, static_cast<size_t>(n)), false);
+        const std::string& s = a[0].value;
+        size_t total = utf8CharCount(s);
+        size_t take = (n < 0) ? (static_cast<size_t>(-n) >= total ? 0 : total - static_cast<size_t>(-n))
+                            : (static_cast<size_t>(n) >= total ? total : static_cast<size_t>(n));
+        return ExprValue("text", s.substr(0, utf8ByteAt(s, take)), false);
     };
     functions_["right"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
         int64_t n = a[1].asInt();
         const std::string& s = a[0].value;
-        if (n <= 0) return ExprValue("text", "", false);
-        size_t start = static_cast<size_t>(n) > s.size() ? 0 : s.size() - static_cast<size_t>(n);
-        return ExprValue("text", s.substr(start), false);
+        size_t total = utf8CharCount(s);
+        size_t skip = (n < 0) ? (static_cast<size_t>(-n) >= total ? total : static_cast<size_t>(-n))
+                            : (static_cast<size_t>(n) >= total ? 0 : total - static_cast<size_t>(n));
+        return ExprValue("text", s.substr(utf8ByteAt(s, skip)), false);
     };
     functions_["repeat"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
@@ -3303,9 +3324,8 @@ void ExprEvaluator::registerBuiltins() {
     functions_["strpos"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("integer", "", true);
         size_t pos = a[0].value.find(a[1].value);
-        return ExprValue("integer",
-                         std::to_string(pos == std::string::npos ? 0 : static_cast<int64_t>(pos + 1)),
-                         false);
+        if (pos == std::string::npos) return ExprValue("integer", "0", false);
+        return ExprValue("integer", std::to_string(utf8CharCount(a[0].value.substr(0, pos)) + 1), false);
     };
     // initcap — capitalize the first letter of each word, lowercase the rest
     functions_["initcap"] = [](const std::vector<ExprValue>& a) {

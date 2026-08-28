@@ -1,0 +1,11 @@
+-- string edges: regexp_split, left/right negative, starts_with
+SELECT regexp_split_to_array('a,b,c', ',')
+SELECT left('abcdef', 2)
+SELECT left('abcdef', -2)
+SELECT right('abcdef', 2)
+SELECT right('abcdef', -2)
+SELECT starts_with('abc', 'ab')
+SELECT strpos('héllo', 'l')
+SELECT left('héllo', 2)
+SELECT right('héllo', -1)
+SELECT position('l' in 'héllo')
