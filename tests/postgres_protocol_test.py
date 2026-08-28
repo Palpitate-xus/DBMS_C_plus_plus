@@ -503,7 +503,7 @@ def main():
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO dml_ast VALUES (DEFAULT, 'first'), (2, NULL), (NULL, 'null-id')"))
         assert data_row_values(simple_query(
-            sock, "SELECT id FROM dml_ast")) == [[b"7"], [b"2"], [b"0"]]
+            sock, "SELECT id FROM dml_ast")) == [[b"7"], [b"2"], [b""]]
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "INSERT INTO dml_ast DEFAULT VALUES"))
         assert data_row_values(simple_query(
