@@ -54,7 +54,7 @@ static void test_bool_or_mixed() {
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"b", "true"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "3"}, {"b", "false"}}) == dbms::DBStatus::OK);
 
-    assert(aggResult(db, "t", "bool_or", "b") == "true");
+    assert(aggResult(db, "t", "bool_or", "b") == "t");
     cleanup(db);
     std::cout << "[AGG_BOOL] bool_or mixed → true OK" << std::endl;
 }
@@ -71,7 +71,7 @@ static void test_bool_and_mixed() {
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"b", "true"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "3"}, {"b", "false"}}) == dbms::DBStatus::OK);
 
-    assert(aggResult(db, "t", "bool_and", "b") == "false");
+    assert(aggResult(db, "t", "bool_and", "b") == "f");
     cleanup(db);
     std::cout << "[AGG_BOOL] bool_and mixed → false OK" << std::endl;
 }
@@ -87,7 +87,7 @@ static void test_bool_and_all_true() {
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"b", "true"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"b", "true"}}) == dbms::DBStatus::OK);
 
-    assert(aggResult(db, "t", "bool_and", "b") == "true");
+    assert(aggResult(db, "t", "bool_and", "b") == "t");
     cleanup(db);
     std::cout << "[AGG_BOOL] bool_and all-true → true OK" << std::endl;
 }
@@ -103,7 +103,7 @@ static void test_bool_or_all_false() {
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"b", "false"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"b", "false"}}) == dbms::DBStatus::OK);
 
-    assert(aggResult(db, "t", "bool_or", "b") == "false");
+    assert(aggResult(db, "t", "bool_or", "b") == "f");
     cleanup(db);
     std::cout << "[AGG_BOOL] bool_or all-false → false OK" << std::endl;
 }
@@ -119,7 +119,7 @@ static void test_every_synonym() {
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"b", "true"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"b", "false"}}) == dbms::DBStatus::OK);
 
-    assert(aggResult(db, "t", "every", "b") == "false");
+    assert(aggResult(db, "t", "every", "b") == "f");
     cleanup(db);
     std::cout << "[AGG_BOOL] every synonym → false OK" << std::endl;
 }
@@ -152,13 +152,13 @@ static void test_int_as_bool() {
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"v", "0"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "3"}, {"v", "1"}}) == dbms::DBStatus::OK);
 
-    // extractColumnValue for int returns "1"/"0"; bool aggregate checks
-    // val=="true"/val=="false". Since "0" matches "false" and "1" doesn't
-    // match "true", bool_or sees a "false" → result is "false".
-    // This is expected: integer columns are not ideal for bool aggregates.
-    assert(aggResult(db, "t", "bool_or", "v") == "false");
+    // extractColumnValue for int returns "1"/"0". Boolean truthiness now
+    // accepts t/f/1/0 spellings (matching the expression evaluator), so
+    // bool_or over {1, 0, 1} sees truthy values → "t". (PostgreSQL itself
+    // rejects bool_or(integer); this lenient path is our superset.)
+    assert(aggResult(db, "t", "bool_or", "v") == "t");
     cleanup(db);
-    std::cout << "[AGG_BOOL] int column → false (0 matches 'false') OK" << std::endl;
+    std::cout << "[AGG_BOOL] int column → true (1 is truthy) OK" << std::endl;
 }
 
 int main() {

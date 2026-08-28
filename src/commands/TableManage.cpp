@@ -20432,8 +20432,11 @@ std::vector<std::string> StorageEngine::aggregate(
                 if (isBoolAnd || isBoolOr) {
                     if (val.empty()) continue;
                     boolSeen = true;
-                    if (isBoolAnd && val == "false") boolResult = false;
-                    if (isBoolOr && val == "true") boolResult = true;
+                    // Accept "t"/"f" (evaluator) and "true"/"false" spellings.
+                    const bool falsyT = val == "false" || val == "f" || val == "0";
+                    const bool truthyT = val == "true" || val == "t" || val == "1";
+                    if (isBoolAnd && falsyT) boolResult = false;
+                    if (isBoolOr && truthyT) boolResult = true;
                     continue;
                 }
                 if (isInt || aggArgExpr) {
@@ -20674,7 +20677,7 @@ std::vector<std::string> StorageEngine::aggregate(
             }
         }
         else if (isBoolAnd || isBoolOr) {
-            rowResult += (boolSeen ? (boolResult ? "true " : "false ") : "NULL ");
+            rowResult += (boolSeen ? (boolResult ? "t " : "f ") : "NULL ");
         }
     }
     if (!rowResult.empty()) result.push_back(rowResult);
@@ -20925,8 +20928,11 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 if (isBoolAnd || isBoolOr) {
                     if (val.empty()) continue;
                     boolSeen = true;
-                    if (isBoolAnd && val == "false") boolResult = false;
-                    if (isBoolOr && val == "true") boolResult = true;
+                    // Accept "t"/"f" (evaluator) and "true"/"false" spellings.
+                    const bool falsyT = val == "false" || val == "f" || val == "0";
+                    const bool truthyT = val == "true" || val == "t" || val == "1";
+                    if (isBoolAnd && falsyT) boolResult = false;
+                    if (isBoolOr && truthyT) boolResult = true;
                     continue;
                 }
                 if (isInt || aggArgExpr) {

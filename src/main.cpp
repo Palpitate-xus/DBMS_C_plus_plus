@@ -17499,7 +17499,11 @@ if (sql.rfind("backup database", 0) == 0) {
                 string func = toLower(trim(item.func));
                 string arg = trim(item.arg);
                 if (!volcanoAggregateFunctions.count(func)) canUseVolcanoGroup = false;
-                if (func != "count" || arg != "*") {
+                // Boolean aggregates accept comparison-expression arguments.
+                const bool boolAggExprArgG =
+                    (func == "bool_and" || func == "bool_or" || func == "every") &&
+                    arg != "*" && arg.find(' ') != string::npos;
+                if ((func != "count" || arg != "*") && !boolAggExprArgG) {
                     if (func == "count" && arg.size() > 9 && arg.substr(0, 9) == "distinct ") {
                         arg = trim(arg.substr(9));
                     }
@@ -17968,7 +17972,12 @@ if (sql.rfind("backup database", 0) == 0) {
                 const string func = toLower(trim(item.func));
                 string arg = trim(item.arg);
                 if (!volcanoAggregateFunctions.count(func)) canUseVolcanoAggregate = false;
-                if (func != "count" || arg != "*") {
+                // Boolean aggregates accept comparison-expression arguments
+                // ("v > 5"): the window/agg evaluator resolves them per row.
+                const bool boolAggExprArg =
+                    (func == "bool_and" || func == "bool_or" || func == "every") &&
+                    arg != "*" && arg.find(' ') != string::npos;
+                if ((func != "count" || arg != "*") && !boolAggExprArg) {
                     if (func == "count" && arg.size() > 9 && arg.substr(0, 9) == "distinct ") {
                         arg = trim(arg.substr(9));
                     }

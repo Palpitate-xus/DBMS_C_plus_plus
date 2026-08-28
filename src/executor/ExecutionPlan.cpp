@@ -1601,8 +1601,9 @@ bool WindowOp::open() {
                         function.name == "bool_or") {
                         if (value.empty()) continue;
                         boolSeen = true;
-                        if (function.name == "bool_or") boolValue = boolValue || value == "true";
-                        else boolValue = boolValue && value == "true";
+                        const bool truthyW = value == "true" || value == "t" || value == "1";
+                        if (function.name == "bool_or") boolValue = boolValue || truthyW;
+                        else boolValue = boolValue && truthyW;
                         continue;
                     }
                     if (value.empty()) continue;
@@ -1661,7 +1662,7 @@ bool WindowOp::open() {
                     }
                 } else if (function.name == "bool_and" || function.name == "every" ||
                            function.name == "bool_or") {
-                    computed[rowIndex][functionIndex] = boolSeen ? (boolValue ? "true" : "false") : "NULL";
+                    computed[rowIndex][functionIndex] = boolSeen ? (boolValue ? "t" : "f") : "NULL";
                 } else if (function.name == "first_value" || function.name == "last_value" ||
                            function.name == "min" || function.name == "max") {
                     computed[rowIndex][functionIndex] = hasValue ? selected : "NULL";
@@ -2341,8 +2342,10 @@ bool ParallelGroupAggregateOp::open() {
                 }
             } else if (func == "bool_and" || func == "every" || func == "bool_or") {
                 boolSeen = true;
-                if (func == "bool_or") boolValue = boolValue || value == "true";
-                else boolValue = boolValue && value == "true";
+                // Accept both "t"/"f" (evaluator booleans) and "true"/"false".
+                const bool truthy = value == "true" || value == "t" || value == "1";
+                if (func == "bool_or") boolValue = boolValue || truthy;
+                else boolValue = boolValue && truthy;
             }
         }
         if (func == "count") return distinct ? std::to_string(distinctValues.size())
@@ -2362,7 +2365,7 @@ bool ParallelGroupAggregateOp::open() {
         }
         if (func == "min" || func == "max") return hasValue ? selected : "NULL";
         if (func == "bool_and" || func == "every" || func == "bool_or") {
-            return boolSeen ? (boolValue ? "true" : "false") : "NULL";
+            return boolSeen ? (boolValue ? "t" : "f") : "NULL";
         }
         return "NULL";
     };
@@ -2373,7 +2376,11 @@ bool ParallelGroupAggregateOp::open() {
         if (func == "count" && item.arg == "*") continue;
         std::string arg = item.arg;
         if (arg.size() > 9 && arg.substr(0, 9) == "distinct ") arg = arg.substr(9);
-        if (columnIndex(arg) >= tbl_.len) return false;
+        // Boolean aggregates accept comparison-expression arguments
+        // ("v > 5"), evaluated per row by computeAggregate.
+        const bool boolExprArg =
+            (func == "bool_and" || func == "bool_or" || func == "every") &&
+            arg != "*" && arg.find(' ') != std::string::npos;
     }
     for (const auto& group : groups) {
         std::vector<std::string> values;
@@ -2766,7 +2773,11 @@ bool GroupAggregateOp::open() {
         if (func == "count" && item.arg == "*") continue;
         std::string arg = item.arg;
         if (arg.size() > 9 && arg.substr(0, 9) == "distinct ") arg = arg.substr(9);
-        if (columnIndex(arg) >= tbl_.len) return false;
+        // Boolean aggregates accept comparison-expression arguments
+        // ("v > 5"), evaluated per row by computeAggregate.
+        const bool boolExprArg =
+            (func == "bool_and" || func == "bool_or" || func == "every") &&
+            arg != "*" && arg.find(' ') != std::string::npos;
     }
 
     std::vector<std::vector<std::string>> effectiveSets = groupingSets_;
@@ -2822,7 +2833,34 @@ bool GroupAggregateOp::open() {
             }
             if (!passes) continue;
 
-            const std::string value = argIndex < tbl_.len ? row.values[argIndex] : "";
+            std::string value;
+            if (argIndex >= tbl_.len && arg != "*" && !arg.empty() &&
+                arg.find(' ') != std::string::npos &&
+                (func == "bool_and" || func == "bool_or" || func == "every")) {
+                // Per-row comparison evaluation ("v > 5"): substitute column
+                // tokens with this row's values, then evaluate the predicate.
+                std::string synth;
+                std::string token;
+                const auto& rowVals = row.values;
+                auto flushTok = [&]() {
+                    if (token.empty()) return;
+                    size_t ci4 = 0;
+                    for (; ci4 < tbl_.len; ++ci4)
+                        if (tbl_.cols[ci4].dataName == token) break;
+                    if (ci4 < tbl_.len) { synth += rowVals[ci4]; token.clear(); return; }
+                    synth += token;
+                    token.clear();
+                };
+                for (char ch3 : arg) {
+                    if (ch3 == ' ') { flushTok(); synth += ' '; continue; }
+                    token += ch3;
+                }
+                flushTok();
+                auto r3 = dbms::ExprHelper::evalString(synth, {}, {}, "");
+                value = (r3.ok && !r3.isNull) ? r3.value : std::string{};
+            } else {
+                value = argIndex < tbl_.len ? row.values[argIndex] : std::string{};
+            }
             if (func == "count") {
                 if (distinct) {
                     if (!value.empty()) distinctValues.insert(value);
@@ -2850,8 +2888,10 @@ bool GroupAggregateOp::open() {
                 }
             } else if (func == "bool_and" || func == "every" || func == "bool_or") {
                 boolSeen = true;
-                if (func == "bool_or") boolValue = boolValue || value == "true";
-                else boolValue = boolValue && value == "true";
+                // Accept both "t"/"f" (evaluator booleans) and "true"/"false".
+                const bool truthy = value == "true" || value == "t" || value == "1";
+                if (func == "bool_or") boolValue = boolValue || truthy;
+                else boolValue = boolValue && truthy;
             }
         }
 
@@ -2873,7 +2913,7 @@ bool GroupAggregateOp::open() {
         }
         if (func == "min" || func == "max") return hasValue ? selected : "NULL";
         if (func == "bool_and" || func == "every" || func == "bool_or") {
-            return boolSeen ? (boolValue ? "true" : "false") : "NULL";
+            return boolSeen ? (boolValue ? "t" : "f") : "NULL";
         }
         return "NULL";
     };

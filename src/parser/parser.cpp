@@ -1229,6 +1229,24 @@ static ExprPtr parseComparisonExpr(const std::vector<std::string>& tokens, size_
         bin->right = parseRangeExpr(tokens, pos);
         left = std::move(bin);
     }
+    // PostgreSQL: IS [NOT] NULL binds LOOSER than comparison operators
+    // ("a = b IS NULL" is "(a = b) IS NULL", not "a = (b IS NULL)").
+    if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "is") {
+        if (SQLParser::toLower(tokens[pos + 1]) == "null") {
+            pos += 2;
+            auto unary = std::make_unique<UnaryOpExpr>();
+            unary->op = "IS NULL";
+            unary->operand = std::move(left);
+            return unary;
+        } else if (pos + 2 < tokens.size() && SQLParser::toLower(tokens[pos + 1]) == "not"
+                   && SQLParser::toLower(tokens[pos + 2]) == "null") {
+            pos += 3;
+            auto unary = std::make_unique<UnaryOpExpr>();
+            unary->op = "IS NOT NULL";
+            unary->operand = std::move(left);
+            return unary;
+        }
+    }
     return left;
 }
 
@@ -1576,23 +1594,10 @@ static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& 
         left = std::move(bin);
     }
 
-    // Postfix IS [NOT] NULL
-    if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "is") {
-        if (SQLParser::toLower(tokens[pos + 1]) == "null") {
-            pos += 2;
-            auto unary = std::make_unique<UnaryOpExpr>();
-            unary->op = "IS NULL";
-            unary->operand = std::move(left);
-            return unary;
-        } else if (pos + 2 < tokens.size() && SQLParser::toLower(tokens[pos + 1]) == "not"
-                   && SQLParser::toLower(tokens[pos + 2]) == "null") {
-            pos += 3;
-            auto unary = std::make_unique<UnaryOpExpr>();
-            unary->op = "IS NOT NULL";
-            unary->operand = std::move(left);
-            return unary;
-        }
-    }
+    // Postfix IS [NOT] NULL is NOT consumed here: it binds looser than
+    // comparisons in PostgreSQL ("a = b IS NULL" is "(a = b) IS NULL"),
+    // so it is handled at parseComparisonExpr and above. Keeping it here
+    // would grab the right operand of a comparison first.
 
     return left;
 }

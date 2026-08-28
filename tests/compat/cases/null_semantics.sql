@@ -1,4 +1,4 @@
--- NULL semantics: literals, coalesce, nullif, greatest/least, FILTER
+-- NULL semantics: literals, coalesce, nullif, greatest/least, bool aggregates
 SELECT coalesce(NULL, NULL, 7)
 SELECT nullif(5, 5), nullif(5, 6)
 SELECT greatest(1, 3), least(4, 2)
@@ -9,3 +9,13 @@ SELECT NULL AND true, NULL OR true, NULL AND false, NULL OR false
 SELECT NOT NULL
 SELECT NULL IS NULL, NULL IS NOT NULL, 3 IS NULL
 SELECT NULLIF(NULL, 1) IS NULL
+SELECT NULL = NULL IS NULL, (NULL = NULL) IS NULL, 1 = 1 IS NULL
+SELECT 2 + 3 IS NULL
+DROP TABLE IF EXISTS nt2
+CREATE TABLE nt2 (id INT, v INT)
+INSERT INTO nt2 VALUES (1, 10), (2, 8), (3, 30)
+SELECT bool_and(v > 5) FROM nt2
+SELECT bool_or(v > 25) FROM nt2
+SELECT every(v > 1) FROM nt2
+SELECT bool_and(v > 9) FROM nt2
+DROP TABLE nt2
