@@ -1,0 +1,13 @@
+-- exp/ln/log/sqrt numeric presentation
+SELECT exp(1.0)
+SELECT exp(1)
+SELECT exp(0.5)
+SELECT ln(10.0)
+SELECT ln(2)
+SELECT log(10.0)
+SELECT log(100)
+SELECT log(2, 64)
+SELECT sqrt(2.0)
+SELECT sqrt(9.0)
+SELECT sqrt(4)
+SELECT sqrt(2.25)

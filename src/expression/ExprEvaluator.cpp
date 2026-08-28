@@ -2963,20 +2963,56 @@ void ExprEvaluator::registerBuiltins() {
     functions_["asin"]  = [&](const auto& a) { return unaryMath(a, std::asin); };
     functions_["acos"]  = [&](const auto& a) { return unaryMath(a, std::acos); };
     functions_["atan"]  = [&](const auto& a) { return unaryMath(a, std::atan); };
-    functions_["exp"]   = [&](const auto& a) { return unaryMath(a, std::exp); };
-    functions_["ln"]    = [&](const auto& a) { return unaryMath(a, std::log); };
-    functions_["log"]   = [](const std::vector<ExprValue>& a) {
-        // log(x) = base-10 log; log(b, x) = base-b log.
-        if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
-        if (a.size() >= 2) {
-            if (a[1].isNull) return ExprValue("double precision", "", true);
-            double b = a[0].asDouble(), x = a[1].asDouble();
-            return ExprValue("double precision", std::to_string(std::log(x) / std::log(b)), false);
-        }
-        return ExprValue("double precision", std::to_string(std::log10(a[0].asDouble())), false);
+    // PG presents exp/ln/log/sqrt as numeric with fixed display scales:
+    //   exp: 15 frac digits for integer input, 16 for fractional input;
+    //   ln/log/log10: 16 for fractional or (ln) any input, bare for exact int log of int;
+    //   sqrt: 15 for fractional input, bare for integer input.
+    // Values are computed in long double to reproduce PG's 16th digit.
+    auto numericFixed = [](long double v, int frac) {
+        char buf[80];
+        std::snprintf(buf, sizeof buf, "%.*Lf", frac, v);
+        return ExprValue("numeric", std::string(buf), false);
     };
-    functions_["log10"] = [&](const auto& a) { return unaryMath(a, std::log10); };
-    functions_["sqrt"]  = [&](const auto& a) { return unaryMath(a, std::sqrt); };
+    auto argHasDot = [](const std::vector<ExprValue>& a) -> bool {
+        return !a.empty() && !a[0].isNull && a[0].value.find('.') != std::string::npos;
+    };
+    functions_["exp"] = [&](const auto& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        return numericFixed(expl(a[0].asDouble()), argHasDot(a) ? 16 : 15);
+    };
+    functions_["ln"] = [&](const auto& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        return numericFixed(logl(a[0].asDouble()), 16);
+    };
+    functions_["sqrt"] = [&](const auto& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        long double v = sqrtl(a[0].asDouble());
+        if (!argHasDot(a)) {
+            if (v == floorl(v)) return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
+            return numericFixed(v, 15);
+        }
+        return numericFixed(v, 15);
+    };
+    functions_["log"] = [&](const std::vector<ExprValue>& a) {
+        // log(x) = base-10 log; log(b, x) = base-b log.
+        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        if (a.size() >= 2) {
+            if (a[1].isNull) return ExprValue("numeric", "", true);
+            long double b = a[0].asDouble(), x = a[1].asDouble();
+            return numericFixed(logl(x) / logl(b), 16);
+        }
+        long double v = log10l(a[0].asDouble());
+        if (!argHasDot(a) && v == floorl(v))
+            return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
+        return numericFixed(v, 16);
+    };
+    functions_["log10"] = [&](const auto& a) {
+        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        long double v = log10l(a[0].asDouble());
+        if (!argHasDot(a) && v == floorl(v))
+            return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
+        return numericFixed(v, 16);
+    };
     functions_["cbrt"]  = [&](const auto& a) { return unaryMath(a, std::cbrt); };
     functions_["ceil"]  = [&](const auto& a) { return unaryMath(a, std::ceil); };
     functions_["floor"] = [&](const auto& a) { return unaryMath(a, std::floor); };
