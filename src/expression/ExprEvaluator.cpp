@@ -377,6 +377,17 @@ static bool parseTimeZoneOffset(const std::string& name, long long& offsetMinute
     if (s.empty()) return false;
     std::string low;
     for (char c : s) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Common named zones (fixed standard-time offsets; no DST model).
+    static const std::map<std::string, long long> namedZones = {
+        {"asia/tokyo", 540}, {"asia/shanghai", 480}, {"asia/kolkata", 330},
+        {"asia/seoul", 540}, {"asia/dubai", 240}, {"asia/singapore", 480},
+        {"europe/london", 0}, {"europe/paris", 60}, {"europe/berlin", 60},
+        {"europe/moscow", 180}, {"america/new_york", -300}, {"america/chicago", -360},
+        {"america/denver", -420}, {"america/los_angeles", -480},
+        {"australia/sydney", 600}, {"pacific/auckland", 720},
+    };
+    auto it = namedZones.find(low);
+    if (it != namedZones.end()) { offsetMinutes = it->second; return true; }
     if (low == "utc" || low == "gmt" || low == "z") { offsetMinutes = 0; return true; }
     if (low.rfind("utc", 0) == 0 || low.rfind("gmt", 0) == 0) s = s.substr(3);
     // [+-]HH[:MM] or [+-]HHMM
@@ -400,7 +411,9 @@ static bool parseTimeZoneOffset(const std::string& name, long long& offsetMinute
             return false;
         }
     }
-    offsetMinutes = sign * (hh * 60 + mm);
+    // POSIX-style numeric zones invert the sign (UTC+8 means UTC-8),
+    // while IANA named zones above keep the natural sign.
+    offsetMinutes = -sign * (hh * 60 + mm);
     return true;
 }
 
@@ -550,8 +563,12 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
         // Naive zone model: the input wall clock is read as UTC and
         // rendered at the zone's local wall clock (local = utc + offset).
         IntervalParts shift;
-        shift.micros = offMin * 60000000LL;
+        // Read the wall clock AS the zone: UTC = local - offset.
+        shift.micros = -offMin * 60000000LL;
         std::string out = timestampShift(v.value, shift, true);
+        // Naive timestamp input becomes timestamptz; render with the UTC offset suffix.
+        bool tzIn = v.typeName.find("tz") != std::string::npos;
+        if (!tzIn && !out.empty()) out += "+00";
         if (out.empty()) return ExprValue("timestamp", "", true);
         return ExprValue("timestamp", out, false);
     }
@@ -929,6 +946,27 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         }
         if (op == "is not distinct from") distinct = !distinct;
         return ExprValue("boolean", distinct ? "t" : "f", false);
+    }
+    // POSIX-ish regex match operators: ~, ~* (case-insensitive), !~, !~*.
+    if (op == "~" || op == "~*" || op == "!~" || op == "!~*") {
+        if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
+        bool m = false;
+        try {
+            std::regex re(r.value);
+            m = std::regex_search(l.value, re);
+        } catch (const std::regex_error&) {
+            return ExprValue("boolean", "f", false);
+        }
+        if (op == "~*" || op == "!~*") {
+            try {
+                std::regex re2(r.value, std::regex::icase);
+                m = std::regex_search(l.value, re2);
+            } catch (const std::regex_error&) {
+                return ExprValue("boolean", "f", false);
+            }
+        }
+        if (op == "!~" || op == "!~*") m = !m;
+        return ExprValue("boolean", m ? "t" : "f", false);
     }
     static const std::set<std::string> cmpOps = {"=", "<>", "!=", "<", ">", "<=", ">="};
     if (cmpOps.count(op)) return applyComparison(op, l, r);

@@ -388,8 +388,9 @@ std::vector<std::string> SQLParser::tokenize(const std::string& sql) {
                     // two-char prefixes: check ->> and #>> before emitting
                     // -> / #>.
                     if (i + 2 < sql.size() && ((two == "->" && sql[i + 2] == '>') ||
-                                               (two == "#>" && sql[i + 2] == '>'))) {
-                        tokens.push_back(two + ">");
+                                               (two == "#>" && sql[i + 2] == '>') ||
+                                               (two == "!~" && sql[i + 2] == '*'))) {
+                        tokens.push_back(two + (sql[i + 2] == '*' ? '*' : '>'));
                         i += 2;
                         continue;
                     }
@@ -1164,7 +1165,7 @@ static ExprPtr parseComparisonExpr(const std::vector<std::string>& tokens, size_
     while (pos < tokens.size()) {
         std::string op = tokens[pos];
         static const std::set<std::string> cmpOps = {
-            "=", "<>", "!=", "<", ">", "<=", ">="
+            "=", "<>", "!=", "<", ">", "<=", ">=", "~", "~*", "!~", "!~*"
         };
         if (cmpOps.count(op) == 0) break;
         ++pos;

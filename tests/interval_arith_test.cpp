@@ -73,22 +73,22 @@ static void test_interval_ops() {
 }
 
 static void test_at_time_zone() {
-    // UTC wall clock rendered at UTC+8
+    // UTC wall clock read at a POSIX numeric zone (sign inverted: UTC+8 = UTC-8)
     auto a = eval("'2024-06-01 00:30:00'::timestamp AT TIME ZONE 'UTC+8'");
     assert(a.ok && !a.isNull);
-    assert(a.value == "2024-06-01 08:30:00");
+    assert(a.value == "2024-06-01 08:30:00+00");
 
     // bare zone name
     auto b = eval("'2024-06-01 12:00:00'::timestamp AT TIME ZONE 'UTC'");
-    assert(b.ok && b.value == "2024-06-01 12:00:00");
+    assert(b.ok && b.value == "2024-06-01 12:00:00+00");
 
-    // negative offset with minutes
+    // negative offset with minutes (POSIX sign inverted: UTC-05:30 = +05:30)
     auto c = eval("'2024-06-01 10:00:00'::timestamp AT TIME ZONE 'UTC-05:30'");
-    assert(c.ok && c.value == "2024-06-01 04:30:00");
+    assert(c.ok && c.value == "2024-06-01 04:30:00+00");
 
-    // function form
+    // function form (naive rendering, POSIX sign inverted)
     auto d = eval("timezone('UTC+8', '2024-06-01 00:30:00')");
-    assert(d.ok && d.value == "2024-06-01 08:30:00");
+    assert(d.ok && d.value == "2024-05-31 16:30:00");
 
     std::cout << "[IV] AT TIME ZONE / timezone() OK" << std::endl;
 }
