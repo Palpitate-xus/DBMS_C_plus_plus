@@ -1,0 +1,12 @@
+-- numeric rounding semantics
+SELECT round(2.5)
+SELECT round(3.5)
+SELECT round(-2.5)
+SELECT round(2.5::numeric)
+SELECT round(0.5::numeric)
+SELECT round(1.5::numeric)
+SELECT round(2.5::float8)
+SELECT round(42.4382, 2)
+SELECT trunc(-2.7)
+SELECT ceil(-2.3)
+SELECT floor(-2.7)

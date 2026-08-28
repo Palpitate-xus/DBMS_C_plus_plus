@@ -133,7 +133,13 @@ void incrementDigitVector(std::vector<uint8_t>& d) {
 // Divide magnitude by 10^drop, rounding half-up.
 std::vector<uint8_t> divideByPowerOf10(const std::vector<uint8_t>& d, int drop) {
     if (drop <= 0) return d;
-    if (static_cast<int>(d.size()) <= drop) return {0};
+    if (static_cast<int>(d.size()) <= drop) {
+        // Everything drops: quotient 0, but half-up still rounds on the
+        // most significant dropped digit (d[0] when size == drop).
+        if (static_cast<int>(d.size()) == drop && !d.empty() && d[0] >= 5)
+            return {1};
+        return {0};
+    }
     std::vector<uint8_t> q(d.begin(), d.end() - drop);
     uint8_t roundDigit = d[d.size() - drop];
     bool roundUp = roundDigit >= 5;

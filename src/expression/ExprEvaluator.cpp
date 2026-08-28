@@ -32,12 +32,12 @@ static std::string toLower(std::string s) {
     return s;
 }
 
+// Exact decimal types (PG rounds these half-up); float types take the
+// double path (PG rounds them half-to-even).
 static bool isNumericTypeName(const std::string& s) {
     std::string t = toLower(s);
     return t == "numeric" || t == "decimal" || t == "integer" ||
-           t == "int" || t == "bigint" || t == "smallint" ||
-           t == "double precision" || t == "float" || t == "float8" ||
-           t == "real" || t == "float4";
+           t == "int" || t == "bigint" || t == "smallint";
 }
 
 static std::optional<Numeric> tryParseNumeric(const std::string& s) {
@@ -504,7 +504,7 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     }
 
     if (isNumericLiteral(raw)) {
-        if (raw.find('.') != std::string::npos) return ExprValue("double precision", raw, false);
+        if (raw.find('.') != std::string::npos) return ExprValue("numeric", raw, false);
         return ExprValue("integer", raw, false);
     }
 
@@ -2928,14 +2928,17 @@ void ExprEvaluator::registerBuiltins() {
                 return ExprValue("numeric", n->withScale(p).toString(), false);
             }
         }
+        // float8 round: half-to-even (rint), like PG float8.
         double v = a[0].asDouble();
         if (a.size() >= 2) {
             int p = static_cast<int>(a[1].asInt());
             double mult = std::pow(10.0, p);
-            v = std::round(v * mult) / mult;
+            v = std::nearbyint(v * mult) / mult;
         } else {
-            v = std::round(v);
+            v = std::nearbyint(v);
         }
+        if (v == std::floor(v) && std::fabs(v) < 1e15)
+            return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
         return ExprValue("numeric", std::to_string(v), false);
     };
     functions_["now"] = [](const std::vector<ExprValue>&) {
@@ -2949,7 +2952,10 @@ void ExprEvaluator::registerBuiltins() {
     auto unaryMath = [](const std::vector<ExprValue>& a, double (*fn)(double),
                         const std::string& outType = "double precision") {
         if (a.empty() || a[0].isNull) return ExprValue(outType, "", true);
-        return ExprValue(outType, std::to_string(fn(a[0].asDouble())), false);
+        double v = fn(a[0].asDouble());
+        if (v == std::floor(v) && std::fabs(v) < 1e15)
+            return ExprValue(outType, std::to_string(static_cast<long long>(v)), false);
+        return ExprValue(outType, std::to_string(v), false);
     };
     functions_["sin"]   = [&](const auto& a) { return unaryMath(a, std::sin); };
     functions_["cos"]   = [&](const auto& a) { return unaryMath(a, std::cos); };
