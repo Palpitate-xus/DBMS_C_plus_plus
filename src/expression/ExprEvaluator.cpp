@@ -558,6 +558,8 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
         return ExprValue(v.typeName, "-" + v.value, false);
     }
     if (op == "not") {
+        // SQL three-valued logic: NOT NULL is NULL.
+        if (v.isNull) return ExprValue("boolean", "", true);
         return ExprValue("boolean", v.asBool() ? "f" : "t", false);
     }
     if (op.rfind("at time zone", 0) == 0) {
@@ -581,10 +583,10 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
         if (out.empty()) return ExprValue("timestamp", "", true);
         return ExprValue("timestamp", out, false);
     }
-    if (op == "is null") {
+    if (toLower(op) == "is null") {
         return ExprValue("boolean", v.isNull ? "t" : "f", false);
     }
-    if (op == "is not null") {
+    if (toLower(op) == "is not null") {
         return ExprValue("boolean", v.isNull ? "f" : "t", false);
     }
     if (op.find("is true") != std::string::npos) {
@@ -2954,6 +2956,16 @@ void ExprEvaluator::registerBuiltins() {
         if (v == std::floor(v) && std::fabs(v) < 1e15)
             return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
         return ExprValue("numeric", std::to_string(v), false);
+    };
+    // Internal IS NULL / IS NOT NULL forms (rewritten from postfix syntax
+    // by the projection router and the scalar executor).
+    functions_["is_null"] = [](const std::vector<ExprValue>& a) {
+        bool n = a.empty() || a[0].isNull;
+        return ExprValue("boolean", n ? "t" : "f", false);
+    };
+    functions_["is_not_null"] = [](const std::vector<ExprValue>& a) {
+        bool n = a.empty() || a[0].isNull;
+        return ExprValue("boolean", n ? "f" : "t", false);
     };
     functions_["now"] = [](const std::vector<ExprValue>&) {
         // Return current timestamp as string; Wave 0 uses a fixed reference

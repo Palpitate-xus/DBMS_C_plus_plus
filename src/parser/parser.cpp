@@ -1460,6 +1460,7 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
             if (isAtTimeZone(tokens, pos)) break; // postfix AT TIME ZONE
             std::string w = SQLParser::toLower(tokens[pos]);
             if (w == "and" || w == "or" || w == "then" || w == "else" || w == "end"
+                || w == "is" || w == "not"
                 || w == "when" || w == "from" || w == "where" || w == "group"
                 || w == "order" || w == "having" || w == "limit" || w == "offset"
                 || w == "union" || w == "intersect" || w == "except" || w == "for"

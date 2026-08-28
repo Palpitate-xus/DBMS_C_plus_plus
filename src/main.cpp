@@ -687,6 +687,7 @@ static bool isScalarFunc(const string& name) {
                                           "array_position", "array_dims", "cardinality",
                                          "unnest",
                                          "subquery",
+                                         "is_null", "is_not_null",
                                          "current_user", "session_user"};
     return scalars.find(name) != scalars.end();
 }
@@ -16870,14 +16871,47 @@ if (sql.rfind("backup database", 0) == 0) {
                         }
                         if (cc2 != string::npos) {
                             string lhsC = trim(itemBase.substr(0, cc2));
-                            string rhsC = trim(itemBase.substr(cc2 + 2));
+                            string rhsFull = trim(itemBase.substr(cc2 + 2));
+                            // The type name ends at the first space; anything
+                            // after it ("NULL::text IS NULL") is a postfix tail.
+                            size_t sp2 = rhsFull.find(' ');
+                            string tail2 = (sp2 == string::npos) ? "" : rhsFull.substr(sp2);
+                            string rhsC = (sp2 == string::npos) ? rhsFull : rhsFull.substr(0, sp2);
                             bool okT = !rhsC.empty() && isalpha(static_cast<unsigned char>(rhsC[0]));
                             size_t pp = rhsC.find('(');
                             string tname = (pp == string::npos) ? rhsC : rhsC.substr(0, pp);
                             for (auto& tc2 : tname) tc2 = static_cast<char>(tolower(static_cast<unsigned char>(tc2)));
                             static const set<string> castTypes = {"int","integer","bigint","smallint","text","varchar","char","numeric","decimal","float","double","real","boolean","bool","date","timestamp","timestamptz","time","interval","json","jsonb"};
                             if (okT && castTypes.count(tname) && !lhsC.empty() && lhsC.find(' ') == string::npos)
-                                itemBase = "cast(" + lhsC + " as " + rhsC + ")";
+                                itemBase = "cast(" + lhsC + " as " + rhsC + ")" + tail2;
+                        }
+                    }
+                    // Postfix IS-ops ("v is null", "v is not null") have no
+                    // parentheses; rewrite to an internal function form so the
+                    // func chain routes them to the scalar evaluator.
+                    {
+                        string lowItem;
+                        for (char lc : itemBase) lowItem += static_cast<char>(tolower(static_cast<unsigned char>(lc)));
+                        static const char* isNullOps[] = { " is not null", " is null" };
+                        for (const char* iop : isNullOps) {
+                            size_t p = lowItem.rfind(iop);
+                            if (p != string::npos && p + strlen(iop) == lowItem.size() && p > 0) {
+                                string operand = trim(itemBase.substr(0, p));
+                                // Allow balanced-paren operands ("cast(x as t)");
+                                // reject bare multi-word ("a + b is null").
+                                int depth2 = 0; bool okOper = !operand.empty();
+                                for (char oc : operand) {
+                                    if (oc == '(') ++depth2;
+                                    else if (oc == ')') --depth2;
+                                    else if (depth2 == 0 && isspace(static_cast<unsigned char>(oc))) { okOper = false; break; }
+                                }
+                                if (okOper && depth2 == 0) {
+                                    itemBase = (string(iop) == " is null")
+                                        ? "is_null(" + operand + ")"
+                                        : "is_not_null(" + operand + ")";
+                                }
+                                break;
+                            }
                         }
                     }
                     size_t lp = itemBase.find('(');

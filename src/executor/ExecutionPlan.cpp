@@ -5,6 +5,7 @@
 #include "Config.h"
 #include "process/RuntimeStats.h"
 #include "types/numeric.h"
+#include "expression/expr_helper.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1310,12 +1311,18 @@ bool WindowOp::open() {
 
         const size_t argumentColumn = (function.argument.empty() || function.argument == "*")
             ? tbl_.len : windowColumnIndex(tbl_, function.argument);
+        // Boolean aggregates accept comparison expressions ("v > 5") as
+        // arguments; evaluated per row instead of a direct column read.
+        const bool boolAggWithExpr =
+            (function.name == "bool_and" || function.name == "bool_or" || function.name == "every") &&
+            argumentColumn >= tbl_.len && !function.argument.empty() &&
+            function.argument != "*";
         const bool argumentRequired = function.name == "lag" || function.name == "lead" ||
             function.name == "sum" || function.name == "avg" || function.name == "min" ||
             function.name == "max" || function.name == "first_value" ||
             function.name == "last_value" || function.name == "bool_and" ||
             function.name == "bool_or" || function.name == "every";
-        if (argumentRequired && argumentColumn >= tbl_.len) return false;
+        if (argumentRequired && argumentColumn >= tbl_.len && !boolAggWithExpr) return false;
 
         std::vector<size_t> order(input.size());
         for (size_t i = 0; i < order.size(); ++i) order[i] = i;
@@ -1549,8 +1556,33 @@ bool WindowOp::open() {
                 std::string selected;
                 for (size_t framePosition = frameBegin; framePosition < frameEnd; ++framePosition) {
                     if (rowIsExcluded(framePosition, position)) continue;
-                    const std::string& value = function.argument == "*"
-                        ? std::string{} : input[order[framePosition]].values[argumentColumn];
+                    std::string value;
+                    if (boolAggWithExpr) {
+                        // Per-row comparison evaluation ("v > 5"): substitute
+                        // column tokens with this row's values.
+                        std::string synth;
+                        std::string token;
+                        const auto& rowVals = input[order[framePosition]].values;
+                        auto flushTok = [&]() {
+                            if (token.empty()) return;
+                            size_t ci3 = 0;
+                            for (; ci3 < tbl_.len; ++ci3)
+                                if (tbl_.cols[ci3].dataName == token) break;
+                            if (ci3 < tbl_.len) { synth += rowVals[ci3]; token.clear(); return; }
+                            synth += token;
+                            token.clear();
+                        };
+                        for (char ch2 : function.argument) {
+                            if (ch2 == ' ') { flushTok(); synth += ' '; continue; }
+                            token += ch2;
+                        }
+                        flushTok();
+                        auto r2 = dbms::ExprHelper::evalString(synth, {}, {}, "");
+                        value = (r2.ok && !r2.isNull) ? r2.value : std::string{};
+                    } else {
+                        value = function.argument == "*"
+                            ? std::string{} : input[order[framePosition]].values[argumentColumn];
+                    }
                     if (function.name == "count") {
                         if (function.argument == "*" || !value.empty()) ++count;
                         continue;

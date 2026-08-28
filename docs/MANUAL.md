@@ -1179,7 +1179,9 @@ SQL assertion）。显式 `SET compatibility_mode = 'extended'` 后，其余门�
 标记）和本 DBMS（wire protocol），规范化不稳定字段后逐条比对行数据与
 SQLSTATE。任何差异必须显式加入 allowlist 并注明原因与过期版本。
 
-当前覆盖（69 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑、
+当前覆盖（69 个用例文件）：算术、字符串函数、布尔/NULL 三值逻辑
+（含 `NOT NULL`→NULL 三值逻辑、`NULL::text IS NULL` 的 `::` 后缀 cast
+与 postfix `IS NULL` 解析修复）、
 整数/numeric 除法（含 PG `select_div_scale` 的 16/20 位小数规则）、
 CASE 表达式、聚合（sum/count/avg/min/max、GROUP BY、FILTER 子句）、
 显式/隐式类型转换（CAST(x AS t) 前缀语法、`::` 后缀语法、舍入与

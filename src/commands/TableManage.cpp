@@ -17960,6 +17960,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return expr.sessionUser;
     }
 
+    // Internal IS NULL / IS NOT NULL forms (rewritten from postfix syntax
+    // by the projection router).
+    if (expr.funcName == "is_null" || expr.funcName == "is_not_null") {
+        if (expr.funcArgs.empty()) return "f";
+        std::string v = getVal(expr.funcArgs[0]);
+        bool isNull = (v == "NULL" || v.empty());
+        bool wantNull = (expr.funcName == "is_null");
+        return (isNull == wantNull) ? "t" : "f";
+    }
+
     // Math functions with PG-exact presentation semantics live in the expression
     // evaluator (float8 shortest-repr, numeric display scales, banker's rounding).
     // Delegate the whole family there; on evaluator failure fall through
@@ -20125,6 +20135,37 @@ static bool aggArgIsExpression(const std::string& arg) {
 // over a row.  getVal resolves a bare column name (or literal) to its
 // string value for the current row.  Returns "" when not evaluable.
 template <typename GetVal>
+// Per-row boolean-expression evaluation for bool_and/bool_or/every
+// arguments ("v > 5"): substitute column tokens with row values and let
+// the expression evaluator resolve the comparison.
+static std::string evalBoolAggArg(const std::string& expr, GetVal getVal) {
+    std::string synth;
+    std::string token;
+    auto flush = [&]() {
+        if (token.empty()) return;
+        std::string v = getVal(token);
+        bool numeric = !v.empty() && v.find_first_not_of("-+.eE0123456789") == std::string::npos;
+        if (!numeric && v != "true" && v != "false") synth += "'" + v + "'";
+        else synth += v;
+        token.clear();
+    };
+    for (char ch : expr) {
+        if (ch == ' ') { flush(); synth += ' '; continue; }
+        if (std::string("<>=!").find(ch) != std::string::npos && token.empty()) {
+            synth += ch;
+            continue;
+        }
+        token += ch;
+    }
+    flush();
+    auto r = dbms::ExprHelper::evalString(synth, {}, {}, "");
+    if (!r.ok || r.isNull) return "";
+    if (r.value == "t" || r.value == "true" || r.value == "1") return "true";
+    if (r.value == "f" || r.value == "false" || r.value == "0") return "false";
+    return r.value;
+}
+
+template <typename GetVal>
 static std::string evalAggArgExpr(const std::string& expr, GetVal getVal) {
     double acc = 0.0;
     bool accSet = false;
@@ -20352,6 +20393,15 @@ std::vector<std::string> StorageEngine::aggregate(
                         return tok;
                     };
                     val = evalAggArgExpr(aggExprText, getVal);
+                } else if ((isBoolAnd || isBoolOr) && aggArgIsExpression(actualColName)) {
+                    auto getValB = [&](const std::string& tok) -> std::string {
+                        for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                            if (tbl.cols[ci2].dataName == tok)
+                                return extractColumnValue(row, tbl, ci2);
+                        if (tok.size() >= 2 && tok.front() == 39 && tok.back() == 39)
+                            return tok.substr(1, tok.size() - 2);
+                        return tok;
+                    };
                 } else {
                     if (colIdx >= tbl.len) {
                         // Bare numeric literal aggregate argument (avg(10.5)):
@@ -20836,6 +20886,15 @@ std::vector<std::string> StorageEngine::groupAggregate(
                         return tok;
                     };
                     val = evalAggArgExpr(aggExprText, getVal);
+                } else if ((isBoolAnd || isBoolOr) && aggArgIsExpression(actualColName)) {
+                    auto getValB = [&](const std::string& tok) -> std::string {
+                        for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                            if (tbl.cols[ci2].dataName == tok)
+                                return extractColumnValue(row, tbl, ci2);
+                        if (tok.size() >= 2 && tok.front() == 39 && tok.back() == 39)
+                            return tok.substr(1, tok.size() - 2);
+                        return tok;
+                    };
                 } else {
                     if (colIdx >= tbl.len) {
                         // Bare numeric literal aggregate argument (avg(10.5)):
@@ -20989,7 +21048,6 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 return orderedVals[lo];
             }
         }
-        if (isBoolAnd || isBoolOr) return boolSeen ? (boolResult ? "true" : "false") : "NULL";
         return "";
     };
 
@@ -21354,7 +21412,6 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
                 return orderedVals[lo];
             }
         }
-        if (isBoolAnd || isBoolOr) return boolSeen ? (boolResult ? "true" : "false") : "NULL";
         return "";
     };
 
