@@ -19133,6 +19133,88 @@ if (sql.rfind("backup database", 0) == 0) {
         if (!exprOrderBySpecs.empty()) {
             answers = g_engine.sortByExpression(s.currentDB, tname, std::move(answers), exprOrderBySpecs);
         }
+        // Plain-path ORDER BY on output aliases or ordinals ("ORDER BY c",
+        // "ORDER BY 1"): sort the projected rows by output cell, PG-style
+        // NULLS LAST (ASC) / NULLS FIRST (DESC).  Bare table-column specs were
+        // already consumed by the volcano SortOp and are skipped here.
+        {
+            vector<pair<size_t, const dbms::StorageEngine::OrderBySpec*>> outKeys;
+            bool allMapped = true;
+            auto outputIndex = [&](const string& raw, size_t& out) -> bool {
+                string name = trim(raw);
+                if (!name.empty() && name.find_first_not_of("0123456789") == string::npos) {
+                    long n = strtol(name.c_str(), nullptr, 10);
+                    if (n >= 1 && (size_t)n <= selectExprs.size()) { out = (size_t)(n - 1); return true; }
+                    return false;
+                }
+                for (size_t ei = 0; ei < selectExprs.size(); ++ei) {
+                    const string& dn = selectExprs[ei].displayName;
+                    if (!dn.empty() && dn == name) { out = ei; return true; }
+                }
+                for (size_t ei = 0; ei < selectExprs.size(); ++ei) {
+                    if (selectExprs[ei].colName == name) { out = ei; return true; }
+                }
+                // Alias-resolved spec text (e.g. "coalesce(v, -1)") may equal
+                // the raw SELECT item text rather than a parsed column name.
+                {
+                    const vector<string> rawItems = splitSelectColumns(columns);
+                    for (size_t ei = 0; ei < rawItems.size() && ei < selectExprs.size(); ++ei) {
+                        string it = trim(rawItems[ei]);
+                        size_t asPos = it.rfind(" as ");
+                        if (asPos != string::npos) it = trim(it.substr(0, asPos));
+                        if (it == name) { out = ei; return true; }
+                    }
+                }
+                return false;
+            };
+            for (const auto& spec : orderBySpecs) {
+                bool isTableCol = false;
+                for (size_t ci = 0; ci < tbl.len; ++ci)
+                    if (tbl.cols[ci].dataName == spec.colName) { isTableCol = true; break; }
+                if (isTableCol) continue;
+                size_t idx = 0;
+                if (!outputIndex(spec.colName, idx)) { allMapped = false; break; }
+                outKeys.push_back({idx, &spec});
+            }
+            if (allMapped && !outKeys.empty()) {
+                auto cellOf = [](const string& row, size_t want) -> string {
+                    vector<string> cells;
+                    size_t start = 0;
+                    while (start <= row.size()) {
+                        size_t sp = row.find(' ', start);
+                        if (sp == string::npos) { cells.push_back(row.substr(start)); break; }
+                        cells.push_back(row.substr(start, sp - start));
+                        start = sp + 1;
+                    }
+                    return want < cells.size() ? cells[want] : string();
+                };
+                auto nullish = [](const string& v) {
+                    return v.empty() || v == "NULL" || v == "null";
+                };
+                std::stable_sort(answers.begin(), answers.end(),
+                    [&](const string& a, const string& b) {
+                        for (const auto& k : outKeys) {
+                            const string va = cellOf(a, k.first);
+                            const string vb = cellOf(b, k.first);
+                            const bool na = nullish(va), nb = nullish(vb);
+                            if (na != nb) {
+                                const bool aNull = na;
+                                return k.second->ascending ? !aNull : aNull;
+                            }
+                            if (na) continue;
+                            int cmp = 0;
+                            dbms::Numeric na_(0), nb_(0);
+                            bool numA = true, numB = true;
+                            try { na_ = dbms::Numeric(va); } catch (...) { numA = false; }
+                            try { nb_ = dbms::Numeric(vb); } catch (...) { numB = false; }
+                            if (numA && numB) cmp = na_ < nb_ ? -1 : (nb_ < na_ ? 1 : 0);
+                            else cmp = va < vb ? -1 : (vb < va ? 1 : 0);
+                            if (cmp != 0) return k.second->ascending ? cmp < 0 : cmp > 0;
+                        }
+                        return false;
+                    });
+            }
+        }
         // Post-query DISTINCT deduplication (skip if DISTINCT ON already handled in query())
         if (isDistinct && distinctOnCols.empty()) {
             vector<string> deduped;
