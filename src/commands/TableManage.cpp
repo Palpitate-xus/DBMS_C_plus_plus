@@ -17910,6 +17910,49 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
             }
         }
+        // Bare arithmetic on a column (e.g. "x - 2.8" as a function argument):
+        // fold left-to-right on + - * / % with columns resolved via getVal,
+        // mirroring the engine arith handler semantics.
+        {
+            static const char* ops[] = { "+", "-", "*", "/", "%" };
+            for (const char* op : ops) {
+                size_t p = arg.find(op);
+                if (p == std::string::npos || p == 0) continue;
+                std::string lhs = arg.substr(0, p);
+                std::string rhs = arg.substr(p + 1);
+                if (lhs.find_first_of("+-*/%") != std::string::npos ||
+                    rhs.find_first_of("+-*/%") != std::string::npos ||
+                    lhs.empty() || rhs.empty()) continue;
+                std::string lv, rv;
+                auto resolve = [&](const std::string& piece, std::string& outv) {
+                    std::string tp = trim(piece);
+                    if (tp.size() >= 2 && tp.front() == 39 && tp.back() == 39) { outv = tp.substr(1, tp.size() - 2); return; }
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        if (tbl.cols[ci].dataName == tp) {
+                            outv = (engine && !dbname.empty())
+                                ? engine->extractColumnValue(rowBuffer, tbl, ci, dbname, true)
+                                : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, ci);
+                            return;
+                        }
+                    }
+                    outv = tp;
+                };
+                resolve(lhs, lv);
+                resolve(rhs, rv);
+                if (lv.find_first_not_of("-+.eE0123456789") != std::string::npos ||
+                    rv.find_first_not_of("-+.eE0123456789") != std::string::npos) continue;
+                double l = std::stod(lv), r = std::stod(rv);
+                double out = 0;
+                if (*op == '+') out = l + r;
+                else if (*op == '-') out = l - r;
+                else if (*op == '*') out = l * r;
+                else if (*op == '/') out = (r != 0) ? l / r : 0;
+                else out = (r != 0) ? std::fmod(l, r) : 0;
+                std::ostringstream os;
+                os << out;
+                return os.str();
+            }
+        }
         return arg;
     };
 
@@ -17917,6 +17960,44 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return expr.sessionUser;
     }
 
+    // Math functions with PG-exact presentation semantics live in the expression
+    // evaluator (float8 shortest-repr, numeric display scales, banker's rounding).
+    // Delegate the whole family there; on evaluator failure fall through
+    // to the legacy engine handlers below.
+    static const std::set<std::string> kEvaluatorMath = {
+        "round", "ceil", "floor", "trunc", "power", "pow", "exp", "ln", "log",
+        "log10", "sqrt", "cbrt", "sin", "cos", "tan", "asin", "acos", "atan",
+        "atan2", "cot", "degrees", "radians", "pi", "sinh", "cosh", "tanh",
+        "asinh", "acosh", "atanh", "mod", "sign", "div"
+    };
+    if (kEvaluatorMath.count(expr.funcName)) {
+        std::string synth = expr.funcName + "(";
+        bool first = true;
+        bool hasNull = false;
+        for (const auto& marg : expr.funcArgs) {
+            std::string mv = getVal(marg);
+            if (mv == "NULL") hasNull = true;
+            if (!first) synth += ",";
+            first = false;
+            // Column reference: carry the declared type through a ::cast so
+            // the evaluator picks the right semantics (float8 vs numeric).
+            std::string colType;
+            for (size_t ci = 0; ci < tbl.len; ++ci) {
+                if (tbl.cols[ci].dataName == marg) { colType = tbl.cols[ci].dataType; break; }
+            }
+            if (!colType.empty()) {
+                synth += "cast(" + mv + " as " + colType + ")";
+            } else if (!mv.empty() && mv.find_first_not_of("-+.eE0123456789 ") == std::string::npos && mv.find_first_of("0123456789") != std::string::npos) {
+                synth += mv;
+            } else {
+                synth += '"' + mv + '"';
+            }
+        }
+        synth += ")";
+        if (hasNull) return "NULL";
+        auto res = dbms::ExprHelper::evalString(synth, {}, {}, dbname);
+        if (res.ok) return res.value;
+    }
     // Arithmetic projection: col op val op val ... evaluated left-to-right
     // (no precedence), for + - * / % on numeric operands.  Operands may be
     // bare columns (row-resolved via getVal), integer/float literals, or

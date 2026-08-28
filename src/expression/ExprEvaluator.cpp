@@ -2925,6 +2925,20 @@ void ExprEvaluator::registerBuiltins() {
             auto n = tryParseNumeric(a[0].value);
             if (n) {
                 int p = (a.size() >= 2) ? static_cast<int>(a[1].asInt()) : 0;
+                if (p < 0) {
+                    // Negative scale: round to tens/hundreds/... PG renders
+                    // an integral result with no decimal point.
+                    long long k = 1;
+                    for (int i = 0; i < -p; ++i) k *= 10;
+                    long long scaled = (n->withScale(0).toString() == "-") ? 0 : std::strtoll(n->withScale(0).toString().c_str(), nullptr, 10);
+                    long long neg = (scaled < 0) ? -1 : 1;
+                    long long av = scaled < 0 ? -scaled : scaled;
+                    long long rem = av % k;
+                    long long base = av - rem;
+                    if (rem * 2 >= k) base += k;
+                    long long outv = base * neg;
+                    return ExprValue("numeric", std::to_string(outv), false);
+                }
                 return ExprValue("numeric", n->withScale(p).toString(), false);
             }
         }
@@ -3037,6 +3051,23 @@ void ExprEvaluator::registerBuiltins() {
         double v = a[0].asDouble();
         if (a.size() >= 2 && !a[1].isNull) {
             int n = static_cast<int>(a[1].asInt());
+            if (isNumericTypeName(a[0].typeName)) {
+                auto nv = tryParseNumeric(a[0].value);
+                if (nv && n >= 0) {
+                    std::string s = nv->toString();
+                    size_t dot = s.find('.');
+                    int have = (dot == std::string::npos) ? 0 : static_cast<int>(s.size() - dot - 1);
+                    if (have < n) {
+                        if (dot == std::string::npos) { s.push_back('.'); dot = s.size() - 1; }
+                        s.append(n - have, '0');
+                    } else if (have > n) {
+                        s.resize(dot + 1 + n);
+                        if (!s.empty() && s.back() == '.') s.pop_back();
+                        if (s == "-" || s == "-0") s = "0";
+                    }
+                    return ExprValue("numeric", s, false);
+                }
+            }
             double mult = std::pow(10.0, n);
             std::string ts2 = std::to_string(std::trunc(v * mult) / mult);
             while (!ts2.empty() && ts2.back() == '0') ts2.pop_back();
@@ -3059,18 +3090,45 @@ void ExprEvaluator::registerBuiltins() {
     // numeric exp/ln presentation, e.g. power(2.5,2) -> 6.2500000000000000).
     functions_["power"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("double precision", "", true);
-        // PG numeric power computes exp/ln in extended precision; long double matches its 16-digit output.
-        long double lv = powl(a[0].asDouble(), a[1].asDouble());
-        double v = static_cast<double>(lv);
         auto isIntVal = [](const ExprValue& e) {
             if (e.isNull) return false;
             std::string s = e.value;
             return s.find('.') == std::string::npos;
         };
+        // PG power presents 17 significant digits: display scale =
+        // 17 - integerDigits(result) (6.25 -> 16 frac, 15.625 -> 15,
+        // 1801.00081924 -> 13).
+        auto displayScale = [](long double val) -> int {
+            int intDigits = (val == 0) ? 1 : static_cast<int>(std::floor(std::log10(std::fabs(val > 0 ? val : -val)))) + 1;
+            int sc = 17 - intDigits;
+            return sc < 0 ? 0 : sc;
+        };
+        // Small integer exponent on a decimal base: PG multiplies exactly
+        // in numeric arithmetic (power_var_int).
+        if (isIntVal(a[1])) {
+            long long e = a[1].asInt();
+            auto nb = tryParseNumeric(a[0].value);
+            if (nb && std::llabs(e) <= 1000) {
+                Numeric r(1);
+                Numeric base = (e < 0) ? (Numeric(1) / *nb) : *nb;
+                long long n = std::llabs(e);
+                for (long long i = 0; i < n; ++i) r = r * base;
+                if (isIntVal(a[0]) && isIntVal(a[1])) {
+                    std::string rs = r.toString();
+                    if (rs.find('.') == std::string::npos)
+                        return ExprValue("double precision", rs, false);
+                }
+                long double rl = std::strtold(r.toString().c_str(), nullptr);
+                return ExprValue("double precision", r.withScale(displayScale(rl)).toString(), false);
+            }
+        }
+        // PG numeric power computes exp/ln in extended precision; long double matches its 16-digit output.
+        long double lv = powl(a[0].asDouble(), a[1].asDouble());
+        double v = static_cast<double>(lv);
         if (isIntVal(a[0]) && isIntVal(a[1]) && v == std::floor(v) && std::fabs(v) < 1e15)
             return ExprValue("double precision", std::to_string(static_cast<long long>(v)), false);
         char buf[64];
-        std::snprintf(buf, sizeof buf, "%.16Lf", lv);
+        std::snprintf(buf, sizeof buf, "%.*Lf", displayScale(lv), lv);
         return ExprValue("double precision", std::string(buf), false);
     };
     functions_["mod"] = [](const std::vector<ExprValue>& a) {
