@@ -3003,11 +3003,24 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("double precision",
                          std::to_string(std::atan2(a[0].asDouble(), a[1].asDouble())), false);
     };
+    // power(a, b): PG numeric-power semantics. Both args integral and the
+    // result exact -> bare integer; otherwise 16 fractional digits (PG's
+    // numeric exp/ln presentation, e.g. power(2.5,2) -> 6.2500000000000000).
     functions_["power"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull || a[1].isNull)
-            return ExprValue("double precision", "", true);
-        return ExprValue("double precision",
-                         std::to_string(std::pow(a[0].asDouble(), a[1].asDouble())), false);
+        if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("double precision", "", true);
+        // PG numeric power computes exp/ln in extended precision; long double matches its 16-digit output.
+        long double lv = powl(a[0].asDouble(), a[1].asDouble());
+        double v = static_cast<double>(lv);
+        auto isIntVal = [](const ExprValue& e) {
+            if (e.isNull) return false;
+            std::string s = e.value;
+            return s.find('.') == std::string::npos;
+        };
+        if (isIntVal(a[0]) && isIntVal(a[1]) && v == std::floor(v) && std::fabs(v) < 1e15)
+            return ExprValue("double precision", std::to_string(static_cast<long long>(v)), false);
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "%.16Lf", lv);
+        return ExprValue("double precision", std::string(buf), false);
     };
     functions_["mod"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
